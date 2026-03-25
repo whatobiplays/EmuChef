@@ -1,0 +1,37 @@
+schema_version: 1
+kind: app_definition
+id: obtainium
+name: Obtainium
+description: APK update tracker.
+category: utility
+package:
+  primary: dev.imranr.obtainium
+  aliases: []
+install_source:
+  type: local_placeholder
+  resolver: none
+  options:
+    path: sample_artifacts/obtainium.apk
+tracking_source:
+  type: local_metadata
+  config_snapshot: vendor/obtainium/apps/obtainium.json
+  app_id: obtainium
+artifacts:
+  apk:
+    required: true
+  shared_storage_config:
+    supported: false
+  app_data_config:
+    supported: false
+  byo_apk:
+    required: false
+provisioning:
+  launch_once_recommended: false
+  shared_storage_paths: []
+  app_data_paths: []
+  config_targets: []
+inputs: []
+metadata:
+  homepage: https://github.com/ImranR98/Obtainium
+  tags:
+    - updater

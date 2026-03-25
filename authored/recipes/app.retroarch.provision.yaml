@@ -1,0 +1,46 @@
+schema_version: 1
+kind: recipe
+id: app.retroarch.provision
+name: Provision RetroArch (AArch64)
+description: Install and launch RetroArch once.
+recipe_dependencies:
+  - app.obtainium.install
+provides:
+  features:
+    - retroarch_provision
+inputs: []
+steps:
+  - id: install_retroarch
+    type: install_apk
+    name: Install RetroArch
+    description: Install the RetroArch APK placeholder.
+    user_toggleable: false
+    dependencies: []
+    constraints:
+      capabilities:
+        - apk_install
+      conflicts_with: []
+    skip_if:
+      - type: package_installed
+        params:
+          package_name: com.retroarch.aarch64
+    params:
+      app: sample_artifacts/RetroArch_aarch64.apk
+      replace_existing: false
+    verify: []
+  - id: launch_retroarch
+    type: launch_app
+    name: Launch RetroArch
+    description: Launch RetroArch once after install.
+    user_toggleable: true
+    dependencies:
+      - install_retroarch
+    constraints:
+      capabilities:
+        - app_launch
+      conflicts_with: []
+    skip_if: []
+    params:
+      package_name:
+        value: com.retroarch.aarch64
+    verify: []

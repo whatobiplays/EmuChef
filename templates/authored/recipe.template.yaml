@@ -1,0 +1,59 @@
+# Example authored recipe template.
+# Copy this file into authored/recipes/ and replace placeholder values.
+# Keep param shapes aligned with the planner step contracts:
+# - literal-only params stay raw literals
+# - ref-only params use { ref: ... }
+# - bindable params use exactly one of { value: ... } or { ref: ... }
+
+schema_version: 1
+kind: recipe
+id: example.recipe.template
+name: Example Recipe Name
+description: Replace with the provisioning behavior this recipe performs.
+recipe_dependencies:
+  - example.dependency.recipe
+provides:
+  features:
+    - example_feature
+inputs:
+  - id: example_source_dir
+    type: directory
+    role: generic
+    label: Example Source Directory
+    description: Local directory that will be copied onto the device.
+    required: true
+    multiple: false
+    validation:
+      must_exist: true
+      allowed_extensions: []
+      path_kind: directory
+    default: null
+    metadata: {}
+steps:
+  - id: copy_example_assets
+    type: copy_byo_input
+    name: Copy Example Assets
+    description: Copy the selected local directory into shared storage.
+    user_toggleable: true
+    dependencies: []
+    constraints:
+      capabilities:
+        - shared_storage_write
+      conflicts_with: []
+    skip_if:
+      - type: path_exists
+        params:
+          path: /sdcard/ExampleAssets/ready.flag
+    params:
+      input:
+        ref: example.recipe.template.$example_source_dir
+      dest:
+        value: /sdcard/ExampleAssets
+      # merge: copy without deleting extras
+      # sync: incremental copy without deleting extras
+      # replace: clear destination first, then copy
+      copy_policy: sync
+    verify:
+      - type: path_exists
+        params:
+          path: /sdcard/ExampleAssets

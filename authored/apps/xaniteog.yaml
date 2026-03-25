@@ -1,0 +1,39 @@
+# Example authored app definition template.
+# Copy this file into authored/apps/ and replace placeholder values.
+# Files under templates/ are examples only and are never loaded by EmuChef.
+
+schema_version: 1
+kind: app_definition
+id: xaniteog
+name: XaniteOG
+description: XaniteOG Native Xbox original
+category: emulator
+package:
+  primary: Ali.Xanite
+install_source:
+  # Free-form metadata for your chosen artifact source/resolver.
+  type: local_file
+  resolver: none
+  options:
+    path: sample_artifacts/XaniteOG.V0.1.5-fix.apk
+tracking_source:
+  # Snapshot/config metadata used by your app tracking workflow.
+  type: obtainium_config_snapshot
+  config_snapshot: vendor/obtainium/apps/example-app.json
+  app_id: xaniteog
+artifacts:
+  apk:
+    required: true
+  shared_storage_config:
+    supported: false
+  app_data_config:
+    supported: false
+  byo_apk:
+    required: false
+provisioning:
+  launch_once_recommended: false
+metadata:
+  homepage: https://github.com/dev-Ali2008/xanite/tree/main
+  tags:
+    - emulator
+    - xbox

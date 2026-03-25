@@ -1,0 +1,63 @@
+# Example authored app definition template.
+# Copy this file into authored/apps/ and replace placeholder values.
+# Files under templates/ are examples only and are never loaded by EmuChef.
+
+schema_version: 1
+kind: app_definition
+id: example.app.template
+name: Example App Name
+description: Replace with a short human-readable app description.
+category: emulator
+package:
+  primary: com.example.app
+  aliases:
+    - com.example.app.beta
+install_source:
+  # Free-form metadata for your chosen artifact source/resolver.
+  type: local_file
+  resolver: none
+  options:
+    path: sample_artifacts/example-app.apk
+tracking_source:
+  # Snapshot/config metadata used by your app tracking workflow.
+  type: obtainium_config_snapshot
+  config_snapshot: vendor/obtainium/apps/example-app.json
+  app_id: example-app
+artifacts:
+  apk:
+    required: true
+  shared_storage_config:
+    supported: false
+  app_data_config:
+    supported: false
+  byo_apk:
+    required: false
+provisioning:
+  launch_once_recommended: false
+  shared_storage_paths:
+    - /sdcard/ExampleApp/
+  app_data_paths: []
+  config_targets:
+    - id: shared_storage_main
+      type: shared_storage
+      path: /sdcard/ExampleApp/
+inputs:
+  - id: byo_apk_path
+    type: file
+    role: apk
+    label: Example APK
+    description: Optional local APK override for this app.
+    required: false
+    multiple: false
+    validation:
+      must_exist: true
+      allowed_extensions:
+        - .apk
+      path_kind: file
+    default: null
+    metadata: {}
+metadata:
+  homepage: https://example.invalid/app
+  tags:
+    - example
+    - template

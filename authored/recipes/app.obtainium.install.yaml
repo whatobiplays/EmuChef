@@ -1,0 +1,29 @@
+schema_version: 1
+kind: recipe
+id: app.obtainium.install
+name: Install Obtainium
+description: Install Obtainium for tracking emulator APKs.
+recipe_dependencies: []
+provides:
+  features:
+    - obtainium_install
+inputs: []
+steps:
+  - id: install_obtainium
+    type: install_apk
+    name: Install Obtainium
+    description: Install the Obtainium APK placeholder.
+    user_toggleable: false
+    dependencies: []
+    constraints:
+      capabilities:
+        - apk_install
+      conflicts_with: []
+    skip_if:
+      - type: package_installed
+        params:
+          package_name: dev.imranr.obtainium
+    params:
+      app: sample_artifacts/obtainium.apk
+      replace_existing: false
+    verify: []

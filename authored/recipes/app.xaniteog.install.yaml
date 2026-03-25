@@ -1,0 +1,29 @@
+# Example authored recipe template.
+# Copy this file into authored/recipes/ and replace placeholder values.
+# Keep param shapes aligned with the planner step contracts:
+# - literal-only params stay raw literals
+# - ref-only params use { ref: ... }
+# - bindable params use exactly one of { value: ... } or { ref: ... }
+
+schema_version: 1
+kind: recipe
+id: app.xaniteog.install
+name: Install XaniteOG
+description: Install the Xbox emulator XaniteOG.
+provides:
+  features:
+    - xaniteog_install
+steps:
+  - id: install_xaniteog
+    type: install_apk
+    name: Install XaniteOG APK
+    description: Installs the XaniteOG APK.
+    user_toggleable: false
+    dependencies: []
+    skip_if:
+      - type: package_installed
+        params:
+          package_name: Ali.Xanite
+    params:
+      app: sample_artifacts/XaniteOG.V0.1.5-fix.apk
+      replace_existing: false

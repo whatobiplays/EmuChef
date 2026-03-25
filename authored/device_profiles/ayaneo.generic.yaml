@@ -1,0 +1,30 @@
+schema_version: 1
+kind: device_profile
+id: ayaneo.generic
+name: AYANEO Generic
+description: Generic profile for supported AYANEO Android handhelds.
+match:
+  manufacturer_contains:
+    - AYANEO
+    - ARBOR
+  brand_contains:
+    - AYANEO
+  model_patterns:
+    - '(?i)ayaneo'
+    - '(?i)pocket'
+  android_version:
+    min: 11
+capability_defaults:
+  adb_available: true
+  apk_install: true
+  shared_storage_write: true
+  app_launch: true
+  shell_command: true
+  package_remove_for_user: true
+  root_shell: false
+  app_data_write: false
+device_tags:
+  - handheld_android
+  - brand_ayaneo
+metadata:
+  vendor: AYANEO

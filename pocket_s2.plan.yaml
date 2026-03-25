@@ -1,0 +1,98 @@
+status: success
+warnings: []
+errors: []
+execution_plan:
+  id: plan.ayaneo.pocket_s2.base.001
+  source:
+    device_profile_ref: ayaneo.pocket_s2
+    device_plan_ref: ayaneo.pocket_s2.base
+    selected_recipe_refs:
+    - app.retroarch.provision
+    - feature.copy_bios
+    - app.xaniteog.install
+    expanded_recipe_refs:
+    - app.obtainium.install
+    - app.retroarch.provision
+    - feature.copy_bios
+    - app.xaniteog.install
+  device_context:
+    manufacturer: AYANEO
+    model: Pocket S2 Pro
+    android_version: 14
+    device_tags:
+    - handheld_android
+    - brand_ayaneo
+  runtime_capabilities:
+    adb_available: true
+    apk_install: true
+    shared_storage_write: true
+    app_launch: true
+    shell_command: true
+    package_remove_for_user: false
+    root_shell: false
+    app_data_write: false
+  inputs_resolved:
+  - id: feature.copy_bios.$bios_source_dir
+    value: /Users/daniel/Syncthing/ROMs/_bios
+  steps:
+  - id: app.obtainium.install/install_obtainium
+    recipe_ref: app.obtainium.install
+    type: install_apk
+    name: Install Obtainium
+    params:
+      app: /Users/daniel/Projects/EmuChef/sample_artifacts/obtainium.apk
+      replace_existing: false
+    skip_if:
+    - type: package_installed
+      params:
+        package_name: dev.imranr.obtainium
+    verify: []
+  - id: app.retroarch.provision/install_retroarch
+    recipe_ref: app.retroarch.provision
+    type: install_apk
+    name: Install RetroArch
+    params:
+      app: /Users/daniel/Projects/EmuChef/sample_artifacts/RetroArch_aarch64.apk
+      replace_existing: false
+    skip_if:
+    - type: package_installed
+      params:
+        package_name: com.retroarch.aarch64
+    verify: []
+  - id: feature.copy_bios/copy_bios_dir
+    recipe_ref: feature.copy_bios
+    type: copy_byo_input
+    name: Copy BIOS folder
+    params:
+      input: /Users/daniel/Syncthing/ROMs/_bios
+      dest: /sdcard/RetroArch/system
+      copy_policy: sync
+    skip_if: []
+    verify:
+    - type: path_exists
+      params:
+        path: /sdcard/RetroArch/system
+  - id: app.xaniteog.install/install_xaniteog
+    recipe_ref: app.xaniteog.install
+    type: install_apk
+    name: Install XaniteOG APK
+    params:
+      app: /Users/daniel/Projects/EmuChef/sample_artifacts/XaniteOG.V0.1.5-fix.apk
+      replace_existing: false
+    skip_if:
+    - type: package_installed
+      params:
+        package_name: Ali.Xanite
+    verify: []
+  - id: app.retroarch.provision/launch_retroarch
+    recipe_ref: app.retroarch.provision
+    type: launch_app
+    name: Launch RetroArch
+    params:
+      package_name: com.retroarch.aarch64
+    skip_if: []
+    verify: []
+  schema_version: 1
+  kind: execution_plan
+schema_version: 1
+kind: planning_result
