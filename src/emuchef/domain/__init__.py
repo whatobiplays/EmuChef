@@ -31,9 +31,13 @@ from .draft_plan import (
 )
 from .draft_update_result import DraftUpdateResult
 from .execution_plan import (
+    ExecutionPermissionPlan,
     ExecutionPlan,
     ExecutionPlanSource,
     ExecutionStep,
+    PermissionPlanAction,
+    PermissionPlanReason,
+    PermissionPlanSource,
     ResolvedInputValue,
 )
 from .history_entry import HistoryEntry
@@ -48,7 +52,16 @@ from .param_values import (
     ScalarValue,
 )
 from .planning_result import PlanningResult, PlanningStatus
-from .recipe import Recipe, RecipeProvides
+from .recipe import (
+    AppOpGrant,
+    ManualPermissionRequirement,
+    PermissionPolicy,
+    PermissionSet,
+    PermissionWhen,
+    Recipe,
+    RecipeProvides,
+    RuntimePermissionGrant,
+)
 from .refs import Reference, parse_reference
 from .step import Step, StepCondition, StepConstraints
 from .step_types import StepType
@@ -84,6 +97,7 @@ __all__ = [
     "DraftUpdateResult",
     "ErrorCode",
     "ErrorMessage",
+    "ExecutionPermissionPlan",
     "ExecutionPlan",
     "ExecutionPlanSource",
     "ExecutionStep",
@@ -95,12 +109,21 @@ __all__ = [
     "JSONValue",
     "LiteralParamValue",
     "ParamValue",
+    "PermissionPlanAction",
+    "PermissionPlanReason",
+    "PermissionPlanSource",
+    "PermissionPolicy",
+    "PermissionSet",
+    "PermissionWhen",
     "PlanningResult",
     "PlanningStatus",
+    "AppOpGrant",
+    "ManualPermissionRequirement",
     "Recipe",
     "RecipeProvides",
     "Reference",
     "ResolvedInputValue",
+    "RuntimePermissionGrant",
     "RuntimeCapabilities",
     "ScalarValue",
     "Step",

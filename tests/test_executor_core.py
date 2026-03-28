@@ -8,9 +8,13 @@ from tempfile import TemporaryDirectory
 from emuchef.domain import (
     CopyPolicy,
     DeviceContext,
+    ExecutionPermissionPlan,
     ExecutionPlan,
     ExecutionPlanSource,
     ExecutionStep,
+    PermissionPlanAction,
+    PermissionPlanReason,
+    PermissionPlanSource,
     ResolvedInputValue,
     RuntimeCapabilities,
     StepCondition,
@@ -157,6 +161,293 @@ class ExecutorCoreTests(unittest.TestCase):
             self.assertEqual(events[-1].status, ProgressStatus.FAILED)
             self.assertIn("APK file not found", events[-1].message or "")
 
+    def test_runner_does_not_execute_permission_actions_without_grant_step(self) -> None:
+        adb = DryRunAdb()
+        runner = ExecutorRunner(adb=adb, workdir=Path.cwd())
+        plan = _with_permission_actions(
+            _single_step_plan(_launch_app_step()),
+            (
+                PermissionPlanAction(
+                    status="applicable",
+                    kind="runtime_permission",
+                    package_name="com.retroarch.aarch64",
+                    permission="android.permission.POST_NOTIFICATIONS",
+                    command=(
+                        "adb",
+                        "shell",
+                        "pm",
+                        "grant",
+                        "com.retroarch.aarch64",
+                        "android.permission.POST_NOTIFICATIONS",
+                    ),
+                    source=PermissionPlanSource(
+                        recipe_id="app.retroarch.provision",
+                        section="permissions.runtime[0]",
+                    ),
+                ),
+            ),
+        )
+
+        result = runner.run(plan)
+
+        self.assertTrue(result.success)
+        self.assertEqual(result.permission_results, ())
+        self.assertNotIn("run_plan_command", [command[0] for command in adb.commands])
+
+    def test_runner_executes_applicable_runtime_permission_action(self) -> None:
+        adb = DryRunAdb()
+        runner = ExecutorRunner(adb=adb, workdir=Path.cwd())
+        plan = _with_permission_actions(
+            _single_step_plan(_grant_permissions_step()),
+            (
+                PermissionPlanAction(
+                    status="applicable",
+                    kind="runtime_permission",
+                    package_name="com.retroarch.aarch64",
+                    permission="android.permission.POST_NOTIFICATIONS",
+                    command=(
+                        "adb",
+                        "shell",
+                        "pm",
+                        "grant",
+                        "com.retroarch.aarch64",
+                        "android.permission.POST_NOTIFICATIONS",
+                    ),
+                    source=PermissionPlanSource(
+                        recipe_id="app.retroarch.provision",
+                        section="permissions.runtime[0]",
+                    ),
+                ),
+            ),
+        )
+
+        result = runner.run(plan)
+
+        self.assertTrue(result.success)
+        self.assertIn(
+            (
+                "run_plan_command",
+                "adb",
+                "shell",
+                "pm",
+                "grant",
+                "com.retroarch.aarch64",
+                "android.permission.POST_NOTIFICATIONS",
+            ),
+            adb.commands,
+        )
+        self.assertEqual(result.permission_results[0].step_id, "app.retroarch.provision/grant_retroarch_permissions")
+        self.assertEqual(result.permission_results[0].status.value, "executed")
+
+    def test_runner_executes_applicable_appop_permission_action(self) -> None:
+        adb = DryRunAdb()
+        runner = ExecutorRunner(adb=adb, workdir=Path.cwd())
+        plan = _with_permission_actions(
+            _single_step_plan(_grant_permissions_step()),
+            (
+                PermissionPlanAction(
+                    status="applicable",
+                    kind="appop",
+                    package_name="com.retroarch.aarch64",
+                    op="MANAGE_EXTERNAL_STORAGE",
+                    desired_mode="allow",
+                    command=(
+                        "adb",
+                        "shell",
+                        "appops",
+                        "set",
+                        "com.retroarch.aarch64",
+                        "MANAGE_EXTERNAL_STORAGE",
+                        "allow",
+                    ),
+                    source=PermissionPlanSource(
+                        recipe_id="app.retroarch.provision",
+                        section="permissions.appops[0]",
+                    ),
+                ),
+            ),
+        )
+
+        result = runner.run(plan)
+
+        self.assertTrue(result.success)
+        self.assertIn(
+            (
+                "run_plan_command",
+                "adb",
+                "shell",
+                "appops",
+                "set",
+                "com.retroarch.aarch64",
+                "MANAGE_EXTERNAL_STORAGE",
+                "allow",
+            ),
+            adb.commands,
+        )
+        self.assertEqual(result.permission_results[0].status.value, "executed")
+
+    def test_runner_reports_skipped_permission_without_executing_it(self) -> None:
+        adb = DryRunAdb()
+        runner = ExecutorRunner(adb=adb, workdir=Path.cwd())
+        plan = _with_permission_actions(
+            _single_step_plan(_grant_permissions_step()),
+            (
+                PermissionPlanAction(
+                    status="skipped",
+                    kind="runtime_permission",
+                    package_name="com.retroarch.aarch64",
+                    permission="android.permission.POST_NOTIFICATIONS",
+                    command=(
+                        "adb",
+                        "shell",
+                        "pm",
+                        "grant",
+                        "com.retroarch.aarch64",
+                        "android.permission.POST_NOTIFICATIONS",
+                    ),
+                    source=PermissionPlanSource(
+                        recipe_id="app.retroarch.provision",
+                        section="permissions.runtime[0]",
+                    ),
+                    reason=PermissionPlanReason(
+                        code="missing_android_api_level",
+                        message="Device Android API level is unknown.",
+                    ),
+                ),
+            ),
+        )
+
+        result = runner.run(plan)
+
+        self.assertTrue(result.success)
+        self.assertNotIn("run_plan_command", [command[0] for command in adb.commands])
+        self.assertEqual(result.permission_results[0].status.value, "skipped")
+        self.assertIn("API level is unknown", result.permission_results[0].message or "")
+
+    def test_runner_reports_manual_permission_without_executing_it(self) -> None:
+        adb = DryRunAdb()
+        runner = ExecutorRunner(adb=adb, workdir=Path.cwd())
+        plan = _with_permission_actions(
+            _single_step_plan(_grant_permissions_step(recipe_ref="app.citra.provision")),
+            (
+                PermissionPlanAction(
+                    status="manual_required",
+                    kind="manual_requirement",
+                    package_name="org.citra.emu",
+                    manual_type="folder_picker",
+                    command=(),
+                    source=PermissionPlanSource(
+                        recipe_id="app.citra.provision",
+                        section="permissions.manual[0]",
+                    ),
+                    reason=PermissionPlanReason(
+                        code="manual_required",
+                        message="App requires SAF URI grant for ROM directory selection",
+                    ),
+                ),
+            ),
+        )
+
+        result = runner.run(plan)
+
+        self.assertTrue(result.success)
+        self.assertNotIn("run_plan_command", [command[0] for command in adb.commands])
+        self.assertEqual(result.permission_results[0].status.value, "manual_required")
+        self.assertIn("SAF URI grant", result.permission_results[0].message or "")
+
+    def test_runner_reports_failed_permission_command(self) -> None:
+        class FailingPermissionAdb(DryRunAdb):
+            def run_plan_command(self, command) -> None:
+                super().run_plan_command(command)
+                raise RuntimeError("pm grant failed")
+
+        adb = FailingPermissionAdb()
+        runner = ExecutorRunner(adb=adb, workdir=Path.cwd())
+        plan = _with_permission_actions(
+            _single_step_plan(_grant_permissions_step()),
+            (
+                PermissionPlanAction(
+                    status="applicable",
+                    kind="runtime_permission",
+                    package_name="com.retroarch.aarch64",
+                    permission="android.permission.POST_NOTIFICATIONS",
+                    command=(
+                        "adb",
+                        "shell",
+                        "pm",
+                        "grant",
+                        "com.retroarch.aarch64",
+                        "android.permission.POST_NOTIFICATIONS",
+                    ),
+                    source=PermissionPlanSource(
+                        recipe_id="app.retroarch.provision",
+                        section="permissions.runtime[0]",
+                    ),
+                ),
+            ),
+        )
+
+        result = runner.run(plan)
+
+        self.assertFalse(result.success)
+        self.assertEqual(result.steps[0].status.value, "failed")
+        self.assertEqual(result.permission_results[0].status.value, "failed")
+        self.assertIn("pm grant failed", result.permission_results[0].message or "")
+
+    def test_runner_grant_permissions_only_uses_matching_recipe_actions(self) -> None:
+        adb = DryRunAdb()
+        runner = ExecutorRunner(adb=adb, workdir=Path.cwd())
+        plan = _with_permission_actions(
+            _single_step_plan(_grant_permissions_step(recipe_ref="app.retroarch.provision")),
+            (
+                PermissionPlanAction(
+                    status="applicable",
+                    kind="runtime_permission",
+                    package_name="com.retroarch.aarch64",
+                    permission="android.permission.POST_NOTIFICATIONS",
+                    command=("adb", "shell", "pm", "grant", "com.retroarch.aarch64", "android.permission.POST_NOTIFICATIONS"),
+                    source=PermissionPlanSource(recipe_id="app.retroarch.provision", section="permissions.runtime[0]"),
+                ),
+                PermissionPlanAction(
+                    status="applicable",
+                    kind="runtime_permission",
+                    package_name="org.citra.emu",
+                    permission="android.permission.POST_NOTIFICATIONS",
+                    command=("adb", "shell", "pm", "grant", "org.citra.emu", "android.permission.POST_NOTIFICATIONS"),
+                    source=PermissionPlanSource(recipe_id="app.citra.provision", section="permissions.runtime[0]"),
+                ),
+            ),
+        )
+
+        result = runner.run(plan)
+
+        self.assertTrue(result.success)
+        self.assertEqual(len(result.permission_results), 1)
+        self.assertEqual(result.permission_results[0].package_name, "com.retroarch.aarch64")
+        self.assertNotIn(
+            ("run_plan_command", "adb", "shell", "pm", "grant", "org.citra.emu", "android.permission.POST_NOTIFICATIONS"),
+            adb.commands,
+        )
+
+    def test_runner_wait_uses_injected_sleep_with_fractional_seconds_conversion(self) -> None:
+        sleep_calls: list[float] = []
+        runner = ExecutorRunner(adb=DryRunAdb(), workdir=Path.cwd(), sleep_fn=sleep_calls.append)
+
+        result = runner.run(_single_step_plan(_wait_step(1500)))
+
+        self.assertTrue(result.success)
+        self.assertEqual(sleep_calls, [1.5])
+        self.assertEqual(result.steps[0].status.value, "executed")
+
+    def test_runner_force_stop_app_runs_adb_force_stop(self) -> None:
+        adb = DryRunAdb()
+        runner = ExecutorRunner(adb=adb, workdir=Path.cwd())
+
+        result = runner.run(_single_step_plan(_force_stop_step()))
+
+        self.assertTrue(result.success)
+        self.assertIn(("force_stop_app", "com.retroarch.aarch64"), adb.commands)
+
     def test_subprocess_adb_mkdir_p_uses_direct_shell_args(self) -> None:
         seen: list[list[str]] = []
 
@@ -170,6 +461,25 @@ class ExecutorCoreTests(unittest.TestCase):
 
         self.assertEqual(seen[0], ["adb", "shell", "mkdir", "-p", "/sdcard/BIOS"])
         self.assertEqual(seen[1], ["adb", "shell", "mkdir", "-p", "/sdcard/BIOS Files"])
+
+    def test_subprocess_adb_detect_device_parses_release_and_sdk_separately(self) -> None:
+        def runner(args: list[str]) -> subprocess.CompletedProcess[str]:
+            outputs = {
+                ("adb", "-s", "device-1", "shell", "getprop", "ro.product.manufacturer"): "AYANEO\n",
+                ("adb", "-s", "device-1", "shell", "getprop", "ro.product.brand"): "AYANEO\n",
+                ("adb", "-s", "device-1", "shell", "getprop", "ro.product.model"): "Pocket 4 Pro\n",
+                ("adb", "-s", "device-1", "shell", "getprop", "ro.build.version.release"): "13\n",
+                ("adb", "-s", "device-1", "shell", "getprop", "ro.build.version.sdk"): "33\n",
+            }
+            key = tuple(args)
+            if key == ("adb", "-s", "device-1", "shell", "su", "-c", "true"):
+                return subprocess.CompletedProcess(args=args, returncode=0, stdout="", stderr="")
+            return subprocess.CompletedProcess(args=args, returncode=0, stdout=outputs.get(key, ""), stderr="")
+
+        detected = SubprocessAdb(serial="device-1", runner=runner).detect_device()
+
+        self.assertEqual(detected.android_version, 13)
+        self.assertEqual(detected.android_api_level, 33)
 
     def test_runner_executes_supported_alpha_steps(self) -> None:
         with TemporaryDirectory() as tmp:
@@ -293,6 +603,66 @@ def _single_step_plan(step: ExecutionStep) -> ExecutionPlan:
         runtime_capabilities=capabilities,
         inputs_resolved=(),
         steps=(step,),
+    )
+
+
+def _with_permission_actions(plan: ExecutionPlan, actions: tuple[PermissionPlanAction, ...]) -> ExecutionPlan:
+    return ExecutionPlan(
+        id=plan.id,
+        source=plan.source,
+        device_context=plan.device_context,
+        runtime_capabilities=plan.runtime_capabilities,
+        inputs_resolved=plan.inputs_resolved,
+        steps=plan.steps,
+        permission_plan=ExecutionPermissionPlan(actions=actions),
+    )
+
+
+def _launch_app_step() -> ExecutionStep:
+    return ExecutionStep(
+        id="app.retroarch.provision/launch_retroarch",
+        recipe_ref="app.retroarch.provision",
+        type=StepType.LAUNCH_APP,
+        name="Launch RetroArch",
+        params={"package_name": "com.retroarch"},
+        skip_if=(),
+        verify=(),
+    )
+
+
+def _grant_permissions_step(recipe_ref: str = "app.retroarch.provision") -> ExecutionStep:
+    return ExecutionStep(
+        id=f"{recipe_ref}/grant_retroarch_permissions",
+        recipe_ref=recipe_ref,
+        type=StepType.GRANT_PERMISSIONS,
+        name="Grant permissions",
+        params={},
+        skip_if=(),
+        verify=(),
+    )
+
+
+def _wait_step(duration_ms: int) -> ExecutionStep:
+    return ExecutionStep(
+        id="app.retroarch.provision/wait_for_bootstrap",
+        recipe_ref="app.retroarch.provision",
+        type=StepType.WAIT,
+        name="Wait",
+        params={"duration_ms": duration_ms},
+        skip_if=(),
+        verify=(),
+    )
+
+
+def _force_stop_step() -> ExecutionStep:
+    return ExecutionStep(
+        id="app.retroarch.provision/stop_retroarch",
+        recipe_ref="app.retroarch.provision",
+        type=StepType.FORCE_STOP_APP,
+        name="Force stop RetroArch",
+        params={"package_name": "com.retroarch.aarch64"},
+        skip_if=(),
+        verify=(),
     )
 
 

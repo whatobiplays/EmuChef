@@ -6,7 +6,7 @@ from collections.abc import Mapping
 from dataclasses import dataclass
 from enum import Enum
 
-from emuchef.domain import BoundParamValue, CopyPolicy, ErrorCode, ErrorMessage, LiteralParamValue, Step, StepType
+from emuchef.domain import BoundParamValue, CopyPolicy, ErrorCode, ErrorMessage, LiteralParamValue, Recipe, Step, StepType
 
 
 class ParamMode(str, Enum):
@@ -65,6 +65,17 @@ STEP_CONTRACTS: dict[StepType, StepContract] = {
         params={
             "package_name": ParamContract(ParamMode.BINDABLE),
             "activity": ParamContract(ParamMode.BINDABLE, required=False),
+        }
+    ),
+    StepType.GRANT_PERMISSIONS: StepContract(params={}),
+    StepType.WAIT: StepContract(
+        params={
+            "duration_ms": ParamContract(ParamMode.LITERAL_ONLY),
+        }
+    ),
+    StepType.FORCE_STOP_APP: StepContract(
+        params={
+            "package_name": ParamContract(ParamMode.LITERAL_ONLY),
         }
     ),
     StepType.RUN_SHELL: StepContract(
@@ -153,7 +164,46 @@ def validate_step_contract(recipe_ref: str, step: Step) -> tuple[ErrorMessage, .
                         details={"recipe_ref": recipe_ref, "step_id": step.id, "param": param_name},
                     )
                 )
+        if step.type is StepType.WAIT and param_name == "duration_ms":
+            if isinstance(value, bool) or not isinstance(value, int) or value <= 0:
+                errors.append(
+                    ErrorMessage(
+                        code=ErrorCode.PARAM_CONTRACT_VIOLATION,
+                        message="Param 'duration_ms' must be a positive integer for step type 'wait'.",
+                        details={"recipe_ref": recipe_ref, "step_id": step.id, "param": param_name},
+                    )
+                )
+        if step.type is StepType.FORCE_STOP_APP and param_name == "package_name":
+            if not isinstance(value, str) or not value.strip():
+                errors.append(
+                    ErrorMessage(
+                        code=ErrorCode.PARAM_CONTRACT_VIOLATION,
+                        message="Param 'package_name' must be a non-empty string for step type 'force_stop_app'.",
+                        details={"recipe_ref": recipe_ref, "step_id": step.id, "param": param_name},
+                    )
+                )
 
+    return tuple(errors)
+
+
+def validate_recipe_permission_steps(recipe: Recipe) -> tuple[ErrorMessage, ...]:
+    has_permissions = bool(recipe.permissions.runtime or recipe.permissions.appops or recipe.permissions.manual)
+    if has_permissions:
+        return ()
+
+    errors: list[ErrorMessage] = []
+    for step in recipe.steps:
+        if step.type is not StepType.GRANT_PERMISSIONS:
+            continue
+        errors.append(
+            ErrorMessage(
+                code=ErrorCode.PARAM_CONTRACT_VIOLATION,
+                message=(
+                    f"Step {step.id!r} uses 'grant_permissions' but recipe {recipe.id!r} does not declare local permissions."
+                ),
+                details={"recipe_ref": recipe.id, "step_id": step.id},
+            )
+        )
     return tuple(errors)
 
 

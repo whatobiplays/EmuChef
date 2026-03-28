@@ -3,6 +3,16 @@
 from collections.abc import Iterable
 
 
+def ensure_non_empty(value: str, label: str) -> None:
+    if not value.strip():
+        raise ValueError(f"{label} must not be empty")
+
+
+def ensure_ordered_range(min_value: int | None, max_value: int | None, label: str) -> None:
+    if min_value is not None and max_value is not None and min_value > max_value:
+        raise ValueError(f"Invalid {label}: min {min_value} exceeds max {max_value}")
+
+
 def ensure_unique(values: Iterable[str], label: str) -> None:
     seen: set[str] = set()
     duplicates: set[str] = set()

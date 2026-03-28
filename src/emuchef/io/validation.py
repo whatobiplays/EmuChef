@@ -23,7 +23,7 @@ from emuchef.domain import (
     WarningMessage,
 )
 from emuchef.planner.catalog import CatalogLoadError
-from emuchef.planner.contracts import referenced_bindings, validate_step_contract
+from emuchef.planner.contracts import referenced_bindings, validate_recipe_permission_steps, validate_step_contract
 from emuchef.planner.dependencies import expand_recipe_dependencies, validate_recipe_step_cycles
 
 from .loader import (
@@ -236,6 +236,7 @@ def _validate_single_file(path: Path, expected_kind: str | None = None) -> tuple
     errors: list[ErrorMessage] = []
     if isinstance(item, Recipe):
         errors.extend(_annotate_recipe_step_cycle_errors(path.resolve(), item, validate_recipe_step_cycles(item)))
+        errors.extend(_annotate_recipe_permission_step_errors(path.resolve(), item, validate_recipe_permission_steps(item)))
         for step_index, step in enumerate(item.steps):
             errors.extend(_annotate_step_contract_errors(path.resolve(), item, step_index, validate_step_contract(item.id, step)))
 
@@ -626,6 +627,19 @@ def _annotate_recipe_cycle_catalog_errors(
         _with_context(error, file=file, object_kind="recipe", object_id=recipe_id, field="recipe_dependencies")
         for error in errors
     )
+
+
+def _annotate_recipe_permission_step_errors(
+    file: Path,
+    recipe: Recipe,
+    errors: tuple[ErrorMessage, ...],
+) -> tuple[ErrorMessage, ...]:
+    annotated: list[ErrorMessage] = []
+    for error in errors:
+        step_id = error.details.get("step_id")
+        field = _step_field(recipe, str(step_id), "type") if isinstance(step_id, str) else "permissions"
+        annotated.append(_with_context(error, file=file, object_kind="recipe", object_id=recipe.id, field=field))
+    return tuple(annotated)
 
 
 def _recipe_dependency_field(recipe: Recipe, dependency_ref: str) -> str | None:

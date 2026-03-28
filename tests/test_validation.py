@@ -54,6 +54,84 @@ class ValidationTests(unittest.TestCase):
             self.assertEqual(result.status.value, "error")
             self.assertTrue(any(error.code.value == "param_contract_violation" for error in result.errors), result.errors)
 
+    def test_wait_with_non_positive_duration_ms_fails(self) -> None:
+        with TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            authored_root = build_validation_tree(
+                root,
+                extra_steps=[
+                    {
+                        "id": "wait_invalid",
+                        "type": "wait",
+                        "name": "Wait",
+                        "user_toggleable": False,
+                        "dependencies": [],
+                        "constraints": {"capabilities": [], "conflicts_with": []},
+                        "skip_if": [],
+                        "params": {"duration_ms": 0},
+                        "verify": [],
+                    }
+                ],
+            )
+            recipe_path = authored_root / "recipes" / "feature_copy_bios.yaml"
+
+            result = validate_authored_path(recipe_path)
+
+            self.assertEqual(result.status.value, "error")
+            self.assertTrue(any(error.code.value == "param_contract_violation" for error in result.errors), result.errors)
+
+    def test_force_stop_app_with_empty_package_name_fails(self) -> None:
+        with TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            authored_root = build_validation_tree(
+                root,
+                extra_steps=[
+                    {
+                        "id": "stop_app",
+                        "type": "force_stop_app",
+                        "name": "Stop app",
+                        "user_toggleable": False,
+                        "dependencies": [],
+                        "constraints": {"capabilities": [], "conflicts_with": []},
+                        "skip_if": [],
+                        "params": {"package_name": ""},
+                        "verify": [],
+                    }
+                ],
+            )
+            recipe_path = authored_root / "recipes" / "feature_copy_bios.yaml"
+
+            result = validate_authored_path(recipe_path)
+
+            self.assertEqual(result.status.value, "error")
+            self.assertTrue(any(error.code.value == "param_contract_violation" for error in result.errors), result.errors)
+
+    def test_grant_permissions_without_local_permissions_fails(self) -> None:
+        with TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            authored_root = build_validation_tree(
+                root,
+                extra_steps=[
+                    {
+                        "id": "grant_permissions",
+                        "type": "grant_permissions",
+                        "name": "Grant permissions",
+                        "user_toggleable": False,
+                        "dependencies": [],
+                        "constraints": {"capabilities": [], "conflicts_with": []},
+                        "skip_if": [],
+                        "params": {},
+                        "verify": [],
+                    }
+                ],
+            )
+            recipe_path = authored_root / "recipes" / "feature_copy_bios.yaml"
+
+            result = validate_authored_path(recipe_path)
+
+            self.assertEqual(result.status.value, "error")
+            self.assertTrue(any(error.code.value == "param_contract_violation" for error in result.errors), result.errors)
+
     def test_invalid_cross_recipe_dependency_ref(self) -> None:
         with TemporaryDirectory() as tmp:
             root = Path(tmp)
@@ -64,6 +142,29 @@ class ValidationTests(unittest.TestCase):
 
             self.assertEqual(result.status.value, "error")
             self.assertTrue(any(error.code.value == "recipe_not_found" for error in result.errors), result.errors)
+
+    def test_invalid_permission_when_range_is_rejected(self) -> None:
+        with TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            authored_root = build_validation_tree(
+                root,
+                permissions={
+                    "runtime": [
+                        {
+                            "package_name": "com.example.app",
+                            "name": "android.permission.POST_NOTIFICATIONS",
+                            "when": {"android_api_min": 34, "android_api_max": 33},
+                        }
+                    ]
+                },
+            )
+            recipe_path = authored_root / "recipes" / "feature_copy_bios.yaml"
+
+            result = validate_authored_path(recipe_path)
+
+            self.assertEqual(result.status.value, "error")
+            self.assertEqual(result.errors[0].code.value, "authored_data_invalid")
+            self.assertIn("min 34 exceeds max 33", result.errors[0].message)
 
     def test_invalid_step_ref_reports_recipe_file_context(self) -> None:
         with TemporaryDirectory() as tmp:
@@ -195,6 +296,8 @@ def build_validation_tree(
     root: Path,
     *,
     copy_step_params: dict | None = None,
+    extra_steps: list[dict] | None = None,
+    permissions: dict | None = None,
     recipe_dependencies: list[str] | None = None,
     device_profile_ref: str = "example.device_profile",
     device_plan_recipe_ref: str = "feature.copy_bios",
@@ -265,6 +368,26 @@ def build_validation_tree(
         },
     )
 
+    recipe_steps = list(extra_steps or [])
+    recipe_steps.append(
+        {
+            "id": "copy_bios_dir",
+            "type": "copy_byo_input",
+            "name": "Copy BIOS folder",
+            "user_toggleable": True,
+            "dependencies": [],
+            "constraints": {"capabilities": ["shared_storage_write"], "conflicts_with": []},
+            "skip_if": [],
+            "params": copy_step_params
+            or {
+                "input": {"ref": "feature.copy_bios.$bios_source_dir"},
+                "dest": {"value": "/sdcard/BIOS"},
+                "copy_policy": "sync",
+            },
+            "verify": [],
+        }
+    )
+
     recipe_payload = {
         "schema_version": 1,
         "kind": "recipe",
@@ -286,25 +409,10 @@ def build_validation_tree(
                 "metadata": {},
             }
         ],
-        "steps": [
-            {
-                "id": "copy_bios_dir",
-                "type": "copy_byo_input",
-                "name": "Copy BIOS folder",
-                "user_toggleable": True,
-                "dependencies": [],
-                "constraints": {"capabilities": ["shared_storage_write"], "conflicts_with": []},
-                "skip_if": [],
-                "params": copy_step_params
-                or {
-                    "input": {"ref": "feature.copy_bios.$bios_source_dir"},
-                    "dest": {"value": "/sdcard/BIOS"},
-                    "copy_policy": "sync",
-                },
-                "verify": [],
-            }
-        ],
+        "steps": recipe_steps,
     }
+    if permissions is not None:
+        recipe_payload["permissions"] = permissions
     write_yaml(authored_root / "recipes" / "feature_copy_bios.yaml", recipe_payload)
 
     if add_cycle:

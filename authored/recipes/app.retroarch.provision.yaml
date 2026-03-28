@@ -3,12 +3,69 @@ kind: recipe
 id: app.retroarch.provision
 name: Provision RetroArch (AArch64)
 description: Install and launch RetroArch once.
-recipe_dependencies:
-  - app.obtainium.install
 provides:
   features:
     - retroarch_provision
-inputs: []
+inputs:
+  - id: retroarch_cfg
+    type: file
+    role: generic
+    label: RetroArch config
+    description: RetroArch config file.
+    required: false
+    multiple: false
+    validation:
+      must_exist: true
+      allowed_extensions: ["cfg"]
+      path_kind: file
+    default: null
+permissions:
+  runtime:
+    - package_name: com.retroarch.aarch64
+      name: android.permission.POST_NOTIFICATIONS
+      required: false
+      when:
+        android_api_min: 33
+    - package_name: com.retroarch.aarch64
+      name: android.permission.READ_EXTERNAL_STORAGE
+      required: false
+      when:
+        android_api_min: 33
+    - package_name: com.retroarch.aarch64
+      name: android.permission.READ_MEDIA_IMAGES
+      required: false
+      when:
+        android_api_min: 33
+    - package_name: com.retroarch.aarch64
+      name: android.permission.READ_MEDIA_AUDIO
+      required: false
+      when:
+        android_api_min: 33
+    - package_name: com.retroarch.aarch64
+      name: android.permission.READ_MEDIA_VIDEO
+      required: false
+      when:
+        android_api_min: 33
+    - package_name: com.retroarch.aarch64
+      name: android.permission.WRITE_EXTERNAL_STORAGE
+      required: false
+      when:
+        android_api_min: 33
+    - package_name: com.retroarch.aarch64
+      name: android.permission.ACCESS_MEDIA_LOCATION
+      required: false
+      when:
+        android_api_min: 33
+  appops:
+    - package_name: com.retroarch.aarch64
+      op: MANAGE_EXTERNAL_STORAGE
+      mode: allow
+      required: false
+      when:
+        rooted: true
+  policy:
+    on_failure: warn
+    require_all: false
 steps:
   - id: install_retroarch
     type: install_apk
@@ -28,13 +85,135 @@ steps:
       app: sample_artifacts/RetroArch_aarch64.apk
       replace_existing: false
     verify: []
+  - id: launch_retroarch_bootstrap
+    type: launch_app
+    name: Launch RetroArch for bootstrap
+    description: Launch RetroArch once so it can initialize its storage and defaults.
+    user_toggleable: false
+    dependencies:
+      - install_retroarch
+    constraints:
+      capabilities:
+        - app_launch
+      conflicts_with: []
+    skip_if: []
+    params:
+      package_name:
+        value: com.retroarch.aarch64
+    verify: []
+  - id: wait_for_retroarch_bootstrap
+    type: wait
+    name: Wait for RetroArch bootstrap
+    description: Pause briefly to let RetroArch finish bootstrap work.
+    user_toggleable: false
+    dependencies:
+      - launch_retroarch_bootstrap
+    constraints:
+      capabilities: []
+      conflicts_with: []
+    skip_if: []
+    params:
+      duration_ms: 5000
+    verify: []
+  - id: stop_retroarch_after_bootstrap
+    type: force_stop_app
+    name: Force stop RetroArch
+    description: Force stop RetroArch after the first bootstrap launch.
+    user_toggleable: false
+    dependencies:
+      - wait_for_retroarch_bootstrap
+    constraints:
+      capabilities: []
+      conflicts_with: []
+    skip_if: []
+    params:
+      package_name: com.retroarch.aarch64
+    verify: []
+  - id: grant_retroarch_permissions
+    type: grant_permissions
+    name: Grant RetroArch permissions
+    description: Apply the recipe's declared RetroArch permissions.
+    user_toggleable: false
+    dependencies:
+      - stop_retroarch_after_bootstrap
+    constraints:
+      capabilities: []
+      conflicts_with: []
+    skip_if: []
+    verify: []
+  - id: launch_retroarch_permissions
+    type: launch_app
+    name: Launch RetroArch after permissions
+    description: Launch RetroArch once so it can initialize its storage and defaults.
+    user_toggleable: false
+    dependencies:
+      - grant_retroarch_permissions
+    constraints:
+      capabilities:
+        - app_launch
+      conflicts_with: []
+    skip_if: []
+    params:
+      package_name:
+        value: com.retroarch.aarch64
+    verify: []
+  - id: wait_for_retroarch_permissions
+    type: wait
+    name: Wait for RetroArch permissions
+    description: Pause briefly to let RetroArch finish permissions work.
+    user_toggleable: false
+    dependencies:
+      - launch_retroarch_permissions
+    constraints:
+      capabilities: []
+      conflicts_with: []
+    skip_if: []
+    params:
+      duration_ms: 5000
+    verify: []
+  - id: stop_retroarch_after_permissions
+    type: force_stop_app
+    name: Force stop RetroArch
+    description: Force stop RetroArch after the permissions launch.
+    user_toggleable: false
+    dependencies:
+      - wait_for_retroarch_permissions
+    constraints:
+      capabilities: []
+      conflicts_with: []
+    skip_if: []
+    params:
+      package_name: com.retroarch.aarch64
+    verify: []
+  - id: seed_retroarch_cfg
+    type: copy_byo_input
+    name: Copy RetroArch config
+    description: Copy the config file into Android/data folder.
+    user_toggleable: true
+    dependencies:
+      # - grant_retroarch_permissions
+      - stop_retroarch_after_permissions
+    constraints:
+      capabilities:
+        - app_data_write
+      conflicts_with: []
+    params:
+      input:
+        ref: app.retroarch.provision.$retroarch_cfg
+      dest:
+        value: /sdcard/Android/data/com.retroarch.aarch64/files
+      copy_policy: sync
+    verify:
+      - type: path_exists
+        params:
+          path: /sdcard/Android/data/com.retroarch.aarch64/files/retroarch.cfg
   - id: launch_retroarch
     type: launch_app
     name: Launch RetroArch
-    description: Launch RetroArch once after install.
+    description: Launch RetroArch again after permissions and optional config seeding.
     user_toggleable: true
     dependencies:
-      - install_retroarch
+      - seed_retroarch_cfg
     constraints:
       capabilities:
         - app_launch

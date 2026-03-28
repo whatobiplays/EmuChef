@@ -2,6 +2,9 @@
 # Copy this file into authored/device_profiles/ and replace placeholder values.
 # Matching uses the combined match block. Include alternate manufacturer strings
 # when real devices report OEM/manufacturer values that differ from the brand.
+# Accepted top-level values:
+# - schema_version: 1
+# - kind: device_profile
 
 schema_version: 1
 kind: device_profile
@@ -9,6 +12,11 @@ id: example.device_profile.template
 name: Example Device Profile
 description: Replace with the handheld/device family this profile targets.
 match:
+  # Matching uses the full combined block:
+  # - manufacturer_contains: case-insensitive substring checks
+  # - brand_contains: case-insensitive substring checks
+  # - model_patterns: Python regex patterns
+  # - android_version.min/max: integer API level checks
   manufacturer_contains:
     - EXAMPLE
     - OEM_VARIANT
@@ -19,6 +27,16 @@ match:
   android_version:
     min: 11
 capability_defaults:
+  # Known capability keys:
+  # - adb_available
+  # - apk_install
+  # - shared_storage_write
+  # - app_launch
+  # - shell_command
+  # - package_remove_for_user
+  # - root_shell
+  # - app_data_write
+  # Values are always true | false.
   adb_available: true
   apk_install: true
   shared_storage_write: true
@@ -28,6 +46,7 @@ capability_defaults:
   root_shell: false
   app_data_write: false
 device_tags:
+  # device_tags is a free-form list of stable strings used for categorization.
   - handheld_android
   - brand_example
 metadata:

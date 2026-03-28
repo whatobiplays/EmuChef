@@ -8,6 +8,7 @@ import re
 import subprocess
 from dataclasses import dataclass
 from pathlib import Path, PurePosixPath
+from collections.abc import Sequence
 from typing import Protocol
 
 from emuchef.domain import ErrorCode
@@ -35,6 +36,7 @@ class DetectedDevice:
     model: str
     android_version: int
     root_available: bool
+    android_api_level: int | None = None
     brand: str | None = None
 
 
@@ -79,6 +81,12 @@ class AdbInterface(Protocol):
         ...
 
     def launch_app(self, package_name: str, activity: str | None = None) -> None:
+        ...
+
+    def force_stop_app(self, package_name: str) -> None:
+        ...
+
+    def run_plan_command(self, command: Sequence[str]) -> None:
         ...
 
 
@@ -127,18 +135,35 @@ class SubprocessAdb:
             return
         self._run(["shell", "monkey", "-p", package_name, "-c", "android.intent.category.LAUNCHER", "1"])
 
+    def force_stop_app(self, package_name: str) -> None:
+        self._run(["shell", "am", "force-stop", package_name])
+
+    def run_plan_command(self, command: Sequence[str]) -> None:
+        command_args = list(command)
+        if not command_args:
+            raise ValueError("Plan command must not be empty.")
+        if command_args[0] != "adb":
+            raise ValueError(f"Plan command must start with 'adb': {command_args!r}")
+
+        tail = command_args[1:]
+        if self._serial is not None and not _command_has_serial_flag(tail):
+            tail = ["-s", self._serial, *tail]
+        self._run_raw([self._executable, *tail])
+
     def detect_device(self) -> DetectedDevice:
         serial = self._serial or self._select_single_device_serial()
         manufacturer = self._getprop(serial, "ro.product.manufacturer")
         brand = self._getprop(serial, "ro.product.brand")
         model = self._getprop(serial, "ro.product.model")
         release = self._getprop(serial, "ro.build.version.release")
+        sdk = self._getprop(serial, "ro.build.version.sdk")
         root_available = self._run_with_serial(serial, ["shell", "su", "-c", "true"], check=False).returncode == 0
         detected = DetectedDevice(
             serial=serial,
             manufacturer=manufacturer or "Unknown",
             model=model or "Unknown",
             android_version=_parse_android_version(release),
+            android_api_level=_parse_android_api_level(sdk),
             root_available=root_available,
             brand=brand or None,
         )
@@ -153,6 +178,9 @@ class SubprocessAdb:
         if serial:
             full_args.extend(["-s", serial])
         full_args.extend(args)
+        return self._run_raw(full_args, check=check)
+
+    def _run_raw(self, full_args: list[str], check: bool = True) -> AdbCommandResult:
         logger.debug("ADB command: %s", " ".join(full_args))
         try:
             completed = self._runner(full_args)
@@ -195,6 +223,7 @@ class DryRunAdb:
         manufacturer: str = "Unknown",
         model: str = "Unknown",
         android_version: int = 0,
+        android_api_level: int | None = None,
         root_available: bool = False,
     ) -> None:
         self.installed_packages: set[str] = set()
@@ -205,6 +234,7 @@ class DryRunAdb:
             manufacturer=manufacturer,
             model=model,
             android_version=android_version,
+            android_api_level=android_api_level,
             root_available=root_available,
         )
 
@@ -247,6 +277,12 @@ class DryRunAdb:
     def launch_app(self, package_name: str, activity: str | None = None) -> None:
         self.commands.append(("launch_app", package_name, activity or ""))
 
+    def force_stop_app(self, package_name: str) -> None:
+        self.commands.append(("force_stop_app", package_name))
+
+    def run_plan_command(self, command: Sequence[str]) -> None:
+        self.commands.append(("run_plan_command", *tuple(command)))
+
     def detect_device(self) -> DetectedDevice:
         self.commands.append(("detect_device",))
         return self._detected_device
@@ -265,6 +301,20 @@ def _parse_android_version(raw_value: str) -> int:
     if match is None:
         return 0
     return int(match.group(0))
+
+
+def _parse_android_api_level(raw_value: str) -> int | None:
+    value = raw_value.strip()
+    if not value:
+        return None
+    try:
+        return int(value)
+    except ValueError:
+        return None
+
+
+def _command_has_serial_flag(args: Sequence[str]) -> bool:
+    return len(args) >= 2 and args[0] == "-s"
 
 
 def resolve_adb_executable(

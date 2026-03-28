@@ -11,6 +11,7 @@ import yaml
 from emuchef.domain import (
     AppArtifactSupport,
     AppArtifacts,
+    AppOpGrant,
     AppConfigTarget,
     AppDefinition,
     AppInstallSource,
@@ -29,9 +30,14 @@ from emuchef.domain import (
     InputType,
     InputValidation,
     LiteralParamValue,
+    ManualPermissionRequirement,
+    PermissionPolicy,
+    PermissionSet,
+    PermissionWhen,
     Recipe,
     RecipeProvides,
     RuntimeCapabilities,
+    RuntimePermissionGrant,
     Step,
     StepCondition,
     StepConstraints,
@@ -39,7 +45,7 @@ from emuchef.domain import (
     parse_reference,
 )
 from emuchef.planner.catalog import AuthoredCatalog, CatalogLoadError
-from emuchef.planner.contracts import referenced_bindings, validate_step_contract
+from emuchef.planner.contracts import referenced_bindings, validate_recipe_permission_steps, validate_step_contract
 from emuchef.planner.dependencies import validate_recipe_step_cycles
 
 
@@ -86,6 +92,7 @@ def load_authored_catalog(root: str | Path) -> AuthoredCatalog:
                     )
                 )
         errors.extend(validate_recipe_step_cycles(recipe))
+        errors.extend(validate_recipe_permission_steps(recipe))
         for step in recipe.steps:
             errors.extend(validate_step_contract(recipe.id, step))
             for binding_ref in referenced_bindings(step):
@@ -306,6 +313,7 @@ def _parse_recipe(data: Mapping[str, Any]) -> Recipe:
         provides=RecipeProvides(features=tuple(str(item) for item in data.get("provides", {}).get("features", []))),
         inputs=tuple(_parse_input_declaration(item) for item in data.get("inputs", [])),
         steps=tuple(_parse_step(item) for item in data.get("steps", [])),
+        permissions=_parse_permission_set(data.get("permissions")),
         schema_version=int(data["schema_version"]),
         kind=str(data["kind"]),
     )
@@ -395,6 +403,66 @@ def _parse_optional_artifact(data: Mapping[str, Any] | None) -> AppArtifactSuppo
     if data is None:
         return None
     return _parse_artifact_support(data)
+
+
+def _parse_permission_set(data: Mapping[str, Any] | None) -> PermissionSet:
+    if data is None:
+        return PermissionSet()
+    return PermissionSet(
+        runtime=tuple(_parse_runtime_permission_grant(item) for item in data.get("runtime", [])),
+        appops=tuple(_parse_appop_grant(item) for item in data.get("appops", [])),
+        manual=tuple(_parse_manual_permission_requirement(item) for item in data.get("manual", [])),
+        policy=_parse_permission_policy(data.get("policy")),
+    )
+
+
+def _parse_permission_when(data: Mapping[str, Any] | None) -> PermissionWhen | None:
+    if data is None:
+        return None
+    rooted = data.get("rooted")
+    return PermissionWhen(
+        rooted=bool(rooted) if rooted is not None else None,
+        android_api_min=int(data["android_api_min"]) if data.get("android_api_min") is not None else None,
+        android_api_max=int(data["android_api_max"]) if data.get("android_api_max") is not None else None,
+    )
+
+
+def _parse_runtime_permission_grant(data: Mapping[str, Any]) -> RuntimePermissionGrant:
+    return RuntimePermissionGrant(
+        package_name=str(data["package_name"]),
+        name=str(data["name"]),
+        required=bool(data.get("required", True)),
+        when=_parse_permission_when(data.get("when")),
+    )
+
+
+def _parse_appop_grant(data: Mapping[str, Any]) -> AppOpGrant:
+    return AppOpGrant(
+        package_name=str(data["package_name"]),
+        op=str(data["op"]),
+        mode=str(data["mode"]),
+        required=bool(data.get("required", True)),
+        when=_parse_permission_when(data.get("when")),
+    )
+
+
+def _parse_manual_permission_requirement(data: Mapping[str, Any]) -> ManualPermissionRequirement:
+    return ManualPermissionRequirement(
+        package_name=str(data["package_name"]),
+        manual_type=str(data["manual_type"]),
+        reason=str(data["reason"]),
+        required=bool(data.get("required", True)),
+        when=_parse_permission_when(data.get("when")),
+    )
+
+
+def _parse_permission_policy(data: Mapping[str, Any] | None) -> PermissionPolicy:
+    if data is None:
+        return PermissionPolicy()
+    return PermissionPolicy(
+        on_failure=str(data.get("on_failure", "warn")),
+        require_all=bool(data.get("require_all", False)),
+    )
 
 
 def _namespaced_inputs(kind: str, items: Mapping[str, Any]) -> dict[str, InputDeclaration]:

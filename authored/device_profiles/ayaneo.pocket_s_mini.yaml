@@ -1,0 +1,33 @@
+# Example authored device profile template.
+# Copy this file into authored/device_profiles/ and replace placeholder values.
+# Matching uses the combined match block. Include alternate manufacturer strings
+# when real devices report OEM/manufacturer values that differ from the brand.
+
+schema_version: 1
+kind: device_profile
+id: ayaneo.pocket_s_mini
+name: AYANEO Pocket S Mini
+description: AYANEO Pocket S Mini
+match:
+  manufacturer_contains:
+    - AYANEO
+  brand_contains:
+    - AYANEO
+  model_patterns:
+    - 'Pocket S mini'
+  android_version:
+    min: 13
+capability_defaults:
+  adb_available: true
+  apk_install: true
+  shared_storage_write: true
+  app_launch: true
+  shell_command: true
+  package_remove_for_user: false
+  root_shell: true
+  app_data_write: true
+device_tags:
+  - handheld_android
+  - brand_ayaneo
+metadata:
+  vendor: AYANEO

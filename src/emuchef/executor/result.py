@@ -4,12 +4,20 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from enum import Enum
+from typing import Literal
 
 
 class StepRunStatus(str, Enum):
     EXECUTED = "executed"
     SKIPPED = "skipped"
     FAILED = "failed"
+
+
+class PermissionRunStatus(str, Enum):
+    EXECUTED = "executed"
+    FAILED = "failed"
+    SKIPPED = "skipped"
+    MANUAL_REQUIRED = "manual_required"
 
 
 class ProgressPhase(str, Enum):
@@ -33,6 +41,22 @@ class StepRunRecord:
 
 
 @dataclass(frozen=True, slots=True)
+class PermissionRunRecord:
+    step_id: str
+    status: PermissionRunStatus
+    kind: Literal["runtime_permission", "appop", "manual_requirement"]
+    package_name: str
+    source_recipe_id: str
+    source_section: str
+    permission: str | None = None
+    op: str | None = None
+    desired_mode: str | None = None
+    manual_type: str | None = None
+    command: tuple[str, ...] = ()
+    message: str | None = None
+
+
+@dataclass(frozen=True, slots=True)
 class ExecutionProgressEvent:
     step_index: int
     total_steps: int
@@ -48,3 +72,4 @@ class ExecutionRunResult:
     success: bool
     total_steps: int
     steps: tuple[StepRunRecord, ...]
+    permission_results: tuple[PermissionRunRecord, ...] = ()

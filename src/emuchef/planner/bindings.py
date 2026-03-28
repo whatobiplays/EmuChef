@@ -157,7 +157,11 @@ def validate_binding_value(input_id: str, declaration: InputDeclaration, value: 
                 )
             )
         if declaration.validation.allowed_extensions and path.suffix:
-            allowed = {extension.lower() for extension in declaration.validation.allowed_extensions}
+            allowed = {
+                normalized
+                for normalized in (_normalize_allowed_extension(extension) for extension in declaration.validation.allowed_extensions)
+                if normalized
+            }
             if path.suffix.lower() not in allowed:
                 errors.append(
                     ErrorMessage(
@@ -188,6 +192,15 @@ def _normalize_path_string(raw_value: str) -> str:
     if path.is_absolute():
         return str(path)
     return str(Path.cwd() / path)
+
+
+def _normalize_allowed_extension(extension: str) -> str:
+    normalized = str(extension).strip().lower()
+    if not normalized:
+        return ""
+    if normalized.startswith("."):
+        return normalized
+    return f".{normalized}"
 
 
 def validate_required_bindings(

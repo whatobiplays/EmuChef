@@ -1,9 +1,30 @@
 # Example authored recipe template.
 # Copy this file into authored/recipes/ and replace placeholder values.
+# Accepted top-level values:
+# - schema_version: 1
+# - kind: recipe
 # Keep param shapes aligned with the planner step contracts:
 # - literal-only params stay raw literals
 # - ref-only params use { ref: ... }
 # - bindable params use exactly one of { value: ... } or { ref: ... }
+# Accepted step types in authored recipes:
+# - install_apk
+# - copy_byo_input
+# - push_file
+# - push_dir
+# - pull_file
+# - launch_app
+# - grant_permissions
+# - wait
+# - force_stop_app
+# - run_shell
+# Executor support is intentionally narrower today:
+# - install_apk
+# - copy_byo_input
+# - launch_app
+# - grant_permissions
+# - wait
+# - force_stop_app
 
 schema_version: 1
 kind: recipe
@@ -16,14 +37,21 @@ provides:
   features:
     - example_feature
 inputs:
+  # Accepted input values:
+  # - type: file | directory
+  # - role: apk | bios | roms | config_bundle | generic
   - id: example_source_dir
     type: directory
     role: generic
     label: Example Source Directory
     description: Local directory that will be copied onto the device.
     required: true
+    # multiple: true | false
     multiple: false
     validation:
+      # validation.path_kind: file | directory | null
+      # If you use allowed_extensions for file inputs, entries may be written
+      # either with or without the dot, for example .cfg or cfg.
       must_exist: true
       allowed_extensions: []
       path_kind: directory
@@ -31,20 +59,40 @@ inputs:
     metadata: {}
 steps:
   - id: copy_example_assets
+    # step.type values are listed above. Param requirements depend on step.type.
     type: copy_byo_input
     name: Copy Example Assets
     description: Copy the selected local directory into shared storage.
+    # user_toggleable: true | false
     user_toggleable: true
+    # dependencies must only reference step ids in this same recipe.
     dependencies: []
     constraints:
+      # Known capability names:
+      # - adb_available
+      # - apk_install
+      # - shared_storage_write
+      # - app_launch
+      # - shell_command
+      # - package_remove_for_user
+      # - root_shell
+      # - app_data_write
       capabilities:
         - shared_storage_write
+      # conflicts_with contains other step ids in this same recipe.
       conflicts_with: []
     skip_if:
+      # Current executor-supported condition types:
+      # - path_exists      params.path
+      # - package_installed params.package_name
       - type: path_exists
         params:
           path: /sdcard/ExampleAssets/ready.flag
     params:
+      # copy_byo_input params:
+      # - input: { ref: <binding-ref> }
+      # - dest: { value: ... } or { ref: ... }
+      # - copy_policy: merge | sync | replace
       input:
         ref: example.recipe.template.$example_source_dir
       dest:
@@ -54,6 +102,49 @@ steps:
       # replace: clear destination first, then copy
       copy_policy: sync
     verify:
+      # verify uses the same condition types as skip_if.
       - type: path_exists
         params:
           path: /sdcard/ExampleAssets
+  - id: wait_for_example_bootstrap
+    type: wait
+    name: Wait for bootstrap
+    user_toggleable: false
+    dependencies:
+      - copy_example_assets
+    constraints:
+      capabilities: []
+      conflicts_with: []
+    skip_if: []
+    params:
+      # wait params:
+      # - duration_ms: positive integer milliseconds
+      duration_ms: 1500
+    verify: []
+  - id: force_stop_example_app
+    type: force_stop_app
+    name: Force stop example app
+    user_toggleable: false
+    dependencies:
+      - wait_for_example_bootstrap
+    constraints:
+      capabilities: []
+      conflicts_with: []
+    skip_if: []
+    params:
+      # force_stop_app params:
+      # - package_name: non-empty string
+      package_name: com.example.app
+    verify: []
+  - id: grant_example_permissions
+    type: grant_permissions
+    name: Grant example permissions
+    user_toggleable: false
+    dependencies:
+      - force_stop_example_app
+    constraints:
+      capabilities: []
+      conflicts_with: []
+    skip_if: []
+    # grant_permissions takes no params and applies this recipe's local permissions.
+    verify: []

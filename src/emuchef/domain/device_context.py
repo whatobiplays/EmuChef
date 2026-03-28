@@ -8,4 +8,5 @@ class DeviceContext:
     manufacturer: str
     model: str
     android_version: int
+    android_api_level: int | None = None
     device_tags: tuple[str, ...] = ()

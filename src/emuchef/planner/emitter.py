@@ -7,17 +7,24 @@ from collections.abc import Mapping
 from pathlib import Path
 
 from emuchef.domain import (
+    AppOpGrant,
     BoundParamValue,
     CopyPolicy,
     ErrorCode,
     ErrorMessage,
+    ExecutionPermissionPlan,
     ExecutionPlan,
     ExecutionPlanSource,
     ExecutionStep,
     LiteralParamValue,
+    ManualPermissionRequirement,
+    PermissionPlanAction,
+    PermissionPlanReason,
+    PermissionPlanSource,
     PlanningResult,
     PlanningStatus,
     ResolvedInputValue,
+    RuntimePermissionGrant,
     WarningCode,
     WarningMessage,
 )
@@ -218,6 +225,7 @@ def emit_execution_plan(
             ResolvedInputValue(id=input_id, value=binding_table[input_id].value) for input_id in input_ids
         ),
         steps=tuple(execution_steps),
+        permission_plan=_emit_permission_plan(catalog, draft_plan),
     )
     status = PlanningStatus.WARNING if warnings else PlanningStatus.SUCCESS
     logger.debug("Execution plan %s emitted with %d steps", plan_id, len(execution_steps))
@@ -304,3 +312,152 @@ def _normalize_execution_param_value(step_type, param_name: str, value, catalog:
     if param_name == "copy_policy":
         return CopyPolicy(str(value)).value
     return value
+
+
+def _emit_permission_plan(catalog: AuthoredCatalog, draft_plan) -> ExecutionPermissionPlan | None:
+    actions: list[PermissionPlanAction] = []
+    rooted = draft_plan.runtime_capabilities.root_shell
+    android_api_level = draft_plan.device_context.android_api_level
+
+    for draft_recipe in draft_plan.recipes:
+        recipe = catalog.recipes[draft_recipe.id]
+        for index, grant in enumerate(recipe.permissions.runtime):
+            actions.append(
+                _emit_runtime_permission_action(
+                    recipe.id,
+                    index,
+                    grant,
+                    rooted=rooted,
+                    android_api_level=android_api_level,
+                )
+            )
+        for index, grant in enumerate(recipe.permissions.appops):
+            actions.append(
+                _emit_appop_action(
+                    recipe.id,
+                    index,
+                    grant,
+                    rooted=rooted,
+                    android_api_level=android_api_level,
+                )
+            )
+        for index, grant in enumerate(recipe.permissions.manual):
+            actions.append(
+                _emit_manual_permission_action(
+                    recipe.id,
+                    index,
+                    grant,
+                    rooted=rooted,
+                    android_api_level=android_api_level,
+                )
+            )
+
+    if not actions:
+        return None
+    return ExecutionPermissionPlan(actions=tuple(actions))
+
+
+def _emit_runtime_permission_action(
+    recipe_id: str,
+    index: int,
+    grant: RuntimePermissionGrant,
+    *,
+    rooted: bool,
+    android_api_level: int | None,
+) -> PermissionPlanAction:
+    reason = _evaluate_permission_when(grant.when, rooted=rooted, android_api_level=android_api_level)
+    return PermissionPlanAction(
+        status="applicable" if reason is None else "skipped",
+        kind="runtime_permission",
+        package_name=grant.package_name,
+        permission=grant.name,
+        required=grant.required,
+        command=("adb", "shell", "pm", "grant", grant.package_name, grant.name),
+        source=PermissionPlanSource(recipe_id=recipe_id, section=f"permissions.runtime[{index}]"),
+        reason=reason,
+    )
+
+
+def _emit_appop_action(
+    recipe_id: str,
+    index: int,
+    grant: AppOpGrant,
+    *,
+    rooted: bool,
+    android_api_level: int | None,
+) -> PermissionPlanAction:
+    reason = _evaluate_permission_when(grant.when, rooted=rooted, android_api_level=android_api_level)
+    return PermissionPlanAction(
+        status="applicable" if reason is None else "skipped",
+        kind="appop",
+        package_name=grant.package_name,
+        op=grant.op,
+        desired_mode=grant.mode,
+        required=grant.required,
+        command=("adb", "shell", "appops", "set", grant.package_name, grant.op, grant.mode),
+        source=PermissionPlanSource(recipe_id=recipe_id, section=f"permissions.appops[{index}]"),
+        reason=reason,
+    )
+
+
+def _emit_manual_permission_action(
+    recipe_id: str,
+    index: int,
+    grant: ManualPermissionRequirement,
+    *,
+    rooted: bool,
+    android_api_level: int | None,
+) -> PermissionPlanAction:
+    applicability_reason = _evaluate_permission_when(grant.when, rooted=rooted, android_api_level=android_api_level)
+    reason = applicability_reason or PermissionPlanReason(code="manual_required", message=grant.reason)
+    status = "skipped" if applicability_reason is not None else "manual_required"
+    return PermissionPlanAction(
+        status=status,
+        kind="manual_requirement",
+        package_name=grant.package_name,
+        manual_type=grant.manual_type,
+        required=grant.required,
+        command=(),
+        source=PermissionPlanSource(recipe_id=recipe_id, section=f"permissions.manual[{index}]"),
+        reason=reason,
+    )
+
+
+def _evaluate_permission_when(when, *, rooted: bool, android_api_level: int | None) -> PermissionPlanReason | None:
+    if when is None:
+        return None
+    if when.rooted is True and not rooted:
+        return PermissionPlanReason(code="requires_root", message="Device is not rooted.")
+    if when.rooted is False and rooted:
+        return PermissionPlanReason(code="requires_unrooted", message="Device is rooted.")
+    if (when.android_api_min is not None or when.android_api_max is not None) and android_api_level is None:
+        return PermissionPlanReason(code="missing_android_api_level", message="Device Android API level is unknown.")
+    if not _android_api_in_range(android_api_level, minimum=when.android_api_min, maximum=when.android_api_max):
+        return PermissionPlanReason(
+            code="android_api_out_of_range",
+            message=(
+                f"Device Android API {android_api_level} is outside supported range "
+                f"{_format_android_api_range(when.android_api_min, when.android_api_max)}."
+            ),
+        )
+    return None
+
+
+def _android_api_in_range(android_api_level: int | None, *, minimum: int | None, maximum: int | None) -> bool:
+    if android_api_level is None:
+        return False
+    if minimum is not None and android_api_level < minimum:
+        return False
+    if maximum is not None and android_api_level > maximum:
+        return False
+    return True
+
+
+def _format_android_api_range(minimum: int | None, maximum: int | None) -> str:
+    if minimum is not None and maximum is not None:
+        return f"min={minimum} max={maximum}"
+    if minimum is not None:
+        return f">= {minimum}"
+    if maximum is not None:
+        return f"<= {maximum}"
+    return "any"

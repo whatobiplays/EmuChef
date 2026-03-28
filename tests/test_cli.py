@@ -13,9 +13,13 @@ import yaml
 from emuchef.cli import main
 from emuchef.domain import (
     DeviceContext,
+    ExecutionPermissionPlan,
     ExecutionPlan,
     ExecutionPlanSource,
     ExecutionStep,
+    PermissionPlanAction,
+    PermissionPlanReason,
+    PermissionPlanSource,
     ResolvedInputValue,
     RuntimeCapabilities,
     StepCondition,
@@ -251,6 +255,7 @@ class CliTests(unittest.TestCase):
             model="Pocket 4 Pro",
             android_version=13,
             root_available=False,
+            android_api_level=33,
             brand="AYANEO",
         )
 
@@ -272,6 +277,7 @@ class CliTests(unittest.TestCase):
             self.assertEqual(rc, 0)
             self.assertIn("serial: emulator-5554", stdout)
             self.assertIn("android_version: 13", stdout)
+            self.assertIn("android_api_level: 33", stdout)
 
     def test_detect_profiles_matches_pocket_air_mini_when_manufacturer_is_arbor(self) -> None:
         with TemporaryDirectory() as tmp:
@@ -560,6 +566,99 @@ class CliTests(unittest.TestCase):
             self.assertIn("- failed: 1", stdout)
             self.assertIn("- not run: 2", stdout)
 
+    def test_apply_summary_includes_permission_results(self) -> None:
+        with TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            apk_path = root / "retroarch.apk"
+            apk_path.write_bytes(b"")
+            bios_dir = root / "bios"
+            bios_dir.mkdir()
+            (bios_dir / "scph1001.bin").write_text("bios", encoding="utf-8")
+            plan_file = root / "plan.yaml"
+            plan_file.write_text(
+                dump_yaml(
+                    build_execution_plan(
+                        apk_path,
+                        bios_dir,
+                        include_grant_permissions=True,
+                        permission_actions=(
+                            PermissionPlanAction(
+                                status="applicable",
+                                kind="runtime_permission",
+                                package_name="com.retroarch.aarch64",
+                                permission="android.permission.POST_NOTIFICATIONS",
+                                command=(
+                                    "adb",
+                                    "shell",
+                                    "pm",
+                                    "grant",
+                                    "com.retroarch.aarch64",
+                                    "android.permission.POST_NOTIFICATIONS",
+                                ),
+                                source=PermissionPlanSource(
+                                    recipe_id="app.retroarch.provision",
+                                    section="permissions.runtime[0]",
+                                ),
+                            ),
+                            PermissionPlanAction(
+                                status="skipped",
+                                kind="appop",
+                                package_name="com.retroarch.aarch64",
+                                op="MANAGE_EXTERNAL_STORAGE",
+                                desired_mode="allow",
+                                command=(
+                                    "adb",
+                                    "shell",
+                                    "appops",
+                                    "set",
+                                    "com.retroarch.aarch64",
+                                    "MANAGE_EXTERNAL_STORAGE",
+                                    "allow",
+                                ),
+                                source=PermissionPlanSource(
+                                    recipe_id="app.retroarch.provision",
+                                    section="permissions.appops[0]",
+                                ),
+                                reason=PermissionPlanReason(
+                                    code="requires_root",
+                                    message="Device is not rooted.",
+                                ),
+                            ),
+                            PermissionPlanAction(
+                                status="manual_required",
+                                kind="manual_requirement",
+                                package_name="com.retroarch.aarch64",
+                                manual_type="folder_picker",
+                                command=(),
+                                source=PermissionPlanSource(
+                                    recipe_id="app.retroarch.provision",
+                                    section="permissions.manual[0]",
+                                ),
+                                reason=PermissionPlanReason(
+                                    code="manual_required",
+                                    message="App requires SAF URI grant for RetroArch storage selection",
+                                ),
+                            ),
+                        ),
+                    )
+                ),
+                encoding="utf-8",
+            )
+
+            rc, stdout, _ = run_cli(["apply", "--plan-file", str(plan_file), "--dry-run"])
+
+            self.assertEqual(rc, 0)
+            self.assertIn("Permission actions:", stdout)
+            self.assertIn("- executed: 1", stdout)
+            self.assertIn("- skipped: 1", stdout)
+            self.assertIn("- manual_required: 1", stdout)
+            self.assertIn(
+                "executed: runtime_permission com.retroarch.aarch64 android.permission.POST_NOTIFICATIONS",
+                stdout,
+            )
+            self.assertIn("skipped: appop com.retroarch.aarch64 MANAGE_EXTERNAL_STORAGE", stdout)
+            self.assertIn("manual_required: manual_requirement com.retroarch.aarch64 folder_picker", stdout)
+
     def test_verbose_and_debug_flags_do_not_break_commands(self) -> None:
         with TemporaryDirectory() as tmp:
             root = Path(tmp)
@@ -810,7 +909,12 @@ def build_cli_project_tree(root: Path) -> Path:
     return authored_root
 
 
-def build_execution_plan(apk_path: Path, bios_dir: Path) -> ExecutionPlan:
+def build_execution_plan(
+    apk_path: Path,
+    bios_dir: Path,
+    include_grant_permissions: bool = False,
+    permission_actions: tuple[PermissionPlanAction, ...] = (),
+) -> ExecutionPlan:
     capabilities = RuntimeCapabilities(
         adb_available=True,
         apk_install=True,
@@ -821,6 +925,48 @@ def build_execution_plan(apk_path: Path, bios_dir: Path) -> ExecutionPlan:
         root_shell=False,
         app_data_write=False,
     )
+    steps = [
+        ExecutionStep(
+            id="app.retroarch.provision/install_retroarch",
+            recipe_ref="app.retroarch.provision",
+            type=StepType.INSTALL_APK,
+            name="Install RetroArch",
+            params={"app": str(apk_path), "replace_existing": False},
+            skip_if=(),
+            verify=(),
+        ),
+        ExecutionStep(
+            id="feature.copy_bios/copy_bios_dir",
+            recipe_ref="feature.copy_bios",
+            type=StepType.COPY_BYO_INPUT,
+            name="Copy BIOS folder",
+            params={"input": str(bios_dir), "dest": "/sdcard/BIOS", "copy_policy": "sync"},
+            skip_if=(),
+            verify=(StepCondition(type="path_exists", params={"path": "/sdcard/BIOS/scph1001.bin"}),),
+        ),
+        ExecutionStep(
+            id="app.retroarch.provision/launch_retroarch",
+            recipe_ref="app.retroarch.provision",
+            type=StepType.LAUNCH_APP,
+            name="Launch RetroArch",
+            params={"package_name": "com.retroarch"},
+            skip_if=(StepCondition(type="package_installed", params={"package_name": "com.example.skip"}),),
+            verify=(),
+        ),
+    ]
+    if include_grant_permissions:
+        steps.append(
+            ExecutionStep(
+                id="app.retroarch.provision/grant_retroarch_permissions",
+                recipe_ref="app.retroarch.provision",
+                type=StepType.GRANT_PERMISSIONS,
+                name="Grant RetroArch permissions",
+                params={},
+                skip_if=(),
+                verify=(),
+            )
+        )
+
     return ExecutionPlan(
         id="plan.test",
         source=ExecutionPlanSource(
@@ -832,35 +978,8 @@ def build_execution_plan(apk_path: Path, bios_dir: Path) -> ExecutionPlan:
         device_context=DeviceContext(manufacturer="AYANEO", model="Pocket 4 Pro", android_version=13),
         runtime_capabilities=capabilities,
         inputs_resolved=(ResolvedInputValue(id="feature.copy_bios.$bios_source_dir", value=str(bios_dir)),),
-        steps=(
-            ExecutionStep(
-                id="app.retroarch.provision/install_retroarch",
-                recipe_ref="app.retroarch.provision",
-                type=StepType.INSTALL_APK,
-                name="Install RetroArch",
-                params={"app": str(apk_path), "replace_existing": False},
-                skip_if=(),
-                verify=(),
-            ),
-            ExecutionStep(
-                id="feature.copy_bios/copy_bios_dir",
-                recipe_ref="feature.copy_bios",
-                type=StepType.COPY_BYO_INPUT,
-                name="Copy BIOS folder",
-                params={"input": str(bios_dir), "dest": "/sdcard/BIOS", "copy_policy": "sync"},
-                skip_if=(),
-                verify=(StepCondition(type="path_exists", params={"path": "/sdcard/BIOS/scph1001.bin"}),),
-            ),
-            ExecutionStep(
-                id="app.retroarch.provision/launch_retroarch",
-                recipe_ref="app.retroarch.provision",
-                type=StepType.LAUNCH_APP,
-                name="Launch RetroArch",
-                params={"package_name": "com.retroarch"},
-                skip_if=(StepCondition(type="package_installed", params={"package_name": "com.example.skip"}),),
-                verify=(),
-            ),
-        ),
+        steps=tuple(steps),
+        permission_plan=ExecutionPermissionPlan(actions=permission_actions) if permission_actions else None,
     )
 
 

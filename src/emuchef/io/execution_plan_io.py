@@ -8,9 +8,13 @@ from typing import Any
 
 from emuchef.domain import (
     DeviceContext,
+    ExecutionPermissionPlan,
     ExecutionPlan,
     ExecutionPlanSource,
     ExecutionStep,
+    PermissionPlanAction,
+    PermissionPlanReason,
+    PermissionPlanSource,
     ResolvedInputValue,
     RuntimeCapabilities,
     StepCondition,
@@ -47,6 +51,7 @@ def parse_execution_plan(data: Mapping[str, Any]) -> ExecutionPlan:
         "runtime_capabilities",
         "inputs_resolved",
         "steps",
+        "permission_plan",
     }
     unknown_top_level = set(data) - allowed_top_level
     if unknown_top_level:
@@ -64,6 +69,9 @@ def parse_execution_plan(data: Mapping[str, Any]) -> ExecutionPlan:
             manufacturer=str(data["device_context"]["manufacturer"]),
             model=str(data["device_context"]["model"]),
             android_version=int(data["device_context"]["android_version"]),
+            android_api_level=int(data["device_context"]["android_api_level"])
+            if data["device_context"].get("android_api_level") is not None
+            else None,
             device_tags=tuple(str(item) for item in data["device_context"].get("device_tags", [])),
         ),
         runtime_capabilities=RuntimeCapabilities(
@@ -80,6 +88,7 @@ def parse_execution_plan(data: Mapping[str, Any]) -> ExecutionPlan:
             ResolvedInputValue(id=str(item["id"]), value=item["value"]) for item in data.get("inputs_resolved", [])
         ),
         steps=tuple(_parse_execution_step(item) for item in data.get("steps", [])),
+        permission_plan=_parse_permission_plan(data.get("permission_plan")),
         schema_version=int(data["schema_version"]),
         kind=str(data["kind"]),
     )
@@ -102,3 +111,40 @@ def _parse_execution_step(data: Mapping[str, Any]) -> ExecutionStep:
 
 def _parse_condition(data: Mapping[str, Any]) -> StepCondition:
     return StepCondition(type=str(data["type"]), params=dict(data.get("params", {})))
+
+
+def _parse_permission_plan(data: Mapping[str, Any] | None) -> ExecutionPermissionPlan | None:
+    if data is None:
+        return None
+    return ExecutionPermissionPlan(actions=tuple(_parse_permission_plan_action(item) for item in data.get("actions", [])))
+
+
+def _parse_permission_plan_action(data: Mapping[str, Any]) -> PermissionPlanAction:
+    return PermissionPlanAction(
+        status=str(data["status"]),
+        kind=str(data["kind"]),
+        package_name=str(data["package_name"]),
+        source=PermissionPlanSource(
+            recipe_id=str(data["source"]["recipe_id"]),
+            section=str(data["source"]["section"]),
+        ),
+        permission=_optional_str(data.get("permission")),
+        op=_optional_str(data.get("op")),
+        desired_mode=_optional_str(data.get("desired_mode")),
+        manual_type=_optional_str(data.get("manual_type")),
+        required=bool(data.get("required", True)),
+        command=tuple(str(item) for item in data.get("command", [])),
+        reason=_parse_permission_plan_reason(data.get("reason")),
+    )
+
+
+def _parse_permission_plan_reason(data: Mapping[str, Any] | None) -> PermissionPlanReason | None:
+    if data is None:
+        return None
+    return PermissionPlanReason(code=str(data["code"]), message=str(data["message"]))
+
+
+def _optional_str(value: Any) -> str | None:
+    if value is None:
+        return None
+    return str(value)

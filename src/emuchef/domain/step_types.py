@@ -10,4 +10,7 @@ class StepType(str, Enum):
     PUSH_DIR = "push_dir"
     PULL_FILE = "pull_file"
     LAUNCH_APP = "launch_app"
+    GRANT_PERMISSIONS = "grant_permissions"
+    WAIT = "wait"
+    FORCE_STOP_APP = "force_stop_app"
     RUN_SHELL = "run_shell"

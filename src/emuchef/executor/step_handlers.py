@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import time
+from collections.abc import Callable
 from pathlib import Path, PurePosixPath
 
 from emuchef.domain import CopyPolicy, ExecutionStep, StepType
@@ -9,7 +11,12 @@ from emuchef.domain import CopyPolicy, ExecutionStep, StepType
 from .adb import AdbInterface
 
 
-def execute_step(adb: AdbInterface, step: ExecutionStep, workdir: Path) -> None:
+def execute_step(
+    adb: AdbInterface,
+    step: ExecutionStep,
+    workdir: Path,
+    sleep_fn: Callable[[float], None] | None = None,
+) -> None:
     if step.type is StepType.INSTALL_APK:
         _install_apk(adb, step, workdir)
         return
@@ -24,6 +31,12 @@ def execute_step(adb: AdbInterface, step: ExecutionStep, workdir: Path) -> None:
         return
     if step.type is StepType.LAUNCH_APP:
         _launch_app(adb, step)
+        return
+    if step.type is StepType.WAIT:
+        _wait(step, sleep_fn or time.sleep)
+        return
+    if step.type is StepType.FORCE_STOP_APP:
+        _force_stop_app(adb, step)
         return
     raise ValueError(f"Unsupported step type: {step.type.value}")
 
@@ -105,6 +118,20 @@ def _launch_app(adb: AdbInterface, step: ExecutionStep) -> None:
     package_name = str(step.params["package_name"])
     activity = step.params.get("activity")
     adb.launch_app(package_name, str(activity) if activity is not None else None)
+
+
+def _wait(step: ExecutionStep, sleep_fn: Callable[[float], None]) -> None:
+    raw_duration = step.params["duration_ms"]
+    if isinstance(raw_duration, bool) or not isinstance(raw_duration, int) or raw_duration <= 0:
+        raise ValueError(f"wait step requires a positive integer duration_ms: {raw_duration!r}")
+    sleep_fn(raw_duration / 1000.0)
+
+
+def _force_stop_app(adb: AdbInterface, step: ExecutionStep) -> None:
+    package_name = str(step.params["package_name"])
+    if not package_name.strip():
+        raise ValueError("force_stop_app step requires a non-empty package_name.")
+    adb.force_stop_app(package_name)
 
 
 def _resolve_local_path(raw_path: str, workdir: Path) -> Path:

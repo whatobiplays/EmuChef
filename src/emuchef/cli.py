@@ -229,7 +229,7 @@ def _run_apply(args: argparse.Namespace) -> int:
     plan_path = Path(args.plan_file)
     execution_plan = load_execution_plan_file(plan_path)
     adb = DryRunAdb() if args.dry_run else _build_adb(args)
-    runner = ExecutorRunner(adb=adb, workdir=plan_path.parent)
+    runner = ExecutorRunner(adb=adb, workdir=plan_path.parent, sleep_fn=(lambda _: None) if args.dry_run else None)
     result = runner.run(
         execution_plan,
         progress_callback=_make_execution_progress_callback(verbose=args.verbose, dry_run=args.dry_run),
@@ -305,6 +305,7 @@ def _resolve_device_context(catalog, args: argparse.Namespace) -> tuple[DeviceCo
             manufacturer=manufacturer,
             model=model,
             android_version=android_version,
+            android_api_level=detected.android_api_level if detected is not None else None,
             device_tags=explicit_tags,
         ),
         detected,
@@ -475,6 +476,21 @@ def _format_execution_summary(result, dry_run: bool) -> str:
         f"- failed: {failed}",
         f"- not run: {not_run}",
     ]
+    if result.permission_results:
+        permission_executed = sum(1 for record in result.permission_results if record.status.value == "executed")
+        permission_skipped = sum(1 for record in result.permission_results if record.status.value == "skipped")
+        permission_failed = sum(1 for record in result.permission_results if record.status.value == "failed")
+        permission_manual = sum(1 for record in result.permission_results if record.status.value == "manual_required")
+        lines.extend(
+            [
+                "Permission actions:",
+                f"- executed: {permission_executed}",
+                f"- skipped: {permission_skipped}",
+                f"- failed: {permission_failed}",
+                f"- manual_required: {permission_manual}",
+                *_bullet_lines([_format_permission_result(record) for record in result.permission_results]),
+            ]
+        )
     return "\n".join(lines) + "\n"
 
 
@@ -518,6 +534,15 @@ def _bullet_lines(items: Sequence[str]) -> list[str]:
     if not items:
         return ["- (none)"]
     return [f"- {item}" for item in items]
+
+
+def _format_permission_result(record) -> str:
+    action_name = record.permission or record.op or record.manual_type or record.kind
+    detail = f"{record.kind} {record.package_name} {action_name}".strip()
+    provenance = f"{record.step_id} -> {record.source_recipe_id}:{record.source_section}"
+    if record.message:
+        return f"{record.status.value}: {detail} ({provenance}) - {record.message}"
+    return f"{record.status.value}: {detail} ({provenance})"
 
 
 def _configure_logging(args: argparse.Namespace) -> None:
