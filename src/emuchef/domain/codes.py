@@ -5,6 +5,7 @@ from enum import Enum
 
 class WarningCode(str, Enum):
     DEVICE_PROFILE_MISMATCH = "device_profile_mismatch"
+    ORPHANED_PERMISSION_ACTIONS = "orphaned_permission_actions"
     OPTIONAL_STEPS_OMITTED_FOR_CAPABILITIES = "optional_steps_omitted_for_capabilities"
     VALIDATION_CONTEXT_LIMITED = "validation_context_limited"
     WARNING_UNKNOWN = "warning_unknown"

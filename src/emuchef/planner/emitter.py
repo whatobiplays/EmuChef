@@ -25,6 +25,7 @@ from emuchef.domain import (
     PlanningStatus,
     ResolvedInputValue,
     RuntimePermissionGrant,
+    StepType,
     WarningCode,
     WarningMessage,
 )
@@ -227,6 +228,7 @@ def emit_execution_plan(
         steps=tuple(execution_steps),
         permission_plan=_emit_permission_plan(catalog, draft_plan),
     )
+    warnings.extend(_emit_orphaned_permission_warnings(execution_plan))
     status = PlanningStatus.WARNING if warnings else PlanningStatus.SUCCESS
     logger.debug("Execution plan %s emitted with %d steps", plan_id, len(execution_steps))
     return PlanningResult(
@@ -355,6 +357,39 @@ def _emit_permission_plan(catalog: AuthoredCatalog, draft_plan) -> ExecutionPerm
     if not actions:
         return None
     return ExecutionPermissionPlan(actions=tuple(actions))
+
+
+def _emit_orphaned_permission_warnings(execution_plan: ExecutionPlan) -> tuple[WarningMessage, ...]:
+    if execution_plan.permission_plan is None:
+        return ()
+
+    grant_recipe_refs = {
+        step.recipe_ref for step in execution_plan.steps if step.type is StepType.GRANT_PERMISSIONS
+    }
+    action_counts_by_recipe: dict[str, int] = {}
+    for action in execution_plan.permission_plan.actions:
+        recipe_ref = action.source.recipe_id
+        action_counts_by_recipe[recipe_ref] = action_counts_by_recipe.get(recipe_ref, 0) + 1
+
+    warnings: list[WarningMessage] = []
+    for recipe_ref, action_count in action_counts_by_recipe.items():
+        if recipe_ref in grant_recipe_refs:
+            continue
+        action_label = "permission action" if action_count == 1 else "permission actions"
+        warnings.append(
+            WarningMessage(
+                code=WarningCode.ORPHANED_PERMISSION_ACTIONS,
+                message=(
+                    f"Recipe {recipe_ref!r} produced {action_count} {action_label} but has no "
+                    "grant_permissions step. These permissions will not be applied during execution."
+                ),
+                details={
+                    "recipe_ref": recipe_ref,
+                    "permission_action_count": action_count,
+                },
+            )
+        )
+    return tuple(warnings)
 
 
 def _emit_runtime_permission_action(

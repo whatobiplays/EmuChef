@@ -22,11 +22,13 @@ from emuchef.domain import (
     InputType,
     InputValidation,
     LiteralParamValue,
+    PlanningStatus,
     RuntimeCapabilities,
     Step,
     StepCondition,
     StepConstraints,
     StepType,
+    WarningCode,
     parse_reference,
 )
 from emuchef.io import dump_yaml, load_authored_catalog, load_execution_plan_file
@@ -608,6 +610,103 @@ class PlannerCoreTests(unittest.TestCase):
             self.assertEqual(loaded_plan.device_context.android_api_level, 33)
             self.assertEqual(loaded_plan.permission_plan.actions[2].command, ())
             self.assertEqual(loaded_plan.permission_plan.actions[1].reason.code, "requires_root")
+
+    def test_permission_plan_warns_when_recipe_has_actions_but_no_grant_step(self) -> None:
+        with TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            authored_root = build_minimal_authored_tree(root, recipe_permissions=sample_permission_block())
+            bios_dir = root / "bios"
+            bios_dir.mkdir()
+
+            catalog = load_authored_catalog(authored_root)
+            session = Planner(catalog).start_session(
+                device_plan_ref="ayaneo.generic.base",
+                device_context=DeviceContext(
+                    manufacturer="AYANEO",
+                    model="Pocket 4 Pro",
+                    android_version=13,
+                    android_api_level=33,
+                ),
+            )
+            session.bind_input("feature.copy_bios.$bios_source_dir", str(bios_dir))
+
+            result = session.emit_execution_plan()
+
+            self.assertEqual(result.status, PlanningStatus.WARNING)
+            orphan_warnings = [warning for warning in result.warnings if warning.code is WarningCode.ORPHANED_PERMISSION_ACTIONS]
+            self.assertEqual(len(orphan_warnings), 1)
+            warning = orphan_warnings[0]
+            self.assertEqual(
+                warning.message,
+                (
+                    "Recipe 'feature.copy_bios' produced 3 permission actions but has no "
+                    "grant_permissions step. These permissions will not be applied during execution."
+                ),
+            )
+            self.assertEqual(
+                warning.details,
+                {
+                    "recipe_ref": "feature.copy_bios",
+                    "permission_action_count": 3,
+                },
+            )
+
+    def test_permission_plan_does_not_warn_when_recipe_has_matching_grant_step(self) -> None:
+        with TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            authored_root = build_retroarch_cfg_authored_tree(root)
+            retroarch_cfg = root / "retroarch.cfg"
+            retroarch_cfg.write_text("video_driver = gl\n", encoding="utf-8")
+
+            catalog = load_authored_catalog(authored_root)
+            session = Planner(catalog).start_session(
+                device_plan_ref="ayaneo.generic.base",
+                device_context=DeviceContext(
+                    manufacturer="AYANEO",
+                    model="Pocket 4 Pro",
+                    android_version=13,
+                    android_api_level=33,
+                ),
+            )
+            session.bind_input("app.retroarch.provision.$retroarch_cfg", str(retroarch_cfg))
+
+            result = session.emit_execution_plan()
+
+            self.assertEqual(result.status, PlanningStatus.SUCCESS)
+            self.assertFalse(any(warning.code is WarningCode.ORPHANED_PERMISSION_ACTIONS for warning in result.warnings))
+
+    def test_permission_plan_warns_per_recipe_when_other_recipe_has_grant_step(self) -> None:
+        with TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            authored_root = build_mixed_permission_recipe_tree(root)
+            retroarch_cfg = root / "retroarch.cfg"
+            retroarch_cfg.write_text("video_driver = gl\n", encoding="utf-8")
+
+            catalog = load_authored_catalog(authored_root)
+            session = Planner(catalog).start_session(
+                device_plan_ref="ayaneo.generic.base",
+                device_context=DeviceContext(
+                    manufacturer="AYANEO",
+                    model="Pocket 4 Pro",
+                    android_version=13,
+                    android_api_level=33,
+                ),
+            )
+            session.bind_input("app.retroarch.provision.$retroarch_cfg", str(retroarch_cfg))
+
+            result = session.emit_execution_plan()
+
+            self.assertEqual(result.status, PlanningStatus.WARNING)
+            self.assertTrue(
+                any(
+                    step.recipe_ref == "app.retroarch.provision" and step.type is StepType.GRANT_PERMISSIONS
+                    for step in result.execution_plan.steps
+                )
+            )
+            orphan_warnings = [warning for warning in result.warnings if warning.code is WarningCode.ORPHANED_PERMISSION_ACTIONS]
+            self.assertEqual(len(orphan_warnings), 1)
+            self.assertEqual(orphan_warnings[0].details["recipe_ref"], "feature.copy_bios")
+            self.assertEqual(orphan_warnings[0].details["permission_action_count"], 3)
 
     def test_permission_plan_skips_when_android_api_level_is_out_of_range(self) -> None:
         with TemporaryDirectory() as tmp:
@@ -1214,6 +1313,40 @@ def build_conflicting_authored_tree(root: Path) -> Path:
         ],
     }
     write_yaml(root / "recipes" / "conflict.yaml", conflict_recipe)
+    return authored_root
+
+
+def build_mixed_permission_recipe_tree(root: Path) -> Path:
+    authored_root = build_retroarch_cfg_authored_tree(root)
+    recipe = {
+        "schema_version": 1,
+        "kind": "recipe",
+        "id": "feature.copy_bios",
+        "name": "Copy BIOS Files",
+        "recipe_dependencies": [],
+        "provides": {"features": ["bios_copy"]},
+        "permissions": sample_permission_block(),
+        "inputs": [],
+        "steps": [
+            {
+                "id": "launch_copy_bios_helper",
+                "type": "launch_app",
+                "name": "Launch BIOS helper",
+                "user_toggleable": True,
+                "dependencies": [],
+                "constraints": {"capabilities": ["app_launch"], "conflicts_with": []},
+                "skip_if": [],
+                "params": {"package_name": {"value": "com.example.copybios"}},
+                "verify": [],
+            }
+        ],
+    }
+    plan_path = root / "device_plans" / "ayaneo_base.yaml"
+    plan = yaml.safe_load(plan_path.read_text(encoding="utf-8"))
+    plan["recipes"].append({"recipe_ref": "feature.copy_bios", "selected_by_default": True})
+
+    write_yaml(root / "recipes" / "copy_bios.yaml", recipe)
+    write_yaml(plan_path, plan)
     return authored_root
 
 
