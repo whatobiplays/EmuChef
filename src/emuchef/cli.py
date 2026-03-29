@@ -274,26 +274,18 @@ def _resolve_device_context(catalog, args: argparse.Namespace) -> tuple[DeviceCo
     explicit_model = args.model
     explicit_android_version = args.android_version
 
-    detected: DetectedDevice | None = None
     resolved_adb = args._resolved_adb
-    try:
-        detected = SubprocessAdb(serial=args.serial, executable=resolved_adb).detect_device()
-        logger.info("Using detected device facts from %s", detected.serial)
-    except AdbResolutionError as exc:
-        if resolved_adb != "adb":
-            raise
-        logger.info("ADB device detection unavailable, using device-plan defaults: %s", exc)
-    except ValueError as exc:
-        logger.info("ADB device detection unavailable, using device-plan defaults: %s", exc)
+    detected = SubprocessAdb(serial=args.serial, executable=resolved_adb).detect_device()
+    logger.info("Using detected device facts from %s", detected.serial)
 
-    manufacturer = explicit_manufacturer or (detected.manufacturer if detected is not None else None)
+    manufacturer = explicit_manufacturer or detected.manufacturer
     if not manufacturer:
         manufacturer = device_profile.match.manufacturer_contains[0] if device_profile.match.manufacturer_contains else device_profile.name
 
-    model = explicit_model or (detected.model if detected is not None else None) or device_profile.name
+    model = explicit_model or detected.model or device_profile.name
 
     android_version = explicit_android_version
-    if android_version is None and detected is not None and detected.android_version > 0:
+    if android_version is None and detected.android_version > 0:
         android_version = detected.android_version
     if android_version is None:
         android_version = device_profile.match.android_version.min if device_profile.match.android_version else None
@@ -305,7 +297,7 @@ def _resolve_device_context(catalog, args: argparse.Namespace) -> tuple[DeviceCo
             manufacturer=manufacturer,
             model=model,
             android_version=android_version,
-            android_api_level=detected.android_api_level if detected is not None else None,
+            android_api_level=detected.android_api_level,
             device_tags=explicit_tags,
         ),
         detected,

@@ -144,21 +144,22 @@ class CliTests(unittest.TestCase):
             root = Path(tmp)
             authored_root = build_cli_project_tree(root)
 
-            rc, stdout, _ = run_cli(
-                [
-                    "draft",
-                    "--authored-root",
-                    str(authored_root),
-                    "--device-plan",
-                    "ayaneo.generic.base",
-                    "--manufacturer",
-                    "AYANEO",
-                    "--model",
-                    "Pocket 4 Pro",
-                    "--android-version",
-                    "13",
-                ]
-            )
+            with patch("emuchef.cli.SubprocessAdb", build_detecting_adb()):
+                rc, stdout, _ = run_cli(
+                    [
+                        "draft",
+                        "--authored-root",
+                        str(authored_root),
+                        "--device-plan",
+                        "ayaneo.generic.base",
+                        "--manufacturer",
+                        "AYANEO",
+                        "--model",
+                        "Pocket 4 Pro",
+                        "--android-version",
+                        "13",
+                    ]
+                )
 
             self.assertEqual(rc, 0)
             self.assertIn("Selected recipes:", stdout)
@@ -185,23 +186,24 @@ class CliTests(unittest.TestCase):
                 ],
             )
 
-            rc, stdout, _ = run_cli(
-                [
-                    "draft",
-                    "--authored-root",
-                    str(authored_root),
-                    "--device-plan",
-                    "ayaneo.generic.base",
-                    "--manufacturer",
-                    "AYANEO",
-                    "--model",
-                    "Pocket 4 Pro",
-                    "--android-version",
-                    "13",
-                    "--ops",
-                    str(ops_file),
-                ]
-            )
+            with patch("emuchef.cli.SubprocessAdb", build_detecting_adb()):
+                rc, stdout, _ = run_cli(
+                    [
+                        "draft",
+                        "--authored-root",
+                        str(authored_root),
+                        "--device-plan",
+                        "ayaneo.generic.base",
+                        "--manufacturer",
+                        "AYANEO",
+                        "--model",
+                        "Pocket 4 Pro",
+                        "--android-version",
+                        "13",
+                        "--ops",
+                        str(ops_file),
+                    ]
+                )
 
             self.assertEqual(rc, 0)
             self.assertNotIn("- feature.copy_bios", stdout)
@@ -216,24 +218,25 @@ class CliTests(unittest.TestCase):
             bios_dir = root / "bios"
             bios_dir.mkdir()
 
-            rc, stdout, _ = run_cli(
-                [
-                    "plan",
-                    "--authored-root",
-                    str(authored_root),
-                    "--device-plan",
-                    "ayaneo.generic.base",
-                    "--manufacturer",
-                    "AYANEO",
-                    "--model",
-                    "Pocket 4 Pro",
-                    "--android-version",
-                    "13",
-                    "--bind",
-                    f"feature.copy_bios.$bios_source_dir={bios_dir}",
-                    "--verbose",
-                ]
-            )
+            with patch("emuchef.cli.SubprocessAdb", build_detecting_adb()):
+                rc, stdout, _ = run_cli(
+                    [
+                        "plan",
+                        "--authored-root",
+                        str(authored_root),
+                        "--device-plan",
+                        "ayaneo.generic.base",
+                        "--manufacturer",
+                        "AYANEO",
+                        "--model",
+                        "Pocket 4 Pro",
+                        "--android-version",
+                        "13",
+                        "--bind",
+                        f"feature.copy_bios.$bios_source_dir={bios_dir}",
+                        "--verbose",
+                    ]
+                )
 
             self.assertEqual(rc, 0)
             payload = yaml.safe_load(stdout)
@@ -478,12 +481,10 @@ class CliTests(unittest.TestCase):
             self.assertEqual(rc, 1)
             self.assertIn("adb_not_found:", stderr)
 
-    def test_draft_and_plan_still_work_offline(self) -> None:
+    def test_draft_and_plan_fail_fast_when_planner_adb_detection_is_unavailable(self) -> None:
         with TemporaryDirectory() as tmp:
             root = Path(tmp)
             authored_root = build_cli_project_tree(root)
-            bios_dir = root / "bios"
-            bios_dir.mkdir()
 
             class OfflineAdb:
                 def __init__(self, serial: str | None = None, executable: str = "adb") -> None:
@@ -495,19 +496,25 @@ class CliTests(unittest.TestCase):
                     )
 
             with patch("emuchef.cli.SubprocessAdb", OfflineAdb):
-                rc, stdout, _ = run_cli(
+                rc, _, stderr = run_cli(
                     [
                         "draft",
                         "--authored-root",
                         str(authored_root),
                         "--device-plan",
                         "ayaneo.generic.base",
+                        "--manufacturer",
+                        "AYANEO",
+                        "--model",
+                        "Pocket 4 Pro",
+                        "--android-version",
+                        "13",
                     ]
                 )
-                self.assertEqual(rc, 0)
-                self.assertIn("Draft:", stdout)
+                self.assertEqual(rc, 1)
+                self.assertIn("adb_not_found:", stderr)
 
-                rc, stdout, _ = run_cli(
+                rc, _, stderr = run_cli(
                     [
                         "plan",
                         "--authored-root",
@@ -518,8 +525,45 @@ class CliTests(unittest.TestCase):
                         str(write_ops(root / "ops.yaml", [{"type": "deselect_recipe", "recipe_ref": "feature.copy_bios"}])),
                     ]
                 )
-                self.assertEqual(rc, 0)
-                self.assertIn("Planning status: success", stdout)
+                self.assertEqual(rc, 1)
+                self.assertIn("adb_not_found:", stderr)
+
+    def test_draft_and_plan_fail_fast_when_planner_adb_detection_finds_no_device(self) -> None:
+        with TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            authored_root = build_cli_project_tree(root)
+
+            class NoDeviceAdb:
+                def __init__(self, serial: str | None = None, executable: str = "adb") -> None:
+                    pass
+
+                def detect_device(self) -> DetectedDevice:
+                    raise ValueError("No connected ADB devices were detected.")
+
+            with patch("emuchef.cli.SubprocessAdb", NoDeviceAdb):
+                rc, _, stderr = run_cli(
+                    [
+                        "draft",
+                        "--authored-root",
+                        str(authored_root),
+                        "--device-plan",
+                        "ayaneo.generic.base",
+                    ]
+                )
+                self.assertEqual(rc, 1)
+                self.assertIn("Error: No connected ADB devices were detected.", stderr)
+
+                rc, _, stderr = run_cli(
+                    [
+                        "plan",
+                        "--authored-root",
+                        str(authored_root),
+                        "--device-plan",
+                        "ayaneo.generic.base",
+                    ]
+                )
+                self.assertEqual(rc, 1)
+                self.assertIn("Error: No connected ADB devices were detected.", stderr)
 
     def test_apply_dry_run_prints_live_progress_and_summary(self) -> None:
         with TemporaryDirectory() as tmp:
@@ -666,43 +710,45 @@ class CliTests(unittest.TestCase):
             bios_dir = root / "bios"
             bios_dir.mkdir()
 
-            rc, stdout, _ = run_cli(
-                [
-                    "plan",
-                    "--authored-root",
-                    str(authored_root),
-                    "--device-plan",
-                    "ayaneo.generic.base",
-                    "--manufacturer",
-                    "AYANEO",
-                    "--model",
-                    "Pocket 4 Pro",
-                    "--android-version",
-                    "13",
-                    "--bind",
-                    f"feature.copy_bios.$bios_source_dir={bios_dir}",
-                    "--verbose",
-                ]
-            )
+            with patch("emuchef.cli.SubprocessAdb", build_detecting_adb()):
+                rc, stdout, _ = run_cli(
+                    [
+                        "plan",
+                        "--authored-root",
+                        str(authored_root),
+                        "--device-plan",
+                        "ayaneo.generic.base",
+                        "--manufacturer",
+                        "AYANEO",
+                        "--model",
+                        "Pocket 4 Pro",
+                        "--android-version",
+                        "13",
+                        "--bind",
+                        f"feature.copy_bios.$bios_source_dir={bios_dir}",
+                        "--verbose",
+                    ]
+                )
             self.assertEqual(rc, 0)
             self.assertIn("kind: planning_result", stdout)
 
-            rc, stdout, stderr = run_cli(
-                [
-                    "draft",
-                    "--authored-root",
-                    str(authored_root),
-                    "--device-plan",
-                    "ayaneo.generic.base",
-                    "--manufacturer",
-                    "AYANEO",
-                    "--model",
-                    "Pocket 4 Pro",
-                    "--android-version",
-                    "13",
-                    "--debug",
-                ]
-            )
+            with patch("emuchef.cli.SubprocessAdb", build_detecting_adb()):
+                rc, stdout, stderr = run_cli(
+                    [
+                        "draft",
+                        "--authored-root",
+                        str(authored_root),
+                        "--device-plan",
+                        "ayaneo.generic.base",
+                        "--manufacturer",
+                        "AYANEO",
+                        "--model",
+                        "Pocket 4 Pro",
+                        "--android-version",
+                        "13",
+                        "--debug",
+                    ]
+                )
             self.assertEqual(rc, 0)
             self.assertIn("Draft:", stdout)
             self.assertIn("DEBUG", stderr)
@@ -714,6 +760,32 @@ def run_cli(argv: list[str]) -> tuple[int, str, str]:
     with redirect_stdout(stdout), redirect_stderr(stderr):
         rc = main(argv)
     return rc, stdout.getvalue(), stderr.getvalue()
+
+
+def build_detecting_adb(
+    *,
+    serial: str = "device-1",
+    manufacturer: str = "AYANEO",
+    model: str = "Pocket 4 Pro",
+    android_version: int = 13,
+    brand: str | None = "AYANEO",
+) -> type:
+    class FakeAdb:
+        def __init__(self, serial: str | None = None, executable: str = "adb") -> None:
+            self.serial = serial
+            self.executable = executable
+
+        def detect_device(self) -> DetectedDevice:
+            return DetectedDevice(
+                serial=serial,
+                manufacturer=manufacturer,
+                model=model,
+                android_version=android_version,
+                root_available=False,
+                brand=brand,
+            )
+
+    return FakeAdb
 
 
 def make_executable(path: Path) -> Path:
