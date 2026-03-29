@@ -45,6 +45,7 @@ from emuchef.domain import (
     parse_reference,
 )
 from emuchef.planner.catalog import AuthoredCatalog, CatalogLoadError
+from emuchef.planner.bindings import PlannerOverrideProblemKind, normalize_planner_overrides
 from emuchef.planner.contracts import referenced_bindings, validate_recipe_permission_steps, validate_step_contract
 from emuchef.planner.dependencies import validate_recipe_step_cycles
 
@@ -137,6 +138,7 @@ def load_authored_catalog(root: str | Path) -> AuthoredCatalog:
                         details={"device_plan_ref": device_plan.id, "recipe_ref": recipe_selection.recipe_ref},
                     )
                 )
+        errors.extend(_validate_device_plan_overrides(device_plan, binding_inputs))
 
     if errors:
         raise CatalogLoadError(tuple(errors))
@@ -472,6 +474,44 @@ def _namespaced_inputs(kind: str, items: Mapping[str, Any]) -> dict[str, InputDe
             full_ref = f"{item_id}.${declaration.id}"
             result[full_ref] = declaration
     return result
+
+
+def _validate_device_plan_overrides(
+    device_plan: DevicePlan,
+    binding_inputs: Mapping[str, InputDeclaration],
+) -> tuple[ErrorMessage, ...]:
+    _, problems = normalize_planner_overrides(
+        device_plan.overrides,
+        binding_inputs,
+        allow_metadata_keys=True,
+    )
+    errors: list[ErrorMessage] = []
+    for problem in problems:
+        if problem.kind is PlannerOverrideProblemKind.UNKNOWN_BINDING:
+            binding_ref = problem.binding_ref or str(problem.key)
+            errors.append(
+                ErrorMessage(
+                    code=ErrorCode.BINDING_MISSING,
+                    message=f"Device plan override {binding_ref!r} references unknown binding {binding_ref!r}.",
+                    details={
+                        "device_plan_ref": device_plan.id,
+                        "override_key": str(problem.key),
+                        "binding_ref": binding_ref,
+                    },
+                )
+            )
+            continue
+        errors.append(
+            ErrorMessage(
+                code=ErrorCode.AUTHORED_DATA_INVALID,
+                message=f"Device plan override {problem.key!r} must be a full binding ref (<scope>.$<name>).",
+                details={
+                    "device_plan_ref": device_plan.id,
+                    "override_key": str(problem.key),
+                },
+            )
+        )
+    return tuple(errors)
 
 
 def _optional_str(value: Any) -> str | None:

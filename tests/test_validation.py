@@ -212,6 +212,25 @@ class ValidationTests(unittest.TestCase):
             self.assertEqual(error.details["object_id"], "example.device_plan")
             self.assertEqual(error.details["field"], "recipes[0].recipe_ref")
 
+    def test_unknown_device_plan_override_binding_reports_device_plan_context(self) -> None:
+        with TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            authored_root = build_validation_tree(
+                root,
+                device_plan_overrides={"feature.copy_bios.$adb": "/tmp/adb"},
+            )
+            plan_path = authored_root / "device_plans" / "example_device_plan.yaml"
+
+            result = validate_authored_path(plan_path, authored_root=authored_root)
+
+            error = next(error for error in result.errors if error.code.value == "binding_missing")
+            self.assertEqual(error.details["file"], str(plan_path.resolve()))
+            self.assertEqual(error.details["object_kind"], "device_plan")
+            self.assertEqual(error.details["object_id"], "example.device_plan")
+            self.assertEqual(error.details["field"], "overrides.feature.copy_bios.$adb")
+            self.assertEqual(error.details["override_key"], "feature.copy_bios.$adb")
+            self.assertEqual(error.details["binding_ref"], "feature.copy_bios.$adb")
+
     def test_recipe_dependency_cycle(self) -> None:
         with TemporaryDirectory() as tmp:
             root = Path(tmp)
@@ -232,6 +251,35 @@ class ValidationTests(unittest.TestCase):
             self.assertEqual(result.status.value, "success")
             self.assertEqual(result.errors, ())
             self.assertGreaterEqual(len(result.validated_paths), 4)
+
+    def test_full_authored_catalog_rejects_unknown_device_plan_override_binding(self) -> None:
+        with TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            authored_root = build_validation_tree(
+                root,
+                device_plan_overrides={"feature.copy_bios.$adb": "/tmp/adb"},
+            )
+            plan_path = authored_root / "device_plans" / "example_device_plan.yaml"
+
+            result = validate_authored_catalog(authored_root)
+
+            error = next(error for error in result.errors if error.code.value == "binding_missing")
+            self.assertEqual(result.status.value, "error")
+            self.assertEqual(error.details["file"], str(plan_path.resolve()))
+            self.assertEqual(error.details["field"], "overrides.feature.copy_bios.$adb")
+
+    def test_device_plan_metadata_override_keys_are_allowed(self) -> None:
+        with TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            authored_root = build_validation_tree(
+                root,
+                device_plan_overrides={"config_variants": {"vendor_family": "example"}},
+            )
+
+            result = validate_authored_catalog(authored_root)
+
+            self.assertEqual(result.status.value, "success")
+            self.assertEqual(result.errors, ())
 
     def test_validate_cli_summary_for_catalog(self) -> None:
         with TemporaryDirectory() as tmp:
@@ -301,6 +349,7 @@ def build_validation_tree(
     recipe_dependencies: list[str] | None = None,
     device_profile_ref: str = "example.device_profile",
     device_plan_recipe_ref: str = "feature.copy_bios",
+    device_plan_overrides: dict | None = None,
     add_cycle: bool = False,
 ) -> Path:
     authored_root = root / "authored"
@@ -444,7 +493,7 @@ def build_validation_tree(
             "device_profile_ref": device_profile_ref,
             "recipes": [{"recipe_ref": device_plan_recipe_ref, "selected_by_default": True}],
             "defaults": {},
-            "overrides": {},
+            "overrides": device_plan_overrides or {},
             "metadata": {},
         },
     )

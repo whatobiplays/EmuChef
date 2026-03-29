@@ -22,6 +22,7 @@ from emuchef.domain import (
     WarningCode,
     WarningMessage,
 )
+from emuchef.planner.bindings import PlannerOverrideProblemKind, normalize_planner_overrides
 from emuchef.planner.catalog import CatalogLoadError
 from emuchef.planner.contracts import referenced_bindings, validate_recipe_permission_steps, validate_step_contract
 from emuchef.planner.dependencies import expand_recipe_dependencies, validate_recipe_step_cycles
@@ -379,6 +380,13 @@ def _validate_catalog_cross_refs(catalog: _ValidationCatalog) -> tuple[ErrorMess
                         recipe_ref=recipe_selection.recipe_ref,
                     )
                 )
+        errors.extend(
+            _validate_device_plan_override_refs(
+                device_plan,
+                catalog.binding_inputs,
+                file=catalog.object_files[("device_plan", device_plan.id)],
+            )
+        )
 
     # The current authored schema does not define an explicit app_ref field on steps.
     return tuple(errors)
@@ -465,6 +473,13 @@ def _validate_item_with_catalog_context(parsed_item: _ParsedItem, catalog: _Vali
                         recipe_ref=recipe_selection.recipe_ref,
                     )
                 )
+        errors.extend(
+            _validate_device_plan_override_refs(
+                device_plan,
+                catalog.binding_inputs,
+                file=parsed_item.path,
+            )
+        )
         return tuple(errors)
 
     return ()
@@ -655,6 +670,57 @@ def _device_plan_recipe_field(device_plan: DevicePlan, recipe_ref: str) -> str |
         if selection.recipe_ref == recipe_ref:
             return f"recipes[{index}].recipe_ref"
     return "recipes"
+
+
+def _validate_device_plan_override_refs(
+    device_plan: DevicePlan,
+    binding_inputs: Mapping[str, InputDeclaration],
+    *,
+    file: Path,
+) -> tuple[ErrorMessage, ...]:
+    _, problems = normalize_planner_overrides(
+        device_plan.overrides,
+        binding_inputs,
+        allow_metadata_keys=True,
+    )
+    errors: list[ErrorMessage] = []
+    for problem in problems:
+        field = _device_plan_override_field(problem.key)
+        if problem.kind is PlannerOverrideProblemKind.UNKNOWN_BINDING:
+            binding_ref = problem.binding_ref or str(problem.key)
+            errors.append(
+                _error(
+                    code=ErrorCode.BINDING_MISSING,
+                    message=f"Device plan override {binding_ref!r} references unknown binding {binding_ref!r}.",
+                    file=file,
+                    object_kind="device_plan",
+                    object_id=device_plan.id,
+                    field=field,
+                    device_plan_ref=device_plan.id,
+                    override_key=str(problem.key),
+                    binding_ref=binding_ref,
+                )
+            )
+            continue
+        errors.append(
+            _error(
+                code=ErrorCode.AUTHORED_DATA_INVALID,
+                message=f"Device plan override {problem.key!r} must be a full binding ref (<scope>.$<name>).",
+                file=file,
+                object_kind="device_plan",
+                object_id=device_plan.id,
+                field=field,
+                device_plan_ref=device_plan.id,
+                override_key=str(problem.key),
+            )
+        )
+    return tuple(errors)
+
+
+def _device_plan_override_field(override_key: object) -> str:
+    if not isinstance(override_key, str):
+        return "overrides"
+    return f"overrides.{override_key}"
 
 
 def _binding_field(recipe: Recipe, step, step_index: int, binding_ref: str) -> str | None:

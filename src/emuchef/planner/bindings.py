@@ -26,19 +26,54 @@ class BindingEntry:
     source: BindingSource
 
 
-def extract_planner_overrides(raw_overrides: Mapping[str, JSONValue]) -> dict[str, JSONValue]:
+class PlannerOverrideProblemKind(str, Enum):
+    INVALID_REF = "invalid_ref"
+    METADATA_NOT_ALLOWED = "metadata_not_allowed"
+    UNKNOWN_BINDING = "unknown_binding"
+
+
+@dataclass(frozen=True, slots=True)
+class PlannerOverrideProblem:
+    key: object
+    kind: PlannerOverrideProblemKind
+    binding_ref: str | None = None
+
+
+def normalize_planner_overrides(
+    raw_overrides: Mapping[object, JSONValue],
+    declarations: Mapping[str, InputDeclaration],
+    *,
+    allow_metadata_keys: bool,
+) -> tuple[dict[str, JSONValue], tuple[PlannerOverrideProblem, ...]]:
     # Only direct `<scope>.$<name>` keys affect binding resolution.
     # `device_plan.overrides.config_variants` remains metadata-only unless wired later.
     result: dict[str, JSONValue] = {}
+    problems: list[PlannerOverrideProblem] = []
     for key, value in raw_overrides.items():
-        if not isinstance(key, str) or ".$" not in key:
+        if not isinstance(key, str):
+            problems.append(PlannerOverrideProblem(key=key, kind=PlannerOverrideProblemKind.INVALID_REF))
+            continue
+        if ".$" not in key:
+            if allow_metadata_keys:
+                continue
+            problems.append(PlannerOverrideProblem(key=key, kind=PlannerOverrideProblemKind.METADATA_NOT_ALLOWED))
             continue
         try:
             reference = parse_reference(key)
         except ValueError:
+            problems.append(PlannerOverrideProblem(key=key, kind=PlannerOverrideProblemKind.INVALID_REF))
+            continue
+        if reference.full not in declarations:
+            problems.append(
+                PlannerOverrideProblem(
+                    key=key,
+                    kind=PlannerOverrideProblemKind.UNKNOWN_BINDING,
+                    binding_ref=reference.full,
+                )
+            )
             continue
         result[reference.full] = value
-    return result
+    return result, tuple(problems)
 
 
 def resolve_binding_entry(

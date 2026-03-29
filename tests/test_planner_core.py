@@ -159,6 +159,22 @@ class PlannerCoreTests(unittest.TestCase):
                 context.exception.errors,
             )
 
+    def test_loader_rejects_unknown_device_plan_override_binding(self) -> None:
+        with TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            authored_root = build_minimal_authored_tree(
+                root,
+                device_plan_overrides={"feature.copy_bios.$adb": "/tmp/adb"},
+            )
+
+            with self.assertRaises(CatalogLoadError) as context:
+                load_authored_catalog(authored_root)
+
+            error = next(error for error in context.exception.errors if error.code is ErrorCode.BINDING_MISSING)
+            self.assertEqual(error.details["device_plan_ref"], "ayaneo.generic.base")
+            self.assertEqual(error.details["override_key"], "feature.copy_bios.$adb")
+            self.assertEqual(error.details["binding_ref"], "feature.copy_bios.$adb")
+
     def test_loader_rejects_overwrite_param_for_copy_step(self) -> None:
         with TemporaryDirectory() as tmp:
             root = Path(tmp)
@@ -813,6 +829,24 @@ class PlannerCoreTests(unittest.TestCase):
             self.assertIsNone(draft_plan)
             self.assertEqual(errors[0].code, ErrorCode.CONFLICT_UNRESOLVED)
 
+    def test_start_session_rejects_unknown_direct_planner_override(self) -> None:
+        with TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            authored_root = build_minimal_authored_tree(root)
+            catalog = load_authored_catalog(authored_root)
+
+            with self.assertRaises(ValueError) as context:
+                Planner(catalog).start_session(
+                    device_plan_ref="ayaneo.generic.base",
+                    device_context=DeviceContext(manufacturer="AYANEO", model="Pocket 4 Pro", android_version=13),
+                    planner_overrides={"feature.copy_bios.$adb": "/tmp/adb"},
+                )
+
+            self.assertEqual(
+                str(context.exception),
+                "Planner override 'feature.copy_bios.$adb' does not resolve to a declared binding.",
+            )
+
 
 def build_minimal_authored_tree(
     root: Path,
@@ -822,6 +856,7 @@ def build_minimal_authored_tree(
     use_legacy_overwrite: bool = False,
     recipe_permissions: dict | None = None,
     dependency_recipe_permissions: dict | None = None,
+    device_plan_overrides: dict | None = None,
 ) -> Path:
     for subdir in ("apps", "recipes", "device_profiles", "device_plans"):
         (root / subdir).mkdir(parents=True, exist_ok=True)
@@ -917,7 +952,7 @@ def build_minimal_authored_tree(
         "device_profile_ref": "ayaneo.generic",
         "recipes": [{"recipe_ref": recipe_id, "selected_by_default": True}],
         "defaults": {},
-        "overrides": {},
+        "overrides": device_plan_overrides or {},
         "metadata": {},
     }
 

@@ -113,7 +113,7 @@ steps:
       conflicts_with: []
     skip_if: []
     params:
-      duration_ms: 5000
+      duration_ms: 1000
     verify: []
   - id: stop_retroarch_after_bootstrap
     type: force_stop_app
@@ -191,7 +191,6 @@ steps:
     description: Copy the config file into Android/data folder.
     user_toggleable: true
     dependencies:
-      # - grant_retroarch_permissions
       - stop_retroarch_after_permissions
     constraints:
       capabilities:

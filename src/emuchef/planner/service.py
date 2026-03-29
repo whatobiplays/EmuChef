@@ -15,7 +15,7 @@ from emuchef.domain import (
     RuntimeCapabilities,
 )
 
-from .bindings import extract_planner_overrides, validate_binding_value
+from .bindings import PlannerOverrideProblem, PlannerOverrideProblemKind, normalize_planner_overrides, validate_binding_value
 from .catalog import AuthoredCatalog
 from .draft_builder import build_draft_plan
 from .emitter import emit_execution_plan
@@ -70,6 +70,19 @@ class Planner:
         if not merged_context.device_tags:
             merged_context = replace(merged_context, device_tags=device_profile.device_tags)
 
+        device_plan_overrides = _validated_planner_overrides(
+            device_plan.overrides,
+            self.catalog.binding_inputs,
+            allow_metadata_keys=True,
+            source_label="Device plan override",
+        )
+        session_planner_overrides = _validated_planner_overrides(
+            planner_overrides or {},
+            self.catalog.binding_inputs,
+            allow_metadata_keys=False,
+            source_label="Planner override",
+        )
+
         state = _SessionState(
             draft_id=draft_id or f"draft.{device_plan_ref}.001",
             plan_id=plan_id or f"plan.{device_plan_ref}.001",
@@ -83,10 +96,8 @@ class Planner:
             step_selection_overrides={},
             user_bindings={},
             planner_overrides={
-                # Only top-level full-ref keys participate in binding resolution.
-                # Nested metadata such as `overrides.config_variants` is preserved but ignored here.
-                **extract_planner_overrides(device_plan.overrides),
-                **(planner_overrides or {}),
+                **device_plan_overrides,
+                **session_planner_overrides,
             },
         )
         draft_plan, errors = build_draft_plan(
@@ -341,6 +352,33 @@ class PlannerSession:
             step_selection_overrides=step_overrides,
             user_bindings=user_bindings,
         )
+
+
+def _validated_planner_overrides(
+    raw_overrides,
+    binding_inputs,
+    *,
+    allow_metadata_keys: bool,
+    source_label: str,
+) -> dict[str, object]:
+    normalized, problems = normalize_planner_overrides(
+        raw_overrides,
+        binding_inputs,
+        allow_metadata_keys=allow_metadata_keys,
+    )
+    if problems:
+        raise ValueError("; ".join(_format_planner_override_problem(source_label, problem) for problem in problems))
+    return normalized
+
+
+def _format_planner_override_problem(source_label: str, problem: PlannerOverrideProblem) -> str:
+    if problem.kind in {
+        PlannerOverrideProblemKind.INVALID_REF,
+        PlannerOverrideProblemKind.METADATA_NOT_ALLOWED,
+    }:
+        return f"{source_label} {problem.key!r} must be a full binding ref (<scope>.$<name>)."
+    binding_ref = problem.binding_ref or str(problem.key)
+    return f"{source_label} {binding_ref!r} does not resolve to a declared binding."
 
 
 def _dependent_step_ids(recipe, dependency_id: str) -> set[str]:
