@@ -4,6 +4,10 @@ from enum import Enum
 
 
 class StepType(str, Enum):
+    RESOLVE_ARTIFACTS = "resolve_artifacts"
+    EXTRACT_ARTIFACTS = "extract_artifacts"
+    EXTRACT_ARCHIVE = "extract_archive"
+    COPY_FILES = "copy_files"
     INSTALL_APK = "install_apk"
     COPY_BYO_INPUT = "copy_byo_input"
     PUSH_FILE = "push_file"

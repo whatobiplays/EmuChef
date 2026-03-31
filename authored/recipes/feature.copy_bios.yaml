@@ -8,7 +8,7 @@ provides:
   features:
     - bios_copy
 inputs:
-  - id: bios_source_dir
+  bios_source_dir:
     type: directory
     role: bios
     label: BIOS Folder
@@ -26,20 +26,19 @@ inputs:
         - bios
 steps:
   - id: copy_bios_dir
-    type: copy_byo_input
+    type: copy_files
     name: Copy BIOS folder
-    description: Copy BIOS contents into the BIOS destination directory.
     user_toggleable: true
     dependencies: []
     constraints:
       capabilities:
         - shared_storage_write
       conflicts_with: []
+    skip_if: []
     params:
-      input:
-        ref: feature.copy_bios.$bios_source_dir
-      dest:
-        value: /sdcard/RetroArch/system
+      source:
+        ref: inputs.bios_source_dir
+      dest: /sdcard/RetroArch/system
       copy_policy: sync
     verify:
       - type: path_exists

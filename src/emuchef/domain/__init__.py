@@ -1,5 +1,6 @@
 """Domain models for EmuChef."""
 
+from .artifacts import ArtifactCacheMode, ArtifactDefinition, ArtifactType, RemoteFileArtifact
 from .app_definition import (
     AppArtifacts,
     AppArtifactSupport,
@@ -31,6 +32,8 @@ from .draft_plan import (
 )
 from .draft_update_result import DraftUpdateResult
 from .execution_plan import (
+    ExecutionArtifact,
+    ExecutionInputValue,
     ExecutionPermissionPlan,
     ExecutionPlan,
     ExecutionPlanSource,
@@ -38,7 +41,6 @@ from .execution_plan import (
     PermissionPlanAction,
     PermissionPlanReason,
     PermissionPlanSource,
-    ResolvedInputValue,
 )
 from .history_entry import HistoryEntry
 from .input_declaration import InputDeclaration, InputRole, InputType, InputValidation
@@ -49,6 +51,7 @@ from .param_values import (
     JSONValue,
     LiteralParamValue,
     ParamValue,
+    RefParamValue,
     ScalarValue,
 )
 from .planning_result import PlanningResult, PlanningStatus
@@ -62,13 +65,28 @@ from .recipe import (
     RecipeProvides,
     RuntimePermissionGrant,
 )
-from .refs import Reference, parse_reference
+from .refs import RefKind, RuntimeRef, parse_reference
+from .runtime_state import (
+    ArtifactRuntimeState,
+    ArtifactRuntimeStatus,
+    ExecutionState,
+    RuntimeValue,
+    RuntimeValueType,
+    StepRuntimeState,
+    StepRuntimeStatus,
+)
+from .step_specs import PRIMARY_OUTPUT_STEP_TYPES, ParamMode, ParamSpec, STEP_SPECS, StepSpec
 from .step import Step, StepCondition, StepConstraints
 from .step_types import StepType
 from .validation_result import ValidationResult, ValidationStatus
 
 __all__ = [
     "AndroidVersionRange",
+    "ArtifactCacheMode",
+    "ArtifactDefinition",
+    "ArtifactRuntimeState",
+    "ArtifactRuntimeStatus",
+    "ArtifactType",
     "AppArtifacts",
     "AppArtifactSupport",
     "AppConfigTarget",
@@ -97,6 +115,9 @@ __all__ = [
     "DraftUpdateResult",
     "ErrorCode",
     "ErrorMessage",
+    "ExecutionArtifact",
+    "ExecutionInputValue",
+    "ExecutionState",
     "ExecutionPermissionPlan",
     "ExecutionPlan",
     "ExecutionPlanSource",
@@ -108,7 +129,10 @@ __all__ = [
     "InputValidation",
     "JSONValue",
     "LiteralParamValue",
+    "ParamMode",
     "ParamValue",
+    "ParamSpec",
+    "PRIMARY_OUTPUT_STEP_TYPES",
     "PermissionPlanAction",
     "PermissionPlanReason",
     "PermissionPlanSource",
@@ -117,18 +141,26 @@ __all__ = [
     "PermissionWhen",
     "PlanningResult",
     "PlanningStatus",
+    "RefKind",
+    "RefParamValue",
     "AppOpGrant",
     "ManualPermissionRequirement",
     "Recipe",
     "RecipeProvides",
-    "Reference",
-    "ResolvedInputValue",
+    "RemoteFileArtifact",
+    "RuntimeRef",
     "RuntimePermissionGrant",
     "RuntimeCapabilities",
+    "RuntimeValue",
+    "RuntimeValueType",
     "ScalarValue",
     "Step",
     "StepCondition",
     "StepConstraints",
+    "STEP_SPECS",
+    "StepRuntimeState",
+    "StepRuntimeStatus",
+    "StepSpec",
     "StepType",
     "WarningCode",
     "WarningMessage",

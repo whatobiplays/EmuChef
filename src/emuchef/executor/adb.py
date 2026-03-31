@@ -5,6 +5,7 @@ from __future__ import annotations
 import logging
 import os
 import re
+import shlex
 import subprocess
 from dataclasses import dataclass
 from pathlib import Path, PurePosixPath
@@ -65,22 +66,38 @@ class AdbInterface(Protocol):
     def push_sync(self, source: Path, dest: str) -> None:
         ...
 
-    def mkdir_p(self, path: str) -> None:
+    def mkdir_p(self, path: str, privileged: bool | None = None) -> None:
         ...
 
-    def remove_file(self, path: str) -> None:
+    def remove_file(self, path: str, privileged: bool | None = None) -> None:
         ...
 
-    def remove_tree(self, path: str) -> None:
+    def remove_tree(self, path: str, privileged: bool | None = None) -> None:
         ...
 
-    def path_exists(self, path: str) -> bool:
+    def path_exists(self, path: str, privileged: bool | None = None) -> bool:
+        ...
+
+    def path_is_dir(self, path: str, privileged: bool | None = None) -> bool:
+        ...
+
+    def copy_on_device(
+        self,
+        source: str,
+        dest: str,
+        *,
+        recursive: bool = False,
+        privileged: bool | None = None,
+    ) -> None:
         ...
 
     def package_installed(self, package_name: str) -> bool:
         ...
 
     def launch_app(self, package_name: str, activity: str | None = None) -> None:
+        ...
+
+    def resolve_launcher_activity(self, package_name: str) -> str | None:
         ...
 
     def force_stop_app(self, package_name: str) -> None:
@@ -113,17 +130,40 @@ class SubprocessAdb:
     def push_sync(self, source: Path, dest: str) -> None:
         self._run(["push", "--sync", str(source), dest])
 
-    def mkdir_p(self, path: str) -> None:
-        self._run(["shell", "mkdir", "-p", path])
+    def mkdir_p(self, path: str, privileged: bool | None = None) -> None:
+        self._run_shell(["mkdir", "-p", path], privileged=_resolve_privileged_flag(path, privileged))
 
-    def remove_file(self, path: str) -> None:
-        self._run(["shell", "rm", "-f", path])
+    def remove_file(self, path: str, privileged: bool | None = None) -> None:
+        self._run_shell(["rm", "-f", path], privileged=_resolve_privileged_flag(path, privileged))
 
-    def remove_tree(self, path: str) -> None:
-        self._run(["shell", "rm", "-rf", path])
+    def remove_tree(self, path: str, privileged: bool | None = None) -> None:
+        self._run_shell(["rm", "-rf", path], privileged=_resolve_privileged_flag(path, privileged))
 
-    def path_exists(self, path: str) -> bool:
-        return self._run(["shell", "test", "-e", path], check=False).returncode == 0
+    def path_exists(self, path: str, privileged: bool | None = None) -> bool:
+        return (
+            self._run_shell(["test", "-e", path], check=False, privileged=_resolve_privileged_flag(path, privileged)).returncode
+            == 0
+        )
+
+    def path_is_dir(self, path: str, privileged: bool | None = None) -> bool:
+        return (
+            self._run_shell(["test", "-d", path], check=False, privileged=_resolve_privileged_flag(path, privileged)).returncode
+            == 0
+        )
+
+    def copy_on_device(
+        self,
+        source: str,
+        dest: str,
+        *,
+        recursive: bool = False,
+        privileged: bool | None = None,
+    ) -> None:
+        args = ["cp"]
+        if recursive:
+            args.append("-R")
+        args.extend([source, dest])
+        self._run_shell(args, privileged=_resolve_privileged_flag(dest, privileged, source=source))
 
     def package_installed(self, package_name: str) -> bool:
         result = self._run(["shell", "pm", "path", package_name], check=False)
@@ -131,9 +171,34 @@ class SubprocessAdb:
 
     def launch_app(self, package_name: str, activity: str | None = None) -> None:
         if activity:
+            logger.info("Launching %s with explicit activity %s", package_name, activity)
             self._run(["shell", "am", "start", "-n", f"{package_name}/{activity}"])
             return
+        resolved_activity = self.resolve_launcher_activity(package_name)
+        if resolved_activity is not None:
+            logger.info("Launching %s with resolved activity %s", package_name, resolved_activity)
+            self._run(["shell", "am", "start", "-n", resolved_activity])
+            return
+        logger.info("Launching %s with monkey fallback", package_name)
         self._run(["shell", "monkey", "-p", package_name, "-c", "android.intent.category.LAUNCHER", "1"])
+
+    def resolve_launcher_activity(self, package_name: str) -> str | None:
+        for command in (
+            ["shell", "cmd", "package", "resolve-activity", "--brief", package_name],
+            ["shell", "pm", "resolve-activity", "--brief", package_name],
+        ):
+            result = self._run(command, check=False)
+            if result.returncode != 0:
+                logger.debug(
+                    "Launcher resolution command failed for %s: %s",
+                    package_name,
+                    " ".join(result.args),
+                )
+                continue
+            resolved_component = _parse_resolved_launcher_component(result.stdout)
+            if resolved_component is not None:
+                return resolved_component
+        return None
 
     def force_stop_app(self, package_name: str) -> None:
         self._run(["shell", "am", "force-stop", package_name])
@@ -172,6 +237,11 @@ class SubprocessAdb:
 
     def _run(self, args: list[str], check: bool = True) -> AdbCommandResult:
         return self._run_with_serial(self._serial, args, check=check)
+
+    def _run_shell(self, args: list[str], check: bool = True, privileged: bool = False) -> AdbCommandResult:
+        if privileged:
+            return self._run(["shell", "su", "-c", shlex.join(args)], check=check)
+        return self._run(["shell", *args], check=check)
 
     def _run_with_serial(self, serial: str | None, args: list[str], check: bool = True) -> AdbCommandResult:
         full_args = [self._executable]
@@ -228,6 +298,7 @@ class DryRunAdb:
     ) -> None:
         self.installed_packages: set[str] = set()
         self.remote_paths: set[str] = set()
+        self.remote_dirs: set[str] = set()
         self.commands: list[tuple[str, ...]] = []
         self._detected_device = DetectedDevice(
             serial=serial,
@@ -249,26 +320,82 @@ class DryRunAdb:
         self.commands.append(("push_sync", str(source), dest))
         self._record_push(source, dest)
 
-    def mkdir_p(self, path: str) -> None:
-        self.commands.append(("mkdir_p", path))
+    def mkdir_p(self, path: str, privileged: bool | None = None) -> None:
+        resolved_privileged = _resolve_privileged_flag(path, privileged)
+        self.commands.append(("mkdir_p", path, str(resolved_privileged)))
         self.remote_paths.add(path)
+        self.remote_dirs.add(path)
 
-    def remove_file(self, path: str) -> None:
-        self.commands.append(("remove_file", path))
+    def remove_file(self, path: str, privileged: bool | None = None) -> None:
+        resolved_privileged = _resolve_privileged_flag(path, privileged)
+        self.commands.append(("remove_file", path, str(resolved_privileged)))
         self.remote_paths.discard(path)
 
-    def remove_tree(self, path: str) -> None:
-        self.commands.append(("remove_tree", path))
+    def remove_tree(self, path: str, privileged: bool | None = None) -> None:
+        resolved_privileged = _resolve_privileged_flag(path, privileged)
+        self.commands.append(("remove_tree", path, str(resolved_privileged)))
         path_prefix = f"{path.rstrip('/')}/"
         self.remote_paths = {
             remote_path
             for remote_path in self.remote_paths
             if remote_path != path and not remote_path.startswith(path_prefix)
         }
+        self.remote_dirs = {
+            remote_path
+            for remote_path in self.remote_dirs
+            if remote_path != path and not remote_path.startswith(path_prefix)
+        }
 
-    def path_exists(self, path: str) -> bool:
-        self.commands.append(("path_exists", path))
+    def path_exists(self, path: str, privileged: bool | None = None) -> bool:
+        resolved_privileged = _resolve_privileged_flag(path, privileged)
+        self.commands.append(("path_exists", path, str(resolved_privileged)))
         return path in self.remote_paths
+
+    def path_is_dir(self, path: str, privileged: bool | None = None) -> bool:
+        resolved_privileged = _resolve_privileged_flag(path, privileged)
+        self.commands.append(("path_is_dir", path, str(resolved_privileged)))
+        return path in self.remote_dirs
+
+    def copy_on_device(
+        self,
+        source: str,
+        dest: str,
+        *,
+        recursive: bool = False,
+        privileged: bool | None = None,
+    ) -> None:
+        resolved_privileged = _resolve_privileged_flag(dest, privileged, source=source)
+        self.commands.append(("copy_on_device", source, dest, str(recursive), str(resolved_privileged)))
+        if recursive and source.endswith("/."):
+            source_dir = source[:-2]
+            source_prefix = f"{source_dir.rstrip('/')}/"
+            new_paths: set[str] = set()
+            new_dirs: set[str] = set()
+            for remote_path in sorted(self.remote_paths):
+                if not remote_path.startswith(source_prefix):
+                    continue
+                relative_path = remote_path[len(source_prefix):]
+                if not relative_path:
+                    continue
+                copied_path = str(PurePosixPath(dest) / relative_path)
+                new_paths.add(copied_path)
+                if remote_path in self.remote_dirs:
+                    new_dirs.add(copied_path)
+            self.remote_paths.update(new_paths)
+            self.remote_dirs.update(new_dirs)
+            self.remote_paths.add(dest)
+            self.remote_dirs.add(dest)
+            return
+        target = dest
+        source_name = PurePosixPath(source.rstrip("/")).name
+        if recursive and source_name:
+            target = str(PurePosixPath(dest) / source_name)
+            self.remote_dirs.add(target)
+        elif dest in self.remote_dirs and source_name:
+            target = str(PurePosixPath(dest) / source_name)
+        self.remote_paths.add(target)
+        if recursive:
+            self.remote_dirs.add(target)
 
     def package_installed(self, package_name: str) -> bool:
         self.commands.append(("package_installed", package_name))
@@ -276,6 +403,10 @@ class DryRunAdb:
 
     def launch_app(self, package_name: str, activity: str | None = None) -> None:
         self.commands.append(("launch_app", package_name, activity or ""))
+
+    def resolve_launcher_activity(self, package_name: str) -> str | None:
+        self.commands.append(("resolve_launcher_activity", package_name))
+        return None
 
     def force_stop_app(self, package_name: str) -> None:
         self.commands.append(("force_stop_app", package_name))
@@ -289,11 +420,15 @@ class DryRunAdb:
 
     def _record_push(self, source: Path, dest: str) -> None:
         self.remote_paths.add(dest)
+        if source.is_dir():
+            self.remote_dirs.add(dest)
         if not source.is_dir():
             return
         for child in source.rglob("*"):
             remote_path = str(PurePosixPath(dest) / child.relative_to(source).as_posix())
             self.remote_paths.add(remote_path)
+            if child.is_dir():
+                self.remote_dirs.add(remote_path)
 
 
 def _parse_android_version(raw_value: str) -> int:
@@ -315,6 +450,23 @@ def _parse_android_api_level(raw_value: str) -> int | None:
 
 def _command_has_serial_flag(args: Sequence[str]) -> bool:
     return len(args) >= 2 and args[0] == "-s"
+
+
+def is_app_private_path(path: str) -> bool:
+    return path.startswith("/data/user/") or path.startswith("/data/data/")
+
+
+def _resolve_privileged_flag(path: str, privileged: bool | None, *, source: str | None = None) -> bool:
+    if privileged is not None:
+        return privileged
+    return is_app_private_path(path) or (source is not None and is_app_private_path(source))
+
+
+def _parse_resolved_launcher_component(stdout: str) -> str | None:
+    for line in reversed([candidate.strip() for candidate in stdout.splitlines() if candidate.strip()]):
+        if "/" in line and " " not in line:
+            return line
+    return None
 
 
 def resolve_adb_executable(

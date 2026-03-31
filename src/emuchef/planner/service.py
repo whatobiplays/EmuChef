@@ -376,7 +376,7 @@ def _format_planner_override_problem(source_label: str, problem: PlannerOverride
         PlannerOverrideProblemKind.INVALID_REF,
         PlannerOverrideProblemKind.METADATA_NOT_ALLOWED,
     }:
-        return f"{source_label} {problem.key!r} must be a full binding ref (<scope>.$<name>)."
+        return f"{source_label} {problem.key!r} must be a normalized input ref (inputs.<id> or <recipe>/<input>)."
     binding_ref = problem.binding_ref or str(problem.key)
     return f"{source_label} {binding_ref!r} does not resolve to a declared binding."
 

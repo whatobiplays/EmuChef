@@ -7,23 +7,32 @@ from pathlib import Path
 from typing import Any
 
 from emuchef.domain import (
+    ArtifactCacheMode,
+    ArtifactType,
+    ExecutionArtifact,
+    ExecutionInputValue,
     DeviceContext,
     ExecutionPermissionPlan,
     ExecutionPlan,
     ExecutionPlanSource,
     ExecutionStep,
+    LiteralParamValue,
     PermissionPlanAction,
     PermissionPlanReason,
     PermissionPlanSource,
-    ResolvedInputValue,
+    RefParamValue,
     RuntimeCapabilities,
+    RuntimeValue,
+    RuntimeValueType,
     StepCondition,
+    StepConstraints,
     StepType,
+    PermissionPolicy,
 )
 
 from .serde import load_yaml
 
-PLANNER_ONLY_STEP_KEYS = {"selected", "user_toggleable", "availability", "reason", "dependencies", "constraints"}
+PLANNER_ONLY_STEP_KEYS = {"selected", "user_toggleable", "availability", "reason"}
 
 
 def load_execution_plan_file(path: str | Path) -> ExecutionPlan:
@@ -49,7 +58,8 @@ def parse_execution_plan(data: Mapping[str, Any]) -> ExecutionPlan:
         "source",
         "device_context",
         "runtime_capabilities",
-        "inputs_resolved",
+        "inputs",
+        "artifacts",
         "steps",
         "permission_plan",
     }
@@ -84,9 +94,10 @@ def parse_execution_plan(data: Mapping[str, Any]) -> ExecutionPlan:
             root_shell=bool(data["runtime_capabilities"]["root_shell"]),
             app_data_write=bool(data["runtime_capabilities"]["app_data_write"]),
         ),
-        inputs_resolved=tuple(
-            ResolvedInputValue(id=str(item["id"]), value=item["value"]) for item in data.get("inputs_resolved", [])
+        inputs=tuple(
+            ExecutionInputValue(id=str(item["id"]), value=_parse_runtime_value(item["value"])) for item in data.get("inputs", [])
         ),
+        artifacts=tuple(_parse_execution_artifact(item) for item in data.get("artifacts", [])),
         steps=tuple(_parse_execution_step(item) for item in data.get("steps", [])),
         permission_plan=_parse_permission_plan(data.get("permission_plan")),
         schema_version=int(data["schema_version"]),
@@ -103,7 +114,12 @@ def _parse_execution_step(data: Mapping[str, Any]) -> ExecutionStep:
         recipe_ref=str(data["recipe_ref"]),
         type=StepType(str(data["type"])),
         name=str(data["name"]),
-        params=dict(data.get("params", {})),
+        dependencies=tuple(str(item) for item in data.get("dependencies", [])),
+        constraints=StepConstraints(
+            capabilities=tuple(str(item) for item in data.get("constraints", {}).get("capabilities", [])),
+            conflicts_with=tuple(str(item) for item in data.get("constraints", {}).get("conflicts_with", [])),
+        ),
+        params={str(key): _parse_param_value(value) for key, value in data.get("params", {}).items()},
         skip_if=tuple(_parse_condition(item) for item in data.get("skip_if", [])),
         verify=tuple(_parse_condition(item) for item in data.get("verify", [])),
     )
@@ -116,7 +132,16 @@ def _parse_condition(data: Mapping[str, Any]) -> StepCondition:
 def _parse_permission_plan(data: Mapping[str, Any] | None) -> ExecutionPermissionPlan | None:
     if data is None:
         return None
-    return ExecutionPermissionPlan(actions=tuple(_parse_permission_plan_action(item) for item in data.get("actions", [])))
+    return ExecutionPermissionPlan(
+        actions=tuple(_parse_permission_plan_action(item) for item in data.get("actions", [])),
+        policies={
+            str(recipe_id): PermissionPolicy(
+                on_failure=str(policy.get("on_failure", "warn")),
+                require_all=bool(policy.get("require_all", False)),
+            )
+            for recipe_id, policy in data.get("policies", {}).items()
+        },
+    )
 
 
 def _parse_permission_plan_action(data: Mapping[str, Any]) -> PermissionPlanAction:
@@ -133,9 +158,33 @@ def _parse_permission_plan_action(data: Mapping[str, Any]) -> PermissionPlanActi
         desired_mode=_optional_str(data.get("desired_mode")),
         manual_type=_optional_str(data.get("manual_type")),
         required=bool(data.get("required", True)),
-        command=tuple(str(item) for item in data.get("command", [])),
         reason=_parse_permission_plan_reason(data.get("reason")),
     )
+
+
+def _parse_execution_artifact(data: Mapping[str, Any]) -> ExecutionArtifact:
+    return ExecutionArtifact(
+        id=str(data["id"]),
+        type=ArtifactType(str(data["type"])),
+        url=str(data["url"]),
+        cache=ArtifactCacheMode(str(data.get("cache", ArtifactCacheMode.DEFAULT.value))),
+    )
+
+
+def _parse_runtime_value(data: Mapping[str, Any]) -> RuntimeValue:
+    return RuntimeValue(
+        type=RuntimeValueType(str(data["type"])),
+        value=data.get("value"),
+        location=str(data["location"]) if data.get("location") is not None else None,
+    )
+
+
+def _parse_param_value(value: Any):
+    if isinstance(value, Mapping) and set(value.keys()) == {"ref"}:
+        return RefParamValue(ref=str(value["ref"]))
+    if isinstance(value, Mapping) and set(value.keys()) == {"value"}:
+        return LiteralParamValue(value=value["value"])
+    return LiteralParamValue(value=value)
 
 
 def _parse_permission_plan_reason(data: Mapping[str, Any] | None) -> PermissionPlanReason | None:

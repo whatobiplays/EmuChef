@@ -7,14 +7,30 @@ recipe_dependencies: []
 provides:
   features:
     - obtainium_install
-inputs: []
+artifacts:
+  obtainium_apk:
+    type: remote_file
+    url: https://github.com/ImranR98/Obtainium/releases/latest/download/app-release.apk
+    cache: default
 steps:
+  - id: resolve_artifacts
+    type: resolve_artifacts
+    name: Resolve Obtainium APK
+    user_toggleable: false
+    dependencies: []
+    constraints:
+      capabilities: []
+      conflicts_with: []
+    params:
+      artifacts:
+        - obtainium_apk
+    verify: []
   - id: install_obtainium
     type: install_apk
     name: Install Obtainium
-    description: Install the Obtainium APK placeholder.
     user_toggleable: false
-    dependencies: []
+    dependencies:
+      - resolve_artifacts
     constraints:
       capabilities:
         - apk_install
@@ -24,6 +40,7 @@ steps:
         params:
           package_name: dev.imranr.obtainium
     params:
-      app: sample_artifacts/obtainium.apk
+      app:
+        ref: artifacts.obtainium_apk.local_path
       replace_existing: false
     verify: []

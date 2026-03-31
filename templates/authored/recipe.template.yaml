@@ -1,30 +1,19 @@
 # Example authored recipe template.
 # Copy this file into authored/recipes/ and replace placeholder values.
+# Files under templates/ are examples only and are never loaded by EmuChef.
 # Accepted top-level values:
 # - schema_version: 1
 # - kind: recipe
-# Keep param shapes aligned with the planner step contracts:
-# - literal-only params stay raw literals
-# - ref-only params use { ref: ... }
-# - bindable params use exactly one of { value: ... } or { ref: ... }
-# Accepted step types in authored recipes:
-# - install_apk
-# - copy_byo_input
-# - push_file
-# - push_dir
-# - pull_file
-# - launch_app
-# - grant_permissions
-# - wait
-# - force_stop_app
-# - run_shell
-# Executor support is intentionally narrower today:
-# - install_apk
-# - copy_byo_input
-# - launch_app
-# - grant_permissions
-# - wait
-# - force_stop_app
+# Author refs stay recipe-local in YAML:
+# - inputs.<id>
+# - artifacts.<id>.<field>
+# - steps.<id>
+# - steps.<id>.outputs.<field>
+# Literal params are authored directly. Only refs use { ref: ... }.
+# For copy_files with a single file source:
+# - use an explicit destination file path when you want a specific filename
+# - use a bare directory path only if you intentionally rely on runtime
+#   directory-existence semantics
 
 schema_version: 1
 kind: recipe
@@ -40,32 +29,72 @@ inputs:
   # Accepted input values:
   # - type: file | directory
   # - role: apk | bios | roms | config_bundle | generic
-  - id: example_source_dir
+  example_source_dir:
     type: directory
     role: generic
     label: Example Source Directory
     description: Local directory that will be copied onto the device.
     required: true
-    # multiple: true | false
     multiple: false
     validation:
-      # validation.path_kind: file | directory | null
-      # If you use allowed_extensions for file inputs, entries may be written
-      # either with or without the dot, for example .cfg or cfg.
       must_exist: true
+      # If you use allowed_extensions for file inputs, entries may be written
+      # either with or without the leading dot, for example .cfg or cfg.
       allowed_extensions: []
       path_kind: directory
     default: null
-    metadata: {}
+artifacts:
+  example_app_apk:
+    # v1 artifact types:
+    # - remote_file
+    type: remote_file
+    url: https://example.com/example-app.apk
+    # cache: default | none
+    cache: default
+  example_core_zip:
+    type: remote_file
+    url: https://example.com/example-core.zip
+    cache: default
+artifact_groups:
+  example_cores:
+    - example_core_zip
+permissions:
+  runtime:
+    - package_name: com.example.app
+      name: android.permission.POST_NOTIFICATIONS
+      required: false
+      when:
+        android_api_min: 33
+  appops:
+    - package_name: com.example.app
+      op: MANAGE_EXTERNAL_STORAGE
+      mode: allow
+      required: false
+      when:
+        rooted: true
+  manual:
+    - package_name: com.example.app
+      manual_type: open_settings
+      reason: Sign in manually before continuing.
+      required: false
+  policy:
+    on_failure: warn
+    require_all: false
 steps:
-  - id: copy_example_assets
-    # step.type values are listed above. Param requirements depend on step.type.
-    type: copy_byo_input
-    name: Copy Example Assets
-    description: Copy the selected local directory into shared storage.
-    # user_toggleable: true | false
-    user_toggleable: true
-    # dependencies must only reference step ids in this same recipe.
+  - id: resolve_example_artifacts
+    # Supported v1 step types:
+    # - resolve_artifacts
+    # - extract_artifacts
+    # - extract_archive
+    # - copy_files
+    # - install_apk
+    # - launch_app
+    # - wait
+    # - force_stop_app
+    # - grant_permissions
+    type: resolve_artifacts
+    name: Resolve example artifacts
+    user_toggleable: false
     dependencies: []
     constraints:
       # Known capability names:
@@ -77,32 +106,71 @@ steps:
       # - package_remove_for_user
       # - root_shell
       # - app_data_write
+      capabilities: []
+      # conflicts_with contains step ids from this same recipe.
+      conflicts_with: []
+    params:
+      artifacts:
+        - example_app_apk
+      artifact_groups:
+        - example_cores
+    verify: []
+  - id: extract_example_cores
+    type: extract_artifacts
+    name: Extract example cores
+    user_toggleable: false
+    dependencies:
+      - resolve_example_artifacts
+    constraints:
+      capabilities: []
+      conflicts_with: []
+    params:
+      artifact_groups:
+        - example_cores
+      # extract_on: host | device
+      extract_on: host
+    verify: []
+  - id: install_example_app
+    type: install_apk
+    name: Install example app
+    user_toggleable: false
+    dependencies:
+      - resolve_example_artifacts
+    constraints:
       capabilities:
-        - shared_storage_write
-      # conflicts_with contains other step ids in this same recipe.
+        - apk_install
       conflicts_with: []
     skip_if:
-      # Current executor-supported condition types:
+      # Current v1 condition types:
       # - path_exists      params.path
+      # - file_exists      params.path
       # - package_installed params.package_name
-      - type: path_exists
+      - type: package_installed
         params:
-          path: /sdcard/ExampleAssets/ready.flag
+          package_name: com.example.app
     params:
-      # copy_byo_input params:
-      # - input: { ref: <binding-ref> }
-      # - dest: { value: ... } or { ref: ... }
-      # - copy_policy: merge | sync | replace
-      input:
-        ref: example.recipe.template.$example_source_dir
-      dest:
-        value: /sdcard/ExampleAssets
-      # merge: copy without deleting extras
-      # sync: incremental copy without deleting extras
-      # replace: clear destination first, then copy
+      app:
+        ref: artifacts.example_app_apk.local_path
+      # replace_existing: true | false
+      replace_existing: false
+    verify: []
+  - id: copy_example_assets
+    type: copy_files
+    name: Copy example assets
+    user_toggleable: true
+    dependencies:
+      - extract_example_cores
+    constraints:
+      capabilities:
+        - shared_storage_write
+      conflicts_with: []
+    params:
+      source:
+        ref: steps.extract_example_cores
+      dest: /sdcard/ExampleAssets
+      # copy_policy: merge | sync | replace
       copy_policy: sync
     verify:
-      # verify uses the same condition types as skip_if.
       - type: path_exists
         params:
           path: /sdcard/ExampleAssets
@@ -111,11 +179,10 @@ steps:
     name: Wait for bootstrap
     user_toggleable: false
     dependencies:
-      - copy_example_assets
+      - install_example_app
     constraints:
       capabilities: []
       conflicts_with: []
-    skip_if: []
     params:
       # wait params:
       # - duration_ms: positive integer milliseconds
@@ -130,7 +197,6 @@ steps:
     constraints:
       capabilities: []
       conflicts_with: []
-    skip_if: []
     params:
       # force_stop_app params:
       # - package_name: non-empty string
@@ -145,6 +211,5 @@ steps:
     constraints:
       capabilities: []
       conflicts_with: []
-    skip_if: []
     # grant_permissions takes no params and applies this recipe's local permissions.
     verify: []

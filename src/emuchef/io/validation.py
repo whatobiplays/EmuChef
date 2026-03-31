@@ -24,7 +24,7 @@ from emuchef.domain import (
 )
 from emuchef.planner.bindings import PlannerOverrideProblemKind, normalize_planner_overrides
 from emuchef.planner.catalog import CatalogLoadError
-from emuchef.planner.contracts import referenced_bindings, validate_recipe_permission_steps, validate_step_contract
+from emuchef.planner.contracts import validate_step_contract, validate_step_references
 from emuchef.planner.dependencies import expand_recipe_dependencies, validate_recipe_step_cycles
 
 from .loader import (
@@ -237,9 +237,11 @@ def _validate_single_file(path: Path, expected_kind: str | None = None) -> tuple
     errors: list[ErrorMessage] = []
     if isinstance(item, Recipe):
         errors.extend(_annotate_recipe_step_cycle_errors(path.resolve(), item, validate_recipe_step_cycles(item)))
-        errors.extend(_annotate_recipe_permission_step_errors(path.resolve(), item, validate_recipe_permission_steps(item)))
         for step_index, step in enumerate(item.steps):
-            errors.extend(_annotate_step_contract_errors(path.resolve(), item, step_index, validate_step_contract(item.id, step)))
+            errors.extend(
+                _annotate_step_contract_errors(path.resolve(), item, step_index, validate_step_contract(item.id, step, item))
+            )
+            errors.extend(_annotate_step_contract_errors(path.resolve(), item, step_index, validate_step_references(item, step)))
 
     return _ParsedItem(path=path.resolve(), kind=kind, item=item), tuple(errors)
 
@@ -277,7 +279,7 @@ def _build_binding_inputs(
 
     for input_id, declaration in _namespaced_inputs("app", apps).items():
         if input_id in binding_inputs:
-            app = apps[input_id.split(".$", 1)[0]]
+            app = apps[input_id.split("/", 1)[0]]
             errors.append(
                 _error(
                     code=ErrorCode.BINDING_REF_CONFLICT,
@@ -294,7 +296,7 @@ def _build_binding_inputs(
 
     for input_id, declaration in _namespaced_inputs("recipe", recipes).items():
         if input_id in binding_inputs:
-            recipe = recipes[input_id.split(".$", 1)[0]]
+            recipe = recipes[input_id.split("/", 1)[0]]
             errors.append(
                 _error(
                     code=ErrorCode.BINDING_REF_CONFLICT,
@@ -330,25 +332,6 @@ def _validate_catalog_cross_refs(catalog: _ValidationCatalog) -> tuple[ErrorMess
                         dependency_ref=dependency_ref,
                     )
                 )
-        for step in recipe.steps:
-            for binding_ref in referenced_bindings(step):
-                if binding_ref not in catalog.binding_inputs:
-                    step_index = _step_index(recipe, step.id)
-                    field = _binding_field(recipe, step, step_index, binding_ref)
-                    errors.append(
-                        _error(
-                            code=ErrorCode.BINDING_MISSING,
-                            message=f"Step {step.id!r} references unknown binding {binding_ref!r}.",
-                            file=catalog.object_files[("recipe", recipe.id)],
-                            object_kind="recipe",
-                            object_id=recipe.id,
-                            field=field,
-                            recipe_ref=recipe.id,
-                            step_id=step.id,
-                            binding_ref=binding_ref,
-                        )
-                    )
-
     errors.extend(_validate_execution_step_id_uniqueness(catalog.recipes, catalog.object_files))
     errors.extend(_validate_recipe_dependency_cycles(catalog.recipes))
 
@@ -398,7 +381,7 @@ def _validate_item_with_catalog_context(parsed_item: _ParsedItem, catalog: _Vali
         recipe_maps[parsed_item.item.id] = parsed_item.item
         object_files = dict(catalog.object_files)
         object_files[("recipe", parsed_item.item.id)] = parsed_item.path
-        binding_inputs, binding_errors = _build_binding_inputs(catalog.apps, recipe_maps, object_files)
+        _, binding_errors = _build_binding_inputs(catalog.apps, recipe_maps, object_files)
         errors = list(binding_errors)
         recipe = parsed_item.item
         for dependency_ref in recipe.recipe_dependencies:
@@ -415,23 +398,6 @@ def _validate_item_with_catalog_context(parsed_item: _ParsedItem, catalog: _Vali
                         dependency_ref=dependency_ref,
                     )
                 )
-        for step in recipe.steps:
-            for binding_ref in referenced_bindings(step):
-                if binding_ref not in binding_inputs:
-                    step_index = _step_index(recipe, step.id)
-                    errors.append(
-                        _error(
-                            code=ErrorCode.BINDING_MISSING,
-                            message=f"Step {step.id!r} references unknown binding {binding_ref!r}.",
-                            file=parsed_item.path,
-                            object_kind="recipe",
-                            object_id=recipe.id,
-                            field=_binding_field(recipe, step, step_index, binding_ref),
-                            recipe_ref=recipe.id,
-                            step_id=step.id,
-                            binding_ref=binding_ref,
-                        )
-                    )
         errors.extend(
             _annotate_recipe_cycle_catalog_errors(
                 parsed_item.path,
@@ -527,6 +493,7 @@ def _validate_recipe_dependency_cycles(
         device_profiles={},
         device_plans={},
         binding_inputs=binding_inputs,
+        recipe_artifacts={},
     )
     _, errors = expand_recipe_dependencies(catalog, selected)
     return tuple(error for error in errors if error.code is ErrorCode.DEPENDENCY_CYCLE)
@@ -705,7 +672,10 @@ def _validate_device_plan_override_refs(
         errors.append(
             _error(
                 code=ErrorCode.AUTHORED_DATA_INVALID,
-                message=f"Device plan override {problem.key!r} must be a full binding ref (<scope>.$<name>).",
+                message=(
+                    f"Device plan override {problem.key!r} must be a normalized input ref "
+                    "(inputs.<id> or <recipe>/<input>)."
+                ),
                 file=file,
                 object_kind="device_plan",
                 object_id=device_plan.id,
@@ -742,6 +712,11 @@ def _step_field(recipe: Recipe, step_id: str, suffix: str) -> str:
 
 
 def _input_field(item: AppDefinition | Recipe, input_id: str) -> str:
+    if isinstance(item.inputs, Mapping):
+        for declared_id in item.inputs.keys():
+            if declared_id == input_id:
+                return f"inputs.{declared_id}"
+        return "inputs"
     for index, declaration in enumerate(item.inputs):
         if declaration.id == input_id:
             return f"inputs[{index}].id"

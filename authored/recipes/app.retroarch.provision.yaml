@@ -2,12 +2,12 @@ schema_version: 1
 kind: recipe
 id: app.retroarch.provision
 name: Provision RetroArch (AArch64)
-description: Install and launch RetroArch once.
+description: Install RetroArch, bootstrap permissions, seed config, copy selected cores, then relaunch.
 provides:
   features:
     - retroarch_provision
 inputs:
-  - id: retroarch_cfg
+  retroarch_cfg:
     type: file
     role: generic
     label: RetroArch config
@@ -19,6 +19,23 @@ inputs:
       allowed_extensions: ["cfg"]
       path_kind: file
     default: null
+artifacts:
+  retroarch_apk:
+    type: remote_file
+    url: https://buildbot.libretro.com/nightly/android/RetroArch_aarch64.apk
+    cache: default
+  core_gambatte_zip:
+    type: remote_file
+    url: http://buildbot.libretro.com/nightly/android/latest/arm64-v8a/gambatte_libretro_android.so.zip
+    cache: default
+  core_snes9x_zip:
+    type: remote_file
+    url: http://buildbot.libretro.com/nightly/android/latest/arm64-v8a/snes9x_libretro_android.so.zip
+    cache: default
+artifact_groups:
+  retroarch_cores:
+    - core_gambatte_zip
+    - core_snes9x_zip
 permissions:
   runtime:
     - package_name: com.retroarch.aarch64
@@ -67,12 +84,27 @@ permissions:
     on_failure: warn
     require_all: false
 steps:
+  - id: resolve_artifacts
+    type: resolve_artifacts
+    name: Resolve RetroArch artifacts
+    user_toggleable: false
+    dependencies: []
+    constraints:
+      capabilities: []
+      conflicts_with: []
+    params:
+      artifacts:
+        - retroarch_apk
+      artifact_groups:
+        - retroarch_cores
+    verify: []
   - id: install_retroarch
     type: install_apk
     name: Install RetroArch
     description: Install the RetroArch APK placeholder.
     user_toggleable: false
-    dependencies: []
+    dependencies:
+      - resolve_artifacts
     constraints:
       capabilities:
         - apk_install
@@ -82,7 +114,8 @@ steps:
         params:
           package_name: com.retroarch.aarch64
     params:
-      app: sample_artifacts/RetroArch_aarch64.apk
+      app:
+        ref: artifacts.retroarch_apk.local_path
       replace_existing: false
     verify: []
   - id: launch_retroarch_bootstrap
@@ -98,8 +131,7 @@ steps:
       conflicts_with: []
     skip_if: []
     params:
-      package_name:
-        value: com.retroarch.aarch64
+      package_name: com.retroarch.aarch64
     verify: []
   - id: wait_for_retroarch_bootstrap
     type: wait
@@ -113,12 +145,11 @@ steps:
       conflicts_with: []
     skip_if: []
     params:
-      duration_ms: 1000
+      duration_ms: 1500
     verify: []
   - id: stop_retroarch_after_bootstrap
     type: force_stop_app
-    name: Force stop RetroArch
-    description: Force stop RetroArch after the first bootstrap launch.
+    name: Force stop RetroArch after bootstrap
     user_toggleable: false
     dependencies:
       - wait_for_retroarch_bootstrap
@@ -154,8 +185,7 @@ steps:
       conflicts_with: []
     skip_if: []
     params:
-      package_name:
-        value: com.retroarch.aarch64
+      package_name: com.retroarch.aarch64
     verify: []
   - id: wait_for_retroarch_permissions
     type: wait
@@ -185,8 +215,44 @@ steps:
     params:
       package_name: com.retroarch.aarch64
     verify: []
+  - id: extract_selected_cores
+    type: extract_artifacts
+    name: Extract selected RetroArch cores
+    user_toggleable: false
+    dependencies:
+      - resolve_artifacts
+    constraints:
+      capabilities: []
+      conflicts_with: []
+    skip_if: []
+    params:
+      artifact_groups:
+        - retroarch_cores
+      extract_on: host
+    verify: []
+  - id: copy_selected_cores
+    type: copy_files
+    name: Copy selected RetroArch cores
+    user_toggleable: true
+    dependencies:
+      - stop_retroarch_after_permissions
+      - extract_selected_cores
+    constraints:
+      capabilities:
+        - app_data_write
+      conflicts_with: []
+    skip_if: []
+    params:
+      source:
+        ref: steps.extract_selected_cores
+      dest: /data/user/0/com.retroarch.aarch64/cores
+      copy_policy: sync
+    verify:
+      - type: path_exists
+        params:
+          path: /data/user/0/com.retroarch.aarch64/cores
   - id: seed_retroarch_cfg
-    type: copy_byo_input
+    type: copy_files
     name: Copy RetroArch config
     description: Copy the config file into Android/data folder.
     user_toggleable: true
@@ -196,14 +262,14 @@ steps:
       capabilities:
         - app_data_write
       conflicts_with: []
+    skip_if: []
     params:
-      input:
-        ref: app.retroarch.provision.$retroarch_cfg
-      dest:
-        value: /sdcard/Android/data/com.retroarch.aarch64/files
-      copy_policy: sync
+      source:
+        ref: inputs.retroarch_cfg
+      dest: /sdcard/Android/data/com.retroarch.aarch64/files/retroarch.cfg
+      copy_policy: merge
     verify:
-      - type: path_exists
+      - type: file_exists
         params:
           path: /sdcard/Android/data/com.retroarch.aarch64/files/retroarch.cfg
   - id: launch_retroarch
@@ -213,12 +279,12 @@ steps:
     user_toggleable: true
     dependencies:
       - seed_retroarch_cfg
+      - copy_selected_cores
     constraints:
       capabilities:
         - app_launch
       conflicts_with: []
     skip_if: []
     params:
-      package_name:
-        value: com.retroarch.aarch64
+      package_name: com.retroarch.aarch64
     verify: []

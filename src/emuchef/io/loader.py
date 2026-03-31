@@ -12,13 +12,13 @@ from emuchef.domain import (
     AppArtifactSupport,
     AppArtifacts,
     AppOpGrant,
+    ArtifactCacheMode,
     AppConfigTarget,
     AppDefinition,
     AppInstallSource,
     AppPackage,
     AppProvisioning,
     AppTrackingSource,
-    BoundParamValue,
     DeviceMatchCriteria,
     DevicePlan,
     DevicePlanRecipeSelection,
@@ -36,6 +36,8 @@ from emuchef.domain import (
     PermissionWhen,
     Recipe,
     RecipeProvides,
+    RefParamValue,
+    RemoteFileArtifact,
     RuntimeCapabilities,
     RuntimePermissionGrant,
     Step,
@@ -46,7 +48,10 @@ from emuchef.domain import (
 )
 from emuchef.planner.catalog import AuthoredCatalog, CatalogLoadError
 from emuchef.planner.bindings import PlannerOverrideProblemKind, normalize_planner_overrides
-from emuchef.planner.contracts import referenced_bindings, validate_recipe_permission_steps, validate_step_contract
+from emuchef.planner.contracts import (
+    validate_step_contract,
+    validate_step_references,
+)
 from emuchef.planner.dependencies import validate_recipe_step_cycles
 
 
@@ -59,6 +64,7 @@ def load_authored_catalog(root: str | Path) -> AuthoredCatalog:
 
     errors: list[ErrorMessage] = []
     binding_inputs: dict[str, InputDeclaration] = {}
+    recipe_artifacts = _namespaced_artifacts(recipes)
 
     for input_id, declaration in _namespaced_inputs("app", apps).items():
         if input_id in binding_inputs:
@@ -93,18 +99,9 @@ def load_authored_catalog(root: str | Path) -> AuthoredCatalog:
                     )
                 )
         errors.extend(validate_recipe_step_cycles(recipe))
-        errors.extend(validate_recipe_permission_steps(recipe))
         for step in recipe.steps:
-            errors.extend(validate_step_contract(recipe.id, step))
-            for binding_ref in referenced_bindings(step):
-                if binding_ref not in binding_inputs:
-                    errors.append(
-                        ErrorMessage(
-                            code=ErrorCode.BINDING_MISSING,
-                            message=f"Step {step.id!r} references unknown binding {binding_ref!r}.",
-                            details={"recipe_ref": recipe.id, "step_id": step.id, "binding_ref": binding_ref},
-                        )
-                    )
+            errors.extend(validate_step_contract(recipe.id, step, recipe))
+            errors.extend(validate_step_references(recipe, step))
 
     seen_execution_step_ids: set[str] = set()
     for recipe in recipes.values():
@@ -150,6 +147,7 @@ def load_authored_catalog(root: str | Path) -> AuthoredCatalog:
         device_profiles=device_profiles,
         device_plans=device_plans,
         binding_inputs=binding_inputs,
+        recipe_artifacts=recipe_artifacts,
     )
 
 
@@ -267,20 +265,22 @@ def _parse_app_definition(data: Mapping[str, Any]) -> AppDefinition:
     )
 
 
-def _parse_input_declaration(data: Mapping[str, Any]) -> InputDeclaration:
+def _parse_input_declaration(data: Mapping[str, Any], *, input_id: str | None = None) -> InputDeclaration:
+    validation = data.get("validation") or {}
+    declared_id = input_id or str(data["id"])
     return InputDeclaration(
-        id=str(data["id"]),
+        id=declared_id,
         type=InputType(str(data["type"])),
-        role=InputRole(str(data["role"])),
-        label=str(data["label"]),
+        role=InputRole(str(data.get("role", InputRole.GENERIC.value))),
+        label=str(data.get("label", declared_id)),
         description=_optional_str(data.get("description")),
-        required=bool(data["required"]),
-        multiple=bool(data["multiple"]),
+        required=bool(data.get("required", True)),
+        multiple=bool(data.get("multiple", False)),
         validation=InputValidation(
-            must_exist=bool(data["validation"].get("must_exist", False)),
-            allowed_extensions=tuple(str(item) for item in data["validation"].get("allowed_extensions", [])),
-            path_kind=InputType(str(data["validation"]["path_kind"]))
-            if data["validation"].get("path_kind") is not None
+            must_exist=bool(validation.get("must_exist", False)),
+            allowed_extensions=tuple(str(item) for item in validation.get("allowed_extensions", [])),
+            path_kind=InputType(str(validation["path_kind"]))
+            if validation.get("path_kind") is not None
             else None,
         ),
         default=data.get("default"),
@@ -307,13 +307,30 @@ def _parse_step(data: Mapping[str, Any]) -> Step:
 
 
 def _parse_recipe(data: Mapping[str, Any]) -> Recipe:
+    inputs_data = data.get("inputs", {})
+    if inputs_data is None:
+        inputs_data = {}
+    if not isinstance(inputs_data, Mapping):
+        raise ValueError("recipe inputs must be a mapping")
+    artifacts_data = data.get("artifacts", {})
+    if artifacts_data is None:
+        artifacts_data = {}
+    if not isinstance(artifacts_data, Mapping):
+        raise ValueError("recipe artifacts must be a mapping")
+    artifact_groups = data.get("artifact_groups", {})
+    if artifact_groups is None:
+        artifact_groups = {}
+    if not isinstance(artifact_groups, Mapping):
+        raise ValueError("recipe artifact_groups must be a mapping")
     return Recipe(
         id=str(data["id"]),
         name=str(data["name"]),
         description=_optional_str(data.get("description")),
         recipe_dependencies=tuple(str(item) for item in data.get("recipe_dependencies", [])),
         provides=RecipeProvides(features=tuple(str(item) for item in data.get("provides", {}).get("features", []))),
-        inputs=tuple(_parse_input_declaration(item) for item in data.get("inputs", [])),
+        inputs={str(key): _parse_input_declaration(value, input_id=str(key)) for key, value in inputs_data.items()},
+        artifacts={str(key): _parse_artifact_definition(str(key), value) for key, value in artifacts_data.items()},
+        artifact_groups={str(key): tuple(str(item) for item in value) for key, value in artifact_groups.items()},
         steps=tuple(_parse_step(item) for item in data.get("steps", [])),
         permissions=_parse_permission_set(data.get("permissions")),
         schema_version=int(data["schema_version"]),
@@ -388,10 +405,20 @@ def _parse_step_condition(data: Mapping[str, Any]) -> StepCondition:
 
 def _parse_param_value(value: Any):
     if isinstance(value, dict) and set(value.keys()) == {"ref"}:
-        return BoundParamValue(ref=parse_reference(str(value["ref"])))
-    if isinstance(value, dict) and set(value.keys()) == {"value"}:
-        return LiteralParamValue(value=value["value"])
+        parse_reference(str(value["ref"]))
+        return RefParamValue(ref=str(value["ref"]))
     return value
+
+
+def _parse_artifact_definition(artifact_id: str, data: Mapping[str, Any]) -> RemoteFileArtifact:
+    artifact_type = str(data["type"])
+    if artifact_type != "remote_file":
+        raise ValueError(f"Unsupported artifact type: {artifact_type!r}")
+    return RemoteFileArtifact(
+        id=artifact_id,
+        url=str(data["url"]),
+        cache=ArtifactCacheMode(str(data.get("cache", ArtifactCacheMode.DEFAULT.value))),
+    )
 
 
 def _parse_artifact_support(data: Mapping[str, Any]) -> AppArtifactSupport:
@@ -470,9 +497,18 @@ def _parse_permission_policy(data: Mapping[str, Any] | None) -> PermissionPolicy
 def _namespaced_inputs(kind: str, items: Mapping[str, Any]) -> dict[str, InputDeclaration]:
     result: dict[str, InputDeclaration] = {}
     for item_id, item in items.items():
-        for declaration in item.inputs:
-            full_ref = f"{item_id}.${declaration.id}"
+        declarations = item.inputs.values() if isinstance(item.inputs, Mapping) else item.inputs
+        for declaration in declarations:
+            full_ref = f"{item_id}/{declaration.id}"
             result[full_ref] = declaration
+    return result
+
+
+def _namespaced_artifacts(items: Mapping[str, Recipe]) -> dict[str, RemoteFileArtifact]:
+    result: dict[str, RemoteFileArtifact] = {}
+    for recipe_id, recipe in items.items():
+        for artifact_id, artifact in recipe.artifacts.items():
+            result[f"{recipe_id}/{artifact_id}"] = artifact
     return result
 
 
@@ -504,7 +540,7 @@ def _validate_device_plan_overrides(
         errors.append(
             ErrorMessage(
                 code=ErrorCode.AUTHORED_DATA_INVALID,
-                message=f"Device plan override {problem.key!r} must be a full binding ref (<scope>.$<name>).",
+                message=f"Device plan override {problem.key!r} must target a known execution-plan input id.",
                 details={
                     "device_plan_ref": device_plan.id,
                     "override_key": str(problem.key),

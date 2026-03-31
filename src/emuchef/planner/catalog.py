@@ -6,7 +6,15 @@ from collections.abc import Mapping
 from dataclasses import dataclass
 from pathlib import Path
 
-from emuchef.domain import AppDefinition, DevicePlan, DeviceProfile, ErrorMessage, InputDeclaration, Recipe
+from emuchef.domain import (
+    AppDefinition,
+    ArtifactDefinition,
+    DevicePlan,
+    DeviceProfile,
+    ErrorMessage,
+    InputDeclaration,
+    Recipe,
+)
 
 
 class CatalogLoadError(Exception):
@@ -25,6 +33,7 @@ class AuthoredCatalog:
     device_profiles: Mapping[str, DeviceProfile]
     device_plans: Mapping[str, DevicePlan]
     binding_inputs: Mapping[str, InputDeclaration]
+    recipe_artifacts: Mapping[str, ArtifactDefinition]
 
     @property
     def asset_root(self) -> Path:

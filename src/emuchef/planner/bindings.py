@@ -8,7 +8,7 @@ from dataclasses import dataclass
 from enum import Enum
 from pathlib import Path
 
-from emuchef.domain import ErrorCode, ErrorMessage, InputDeclaration, InputType, JSONValue, parse_reference
+from emuchef.domain import ErrorCode, ErrorMessage, InputDeclaration, InputType, JSONValue
 
 logger = logging.getLogger(__name__)
 
@@ -45,7 +45,7 @@ def normalize_planner_overrides(
     *,
     allow_metadata_keys: bool,
 ) -> tuple[dict[str, JSONValue], tuple[PlannerOverrideProblem, ...]]:
-    # Only direct `<scope>.$<name>` keys affect binding resolution.
+    # Only direct execution-plan-global input ids affect binding resolution.
     # `device_plan.overrides.config_variants` remains metadata-only unless wired later.
     result: dict[str, JSONValue] = {}
     problems: list[PlannerOverrideProblem] = []
@@ -53,26 +53,22 @@ def normalize_planner_overrides(
         if not isinstance(key, str):
             problems.append(PlannerOverrideProblem(key=key, kind=PlannerOverrideProblemKind.INVALID_REF))
             continue
-        if ".$" not in key:
+        normalized_key = key[len("inputs.") :] if key.startswith("inputs.") else key
+        if "/" not in normalized_key:
             if allow_metadata_keys:
                 continue
             problems.append(PlannerOverrideProblem(key=key, kind=PlannerOverrideProblemKind.METADATA_NOT_ALLOWED))
             continue
-        try:
-            reference = parse_reference(key)
-        except ValueError:
-            problems.append(PlannerOverrideProblem(key=key, kind=PlannerOverrideProblemKind.INVALID_REF))
-            continue
-        if reference.full not in declarations:
+        if normalized_key not in declarations:
             problems.append(
                 PlannerOverrideProblem(
                     key=key,
                     kind=PlannerOverrideProblemKind.UNKNOWN_BINDING,
-                    binding_ref=reference.full,
+                    binding_ref=normalized_key,
                 )
             )
             continue
-        result[reference.full] = value
+        result[normalized_key] = value
     return result, tuple(problems)
 
 

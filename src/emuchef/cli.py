@@ -458,6 +458,7 @@ def _format_execution_summary(result, dry_run: bool) -> str:
     prefix = "Dry run" if dry_run else "Execution"
     succeeded = sum(1 for record in result.steps if record.status.value == "executed")
     skipped = sum(1 for record in result.steps if record.status.value == "skipped")
+    blocked = sum(1 for record in result.steps if record.status.value == "blocked")
     failed = sum(1 for record in result.steps if record.status.value == "failed")
     not_run = max(result.total_steps - len(result.steps), 0)
     lines = [
@@ -465,21 +466,24 @@ def _format_execution_summary(result, dry_run: bool) -> str:
         f"- total: {result.total_steps}",
         f"- succeeded: {succeeded}",
         f"- skipped: {skipped}",
+        f"- blocked: {blocked}",
         f"- failed: {failed}",
         f"- not run: {not_run}",
     ]
     if result.permission_results:
         permission_executed = sum(1 for record in result.permission_results if record.status.value == "executed")
-        permission_skipped = sum(1 for record in result.permission_results if record.status.value == "skipped")
+        permission_not_applicable = sum(
+            1 for record in result.permission_results if record.status.value == "not_applicable"
+        )
         permission_failed = sum(1 for record in result.permission_results if record.status.value == "failed")
-        permission_manual = sum(1 for record in result.permission_results if record.status.value == "manual_required")
+        permission_manual = sum(1 for record in result.permission_results if record.status.value == "manual")
         lines.extend(
             [
                 "Permission actions:",
                 f"- executed: {permission_executed}",
-                f"- skipped: {permission_skipped}",
+                f"- not_applicable: {permission_not_applicable}",
                 f"- failed: {permission_failed}",
-                f"- manual_required: {permission_manual}",
+                f"- manual: {permission_manual}",
                 *_bullet_lines([_format_permission_result(record) for record in result.permission_results]),
             ]
         )

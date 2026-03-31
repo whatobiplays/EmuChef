@@ -14,7 +14,10 @@ class WarningCode(str, Enum):
 class ErrorCode(str, Enum):
     ADB_NOT_FOUND = "adb_not_found"
     APP_DEFINITION_NOT_FOUND = "app_definition_not_found"
+    APP_DATA_WRITE_UNAVAILABLE = "app_data_write_unavailable"
     APP_ID_CONFLICT = "app_id_conflict"
+    ARTIFACT_DOWNLOAD_FAILED = "artifact_download_failed"
+    ARTIFACT_NOT_RESOLVED = "artifact_not_resolved"
     AUTHORED_DATA_INVALID = "authored_data_invalid"
     BINDING_MISSING = "binding_missing"
     BINDING_REF_CONFLICT = "binding_ref_conflict"
@@ -28,6 +31,7 @@ class ErrorCode(str, Enum):
     EMPTY_EXECUTION_PLAN = "empty_execution_plan"
     CAPABILITY_REDUCTION_FAILED = "capability_reduction_failed"
     INPUT_NOT_FOUND = "input_not_found"
+    INVALID_REF_FORMAT = "invalid_ref_format"
     INVALID_OPERATION = "invalid_operation"
     PARAM_CONTRACT_VIOLATION = "param_contract_violation"
     RECIPE_ID_CONFLICT = "recipe_id_conflict"
@@ -35,6 +39,13 @@ class ErrorCode(str, Enum):
     STEP_ID_CONFLICT = "step_id_conflict"
     STEP_NOT_FOUND = "step_not_found"
     STEP_NOT_TOGGLEABLE = "step_not_toggleable"
+    STEP_OUTPUT_UNAVAILABLE = "step_output_unavailable"
+    TLS_VERIFICATION_FAILED = "tls_verification_failed"
+    UNKNOWN_ARTIFACT_FIELD = "unknown_artifact_field"
+    UNKNOWN_ARTIFACT_REF = "unknown_artifact_ref"
+    UNKNOWN_INPUT_REF = "unknown_input_ref"
+    UNKNOWN_STEP_OUTPUT = "unknown_step_output"
+    UNKNOWN_STEP_REF = "unknown_step_ref"
     ERROR_UNKNOWN = "error_unknown"
 
 

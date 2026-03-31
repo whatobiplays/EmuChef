@@ -7,11 +7,14 @@ from dataclasses import dataclass, field
 from typing import Literal
 
 from ._validation import ensure_non_empty, ensure_unique
+from .artifacts import ArtifactCacheMode, ArtifactType
 from .constants import SCHEMA_VERSION
 from .device_context import DeviceContext
 from .device_profiles import RuntimeCapabilities
-from .param_values import JSONValue
-from .step import StepCondition
+from .param_values import ParamValue
+from .recipe import PermissionPolicy
+from .runtime_state import RuntimeValue
+from .step import StepCondition, StepConstraints
 from .step_types import StepType
 
 
@@ -45,7 +48,7 @@ class PermissionPlanReason:
 
 @dataclass(frozen=True, slots=True)
 class PermissionPlanAction:
-    status: Literal["applicable", "skipped", "manual_required"]
+    status: Literal["applicable", "not_applicable", "manual"]
     kind: Literal["runtime_permission", "appop", "manual_requirement"]
     package_name: str
     source: PermissionPlanSource
@@ -54,11 +57,10 @@ class PermissionPlanAction:
     desired_mode: str | None = None
     manual_type: str | None = None
     required: bool = True
-    command: tuple[str, ...] = ()
     reason: PermissionPlanReason | None = None
 
     def __post_init__(self) -> None:
-        if self.status not in {"applicable", "skipped", "manual_required"}:
+        if self.status not in {"applicable", "not_applicable", "manual"}:
             raise ValueError(f"Unsupported permission plan action status: {self.status!r}")
         if self.kind not in {"runtime_permission", "appop", "manual_requirement"}:
             raise ValueError(f"Unsupported permission plan action kind: {self.kind!r}")
@@ -81,12 +83,21 @@ class PermissionPlanAction:
 @dataclass(frozen=True, slots=True)
 class ExecutionPermissionPlan:
     actions: tuple[PermissionPlanAction, ...] = ()
+    policies: Mapping[str, PermissionPolicy] = field(default_factory=dict)
 
 
 @dataclass(frozen=True, slots=True)
-class ResolvedInputValue:
+class ExecutionInputValue:
     id: str
-    value: JSONValue
+    value: RuntimeValue
+
+
+@dataclass(frozen=True, slots=True)
+class ExecutionArtifact:
+    id: str
+    type: ArtifactType
+    url: str
+    cache: ArtifactCacheMode = ArtifactCacheMode.DEFAULT
 
 
 @dataclass(frozen=True, slots=True)
@@ -95,7 +106,9 @@ class ExecutionStep:
     recipe_ref: str
     type: StepType
     name: str
-    params: Mapping[str, JSONValue] = field(default_factory=dict)
+    dependencies: tuple[str, ...] = ()
+    constraints: StepConstraints = field(default_factory=StepConstraints)
+    params: Mapping[str, ParamValue] = field(default_factory=dict)
     skip_if: tuple[StepCondition, ...] = ()
     verify: tuple[StepCondition, ...] = ()
 
@@ -106,12 +119,14 @@ class ExecutionPlan:
     source: ExecutionPlanSource
     device_context: DeviceContext
     runtime_capabilities: RuntimeCapabilities
-    inputs_resolved: tuple[ResolvedInputValue, ...]
+    inputs: tuple[ExecutionInputValue, ...]
+    artifacts: tuple[ExecutionArtifact, ...]
     steps: tuple[ExecutionStep, ...]
     permission_plan: ExecutionPermissionPlan | None = None
     schema_version: Literal[SCHEMA_VERSION] = SCHEMA_VERSION
     kind: Literal["execution_plan"] = "execution_plan"
 
     def __post_init__(self) -> None:
-        ensure_unique((item.id for item in self.inputs_resolved), "resolved input ids")
+        ensure_unique((item.id for item in self.inputs), "execution input ids")
+        ensure_unique((artifact.id for artifact in self.artifacts), "execution artifact ids")
         ensure_unique((step.id for step in self.steps), "execution step ids")

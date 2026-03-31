@@ -1,11 +1,9 @@
-"""Param value models for authored and resolved params."""
+"""Param value models for authored and execution-plan params."""
 
 from __future__ import annotations
 
 from dataclasses import dataclass
 from typing import TypeAlias
-
-from .refs import Reference
 
 ScalarValue: TypeAlias = str | int | float | bool | None
 JSONValue: TypeAlias = ScalarValue | list["JSONValue"] | dict[str, "JSONValue"]
@@ -17,9 +15,10 @@ class LiteralParamValue:
 
 
 @dataclass(frozen=True, slots=True)
-class BoundParamValue:
-    ref: Reference
+class RefParamValue:
+    ref: str
 
 
-ParamValue: TypeAlias = LiteralParamValue | BoundParamValue
+BoundParamValue = RefParamValue
+ParamValue: TypeAlias = LiteralParamValue | RefParamValue
 AuthoredParamValue: TypeAlias = JSONValue | ParamValue

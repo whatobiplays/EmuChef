@@ -24,7 +24,7 @@ class InputRole(str, Enum):
 
 @dataclass(frozen=True, slots=True)
 class InputValidation:
-    must_exist: bool
+    must_exist: bool = False
     allowed_extensions: tuple[str, ...] = ()
     path_kind: InputType | None = None
 
@@ -33,11 +33,11 @@ class InputValidation:
 class InputDeclaration:
     id: str
     type: InputType
-    role: InputRole
-    label: str
     required: bool
     multiple: bool
-    validation: InputValidation
+    role: InputRole = InputRole.GENERIC
+    label: str = ""
+    validation: InputValidation = field(default_factory=InputValidation)
     description: str | None = None
     default: JSONValue = None
     metadata: Mapping[str, JSONValue] = field(default_factory=dict)

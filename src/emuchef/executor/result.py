@@ -10,14 +10,15 @@ from typing import Literal
 class StepRunStatus(str, Enum):
     EXECUTED = "executed"
     SKIPPED = "skipped"
+    BLOCKED = "blocked"
     FAILED = "failed"
 
 
 class PermissionRunStatus(str, Enum):
     EXECUTED = "executed"
     FAILED = "failed"
-    SKIPPED = "skipped"
-    MANUAL_REQUIRED = "manual_required"
+    NOT_APPLICABLE = "not_applicable"
+    MANUAL = "manual"
 
 
 class ProgressPhase(str, Enum):
@@ -29,6 +30,7 @@ class ProgressPhase(str, Enum):
 
 class ProgressStatus(str, Enum):
     SKIPPED = "skipped"
+    BLOCKED = "blocked"
     SUCCEEDED = "succeeded"
     FAILED = "failed"
 
@@ -52,7 +54,6 @@ class PermissionRunRecord:
     op: str | None = None
     desired_mode: str | None = None
     manual_type: str | None = None
-    command: tuple[str, ...] = ()
     message: str | None = None
 
 

@@ -1,8 +1,3 @@
-# Example authored device profile template.
-# Copy this file into authored/device_profiles/ and replace placeholder values.
-# Matching uses the combined match block. Include alternate manufacturer strings
-# when real devices report OEM/manufacturer values that differ from the brand.
-
 schema_version: 1
 kind: device_profile
 id: ayaneo.pocket_s_mini

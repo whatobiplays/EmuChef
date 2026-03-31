@@ -18,7 +18,9 @@ from emuchef.domain import (
     DraftStepState,
     ErrorCode,
     ErrorMessage,
+    RefKind,
     RuntimeCapabilities,
+    parse_reference,
 )
 
 from .bindings import build_binding_table
@@ -26,12 +28,9 @@ from .catalog import AuthoredCatalog
 from .conflicts import StepConflictContext, resolve_step_conflicts
 from .contracts import referenced_bindings
 from .dependencies import expand_recipe_dependencies
+from .ids import make_execution_input_id, make_execution_step_id
 
 logger = logging.getLogger(__name__)
-
-
-def make_execution_step_id(recipe_ref: str, step_id: str) -> str:
-    return f"{recipe_ref}/{step_id}"
 
 
 def build_draft_plan(
@@ -163,8 +162,15 @@ def build_draft_plan(
             )
             if not selected:
                 continue
-            for binding_ref in referenced_bindings(step):
-                selected_input_ids.setdefault(binding_ref, []).append(namespaced_id)
+            for _, ref in referenced_bindings(step):
+                try:
+                    parsed = parse_reference(ref)
+                except ValueError:
+                    continue
+                if parsed.kind is not RefKind.INPUT:
+                    continue
+                input_id = make_execution_input_id(recipe_ref, parsed.target_id)
+                selected_input_ids.setdefault(input_id, []).append(namespaced_id)
 
     binding_table = build_binding_table(
         tuple(selected_input_ids),
