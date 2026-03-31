@@ -1,0 +1,24 @@
+schema_version: 1
+kind: device_plan
+id: ayaneo.konkr_pocket_fit.base
+name: AYANEO KONKR Pocket FIT Base Setup
+description: Starter setup for the AYANEO KONKR Pocket FIT.
+device_profile_ref: ayaneo.konkr_pocket_fit
+recipes:
+  - recipe_ref: app.retroarch.provision
+    selected_by_default: true
+  # - recipe_ref: feature.copy_bios
+  #   selected_by_default: true
+  # - recipe_ref: app.xaniteog.install
+  #   selected_by_default: true
+defaults:
+  show_advanced_steps: false
+overrides:
+  # Note: config_variants is metadata only and does not affect binding resolution or emitted execution plans.
+  config_variants:
+    vendor_family: ayaneo
+    screen_class: handheld_16_9
+metadata:
+  tags:
+    - base_setup
+    - recommended
