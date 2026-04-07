@@ -48,21 +48,20 @@ class PermissionPlanReason:
 
 @dataclass(frozen=True, slots=True)
 class PermissionPlanAction:
-    status: Literal["applicable", "not_applicable", "manual"]
-    kind: Literal["runtime_permission", "appop", "manual_requirement"]
+    status: Literal["applicable", "not_applicable"]
+    kind: Literal["runtime_permission", "appop"]
     package_name: str
     source: PermissionPlanSource
     permission: str | None = None
     op: str | None = None
     desired_mode: str | None = None
-    manual_type: str | None = None
     required: bool = True
     reason: PermissionPlanReason | None = None
 
     def __post_init__(self) -> None:
-        if self.status not in {"applicable", "not_applicable", "manual"}:
+        if self.status not in {"applicable", "not_applicable"}:
             raise ValueError(f"Unsupported permission plan action status: {self.status!r}")
-        if self.kind not in {"runtime_permission", "appop", "manual_requirement"}:
+        if self.kind not in {"runtime_permission", "appop"}:
             raise ValueError(f"Unsupported permission plan action kind: {self.kind!r}")
         ensure_non_empty(self.package_name, "permission plan action package_name")
         if self.kind == "runtime_permission":
@@ -74,10 +73,6 @@ class PermissionPlanAction:
                 raise ValueError("App-op permission plan actions require op and desired_mode")
             ensure_non_empty(self.op, "permission plan action op")
             ensure_non_empty(self.desired_mode, "permission plan action desired_mode")
-        if self.kind == "manual_requirement":
-            if self.manual_type is None:
-                raise ValueError("Manual permission plan actions require manual_type")
-            ensure_non_empty(self.manual_type, "permission plan action manual_type")
 
 
 @dataclass(frozen=True, slots=True)

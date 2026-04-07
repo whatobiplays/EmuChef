@@ -145,6 +145,10 @@ def _parse_permission_plan(data: Mapping[str, Any] | None) -> ExecutionPermissio
 
 
 def _parse_permission_plan_action(data: Mapping[str, Any]) -> PermissionPlanAction:
+    allowed_fields = {"status", "kind", "package_name", "source", "permission", "op", "desired_mode", "required", "reason"}
+    unexpected_fields = sorted(str(field) for field in data.keys() if str(field) not in allowed_fields)
+    if unexpected_fields:
+        raise ValueError(f"Permission plan action contains unknown fields: {unexpected_fields}")
     return PermissionPlanAction(
         status=str(data["status"]),
         kind=str(data["kind"]),
@@ -156,7 +160,6 @@ def _parse_permission_plan_action(data: Mapping[str, Any]) -> PermissionPlanActi
         permission=_optional_str(data.get("permission")),
         op=_optional_str(data.get("op")),
         desired_mode=_optional_str(data.get("desired_mode")),
-        manual_type=_optional_str(data.get("manual_type")),
         required=bool(data.get("required", True)),
         reason=_parse_permission_plan_reason(data.get("reason")),
     )

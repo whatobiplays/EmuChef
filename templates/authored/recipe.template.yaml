@@ -72,11 +72,6 @@ permissions:
       required: false
       when:
         rooted: true
-  manual:
-    - package_name: com.example.app
-      manual_type: open_settings
-      reason: Sign in manually before continuing.
-      required: false
   policy:
     on_failure: warn
     require_all: false
@@ -211,5 +206,5 @@ steps:
     constraints:
       capabilities: []
       conflicts_with: []
-    # grant_permissions takes no params and applies this recipe's local permissions.
+    # grant_permissions takes no params and applies this recipe's runtime permissions and appops.
     verify: []

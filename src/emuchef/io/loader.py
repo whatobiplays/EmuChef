@@ -30,7 +30,6 @@ from emuchef.domain import (
     InputType,
     InputValidation,
     LiteralParamValue,
-    ManualPermissionRequirement,
     PermissionPolicy,
     PermissionSet,
     PermissionWhen,
@@ -437,10 +436,10 @@ def _parse_optional_artifact(data: Mapping[str, Any] | None) -> AppArtifactSuppo
 def _parse_permission_set(data: Mapping[str, Any] | None) -> PermissionSet:
     if data is None:
         return PermissionSet()
+    _ensure_allowed_mapping_keys(data, {"runtime", "appops", "policy"}, "recipe permissions")
     return PermissionSet(
         runtime=tuple(_parse_runtime_permission_grant(item) for item in data.get("runtime", [])),
         appops=tuple(_parse_appop_grant(item) for item in data.get("appops", [])),
-        manual=tuple(_parse_manual_permission_requirement(item) for item in data.get("manual", [])),
         policy=_parse_permission_policy(data.get("policy")),
     )
 
@@ -475,16 +474,6 @@ def _parse_appop_grant(data: Mapping[str, Any]) -> AppOpGrant:
     )
 
 
-def _parse_manual_permission_requirement(data: Mapping[str, Any]) -> ManualPermissionRequirement:
-    return ManualPermissionRequirement(
-        package_name=str(data["package_name"]),
-        manual_type=str(data["manual_type"]),
-        reason=str(data["reason"]),
-        required=bool(data.get("required", True)),
-        when=_parse_permission_when(data.get("when")),
-    )
-
-
 def _parse_permission_policy(data: Mapping[str, Any] | None) -> PermissionPolicy:
     if data is None:
         return PermissionPolicy()
@@ -502,6 +491,12 @@ def _namespaced_inputs(kind: str, items: Mapping[str, Any]) -> dict[str, InputDe
             full_ref = f"{item_id}/{declaration.id}"
             result[full_ref] = declaration
     return result
+
+
+def _ensure_allowed_mapping_keys(data: Mapping[str, Any], allowed_keys: set[str], label: str) -> None:
+    unexpected = sorted(str(key) for key in data.keys() if str(key) not in allowed_keys)
+    if unexpected:
+        raise ValueError(f"{label} contains unsupported keys: {unexpected}")
 
 
 def _namespaced_artifacts(items: Mapping[str, Recipe]) -> dict[str, RemoteFileArtifact]:

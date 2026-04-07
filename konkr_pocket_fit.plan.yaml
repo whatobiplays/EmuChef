@@ -271,7 +271,6 @@ execution_plan:
       permission: android.permission.POST_NOTIFICATIONS
       op: null
       desired_mode: null
-      manual_type: null
       required: false
       reason: null
     - status: applicable
@@ -283,7 +282,6 @@ execution_plan:
       permission: android.permission.READ_EXTERNAL_STORAGE
       op: null
       desired_mode: null
-      manual_type: null
       required: false
       reason: null
     - status: applicable
@@ -295,7 +293,6 @@ execution_plan:
       permission: android.permission.READ_MEDIA_IMAGES
       op: null
       desired_mode: null
-      manual_type: null
       required: false
       reason: null
     - status: applicable
@@ -307,7 +304,6 @@ execution_plan:
       permission: android.permission.READ_MEDIA_AUDIO
       op: null
       desired_mode: null
-      manual_type: null
       required: false
       reason: null
     - status: applicable
@@ -319,7 +315,6 @@ execution_plan:
       permission: android.permission.READ_MEDIA_VIDEO
       op: null
       desired_mode: null
-      manual_type: null
       required: false
       reason: null
     - status: applicable
@@ -331,7 +326,6 @@ execution_plan:
       permission: android.permission.WRITE_EXTERNAL_STORAGE
       op: null
       desired_mode: null
-      manual_type: null
       required: false
       reason: null
     - status: applicable
@@ -343,7 +337,6 @@ execution_plan:
       permission: android.permission.ACCESS_MEDIA_LOCATION
       op: null
       desired_mode: null
-      manual_type: null
       required: false
       reason: null
     - status: applicable
@@ -355,7 +348,6 @@ execution_plan:
       permission: null
       op: MANAGE_EXTERNAL_STORAGE
       desired_mode: allow
-      manual_type: null
       required: false
       reason: null
     policies:

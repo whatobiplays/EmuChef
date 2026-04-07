@@ -57,7 +57,6 @@ from .param_values import (
 from .planning_result import PlanningResult, PlanningStatus
 from .recipe import (
     AppOpGrant,
-    ManualPermissionRequirement,
     PermissionPolicy,
     PermissionSet,
     PermissionWhen,
@@ -144,7 +143,6 @@ __all__ = [
     "RefKind",
     "RefParamValue",
     "AppOpGrant",
-    "ManualPermissionRequirement",
     "Recipe",
     "RecipeProvides",
     "RemoteFileArtifact",

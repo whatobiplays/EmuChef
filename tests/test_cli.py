@@ -10,10 +10,15 @@ from unittest.mock import patch
 from emuchef.cli import main
 from emuchef.domain import (
     DeviceContext,
+    ExecutionPermissionPlan,
     ExecutionPlan,
     ExecutionPlanSource,
+    PermissionPlanAction,
+    PermissionPlanReason,
+    PermissionPlanSource,
     ExecutionStep,
     LiteralParamValue,
+    PermissionPolicy,
     RuntimeCapabilities,
     StepType,
 )
@@ -187,6 +192,82 @@ class CliTests(unittest.TestCase):
             self.assertIn("[2/2] Downstream: blocked", output)
             self.assertIn("Dry run: failed", output)
             self.assertIn("- blocked: 1", output)
+
+    def test_apply_permission_summary_contains_only_runtime_and_appop_reporting(self) -> None:
+        with TemporaryDirectory() as tmp:
+            plan = ExecutionPlan(
+                id="plan.test",
+                source=ExecutionPlanSource(
+                    device_profile_ref="example.device_profile",
+                    device_plan_ref="example.device_plan",
+                    selected_recipe_refs=("example.recipe",),
+                    expanded_recipe_refs=("example.recipe",),
+                ),
+                device_context=DeviceContext(
+                    manufacturer="Example",
+                    model="Example",
+                    android_version=13,
+                    android_api_level=33,
+                    device_tags=(),
+                ),
+                runtime_capabilities=RuntimeCapabilities(
+                    adb_available=True,
+                    apk_install=True,
+                    shared_storage_write=True,
+                    app_launch=True,
+                    shell_command=True,
+                    package_remove_for_user=False,
+                    root_shell=True,
+                    app_data_write=True,
+                ),
+                inputs=(),
+                artifacts=(),
+                steps=(
+                    ExecutionStep(
+                        id="example.recipe/grant",
+                        recipe_ref="example.recipe",
+                        type=StepType.GRANT_PERMISSIONS,
+                        name="Grant",
+                    ),
+                ),
+                permission_plan=ExecutionPermissionPlan(
+                    actions=(
+                        PermissionPlanAction(
+                            status="applicable",
+                            kind="runtime_permission",
+                            package_name="com.example.app",
+                            permission="android.permission.POST_NOTIFICATIONS",
+                            required=False,
+                            source=PermissionPlanSource(recipe_id="example.recipe", section="permissions.runtime[0]"),
+                        ),
+                        PermissionPlanAction(
+                            status="not_applicable",
+                            kind="appop",
+                            package_name="com.example.app",
+                            op="MANAGE_EXTERNAL_STORAGE",
+                            desired_mode="allow",
+                            required=False,
+                            source=PermissionPlanSource(recipe_id="example.recipe", section="permissions.appops[0]"),
+                            reason=PermissionPlanReason(code="requires_root", message="Device is not rooted."),
+                        ),
+                    ),
+                    policies={"example.recipe": PermissionPolicy()},
+                ),
+            )
+            plan_path = Path(tmp) / "plan.yaml"
+            dump_yaml(plan, path=plan_path)
+
+            stdout = StringIO()
+            stderr = StringIO()
+            with contextlib.redirect_stdout(stdout), contextlib.redirect_stderr(stderr):
+                rc = main(["apply", "--plan-file", str(plan_path), "--dry-run"])
+            self.assertEqual(rc, 0, stderr.getvalue())
+            output = stdout.getvalue()
+            self.assertIn("Permission actions:", output)
+            self.assertIn("- executed: 1", output)
+            self.assertIn("- not_applicable: 1", output)
+            self.assertIn("- failed: 0", output)
+            self.assertNotIn("- manual:", output)
 
 
 if __name__ == "__main__":

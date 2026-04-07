@@ -18,7 +18,6 @@ class PermissionRunStatus(str, Enum):
     EXECUTED = "executed"
     FAILED = "failed"
     NOT_APPLICABLE = "not_applicable"
-    MANUAL = "manual"
 
 
 class ProgressPhase(str, Enum):
@@ -46,14 +45,13 @@ class StepRunRecord:
 class PermissionRunRecord:
     step_id: str
     status: PermissionRunStatus
-    kind: Literal["runtime_permission", "appop", "manual_requirement"]
+    kind: Literal["runtime_permission", "appop"]
     package_name: str
     source_recipe_id: str
     source_section: str
     permission: str | None = None
     op: str | None = None
     desired_mode: str | None = None
-    manual_type: str | None = None
     message: str | None = None
 
 

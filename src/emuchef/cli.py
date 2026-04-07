@@ -476,14 +476,12 @@ def _format_execution_summary(result, dry_run: bool) -> str:
             1 for record in result.permission_results if record.status.value == "not_applicable"
         )
         permission_failed = sum(1 for record in result.permission_results if record.status.value == "failed")
-        permission_manual = sum(1 for record in result.permission_results if record.status.value == "manual")
         lines.extend(
             [
                 "Permission actions:",
                 f"- executed: {permission_executed}",
                 f"- not_applicable: {permission_not_applicable}",
                 f"- failed: {permission_failed}",
-                f"- manual: {permission_manual}",
                 *_bullet_lines([_format_permission_result(record) for record in result.permission_results]),
             ]
         )
@@ -533,7 +531,7 @@ def _bullet_lines(items: Sequence[str]) -> list[str]:
 
 
 def _format_permission_result(record) -> str:
-    action_name = record.permission or record.op or record.manual_type or record.kind
+    action_name = record.permission or record.op or record.kind
     detail = f"{record.kind} {record.package_name} {action_name}".strip()
     provenance = f"{record.step_id} -> {record.source_recipe_id}:{record.source_section}"
     if record.message:

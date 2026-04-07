@@ -55,20 +55,6 @@ class AppOpGrant:
 
 
 @dataclass(frozen=True, slots=True)
-class ManualPermissionRequirement:
-    package_name: str
-    manual_type: str
-    reason: str
-    required: bool = True
-    when: PermissionWhen | None = None
-
-    def __post_init__(self) -> None:
-        ensure_non_empty(self.package_name, "manual permission package_name")
-        ensure_non_empty(self.manual_type, "manual permission manual_type")
-        ensure_non_empty(self.reason, "manual permission reason")
-
-
-@dataclass(frozen=True, slots=True)
 class PermissionPolicy:
     on_failure: str = "warn"
     require_all: bool = False
@@ -81,7 +67,6 @@ class PermissionPolicy:
 class PermissionSet:
     runtime: tuple[RuntimePermissionGrant, ...] = ()
     appops: tuple[AppOpGrant, ...] = ()
-    manual: tuple[ManualPermissionRequirement, ...] = ()
     policy: PermissionPolicy = field(default_factory=PermissionPolicy)
 
 

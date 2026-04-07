@@ -15,7 +15,6 @@ from emuchef.domain import (
     ExecutionPlan,
     ExecutionPlanSource,
     ExecutionStep,
-    ManualPermissionRequirement,
     PermissionPlanAction,
     PermissionPlanReason,
     PermissionPlanSource,
@@ -221,16 +220,6 @@ def _emit_permission_plan(
                     android_api_level=android_api_level,
                 )
             )
-        for index, grant in enumerate(recipe.permissions.manual):
-            actions.append(
-                _emit_manual_permission_action(
-                    recipe_id,
-                    index,
-                    grant,
-                    rooted=rooted,
-                    android_api_level=android_api_level,
-                )
-            )
 
     if not actions:
         return None
@@ -278,36 +267,6 @@ def _emit_appop_action(
         required=grant.required,
         source=PermissionPlanSource(recipe_id=recipe_id, section=f"permissions.appops[{index}]"),
         reason=reason,
-    )
-
-
-def _emit_manual_permission_action(
-    recipe_id: str,
-    index: int,
-    grant: ManualPermissionRequirement,
-    *,
-    rooted: bool,
-    android_api_level: int | None,
-) -> PermissionPlanAction:
-    reason = _evaluate_permission_when(grant.when, rooted=rooted, android_api_level=android_api_level)
-    if reason is not None:
-        return PermissionPlanAction(
-            status="not_applicable",
-            kind="manual_requirement",
-            package_name=grant.package_name,
-            manual_type=grant.manual_type,
-            required=grant.required,
-            source=PermissionPlanSource(recipe_id=recipe_id, section=f"permissions.manual[{index}]"),
-            reason=reason,
-        )
-    return PermissionPlanAction(
-        status="manual",
-        kind="manual_requirement",
-        package_name=grant.package_name,
-        manual_type=grant.manual_type,
-        required=grant.required,
-        source=PermissionPlanSource(recipe_id=recipe_id, section=f"permissions.manual[{index}]"),
-        reason=PermissionPlanReason(code="manual", message=grant.reason),
     )
 
 

@@ -118,7 +118,6 @@ execution_plan:
       permission: android.permission.POST_NOTIFICATIONS
       op: null
       desired_mode: null
-      manual_type: null
       required: false
       command:
       - adb
@@ -139,7 +138,6 @@ execution_plan:
       permission: null
       op: MANAGE_EXTERNAL_STORAGE
       desired_mode: allow
-      manual_type: null
       required: false
       command:
       - adb

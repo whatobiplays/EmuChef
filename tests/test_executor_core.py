@@ -184,15 +184,6 @@ class ExecutorCoreTests(unittest.TestCase):
                         source=PermissionPlanSource(recipe_id="example.recipe", section="permissions.runtime[0]"),
                     ),
                     PermissionPlanAction(
-                        status="manual",
-                        kind="manual_requirement",
-                        package_name="com.example.app",
-                        manual_type="open_settings",
-                        required=False,
-                        source=PermissionPlanSource(recipe_id="example.recipe", section="permissions.manual[0]"),
-                        reason=PermissionPlanReason(code="manual", message="Open settings"),
-                    ),
-                    PermissionPlanAction(
                         status="not_applicable",
                         kind="appop",
                         package_name="com.example.app",
@@ -217,9 +208,28 @@ class ExecutorCoreTests(unittest.TestCase):
         adb = DryRunAdb()
         result = ExecutorRunner(adb=adb).run(plan)
         self.assertTrue(result.success, result)
-        self.assertEqual([record.status.value for record in result.permission_results], ["executed", "manual", "not_applicable"])
+        self.assertEqual([record.status.value for record in result.permission_results], ["executed", "not_applicable"])
+        self.assertEqual([record.kind for record in result.permission_results], ["runtime_permission", "appop"])
         self.assertTrue(any(command[:4] == ("run_plan_command", "adb", "shell", "pm") for command in adb.commands), adb.commands)
         self.assertFalse(any("com.other.app" in command for command in adb.commands), adb.commands)
+
+    def test_grant_permissions_succeeds_cleanly_with_zero_actions(self) -> None:
+        plan = _base_plan(
+            steps=(
+                ExecutionStep(
+                    id="example.recipe/grant",
+                    recipe_ref="example.recipe",
+                    type=StepType.GRANT_PERMISSIONS,
+                    name="Grant",
+                ),
+            ),
+            permission_plan=ExecutionPermissionPlan(actions=(), policies={"example.recipe": PermissionPolicy()}),
+        )
+        adb = DryRunAdb()
+        result = ExecutorRunner(adb=adb).run(plan)
+        self.assertTrue(result.success, result)
+        self.assertEqual(result.permission_results, ())
+        self.assertFalse(any(command[0] == "run_plan_command" for command in adb.commands), adb.commands)
 
     def test_wait_uses_millisecond_sleep_with_float_seconds(self) -> None:
         observed: list[float] = []

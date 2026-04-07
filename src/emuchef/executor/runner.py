@@ -307,9 +307,6 @@ def _execute_permission_actions_for_step(
         if action.status == "not_applicable":
             records.append(_permission_result(step.id, action, status=PermissionRunStatus.NOT_APPLICABLE, message=message))
             continue
-        if action.status == "manual":
-            records.append(_permission_result(step.id, action, status=PermissionRunStatus.MANUAL, message=message))
-            continue
 
         try:
             adb.run_plan_command(tuple(_permission_command(action)))
@@ -343,7 +340,6 @@ def _permission_result(step_id: str, action, *, status: PermissionRunStatus, mes
         permission=action.permission,
         op=action.op,
         desired_mode=action.desired_mode,
-        manual_type=action.manual_type,
         source_recipe_id=action.source.recipe_id,
         source_section=action.source.section,
         message=message,
