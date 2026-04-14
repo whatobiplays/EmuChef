@@ -2,6 +2,10 @@
 
 CLI-first Android emulation handheld provisioner.
 
+## Context
+
+Repository context and current behavior notes live in `CONTEXT.md`.
+
 ## Templates
 
 Example authored YAML templates live under `templates/authored/`.
