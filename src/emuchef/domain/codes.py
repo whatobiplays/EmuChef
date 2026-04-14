@@ -50,4 +50,5 @@ class ErrorCode(str, Enum):
 
 
 class AvailabilityCode(str, Enum):
+    OPTIONAL_INPUT_UNBOUND = "optional_input_unbound"
     REQUIRED_CAPABILITY_MISSING = "required_capability_missing"

@@ -244,13 +244,14 @@ def validate_required_bindings(
         declaration = declarations[input_id]
         binding = table.get(input_id)
         if binding is None:
-            errors.append(
-                ErrorMessage(
-                    code=ErrorCode.BINDING_MISSING,
-                    message=f"Required binding {input_id!r} is missing.",
-                    details={"input_id": input_id},
+            if declaration.required:
+                errors.append(
+                    ErrorMessage(
+                        code=ErrorCode.BINDING_MISSING,
+                        message=f"Required binding {input_id!r} is missing.",
+                        details={"input_id": input_id},
+                    )
                 )
-            )
             continue
         errors.extend(validate_binding_value(input_id, declaration, binding.value))
     return tuple(errors)

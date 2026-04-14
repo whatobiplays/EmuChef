@@ -29,6 +29,9 @@ inputs:
   # Accepted input values:
   # - type: file | directory
   # - role: apk | bios | roms | config_bundle | generic
+  # Optional inputs (`required: false`) do not fail planning when unbound.
+  # Any selected step with a direct `inputs.<id>` ref to an unbound optional
+  # input is pruned from the draft before final binding enforcement.
   example_source_dir:
     type: directory
     role: generic

@@ -210,6 +210,9 @@ Current RetroArch-specific notes:
 - core copy uses privileged app-data write behavior
 - config copy now targets the explicit file:
   - `/sdcard/Android/data/com.retroarch.aarch64/files/retroarch.cfg`
+- optional inputs may remain unbound during planning
+- steps with direct `inputs.<id>` refs to unbound optional inputs are pruned
+  before final binding checks
 
 ## Templates
 

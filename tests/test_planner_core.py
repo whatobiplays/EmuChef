@@ -4,7 +4,7 @@ from pathlib import Path
 from tempfile import TemporaryDirectory
 import unittest
 
-from emuchef.domain import DeviceContext, LiteralParamValue, RefParamValue
+from emuchef.domain import Availability, AvailabilityCode, DeviceContext, ErrorCode, LiteralParamValue, RefParamValue
 from emuchef.io import load_authored_catalog, validate_authored_catalog
 from emuchef.planner import Planner
 
@@ -300,6 +300,123 @@ class PlannerCoreTests(unittest.TestCase):
             assert emitted.execution_plan is not None
             self.assertIsNone(emitted.execution_plan.permission_plan)
 
+    def test_unbound_optional_input_prunes_direct_consumer_and_dependent_steps(self) -> None:
+        recipe = base_recipe(
+            recipe_id="example.recipe",
+            inputs={
+                "optional_cfg": {
+                    "type": "file",
+                    "role": "generic",
+                    "label": "Optional Config",
+                    "description": "Optional config file.",
+                    "required": False,
+                    "multiple": False,
+                    "validation": {"must_exist": False, "allowed_extensions": ["cfg"], "path_kind": "file"},
+                }
+            },
+            steps=[
+                {
+                    "id": "prepare",
+                    "type": "wait",
+                    "name": "Prepare",
+                    "user_toggleable": False,
+                    "dependencies": [],
+                    "constraints": {"capabilities": [], "conflicts_with": []},
+                    "params": {"duration_ms": 1},
+                    "verify": [],
+                },
+                {
+                    "id": "seed",
+                    "type": "copy_files",
+                    "name": "Seed",
+                    "user_toggleable": True,
+                    "dependencies": ["prepare"],
+                    "constraints": {"capabilities": ["shared_storage_write"], "conflicts_with": []},
+                    "params": {"source": {"ref": "inputs.optional_cfg"}, "dest": "/sdcard/Example.cfg"},
+                    "verify": [],
+                },
+                {
+                    "id": "launch",
+                    "type": "launch_app",
+                    "name": "Launch",
+                    "user_toggleable": True,
+                    "dependencies": ["seed"],
+                    "constraints": {"capabilities": ["app_launch"], "conflicts_with": []},
+                    "params": {"package_name": "com.example.app", "activity": ".MainActivity"},
+                    "verify": [],
+                },
+            ],
+        )
+        with TemporaryDirectory() as tmp:
+            authored_root = build_authored_tree(Path(tmp), recipes=[recipe])
+            catalog = load_authored_catalog(authored_root)
+            planner = Planner(catalog)
+            session = planner.start_session(
+                "example.device_plan",
+                DeviceContext(manufacturer="Example", model="Example", android_version=13, android_api_level=33, device_tags=()),
+            )
+
+            steps = {step.id: step for step in session.draft_plan.steps}
+            seed_step = steps["example.recipe/seed"]
+            launch_step = steps["example.recipe/launch"]
+
+            self.assertFalse(seed_step.selected)
+            self.assertEqual(seed_step.availability, Availability.UNAVAILABLE)
+            assert seed_step.reason is not None
+            self.assertEqual(seed_step.reason.code, AvailabilityCode.OPTIONAL_INPUT_UNBOUND)
+            self.assertEqual(seed_step.reason.details["input_id"], "example.recipe/optional_cfg")
+            self.assertFalse(launch_step.selected)
+            self.assertEqual(launch_step.availability, Availability.AVAILABLE)
+            self.assertEqual(tuple(item.id for item in session.draft_plan.inputs), ())
+
+            emitted = session.emit_execution_plan()
+            self.assertEqual(emitted.status.value, "success", emitted.errors)
+            assert emitted.execution_plan is not None
+            self.assertEqual([step.id for step in emitted.execution_plan.steps], ["example.recipe/prepare"])
+            self.assertEqual(emitted.execution_plan.inputs, ())
+
+    def test_required_input_still_fails_when_unbound(self) -> None:
+        recipe = base_recipe(
+            recipe_id="example.recipe",
+            inputs={
+                "required_cfg": {
+                    "type": "file",
+                    "role": "generic",
+                    "label": "Required Config",
+                    "description": "Required config file.",
+                    "required": True,
+                    "multiple": False,
+                    "validation": {"must_exist": False, "allowed_extensions": ["cfg"], "path_kind": "file"},
+                }
+            },
+            steps=[
+                {
+                    "id": "seed",
+                    "type": "copy_files",
+                    "name": "Seed",
+                    "user_toggleable": True,
+                    "dependencies": [],
+                    "constraints": {"capabilities": ["shared_storage_write"], "conflicts_with": []},
+                    "params": {"source": {"ref": "inputs.required_cfg"}, "dest": "/sdcard/Example.cfg"},
+                    "verify": [],
+                }
+            ],
+        )
+        with TemporaryDirectory() as tmp:
+            authored_root = build_authored_tree(Path(tmp), recipes=[recipe])
+            catalog = load_authored_catalog(authored_root)
+            planner = Planner(catalog)
+            session = planner.start_session(
+                "example.device_plan",
+                DeviceContext(manufacturer="Example", model="Example", android_version=13, android_api_level=33, device_tags=()),
+            )
+
+            emitted = session.emit_execution_plan()
+            self.assertEqual(emitted.status.value, "error")
+            self.assertEqual(len(emitted.errors), 1)
+            self.assertEqual(emitted.errors[0].code, ErrorCode.BINDING_MISSING)
+            self.assertEqual(emitted.errors[0].details["input_id"], "example.recipe/required_cfg")
+
     def test_sample_retroarch_flow_emits_grouped_artifacts_and_ordered_steps(self) -> None:
         with TemporaryDirectory() as tmp:
             cfg = Path(tmp) / "retroarch.cfg"
@@ -345,6 +462,36 @@ class PlannerCoreTests(unittest.TestCase):
                 seed_step.verify[0].params["path"],
                 "/sdcard/Android/data/com.retroarch.aarch64/files/retroarch.cfg",
             )
+
+    def test_retroarch_plan_without_optional_cfg_prunes_seed_but_keeps_launch(self) -> None:
+        catalog = load_authored_catalog("authored")
+        planner = Planner(catalog)
+        session = planner.start_session(
+            "ayaneo.konkr_pocket_fit.base",
+            DeviceContext(manufacturer="AYANEO", model="Pocket FIT", android_version=14, android_api_level=34, device_tags=()),
+            runtime_capabilities=catalog.device_profiles["ayaneo.konkr_pocket_fit"].capability_defaults,
+        )
+
+        steps = {step.id: step for step in session.draft_plan.steps}
+        seed_step = steps["app.retroarch.provision/seed_retroarch_cfg"]
+        launch_step = steps["app.retroarch.provision/launch_retroarch"]
+
+        self.assertFalse(seed_step.selected)
+        self.assertEqual(seed_step.availability, Availability.UNAVAILABLE)
+        assert seed_step.reason is not None
+        self.assertEqual(seed_step.reason.code, AvailabilityCode.OPTIONAL_INPUT_UNBOUND)
+        self.assertEqual(seed_step.reason.details["input_id"], "app.retroarch.provision/retroarch_cfg")
+        self.assertTrue(launch_step.selected)
+
+        result = session.emit_execution_plan()
+        self.assertEqual(result.status.value, "success", result.errors)
+        plan = result.execution_plan
+        assert plan is not None
+
+        step_ids = [step.id for step in plan.steps]
+        self.assertIn("app.retroarch.provision/launch_retroarch", step_ids)
+        self.assertNotIn("app.retroarch.provision/seed_retroarch_cfg", step_ids)
+        self.assertEqual(tuple(item.id for item in plan.inputs), ())
 
 
 if __name__ == "__main__":

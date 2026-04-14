@@ -27,12 +27,7 @@ execution_plan:
     package_remove_for_user: false
     root_shell: true
     app_data_write: true
-  inputs:
-  - id: app.retroarch.provision/retroarch_cfg
-    value:
-      type: file_path
-      value: /Users/daniel/Downloads/retroarch-2.cfg
-      location: host
+  inputs: []
   artifacts:
   - id: app.retroarch.provision/retroarch_apk
     type: remote_file
@@ -609,7 +604,7 @@ execution_plan:
     name: Copy selected RetroArch core system files
     dependencies:
     - app.retroarch.provision/stop_retroarch_after_permissions
-    - app.retroarch.provision/extract_cores
+    - app.retroarch.provision/extract_core_system_files
     constraints:
       capabilities:
       - app_data_write
@@ -632,34 +627,11 @@ execution_plan:
     - type: path_exists
       params:
         path: /storage/emulated/0/RetroArch/system/PPSSPP
-  - id: app.retroarch.provision/seed_retroarch_cfg
-    recipe_ref: app.retroarch.provision
-    type: copy_files
-    name: Copy RetroArch config
-    dependencies:
-    - app.retroarch.provision/stop_retroarch_after_permissions
-    constraints:
-      capabilities:
-      - app_data_write
-      conflicts_with: []
-    params:
-      source:
-        ref: inputs.app.retroarch.provision/retroarch_cfg
-      dest:
-        value: /sdcard/Android/data/com.retroarch.aarch64/files/retroarch.cfg
-      copy_policy:
-        value: replace
-    skip_if: []
-    verify:
-    - type: file_exists
-      params:
-        path: /sdcard/Android/data/com.retroarch.aarch64/files/retroarch.cfg
   - id: app.retroarch.provision/launch_retroarch
     recipe_ref: app.retroarch.provision
     type: launch_app
     name: Launch RetroArch
     dependencies:
-    - app.retroarch.provision/seed_retroarch_cfg
     - app.retroarch.provision/copy_assets
     - app.retroarch.provision/copy_autoconfig
     - app.retroarch.provision/copy_database_rdb

@@ -569,7 +569,7 @@ steps:
     user_toggleable: true
     dependencies:
       - stop_retroarch_after_permissions
-      - extract_cores
+      - extract_core_system_files
     constraints:
       capabilities:
         - app_data_write
@@ -616,7 +616,6 @@ steps:
     description: Launch RetroArch again after permissions and optional config seeding.
     user_toggleable: true
     dependencies:
-      - seed_retroarch_cfg
       - copy_assets
       - copy_autoconfig
       # - copy_cheats

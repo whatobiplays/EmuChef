@@ -54,7 +54,7 @@ def build_draft_plan(
     step_contexts: dict[str, StepConflictContext] = {}
     step_availability: dict[str, bool] = {}
     step_reasons: dict[str, AvailabilityReason | None] = {}
-    recipe_info: dict[str, tuple[bool, AvailabilityReason | None, bool]] = {}
+    auto_included_by_recipe: dict[str, bool] = {}
 
     for recipe_ref in expanded_recipe_refs:
         recipe = catalog.recipes[recipe_ref]
@@ -104,9 +104,7 @@ def build_draft_plan(
             return None, selection_errors
 
         auto_included = recipe_ref not in user_selected_recipe_refs
-        recipe_available = any(available_by_step_id.values()) or not recipe.steps
-        recipe_reason = None if recipe_available else _merge_recipe_reason(tuple(reason for reason in reason_by_step_id.values() if reason))
-        recipe_info[recipe_ref] = (recipe_available, recipe_reason, auto_included)
+        auto_included_by_recipe[recipe_ref] = auto_included
 
         for step in recipe.steps:
             namespaced_id = make_execution_step_id(recipe_ref, step.id)
@@ -126,25 +124,39 @@ def build_draft_plan(
     if conflict_errors or resolved_selected_step_ids is None:
         return None, conflict_errors
     logger.debug("Draft selected steps after normalization: %s", sorted(resolved_selected_step_ids))
+    resolved_selected_step_ids = _prune_optional_input_steps(
+        catalog,
+        expanded_recipe_refs,
+        resolved_selected_step_ids,
+        step_availability,
+        step_reasons,
+        user_bindings,
+        planner_overrides,
+    )
+    logger.debug("Draft selected steps after optional-input pruning: %s", sorted(resolved_selected_step_ids))
 
     draft_recipes: list[DraftRecipeState] = []
     draft_steps: list[DraftStepState] = []
     selected_input_ids: OrderedDict[str, list[str]] = OrderedDict()
 
     for recipe_ref in expanded_recipe_refs:
-        recipe_available, recipe_reason, auto_included = recipe_info[recipe_ref]
+        recipe = catalog.recipes[recipe_ref]
+        recipe_step_ids = tuple(make_execution_step_id(recipe_ref, step.id) for step in recipe.steps)
+        recipe_available = any(step_availability[step_id] for step_id in recipe_step_ids) or not recipe.steps
+        recipe_reason = None if recipe_available else _merge_recipe_reason(
+            tuple(reason for step_id in recipe_step_ids if (reason := step_reasons[step_id]) is not None)
+        )
         draft_recipes.append(
             DraftRecipeState(
                 id=recipe_ref,
                 selected=True,
-                auto_included=auto_included,
-                user_toggleable=not auto_included,
+                auto_included=auto_included_by_recipe[recipe_ref],
+                user_toggleable=not auto_included_by_recipe[recipe_ref],
                 availability=Availability.AVAILABLE if recipe_available else Availability.UNAVAILABLE,
                 reason=recipe_reason,
             )
         )
 
-        recipe = catalog.recipes[recipe_ref]
         for step in recipe.steps:
             namespaced_id = make_execution_step_id(recipe_ref, step.id)
             selected = namespaced_id in resolved_selected_step_ids
@@ -213,6 +225,114 @@ def build_draft_plan(
     )
 
 
+def _prune_optional_input_steps(
+    catalog: AuthoredCatalog,
+    recipe_refs: Sequence[str],
+    selected_step_ids: set[str],
+    step_availability: dict[str, bool],
+    step_reasons: dict[str, AvailabilityReason | None],
+    user_bindings: Mapping[str, object],
+    planner_overrides: Mapping[str, object],
+) -> set[str]:
+    selected = set(selected_step_ids)
+
+    while True:
+        binding_table = build_binding_table(
+            _selected_input_ids(catalog, recipe_refs, selected),
+            catalog.binding_inputs,
+            user_bindings,  # type: ignore[arg-type]
+            planner_overrides,  # type: ignore[arg-type]
+        )
+        prune_targets = _optional_input_prune_targets(catalog, recipe_refs, selected, binding_table)
+        if not prune_targets:
+            return selected
+
+        removed_step_ids: set[str] = set()
+        for step_id, input_ids in prune_targets.items():
+            step_availability[step_id] = False
+            step_reasons[step_id] = _optional_input_unbound_reason(input_ids)
+            removed_step_ids.add(step_id)
+
+            recipe_ref, local_step_id = step_id.split("/", 1)
+            removed_step_ids.update(
+                make_execution_step_id(recipe_ref, dependent_step_id)
+                for dependent_step_id in _dependent_step_ids(catalog.recipes[recipe_ref], local_step_id)
+            )
+
+        selected.difference_update(removed_step_ids)
+
+
+def _selected_input_ids(
+    catalog: AuthoredCatalog,
+    recipe_refs: Sequence[str],
+    selected_step_ids: set[str],
+) -> tuple[str, ...]:
+    input_ids: OrderedDict[str, None] = OrderedDict()
+    for recipe_ref in recipe_refs:
+        recipe = catalog.recipes[recipe_ref]
+        for step in recipe.steps:
+            namespaced_id = make_execution_step_id(recipe_ref, step.id)
+            if namespaced_id not in selected_step_ids:
+                continue
+            for _, ref in referenced_bindings(step):
+                try:
+                    parsed = parse_reference(ref)
+                except ValueError:
+                    continue
+                if parsed.kind is not RefKind.INPUT:
+                    continue
+                input_ids.setdefault(make_execution_input_id(recipe_ref, parsed.target_id), None)
+    return tuple(input_ids)
+
+
+def _optional_input_prune_targets(
+    catalog: AuthoredCatalog,
+    recipe_refs: Sequence[str],
+    selected_step_ids: set[str],
+    binding_table,
+) -> dict[str, tuple[str, ...]]:
+    targets: dict[str, tuple[str, ...]] = {}
+    for recipe_ref in recipe_refs:
+        recipe = catalog.recipes[recipe_ref]
+        for step in recipe.steps:
+            namespaced_id = make_execution_step_id(recipe_ref, step.id)
+            if namespaced_id not in selected_step_ids:
+                continue
+
+            unbound_optional_inputs: OrderedDict[str, None] = OrderedDict()
+            for _, ref in referenced_bindings(step):
+                try:
+                    parsed = parse_reference(ref)
+                except ValueError:
+                    continue
+                if parsed.kind is not RefKind.INPUT:
+                    continue
+                input_id = make_execution_input_id(recipe_ref, parsed.target_id)
+                declaration = catalog.binding_inputs[input_id]
+                if declaration.required or input_id in binding_table:
+                    continue
+                unbound_optional_inputs.setdefault(input_id, None)
+
+            if unbound_optional_inputs:
+                targets[namespaced_id] = tuple(unbound_optional_inputs)
+    return targets
+
+
+def _optional_input_unbound_reason(input_ids: Sequence[str]) -> AvailabilityReason:
+    unique_ids = tuple(OrderedDict.fromkeys(str(input_id) for input_id in input_ids))
+    if len(unique_ids) == 1:
+        return AvailabilityReason(
+            code=AvailabilityCode.OPTIONAL_INPUT_UNBOUND,
+            message=f"This step requires optional input {unique_ids[0]!r}, which is currently unbound.",
+            details={"input_id": unique_ids[0]},
+        )
+    return AvailabilityReason(
+        code=AvailabilityCode.OPTIONAL_INPUT_UNBOUND,
+        message="This step requires optional inputs that are currently unbound.",
+        details={"input_id": list(unique_ids)},
+    )
+
+
 def _select_step_ids(
     recipe,
     requested_ids: Sequence[str],
@@ -261,6 +381,21 @@ def _select_step_ids(
 def _merge_recipe_reason(reasons: tuple[AvailabilityReason, ...]) -> AvailabilityReason | None:
     if not reasons:
         return None
+    if len(reasons) == 1:
+        return reasons[0]
+    if all(reason.code is AvailabilityCode.OPTIONAL_INPUT_UNBOUND for reason in reasons):
+        input_ids: list[str] = []
+        for reason in reasons:
+            detail = reason.details.get("input_id")
+            if isinstance(detail, list):
+                input_ids.extend(str(item) for item in detail)
+            elif detail is not None:
+                input_ids.append(str(detail))
+        return AvailabilityReason(
+            code=AvailabilityCode.OPTIONAL_INPUT_UNBOUND,
+            message="This recipe has no currently runnable steps because optional inputs are unbound.",
+            details={"input_id": list(sorted(set(input_ids)))},
+        )
     missing: list[str] = []
     for reason in reasons:
         detail = reason.details.get("capability")
@@ -274,3 +409,17 @@ def _merge_recipe_reason(reasons: tuple[AvailabilityReason, ...]) -> Availabilit
         message="This recipe has no currently runnable steps for the available device capabilities.",
         details={"capability": list(unique_missing)},
     )
+
+
+def _dependent_step_ids(recipe, dependency_id: str) -> set[str]:
+    dependents: set[str] = set()
+    changed = True
+    while changed:
+        changed = False
+        for step in recipe.steps:
+            if step.id == dependency_id or step.id in dependents:
+                continue
+            if dependency_id in step.dependencies or dependents.intersection(step.dependencies):
+                dependents.add(step.id)
+                changed = True
+    return dependents

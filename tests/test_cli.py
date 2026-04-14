@@ -77,6 +77,41 @@ class CliTests(unittest.TestCase):
             self.assertIn("ref: inputs.app.retroarch.provision/retroarch_cfg", output)
             self.assertIn("type: resolve_artifacts", output)
 
+    def test_plan_allows_missing_optional_retroarch_cfg(self) -> None:
+        detected = DetectedDevice(
+            serial="SERIAL",
+            manufacturer="AYANEO",
+            brand="AYANEO",
+            model="Pocket FIT",
+            android_version=14,
+            android_api_level=34,
+            root_available=True,
+        )
+        stdout = StringIO()
+        stderr = StringIO()
+        with (
+            patch("emuchef.cli.resolve_adb_executable", return_value="adb"),
+            patch("emuchef.cli.SubprocessAdb.detect_device", return_value=detected),
+            contextlib.redirect_stdout(stdout),
+            contextlib.redirect_stderr(stderr),
+        ):
+            rc = main(
+                [
+                    "plan",
+                    "--authored-root",
+                    "authored",
+                    "--device-plan",
+                    "ayaneo.konkr_pocket_fit.base",
+                    "--verbose",
+                ]
+            )
+        self.assertEqual(rc, 0, stderr.getvalue())
+        output = stdout.getvalue()
+        self.assertIn("status: success", output)
+        self.assertNotIn("binding_missing", output)
+        self.assertIn("id: app.retroarch.provision/launch_retroarch", output)
+        self.assertNotIn("id: app.retroarch.provision/seed_retroarch_cfg", output)
+
     def test_apply_dry_run_shows_progress_and_summary(self) -> None:
         with TemporaryDirectory() as tmp:
             plan = ExecutionPlan(
