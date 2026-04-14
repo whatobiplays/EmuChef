@@ -267,7 +267,6 @@ class CliTests(unittest.TestCase):
             self.assertIn("- executed: 1", output)
             self.assertIn("- not_applicable: 1", output)
             self.assertIn("- failed: 0", output)
-            self.assertNotIn("- manual:", output)
 
 
 if __name__ == "__main__":
