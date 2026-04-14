@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from pathlib import Path
 from tempfile import TemporaryDirectory
+import shlex
 import ssl
 import subprocess
 import unittest
@@ -786,6 +787,89 @@ class ExecutorCoreTests(unittest.TestCase):
             calls[-1],
             ["adb", "shell", "monkey", "-p", "com.example.app", "-c", "android.intent.category.LAUNCHER", "1"],
         )
+
+    def test_copy_on_device_privileged_quotes_spaced_paths_for_su(self) -> None:
+        calls: list[list[str]] = []
+
+        def runner(args: list[str]) -> subprocess.CompletedProcess[str]:
+            calls.append(args)
+            return subprocess.CompletedProcess(args, 0, "", "")
+
+        source = "/data/local/tmp/emuchef/Amstrad - CPC.rdb"
+        dest = "/data/user/0/com.example.app/database/rdb"
+        adb = SubprocessAdb(executable="adb", runner=runner)
+        adb.copy_on_device(source, dest, privileged=True)
+        self.assertEqual(
+            calls,
+            [["adb", "shell", shlex.join(["su", "-c", shlex.join(["cp", source, dest])])]],
+        )
+
+    def test_mkdir_p_quotes_spaced_paths_for_adb_shell(self) -> None:
+        calls: list[list[str]] = []
+
+        def runner(args: list[str]) -> subprocess.CompletedProcess[str]:
+            calls.append(args)
+            return subprocess.CompletedProcess(args, 0, "", "")
+
+        path = "/sdcard/RetroArch/My Config"
+        adb = SubprocessAdb(executable="adb", runner=runner)
+        adb.mkdir_p(path)
+        self.assertEqual(calls, [["adb", "shell", shlex.join(["mkdir", "-p", path])]])
+
+    def test_executor_copy_to_app_private_quotes_spaced_staged_filename(self) -> None:
+        with TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            database_dir = tmp_path / "database"
+            database_dir.mkdir()
+            database = database_dir / "Amstrad - CPC.rdb"
+            database.write_text("db", encoding="utf-8")
+            calls: list[list[str]] = []
+
+            def runner(args: list[str]) -> subprocess.CompletedProcess[str]:
+                calls.append(args)
+                return subprocess.CompletedProcess(args, 0, "", "")
+
+            plan = _base_plan(
+                steps=(
+                    ExecutionStep(
+                        id="example.recipe/copy_database_rdb",
+                        recipe_ref="example.recipe",
+                        type=StepType.COPY_FILES,
+                        name="Copy database",
+                        params={
+                            "source": LiteralParamValue(
+                                value=RuntimeValue(
+                                    type=RuntimeValueType.DIRECTORY_PATH,
+                                    value=str(database_dir),
+                                    location="host",
+                                )
+                            ),
+                            "dest": LiteralParamValue(value="/data/user/0/com.example.app/database/rdb"),
+                        },
+                    ),
+                ),
+            )
+
+            result = ExecutorRunner(adb=SubprocessAdb(executable="adb", runner=runner), workdir=tmp_path).run(plan)
+            self.assertTrue(result.success, result)
+            expected_copy = [
+                "adb",
+                "shell",
+                shlex.join(
+                    [
+                        "su",
+                        "-c",
+                        shlex.join(
+                            [
+                                "cp",
+                                "/data/local/tmp/emuchef/example.recipe_copy_database_rdb/Amstrad - CPC.rdb",
+                                "/data/user/0/com.example.app/database/rdb",
+                            ]
+                        ),
+                    ]
+                ),
+            ]
+            self.assertIn(expected_copy, calls)
 
     @staticmethod
     def _write_zip(path: Path, entries: dict[str, str]) -> None:

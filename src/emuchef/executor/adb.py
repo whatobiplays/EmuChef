@@ -239,9 +239,7 @@ class SubprocessAdb:
         return self._run_with_serial(self._serial, args, check=check)
 
     def _run_shell(self, args: list[str], check: bool = True, privileged: bool = False) -> AdbCommandResult:
-        if privileged:
-            return self._run(["shell", "su", "-c", shlex.join(args)], check=check)
-        return self._run(["shell", *args], check=check)
+        return self._run(["shell", _build_shell_command(args, privileged=privileged)], check=check)
 
     def _run_with_serial(self, serial: str | None, args: list[str], check: bool = True) -> AdbCommandResult:
         full_args = [self._executable]
@@ -450,6 +448,21 @@ def _parse_android_api_level(raw_value: str) -> int | None:
 
 def _command_has_serial_flag(args: Sequence[str]) -> bool:
     return len(args) >= 2 and args[0] == "-s"
+
+
+def _build_shell_command(args: Sequence[str], *, privileged: bool) -> str:
+    """Build a shell-safe command string for `adb shell`.
+
+    `adb shell` ultimately executes a command string on the device, not a structured
+    argv array. We therefore shell-quote the command ourselves. For privileged calls
+    we must also quote the inner command passed to `su -c` so paths with spaces
+    survive both the outer device shell parse and the nested root-shell parse.
+    """
+
+    command = shlex.join(list(args))
+    if privileged:
+        return shlex.join(["su", "-c", command])
+    return command
 
 
 def is_app_private_path(path: str) -> bool:

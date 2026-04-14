@@ -31,20 +31,104 @@ execution_plan:
   - id: app.retroarch.provision/retroarch_cfg
     value:
       type: file_path
-      value: /Users/daniel/Downloads/retroarch.cfg
+      value: /Users/daniel/Downloads/retroarch-2.cfg
       location: host
   artifacts:
   - id: app.retroarch.provision/retroarch_apk
     type: remote_file
     url: https://buildbot.libretro.com/nightly/android/RetroArch_aarch64.apk
     cache: default
+  - id: app.retroarch.provision/asset_assets_zip
+    type: remote_file
+    url: https://buildbot.libretro.com/assets/frontend/assets.zip
+    cache: default
+  - id: app.retroarch.provision/asset_autoconfig_zip
+    type: remote_file
+    url: https://buildbot.libretro.com/assets/frontend/autoconfig.zip
+    cache: default
+  - id: app.retroarch.provision/asset_cheats_zip
+    type: remote_file
+    url: https://buildbot.libretro.com/assets/frontend/cheats.zip
+    cache: default
+  - id: app.retroarch.provision/asset_database_rdb_zip
+    type: remote_file
+    url: https://buildbot.libretro.com/assets/frontend/database-rdb.zip
+    cache: default
+  - id: app.retroarch.provision/asset_info_zip
+    type: remote_file
+    url: https://buildbot.libretro.com/assets/frontend/info.zip
+    cache: default
+  - id: app.retroarch.provision/asset_overlays_zip
+    type: remote_file
+    url: https://buildbot.libretro.com/assets/frontend/overlays.zip
+    cache: default
+  - id: app.retroarch.provision/asset_shaders_glsl_zip
+    type: remote_file
+    url: https://buildbot.libretro.com/assets/frontend/shaders_glsl.zip
+    cache: default
+  - id: app.retroarch.provision/core_dolphin_zip
+    type: remote_file
+    url: http://buildbot.libretro.com/nightly/android/latest/arm64-v8a/dolphin_libretro_android.so.zip
+    cache: default
+  - id: app.retroarch.provision/core_fbneo_zip
+    type: remote_file
+    url: http://buildbot.libretro.com/nightly/android/latest/arm64-v8a/fbneo_libretro_android.so.zip
+    cache: default
+  - id: app.retroarch.provision/core_fceumm_zip
+    type: remote_file
+    url: http://buildbot.libretro.com/nightly/android/latest/arm64-v8a/fceumm_libretro_android.so.zip
+    cache: default
+  - id: app.retroarch.provision/core_flycast_zip
+    type: remote_file
+    url: http://buildbot.libretro.com/nightly/android/latest/arm64-v8a/flycast_libretro_android.so.zip
+    cache: default
   - id: app.retroarch.provision/core_gambatte_zip
     type: remote_file
     url: http://buildbot.libretro.com/nightly/android/latest/arm64-v8a/gambatte_libretro_android.so.zip
     cache: default
+  - id: app.retroarch.provision/core_genesis_plus_gx_zip
+    type: remote_file
+    url: http://buildbot.libretro.com/nightly/android/latest/arm64-v8a/genesis_plus_gx_libretro_android.so.zip
+    cache: default
+  - id: app.retroarch.provision/core_handy_zip
+    type: remote_file
+    url: http://buildbot.libretro.com/nightly/android/latest/arm64-v8a/handy_libretro_android.so.zip
+    cache: default
+  - id: app.retroarch.provision/core_mednafen_saturn_zip
+    type: remote_file
+    url: http://buildbot.libretro.com/nightly/android/latest/arm64-v8a/mednafen_saturn_libretro_android.so.zip
+    cache: default
+  - id: app.retroarch.provision/core_melondsds_zip
+    type: remote_file
+    url: http://buildbot.libretro.com/nightly/android/latest/arm64-v8a/melondsds_libretro_android.so.zip
+    cache: default
+  - id: app.retroarch.provision/core_mupen64plus_next_gles3_zip
+    type: remote_file
+    url: http://buildbot.libretro.com/nightly/android/latest/arm64-v8a/mupen64plus_next_gles3_libretro_android.so.zip
+    cache: default
+  - id: app.retroarch.provision/core_pokemini_zip
+    type: remote_file
+    url: http://buildbot.libretro.com/nightly/android/latest/arm64-v8a/pokemini_libretro_android.so.zip
+    cache: default
+  - id: app.retroarch.provision/core_ppsspp_zip
+    type: remote_file
+    url: http://buildbot.libretro.com/nightly/android/latest/arm64-v8a/ppsspp_libretro_android.so.zip
+    cache: default
   - id: app.retroarch.provision/core_snes9x_zip
     type: remote_file
     url: http://buildbot.libretro.com/nightly/android/latest/arm64-v8a/snes9x_libretro_android.so.zip
+    cache: default
+  - id: app.retroarch.provision/core_files_dolphin_zip
+    type: remote_file
+    url: https://buildbot.libretro.com/assets/system/Dolphin.zip
+    cache: default
+  - id: app.retroarch.provision/core_files_fbneo_zip
+    type: remote_file
+    url: https://buildbot.libretro.com/assets/system/FinalBurn%20Neo%20%28hiscore%29.zip
+    cache: default
+  - id: app.retroarch.provision/core_files_ppsspp_zip
+    type: remote_file
+    url: https://buildbot.libretro.com/assets/system/PPSSPP.zip
     cache: default
   steps:
   - id: app.retroarch.provision/resolve_artifacts
@@ -59,8 +143,29 @@ execution_plan:
       artifacts:
         value:
         - app.retroarch.provision/retroarch_apk
+        - app.retroarch.provision/asset_assets_zip
+        - app.retroarch.provision/asset_autoconfig_zip
+        - app.retroarch.provision/asset_cheats_zip
+        - app.retroarch.provision/asset_database_rdb_zip
+        - app.retroarch.provision/asset_info_zip
+        - app.retroarch.provision/asset_overlays_zip
+        - app.retroarch.provision/asset_shaders_glsl_zip
+        - app.retroarch.provision/core_dolphin_zip
+        - app.retroarch.provision/core_fbneo_zip
+        - app.retroarch.provision/core_fceumm_zip
+        - app.retroarch.provision/core_flycast_zip
         - app.retroarch.provision/core_gambatte_zip
+        - app.retroarch.provision/core_genesis_plus_gx_zip
+        - app.retroarch.provision/core_handy_zip
+        - app.retroarch.provision/core_mednafen_saturn_zip
+        - app.retroarch.provision/core_melondsds_zip
+        - app.retroarch.provision/core_mupen64plus_next_gles3_zip
+        - app.retroarch.provision/core_pokemini_zip
+        - app.retroarch.provision/core_ppsspp_zip
         - app.retroarch.provision/core_snes9x_zip
+        - app.retroarch.provision/core_files_dolphin_zip
+        - app.retroarch.provision/core_files_fbneo_zip
+        - app.retroarch.provision/core_files_ppsspp_zip
     skip_if: []
     verify: []
   - id: app.retroarch.provision/install_retroarch
@@ -83,7 +188,115 @@ execution_plan:
       params:
         package_name: com.retroarch.aarch64
     verify: []
-  - id: app.retroarch.provision/extract_selected_cores
+  - id: app.retroarch.provision/extract_assets
+    recipe_ref: app.retroarch.provision
+    type: extract_archive
+    name: Extract RetroArch assets
+    dependencies:
+    - app.retroarch.provision/resolve_artifacts
+    constraints:
+      capabilities: []
+      conflicts_with: []
+    params:
+      archive:
+        ref: artifacts.app.retroarch.provision/asset_assets_zip.local_path
+      extract_on:
+        value: host
+      cleanup:
+        value: true
+    skip_if: []
+    verify: []
+  - id: app.retroarch.provision/extract_autoconfig
+    recipe_ref: app.retroarch.provision
+    type: extract_archive
+    name: Extract RetroArch autoconfig
+    dependencies:
+    - app.retroarch.provision/resolve_artifacts
+    constraints:
+      capabilities: []
+      conflicts_with: []
+    params:
+      archive:
+        ref: artifacts.app.retroarch.provision/asset_autoconfig_zip.local_path
+      extract_on:
+        value: host
+      cleanup:
+        value: true
+    skip_if: []
+    verify: []
+  - id: app.retroarch.provision/extract_database_rdb
+    recipe_ref: app.retroarch.provision
+    type: extract_archive
+    name: Extract RetroArch database
+    dependencies:
+    - app.retroarch.provision/resolve_artifacts
+    constraints:
+      capabilities: []
+      conflicts_with: []
+    params:
+      archive:
+        ref: artifacts.app.retroarch.provision/asset_database_rdb_zip.local_path
+      extract_on:
+        value: host
+      cleanup:
+        value: true
+    skip_if: []
+    verify: []
+  - id: app.retroarch.provision/extract_info
+    recipe_ref: app.retroarch.provision
+    type: extract_archive
+    name: Extract RetroArch info
+    dependencies:
+    - app.retroarch.provision/resolve_artifacts
+    constraints:
+      capabilities: []
+      conflicts_with: []
+    params:
+      archive:
+        ref: artifacts.app.retroarch.provision/asset_info_zip.local_path
+      extract_on:
+        value: host
+      cleanup:
+        value: true
+    skip_if: []
+    verify: []
+  - id: app.retroarch.provision/extract_overlays
+    recipe_ref: app.retroarch.provision
+    type: extract_archive
+    name: Extract RetroArch overlays
+    dependencies:
+    - app.retroarch.provision/resolve_artifacts
+    constraints:
+      capabilities: []
+      conflicts_with: []
+    params:
+      archive:
+        ref: artifacts.app.retroarch.provision/asset_overlays_zip.local_path
+      extract_on:
+        value: host
+      cleanup:
+        value: true
+    skip_if: []
+    verify: []
+  - id: app.retroarch.provision/extract_shaders_glsl
+    recipe_ref: app.retroarch.provision
+    type: extract_archive
+    name: Extract RetroArch GLSL shaders
+    dependencies:
+    - app.retroarch.provision/resolve_artifacts
+    constraints:
+      capabilities: []
+      conflicts_with: []
+    params:
+      archive:
+        ref: artifacts.app.retroarch.provision/asset_shaders_glsl_zip.local_path
+      extract_on:
+        value: host
+      cleanup:
+        value: true
+    skip_if: []
+    verify: []
+  - id: app.retroarch.provision/extract_cores
     recipe_ref: app.retroarch.provision
     type: extract_artifacts
     name: Extract selected RetroArch cores
@@ -95,8 +308,38 @@ execution_plan:
     params:
       artifacts:
         value:
+        - app.retroarch.provision/core_dolphin_zip
+        - app.retroarch.provision/core_fbneo_zip
+        - app.retroarch.provision/core_fceumm_zip
+        - app.retroarch.provision/core_flycast_zip
         - app.retroarch.provision/core_gambatte_zip
+        - app.retroarch.provision/core_genesis_plus_gx_zip
+        - app.retroarch.provision/core_handy_zip
+        - app.retroarch.provision/core_mednafen_saturn_zip
+        - app.retroarch.provision/core_melondsds_zip
+        - app.retroarch.provision/core_mupen64plus_next_gles3_zip
+        - app.retroarch.provision/core_pokemini_zip
+        - app.retroarch.provision/core_ppsspp_zip
         - app.retroarch.provision/core_snes9x_zip
+      extract_on:
+        value: host
+    skip_if: []
+    verify: []
+  - id: app.retroarch.provision/extract_core_system_files
+    recipe_ref: app.retroarch.provision
+    type: extract_artifacts
+    name: Extract selected RetroArch core system files
+    dependencies:
+    - app.retroarch.provision/resolve_artifacts
+    constraints:
+      capabilities: []
+      conflicts_with: []
+    params:
+      artifacts:
+        value:
+        - app.retroarch.provision/core_files_dolphin_zip
+        - app.retroarch.provision/core_files_fbneo_zip
+        - app.retroarch.provision/core_files_ppsspp_zip
       extract_on:
         value: host
     skip_if: []
@@ -199,29 +442,196 @@ execution_plan:
         value: com.retroarch.aarch64
     skip_if: []
     verify: []
-  - id: app.retroarch.provision/copy_selected_cores
+  - id: app.retroarch.provision/copy_assets
     recipe_ref: app.retroarch.provision
     type: copy_files
-    name: Copy selected RetroArch cores
+    name: Copy RetroArch assets
     dependencies:
     - app.retroarch.provision/stop_retroarch_after_permissions
-    - app.retroarch.provision/extract_selected_cores
+    - app.retroarch.provision/extract_assets
     constraints:
       capabilities:
       - app_data_write
       conflicts_with: []
     params:
       source:
-        ref: steps.app.retroarch.provision/extract_selected_cores.outputs.extracted_paths
+        ref: steps.app.retroarch.provision/extract_assets.outputs.extracted_path
+      dest:
+        value: /data/user/0/com.retroarch.aarch64/assets
+      copy_policy:
+        value: merge
+    skip_if: []
+    verify:
+    - type: path_exists
+      params:
+        path: /data/user/0/com.retroarch.aarch64/assets
+  - id: app.retroarch.provision/copy_autoconfig
+    recipe_ref: app.retroarch.provision
+    type: copy_files
+    name: Copy RetroArch autoconfig
+    dependencies:
+    - app.retroarch.provision/stop_retroarch_after_permissions
+    - app.retroarch.provision/extract_autoconfig
+    constraints:
+      capabilities:
+      - app_data_write
+      conflicts_with: []
+    params:
+      source:
+        ref: steps.app.retroarch.provision/extract_assets.outputs.extracted_path
+      dest:
+        value: /data/user/0/com.retroarch.aarch64/autoconfig
+      copy_policy:
+        value: merge
+    skip_if: []
+    verify:
+    - type: path_exists
+      params:
+        path: /data/user/0/com.retroarch.aarch64/autoconfig
+  - id: app.retroarch.provision/copy_database_rdb
+    recipe_ref: app.retroarch.provision
+    type: copy_files
+    name: Copy RetroArch database
+    dependencies:
+    - app.retroarch.provision/stop_retroarch_after_permissions
+    - app.retroarch.provision/extract_database_rdb
+    constraints:
+      capabilities:
+      - app_data_write
+      conflicts_with: []
+    params:
+      source:
+        ref: steps.app.retroarch.provision/extract_database_rdb.outputs.extracted_path
+      dest:
+        value: /data/user/0/com.retroarch.aarch64/database/rdb
+      copy_policy:
+        value: merge
+    skip_if: []
+    verify:
+    - type: path_exists
+      params:
+        path: /data/user/0/com.retroarch.aarch64/database/rdb
+  - id: app.retroarch.provision/copy_info
+    recipe_ref: app.retroarch.provision
+    type: copy_files
+    name: Copy RetroArch info
+    dependencies:
+    - app.retroarch.provision/stop_retroarch_after_permissions
+    - app.retroarch.provision/extract_info
+    constraints:
+      capabilities:
+      - app_data_write
+      conflicts_with: []
+    params:
+      source:
+        ref: steps.app.retroarch.provision/extract_info.outputs.extracted_path
+      dest:
+        value: /data/user/0/com.retroarch.aarch64/info
+      copy_policy:
+        value: merge
+    skip_if: []
+    verify:
+    - type: path_exists
+      params:
+        path: /data/user/0/com.retroarch.aarch64/info
+  - id: app.retroarch.provision/copy_overlays
+    recipe_ref: app.retroarch.provision
+    type: copy_files
+    name: Copy RetroArch overlays
+    dependencies:
+    - app.retroarch.provision/stop_retroarch_after_permissions
+    - app.retroarch.provision/extract_overlays
+    constraints:
+      capabilities:
+      - app_data_write
+      conflicts_with: []
+    params:
+      source:
+        ref: steps.app.retroarch.provision/extract_overlays.outputs.extracted_path
+      dest:
+        value: /data/user/0/com.retroarch.aarch64/overlays
+      copy_policy:
+        value: merge
+    skip_if: []
+    verify:
+    - type: path_exists
+      params:
+        path: /data/user/0/com.retroarch.aarch64/overlays
+  - id: app.retroarch.provision/copy_shaders_glsl
+    recipe_ref: app.retroarch.provision
+    type: copy_files
+    name: Copy RetroArch GLSL shaders
+    dependencies:
+    - app.retroarch.provision/stop_retroarch_after_permissions
+    - app.retroarch.provision/extract_shaders_glsl
+    constraints:
+      capabilities:
+      - app_data_write
+      conflicts_with: []
+    params:
+      source:
+        ref: steps.app.retroarch.provision/extract_shaders_glsl.outputs.extracted_path
+      dest:
+        value: /data/user/0/com.retroarch.aarch64/shaders/shaders_glsl
+      copy_policy:
+        value: merge
+    skip_if: []
+    verify:
+    - type: path_exists
+      params:
+        path: /data/user/0/com.retroarch.aarch64/shaders/shaders_glsl
+  - id: app.retroarch.provision/copy_cores
+    recipe_ref: app.retroarch.provision
+    type: copy_files
+    name: Copy selected RetroArch cores
+    dependencies:
+    - app.retroarch.provision/stop_retroarch_after_permissions
+    - app.retroarch.provision/extract_cores
+    constraints:
+      capabilities:
+      - app_data_write
+      conflicts_with: []
+    params:
+      source:
+        ref: steps.app.retroarch.provision/extract_cores.outputs.extracted_paths
       dest:
         value: /data/user/0/com.retroarch.aarch64/cores
       copy_policy:
-        value: sync
+        value: merge
     skip_if: []
     verify:
     - type: path_exists
       params:
         path: /data/user/0/com.retroarch.aarch64/cores
+  - id: app.retroarch.provision/copy_core_system_files
+    recipe_ref: app.retroarch.provision
+    type: copy_files
+    name: Copy selected RetroArch core system files
+    dependencies:
+    - app.retroarch.provision/stop_retroarch_after_permissions
+    - app.retroarch.provision/extract_cores
+    constraints:
+      capabilities:
+      - app_data_write
+      conflicts_with: []
+    params:
+      source:
+        ref: steps.app.retroarch.provision/extract_core_system_files.outputs.extracted_paths
+      dest:
+        value: /storage/emulated/0/RetroArch/system
+      copy_policy:
+        value: merge
+    skip_if: []
+    verify:
+    - type: path_exists
+      params:
+        path: /storage/emulated/0/RetroArch/system/dolphin-emu
+    - type: path_exists
+      params:
+        path: /storage/emulated/0/RetroArch/system/fbneo
+    - type: path_exists
+      params:
+        path: /storage/emulated/0/RetroArch/system/PPSSPP
   - id: app.retroarch.provision/seed_retroarch_cfg
     recipe_ref: app.retroarch.provision
     type: copy_files
@@ -238,7 +648,7 @@ execution_plan:
       dest:
         value: /sdcard/Android/data/com.retroarch.aarch64/files/retroarch.cfg
       copy_policy:
-        value: merge
+        value: replace
     skip_if: []
     verify:
     - type: file_exists
@@ -250,7 +660,14 @@ execution_plan:
     name: Launch RetroArch
     dependencies:
     - app.retroarch.provision/seed_retroarch_cfg
-    - app.retroarch.provision/copy_selected_cores
+    - app.retroarch.provision/copy_assets
+    - app.retroarch.provision/copy_autoconfig
+    - app.retroarch.provision/copy_database_rdb
+    - app.retroarch.provision/copy_info
+    - app.retroarch.provision/copy_overlays
+    - app.retroarch.provision/copy_shaders_glsl
+    - app.retroarch.provision/copy_cores
+    - app.retroarch.provision/copy_core_system_files
     constraints:
       capabilities:
       - app_launch
