@@ -83,6 +83,45 @@ def validate_authored_catalog(root: str | Path) -> ValidationResult:
     )
 
 
+def validate_authored_recipe(
+    recipe: Recipe,
+    *,
+    path: str | Path,
+    authored_root: str | Path | None = None,
+) -> ValidationResult:
+    recipe_path = Path(path).resolve()
+    warnings: list[WarningMessage] = []
+    errors = list(_validate_recipe_locally(recipe, file=recipe_path))
+
+    if authored_root is None:
+        warnings.append(
+            WarningMessage(
+                code=WarningCode.VALIDATION_CONTEXT_LIMITED,
+                message="Cross-file validation was limited because no authored_root was provided.",
+                details=_issue_details(
+                    file=recipe_path,
+                    object_kind="recipe",
+                    object_id=recipe.id,
+                ),
+            )
+        )
+    else:
+        catalog = _collect_catalog(Path(authored_root))
+        errors.extend(
+            _validate_item_with_catalog_context(
+                _ParsedItem(path=recipe_path, kind="recipe", item=recipe),
+                catalog,
+            )
+        )
+
+    return ValidationResult(
+        status=_derive_status(tuple(warnings), tuple(errors)),
+        warnings=tuple(warnings),
+        errors=tuple(errors),
+        validated_paths=(str(recipe_path),),
+    )
+
+
 def validate_authored_path(path: str | Path, authored_root: str | Path | None = None) -> ValidationResult:
     target_path = Path(path)
     parsed_item, local_errors = _validate_single_file(target_path)
@@ -236,12 +275,7 @@ def _validate_single_file(path: Path, expected_kind: str | None = None) -> tuple
 
     errors: list[ErrorMessage] = []
     if isinstance(item, Recipe):
-        errors.extend(_annotate_recipe_step_cycle_errors(path.resolve(), item, validate_recipe_step_cycles(item)))
-        for step_index, step in enumerate(item.steps):
-            errors.extend(
-                _annotate_step_contract_errors(path.resolve(), item, step_index, validate_step_contract(item.id, step, item))
-            )
-            errors.extend(_annotate_step_contract_errors(path.resolve(), item, step_index, validate_step_references(item, step)))
+        errors.extend(_validate_recipe_locally(item, file=path.resolve()))
 
     return _ParsedItem(path=path.resolve(), kind=kind, item=item), tuple(errors)
 
@@ -267,6 +301,15 @@ def _load_raw_mapping(path: Path) -> tuple[Mapping[str, Any] | None, tuple[Error
                 file=path.resolve(),
             ),
         )
+
+
+def _validate_recipe_locally(recipe: Recipe, *, file: Path) -> tuple[ErrorMessage, ...]:
+    errors: list[ErrorMessage] = []
+    errors.extend(_annotate_recipe_step_cycle_errors(file, recipe, validate_recipe_step_cycles(recipe)))
+    for step_index, step in enumerate(recipe.steps):
+        errors.extend(_annotate_step_contract_errors(file, recipe, step_index, validate_step_contract(recipe.id, step, recipe)))
+        errors.extend(_annotate_step_contract_errors(file, recipe, step_index, validate_step_references(recipe, step)))
+    return tuple(errors)
 
 
 def _build_binding_inputs(

@@ -417,6 +417,154 @@ class PlannerCoreTests(unittest.TestCase):
             self.assertEqual(emitted.errors[0].code, ErrorCode.BINDING_MISSING)
             self.assertEqual(emitted.errors[0].details["input_id"], "example.recipe/required_cfg")
 
+    def test_optional_input_binding_reenables_pruned_step_and_draft_input(self) -> None:
+        recipe = base_recipe(
+            recipe_id="example.recipe",
+            inputs={
+                "optional_cfg": {
+                    "type": "file",
+                    "role": "generic",
+                    "label": "Optional Config",
+                    "description": "Optional config file.",
+                    "required": False,
+                    "multiple": False,
+                    "validation": {"must_exist": False, "allowed_extensions": ["cfg"], "path_kind": "file"},
+                }
+            },
+            steps=[
+                {
+                    "id": "prepare",
+                    "type": "wait",
+                    "name": "Prepare",
+                    "user_toggleable": False,
+                    "dependencies": [],
+                    "constraints": {"capabilities": [], "conflicts_with": []},
+                    "params": {"duration_ms": 1},
+                    "verify": [],
+                },
+                {
+                    "id": "seed",
+                    "type": "copy_files",
+                    "name": "Seed",
+                    "user_toggleable": True,
+                    "dependencies": ["prepare"],
+                    "constraints": {"capabilities": ["shared_storage_write"], "conflicts_with": []},
+                    "params": {"source": {"ref": "inputs.optional_cfg"}, "dest": "/sdcard/Example.cfg"},
+                    "verify": [],
+                },
+            ],
+        )
+        with TemporaryDirectory() as tmp:
+            cfg = Path(tmp) / "optional.cfg"
+            cfg.write_text("video_driver = gl\n", encoding="utf-8")
+            authored_root = build_authored_tree(Path(tmp), recipes=[recipe])
+            catalog = load_authored_catalog(authored_root)
+            planner = Planner(catalog)
+            session = planner.start_session(
+                "example.device_plan",
+                DeviceContext(manufacturer="Example", model="Example", android_version=13, android_api_level=33, device_tags=()),
+            )
+
+            steps = {step.id: step for step in session.draft_plan.steps}
+            seed_step = steps["example.recipe/seed"]
+            self.assertFalse(seed_step.selected)
+            self.assertEqual(seed_step.availability, Availability.UNAVAILABLE)
+            self.assertEqual(tuple(item.id for item in session.draft_plan.inputs), ())
+
+            update = session.bind_input("example.recipe/optional_cfg", str(cfg))
+            self.assertFalse(update.errors)
+            steps = {step.id: step for step in update.draft_plan.steps}
+            seed_step = steps["example.recipe/seed"]
+            self.assertTrue(seed_step.selected)
+            self.assertEqual(seed_step.availability, Availability.AVAILABLE)
+            self.assertEqual(tuple(item.id for item in update.draft_plan.inputs), ("example.recipe/optional_cfg",))
+
+            emitted = session.emit_execution_plan()
+            self.assertEqual(emitted.status.value, "success", emitted.errors)
+            assert emitted.execution_plan is not None
+            self.assertIn("example.recipe/seed", [step.id for step in emitted.execution_plan.steps])
+            self.assertEqual(tuple(item.id for item in emitted.execution_plan.inputs), ("example.recipe/optional_cfg",))
+
+    def test_optional_input_unbind_prunes_step_again_and_clears_active_binding(self) -> None:
+        recipe = base_recipe(
+            recipe_id="example.recipe",
+            inputs={
+                "optional_cfg": {
+                    "type": "file",
+                    "role": "generic",
+                    "label": "Optional Config",
+                    "description": "Optional config file.",
+                    "required": False,
+                    "multiple": False,
+                    "validation": {"must_exist": False, "allowed_extensions": ["cfg"], "path_kind": "file"},
+                }
+            },
+            steps=[
+                {
+                    "id": "prepare",
+                    "type": "wait",
+                    "name": "Prepare",
+                    "user_toggleable": False,
+                    "dependencies": [],
+                    "constraints": {"capabilities": [], "conflicts_with": []},
+                    "params": {"duration_ms": 1},
+                    "verify": [],
+                },
+                {
+                    "id": "seed",
+                    "type": "copy_files",
+                    "name": "Seed",
+                    "user_toggleable": True,
+                    "dependencies": ["prepare"],
+                    "constraints": {"capabilities": ["shared_storage_write"], "conflicts_with": []},
+                    "params": {"source": {"ref": "inputs.optional_cfg"}, "dest": "/sdcard/Example.cfg"},
+                    "verify": [],
+                },
+            ],
+        )
+        with TemporaryDirectory() as tmp:
+            cfg = Path(tmp) / "optional.cfg"
+            cfg.write_text("video_driver = gl\n", encoding="utf-8")
+            authored_root = build_authored_tree(Path(tmp), recipes=[recipe])
+            catalog = load_authored_catalog(authored_root)
+            planner = Planner(catalog)
+            session = planner.start_session(
+                "example.device_plan",
+                DeviceContext(manufacturer="Example", model="Example", android_version=13, android_api_level=33, device_tags=()),
+            )
+
+            self.assertFalse(session.bind_input("example.recipe/optional_cfg", str(cfg)).errors)
+            update = session.unbind_input("example.recipe/optional_cfg")
+            self.assertFalse(update.errors)
+            self.assertNotIn("example.recipe/optional_cfg", session._state.user_bindings)
+
+            steps = {step.id: step for step in update.draft_plan.steps}
+            seed_step = steps["example.recipe/seed"]
+            self.assertFalse(seed_step.selected)
+            self.assertEqual(seed_step.availability, Availability.UNAVAILABLE)
+            self.assertEqual(tuple(item.id for item in update.draft_plan.inputs), ())
+
+            emitted = session.emit_execution_plan()
+            self.assertEqual(emitted.status.value, "success", emitted.errors)
+            assert emitted.execution_plan is not None
+            self.assertNotIn("example.recipe/seed", [step.id for step in emitted.execution_plan.steps])
+
+    def test_bind_input_rejects_unknown_input_outside_active_session_context(self) -> None:
+        recipe = base_recipe(recipe_id="example.recipe", steps=[])
+        with TemporaryDirectory() as tmp:
+            authored_root = build_authored_tree(Path(tmp), recipes=[recipe])
+            catalog = load_authored_catalog(authored_root)
+            planner = Planner(catalog)
+            session = planner.start_session(
+                "example.device_plan",
+                DeviceContext(manufacturer="Example", model="Example", android_version=13, android_api_level=33, device_tags=()),
+            )
+
+            update = session.bind_input("missing.recipe/unknown_input", "/tmp/value.cfg")
+            self.assertEqual(len(update.errors), 1)
+            self.assertEqual(update.errors[0].code, ErrorCode.INPUT_NOT_FOUND)
+            self.assertEqual(update.errors[0].details["input_id"], "missing.recipe/unknown_input")
+
     def test_sample_retroarch_flow_emits_grouped_artifacts_and_ordered_steps(self) -> None:
         with TemporaryDirectory() as tmp:
             cfg = Path(tmp) / "retroarch.cfg"
@@ -437,14 +585,19 @@ class PlannerCoreTests(unittest.TestCase):
 
             step_ids = [step.id for step in plan.steps]
             self.assertIn("app.retroarch.provision/resolve_artifacts", step_ids)
-            self.assertIn("app.retroarch.provision/extract_selected_cores", step_ids)
+            self.assertIn("app.retroarch.provision/extract_cores", step_ids)
+            self.assertIn("app.retroarch.provision/copy_cores", step_ids)
             self.assertIn("app.retroarch.provision/grant_retroarch_permissions", step_ids)
             self.assertLess(
-                step_ids.index("app.retroarch.provision/extract_selected_cores"),
-                step_ids.index("app.retroarch.provision/copy_selected_cores"),
+                step_ids.index("app.retroarch.provision/extract_cores"),
+                step_ids.index("app.retroarch.provision/copy_cores"),
             )
             self.assertLess(
                 step_ids.index("app.retroarch.provision/grant_retroarch_permissions"),
+                step_ids.index("app.retroarch.provision/seed_retroarch_cfg"),
+            )
+            self.assertLess(
+                step_ids.index("app.retroarch.provision/copy_cores"),
                 step_ids.index("app.retroarch.provision/seed_retroarch_cfg"),
             )
             self.assertTrue(

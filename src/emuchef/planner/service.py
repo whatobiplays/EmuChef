@@ -20,6 +20,7 @@ from .catalog import AuthoredCatalog
 from .draft_builder import build_draft_plan
 from .emitter import emit_execution_plan
 from .history import HistoryManager
+from .ids import make_execution_input_id
 from .operations import (
     BindInput,
     DeselectRecipe,
@@ -293,10 +294,12 @@ class PlannerSession:
                     details={"step_id": operation.step_id},
                 )
         if isinstance(operation, (BindInput, UnbindInput)):
-            if operation.input_id not in {item.id for item in self._draft_plan.inputs}:
+            if operation.input_id not in self._session_bindable_input_ids(
+                include_latent_user_bindings=isinstance(operation, UnbindInput)
+            ):
                 return ErrorMessage(
                     code=ErrorCode.INPUT_NOT_FOUND,
-                    message=f"Input {operation.input_id!r} was not found in the current draft plan.",
+                    message=f"Input {operation.input_id!r} was not found in the current session context.",
                     details={"input_id": operation.input_id},
                 )
         if isinstance(operation, BindInput):
@@ -312,6 +315,23 @@ class PlannerSession:
                     details={"recipe_ref": operation.recipe_ref},
                 )
         return None
+
+    def _session_bindable_input_ids(self, *, include_latent_user_bindings: bool) -> set[str]:
+        # Draft inputs are the currently-selected-step projection. Bind/unbind operations
+        # also need the declared inputs for recipes active in this session so optional
+        # input bindings can re-enable pruned steps without broadening draft projection.
+        bindable_input_ids = {item.id for item in self._draft_plan.inputs}
+        active_recipe_ids = {recipe.id for recipe in self._draft_plan.recipes if recipe.selected}
+
+        for recipe_id in active_recipe_ids:
+            recipe = self._catalog.recipes[recipe_id]
+            for input_id in recipe.inputs:
+                bindable_input_ids.add(make_execution_input_id(recipe_id, input_id))
+
+        if include_latent_user_bindings:
+            bindable_input_ids.update(self._state.user_bindings)
+
+        return bindable_input_ids
 
     def _mutate_state(self, operation: DraftOperation) -> _SessionState:
         selected_recipes = list(self._state.user_selected_recipe_refs)

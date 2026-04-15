@@ -6,6 +6,22 @@ CLI-first Android emulation handheld provisioner.
 
 Repository context and current behavior notes live in `CONTEXT.md`.
 
+## Editor
+
+The Milestone 1 desktop editor targets authored recipe files only.
+
+Install the project in development mode, then launch the editor against either:
+
+- a repo root that contains `authored/`
+- the `authored/` root itself
+
+Example:
+
+```bash
+pip install -e .
+emuchef-editor /path/to/EmuChef
+```
+
 ## Templates
 
 Example authored YAML templates live under `templates/authored/`.

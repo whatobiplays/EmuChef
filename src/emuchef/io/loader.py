@@ -54,6 +54,48 @@ from emuchef.planner.contracts import (
 from emuchef.planner.dependencies import validate_recipe_step_cycles
 
 
+def load_authored_recipe(path: str | Path) -> Recipe:
+    recipe_path = Path(path)
+    data = _load_yaml(recipe_path)
+
+    errors: list[ErrorMessage] = []
+    try:
+        schema_version = int(data.get("schema_version", -1))
+    except (TypeError, ValueError):
+        schema_version = -1
+    if schema_version != 1:
+        errors.append(
+            ErrorMessage(
+                code=ErrorCode.AUTHORED_DATA_INVALID,
+                message=f"File {recipe_path.name!r} has unsupported schema_version {data.get('schema_version')!r}.",
+                details={"path": str(recipe_path), "schema_version": data.get("schema_version")},
+            )
+        )
+    if data.get("kind") != "recipe":
+        errors.append(
+            ErrorMessage(
+                code=ErrorCode.AUTHORED_DATA_INVALID,
+                message=f"File {recipe_path.name!r} has kind {data.get('kind')!r}, expected 'recipe'.",
+                details={"path": str(recipe_path), "kind": data.get("kind"), "expected_kind": "recipe"},
+            )
+        )
+    if errors:
+        raise CatalogLoadError(tuple(errors))
+
+    try:
+        return _parse_recipe(data)
+    except (KeyError, TypeError, ValueError) as exc:
+        raise CatalogLoadError(
+            (
+                ErrorMessage(
+                    code=ErrorCode.AUTHORED_DATA_INVALID,
+                    message=f"File {recipe_path.name!r} has an invalid schema shape: {exc}.",
+                    details={"path": str(recipe_path)},
+                ),
+            )
+        ) from exc
+
+
 def load_authored_catalog(root: str | Path) -> AuthoredCatalog:
     root_path = Path(root)
     apps = _load_directory(root_path / "apps", "app_definition", _parse_app_definition)

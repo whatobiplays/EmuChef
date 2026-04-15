@@ -366,35 +366,35 @@ steps:
         params:
           path: /data/user/0/com.retroarch.aarch64/autoconfig
 
-  # - id: extract_cheats
-  #   type: extract_archive
-  #   name: Extract RetroArch cheats
-  #   user_toggleable: false
-  #   dependencies:
-  #     - resolve_artifacts
-  #   params:
-  #     archive:
-  #       ref: artifacts.asset_cheats_zip.local_path
-  #     extract_on: host
-  # - id: copy_cheats
-  #   type: copy_files
-  #   name: Copy RetroArch cheats
-  #   user_toggleable: false
-  #   dependencies:
-  #     - stop_retroarch_after_permissions
-  #     - extract_cheats
-  #   constraints:
-  #     capabilities:
-  #       - app_data_write
-  #   params:
-  #     source:
-  #       ref: steps.extract_cheats
-  #     dest: /storage/emulated/0/RetroArch/cheats
-  #     copy_policy: merge
-  #   verify:
-  #     - type: path_exists
-  #       params:
-  #         path: /storage/emulated/0/RetroArch/cheats
+  - id: extract_cheats
+    type: extract_archive
+    name: Extract RetroArch cheats
+    user_toggleable: false
+    dependencies:
+      - resolve_artifacts
+    params:
+      archive:
+        ref: artifacts.asset_cheats_zip.local_path
+      extract_on: host
+  - id: copy_cheats
+    type: copy_files
+    name: Copy RetroArch cheats
+    user_toggleable: false
+    dependencies:
+      - stop_retroarch_after_permissions
+      - extract_cheats
+    constraints:
+      capabilities:
+        - app_data_write
+    params:
+      source:
+        ref: steps.extract_cheats
+      dest: /storage/emulated/0/RetroArch/cheats
+      copy_policy: merge
+    verify:
+      - type: path_exists
+        params:
+          path: /storage/emulated/0/RetroArch/cheats
 
   - id: extract_database_rdb
     type: extract_archive

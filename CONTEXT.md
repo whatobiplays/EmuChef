@@ -22,6 +22,8 @@ The code is intentionally split into:
 - `src/emuchef/planner`: normalization, draft/session logic, execution-plan emission
 - `src/emuchef/executor`: runtime ref resolution, artifact handling, ADB, step execution
 - `src/emuchef/domain`: typed models and enums
+- `src/emuchef_editor/core`: UI-agnostic recipe document, canonical YAML, ref indexing, and validation adapters for the editor
+- `src/emuchef_editor/app`: PySide6 workspace shell for opening authored recipe files and showing diagnostics and canonical YAML preview
 
 ## Current Authored Model
 
@@ -44,6 +46,13 @@ Planner-internal execution-plan refs are normalized and namespaced, but that
 does not leak into authored YAML.
 
 Literal params are authored directly. Only refs use `{ ref: ... }`.
+
+The desktop editor uses the same authored recipe model and in-process validation path as the CLI-facing authored loader.
+The editor remains in authored-ref space:
+
+- it shows recipe-local refs
+- it emits recipe-local refs
+- it does not expose planner-normalized refs or execution-style ids
 
 ## Supported CLI
 
@@ -167,6 +176,8 @@ Validation output now includes file-level context in `details`:
 
 Default CLI output groups issues by file.
 
+The editor reuses the same validation path in-process and maps shared warnings/errors into diagnostics for the open recipe document.
+
 ## Device/Profile Behavior
 
 Device matching is intentionally simple and deterministic:
@@ -231,11 +242,27 @@ The templates now document accepted values and current authoring conventions for
 - condition types
 - capability names
 
+The editor writes canonical authored recipe YAML instead of preserving arbitrary comments or formatting.
+Current canonical top-level ordering for recipes is:
+
+1. `schema_version`
+2. `kind`
+3. `id`
+4. `name`
+5. `description`
+6. `recipe_dependencies`
+7. `provides`
+8. `inputs`
+9. `artifacts`
+10. `artifact_groups`
+11. `permissions`
+12. `steps`
+
 ## Current Known Gaps / Follow-up
 
 Known intentional gaps:
 
-- no UI / PySide work
+- recipe section editing widgets are not implemented yet
 - executor remains single-threaded
 - artifact download uses Python stdlib networking only
 - archive extraction is still ZIP-oriented in practice
