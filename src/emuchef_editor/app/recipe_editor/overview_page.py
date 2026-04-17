@@ -2,8 +2,8 @@
 
 from __future__ import annotations
 
-from PySide6.QtCore import QSignalBlocker
-from PySide6.QtWidgets import QFormLayout, QHBoxLayout, QLineEdit, QLabel, QVBoxLayout, QWidget
+from PySide6.QtCore import QSignalBlocker, Qt
+from PySide6.QtWidgets import QFormLayout, QHBoxLayout, QLabel, QVBoxLayout, QWidget
 
 from emuchef_editor.core.documents.commands import (
     AddProvidedFeatureCommand,
@@ -18,7 +18,13 @@ from emuchef_editor.core.documents.commands import (
 )
 from emuchef_editor.core.documents.recipe_document import RecipeDocument
 
-from .common import CommitPlainTextEdit, OrderedStringListEditor
+from .common import (
+    CommitPlainTextEdit,
+    OrderedStringListEditor,
+    configure_data_entry_form,
+    create_expanding_line_edit,
+    expand_form_field,
+)
 
 
 class OverviewPage(QWidget):
@@ -29,17 +35,20 @@ class OverviewPage(QWidget):
         self._command_handler = command_handler
         self._document: RecipeDocument | None = None
 
-        self._id_edit = QLineEdit()
-        self._name_edit = QLineEdit()
+        self._id_edit = create_expanding_line_edit()
+        self._name_edit = create_expanding_line_edit()
         self._description_edit = CommitPlainTextEdit()
+        expand_form_field(self._description_edit)
         self._kind_label = QLabel("")
         self._schema_version_label = QLabel("")
+        self._kind_label.setAlignment(Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter)
+        self._schema_version_label.setAlignment(Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter)
 
-        form = QFormLayout()
-        form.addRow("ID", self._id_edit)
-        form.addRow("Name", self._name_edit)
-        form.addRow("Kind", self._kind_label)
-        form.addRow("Schema Version", self._schema_version_label)
+        self._form = configure_data_entry_form(QFormLayout())
+        self._form.addRow("ID", self._id_edit)
+        self._form.addRow("Name", self._name_edit)
+        self._form.addRow("Kind", self._kind_label)
+        self._form.addRow("Schema Version", self._schema_version_label)
 
         self._recipe_dependencies = OrderedStringListEditor(
             prompt_title="Add Recipe Dependency",
@@ -61,10 +70,12 @@ class OverviewPage(QWidget):
         lists_row.addLayout(feature_panel)
 
         layout = QVBoxLayout(self)
-        layout.addLayout(form)
+        layout.setAlignment(Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignTop)
+        layout.addLayout(self._form)
         layout.addWidget(QLabel("Description"))
         layout.addWidget(self._description_edit)
         layout.addLayout(lists_row)
+        layout.addStretch(1)
 
         self._id_edit.editingFinished.connect(self._commit_id)
         self._name_edit.editingFinished.connect(self._commit_name)

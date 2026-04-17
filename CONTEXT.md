@@ -70,6 +70,7 @@ Editor interaction rules:
 - diagnostics and YAML preview refresh after each committed edit
 - undo and redo operate at command granularity and persist across saves for the open document
 - dirty state is a semantic comparison against the last saved canonical YAML baseline
+- form-based editor pages keep labels right-aligned while data-entry fields stay left-aligned, expand to the available pane width, and anchor the entry group at the top-left of the editor pane
 
 Field-scope rules currently enforced by the editor:
 

@@ -8,7 +8,6 @@ from PySide6.QtWidgets import (
     QHBoxLayout,
     QInputDialog,
     QLabel,
-    QLineEdit,
     QListWidget,
     QListWidgetItem,
     QPushButton,
@@ -26,6 +25,8 @@ from emuchef_editor.core.documents.commands import (
     ReorderArtifactGroupMemberCommand,
 )
 from emuchef_editor.core.documents.recipe_document import RecipeDocument
+
+from .common import configure_data_entry_form, create_expanding_line_edit
 
 
 class ArtifactGroupsPage(QWidget):
@@ -57,14 +58,14 @@ class ArtifactGroupsPage(QWidget):
         left_layout.addWidget(self._group_list)
         left_layout.addLayout(group_buttons)
 
-        self._group_id_value = QLineEdit()
-        self._group_id_value.setReadOnly(True)
+        self._group_id_value = create_expanding_line_edit(read_only=True)
         self._member_list = QListWidget()
         self._member_list.currentRowChanged.connect(self._on_member_selection_changed)
         self._add_member_button = QPushButton("Add")
         self._remove_member_button = QPushButton("Remove")
         self._move_member_up_button = QPushButton("Move Up")
         self._move_member_down_button = QPushButton("Move Down")
+        self._form = configure_data_entry_form(QFormLayout())
 
         member_buttons = QHBoxLayout()
         member_buttons.addWidget(self._add_member_button)
@@ -74,12 +75,13 @@ class ArtifactGroupsPage(QWidget):
 
         right_panel = QWidget()
         right_layout = QVBoxLayout(right_panel)
-        form = QFormLayout()
-        form.addRow("Group ID", self._group_id_value)
-        right_layout.addLayout(form)
+        right_layout.setAlignment(Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignTop)
+        self._form.addRow("Group ID", self._group_id_value)
+        right_layout.addLayout(self._form)
         right_layout.addWidget(QLabel("Members"))
         right_layout.addWidget(self._member_list)
         right_layout.addLayout(member_buttons)
+        right_layout.addStretch(1)
 
         splitter = QSplitter()
         splitter.addWidget(left_panel)

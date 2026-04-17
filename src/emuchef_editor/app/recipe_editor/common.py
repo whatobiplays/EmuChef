@@ -2,12 +2,15 @@
 
 from __future__ import annotations
 
-from PySide6.QtCore import Signal
+from PySide6.QtCore import Qt, Signal
 from PySide6.QtWidgets import (
+    QComboBox,
+    QFormLayout,
     QHBoxLayout,
     QInputDialog,
     QLineEdit,
     QListWidget,
+    QSizePolicy,
     QPushButton,
     QPlainTextEdit,
     QVBoxLayout,
@@ -33,6 +36,39 @@ class CommitPlainTextEdit(QPlainTextEdit):
         super().focusOutEvent(event)
         if current_text != self._committed_text:
             self.committed.emit(current_text)
+
+
+def configure_data_entry_form(form: QFormLayout) -> QFormLayout:
+    """Apply the shared alignment and growth policy for recipe editor forms."""
+
+    form.setFieldGrowthPolicy(QFormLayout.FieldGrowthPolicy.AllNonFixedFieldsGrow)
+    form.setFormAlignment(Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignTop)
+    form.setLabelAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
+    return form
+
+
+def expand_form_field(widget: QWidget) -> QWidget:
+    """Ensure a form field grows to the available horizontal space."""
+
+    widget.setSizePolicy(QSizePolicy.Policy.Expanding, widget.sizePolicy().verticalPolicy())
+    return widget
+
+
+def create_expanding_line_edit(*, read_only: bool = False) -> QLineEdit:
+    """Create a line edit that fills the form field column."""
+
+    line_edit = QLineEdit()
+    line_edit.setReadOnly(read_only)
+    expand_form_field(line_edit)
+    return line_edit
+
+
+def create_expanding_combo_box() -> QComboBox:
+    """Create a combo box that fills the form field column."""
+
+    combo_box = QComboBox()
+    expand_form_field(combo_box)
+    return combo_box
 
 
 class OrderedStringListEditor(QWidget):

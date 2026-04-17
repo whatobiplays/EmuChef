@@ -4,14 +4,12 @@ from __future__ import annotations
 
 from PySide6.QtCore import Qt
 from PySide6.QtWidgets import (
-    QComboBox,
     QDialog,
     QDialogButtonBox,
     QFormLayout,
     QHBoxLayout,
     QInputDialog,
     QLabel,
-    QLineEdit,
     QListWidget,
     QListWidgetItem,
     QPushButton,
@@ -28,6 +26,8 @@ from emuchef_editor.core.documents.commands import (
     UpdateArtifactFieldCommand,
 )
 from emuchef_editor.core.documents.recipe_document import RecipeDocument
+
+from .common import configure_data_entry_form, create_expanding_combo_box, create_expanding_line_edit
 
 
 class ArtifactsPage(QWidget):
@@ -56,23 +56,24 @@ class ArtifactsPage(QWidget):
         left_layout.addWidget(self._list)
         left_layout.addLayout(list_buttons)
 
-        self._id_value = QLineEdit()
-        self._id_value.setReadOnly(True)
+        self._id_value = create_expanding_line_edit(read_only=True)
         self._kind_value = QLabel("")
-        self._url_edit = QLineEdit()
-        self._cache_combo = QComboBox()
+        self._kind_value.setAlignment(Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter)
+        self._url_edit = create_expanding_line_edit()
+        self._cache_combo = create_expanding_combo_box()
         for value in ArtifactCacheMode:
             self._cache_combo.addItem(value.value, value)
 
-        form = QFormLayout()
-        form.addRow("ID", self._id_value)
-        form.addRow("Kind", self._kind_value)
-        form.addRow("URL", self._url_edit)
-        form.addRow("Cache", self._cache_combo)
+        self._form = configure_data_entry_form(QFormLayout())
+        self._form.addRow("ID", self._id_value)
+        self._form.addRow("Kind", self._kind_value)
+        self._form.addRow("URL", self._url_edit)
+        self._form.addRow("Cache", self._cache_combo)
 
         right_panel = QWidget()
         right_layout = QVBoxLayout(right_panel)
-        right_layout.addLayout(form)
+        right_layout.setAlignment(Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignTop)
+        right_layout.addLayout(self._form)
         right_layout.addStretch(1)
 
         splitter = QSplitter()
@@ -222,9 +223,9 @@ class ArtifactsPage(QWidget):
     def _prompt_for_new_artifact(self) -> tuple[str, str] | None:
         dialog = QDialog(self)
         dialog.setWindowTitle("Add Artifact")
-        form = QFormLayout(dialog)
-        artifact_id_edit = QLineEdit()
-        url_edit = QLineEdit()
+        form = configure_data_entry_form(QFormLayout(dialog))
+        artifact_id_edit = create_expanding_line_edit()
+        url_edit = create_expanding_line_edit()
         form.addRow("Artifact id", artifact_id_edit)
         form.addRow("URL", url_edit)
         buttons = QDialogButtonBox(QDialogButtonBox.StandardButton.Ok | QDialogButtonBox.StandardButton.Cancel)

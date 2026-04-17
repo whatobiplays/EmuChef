@@ -15,7 +15,8 @@ PYSIDE6_AVAILABLE = importlib.util.find_spec("PySide6") is not None
 
 if PYSIDE6_AVAILABLE:
     os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
-    from PySide6.QtWidgets import QApplication
+    from PySide6.QtCore import Qt
+    from PySide6.QtWidgets import QApplication, QComboBox, QFormLayout, QLineEdit, QSizePolicy
 
     from emuchef_editor.app.app import main as editor_main
     from emuchef_editor.app.main_window import MainWindow
@@ -147,6 +148,53 @@ class EditorAppTests(unittest.TestCase):
             self.assertFalse(window._undo_action.isEnabled())
             self.assertFalse(window._redo_action.isEnabled())
             self.assertNotIn("*", window.windowTitle())
+
+            window.close()
+
+    def test_editor_forms_grow_fields_and_keep_label_alignment(self) -> None:
+        recipe = base_recipe(
+            recipe_id="example.recipe",
+            artifacts={"base_zip": {"type": "remote_file", "url": "https://example.com/base.zip"}},
+            artifact_groups={"bundle": ["base_zip"]},
+            steps=[],
+        )
+        with TemporaryDirectory() as tmp:
+            repo_root = Path(tmp)
+            authored_root = build_authored_tree(repo_root, recipes=[recipe])
+            recipe_path = authored_root / "recipes" / "example_recipe.yaml"
+
+            window = MainWindow(repo_root)
+            window.open_recipe_file(recipe_path)
+
+            for page in (
+                window._editor_view._overview_page,
+                window._editor_view._inputs_page,
+                window._editor_view._artifacts_page,
+                window._editor_view._artifact_groups_page,
+            ):
+                form = page._form
+                self.assertEqual(form.fieldGrowthPolicy(), QFormLayout.FieldGrowthPolicy.AllNonFixedFieldsGrow)
+                self.assertTrue(form.formAlignment() & Qt.AlignmentFlag.AlignLeft)
+                self.assertTrue(form.formAlignment() & Qt.AlignmentFlag.AlignTop)
+                self.assertTrue(form.labelAlignment() & Qt.AlignmentFlag.AlignRight)
+                self.assertTrue(form.labelAlignment() & Qt.AlignmentFlag.AlignVCenter)
+
+            for widget in (
+                window._editor_view._overview_page._id_edit,
+                window._editor_view._overview_page._name_edit,
+                window._editor_view._inputs_page._id_value,
+                window._editor_view._inputs_page._type_combo,
+                window._editor_view._inputs_page._role_combo,
+                window._editor_view._inputs_page._label_edit,
+                window._editor_view._inputs_page._allowed_extensions_edit,
+                window._editor_view._inputs_page._path_kind_combo,
+                window._editor_view._artifacts_page._id_value,
+                window._editor_view._artifacts_page._url_edit,
+                window._editor_view._artifacts_page._cache_combo,
+                window._editor_view._artifact_groups_page._group_id_value,
+            ):
+                self.assertIsInstance(widget, (QLineEdit, QComboBox))
+                self.assertEqual(widget.sizePolicy().horizontalPolicy(), QSizePolicy.Policy.Expanding)
 
             window.close()
 

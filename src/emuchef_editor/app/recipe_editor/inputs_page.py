@@ -6,12 +6,10 @@ import yaml
 from PySide6.QtCore import Qt
 from PySide6.QtWidgets import (
     QCheckBox,
-    QComboBox,
     QFormLayout,
     QHBoxLayout,
     QInputDialog,
     QLabel,
-    QLineEdit,
     QListWidget,
     QListWidgetItem,
     QPushButton,
@@ -29,7 +27,13 @@ from emuchef_editor.core.documents.commands import (
 )
 from emuchef_editor.core.documents.recipe_document import RecipeDocument
 
-from .common import CommitPlainTextEdit
+from .common import (
+    CommitPlainTextEdit,
+    configure_data_entry_form,
+    create_expanding_combo_box,
+    create_expanding_line_edit,
+    expand_form_field,
+)
 
 
 class InputsPage(QWidget):
@@ -58,21 +62,21 @@ class InputsPage(QWidget):
         left_layout.addWidget(self._list)
         left_layout.addLayout(list_buttons)
 
-        self._id_value = QLineEdit()
-        self._id_value.setReadOnly(True)
-        self._type_combo = QComboBox()
+        self._id_value = create_expanding_line_edit(read_only=True)
+        self._type_combo = create_expanding_combo_box()
         for value in InputType:
             self._type_combo.addItem(value.value, value)
-        self._role_combo = QComboBox()
+        self._role_combo = create_expanding_combo_box()
         for value in InputRole:
             self._role_combo.addItem(value.value, value)
-        self._label_edit = QLineEdit()
+        self._label_edit = create_expanding_line_edit()
         self._description_edit = CommitPlainTextEdit()
+        expand_form_field(self._description_edit)
         self._required_check = QCheckBox()
         self._multiple_check = QCheckBox()
         self._must_exist_check = QCheckBox()
-        self._allowed_extensions_edit = QLineEdit()
-        self._path_kind_combo = QComboBox()
+        self._allowed_extensions_edit = create_expanding_line_edit()
+        self._path_kind_combo = create_expanding_combo_box()
         self._path_kind_combo.addItem("(none)", None)
         for value in InputType:
             self._path_kind_combo.addItem(value.value, value)
@@ -82,25 +86,29 @@ class InputsPage(QWidget):
         self._metadata_value.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
         self._default_label = QLabel("Default")
         self._metadata_label = QLabel("Metadata")
+        self._default_value.setAlignment(Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignTop)
+        self._metadata_value.setAlignment(Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignTop)
 
-        form = QFormLayout()
-        form.addRow("ID", self._id_value)
-        form.addRow("Type", self._type_combo)
-        form.addRow("Role", self._role_combo)
-        form.addRow("Label", self._label_edit)
-        form.addRow("Required", self._required_check)
-        form.addRow("Multiple", self._multiple_check)
-        form.addRow("Must Exist", self._must_exist_check)
-        form.addRow("Allowed Extensions", self._allowed_extensions_edit)
-        form.addRow("Path Kind", self._path_kind_combo)
-        form.addRow(self._default_label, self._default_value)
-        form.addRow(self._metadata_label, self._metadata_value)
+        self._form = configure_data_entry_form(QFormLayout())
+        self._form.addRow("ID", self._id_value)
+        self._form.addRow("Type", self._type_combo)
+        self._form.addRow("Role", self._role_combo)
+        self._form.addRow("Label", self._label_edit)
+        self._form.addRow("Required", self._required_check)
+        self._form.addRow("Multiple", self._multiple_check)
+        self._form.addRow("Must Exist", self._must_exist_check)
+        self._form.addRow("Allowed Extensions", self._allowed_extensions_edit)
+        self._form.addRow("Path Kind", self._path_kind_combo)
+        self._form.addRow(self._default_label, self._default_value)
+        self._form.addRow(self._metadata_label, self._metadata_value)
 
         right_panel = QWidget()
         right_layout = QVBoxLayout(right_panel)
-        right_layout.addLayout(form)
+        right_layout.setAlignment(Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignTop)
+        right_layout.addLayout(self._form)
         right_layout.addWidget(QLabel("Description"))
         right_layout.addWidget(self._description_edit)
+        right_layout.addStretch(1)
 
         splitter = QSplitter()
         splitter.addWidget(left_panel)
