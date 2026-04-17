@@ -23,7 +23,7 @@ The code is intentionally split into:
 - `src/emuchef/executor`: runtime ref resolution, artifact handling, ADB, step execution
 - `src/emuchef/domain`: typed models and enums
 - `src/emuchef_editor/core`: UI-agnostic recipe document, canonical YAML, ref indexing, and validation adapters for the editor
-- `src/emuchef_editor/app`: PySide6 workspace shell for opening authored recipe files and showing diagnostics and canonical YAML preview
+- `src/emuchef_editor/app`: PySide6 desktop editor for authored recipe files
 
 ## Current Authored Model
 
@@ -53,6 +53,32 @@ The editor remains in authored-ref space:
 - it shows recipe-local refs
 - it emits recipe-local refs
 - it does not expose planner-normalized refs or execution-style ids
+
+The current editor scope is recipe-authoring only. It edits:
+
+- Overview
+- Inputs
+- Artifacts
+- Artifact Groups
+
+It does not yet edit steps or rewrite refs after id changes.
+
+Editor interaction rules:
+
+- edits apply immediately to the in-memory recipe document
+- save is explicit and writes canonical YAML to disk
+- diagnostics and YAML preview refresh after each committed edit
+- undo and redo operate at command granularity and persist across saves for the open document
+- dirty state is a semantic comparison against the last saved canonical YAML baseline
+
+Field-scope rules currently enforced by the editor:
+
+- `kind` is read-only
+- `schema_version` is read-only and reflects latest-schema-only support
+- artifact kind support is currently limited to `remote_file`
+- input, artifact, and artifact-group ids are chosen at creation time and then remain read-only
+- deleting inputs, artifacts, or groups does not rewrite step refs
+- deleting an artifact removes it from artifact-group memberships, but does not rewrite step refs
 
 ## Supported CLI
 
@@ -177,6 +203,7 @@ Validation output now includes file-level context in `details`:
 Default CLI output groups issues by file.
 
 The editor reuses the same validation path in-process and maps shared warnings/errors into diagnostics for the open recipe document.
+When validating an open unsaved recipe against an authored root, the in-memory document replaces the current file's on-disk authored contribution for catalog-context checks.
 
 ## Device/Profile Behavior
 
@@ -257,6 +284,14 @@ Current canonical top-level ordering for recipes is:
 10. `artifact_groups`
 11. `permissions`
 12. `steps`
+
+Current ordering rules inside canonical recipe YAML:
+
+- `inputs` preserve authored insertion order
+- `artifacts` preserve authored insertion order
+- `artifact_groups` preserve editor-managed order
+- artifact-group membership lists preserve authored/editor-managed order
+- UI list sorting for inputs or artifacts is view-only and does not redefine authored order
 
 ## Current Known Gaps / Follow-up
 

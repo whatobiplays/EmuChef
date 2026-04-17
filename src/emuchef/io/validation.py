@@ -421,11 +421,30 @@ def _validate_catalog_cross_refs(catalog: _ValidationCatalog) -> tuple[ErrorMess
 def _validate_item_with_catalog_context(parsed_item: _ParsedItem, catalog: _ValidationCatalog) -> tuple[ErrorMessage, ...]:
     if parsed_item.kind == "recipe":
         recipe_maps = dict(catalog.recipes)
-        recipe_maps[parsed_item.item.id] = parsed_item.item
         object_files = dict(catalog.object_files)
+        replaced_recipe_id = _find_recipe_id_for_path(catalog.object_files, parsed_item.path)
+        if replaced_recipe_id is not None:
+            recipe_maps.pop(replaced_recipe_id, None)
+            object_files.pop(("recipe", replaced_recipe_id), None)
+
+        errors: list[ErrorMessage] = []
+        existing_path = object_files.get(("recipe", parsed_item.item.id))
+        if existing_path is not None and existing_path != parsed_item.path:
+            errors.append(
+                _error(
+                    code=ErrorCode.RECIPE_ID_CONFLICT,
+                    message=f"Duplicate recipe id {parsed_item.item.id!r}.",
+                    file=parsed_item.path,
+                    object_kind="recipe",
+                    object_id=parsed_item.item.id,
+                    field="id",
+                )
+            )
+
+        recipe_maps[parsed_item.item.id] = parsed_item.item
         object_files[("recipe", parsed_item.item.id)] = parsed_item.path
         _, binding_errors = _build_binding_inputs(catalog.apps, recipe_maps, object_files)
-        errors = list(binding_errors)
+        errors.extend(binding_errors)
         recipe = parsed_item.item
         for dependency_ref in recipe.recipe_dependencies:
             if dependency_ref not in recipe_maps:
@@ -492,6 +511,14 @@ def _validate_item_with_catalog_context(parsed_item: _ParsedItem, catalog: _Vali
         return tuple(errors)
 
     return ()
+
+
+def _find_recipe_id_for_path(object_files: Mapping[tuple[str, str], Path], path: Path) -> str | None:
+    target_path = path.resolve()
+    for (kind, object_id), object_path in object_files.items():
+        if kind == "recipe" and object_path.resolve() == target_path:
+            return object_id
+    return None
 
 
 def _validate_execution_step_id_uniqueness(

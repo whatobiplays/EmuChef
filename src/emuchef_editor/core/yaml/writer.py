@@ -61,15 +61,9 @@ def build_recipe_payload(recipe: Recipe) -> dict[str, Any]:
         "name": recipe.name,
         "description": recipe.description,
         "provides": {"features": list(recipe.provides.features)},
-        "inputs": {input_id: _serialize_input(declaration) for input_id, declaration in sorted(recipe.inputs.items())},
-        "artifacts": {
-            artifact_id: _serialize_artifact(artifact)
-            for artifact_id, artifact in sorted(recipe.artifacts.items())
-        },
-        "artifact_groups": {
-            group_id: list(artifact_ids)
-            for group_id, artifact_ids in sorted(recipe.artifact_groups.items())
-        },
+        "inputs": {input_id: _serialize_input(declaration) for input_id, declaration in recipe.inputs.items()},
+        "artifacts": {artifact_id: _serialize_artifact(artifact) for artifact_id, artifact in recipe.artifacts.items()},
+        "artifact_groups": {group_id: list(artifact_ids) for group_id, artifact_ids in recipe.artifact_groups.items()},
         "permissions": _serialize_permissions(recipe.permissions),
         "steps": [_serialize_step(step) for step in recipe.steps],
     }

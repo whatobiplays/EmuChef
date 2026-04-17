@@ -1,11 +1,11 @@
-"""Main window for the Milestone 1 recipe editor shell."""
+"""Main window for the authored recipe editor."""
 
 from __future__ import annotations
 
 from pathlib import Path
 
 from PySide6.QtCore import Qt
-from PySide6.QtGui import QAction
+from PySide6.QtGui import QAction, QKeySequence
 from PySide6.QtWidgets import (
     QFileDialog,
     QListWidget,
@@ -16,11 +16,12 @@ from PySide6.QtWidgets import (
 )
 
 from emuchef.planner.catalog import CatalogLoadError
+from emuchef_editor.core.documents.commands import RecipeCommand
 from emuchef_editor.core.documents.recipe_document import RecipeDocument
 from emuchef_editor.core.validation.validator_service import DiagnosticResult, ValidatorService
 from emuchef_editor.core.yaml.loader import load_recipe_document
 
-from .recipe_editor.placeholder import RecipeEditorPlaceholder
+from .recipe_editor import RecipeEditor
 from .shared.diagnostics_view import DiagnosticsView
 from .shared.yaml_preview import YamlPreview
 from .workspace.service import WorkspaceState, open_workspace
@@ -36,7 +37,7 @@ class MainWindow(QMainWindow):
         self._workspace_list = QListWidget()
         self._workspace_list.itemActivated.connect(self._open_item)
 
-        self._editor_view = RecipeEditorPlaceholder()
+        self._editor_view = RecipeEditor(self._apply_document_command)
         self._diagnostics_view = DiagnosticsView()
         self._yaml_preview = YamlPreview()
 
@@ -58,14 +59,27 @@ class MainWindow(QMainWindow):
         self._save_action = QAction("Save Canonical YAML", self)
         self._save_action.triggered.connect(self.save_current_document)
         self._save_action.setEnabled(False)
+        self._undo_action = QAction("Undo", self)
+        self._undo_action.setShortcut(QKeySequence.StandardKey.Undo)
+        self._undo_action.triggered.connect(self.undo_current_document)
+        self._undo_action.setEnabled(False)
+        self._redo_action = QAction("Redo", self)
+        self._redo_action.setShortcut(QKeySequence.StandardKey.Redo)
+        self._redo_action.triggered.connect(self.redo_current_document)
+        self._redo_action.setEnabled(False)
 
         file_menu = self.menuBar().addMenu("File")
         file_menu.addAction(self._open_workspace_action)
         file_menu.addAction(self._save_action)
+        edit_menu = self.menuBar().addMenu("Edit")
+        edit_menu.addAction(self._undo_action)
+        edit_menu.addAction(self._redo_action)
 
         toolbar = self.addToolBar("Main")
         toolbar.addAction(self._open_workspace_action)
         toolbar.addAction(self._save_action)
+        toolbar.addAction(self._undo_action)
+        toolbar.addAction(self._redo_action)
 
         self.statusBar().showMessage("Open a repo root or authored root to begin.")
         self.resize(1400, 800)
@@ -95,9 +109,7 @@ class MainWindow(QMainWindow):
             self._workspace_list.clear()
             self._current_document = None
             self._editor_view.set_load_error(root, str(exc))
-            self._diagnostics_view.set_result(None)
-            self._yaml_preview.set_yaml("")
-            self._save_action.setEnabled(False)
+            self._clear_document_views()
             self.statusBar().showMessage(str(exc))
             self._refresh_window_title()
             return
@@ -108,11 +120,9 @@ class MainWindow(QMainWindow):
             item.setData(Qt.ItemDataRole.UserRole, str(recipe_file))
             self._workspace_list.addItem(item)
 
-        self._editor_view.clear()
-        self._diagnostics_view.set_result(None)
-        self._yaml_preview.set_yaml("")
         self._current_document = None
-        self._save_action.setEnabled(False)
+        self._editor_view.clear()
+        self._clear_document_views()
         self.statusBar().showMessage(f"Loaded workspace {self._workspace_state.authored_root}")
         self._refresh_window_title()
 
@@ -130,10 +140,7 @@ class MainWindow(QMainWindow):
             return
 
         self._current_document = document
-        self._editor_view.set_document(document)
-        self._diagnostics_view.set_result(document.validation_result)
-        self._yaml_preview.set_yaml(document.to_yaml())
-        self._save_action.setEnabled(True)
+        self._sync_current_document()
         self.statusBar().showMessage(f"Opened {document.path.name}")
         self._refresh_window_title()
 
@@ -141,10 +148,22 @@ class MainWindow(QMainWindow):
         if self._current_document is None:
             return
         self._current_document.save()
-        self._editor_view.set_document(self._current_document)
-        self._diagnostics_view.set_result(self._current_document.validation_result)
-        self._yaml_preview.set_yaml(self._current_document.to_yaml())
+        self._sync_current_document()
         self.statusBar().showMessage(f"Saved {self._current_document.path.name}")
+
+    def undo_current_document(self) -> None:
+        if self._current_document is None:
+            return
+        if self._current_document.undo():
+            self._sync_current_document()
+            self.statusBar().showMessage(f"Undid change in {self._current_document.path.name}")
+
+    def redo_current_document(self) -> None:
+        if self._current_document is None:
+            return
+        if self._current_document.redo():
+            self._sync_current_document()
+            self.statusBar().showMessage(f"Redid change in {self._current_document.path.name}")
 
     def _open_item(self, item: QListWidgetItem) -> None:
         recipe_path = item.data(Qt.ItemDataRole.UserRole)
@@ -162,8 +181,41 @@ class MainWindow(QMainWindow):
         self._diagnostics_view.set_result(diagnostics)
         self._yaml_preview.set_yaml("")
         self._save_action.setEnabled(False)
+        self._undo_action.setEnabled(False)
+        self._redo_action.setEnabled(False)
         self.statusBar().showMessage(f"Failed to load {Path(recipe_path).name}")
         self._refresh_window_title()
+
+    def _apply_document_command(self, command: RecipeCommand) -> bool:
+        if self._current_document is None:
+            return False
+        try:
+            changed = self._current_document.apply_command(command)
+        except ValueError as exc:
+            self.statusBar().showMessage(str(exc))
+            return False
+        if changed:
+            self._sync_current_document()
+        return changed
+
+    def _sync_current_document(self) -> None:
+        if self._current_document is None:
+            self._clear_document_views()
+            return
+        self._editor_view.set_document(self._current_document)
+        self._diagnostics_view.set_result(self._current_document.validation_result)
+        self._yaml_preview.set_yaml(self._current_document.to_yaml())
+        self._save_action.setEnabled(True)
+        self._undo_action.setEnabled(self._current_document.can_undo)
+        self._redo_action.setEnabled(self._current_document.can_redo)
+        self._refresh_window_title()
+
+    def _clear_document_views(self) -> None:
+        self._diagnostics_view.set_result(None)
+        self._yaml_preview.set_yaml("")
+        self._save_action.setEnabled(False)
+        self._undo_action.setEnabled(False)
+        self._redo_action.setEnabled(False)
 
     def _refresh_window_title(self) -> None:
         workspace_title = (
@@ -172,7 +224,7 @@ class MainWindow(QMainWindow):
             else "No workspace"
         )
         document_title = (
-            self._current_document.working_recipe.id
+            f"{self._current_document.working_recipe.id}{' *' if self._current_document.is_dirty else ''}"
             if self._current_document is not None
             else "No document"
         )

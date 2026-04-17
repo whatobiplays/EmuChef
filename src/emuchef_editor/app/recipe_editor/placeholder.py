@@ -1,4 +1,4 @@
-"""Placeholder center-pane widget for Milestone 1."""
+"""Empty-state and load-error widget for the recipe editor."""
 
 from __future__ import annotations
 
@@ -32,7 +32,7 @@ class RecipeEditorPlaceholder(QWidget):
                     f"Recipe ID: {document.working_recipe.id}",
                     f"Path: {document.path}",
                     f"Authored root: {document.authored_root if document.authored_root is not None else 'None'}",
-                    "Recipe section editing widgets arrive in a later milestone.",
+                    "Open the Overview, Inputs, Artifacts, or Artifact Groups tabs to edit this recipe.",
                 ]
             )
         )
