@@ -20,6 +20,8 @@ if PYSIDE6_AVAILABLE:
 
     from emuchef_editor.app.app import main as editor_main
     from emuchef_editor.app.main_window import MainWindow
+    from emuchef_editor.app.recipe_editor.common import TextEntryDialog
+    from emuchef_editor.app.recipe_editor.tooltips import field_tooltip, prompt_tooltip
 
 
 @unittest.skipUnless(PYSIDE6_AVAILABLE, "PySide6 is not installed in the local test environment.")
@@ -197,6 +199,76 @@ class EditorAppTests(unittest.TestCase):
                 self.assertEqual(widget.sizePolicy().horizontalPolicy(), QSizePolicy.Policy.Expanding)
 
             window.close()
+
+    def test_editor_fields_and_form_labels_expose_expected_tooltips(self) -> None:
+        recipe = base_recipe(
+            recipe_id="example.recipe",
+            artifacts={"base_zip": {"type": "remote_file", "url": "https://example.com/base.zip"}},
+            artifact_groups={"bundle": ["base_zip"]},
+            steps=[],
+        )
+        with TemporaryDirectory() as tmp:
+            repo_root = Path(tmp)
+            authored_root = build_authored_tree(repo_root, recipes=[recipe])
+            recipe_path = authored_root / "recipes" / "example_recipe.yaml"
+
+            window = MainWindow(repo_root)
+            window.open_recipe_file(recipe_path)
+
+            overview_page = window._editor_view._overview_page
+            inputs_page = window._editor_view._inputs_page
+            artifacts_page = window._editor_view._artifacts_page
+            groups_page = window._editor_view._artifact_groups_page
+
+            self.assertEqual(overview_page._id_edit.toolTip(), field_tooltip("overview.id"))
+            self.assertEqual(
+                overview_page._form.labelForField(overview_page._id_edit).toolTip(),
+                field_tooltip("overview.id"),
+            )
+            self.assertEqual(overview_page._description_edit.toolTip(), field_tooltip("overview.description"))
+            self.assertEqual(
+                overview_page._recipe_dependencies._value_edit.toolTip(),
+                field_tooltip("overview.recipe_dependencies"),
+            )
+
+            self.assertEqual(inputs_page._type_combo.toolTip(), field_tooltip("inputs.type"))
+            self.assertEqual(
+                inputs_page._form.labelForField(inputs_page._type_combo).toolTip(),
+                field_tooltip("inputs.type"),
+            )
+            self.assertEqual(inputs_page._metadata_value.toolTip(), field_tooltip("inputs.metadata"))
+
+            self.assertEqual(artifacts_page._url_edit.toolTip(), field_tooltip("artifacts.url"))
+            self.assertEqual(
+                artifacts_page._form.labelForField(artifacts_page._url_edit).toolTip(),
+                field_tooltip("artifacts.url"),
+            )
+
+            self.assertEqual(groups_page._group_id_value.toolTip(), field_tooltip("artifact_groups.id"))
+            self.assertEqual(
+                groups_page._form.labelForField(groups_page._group_id_value).toolTip(),
+                field_tooltip("artifact_groups.id"),
+            )
+
+            window.close()
+
+    def test_text_entry_dialog_applies_prompt_tooltip_and_returns_value(self) -> None:
+        dialog = TextEntryDialog(
+            title="Add Input",
+            label="Input id",
+            tooltip=prompt_tooltip("input_id"),
+        )
+
+        self.assertEqual(dialog.value_edit.toolTip(), prompt_tooltip("input_id"))
+        self.assertEqual(
+            dialog._form.labelForField(dialog.value_edit).toolTip(),
+            prompt_tooltip("input_id"),
+        )
+
+        dialog.value_edit.setText("retroarch_cfg")
+        dialog.accept()
+
+        self.assertEqual(dialog.value(), "retroarch_cfg")
 
     def test_app_main_bootstraps_without_entering_real_event_loop(self) -> None:
         recipe = base_recipe(recipe_id="example.recipe", steps=[])

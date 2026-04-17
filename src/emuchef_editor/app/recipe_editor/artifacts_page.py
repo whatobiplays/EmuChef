@@ -8,7 +8,6 @@ from PySide6.QtWidgets import (
     QDialogButtonBox,
     QFormLayout,
     QHBoxLayout,
-    QInputDialog,
     QLabel,
     QListWidget,
     QListWidgetItem,
@@ -27,7 +26,14 @@ from emuchef_editor.core.documents.commands import (
 )
 from emuchef_editor.core.documents.recipe_document import RecipeDocument
 
-from .common import configure_data_entry_form, create_expanding_combo_box, create_expanding_line_edit
+from .common import (
+    TextEntryDialog,
+    add_tooltipped_form_row,
+    configure_data_entry_form,
+    create_expanding_combo_box,
+    create_expanding_line_edit,
+)
+from .tooltips import field_tooltip, prompt_tooltip
 
 
 class ArtifactsPage(QWidget):
@@ -65,10 +71,10 @@ class ArtifactsPage(QWidget):
             self._cache_combo.addItem(value.value, value)
 
         self._form = configure_data_entry_form(QFormLayout())
-        self._form.addRow("ID", self._id_value)
-        self._form.addRow("Kind", self._kind_value)
-        self._form.addRow("URL", self._url_edit)
-        self._form.addRow("Cache", self._cache_combo)
+        add_tooltipped_form_row(self._form, "ID", self._id_value, field_tooltip("artifacts.id"))
+        add_tooltipped_form_row(self._form, "Kind", self._kind_value, field_tooltip("artifacts.kind"))
+        add_tooltipped_form_row(self._form, "URL", self._url_edit, field_tooltip("artifacts.url"))
+        add_tooltipped_form_row(self._form, "Cache", self._cache_combo, field_tooltip("artifacts.cache"))
 
         right_panel = QWidget()
         right_layout = QVBoxLayout(right_panel)
@@ -181,7 +187,7 @@ class ArtifactsPage(QWidget):
     def _duplicate_artifact(self) -> None:
         if self._selected_artifact_id is None:
             return
-        new_id = self._prompt_for_identifier("Duplicate Artifact", "New artifact id")
+        new_id = self._prompt_for_identifier("Duplicate Artifact", "New artifact id", prompt_tooltip("artifact_id"))
         if new_id is None:
             return
         source_artifact_id = self._selected_artifact_id
@@ -214,11 +220,8 @@ class ArtifactsPage(QWidget):
             )
         )
 
-    def _prompt_for_identifier(self, title: str, label: str) -> str | None:
-        value, accepted = QInputDialog.getText(self, title, label)
-        if not accepted:
-            return None
-        return value
+    def _prompt_for_identifier(self, title: str, label: str, tooltip: str) -> str | None:
+        return TextEntryDialog.prompt(self, title=title, label=label, tooltip=tooltip)
 
     def _prompt_for_new_artifact(self) -> tuple[str, str] | None:
         dialog = QDialog(self)
@@ -226,8 +229,8 @@ class ArtifactsPage(QWidget):
         form = configure_data_entry_form(QFormLayout(dialog))
         artifact_id_edit = create_expanding_line_edit()
         url_edit = create_expanding_line_edit()
-        form.addRow("Artifact id", artifact_id_edit)
-        form.addRow("URL", url_edit)
+        add_tooltipped_form_row(form, "Artifact id", artifact_id_edit, prompt_tooltip("artifact_id"))
+        add_tooltipped_form_row(form, "URL", url_edit, prompt_tooltip("artifact_url"))
         buttons = QDialogButtonBox(QDialogButtonBox.StandardButton.Ok | QDialogButtonBox.StandardButton.Cancel)
         buttons.accepted.connect(dialog.accept)
         buttons.rejected.connect(dialog.reject)

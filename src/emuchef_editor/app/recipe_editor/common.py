@@ -5,9 +5,10 @@ from __future__ import annotations
 from PySide6.QtCore import Qt, Signal
 from PySide6.QtWidgets import (
     QComboBox,
+    QDialog,
+    QDialogButtonBox,
     QFormLayout,
     QHBoxLayout,
-    QInputDialog,
     QLineEdit,
     QListWidget,
     QSizePolicy,
@@ -54,6 +55,30 @@ def expand_form_field(widget: QWidget) -> QWidget:
     return widget
 
 
+def apply_tooltip(widget: QWidget, tooltip: str) -> QWidget:
+    """Attach shared tooltip copy to a widget."""
+
+    widget.setToolTip(tooltip)
+    return widget
+
+
+def add_tooltipped_form_row(
+    form: QFormLayout,
+    label: str | QWidget,
+    field: QWidget,
+    tooltip: str,
+) -> None:
+    """Add a form row and apply the same tooltip to its label and field."""
+
+    apply_tooltip(field, tooltip)
+    if isinstance(label, QWidget):
+        apply_tooltip(label, tooltip)
+    form.addRow(label, field)
+    label_widget = form.labelForField(field)
+    if label_widget is not None:
+        apply_tooltip(label_widget, tooltip)
+
+
 def create_expanding_line_edit(*, read_only: bool = False) -> QLineEdit:
     """Create a line edit that fills the form field column."""
 
@@ -71,6 +96,69 @@ def create_expanding_combo_box() -> QComboBox:
     return combo_box
 
 
+class TextEntryDialog(QDialog):
+    """Small modal dialog for single-value editor prompts with tooltip support."""
+
+    def __init__(
+        self,
+        *,
+        title: str,
+        label: str,
+        tooltip: str,
+        initial_value: str = "",
+        parent: QWidget | None = None,
+    ) -> None:
+        super().__init__(parent)
+        self.setWindowTitle(title)
+
+        self._form = configure_data_entry_form(QFormLayout())
+        self._value_edit = create_expanding_line_edit()
+        self._value_edit.setText(initial_value)
+        add_tooltipped_form_row(self._form, label, self._value_edit, tooltip)
+
+        buttons = QDialogButtonBox(QDialogButtonBox.StandardButton.Ok | QDialogButtonBox.StandardButton.Cancel)
+        buttons.accepted.connect(self.accept)
+        buttons.rejected.connect(self.reject)
+
+        layout = QVBoxLayout(self)
+        layout.addLayout(self._form)
+        layout.addWidget(buttons)
+
+    @property
+    def value_edit(self) -> QLineEdit:
+        """Expose the prompt field for tests and call sites that need direct access."""
+
+        return self._value_edit
+
+    def value(self) -> str:
+        """Return the current dialog field value."""
+
+        return self._value_edit.text()
+
+    @classmethod
+    def prompt(
+        cls,
+        parent: QWidget | None,
+        *,
+        title: str,
+        label: str,
+        tooltip: str,
+        initial_value: str = "",
+    ) -> str | None:
+        """Show the prompt dialog and return the entered value when accepted."""
+
+        dialog = cls(
+            title=title,
+            label=label,
+            tooltip=tooltip,
+            initial_value=initial_value,
+            parent=parent,
+        )
+        if dialog.exec() != QDialog.DialogCode.Accepted:
+            return None
+        return dialog.value()
+
+
 class OrderedStringListEditor(QWidget):
     """Structured editor for an ordered list of strings."""
 
@@ -84,11 +172,14 @@ class OrderedStringListEditor(QWidget):
         *,
         prompt_title: str,
         prompt_label: str,
+        prompt_tooltip: str = "",
+        field_tooltip: str = "",
         parent: QWidget | None = None,
     ) -> None:
         super().__init__(parent)
         self._prompt_title = prompt_title
         self._prompt_label = prompt_label
+        self._prompt_tooltip = prompt_tooltip
         self._loading = False
 
         self._list = QListWidget()
@@ -101,6 +192,8 @@ class OrderedStringListEditor(QWidget):
         self._value_edit = QLineEdit()
         self._value_edit.setEnabled(False)
         self._value_edit.editingFinished.connect(self._commit_selected_value)
+        if field_tooltip:
+            apply_tooltip(self._value_edit, field_tooltip)
 
         button_row = QHBoxLayout()
         button_row.addWidget(self._add_button)
@@ -189,7 +282,9 @@ class OrderedStringListEditor(QWidget):
         self._down_button.setEnabled(has_selection and row < self._list.count() - 1)
 
     def _prompt_for_value(self) -> str | None:
-        value, accepted = QInputDialog.getText(self, self._prompt_title, self._prompt_label)
-        if not accepted:
-            return None
-        return value
+        return TextEntryDialog.prompt(
+            self,
+            title=self._prompt_title,
+            label=self._prompt_label,
+            tooltip=self._prompt_tooltip,
+        )

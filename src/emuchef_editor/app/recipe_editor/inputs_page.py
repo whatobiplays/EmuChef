@@ -8,7 +8,6 @@ from PySide6.QtWidgets import (
     QCheckBox,
     QFormLayout,
     QHBoxLayout,
-    QInputDialog,
     QLabel,
     QListWidget,
     QListWidgetItem,
@@ -29,11 +28,15 @@ from emuchef_editor.core.documents.recipe_document import RecipeDocument
 
 from .common import (
     CommitPlainTextEdit,
+    TextEntryDialog,
+    add_tooltipped_form_row,
+    apply_tooltip,
     configure_data_entry_form,
     create_expanding_combo_box,
     create_expanding_line_edit,
     expand_form_field,
 )
+from .tooltips import field_tooltip, prompt_tooltip
 
 
 class InputsPage(QWidget):
@@ -90,23 +93,47 @@ class InputsPage(QWidget):
         self._metadata_value.setAlignment(Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignTop)
 
         self._form = configure_data_entry_form(QFormLayout())
-        self._form.addRow("ID", self._id_value)
-        self._form.addRow("Type", self._type_combo)
-        self._form.addRow("Role", self._role_combo)
-        self._form.addRow("Label", self._label_edit)
-        self._form.addRow("Required", self._required_check)
-        self._form.addRow("Multiple", self._multiple_check)
-        self._form.addRow("Must Exist", self._must_exist_check)
-        self._form.addRow("Allowed Extensions", self._allowed_extensions_edit)
-        self._form.addRow("Path Kind", self._path_kind_combo)
-        self._form.addRow(self._default_label, self._default_value)
-        self._form.addRow(self._metadata_label, self._metadata_value)
+        add_tooltipped_form_row(self._form, "ID", self._id_value, field_tooltip("inputs.id"))
+        add_tooltipped_form_row(self._form, "Type", self._type_combo, field_tooltip("inputs.type"))
+        add_tooltipped_form_row(self._form, "Role", self._role_combo, field_tooltip("inputs.role"))
+        add_tooltipped_form_row(self._form, "Label", self._label_edit, field_tooltip("inputs.label"))
+        add_tooltipped_form_row(self._form, "Required", self._required_check, field_tooltip("inputs.required"))
+        add_tooltipped_form_row(self._form, "Multiple", self._multiple_check, field_tooltip("inputs.multiple"))
+        add_tooltipped_form_row(
+            self._form,
+            "Must Exist",
+            self._must_exist_check,
+            field_tooltip("inputs.must_exist"),
+        )
+        add_tooltipped_form_row(
+            self._form,
+            "Allowed Extensions",
+            self._allowed_extensions_edit,
+            field_tooltip("inputs.allowed_extensions"),
+        )
+        add_tooltipped_form_row(
+            self._form,
+            "Path Kind",
+            self._path_kind_combo,
+            field_tooltip("inputs.path_kind"),
+        )
+        add_tooltipped_form_row(self._form, self._default_label, self._default_value, field_tooltip("inputs.default"))
+        add_tooltipped_form_row(
+            self._form,
+            self._metadata_label,
+            self._metadata_value,
+            field_tooltip("inputs.metadata"),
+        )
+
+        self._description_label = QLabel("Description")
+        apply_tooltip(self._description_label, field_tooltip("inputs.description"))
+        apply_tooltip(self._description_edit, field_tooltip("inputs.description"))
 
         right_panel = QWidget()
         right_layout = QVBoxLayout(right_panel)
         right_layout.setAlignment(Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignTop)
         right_layout.addLayout(self._form)
-        right_layout.addWidget(QLabel("Description"))
+        right_layout.addWidget(self._description_label)
         right_layout.addWidget(self._description_edit)
         right_layout.addStretch(1)
 
@@ -238,7 +265,7 @@ class InputsPage(QWidget):
         self._duplicate_button.setEnabled(has_selection)
 
     def _add_input(self) -> None:
-        input_id = self._prompt_for_identifier("Add Input", "Input id")
+        input_id = self._prompt_for_identifier("Add Input", "Input id", prompt_tooltip("input_id"))
         if input_id is None:
             return
         previous_selection = self._selected_input_id
@@ -262,7 +289,7 @@ class InputsPage(QWidget):
         if self._selected_input_id is None:
             return
         source_input_id = self._selected_input_id
-        new_input_id = self._prompt_for_identifier("Duplicate Input", "New input id")
+        new_input_id = self._prompt_for_identifier("Duplicate Input", "New input id", prompt_tooltip("input_id"))
         if new_input_id is None:
             return
         previous_selection = self._selected_input_id
@@ -307,11 +334,8 @@ class InputsPage(QWidget):
             return
         self._command_handler(UpdateInputFieldCommand(input_id=self._selected_input_id, field=field, value=value))
 
-    def _prompt_for_identifier(self, title: str, label: str) -> str | None:
-        value, accepted = QInputDialog.getText(self, title, label)
-        if not accepted:
-            return None
-        return value
+    def _prompt_for_identifier(self, title: str, label: str, tooltip: str) -> str | None:
+        return TextEntryDialog.prompt(self, title=title, label=label, tooltip=tooltip)
 
 
 def _format_optional_yaml(value: object) -> str:

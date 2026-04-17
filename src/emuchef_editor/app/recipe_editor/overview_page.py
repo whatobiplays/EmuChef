@@ -21,10 +21,13 @@ from emuchef_editor.core.documents.recipe_document import RecipeDocument
 from .common import (
     CommitPlainTextEdit,
     OrderedStringListEditor,
+    add_tooltipped_form_row,
+    apply_tooltip,
     configure_data_entry_form,
     create_expanding_line_edit,
     expand_form_field,
 )
+from .tooltips import field_tooltip, prompt_tooltip
 
 
 class OverviewPage(QWidget):
@@ -45,34 +48,51 @@ class OverviewPage(QWidget):
         self._schema_version_label.setAlignment(Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter)
 
         self._form = configure_data_entry_form(QFormLayout())
-        self._form.addRow("ID", self._id_edit)
-        self._form.addRow("Name", self._name_edit)
-        self._form.addRow("Kind", self._kind_label)
-        self._form.addRow("Schema Version", self._schema_version_label)
+        add_tooltipped_form_row(self._form, "ID", self._id_edit, field_tooltip("overview.id"))
+        add_tooltipped_form_row(self._form, "Name", self._name_edit, field_tooltip("overview.name"))
+        add_tooltipped_form_row(self._form, "Kind", self._kind_label, field_tooltip("overview.kind"))
+        add_tooltipped_form_row(
+            self._form,
+            "Schema Version",
+            self._schema_version_label,
+            field_tooltip("overview.schema_version"),
+        )
 
         self._recipe_dependencies = OrderedStringListEditor(
             prompt_title="Add Recipe Dependency",
             prompt_label="Dependency recipe id",
+            prompt_tooltip=prompt_tooltip("recipe_dependency"),
+            field_tooltip=field_tooltip("overview.recipe_dependencies"),
         )
         self._provided_features = OrderedStringListEditor(
             prompt_title="Add Provided Feature",
             prompt_label="Feature name",
+            prompt_tooltip=prompt_tooltip("provided_feature"),
+            field_tooltip=field_tooltip("overview.provides_features"),
         )
 
         lists_row = QHBoxLayout()
         dependency_panel = QVBoxLayout()
-        dependency_panel.addWidget(QLabel("Recipe Dependencies"))
+        self._recipe_dependencies_label = QLabel("Recipe Dependencies")
+        apply_tooltip(self._recipe_dependencies_label, field_tooltip("overview.recipe_dependencies"))
+        dependency_panel.addWidget(self._recipe_dependencies_label)
         dependency_panel.addWidget(self._recipe_dependencies)
         feature_panel = QVBoxLayout()
-        feature_panel.addWidget(QLabel("Provides Features"))
+        self._provided_features_label = QLabel("Provides Features")
+        apply_tooltip(self._provided_features_label, field_tooltip("overview.provides_features"))
+        feature_panel.addWidget(self._provided_features_label)
         feature_panel.addWidget(self._provided_features)
         lists_row.addLayout(dependency_panel)
         lists_row.addLayout(feature_panel)
 
+        self._description_label = QLabel("Description")
+        apply_tooltip(self._description_label, field_tooltip("overview.description"))
+        apply_tooltip(self._description_edit, field_tooltip("overview.description"))
+
         layout = QVBoxLayout(self)
         layout.setAlignment(Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignTop)
         layout.addLayout(self._form)
-        layout.addWidget(QLabel("Description"))
+        layout.addWidget(self._description_label)
         layout.addWidget(self._description_edit)
         layout.addLayout(lists_row)
         layout.addStretch(1)

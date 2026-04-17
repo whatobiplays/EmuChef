@@ -26,7 +26,8 @@ from emuchef_editor.core.documents.commands import (
 )
 from emuchef_editor.core.documents.recipe_document import RecipeDocument
 
-from .common import configure_data_entry_form, create_expanding_line_edit
+from .common import TextEntryDialog, add_tooltipped_form_row, configure_data_entry_form, create_expanding_line_edit
+from .tooltips import field_tooltip, prompt_tooltip
 
 
 class ArtifactGroupsPage(QWidget):
@@ -76,7 +77,7 @@ class ArtifactGroupsPage(QWidget):
         right_panel = QWidget()
         right_layout = QVBoxLayout(right_panel)
         right_layout.setAlignment(Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignTop)
-        self._form.addRow("Group ID", self._group_id_value)
+        add_tooltipped_form_row(self._form, "Group ID", self._group_id_value, field_tooltip("artifact_groups.id"))
         right_layout.addLayout(self._form)
         right_layout.addWidget(QLabel("Members"))
         right_layout.addWidget(self._member_list)
@@ -175,7 +176,7 @@ class ArtifactGroupsPage(QWidget):
         self._move_member_down_button.setEnabled(has_member and member_row < self._member_list.count() - 1)
 
     def _add_group(self) -> None:
-        group_id = self._prompt_for_identifier("Add Artifact Group", "Group id")
+        group_id = self._prompt_for_identifier("Add Artifact Group", "Group id", prompt_tooltip("artifact_group_id"))
         if group_id is None:
             return
         previous_selection = self._selected_group_id
@@ -278,8 +279,5 @@ class ArtifactGroupsPage(QWidget):
         members = set(self._document.working_recipe.artifact_groups[self._selected_group_id])
         return [artifact_id for artifact_id in sorted(self._document.working_recipe.artifacts) if artifact_id not in members]
 
-    def _prompt_for_identifier(self, title: str, label: str) -> str | None:
-        value, accepted = QInputDialog.getText(self, title, label)
-        if not accepted:
-            return None
-        return value
+    def _prompt_for_identifier(self, title: str, label: str, tooltip: str) -> str | None:
+        return TextEntryDialog.prompt(self, title=title, label=label, tooltip=tooltip)
