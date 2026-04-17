@@ -61,13 +61,13 @@ class OverviewPage(QWidget):
         self._recipe_dependencies = OrderedStringListEditor(
             prompt_title="Add Recipe Dependency",
             prompt_label="Dependency recipe id",
-            prompt_tooltip=prompt_tooltip("recipe_dependency"),
+            prompt_tooltip=prompt_tooltip("overview.recipe_dependencies"),
             field_tooltip=field_tooltip("overview.recipe_dependencies"),
         )
         self._provided_features = OrderedStringListEditor(
             prompt_title="Add Provided Feature",
             prompt_label="Feature name",
-            prompt_tooltip=prompt_tooltip("provided_feature"),
+            prompt_tooltip=prompt_tooltip("overview.provides_features"),
             field_tooltip=field_tooltip("overview.provides_features"),
         )
 

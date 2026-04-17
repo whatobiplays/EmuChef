@@ -176,7 +176,7 @@ class ArtifactGroupsPage(QWidget):
         self._move_member_down_button.setEnabled(has_member and member_row < self._member_list.count() - 1)
 
     def _add_group(self) -> None:
-        group_id = self._prompt_for_identifier("Add Artifact Group", "Group id", prompt_tooltip("artifact_group_id"))
+        group_id = self._prompt_for_identifier("Add Artifact Group", "Group id", prompt_tooltip("artifact_groups.id"))
         if group_id is None:
             return
         previous_selection = self._selected_group_id
@@ -279,5 +279,5 @@ class ArtifactGroupsPage(QWidget):
         members = set(self._document.working_recipe.artifact_groups[self._selected_group_id])
         return [artifact_id for artifact_id in sorted(self._document.working_recipe.artifacts) if artifact_id not in members]
 
-    def _prompt_for_identifier(self, title: str, label: str, tooltip: str) -> str | None:
+    def _prompt_for_identifier(self, title: str, label: str, tooltip: str | None) -> str | None:
         return TextEntryDialog.prompt(self, title=title, label=label, tooltip=tooltip)

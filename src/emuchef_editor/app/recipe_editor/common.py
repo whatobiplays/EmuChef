@@ -55,10 +55,11 @@ def expand_form_field(widget: QWidget) -> QWidget:
     return widget
 
 
-def apply_tooltip(widget: QWidget, tooltip: str) -> QWidget:
-    """Attach shared tooltip copy to a widget."""
+def apply_tooltip(widget: QWidget, tooltip: str | None) -> QWidget:
+    """Attach shared tooltip copy to a widget, clearing it when the text is blank."""
 
-    widget.setToolTip(tooltip)
+    normalized = tooltip.strip() if tooltip is not None else ""
+    widget.setToolTip(normalized)
     return widget
 
 
@@ -66,7 +67,7 @@ def add_tooltipped_form_row(
     form: QFormLayout,
     label: str | QWidget,
     field: QWidget,
-    tooltip: str,
+    tooltip: str | None,
 ) -> None:
     """Add a form row and apply the same tooltip to its label and field."""
 
@@ -104,7 +105,7 @@ class TextEntryDialog(QDialog):
         *,
         title: str,
         label: str,
-        tooltip: str,
+        tooltip: str | None,
         initial_value: str = "",
         parent: QWidget | None = None,
     ) -> None:
@@ -142,7 +143,7 @@ class TextEntryDialog(QDialog):
         *,
         title: str,
         label: str,
-        tooltip: str,
+        tooltip: str | None,
         initial_value: str = "",
     ) -> str | None:
         """Show the prompt dialog and return the entered value when accepted."""
@@ -172,8 +173,8 @@ class OrderedStringListEditor(QWidget):
         *,
         prompt_title: str,
         prompt_label: str,
-        prompt_tooltip: str = "",
-        field_tooltip: str = "",
+        prompt_tooltip: str | None = None,
+        field_tooltip: str | None = None,
         parent: QWidget | None = None,
     ) -> None:
         super().__init__(parent)

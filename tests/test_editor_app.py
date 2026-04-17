@@ -16,11 +16,11 @@ PYSIDE6_AVAILABLE = importlib.util.find_spec("PySide6") is not None
 if PYSIDE6_AVAILABLE:
     os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
     from PySide6.QtCore import Qt
-    from PySide6.QtWidgets import QApplication, QComboBox, QFormLayout, QLineEdit, QSizePolicy
+    from PySide6.QtWidgets import QApplication, QComboBox, QFormLayout, QLineEdit, QSizePolicy, QWidget
 
     from emuchef_editor.app.app import main as editor_main
     from emuchef_editor.app.main_window import MainWindow
-    from emuchef_editor.app.recipe_editor.common import TextEntryDialog
+    from emuchef_editor.app.recipe_editor.common import TextEntryDialog, add_tooltipped_form_row
     from emuchef_editor.app.recipe_editor.tooltips import field_tooltip, prompt_tooltip
 
 
@@ -238,6 +238,11 @@ class EditorAppTests(unittest.TestCase):
             )
             self.assertEqual(inputs_page._metadata_value.toolTip(), field_tooltip("inputs.metadata"))
 
+            self.assertEqual(artifacts_page._kind_value.toolTip(), field_tooltip("artifacts.kind"))
+            self.assertEqual(
+                artifacts_page._form.labelForField(artifacts_page._kind_value).toolTip(),
+                field_tooltip("artifacts.kind"),
+            )
             self.assertEqual(artifacts_page._url_edit.toolTip(), field_tooltip("artifacts.url"))
             self.assertEqual(
                 artifacts_page._form.labelForField(artifacts_page._url_edit).toolTip(),
@@ -252,17 +257,31 @@ class EditorAppTests(unittest.TestCase):
 
             window.close()
 
+    def test_add_tooltipped_form_row_skips_missing_and_blank_tooltips(self) -> None:
+        host = QWidget()
+        form = QFormLayout(host)
+
+        missing_field = QLineEdit()
+        add_tooltipped_form_row(form, "Missing", missing_field, field_tooltip("missing.field"))
+        self.assertEqual(missing_field.toolTip(), "")
+        self.assertEqual(form.labelForField(missing_field).toolTip(), "")
+
+        blank_field = QLineEdit()
+        add_tooltipped_form_row(form, "Blank", blank_field, "   ")
+        self.assertEqual(blank_field.toolTip(), "")
+        self.assertEqual(form.labelForField(blank_field).toolTip(), "")
+
     def test_text_entry_dialog_applies_prompt_tooltip_and_returns_value(self) -> None:
         dialog = TextEntryDialog(
             title="Add Input",
             label="Input id",
-            tooltip=prompt_tooltip("input_id"),
+            tooltip=prompt_tooltip("inputs.id"),
         )
 
-        self.assertEqual(dialog.value_edit.toolTip(), prompt_tooltip("input_id"))
+        self.assertEqual(dialog.value_edit.toolTip(), prompt_tooltip("inputs.id"))
         self.assertEqual(
             dialog._form.labelForField(dialog.value_edit).toolTip(),
-            prompt_tooltip("input_id"),
+            prompt_tooltip("inputs.id"),
         )
 
         dialog.value_edit.setText("retroarch_cfg")

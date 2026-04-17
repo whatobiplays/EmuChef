@@ -265,7 +265,7 @@ class InputsPage(QWidget):
         self._duplicate_button.setEnabled(has_selection)
 
     def _add_input(self) -> None:
-        input_id = self._prompt_for_identifier("Add Input", "Input id", prompt_tooltip("input_id"))
+        input_id = self._prompt_for_identifier("Add Input", "Input id", prompt_tooltip("inputs.id"))
         if input_id is None:
             return
         previous_selection = self._selected_input_id
@@ -289,7 +289,7 @@ class InputsPage(QWidget):
         if self._selected_input_id is None:
             return
         source_input_id = self._selected_input_id
-        new_input_id = self._prompt_for_identifier("Duplicate Input", "New input id", prompt_tooltip("input_id"))
+        new_input_id = self._prompt_for_identifier("Duplicate Input", "New input id", prompt_tooltip("inputs.id"))
         if new_input_id is None:
             return
         previous_selection = self._selected_input_id
@@ -334,7 +334,7 @@ class InputsPage(QWidget):
             return
         self._command_handler(UpdateInputFieldCommand(input_id=self._selected_input_id, field=field, value=value))
 
-    def _prompt_for_identifier(self, title: str, label: str, tooltip: str) -> str | None:
+    def _prompt_for_identifier(self, title: str, label: str, tooltip: str | None) -> str | None:
         return TextEntryDialog.prompt(self, title=title, label=label, tooltip=tooltip)
 
 

@@ -14,15 +14,18 @@ def _enum_values(*values: str) -> str:
 
 FIELD_TOOLTIPS: dict[str, str] = {
     "overview.id": (
-        "Unique authored recipe id. Use a stable dotted id such as "
-        "'app.retroarch.provision'. Changing it updates YAML content only."
+        "Use a stable authored recipe id such as 'app.retroarch.provision'. "
+        "Changing it updates YAML content only."
     ),
     "overview.name": "Human-readable recipe name shown in the editor and authored YAML.",
-    "overview.description": "Optional free-form description for recipe authors and maintainers.",
-    "overview.kind": "Read-only. Authored recipes always use the kind 'recipe'.",
+    "overview.description": "Optional free-form description for authors and maintainers.",
+    "overview.kind": (
+        "This identifies the authored document type. "
+        "It stays read-only in Milestone 2 because the editor only supports recipe authoring."
+    ),
     "overview.schema_version": (
-        f"Read-only. The editor supports the latest authored recipe schema only. "
-        f"Current value: {SCHEMA_VERSION}."
+        f"This is the authored recipe schema version. "
+        f"It stays read-only in Milestone 2 because the editor supports only the latest schema, {SCHEMA_VERSION}."
     ),
     "overview.recipe_dependencies": (
         "Ordered list of recipe ids this recipe depends on. Each entry must match another authored recipe id."
@@ -31,18 +34,19 @@ FIELD_TOOLTIPS: dict[str, str] = {
         "Ordered list of feature names this recipe provides. Use stable strings other recipes can reference."
     ),
     "inputs.id": (
-        "Read-only after creation. Unique input id used by authored refs such as 'inputs.<id>'."
+        "This stable authored id is used by refs such as 'inputs.<id>'. "
+        "It stays read-only in Milestone 2 because rename with ref rewrite is not implemented yet."
     ),
     "inputs.type": (
-        "Input path type. Accepted values: "
-        f"{_enum_values(*(value.value for value in InputType))}."
+        "Path shape accepted for this input. "
+        f"Accepted values: {_enum_values(*(value.value for value in InputType))}."
     ),
     "inputs.role": (
-        "Optional usage hint for the input. Accepted values: "
-        f"{_enum_values(*(value.value for value in InputRole))}."
+        "Optional usage hint for the input. "
+        f"Accepted values: {_enum_values(*(value.value for value in InputRole))}."
     ),
     "inputs.label": "Human-readable label shown for this input in editor and validation surfaces.",
-    "inputs.description": "Optional author-facing description of what the input should contain.",
+    "inputs.description": "Optional author-facing description of what this input should contain.",
     "inputs.required": "When enabled, the input must have at least one bound value before planning can succeed.",
     "inputs.multiple": "When enabled, the input accepts multiple path values instead of a single path.",
     "inputs.must_exist": "When enabled, each bound path must already exist on disk.",
@@ -51,54 +55,79 @@ FIELD_TOOLTIPS: dict[str, str] = {
         "Extensions are checked when a bound path has a suffix."
     ),
     "inputs.path_kind": (
-        "Optional bound-path override. Accepted values: "
-        f"{_enum_values(*(value.value for value in InputType))}, or no override. "
+        "Optional bound-path override. "
+        f"Accepted values: {_enum_values(*(value.value for value in InputType))}, or no override. "
         "If unset, the input type is used."
     ),
-    "inputs.default": "Read-only. Optional default value loaded from authored YAML and preserved on save.",
-    "inputs.metadata": "Read-only. Optional authored metadata map preserved on save.",
-    "artifacts.id": (
-        "Read-only after creation. Unique artifact id used by authored refs such as 'artifacts.<id>.<field>'."
+    "inputs.default": (
+        "This is the authored default value for the input. "
+        "It stays read-only in Milestone 2 because default editing is out of scope."
     ),
-    "artifacts.kind": "Read-only, currently supports only 'remote_file'.",
+    "inputs.metadata": (
+        "This is the authored metadata map attached to the input. "
+        "It stays read-only in Milestone 2 because metadata editing is out of scope."
+    ),
+    "artifacts.id": (
+        "This stable authored id is used by refs such as 'artifacts.<id>.<field>'. "
+        "It stays read-only in Milestone 2 because rename with ref rewrite is not implemented yet."
+    ),
+    "artifacts.kind": (
+        "This identifies how the artifact is authored and resolved. "
+        "It stays read-only in Milestone 2 because artifact editing currently supports only 'remote_file'."
+    ),
     "artifacts.url": "Remote file URL to resolve and download for this artifact.",
     "artifacts.cache": (
-        "Artifact download caching mode. Accepted values: "
-        f"{_enum_values(*(value.value for value in ArtifactCacheMode))}."
+        "Artifact download caching mode. "
+        f"Accepted values: {_enum_values(*(value.value for value in ArtifactCacheMode))}."
     ),
     "artifact_groups.id": (
-        "Read-only after creation. Unique artifact group id. Group order and member order are preserved in YAML."
+        "This stable authored id names the artifact group. "
+        "It stays read-only in Milestone 2 because rename with membership and ref updates is not implemented yet."
     ),
 }
 
 
 PROMPT_TOOLTIPS: dict[str, str] = {
-    "input_id": (
-        "Unique input id. It becomes read-only after creation and is referenced as 'inputs.<id>' in authored YAML."
+    "inputs.id": (
+        "Choose a stable authored id for this input. "
+        "It becomes read-only after creation because rename with ref rewrite is not implemented in Milestone 2."
     ),
-    "artifact_id": (
-        "Unique artifact id. It becomes read-only after creation and is referenced as 'artifacts.<id>.<field>'."
+    "artifacts.id": (
+        "Choose a stable authored id for this artifact. "
+        "It becomes read-only after creation because rename with ref rewrite is not implemented in Milestone 2."
     ),
-    "artifact_url": "Remote file URL to download for this artifact.",
-    "artifact_group_id": (
-        "Unique artifact group id. Group order and membership order are preserved in authored YAML."
+    "artifacts.url": "Enter the remote file URL to download for this artifact.",
+    "artifact_groups.id": (
+        "Choose a stable authored id for this artifact group. "
+        "It becomes read-only after creation because rename support is not implemented in Milestone 2."
     ),
-    "recipe_dependency": (
-        "Recipe id this recipe depends on. Use another authored recipe id such as 'base.android.permissions'."
+    "overview.recipe_dependencies": (
+        "Enter another authored recipe id this recipe depends on. "
+        "Use a value such as 'base.android.permissions'."
     ),
-    "provided_feature": (
-        "Feature name this recipe provides. Use a stable string that other recipes or tooling can reference."
+    "overview.provides_features": (
+        "Enter a stable feature string this recipe provides. "
+        "Other recipes or tooling may reference it."
     ),
 }
 
 
-def field_tooltip(key: str) -> str:
+def _normalize_tooltip(value: str | None) -> str | None:
+    """Return a stripped tooltip string, or none when the entry is missing or blank."""
+
+    if value is None:
+        return None
+    normalized = value.strip()
+    return normalized or None
+
+
+def field_tooltip(key: str) -> str | None:
     """Return tooltip text for a persistent editor field."""
 
-    return FIELD_TOOLTIPS[key]
+    return _normalize_tooltip(FIELD_TOOLTIPS.get(key))
 
 
-def prompt_tooltip(key: str) -> str:
+def prompt_tooltip(key: str) -> str | None:
     """Return tooltip text for a creation-time prompt field."""
 
-    return PROMPT_TOOLTIPS[key]
+    return _normalize_tooltip(PROMPT_TOOLTIPS.get(key))

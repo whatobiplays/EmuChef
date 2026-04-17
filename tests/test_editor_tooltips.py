@@ -1,9 +1,11 @@
 from __future__ import annotations
 
 import unittest
+from unittest.mock import patch
 
 from emuchef.domain import ArtifactCacheMode, InputRole, InputType
 from emuchef.domain.constants import SCHEMA_VERSION
+from emuchef_editor.app.recipe_editor import tooltips
 from emuchef_editor.app.recipe_editor.tooltips import field_tooltip, prompt_tooltip
 
 
@@ -27,9 +29,19 @@ class EditorTooltipTests(unittest.TestCase):
         self.assertIn(str(SCHEMA_VERSION), field_tooltip("overview.schema_version"))
 
     def test_prompt_tooltips_cover_creation_time_ids(self) -> None:
-        self.assertIn("read-only", prompt_tooltip("input_id"))
-        self.assertIn("artifacts.<id>.<field>", prompt_tooltip("artifact_id"))
-        self.assertIn("Group order", prompt_tooltip("artifact_group_id"))
+        self.assertIn("read-only", prompt_tooltip("inputs.id"))
+        self.assertIn("artifact", prompt_tooltip("artifacts.id"))
+        self.assertIn("group", prompt_tooltip("artifact_groups.id"))
+
+    def test_missing_registry_key_returns_no_tooltip(self) -> None:
+        self.assertIsNone(field_tooltip("missing.field"))
+        self.assertIsNone(prompt_tooltip("missing.prompt"))
+
+    def test_blank_registry_value_is_treated_as_no_tooltip(self) -> None:
+        with patch.dict(tooltips.FIELD_TOOLTIPS, {"blank.field": "   "}):
+            self.assertIsNone(field_tooltip("blank.field"))
+        with patch.dict(tooltips.PROMPT_TOOLTIPS, {"blank.prompt": "\n\t "}):
+            self.assertIsNone(prompt_tooltip("blank.prompt"))
 
 
 if __name__ == "__main__":

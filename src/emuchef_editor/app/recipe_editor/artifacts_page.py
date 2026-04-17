@@ -187,7 +187,7 @@ class ArtifactsPage(QWidget):
     def _duplicate_artifact(self) -> None:
         if self._selected_artifact_id is None:
             return
-        new_id = self._prompt_for_identifier("Duplicate Artifact", "New artifact id", prompt_tooltip("artifact_id"))
+        new_id = self._prompt_for_identifier("Duplicate Artifact", "New artifact id", prompt_tooltip("artifacts.id"))
         if new_id is None:
             return
         source_artifact_id = self._selected_artifact_id
@@ -220,7 +220,7 @@ class ArtifactsPage(QWidget):
             )
         )
 
-    def _prompt_for_identifier(self, title: str, label: str, tooltip: str) -> str | None:
+    def _prompt_for_identifier(self, title: str, label: str, tooltip: str | None) -> str | None:
         return TextEntryDialog.prompt(self, title=title, label=label, tooltip=tooltip)
 
     def _prompt_for_new_artifact(self) -> tuple[str, str] | None:
@@ -229,8 +229,8 @@ class ArtifactsPage(QWidget):
         form = configure_data_entry_form(QFormLayout(dialog))
         artifact_id_edit = create_expanding_line_edit()
         url_edit = create_expanding_line_edit()
-        add_tooltipped_form_row(form, "Artifact id", artifact_id_edit, prompt_tooltip("artifact_id"))
-        add_tooltipped_form_row(form, "URL", url_edit, prompt_tooltip("artifact_url"))
+        add_tooltipped_form_row(form, "Artifact id", artifact_id_edit, prompt_tooltip("artifacts.id"))
+        add_tooltipped_form_row(form, "URL", url_edit, prompt_tooltip("artifacts.url"))
         buttons = QDialogButtonBox(QDialogButtonBox.StandardButton.Ok | QDialogButtonBox.StandardButton.Cancel)
         buttons.accepted.connect(dialog.accept)
         buttons.rejected.connect(dialog.reject)
