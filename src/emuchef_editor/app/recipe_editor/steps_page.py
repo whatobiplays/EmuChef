@@ -140,6 +140,7 @@ class _OrderedChoiceEditor(QWidget):
         self._remove_button.clicked.connect(self._remove_item)
         self._up_button.clicked.connect(self._move_up)
         self._down_button.clicked.connect(self._move_down)
+        self._refresh_geometry()
         self._refresh_button_state()
 
     def set_state(
@@ -170,7 +171,7 @@ class _OrderedChoiceEditor(QWidget):
                         target_row = row
                         break
             self._list.setCurrentRow(target_row)
-        self._list.refresh_height()
+        self._refresh_geometry()
         self._refresh_button_state()
 
     def values(self) -> tuple[str, ...]:
@@ -244,6 +245,16 @@ class _OrderedChoiceEditor(QWidget):
         self._pending_values = values
         self._pending_selection = selected_value
         self.changed.emit(values)
+
+    def _refresh_geometry(self) -> None:
+        """Recompute the composite editor height after the list content changes."""
+
+        self._list.refresh_height()
+        layout = self.layout()
+        if layout is not None:
+            layout.invalidate()
+            layout.activate()
+        self.updateGeometry()
 
 
 class _ConditionDialog(QDialog):
@@ -1157,6 +1168,10 @@ class StepsPage(QWidget):
     def _refresh_params_section_height(self) -> None:
         current_panel = self._params_stack.currentWidget()
         if current_panel is not None:
+            panel_layout = current_panel.layout()
+            if panel_layout is not None:
+                panel_layout.invalidate()
+                panel_layout.activate()
             current_panel.adjustSize()
             current_panel.updateGeometry()
         self._params_stack.updateGeometry()

@@ -647,6 +647,64 @@ class EditorAppTests(unittest.TestCase):
             ):
                 window.close()
 
+    def test_steps_page_resolve_artifact_groups_editor_keeps_list_above_button_row(self) -> None:
+        recipe = base_recipe(
+            recipe_id="example.recipe",
+            artifacts={
+                "artifact_one": {"type": "remote_file", "url": "https://example.com/one.zip"},
+                "artifact_two": {"type": "remote_file", "url": "https://example.com/two.zip"},
+                "artifact_three": {"type": "remote_file", "url": "https://example.com/three.zip"},
+                "artifact_four": {"type": "remote_file", "url": "https://example.com/four.zip"},
+            },
+            artifact_groups={
+                "group_one": ["artifact_one"],
+                "group_two": ["artifact_two"],
+                "group_three": ["artifact_three"],
+                "group_four": ["artifact_four"],
+            },
+            steps=[
+                {
+                    "id": "resolve",
+                    "type": "resolve_artifacts",
+                    "name": "Resolve",
+                    "user_toggleable": False,
+                    "dependencies": [],
+                    "constraints": {"capabilities": [], "conflicts_with": []},
+                    "params": {
+                        "artifacts": ["artifact_one", "artifact_two", "artifact_three", "artifact_four"],
+                        "artifact_groups": ["group_one", "group_two", "group_three", "group_four"],
+                    },
+                    "verify": [],
+                }
+            ],
+        )
+        with TemporaryDirectory() as tmp:
+            repo_root = Path(tmp)
+            authored_root = build_authored_tree(repo_root, recipes=[recipe])
+            recipe_path = authored_root / "recipes" / "example_recipe.yaml"
+
+            window = MainWindow(repo_root)
+            window.open_recipe_file(recipe_path)
+            window.show()
+            self._app.processEvents()
+
+            page = window._editor_view._steps_page
+            window._editor_view._tabs.setCurrentIndex(4)
+            page._select_step("resolve")
+            page._detail_scroll.widget().adjustSize()
+            self._app.processEvents()
+
+            for editor in (page._resolve_artifacts_editor, page._resolve_artifact_groups_editor):
+                self.assertLess(editor._list.geometry().bottom(), editor._add_button.geometry().top())
+                self.assertLessEqual(editor._down_button.geometry().bottom(), editor.rect().bottom())
+
+            with patch.object(
+                window,
+                "_prompt_unsaved_changes",
+                return_value=QMessageBox.StandardButton.Discard,
+            ):
+                window.close()
+
     def test_steps_page_params_host_resizes_for_step_transitions_and_extract_archive_mode(self) -> None:
         recipe = base_recipe(
             recipe_id="example.recipe",
