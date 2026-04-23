@@ -664,10 +664,31 @@ def _annotate_recipe_step_cycle_errors(
     recipe: Recipe,
     errors: tuple[ErrorMessage, ...],
 ) -> tuple[ErrorMessage, ...]:
-    return tuple(
-        _with_context(error, file=file, object_kind="recipe", object_id=recipe.id, field="steps")
-        for error in errors
-    )
+    annotated: list[ErrorMessage] = []
+    for error in errors:
+        field = "steps"
+        if error.code is ErrorCode.STEP_NOT_FOUND:
+            step_id = error.details.get("step_id")
+            dependency_id = error.details.get("dependency")
+            if isinstance(step_id, str) and isinstance(dependency_id, str):
+                step_index = _step_index(recipe, step_id)
+                dependencies = recipe.steps[step_index].dependencies if 0 <= step_index < len(recipe.steps) else ()
+                try:
+                    dependency_index = dependencies.index(dependency_id)
+                except ValueError:
+                    field = f"steps[{step_index}].dependencies"
+                else:
+                    field = f"steps[{step_index}].dependencies[{dependency_index}]"
+        annotated.append(
+            _with_context(
+                error,
+                file=file,
+                object_kind="recipe",
+                object_id=recipe.id,
+                field=field,
+            )
+        )
+    return tuple(annotated)
 
 
 def _annotate_recipe_cycle_catalog_errors(
@@ -774,7 +795,7 @@ def _step_index(recipe: Recipe, step_id: str) -> int:
     for index, step in enumerate(recipe.steps):
         if step.id == step_id:
             return index
-    return 0
+    return -1
 
 
 def _step_field(recipe: Recipe, step_id: str, suffix: str) -> str:

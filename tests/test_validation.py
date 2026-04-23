@@ -90,6 +90,33 @@ steps: []
             self.assertEqual(result.status.value, "error")
             self.assertTrue(any(error.code.value == "recipe_not_found" for error in result.errors), result.errors)
 
+    def test_missing_step_dependency_is_reported_with_step_dependency_field(self) -> None:
+        recipe = base_recipe(
+            recipe_id="example.recipe",
+            steps=[
+                {
+                    "id": "consumer",
+                    "type": "wait",
+                    "name": "Consumer",
+                    "user_toggleable": False,
+                    "dependencies": ["missing_step"],
+                    "constraints": {"capabilities": [], "conflicts_with": []},
+                    "params": {"duration_ms": 1000},
+                    "verify": [],
+                }
+            ],
+        )
+        with TemporaryDirectory() as tmp:
+            authored_root = build_authored_tree(Path(tmp), recipes=[recipe])
+            result = validate_authored_catalog(authored_root)
+
+            self.assertEqual(result.status.value, "error")
+            error = next(error for error in result.errors if error.code.value == "step_not_found")
+            self.assertEqual(error.details["object_kind"], "recipe")
+            self.assertEqual(error.details["object_id"], "example.recipe")
+            self.assertEqual(error.details["field"], "steps[0].dependencies[0]")
+            self.assertIn("depends on unknown step", error.message)
+
     def test_device_plan_with_missing_device_profile_ref(self) -> None:
         recipe = base_recipe(recipe_id="example.recipe", steps=[])
         with TemporaryDirectory() as tmp:

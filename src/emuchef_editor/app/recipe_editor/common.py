@@ -1,8 +1,13 @@
-"""Shared widgets for recipe editor pages."""
+"""Shared widgets for recipe editor pages.
+
+These helpers keep editor pages structurally consistent without pushing UI
+behavior into the core document layer. Widgets here focus on presentation and
+commit semantics only.
+"""
 
 from __future__ import annotations
 
-from PySide6.QtCore import Qt, Signal
+from PySide6.QtCore import QSize, Qt, Signal
 from PySide6.QtWidgets import (
     QComboBox,
     QDialog,
@@ -14,6 +19,7 @@ from PySide6.QtWidgets import (
     QSizePolicy,
     QPushButton,
     QPlainTextEdit,
+    QStackedWidget,
     QVBoxLayout,
     QWidget,
 )
@@ -37,6 +43,103 @@ class CommitPlainTextEdit(QPlainTextEdit):
         super().focusOutEvent(event)
         if current_text != self._committed_text:
             self.committed.emit(current_text)
+
+
+class AutoSizingListWidget(QListWidget):
+    """List widget that grows with its content and stays visible when empty."""
+
+    def __init__(self, *, minimum_visible_rows: int = 1, parent: QWidget | None = None) -> None:
+        super().__init__(parent)
+        self._minimum_visible_rows = max(1, minimum_visible_rows)
+        self.setVerticalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        self.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
+
+        model = self.model()
+        model.rowsInserted.connect(self._sync_height)
+        model.rowsRemoved.connect(self._sync_height)
+        model.modelReset.connect(self._sync_height)
+        model.dataChanged.connect(self._sync_height)
+        self._sync_height()
+
+    def minimumSizeHint(self) -> QSize:  # type: ignore[override]
+        base = super().minimumSizeHint()
+        return QSize(base.width(), self._target_height())
+
+    def sizeHint(self) -> QSize:  # type: ignore[override]
+        base = super().sizeHint()
+        return QSize(base.width(), self._target_height())
+
+    def refresh_height(self) -> None:
+        """Recompute the fixed height after external item or visibility changes."""
+
+        self._sync_height()
+
+    def _sync_height(self, *_args) -> None:
+        self.setFixedHeight(self._target_height())
+        self.updateGeometry()
+
+    def _target_height(self) -> int:
+        visible_rows = max(self._minimum_visible_rows, self.count())
+        row_height = self.sizeHintForRow(0)
+        if row_height <= 0:
+            row_height = self.fontMetrics().lineSpacing() + 8
+        spacing_height = max(0, visible_rows - 1) * self.spacing()
+        return (self.frameWidth() * 2) + (visible_rows * row_height) + spacing_height
+
+
+class AutoSizingPlainTextEdit(QPlainTextEdit):
+    """Read-only plain-text view that fits its visible content height."""
+
+    def __init__(self, *, minimum_visible_lines: int = 1, parent: QWidget | None = None) -> None:
+        super().__init__(parent)
+        self._minimum_visible_lines = max(1, minimum_visible_lines)
+        self.setVerticalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        self.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
+        self.document().contentsChanged.connect(self._sync_height)
+        self._sync_height()
+
+    def minimumSizeHint(self) -> QSize:  # type: ignore[override]
+        base = super().minimumSizeHint()
+        return QSize(base.width(), self._target_height())
+
+    def sizeHint(self) -> QSize:  # type: ignore[override]
+        base = super().sizeHint()
+        return QSize(base.width(), self._target_height())
+
+    def refresh_height(self) -> None:
+        """Recompute the fixed height after text or visibility changes."""
+
+        self._sync_height()
+
+    def _sync_height(self) -> None:
+        self.setFixedHeight(self._target_height())
+        self.updateGeometry()
+
+    def _target_height(self) -> int:
+        line_count = max(self._minimum_visible_lines, self.blockCount())
+        line_height = self.fontMetrics().lineSpacing()
+        document_margins = int(self.document().documentMargin() * 2)
+        return (self.frameWidth() * 2) + document_margins + (line_count * line_height)
+
+
+class CurrentWidgetSizeStack(QStackedWidget):
+    """Stacked widget whose vertical size follows the active page only."""
+
+    def __init__(self, parent: QWidget | None = None) -> None:
+        super().__init__(parent)
+        self.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
+        self.currentChanged.connect(self._on_current_changed)
+
+    def minimumSizeHint(self) -> QSize:  # type: ignore[override]
+        widget = self.currentWidget()
+        return widget.minimumSizeHint() if widget is not None else super().minimumSizeHint()
+
+    def sizeHint(self) -> QSize:  # type: ignore[override]
+        widget = self.currentWidget()
+        return widget.sizeHint() if widget is not None else super().sizeHint()
+
+    def _on_current_changed(self, _index: int) -> None:
+        self.updateGeometry()
 
 
 def configure_data_entry_form(form: QFormLayout) -> QFormLayout:

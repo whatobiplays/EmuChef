@@ -6,7 +6,7 @@ from collections.abc import Mapping
 from dataclasses import dataclass, field
 from typing import Literal
 
-from ._validation import ensure_known, ensure_non_empty, ensure_ordered_range, ensure_unique
+from ._validation import ensure_non_empty, ensure_ordered_range, ensure_unique
 from .artifacts import ArtifactDefinition
 from .constants import SCHEMA_VERSION
 from .input_declaration import InputDeclaration
@@ -91,6 +91,3 @@ class Recipe:
         ensure_unique(self.artifacts.keys(), "recipe artifact ids")
         ensure_unique(self.artifact_groups.keys(), "recipe artifact group ids")
         ensure_unique((step.id for step in self.steps), "recipe step ids")
-        step_ids = {step.id for step in self.steps}
-        for step in self.steps:
-            ensure_known(step.dependencies, step_ids, "step dependencies")

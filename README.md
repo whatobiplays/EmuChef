@@ -10,13 +10,23 @@ Repository context and current behavior notes live in `CONTEXT.md`.
 
 The desktop editor targets authored recipe files only.
 
-Milestone 3 supports:
+The current editor supports:
 
 - Overview editing
 - Inputs editing
 - Artifacts editing
 - Artifact Groups editing
 - Permissions editing for the current authored surface: `runtime`, `appops`, and `policy`
+- Steps editing for the current supported step types:
+  - `resolve_artifacts`
+  - `extract_artifacts`
+  - `extract_archive`
+  - `copy_files`
+  - `install_apk`
+  - `grant_permissions`
+  - `launch_app`
+  - `wait`
+  - `force_stop_app`
 - template-driven New Recipe creation
 - blank-template New Recipe creation
 - Save As
@@ -44,8 +54,13 @@ Current editor scope notes:
 - it edits the shared typed authored recipe model rather than raw YAML text
 - `kind` and `schema_version` are read-only
 - input, artifact, and group ids are chosen at creation time and then stay read-only
+- step ids and step types are chosen at creation time and then stay read-only
 - permission editing is limited to the current shared authored schema and does not expose unsupported compatibility-only structures
-- step editing and ref rewrite are not implemented yet
+- step refs stay in authored-ref space and save explicitly as `{ ref: ... }`
+- the Steps page uses structured pickers for dependencies, refs, constraints, `skip_if`, and `verify`
+- unsupported authored step content that the current M4 UI does not edit is preserved rather than dropped
+- deleting a step does not rewrite downstream dependencies or refs; diagnostics surface the resulting breakage
+- ref rewrite after id changes is not implemented
 
 ## Templates
 

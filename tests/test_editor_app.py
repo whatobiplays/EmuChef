@@ -9,7 +9,7 @@ from tempfile import TemporaryDirectory
 import unittest
 from unittest.mock import Mock, patch
 
-from emuchef.domain import RuntimePermissionGrant
+from emuchef.domain import RuntimePermissionGrant, StepCondition, StepType
 from support import base_recipe, build_authored_tree
 
 PYSIDE6_AVAILABLE = importlib.util.find_spec("PySide6") is not None
@@ -69,7 +69,7 @@ class EditorAppTests(unittest.TestCase):
             window.open_recipe_file(recipe_path)
 
             self.assertIsNotNone(window.current_document)
-            self.assertEqual(window._editor_view._tabs.count(), 5)
+            self.assertEqual(window._editor_view._tabs.count(), 6)
             self.assertIn("schema_version: 1", window._yaml_preview.toPlainText())
             self.assertIn("example.recipe", window.windowTitle())
             self.assertEqual(window._diagnostics_view._tree.topLevelItemCount(), 0)
@@ -158,7 +158,8 @@ class EditorAppTests(unittest.TestCase):
             window = MainWindow(repo_root)
             window.open_recipe_file(recipe_path)
 
-            self.assertEqual(window._editor_view._tabs.tabText(4), "Permissions")
+            self.assertEqual(window._editor_view._tabs.tabText(4), "Steps")
+            self.assertEqual(window._editor_view._tabs.tabText(5), "Permissions")
             page = window._editor_view._permissions_page
             with patch.object(
                 page,
@@ -287,6 +288,480 @@ class EditorAppTests(unittest.TestCase):
             self.assertEqual(window.current_document.to_yaml(), original_yaml)
             self.assertTrue(window.current_document.can_undo)
             self.assertTrue(window.current_document.is_dirty)
+
+            with patch.object(
+                window,
+                "_prompt_unsaved_changes",
+                return_value=QMessageBox.StandardButton.Discard,
+            ):
+                window.close()
+
+    def test_steps_tab_supports_representative_widget_flows(self) -> None:
+        recipe = base_recipe(
+            recipe_id="example.recipe",
+            inputs={
+                "source_dir": {
+                    "type": "directory",
+                    "role": "generic",
+                    "label": "Source Directory",
+                    "required": True,
+                    "multiple": False,
+                    "validation": {"must_exist": True, "allowed_extensions": [], "path_kind": "directory"},
+                }
+            },
+            steps=[],
+        )
+        with TemporaryDirectory() as tmp:
+            repo_root = Path(tmp)
+            authored_root = build_authored_tree(repo_root, recipes=[recipe])
+            recipe_path = authored_root / "recipes" / "example_recipe.yaml"
+
+            window = MainWindow(repo_root)
+            window.open_recipe_file(recipe_path)
+
+            page = window._editor_view._steps_page
+            self.assertEqual(window._editor_view._tabs.tabText(4), "Steps")
+            window._editor_view._tabs.setCurrentIndex(4)
+
+            with patch.object(
+                page,
+                "_prompt_for_new_step",
+                return_value=(StepType.COPY_FILES, "copy_assets", "Copy Assets"),
+            ):
+                page._add_step_button.click()
+
+            self.assertEqual(window.current_document.working_recipe.steps[0].id, "copy_assets")
+            self.assertTrue(page._step_id_value.isReadOnly())
+            self.assertTrue(page._step_type_value.isReadOnly())
+            self.assertIsInstance(page._copy_source_combo, QComboBox)
+
+            page._copy_source_combo.setCurrentIndex(page._copy_source_combo.findData("inputs.source_dir"))
+            page._copy_dest_edit.setText("/sdcard/Example")
+            page._copy_dest_edit.editingFinished.emit()
+            page._copy_policy_combo.setCurrentIndex(page._copy_policy_combo.findData("sync"))
+            page._step_user_toggleable_check.setChecked(True)
+
+            with patch.object(
+                page,
+                "_prompt_for_new_step",
+                return_value=(StepType.WAIT, "pause", "Pause"),
+            ):
+                page._add_step_button.click()
+
+            page._select_step("pause")
+            page._wait_duration_spin.setValue(1500)
+
+            page._select_step("copy_assets")
+            with patch("emuchef_editor.app.recipe_editor.steps_page.TextEntryDialog.prompt", return_value="copy_assets_dup"):
+                page._duplicate_step_button.click()
+
+            page._select_step("copy_assets_dup")
+            page._move_up_button.click()
+
+            page._select_step("copy_assets")
+            with patch.object(page, "_confirm_delete_step", return_value=True):
+                page._delete_step_button.click()
+
+            self.assertEqual(
+                tuple(step.id for step in window.current_document.working_recipe.steps),
+                ("copy_assets_dup", "pause"),
+            )
+            self.assertTrue(window.current_document.working_recipe.steps[0].user_toggleable)
+            self.assertIn("ref: inputs.source_dir", window._yaml_preview.toPlainText())
+            self.assertIn("duration_ms: 1500", window._yaml_preview.toPlainText())
+            self.assertTrue(window._undo_action.isEnabled())
+            self.assertTrue(window.current_document.is_dirty)
+
+            with patch.object(
+                window,
+                "_prompt_unsaved_changes",
+                return_value=QMessageBox.StandardButton.Discard,
+            ):
+                window.close()
+
+    def test_steps_page_shows_notes_and_locks_preserved_unsupported_lists(self) -> None:
+        recipe = base_recipe(
+            recipe_id="example.recipe",
+            inputs={
+                "source_dir": {
+                    "type": "directory",
+                    "role": "generic",
+                    "label": "Source Directory",
+                    "required": True,
+                    "multiple": False,
+                    "validation": {"must_exist": True, "allowed_extensions": [], "path_kind": "directory"},
+                }
+            },
+            steps=[
+                {
+                    "id": "grant",
+                    "type": "grant_permissions",
+                    "name": "Grant",
+                    "user_toggleable": False,
+                    "dependencies": [],
+                    "constraints": {"capabilities": [], "conflicts_with": []},
+                    "verify": [],
+                },
+                {
+                    "id": "copy",
+                    "type": "copy_files",
+                    "name": "Copy",
+                    "user_toggleable": False,
+                    "dependencies": [],
+                    "constraints": {
+                        "capabilities": ["shared_storage_write", "unsupported_capability"],
+                        "conflicts_with": [],
+                    },
+                    "skip_if": [
+                        {"type": "path_exists", "params": {"path": "/sdcard/Example"}},
+                        {"type": "custom_skip", "params": {"foo": "bar"}},
+                    ],
+                    "params": {"source": {"ref": "inputs.source_dir"}, "dest": "/sdcard/Example"},
+                    "verify": [],
+                },
+            ],
+        )
+        with TemporaryDirectory() as tmp:
+            repo_root = Path(tmp)
+            authored_root = build_authored_tree(repo_root, recipes=[recipe])
+            recipe_path = authored_root / "recipes" / "example_recipe.yaml"
+
+            window = MainWindow(repo_root)
+            window.open_recipe_file(recipe_path)
+            page = window._editor_view._steps_page
+            window._editor_view._tabs.setCurrentIndex(4)
+
+            page._select_step("grant")
+            self.assertIs(page._params_stack.currentWidget(), page._grant_permissions_panel)
+            self.assertIn("permission plan", page._grant_permissions_note_label.text())
+
+            page._select_step("copy")
+            self.assertIs(page._params_stack.currentWidget(), page._copy_files_panel)
+            self.assertIn("destination directory", page._copy_help_label.text())
+            self.assertFalse(page._constraints_preserved_view.isHidden())
+            self.assertIn("unsupported_capability", page._constraints_preserved_view.toPlainText())
+            self.assertFalse(page._capabilities_editor._remove_button.isEnabled())
+            self.assertFalse(page._skip_if_editor._preserved_view.isHidden())
+            self.assertIn("custom_skip", page._skip_if_editor._preserved_view.toPlainText())
+            self.assertFalse(page._skip_if_editor._remove_button.isEnabled())
+
+            with patch.object(
+                window,
+                "_prompt_unsaved_changes",
+                return_value=QMessageBox.StandardButton.Discard,
+            ):
+                window.close()
+
+    def test_steps_page_surfaces_unresolved_ref_choices_without_clearing_them(self) -> None:
+        recipe = base_recipe(
+            recipe_id="example.recipe",
+            steps=[
+                {
+                    "id": "copy",
+                    "type": "copy_files",
+                    "name": "Copy",
+                    "user_toggleable": False,
+                    "dependencies": [],
+                    "constraints": {"capabilities": [], "conflicts_with": []},
+                    "params": {
+                        "source": {"ref": "steps.missing.outputs.copied_paths"},
+                        "dest": "/sdcard/Example",
+                    },
+                    "verify": [],
+                }
+            ],
+        )
+        with TemporaryDirectory() as tmp:
+            repo_root = Path(tmp)
+            authored_root = build_authored_tree(repo_root, recipes=[recipe])
+            recipe_path = authored_root / "recipes" / "example_recipe.yaml"
+
+            window = MainWindow(repo_root)
+            window.open_recipe_file(recipe_path)
+            page = window._editor_view._steps_page
+            window._editor_view._tabs.setCurrentIndex(4)
+            page._select_step("copy")
+
+            self.assertEqual(page._copy_source_combo.currentData(), "steps.missing.outputs.copied_paths")
+            self.assertIn("[Unresolved]", page._copy_source_combo.currentText())
+            page._step_name_edit.setText("Copy Updated")
+            page._step_name_edit.editingFinished.emit()
+            self.assertIn("ref: steps.missing.outputs.copied_paths", window._yaml_preview.toPlainText())
+
+            with patch.object(
+                window,
+                "_prompt_unsaved_changes",
+                return_value=QMessageBox.StandardButton.Discard,
+            ):
+                window.close()
+
+    def test_steps_page_dependency_card_and_auto_sizing_lists(self) -> None:
+        recipe = base_recipe(
+            recipe_id="example.recipe",
+            inputs={
+                "source_dir": {
+                    "type": "directory",
+                    "role": "generic",
+                    "label": "Source Directory",
+                    "required": True,
+                    "multiple": False,
+                    "validation": {"must_exist": True, "allowed_extensions": [], "path_kind": "directory"},
+                }
+            },
+            steps=[
+                {
+                    "id": "prepare",
+                    "type": "wait",
+                    "name": "Prepare",
+                    "user_toggleable": False,
+                    "dependencies": [],
+                    "constraints": {"capabilities": [], "conflicts_with": []},
+                    "params": {"duration_ms": 250},
+                    "verify": [],
+                },
+                {
+                    "id": "copy",
+                    "type": "copy_files",
+                    "name": "Copy",
+                    "user_toggleable": False,
+                    "dependencies": ["prepare"],
+                    "constraints": {"capabilities": [], "conflicts_with": []},
+                    "params": {"source": {"ref": "inputs.source_dir"}, "dest": "/sdcard/Example"},
+                    "verify": [],
+                },
+                {
+                    "id": "grant",
+                    "type": "grant_permissions",
+                    "name": "Grant",
+                    "user_toggleable": False,
+                    "dependencies": [],
+                    "constraints": {"capabilities": [], "conflicts_with": []},
+                    "verify": [],
+                },
+            ],
+        )
+        with TemporaryDirectory() as tmp:
+            repo_root = Path(tmp)
+            authored_root = build_authored_tree(repo_root, recipes=[recipe])
+            recipe_path = authored_root / "recipes" / "example_recipe.yaml"
+
+            window = MainWindow(repo_root)
+            window.open_recipe_file(recipe_path)
+            window.show()
+            self._app.processEvents()
+
+            page = window._editor_view._steps_page
+            window._editor_view._tabs.setCurrentIndex(4)
+            page._select_step("copy")
+            self._app.processEvents()
+
+            dependency_item = page._dependencies_list.item(0)
+            self.assertIsNotNone(dependency_item)
+            self.assertFalse(bool(dependency_item.flags() & Qt.ItemFlag.ItemIsUserCheckable))
+
+            captured_labels = page._available_dependency_ids()
+
+            with patch.object(page, "_prompt_for_dependency", return_value="grant"):
+                page._add_dependency_button.click()
+            self._app.processEvents()
+
+            self.assertEqual(captured_labels, ("grant",))
+            self.assertEqual(window.current_document.working_recipe.steps[1].dependencies, ("prepare", "grant"))
+            self.assertEqual(tuple(page._dependencies_list.item(row).text() for row in range(page._dependencies_list.count())), ("prepare", "grant"))
+            self.assertIn("- prepare", window._yaml_preview.toPlainText())
+            self.assertIn("- grant", window._yaml_preview.toPlainText())
+
+            page._dependencies_list.setCurrentRow(1)
+            page._remove_dependency_button.click()
+            self._app.processEvents()
+
+            self.assertEqual(window.current_document.working_recipe.steps[1].dependencies, ("prepare",))
+            self.assertEqual(tuple(page._dependencies_list.item(row).text() for row in range(page._dependencies_list.count())), ("prepare",))
+
+            empty_capabilities_height = page._capabilities_editor._list.height()
+            empty_conflicts_height = page._conflicts_editor._list.height()
+            empty_skip_if_height = page._skip_if_editor._list.height()
+            empty_verify_height = page._verify_editor._list.height()
+            self.assertGreater(empty_capabilities_height, 0)
+            self.assertGreater(empty_conflicts_height, 0)
+            self.assertGreater(empty_skip_if_height, 0)
+            self.assertGreater(empty_verify_height, 0)
+
+            capability_labels = [label for _value, label in page._capabilities_editor._choices[:2]]
+            self.assertGreaterEqual(len(capability_labels), 2)
+            with patch(
+                "emuchef_editor.app.recipe_editor.steps_page.QInputDialog.getItem",
+                side_effect=[(capability_labels[0], True), (capability_labels[1], True)],
+            ):
+                page._capabilities_editor._add_button.click()
+                page._capabilities_editor._add_button.click()
+            self._app.processEvents()
+            self.assertEqual(len(page._capabilities_editor.values()), 2)
+            self.assertIn(page._capabilities_editor.values()[0], window._yaml_preview.toPlainText())
+            self.assertGreater(page._capabilities_editor._list.height(), empty_capabilities_height)
+
+            conflict_labels = [label for _value, label in page._conflicts_editor._choices[:2]]
+            self.assertEqual(conflict_labels, ["prepare", "grant"])
+            with patch(
+                "emuchef_editor.app.recipe_editor.steps_page.QInputDialog.getItem",
+                side_effect=[(conflict_labels[1], True), (conflict_labels[0], True)],
+            ):
+                page._conflicts_editor._add_button.click()
+                page._conflicts_editor._add_button.click()
+            self._app.processEvents()
+            self.assertEqual(page._conflicts_editor.values(), ("grant", "prepare"))
+            self.assertIn("conflicts_with:", window._yaml_preview.toPlainText())
+            self.assertIn("- grant", window._yaml_preview.toPlainText())
+            self.assertGreater(page._conflicts_editor._list.height(), empty_conflicts_height)
+
+            condition = StepCondition(type="path_exists", params={"path": "/sdcard/Example"})
+            second_condition = StepCondition(type="package_installed", params={"package_name": "com.example.app"})
+            with patch(
+                "emuchef_editor.app.recipe_editor.steps_page._ConditionDialog.prompt",
+                side_effect=[condition, second_condition],
+            ):
+                page._skip_if_editor._add_button.click()
+                page._skip_if_editor._add_button.click()
+            self._app.processEvents()
+            self.assertIn("skip_if:", window._yaml_preview.toPlainText())
+            self.assertGreater(page._skip_if_editor._list.height(), empty_skip_if_height)
+
+            verify_condition = StepCondition(type="file_exists", params={"path": "/sdcard/Example/config.ini"})
+            second_verify_condition = StepCondition(type="path_exists", params={"path": "/sdcard/Example"})
+            with patch(
+                "emuchef_editor.app.recipe_editor.steps_page._ConditionDialog.prompt",
+                side_effect=[verify_condition, second_verify_condition],
+            ):
+                page._verify_editor._add_button.click()
+                page._verify_editor._add_button.click()
+            self._app.processEvents()
+            self.assertIn("verify:", window._yaml_preview.toPlainText())
+            self.assertGreater(page._verify_editor._list.height(), empty_verify_height)
+
+            with patch.object(
+                window,
+                "_prompt_unsaved_changes",
+                return_value=QMessageBox.StandardButton.Discard,
+            ):
+                window.close()
+
+    def test_steps_page_params_host_resizes_for_step_transitions_and_extract_archive_mode(self) -> None:
+        recipe = base_recipe(
+            recipe_id="example.recipe",
+            inputs={
+                "archive_file": {
+                    "type": "file",
+                    "role": "generic",
+                    "label": "Archive File",
+                    "required": True,
+                    "multiple": False,
+                    "validation": {"must_exist": True, "allowed_extensions": [], "path_kind": "file"},
+                },
+                "source_dir": {
+                    "type": "directory",
+                    "role": "generic",
+                    "label": "Source Directory",
+                    "required": True,
+                    "multiple": False,
+                    "validation": {"must_exist": True, "allowed_extensions": [], "path_kind": "directory"},
+                },
+            },
+            steps=[
+                {
+                    "id": "grant",
+                    "type": "grant_permissions",
+                    "name": "Grant",
+                    "user_toggleable": False,
+                    "dependencies": [],
+                    "constraints": {"capabilities": [], "conflicts_with": []},
+                    "verify": [],
+                },
+                {
+                    "id": "copy",
+                    "type": "copy_files",
+                    "name": "Copy",
+                    "user_toggleable": False,
+                    "dependencies": [],
+                    "constraints": {"capabilities": [], "conflicts_with": []},
+                    "params": {"source": {"ref": "inputs.source_dir"}, "dest": "/sdcard/Example"},
+                    "verify": [],
+                },
+                {
+                    "id": "archive_plain",
+                    "type": "extract_archive",
+                    "name": "Extract Plain",
+                    "user_toggleable": False,
+                    "dependencies": [],
+                    "constraints": {"capabilities": [], "conflicts_with": []},
+                    "params": {"archive": {"ref": "inputs.archive_file"}, "extract_on": "host"},
+                    "verify": [],
+                },
+                {
+                    "id": "archive_preserved",
+                    "type": "extract_archive",
+                    "name": "Extract Preserved",
+                    "user_toggleable": False,
+                    "dependencies": [],
+                    "constraints": {"capabilities": [], "conflicts_with": []},
+                    "params": {
+                        "archive": {"ref": "inputs.archive_file"},
+                        "extract_on": "host",
+                        "custom_behavior": "keep_me",
+                    },
+                    "verify": [],
+                },
+            ],
+        )
+        with TemporaryDirectory() as tmp:
+            repo_root = Path(tmp)
+            authored_root = build_authored_tree(repo_root, recipes=[recipe])
+            recipe_path = authored_root / "recipes" / "example_recipe.yaml"
+
+            window = MainWindow(repo_root)
+            window.open_recipe_file(recipe_path)
+            window.show()
+            self._app.processEvents()
+
+            page = window._editor_view._steps_page
+            window._editor_view._tabs.setCurrentIndex(4)
+
+            def params_height() -> int:
+                page._detail_scroll.widget().adjustSize()
+                self._app.processEvents()
+                return page._params_section.height()
+
+            page._select_step("archive_plain")
+            self._app.processEvents()
+            archive_host_height = params_height()
+
+            page._extract_archive_extract_on_combo.setCurrentIndex(page._extract_archive_extract_on_combo.findData("device"))
+            self._app.processEvents()
+            archive_device_height = params_height()
+            self.assertGreater(archive_device_height, archive_host_height)
+
+            page._extract_archive_extract_on_combo.setCurrentIndex(page._extract_archive_extract_on_combo.findData("host"))
+            self._app.processEvents()
+            self.assertEqual(params_height(), archive_host_height)
+
+            page._select_step("archive_preserved")
+            self._app.processEvents()
+            preserved_height = params_height()
+            self.assertGreater(preserved_height, archive_host_height)
+            self.assertFalse(page._params_preserved_view.isHidden())
+
+            page._select_step("archive_plain")
+            self._app.processEvents()
+            self.assertEqual(params_height(), archive_host_height)
+            self.assertTrue(page._params_preserved_view.isHidden())
+
+            page._select_step("grant")
+            self._app.processEvents()
+            grant_height = params_height()
+
+            page._select_step("copy")
+            self._app.processEvents()
+            copy_height = params_height()
+            self.assertGreater(copy_height, grant_height)
 
             with patch.object(
                 window,

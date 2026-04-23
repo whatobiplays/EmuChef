@@ -4,7 +4,17 @@ from pathlib import Path
 from tempfile import TemporaryDirectory
 import unittest
 
-from emuchef.domain import AppOpGrant, PermissionWhen, RuntimePermissionGrant
+import yaml
+
+from emuchef.domain import (
+    AppOpGrant,
+    PermissionWhen,
+    RefParamValue,
+    RuntimePermissionGrant,
+    StepCondition,
+    StepConstraints,
+    StepType,
+)
 from emuchef.io import load_authored_recipe
 from emuchef_editor.app.workspace.service import open_workspace, resolve_authored_root
 from emuchef_editor.core.documents.commands import (
@@ -16,12 +26,15 @@ from emuchef_editor.core.documents.commands import (
     AddProvidedFeatureCommand,
     AddRecipeDependencyCommand,
     AddRuntimePermissionCommand,
+    AddStepCommand,
     DeleteArtifactCommand,
     DeleteAppOpCommand,
     DeleteInputCommand,
     DeleteRuntimePermissionCommand,
+    DeleteStepCommand,
     DuplicateArtifactCommand,
     DuplicateInputCommand,
+    DuplicateStepCommand,
     MoveProvidedFeatureCommand,
     MoveRecipeDependencyCommand,
     RemoveArtifactGroupMemberCommand,
@@ -29,7 +42,15 @@ from emuchef_editor.core.documents.commands import (
     RemoveRecipeDependencyCommand,
     ReorderArtifactGroupCommand,
     ReorderArtifactGroupMemberCommand,
+    ReorderStepCommand,
+    SetStepUserToggleableCommand,
     SetOverviewFieldCommand,
+    UpdateStepBasicsCommand,
+    UpdateStepConstraintsCommand,
+    UpdateStepDependenciesCommand,
+    UpdateStepParamsCommand,
+    UpdateStepSkipIfCommand,
+    UpdateStepVerifyCommand,
     UpdateAppOpCommand,
     UpdateArtifactFieldCommand,
     UpdateInputFieldCommand,
@@ -109,6 +130,16 @@ class EditorCoreTests(unittest.TestCase):
     def test_ref_index_includes_inputs_artifacts_steps_and_step_outputs(self) -> None:
         recipe = base_recipe(
             recipe_id="example.recipe",
+            inputs={
+                "source_dir": {
+                    "type": "directory",
+                    "role": "generic",
+                    "label": "Source Directory",
+                    "required": True,
+                    "multiple": False,
+                    "validation": {"must_exist": True, "allowed_extensions": [], "path_kind": "directory"},
+                }
+            },
             artifacts={
                 "archive_zip": {
                     "type": "remote_file",
@@ -137,6 +168,13 @@ class EditorCoreTests(unittest.TestCase):
             self.assertIn(
                 "steps.extract_archive.outputs.extracted_path",
                 document.ref_index.step_output_refs,
+            )
+            candidate_by_ref = {candidate.ref: candidate for candidate in document.ref_index.candidates}
+            self.assertEqual(candidate_by_ref["inputs.source_dir"].value_type.value, "directory_path")
+            self.assertEqual(candidate_by_ref["artifacts.archive_zip.filename"].value_type.value, "string")
+            self.assertEqual(
+                candidate_by_ref["steps.extract_archive.outputs.extracted_path"].value_type.value,
+                "directory_path",
             )
 
     def test_semantic_dirty_tracking_ignores_non_canonical_open_then_resets_after_save(self) -> None:
@@ -697,6 +735,408 @@ class EditorCoreTests(unittest.TestCase):
             written = destination_path.read_text(encoding="utf-8")
             self.assertIn("id: created.recipe", written)
             self.assertIn("name: Template Recipe", written)
+
+    def test_step_commands_cover_supported_types_and_default_param_omission(self) -> None:
+        recipe = base_recipe(
+            recipe_id="example.recipe",
+            inputs={
+                "source_dir": {
+                    "type": "directory",
+                    "role": "generic",
+                    "label": "Source Directory",
+                    "required": True,
+                    "multiple": False,
+                    "validation": {"must_exist": True, "allowed_extensions": [], "path_kind": "directory"},
+                }
+            },
+            artifacts={
+                "archive_zip": {"type": "remote_file", "url": "https://example.com/archive.zip"},
+                "app_apk": {"type": "remote_file", "url": "https://example.com/app.apk"},
+                "base_zip": {"type": "remote_file", "url": "https://example.com/base.zip"},
+            },
+            artifact_groups={"bundle": ["base_zip"]},
+            steps=[],
+        )
+        with TemporaryDirectory() as tmp:
+            authored_root = build_authored_tree(Path(tmp), recipes=[recipe])
+            document = load_recipe_document(authored_root / "recipes" / "example_recipe.yaml")
+
+            additions = (
+                ("resolve", StepType.RESOLVE_ARTIFACTS, "Resolve Artifacts"),
+                ("extract", StepType.EXTRACT_ARTIFACTS, "Extract Artifacts"),
+                ("unpack", StepType.EXTRACT_ARCHIVE, "Extract Archive"),
+                ("copy", StepType.COPY_FILES, "Copy Files"),
+                ("install", StepType.INSTALL_APK, "Install APK"),
+                ("grant", StepType.GRANT_PERMISSIONS, "Grant Permissions"),
+                ("launch", StepType.LAUNCH_APP, "Launch App"),
+                ("pause", StepType.WAIT, "Wait"),
+                ("stop", StepType.FORCE_STOP_APP, "Force Stop"),
+            )
+            for step_id, step_type, name in additions:
+                self.assertTrue(document.apply_command(AddStepCommand(step_id=step_id, step_type=step_type, name=name)))
+
+            self.assertTrue(
+                document.apply_command(
+                    UpdateStepParamsCommand(
+                        step_id="resolve",
+                        params={"artifacts": ["base_zip"], "artifact_groups": ["bundle"]},
+                    )
+                )
+            )
+            self.assertTrue(
+                document.apply_command(
+                    UpdateStepParamsCommand(
+                        step_id="extract",
+                        params={"artifacts": ["base_zip"], "extract_on": "device"},
+                    )
+                )
+            )
+            self.assertTrue(
+                document.apply_command(
+                    UpdateStepParamsCommand(
+                        step_id="extract",
+                        params={"artifacts": ["base_zip"], "extract_on": "host"},
+                    )
+                )
+            )
+            self.assertTrue(
+                document.apply_command(
+                    UpdateStepParamsCommand(
+                        step_id="unpack",
+                        params={
+                            "archive": RefParamValue(ref="artifacts.archive_zip.local_path"),
+                            "extract_on": "device",
+                            "dest": "/sdcard/Extracted",
+                            "device_temp_path": "/data/local/tmp/archive",
+                            "cleanup": False,
+                        },
+                    )
+                )
+            )
+            self.assertTrue(
+                document.apply_command(
+                    UpdateStepParamsCommand(
+                        step_id="unpack",
+                        params={"archive": RefParamValue(ref="artifacts.archive_zip.local_path"), "extract_on": "host", "cleanup": True},
+                    )
+                )
+            )
+            self.assertTrue(
+                document.apply_command(
+                    UpdateStepParamsCommand(
+                        step_id="copy",
+                        params={
+                            "source": RefParamValue(ref="inputs.source_dir"),
+                            "dest": "/sdcard/RetroArch/cores",
+                            "copy_policy": "sync",
+                        },
+                    )
+                )
+            )
+            self.assertTrue(
+                document.apply_command(
+                    UpdateStepParamsCommand(
+                        step_id="install",
+                        params={"app": RefParamValue(ref="artifacts.app_apk.local_path"), "replace_existing": False},
+                    )
+                )
+            )
+            self.assertTrue(
+                document.apply_command(
+                    UpdateStepParamsCommand(
+                        step_id="launch",
+                        params={"package_name": "com.example.app", "activity": "MainActivity"},
+                    )
+                )
+            )
+            self.assertTrue(
+                document.apply_command(UpdateStepParamsCommand(step_id="pause", params={"duration_ms": 1500}))
+            )
+            self.assertTrue(
+                document.apply_command(
+                    UpdateStepParamsCommand(step_id="stop", params={"package_name": "com.example.app"})
+                )
+            )
+            self.assertTrue(
+                document.apply_command(
+                    UpdateStepBasicsCommand(step_id="copy", name="Copy Assets", description="Copy staged files.")
+                )
+            )
+            self.assertTrue(document.apply_command(SetStepUserToggleableCommand(step_id="copy", user_toggleable=True)))
+            self.assertTrue(
+                document.apply_command(
+                    UpdateStepDependenciesCommand(step_id="copy", dependencies=("resolve", "extract"))
+                )
+            )
+            self.assertTrue(
+                document.apply_command(
+                    UpdateStepConstraintsCommand(
+                        step_id="copy",
+                        constraints=StepConstraints(
+                            capabilities=("shared_storage_write",),
+                            conflicts_with=("stop",),
+                        ),
+                    )
+                )
+            )
+            self.assertTrue(
+                document.apply_command(
+                    UpdateStepSkipIfCommand(
+                        step_id="copy",
+                        skip_if=(StepCondition(type="package_installed", params={"package_name": "com.example.app"}),),
+                    )
+                )
+            )
+            self.assertTrue(
+                document.apply_command(
+                    UpdateStepVerifyCommand(
+                        step_id="copy",
+                        verify=(StepCondition(type="path_exists", params={"path": "/sdcard/RetroArch/cores"}),),
+                    )
+                )
+            )
+            self.assertTrue(
+                document.apply_command(DuplicateStepCommand(source_step_id="copy", new_step_id="copy_duplicate"))
+            )
+            self.assertTrue(document.apply_command(ReorderStepCommand(step_id="copy_duplicate", to_index=0)))
+            self.assertTrue(document.apply_command(DeleteStepCommand(step_id="grant")))
+
+            self.assertEqual(document.working_recipe.steps[0].id, "copy_duplicate")
+            self.assertEqual(
+                tuple(step.type for step in document.working_recipe.steps),
+                (
+                    StepType.COPY_FILES,
+                    StepType.RESOLVE_ARTIFACTS,
+                    StepType.EXTRACT_ARTIFACTS,
+                    StepType.EXTRACT_ARCHIVE,
+                    StepType.COPY_FILES,
+                    StepType.INSTALL_APK,
+                    StepType.LAUNCH_APP,
+                    StepType.WAIT,
+                    StepType.FORCE_STOP_APP,
+                ),
+            )
+            copy_step = next(step for step in document.working_recipe.steps if step.id == "copy")
+            self.assertTrue(copy_step.user_toggleable)
+            self.assertEqual(copy_step.dependencies, ("resolve", "extract"))
+            self.assertEqual(copy_step.constraints.capabilities, ("shared_storage_write",))
+            self.assertEqual(copy_step.constraints.conflicts_with, ("stop",))
+            self.assertEqual(copy_step.skip_if[0].type, "package_installed")
+            self.assertEqual(copy_step.verify[0].type, "path_exists")
+            self.assertEqual(copy_step.params["copy_policy"], "sync")
+            self.assertEqual(copy_step.params["source"].ref, "inputs.source_dir")
+
+            install_step = next(step for step in document.working_recipe.steps if step.id == "install")
+            unpack_step = next(step for step in document.working_recipe.steps if step.id == "unpack")
+            extract_step = next(step for step in document.working_recipe.steps if step.id == "extract")
+            self.assertNotIn("replace_existing", install_step.params)
+            self.assertEqual(tuple(unpack_step.params), ("archive",))
+            self.assertEqual(extract_step.params, {"artifacts": ["base_zip"]})
+
+            emitted = document.to_yaml()
+            self.assertIn("steps:", emitted)
+            self.assertIn("ref: artifacts.archive_zip.local_path", emitted)
+            self.assertIn("ref: inputs.source_dir", emitted)
+            self.assertNotIn("replace_existing: false", emitted)
+            self.assertNotIn("extract_on: host", emitted)
+            self.assertNotIn("cleanup: true", emitted)
+
+    def test_step_delete_preserves_broken_dependency_for_diagnostics(self) -> None:
+        recipe = base_recipe(
+            recipe_id="example.recipe",
+            steps=[
+                {
+                    "id": "prepare",
+                    "type": "wait",
+                    "name": "Prepare",
+                    "user_toggleable": False,
+                    "dependencies": [],
+                    "constraints": {"capabilities": [], "conflicts_with": []},
+                    "params": {"duration_ms": 1000},
+                    "verify": [],
+                },
+                {
+                    "id": "consume",
+                    "type": "wait",
+                    "name": "Consume",
+                    "user_toggleable": False,
+                    "dependencies": ["prepare"],
+                    "constraints": {"capabilities": [], "conflicts_with": []},
+                    "params": {"duration_ms": 1000},
+                    "verify": [],
+                },
+            ],
+        )
+        with TemporaryDirectory() as tmp:
+            authored_root = build_authored_tree(Path(tmp), recipes=[recipe])
+            document = load_recipe_document(authored_root / "recipes" / "example_recipe.yaml")
+
+            self.assertTrue(document.apply_command(DeleteStepCommand(step_id="prepare")))
+
+            self.assertEqual(tuple(step.id for step in document.working_recipe.steps), ("consume",))
+            self.assertEqual(document.working_recipe.steps[0].dependencies, ("prepare",))
+            diagnostics = document.validation_result.diagnostics
+            self.assertIn("step_not_found", tuple(item.code for item in diagnostics))
+            dependency_error = next(item for item in diagnostics if item.code == "step_not_found")
+            self.assertEqual(dependency_error.field, "steps[0].dependencies[0]")
+
+    def test_supported_step_edit_preserves_serialized_unsupported_content(self) -> None:
+        recipe = base_recipe(
+            recipe_id="example.recipe",
+            inputs={
+                "source_dir": {
+                    "type": "directory",
+                    "role": "generic",
+                    "label": "Source Directory",
+                    "required": True,
+                    "multiple": False,
+                    "validation": {"must_exist": True, "allowed_extensions": [], "path_kind": "directory"},
+                }
+            },
+            steps=[
+                {
+                    "id": "copy",
+                    "type": "copy_files",
+                    "name": "Copy",
+                    "user_toggleable": False,
+                    "dependencies": [],
+                    "constraints": {
+                        "capabilities": ["shared_storage_write", "unsupported_capability"],
+                        "conflicts_with": ["missing_conflict"],
+                    },
+                    "params": {
+                        "source": {"ref": "inputs.source_dir"},
+                        "dest": "/sdcard/Example",
+                        "experimental_mode": {"enabled": True},
+                    },
+                    "skip_if": [
+                        {"type": "package_installed", "params": {"package_name": "com.example.app"}},
+                        {"type": "custom_skip", "params": {"foo": "bar"}},
+                    ],
+                    "verify": [
+                        {"type": "path_exists", "params": {"path": "/sdcard/Example"}},
+                        {"type": "custom_verify", "params": {"bar": "baz"}},
+                    ],
+                }
+            ],
+        )
+        with TemporaryDirectory() as tmp:
+            authored_root = build_authored_tree(Path(tmp), recipes=[recipe])
+            document = load_recipe_document(authored_root / "recipes" / "example_recipe.yaml")
+            before_yaml = document.to_yaml()
+            before_payload = yaml.safe_load(before_yaml)
+
+            self.assertTrue(
+                document.apply_command(
+                    UpdateStepBasicsCommand(
+                        step_id="copy",
+                        name="Copy Updated",
+                        description="Updated description.",
+                    )
+                )
+            )
+
+            after_yaml = document.to_yaml()
+            after_payload = yaml.safe_load(after_yaml)
+            before_step = before_payload["steps"][0]
+            after_step = after_payload["steps"][0]
+            self.assertEqual(before_step["params"]["experimental_mode"], after_step["params"]["experimental_mode"])
+            self.assertEqual(before_step["skip_if"][1], after_step["skip_if"][1])
+            self.assertEqual(before_step["verify"][1], after_step["verify"][1])
+            self.assertEqual(before_step["constraints"], after_step["constraints"])
+            self.assertIn("experimental_mode:", after_yaml)
+            self.assertIn("custom_skip", after_yaml)
+            self.assertIn("custom_verify", after_yaml)
+            self.assertIn("unsupported_capability", after_yaml)
+            self.assertIn("missing_conflict", after_yaml)
+
+    def test_step_output_refs_remain_explicit_and_do_not_add_dependencies(self) -> None:
+        recipe = base_recipe(
+            recipe_id="example.recipe",
+            artifacts={
+                "archive_zip": {"type": "remote_file", "url": "https://example.com/archive.zip"},
+            },
+            steps=[
+                {
+                    "id": "extract",
+                    "type": "extract_archive",
+                    "name": "Extract",
+                    "user_toggleable": False,
+                    "dependencies": [],
+                    "constraints": {"capabilities": [], "conflicts_with": []},
+                    "params": {"archive": {"ref": "artifacts.archive_zip.local_path"}},
+                    "verify": [],
+                },
+                {
+                    "id": "copy",
+                    "type": "copy_files",
+                    "name": "Copy",
+                    "user_toggleable": False,
+                    "dependencies": [],
+                    "constraints": {"capabilities": [], "conflicts_with": []},
+                    "params": {"dest": "/sdcard/Example"},
+                    "verify": [],
+                },
+            ],
+        )
+        with TemporaryDirectory() as tmp:
+            authored_root = build_authored_tree(Path(tmp), recipes=[recipe])
+            document = load_recipe_document(authored_root / "recipes" / "example_recipe.yaml")
+
+            self.assertTrue(
+                document.apply_command(
+                    UpdateStepParamsCommand(
+                        step_id="copy",
+                        params={
+                            "source": RefParamValue(ref="steps.extract.outputs.extracted_path"),
+                            "dest": "/sdcard/Example",
+                        },
+                    )
+                )
+            )
+
+            copy_step = next(step for step in document.working_recipe.steps if step.id == "copy")
+            self.assertEqual(copy_step.dependencies, ())
+            self.assertEqual(copy_step.params["source"].ref, "steps.extract.outputs.extracted_path")
+            self.assertIn("ref: steps.extract.outputs.extracted_path", document.to_yaml())
+            self.assertNotIn("ref: steps.extract\n", document.to_yaml())
+
+    def test_editing_supported_step_fields_preserves_unresolved_refs(self) -> None:
+        recipe = base_recipe(
+            recipe_id="example.recipe",
+            steps=[
+                {
+                    "id": "copy",
+                    "type": "copy_files",
+                    "name": "Copy",
+                    "user_toggleable": False,
+                    "dependencies": [],
+                    "constraints": {"capabilities": [], "conflicts_with": []},
+                    "params": {
+                        "source": {"ref": "steps.missing.outputs.copied_paths"},
+                        "dest": "/sdcard/Example",
+                    },
+                    "verify": [],
+                }
+            ],
+        )
+        with TemporaryDirectory() as tmp:
+            authored_root = build_authored_tree(Path(tmp), recipes=[recipe])
+            document = load_recipe_document(authored_root / "recipes" / "example_recipe.yaml")
+
+            self.assertTrue(
+                document.apply_command(
+                    UpdateStepBasicsCommand(
+                        step_id="copy",
+                        name="Copy Updated",
+                        description="Updated description.",
+                    )
+                )
+            )
+
+            copy_step = document.working_recipe.steps[0]
+            self.assertEqual(copy_step.params["source"].ref, "steps.missing.outputs.copied_paths")
+            self.assertIn("ref: steps.missing.outputs.copied_paths", document.to_yaml())
 
 
 if __name__ == "__main__":

@@ -12,6 +12,7 @@ from .inputs_page import InputsPage
 from .overview_page import OverviewPage
 from .placeholder import RecipeEditorPlaceholder
 from .permissions_page import PermissionsPage
+from .steps_page import StepsPage
 
 
 class RecipeEditor(QWidget):
@@ -25,11 +26,13 @@ class RecipeEditor(QWidget):
         self._inputs_page = InputsPage(command_handler)
         self._artifacts_page = ArtifactsPage(command_handler)
         self._artifact_groups_page = ArtifactGroupsPage(command_handler)
+        self._steps_page = StepsPage(command_handler)
         self._permissions_page = PermissionsPage(command_handler)
         self._tabs.addTab(self._overview_page, "Overview")
         self._tabs.addTab(self._inputs_page, "Inputs")
         self._tabs.addTab(self._artifacts_page, "Artifacts")
         self._tabs.addTab(self._artifact_groups_page, "Artifact Groups")
+        self._tabs.addTab(self._steps_page, "Steps")
         self._tabs.addTab(self._permissions_page, "Permissions")
 
         self._stack = QStackedWidget()
@@ -45,6 +48,7 @@ class RecipeEditor(QWidget):
         self._inputs_page.set_document(document)
         self._artifacts_page.set_document(document)
         self._artifact_groups_page.set_document(document)
+        self._steps_page.set_document(document)
         self._permissions_page.set_document(document)
         self._stack.setCurrentWidget(self._tabs)
 

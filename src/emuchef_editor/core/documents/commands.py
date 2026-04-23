@@ -2,11 +2,13 @@
 
 from __future__ import annotations
 
+from collections.abc import Mapping
 from dataclasses import dataclass, replace
 from typing import Literal
 
 from emuchef.domain import (
     AppOpGrant,
+    AuthoredParamValue,
     ArtifactCacheMode,
     InputDeclaration,
     InputRole,
@@ -16,8 +18,14 @@ from emuchef.domain import (
     PermissionSet,
     PermissionWhen,
     Recipe,
+    RefParamValue,
     RemoteFileArtifact,
     RuntimePermissionGrant,
+    STEP_SPECS,
+    Step,
+    StepCondition,
+    StepConstraints,
+    StepType,
 )
 
 
@@ -206,6 +214,74 @@ class UpdatePermissionPolicyFieldCommand:
     value: object
 
 
+@dataclass(frozen=True, slots=True)
+class AddStepCommand:
+    step_id: str
+    step_type: StepType | str
+    name: str
+    index: int | None = None
+
+
+@dataclass(frozen=True, slots=True)
+class UpdateStepBasicsCommand:
+    step_id: str
+    name: str
+    description: str | None
+
+
+@dataclass(frozen=True, slots=True)
+class DeleteStepCommand:
+    step_id: str
+
+
+@dataclass(frozen=True, slots=True)
+class DuplicateStepCommand:
+    source_step_id: str
+    new_step_id: str
+
+
+@dataclass(frozen=True, slots=True)
+class ReorderStepCommand:
+    step_id: str
+    to_index: int
+
+
+@dataclass(frozen=True, slots=True)
+class SetStepUserToggleableCommand:
+    step_id: str
+    user_toggleable: bool
+
+
+@dataclass(frozen=True, slots=True)
+class UpdateStepDependenciesCommand:
+    step_id: str
+    dependencies: tuple[str, ...]
+
+
+@dataclass(frozen=True, slots=True)
+class UpdateStepParamsCommand:
+    step_id: str
+    params: Mapping[str, AuthoredParamValue]
+
+
+@dataclass(frozen=True, slots=True)
+class UpdateStepConstraintsCommand:
+    step_id: str
+    constraints: StepConstraints
+
+
+@dataclass(frozen=True, slots=True)
+class UpdateStepSkipIfCommand:
+    step_id: str
+    skip_if: tuple[StepCondition, ...]
+
+
+@dataclass(frozen=True, slots=True)
+class UpdateStepVerifyCommand:
+    step_id: str
+    verify: tuple[StepCondition, ...]
+
+
 RecipeCommand = (
     SetOverviewFieldCommand
     | AddRecipeDependencyCommand
@@ -237,6 +313,17 @@ RecipeCommand = (
     | UpdateAppOpCommand
     | DeleteAppOpCommand
     | UpdatePermissionPolicyFieldCommand
+    | AddStepCommand
+    | UpdateStepBasicsCommand
+    | DeleteStepCommand
+    | DuplicateStepCommand
+    | ReorderStepCommand
+    | SetStepUserToggleableCommand
+    | UpdateStepDependenciesCommand
+    | UpdateStepParamsCommand
+    | UpdateStepConstraintsCommand
+    | UpdateStepSkipIfCommand
+    | UpdateStepVerifyCommand
 )
 
 
@@ -327,6 +414,28 @@ def apply_recipe_command(recipe: Recipe, command: RecipeCommand) -> tuple[Recipe
         return _delete_appop(recipe, command.index), "Delete app op"
     if isinstance(command, UpdatePermissionPolicyFieldCommand):
         return _update_permission_policy_field(recipe, command), f"Update permission policy {command.field}"
+    if isinstance(command, AddStepCommand):
+        return _add_step(recipe, command), "Add step"
+    if isinstance(command, UpdateStepBasicsCommand):
+        return _update_step_basics(recipe, command), f"Update step {command.step_id}"
+    if isinstance(command, DeleteStepCommand):
+        return _delete_step(recipe, command.step_id), "Delete step"
+    if isinstance(command, DuplicateStepCommand):
+        return _duplicate_step(recipe, command.source_step_id, command.new_step_id), "Duplicate step"
+    if isinstance(command, ReorderStepCommand):
+        return _reorder_step(recipe, command.step_id, command.to_index), "Reorder step"
+    if isinstance(command, SetStepUserToggleableCommand):
+        return _set_step_user_toggleable(recipe, command.step_id, command.user_toggleable), "Toggle step"
+    if isinstance(command, UpdateStepDependenciesCommand):
+        return _update_step_dependencies(recipe, command), f"Update dependencies for {command.step_id}"
+    if isinstance(command, UpdateStepParamsCommand):
+        return _update_step_params(recipe, command), f"Update params for {command.step_id}"
+    if isinstance(command, UpdateStepConstraintsCommand):
+        return _update_step_constraints(recipe, command), f"Update constraints for {command.step_id}"
+    if isinstance(command, UpdateStepSkipIfCommand):
+        return _update_step_skip_if(recipe, command), f"Update skip_if for {command.step_id}"
+    if isinstance(command, UpdateStepVerifyCommand):
+        return _update_step_verify(recipe, command), f"Update verify for {command.step_id}"
     raise TypeError(f"Unsupported recipe command: {type(command).__name__}")
 
 
@@ -594,6 +703,116 @@ def _update_permission_policy_field(recipe: Recipe, command: UpdatePermissionPol
     return _replace_permissions(recipe, policy=updated_policy)
 
 
+def _add_step(recipe: Recipe, command: AddStepCommand) -> Recipe:
+    step_id = _normalize_identifier(command.step_id, label="step id")
+    if any(step.id == step_id for step in recipe.steps):
+        raise ValueError(f"Step {step_id!r} already exists.")
+    step_type = _coerce_supported_step_type(command.step_type)
+    insertion_index = len(recipe.steps) if command.index is None else command.index
+    _validate_insert_index(insertion_index, len(recipe.steps), label="step")
+    steps = list(recipe.steps)
+    steps.insert(
+        insertion_index,
+        Step(
+            id=step_id,
+            type=step_type,
+            name=_required_text(command.name, label="step name"),
+            user_toggleable=False,
+            dependencies=(),
+            constraints=StepConstraints(),
+            skip_if=(),
+            params={},
+            verify=(),
+            description=None,
+        ),
+    )
+    return replace(recipe, steps=tuple(steps))
+
+
+def _update_step_basics(recipe: Recipe, command: UpdateStepBasicsCommand) -> Recipe:
+    step = _require_known_step(recipe, command.step_id)
+    updated = replace(
+        step,
+        name=_required_text(command.name, label="step name"),
+        description=_optional_text(command.description),
+    )
+    return replace(recipe, steps=_replace_step(recipe.steps, command.step_id, updated))
+
+
+def _delete_step(recipe: Recipe, step_id: str) -> Recipe:
+    _require_known_step(recipe, step_id)
+    return replace(recipe, steps=tuple(step for step in recipe.steps if step.id != step_id))
+
+
+def _duplicate_step(recipe: Recipe, source_step_id: str, new_step_id: str) -> Recipe:
+    source = _require_known_step(recipe, source_step_id)
+    normalized_id = _normalize_identifier(new_step_id, label="step id")
+    if any(step.id == normalized_id for step in recipe.steps):
+        raise ValueError(f"Step {normalized_id!r} already exists.")
+    source_index = _step_index(recipe.steps, source_step_id)
+    steps = list(recipe.steps)
+    steps.insert(source_index + 1, replace(source, id=normalized_id))
+    return replace(recipe, steps=tuple(steps))
+
+
+def _reorder_step(recipe: Recipe, step_id: str, to_index: int) -> Recipe:
+    steps = list(recipe.steps)
+    moved_steps = _move_item(steps, _step_index(recipe.steps, step_id), to_index)
+    return replace(recipe, steps=tuple(moved_steps))
+
+
+def _set_step_user_toggleable(recipe: Recipe, step_id: str, user_toggleable: bool) -> Recipe:
+    step = _require_known_step(recipe, step_id)
+    updated = replace(step, user_toggleable=bool(user_toggleable))
+    return replace(recipe, steps=_replace_step(recipe.steps, step_id, updated))
+
+
+def _update_step_dependencies(recipe: Recipe, command: UpdateStepDependenciesCommand) -> Recipe:
+    step = _require_known_step(recipe, command.step_id)
+    updated = replace(
+        step,
+        dependencies=_normalize_identifier_tuple(command.dependencies, label="step dependency id"),
+    )
+    return replace(recipe, steps=_replace_step(recipe.steps, command.step_id, updated))
+
+
+def _update_step_params(recipe: Recipe, command: UpdateStepParamsCommand) -> Recipe:
+    step = _require_known_step(recipe, command.step_id)
+    normalized_params = _normalize_step_params(step.type, command.params)
+    updated = replace(step, params=normalized_params)
+    return replace(recipe, steps=_replace_step(recipe.steps, command.step_id, updated))
+
+
+def _update_step_constraints(recipe: Recipe, command: UpdateStepConstraintsCommand) -> Recipe:
+    step = _require_known_step(recipe, command.step_id)
+    updated = replace(
+        step,
+        constraints=StepConstraints(
+            capabilities=_normalize_identifier_tuple(
+                command.constraints.capabilities,
+                label="step capability",
+            ),
+            conflicts_with=_normalize_identifier_tuple(
+                command.constraints.conflicts_with,
+                label="step conflict",
+            ),
+        ),
+    )
+    return replace(recipe, steps=_replace_step(recipe.steps, command.step_id, updated))
+
+
+def _update_step_skip_if(recipe: Recipe, command: UpdateStepSkipIfCommand) -> Recipe:
+    step = _require_known_step(recipe, command.step_id)
+    updated = replace(step, skip_if=tuple(command.skip_if))
+    return replace(recipe, steps=_replace_step(recipe.steps, command.step_id, updated))
+
+
+def _update_step_verify(recipe: Recipe, command: UpdateStepVerifyCommand) -> Recipe:
+    step = _require_known_step(recipe, command.step_id)
+    updated = replace(step, verify=tuple(command.verify))
+    return replace(recipe, steps=_replace_step(recipe.steps, command.step_id, updated))
+
+
 def _replace_permissions(
     recipe: Recipe,
     *,
@@ -625,6 +844,49 @@ def _normalize_permission_when(when: PermissionWhen | None) -> PermissionWhen | 
     if when.rooted is None and when.android_api_min is None and when.android_api_max is None:
         return None
     return when
+
+
+def _replace_step(steps: tuple[Step, ...], step_id: str, updated_step: Step) -> tuple[Step, ...]:
+    _step_index(steps, step_id)
+    return tuple(updated_step if step.id == step_id else step for step in steps)
+
+
+def _require_known_step(recipe: Recipe, step_id: str) -> Step:
+    for step in recipe.steps:
+        if step.id == step_id:
+            return step
+    raise ValueError(f"Unknown step {step_id!r}.")
+
+
+def _step_index(steps: tuple[Step, ...], step_id: str) -> int:
+    for index, step in enumerate(steps):
+        if step.id == step_id:
+            return index
+    raise ValueError(f"Unknown step {step_id!r}.")
+
+
+def _normalize_step_params(
+    step_type: StepType,
+    params: Mapping[str, AuthoredParamValue],
+) -> dict[str, AuthoredParamValue]:
+    normalized = dict(params)
+    spec = STEP_SPECS.get(step_type)
+    if spec is None:
+        return normalized
+    for param_name, param_spec in spec.params.items():
+        if param_name not in normalized or param_spec.default is None:
+            continue
+        if _param_value_equals_default(normalized[param_name], param_spec.default):
+            del normalized[param_name]
+    return normalized
+
+
+def _param_value_equals_default(value: AuthoredParamValue, default: object) -> bool:
+    if isinstance(value, RefParamValue):
+        return False
+    if hasattr(value, "value"):
+        return getattr(value, "value") == default
+    return value == default
 
 
 def _replace_mapping_value(mapping, key: str, value):
@@ -732,6 +994,20 @@ def _coerce_artifact_cache(value: object) -> ArtifactCacheMode:
     if isinstance(value, ArtifactCacheMode):
         return value
     return ArtifactCacheMode(str(value))
+
+
+def _coerce_supported_step_type(value: object) -> StepType:
+    step_type = value if isinstance(value, StepType) else StepType(str(value))
+    if step_type not in STEP_SPECS:
+        raise ValueError(f"Unsupported step type {step_type.value!r}.")
+    return step_type
+
+
+def _normalize_identifier_tuple(values: tuple[str, ...], *, label: str) -> tuple[str, ...]:
+    normalized = tuple(_normalize_identifier(value, label=label) for value in values)
+    if len(set(normalized)) != len(normalized):
+        raise ValueError(f"{label}s must be unique.")
+    return normalized
 
 
 def _coerce_allowed_extensions(value: object) -> tuple[str, ...]:

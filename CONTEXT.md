@@ -60,9 +60,10 @@ The current editor scope is recipe-authoring only. It edits:
 - Inputs
 - Artifacts
 - Artifact Groups
+- Steps
 - Permissions
 
-It does not yet edit steps or rewrite refs after id changes.
+It does not rewrite refs after id changes.
 
 Editor interaction rules:
 
@@ -78,6 +79,35 @@ Editor interaction rules:
 - dirty state is a semantic comparison against the last saved canonical YAML baseline
 - form-based editor pages keep labels right-aligned while data-entry fields stay left-aligned, expand to the available pane width, and anchor the entry group at the top-left of the editor pane
 - current field surfaces expose hover tooltips that explain authored field purpose, accepted values, and creation-time id semantics
+- the Steps page uses a master-detail layout with:
+  - ordered step list actions for add, delete, duplicate, reorder, and `user_toggleable`
+  - grouped step detail sections for basics, dependencies, params, constraints / `skip_if`, and `verify`
+  - a dependency editor card with add/remove actions over existing step ids only
+  - structured ref pickers over typed authored refs only
+  - auto-sizing params content that shrinks and grows with the active step form, visible preserved-content blocks, and `extract_archive.extract_on`
+  - auto-sizing ordered lists for dependencies, capabilities, `conflicts_with`, `skip_if`, and `verify`, with one visible empty row when a list has no items
+  - live diagnostics and YAML refresh after committed step edits
+- the editor persists explicit authored refs only:
+  - `inputs.<id>`
+  - `artifacts.<id>.<field>`
+  - `steps.<id>.outputs.<field>`
+- shorthand step refs may be offered as picker convenience labels, but saved YAML remains explicit `{ ref: ... }`
+- unresolved step refs remain preserved in the open document and are surfaced in the step editor as unresolved picker values
+- supported step-authoring surface currently includes:
+  - `resolve_artifacts`
+  - `extract_artifacts`
+  - `extract_archive`
+  - `copy_files`
+  - `install_apk`
+  - `grant_permissions`
+  - `launch_app`
+  - `wait`
+  - `force_stop_app`
+- step ids and step types are chosen at creation time and then remain read-only
+- dependency additions append to the end of the authored dependency list and are not re-sorted by the UI or YAML writer
+- deleting a step is allowed even when downstream dependencies or refs still target it; the shared validation path reports that breakage instead of the editor rewriting it
+- unsupported authored step params, condition entries, and constraint entries that the current UI does not edit are preserved semantically and round-trip unchanged when supported sections of the same step are edited
+- when unsupported constraint or condition entries are present, the affected destructive list operations stay locked and the preserved authored entries remain visible read-only
 
 Field-scope rules currently enforced by the editor:
 
@@ -214,6 +244,7 @@ Default CLI output groups issues by file.
 
 The editor reuses the same validation path in-process and maps shared warnings/errors into diagnostics for the open recipe document.
 When validating an open unsaved recipe against an authored root, the in-memory document replaces the current file's on-disk authored contribution for catalog-context checks.
+Unknown step dependencies are validation errors, not typed-model construction errors, so the editor can preserve downstream breakage after step deletion and surface it through diagnostics.
 
 ## Device/Profile Behavior
 

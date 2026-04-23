@@ -63,6 +63,7 @@ def validate_recipe_step_cycles(recipe: Recipe) -> tuple[ErrorMessage, ...]:
     by_id = {step.id: step for step in recipe.steps}
     permanent: set[str] = set()
     temporary: set[str] = set()
+    missing_dependencies: set[tuple[str, str]] = set()
     errors: list[ErrorMessage] = []
 
     def visit(step_id: str, stack: tuple[str, ...]) -> None:
@@ -78,8 +79,29 @@ def validate_recipe_step_cycles(recipe: Recipe) -> tuple[ErrorMessage, ...]:
                 )
             )
             return
+        step = by_id.get(step_id)
+        if step is None:
+            if not stack:
+                return
+            dependent_step_id = stack[-1]
+            missing_key = (dependent_step_id, step_id)
+            if missing_key in missing_dependencies:
+                return
+            missing_dependencies.add(missing_key)
+            errors.append(
+                ErrorMessage(
+                    code=ErrorCode.STEP_NOT_FOUND,
+                    message=f"Step {dependent_step_id!r} depends on unknown step {step_id!r}.",
+                    details={
+                        "recipe_ref": recipe.id,
+                        "step_id": dependent_step_id,
+                        "dependency": step_id,
+                    },
+                )
+            )
+            return
         temporary.add(step_id)
-        for dependency in by_id[step_id].dependencies:
+        for dependency in step.dependencies:
             visit(dependency, stack + (step_id,))
         temporary.remove(step_id)
         permanent.add(step_id)
