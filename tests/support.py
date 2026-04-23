@@ -41,6 +41,7 @@ def build_authored_tree(
     root: Path,
     *,
     recipes: list[dict],
+    recipe_templates: dict[str, dict] | None = None,
     selected_recipe_refs: list[str] | None = None,
     device_plan_overrides: dict | None = None,
     capability_defaults: dict | None = None,
@@ -132,5 +133,11 @@ def build_authored_tree(
             "metadata": {},
         },
     )
+
+    if recipe_templates:
+        template_root = root / "templates" / "authored"
+        template_root.mkdir(parents=True, exist_ok=True)
+        for filename, payload in recipe_templates.items():
+            write_yaml(template_root / filename, payload)
 
     return authored_root

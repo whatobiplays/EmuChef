@@ -11,6 +11,7 @@ from .artifacts_page import ArtifactsPage
 from .inputs_page import InputsPage
 from .overview_page import OverviewPage
 from .placeholder import RecipeEditorPlaceholder
+from .permissions_page import PermissionsPage
 
 
 class RecipeEditor(QWidget):
@@ -24,10 +25,12 @@ class RecipeEditor(QWidget):
         self._inputs_page = InputsPage(command_handler)
         self._artifacts_page = ArtifactsPage(command_handler)
         self._artifact_groups_page = ArtifactGroupsPage(command_handler)
+        self._permissions_page = PermissionsPage(command_handler)
         self._tabs.addTab(self._overview_page, "Overview")
         self._tabs.addTab(self._inputs_page, "Inputs")
         self._tabs.addTab(self._artifacts_page, "Artifacts")
         self._tabs.addTab(self._artifact_groups_page, "Artifact Groups")
+        self._tabs.addTab(self._permissions_page, "Permissions")
 
         self._stack = QStackedWidget()
         self._stack.addWidget(self._placeholder)
@@ -42,6 +45,7 @@ class RecipeEditor(QWidget):
         self._inputs_page.set_document(document)
         self._artifacts_page.set_document(document)
         self._artifact_groups_page.set_document(document)
+        self._permissions_page.set_document(document)
         self._stack.setCurrentWidget(self._tabs)
 
     def set_load_error(self, path, message: str) -> None:

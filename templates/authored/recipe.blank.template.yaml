@@ -1,0 +1,23 @@
+# Minimal authored recipe starter template.
+# Files under templates/ are examples only and are never loaded by EmuChef.
+# Copy this file into authored/recipes/ or use it through the config editor's
+# New Recipe flow.
+
+schema_version: 1
+kind: recipe
+id: new.recipe
+name: New Recipe
+description: Replace with the provisioning behavior this recipe performs.
+recipe_dependencies: []
+provides:
+  features: []
+inputs: {}
+artifacts: {}
+artifact_groups: {}
+permissions:
+  runtime: []
+  appops: []
+  policy:
+    on_failure: warn
+    require_all: false
+steps: []

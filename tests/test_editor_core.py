@@ -4,17 +4,22 @@ from pathlib import Path
 from tempfile import TemporaryDirectory
 import unittest
 
+from emuchef.domain import AppOpGrant, PermissionWhen, RuntimePermissionGrant
 from emuchef.io import load_authored_recipe
 from emuchef_editor.app.workspace.service import open_workspace, resolve_authored_root
 from emuchef_editor.core.documents.commands import (
     AddArtifactCommand,
     AddArtifactGroupCommand,
     AddArtifactGroupMemberCommand,
+    AddAppOpCommand,
     AddInputCommand,
     AddProvidedFeatureCommand,
     AddRecipeDependencyCommand,
+    AddRuntimePermissionCommand,
     DeleteArtifactCommand,
+    DeleteAppOpCommand,
     DeleteInputCommand,
+    DeleteRuntimePermissionCommand,
     DuplicateArtifactCommand,
     DuplicateInputCommand,
     MoveProvidedFeatureCommand,
@@ -25,13 +30,16 @@ from emuchef_editor.core.documents.commands import (
     ReorderArtifactGroupCommand,
     ReorderArtifactGroupMemberCommand,
     SetOverviewFieldCommand,
+    UpdateAppOpCommand,
     UpdateArtifactFieldCommand,
     UpdateInputFieldCommand,
+    UpdatePermissionPolicyFieldCommand,
     UpdateProvidedFeatureCommand,
     UpdateRecipeDependencyCommand,
+    UpdateRuntimePermissionCommand,
 )
 from emuchef_editor.core.validation.validator_service import ValidatorService
-from emuchef_editor.core.yaml.loader import load_recipe_document
+from emuchef_editor.core.yaml.loader import create_recipe_document_from_template, load_recipe_document
 
 from support import base_recipe, build_authored_tree
 
@@ -242,6 +250,42 @@ class EditorCoreTests(unittest.TestCase):
             self.assertEqual(authored_workspace.authored_root, authored_root.resolve())
             self.assertEqual(len(repo_workspace.recipe_files), 1)
             self.assertEqual(repo_workspace.recipe_files[0].name, "example_recipe.yaml")
+
+    def test_workspace_discovery_lists_recipe_templates_separately(self) -> None:
+        recipe = base_recipe(recipe_id="example.recipe", steps=[])
+        template = base_recipe(recipe_id="template.recipe", name="Template Recipe", steps=[])
+        blank_template = base_recipe(recipe_id="blank.recipe", name="Blank Recipe", steps=[])
+        with TemporaryDirectory() as tmp:
+            repo_root = Path(tmp)
+            authored_root = build_authored_tree(
+                repo_root,
+                recipes=[recipe],
+                recipe_templates={
+                    "recipe.template.yaml": template,
+                    "recipe.blank.template.yaml": blank_template,
+                    "device_plan.template.yaml": {
+                        "schema_version": 1,
+                        "kind": "device_plan",
+                        "id": "not.a.recipe",
+                        "name": "Not A Recipe",
+                        "description": "Should be ignored by recipe template discovery.",
+                        "device_profile_ref": "example.device_profile",
+                        "recipes": [],
+                        "defaults": {},
+                        "overrides": {},
+                        "metadata": {},
+                    },
+                },
+            )
+
+            repo_workspace = open_workspace(repo_root)
+            authored_workspace = open_workspace(authored_root)
+
+            self.assertEqual(
+                tuple(path.name for path in repo_workspace.template_files),
+                ("recipe.blank.template.yaml", "recipe.template.yaml"),
+            )
+            self.assertEqual(repo_workspace.template_files, authored_workspace.template_files)
 
     def test_overview_commands_update_fields_lists_and_live_yaml(self) -> None:
         recipe = base_recipe(recipe_id="example.recipe", steps=[])
@@ -495,6 +539,164 @@ class EditorCoreTests(unittest.TestCase):
             self.assertLess(emitted.index("  earlier_group:"), emitted.index("  final_group:"))
             self.assertIn("  later_group:\n  - zeta_artifact\n  - alpha_artifact", emitted)
             self.assertIn("  final_group:\n  - middle_artifact", emitted)
+
+    def test_permission_commands_support_runtime_appops_policy_and_when_normalization(self) -> None:
+        recipe = base_recipe(recipe_id="example.recipe", steps=[])
+        with TemporaryDirectory() as tmp:
+            authored_root = build_authored_tree(Path(tmp), recipes=[recipe])
+            document = load_recipe_document(authored_root / "recipes" / "example_recipe.yaml")
+
+            self.assertTrue(
+                document.apply_command(
+                    AddRuntimePermissionCommand(
+                        RuntimePermissionGrant(
+                            package_name="com.example.app",
+                            name="READ_MEDIA_VIDEO",
+                        )
+                    )
+                )
+            )
+            self.assertTrue(
+                document.apply_command(
+                    UpdateRuntimePermissionCommand(
+                        index=0,
+                        permission=RuntimePermissionGrant(
+                            package_name="com.example.updated",
+                            name="READ_MEDIA_AUDIO",
+                            required=False,
+                            when=PermissionWhen(),
+                        ),
+                    )
+                )
+            )
+            self.assertTrue(
+                document.apply_command(
+                    AddAppOpCommand(
+                        AppOpGrant(
+                            package_name="com.example.updated",
+                            op="WRITE_SETTINGS",
+                            mode="allow",
+                        )
+                    )
+                )
+            )
+            self.assertTrue(
+                document.apply_command(
+                    UpdateAppOpCommand(
+                        index=0,
+                        appop=AppOpGrant(
+                            package_name="com.example.updated",
+                            op="SYSTEM_ALERT_WINDOW",
+                            mode="ignore",
+                            required=False,
+                            when=PermissionWhen(rooted=True, android_api_min=30, android_api_max=34),
+                        ),
+                    )
+                )
+            )
+            self.assertTrue(
+                document.apply_command(
+                    UpdatePermissionPolicyFieldCommand(field="on_failure", value="fail")
+                )
+            )
+            self.assertTrue(
+                document.apply_command(
+                    UpdatePermissionPolicyFieldCommand(field="require_all", value=True)
+                )
+            )
+            self.assertTrue(document.apply_command(DeleteRuntimePermissionCommand(index=0)))
+            self.assertTrue(
+                document.apply_command(
+                    AddRuntimePermissionCommand(
+                        RuntimePermissionGrant(
+                            package_name="com.example.updated",
+                            name="POST_NOTIFICATIONS",
+                            required=False,
+                            when=PermissionWhen(rooted=False, android_api_min=33),
+                        )
+                    )
+                )
+            )
+            self.assertTrue(document.apply_command(DeleteAppOpCommand(index=0)))
+
+            permissions = document.working_recipe.permissions
+            self.assertEqual(len(permissions.runtime), 1)
+            self.assertEqual(permissions.runtime[0].package_name, "com.example.updated")
+            self.assertEqual(permissions.runtime[0].when.rooted, False)
+            self.assertEqual(permissions.runtime[0].when.android_api_min, 33)
+            self.assertIsNone(permissions.runtime[0].when.android_api_max)
+            self.assertEqual(permissions.appops, ())
+            self.assertEqual(permissions.policy.on_failure, "fail")
+            self.assertTrue(permissions.policy.require_all)
+            self.assertIn("permissions:", document.to_yaml())
+            self.assertIn("POST_NOTIFICATIONS", document.to_yaml())
+            self.assertIn("on_failure: fail", document.to_yaml())
+            self.assertIn("require_all: true", document.to_yaml())
+
+    def test_save_as_updates_document_path_and_preserves_history(self) -> None:
+        recipe = base_recipe(recipe_id="example.recipe", steps=[])
+        with TemporaryDirectory() as tmp:
+            authored_root = build_authored_tree(Path(tmp), recipes=[recipe])
+            original_path = authored_root / "recipes" / "example_recipe.yaml"
+            save_as_path = authored_root / "recipes" / "copied_recipe.yaml"
+            document = load_recipe_document(original_path)
+
+            self.assertTrue(
+                document.apply_command(SetOverviewFieldCommand(field="name", value="Renamed Recipe"))
+            )
+            self.assertTrue(document.can_undo)
+            payload = document.save_as(save_as_path)
+
+            self.assertEqual(document.path, save_as_path.resolve())
+            self.assertTrue(save_as_path.exists())
+            self.assertEqual(save_as_path.read_text(encoding="utf-8"), payload)
+            self.assertFalse(document.is_dirty)
+            self.assertTrue(document.can_undo)
+
+            self.assertTrue(document.undo())
+            self.assertTrue(document.is_dirty)
+            self.assertEqual(document.working_recipe.name, "Example Recipe")
+
+            self.assertTrue(document.redo())
+            self.assertFalse(document.is_dirty)
+            self.assertEqual(document.working_recipe.name, "Renamed Recipe")
+
+    def test_create_recipe_document_from_template_writes_destination_and_opens_clean_document(self) -> None:
+        recipe = base_recipe(recipe_id="example.recipe", steps=[])
+        template = base_recipe(
+            recipe_id="template.recipe",
+            name="Template Recipe",
+            steps=[],
+            permissions={
+                "runtime": [{"package_name": "com.example.app", "name": "POST_NOTIFICATIONS"}],
+                "policy": {"on_failure": "warn", "require_all": False},
+            },
+        )
+        with TemporaryDirectory() as tmp:
+            repo_root = Path(tmp)
+            authored_root = build_authored_tree(
+                repo_root,
+                recipes=[recipe],
+                recipe_templates={"recipe.template.yaml": template},
+            )
+            destination_path = authored_root / "recipes" / "new_recipe.yaml"
+
+            document = create_recipe_document_from_template(
+                repo_root / "templates" / "authored" / "recipe.template.yaml",
+                destination_path=destination_path,
+                recipe_id="created.recipe",
+                authored_root=authored_root,
+            )
+
+            self.assertEqual(document.path, destination_path.resolve())
+            self.assertEqual(document.working_recipe.id, "created.recipe")
+            self.assertEqual(document.working_recipe.name, "Template Recipe")
+            self.assertFalse(document.is_dirty)
+            self.assertFalse(document.can_undo)
+            self.assertTrue(destination_path.exists())
+            written = destination_path.read_text(encoding="utf-8")
+            self.assertIn("id: created.recipe", written)
+            self.assertIn("name: Template Recipe", written)
 
 
 if __name__ == "__main__":

@@ -5,7 +5,20 @@ from __future__ import annotations
 from dataclasses import dataclass, replace
 from typing import Literal
 
-from emuchef.domain import ArtifactCacheMode, InputDeclaration, InputRole, InputType, InputValidation, Recipe, RemoteFileArtifact
+from emuchef.domain import (
+    AppOpGrant,
+    ArtifactCacheMode,
+    InputDeclaration,
+    InputRole,
+    InputType,
+    InputValidation,
+    PermissionPolicy,
+    PermissionSet,
+    PermissionWhen,
+    Recipe,
+    RemoteFileArtifact,
+    RuntimePermissionGrant,
+)
 
 
 @dataclass(frozen=True, slots=True)
@@ -153,6 +166,46 @@ class ReorderArtifactGroupMemberCommand:
     to_index: int
 
 
+@dataclass(frozen=True, slots=True)
+class AddRuntimePermissionCommand:
+    permission: RuntimePermissionGrant
+    index: int | None = None
+
+
+@dataclass(frozen=True, slots=True)
+class UpdateRuntimePermissionCommand:
+    index: int
+    permission: RuntimePermissionGrant
+
+
+@dataclass(frozen=True, slots=True)
+class DeleteRuntimePermissionCommand:
+    index: int
+
+
+@dataclass(frozen=True, slots=True)
+class AddAppOpCommand:
+    appop: AppOpGrant
+    index: int | None = None
+
+
+@dataclass(frozen=True, slots=True)
+class UpdateAppOpCommand:
+    index: int
+    appop: AppOpGrant
+
+
+@dataclass(frozen=True, slots=True)
+class DeleteAppOpCommand:
+    index: int
+
+
+@dataclass(frozen=True, slots=True)
+class UpdatePermissionPolicyFieldCommand:
+    field: Literal["on_failure", "require_all"]
+    value: object
+
+
 RecipeCommand = (
     SetOverviewFieldCommand
     | AddRecipeDependencyCommand
@@ -177,6 +230,13 @@ RecipeCommand = (
     | AddArtifactGroupMemberCommand
     | RemoveArtifactGroupMemberCommand
     | ReorderArtifactGroupMemberCommand
+    | AddRuntimePermissionCommand
+    | UpdateRuntimePermissionCommand
+    | DeleteRuntimePermissionCommand
+    | AddAppOpCommand
+    | UpdateAppOpCommand
+    | DeleteAppOpCommand
+    | UpdatePermissionPolicyFieldCommand
 )
 
 
@@ -253,6 +313,20 @@ def apply_recipe_command(recipe: Recipe, command: RecipeCommand) -> tuple[Recipe
         return _remove_artifact_group_member(recipe, command.group_id, command.index), "Remove group member"
     if isinstance(command, ReorderArtifactGroupMemberCommand):
         return _reorder_artifact_group_member(recipe, command.group_id, command.index, command.to_index), "Reorder group member"
+    if isinstance(command, AddRuntimePermissionCommand):
+        return _add_runtime_permission(recipe, command.permission, command.index), "Add runtime permission"
+    if isinstance(command, UpdateRuntimePermissionCommand):
+        return _update_runtime_permission(recipe, command.index, command.permission), "Update runtime permission"
+    if isinstance(command, DeleteRuntimePermissionCommand):
+        return _delete_runtime_permission(recipe, command.index), "Delete runtime permission"
+    if isinstance(command, AddAppOpCommand):
+        return _add_appop(recipe, command.appop, command.index), "Add app op"
+    if isinstance(command, UpdateAppOpCommand):
+        return _update_appop(recipe, command.index, command.appop), "Update app op"
+    if isinstance(command, DeleteAppOpCommand):
+        return _delete_appop(recipe, command.index), "Delete app op"
+    if isinstance(command, UpdatePermissionPolicyFieldCommand):
+        return _update_permission_policy_field(recipe, command), f"Update permission policy {command.field}"
     raise TypeError(f"Unsupported recipe command: {type(command).__name__}")
 
 
@@ -459,6 +533,98 @@ def _reorder_artifact_group_member(recipe: Recipe, group_id: str, index: int, to
     members = list(recipe.artifact_groups[group_id])
     moved_members = _move_item(members, index, to_index)
     return replace(recipe, artifact_groups=_replace_mapping_value(recipe.artifact_groups, group_id, tuple(moved_members)))
+
+
+def _add_runtime_permission(
+    recipe: Recipe,
+    permission: RuntimePermissionGrant,
+    index: int | None,
+) -> Recipe:
+    permissions = list(recipe.permissions.runtime)
+    insertion_index = len(permissions) if index is None else index
+    _validate_insert_index(insertion_index, len(permissions), label="runtime permission")
+    permissions.insert(insertion_index, _normalize_runtime_permission(permission))
+    return _replace_permissions(recipe, runtime=tuple(permissions))
+
+
+def _update_runtime_permission(recipe: Recipe, index: int, permission: RuntimePermissionGrant) -> Recipe:
+    permissions = list(recipe.permissions.runtime)
+    _validate_index(index, len(permissions), label="runtime permission")
+    permissions[index] = _normalize_runtime_permission(permission)
+    return _replace_permissions(recipe, runtime=tuple(permissions))
+
+
+def _delete_runtime_permission(recipe: Recipe, index: int) -> Recipe:
+    permissions = list(recipe.permissions.runtime)
+    _validate_index(index, len(permissions), label="runtime permission")
+    del permissions[index]
+    return _replace_permissions(recipe, runtime=tuple(permissions))
+
+
+def _add_appop(recipe: Recipe, appop: AppOpGrant, index: int | None) -> Recipe:
+    appops = list(recipe.permissions.appops)
+    insertion_index = len(appops) if index is None else index
+    _validate_insert_index(insertion_index, len(appops), label="app op")
+    appops.insert(insertion_index, _normalize_appop(appop))
+    return _replace_permissions(recipe, appops=tuple(appops))
+
+
+def _update_appop(recipe: Recipe, index: int, appop: AppOpGrant) -> Recipe:
+    appops = list(recipe.permissions.appops)
+    _validate_index(index, len(appops), label="app op")
+    appops[index] = _normalize_appop(appop)
+    return _replace_permissions(recipe, appops=tuple(appops))
+
+
+def _delete_appop(recipe: Recipe, index: int) -> Recipe:
+    appops = list(recipe.permissions.appops)
+    _validate_index(index, len(appops), label="app op")
+    del appops[index]
+    return _replace_permissions(recipe, appops=tuple(appops))
+
+
+def _update_permission_policy_field(recipe: Recipe, command: UpdatePermissionPolicyFieldCommand) -> Recipe:
+    policy = recipe.permissions.policy
+    if command.field == "on_failure":
+        updated_policy = replace(policy, on_failure=_required_text(command.value, label="permission policy on_failure"))
+    elif command.field == "require_all":
+        updated_policy = replace(policy, require_all=bool(command.value))
+    else:
+        raise ValueError(f"Unknown permission policy field {command.field!r}.")
+    return _replace_permissions(recipe, policy=updated_policy)
+
+
+def _replace_permissions(
+    recipe: Recipe,
+    *,
+    runtime: tuple[RuntimePermissionGrant, ...] | None = None,
+    appops: tuple[AppOpGrant, ...] | None = None,
+    policy: PermissionPolicy | None = None,
+) -> Recipe:
+    return replace(
+        recipe,
+        permissions=PermissionSet(
+            runtime=recipe.permissions.runtime if runtime is None else runtime,
+            appops=recipe.permissions.appops if appops is None else appops,
+            policy=recipe.permissions.policy if policy is None else policy,
+        ),
+    )
+
+
+def _normalize_runtime_permission(permission: RuntimePermissionGrant) -> RuntimePermissionGrant:
+    return replace(permission, when=_normalize_permission_when(permission.when))
+
+
+def _normalize_appop(appop: AppOpGrant) -> AppOpGrant:
+    return replace(appop, when=_normalize_permission_when(appop.when))
+
+
+def _normalize_permission_when(when: PermissionWhen | None) -> PermissionWhen | None:
+    if when is None:
+        return None
+    if when.rooted is None and when.android_api_min is None and when.android_api_max is None:
+        return None
+    return when
 
 
 def _replace_mapping_value(mapping, key: str, value):

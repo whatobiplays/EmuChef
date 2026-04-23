@@ -5,12 +5,14 @@ from __future__ import annotations
 from pathlib import Path
 
 from PySide6.QtCore import Qt
-from PySide6.QtGui import QAction, QKeySequence
+from PySide6.QtGui import QAction, QCloseEvent, QKeySequence
 from PySide6.QtWidgets import (
+    QDialog,
     QFileDialog,
     QListWidget,
     QListWidgetItem,
     QMainWindow,
+    QMessageBox,
     QSplitter,
     QTabWidget,
 )
@@ -19,9 +21,9 @@ from emuchef.planner.catalog import CatalogLoadError
 from emuchef_editor.core.documents.commands import RecipeCommand
 from emuchef_editor.core.documents.recipe_document import RecipeDocument
 from emuchef_editor.core.validation.validator_service import DiagnosticResult, ValidatorService
-from emuchef_editor.core.yaml.loader import load_recipe_document
+from emuchef_editor.core.yaml.loader import create_recipe_document_from_template, load_recipe_document
 
-from .recipe_editor import RecipeEditor
+from .recipe_editor import NewRecipeDialog, RecipeEditor
 from .shared.diagnostics_view import DiagnosticsView
 from .shared.yaml_preview import YamlPreview
 from .workspace.service import WorkspaceState, open_workspace
@@ -56,9 +58,17 @@ class MainWindow(QMainWindow):
 
         self._open_workspace_action = QAction("Open Workspace...", self)
         self._open_workspace_action.triggered.connect(self.open_workspace_dialog)
-        self._save_action = QAction("Save Canonical YAML", self)
+        self._new_recipe_action = QAction("New Recipe...", self)
+        self._new_recipe_action.setShortcut(QKeySequence.StandardKey.New)
+        self._new_recipe_action.triggered.connect(self.start_new_recipe_flow)
+        self._save_action = QAction("Save", self)
+        self._save_action.setShortcut(QKeySequence.StandardKey.Save)
         self._save_action.triggered.connect(self.save_current_document)
         self._save_action.setEnabled(False)
+        self._save_as_action = QAction("Save As...", self)
+        self._save_as_action.setShortcut(QKeySequence.StandardKey.SaveAs)
+        self._save_as_action.triggered.connect(self.save_current_document_as)
+        self._save_as_action.setEnabled(False)
         self._undo_action = QAction("Undo", self)
         self._undo_action.setShortcut(QKeySequence.StandardKey.Undo)
         self._undo_action.triggered.connect(self.undo_current_document)
@@ -70,14 +80,18 @@ class MainWindow(QMainWindow):
 
         file_menu = self.menuBar().addMenu("File")
         file_menu.addAction(self._open_workspace_action)
+        file_menu.addAction(self._new_recipe_action)
         file_menu.addAction(self._save_action)
+        file_menu.addAction(self._save_as_action)
         edit_menu = self.menuBar().addMenu("Edit")
         edit_menu.addAction(self._undo_action)
         edit_menu.addAction(self._redo_action)
 
         toolbar = self.addToolBar("Main")
         toolbar.addAction(self._open_workspace_action)
+        toolbar.addAction(self._new_recipe_action)
         toolbar.addAction(self._save_action)
+        toolbar.addAction(self._save_as_action)
         toolbar.addAction(self._undo_action)
         toolbar.addAction(self._redo_action)
 
@@ -86,7 +100,7 @@ class MainWindow(QMainWindow):
         self._refresh_window_title()
 
         if workspace_root is not None:
-            self.open_workspace(workspace_root)
+            self.open_workspace(workspace_root, guard_unsaved=False)
 
     @property
     def current_document(self) -> RecipeDocument | None:
@@ -101,7 +115,9 @@ class MainWindow(QMainWindow):
         if selected:
             self.open_workspace(selected)
 
-    def open_workspace(self, root: str | Path) -> None:
+    def open_workspace(self, root: str | Path, *, guard_unsaved: bool = True) -> None:
+        if guard_unsaved and not self._confirm_unsaved_transition():
+            return
         try:
             self._workspace_state = open_workspace(root)
         except ValueError as exc:
@@ -114,19 +130,19 @@ class MainWindow(QMainWindow):
             self._refresh_window_title()
             return
 
-        self._workspace_list.clear()
-        for recipe_file in self._workspace_state.recipe_files:
-            item = QListWidgetItem(recipe_file.relative_to(self._workspace_state.authored_root).as_posix())
-            item.setData(Qt.ItemDataRole.UserRole, str(recipe_file))
-            self._workspace_list.addItem(item)
-
         self._current_document = None
         self._editor_view.clear()
         self._clear_document_views()
+        self._populate_workspace_items()
         self.statusBar().showMessage(f"Loaded workspace {self._workspace_state.authored_root}")
         self._refresh_window_title()
 
-    def open_recipe_file(self, recipe_path: str | Path) -> None:
+    def start_new_recipe_flow(self) -> None:
+        self._start_new_recipe_flow()
+
+    def open_recipe_file(self, recipe_path: str | Path, *, guard_unsaved: bool = True) -> None:
+        if guard_unsaved and not self._confirm_unsaved_transition():
+            return
         authored_root = self._workspace_state.authored_root if self._workspace_state is not None else None
         try:
             document = load_recipe_document(
@@ -141,15 +157,47 @@ class MainWindow(QMainWindow):
 
         self._current_document = document
         self._sync_current_document()
+        self._select_workspace_path(document.path)
         self.statusBar().showMessage(f"Opened {document.path.name}")
         self._refresh_window_title()
 
-    def save_current_document(self) -> None:
+    def save_current_document(self) -> bool:
         if self._current_document is None:
-            return
-        self._current_document.save()
+            return False
+        try:
+            self._current_document.save()
+        except (OSError, ValueError) as exc:
+            self.statusBar().showMessage(f"Save failed: {exc}")
+            return False
         self._sync_current_document()
         self.statusBar().showMessage(f"Saved {self._current_document.path.name}")
+        return True
+
+    def save_current_document_as(self) -> bool:
+        if self._current_document is None:
+            return False
+        selected, _filter = QFileDialog.getSaveFileName(
+            self,
+            "Save Recipe As",
+            str(self._current_document.path),
+            "YAML Files (*.yaml *.yml)",
+        )
+        if not selected:
+            return False
+        destination_path = Path(selected).resolve()
+        if destination_path.exists() and not self._confirm_overwrite(destination_path):
+            self.statusBar().showMessage("Save As canceled.")
+            return False
+        try:
+            self._current_document.save_as(destination_path)
+        except (OSError, ValueError) as exc:
+            self.statusBar().showMessage(f"Save As failed: {exc}")
+            return False
+        self._populate_workspace_items()
+        self._select_workspace_path(destination_path)
+        self._sync_current_document()
+        self.statusBar().showMessage(f"Saved {destination_path.name}")
+        return True
 
     def undo_current_document(self) -> None:
         if self._current_document is None:
@@ -166,9 +214,12 @@ class MainWindow(QMainWindow):
             self.statusBar().showMessage(f"Redid change in {self._current_document.path.name}")
 
     def _open_item(self, item: QListWidgetItem) -> None:
-        recipe_path = item.data(Qt.ItemDataRole.UserRole)
-        if recipe_path:
-            self.open_recipe_file(recipe_path)
+        item_data = item.data(Qt.ItemDataRole.UserRole) or {}
+        item_kind = item_data.get("kind")
+        if item_kind == "recipe":
+            self.open_recipe_file(item_data["path"])
+        elif item_kind == "template":
+            self._start_new_recipe_flow(preselected_template=Path(item_data["path"]))
 
     def _show_load_failure(
         self,
@@ -181,6 +232,7 @@ class MainWindow(QMainWindow):
         self._diagnostics_view.set_result(diagnostics)
         self._yaml_preview.set_yaml("")
         self._save_action.setEnabled(False)
+        self._save_as_action.setEnabled(False)
         self._undo_action.setEnabled(False)
         self._redo_action.setEnabled(False)
         self.statusBar().showMessage(f"Failed to load {Path(recipe_path).name}")
@@ -206,6 +258,7 @@ class MainWindow(QMainWindow):
         self._diagnostics_view.set_result(self._current_document.validation_result)
         self._yaml_preview.set_yaml(self._current_document.to_yaml())
         self._save_action.setEnabled(True)
+        self._save_as_action.setEnabled(True)
         self._undo_action.setEnabled(self._current_document.can_undo)
         self._redo_action.setEnabled(self._current_document.can_redo)
         self._refresh_window_title()
@@ -214,6 +267,7 @@ class MainWindow(QMainWindow):
         self._diagnostics_view.set_result(None)
         self._yaml_preview.set_yaml("")
         self._save_action.setEnabled(False)
+        self._save_as_action.setEnabled(False)
         self._undo_action.setEnabled(False)
         self._redo_action.setEnabled(False)
 
@@ -229,6 +283,132 @@ class MainWindow(QMainWindow):
             else "No document"
         )
         self.setWindowTitle(f"EmuChef Editor | {workspace_title} | {document_title}")
+
+    def closeEvent(self, event: QCloseEvent) -> None:  # type: ignore[override]
+        if self._confirm_unsaved_transition():
+            event.accept()
+            return
+        event.ignore()
+
+    def _start_new_recipe_flow(self, *, preselected_template: Path | None = None) -> None:
+        if self._workspace_state is None:
+            self.statusBar().showMessage("Open a workspace before creating a new recipe.")
+            return
+        if not self._confirm_unsaved_transition():
+            return
+        if not self._workspace_state.template_files:
+            self.statusBar().showMessage("No recipe templates were found for this workspace.")
+            return
+        dialog = NewRecipeDialog(
+            template_paths=self._workspace_state.template_files,
+            authored_root=self._workspace_state.authored_root,
+            preselected_template=preselected_template,
+            parent=self,
+        )
+        if dialog.exec() != QDialog.DialogCode.Accepted:
+            return
+        try:
+            request = dialog.request()
+            if request.destination_path.exists() and not self._confirm_overwrite(request.destination_path):
+                self.statusBar().showMessage("New recipe creation canceled.")
+                return
+            document = create_recipe_document_from_template(
+                request.template_path,
+                destination_path=request.destination_path,
+                recipe_id=request.recipe_id,
+                authored_root=self._workspace_state.authored_root,
+                validator_service=self._validator_service,
+            )
+        except (CatalogLoadError, OSError, ValueError) as exc:
+            self.statusBar().showMessage(f"New recipe creation failed: {exc}")
+            return
+
+        self._current_document = document
+        self._populate_workspace_items()
+        self._select_workspace_path(document.path)
+        self._sync_current_document()
+        self.statusBar().showMessage(f"Created {document.path.name}")
+
+    def _populate_workspace_items(self) -> None:
+        self._workspace_list.clear()
+        if self._workspace_state is None:
+            return
+        self._add_workspace_header("Authored Recipes")
+        for recipe_file in self._workspace_state.recipe_files:
+            self._add_workspace_item(
+                recipe_file.relative_to(self._workspace_state.authored_root).as_posix(),
+                kind="recipe",
+                path=recipe_file,
+            )
+        if self._workspace_state.template_files:
+            self._add_workspace_header("Templates")
+            for template_file in self._workspace_state.template_files:
+                self._add_workspace_item(
+                    template_file.relative_to(self._workspace_state.authored_root.parent).as_posix(),
+                    kind="template",
+                    path=template_file,
+                )
+
+    def _add_workspace_header(self, label: str) -> None:
+        item = QListWidgetItem(label)
+        item.setData(Qt.ItemDataRole.UserRole, {"kind": "header"})
+        item.setFlags(Qt.ItemFlag.ItemIsEnabled)
+        self._workspace_list.addItem(item)
+
+    def _add_workspace_item(self, label: str, *, kind: str, path: Path) -> None:
+        item = QListWidgetItem(label)
+        item.setData(
+            Qt.ItemDataRole.UserRole,
+            {"kind": kind, "path": str(path.resolve())},
+        )
+        self._workspace_list.addItem(item)
+
+    def _select_workspace_path(self, path: Path) -> None:
+        target = path.resolve()
+        for index in range(self._workspace_list.count()):
+            item = self._workspace_list.item(index)
+            item_data = item.data(Qt.ItemDataRole.UserRole) or {}
+            if item_data.get("path") == str(target):
+                self._workspace_list.setCurrentItem(item)
+                return
+
+    def _confirm_unsaved_transition(self) -> bool:
+        if self._current_document is None or not self._current_document.is_dirty:
+            return True
+        response = self._prompt_unsaved_changes()
+        if response == QMessageBox.StandardButton.Save:
+            return self.save_current_document()
+        if response == QMessageBox.StandardButton.Discard:
+            return True
+        return False
+
+    def _prompt_unsaved_changes(self) -> QMessageBox.StandardButton:
+        box = QMessageBox(self)
+        box.setWindowTitle("Unsaved Changes")
+        box.setText("Save changes before continuing?")
+        save_button = box.addButton("Save", QMessageBox.ButtonRole.AcceptRole)
+        discard_button = box.addButton("Don’t Save", QMessageBox.ButtonRole.DestructiveRole)
+        cancel_button = box.addButton("Cancel", QMessageBox.ButtonRole.RejectRole)
+        box.setDefaultButton(save_button)
+        box.exec()
+        clicked = box.clickedButton()
+        if clicked is save_button:
+            return QMessageBox.StandardButton.Save
+        if clicked is discard_button:
+            return QMessageBox.StandardButton.Discard
+        if clicked is cancel_button:
+            return QMessageBox.StandardButton.Cancel
+        return QMessageBox.StandardButton.Cancel
+
+    def _confirm_overwrite(self, destination_path: Path) -> bool:
+        response = QMessageBox.question(
+            self,
+            "Overwrite Existing File?",
+            f"{destination_path.name} already exists. Overwrite it?",
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+            QMessageBox.StandardButton.No,
+        )
+        return response == QMessageBox.StandardButton.Yes
 
 
 def _format_catalog_load_error(error: CatalogLoadError) -> str:

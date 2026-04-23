@@ -95,6 +95,14 @@ class RecipeDocument:
         self._refresh_derived_state()
         return payload
 
+    def save_as(self, path: str | Path) -> str:
+        target_path = Path(path).resolve()
+        payload = write_recipe_yaml(self.working_recipe, target_path)
+        self.path = target_path
+        self._baseline_yaml = payload
+        self._refresh_derived_state()
+        return payload
+
     def _refresh_derived_state(self, *, canonical_yaml: str | None = None) -> None:
         self._canonical_yaml = canonical_yaml or emit_recipe_yaml(self.working_recipe)
         self.ref_index = build_ref_index(self.working_recipe)

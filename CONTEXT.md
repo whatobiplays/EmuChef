@@ -60,6 +60,7 @@ The current editor scope is recipe-authoring only. It edits:
 - Inputs
 - Artifacts
 - Artifact Groups
+- Permissions
 
 It does not yet edit steps or rewrite refs after id changes.
 
@@ -67,6 +68,11 @@ Editor interaction rules:
 
 - edits apply immediately to the in-memory recipe document
 - save is explicit and writes canonical YAML to disk
+- Save As writes canonical YAML to a new path, updates the open document path and saved baseline, and keeps undo/redo history intact
+- new recipes are created from recipe templates under `templates/authored/`, including a blank recipe template
+- template preview is read-only and informational
+- the workspace lists authored recipes separately from recipe templates
+- unsaved-changes prompts gate opening another recipe, starting a new recipe, and closing the window
 - diagnostics and YAML preview refresh after each committed edit
 - undo and redo operate at command granularity and persist across saves for the open document
 - dirty state is a semantic comparison against the last saved canonical YAML baseline
@@ -79,6 +85,8 @@ Field-scope rules currently enforced by the editor:
 - `schema_version` is read-only and reflects latest-schema-only support
 - artifact kind support is currently limited to `remote_file`
 - input, artifact, and artifact-group ids are chosen at creation time and then remain read-only
+- permission editing is limited to the current shared authored schema surface: `runtime`, `appops`, and `policy`
+- unsupported permission keys or shapes that the shared authored loader cannot represent fail load/validation explicitly and are not normalized by the editor
 - deleting inputs, artifacts, or groups does not rewrite step refs
 - deleting an artifact removes it from artifact-group memberships, but does not rewrite step refs
 
@@ -261,6 +269,16 @@ Example authored templates live under `templates/authored/`.
 They are intentionally outside `authored/` so the loader never treats them as
 real authored inputs.
 
+The recipe editor treats recipe templates as creation sources, not as normal
+editable authored recipe documents.
+Recipe template choices currently include:
+
+- `recipe.template.yaml`
+- `recipe.blank.template.yaml`
+
+Creating a new recipe from a template writes the destination file immediately
+and only opens the new document after the write succeeds.
+
 The templates now document accepted values and current authoring conventions for:
 
 - kinds
@@ -299,7 +317,7 @@ Current ordering rules inside canonical recipe YAML:
 
 Known intentional gaps:
 
-- recipe section editing widgets are not implemented yet
+- step editing widgets are not implemented yet
 - executor remains single-threaded
 - artifact download uses Python stdlib networking only
 - archive extraction is still ZIP-oriented in practice
