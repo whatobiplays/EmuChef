@@ -57,6 +57,8 @@ from .common import (
     CommitPlainTextEdit,
     CurrentWidgetSizeStack,
     TextEntryDialog,
+    add_tooltipped_form_row,
+    apply_tooltip,
     configure_data_entry_form,
     create_expanding_combo_box,
     create_expanding_line_edit,
@@ -71,6 +73,7 @@ from .step_metadata import (
     SUPPORTED_CONDITION_TYPES,
     SUPPORTED_EDITOR_STEP_TYPES,
 )
+from .tooltips import field_tooltip, prompt_tooltip
 
 
 def _yaml_block(value: object) -> str:
@@ -97,7 +100,14 @@ class _OrderedChoiceEditor(QWidget):
 
     changed = Signal(tuple)
 
-    def __init__(self, *, prompt_title: str, prompt_label: str, parent: QWidget | None = None) -> None:
+    def __init__(
+        self,
+        *,
+        prompt_title: str,
+        prompt_label: str,
+        field_tooltip_text: str | None = None,
+        parent: QWidget | None = None,
+    ) -> None:
         super().__init__(parent)
         self._prompt_title = prompt_title
         self._prompt_label = prompt_label
@@ -108,6 +118,8 @@ class _OrderedChoiceEditor(QWidget):
         self._pending_selection: str | None = None
 
         self._list = AutoSizingListWidget()
+        apply_tooltip(self, field_tooltip_text)
+        apply_tooltip(self._list, field_tooltip_text)
         self._list.currentRowChanged.connect(self._refresh_button_state)
         self._add_button = QPushButton("Add")
         self._remove_button = QPushButton("Remove")
@@ -247,8 +259,8 @@ class _ConditionDialog(QDialog):
         self._value_edit = create_expanding_line_edit()
         self._value_label = QLabel("Path")
         self._form = configure_data_entry_form(QFormLayout())
-        self._form.addRow("Type", self._type_combo)
-        self._form.addRow(self._value_label, self._value_edit)
+        add_tooltipped_form_row(self._form, "Type", self._type_combo, prompt_tooltip("steps.condition.type"))
+        add_tooltipped_form_row(self._form, self._value_label, self._value_edit, prompt_tooltip("steps.condition.target"))
 
         buttons = QDialogButtonBox(QDialogButtonBox.StandardButton.Ok | QDialogButtonBox.StandardButton.Cancel)
         buttons.accepted.connect(self.accept)
@@ -270,6 +282,7 @@ class _ConditionDialog(QDialog):
         condition_type = str(self._type_combo.currentData())
         _field_name, field_label = CONDITION_PARAM_FIELD[condition_type]
         self._value_label.setText(field_label)
+        apply_tooltip(self._value_label, prompt_tooltip("steps.condition.target"))
 
     @classmethod
     def prompt(cls, parent: QWidget | None = None) -> StepCondition | None:
@@ -290,8 +303,11 @@ class _ConditionListEditor(QWidget):
         self._conditions: list[StepCondition] = []
         self._loading = False
         self._locked = False
+        tooltip = field_tooltip(f"steps.{title}")
 
         self._list = AutoSizingListWidget()
+        apply_tooltip(self, tooltip)
+        apply_tooltip(self._list, tooltip)
         self._list.currentRowChanged.connect(self._load_selected_condition)
         self._add_button = QPushButton("Add")
         self._remove_button = QPushButton("Remove")
@@ -310,12 +326,14 @@ class _ConditionListEditor(QWidget):
         self._value_label = QLabel("Path")
         self._value_edit = create_expanding_line_edit()
         detail_form = configure_data_entry_form(QFormLayout())
-        detail_form.addRow("Type", self._type_combo)
-        detail_form.addRow(self._value_label, self._value_edit)
+        add_tooltipped_form_row(detail_form, "Type", self._type_combo, tooltip)
+        add_tooltipped_form_row(detail_form, self._value_label, self._value_edit, tooltip)
 
         self._preserved_label = QLabel("Preserved unsupported conditions")
         self._preserved_view = AutoSizingPlainTextEdit()
         self._preserved_view.setReadOnly(True)
+        apply_tooltip(self._preserved_label, field_tooltip("steps.preserved_content"))
+        apply_tooltip(self._preserved_view, field_tooltip("steps.preserved_content"))
         self._preserved_label.hide()
         self._preserved_view.hide()
 
@@ -462,17 +480,17 @@ class _NewStepDialog(QDialog):
             self._type_combo.addItem(step_type.value, step_type)
         self._id_edit = create_expanding_line_edit()
         self._name_edit = create_expanding_line_edit()
-        form = configure_data_entry_form(QFormLayout())
-        form.addRow("Type", self._type_combo)
-        form.addRow("Step id", self._id_edit)
-        form.addRow("Name", self._name_edit)
+        self._form = configure_data_entry_form(QFormLayout())
+        add_tooltipped_form_row(self._form, "Type", self._type_combo, prompt_tooltip("steps.type"))
+        add_tooltipped_form_row(self._form, "Step id", self._id_edit, prompt_tooltip("steps.id"))
+        add_tooltipped_form_row(self._form, "Name", self._name_edit, prompt_tooltip("steps.name"))
 
         buttons = QDialogButtonBox(QDialogButtonBox.StandardButton.Ok | QDialogButtonBox.StandardButton.Cancel)
         buttons.accepted.connect(self.accept)
         buttons.rejected.connect(self.reject)
 
         layout = QVBoxLayout(self)
-        layout.addLayout(form)
+        layout.addLayout(self._form)
         layout.addWidget(buttons)
 
     def values(self) -> tuple[StepType, str, str]:
@@ -531,14 +549,22 @@ class StepsPage(QWidget):
         self._step_description_edit = CommitPlainTextEdit()
         expand_form_field(self._step_description_edit)
         self._basics_form = configure_data_entry_form(QFormLayout())
-        self._basics_form.addRow("ID", self._step_id_value)
-        self._basics_form.addRow("Type", self._step_type_value)
-        self._basics_form.addRow("Name", self._step_name_edit)
-        self._basics_form.addRow("User Toggleable", self._step_user_toggleable_check)
+        add_tooltipped_form_row(self._basics_form, "ID", self._step_id_value, field_tooltip("steps.id"))
+        add_tooltipped_form_row(self._basics_form, "Type", self._step_type_value, field_tooltip("steps.type"))
+        add_tooltipped_form_row(self._basics_form, "Name", self._step_name_edit, field_tooltip("steps.name"))
+        add_tooltipped_form_row(
+            self._basics_form,
+            "User Toggleable",
+            self._step_user_toggleable_check,
+            field_tooltip("steps.user_toggleable"),
+        )
         basics_section = QGroupBox("Basics")
         basics_layout = QVBoxLayout(basics_section)
         basics_layout.addLayout(self._basics_form)
-        basics_layout.addWidget(QLabel("Description"))
+        self._description_label = QLabel("Description")
+        apply_tooltip(self._description_label, field_tooltip("steps.description"))
+        apply_tooltip(self._step_description_edit, field_tooltip("steps.description"))
+        basics_layout.addWidget(self._description_label)
         basics_layout.addWidget(self._step_description_edit)
 
         self._dependencies_list = AutoSizingListWidget()
@@ -546,6 +572,8 @@ class StepsPage(QWidget):
         self._add_dependency_button = QPushButton("Add")
         self._remove_dependency_button = QPushButton("Remove")
         dependencies_section = QGroupBox("Dependencies")
+        apply_tooltip(dependencies_section, field_tooltip("steps.dependencies"))
+        apply_tooltip(self._dependencies_list, field_tooltip("steps.dependencies"))
         dependencies_layout = QVBoxLayout(dependencies_section)
         dependencies_layout.addWidget(self._dependencies_list)
         dependency_buttons = QHBoxLayout()
@@ -562,6 +590,8 @@ class StepsPage(QWidget):
         self._params_preserved_label = QLabel("Preserved unsupported params")
         self._params_preserved_view = AutoSizingPlainTextEdit()
         self._params_preserved_view.setReadOnly(True)
+        apply_tooltip(self._params_preserved_label, field_tooltip("steps.preserved_content"))
+        apply_tooltip(self._params_preserved_view, field_tooltip("steps.preserved_content"))
         self._params_preserved_label.hide()
         self._params_preserved_view.hide()
         params_section = QGroupBox("Params")
@@ -571,8 +601,16 @@ class StepsPage(QWidget):
         params_layout.addWidget(self._params_preserved_label)
         params_layout.addWidget(self._params_preserved_view)
 
-        self._capabilities_editor = _OrderedChoiceEditor(prompt_title="Add Capability", prompt_label="Capability")
-        self._conflicts_editor = _OrderedChoiceEditor(prompt_title="Add Conflict", prompt_label="Step")
+        self._capabilities_editor = _OrderedChoiceEditor(
+            prompt_title="Add Capability",
+            prompt_label="Capability",
+            field_tooltip_text=field_tooltip("steps.constraints.capabilities"),
+        )
+        self._conflicts_editor = _OrderedChoiceEditor(
+            prompt_title="Add Conflict",
+            prompt_label="Step",
+            field_tooltip_text=field_tooltip("steps.constraints.conflicts_with"),
+        )
         self._capabilities_editor.changed.connect(self._commit_capabilities)
         self._conflicts_editor.changed.connect(self._commit_conflicts)
         self._skip_if_editor = _ConditionListEditor(title="skip_if")
@@ -580,22 +618,32 @@ class StepsPage(QWidget):
         self._constraints_preserved_label = QLabel("Preserved unsupported constraints")
         self._constraints_preserved_view = AutoSizingPlainTextEdit()
         self._constraints_preserved_view.setReadOnly(True)
+        apply_tooltip(self._constraints_preserved_label, field_tooltip("steps.preserved_content"))
+        apply_tooltip(self._constraints_preserved_view, field_tooltip("steps.preserved_content"))
         self._constraints_preserved_label.hide()
         self._constraints_preserved_view.hide()
         constraints_section = QGroupBox("Constraints / Skip")
         constraints_layout = QVBoxLayout(constraints_section)
-        constraints_layout.addWidget(QLabel("Capabilities"))
+        self._capabilities_label = QLabel("Capabilities")
+        apply_tooltip(self._capabilities_label, field_tooltip("steps.constraints.capabilities"))
+        constraints_layout.addWidget(self._capabilities_label)
         constraints_layout.addWidget(self._capabilities_editor)
-        constraints_layout.addWidget(QLabel("Conflicts With"))
+        self._conflicts_label = QLabel("Conflicts With")
+        apply_tooltip(self._conflicts_label, field_tooltip("steps.constraints.conflicts_with"))
+        constraints_layout.addWidget(self._conflicts_label)
         constraints_layout.addWidget(self._conflicts_editor)
         constraints_layout.addWidget(self._constraints_preserved_label)
         constraints_layout.addWidget(self._constraints_preserved_view)
-        constraints_layout.addWidget(QLabel("skip_if"))
+        self._skip_if_label = QLabel("skip_if")
+        apply_tooltip(self._skip_if_label, field_tooltip("steps.skip_if"))
+        constraints_layout.addWidget(self._skip_if_label)
         constraints_layout.addWidget(self._skip_if_editor)
 
         self._verify_editor = _ConditionListEditor(title="verify")
+        apply_tooltip(self._verify_editor, field_tooltip("steps.verify"))
         self._verify_editor.changed.connect(self._commit_verify)
         verify_section = QGroupBox("Verify")
+        apply_tooltip(verify_section, field_tooltip("steps.verify"))
         verify_layout = QVBoxLayout(verify_section)
         verify_layout.addWidget(self._verify_editor)
 
@@ -657,32 +705,61 @@ class StepsPage(QWidget):
     def _build_param_panels(self) -> None:
         self._resolve_artifacts_panel = QWidget()
         resolve_layout = QVBoxLayout(self._resolve_artifacts_panel)
-        self._resolve_artifacts_editor = _OrderedChoiceEditor(prompt_title="Add Artifact", prompt_label="Artifact")
-        self._resolve_artifact_groups_editor = _OrderedChoiceEditor(prompt_title="Add Artifact Group", prompt_label="Group")
+        self._resolve_artifacts_editor = _OrderedChoiceEditor(
+            prompt_title="Add Artifact",
+            prompt_label="Artifact",
+            field_tooltip_text=field_tooltip("steps.resolve_artifacts.artifacts"),
+        )
+        self._resolve_artifact_groups_editor = _OrderedChoiceEditor(
+            prompt_title="Add Artifact Group",
+            prompt_label="Group",
+            field_tooltip_text=field_tooltip("steps.resolve_artifacts.artifact_groups"),
+        )
         self._resolve_artifacts_editor.changed.connect(self._commit_step_params)
         self._resolve_artifact_groups_editor.changed.connect(self._commit_step_params)
-        resolve_layout.addWidget(QLabel("Artifacts"))
+        self._resolve_artifacts_label = QLabel("Artifacts")
+        apply_tooltip(self._resolve_artifacts_label, field_tooltip("steps.resolve_artifacts.artifacts"))
+        resolve_layout.addWidget(self._resolve_artifacts_label)
         resolve_layout.addWidget(self._resolve_artifacts_editor)
-        resolve_layout.addWidget(QLabel("Artifact Groups"))
+        self._resolve_artifact_groups_label = QLabel("Artifact Groups")
+        apply_tooltip(self._resolve_artifact_groups_label, field_tooltip("steps.resolve_artifacts.artifact_groups"))
+        resolve_layout.addWidget(self._resolve_artifact_groups_label)
         resolve_layout.addWidget(self._resolve_artifact_groups_editor)
         self._register_param_panel(StepType.RESOLVE_ARTIFACTS, self._resolve_artifacts_panel)
 
         self._extract_artifacts_panel = QWidget()
         extract_layout = QVBoxLayout(self._extract_artifacts_panel)
-        self._extract_artifacts_editor = _OrderedChoiceEditor(prompt_title="Add Artifact", prompt_label="Artifact")
-        self._extract_artifact_groups_editor = _OrderedChoiceEditor(prompt_title="Add Artifact Group", prompt_label="Group")
+        self._extract_artifacts_editor = _OrderedChoiceEditor(
+            prompt_title="Add Artifact",
+            prompt_label="Artifact",
+            field_tooltip_text=field_tooltip("steps.extract_artifacts.artifacts"),
+        )
+        self._extract_artifact_groups_editor = _OrderedChoiceEditor(
+            prompt_title="Add Artifact Group",
+            prompt_label="Group",
+            field_tooltip_text=field_tooltip("steps.extract_artifacts.artifact_groups"),
+        )
         self._extract_artifacts_extract_on_combo = create_expanding_combo_box()
         self._extract_artifacts_extract_on_combo.addItem("host", "host")
         self._extract_artifacts_extract_on_combo.addItem("device", "device")
         self._extract_artifacts_editor.changed.connect(self._commit_step_params)
         self._extract_artifact_groups_editor.changed.connect(self._commit_step_params)
         self._extract_artifacts_extract_on_combo.currentIndexChanged.connect(self._commit_step_params)
-        extract_layout.addWidget(QLabel("Artifacts"))
+        self._extract_artifacts_label = QLabel("Artifacts")
+        apply_tooltip(self._extract_artifacts_label, field_tooltip("steps.extract_artifacts.artifacts"))
+        extract_layout.addWidget(self._extract_artifacts_label)
         extract_layout.addWidget(self._extract_artifacts_editor)
-        extract_layout.addWidget(QLabel("Artifact Groups"))
+        self._extract_artifact_groups_label = QLabel("Artifact Groups")
+        apply_tooltip(self._extract_artifact_groups_label, field_tooltip("steps.extract_artifacts.artifact_groups"))
+        extract_layout.addWidget(self._extract_artifact_groups_label)
         extract_layout.addWidget(self._extract_artifact_groups_editor)
         extract_form = configure_data_entry_form(QFormLayout())
-        extract_form.addRow("Extract On", self._extract_artifacts_extract_on_combo)
+        add_tooltipped_form_row(
+            extract_form,
+            "Extract On",
+            self._extract_artifacts_extract_on_combo,
+            field_tooltip("steps.extract_artifacts.extract_on"),
+        )
         extract_layout.addLayout(extract_form)
         self._register_param_panel(StepType.EXTRACT_ARTIFACTS, self._extract_artifacts_panel)
 
@@ -698,11 +775,36 @@ class StepsPage(QWidget):
         self._extract_archive_dest_label = QLabel("Dest")
         self._extract_archive_temp_label = QLabel("Device Temp Path")
         extract_archive_form = configure_data_entry_form(QFormLayout())
-        extract_archive_form.addRow("Archive", self._extract_archive_archive_combo)
-        extract_archive_form.addRow("Extract On", self._extract_archive_extract_on_combo)
-        extract_archive_form.addRow(self._extract_archive_dest_label, self._extract_archive_dest_edit)
-        extract_archive_form.addRow(self._extract_archive_temp_label, self._extract_archive_device_temp_path_edit)
-        extract_archive_form.addRow("Cleanup", self._extract_archive_cleanup_check)
+        add_tooltipped_form_row(
+            extract_archive_form,
+            "Archive",
+            self._extract_archive_archive_combo,
+            field_tooltip("steps.extract_archive.archive"),
+        )
+        add_tooltipped_form_row(
+            extract_archive_form,
+            "Extract On",
+            self._extract_archive_extract_on_combo,
+            field_tooltip("steps.extract_archive.extract_on"),
+        )
+        add_tooltipped_form_row(
+            extract_archive_form,
+            self._extract_archive_dest_label,
+            self._extract_archive_dest_edit,
+            field_tooltip("steps.extract_archive.dest"),
+        )
+        add_tooltipped_form_row(
+            extract_archive_form,
+            self._extract_archive_temp_label,
+            self._extract_archive_device_temp_path_edit,
+            field_tooltip("steps.extract_archive.device_temp_path"),
+        )
+        add_tooltipped_form_row(
+            extract_archive_form,
+            "Cleanup",
+            self._extract_archive_cleanup_check,
+            field_tooltip("steps.extract_archive.cleanup"),
+        )
         extract_archive_layout.addLayout(extract_archive_form)
         self._extract_archive_archive_combo.currentIndexChanged.connect(self._commit_step_params)
         self._extract_archive_extract_on_combo.currentIndexChanged.connect(self._on_extract_archive_location_changed)
@@ -721,10 +823,16 @@ class StepsPage(QWidget):
         self._copy_help_label = QLabel(COPY_FILES_HELP)
         self._copy_help_label.setWordWrap(True)
         copy_form = configure_data_entry_form(QFormLayout())
-        copy_form.addRow("Source", self._copy_source_combo)
-        copy_form.addRow("Dest", self._copy_dest_edit)
-        copy_form.addRow("Copy Policy", self._copy_policy_combo)
+        add_tooltipped_form_row(copy_form, "Source", self._copy_source_combo, field_tooltip("steps.copy_files.source"))
+        add_tooltipped_form_row(copy_form, "Dest", self._copy_dest_edit, field_tooltip("steps.copy_files.dest"))
+        add_tooltipped_form_row(
+            copy_form,
+            "Copy Policy",
+            self._copy_policy_combo,
+            field_tooltip("steps.copy_files.copy_policy"),
+        )
         copy_layout.addLayout(copy_form)
+        apply_tooltip(self._copy_help_label, field_tooltip("steps.copy_files.dest"))
         copy_layout.addWidget(self._copy_help_label)
         self._copy_source_combo.currentIndexChanged.connect(self._commit_step_params)
         self._copy_dest_edit.editingFinished.connect(self._commit_step_params)
@@ -736,8 +844,18 @@ class StepsPage(QWidget):
         self._install_apk_app_combo = create_expanding_combo_box()
         self._install_apk_replace_existing_check = QCheckBox()
         install_form = configure_data_entry_form(QFormLayout())
-        install_form.addRow("App", self._install_apk_app_combo)
-        install_form.addRow("Replace Existing", self._install_apk_replace_existing_check)
+        add_tooltipped_form_row(
+            install_form,
+            "App",
+            self._install_apk_app_combo,
+            field_tooltip("steps.install_apk.app"),
+        )
+        add_tooltipped_form_row(
+            install_form,
+            "Replace Existing",
+            self._install_apk_replace_existing_check,
+            field_tooltip("steps.install_apk.replace_existing"),
+        )
         install_layout.addLayout(install_form)
         self._install_apk_app_combo.currentIndexChanged.connect(self._commit_step_params)
         self._install_apk_replace_existing_check.toggled.connect(self._commit_step_params)
@@ -747,6 +865,7 @@ class StepsPage(QWidget):
         grant_layout = QVBoxLayout(self._grant_permissions_panel)
         self._grant_permissions_note_label = QLabel(GRANT_PERMISSIONS_NOTE)
         self._grant_permissions_note_label.setWordWrap(True)
+        apply_tooltip(self._grant_permissions_note_label, field_tooltip("steps.grant_permissions.note"))
         grant_layout.addWidget(self._grant_permissions_note_label)
         self._register_param_panel(StepType.GRANT_PERMISSIONS, self._grant_permissions_panel)
 
@@ -755,8 +874,18 @@ class StepsPage(QWidget):
         self._launch_package_edit = create_expanding_line_edit()
         self._launch_activity_edit = create_expanding_line_edit()
         launch_form = configure_data_entry_form(QFormLayout())
-        launch_form.addRow("Package Name", self._launch_package_edit)
-        launch_form.addRow("Activity", self._launch_activity_edit)
+        add_tooltipped_form_row(
+            launch_form,
+            "Package Name",
+            self._launch_package_edit,
+            field_tooltip("steps.launch_app.package_name"),
+        )
+        add_tooltipped_form_row(
+            launch_form,
+            "Activity",
+            self._launch_activity_edit,
+            field_tooltip("steps.launch_app.activity"),
+        )
         launch_layout.addLayout(launch_form)
         self._launch_package_edit.editingFinished.connect(self._commit_step_params)
         self._launch_activity_edit.editingFinished.connect(self._commit_step_params)
@@ -769,7 +898,12 @@ class StepsPage(QWidget):
         self._wait_duration_spin.setMaximum(2_147_483_647)
         expand_form_field(self._wait_duration_spin)
         wait_form = configure_data_entry_form(QFormLayout())
-        wait_form.addRow("Duration (ms)", self._wait_duration_spin)
+        add_tooltipped_form_row(
+            wait_form,
+            "Duration (ms)",
+            self._wait_duration_spin,
+            field_tooltip("steps.wait.duration_ms"),
+        )
         wait_layout.addLayout(wait_form)
         self._wait_duration_spin.valueChanged.connect(self._commit_step_params)
         self._register_param_panel(StepType.WAIT, self._wait_panel)
@@ -778,7 +912,12 @@ class StepsPage(QWidget):
         force_stop_layout = QVBoxLayout(self._force_stop_panel)
         self._force_stop_package_edit = create_expanding_line_edit()
         force_stop_form = configure_data_entry_form(QFormLayout())
-        force_stop_form.addRow("Package Name", self._force_stop_package_edit)
+        add_tooltipped_form_row(
+            force_stop_form,
+            "Package Name",
+            self._force_stop_package_edit,
+            field_tooltip("steps.force_stop_app.package_name"),
+        )
         force_stop_layout.addLayout(force_stop_form)
         self._force_stop_package_edit.editingFinished.connect(self._commit_step_params)
         self._register_param_panel(StepType.FORCE_STOP_APP, self._force_stop_panel)
@@ -1061,7 +1200,12 @@ class StepsPage(QWidget):
         step = self._selected_step()
         if step is None:
             return
-        new_step_id = TextEntryDialog.prompt(self, title="Duplicate Step", label="New step id", tooltip=None)
+        new_step_id = TextEntryDialog.prompt(
+            self,
+            title="Duplicate Step",
+            label="New step id",
+            tooltip=prompt_tooltip("steps.id"),
+        )
         if new_step_id is None:
             return
         previous_selection = self._selected_step_id

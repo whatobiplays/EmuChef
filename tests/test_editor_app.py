@@ -32,6 +32,8 @@ if PYSIDE6_AVAILABLE:
     from emuchef_editor.app.main_window import MainWindow
     from emuchef_editor.app.recipe_editor.common import TextEntryDialog, add_tooltipped_form_row
     from emuchef_editor.app.recipe_editor.new_recipe_dialog import NewRecipeDialog, NewRecipeRequest
+    from emuchef_editor.app.recipe_editor.permissions_page import _AppOpDialog, _RuntimePermissionDialog
+    from emuchef_editor.app.recipe_editor.steps_page import _ConditionDialog, _NewStepDialog
     from emuchef_editor.app.recipe_editor.tooltips import field_tooltip, prompt_tooltip
 
 
@@ -1150,6 +1152,171 @@ class EditorAppTests(unittest.TestCase):
             )
 
             window.close()
+
+    def test_steps_and_permissions_fields_expose_expected_tooltips(self) -> None:
+        recipe = base_recipe(
+            recipe_id="example.recipe",
+            inputs={
+                "source_dir": {
+                    "type": "directory",
+                    "role": "generic",
+                    "label": "Source Directory",
+                    "required": True,
+                    "multiple": False,
+                    "validation": {"must_exist": True, "allowed_extensions": [], "path_kind": "directory"},
+                }
+            },
+            permissions={
+                "runtime": [{"package_name": "com.example.app", "name": "READ_MEDIA_VIDEO"}],
+                "appops": [{"package_name": "com.example.app", "op": "RUN_IN_BACKGROUND", "mode": "allow"}],
+                "policy": {"on_failure": "warn", "require_all": False},
+            },
+            steps=[
+                {
+                    "id": "grant",
+                    "type": "grant_permissions",
+                    "name": "Grant",
+                    "user_toggleable": False,
+                    "dependencies": [],
+                    "constraints": {"capabilities": [], "conflicts_with": []},
+                    "verify": [],
+                },
+                {
+                    "id": "copy",
+                    "type": "copy_files",
+                    "name": "Copy",
+                    "user_toggleable": False,
+                    "dependencies": [],
+                    "constraints": {
+                        "capabilities": ["unsupported_capability"],
+                        "conflicts_with": [],
+                    },
+                    "skip_if": [
+                        {"type": "custom_skip", "params": {"foo": "bar"}},
+                    ],
+                    "params": {
+                        "source": {"ref": "inputs.source_dir"},
+                        "dest": "/sdcard/Example",
+                        "custom_behavior": "keep_me",
+                    },
+                    "verify": [],
+                },
+            ],
+        )
+        with TemporaryDirectory() as tmp:
+            repo_root = Path(tmp)
+            authored_root = build_authored_tree(repo_root, recipes=[recipe])
+            recipe_path = authored_root / "recipes" / "example_recipe.yaml"
+
+            window = MainWindow(repo_root)
+            window.open_recipe_file(recipe_path)
+
+            permissions_page = window._editor_view._permissions_page
+            steps_page = window._editor_view._steps_page
+
+            self.assertEqual(
+                permissions_page._policy_on_failure_combo.toolTip(),
+                field_tooltip("permissions.policy.on_failure"),
+            )
+            self.assertEqual(
+                permissions_page._policy_form.labelForField(permissions_page._policy_on_failure_combo).toolTip(),
+                field_tooltip("permissions.policy.on_failure"),
+            )
+            self.assertEqual(
+                permissions_page._runtime_package_edit.toolTip(),
+                field_tooltip("permissions.runtime.package"),
+            )
+            self.assertEqual(
+                permissions_page._runtime_form.labelForField(permissions_page._runtime_package_edit).toolTip(),
+                field_tooltip("permissions.runtime.package"),
+            )
+
+            steps_page._select_step("copy")
+            copy_form = steps_page._copy_files_panel.layout().itemAt(0).layout()
+            self.assertEqual(steps_page._step_type_value.toolTip(), field_tooltip("steps.type"))
+            self.assertEqual(
+                steps_page._basics_form.labelForField(steps_page._step_type_value).toolTip(),
+                field_tooltip("steps.type"),
+            )
+            self.assertEqual(
+                steps_page._copy_source_combo.toolTip(),
+                field_tooltip("steps.copy_files.source"),
+            )
+            self.assertEqual(
+                copy_form.labelForField(steps_page._copy_source_combo).toolTip(),
+                field_tooltip("steps.copy_files.source"),
+            )
+            self.assertEqual(
+                steps_page._params_preserved_label.toolTip(),
+                field_tooltip("steps.preserved_content"),
+            )
+            self.assertEqual(
+                steps_page._params_preserved_view.toolTip(),
+                field_tooltip("steps.preserved_content"),
+            )
+            self.assertEqual(
+                steps_page._constraints_preserved_label.toolTip(),
+                field_tooltip("steps.preserved_content"),
+            )
+            self.assertEqual(
+                steps_page._constraints_preserved_view.toolTip(),
+                field_tooltip("steps.preserved_content"),
+            )
+            self.assertEqual(
+                steps_page._skip_if_editor._preserved_label.toolTip(),
+                field_tooltip("steps.preserved_content"),
+            )
+            self.assertEqual(
+                steps_page._skip_if_editor._preserved_view.toolTip(),
+                field_tooltip("steps.preserved_content"),
+            )
+
+            steps_page._select_step("grant")
+            self.assertEqual(
+                steps_page._grant_permissions_note_label.toolTip(),
+                field_tooltip("steps.grant_permissions.note"),
+            )
+
+            window.close()
+
+    def test_step_and_permission_dialogs_expose_expected_tooltips(self) -> None:
+        step_dialog = _NewStepDialog()
+        self.assertEqual(step_dialog._type_combo.toolTip(), prompt_tooltip("steps.type"))
+        self.assertEqual(
+            step_dialog._form.labelForField(step_dialog._type_combo).toolTip(),
+            prompt_tooltip("steps.type"),
+        )
+        self.assertEqual(step_dialog._id_edit.toolTip(), prompt_tooltip("steps.id"))
+        self.assertEqual(
+            step_dialog._form.labelForField(step_dialog._id_edit).toolTip(),
+            prompt_tooltip("steps.id"),
+        )
+
+        runtime_dialog = _RuntimePermissionDialog()
+        self.assertEqual(runtime_dialog._package_edit.toolTip(), prompt_tooltip("permissions.runtime.package"))
+        self.assertEqual(
+            runtime_dialog._form.labelForField(runtime_dialog._package_edit).toolTip(),
+            prompt_tooltip("permissions.runtime.package"),
+        )
+
+        appop_dialog = _AppOpDialog()
+        self.assertEqual(appop_dialog._op_edit.toolTip(), prompt_tooltip("permissions.appops.op"))
+        self.assertEqual(
+            appop_dialog._form.labelForField(appop_dialog._op_edit).toolTip(),
+            prompt_tooltip("permissions.appops.op"),
+        )
+
+        condition_dialog = _ConditionDialog()
+        self.assertEqual(condition_dialog._type_combo.toolTip(), prompt_tooltip("steps.condition.type"))
+        self.assertEqual(
+            condition_dialog._form.labelForField(condition_dialog._type_combo).toolTip(),
+            prompt_tooltip("steps.condition.type"),
+        )
+        self.assertEqual(condition_dialog._value_edit.toolTip(), prompt_tooltip("steps.condition.target"))
+        self.assertEqual(
+            condition_dialog._form.labelForField(condition_dialog._value_edit).toolTip(),
+            prompt_tooltip("steps.condition.target"),
+        )
 
     def test_add_tooltipped_form_row_skips_missing_and_blank_tooltips(self) -> None:
         host = QWidget()

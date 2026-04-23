@@ -84,6 +84,70 @@ FIELD_TOOLTIPS: dict[str, str] = {
         "This stable authored id names the artifact group. "
         "It stays read-only in Milestone 2 because rename with membership and ref updates is not implemented yet."
     ),
+    "permissions.runtime.package": "Android package name the runtime permission grant applies to.",
+    "permissions.runtime.permission": "Android runtime permission name to grant for the selected package.",
+    "permissions.runtime.required": "When enabled, failure to apply this grant is treated as required permission work.",
+    "permissions.runtime.rooted": "Optional rooted-state filter for this grant. Leave it at Any to apply regardless of device root state.",
+    "permissions.runtime.android_api_min": "Optional minimum Android API level where this grant should apply.",
+    "permissions.runtime.android_api_max": "Optional maximum Android API level where this grant should apply.",
+    "permissions.appops.package": "Android package name the app-op grant applies to.",
+    "permissions.appops.op": "Android app-op name to configure for the selected package.",
+    "permissions.appops.mode": "Authored app-op mode value to apply, such as allow or ignore.",
+    "permissions.appops.required": "When enabled, failure to apply this app-op is treated as required permission work.",
+    "permissions.appops.rooted": "Optional rooted-state filter for this app-op. Leave it at Any to apply regardless of device root state.",
+    "permissions.appops.android_api_min": "Optional minimum Android API level where this app-op should apply.",
+    "permissions.appops.android_api_max": "Optional maximum Android API level where this app-op should apply.",
+    "permissions.policy.on_failure": "Policy outcome on failure when permission work fails. Common values are warn and fail.",
+    "permissions.policy.require_all": "When enabled, all applicable permission actions must succeed for the policy to pass.",
+    "steps.id": (
+        "This stable authored step id is used by dependencies and refs such as 'steps.<id>.outputs.<field>'. "
+        "It stays read-only after creation because step rename with ref rewrite is not implemented."
+    ),
+    "steps.type": (
+        "This selects the authored step kind. "
+        "It stays read-only after creation because changing type would rewrite step structure and is not supported."
+    ),
+    "steps.name": "Human-readable step name shown in the editor and authored YAML.",
+    "steps.user_toggleable": "When enabled, users may opt this step in or out at execution time.",
+    "steps.description": "Optional author-facing description of what this step does or why it exists.",
+    "steps.dependencies": "Ordered list of prerequisite step ids. New dependencies append to the authored list and are not re-sorted.",
+    "steps.constraints.capabilities": "Runtime capabilities this step requires before execution can proceed.",
+    "steps.constraints.conflicts_with": "Other steps that must not run alongside this step in the same execution plan.",
+    "steps.skip_if": "Structured conditions checked immediately before execution. Matching conditions skip the step instead of running it.",
+    "steps.verify": "Structured checks that run only after successful step execution.",
+    "steps.resolve_artifacts.artifacts": "Artifacts to resolve directly by authored artifact id.",
+    "steps.resolve_artifacts.artifact_groups": "Artifact groups to resolve by authored group id.",
+    "steps.extract_artifacts.artifacts": "Artifacts whose resolved files should be extracted directly.",
+    "steps.extract_artifacts.artifact_groups": "Artifact groups whose resolved files should be extracted.",
+    "steps.extract_artifacts.extract_on": "Extraction target location. Accepted values: host or device.",
+    "steps.extract_archive.archive": (
+        "Choose an authored ref to the archive file to extract. "
+        "Saved YAML keeps the explicit { ref: ... } value."
+    ),
+    "steps.extract_archive.extract_on": "Extraction target location. Accepted values: host or device.",
+    "steps.extract_archive.dest": "Destination path used when archive extraction runs on the device.",
+    "steps.extract_archive.device_temp_path": "Optional device-side temporary path used during device extraction.",
+    "steps.extract_archive.cleanup": "When enabled, temporary extraction artifacts are cleaned up after the step finishes.",
+    "steps.copy_files.source": (
+        "Choose an authored ref to the source file, directory, or path list. "
+        "Saved YAML keeps the explicit { ref: ... } value."
+    ),
+    "steps.copy_files.dest": "Literal destination path for the copy operation. Directory and exact-target behavior depends on the source shape.",
+    "steps.copy_files.copy_policy": "Copy behavior to apply when the destination already contains content.",
+    "steps.install_apk.app": (
+        "Choose an authored ref to the APK file to install. "
+        "Saved YAML keeps the explicit { ref: ... } value."
+    ),
+    "steps.install_apk.replace_existing": "When enabled, an existing installation may be replaced during APK install.",
+    "steps.grant_permissions.note": "This step consumes the top-level permission plan. It is valid as a clean no-op when no permission actions apply.",
+    "steps.launch_app.package_name": "Android package name to launch.",
+    "steps.launch_app.activity": "Optional explicit activity name. Leave it blank to use normal launcher resolution behavior.",
+    "steps.wait.duration_ms": "Integer wait duration in milliseconds.",
+    "steps.force_stop_app.package_name": "Android package name to stop before continuing.",
+    "steps.preserved_content": (
+        "Unsupported authored step content is shown read-only here. "
+        "It is preserved on save unless you explicitly replace it through a supported editor surface."
+    ),
 }
 
 
@@ -109,6 +173,22 @@ PROMPT_TOOLTIPS: dict[str, str] = {
         "Enter a stable feature string this recipe provides. "
         "Other recipes or tooling may reference it."
     ),
+    "permissions.runtime.package": "Enter the Android package name this runtime permission applies to.",
+    "permissions.runtime.permission": "Enter the Android runtime permission name to grant.",
+    "permissions.appops.package": "Enter the Android package name this app-op applies to.",
+    "permissions.appops.op": "Enter the Android app-op name to configure.",
+    "permissions.appops.mode": "Enter the authored app-op mode value to apply.",
+    "steps.id": (
+        "Choose a stable authored step id. "
+        "It becomes read-only after creation because step rename with ref rewrite is not implemented."
+    ),
+    "steps.type": (
+        "Choose the authored step type. "
+        "It becomes read-only after creation because changing type would rewrite step structure and is not supported."
+    ),
+    "steps.name": "Enter the human-readable step name shown in the editor and authored YAML.",
+    "steps.condition.type": "Choose the structured condition type to add to this list.",
+    "steps.condition.target": "Enter the path, package name, or other target value required by the selected condition type.",
 }
 
 

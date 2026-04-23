@@ -39,6 +39,7 @@ from .common import (
     create_expanding_combo_box,
     create_expanding_line_edit,
 )
+from .tooltips import field_tooltip, prompt_tooltip
 
 
 @dataclass(frozen=True, slots=True)
@@ -81,12 +82,37 @@ class PermissionsPage(QWidget):
         self._runtime_api_min_edit = create_expanding_line_edit()
         self._runtime_api_max_edit = create_expanding_line_edit()
         self._runtime_form = configure_data_entry_form(QFormLayout())
-        add_tooltipped_form_row(self._runtime_form, "Package", self._runtime_package_edit, None)
-        add_tooltipped_form_row(self._runtime_form, "Permission", self._runtime_name_edit, None)
-        add_tooltipped_form_row(self._runtime_form, "Required", self._runtime_required_check, None)
-        add_tooltipped_form_row(self._runtime_form, "Rooted", self._runtime_rooted_combo, None)
-        add_tooltipped_form_row(self._runtime_form, "Android API Min", self._runtime_api_min_edit, None)
-        add_tooltipped_form_row(self._runtime_form, "Android API Max", self._runtime_api_max_edit, None)
+        add_tooltipped_form_row(self._runtime_form, "Package", self._runtime_package_edit, field_tooltip("permissions.runtime.package"))
+        add_tooltipped_form_row(
+            self._runtime_form,
+            "Permission",
+            self._runtime_name_edit,
+            field_tooltip("permissions.runtime.permission"),
+        )
+        add_tooltipped_form_row(
+            self._runtime_form,
+            "Required",
+            self._runtime_required_check,
+            field_tooltip("permissions.runtime.required"),
+        )
+        add_tooltipped_form_row(
+            self._runtime_form,
+            "Rooted",
+            self._runtime_rooted_combo,
+            field_tooltip("permissions.runtime.rooted"),
+        )
+        add_tooltipped_form_row(
+            self._runtime_form,
+            "Android API Min",
+            self._runtime_api_min_edit,
+            field_tooltip("permissions.runtime.android_api_min"),
+        )
+        add_tooltipped_form_row(
+            self._runtime_form,
+            "Android API Max",
+            self._runtime_api_max_edit,
+            field_tooltip("permissions.runtime.android_api_max"),
+        )
         runtime_right = QWidget()
         runtime_right_layout = QVBoxLayout(runtime_right)
         runtime_right_layout.setAlignment(Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignTop)
@@ -124,13 +150,33 @@ class PermissionsPage(QWidget):
         self._appop_api_min_edit = create_expanding_line_edit()
         self._appop_api_max_edit = create_expanding_line_edit()
         self._appop_form = configure_data_entry_form(QFormLayout())
-        add_tooltipped_form_row(self._appop_form, "Package", self._appop_package_edit, None)
-        add_tooltipped_form_row(self._appop_form, "App Op", self._appop_name_edit, None)
-        add_tooltipped_form_row(self._appop_form, "Mode", self._appop_mode_edit, None)
-        add_tooltipped_form_row(self._appop_form, "Required", self._appop_required_check, None)
-        add_tooltipped_form_row(self._appop_form, "Rooted", self._appop_rooted_combo, None)
-        add_tooltipped_form_row(self._appop_form, "Android API Min", self._appop_api_min_edit, None)
-        add_tooltipped_form_row(self._appop_form, "Android API Max", self._appop_api_max_edit, None)
+        add_tooltipped_form_row(self._appop_form, "Package", self._appop_package_edit, field_tooltip("permissions.appops.package"))
+        add_tooltipped_form_row(self._appop_form, "App Op", self._appop_name_edit, field_tooltip("permissions.appops.op"))
+        add_tooltipped_form_row(self._appop_form, "Mode", self._appop_mode_edit, field_tooltip("permissions.appops.mode"))
+        add_tooltipped_form_row(
+            self._appop_form,
+            "Required",
+            self._appop_required_check,
+            field_tooltip("permissions.appops.required"),
+        )
+        add_tooltipped_form_row(
+            self._appop_form,
+            "Rooted",
+            self._appop_rooted_combo,
+            field_tooltip("permissions.appops.rooted"),
+        )
+        add_tooltipped_form_row(
+            self._appop_form,
+            "Android API Min",
+            self._appop_api_min_edit,
+            field_tooltip("permissions.appops.android_api_min"),
+        )
+        add_tooltipped_form_row(
+            self._appop_form,
+            "Android API Max",
+            self._appop_api_max_edit,
+            field_tooltip("permissions.appops.android_api_max"),
+        )
         appop_right = QWidget()
         appop_right_layout = QVBoxLayout(appop_right)
         appop_right_layout.setAlignment(Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignTop)
@@ -150,8 +196,18 @@ class PermissionsPage(QWidget):
         self._policy_on_failure_combo.addItems(["warn", "fail"])
         self._policy_require_all_check = QCheckBox()
         self._policy_form = configure_data_entry_form(QFormLayout())
-        add_tooltipped_form_row(self._policy_form, "On Failure", self._policy_on_failure_combo, None)
-        add_tooltipped_form_row(self._policy_form, "Require All", self._policy_require_all_check, None)
+        add_tooltipped_form_row(
+            self._policy_form,
+            "On Failure",
+            self._policy_on_failure_combo,
+            field_tooltip("permissions.policy.on_failure"),
+        )
+        add_tooltipped_form_row(
+            self._policy_form,
+            "Require All",
+            self._policy_require_all_check,
+            field_tooltip("permissions.policy.require_all"),
+        )
         policy_section = QGroupBox("Policy")
         policy_section_layout = QVBoxLayout(policy_section)
         policy_section_layout.addLayout(self._policy_form)
@@ -429,14 +485,24 @@ class _RuntimePermissionDialog(QDialog):
         self.setWindowTitle("Add Runtime Permission")
         self._package_edit = create_expanding_line_edit()
         self._name_edit = create_expanding_line_edit()
-        form = configure_data_entry_form(QFormLayout())
-        add_tooltipped_form_row(form, "Package", self._package_edit, None)
-        add_tooltipped_form_row(form, "Permission", self._name_edit, None)
+        self._form = configure_data_entry_form(QFormLayout())
+        add_tooltipped_form_row(
+            self._form,
+            "Package",
+            self._package_edit,
+            prompt_tooltip("permissions.runtime.package"),
+        )
+        add_tooltipped_form_row(
+            self._form,
+            "Permission",
+            self._name_edit,
+            prompt_tooltip("permissions.runtime.permission"),
+        )
         buttons = QDialogButtonBox(QDialogButtonBox.StandardButton.Ok | QDialogButtonBox.StandardButton.Cancel)
         buttons.accepted.connect(self.accept)
         buttons.rejected.connect(self.reject)
         layout = QVBoxLayout(self)
-        layout.addLayout(form)
+        layout.addLayout(self._form)
         layout.addWidget(buttons)
 
     def permission(self) -> RuntimePermissionGrant:
@@ -455,15 +521,15 @@ class _AppOpDialog(QDialog):
         self._package_edit = create_expanding_line_edit()
         self._op_edit = create_expanding_line_edit()
         self._mode_edit = create_expanding_line_edit()
-        form = configure_data_entry_form(QFormLayout())
-        add_tooltipped_form_row(form, "Package", self._package_edit, None)
-        add_tooltipped_form_row(form, "App Op", self._op_edit, None)
-        add_tooltipped_form_row(form, "Mode", self._mode_edit, None)
+        self._form = configure_data_entry_form(QFormLayout())
+        add_tooltipped_form_row(self._form, "Package", self._package_edit, prompt_tooltip("permissions.appops.package"))
+        add_tooltipped_form_row(self._form, "App Op", self._op_edit, prompt_tooltip("permissions.appops.op"))
+        add_tooltipped_form_row(self._form, "Mode", self._mode_edit, prompt_tooltip("permissions.appops.mode"))
         buttons = QDialogButtonBox(QDialogButtonBox.StandardButton.Ok | QDialogButtonBox.StandardButton.Cancel)
         buttons.accepted.connect(self.accept)
         buttons.rejected.connect(self.reject)
         layout = QVBoxLayout(self)
-        layout.addLayout(form)
+        layout.addLayout(self._form)
         layout.addWidget(buttons)
 
     def appop(self) -> AppOpGrant:

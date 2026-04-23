@@ -78,7 +78,7 @@ Editor interaction rules:
 - undo and redo operate at command granularity and persist across saves for the open document
 - dirty state is a semantic comparison against the last saved canonical YAML baseline
 - form-based editor pages keep labels right-aligned while data-entry fields stay left-aligned, expand to the available pane width, and anchor the entry group at the top-left of the editor pane
-- current field surfaces expose hover tooltips that explain authored field purpose, accepted values, and creation-time id semantics
+- current field surfaces across Overview, Inputs, Artifacts, Artifact Groups, Steps, and Permissions expose hover tooltips that explain authored field purpose, accepted values, read-only semantics, and creation-time id or dialog semantics
 - the Steps page uses a master-detail layout with:
   - ordered step list actions for add, delete, duplicate, reorder, and `user_toggleable`
   - grouped step detail sections for basics, dependencies, params, constraints / `skip_if`, and `verify`
@@ -108,6 +108,7 @@ Editor interaction rules:
 - deleting a step is allowed even when downstream dependencies or refs still target it; the shared validation path reports that breakage instead of the editor rewriting it
 - unsupported authored step params, condition entries, and constraint entries that the current UI does not edit are preserved semantically and round-trip unchanged when supported sections of the same step are edited
 - when unsupported constraint or condition entries are present, the affected destructive list operations stay locked and the preserved authored entries remain visible read-only
+- read-only preserved step-content surfaces expose hover guidance explaining that unsupported authored content remains preserved on save unless explicitly replaced through a supported editor surface
 
 Field-scope rules currently enforced by the editor:
 
