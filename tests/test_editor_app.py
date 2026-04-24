@@ -10,7 +10,7 @@ import unittest
 from unittest.mock import Mock, patch
 
 from emuchef.domain import PERMISSION_POLICY_ON_FAILURE_VALUES, RuntimePermissionGrant, StepCondition, StepType
-from support import base_recipe, build_authored_tree
+from support import base_recipe, build_authored_tree, write_yaml
 
 PYSIDE6_AVAILABLE = importlib.util.find_spec("PySide6") is not None
 
@@ -264,6 +264,91 @@ class EditorAppTests(unittest.TestCase):
                 start_flow.call_args.kwargs["preselected_template"],
                 Path(template_item.data(Qt.ItemDataRole.UserRole)["path"]),
             )
+
+            window.close()
+
+    def test_workspace_refresh_updates_for_external_recipe_and_template_changes(self) -> None:
+        recipe = base_recipe(recipe_id="example.recipe", steps=[])
+        template = base_recipe(recipe_id="template.recipe", name="Template Recipe", steps=[])
+        with TemporaryDirectory() as tmp:
+            repo_root = Path(tmp)
+            authored_root = build_authored_tree(
+                repo_root,
+                recipes=[recipe],
+                recipe_templates={"recipe.template.yaml": template},
+            )
+            recipe_path = authored_root / "recipes" / "example_recipe.yaml"
+            templates_root = repo_root / "templates" / "authored"
+
+            window = MainWindow(repo_root)
+            window.open_recipe_file(recipe_path)
+
+            def workspace_entries(kind: str) -> tuple[str, ...]:
+                return tuple(
+                    window._workspace_list.item(index).text()
+                    for index in range(window._workspace_list.count())
+                    if (window._workspace_list.item(index).data(Qt.ItemDataRole.UserRole) or {}).get("kind") == kind
+                )
+
+            self.assertEqual(window._workspace_list.currentItem().data(Qt.ItemDataRole.UserRole)["path"], str(recipe_path.resolve()))
+
+            added_recipe_path = authored_root / "recipes" / "added_recipe.yaml"
+            write_yaml(added_recipe_path, base_recipe(recipe_id="added.recipe", steps=[]))
+            window._on_workspace_directory_changed(str(authored_root / "recipes"))
+            self.assertIn("recipes/added_recipe.yaml", workspace_entries("recipe"))
+            self.assertEqual(window._workspace_list.currentItem().data(Qt.ItemDataRole.UserRole)["path"], str(recipe_path.resolve()))
+
+            renamed_recipe_path = authored_root / "recipes" / "renamed_recipe.yaml"
+            added_recipe_path.rename(renamed_recipe_path)
+            window._on_workspace_directory_changed(str(authored_root / "recipes"))
+            self.assertNotIn("recipes/added_recipe.yaml", workspace_entries("recipe"))
+            self.assertIn("recipes/renamed_recipe.yaml", workspace_entries("recipe"))
+
+            renamed_recipe_path.unlink()
+            window._on_workspace_directory_changed(str(authored_root / "recipes"))
+            self.assertNotIn("recipes/renamed_recipe.yaml", workspace_entries("recipe"))
+
+            added_template_path = templates_root / "added.template.yaml"
+            write_yaml(added_template_path, base_recipe(recipe_id="added.template", steps=[]))
+            window._on_workspace_directory_changed(str(templates_root))
+            self.assertIn("templates/authored/added.template.yaml", workspace_entries("template"))
+
+            renamed_template_path = templates_root / "renamed.template.yaml"
+            added_template_path.rename(renamed_template_path)
+            window._on_workspace_directory_changed(str(templates_root))
+            self.assertNotIn("templates/authored/added.template.yaml", workspace_entries("template"))
+            self.assertIn("templates/authored/renamed.template.yaml", workspace_entries("template"))
+
+            renamed_template_path.unlink()
+            window._on_workspace_directory_changed(str(templates_root))
+            self.assertNotIn("templates/authored/renamed.template.yaml", workspace_entries("template"))
+
+            window.close()
+
+    def test_workspace_refresh_keeps_open_document_when_backing_file_disappears(self) -> None:
+        recipe = base_recipe(recipe_id="example.recipe", steps=[])
+        with TemporaryDirectory() as tmp:
+            repo_root = Path(tmp)
+            authored_root = build_authored_tree(repo_root, recipes=[recipe])
+            recipe_path = authored_root / "recipes" / "example_recipe.yaml"
+
+            window = MainWindow(repo_root)
+            window.open_recipe_file(recipe_path)
+
+            recipe_path.unlink()
+            window._on_workspace_directory_changed(str(authored_root / "recipes"))
+
+            self.assertIsNotNone(window.current_document)
+            self.assertEqual(window.current_document.path, recipe_path.resolve())
+            self.assertEqual(window.current_document.working_recipe.id, "example.recipe")
+            self.assertEqual(window._workspace_list.currentRow(), -1)
+            self.assertIn("no longer present in the workspace", window.statusBar().currentMessage())
+
+            write_yaml(recipe_path, recipe)
+            window._on_workspace_directory_changed(str(authored_root / "recipes"))
+
+            self.assertIsNotNone(window._workspace_list.currentItem())
+            self.assertEqual(window._workspace_list.currentItem().data(Qt.ItemDataRole.UserRole)["path"], str(recipe_path.resolve()))
 
             window.close()
 

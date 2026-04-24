@@ -73,6 +73,8 @@ Editor interaction rules:
 - new recipes are created from recipe templates under `templates/authored/`, including a blank recipe template
 - template preview is read-only and informational
 - the workspace lists authored recipes separately from recipe templates
+- the workspace list auto-refreshes when authored recipe files or recipe template files are added, removed, or renamed on disk while the workspace is open
+- if an open recipe file disappears from the workspace because of an external remove or rename, the in-memory document stays open and the workspace selection clears until that exact path reappears
 - unsaved-changes prompts gate opening another recipe, starting a new recipe, and closing the window
 - diagnostics and YAML preview refresh after each committed edit
 - undo and redo operate at command granularity and persist across saves for the open document
