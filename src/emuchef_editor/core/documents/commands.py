@@ -18,6 +18,7 @@ from emuchef.domain import (
     PermissionSet,
     PermissionWhen,
     Recipe,
+    RefKind,
     RefParamValue,
     RemoteFileArtifact,
     RuntimePermissionGrant,
@@ -26,6 +27,7 @@ from emuchef.domain import (
     StepCondition,
     StepConstraints,
     StepType,
+    parse_reference,
 )
 
 
@@ -87,6 +89,12 @@ class AddInputCommand:
 
 
 @dataclass(frozen=True, slots=True)
+class RenameInputCommand:
+    input_id: str
+    new_input_id: str
+
+
+@dataclass(frozen=True, slots=True)
 class UpdateInputFieldCommand:
     input_id: str
     field: Literal[
@@ -121,6 +129,12 @@ class AddArtifactCommand:
 
 
 @dataclass(frozen=True, slots=True)
+class RenameArtifactCommand:
+    artifact_id: str
+    new_artifact_id: str
+
+
+@dataclass(frozen=True, slots=True)
 class UpdateArtifactFieldCommand:
     artifact_id: str
     field: Literal["url", "cache"]
@@ -141,6 +155,12 @@ class DuplicateArtifactCommand:
 @dataclass(frozen=True, slots=True)
 class AddArtifactGroupCommand:
     group_id: str
+
+
+@dataclass(frozen=True, slots=True)
+class RenameArtifactGroupCommand:
+    group_id: str
+    new_group_id: str
 
 
 @dataclass(frozen=True, slots=True)
@@ -223,6 +243,17 @@ class AddStepCommand:
 
 
 @dataclass(frozen=True, slots=True)
+class RenameRecipeIdCommand:
+    new_recipe_id: str
+
+
+@dataclass(frozen=True, slots=True)
+class RenameStepCommand:
+    step_id: str
+    new_step_id: str
+
+
+@dataclass(frozen=True, slots=True)
 class UpdateStepBasicsCommand:
     step_id: str
     name: str
@@ -293,14 +324,17 @@ RecipeCommand = (
     | RemoveProvidedFeatureCommand
     | MoveProvidedFeatureCommand
     | AddInputCommand
+    | RenameInputCommand
     | UpdateInputFieldCommand
     | DeleteInputCommand
     | DuplicateInputCommand
     | AddArtifactCommand
+    | RenameArtifactCommand
     | UpdateArtifactFieldCommand
     | DeleteArtifactCommand
     | DuplicateArtifactCommand
     | AddArtifactGroupCommand
+    | RenameArtifactGroupCommand
     | DeleteArtifactGroupCommand
     | ReorderArtifactGroupCommand
     | AddArtifactGroupMemberCommand
@@ -314,6 +348,8 @@ RecipeCommand = (
     | DeleteAppOpCommand
     | UpdatePermissionPolicyFieldCommand
     | AddStepCommand
+    | RenameRecipeIdCommand
+    | RenameStepCommand
     | UpdateStepBasicsCommand
     | DeleteStepCommand
     | DuplicateStepCommand
@@ -374,6 +410,8 @@ def apply_recipe_command(recipe: Recipe, command: RecipeCommand) -> tuple[Recipe
         ), "Reorder provided feature"
     if isinstance(command, AddInputCommand):
         return _add_input(recipe, command.input_id), "Add input"
+    if isinstance(command, RenameInputCommand):
+        return _rename_input(recipe, command.input_id, command.new_input_id), f"Rename input {command.input_id}"
     if isinstance(command, UpdateInputFieldCommand):
         return _update_input_field(recipe, command), f"Update input {command.input_id}"
     if isinstance(command, DeleteInputCommand):
@@ -382,6 +420,8 @@ def apply_recipe_command(recipe: Recipe, command: RecipeCommand) -> tuple[Recipe
         return _duplicate_input(recipe, command.source_input_id, command.new_input_id), "Duplicate input"
     if isinstance(command, AddArtifactCommand):
         return _add_artifact(recipe, command.artifact_id, command.url), "Add artifact"
+    if isinstance(command, RenameArtifactCommand):
+        return _rename_artifact(recipe, command.artifact_id, command.new_artifact_id), f"Rename artifact {command.artifact_id}"
     if isinstance(command, UpdateArtifactFieldCommand):
         return _update_artifact_field(recipe, command), f"Update artifact {command.artifact_id}"
     if isinstance(command, DeleteArtifactCommand):
@@ -390,6 +430,8 @@ def apply_recipe_command(recipe: Recipe, command: RecipeCommand) -> tuple[Recipe
         return _duplicate_artifact(recipe, command.source_artifact_id, command.new_artifact_id), "Duplicate artifact"
     if isinstance(command, AddArtifactGroupCommand):
         return _add_artifact_group(recipe, command.group_id), "Add artifact group"
+    if isinstance(command, RenameArtifactGroupCommand):
+        return _rename_artifact_group(recipe, command.group_id, command.new_group_id), f"Rename artifact group {command.group_id}"
     if isinstance(command, DeleteArtifactGroupCommand):
         return _delete_artifact_group(recipe, command.group_id), "Delete artifact group"
     if isinstance(command, ReorderArtifactGroupCommand):
@@ -416,6 +458,10 @@ def apply_recipe_command(recipe: Recipe, command: RecipeCommand) -> tuple[Recipe
         return _update_permission_policy_field(recipe, command), f"Update permission policy {command.field}"
     if isinstance(command, AddStepCommand):
         return _add_step(recipe, command), "Add step"
+    if isinstance(command, RenameRecipeIdCommand):
+        return _rename_recipe_id(recipe, command.new_recipe_id), "Rename recipe id"
+    if isinstance(command, RenameStepCommand):
+        return _rename_step(recipe, command.step_id, command.new_step_id), f"Rename step {command.step_id}"
     if isinstance(command, UpdateStepBasicsCommand):
         return _update_step_basics(recipe, command), f"Update step {command.step_id}"
     if isinstance(command, DeleteStepCommand):
@@ -479,6 +525,24 @@ def _add_input(recipe: Recipe, input_id: str) -> Recipe:
     return replace(recipe, inputs=inputs)
 
 
+def _rename_recipe_id(recipe: Recipe, new_recipe_id: str) -> Recipe:
+    normalized_id = _normalize_identifier(new_recipe_id, label="recipe id")
+    recipe_dependencies = tuple(normalized_id if dependency == recipe.id else dependency for dependency in recipe.recipe_dependencies)
+    return replace(recipe, id=normalized_id, recipe_dependencies=recipe_dependencies)
+
+
+def _rename_input(recipe: Recipe, input_id: str, new_input_id: str) -> Recipe:
+    declaration = recipe.inputs.get(input_id)
+    if declaration is None:
+        raise ValueError(f"Unknown input id {input_id!r}.")
+    normalized_id = _normalize_identifier(new_input_id, label="input id")
+    if normalized_id != input_id and normalized_id in recipe.inputs:
+        raise ValueError(f"Input {normalized_id!r} already exists.")
+    inputs = _rename_mapping_key(recipe.inputs, input_id, normalized_id, replace(declaration, id=normalized_id))
+    steps = tuple(_rewrite_step_refs(step, "input", input_id, normalized_id) for step in recipe.steps)
+    return replace(recipe, inputs=inputs, steps=steps)
+
+
 def _update_input_field(recipe: Recipe, command: UpdateInputFieldCommand) -> Recipe:
     declaration = recipe.inputs.get(command.input_id)
     if declaration is None:
@@ -528,6 +592,7 @@ def _delete_input(recipe: Recipe, input_id: str) -> Recipe:
     return replace(
         recipe,
         inputs={key: value for key, value in recipe.inputs.items() if key != input_id},
+        steps=tuple(_remove_step_refs(step, "input", input_id) for step in recipe.steps),
     )
 
 
@@ -571,6 +636,22 @@ def _update_artifact_field(recipe: Recipe, command: UpdateArtifactFieldCommand) 
     return replace(recipe, artifacts=_replace_mapping_value(recipe.artifacts, command.artifact_id, updated))
 
 
+def _rename_artifact(recipe: Recipe, artifact_id: str, new_artifact_id: str) -> Recipe:
+    artifact = recipe.artifacts.get(artifact_id)
+    if artifact is None:
+        raise ValueError(f"Unknown artifact id {artifact_id!r}.")
+    normalized_id = _normalize_identifier(new_artifact_id, label="artifact id")
+    if normalized_id != artifact_id and normalized_id in recipe.artifacts:
+        raise ValueError(f"Artifact {normalized_id!r} already exists.")
+    artifacts = _rename_mapping_key(recipe.artifacts, artifact_id, normalized_id, replace(artifact, id=normalized_id))
+    artifact_groups = {
+        group_id: tuple(normalized_id if member == artifact_id else member for member in members)
+        for group_id, members in recipe.artifact_groups.items()
+    }
+    steps = tuple(_rewrite_step_refs(step, "artifact", artifact_id, normalized_id) for step in recipe.steps)
+    return replace(recipe, artifacts=artifacts, artifact_groups=artifact_groups, steps=steps)
+
+
 def _delete_artifact(recipe: Recipe, artifact_id: str) -> Recipe:
     _require_known_mapping_key(recipe.artifacts, artifact_id, label="artifact")
     artifacts = {key: value for key, value in recipe.artifacts.items() if key != artifact_id}
@@ -578,7 +659,8 @@ def _delete_artifact(recipe: Recipe, artifact_id: str) -> Recipe:
         group_id: tuple(member for member in members if member != artifact_id)
         for group_id, members in recipe.artifact_groups.items()
     }
-    return replace(recipe, artifacts=artifacts, artifact_groups=artifact_groups)
+    steps = tuple(_remove_step_refs(step, "artifact", artifact_id) for step in recipe.steps)
+    return replace(recipe, artifacts=artifacts, artifact_groups=artifact_groups, steps=steps)
 
 
 def _duplicate_artifact(recipe: Recipe, source_artifact_id: str, new_artifact_id: str) -> Recipe:
@@ -604,10 +686,22 @@ def _add_artifact_group(recipe: Recipe, group_id: str) -> Recipe:
 
 def _delete_artifact_group(recipe: Recipe, group_id: str) -> Recipe:
     _require_known_mapping_key(recipe.artifact_groups, group_id, label="artifact group")
+    steps = tuple(_remove_artifact_group_selection(step, group_id) for step in recipe.steps)
     return replace(
         recipe,
         artifact_groups={key: value for key, value in recipe.artifact_groups.items() if key != group_id},
+        steps=steps,
     )
+
+
+def _rename_artifact_group(recipe: Recipe, group_id: str, new_group_id: str) -> Recipe:
+    _require_known_mapping_key(recipe.artifact_groups, group_id, label="artifact group")
+    normalized_id = _normalize_identifier(new_group_id, label="artifact group id")
+    if normalized_id != group_id and normalized_id in recipe.artifact_groups:
+        raise ValueError(f"Artifact group {normalized_id!r} already exists.")
+    artifact_groups = _rename_mapping_key(recipe.artifact_groups, group_id, normalized_id, recipe.artifact_groups[group_id])
+    steps = tuple(_rewrite_artifact_group_selection(step, group_id, normalized_id) for step in recipe.steps)
+    return replace(recipe, artifact_groups=artifact_groups, steps=steps)
 
 
 def _reorder_artifact_group(recipe: Recipe, group_id: str, to_index: int) -> Recipe:
@@ -729,6 +823,19 @@ def _add_step(recipe: Recipe, command: AddStepCommand) -> Recipe:
     return replace(recipe, steps=tuple(steps))
 
 
+def _rename_step(recipe: Recipe, step_id: str, new_step_id: str) -> Recipe:
+    source = _require_known_step(recipe, step_id)
+    normalized_id = _normalize_identifier(new_step_id, label="step id")
+    if normalized_id != step_id and any(step.id == normalized_id for step in recipe.steps):
+        raise ValueError(f"Step {normalized_id!r} already exists.")
+    steps: list[Step] = []
+    for step in recipe.steps:
+        updated = replace(source, id=normalized_id) if step.id == step_id else step
+        updated = _rewrite_step_refs(updated, "step", step_id, normalized_id)
+        steps.append(updated)
+    return replace(recipe, steps=tuple(steps))
+
+
 def _update_step_basics(recipe: Recipe, command: UpdateStepBasicsCommand) -> Recipe:
     step = _require_known_step(recipe, command.step_id)
     updated = replace(
@@ -741,7 +848,10 @@ def _update_step_basics(recipe: Recipe, command: UpdateStepBasicsCommand) -> Rec
 
 def _delete_step(recipe: Recipe, step_id: str) -> Recipe:
     _require_known_step(recipe, step_id)
-    return replace(recipe, steps=tuple(step for step in recipe.steps if step.id != step_id))
+    return replace(
+        recipe,
+        steps=tuple(_remove_step_refs(step, "step", step_id) for step in recipe.steps if step.id != step_id),
+    )
 
 
 def _duplicate_step(recipe: Recipe, source_step_id: str, new_step_id: str) -> Recipe:
@@ -887,6 +997,154 @@ def _param_value_equals_default(value: AuthoredParamValue, default: object) -> b
     if hasattr(value, "value"):
         return getattr(value, "value") == default
     return value == default
+
+
+def _rewrite_step_refs(step: Step, target_kind: Literal["input", "artifact", "artifact_group", "step"], old_id: str, new_id: str) -> Step:
+    updated = step
+    params = dict(step.params)
+    changed_params = False
+    for param_name, value in step.params.items():
+        if not _is_supported_step_param(step, param_name):
+            continue
+        if isinstance(value, RefParamValue):
+            rewritten_ref = _rewrite_ref(value.ref, target_kind, old_id, new_id)
+            if rewritten_ref is not None and rewritten_ref != value.ref:
+                params[param_name] = replace(value, ref=rewritten_ref)
+                changed_params = True
+            continue
+        if target_kind == "artifact" and param_name == "artifacts":
+            rewritten_value, changed = _rewrite_string_sequence_value(value, old_id, new_id)
+            if changed:
+                params[param_name] = rewritten_value
+                changed_params = True
+            continue
+        if target_kind == "artifact_group" and param_name == "artifact_groups":
+            rewritten_value, changed = _rewrite_string_sequence_value(value, old_id, new_id)
+            if changed:
+                params[param_name] = rewritten_value
+                changed_params = True
+    if changed_params:
+        updated = replace(updated, params=params)
+    if target_kind == "step":
+        dependencies = tuple(new_id if dependency == old_id else dependency for dependency in updated.dependencies)
+        conflicts = tuple(new_id if conflict == old_id else conflict for conflict in updated.constraints.conflicts_with)
+        if dependencies != updated.dependencies or conflicts != updated.constraints.conflicts_with:
+            updated = replace(
+                updated,
+                dependencies=dependencies,
+                constraints=replace(updated.constraints, conflicts_with=conflicts),
+            )
+    return updated
+
+
+def _remove_step_refs(step: Step, target_kind: Literal["input", "artifact", "step"], target_id: str) -> Step:
+    updated = step
+    params = dict(step.params)
+    changed_params = False
+    for param_name, value in step.params.items():
+        if not _is_supported_step_param(step, param_name):
+            continue
+        if isinstance(value, RefParamValue):
+            if _ref_matches(value.ref, target_kind, target_id):
+                del params[param_name]
+                changed_params = True
+            continue
+        if target_kind == "artifact" and param_name == "artifacts":
+            rewritten_value, changed = _remove_string_sequence_value(value, target_id)
+            if changed:
+                params[param_name] = rewritten_value
+                changed_params = True
+    if changed_params:
+        updated = replace(updated, params=params)
+    if target_kind == "step":
+        dependencies = tuple(dependency for dependency in updated.dependencies if dependency != target_id)
+        conflicts = tuple(conflict for conflict in updated.constraints.conflicts_with if conflict != target_id)
+        if dependencies != updated.dependencies or conflicts != updated.constraints.conflicts_with:
+            updated = replace(
+                updated,
+                dependencies=dependencies,
+                constraints=replace(updated.constraints, conflicts_with=conflicts),
+            )
+    return updated
+
+
+def _rewrite_artifact_group_selection(step: Step, group_id: str, new_group_id: str) -> Step:
+    params = dict(step.params)
+    value = params.get("artifact_groups")
+    if not _is_supported_step_param(step, "artifact_groups") or value is None:
+        return step
+    rewritten_value, changed = _rewrite_string_sequence_value(value, group_id, new_group_id)
+    if not changed:
+        return step
+    params["artifact_groups"] = rewritten_value
+    return replace(step, params=params)
+
+
+def _remove_artifact_group_selection(step: Step, group_id: str) -> Step:
+    params = dict(step.params)
+    value = params.get("artifact_groups")
+    if not _is_supported_step_param(step, "artifact_groups") or value is None:
+        return step
+    rewritten_value, changed = _remove_string_sequence_value(value, group_id)
+    if not changed:
+        return step
+    params["artifact_groups"] = rewritten_value
+    return replace(step, params=params)
+
+
+def _rewrite_ref(ref: str, target_kind: Literal["input", "artifact", "artifact_group", "step"], old_id: str, new_id: str) -> str | None:
+    try:
+        parsed = parse_reference(ref)
+    except ValueError:
+        return None
+    if target_kind == "input" and parsed.kind is RefKind.INPUT and parsed.target_id == old_id:
+        return f"inputs.{new_id}"
+    if target_kind == "artifact" and parsed.kind is RefKind.ARTIFACT_FIELD and parsed.target_id == old_id:
+        return f"artifacts.{new_id}.{parsed.field}"
+    if target_kind == "step" and parsed.target_id == old_id:
+        if parsed.kind is RefKind.STEP_SHORTHAND:
+            return f"steps.{new_id}"
+        if parsed.kind is RefKind.STEP_OUTPUT:
+            return f"steps.{new_id}.outputs.{parsed.field}"
+    return None
+
+
+def _ref_matches(ref: str, target_kind: Literal["input", "artifact", "step"], target_id: str) -> bool:
+    return _rewrite_ref(ref, target_kind, target_id, target_id) is not None
+
+
+def _is_supported_step_param(step: Step, param_name: str) -> bool:
+    spec = STEP_SPECS.get(step.type)
+    return spec is not None and param_name in spec.params
+
+
+def _rewrite_string_sequence_value(value: object, old_id: str, new_id: str) -> tuple[object, bool]:
+    values = _coerce_string_sequence(value)
+    if values is None:
+        return value, False
+    rewritten = [new_id if item == old_id else item for item in values]
+    return rewritten, rewritten != values
+
+
+def _remove_string_sequence_value(value: object, target_id: str) -> tuple[object, bool]:
+    values = _coerce_string_sequence(value)
+    if values is None:
+        return value, False
+    rewritten = [item for item in values if item != target_id]
+    return rewritten, rewritten != values
+
+
+def _coerce_string_sequence(value: object) -> list[str] | None:
+    if hasattr(value, "value"):
+        value = getattr(value, "value")
+    if isinstance(value, (list, tuple)):
+        return [str(item) for item in value]
+    return None
+
+
+def _rename_mapping_key(mapping, old_key: str, new_key: str, new_value):
+    _require_known_mapping_key(mapping, old_key, label="mapping entry")
+    return {new_key if item_key == old_key else item_key: (new_value if item_key == old_key else item_value) for item_key, item_value in mapping.items()}
 
 
 def _replace_mapping_value(mapping, key: str, value):

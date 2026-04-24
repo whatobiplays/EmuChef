@@ -22,6 +22,7 @@ if PYSIDE6_AVAILABLE:
         QApplication,
         QComboBox,
         QFormLayout,
+        QLabel,
         QLineEdit,
         QMessageBox,
         QSizePolicy,
@@ -35,6 +36,8 @@ if PYSIDE6_AVAILABLE:
     from emuchef_editor.app.recipe_editor.permissions_page import _AppOpDialog, _RuntimePermissionDialog
     from emuchef_editor.app.recipe_editor.steps_page import _ConditionDialog, _NewStepDialog
     from emuchef_editor.app.recipe_editor.tooltips import field_tooltip, prompt_tooltip
+    from emuchef_editor.app.recipe_editor.usage_dialogs import DeleteWithUsagesDialog, FindUsagesDialog, UsageDialogContext
+    from emuchef_editor.core.analysis.usages import UsageTarget, analyze_recipe_usages
 
 
 @unittest.skipUnless(PYSIDE6_AVAILABLE, "PySide6 is not installed in the local test environment.")
@@ -487,7 +490,7 @@ class EditorAppTests(unittest.TestCase):
             page._move_up_button.click()
 
             page._select_step("copy_assets")
-            with patch.object(page, "_confirm_delete_step", return_value=True):
+            with patch.object(DeleteWithUsagesDialog, "prompt", return_value="delete"):
                 page._delete_step_button.click()
 
             self.assertEqual(
@@ -506,6 +509,182 @@ class EditorAppTests(unittest.TestCase):
                 return_value=QMessageBox.StandardButton.Discard,
             ):
                 window.close()
+
+    def test_in_file_refactor_actions_rename_find_usages_and_delete_with_cleanup(self) -> None:
+        recipe = base_recipe(
+            recipe_id="example.recipe",
+            recipe_dependencies=["example.recipe"],
+            inputs={
+                "source_dir": {
+                    "type": "directory",
+                    "role": "generic",
+                    "label": "Source Directory",
+                    "required": True,
+                    "multiple": False,
+                    "validation": {"must_exist": True, "allowed_extensions": [], "path_kind": "directory"},
+                }
+            },
+            artifacts={
+                "archive_zip": {"type": "remote_file", "url": "https://example.com/archive.zip"},
+                "other_zip": {"type": "remote_file", "url": "https://example.com/other.zip"},
+            },
+            artifact_groups={"bundle": ["archive_zip", "other_zip"]},
+            steps=[
+                {
+                    "id": "resolve",
+                    "type": "resolve_artifacts",
+                    "name": "Resolve",
+                    "user_toggleable": False,
+                    "dependencies": [],
+                    "constraints": {"capabilities": [], "conflicts_with": []},
+                    "params": {"artifacts": ["archive_zip"], "artifact_groups": ["bundle"]},
+                    "verify": [],
+                },
+                {
+                    "id": "extract",
+                    "type": "extract_archive",
+                    "name": "Extract",
+                    "user_toggleable": False,
+                    "dependencies": [],
+                    "constraints": {"capabilities": [], "conflicts_with": []},
+                    "params": {"archive": {"ref": "artifacts.archive_zip.local_path"}},
+                    "verify": [],
+                },
+                {
+                    "id": "copy",
+                    "type": "copy_files",
+                    "name": "Copy",
+                    "user_toggleable": False,
+                    "dependencies": ["extract"],
+                    "constraints": {"capabilities": [], "conflicts_with": ["extract"]},
+                    "params": {"source": {"ref": "steps.extract.outputs.extracted_path"}, "dest": "/sdcard/Example"},
+                    "verify": [],
+                },
+                {
+                    "id": "copy_input",
+                    "type": "copy_files",
+                    "name": "Copy Input",
+                    "user_toggleable": False,
+                    "dependencies": [],
+                    "constraints": {"capabilities": [], "conflicts_with": []},
+                    "params": {"source": {"ref": "inputs.source_dir"}, "dest": "/sdcard/Input"},
+                    "verify": [],
+                },
+            ],
+        )
+        with TemporaryDirectory() as tmp:
+            repo_root = Path(tmp)
+            authored_root = build_authored_tree(repo_root, recipes=[recipe])
+            recipe_path = authored_root / "recipes" / "example_recipe.yaml"
+
+            window = MainWindow(repo_root)
+            window.open_recipe_file(recipe_path)
+
+            overview_page = window._editor_view._overview_page
+            self.assertTrue(overview_page._id_edit.isReadOnly())
+            with patch(
+                "emuchef_editor.app.recipe_editor.overview_page.TextEntryDialog.prompt",
+                return_value="renamed.recipe",
+            ):
+                overview_page._rename_id_button.click()
+            self.assertEqual(window.current_document.working_recipe.id, "renamed.recipe")
+            self.assertEqual(window.current_document.working_recipe.recipe_dependencies, ("renamed.recipe",))
+
+            inputs_page = window._editor_view._inputs_page
+            inputs_page._select_input("source_dir")
+            with patch.object(inputs_page, "_prompt_for_identifier", return_value="renamed_source"):
+                inputs_page._rename_button.click()
+            self.assertIn("renamed_source", window.current_document.working_recipe.inputs)
+            self.assertIn("ref: inputs.renamed_source", window._yaml_preview.toPlainText())
+
+            steps_page = window._editor_view._steps_page
+            steps_page._select_step("extract")
+            before_yaml = window.current_document.to_yaml()
+            with patch.object(FindUsagesDialog, "show_usages") as show_usages:
+                steps_page._find_step_usages_button.click()
+            show_usages.assert_called_once()
+            self.assertEqual(window.current_document.to_yaml(), before_yaml)
+
+            artifacts_page = window._editor_view._artifacts_page
+            artifacts_page._select_artifact("archive_zip")
+            with patch.object(DeleteWithUsagesDialog, "prompt", return_value="find_usages"), patch.object(
+                FindUsagesDialog,
+                "show_usages",
+            ) as show_usages:
+                artifacts_page._delete_button.click()
+            show_usages.assert_called_once()
+            self.assertIn("archive_zip", window.current_document.working_recipe.artifacts)
+
+            with patch.object(DeleteWithUsagesDialog, "prompt", return_value="delete"):
+                artifacts_page._delete_button.click()
+            self.assertNotIn("archive_zip", window.current_document.working_recipe.artifacts)
+            self.assertEqual(window.current_document.working_recipe.artifact_groups["bundle"], ("other_zip",))
+            resolve_step = next(step for step in window.current_document.working_recipe.steps if step.id == "resolve")
+            extract_step = next(step for step in window.current_document.working_recipe.steps if step.id == "extract")
+            self.assertEqual(resolve_step.params["artifacts"], [])
+            self.assertNotIn("archive", extract_step.params)
+
+            with patch.object(
+                window,
+                "_prompt_unsaved_changes",
+                return_value=QMessageBox.StandardButton.Discard,
+            ):
+                window.close()
+
+    def test_usage_delete_dialog_shows_preserved_unsupported_content_warning(self) -> None:
+        recipe = base_recipe(
+            recipe_id="example.recipe",
+            inputs={
+                "source_dir": {
+                    "type": "directory",
+                    "role": "generic",
+                    "label": "Source Directory",
+                    "required": True,
+                    "multiple": False,
+                    "validation": {"must_exist": True, "allowed_extensions": [], "path_kind": "directory"},
+                }
+            },
+            steps=[
+                {
+                    "id": "copy",
+                    "type": "copy_files",
+                    "name": "Copy",
+                    "user_toggleable": False,
+                    "dependencies": [],
+                    "constraints": {"capabilities": ["unsupported_capability"], "conflicts_with": []},
+                    "params": {
+                        "source": {"ref": "inputs.source_dir"},
+                        "dest": "/sdcard/Example",
+                        "experimental_ref": {"ref": "inputs.source_dir"},
+                    },
+                    "verify": [{"type": "custom_verify", "params": {"target": "inputs.source_dir"}}],
+                }
+            ],
+        )
+        with TemporaryDirectory() as tmp:
+            authored_root = build_authored_tree(Path(tmp), recipes=[recipe])
+            document_path = authored_root / "recipes" / "example_recipe.yaml"
+            window = MainWindow(authored_root.parent)
+            window.open_recipe_file(document_path)
+            analysis = analyze_recipe_usages(
+                window.current_document.working_recipe,
+                UsageTarget(kind="input", id="source_dir"),
+            )
+
+            dialog = DeleteWithUsagesDialog(
+                UsageDialogContext(title="Confirm Delete", item_label="input source_dir", analysis=analysis),
+                window,
+            )
+
+            warning_labels = [
+                label.text()
+                for label in dialog.findChildren(QLabel)
+                if "preserved unsupported content" in label.text()
+            ]
+            self.assertTrue(warning_labels)
+
+            dialog.close()
+            window.close()
 
     def test_steps_page_shows_notes_and_locks_preserved_unsupported_lists(self) -> None:
         recipe = base_recipe(

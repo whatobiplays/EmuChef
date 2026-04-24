@@ -16,11 +16,13 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
+from emuchef_editor.core.analysis.usages import UsageTarget, analyze_recipe_usages
 from emuchef_editor.core.documents.commands import (
     AddArtifactGroupCommand,
     AddArtifactGroupMemberCommand,
     DeleteArtifactGroupCommand,
     RemoveArtifactGroupMemberCommand,
+    RenameArtifactGroupCommand,
     ReorderArtifactGroupCommand,
     ReorderArtifactGroupMemberCommand,
 )
@@ -28,6 +30,7 @@ from emuchef_editor.core.documents.recipe_document import RecipeDocument
 
 from .common import TextEntryDialog, add_tooltipped_form_row, configure_data_entry_form, create_expanding_line_edit
 from .tooltips import field_tooltip, prompt_tooltip
+from .usage_dialogs import DeleteWithUsagesDialog, FindUsagesDialog, confirm_preserved_content_warning
 
 
 class ArtifactGroupsPage(QWidget):
@@ -44,13 +47,17 @@ class ArtifactGroupsPage(QWidget):
         self._group_list = QListWidget()
         self._group_list.currentItemChanged.connect(self._on_group_selection_changed)
         self._add_group_button = QPushButton("Add")
+        self._rename_group_button = QPushButton("Rename")
         self._delete_group_button = QPushButton("Delete")
+        self._find_group_usages_button = QPushButton("Find Usages")
         self._move_group_up_button = QPushButton("Move Up")
         self._move_group_down_button = QPushButton("Move Down")
 
         group_buttons = QHBoxLayout()
         group_buttons.addWidget(self._add_group_button)
+        group_buttons.addWidget(self._rename_group_button)
         group_buttons.addWidget(self._delete_group_button)
+        group_buttons.addWidget(self._find_group_usages_button)
         group_buttons.addWidget(self._move_group_up_button)
         group_buttons.addWidget(self._move_group_down_button)
 
@@ -94,7 +101,9 @@ class ArtifactGroupsPage(QWidget):
         layout.addWidget(splitter)
 
         self._add_group_button.clicked.connect(self._add_group)
+        self._rename_group_button.clicked.connect(self._rename_group)
         self._delete_group_button.clicked.connect(self._delete_group)
+        self._find_group_usages_button.clicked.connect(self._find_group_usages)
         self._move_group_up_button.clicked.connect(self._move_group_up)
         self._move_group_down_button.clicked.connect(self._move_group_down)
         self._add_member_button.clicked.connect(self._add_member)
@@ -167,7 +176,9 @@ class ArtifactGroupsPage(QWidget):
         has_group = self._selected_group_id is not None
         member_row = self._member_list.currentRow()
         has_member = member_row >= 0
+        self._rename_group_button.setEnabled(has_group)
         self._delete_group_button.setEnabled(has_group)
+        self._find_group_usages_button.setEnabled(has_group)
         self._move_group_up_button.setEnabled(has_group and group_row > 0)
         self._move_group_down_button.setEnabled(has_group and group_row < self._group_list.count() - 1)
         self._add_member_button.setEnabled(has_group and bool(self._available_members()))
@@ -188,12 +199,46 @@ class ArtifactGroupsPage(QWidget):
         if self._document is None or self._selected_group_id is None:
             return
         group_id = self._selected_group_id
+        analysis = analyze_recipe_usages(self._document.working_recipe, UsageTarget(kind="artifact_group", id=group_id))
+        decision = DeleteWithUsagesDialog.prompt(self, item_label=f"artifact group {group_id}", analysis=analysis)
+        if decision == "find_usages":
+            FindUsagesDialog.show_usages(self, item_label=f"artifact group {group_id}", analysis=analysis)
+            return
+        if decision != "delete":
+            return
         group_ids = tuple(self._document.working_recipe.artifact_groups.keys())
         current_index = group_ids.index(group_id)
         remaining = [item for item in group_ids if item != group_id]
         self._selected_group_id = remaining[min(current_index, len(remaining) - 1)] if remaining else None
         self._selected_member_index = -1
         self._command_handler(DeleteArtifactGroupCommand(group_id=group_id))
+
+    def _rename_group(self) -> None:
+        if self._document is None or self._selected_group_id is None:
+            return
+        group_id = self._selected_group_id
+        new_group_id = self._prompt_for_identifier(
+            "Rename Artifact Group",
+            "Group id",
+            prompt_tooltip("artifact_groups.id"),
+            initial_value=group_id,
+        )
+        if new_group_id is None or new_group_id == group_id:
+            return
+        analysis = analyze_recipe_usages(self._document.working_recipe, UsageTarget(kind="artifact_group", id=group_id))
+        if analysis.has_preserved_unsupported_content_warning and not confirm_preserved_content_warning(self, action=f"Renaming artifact group {group_id!r}"):
+            return
+        previous_selection = self._selected_group_id
+        self._selected_group_id = new_group_id
+        if not self._command_handler(RenameArtifactGroupCommand(group_id=group_id, new_group_id=new_group_id)):
+            self._selected_group_id = previous_selection
+
+    def _find_group_usages(self) -> None:
+        if self._document is None or self._selected_group_id is None:
+            return
+        group_id = self._selected_group_id
+        analysis = analyze_recipe_usages(self._document.working_recipe, UsageTarget(kind="artifact_group", id=group_id))
+        FindUsagesDialog.show_usages(self, item_label=f"artifact group {group_id}", analysis=analysis)
 
     def _move_group_up(self) -> None:
         if self._selected_group_id is None:
@@ -279,5 +324,12 @@ class ArtifactGroupsPage(QWidget):
         members = set(self._document.working_recipe.artifact_groups[self._selected_group_id])
         return [artifact_id for artifact_id in sorted(self._document.working_recipe.artifacts) if artifact_id not in members]
 
-    def _prompt_for_identifier(self, title: str, label: str, tooltip: str | None) -> str | None:
-        return TextEntryDialog.prompt(self, title=title, label=label, tooltip=tooltip)
+    def _prompt_for_identifier(
+        self,
+        title: str,
+        label: str,
+        tooltip: str | None,
+        *,
+        initial_value: str = "",
+    ) -> str | None:
+        return TextEntryDialog.prompt(self, title=title, label=label, tooltip=tooltip, initial_value=initial_value)

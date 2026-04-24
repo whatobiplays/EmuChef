@@ -3,8 +3,9 @@
 from __future__ import annotations
 
 from PySide6.QtCore import QSignalBlocker, Qt
-from PySide6.QtWidgets import QFormLayout, QHBoxLayout, QLabel, QVBoxLayout, QWidget
+from PySide6.QtWidgets import QFormLayout, QHBoxLayout, QLabel, QPushButton, QVBoxLayout, QWidget
 
+from emuchef_editor.core.analysis.usages import UsageTarget, analyze_recipe_usages
 from emuchef_editor.core.documents.commands import (
     AddProvidedFeatureCommand,
     AddRecipeDependencyCommand,
@@ -12,6 +13,7 @@ from emuchef_editor.core.documents.commands import (
     MoveRecipeDependencyCommand,
     RemoveProvidedFeatureCommand,
     RemoveRecipeDependencyCommand,
+    RenameRecipeIdCommand,
     SetOverviewFieldCommand,
     UpdateProvidedFeatureCommand,
     UpdateRecipeDependencyCommand,
@@ -21,6 +23,7 @@ from emuchef_editor.core.documents.recipe_document import RecipeDocument
 from .common import (
     CommitPlainTextEdit,
     OrderedStringListEditor,
+    TextEntryDialog,
     add_tooltipped_form_row,
     apply_tooltip,
     configure_data_entry_form,
@@ -28,6 +31,7 @@ from .common import (
     expand_form_field,
 )
 from .tooltips import field_tooltip, prompt_tooltip
+from .usage_dialogs import FindUsagesDialog, confirm_preserved_content_warning
 
 
 class OverviewPage(QWidget):
@@ -38,7 +42,7 @@ class OverviewPage(QWidget):
         self._command_handler = command_handler
         self._document: RecipeDocument | None = None
 
-        self._id_edit = create_expanding_line_edit()
+        self._id_edit = create_expanding_line_edit(read_only=True)
         self._name_edit = create_expanding_line_edit()
         self._description_edit = CommitPlainTextEdit()
         expand_form_field(self._description_edit)
@@ -71,6 +75,13 @@ class OverviewPage(QWidget):
             field_tooltip=field_tooltip("overview.provides_features"),
         )
 
+        self._rename_id_button = QPushButton("Rename")
+        self._find_id_usages_button = QPushButton("Find Usages")
+        id_actions = QHBoxLayout()
+        id_actions.addWidget(self._rename_id_button)
+        id_actions.addWidget(self._find_id_usages_button)
+        id_actions.addStretch(1)
+
         lists_row = QHBoxLayout()
         dependency_panel = QVBoxLayout()
         self._recipe_dependencies_label = QLabel("Recipe Dependencies")
@@ -92,12 +103,14 @@ class OverviewPage(QWidget):
         layout = QVBoxLayout(self)
         layout.setAlignment(Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignTop)
         layout.addLayout(self._form)
+        layout.addLayout(id_actions)
         layout.addWidget(self._description_label)
         layout.addWidget(self._description_edit)
         layout.addLayout(lists_row)
         layout.addStretch(1)
 
-        self._id_edit.editingFinished.connect(self._commit_id)
+        self._rename_id_button.clicked.connect(self._rename_recipe_id)
+        self._find_id_usages_button.clicked.connect(self._find_recipe_id_usages)
         self._name_edit.editingFinished.connect(self._commit_name)
         self._description_edit.committed.connect(self._commit_description)
 
@@ -124,11 +137,30 @@ class OverviewPage(QWidget):
         self._recipe_dependencies.set_items(recipe.recipe_dependencies)
         self._provided_features.set_items(recipe.provides.features)
 
-    def _commit_id(self) -> None:
+    def _rename_recipe_id(self) -> None:
         if self._document is None:
             return
-        if self._id_edit.text() != self._document.working_recipe.id:
-            self._command_handler(SetOverviewFieldCommand(field="id", value=self._id_edit.text()))
+        current_id = self._document.working_recipe.id
+        new_id = TextEntryDialog.prompt(
+            self,
+            title="Rename Recipe ID",
+            label="Recipe id",
+            tooltip=prompt_tooltip("overview.id"),
+            initial_value=current_id,
+        )
+        if new_id is None or new_id == current_id:
+            return
+        analysis = analyze_recipe_usages(self._document.working_recipe, UsageTarget(kind="recipe", id=current_id))
+        if analysis.has_preserved_unsupported_content_warning and not confirm_preserved_content_warning(self, action="Renaming this recipe id"):
+            return
+        self._command_handler(RenameRecipeIdCommand(new_recipe_id=new_id))
+
+    def _find_recipe_id_usages(self) -> None:
+        if self._document is None:
+            return
+        recipe_id = self._document.working_recipe.id
+        analysis = analyze_recipe_usages(self._document.working_recipe, UsageTarget(kind="recipe", id=recipe_id))
+        FindUsagesDialog.show_usages(self, item_label=f"recipe {recipe_id}", analysis=analysis)
 
     def _commit_name(self) -> None:
         if self._document is None:

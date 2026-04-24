@@ -18,10 +18,12 @@ from PySide6.QtWidgets import (
 )
 
 from emuchef.domain import ArtifactCacheMode
+from emuchef_editor.core.analysis.usages import UsageTarget, analyze_recipe_usages
 from emuchef_editor.core.documents.commands import (
     AddArtifactCommand,
     DeleteArtifactCommand,
     DuplicateArtifactCommand,
+    RenameArtifactCommand,
     UpdateArtifactFieldCommand,
 )
 from emuchef_editor.core.documents.recipe_document import RecipeDocument
@@ -34,6 +36,7 @@ from .common import (
     create_expanding_line_edit,
 )
 from .tooltips import field_tooltip, prompt_tooltip
+from .usage_dialogs import DeleteWithUsagesDialog, FindUsagesDialog, confirm_preserved_content_warning
 
 
 class ArtifactsPage(QWidget):
@@ -49,12 +52,16 @@ class ArtifactsPage(QWidget):
         self._list = QListWidget()
         self._list.currentItemChanged.connect(self._on_selection_changed)
         self._add_button = QPushButton("Add")
+        self._rename_button = QPushButton("Rename")
         self._delete_button = QPushButton("Delete")
+        self._find_usages_button = QPushButton("Find Usages")
         self._duplicate_button = QPushButton("Duplicate")
 
         list_buttons = QHBoxLayout()
         list_buttons.addWidget(self._add_button)
+        list_buttons.addWidget(self._rename_button)
         list_buttons.addWidget(self._delete_button)
+        list_buttons.addWidget(self._find_usages_button)
         list_buttons.addWidget(self._duplicate_button)
 
         left_panel = QWidget()
@@ -92,7 +99,9 @@ class ArtifactsPage(QWidget):
         layout.addWidget(splitter)
 
         self._add_button.clicked.connect(self._add_artifact)
+        self._rename_button.clicked.connect(self._rename_artifact)
         self._delete_button.clicked.connect(self._delete_artifact)
+        self._find_usages_button.clicked.connect(self._find_artifact_usages)
         self._duplicate_button.clicked.connect(self._duplicate_artifact)
         self._url_edit.editingFinished.connect(self._commit_url)
         self._cache_combo.currentIndexChanged.connect(self._commit_cache)
@@ -161,7 +170,9 @@ class ArtifactsPage(QWidget):
 
     def _refresh_button_state(self) -> None:
         has_selection = self._selected_artifact_id is not None
+        self._rename_button.setEnabled(has_selection)
         self._delete_button.setEnabled(has_selection)
+        self._find_usages_button.setEnabled(has_selection)
         self._duplicate_button.setEnabled(has_selection)
 
     def _add_artifact(self) -> None:
@@ -178,11 +189,45 @@ class ArtifactsPage(QWidget):
         if self._document is None or self._selected_artifact_id is None:
             return
         artifact_id = self._selected_artifact_id
+        analysis = analyze_recipe_usages(self._document.working_recipe, UsageTarget(kind="artifact", id=artifact_id))
+        decision = DeleteWithUsagesDialog.prompt(self, item_label=f"artifact {artifact_id}", analysis=analysis)
+        if decision == "find_usages":
+            FindUsagesDialog.show_usages(self, item_label=f"artifact {artifact_id}", analysis=analysis)
+            return
+        if decision != "delete":
+            return
         sorted_ids = sorted(self._document.working_recipe.artifacts)
         current_index = sorted_ids.index(artifact_id)
         remaining = [item for item in sorted_ids if item != artifact_id]
         self._selected_artifact_id = remaining[min(current_index, len(remaining) - 1)] if remaining else None
         self._command_handler(DeleteArtifactCommand(artifact_id=artifact_id))
+
+    def _rename_artifact(self) -> None:
+        if self._document is None or self._selected_artifact_id is None:
+            return
+        artifact_id = self._selected_artifact_id
+        new_artifact_id = self._prompt_for_identifier(
+            "Rename Artifact",
+            "Artifact id",
+            prompt_tooltip("artifacts.id"),
+            initial_value=artifact_id,
+        )
+        if new_artifact_id is None or new_artifact_id == artifact_id:
+            return
+        analysis = analyze_recipe_usages(self._document.working_recipe, UsageTarget(kind="artifact", id=artifact_id))
+        if analysis.has_preserved_unsupported_content_warning and not confirm_preserved_content_warning(self, action=f"Renaming artifact {artifact_id!r}"):
+            return
+        previous_selection = self._selected_artifact_id
+        self._selected_artifact_id = new_artifact_id
+        if not self._command_handler(RenameArtifactCommand(artifact_id=artifact_id, new_artifact_id=new_artifact_id)):
+            self._selected_artifact_id = previous_selection
+
+    def _find_artifact_usages(self) -> None:
+        if self._document is None or self._selected_artifact_id is None:
+            return
+        artifact_id = self._selected_artifact_id
+        analysis = analyze_recipe_usages(self._document.working_recipe, UsageTarget(kind="artifact", id=artifact_id))
+        FindUsagesDialog.show_usages(self, item_label=f"artifact {artifact_id}", analysis=analysis)
 
     def _duplicate_artifact(self) -> None:
         if self._selected_artifact_id is None:
@@ -220,8 +265,15 @@ class ArtifactsPage(QWidget):
             )
         )
 
-    def _prompt_for_identifier(self, title: str, label: str, tooltip: str | None) -> str | None:
-        return TextEntryDialog.prompt(self, title=title, label=label, tooltip=tooltip)
+    def _prompt_for_identifier(
+        self,
+        title: str,
+        label: str,
+        tooltip: str | None,
+        *,
+        initial_value: str = "",
+    ) -> str | None:
+        return TextEntryDialog.prompt(self, title=title, label=label, tooltip=tooltip, initial_value=initial_value)
 
     def _prompt_for_new_artifact(self) -> tuple[str, str] | None:
         dialog = QDialog(self)

@@ -19,7 +19,6 @@ from PySide6.QtWidgets import (
     QListWidget,
     QListWidgetItem,
     QMenu,
-    QMessageBox,
     QPushButton,
     QScrollArea,
     QSpinBox,
@@ -37,11 +36,13 @@ from emuchef.domain import (
     StepConstraints,
     StepType,
 )
+from emuchef_editor.core.analysis.usages import UsageTarget, analyze_recipe_usages
 from emuchef_editor.core.documents.commands import (
     AddStepCommand,
     DeleteStepCommand,
     DuplicateStepCommand,
     ReorderStepCommand,
+    RenameStepCommand,
     SetStepUserToggleableCommand,
     UpdateStepBasicsCommand,
     UpdateStepConstraintsCommand,
@@ -74,6 +75,7 @@ from .step_metadata import (
     SUPPORTED_EDITOR_STEP_TYPES,
 )
 from .tooltips import field_tooltip, prompt_tooltip
+from .usage_dialogs import DeleteWithUsagesDialog, FindUsagesDialog, confirm_preserved_content_warning
 
 
 def _yaml_block(value: object) -> str:
@@ -533,7 +535,9 @@ class StepsPage(QWidget):
         self._step_list = QListWidget()
         self._step_list.currentItemChanged.connect(self._on_selection_changed)
         self._add_step_button = QPushButton("Add")
+        self._rename_step_button = QPushButton("Rename")
         self._delete_step_button = QPushButton("Delete")
+        self._find_step_usages_button = QPushButton("Find Usages")
         self._duplicate_step_button = QPushButton("Duplicate")
         self._move_up_button = QPushButton("Move Up")
         self._move_down_button = QPushButton("Move Down")
@@ -541,7 +545,9 @@ class StepsPage(QWidget):
         left_buttons = QHBoxLayout()
         for button in (
             self._add_step_button,
+            self._rename_step_button,
             self._delete_step_button,
+            self._find_step_usages_button,
             self._duplicate_step_button,
             self._move_up_button,
             self._move_down_button,
@@ -682,7 +688,9 @@ class StepsPage(QWidget):
         layout.addWidget(splitter)
 
         self._add_step_button.clicked.connect(self._add_step)
+        self._rename_step_button.clicked.connect(self._rename_step)
         self._delete_step_button.clicked.connect(self._delete_step)
+        self._find_step_usages_button.clicked.connect(self._find_step_usages)
         self._duplicate_step_button.clicked.connect(self._duplicate_step)
         self._move_up_button.clicked.connect(self._move_step_up)
         self._move_down_button.clicked.connect(self._move_step_down)
@@ -1111,7 +1119,9 @@ class StepsPage(QWidget):
     def _refresh_step_buttons(self) -> None:
         has_selection = self._selected_step() is not None
         selected_row = self._step_list.currentRow()
+        self._rename_step_button.setEnabled(has_selection)
         self._delete_step_button.setEnabled(has_selection)
+        self._find_step_usages_button.setEnabled(has_selection)
         self._duplicate_step_button.setEnabled(has_selection)
         self._move_up_button.setEnabled(has_selection and selected_row > 0)
         self._move_down_button.setEnabled(has_selection and selected_row >= 0 and selected_row < self._step_list.count() - 1)
@@ -1203,13 +1213,48 @@ class StepsPage(QWidget):
 
     def _delete_step(self) -> None:
         step = self._selected_step()
-        if step is None or not self._confirm_delete_step(step):
+        if step is None or self._document is None:
+            return
+        analysis = analyze_recipe_usages(self._document.working_recipe, UsageTarget(kind="step", id=step.id))
+        decision = DeleteWithUsagesDialog.prompt(self, item_label=f"step {step.id}", analysis=analysis)
+        if decision == "find_usages":
+            FindUsagesDialog.show_usages(self, item_label=f"step {step.id}", analysis=analysis)
+            return
+        if decision != "delete":
             return
         current_row = self._step_list.currentRow()
         remaining = [candidate.id for candidate in self._document.working_recipe.steps if candidate.id != step.id] if self._document is not None else []
         self._selected_step_id = remaining[min(current_row, len(remaining) - 1)] if remaining else None
         if not self._command_handler(DeleteStepCommand(step_id=step.id)):
             self._selected_step_id = step.id
+
+    def _rename_step(self) -> None:
+        step = self._selected_step()
+        if step is None or self._document is None:
+            return
+        new_step_id = TextEntryDialog.prompt(
+            self,
+            title="Rename Step",
+            label="Step id",
+            tooltip=prompt_tooltip("steps.id"),
+            initial_value=step.id,
+        )
+        if new_step_id is None or new_step_id == step.id:
+            return
+        analysis = analyze_recipe_usages(self._document.working_recipe, UsageTarget(kind="step", id=step.id))
+        if analysis.has_preserved_unsupported_content_warning and not confirm_preserved_content_warning(self, action=f"Renaming step {step.id!r}"):
+            return
+        previous_selection = self._selected_step_id
+        self._selected_step_id = new_step_id
+        if not self._command_handler(RenameStepCommand(step_id=step.id, new_step_id=new_step_id)):
+            self._selected_step_id = previous_selection
+
+    def _find_step_usages(self) -> None:
+        step = self._selected_step()
+        if step is None or self._document is None:
+            return
+        analysis = analyze_recipe_usages(self._document.working_recipe, UsageTarget(kind="step", id=step.id))
+        FindUsagesDialog.show_usages(self, item_label=f"step {step.id}", analysis=analysis)
 
     def _duplicate_step(self) -> None:
         step = self._selected_step()
@@ -1443,19 +1488,6 @@ class StepsPage(QWidget):
 
     def _prompt_for_new_step(self) -> tuple[StepType, str, str] | None:
         return _NewStepDialog.prompt(self)
-
-    def _confirm_delete_step(self, step: Step) -> bool:
-        response = QMessageBox.question(
-            self,
-            "Delete Step?",
-            (
-                f"Delete step {step.id!r}? Downstream refs and dependencies are not rewritten. "
-                "Live diagnostics will surface any resulting breakage."
-            ),
-            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
-            QMessageBox.StandardButton.No,
-        )
-        return response == QMessageBox.StandardButton.Yes
 
 
 def _serialize_condition(condition: StepCondition) -> dict[str, object]:

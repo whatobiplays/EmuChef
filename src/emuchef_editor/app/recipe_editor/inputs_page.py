@@ -18,10 +18,12 @@ from PySide6.QtWidgets import (
 )
 
 from emuchef.domain import InputRole, InputType
+from emuchef_editor.core.analysis.usages import UsageTarget, analyze_recipe_usages
 from emuchef_editor.core.documents.commands import (
     AddInputCommand,
     DeleteInputCommand,
     DuplicateInputCommand,
+    RenameInputCommand,
     UpdateInputFieldCommand,
 )
 from emuchef_editor.core.documents.recipe_document import RecipeDocument
@@ -37,6 +39,7 @@ from .common import (
     expand_form_field,
 )
 from .tooltips import field_tooltip, prompt_tooltip
+from .usage_dialogs import DeleteWithUsagesDialog, FindUsagesDialog, confirm_preserved_content_warning
 
 
 class InputsPage(QWidget):
@@ -52,12 +55,16 @@ class InputsPage(QWidget):
         self._list = QListWidget()
         self._list.currentItemChanged.connect(self._on_selection_changed)
         self._add_button = QPushButton("Add")
+        self._rename_button = QPushButton("Rename")
         self._delete_button = QPushButton("Delete")
+        self._find_usages_button = QPushButton("Find Usages")
         self._duplicate_button = QPushButton("Duplicate")
 
         list_buttons = QHBoxLayout()
         list_buttons.addWidget(self._add_button)
+        list_buttons.addWidget(self._rename_button)
         list_buttons.addWidget(self._delete_button)
+        list_buttons.addWidget(self._find_usages_button)
         list_buttons.addWidget(self._duplicate_button)
 
         left_panel = QWidget()
@@ -147,7 +154,9 @@ class InputsPage(QWidget):
         layout.addWidget(splitter)
 
         self._add_button.clicked.connect(self._add_input)
+        self._rename_button.clicked.connect(self._rename_input)
         self._delete_button.clicked.connect(self._delete_input)
+        self._find_usages_button.clicked.connect(self._find_input_usages)
         self._duplicate_button.clicked.connect(self._duplicate_input)
         self._type_combo.currentIndexChanged.connect(self._commit_type)
         self._role_combo.currentIndexChanged.connect(self._commit_role)
@@ -261,7 +270,9 @@ class InputsPage(QWidget):
 
     def _refresh_button_state(self) -> None:
         has_selection = self._selected_input_id is not None
+        self._rename_button.setEnabled(has_selection)
         self._delete_button.setEnabled(has_selection)
+        self._find_usages_button.setEnabled(has_selection)
         self._duplicate_button.setEnabled(has_selection)
 
     def _add_input(self) -> None:
@@ -277,6 +288,13 @@ class InputsPage(QWidget):
         if self._document is None or self._selected_input_id is None:
             return
         input_id = self._selected_input_id
+        analysis = analyze_recipe_usages(self._document.working_recipe, UsageTarget(kind="input", id=input_id))
+        decision = DeleteWithUsagesDialog.prompt(self, item_label=f"input {input_id}", analysis=analysis)
+        if decision == "find_usages":
+            FindUsagesDialog.show_usages(self, item_label=f"input {input_id}", analysis=analysis)
+            return
+        if decision != "delete":
+            return
         sorted_ids = sorted(self._document.working_recipe.inputs)
         current_index = sorted_ids.index(input_id)
         remaining = [item for item in sorted_ids if item != input_id]
@@ -284,6 +302,33 @@ class InputsPage(QWidget):
         self._selected_input_id = next_selection
         if not self._command_handler(DeleteInputCommand(input_id=input_id)):
             self._selected_input_id = input_id
+
+    def _rename_input(self) -> None:
+        if self._document is None or self._selected_input_id is None:
+            return
+        input_id = self._selected_input_id
+        new_input_id = self._prompt_for_identifier(
+            "Rename Input",
+            "Input id",
+            prompt_tooltip("inputs.id"),
+            initial_value=input_id,
+        )
+        if new_input_id is None or new_input_id == input_id:
+            return
+        analysis = analyze_recipe_usages(self._document.working_recipe, UsageTarget(kind="input", id=input_id))
+        if analysis.has_preserved_unsupported_content_warning and not confirm_preserved_content_warning(self, action=f"Renaming input {input_id!r}"):
+            return
+        previous_selection = self._selected_input_id
+        self._selected_input_id = new_input_id
+        if not self._command_handler(RenameInputCommand(input_id=input_id, new_input_id=new_input_id)):
+            self._selected_input_id = previous_selection
+
+    def _find_input_usages(self) -> None:
+        if self._document is None or self._selected_input_id is None:
+            return
+        input_id = self._selected_input_id
+        analysis = analyze_recipe_usages(self._document.working_recipe, UsageTarget(kind="input", id=input_id))
+        FindUsagesDialog.show_usages(self, item_label=f"input {input_id}", analysis=analysis)
 
     def _duplicate_input(self) -> None:
         if self._selected_input_id is None:
@@ -334,8 +379,15 @@ class InputsPage(QWidget):
             return
         self._command_handler(UpdateInputFieldCommand(input_id=self._selected_input_id, field=field, value=value))
 
-    def _prompt_for_identifier(self, title: str, label: str, tooltip: str | None) -> str | None:
-        return TextEntryDialog.prompt(self, title=title, label=label, tooltip=tooltip)
+    def _prompt_for_identifier(
+        self,
+        title: str,
+        label: str,
+        tooltip: str | None,
+        *,
+        initial_value: str = "",
+    ) -> str | None:
+        return TextEntryDialog.prompt(self, title=title, label=label, tooltip=tooltip, initial_value=initial_value)
 
 
 def _format_optional_yaml(value: object) -> str:

@@ -28,6 +28,7 @@ from emuchef_editor.core.documents.commands import (
     AddRuntimePermissionCommand,
     AddStepCommand,
     DeleteArtifactCommand,
+    DeleteArtifactGroupCommand,
     DeleteAppOpCommand,
     DeleteInputCommand,
     DeleteRuntimePermissionCommand,
@@ -43,6 +44,11 @@ from emuchef_editor.core.documents.commands import (
     ReorderArtifactGroupCommand,
     ReorderArtifactGroupMemberCommand,
     ReorderStepCommand,
+    RenameArtifactCommand,
+    RenameArtifactGroupCommand,
+    RenameInputCommand,
+    RenameRecipeIdCommand,
+    RenameStepCommand,
     SetStepUserToggleableCommand,
     SetOverviewFieldCommand,
     UpdateStepBasicsCommand,
@@ -59,6 +65,7 @@ from emuchef_editor.core.documents.commands import (
     UpdateRecipeDependencyCommand,
     UpdateRuntimePermissionCommand,
 )
+from emuchef_editor.core.analysis.usages import UsageTarget, analyze_recipe_usages
 from emuchef_editor.core.validation.validator_service import ValidatorService
 from emuchef_editor.core.yaml.loader import create_recipe_document_from_template, load_recipe_document
 
@@ -440,6 +447,116 @@ class EditorCoreTests(unittest.TestCase):
             self.assertEqual(document.working_recipe.artifacts["third_zip"].cache.value, "none")
             self.assertEqual(document.working_recipe.artifact_groups["bundle"], ("first_zip",))
 
+    def test_delete_artifact_cleans_group_membership_step_selection_and_param_ref_in_one_command(self) -> None:
+        recipe = base_recipe(
+            recipe_id="example.recipe",
+            artifacts={
+                "target_zip": {"type": "remote_file", "url": "https://example.com/target.zip"},
+                "other_zip": {"type": "remote_file", "url": "https://example.com/other.zip"},
+            },
+            artifact_groups={"bundle": ["target_zip", "other_zip"]},
+            steps=[
+                {
+                    "id": "resolve",
+                    "type": "resolve_artifacts",
+                    "name": "Resolve",
+                    "user_toggleable": False,
+                    "dependencies": [],
+                    "constraints": {"capabilities": [], "conflicts_with": []},
+                    "params": {"artifacts": ["target_zip", "other_zip"]},
+                    "verify": [],
+                },
+                {
+                    "id": "extract",
+                    "type": "extract_archive",
+                    "name": "Extract",
+                    "user_toggleable": False,
+                    "dependencies": [],
+                    "constraints": {"capabilities": [], "conflicts_with": []},
+                    "params": {"archive": {"ref": "artifacts.target_zip.local_path"}},
+                    "verify": [],
+                },
+            ],
+        )
+        with TemporaryDirectory() as tmp:
+            authored_root = build_authored_tree(Path(tmp), recipes=[recipe])
+            document = load_recipe_document(authored_root / "recipes" / "example_recipe.yaml")
+
+            self.assertTrue(document.apply_command(DeleteArtifactCommand(artifact_id="target_zip")))
+
+            self.assertNotIn("target_zip", document.working_recipe.artifacts)
+            self.assertEqual(document.working_recipe.artifact_groups["bundle"], ("other_zip",))
+            resolve_step = next(step for step in document.working_recipe.steps if step.id == "resolve")
+            extract_step = next(step for step in document.working_recipe.steps if step.id == "extract")
+            self.assertEqual(resolve_step.params["artifacts"], ["other_zip"])
+            self.assertNotIn("archive", extract_step.params)
+            emitted = document.to_yaml()
+            self.assertNotIn("target_zip:", emitted)
+            self.assertNotIn("target_zip\n", emitted)
+            self.assertNotIn("artifacts.target_zip.local_path", emitted)
+
+            self.assertTrue(document.undo())
+            self.assertIn("target_zip", document.working_recipe.artifacts)
+            self.assertEqual(document.working_recipe.artifact_groups["bundle"], ("target_zip", "other_zip"))
+            self.assertEqual(
+                next(step for step in document.working_recipe.steps if step.id == "extract").params["archive"].ref,
+                "artifacts.target_zip.local_path",
+            )
+
+    def test_delete_input_and_artifact_group_remove_supported_structured_refs_only(self) -> None:
+        recipe = base_recipe(
+            recipe_id="example.recipe",
+            inputs={
+                "source_dir": {
+                    "type": "directory",
+                    "role": "generic",
+                    "label": "Source Directory",
+                    "required": True,
+                    "multiple": False,
+                    "validation": {"must_exist": True, "allowed_extensions": [], "path_kind": "directory"},
+                }
+            },
+            artifacts={
+                "base_zip": {"type": "remote_file", "url": "https://example.com/base.zip"},
+            },
+            artifact_groups={"bundle": ["base_zip"], "other_bundle": ["base_zip"]},
+            steps=[
+                {
+                    "id": "resolve",
+                    "type": "resolve_artifacts",
+                    "name": "Resolve",
+                    "user_toggleable": False,
+                    "dependencies": [],
+                    "constraints": {"capabilities": [], "conflicts_with": []},
+                    "params": {"artifact_groups": ["bundle", "other_bundle"]},
+                    "verify": [],
+                },
+                {
+                    "id": "copy",
+                    "type": "copy_files",
+                    "name": "Copy",
+                    "user_toggleable": False,
+                    "dependencies": [],
+                    "constraints": {"capabilities": [], "conflicts_with": []},
+                    "params": {"source": {"ref": "inputs.source_dir"}, "dest": "/sdcard/Example"},
+                    "verify": [],
+                },
+            ],
+        )
+        with TemporaryDirectory() as tmp:
+            authored_root = build_authored_tree(Path(tmp), recipes=[recipe])
+            document = load_recipe_document(authored_root / "recipes" / "example_recipe.yaml")
+
+            self.assertTrue(document.apply_command(DeleteInputCommand(input_id="source_dir")))
+            self.assertTrue(document.apply_command(DeleteArtifactGroupCommand(group_id="bundle")))
+
+            copy_step = next(step for step in document.working_recipe.steps if step.id == "copy")
+            resolve_step = next(step for step in document.working_recipe.steps if step.id == "resolve")
+            self.assertNotIn("source", copy_step.params)
+            self.assertEqual(copy_step.params["dest"], "/sdcard/Example")
+            self.assertNotIn("bundle", document.working_recipe.artifact_groups)
+            self.assertEqual(resolve_step.params["artifact_groups"], ["other_bundle"])
+
     def test_artifact_group_commands_preserve_group_and_membership_order(self) -> None:
         recipe = base_recipe(
             recipe_id="example.recipe",
@@ -577,6 +694,115 @@ class EditorCoreTests(unittest.TestCase):
             self.assertLess(emitted.index("  earlier_group:"), emitted.index("  final_group:"))
             self.assertIn("  later_group:\n  - zeta_artifact\n  - alpha_artifact", emitted)
             self.assertIn("  final_group:\n  - middle_artifact", emitted)
+
+    def test_rename_commands_rewrite_supported_structured_usages(self) -> None:
+        recipe = base_recipe(
+            recipe_id="example.recipe",
+            recipe_dependencies=["example.recipe"],
+            inputs={
+                "source_dir": {
+                    "type": "directory",
+                    "role": "generic",
+                    "label": "Source Directory",
+                    "required": True,
+                    "multiple": False,
+                    "validation": {"must_exist": True, "allowed_extensions": [], "path_kind": "directory"},
+                }
+            },
+            artifacts={
+                "archive_zip": {"type": "remote_file", "url": "https://example.com/archive.zip"},
+                "base_zip": {"type": "remote_file", "url": "https://example.com/base.zip"},
+            },
+            artifact_groups={"bundle": ["archive_zip", "base_zip"]},
+            steps=[
+                {
+                    "id": "resolve",
+                    "type": "resolve_artifacts",
+                    "name": "Resolve",
+                    "user_toggleable": False,
+                    "dependencies": [],
+                    "constraints": {"capabilities": [], "conflicts_with": []},
+                    "params": {"artifacts": ["archive_zip"], "artifact_groups": ["bundle"]},
+                    "verify": [],
+                },
+                {
+                    "id": "extract",
+                    "type": "extract_archive",
+                    "name": "Extract",
+                    "user_toggleable": False,
+                    "dependencies": [],
+                    "constraints": {"capabilities": [], "conflicts_with": []},
+                    "params": {"archive": {"ref": "artifacts.archive_zip.local_path"}},
+                    "verify": [],
+                },
+                {
+                    "id": "copy",
+                    "type": "copy_files",
+                    "name": "Copy",
+                    "user_toggleable": False,
+                    "dependencies": ["extract"],
+                    "constraints": {"capabilities": [], "conflicts_with": ["extract"]},
+                    "params": {"source": {"ref": "steps.extract.outputs.extracted_path"}, "dest": "/sdcard/Example"},
+                    "verify": [],
+                },
+                {
+                    "id": "copy_input",
+                    "type": "copy_files",
+                    "name": "Copy Input",
+                    "user_toggleable": False,
+                    "dependencies": [],
+                    "constraints": {"capabilities": [], "conflicts_with": []},
+                    "params": {"source": {"ref": "inputs.source_dir"}, "dest": "/sdcard/Input"},
+                    "verify": [],
+                },
+                {
+                    "id": "copy_shorthand",
+                    "type": "copy_files",
+                    "name": "Copy Shorthand",
+                    "user_toggleable": False,
+                    "dependencies": [],
+                    "constraints": {"capabilities": [], "conflicts_with": []},
+                    "params": {"source": {"ref": "steps.extract"}, "dest": "/sdcard/Shorthand"},
+                    "verify": [],
+                },
+            ],
+        )
+        with TemporaryDirectory() as tmp:
+            authored_root = build_authored_tree(Path(tmp), recipes=[recipe])
+            document = load_recipe_document(authored_root / "recipes" / "example_recipe.yaml")
+
+            self.assertTrue(document.apply_command(RenameRecipeIdCommand(new_recipe_id="updated.recipe")))
+            self.assertTrue(document.apply_command(RenameInputCommand(input_id="source_dir", new_input_id="renamed_source")))
+            self.assertTrue(document.apply_command(RenameArtifactCommand(artifact_id="archive_zip", new_artifact_id="renamed_archive")))
+            self.assertTrue(document.apply_command(RenameArtifactGroupCommand(group_id="bundle", new_group_id="renamed_bundle")))
+            self.assertTrue(document.apply_command(RenameStepCommand(step_id="extract", new_step_id="unpack")))
+
+            self.assertEqual(document.working_recipe.id, "updated.recipe")
+            self.assertEqual(document.working_recipe.recipe_dependencies, ("updated.recipe",))
+            self.assertIn("renamed_source", document.working_recipe.inputs)
+            self.assertIn("renamed_archive", document.working_recipe.artifacts)
+            self.assertEqual(document.working_recipe.artifact_groups["renamed_bundle"], ("renamed_archive", "base_zip"))
+            resolve_step = next(step for step in document.working_recipe.steps if step.id == "resolve")
+            copy_step = next(step for step in document.working_recipe.steps if step.id == "copy")
+            copy_input_step = next(step for step in document.working_recipe.steps if step.id == "copy_input")
+            copy_shorthand_step = next(step for step in document.working_recipe.steps if step.id == "copy_shorthand")
+            self.assertEqual(resolve_step.params["artifacts"], ["renamed_archive"])
+            self.assertEqual(resolve_step.params["artifact_groups"], ["renamed_bundle"])
+            self.assertEqual(copy_step.dependencies, ("unpack",))
+            self.assertEqual(copy_step.constraints.conflicts_with, ("unpack",))
+            self.assertEqual(copy_step.params["source"].ref, "steps.unpack.outputs.extracted_path")
+            self.assertEqual(copy_input_step.params["source"].ref, "inputs.renamed_source")
+            self.assertEqual(copy_shorthand_step.params["source"].ref, "steps.unpack")
+            self.assertEqual(
+                next(step for step in document.working_recipe.steps if step.id == "unpack").params["archive"].ref,
+                "artifacts.renamed_archive.local_path",
+            )
+
+            emitted = document.to_yaml()
+            self.assertIn("id: updated.recipe", emitted)
+            self.assertIn("ref: inputs.renamed_source", emitted)
+            self.assertIn("ref: artifacts.renamed_archive.local_path", emitted)
+            self.assertIn("ref: steps.unpack.outputs.extracted_path", emitted)
 
     def test_permission_commands_support_runtime_appops_policy_and_when_normalization(self) -> None:
         recipe = base_recipe(recipe_id="example.recipe", steps=[])
@@ -941,28 +1167,38 @@ class EditorCoreTests(unittest.TestCase):
             self.assertNotIn("extract_on: host", emitted)
             self.assertNotIn("cleanup: true", emitted)
 
-    def test_step_delete_preserves_broken_dependency_for_diagnostics(self) -> None:
+    def test_step_delete_removes_supported_dependencies_conflicts_and_refs(self) -> None:
         recipe = base_recipe(
             recipe_id="example.recipe",
             steps=[
                 {
                     "id": "prepare",
-                    "type": "wait",
+                    "type": "extract_archive",
                     "name": "Prepare",
                     "user_toggleable": False,
                     "dependencies": [],
                     "constraints": {"capabilities": [], "conflicts_with": []},
-                    "params": {"duration_ms": 1000},
+                    "params": {"archive": {"ref": "steps.seed.outputs.copied_paths"}},
                     "verify": [],
                 },
                 {
                     "id": "consume",
-                    "type": "wait",
+                    "type": "copy_files",
                     "name": "Consume",
                     "user_toggleable": False,
                     "dependencies": ["prepare"],
+                    "constraints": {"capabilities": [], "conflicts_with": ["prepare"]},
+                    "params": {"source": {"ref": "steps.prepare.outputs.extracted_path"}, "dest": "/sdcard/Example"},
+                    "verify": [],
+                },
+                {
+                    "id": "consume_shorthand",
+                    "type": "copy_files",
+                    "name": "Consume Shorthand",
+                    "user_toggleable": False,
+                    "dependencies": [],
                     "constraints": {"capabilities": [], "conflicts_with": []},
-                    "params": {"duration_ms": 1000},
+                    "params": {"source": {"ref": "steps.prepare"}, "dest": "/sdcard/Example2"},
                     "verify": [],
                 },
             ],
@@ -973,12 +1209,14 @@ class EditorCoreTests(unittest.TestCase):
 
             self.assertTrue(document.apply_command(DeleteStepCommand(step_id="prepare")))
 
-            self.assertEqual(tuple(step.id for step in document.working_recipe.steps), ("consume",))
-            self.assertEqual(document.working_recipe.steps[0].dependencies, ("prepare",))
-            diagnostics = document.validation_result.diagnostics
-            self.assertIn("step_not_found", tuple(item.code for item in diagnostics))
-            dependency_error = next(item for item in diagnostics if item.code == "step_not_found")
-            self.assertEqual(dependency_error.field, "steps[0].dependencies[0]")
+            self.assertEqual(tuple(step.id for step in document.working_recipe.steps), ("consume", "consume_shorthand"))
+            consume_step = document.working_recipe.steps[0]
+            shorthand_step = document.working_recipe.steps[1]
+            self.assertEqual(consume_step.dependencies, ())
+            self.assertEqual(consume_step.constraints.conflicts_with, ())
+            self.assertNotIn("source", consume_step.params)
+            self.assertNotIn("source", shorthand_step.params)
+            self.assertNotIn("steps.prepare", document.to_yaml())
 
     def test_supported_step_edit_preserves_serialized_unsupported_content(self) -> None:
         recipe = base_recipe(
@@ -1049,6 +1287,114 @@ class EditorCoreTests(unittest.TestCase):
             self.assertIn("custom_verify", after_yaml)
             self.assertIn("unsupported_capability", after_yaml)
             self.assertIn("missing_conflict", after_yaml)
+
+    def test_rename_preserves_unsupported_step_content_semantically(self) -> None:
+        recipe = base_recipe(
+            recipe_id="example.recipe",
+            inputs={
+                "source_dir": {
+                    "type": "directory",
+                    "role": "generic",
+                    "label": "Source Directory",
+                    "required": True,
+                    "multiple": False,
+                    "validation": {"must_exist": True, "allowed_extensions": [], "path_kind": "directory"},
+                }
+            },
+            steps=[
+                {
+                    "id": "copy",
+                    "type": "copy_files",
+                    "name": "Copy",
+                    "user_toggleable": False,
+                    "dependencies": [],
+                    "constraints": {"capabilities": [], "conflicts_with": []},
+                    "params": {
+                        "source": {"ref": "inputs.source_dir"},
+                        "dest": "/sdcard/Example",
+                        "experimental_source": {"ref": "inputs.source_dir"},
+                    },
+                    "skip_if": [
+                        {"type": "custom_skip", "params": {"target": "inputs.source_dir"}},
+                    ],
+                    "verify": [
+                        {"type": "custom_verify", "params": {"target": "inputs.source_dir"}},
+                    ],
+                }
+            ],
+        )
+        with TemporaryDirectory() as tmp:
+            authored_root = build_authored_tree(Path(tmp), recipes=[recipe])
+            document = load_recipe_document(authored_root / "recipes" / "example_recipe.yaml")
+            before_step = yaml.safe_load(document.to_yaml())["steps"][0]
+
+            self.assertTrue(document.apply_command(RenameInputCommand(input_id="source_dir", new_input_id="renamed_source")))
+
+            after_step = yaml.safe_load(document.to_yaml())["steps"][0]
+            self.assertEqual(after_step["params"]["source"]["ref"], "inputs.renamed_source")
+            self.assertEqual(after_step["params"]["experimental_source"], before_step["params"]["experimental_source"])
+            self.assertEqual(after_step["skip_if"], before_step["skip_if"])
+            self.assertEqual(after_step["verify"], before_step["verify"])
+            self.assertIn("renamed_source", document.working_recipe.inputs)
+
+    def test_usage_analysis_groups_supported_usages_and_flags_preserved_content(self) -> None:
+        recipe = base_recipe(
+            recipe_id="example.recipe",
+            artifacts={
+                "archive_zip": {"type": "remote_file", "url": "https://example.com/archive.zip"},
+            },
+            artifact_groups={"bundle": ["archive_zip"]},
+            steps=[
+                {
+                    "id": "extract",
+                    "type": "extract_archive",
+                    "name": "Extract",
+                    "user_toggleable": False,
+                    "dependencies": [],
+                    "constraints": {"capabilities": [], "conflicts_with": []},
+                    "params": {"archive": {"ref": "artifacts.archive_zip.local_path"}},
+                    "verify": [],
+                },
+                {
+                    "id": "copy",
+                    "type": "copy_files",
+                    "name": "Copy",
+                    "user_toggleable": False,
+                    "dependencies": ["extract"],
+                    "constraints": {"capabilities": ["unsupported_capability"], "conflicts_with": ["extract"]},
+                    "params": {
+                        "source": {"ref": "steps.extract.outputs.extracted_path"},
+                        "dest": "/sdcard/Example",
+                        "experimental_ref": {"ref": "steps.extract"},
+                    },
+                    "skip_if": [{"type": "custom_skip", "params": {"foo": "bar"}}],
+                    "verify": [],
+                },
+            ],
+        )
+        with TemporaryDirectory() as tmp:
+            authored_root = build_authored_tree(Path(tmp), recipes=[recipe])
+            document = load_recipe_document(authored_root / "recipes" / "example_recipe.yaml")
+
+            step_analysis = analyze_recipe_usages(
+                document.working_recipe,
+                UsageTarget(kind="step", id="extract"),
+            )
+            grouped = {group.title: tuple(usage.summary for usage in group.usages) for group in step_analysis.groups}
+
+            self.assertIn("Param Refs", grouped)
+            self.assertIn("Dependencies", grouped)
+            self.assertIn("Constraints / Conflicts", grouped)
+            self.assertTrue(any("copy" in summary and "source" in summary for summary in grouped["Param Refs"]))
+            self.assertTrue(any("copy" in summary for summary in grouped["Dependencies"]))
+            self.assertTrue(any("copy" in summary for summary in grouped["Constraints / Conflicts"]))
+            self.assertTrue(step_analysis.has_preserved_unsupported_content_warning)
+
+            no_usage_analysis = analyze_recipe_usages(
+                document.working_recipe,
+                UsageTarget(kind="input", id="missing_input"),
+            )
+            self.assertEqual(no_usage_analysis.groups, ())
 
     def test_step_output_refs_remain_explicit_and_do_not_add_dependencies(self) -> None:
         recipe = base_recipe(

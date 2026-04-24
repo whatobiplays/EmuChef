@@ -63,7 +63,9 @@ The current editor scope is recipe-authoring only. It edits:
 - Steps
 - Permissions
 
-It does not rewrite refs after id changes.
+The editor supports in-file refactor tooling for authored recipe ids, input ids,
+artifact ids, artifact-group ids, and step ids. Rename, usage analysis, and
+delete cleanup are scoped to the currently open recipe file only.
 
 Editor interaction rules:
 
@@ -95,6 +97,11 @@ Editor interaction rules:
   - `steps.<id>.outputs.<field>`
 - shorthand step refs may be offered as picker convenience labels, but saved YAML remains explicit `{ ref: ... }`
 - unresolved step refs remain preserved in the open document and are surfaced in the step editor as unresolved picker values
+- Find Usages shows a grouped read-only list of supported in-file usages for the selected recipe, input, artifact, artifact group, or step id
+- rename actions update supported structured in-file references while preserving unsupported step content unchanged
+- delete actions show a grouped usage summary before destructive deletion
+- confirmed deletes remove the selected item and matching supported structured references, such as param refs, step dependencies, `conflicts_with`, artifact-group membership, and supported step artifact or artifact-group selection entries
+- cleanup removes only matching structured references or list entries; surrounding steps, groups, params objects, and constraints objects remain unless they are the explicit delete target
 - supported step-authoring surface currently includes:
   - `resolve_artifacts`
   - `extract_artifacts`
@@ -105,10 +112,10 @@ Editor interaction rules:
   - `launch_app`
   - `wait`
   - `force_stop_app`
-- step ids and step types are chosen at creation time and then remain read-only
+- step ids and step types are chosen at creation time; step type remains fixed, and step id changes use the explicit Rename action
 - dependency additions append to the end of the authored dependency list and are not re-sorted by the UI or YAML writer
-- deleting a step is allowed even when downstream dependencies or refs still target it; the shared validation path reports that breakage instead of the editor rewriting it
 - unsupported authored step params, condition entries, and constraint entries that the current UI does not edit are preserved semantically and round-trip unchanged when supported sections of the same step are edited
+- rename and delete tooling warns when preserved unsupported step content exists, because additional references may be present there and are not rewritten
 - when unsupported constraint or condition entries are present, the affected destructive list operations stay locked and the preserved authored entries remain visible read-only
 - read-only preserved step-content surfaces expose hover guidance explaining that unsupported authored content remains preserved on save unless explicitly replaced through a supported editor surface
 
@@ -117,12 +124,14 @@ Field-scope rules currently enforced by the editor:
 - `kind` is read-only
 - `schema_version` is read-only and reflects latest-schema-only support
 - artifact kind support is currently limited to `remote_file`
-- input, artifact, and artifact-group ids are chosen at creation time and then remain read-only
+- recipe, input, artifact, artifact-group, and step id fields are read-only in detail forms and are changed through explicit Rename actions
 - permission editing is limited to the current shared authored schema surface: `runtime`, `appops`, and `policy`
 - `permissions.policy.on_failure` is edited through a non-freeform dropdown seeded from the shared known policy values; if authored YAML contains another value, the editor shows it as a visible invalid option until the user replaces it
 - unsupported permission keys or shapes that the shared authored loader cannot represent fail load/validation explicitly and are not normalized by the editor
-- deleting inputs, artifacts, or groups does not rewrite step refs
-- deleting an artifact removes it from artifact-group memberships, but does not rewrite step refs
+- deleting an input removes matching supported `inputs.<id>` param refs
+- deleting an artifact removes matching supported artifact refs, artifact-group memberships, and supported step artifact-selection entries
+- deleting an artifact group removes matching supported step artifact-group selection entries
+- deleting a step removes matching supported step refs, step-output refs, dependencies, and `conflicts_with` entries
 
 ## Supported CLI
 
@@ -248,7 +257,7 @@ Default CLI output groups issues by file.
 
 The editor reuses the same validation path in-process and maps shared warnings/errors into diagnostics for the open recipe document.
 When validating an open unsaved recipe against an authored root, the in-memory document replaces the current file's on-disk authored contribution for catalog-context checks.
-Unknown step dependencies are validation errors, not typed-model construction errors, so the editor can preserve downstream breakage after step deletion and surface it through diagnostics.
+Unknown step dependencies are validation errors, not typed-model construction errors, so the editor can still preserve authored broken dependency state and surface it through diagnostics.
 
 ## Device/Profile Behavior
 
