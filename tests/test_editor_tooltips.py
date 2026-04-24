@@ -3,7 +3,7 @@ from __future__ import annotations
 import unittest
 from unittest.mock import patch
 
-from emuchef.domain import ArtifactCacheMode, InputRole, InputType
+from emuchef.domain import ArtifactCacheMode, InputRole, InputType, PERMISSION_POLICY_ON_FAILURE_VALUES
 from emuchef.domain.constants import SCHEMA_VERSION
 from emuchef_editor.app.recipe_editor import tooltips
 from emuchef_editor.app.recipe_editor.tooltips import field_tooltip, prompt_tooltip
@@ -35,10 +35,15 @@ class EditorTooltipTests(unittest.TestCase):
 
     def test_permissions_and_step_tooltips_are_registered(self) -> None:
         self.assertIn("package", field_tooltip("permissions.runtime.package"))
-        self.assertIn("failure", field_tooltip("permissions.policy.on_failure"))
+        self.assertIn("Accepted values", field_tooltip("permissions.policy.on_failure"))
         self.assertIn("read-only", field_tooltip("steps.type"))
         self.assertIn("ref", field_tooltip("steps.copy_files.source"))
         self.assertIn("read-only", field_tooltip("steps.preserved_content"))
+
+    def test_permission_policy_tooltip_tracks_known_schema_values(self) -> None:
+        tooltip = field_tooltip("permissions.policy.on_failure")
+        for value in PERMISSION_POLICY_ON_FAILURE_VALUES:
+            self.assertIn(value, tooltip)
 
     def test_condition_prompt_tooltips_are_registered(self) -> None:
         self.assertIn("condition", prompt_tooltip("steps.condition.type"))

@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from emuchef.domain import ArtifactCacheMode, InputRole, InputType
+from emuchef.domain import ArtifactCacheMode, InputRole, InputType, PERMISSION_POLICY_ON_FAILURE_VALUES
 from emuchef.domain.constants import SCHEMA_VERSION
 
 
@@ -97,7 +97,10 @@ FIELD_TOOLTIPS: dict[str, str] = {
     "permissions.appops.rooted": "Optional rooted-state filter for this app-op. Leave it at Any to apply regardless of device root state.",
     "permissions.appops.android_api_min": "Optional minimum Android API level where this app-op should apply.",
     "permissions.appops.android_api_max": "Optional maximum Android API level where this app-op should apply.",
-    "permissions.policy.on_failure": "Policy outcome on failure when permission work fails. Common values are warn and fail.",
+    "permissions.policy.on_failure": (
+        "Policy outcome when permission work fails. "
+        f"Accepted values: {_enum_values(*PERMISSION_POLICY_ON_FAILURE_VALUES)}."
+    ),
     "permissions.policy.require_all": "When enabled, all applicable permission actions must succeed for the policy to pass.",
     "steps.id": (
         "This stable authored step id is used by dependencies and refs such as 'steps.<id>.outputs.<field>'. "

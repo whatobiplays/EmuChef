@@ -12,6 +12,8 @@ from .constants import SCHEMA_VERSION
 from .input_declaration import InputDeclaration
 from .step import Step
 
+PERMISSION_POLICY_ON_FAILURE_VALUES: tuple[str, ...] = ("warn", "fail")
+
 
 @dataclass(frozen=True, slots=True)
 class RecipeProvides:

@@ -21,7 +21,12 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
-from emuchef.domain import AppOpGrant, PermissionWhen, RuntimePermissionGrant
+from emuchef.domain import (
+    AppOpGrant,
+    PERMISSION_POLICY_ON_FAILURE_VALUES,
+    PermissionWhen,
+    RuntimePermissionGrant,
+)
 from emuchef_editor.core.documents.commands import (
     AddAppOpCommand,
     AddRuntimePermissionCommand,
@@ -192,8 +197,7 @@ class PermissionsPage(QWidget):
         appop_section_layout.addWidget(appop_splitter)
 
         self._policy_on_failure_combo = create_expanding_combo_box()
-        self._policy_on_failure_combo.setEditable(True)
-        self._policy_on_failure_combo.addItems(["warn", "fail"])
+        self._policy_on_failure_combo.addItems(PERMISSION_POLICY_ON_FAILURE_VALUES)
         self._policy_require_all_check = QCheckBox()
         self._policy_form = configure_data_entry_form(QFormLayout())
         add_tooltipped_form_row(
@@ -283,6 +287,8 @@ class PermissionsPage(QWidget):
             return
         policy = self._document.working_recipe.permissions.policy
         self._loading = True
+        self._policy_on_failure_combo.clear()
+        self._policy_on_failure_combo.addItems(PERMISSION_POLICY_ON_FAILURE_VALUES)
         if self._policy_on_failure_combo.findText(policy.on_failure) < 0:
             self._policy_on_failure_combo.addItem(policy.on_failure)
         self._policy_on_failure_combo.setCurrentText(policy.on_failure)

@@ -57,6 +57,7 @@ from .param_values import (
 from .planning_result import PlanningResult, PlanningStatus
 from .recipe import (
     AppOpGrant,
+    PERMISSION_POLICY_ON_FAILURE_VALUES,
     PermissionPolicy,
     PermissionSet,
     PermissionWhen,
@@ -135,6 +136,7 @@ __all__ = [
     "PermissionPlanAction",
     "PermissionPlanReason",
     "PermissionPlanSource",
+    "PERMISSION_POLICY_ON_FAILURE_VALUES",
     "PermissionPolicy",
     "PermissionSet",
     "PermissionWhen",

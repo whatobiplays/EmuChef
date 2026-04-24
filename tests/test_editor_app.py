@@ -9,7 +9,7 @@ from tempfile import TemporaryDirectory
 import unittest
 from unittest.mock import Mock, patch
 
-from emuchef.domain import RuntimePermissionGrant, StepCondition, StepType
+from emuchef.domain import PERMISSION_POLICY_ON_FAILURE_VALUES, RuntimePermissionGrant, StepCondition, StepType
 from support import base_recipe, build_authored_tree
 
 PYSIDE6_AVAILABLE = importlib.util.find_spec("PySide6") is not None
@@ -163,6 +163,11 @@ class EditorAppTests(unittest.TestCase):
             self.assertEqual(window._editor_view._tabs.tabText(4), "Steps")
             self.assertEqual(window._editor_view._tabs.tabText(5), "Permissions")
             page = window._editor_view._permissions_page
+            self.assertFalse(page._policy_on_failure_combo.isEditable())
+            self.assertEqual(
+                tuple(page._policy_on_failure_combo.itemText(index) for index in range(page._policy_on_failure_combo.count())),
+                PERMISSION_POLICY_ON_FAILURE_VALUES,
+            )
             with patch.object(
                 page,
                 "_prompt_for_new_runtime_permission",
@@ -183,6 +188,42 @@ class EditorAppTests(unittest.TestCase):
             self.assertIn("POST_NOTIFICATIONS", window._yaml_preview.toPlainText())
             self.assertIn("on_failure: fail", window._yaml_preview.toPlainText())
             self.assertIn("*", window.windowTitle())
+
+            with patch.object(
+                window,
+                "_prompt_unsaved_changes",
+                return_value=QMessageBox.StandardButton.Discard,
+            ):
+                window.close()
+
+    def test_permissions_policy_preserves_unknown_on_failure_until_user_selects_known_value(self) -> None:
+        recipe = base_recipe(
+            recipe_id="example.recipe",
+            permissions={
+                "policy": {"on_failure": "custom", "require_all": False},
+            },
+            steps=[],
+        )
+        with TemporaryDirectory() as tmp:
+            repo_root = Path(tmp)
+            authored_root = build_authored_tree(repo_root, recipes=[recipe])
+            recipe_path = authored_root / "recipes" / "example_recipe.yaml"
+
+            window = MainWindow(repo_root)
+            window.open_recipe_file(recipe_path)
+
+            page = window._editor_view._permissions_page
+            self.assertFalse(page._policy_on_failure_combo.isEditable())
+            self.assertEqual(page._policy_on_failure_combo.currentText(), "custom")
+            self.assertEqual(
+                tuple(page._policy_on_failure_combo.itemText(index) for index in range(page._policy_on_failure_combo.count())),
+                PERMISSION_POLICY_ON_FAILURE_VALUES + ("custom",),
+            )
+
+            page._policy_on_failure_combo.setCurrentIndex(page._policy_on_failure_combo.findText("fail"))
+
+            self.assertEqual(window.current_document.working_recipe.permissions.policy.on_failure, "fail")
+            self.assertIn("on_failure: fail", window._yaml_preview.toPlainText())
 
             with patch.object(
                 window,

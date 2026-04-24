@@ -117,6 +117,7 @@ Field-scope rules currently enforced by the editor:
 - artifact kind support is currently limited to `remote_file`
 - input, artifact, and artifact-group ids are chosen at creation time and then remain read-only
 - permission editing is limited to the current shared authored schema surface: `runtime`, `appops`, and `policy`
+- `permissions.policy.on_failure` is edited through a non-freeform dropdown seeded from the shared known policy values; if authored YAML contains another value, the editor shows it as a visible invalid option until the user replaces it
 - unsupported permission keys or shapes that the shared authored loader cannot represent fail load/validation explicitly and are not normalized by the editor
 - deleting inputs, artifacts, or groups does not rewrite step refs
 - deleting an artifact removes it from artifact-group memberships, but does not rewrite step refs
