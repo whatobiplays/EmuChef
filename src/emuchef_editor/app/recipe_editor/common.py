@@ -7,13 +7,15 @@ commit semantics only.
 
 from __future__ import annotations
 
-from PySide6.QtCore import QSize, Qt, Signal
+from PySide6.QtCore import QRect, QSize, Qt, Signal
 from PySide6.QtWidgets import (
     QComboBox,
     QDialog,
     QDialogButtonBox,
     QFormLayout,
     QHBoxLayout,
+    QLayout,
+    QLayoutItem,
     QLineEdit,
     QListWidget,
     QSizePolicy,
@@ -140,6 +142,103 @@ class CurrentWidgetSizeStack(QStackedWidget):
 
     def _on_current_changed(self, _index: int) -> None:
         self.updateGeometry()
+
+
+class FlowLayout(QLayout):
+    """Layout child widgets left-to-right and wrap rows when width is limited.
+
+    Qt's box layouts report a minimum width equal to the sum of every child in a
+    row. Editor action bars use this layout when the actions should stay
+    reachable without forcing the surrounding splitter pane to remain that wide.
+    """
+
+    def __init__(
+        self,
+        parent: QWidget | None = None,
+        *,
+        margin: int = 0,
+        spacing: int = 6,
+    ) -> None:
+        super().__init__(parent)
+        self._items: list[QLayoutItem] = []
+        self.setContentsMargins(margin, margin, margin, margin)
+        self.setSpacing(spacing)
+
+    def addItem(self, item: QLayoutItem) -> None:  # type: ignore[override]
+        self._items.append(item)
+        self.invalidate()
+
+    def count(self) -> int:  # type: ignore[override]
+        return len(self._items)
+
+    def itemAt(self, index: int) -> QLayoutItem | None:  # type: ignore[override]
+        if 0 <= index < len(self._items):
+            return self._items[index]
+        return None
+
+    def takeAt(self, index: int) -> QLayoutItem | None:  # type: ignore[override]
+        if 0 <= index < len(self._items):
+            item = self._items.pop(index)
+            self.invalidate()
+            return item
+        return None
+
+    def expandingDirections(self) -> Qt.Orientation:  # type: ignore[override]
+        return Qt.Orientation(0)
+
+    def hasHeightForWidth(self) -> bool:  # type: ignore[override]
+        return True
+
+    def heightForWidth(self, width: int) -> int:  # type: ignore[override]
+        return self._do_layout(QRect(0, 0, width, 0), test_only=True)
+
+    def setGeometry(self, rect: QRect) -> None:  # type: ignore[override]
+        super().setGeometry(rect)
+        self._do_layout(rect, test_only=False)
+
+    def sizeHint(self) -> QSize:  # type: ignore[override]
+        left, top, right, bottom = self.getContentsMargins()
+        visible_items = [item for item in self._items if not item.isEmpty()]
+        if not visible_items:
+            return QSize(left + right, top + bottom)
+        spacing = max(0, self.spacing())
+        width = left + right + sum(item.sizeHint().width() for item in visible_items)
+        width += spacing * max(0, len(visible_items) - 1)
+        height = top + bottom + max(item.sizeHint().height() for item in visible_items)
+        return QSize(width, height)
+
+    def minimumSize(self) -> QSize:  # type: ignore[override]
+        left, top, right, bottom = self.getContentsMargins()
+        size = QSize()
+        for item in self._items:
+            if not item.isEmpty():
+                size = size.expandedTo(item.minimumSize())
+        size += QSize(left + right, top + bottom)
+        return size
+
+    def _do_layout(self, rect: QRect, *, test_only: bool) -> int:
+        left, top, right, bottom = self.getContentsMargins()
+        effective_rect = rect.adjusted(left, top, -right, -bottom)
+        x = effective_rect.x()
+        y = effective_rect.y()
+        line_height = 0
+        spacing = max(0, self.spacing())
+        max_x = effective_rect.x() + max(0, effective_rect.width())
+
+        for item in self._items:
+            if item.isEmpty():
+                continue
+            item_size = item.sizeHint()
+            if line_height > 0 and x + item_size.width() > max_x:
+                x = effective_rect.x()
+                y += line_height + spacing
+                line_height = 0
+            if not test_only:
+                item.setGeometry(QRect(x, y, item_size.width(), item_size.height()))
+            x += item_size.width() + spacing
+            line_height = max(line_height, item_size.height())
+
+        return (y + line_height) - rect.y() + bottom
 
 
 def configure_data_entry_form(form: QFormLayout) -> QFormLayout:

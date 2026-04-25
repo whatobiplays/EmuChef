@@ -57,6 +57,7 @@ from .common import (
     AutoSizingPlainTextEdit,
     CommitPlainTextEdit,
     CurrentWidgetSizeStack,
+    FlowLayout,
     TextEntryDialog,
     add_tooltipped_form_row,
     apply_tooltip,
@@ -542,7 +543,7 @@ class StepsPage(QWidget):
         self._move_up_button = QPushButton("Move Up")
         self._move_down_button = QPushButton("Move Down")
         self._toggle_user_toggleable_button = QPushButton("Toggle User Toggleable")
-        left_buttons = QHBoxLayout()
+        left_buttons = FlowLayout()
         for button in (
             self._add_step_button,
             self._rename_step_button,

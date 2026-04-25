@@ -16,8 +16,9 @@ PYSIDE6_AVAILABLE = importlib.util.find_spec("PySide6") is not None
 
 if PYSIDE6_AVAILABLE:
     os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
-    from PySide6.QtCore import Qt
+    from PySide6.QtCore import QPoint, Qt
     from PySide6.QtGui import QCloseEvent
+    from PySide6.QtTest import QTest
     from PySide6.QtWidgets import (
         QApplication,
         QComboBox,
@@ -45,6 +46,13 @@ class EditorAppTests(unittest.TestCase):
     @classmethod
     def setUpClass(cls) -> None:
         cls._app = QApplication.instance() or QApplication(["emuchef-editor-test"])
+
+    def _first_workspace_recipe_item(self, window: MainWindow):
+        for index in range(window._workspace_list.count()):
+            item = window._workspace_list.item(index)
+            if (item.data(Qt.ItemDataRole.UserRole) or {}).get("kind") == "recipe":
+                return item
+        self.fail("Workspace recipe item was not found.")
 
     def test_main_window_lists_recipe_files_and_opens_recipe(self) -> None:
         recipe = base_recipe(
@@ -268,6 +276,98 @@ class EditorAppTests(unittest.TestCase):
                 Path(template_item.data(Qt.ItemDataRole.UserRole)["path"]),
             )
 
+            window.close()
+
+    def test_workspace_recipe_open_paths_work_after_window_resize(self) -> None:
+        recipe = base_recipe(recipe_id="example.recipe", steps=[])
+        with TemporaryDirectory() as tmp:
+            repo_root = Path(tmp)
+            authored_root = build_authored_tree(repo_root, recipes=[recipe])
+            recipe_path = authored_root / "recipes" / "example_recipe.yaml"
+
+            window = MainWindow(repo_root)
+            window.show()
+            self._app.processEvents()
+            window.resize(900, 650)
+            self._app.processEvents()
+
+            recipe_item = self._first_workspace_recipe_item(window)
+
+            window.open_recipe_file(recipe_path)
+            self.assertEqual(window.current_document.path, recipe_path.resolve())
+
+            window._current_document = None
+            window._open_item(recipe_item)
+            self._app.processEvents()
+            self.assertEqual(window.current_document.path, recipe_path.resolve())
+
+            window._current_document = None
+            window._workspace_list.itemActivated.emit(recipe_item)
+            self._app.processEvents()
+            self.assertEqual(window.current_document.path, recipe_path.resolve())
+
+            window._current_document = None
+            window._workspace_list.itemDoubleClicked.emit(recipe_item)
+            self._app.processEvents()
+            self.assertEqual(window.current_document.path, recipe_path.resolve())
+
+            window._current_document = None
+            window._workspace_list.setCurrentItem(recipe_item)
+            window._workspace_list.setFocus()
+            QTest.keyClick(window._workspace_list, Qt.Key.Key_Return)
+            self._app.processEvents()
+            self.assertEqual(window.current_document.path, recipe_path.resolve())
+
+            window.close()
+
+    def test_workspace_recipe_mouse_double_click_opens_after_window_resize(self) -> None:
+        recipe = base_recipe(recipe_id="example.recipe", steps=[])
+        with TemporaryDirectory() as tmp:
+            repo_root = Path(tmp)
+            authored_root = build_authored_tree(repo_root, recipes=[recipe])
+            recipe_path = authored_root / "recipes" / "example_recipe.yaml"
+
+            window = MainWindow(repo_root)
+            window.show()
+            self._app.processEvents()
+            window.resize(900, 650)
+            self._app.processEvents()
+
+            recipe_item = self._first_workspace_recipe_item(window)
+            item_rect = window._workspace_list.visualItemRect(recipe_item)
+            click_point = QPoint(8, item_rect.center().y())
+            self.assertEqual(window._workspace_list.indexAt(click_point).row(), window._workspace_list.row(recipe_item))
+
+            QTest.mouseDClick(
+                window._workspace_list.viewport(),
+                Qt.MouseButton.LeftButton,
+                Qt.KeyboardModifier.NoModifier,
+                click_point,
+            )
+            self._app.processEvents()
+
+            self.assertEqual(window.current_document.path, recipe_path.resolve())
+            window.close()
+
+    def test_workspace_recipe_activation_deduplicates_double_click_and_native_activation(self) -> None:
+        recipe = base_recipe(recipe_id="example.recipe", steps=[])
+        with TemporaryDirectory() as tmp:
+            repo_root = Path(tmp)
+            build_authored_tree(repo_root, recipes=[recipe])
+
+            window = MainWindow(repo_root)
+            window.show()
+            self._app.processEvents()
+            window.resize(900, 650)
+            self._app.processEvents()
+
+            recipe_item = self._first_workspace_recipe_item(window)
+            with patch.object(window, "open_recipe_file") as open_recipe_file:
+                window._workspace_list.itemDoubleClicked.emit(recipe_item)
+                window._workspace_list.itemActivated.emit(recipe_item)
+                self._app.processEvents()
+
+            open_recipe_file.assert_called_once()
             window.close()
 
     def test_workspace_refresh_updates_for_external_recipe_and_template_changes(self) -> None:
@@ -1002,6 +1102,62 @@ class EditorAppTests(unittest.TestCase):
             for editor in (page._resolve_artifacts_editor, page._resolve_artifact_groups_editor):
                 self.assertLess(editor._list.geometry().bottom(), editor._add_button.geometry().top())
                 self.assertLessEqual(editor._down_button.geometry().bottom(), editor.rect().bottom())
+
+            with patch.object(
+                window,
+                "_prompt_unsaved_changes",
+                return_value=QMessageBox.StandardButton.Discard,
+            ):
+                window.close()
+
+    def test_steps_page_list_action_buttons_wrap_when_left_pane_is_narrow(self) -> None:
+        recipe = base_recipe(
+            recipe_id="example.recipe",
+            steps=[
+                {
+                    "id": "grant",
+                    "type": "grant_permissions",
+                    "name": "Grant",
+                    "user_toggleable": False,
+                    "dependencies": [],
+                    "constraints": {"capabilities": [], "conflicts_with": []},
+                    "verify": [],
+                }
+            ],
+        )
+        with TemporaryDirectory() as tmp:
+            repo_root = Path(tmp)
+            authored_root = build_authored_tree(repo_root, recipes=[recipe])
+            recipe_path = authored_root / "recipes" / "example_recipe.yaml"
+
+            window = MainWindow(repo_root)
+            window.open_recipe_file(recipe_path)
+            window.show()
+            self._app.processEvents()
+
+            page = window._editor_view._steps_page
+            window._editor_view._tabs.setCurrentIndex(4)
+            page._select_step("grant")
+            left_panel = page._step_list.parentWidget()
+            self.assertIsNotNone(left_panel)
+            left_panel.setFixedWidth(360)
+            left_panel.layout().activate()
+            self._app.processEvents()
+
+            buttons = (
+                page._add_step_button,
+                page._rename_step_button,
+                page._delete_step_button,
+                page._find_step_usages_button,
+                page._duplicate_step_button,
+                page._move_up_button,
+                page._move_down_button,
+                page._toggle_user_toggleable_button,
+            )
+            first_row_top = buttons[0].geometry().top()
+            self.assertTrue(any(button.geometry().top() > first_row_top for button in buttons[1:]))
+            for button in buttons:
+                self.assertLessEqual(button.geometry().right(), left_panel.contentsRect().right())
 
             with patch.object(
                 window,

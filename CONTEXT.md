@@ -85,6 +85,7 @@ Editor interaction rules:
 - current field surfaces across Overview, Inputs, Artifacts, Artifact Groups, Steps, and Permissions expose hover tooltips that explain authored field purpose, accepted values, read-only semantics, and creation-time id or dialog semantics
 - the Steps page uses a master-detail layout with:
   - ordered step list actions for add, delete, duplicate, reorder, and `user_toggleable`
+  - step list action buttons wrap to additional rows when the list pane is narrowed
   - grouped step detail sections for basics, dependencies, params, constraints / `skip_if`, and `verify`
   - a dependency editor card with add/remove actions over existing step ids only
   - structured ref pickers over typed authored refs only

@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from PySide6.QtCore import QFileSystemWatcher, Qt
+from PySide6.QtCore import QEvent, QFileSystemWatcher, Qt, QTimer
 from PySide6.QtGui import QAction, QCloseEvent, QKeySequence
 from PySide6.QtWidgets import (
     QDialog,
@@ -36,11 +36,16 @@ class MainWindow(QMainWindow):
         self._workspace_state: WorkspaceState | None = None
         self._current_document: RecipeDocument | None = None
         self._open_document_missing_from_workspace = False
+        self._pending_workspace_item_open: tuple[str, str] | None = None
+        self._workspace_item_open_queued = False
         self._workspace_watcher = QFileSystemWatcher(self)
         self._workspace_watcher.directoryChanged.connect(self._on_workspace_directory_changed)
 
         self._workspace_list = QListWidget()
-        self._workspace_list.itemActivated.connect(self._open_item)
+        self._workspace_list.itemActivated.connect(self._queue_workspace_item_open)
+        self._workspace_list.itemDoubleClicked.connect(self._queue_workspace_item_open)
+        self._workspace_list.installEventFilter(self)
+        self._workspace_list.viewport().installEventFilter(self)
 
         self._editor_view = RecipeEditor(self._apply_document_command)
         self._diagnostics_view = DiagnosticsView()
@@ -112,6 +117,21 @@ class MainWindow(QMainWindow):
     @property
     def workspace_state(self) -> WorkspaceState | None:
         return self._workspace_state
+
+    def eventFilter(self, watched, event) -> bool:  # type: ignore[override]
+        if watched is self._workspace_list.viewport() and event.type() == QEvent.Type.MouseButtonDblClick:
+            item = self._workspace_list.itemFromIndex(self._workspace_list.indexAt(event.position().toPoint()))
+            if item is not None and self._workspace_item_action(item) is not None:
+                self._workspace_list.setCurrentItem(item)
+                self._queue_workspace_item_open(item)
+                return True
+        if watched in {self._workspace_list, self._workspace_list.viewport()} and event.type() == QEvent.Type.KeyPress:
+            if event.key() in {Qt.Key.Key_Return, Qt.Key.Key_Enter}:
+                item = self._workspace_list.currentItem()
+                if item is not None and self._workspace_item_action(item) is not None:
+                    self._queue_workspace_item_open(item)
+                    return True
+        return super().eventFilter(watched, event)
 
     def open_workspace_dialog(self) -> None:
         selected = QFileDialog.getExistingDirectory(self, "Open Workspace Root")
@@ -221,12 +241,41 @@ class MainWindow(QMainWindow):
             self.statusBar().showMessage(f"Redid change in {self._current_document.path.name}")
 
     def _open_item(self, item: QListWidgetItem) -> None:
+        action = self._workspace_item_action(item)
+        if action is not None:
+            self._open_workspace_item_action(*action)
+
+    def _queue_workspace_item_open(self, item: QListWidgetItem) -> None:
+        """Queue workspace item activation so duplicate native signals coalesce."""
+
+        action = self._workspace_item_action(item)
+        if action is None or action == self._pending_workspace_item_open:
+            return
+        self._pending_workspace_item_open = action
+        if not self._workspace_item_open_queued:
+            self._workspace_item_open_queued = True
+            QTimer.singleShot(0, self._flush_queued_workspace_item_open)
+
+    def _flush_queued_workspace_item_open(self) -> None:
+        action = self._pending_workspace_item_open
+        self._pending_workspace_item_open = None
+        self._workspace_item_open_queued = False
+        if action is not None:
+            self._open_workspace_item_action(*action)
+
+    def _workspace_item_action(self, item: QListWidgetItem) -> tuple[str, str] | None:
         item_data = item.data(Qt.ItemDataRole.UserRole) or {}
         item_kind = item_data.get("kind")
+        item_path = item_data.get("path")
+        if item_kind in {"recipe", "template"} and item_path is not None:
+            return item_kind, item_path
+        return None
+
+    def _open_workspace_item_action(self, item_kind: str, item_path: str) -> None:
         if item_kind == "recipe":
-            self.open_recipe_file(item_data["path"])
+            self.open_recipe_file(item_path)
         elif item_kind == "template":
-            self._start_new_recipe_flow(preselected_template=Path(item_data["path"]))
+            self._start_new_recipe_flow(preselected_template=Path(item_path))
 
     def _show_load_failure(
         self,
