@@ -260,6 +260,18 @@ def _validate_single_file(path: Path, expected_kind: str | None = None) -> tuple
             ),
         )
 
+    if kind == "recipe" and "permissions" in raw:
+        return None, (
+            _error(
+                code=ErrorCode.AUTHORED_DATA_INVALID,
+                message="Recipe top-level 'permissions' is no longer supported; author permissions under grant_permissions.params.",
+                file=path.resolve(),
+                object_kind="recipe",
+                object_id=raw.get("id"),
+                field="permissions",
+            ),
+        )
+
     try:
         item = _PARSERS[kind](raw)
     except (KeyError, TypeError, ValueError) as exc:

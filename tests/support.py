@@ -18,10 +18,10 @@ def base_recipe(
     inputs: dict | None = None,
     artifacts: dict | None = None,
     artifact_groups: dict | None = None,
-    permissions: dict | None = None,
+    top_level_permissions: dict | None = None,
     steps: list[dict] | None = None,
 ) -> dict:
-    return {
+    payload = {
         "schema_version": 1,
         "kind": "recipe",
         "id": recipe_id,
@@ -32,9 +32,11 @@ def base_recipe(
         "inputs": inputs or {},
         "artifacts": artifacts or {},
         "artifact_groups": artifact_groups or {},
-        "permissions": permissions or {},
         "steps": steps or [],
     }
+    if top_level_permissions is not None:
+        payload["permissions"] = top_level_permissions
+    return payload
 
 
 def build_authored_tree(

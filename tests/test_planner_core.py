@@ -130,15 +130,6 @@ class PlannerCoreTests(unittest.TestCase):
                 "app_apk": {"type": "remote_file", "url": "https://example.com/app.apk"},
                 "core_zip": {"type": "remote_file", "url": "https://example.com/core.zip"},
             },
-            permissions={
-                "runtime": [
-                    {
-                        "package_name": "com.example.app",
-                        "name": "android.permission.POST_NOTIFICATIONS",
-                        "required": False,
-                    }
-                ]
-            },
             steps=[
                 {
                     "id": "resolve",
@@ -219,9 +210,6 @@ class PlannerCoreTests(unittest.TestCase):
                 RefParamValue(ref="steps.example.recipe/extract.outputs.extracted_paths"),
             )
             self.assertEqual(launch_step.params["activity"], LiteralParamValue(value=".MainActivity"))
-            self.assertIsNotNone(plan.permission_plan)
-            assert plan.permission_plan is not None
-            self.assertFalse(any(hasattr(action, "command") for action in plan.permission_plan.actions))
 
     def test_extract_archive_cleanup_defaults_true(self) -> None:
         recipe = base_recipe(
@@ -298,7 +286,81 @@ class PlannerCoreTests(unittest.TestCase):
             emitted = session.emit_execution_plan()
             self.assertEqual(emitted.status.value, "success", emitted.errors)
             assert emitted.execution_plan is not None
-            self.assertIsNone(emitted.execution_plan.permission_plan)
+            grant_step = emitted.execution_plan.steps[0]
+            self.assertEqual(grant_step.params, {})
+
+    def test_grant_permissions_params_are_step_local_and_no_permission_plan_is_emitted(self) -> None:
+        recipe = base_recipe(
+            recipe_id="example.recipe",
+            steps=[
+                {
+                    "id": "grant_early",
+                    "type": "grant_permissions",
+                    "name": "Grant Early",
+                    "user_toggleable": False,
+                    "dependencies": [],
+                    "constraints": {"capabilities": [], "conflicts_with": []},
+                    "params": {
+                        "runtime": [
+                            {
+                                "package_name": "com.example.first",
+                                "name": "android.permission.POST_NOTIFICATIONS",
+                                "required": False,
+                            }
+                        ],
+                        "policy": {"on_failure": "warn", "require_all": False},
+                    },
+                    "verify": [],
+                },
+                {
+                    "id": "grant_late",
+                    "type": "grant_permissions",
+                    "name": "Grant Late",
+                    "user_toggleable": False,
+                    "dependencies": [],
+                    "constraints": {"capabilities": [], "conflicts_with": []},
+                    "params": {
+                        "appops": [
+                            {
+                                "package_name": "com.example.second",
+                                "op": "MANAGE_EXTERNAL_STORAGE",
+                                "mode": "allow",
+                                "required": False,
+                            }
+                        ],
+                        "policy": {"on_failure": "fail", "require_all": True},
+                    },
+                    "verify": [],
+                },
+            ],
+        )
+        with TemporaryDirectory() as tmp:
+            authored_root = build_authored_tree(Path(tmp), recipes=[recipe])
+            catalog = load_authored_catalog(authored_root)
+            planner = Planner(catalog)
+            session = planner.start_session(
+                "example.device_plan",
+                DeviceContext(manufacturer="Example", model="Example", android_version=13, android_api_level=33, device_tags=()),
+            )
+            emitted = session.emit_execution_plan()
+
+            self.assertEqual(emitted.status.value, "success", emitted.errors)
+            plan = emitted.execution_plan
+            assert plan is not None
+            self.assertFalse(hasattr(plan, "permission_plan"))
+            steps = {step.id: step for step in plan.steps}
+            self.assertEqual(
+                steps["example.recipe/grant_early"].params["runtime"].value[0]["package_name"],
+                "com.example.first",
+            )
+            self.assertEqual(
+                steps["example.recipe/grant_late"].params["appops"].value[0]["package_name"],
+                "com.example.second",
+            )
+            self.assertEqual(
+                steps["example.recipe/grant_late"].params["policy"].value,
+                {"on_failure": "fail", "require_all": True},
+            )
 
     def test_unbound_optional_input_prunes_direct_consumer_and_dependent_steps(self) -> None:
         recipe = base_recipe(

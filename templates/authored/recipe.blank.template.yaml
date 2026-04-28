@@ -14,10 +14,4 @@ provides:
 inputs: {}
 artifacts: {}
 artifact_groups: {}
-permissions:
-  runtime: []
-  appops: []
-  policy:
-    on_failure: warn
-    require_all: false
 steps: []

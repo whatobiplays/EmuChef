@@ -7,10 +7,7 @@ import unittest
 import yaml
 
 from emuchef.domain import (
-    AppOpGrant,
-    PermissionWhen,
     RefParamValue,
-    RuntimePermissionGrant,
     StepCondition,
     StepConstraints,
     StepType,
@@ -21,17 +18,13 @@ from emuchef_editor.core.documents.commands import (
     AddArtifactCommand,
     AddArtifactGroupCommand,
     AddArtifactGroupMemberCommand,
-    AddAppOpCommand,
     AddInputCommand,
     AddProvidedFeatureCommand,
     AddRecipeDependencyCommand,
-    AddRuntimePermissionCommand,
     AddStepCommand,
     DeleteArtifactCommand,
     DeleteArtifactGroupCommand,
-    DeleteAppOpCommand,
     DeleteInputCommand,
-    DeleteRuntimePermissionCommand,
     DeleteStepCommand,
     DuplicateArtifactCommand,
     DuplicateInputCommand,
@@ -57,13 +50,10 @@ from emuchef_editor.core.documents.commands import (
     UpdateStepParamsCommand,
     UpdateStepSkipIfCommand,
     UpdateStepVerifyCommand,
-    UpdateAppOpCommand,
     UpdateArtifactFieldCommand,
     UpdateInputFieldCommand,
-    UpdatePermissionPolicyFieldCommand,
     UpdateProvidedFeatureCommand,
     UpdateRecipeDependencyCommand,
-    UpdateRuntimePermissionCommand,
 )
 from emuchef_editor.core.analysis.usages import UsageTarget, analyze_recipe_usages
 from emuchef_editor.core.validation.validator_service import ValidatorService
@@ -216,12 +206,6 @@ class EditorCoreTests(unittest.TestCase):
                         "inputs: {}",
                         "artifacts: {}",
                         "artifact_groups: {}",
-                        "permissions:",
-                        "  runtime: []",
-                        "  appops: []",
-                        "  policy:",
-                        "    on_failure: warn",
-                        "    require_all: false",
                         "steps:",
                         "  - id: grant",
                         "    type: grant_permissions",
@@ -804,95 +788,53 @@ class EditorCoreTests(unittest.TestCase):
             self.assertIn("ref: artifacts.renamed_archive.local_path", emitted)
             self.assertIn("ref: steps.unpack.outputs.extracted_path", emitted)
 
-    def test_permission_commands_support_runtime_appops_policy_and_when_normalization(self) -> None:
-        recipe = base_recipe(recipe_id="example.recipe", steps=[])
+    def test_grant_permission_params_are_normal_step_params(self) -> None:
+        recipe = base_recipe(
+            recipe_id="example.recipe",
+            steps=[
+                {
+                    "id": "grant",
+                    "type": "grant_permissions",
+                    "name": "Grant",
+                    "user_toggleable": False,
+                    "dependencies": [],
+                    "constraints": {"capabilities": [], "conflicts_with": []},
+                    "verify": [],
+                }
+            ],
+        )
         with TemporaryDirectory() as tmp:
             authored_root = build_authored_tree(Path(tmp), recipes=[recipe])
             document = load_recipe_document(authored_root / "recipes" / "example_recipe.yaml")
 
             self.assertTrue(
                 document.apply_command(
-                    AddRuntimePermissionCommand(
-                        RuntimePermissionGrant(
-                            package_name="com.example.app",
-                            name="READ_MEDIA_VIDEO",
-                        )
+                    UpdateStepParamsCommand(
+                        step_id="grant",
+                        params={
+                            "runtime": [
+                                {
+                                    "package_name": "com.example.updated",
+                                    "name": "POST_NOTIFICATIONS",
+                                    "required": False,
+                                    "when": {"rooted": False, "android_api_min": 33},
+                                }
+                            ],
+                            "appops": [],
+                            "policy": {"on_failure": "fail", "require_all": True},
+                        },
                     )
                 )
             )
-            self.assertTrue(
-                document.apply_command(
-                    UpdateRuntimePermissionCommand(
-                        index=0,
-                        permission=RuntimePermissionGrant(
-                            package_name="com.example.updated",
-                            name="READ_MEDIA_AUDIO",
-                            required=False,
-                            when=PermissionWhen(),
-                        ),
-                    )
-                )
-            )
-            self.assertTrue(
-                document.apply_command(
-                    AddAppOpCommand(
-                        AppOpGrant(
-                            package_name="com.example.updated",
-                            op="WRITE_SETTINGS",
-                            mode="allow",
-                        )
-                    )
-                )
-            )
-            self.assertTrue(
-                document.apply_command(
-                    UpdateAppOpCommand(
-                        index=0,
-                        appop=AppOpGrant(
-                            package_name="com.example.updated",
-                            op="SYSTEM_ALERT_WINDOW",
-                            mode="ignore",
-                            required=False,
-                            when=PermissionWhen(rooted=True, android_api_min=30, android_api_max=34),
-                        ),
-                    )
-                )
-            )
-            self.assertTrue(
-                document.apply_command(
-                    UpdatePermissionPolicyFieldCommand(field="on_failure", value="fail")
-                )
-            )
-            self.assertTrue(
-                document.apply_command(
-                    UpdatePermissionPolicyFieldCommand(field="require_all", value=True)
-                )
-            )
-            self.assertTrue(document.apply_command(DeleteRuntimePermissionCommand(index=0)))
-            self.assertTrue(
-                document.apply_command(
-                    AddRuntimePermissionCommand(
-                        RuntimePermissionGrant(
-                            package_name="com.example.updated",
-                            name="POST_NOTIFICATIONS",
-                            required=False,
-                            when=PermissionWhen(rooted=False, android_api_min=33),
-                        )
-                    )
-                )
-            )
-            self.assertTrue(document.apply_command(DeleteAppOpCommand(index=0)))
 
-            permissions = document.working_recipe.permissions
-            self.assertEqual(len(permissions.runtime), 1)
-            self.assertEqual(permissions.runtime[0].package_name, "com.example.updated")
-            self.assertEqual(permissions.runtime[0].when.rooted, False)
-            self.assertEqual(permissions.runtime[0].when.android_api_min, 33)
-            self.assertIsNone(permissions.runtime[0].when.android_api_max)
-            self.assertEqual(permissions.appops, ())
-            self.assertEqual(permissions.policy.on_failure, "fail")
-            self.assertTrue(permissions.policy.require_all)
-            self.assertIn("permissions:", document.to_yaml())
+            grant = document.working_recipe.steps[0]
+            self.assertEqual(grant.params["runtime"][0]["package_name"], "com.example.updated")
+            self.assertEqual(grant.params["runtime"][0]["when"]["rooted"], False)
+            self.assertEqual(grant.params["runtime"][0]["when"]["android_api_min"], 33)
+            self.assertEqual(grant.params["appops"], [])
+            self.assertEqual(grant.params["policy"]["on_failure"], "fail")
+            self.assertTrue(grant.params["policy"]["require_all"])
+            self.assertNotIn("permissions:", document.to_yaml())
             self.assertIn("POST_NOTIFICATIONS", document.to_yaml())
             self.assertIn("on_failure: fail", document.to_yaml())
             self.assertIn("require_all: true", document.to_yaml())
@@ -930,11 +872,21 @@ class EditorCoreTests(unittest.TestCase):
         template = base_recipe(
             recipe_id="template.recipe",
             name="Template Recipe",
-            steps=[],
-            permissions={
-                "runtime": [{"package_name": "com.example.app", "name": "POST_NOTIFICATIONS"}],
-                "policy": {"on_failure": "warn", "require_all": False},
-            },
+            steps=[
+                {
+                    "id": "grant",
+                    "type": "grant_permissions",
+                    "name": "Grant",
+                    "user_toggleable": False,
+                    "dependencies": [],
+                    "constraints": {"capabilities": [], "conflicts_with": []},
+                    "params": {
+                        "runtime": [{"package_name": "com.example.app", "name": "POST_NOTIFICATIONS"}],
+                        "policy": {"on_failure": "warn", "require_all": False},
+                    },
+                    "verify": [],
+                }
+            ],
         )
         with TemporaryDirectory() as tmp:
             repo_root = Path(tmp)

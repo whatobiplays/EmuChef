@@ -87,7 +87,11 @@ STEP_SPECS: dict[StepType, StepSpec] = {
     ),
     StepType.GRANT_PERMISSIONS: StepSpec(
         type_name=StepType.GRANT_PERMISSIONS,
-        params={},
+        params={
+            "runtime": ParamSpec(ParamMode.LITERAL, required=False),
+            "appops": ParamSpec(ParamMode.LITERAL, required=False),
+            "policy": ParamSpec(ParamMode.LITERAL, required=False),
+        },
         executor_handler="grant_permissions",
     ),
     StepType.LAUNCH_APP: StepSpec(

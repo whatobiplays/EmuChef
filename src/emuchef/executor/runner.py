@@ -13,11 +13,9 @@ from emuchef.domain import (
     ExecutionPlan,
     ExecutionState,
     LiteralParamValue,
-    PermissionPolicy,
     RefParamValue,
     StepRuntimeState,
     StepRuntimeStatus,
-    StepType,
 )
 
 from .adb import AdbInterface, AdbResolutionError
@@ -26,8 +24,6 @@ from .resolver import RefResolutionError, resolve_runtime_ref
 from .result import (
     ExecutionProgressEvent,
     ExecutionRunResult,
-    PermissionRunRecord,
-    PermissionRunStatus,
     ProgressPhase,
     ProgressStatus,
     StepRunRecord,
@@ -54,7 +50,6 @@ class ExecutorRunner:
     def run(self, plan: ExecutionPlan, progress_callback: ProgressCallback | None = None) -> ExecutionRunResult:
         total_steps = len(plan.steps)
         records: list[StepRunRecord] = []
-        permission_results: list[PermissionRunRecord] = []
         state = ExecutionState(
             inputs={item.id: item.value for item in plan.inputs},
             artifacts={artifact.id: ArtifactRuntimeState(artifact_id=artifact.id) for artifact in plan.artifacts},
@@ -65,6 +60,7 @@ class ExecutorRunner:
             workdir=self._workdir,
             artifacts_by_id={artifact.id: artifact for artifact in plan.artifacts},
             state=state,
+            device_context=plan.device_context,
             runtime_capabilities=plan.runtime_capabilities,
             sleep_fn=self._sleep_fn,
         )
@@ -169,28 +165,7 @@ class ExecutorRunner:
                 )
                 logger.info("Executing step %s (%s)", step.id, step.type.value)
                 resolved_params = _resolve_step_params(state, step.params)
-
-                if step.type is StepType.GRANT_PERMISSIONS:
-                    step_permission_results, permission_failed = _execute_permission_actions_for_step(self._adb, plan, step)
-                    permission_results.extend(step_permission_results)
-                    if permission_failed:
-                        message = permission_failed
-                        state.steps[step.id] = StepRuntimeState(step_id=step.id, status=StepRuntimeStatus.FAILED, error=message)
-                        records.append(StepRunRecord(step_id=step.id, status=StepRunStatus.FAILED, message=message))
-                        _emit_progress(
-                            progress_callback,
-                            step_index=step_index,
-                            total_steps=total_steps,
-                            step_id=step.id,
-                            step_name=step.name,
-                            phase=ProgressPhase.FINISHED,
-                            status=ProgressStatus.FAILED,
-                            message=message,
-                        )
-                        continue
-                    outputs = {}
-                else:
-                    outputs = execute_step(context, step, resolved_params)
+                outputs = execute_step(context, step, resolved_params)
 
                 _emit_progress(
                     progress_callback,
@@ -223,7 +198,7 @@ class ExecutorRunner:
                     status=StepRuntimeStatus.SUCCEEDED,
                     outputs=dict(outputs),
                 )
-                records.append(StepRunRecord(step_id=step.id, status=StepRunStatus.EXECUTED))
+                records.append(StepRunRecord(step_id=step.id, status=StepRunStatus.EXECUTED, outputs=dict(outputs)))
                 _emit_progress(
                     progress_callback,
                     step_index=step_index,
@@ -238,12 +213,13 @@ class ExecutorRunner:
                     raise
                 logger.exception("Step failed: %s", step.id)
                 message = str(exc)
+                outputs = dict(getattr(exc, "outputs", {}))
                 if isinstance(exc, RefResolutionError):
                     message = f"{exc.code.value}: {message}"
                 elif isinstance(getattr(exc, "code", None), ErrorCode):
                     message = f"{exc.code.value}: {message}"
                 state.steps[step.id] = StepRuntimeState(step_id=step.id, status=StepRuntimeStatus.FAILED, error=message)
-                records.append(StepRunRecord(step_id=step.id, status=StepRunStatus.FAILED, message=message))
+                records.append(StepRunRecord(step_id=step.id, status=StepRunStatus.FAILED, message=message, outputs=outputs))
                 _emit_progress(
                     progress_callback,
                     step_index=step_index,
@@ -260,7 +236,6 @@ class ExecutorRunner:
             success=success,
             total_steps=total_steps,
             steps=tuple(records),
-            permission_results=tuple(permission_results),
         )
 
 
@@ -283,66 +258,6 @@ def _blocking_dependencies(state: ExecutionState, dependency_ids: tuple[str, ...
         for dependency_id in dependency_ids
         if (step_state := state.steps.get(dependency_id)) is not None
         and step_state.status in {StepRuntimeStatus.FAILED, StepRuntimeStatus.BLOCKED}
-    )
-
-
-def _execute_permission_actions_for_step(
-    adb: AdbInterface,
-    plan: ExecutionPlan,
-    step,
-) -> tuple[list[PermissionRunRecord], str | None]:
-    if plan.permission_plan is None:
-        return [], None
-
-    recipe_actions = [action for action in plan.permission_plan.actions if action.source.recipe_id == step.recipe_ref]
-    if not recipe_actions:
-        return [], None
-
-    policy = plan.permission_plan.policies.get(step.recipe_ref, PermissionPolicy())
-    records: list[PermissionRunRecord] = []
-    failure_message: str | None = None
-
-    for action in recipe_actions:
-        message = action.reason.message if action.reason is not None else None
-        if action.status == "not_applicable":
-            records.append(_permission_result(step.id, action, status=PermissionRunStatus.NOT_APPLICABLE, message=message))
-            continue
-
-        try:
-            adb.run_plan_command(tuple(_permission_command(action)))
-            records.append(_permission_result(step.id, action, status=PermissionRunStatus.EXECUTED))
-        except Exception as exc:
-            if isinstance(exc, AdbResolutionError):
-                raise
-            message = str(exc)
-            records.append(_permission_result(step.id, action, status=PermissionRunStatus.FAILED, message=message))
-            if action.required or policy.require_all or policy.on_failure == "fail":
-                failure_message = message
-                break
-
-    return records, failure_message
-
-
-def _permission_command(action) -> list[str]:
-    if action.kind == "runtime_permission":
-        return ["adb", "shell", "pm", "grant", action.package_name, str(action.permission)]
-    if action.kind == "appop":
-        return ["adb", "shell", "appops", "set", action.package_name, str(action.op), str(action.desired_mode)]
-    raise ValueError(f"Permission action kind {action.kind!r} does not have an executable command.")
-
-
-def _permission_result(step_id: str, action, *, status: PermissionRunStatus, message: str | None = None) -> PermissionRunRecord:
-    return PermissionRunRecord(
-        step_id=step_id,
-        status=status,
-        kind=action.kind,
-        package_name=action.package_name,
-        permission=action.permission,
-        op=action.op,
-        desired_mode=action.desired_mode,
-        source_recipe_id=action.source.recipe_id,
-        source_section=action.source.section,
-        message=message,
     )
 
 

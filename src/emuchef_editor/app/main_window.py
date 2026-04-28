@@ -119,15 +119,18 @@ class MainWindow(QMainWindow):
         return self._workspace_state
 
     def eventFilter(self, watched, event) -> bool:  # type: ignore[override]
-        if watched is self._workspace_list.viewport() and event.type() == QEvent.Type.MouseButtonDblClick:
+        workspace_list = getattr(self, "_workspace_list", None)
+        if workspace_list is None:
+            return False
+        if watched is workspace_list.viewport() and event.type() == QEvent.Type.MouseButtonDblClick:
             item = self._workspace_list.itemFromIndex(self._workspace_list.indexAt(event.position().toPoint()))
             if item is not None and self._workspace_item_action(item) is not None:
                 self._workspace_list.setCurrentItem(item)
                 self._queue_workspace_item_open(item)
                 return True
-        if watched in {self._workspace_list, self._workspace_list.viewport()} and event.type() == QEvent.Type.KeyPress:
+        if watched in {workspace_list, workspace_list.viewport()} and event.type() == QEvent.Type.KeyPress:
             if event.key() in {Qt.Key.Key_Return, Qt.Key.Key_Enter}:
-                item = self._workspace_list.currentItem()
+                item = workspace_list.currentItem()
                 if item is not None and self._workspace_item_action(item) is not None:
                     self._queue_workspace_item_open(item)
                     return True

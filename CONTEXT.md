@@ -32,7 +32,6 @@ Recipes now use:
 - `inputs:` as a map keyed by input id
 - `artifacts:` as a map keyed by artifact id
 - `artifact_groups:` as a map keyed by group id
-- top-level declarative `permissions:`
 - ordered `steps:`
 
 Author refs stay recipe-local in YAML:
@@ -46,6 +45,21 @@ Planner-internal execution-plan refs are normalized and namespaced, but that
 does not leak into authored YAML.
 
 Literal params are authored directly. Only refs use `{ ref: ... }`.
+
+Permission intent is authored on `grant_permissions` steps, not on the recipe
+root. A recipe with top-level `permissions:` is invalid, even if it also
+contains `grant_permissions.params`.
+
+`grant_permissions.params` supports:
+
+- `runtime`: runtime permission grants
+- `appops`: app-op grants
+- `policy`: local failure policy for that step's applicable actions
+
+Multiple `grant_permissions` steps may appear in one recipe. Each step grants
+only the actions declared in its own params, policy applies only to that local
+action set, and there is no implicit merge across grant steps. Empty grant params
+are a valid clean no-op.
 
 The desktop editor uses the same authored recipe model and in-process validation path as the CLI-facing authored loader.
 The editor remains in authored-ref space:
@@ -61,7 +75,6 @@ The current editor scope is recipe-authoring only. It edits:
 - Artifacts
 - Artifact Groups
 - Steps
-- Permissions
 
 The editor supports in-file refactor tooling for authored recipe ids, input ids,
 artifact ids, artifact-group ids, and step ids. Rename, usage analysis, and
@@ -82,13 +95,14 @@ Editor interaction rules:
 - undo and redo operate at command granularity and persist across saves for the open document
 - dirty state is a semantic comparison against the last saved canonical YAML baseline
 - form-based editor pages keep labels right-aligned while data-entry fields stay left-aligned, expand to the available pane width, and anchor the entry group at the top-left of the editor pane
-- current field surfaces across Overview, Inputs, Artifacts, Artifact Groups, Steps, and Permissions expose hover tooltips that explain authored field purpose, accepted values, read-only semantics, and creation-time id or dialog semantics
+- current field surfaces across Overview, Inputs, Artifacts, Artifact Groups, and Steps expose hover tooltips that explain authored field purpose, accepted values, read-only semantics, and creation-time id or dialog semantics
 - the Steps page uses a master-detail layout with:
   - ordered step list actions for add, delete, duplicate, reorder, and `user_toggleable`
   - step list action buttons wrap to additional rows when the list pane is narrowed
   - grouped step detail sections for basics, dependencies, params, constraints / `skip_if`, and `verify`
   - a dependency editor card with add/remove actions over existing step ids only
   - structured ref pickers over typed authored refs only
+  - step-local `grant_permissions` runtime/app-op/policy editors
   - auto-sizing params content that shrinks and grows with the active step form, visible preserved-content blocks, and `extract_archive.extract_on`
   - auto-sizing ordered lists for dependencies, capabilities, `conflicts_with`, `skip_if`, and `verify`, with one visible empty row when a list has no items
   - live diagnostics and YAML refresh after committed step edits
@@ -126,9 +140,9 @@ Field-scope rules currently enforced by the editor:
 - `schema_version` is read-only and reflects latest-schema-only support
 - artifact kind support is currently limited to `remote_file`
 - recipe, input, artifact, artifact-group, and step id fields are read-only in detail forms and are changed through explicit Rename actions
-- permission editing is limited to the current shared authored schema surface: `runtime`, `appops`, and `policy`
-- `permissions.policy.on_failure` is edited through a non-freeform dropdown seeded from the shared known policy values; if authored YAML contains another value, the editor shows it as a visible invalid option until the user replaces it
-- unsupported permission keys or shapes that the shared authored loader cannot represent fail load/validation explicitly and are not normalized by the editor
+- permission editing lives in the selected `grant_permissions` step's params surface: `runtime`, `appops`, and `policy`
+- `grant_permissions.params.policy.on_failure` is edited through a non-freeform dropdown seeded from the shared known policy values; if authored YAML contains another value, the editor shows it as a visible invalid option until the user replaces it
+- top-level recipe `permissions:` fails load/validation explicitly and is not auto-coerced by the editor or loader
 - deleting an input removes matching supported `inputs.<id>` param refs
 - deleting an artifact removes matching supported artifact refs, artifact-group memberships, and supported step artifact-selection entries
 - deleting an artifact group removes matching supported step artifact-group selection entries
@@ -160,7 +174,7 @@ Common notes:
 
 ## Current Executor Semantics
 
-Executor remains single-threaded and dumb:
+Executor remains single-threaded and owns runtime command execution:
 
 - evaluate dependency state
 - evaluate capability/conflict gating
@@ -182,9 +196,16 @@ Current step types:
 
 Important execution details:
 
-- `permission_plan.actions` contain only runtime permission and app-op entries,
-  and they execute only when a `grant_permissions` step runs
-- there is no longer a global post-step permission phase
+- `grant_permissions` constructs and executes ADB permission commands from the
+  selected step's own `params.runtime` and `params.appops`
+- planner normalization stays declarative and does not generate permission shell
+  commands
+- a failing `grant_permissions` step fails that step and blocks dependents
+  through normal dependency flow; unrelated grant steps are unaffected unless
+  dependencies connect them
+- skipped and failed steps do not expose resolvable runtime-ref outputs, but a
+  failed `grant_permissions` step may still keep collected permission action
+  results in its step run record for reporting
 - `wait` uses `duration_ms`
 - `launch_app` now tries package-manager-based launcher resolution before falling
   back to `monkey`
@@ -347,8 +368,7 @@ Current canonical top-level ordering for recipes is:
 8. `inputs`
 9. `artifacts`
 10. `artifact_groups`
-11. `permissions`
-12. `steps`
+11. `steps`
 
 Current ordering rules inside canonical recipe YAML:
 
@@ -356,13 +376,13 @@ Current ordering rules inside canonical recipe YAML:
 - `artifacts` preserve authored insertion order
 - `artifact_groups` preserve editor-managed order
 - artifact-group membership lists preserve authored/editor-managed order
+- grant-step permission item lists preserve authored/editor-managed order
 - UI list sorting for inputs or artifacts is view-only and does not redefine authored order
 
 ## Current Known Gaps / Follow-up
 
 Known intentional gaps:
 
-- step editing widgets are not implemented yet
 - executor remains single-threaded
 - artifact download uses Python stdlib networking only
 - archive extraction is still ZIP-oriented in practice

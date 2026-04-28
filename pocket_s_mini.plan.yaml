@@ -27,9 +27,11 @@ execution_plan:
     package_remove_for_user: false
     root_shell: true
     app_data_write: true
-  inputs_resolved:
+  inputs:
   - id: app.retroarch.provision.$retroarch_cfg
-    value: /Users/daniel/Downloads/retroarch.cfg
+    value:
+      type: file_path
+      value: /Users/daniel/Downloads/retroarch.cfg
   steps:
   - id: app.retroarch.provision/install_retroarch
     recipe_ref: app.retroarch.provision
@@ -71,7 +73,53 @@ execution_plan:
     recipe_ref: app.retroarch.provision
     type: grant_permissions
     name: Grant RetroArch permissions
-    params: {}
+    params:
+      runtime:
+      - package_name: com.retroarch.aarch64
+        name: android.permission.POST_NOTIFICATIONS
+        required: false
+        when:
+          android_api_min: 33
+      - package_name: com.retroarch.aarch64
+        name: android.permission.READ_EXTERNAL_STORAGE
+        required: false
+        when:
+          android_api_min: 33
+      - package_name: com.retroarch.aarch64
+        name: android.permission.READ_MEDIA_IMAGES
+        required: false
+        when:
+          android_api_min: 33
+      - package_name: com.retroarch.aarch64
+        name: android.permission.READ_MEDIA_AUDIO
+        required: false
+        when:
+          android_api_min: 33
+      - package_name: com.retroarch.aarch64
+        name: android.permission.READ_MEDIA_VIDEO
+        required: false
+        when:
+          android_api_min: 33
+      - package_name: com.retroarch.aarch64
+        name: android.permission.WRITE_EXTERNAL_STORAGE
+        required: false
+        when:
+          android_api_min: 33
+      - package_name: com.retroarch.aarch64
+        name: android.permission.ACCESS_MEDIA_LOCATION
+        required: false
+        when:
+          android_api_min: 33
+      appops:
+      - package_name: com.retroarch.aarch64
+        op: MANAGE_EXTERNAL_STORAGE
+        mode: allow
+        required: false
+        when:
+          rooted: true
+      policy:
+        on_failure: warn
+        require_all: false
     skip_if: []
     verify: []
   - id: app.retroarch.provision/launch_retroarch_permissions
@@ -119,153 +167,6 @@ execution_plan:
       package_name: com.retroarch.aarch64
     skip_if: []
     verify: []
-  permission_plan:
-    actions:
-    - status: applicable
-      kind: runtime_permission
-      package_name: com.retroarch.aarch64
-      source:
-        recipe_id: app.retroarch.provision
-        section: permissions.runtime[0]
-      permission: android.permission.POST_NOTIFICATIONS
-      op: null
-      desired_mode: null
-      required: false
-      command:
-      - adb
-      - shell
-      - pm
-      - grant
-      - com.retroarch.aarch64
-      - android.permission.POST_NOTIFICATIONS
-      reason: null
-    - status: applicable
-      kind: runtime_permission
-      package_name: com.retroarch.aarch64
-      source:
-        recipe_id: app.retroarch.provision
-        section: permissions.runtime[1]
-      permission: android.permission.READ_EXTERNAL_STORAGE
-      op: null
-      desired_mode: null
-      required: false
-      command:
-      - adb
-      - shell
-      - pm
-      - grant
-      - com.retroarch.aarch64
-      - android.permission.READ_EXTERNAL_STORAGE
-      reason: null
-    - status: applicable
-      kind: runtime_permission
-      package_name: com.retroarch.aarch64
-      source:
-        recipe_id: app.retroarch.provision
-        section: permissions.runtime[2]
-      permission: android.permission.READ_MEDIA_IMAGES
-      op: null
-      desired_mode: null
-      required: false
-      command:
-      - adb
-      - shell
-      - pm
-      - grant
-      - com.retroarch.aarch64
-      - android.permission.READ_MEDIA_IMAGES
-      reason: null
-    - status: applicable
-      kind: runtime_permission
-      package_name: com.retroarch.aarch64
-      source:
-        recipe_id: app.retroarch.provision
-        section: permissions.runtime[3]
-      permission: android.permission.READ_MEDIA_AUDIO
-      op: null
-      desired_mode: null
-      required: false
-      command:
-      - adb
-      - shell
-      - pm
-      - grant
-      - com.retroarch.aarch64
-      - android.permission.READ_MEDIA_AUDIO
-      reason: null
-    - status: applicable
-      kind: runtime_permission
-      package_name: com.retroarch.aarch64
-      source:
-        recipe_id: app.retroarch.provision
-        section: permissions.runtime[4]
-      permission: android.permission.READ_MEDIA_VIDEO
-      op: null
-      desired_mode: null
-      required: false
-      command:
-      - adb
-      - shell
-      - pm
-      - grant
-      - com.retroarch.aarch64
-      - android.permission.READ_MEDIA_VIDEO
-      reason: null
-    - status: applicable
-      kind: runtime_permission
-      package_name: com.retroarch.aarch64
-      source:
-        recipe_id: app.retroarch.provision
-        section: permissions.runtime[5]
-      permission: android.permission.WRITE_EXTERNAL_STORAGE
-      op: null
-      desired_mode: null
-      required: false
-      command:
-      - adb
-      - shell
-      - pm
-      - grant
-      - com.retroarch.aarch64
-      - android.permission.WRITE_EXTERNAL_STORAGE
-      reason: null
-    - status: applicable
-      kind: runtime_permission
-      package_name: com.retroarch.aarch64
-      source:
-        recipe_id: app.retroarch.provision
-        section: permissions.runtime[6]
-      permission: android.permission.ACCESS_MEDIA_LOCATION
-      op: null
-      desired_mode: null
-      required: false
-      command:
-      - adb
-      - shell
-      - pm
-      - grant
-      - com.retroarch.aarch64
-      - android.permission.ACCESS_MEDIA_LOCATION
-      reason: null
-    - status: applicable
-      kind: appop
-      package_name: com.retroarch.aarch64
-      source:
-        recipe_id: app.retroarch.provision
-        section: permissions.appops[0]
-      permission: null
-      op: MANAGE_EXTERNAL_STORAGE
-      desired_mode: allow
-      required: false
-      command:
-      - adb
-      - shell
-      - appops
-      - set
-      - com.retroarch.aarch64
-      - MANAGE_EXTERNAL_STORAGE
-      - allow
-      reason: null
   schema_version: 1
   kind: execution_plan
 schema_version: 1

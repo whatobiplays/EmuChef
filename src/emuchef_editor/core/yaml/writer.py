@@ -9,17 +9,12 @@ from typing import Any
 import yaml
 
 from emuchef.domain import (
-    AppOpGrant,
     InputDeclaration,
     InputValidation,
     LiteralParamValue,
-    PermissionPolicy,
-    PermissionSet,
-    PermissionWhen,
     Recipe,
     RefParamValue,
     RemoteFileArtifact,
-    RuntimePermissionGrant,
     Step,
     StepCondition,
     StepConstraints,
@@ -37,7 +32,6 @@ _TOP_LEVEL_FIELDS = (
     "inputs",
     "artifacts",
     "artifact_groups",
-    "permissions",
     "steps",
 )
 
@@ -64,7 +58,6 @@ def build_recipe_payload(recipe: Recipe) -> dict[str, Any]:
         "inputs": {input_id: _serialize_input(declaration) for input_id, declaration in recipe.inputs.items()},
         "artifacts": {artifact_id: _serialize_artifact(artifact) for artifact_id, artifact in recipe.artifacts.items()},
         "artifact_groups": {group_id: list(artifact_ids) for group_id, artifact_ids in recipe.artifact_groups.items()},
-        "permissions": _serialize_permissions(recipe.permissions),
         "steps": [_serialize_step(step) for step in recipe.steps],
     }
     if hasattr(recipe, "recipe_dependencies"):
@@ -128,58 +121,6 @@ def _serialize_artifact(artifact: RemoteFileArtifact) -> dict[str, Any]:
         },
         ("type", "url", "cache"),
     )
-
-
-def _serialize_permissions(permissions: PermissionSet) -> dict[str, Any]:
-    return {
-        "runtime": [_serialize_runtime_permission(item) for item in permissions.runtime],
-        "appops": [_serialize_appop_permission(item) for item in permissions.appops],
-        "policy": _serialize_permission_policy(permissions.policy),
-    }
-
-
-def _serialize_runtime_permission(permission: RuntimePermissionGrant) -> dict[str, Any]:
-    payload: dict[str, Any] = {
-        "package_name": permission.package_name,
-        "name": permission.name,
-        "required": permission.required,
-    }
-    if permission.when is not None:
-        payload["when"] = _serialize_permission_when(permission.when)
-    return _ordered_mapping(payload, ("package_name", "name", "required", "when"))
-
-
-def _serialize_appop_permission(permission: AppOpGrant) -> dict[str, Any]:
-    payload: dict[str, Any] = {
-        "package_name": permission.package_name,
-        "op": permission.op,
-        "mode": permission.mode,
-        "required": permission.required,
-    }
-    if permission.when is not None:
-        payload["when"] = _serialize_permission_when(permission.when)
-    return _ordered_mapping(payload, ("package_name", "op", "mode", "required", "when"))
-
-
-def _serialize_permission_policy(policy: PermissionPolicy) -> dict[str, Any]:
-    return _ordered_mapping(
-        {
-            "on_failure": policy.on_failure,
-            "require_all": policy.require_all,
-        },
-        ("on_failure", "require_all"),
-    )
-
-
-def _serialize_permission_when(when: PermissionWhen) -> dict[str, Any]:
-    payload: dict[str, Any] = {}
-    if when.rooted is not None:
-        payload["rooted"] = when.rooted
-    if when.android_api_min is not None:
-        payload["android_api_min"] = when.android_api_min
-    if when.android_api_max is not None:
-        payload["android_api_max"] = when.android_api_max
-    return _ordered_mapping(payload, ("rooted", "android_api_min", "android_api_max"))
 
 
 def _serialize_step(step: Step) -> dict[str, Any]:

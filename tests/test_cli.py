@@ -10,15 +10,10 @@ from unittest.mock import patch
 from emuchef.cli import main
 from emuchef.domain import (
     DeviceContext,
-    ExecutionPermissionPlan,
     ExecutionPlan,
     ExecutionPlanSource,
-    PermissionPlanAction,
-    PermissionPlanReason,
-    PermissionPlanSource,
     ExecutionStep,
     LiteralParamValue,
-    PermissionPolicy,
     RuntimeCapabilities,
     StepType,
 )
@@ -150,7 +145,6 @@ class CliTests(unittest.TestCase):
                         params={"duration_ms": LiteralParamValue(value=10)},
                     ),
                 ),
-                permission_plan=None,
             )
             plan_path = Path(tmp) / "plan.yaml"
             dump_yaml(plan, path=plan_path)
@@ -213,7 +207,6 @@ class CliTests(unittest.TestCase):
                         params={"duration_ms": LiteralParamValue(value=1)},
                     ),
                 ),
-                permission_plan=None,
             )
             plan_path = Path(tmp) / "plan.yaml"
             dump_yaml(plan, path=plan_path)
@@ -263,30 +256,29 @@ class CliTests(unittest.TestCase):
                         recipe_ref="example.recipe",
                         type=StepType.GRANT_PERMISSIONS,
                         name="Grant",
+                        params={
+                            "runtime": LiteralParamValue(
+                                value=[
+                                    {
+                                        "package_name": "com.example.app",
+                                        "name": "android.permission.POST_NOTIFICATIONS",
+                                        "required": False,
+                                    }
+                                ]
+                            ),
+                            "appops": LiteralParamValue(
+                                value=[
+                                    {
+                                        "package_name": "com.example.app",
+                                        "op": "MANAGE_EXTERNAL_STORAGE",
+                                        "mode": "allow",
+                                        "required": False,
+                                        "when": {"rooted": False},
+                                    }
+                                ]
+                            ),
+                        },
                     ),
-                ),
-                permission_plan=ExecutionPermissionPlan(
-                    actions=(
-                        PermissionPlanAction(
-                            status="applicable",
-                            kind="runtime_permission",
-                            package_name="com.example.app",
-                            permission="android.permission.POST_NOTIFICATIONS",
-                            required=False,
-                            source=PermissionPlanSource(recipe_id="example.recipe", section="permissions.runtime[0]"),
-                        ),
-                        PermissionPlanAction(
-                            status="not_applicable",
-                            kind="appop",
-                            package_name="com.example.app",
-                            op="MANAGE_EXTERNAL_STORAGE",
-                            desired_mode="allow",
-                            required=False,
-                            source=PermissionPlanSource(recipe_id="example.recipe", section="permissions.appops[0]"),
-                            reason=PermissionPlanReason(code="requires_root", message="Device is not rooted."),
-                        ),
-                    ),
-                    policies={"example.recipe": PermissionPolicy()},
                 ),
             )
             plan_path = Path(tmp) / "plan.yaml"

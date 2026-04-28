@@ -11,7 +11,6 @@ import yaml
 from emuchef.domain import (
     AppArtifactSupport,
     AppArtifacts,
-    AppOpGrant,
     ArtifactCacheMode,
     AppConfigTarget,
     AppDefinition,
@@ -30,15 +29,11 @@ from emuchef.domain import (
     InputType,
     InputValidation,
     LiteralParamValue,
-    PermissionPolicy,
-    PermissionSet,
-    PermissionWhen,
     Recipe,
     RecipeProvides,
     RefParamValue,
     RemoteFileArtifact,
     RuntimeCapabilities,
-    RuntimePermissionGrant,
     Step,
     StepCondition,
     StepConstraints,
@@ -348,6 +343,8 @@ def _parse_step(data: Mapping[str, Any]) -> Step:
 
 
 def _parse_recipe(data: Mapping[str, Any]) -> Recipe:
+    if "permissions" in data:
+        raise ValueError("top-level 'permissions' is no longer supported; author permissions under grant_permissions.params")
     inputs_data = data.get("inputs", {})
     if inputs_data is None:
         inputs_data = {}
@@ -373,7 +370,6 @@ def _parse_recipe(data: Mapping[str, Any]) -> Recipe:
         artifacts={str(key): _parse_artifact_definition(str(key), value) for key, value in artifacts_data.items()},
         artifact_groups={str(key): tuple(str(item) for item in value) for key, value in artifact_groups.items()},
         steps=tuple(_parse_step(item) for item in data.get("steps", [])),
-        permissions=_parse_permission_set(data.get("permissions")),
         schema_version=int(data["schema_version"]),
         kind=str(data["kind"]),
     )
@@ -473,56 +469,6 @@ def _parse_optional_artifact(data: Mapping[str, Any] | None) -> AppArtifactSuppo
     if data is None:
         return None
     return _parse_artifact_support(data)
-
-
-def _parse_permission_set(data: Mapping[str, Any] | None) -> PermissionSet:
-    if data is None:
-        return PermissionSet()
-    _ensure_allowed_mapping_keys(data, {"runtime", "appops", "policy"}, "recipe permissions")
-    return PermissionSet(
-        runtime=tuple(_parse_runtime_permission_grant(item) for item in data.get("runtime", [])),
-        appops=tuple(_parse_appop_grant(item) for item in data.get("appops", [])),
-        policy=_parse_permission_policy(data.get("policy")),
-    )
-
-
-def _parse_permission_when(data: Mapping[str, Any] | None) -> PermissionWhen | None:
-    if data is None:
-        return None
-    rooted = data.get("rooted")
-    return PermissionWhen(
-        rooted=bool(rooted) if rooted is not None else None,
-        android_api_min=int(data["android_api_min"]) if data.get("android_api_min") is not None else None,
-        android_api_max=int(data["android_api_max"]) if data.get("android_api_max") is not None else None,
-    )
-
-
-def _parse_runtime_permission_grant(data: Mapping[str, Any]) -> RuntimePermissionGrant:
-    return RuntimePermissionGrant(
-        package_name=str(data["package_name"]),
-        name=str(data["name"]),
-        required=bool(data.get("required", True)),
-        when=_parse_permission_when(data.get("when")),
-    )
-
-
-def _parse_appop_grant(data: Mapping[str, Any]) -> AppOpGrant:
-    return AppOpGrant(
-        package_name=str(data["package_name"]),
-        op=str(data["op"]),
-        mode=str(data["mode"]),
-        required=bool(data.get("required", True)),
-        when=_parse_permission_when(data.get("when")),
-    )
-
-
-def _parse_permission_policy(data: Mapping[str, Any] | None) -> PermissionPolicy:
-    if data is None:
-        return PermissionPolicy()
-    return PermissionPolicy(
-        on_failure=str(data.get("on_failure", "warn")),
-        require_all=bool(data.get("require_all", False)),
-    )
 
 
 def _namespaced_inputs(kind: str, items: Mapping[str, Any]) -> dict[str, InputDeclaration]:

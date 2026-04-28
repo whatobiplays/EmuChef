@@ -33,15 +33,15 @@ class EditorTooltipTests(unittest.TestCase):
         self.assertIn("artifact", prompt_tooltip("artifacts.id"))
         self.assertIn("group", prompt_tooltip("artifact_groups.id"))
 
-    def test_permissions_and_step_tooltips_are_registered(self) -> None:
-        self.assertIn("package", field_tooltip("permissions.runtime.package"))
-        self.assertIn("Accepted values", field_tooltip("permissions.policy.on_failure"))
+    def test_grant_permissions_and_step_tooltips_are_registered(self) -> None:
+        self.assertIn("package", field_tooltip("steps.grant_permissions.runtime.package_name"))
+        self.assertIn("Accepted values", field_tooltip("steps.grant_permissions.policy.on_failure"))
         self.assertIn("read-only", field_tooltip("steps.type"))
         self.assertIn("ref", field_tooltip("steps.copy_files.source"))
         self.assertIn("read-only", field_tooltip("steps.preserved_content"))
 
     def test_permission_policy_tooltip_tracks_known_schema_values(self) -> None:
-        tooltip = field_tooltip("permissions.policy.on_failure")
+        tooltip = field_tooltip("steps.grant_permissions.policy.on_failure")
         for value in PERMISSION_POLICY_ON_FAILURE_VALUES:
             self.assertIn(value, tooltip)
 

@@ -2,9 +2,11 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from collections.abc import Mapping
+from dataclasses import dataclass, field
 from enum import Enum
-from typing import Literal
+
+from emuchef.domain import RuntimeValue
 
 
 class StepRunStatus(str, Enum):
@@ -12,12 +14,6 @@ class StepRunStatus(str, Enum):
     SKIPPED = "skipped"
     BLOCKED = "blocked"
     FAILED = "failed"
-
-
-class PermissionRunStatus(str, Enum):
-    EXECUTED = "executed"
-    FAILED = "failed"
-    NOT_APPLICABLE = "not_applicable"
 
 
 class ProgressPhase(str, Enum):
@@ -39,20 +35,7 @@ class StepRunRecord:
     step_id: str
     status: StepRunStatus
     message: str | None = None
-
-
-@dataclass(frozen=True, slots=True)
-class PermissionRunRecord:
-    step_id: str
-    status: PermissionRunStatus
-    kind: Literal["runtime_permission", "appop"]
-    package_name: str
-    source_recipe_id: str
-    source_section: str
-    permission: str | None = None
-    op: str | None = None
-    desired_mode: str | None = None
-    message: str | None = None
+    outputs: Mapping[str, RuntimeValue] = field(default_factory=dict)
 
 
 @dataclass(frozen=True, slots=True)
@@ -71,4 +54,3 @@ class ExecutionRunResult:
     success: bool
     total_steps: int
     steps: tuple[StepRunRecord, ...]
-    permission_results: tuple[PermissionRunRecord, ...] = ()

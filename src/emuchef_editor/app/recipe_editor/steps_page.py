@@ -69,12 +69,12 @@ from .common import (
 from .step_metadata import (
     CONDITION_PARAM_FIELD,
     COPY_FILES_HELP,
-    GRANT_PERMISSIONS_NOTE,
     KNOWN_CAPABILITIES,
     REF_VALUE_FILTERS,
     SUPPORTED_CONDITION_TYPES,
     SUPPORTED_EDITOR_STEP_TYPES,
 )
+from .permissions_page import GrantPermissionParamsEditor
 from .tooltips import field_tooltip, prompt_tooltip
 from .usage_dialogs import DeleteWithUsagesDialog, FindUsagesDialog, confirm_preserved_content_warning
 
@@ -883,10 +883,9 @@ class StepsPage(QWidget):
 
         self._grant_permissions_panel = QWidget()
         grant_layout = QVBoxLayout(self._grant_permissions_panel)
-        self._grant_permissions_note_label = QLabel(GRANT_PERMISSIONS_NOTE)
-        self._grant_permissions_note_label.setWordWrap(True)
-        apply_tooltip(self._grant_permissions_note_label, field_tooltip("steps.grant_permissions.note"))
-        grant_layout.addWidget(self._grant_permissions_note_label)
+        self._grant_permissions_editor = GrantPermissionParamsEditor()
+        self._grant_permissions_editor.changed.connect(self._commit_step_params)
+        grant_layout.addWidget(self._grant_permissions_editor)
         self._register_param_panel(StepType.GRANT_PERMISSIONS, self._grant_permissions_panel)
 
         self._launch_app_panel = QWidget()
@@ -1051,6 +1050,8 @@ class StepsPage(QWidget):
         elif step.type is StepType.INSTALL_APK:
             self._populate_ref_combo(self._install_apk_app_combo, step.params.get("app"), self._ref_candidates(step.type, "app"))
             self._install_apk_replace_existing_check.setChecked(bool(step.params.get("replace_existing", False)))
+        elif step.type is StepType.GRANT_PERMISSIONS:
+            self._grant_permissions_editor.set_params(step.params)
         elif step.type is StepType.LAUNCH_APP:
             self._launch_package_edit.setText(str(step.params.get("package_name", "")))
             self._launch_activity_edit.setText(str(step.params.get("activity", "")))
@@ -1421,6 +1422,7 @@ class StepsPage(QWidget):
             params["replace_existing"] = self._install_apk_replace_existing_check.isChecked()
             return params
         if step.type is StepType.GRANT_PERMISSIONS:
+            params.update(self._grant_permissions_editor.params())
             return params
         if step.type is StepType.LAUNCH_APP:
             if self._launch_package_edit.text().strip():

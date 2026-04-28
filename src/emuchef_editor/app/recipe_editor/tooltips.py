@@ -84,24 +84,6 @@ FIELD_TOOLTIPS: dict[str, str] = {
         "This stable authored id names the artifact group. "
         "It stays read-only in Milestone 2 because rename with membership and ref updates is not implemented yet."
     ),
-    "permissions.runtime.package": "Android package name the runtime permission grant applies to.",
-    "permissions.runtime.permission": "Android runtime permission name to grant for the selected package.",
-    "permissions.runtime.required": "When enabled, failure to apply this grant is treated as required permission work.",
-    "permissions.runtime.rooted": "Optional rooted-state filter for this grant. Leave it at Any to apply regardless of device root state.",
-    "permissions.runtime.android_api_min": "Optional minimum Android API level where this grant should apply.",
-    "permissions.runtime.android_api_max": "Optional maximum Android API level where this grant should apply.",
-    "permissions.appops.package": "Android package name the app-op grant applies to.",
-    "permissions.appops.op": "Android app-op name to configure for the selected package.",
-    "permissions.appops.mode": "Authored app-op mode value to apply, such as allow or ignore.",
-    "permissions.appops.required": "When enabled, failure to apply this app-op is treated as required permission work.",
-    "permissions.appops.rooted": "Optional rooted-state filter for this app-op. Leave it at Any to apply regardless of device root state.",
-    "permissions.appops.android_api_min": "Optional minimum Android API level where this app-op should apply.",
-    "permissions.appops.android_api_max": "Optional maximum Android API level where this app-op should apply.",
-    "permissions.policy.on_failure": (
-        "Policy outcome when permission work fails. "
-        f"Accepted values: {_enum_values(*PERMISSION_POLICY_ON_FAILURE_VALUES)}."
-    ),
-    "permissions.policy.require_all": "When enabled, all applicable permission actions must succeed for the policy to pass.",
     "steps.id": (
         "This stable authored step id is used by dependencies and refs such as 'steps.<id>.outputs.<field>'. "
         "It stays read-only after creation because step rename with ref rewrite is not implemented."
@@ -142,7 +124,21 @@ FIELD_TOOLTIPS: dict[str, str] = {
         "Saved YAML keeps the explicit { ref: ... } value."
     ),
     "steps.install_apk.replace_existing": "When enabled, an existing installation may be replaced during APK install.",
-    "steps.grant_permissions.note": "This step consumes the top-level permission plan. It is valid as a clean no-op when no permission actions apply.",
+    "steps.grant_permissions.runtime.package_name": "Android package name this grant step applies the runtime permission to.",
+    "steps.grant_permissions.runtime.name": "Android runtime permission name this grant step should grant.",
+    "steps.grant_permissions.runtime.required": "When enabled, failure to apply this runtime grant is treated as required work for this grant step.",
+    "steps.grant_permissions.appops.package_name": "Android package name this grant step applies the app-op to.",
+    "steps.grant_permissions.appops.op": "Android app-op name this grant step should configure.",
+    "steps.grant_permissions.appops.mode": "Authored app-op mode value to apply, such as allow or ignore.",
+    "steps.grant_permissions.appops.required": "When enabled, failure to apply this app-op is treated as required work for this grant step.",
+    "steps.grant_permissions.when.rooted": "Optional rooted-state filter for this grant action. Leave it at Any to apply regardless of device root state.",
+    "steps.grant_permissions.when.android_api_min": "Optional minimum Android API level where this grant action should apply.",
+    "steps.grant_permissions.when.android_api_max": "Optional maximum Android API level where this grant action should apply.",
+    "steps.grant_permissions.policy.on_failure": (
+        "Policy outcome when this grant step has applicable permission failures. "
+        f"Accepted values: {_enum_values(*PERMISSION_POLICY_ON_FAILURE_VALUES)}."
+    ),
+    "steps.grant_permissions.policy.require_all": "When enabled, all applicable actions in this grant step must succeed for the policy to pass.",
     "steps.launch_app.package_name": "Android package name to launch.",
     "steps.launch_app.activity": "Optional explicit activity name. Leave it blank to use normal launcher resolution behavior.",
     "steps.wait.duration_ms": "Integer wait duration in milliseconds.",
@@ -176,11 +172,11 @@ PROMPT_TOOLTIPS: dict[str, str] = {
         "Enter a stable feature string this recipe provides. "
         "Other recipes or tooling may reference it."
     ),
-    "permissions.runtime.package": "Enter the Android package name this runtime permission applies to.",
-    "permissions.runtime.permission": "Enter the Android runtime permission name to grant.",
-    "permissions.appops.package": "Enter the Android package name this app-op applies to.",
-    "permissions.appops.op": "Enter the Android app-op name to configure.",
-    "permissions.appops.mode": "Enter the authored app-op mode value to apply.",
+    "steps.grant_permissions.runtime.package_name": "Enter the Android package name this runtime permission applies to.",
+    "steps.grant_permissions.runtime.name": "Enter the Android runtime permission name to grant.",
+    "steps.grant_permissions.appops.package_name": "Enter the Android package name this app-op applies to.",
+    "steps.grant_permissions.appops.op": "Enter the Android app-op name to configure.",
+    "steps.grant_permissions.appops.mode": "Enter the authored app-op mode value to apply.",
     "steps.id": (
         "Choose a stable authored step id. "
         "It becomes read-only after creation because step rename with ref rewrite is not implemented."

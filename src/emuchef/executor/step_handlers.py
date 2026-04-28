@@ -17,6 +17,7 @@ from emuchef.domain import (
     ArtifactCacheMode,
     ArtifactRuntimeStatus,
     CopyPolicy,
+    DeviceContext,
     ErrorCode,
     ExecutionArtifact,
     ExecutionState,
@@ -27,13 +28,20 @@ from emuchef.domain import (
     StepType,
 )
 
-from .adb import AdbInterface, is_app_private_path
+from .adb import AdbInterface, AdbResolutionError, is_app_private_path
 
 
 class StepExecutionError(RuntimeError):
-    def __init__(self, code: ErrorCode, message: str) -> None:
+    def __init__(self, code: ErrorCode, message: str, outputs: Mapping[str, RuntimeValue] | None = None) -> None:
         super().__init__(message)
         self.code = code
+        self.outputs = dict(outputs or {})
+
+
+class StepExecutionFailure(RuntimeError):
+    def __init__(self, message: str, outputs: Mapping[str, RuntimeValue] | None = None) -> None:
+        super().__init__(message)
+        self.outputs = dict(outputs or {})
 
 
 @dataclass(slots=True)
@@ -42,6 +50,7 @@ class ExecutionContext:
     workdir: Path
     artifacts_by_id: Mapping[str, ExecutionArtifact]
     state: ExecutionState
+    device_context: DeviceContext
     runtime_capabilities: RuntimeCapabilities
     sleep_fn: Callable[[float], None]
 
@@ -63,6 +72,8 @@ def execute_step(
     if step.type is StepType.INSTALL_APK:
         _install_apk(context, resolved_params)
         return {}
+    if step.type is StepType.GRANT_PERMISSIONS:
+        return _grant_permissions(context, step, resolved_params)
     if step.type is StepType.LAUNCH_APP:
         _launch_app(context, resolved_params)
         return {}
@@ -216,6 +227,48 @@ def _install_apk(context: ExecutionContext, resolved_params: Mapping[str, object
     context.adb.install_apk(apk_path, replace_existing=bool(resolved_params.get("replace_existing", False)))
 
 
+def _grant_permissions(
+    context: ExecutionContext,
+    step: ExecutionStep,
+    resolved_params: Mapping[str, object],
+) -> dict[str, RuntimeValue]:
+    policy = _permission_policy(resolved_params.get("policy"))
+    action_results: list[dict[str, object]] = []
+    failure_message: str | None = None
+
+    for action in _permission_actions(resolved_params):
+        reason = _permission_not_applicable_reason(
+            action.get("when"),
+            rooted=context.runtime_capabilities.root_shell,
+            android_api_level=context.device_context.android_api_level,
+        )
+        if reason is not None:
+            action_results.append({**_permission_result_base(step, action), "status": "not_applicable", **reason})
+            continue
+
+        try:
+            context.adb.run_plan_command(tuple(_permission_command(action)))
+            action_results.append({**_permission_result_base(step, action), "status": "executed"})
+        except Exception as exc:
+            if isinstance(exc, AdbResolutionError):
+                raise
+            message = str(exc)
+            action_results.append({**_permission_result_base(step, action), "status": "failed", "message": message})
+            if bool(action.get("required", True)) or policy["require_all"] or policy["on_failure"] == "fail":
+                failure_message = message
+                break
+
+    outputs = {
+        "permission_results": RuntimeValue(
+            type=RuntimeValueType.OBJECT,
+            value={"actions": action_results},
+        )
+    }
+    if failure_message is not None:
+        raise StepExecutionFailure(failure_message, outputs=outputs)
+    return outputs
+
+
 def _launch_app(context: ExecutionContext, resolved_params: Mapping[str, object]) -> None:
     package_name = str(resolved_params["package_name"])
     activity = resolved_params.get("activity")
@@ -234,6 +287,112 @@ def _force_stop_app(context: ExecutionContext, resolved_params: Mapping[str, obj
     if not package_name.strip():
         raise ValueError("force_stop_app step requires a non-empty package_name.")
     context.adb.force_stop_app(package_name)
+
+
+def _permission_actions(resolved_params: Mapping[str, object]) -> list[dict[str, object]]:
+    actions: list[dict[str, object]] = []
+    for index, item in enumerate(_coerce_mapping_list(resolved_params.get("runtime"))):
+        actions.append(
+            {
+                "kind": "runtime_permission",
+                "package_name": str(item["package_name"]),
+                "permission": str(item["name"]),
+                "required": bool(item.get("required", True)),
+                "when": item.get("when"),
+                "source_section": f"params.runtime[{index}]",
+            }
+        )
+    for index, item in enumerate(_coerce_mapping_list(resolved_params.get("appops"))):
+        actions.append(
+            {
+                "kind": "appop",
+                "package_name": str(item["package_name"]),
+                "op": str(item["op"]),
+                "desired_mode": str(item["mode"]),
+                "required": bool(item.get("required", True)),
+                "when": item.get("when"),
+                "source_section": f"params.appops[{index}]",
+            }
+        )
+    return actions
+
+
+def _permission_policy(value: object) -> dict[str, object]:
+    if not isinstance(value, Mapping):
+        return {"on_failure": "warn", "require_all": False}
+    return {
+        "on_failure": str(value.get("on_failure", "warn")),
+        "require_all": bool(value.get("require_all", False)),
+    }
+
+
+def _permission_command(action: Mapping[str, object]) -> list[str]:
+    if action["kind"] == "runtime_permission":
+        return ["adb", "shell", "pm", "grant", str(action["package_name"]), str(action["permission"])]
+    if action["kind"] == "appop":
+        return [
+            "adb",
+            "shell",
+            "appops",
+            "set",
+            str(action["package_name"]),
+            str(action["op"]),
+            str(action["desired_mode"]),
+        ]
+    raise ValueError(f"Permission action kind {action['kind']!r} does not have an executable command.")
+
+
+def _permission_result_base(step: ExecutionStep, action: Mapping[str, object]) -> dict[str, object]:
+    result: dict[str, object] = {
+        "step_id": step.id,
+        "kind": str(action["kind"]),
+        "package_name": str(action["package_name"]),
+        "source_recipe_id": step.recipe_ref,
+        "source_section": str(action["source_section"]),
+    }
+    if action["kind"] == "runtime_permission":
+        result["permission"] = str(action["permission"])
+    if action["kind"] == "appop":
+        result["op"] = str(action["op"])
+        result["desired_mode"] = str(action["desired_mode"])
+    return result
+
+
+def _permission_not_applicable_reason(
+    when: object,
+    *,
+    rooted: bool,
+    android_api_level: int | None,
+) -> dict[str, str] | None:
+    if not isinstance(when, Mapping):
+        return None
+    required_rooted = when.get("rooted")
+    if required_rooted is True and not rooted:
+        return {"reason_code": "requires_root", "message": "Device is not rooted."}
+    if required_rooted is False and rooted:
+        return {"reason_code": "requires_unrooted", "message": "Device is rooted."}
+
+    api_min = when.get("android_api_min")
+    api_max = when.get("android_api_max")
+    if (api_min is not None or api_max is not None) and android_api_level is None:
+        return {"reason_code": "missing_android_api_level", "message": "Device Android API level is unknown."}
+    if isinstance(api_min, int) and android_api_level is not None and android_api_level < api_min:
+        return {
+            "reason_code": "android_api_out_of_range",
+            "message": f"Device Android API {android_api_level} is below minimum {api_min}.",
+        }
+    if isinstance(api_max, int) and android_api_level is not None and android_api_level > api_max:
+        return {
+            "reason_code": "android_api_out_of_range",
+            "message": f"Device Android API {android_api_level} is above maximum {api_max}.",
+        }
+    return None
+
+
+def _coerce_mapping_list(value: object | None) -> list[Mapping[str, object]]:
+    if value is None:
+        return []
+    return [item for item in list(value) if isinstance(item, Mapping)]
 
 
 def _copy_host_source(context: ExecutionContext, source: RuntimeValue, dest: str, copy_policy: CopyPolicy) -> list[str]:

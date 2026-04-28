@@ -46,9 +46,11 @@ execution_plan:
     package_remove_for_user: false
     root_shell: false
     app_data_write: false
-  inputs_resolved:
+  inputs:
   - id: feature.copy_bios.$bios_source_dir
-    value: /Users/daniel/Syncthing/ROMs/_bios
+    value:
+      type: directory_path
+      value: /Users/daniel/Syncthing/ROMs/_bios
   steps:
   - id: app.obtainium.install/install_obtainium
     recipe_ref: app.obtainium.install
@@ -107,49 +109,6 @@ execution_plan:
       package_name: com.retroarch.aarch64
     skip_if: []
     verify: []
-  permission_plan:
-    actions:
-    - status: skipped
-      kind: runtime_permission
-      package_name: com.retroarch.aarch64
-      source:
-        recipe_id: app.retroarch.provision
-        section: permissions.runtime[0]
-      permission: android.permission.POST_NOTIFICATIONS
-      op: null
-      desired_mode: null
-      required: false
-      command:
-      - adb
-      - shell
-      - pm
-      - grant
-      - com.retroarch.aarch64
-      - android.permission.POST_NOTIFICATIONS
-      reason:
-        code: android_api_out_of_range
-        message: Device Android API 13 is outside supported range >= 33.
-    - status: skipped
-      kind: appop
-      package_name: com.retroarch.aarch64
-      source:
-        recipe_id: app.retroarch.provision
-        section: permissions.appops[0]
-      permission: null
-      op: MANAGE_EXTERNAL_STORAGE
-      desired_mode: allow
-      required: false
-      command:
-      - adb
-      - shell
-      - appops
-      - set
-      - com.retroarch.aarch64
-      - MANAGE_EXTERNAL_STORAGE
-      - allow
-      reason:
-        code: requires_root
-        message: Device is not rooted.
   schema_version: 1
   kind: execution_plan
 schema_version: 1

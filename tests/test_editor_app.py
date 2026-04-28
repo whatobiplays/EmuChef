@@ -82,7 +82,7 @@ class EditorAppTests(unittest.TestCase):
             window.open_recipe_file(recipe_path)
 
             self.assertIsNotNone(window.current_document)
-            self.assertEqual(window._editor_view._tabs.count(), 6)
+            self.assertEqual(window._editor_view._tabs.count(), 5)
             self.assertIn("schema_version: 1", window._yaml_preview.toPlainText())
             self.assertIn("example.recipe", window.windowTitle())
             self.assertEqual(window._diagnostics_view._tree.topLevelItemCount(), 0)
@@ -154,14 +154,24 @@ class EditorAppTests(unittest.TestCase):
 
             window.close()
 
-    def test_permissions_tab_edits_refresh_preview_and_dirty_state(self) -> None:
+    def test_grant_permissions_step_edits_refresh_preview_and_dirty_state(self) -> None:
         recipe = base_recipe(
             recipe_id="example.recipe",
-            permissions={
-                "runtime": [{"package_name": "com.example.app", "name": "READ_MEDIA_VIDEO"}],
-                "policy": {"on_failure": "warn", "require_all": False},
-            },
-            steps=[],
+            steps=[
+                {
+                    "id": "grant",
+                    "type": "grant_permissions",
+                    "name": "Grant",
+                    "user_toggleable": False,
+                    "dependencies": [],
+                    "constraints": {"capabilities": [], "conflicts_with": []},
+                    "params": {
+                        "runtime": [{"package_name": "com.example.app", "name": "READ_MEDIA_VIDEO"}],
+                        "policy": {"on_failure": "warn", "require_all": False},
+                    },
+                    "verify": [],
+                }
+            ],
         )
         with TemporaryDirectory() as tmp:
             repo_root = Path(tmp)
@@ -172,29 +182,31 @@ class EditorAppTests(unittest.TestCase):
             window.open_recipe_file(recipe_path)
 
             self.assertEqual(window._editor_view._tabs.tabText(4), "Steps")
-            self.assertEqual(window._editor_view._tabs.tabText(5), "Permissions")
-            page = window._editor_view._permissions_page
-            self.assertFalse(page._policy_on_failure_combo.isEditable())
+            page = window._editor_view._steps_page
+            page._select_step("grant")
+            editor = page._grant_permissions_editor
+            self.assertFalse(editor._policy_on_failure_combo.isEditable())
             self.assertEqual(
-                tuple(page._policy_on_failure_combo.itemText(index) for index in range(page._policy_on_failure_combo.count())),
+                tuple(editor._policy_on_failure_combo.itemText(index) for index in range(editor._policy_on_failure_combo.count())),
                 PERMISSION_POLICY_ON_FAILURE_VALUES,
             )
             with patch.object(
-                page,
+                editor,
                 "_prompt_for_new_runtime_permission",
                 return_value=RuntimePermissionGrant(
                     package_name="com.example.app",
                     name="POST_NOTIFICATIONS",
                 ),
             ):
-                page._add_runtime_button.click()
+                editor._add_runtime_button.click()
 
-            page._policy_on_failure_combo.setCurrentText("fail")
-            page._policy_require_all_check.setChecked(True)
+            editor._policy_on_failure_combo.setCurrentText("fail")
+            editor._policy_require_all_check.setChecked(True)
 
-            self.assertEqual(len(window.current_document.working_recipe.permissions.runtime), 2)
-            self.assertEqual(window.current_document.working_recipe.permissions.policy.on_failure, "fail")
-            self.assertTrue(window.current_document.working_recipe.permissions.policy.require_all)
+            grant_step = window.current_document.working_recipe.steps[0]
+            self.assertEqual(len(grant_step.params["runtime"]), 2)
+            self.assertEqual(grant_step.params["policy"]["on_failure"], "fail")
+            self.assertTrue(grant_step.params["policy"]["require_all"])
             self.assertTrue(window.current_document.is_dirty)
             self.assertIn("POST_NOTIFICATIONS", window._yaml_preview.toPlainText())
             self.assertIn("on_failure: fail", window._yaml_preview.toPlainText())
@@ -207,13 +219,21 @@ class EditorAppTests(unittest.TestCase):
             ):
                 window.close()
 
-    def test_permissions_policy_preserves_unknown_on_failure_until_user_selects_known_value(self) -> None:
+    def test_grant_permissions_policy_preserves_unknown_on_failure_until_user_selects_known_value(self) -> None:
         recipe = base_recipe(
             recipe_id="example.recipe",
-            permissions={
-                "policy": {"on_failure": "custom", "require_all": False},
-            },
-            steps=[],
+            steps=[
+                {
+                    "id": "grant",
+                    "type": "grant_permissions",
+                    "name": "Grant",
+                    "user_toggleable": False,
+                    "dependencies": [],
+                    "constraints": {"capabilities": [], "conflicts_with": []},
+                    "params": {"policy": {"on_failure": "custom", "require_all": False}},
+                    "verify": [],
+                }
+            ],
         )
         with TemporaryDirectory() as tmp:
             repo_root = Path(tmp)
@@ -223,17 +243,19 @@ class EditorAppTests(unittest.TestCase):
             window = MainWindow(repo_root)
             window.open_recipe_file(recipe_path)
 
-            page = window._editor_view._permissions_page
-            self.assertFalse(page._policy_on_failure_combo.isEditable())
-            self.assertEqual(page._policy_on_failure_combo.currentText(), "custom")
+            page = window._editor_view._steps_page
+            page._select_step("grant")
+            editor = page._grant_permissions_editor
+            self.assertFalse(editor._policy_on_failure_combo.isEditable())
+            self.assertEqual(editor._policy_on_failure_combo.currentText(), "custom")
             self.assertEqual(
-                tuple(page._policy_on_failure_combo.itemText(index) for index in range(page._policy_on_failure_combo.count())),
+                tuple(editor._policy_on_failure_combo.itemText(index) for index in range(editor._policy_on_failure_combo.count())),
                 PERMISSION_POLICY_ON_FAILURE_VALUES + ("custom",),
             )
 
-            page._policy_on_failure_combo.setCurrentIndex(page._policy_on_failure_combo.findText("fail"))
+            editor._policy_on_failure_combo.setCurrentIndex(editor._policy_on_failure_combo.findText("fail"))
 
-            self.assertEqual(window.current_document.working_recipe.permissions.policy.on_failure, "fail")
+            self.assertEqual(window.current_document.working_recipe.steps[0].params["policy"]["on_failure"], "fail")
             self.assertIn("on_failure: fail", window._yaml_preview.toPlainText())
 
             with patch.object(
@@ -840,7 +862,8 @@ class EditorAppTests(unittest.TestCase):
 
             page._select_step("grant")
             self.assertIs(page._params_stack.currentWidget(), page._grant_permissions_panel)
-            self.assertIn("permission plan", page._grant_permissions_note_label.text())
+            self.assertEqual(page._grant_permissions_editor._runtime_list.count(), 0)
+            self.assertEqual(page._grant_permissions_editor._appops_list.count(), 0)
 
             page._select_step("copy")
             self.assertIs(page._params_stack.currentWidget(), page._copy_files_panel)
@@ -1282,7 +1305,7 @@ class EditorAppTests(unittest.TestCase):
             page._select_step("copy")
             self._app.processEvents()
             copy_height = params_height()
-            self.assertGreater(copy_height, grant_height)
+            self.assertGreater(grant_height, copy_height)
 
             with patch.object(
                 window,
@@ -1672,7 +1695,7 @@ class EditorAppTests(unittest.TestCase):
 
             window.close()
 
-    def test_steps_and_permissions_fields_expose_expected_tooltips(self) -> None:
+    def test_steps_and_grant_permissions_fields_expose_expected_tooltips(self) -> None:
         recipe = base_recipe(
             recipe_id="example.recipe",
             inputs={
@@ -1685,11 +1708,6 @@ class EditorAppTests(unittest.TestCase):
                     "validation": {"must_exist": True, "allowed_extensions": [], "path_kind": "directory"},
                 }
             },
-            permissions={
-                "runtime": [{"package_name": "com.example.app", "name": "READ_MEDIA_VIDEO"}],
-                "appops": [{"package_name": "com.example.app", "op": "RUN_IN_BACKGROUND", "mode": "allow"}],
-                "policy": {"on_failure": "warn", "require_all": False},
-            },
             steps=[
                 {
                     "id": "grant",
@@ -1698,6 +1716,11 @@ class EditorAppTests(unittest.TestCase):
                     "user_toggleable": False,
                     "dependencies": [],
                     "constraints": {"capabilities": [], "conflicts_with": []},
+                    "params": {
+                        "runtime": [{"package_name": "com.example.app", "name": "READ_MEDIA_VIDEO"}],
+                        "appops": [{"package_name": "com.example.app", "op": "RUN_IN_BACKGROUND", "mode": "allow"}],
+                        "policy": {"on_failure": "warn", "require_all": False},
+                    },
                     "verify": [],
                 },
                 {
@@ -1729,25 +1752,27 @@ class EditorAppTests(unittest.TestCase):
 
             window = MainWindow(repo_root)
             window.open_recipe_file(recipe_path)
+            self.assertIsNotNone(window.current_document)
 
-            permissions_page = window._editor_view._permissions_page
             steps_page = window._editor_view._steps_page
 
+            steps_page._select_step("grant")
+            grant_editor = steps_page._grant_permissions_editor
             self.assertEqual(
-                permissions_page._policy_on_failure_combo.toolTip(),
-                field_tooltip("permissions.policy.on_failure"),
+                grant_editor._policy_on_failure_combo.toolTip(),
+                field_tooltip("steps.grant_permissions.policy.on_failure"),
             )
             self.assertEqual(
-                permissions_page._policy_form.labelForField(permissions_page._policy_on_failure_combo).toolTip(),
-                field_tooltip("permissions.policy.on_failure"),
+                grant_editor._policy_form.labelForField(grant_editor._policy_on_failure_combo).toolTip(),
+                field_tooltip("steps.grant_permissions.policy.on_failure"),
             )
             self.assertEqual(
-                permissions_page._runtime_package_edit.toolTip(),
-                field_tooltip("permissions.runtime.package"),
+                grant_editor._runtime_package_edit.toolTip(),
+                field_tooltip("steps.grant_permissions.runtime.package_name"),
             )
             self.assertEqual(
-                permissions_page._runtime_form.labelForField(permissions_page._runtime_package_edit).toolTip(),
-                field_tooltip("permissions.runtime.package"),
+                grant_editor._runtime_form.labelForField(grant_editor._runtime_package_edit).toolTip(),
+                field_tooltip("steps.grant_permissions.runtime.package_name"),
             )
 
             steps_page._select_step("copy")
@@ -1790,10 +1815,9 @@ class EditorAppTests(unittest.TestCase):
                 field_tooltip("steps.preserved_content"),
             )
 
-            steps_page._select_step("grant")
             self.assertEqual(
-                steps_page._grant_permissions_note_label.toolTip(),
-                field_tooltip("steps.grant_permissions.note"),
+                grant_editor._appop_name_edit.toolTip(),
+                field_tooltip("steps.grant_permissions.appops.op"),
             )
 
             window.close()
@@ -1812,17 +1836,17 @@ class EditorAppTests(unittest.TestCase):
         )
 
         runtime_dialog = _RuntimePermissionDialog()
-        self.assertEqual(runtime_dialog._package_edit.toolTip(), prompt_tooltip("permissions.runtime.package"))
+        self.assertEqual(runtime_dialog._package_edit.toolTip(), prompt_tooltip("steps.grant_permissions.runtime.package_name"))
         self.assertEqual(
             runtime_dialog._form.labelForField(runtime_dialog._package_edit).toolTip(),
-            prompt_tooltip("permissions.runtime.package"),
+            prompt_tooltip("steps.grant_permissions.runtime.package_name"),
         )
 
         appop_dialog = _AppOpDialog()
-        self.assertEqual(appop_dialog._op_edit.toolTip(), prompt_tooltip("permissions.appops.op"))
+        self.assertEqual(appop_dialog._op_edit.toolTip(), prompt_tooltip("steps.grant_permissions.appops.op"))
         self.assertEqual(
             appop_dialog._form.labelForField(appop_dialog._op_edit).toolTip(),
-            prompt_tooltip("permissions.appops.op"),
+            prompt_tooltip("steps.grant_permissions.appops.op"),
         )
 
         condition_dialog = _ConditionDialog()

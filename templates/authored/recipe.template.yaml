@@ -61,23 +61,6 @@ artifacts:
 artifact_groups:
   example_cores:
     - example_core_zip
-permissions:
-  runtime:
-    - package_name: com.example.app
-      name: android.permission.POST_NOTIFICATIONS
-      required: false
-      when:
-        android_api_min: 33
-  appops:
-    - package_name: com.example.app
-      op: MANAGE_EXTERNAL_STORAGE
-      mode: allow
-      required: false
-      when:
-        rooted: true
-  policy:
-    on_failure: warn
-    require_all: false
 steps:
   - id: resolve_example_artifacts
     # Supported v1 step types:
@@ -209,5 +192,24 @@ steps:
     constraints:
       capabilities: []
       conflicts_with: []
-    # grant_permissions takes no params and applies this recipe's runtime permissions and appops.
+    # grant_permissions actions are authored on this step. Multiple grant steps
+    # are allowed, and each step applies only the runtime/appops items declared
+    # in its own params.
+    params:
+      runtime:
+        - package_name: com.example.app
+          name: android.permission.POST_NOTIFICATIONS
+          required: false
+          when:
+            android_api_min: 33
+      appops:
+        - package_name: com.example.app
+          op: MANAGE_EXTERNAL_STORAGE
+          mode: allow
+          required: false
+          when:
+            rooted: true
+      policy:
+        on_failure: warn
+        require_all: false
     verify: []

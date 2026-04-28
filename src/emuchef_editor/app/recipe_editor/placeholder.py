@@ -32,7 +32,7 @@ class RecipeEditorPlaceholder(QWidget):
                     f"Recipe ID: {document.working_recipe.id}",
                     f"Path: {document.path}",
                     f"Authored root: {document.authored_root if document.authored_root is not None else 'None'}",
-                    "Open the Overview, Inputs, Artifacts, Artifact Groups, or Permissions tabs to edit this recipe.",
+                    "Open the Overview, Inputs, Artifacts, Artifact Groups, or Steps tabs to edit this recipe.",
                 ]
             )
         )

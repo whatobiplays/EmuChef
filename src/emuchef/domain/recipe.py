@@ -66,13 +66,6 @@ class PermissionPolicy:
 
 
 @dataclass(frozen=True, slots=True)
-class PermissionSet:
-    runtime: tuple[RuntimePermissionGrant, ...] = ()
-    appops: tuple[AppOpGrant, ...] = ()
-    policy: PermissionPolicy = field(default_factory=PermissionPolicy)
-
-
-@dataclass(frozen=True, slots=True)
 class Recipe:
     id: str
     name: str
@@ -82,7 +75,6 @@ class Recipe:
     steps: tuple[Step, ...]
     artifacts: Mapping[str, ArtifactDefinition] = field(default_factory=dict)
     artifact_groups: Mapping[str, tuple[str, ...]] = field(default_factory=dict)
-    permissions: PermissionSet = field(default_factory=PermissionSet)
     description: str | None = None
     schema_version: Literal[SCHEMA_VERSION] = SCHEMA_VERSION
     kind: Literal["recipe"] = "recipe"

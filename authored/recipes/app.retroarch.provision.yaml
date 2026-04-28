@@ -146,53 +146,6 @@ artifact_groups:
   - core_files_dolphin_zip
   - core_files_fbneo_zip
   - core_files_ppsspp_zip
-permissions:
-  runtime:
-  - package_name: com.retroarch.aarch64
-    name: android.permission.POST_NOTIFICATIONS
-    required: false
-    when:
-      android_api_min: 33
-  - package_name: com.retroarch.aarch64
-    name: android.permission.READ_EXTERNAL_STORAGE
-    required: false
-    when:
-      android_api_min: 33
-  - package_name: com.retroarch.aarch64
-    name: android.permission.READ_MEDIA_IMAGES
-    required: false
-    when:
-      android_api_min: 33
-  - package_name: com.retroarch.aarch64
-    name: android.permission.READ_MEDIA_AUDIO
-    required: false
-    when:
-      android_api_min: 33
-  - package_name: com.retroarch.aarch64
-    name: android.permission.READ_MEDIA_VIDEO
-    required: false
-    when:
-      android_api_min: 33
-  - package_name: com.retroarch.aarch64
-    name: android.permission.WRITE_EXTERNAL_STORAGE
-    required: false
-    when:
-      android_api_min: 33
-  - package_name: com.retroarch.aarch64
-    name: android.permission.ACCESS_MEDIA_LOCATION
-    required: false
-    when:
-      android_api_min: 33
-  appops:
-  - package_name: com.retroarch.aarch64
-    op: MANAGE_EXTERNAL_STORAGE
-    mode: allow
-    required: false
-    when:
-      rooted: true
-  policy:
-    on_failure: warn
-    require_all: false
 steps:
 - id: resolve_artifacts
   type: resolve_artifacts
@@ -276,7 +229,7 @@ steps:
 - id: grant_retroarch_permissions
   type: grant_permissions
   name: Grant RetroArch permissions
-  description: Apply the recipe's declared RetroArch permissions.
+  description: Apply this step's declared RetroArch permissions.
   user_toggleable: false
   dependencies:
   - stop_retroarch_after_bootstrap
@@ -284,7 +237,53 @@ steps:
     capabilities: []
     conflicts_with: []
   skip_if: []
-  params: {}
+  params:
+    runtime:
+    - package_name: com.retroarch.aarch64
+      name: android.permission.POST_NOTIFICATIONS
+      required: false
+      when:
+        android_api_min: 33
+    - package_name: com.retroarch.aarch64
+      name: android.permission.READ_EXTERNAL_STORAGE
+      required: false
+      when:
+        android_api_min: 33
+    - package_name: com.retroarch.aarch64
+      name: android.permission.READ_MEDIA_IMAGES
+      required: false
+      when:
+        android_api_min: 33
+    - package_name: com.retroarch.aarch64
+      name: android.permission.READ_MEDIA_AUDIO
+      required: false
+      when:
+        android_api_min: 33
+    - package_name: com.retroarch.aarch64
+      name: android.permission.READ_MEDIA_VIDEO
+      required: false
+      when:
+        android_api_min: 33
+    - package_name: com.retroarch.aarch64
+      name: android.permission.WRITE_EXTERNAL_STORAGE
+      required: false
+      when:
+        android_api_min: 33
+    - package_name: com.retroarch.aarch64
+      name: android.permission.ACCESS_MEDIA_LOCATION
+      required: false
+      when:
+        android_api_min: 33
+    appops:
+    - package_name: com.retroarch.aarch64
+      op: MANAGE_EXTERNAL_STORAGE
+      mode: allow
+      required: false
+      when:
+        rooted: true
+    policy:
+      on_failure: warn
+      require_all: false
   verify: []
 - id: launch_retroarch_permissions
   type: launch_app

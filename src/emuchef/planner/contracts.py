@@ -12,6 +12,7 @@ from emuchef.domain import (
     ErrorMessage,
     LiteralParamValue,
     ParamMode,
+    PERMISSION_POLICY_ON_FAILURE_VALUES,
     Recipe,
     RefKind,
     RefParamValue,
@@ -372,7 +373,224 @@ def _validate_step_specifics(
                 )
             )
 
+    if step.type is StepType.GRANT_PERMISSIONS:
+        errors.extend(_validate_grant_permissions_params(recipe_ref, step_id, normalized))
+
     return errors
+
+
+def _validate_grant_permissions_params(
+    recipe_ref: str,
+    step_id: str,
+    normalized: Mapping[str, object],
+) -> list[ErrorMessage]:
+    errors: list[ErrorMessage] = []
+    runtime = _unwrap_literal(normalized.get("runtime"))
+    appops = _unwrap_literal(normalized.get("appops"))
+    policy = _unwrap_literal(normalized.get("policy"))
+
+    if runtime is not None:
+        errors.extend(
+            _validate_permission_items(
+                recipe_ref,
+                step_id,
+                "runtime",
+                runtime,
+                required_fields=("package_name", "name"),
+                allowed_fields={"package_name", "name", "required", "when"},
+            )
+        )
+    if appops is not None:
+        errors.extend(
+            _validate_permission_items(
+                recipe_ref,
+                step_id,
+                "appops",
+                appops,
+                required_fields=("package_name", "op", "mode"),
+                allowed_fields={"package_name", "op", "mode", "required", "when"},
+            )
+        )
+    if policy is not None:
+        errors.extend(_validate_permission_policy(recipe_ref, step_id, policy))
+    return errors
+
+
+def _validate_permission_items(
+    recipe_ref: str,
+    step_id: str,
+    param_name: str,
+    value: object,
+    *,
+    required_fields: tuple[str, ...],
+    allowed_fields: set[str],
+) -> list[ErrorMessage]:
+    errors: list[ErrorMessage] = []
+    if not isinstance(value, (list, tuple)):
+        return [
+            _param_error(
+                recipe_ref,
+                step_id,
+                param_name,
+                f"Param {param_name!r} must be a list for step type 'grant_permissions'.",
+            )
+        ]
+    for index, item in enumerate(value):
+        field_prefix = f"{param_name}[{index}]"
+        if not isinstance(item, Mapping):
+            errors.append(
+                _param_error(
+                    recipe_ref,
+                    step_id,
+                    field_prefix,
+                    f"Param {field_prefix!r} must be a mapping for step type 'grant_permissions'.",
+                )
+            )
+            continue
+        for field_name in sorted(str(key) for key in item.keys() if str(key) not in allowed_fields):
+            errors.append(
+                _param_error(
+                    recipe_ref,
+                    step_id,
+                    f"{field_prefix}.{field_name}",
+                    f"Param {field_prefix!r} contains unsupported field {field_name!r}.",
+                )
+            )
+        for field_name in required_fields:
+            _append_required_text_error(errors, recipe_ref, step_id, item, f"{field_prefix}.{field_name}", field_name)
+        if "required" in item and not isinstance(item["required"], bool):
+            errors.append(
+                _param_error(
+                    recipe_ref,
+                    step_id,
+                    f"{field_prefix}.required",
+                    f"Param {field_prefix}.required must be a boolean.",
+                )
+            )
+        if "when" in item:
+            errors.extend(_validate_permission_when(recipe_ref, step_id, f"{field_prefix}.when", item["when"]))
+    return errors
+
+
+def _validate_permission_policy(recipe_ref: str, step_id: str, value: object) -> list[ErrorMessage]:
+    errors: list[ErrorMessage] = []
+    if not isinstance(value, Mapping):
+        return [
+            _param_error(
+                recipe_ref,
+                step_id,
+                "policy",
+                "Param 'policy' must be a mapping for step type 'grant_permissions'.",
+            )
+        ]
+    allowed_fields = {"on_failure", "require_all"}
+    for field_name in sorted(str(key) for key in value.keys() if str(key) not in allowed_fields):
+        errors.append(
+            _param_error(
+                recipe_ref,
+                step_id,
+                f"policy.{field_name}",
+                f"Param 'policy' contains unsupported field {field_name!r}.",
+            )
+        )
+    on_failure = value.get("on_failure", "warn")
+    if on_failure not in PERMISSION_POLICY_ON_FAILURE_VALUES:
+        errors.append(
+            _param_error(
+                recipe_ref,
+                step_id,
+                "policy.on_failure",
+                "Param 'policy.on_failure' must be one of: " + ", ".join(PERMISSION_POLICY_ON_FAILURE_VALUES) + ".",
+            )
+        )
+    if "require_all" in value and not isinstance(value["require_all"], bool):
+        errors.append(
+            _param_error(
+                recipe_ref,
+                step_id,
+                "policy.require_all",
+                "Param 'policy.require_all' must be a boolean.",
+            )
+        )
+    return errors
+
+
+def _validate_permission_when(
+    recipe_ref: str,
+    step_id: str,
+    field_prefix: str,
+    value: object,
+) -> list[ErrorMessage]:
+    errors: list[ErrorMessage] = []
+    if not isinstance(value, Mapping):
+        return [_param_error(recipe_ref, step_id, field_prefix, f"Param {field_prefix!r} must be a mapping.")]
+    allowed_fields = {"rooted", "android_api_min", "android_api_max"}
+    for field_name in sorted(str(key) for key in value.keys() if str(key) not in allowed_fields):
+        errors.append(
+            _param_error(
+                recipe_ref,
+                step_id,
+                f"{field_prefix}.{field_name}",
+                f"Param {field_prefix!r} contains unsupported field {field_name!r}.",
+            )
+        )
+    rooted = value.get("rooted")
+    if rooted is not None and not isinstance(rooted, bool):
+        errors.append(_param_error(recipe_ref, step_id, f"{field_prefix}.rooted", f"Param {field_prefix}.rooted must be a boolean."))
+    api_min = value.get("android_api_min")
+    api_max = value.get("android_api_max")
+    if api_min is not None and (isinstance(api_min, bool) or not isinstance(api_min, int)):
+        errors.append(
+            _param_error(recipe_ref, step_id, f"{field_prefix}.android_api_min", f"Param {field_prefix}.android_api_min must be an integer.")
+        )
+    if api_max is not None and (isinstance(api_max, bool) or not isinstance(api_max, int)):
+        errors.append(
+            _param_error(recipe_ref, step_id, f"{field_prefix}.android_api_max", f"Param {field_prefix}.android_api_max must be an integer.")
+        )
+    if isinstance(api_min, int) and not isinstance(api_min, bool) and isinstance(api_max, int) and not isinstance(api_max, bool) and api_min > api_max:
+        errors.append(
+            _param_error(
+                recipe_ref,
+                step_id,
+                field_prefix,
+                f"Param {field_prefix!r} must not set android_api_min above android_api_max.",
+            )
+        )
+    return errors
+
+
+def _append_required_text_error(
+    errors: list[ErrorMessage],
+    recipe_ref: str,
+    step_id: str,
+    item: Mapping[str, object],
+    param_name: str,
+    field_name: str,
+) -> None:
+    value = item.get(field_name)
+    if not isinstance(value, str) or not value.strip():
+        errors.append(
+            _param_error(
+                recipe_ref,
+                step_id,
+                param_name,
+                f"Param {param_name!r} must be a non-empty string.",
+            )
+        )
+
+
+def _param_error(recipe_ref: str, step_id: str, param_name: str, message: str) -> ErrorMessage:
+    return ErrorMessage(
+        code=ErrorCode.PARAM_CONTRACT_VIOLATION,
+        message=message,
+        details={"recipe_ref": recipe_ref, "step_id": step_id, "param": param_name},
+    )
+
+
+def _unwrap_literal(value: object) -> object:
+    if isinstance(value, LiteralParamValue):
+        return value.value
+    return value
 
 
 def _coerce_string_tuple(value: object | None) -> tuple[str, ...]:

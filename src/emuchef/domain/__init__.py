@@ -34,13 +34,9 @@ from .draft_update_result import DraftUpdateResult
 from .execution_plan import (
     ExecutionArtifact,
     ExecutionInputValue,
-    ExecutionPermissionPlan,
     ExecutionPlan,
     ExecutionPlanSource,
     ExecutionStep,
-    PermissionPlanAction,
-    PermissionPlanReason,
-    PermissionPlanSource,
 )
 from .history_entry import HistoryEntry
 from .input_declaration import InputDeclaration, InputRole, InputType, InputValidation
@@ -59,7 +55,6 @@ from .recipe import (
     AppOpGrant,
     PERMISSION_POLICY_ON_FAILURE_VALUES,
     PermissionPolicy,
-    PermissionSet,
     PermissionWhen,
     Recipe,
     RecipeProvides,
@@ -118,7 +113,6 @@ __all__ = [
     "ExecutionArtifact",
     "ExecutionInputValue",
     "ExecutionState",
-    "ExecutionPermissionPlan",
     "ExecutionPlan",
     "ExecutionPlanSource",
     "ExecutionStep",
@@ -133,12 +127,8 @@ __all__ = [
     "ParamValue",
     "ParamSpec",
     "PRIMARY_OUTPUT_STEP_TYPES",
-    "PermissionPlanAction",
-    "PermissionPlanReason",
-    "PermissionPlanSource",
     "PERMISSION_POLICY_ON_FAILURE_VALUES",
     "PermissionPolicy",
-    "PermissionSet",
     "PermissionWhen",
     "PlanningResult",
     "PlanningStatus",

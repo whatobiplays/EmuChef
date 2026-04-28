@@ -12,14 +12,10 @@ from emuchef.domain import (
     ExecutionArtifact,
     ExecutionInputValue,
     DeviceContext,
-    ExecutionPermissionPlan,
     ExecutionPlan,
     ExecutionPlanSource,
     ExecutionStep,
     LiteralParamValue,
-    PermissionPlanAction,
-    PermissionPlanReason,
-    PermissionPlanSource,
     RefParamValue,
     RuntimeCapabilities,
     RuntimeValue,
@@ -27,7 +23,6 @@ from emuchef.domain import (
     StepCondition,
     StepConstraints,
     StepType,
-    PermissionPolicy,
 )
 
 from .serde import load_yaml
@@ -61,7 +56,6 @@ def parse_execution_plan(data: Mapping[str, Any]) -> ExecutionPlan:
         "inputs",
         "artifacts",
         "steps",
-        "permission_plan",
     }
     unknown_top_level = set(data) - allowed_top_level
     if unknown_top_level:
@@ -99,7 +93,6 @@ def parse_execution_plan(data: Mapping[str, Any]) -> ExecutionPlan:
         ),
         artifacts=tuple(_parse_execution_artifact(item) for item in data.get("artifacts", [])),
         steps=tuple(_parse_execution_step(item) for item in data.get("steps", [])),
-        permission_plan=_parse_permission_plan(data.get("permission_plan")),
         schema_version=int(data["schema_version"]),
         kind=str(data["kind"]),
     )
@@ -129,42 +122,6 @@ def _parse_condition(data: Mapping[str, Any]) -> StepCondition:
     return StepCondition(type=str(data["type"]), params=dict(data.get("params", {})))
 
 
-def _parse_permission_plan(data: Mapping[str, Any] | None) -> ExecutionPermissionPlan | None:
-    if data is None:
-        return None
-    return ExecutionPermissionPlan(
-        actions=tuple(_parse_permission_plan_action(item) for item in data.get("actions", [])),
-        policies={
-            str(recipe_id): PermissionPolicy(
-                on_failure=str(policy.get("on_failure", "warn")),
-                require_all=bool(policy.get("require_all", False)),
-            )
-            for recipe_id, policy in data.get("policies", {}).items()
-        },
-    )
-
-
-def _parse_permission_plan_action(data: Mapping[str, Any]) -> PermissionPlanAction:
-    allowed_fields = {"status", "kind", "package_name", "source", "permission", "op", "desired_mode", "required", "reason"}
-    unexpected_fields = sorted(str(field) for field in data.keys() if str(field) not in allowed_fields)
-    if unexpected_fields:
-        raise ValueError(f"Permission plan action contains unknown fields: {unexpected_fields}")
-    return PermissionPlanAction(
-        status=str(data["status"]),
-        kind=str(data["kind"]),
-        package_name=str(data["package_name"]),
-        source=PermissionPlanSource(
-            recipe_id=str(data["source"]["recipe_id"]),
-            section=str(data["source"]["section"]),
-        ),
-        permission=_optional_str(data.get("permission")),
-        op=_optional_str(data.get("op")),
-        desired_mode=_optional_str(data.get("desired_mode")),
-        required=bool(data.get("required", True)),
-        reason=_parse_permission_plan_reason(data.get("reason")),
-    )
-
-
 def _parse_execution_artifact(data: Mapping[str, Any]) -> ExecutionArtifact:
     return ExecutionArtifact(
         id=str(data["id"]),
@@ -188,15 +145,3 @@ def _parse_param_value(value: Any):
     if isinstance(value, Mapping) and set(value.keys()) == {"value"}:
         return LiteralParamValue(value=value["value"])
     return LiteralParamValue(value=value)
-
-
-def _parse_permission_plan_reason(data: Mapping[str, Any] | None) -> PermissionPlanReason | None:
-    if data is None:
-        return None
-    return PermissionPlanReason(code=str(data["code"]), message=str(data["message"]))
-
-
-def _optional_str(value: Any) -> str | None:
-    if value is None:
-        return None
-    return str(value)

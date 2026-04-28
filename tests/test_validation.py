@@ -82,6 +82,114 @@ steps: []
             self.assertEqual(error.details["object_id"], "example.recipe")
             self.assertEqual(error.details["field"], "steps[0].params.duration_ms")
 
+    def test_top_level_permissions_rejected_even_with_grant_step_params(self) -> None:
+        recipe = base_recipe(
+            recipe_id="example.recipe",
+            top_level_permissions={
+                "runtime": [
+                    {
+                        "package_name": "com.example.app",
+                        "name": "android.permission.POST_NOTIFICATIONS",
+                        "required": False,
+                    }
+                ],
+            },
+            steps=[
+                {
+                    "id": "grant",
+                    "type": "grant_permissions",
+                    "name": "Grant",
+                    "user_toggleable": False,
+                    "dependencies": [],
+                    "constraints": {"capabilities": [], "conflicts_with": []},
+                    "params": {
+                        "runtime": [
+                            {
+                                "package_name": "com.example.app",
+                                "name": "android.permission.CAMERA",
+                                "required": False,
+                            }
+                        ],
+                    },
+                    "verify": [],
+                }
+            ],
+        )
+        with TemporaryDirectory() as tmp:
+            authored_root = build_authored_tree(Path(tmp), recipes=[recipe])
+            result = validate_authored_catalog(authored_root)
+
+            self.assertEqual(result.status.value, "error")
+            self.assertTrue(
+                any("top-level 'permissions'" in error.message for error in result.errors),
+                result.errors,
+            )
+            self.assertTrue(any(error.details.get("field") == "permissions" for error in result.errors), result.errors)
+
+    def test_grant_permissions_params_validate_as_step_local_permissions(self) -> None:
+        recipe = base_recipe(
+            recipe_id="example.recipe",
+            steps=[
+                {
+                    "id": "grant",
+                    "type": "grant_permissions",
+                    "name": "Grant",
+                    "user_toggleable": False,
+                    "dependencies": [],
+                    "constraints": {"capabilities": [], "conflicts_with": []},
+                    "params": {
+                        "runtime": [
+                            {
+                                "package_name": "com.example.app",
+                                "name": "android.permission.POST_NOTIFICATIONS",
+                                "required": False,
+                                "when": {"android_api_min": 33},
+                            }
+                        ],
+                        "appops": [
+                            {
+                                "package_name": "com.example.app",
+                                "op": "MANAGE_EXTERNAL_STORAGE",
+                                "mode": "allow",
+                                "required": False,
+                                "when": {"rooted": True},
+                            }
+                        ],
+                        "policy": {"on_failure": "warn", "require_all": False},
+                    },
+                    "verify": [],
+                }
+            ],
+        )
+        with TemporaryDirectory() as tmp:
+            authored_root = build_authored_tree(Path(tmp), recipes=[recipe])
+            result = validate_authored_catalog(authored_root)
+            self.assertEqual(result.status.value, "success", result.errors)
+
+    def test_invalid_grant_permissions_policy_reports_param_field(self) -> None:
+        recipe = base_recipe(
+            recipe_id="example.recipe",
+            steps=[
+                {
+                    "id": "grant",
+                    "type": "grant_permissions",
+                    "name": "Grant",
+                    "user_toggleable": False,
+                    "dependencies": [],
+                    "constraints": {"capabilities": [], "conflicts_with": []},
+                    "params": {"policy": {"on_failure": "explode", "require_all": False}},
+                    "verify": [],
+                }
+            ],
+        )
+        with TemporaryDirectory() as tmp:
+            authored_root = build_authored_tree(Path(tmp), recipes=[recipe])
+            result = validate_authored_catalog(authored_root)
+
+            self.assertEqual(result.status.value, "error")
+            error = next(error for error in result.errors if error.code.value == "param_contract_violation")
+            self.assertEqual(error.details["field"], "steps[0].params.policy.on_failure")
+
     def test_invalid_cross_file_recipe_dependency_ref(self) -> None:
         recipe = base_recipe(recipe_id="example.recipe", recipe_dependencies=["missing.recipe"], steps=[])
         with TemporaryDirectory() as tmp:

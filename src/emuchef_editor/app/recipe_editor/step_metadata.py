@@ -51,8 +51,3 @@ COPY_FILES_HELP = (
     "Otherwise dest is the exact target path. App-private destinations under "
     "/data/user/ and /data/data/ require privileged app-data writes."
 )
-
-GRANT_PERMISSIONS_NOTE = (
-    "This step consumes the top-level permission plan. It is valid as a clean "
-    "no-op when no permission actions apply."
-)

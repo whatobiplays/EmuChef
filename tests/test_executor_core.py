@@ -15,15 +15,10 @@ from emuchef.domain import (
     DeviceContext,
     ExecutionArtifact,
     ExecutionInputValue,
-    ExecutionPermissionPlan,
     ExecutionPlan,
     ExecutionPlanSource,
     ExecutionStep,
     LiteralParamValue,
-    PermissionPlanAction,
-    PermissionPlanReason,
-    PermissionPlanSource,
-    PermissionPolicy,
     RefParamValue,
     RuntimeCapabilities,
     RuntimeValue,
@@ -64,7 +59,7 @@ def _device_context() -> DeviceContext:
     )
 
 
-def _base_plan(*, inputs=(), artifacts=(), steps=(), permission_plan=None, runtime_capabilities=None) -> ExecutionPlan:
+def _base_plan(*, inputs=(), artifacts=(), steps=(), runtime_capabilities=None) -> ExecutionPlan:
     return ExecutionPlan(
         id="plan.test",
         source=ExecutionPlanSource(
@@ -78,7 +73,6 @@ def _base_plan(*, inputs=(), artifacts=(), steps=(), permission_plan=None, runti
         inputs=tuple(inputs),
         artifacts=tuple(artifacts),
         steps=tuple(steps),
-        permission_plan=permission_plan,
     )
 
 
@@ -133,7 +127,7 @@ class ExecutorCoreTests(unittest.TestCase):
             resolve_runtime_ref(state, "steps.example.recipe/extract.outputs.extracted_paths")
         self.assertEqual(context.exception.code.value, "step_output_unavailable")
 
-    def test_permission_actions_are_not_auto_executed_without_grant_step(self) -> None:
+    def test_permissions_are_not_executed_without_grant_step_params(self) -> None:
         plan = _base_plan(
             steps=(
                 ExecutionStep(
@@ -144,75 +138,11 @@ class ExecutorCoreTests(unittest.TestCase):
                     params={"duration_ms": LiteralParamValue(value=1)},
                 ),
             ),
-            permission_plan=ExecutionPermissionPlan(
-                actions=(
-                    PermissionPlanAction(
-                        status="applicable",
-                        kind="runtime_permission",
-                        package_name="com.example.app",
-                        permission="android.permission.POST_NOTIFICATIONS",
-                        required=False,
-                        source=PermissionPlanSource(recipe_id="example.recipe", section="permissions.runtime[0]"),
-                    ),
-                ),
-                policies={"example.recipe": PermissionPolicy()},
-            ),
         )
         adb = DryRunAdb()
         result = ExecutorRunner(adb=adb, sleep_fn=lambda _: None).run(plan)
         self.assertTrue(result.success)
-        self.assertEqual(result.permission_results, ())
         self.assertFalse(any(command[0] == "run_plan_command" for command in adb.commands), adb.commands)
-
-    def test_grant_permissions_executes_only_matching_recipe_actions(self) -> None:
-        plan = _base_plan(
-            steps=(
-                ExecutionStep(
-                    id="example.recipe/grant",
-                    recipe_ref="example.recipe",
-                    type=StepType.GRANT_PERMISSIONS,
-                    name="Grant",
-                ),
-            ),
-            permission_plan=ExecutionPermissionPlan(
-                actions=(
-                    PermissionPlanAction(
-                        status="applicable",
-                        kind="runtime_permission",
-                        package_name="com.example.app",
-                        permission="android.permission.POST_NOTIFICATIONS",
-                        required=False,
-                        source=PermissionPlanSource(recipe_id="example.recipe", section="permissions.runtime[0]"),
-                    ),
-                    PermissionPlanAction(
-                        status="not_applicable",
-                        kind="appop",
-                        package_name="com.example.app",
-                        op="MANAGE_EXTERNAL_STORAGE",
-                        desired_mode="allow",
-                        required=False,
-                        source=PermissionPlanSource(recipe_id="example.recipe", section="permissions.appops[0]"),
-                        reason=PermissionPlanReason(code="requires_root", message="Device is not rooted."),
-                    ),
-                    PermissionPlanAction(
-                        status="applicable",
-                        kind="runtime_permission",
-                        package_name="com.other.app",
-                        permission="android.permission.CAMERA",
-                        required=False,
-                        source=PermissionPlanSource(recipe_id="other.recipe", section="permissions.runtime[0]"),
-                    ),
-                ),
-                policies={"example.recipe": PermissionPolicy(on_failure="warn", require_all=False)},
-            ),
-        )
-        adb = DryRunAdb()
-        result = ExecutorRunner(adb=adb).run(plan)
-        self.assertTrue(result.success, result)
-        self.assertEqual([record.status.value for record in result.permission_results], ["executed", "not_applicable"])
-        self.assertEqual([record.kind for record in result.permission_results], ["runtime_permission", "appop"])
-        self.assertTrue(any(command[:4] == ("run_plan_command", "adb", "shell", "pm") for command in adb.commands), adb.commands)
-        self.assertFalse(any("com.other.app" in command for command in adb.commands), adb.commands)
 
     def test_grant_permissions_succeeds_cleanly_with_zero_actions(self) -> None:
         plan = _base_plan(
@@ -224,13 +154,128 @@ class ExecutorCoreTests(unittest.TestCase):
                     name="Grant",
                 ),
             ),
-            permission_plan=ExecutionPermissionPlan(actions=(), policies={"example.recipe": PermissionPolicy()}),
         )
         adb = DryRunAdb()
         result = ExecutorRunner(adb=adb).run(plan)
         self.assertTrue(result.success, result)
-        self.assertEqual(result.permission_results, ())
+        self.assertEqual(result.steps[0].outputs["permission_results"].value, {"actions": []})
         self.assertFalse(any(command[0] == "run_plan_command" for command in adb.commands), adb.commands)
+
+    def test_grant_permissions_executes_step_local_params_and_records_step_output(self) -> None:
+        plan = _base_plan(
+            steps=(
+                ExecutionStep(
+                    id="example.recipe/grant",
+                    recipe_ref="example.recipe",
+                    type=StepType.GRANT_PERMISSIONS,
+                    name="Grant",
+                    params={
+                        "runtime": LiteralParamValue(
+                            value=[
+                                {
+                                    "package_name": "com.example.app",
+                                    "name": "android.permission.POST_NOTIFICATIONS",
+                                    "required": False,
+                                }
+                            ]
+                        ),
+                        "appops": LiteralParamValue(
+                            value=[
+                                {
+                                    "package_name": "com.example.app",
+                                    "op": "MANAGE_EXTERNAL_STORAGE",
+                                    "mode": "allow",
+                                    "required": False,
+                                    "when": {"rooted": False},
+                                }
+                            ]
+                        ),
+                        "policy": LiteralParamValue(value={"on_failure": "warn", "require_all": False}),
+                    },
+                ),
+            ),
+        )
+        adb = DryRunAdb(root_available=True)
+        result = ExecutorRunner(adb=adb).run(plan)
+
+        self.assertTrue(result.success, result)
+        self.assertFalse(hasattr(result, "permission_results"))
+        permission_output = result.steps[0].outputs["permission_results"].value
+        self.assertEqual([item["status"] for item in permission_output["actions"]], ["executed", "not_applicable"])
+        self.assertEqual([item["kind"] for item in permission_output["actions"]], ["runtime_permission", "appop"])
+        self.assertTrue(any(command[:4] == ("run_plan_command", "adb", "shell", "pm") for command in adb.commands), adb.commands)
+        self.assertFalse(any(command[:4] == ("run_plan_command", "adb", "shell", "appops") for command in adb.commands), adb.commands)
+
+    def test_failing_grant_permissions_step_blocks_dependents_but_not_unrelated_grants(self) -> None:
+        class FailingPermissionAdb(DryRunAdb):
+            def run_plan_command(self, command):
+                super().run_plan_command(command)
+                if tuple(command) == (
+                    "adb",
+                    "shell",
+                    "pm",
+                    "grant",
+                    "com.example.fail",
+                    "android.permission.CAMERA",
+                ):
+                    raise RuntimeError("permission denied")
+
+        plan = _base_plan(
+            steps=(
+                ExecutionStep(
+                    id="example.recipe/grant_fail",
+                    recipe_ref="example.recipe",
+                    type=StepType.GRANT_PERMISSIONS,
+                    name="Grant Fail",
+                    params={
+                        "runtime": LiteralParamValue(
+                            value=[
+                                {
+                                    "package_name": "com.example.fail",
+                                    "name": "android.permission.CAMERA",
+                                    "required": True,
+                                }
+                            ]
+                        ),
+                        "policy": LiteralParamValue(value={"on_failure": "warn", "require_all": False}),
+                    },
+                ),
+                ExecutionStep(
+                    id="example.recipe/dependent",
+                    recipe_ref="example.recipe",
+                    type=StepType.WAIT,
+                    name="Dependent",
+                    dependencies=("example.recipe/grant_fail",),
+                    params={"duration_ms": LiteralParamValue(value=1)},
+                ),
+                ExecutionStep(
+                    id="example.recipe/grant_other",
+                    recipe_ref="example.recipe",
+                    type=StepType.GRANT_PERMISSIONS,
+                    name="Grant Other",
+                    params={
+                        "runtime": LiteralParamValue(
+                            value=[
+                                {
+                                    "package_name": "com.example.other",
+                                    "name": "android.permission.POST_NOTIFICATIONS",
+                                    "required": False,
+                                }
+                            ]
+                        ),
+                    },
+                ),
+            ),
+        )
+        result = ExecutorRunner(adb=FailingPermissionAdb(), sleep_fn=lambda _: None).run(plan)
+
+        self.assertFalse(result.success)
+        self.assertEqual([record.status.value for record in result.steps], ["failed", "blocked", "executed"])
+        failed_output = result.steps[0].outputs["permission_results"].value
+        self.assertEqual(failed_output["actions"][0]["status"], "failed")
+        self.assertIn("permission denied", failed_output["actions"][0]["message"])
+        self.assertNotIn("permission_results", result.steps[1].outputs)
+        self.assertEqual(result.steps[2].outputs["permission_results"].value["actions"][0]["status"], "executed")
 
     def test_wait_uses_millisecond_sleep_with_float_seconds(self) -> None:
         observed: list[float] = []
@@ -681,20 +726,18 @@ class ExecutorCoreTests(unittest.TestCase):
                     type=StepType.GRANT_PERMISSIONS,
                     name="Grant",
                     dependencies=("example.recipe/resolve",),
+                    params={
+                        "runtime": LiteralParamValue(
+                            value=[
+                                {
+                                    "package_name": "com.example.app",
+                                    "name": "android.permission.POST_NOTIFICATIONS",
+                                    "required": False,
+                                }
+                            ]
+                        )
+                    },
                 ),
-            ),
-            permission_plan=ExecutionPermissionPlan(
-                actions=(
-                    PermissionPlanAction(
-                        status="applicable",
-                        kind="runtime_permission",
-                        package_name="com.example.app",
-                        permission="android.permission.POST_NOTIFICATIONS",
-                        required=False,
-                        source=PermissionPlanSource(recipe_id="example.recipe", section="permissions.runtime[0]"),
-                    ),
-                ),
-                policies={"example.recipe": PermissionPolicy()},
             ),
         )
         with patch(
@@ -705,7 +748,7 @@ class ExecutorCoreTests(unittest.TestCase):
         self.assertFalse(result.success)
         self.assertEqual([record.status.value for record in result.steps], ["failed", "blocked"])
         self.assertIn("tls_verification_failed", result.steps[0].message or "")
-        self.assertEqual(result.permission_results, ())
+        self.assertEqual(result.steps[1].outputs, {})
 
     def test_artifact_download_failure_is_typed(self) -> None:
         plan = _base_plan(

@@ -5,22 +5,15 @@ from __future__ import annotations
 import logging
 
 from emuchef.domain import (
-    AppOpGrant,
-    DeviceContext,
     ErrorCode,
     ErrorMessage,
     ExecutionArtifact,
     ExecutionInputValue,
-    ExecutionPermissionPlan,
     ExecutionPlan,
     ExecutionPlanSource,
     ExecutionStep,
-    PermissionPlanAction,
-    PermissionPlanReason,
-    PermissionPlanSource,
     PlanningResult,
     PlanningStatus,
-    RuntimePermissionGrant,
     RuntimeValue,
     RuntimeValueType,
 )
@@ -135,12 +128,6 @@ def emit_execution_plan(
         ),
         artifacts=tuple(_emit_execution_artifacts(catalog, selected_recipe_ids)),
         steps=tuple(execution_steps),
-        permission_plan=_emit_permission_plan(
-            catalog,
-            selected_recipe_ids,
-            draft_plan.device_context,
-            rooted=draft_plan.runtime_capabilities.root_shell,
-        ),
     )
     return PlanningResult(
         status=PlanningStatus.SUCCESS,
@@ -186,107 +173,3 @@ def _coerce_runtime_value(value) -> RuntimeValue:
     if isinstance(value, str):
         return RuntimeValue(type=RuntimeValueType.STRING, value=value)
     return RuntimeValue(type=RuntimeValueType.OBJECT, value=value)
-
-
-def _emit_permission_plan(
-    catalog: AuthoredCatalog,
-    selected_recipe_ids: list[str],
-    device_context: DeviceContext,
-    *,
-    rooted: bool,
-) -> ExecutionPermissionPlan | None:
-    actions: list[PermissionPlanAction] = []
-    android_api_level = device_context.android_api_level
-
-    for recipe_id in selected_recipe_ids:
-        recipe = catalog.recipes[recipe_id]
-        for index, grant in enumerate(recipe.permissions.runtime):
-            actions.append(
-                _emit_runtime_permission_action(
-                    recipe_id,
-                    index,
-                    grant,
-                    rooted=rooted,
-                    android_api_level=android_api_level,
-                )
-            )
-        for index, grant in enumerate(recipe.permissions.appops):
-            actions.append(
-                _emit_appop_action(
-                    recipe_id,
-                    index,
-                    grant,
-                    rooted=rooted,
-                    android_api_level=android_api_level,
-                )
-            )
-
-    if not actions:
-        return None
-    return ExecutionPermissionPlan(
-        actions=tuple(actions),
-        policies={recipe_id: catalog.recipes[recipe_id].permissions.policy for recipe_id in selected_recipe_ids},
-    )
-
-
-def _emit_runtime_permission_action(
-    recipe_id: str,
-    index: int,
-    grant: RuntimePermissionGrant,
-    *,
-    rooted: bool,
-    android_api_level: int | None,
-) -> PermissionPlanAction:
-    reason = _evaluate_permission_when(grant.when, rooted=rooted, android_api_level=android_api_level)
-    return PermissionPlanAction(
-        status="applicable" if reason is None else "not_applicable",
-        kind="runtime_permission",
-        package_name=grant.package_name,
-        permission=grant.name,
-        required=grant.required,
-        source=PermissionPlanSource(recipe_id=recipe_id, section=f"permissions.runtime[{index}]"),
-        reason=reason,
-    )
-
-
-def _emit_appop_action(
-    recipe_id: str,
-    index: int,
-    grant: AppOpGrant,
-    *,
-    rooted: bool,
-    android_api_level: int | None,
-) -> PermissionPlanAction:
-    reason = _evaluate_permission_when(grant.when, rooted=rooted, android_api_level=android_api_level)
-    return PermissionPlanAction(
-        status="applicable" if reason is None else "not_applicable",
-        kind="appop",
-        package_name=grant.package_name,
-        op=grant.op,
-        desired_mode=grant.mode,
-        required=grant.required,
-        source=PermissionPlanSource(recipe_id=recipe_id, section=f"permissions.appops[{index}]"),
-        reason=reason,
-    )
-
-
-def _evaluate_permission_when(when, *, rooted: bool, android_api_level: int | None) -> PermissionPlanReason | None:
-    if when is None:
-        return None
-    if when.rooted is True and not rooted:
-        return PermissionPlanReason(code="requires_root", message="Device is not rooted.")
-    if when.rooted is False and rooted:
-        return PermissionPlanReason(code="requires_unrooted", message="Device is rooted.")
-    if (when.android_api_min is not None or when.android_api_max is not None) and android_api_level is None:
-        return PermissionPlanReason(code="missing_android_api_level", message="Device Android API level is unknown.")
-    if when.android_api_min is not None and android_api_level < when.android_api_min:
-        return PermissionPlanReason(
-            code="android_api_out_of_range",
-            message=f"Device Android API {android_api_level} is below minimum {when.android_api_min}.",
-        )
-    if when.android_api_max is not None and android_api_level > when.android_api_max:
-        return PermissionPlanReason(
-            code="android_api_out_of_range",
-            message=f"Device Android API {android_api_level} is above maximum {when.android_api_max}.",
-        )
-    return None

@@ -16,7 +16,6 @@ The current editor supports:
 - Inputs editing
 - Artifacts editing
 - Artifact Groups editing
-- Permissions editing for the current authored surface: `runtime`, `appops`, and `policy`
 - Steps editing for the current supported step types:
   - `resolve_artifacts`
   - `extract_artifacts`
@@ -55,7 +54,8 @@ Current editor scope notes:
 - `kind` and `schema_version` are read-only
 - input, artifact, and group ids are chosen at creation time and then stay read-only
 - step ids and step types are chosen at creation time and then stay read-only
-- permission editing is limited to the current shared authored schema and does not expose unsupported compatibility-only structures
+- permission editing lives on `grant_permissions` step params as `runtime`, `appops`, and `policy`
+- top-level recipe `permissions:` is invalid and is not migrated or ignored by the loader
 - step refs stay in authored-ref space and save explicitly as `{ ref: ... }`
 - the Steps page uses structured pickers for dependencies, refs, constraints, `skip_if`, and `verify`
 - unsupported authored step content that the current M4 UI does not edit is preserved rather than dropped

@@ -27,7 +27,12 @@ execution_plan:
     package_remove_for_user: false
     root_shell: true
     app_data_write: true
-  inputs: []
+  inputs:
+  - id: app.retroarch.provision/retroarch_cfg
+    value:
+      type: file_path
+      value: /Users/daniel/Downloads/retroarch.cfg
+      location: host
   artifacts:
   - id: app.retroarch.provision/retroarch_apk
     type: remote_file
@@ -219,6 +224,24 @@ execution_plan:
         value: true
     skip_if: []
     verify: []
+  - id: app.retroarch.provision/extract_cheats
+    recipe_ref: app.retroarch.provision
+    type: extract_archive
+    name: Extract RetroArch cheats
+    dependencies:
+    - app.retroarch.provision/resolve_artifacts
+    constraints:
+      capabilities: []
+      conflicts_with: []
+    params:
+      archive:
+        ref: artifacts.app.retroarch.provision/asset_cheats_zip.local_path
+      extract_on:
+        value: host
+      cleanup:
+        value: true
+    skip_if: []
+    verify: []
   - id: app.retroarch.provision/extract_database_rdb
     recipe_ref: app.retroarch.provision
     type: extract_archive
@@ -391,7 +414,56 @@ execution_plan:
     constraints:
       capabilities: []
       conflicts_with: []
-    params: {}
+    params:
+      runtime:
+        value:
+        - package_name: com.retroarch.aarch64
+          name: android.permission.POST_NOTIFICATIONS
+          required: false
+          when:
+            android_api_min: 33
+        - package_name: com.retroarch.aarch64
+          name: android.permission.READ_EXTERNAL_STORAGE
+          required: false
+          when:
+            android_api_min: 33
+        - package_name: com.retroarch.aarch64
+          name: android.permission.READ_MEDIA_IMAGES
+          required: false
+          when:
+            android_api_min: 33
+        - package_name: com.retroarch.aarch64
+          name: android.permission.READ_MEDIA_AUDIO
+          required: false
+          when:
+            android_api_min: 33
+        - package_name: com.retroarch.aarch64
+          name: android.permission.READ_MEDIA_VIDEO
+          required: false
+          when:
+            android_api_min: 33
+        - package_name: com.retroarch.aarch64
+          name: android.permission.WRITE_EXTERNAL_STORAGE
+          required: false
+          when:
+            android_api_min: 33
+        - package_name: com.retroarch.aarch64
+          name: android.permission.ACCESS_MEDIA_LOCATION
+          required: false
+          when:
+            android_api_min: 33
+      appops:
+        value:
+        - package_name: com.retroarch.aarch64
+          op: MANAGE_EXTERNAL_STORAGE
+          mode: allow
+          required: false
+          when:
+            rooted: true
+      policy:
+        value:
+          on_failure: warn
+          require_all: false
     skip_if: []
     verify: []
   - id: app.retroarch.provision/launch_retroarch_permissions
@@ -483,6 +555,29 @@ execution_plan:
     - type: path_exists
       params:
         path: /data/user/0/com.retroarch.aarch64/autoconfig
+  - id: app.retroarch.provision/copy_cheats
+    recipe_ref: app.retroarch.provision
+    type: copy_files
+    name: Copy RetroArch cheats
+    dependencies:
+    - app.retroarch.provision/stop_retroarch_after_permissions
+    - app.retroarch.provision/extract_cheats
+    constraints:
+      capabilities:
+      - app_data_write
+      conflicts_with: []
+    params:
+      source:
+        ref: steps.app.retroarch.provision/extract_cheats.outputs.extracted_path
+      dest:
+        value: /storage/emulated/0/RetroArch/cheats
+      copy_policy:
+        value: merge
+    skip_if: []
+    verify:
+    - type: path_exists
+      params:
+        path: /storage/emulated/0/RetroArch/cheats
   - id: app.retroarch.provision/copy_database_rdb
     recipe_ref: app.retroarch.provision
     type: copy_files
@@ -627,6 +722,28 @@ execution_plan:
     - type: path_exists
       params:
         path: /storage/emulated/0/RetroArch/system/PPSSPP
+  - id: app.retroarch.provision/seed_retroarch_cfg
+    recipe_ref: app.retroarch.provision
+    type: copy_files
+    name: Copy RetroArch config
+    dependencies:
+    - app.retroarch.provision/stop_retroarch_after_permissions
+    constraints:
+      capabilities:
+      - app_data_write
+      conflicts_with: []
+    params:
+      source:
+        ref: inputs.app.retroarch.provision/retroarch_cfg
+      dest:
+        value: /sdcard/Android/data/com.retroarch.aarch64/files/retroarch.cfg
+      copy_policy:
+        value: replace
+    skip_if: []
+    verify:
+    - type: file_exists
+      params:
+        path: /sdcard/Android/data/com.retroarch.aarch64/files/retroarch.cfg
   - id: app.retroarch.provision/launch_retroarch
     recipe_ref: app.retroarch.provision
     type: launch_app
@@ -649,100 +766,6 @@ execution_plan:
         value: com.retroarch.aarch64
     skip_if: []
     verify: []
-  permission_plan:
-    actions:
-    - status: applicable
-      kind: runtime_permission
-      package_name: com.retroarch.aarch64
-      source:
-        recipe_id: app.retroarch.provision
-        section: permissions.runtime[0]
-      permission: android.permission.POST_NOTIFICATIONS
-      op: null
-      desired_mode: null
-      required: false
-      reason: null
-    - status: applicable
-      kind: runtime_permission
-      package_name: com.retroarch.aarch64
-      source:
-        recipe_id: app.retroarch.provision
-        section: permissions.runtime[1]
-      permission: android.permission.READ_EXTERNAL_STORAGE
-      op: null
-      desired_mode: null
-      required: false
-      reason: null
-    - status: applicable
-      kind: runtime_permission
-      package_name: com.retroarch.aarch64
-      source:
-        recipe_id: app.retroarch.provision
-        section: permissions.runtime[2]
-      permission: android.permission.READ_MEDIA_IMAGES
-      op: null
-      desired_mode: null
-      required: false
-      reason: null
-    - status: applicable
-      kind: runtime_permission
-      package_name: com.retroarch.aarch64
-      source:
-        recipe_id: app.retroarch.provision
-        section: permissions.runtime[3]
-      permission: android.permission.READ_MEDIA_AUDIO
-      op: null
-      desired_mode: null
-      required: false
-      reason: null
-    - status: applicable
-      kind: runtime_permission
-      package_name: com.retroarch.aarch64
-      source:
-        recipe_id: app.retroarch.provision
-        section: permissions.runtime[4]
-      permission: android.permission.READ_MEDIA_VIDEO
-      op: null
-      desired_mode: null
-      required: false
-      reason: null
-    - status: applicable
-      kind: runtime_permission
-      package_name: com.retroarch.aarch64
-      source:
-        recipe_id: app.retroarch.provision
-        section: permissions.runtime[5]
-      permission: android.permission.WRITE_EXTERNAL_STORAGE
-      op: null
-      desired_mode: null
-      required: false
-      reason: null
-    - status: applicable
-      kind: runtime_permission
-      package_name: com.retroarch.aarch64
-      source:
-        recipe_id: app.retroarch.provision
-        section: permissions.runtime[6]
-      permission: android.permission.ACCESS_MEDIA_LOCATION
-      op: null
-      desired_mode: null
-      required: false
-      reason: null
-    - status: applicable
-      kind: appop
-      package_name: com.retroarch.aarch64
-      source:
-        recipe_id: app.retroarch.provision
-        section: permissions.appops[0]
-      permission: null
-      op: MANAGE_EXTERNAL_STORAGE
-      desired_mode: allow
-      required: false
-      reason: null
-    policies:
-      app.retroarch.provision:
-        on_failure: warn
-        require_all: false
   schema_version: 1
   kind: execution_plan
 schema_version: 1

@@ -29,9 +29,11 @@ execution_plan:
     package_remove_for_user: true
     root_shell: false
     app_data_write: false
-  inputs_resolved:
+  inputs:
   - id: feature.copy_bios.$bios_source_dir
-    value: /Users/daniel/Syncthing/ROMs/_bios
+    value:
+      type: directory_path
+      value: /Users/daniel/Syncthing/ROMs/_bios
   steps:
   - id: app.obtainium.install/install_obtainium
     recipe_ref: app.obtainium.install

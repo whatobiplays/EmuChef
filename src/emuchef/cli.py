@@ -470,19 +470,18 @@ def _format_execution_summary(result, dry_run: bool) -> str:
         f"- failed: {failed}",
         f"- not run: {not_run}",
     ]
-    if result.permission_results:
-        permission_executed = sum(1 for record in result.permission_results if record.status.value == "executed")
-        permission_not_applicable = sum(
-            1 for record in result.permission_results if record.status.value == "not_applicable"
-        )
-        permission_failed = sum(1 for record in result.permission_results if record.status.value == "failed")
+    permission_results = _collect_permission_results(result)
+    if permission_results:
+        permission_executed = sum(1 for record in permission_results if record.get("status") == "executed")
+        permission_not_applicable = sum(1 for record in permission_results if record.get("status") == "not_applicable")
+        permission_failed = sum(1 for record in permission_results if record.get("status") == "failed")
         lines.extend(
             [
                 "Permission actions:",
                 f"- executed: {permission_executed}",
                 f"- not_applicable: {permission_not_applicable}",
                 f"- failed: {permission_failed}",
-                *_bullet_lines([_format_permission_result(record) for record in result.permission_results]),
+                *_bullet_lines([_format_permission_result(record) for record in permission_results]),
             ]
         )
     return "\n".join(lines) + "\n"
@@ -530,13 +529,29 @@ def _bullet_lines(items: Sequence[str]) -> list[str]:
     return [f"- {item}" for item in items]
 
 
-def _format_permission_result(record) -> str:
-    action_name = record.permission or record.op or record.kind
-    detail = f"{record.kind} {record.package_name} {action_name}".strip()
-    provenance = f"{record.step_id} -> {record.source_recipe_id}:{record.source_section}"
-    if record.message:
-        return f"{record.status.value}: {detail} ({provenance}) - {record.message}"
-    return f"{record.status.value}: {detail} ({provenance})"
+def _collect_permission_results(result) -> list[Mapping[str, object]]:
+    records: list[Mapping[str, object]] = []
+    for step in result.steps:
+        output = step.outputs.get("permission_results")
+        if output is None or not isinstance(output.value, Mapping):
+            continue
+        actions = output.value.get("actions")
+        if not isinstance(actions, Sequence) or isinstance(actions, (str, bytes, bytearray)):
+            continue
+        records.extend(action for action in actions if isinstance(action, Mapping))
+    return records
+
+
+def _format_permission_result(record: Mapping[str, object]) -> str:
+    kind = str(record.get("kind", "permission"))
+    package_name = str(record.get("package_name", ""))
+    action_name = str(record.get("permission") or record.get("op") or kind)
+    detail = f"{kind} {package_name} {action_name}".strip()
+    provenance = f"{record.get('step_id')} -> {record.get('source_recipe_id')}:{record.get('source_section')}"
+    message = record.get("message")
+    if message:
+        return f"{record.get('status')}: {detail} ({provenance}) - {message}"
+    return f"{record.get('status')}: {detail} ({provenance})"
 
 
 def _configure_logging(args: argparse.Namespace) -> None:
