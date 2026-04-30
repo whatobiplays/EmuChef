@@ -126,7 +126,7 @@ def _serialize_artifact(artifact: RemoteFileArtifact) -> dict[str, Any]:
 def _serialize_step(step: Step) -> dict[str, Any]:
     payload: dict[str, Any] = {
         "id": step.id,
-        "type": step.type.value,
+        "type": step.type,
         "name": step.name,
         "user_toggleable": step.user_toggleable,
         "dependencies": list(step.dependencies),

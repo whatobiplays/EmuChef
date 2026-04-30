@@ -7,7 +7,6 @@ from functools import lru_cache
 from emuchef.domain.copy_policy import CopyPolicy
 from emuchef.domain.runtime_state import RuntimeValueType
 from emuchef.domain.step_specs import ParamMode, ParamSpec, StepSpec
-from emuchef.domain.step_types import StepType
 
 from .contracts import StepEditorMetadata, StepOutputMetadata, StepPlugin, StepRegistry
 from .planner_hooks import (
@@ -37,9 +36,9 @@ def _handler(name: str, *, takes_step: bool = True):
 
 BUILTIN_STEP_PLUGINS: tuple[StepPlugin, ...] = (
     StepPlugin(
-        type=StepType.RESOLVE_ARTIFACTS,
+        type="resolve_artifacts",
         spec=StepSpec(
-            type_name=StepType.RESOLVE_ARTIFACTS,
+            type_name="resolve_artifacts",
             params={
                 "artifacts": ParamSpec(ParamMode.LITERAL, required=False),
                 "artifact_groups": ParamSpec(ParamMode.LITERAL, required=False),
@@ -56,9 +55,9 @@ BUILTIN_STEP_PLUGINS: tuple[StepPlugin, ...] = (
         ),
     ),
     StepPlugin(
-        type=StepType.EXTRACT_ARTIFACTS,
+        type="extract_artifacts",
         spec=StepSpec(
-            type_name=StepType.EXTRACT_ARTIFACTS,
+            type_name="extract_artifacts",
             params={
                 "artifacts": ParamSpec(ParamMode.LITERAL, required=False),
                 "artifact_groups": ParamSpec(ParamMode.LITERAL, required=False),
@@ -78,9 +77,9 @@ BUILTIN_STEP_PLUGINS: tuple[StepPlugin, ...] = (
         ),
     ),
     StepPlugin(
-        type=StepType.EXTRACT_ARCHIVE,
+        type="extract_archive",
         spec=StepSpec(
-            type_name=StepType.EXTRACT_ARCHIVE,
+            type_name="extract_archive",
             params={
                 "archive": ParamSpec(ParamMode.REF),
                 "extract_on": ParamSpec(ParamMode.LITERAL, required=False, default="host", enum_values=("host", "device")),
@@ -102,9 +101,9 @@ BUILTIN_STEP_PLUGINS: tuple[StepPlugin, ...] = (
         ),
     ),
     StepPlugin(
-        type=StepType.COPY_FILES,
+        type="copy_files",
         spec=StepSpec(
-            type_name=StepType.COPY_FILES,
+            type_name="copy_files",
             params={
                 "source": ParamSpec(ParamMode.REF),
                 "dest": ParamSpec(ParamMode.LITERAL),
@@ -135,9 +134,9 @@ BUILTIN_STEP_PLUGINS: tuple[StepPlugin, ...] = (
         ),
     ),
     StepPlugin(
-        type=StepType.INSTALL_APK,
+        type="install_apk",
         spec=StepSpec(
-            type_name=StepType.INSTALL_APK,
+            type_name="install_apk",
             params={
                 "app": ParamSpec(ParamMode.REF),
                 "replace_existing": ParamSpec(ParamMode.LITERAL, required=False, default=False),
@@ -153,9 +152,9 @@ BUILTIN_STEP_PLUGINS: tuple[StepPlugin, ...] = (
         ),
     ),
     StepPlugin(
-        type=StepType.GRANT_PERMISSIONS,
+        type="grant_permissions",
         spec=StepSpec(
-            type_name=StepType.GRANT_PERMISSIONS,
+            type_name="grant_permissions",
             params={
                 "runtime": ParamSpec(ParamMode.LITERAL, required=False),
                 "appops": ParamSpec(ParamMode.LITERAL, required=False),
@@ -172,9 +171,9 @@ BUILTIN_STEP_PLUGINS: tuple[StepPlugin, ...] = (
         ),
     ),
     StepPlugin(
-        type=StepType.LAUNCH_APP,
+        type="launch_app",
         spec=StepSpec(
-            type_name=StepType.LAUNCH_APP,
+            type_name="launch_app",
             params={
                 "package_name": ParamSpec(ParamMode.LITERAL),
                 "activity": ParamSpec(ParamMode.LITERAL, required=False),
@@ -190,9 +189,9 @@ BUILTIN_STEP_PLUGINS: tuple[StepPlugin, ...] = (
         ),
     ),
     StepPlugin(
-        type=StepType.WAIT,
+        type="wait",
         spec=StepSpec(
-            type_name=StepType.WAIT,
+            type_name="wait",
             params={"duration_ms": ParamSpec(ParamMode.LITERAL)},
             executor_handler="wait",
         ),
@@ -205,9 +204,9 @@ BUILTIN_STEP_PLUGINS: tuple[StepPlugin, ...] = (
         ),
     ),
     StepPlugin(
-        type=StepType.FORCE_STOP_APP,
+        type="force_stop_app",
         spec=StepSpec(
-            type_name=StepType.FORCE_STOP_APP,
+            type_name="force_stop_app",
             params={"package_name": ParamSpec(ParamMode.LITERAL)},
             executor_handler="force_stop_app",
         ),

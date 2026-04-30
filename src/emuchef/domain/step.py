@@ -7,7 +7,7 @@ from dataclasses import dataclass, field
 
 from ._validation import ensure_unique
 from .param_values import AuthoredParamValue, JSONValue
-from .step_types import StepType
+from .step_types import StepTypeId
 
 
 @dataclass(frozen=True, slots=True)
@@ -25,7 +25,7 @@ class StepCondition:
 @dataclass(frozen=True, slots=True)
 class Step:
     id: str
-    type: StepType
+    type: StepTypeId
     name: str
     user_toggleable: bool
     dependencies: tuple[str, ...]

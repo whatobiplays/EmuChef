@@ -72,7 +72,7 @@ from .runtime_state import (
 )
 from .step_specs import PRIMARY_OUTPUT_STEP_TYPES, ParamMode, ParamSpec, STEP_SPECS, StepSpec
 from .step import Step, StepCondition, StepConstraints
-from .step_types import StepType
+from .step_types import StepTypeId
 from .validation_result import ValidationResult, ValidationStatus
 
 __all__ = [
@@ -151,7 +151,7 @@ __all__ = [
     "StepRuntimeState",
     "StepRuntimeStatus",
     "StepSpec",
-    "StepType",
+    "StepTypeId",
     "WarningCode",
     "WarningMessage",
     "ValidationResult",

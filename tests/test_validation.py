@@ -82,6 +82,55 @@ steps: []
             self.assertEqual(error.details["object_id"], "example.recipe")
             self.assertEqual(error.details["field"], "steps[0].params.duration_ms")
 
+    def test_unsupported_string_step_id_reports_step_contract_violation(self) -> None:
+        recipe = base_recipe(
+            recipe_id="example.recipe",
+            steps=[
+                {
+                    "id": "custom",
+                    "type": "custom_plugin_step",
+                    "name": "Custom",
+                    "user_toggleable": False,
+                    "dependencies": [],
+                    "constraints": {"capabilities": [], "conflicts_with": []},
+                    "verify": [],
+                }
+            ],
+        )
+        with TemporaryDirectory() as tmp:
+            authored_root = build_authored_tree(Path(tmp), recipes=[recipe])
+            result = validate_authored_catalog(authored_root)
+
+            self.assertEqual(result.status.value, "error")
+            error = next(error for error in result.errors if "Unsupported step type" in error.message)
+            self.assertEqual(error.code.value, "param_contract_violation")
+            self.assertEqual(error.details["step_type"], "custom_plugin_step")
+
+    def test_legacy_removed_step_ids_are_not_supported(self) -> None:
+        for legacy_type in ("run_shell", "push_file", "copy_byo_input"):
+            with self.subTest(legacy_type=legacy_type):
+                recipe = base_recipe(
+                    recipe_id="example.recipe",
+                    steps=[
+                        {
+                            "id": "legacy",
+                            "type": legacy_type,
+                            "name": "Legacy",
+                            "user_toggleable": False,
+                            "dependencies": [],
+                            "constraints": {"capabilities": [], "conflicts_with": []},
+                            "verify": [],
+                        }
+                    ],
+                )
+                with TemporaryDirectory() as tmp:
+                    authored_root = build_authored_tree(Path(tmp), recipes=[recipe])
+                    result = validate_authored_catalog(authored_root)
+
+                self.assertEqual(result.status.value, "error")
+                error = next(error for error in result.errors if "Unsupported step type" in error.message)
+                self.assertEqual(error.details["step_type"], legacy_type)
+
     def test_top_level_permissions_rejected_even_with_grant_step_params(self) -> None:
         recipe = base_recipe(
             recipe_id="example.recipe",

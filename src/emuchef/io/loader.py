@@ -37,7 +37,6 @@ from emuchef.domain import (
     Step,
     StepCondition,
     StepConstraints,
-    StepType,
     parse_reference,
 )
 from emuchef.planner.catalog import AuthoredCatalog, CatalogLoadError
@@ -47,6 +46,7 @@ from emuchef.planner.contracts import (
     validate_step_references,
 )
 from emuchef.planner.dependencies import validate_recipe_step_cycles
+from emuchef.steps import builtin_step_registry
 
 
 def load_authored_recipe(path: str | Path) -> Recipe:
@@ -78,7 +78,7 @@ def load_authored_recipe(path: str | Path) -> Recipe:
         raise CatalogLoadError(tuple(errors))
 
     try:
-        return _parse_recipe(data)
+        recipe = _parse_recipe(data)
     except (KeyError, TypeError, ValueError) as exc:
         raise CatalogLoadError(
             (
@@ -89,6 +89,10 @@ def load_authored_recipe(path: str | Path) -> Recipe:
                 ),
             )
         ) from exc
+    unsupported_step_errors = _unsupported_step_type_errors(recipe, path=recipe_path)
+    if unsupported_step_errors:
+        raise CatalogLoadError(unsupported_step_errors)
+    return recipe
 
 
 def load_authored_catalog(root: str | Path) -> AuthoredCatalog:
@@ -327,7 +331,7 @@ def _parse_input_declaration(data: Mapping[str, Any], *, input_id: str | None = 
 def _parse_step(data: Mapping[str, Any]) -> Step:
     return Step(
         id=str(data["id"]),
-        type=StepType(str(data["type"])),
+        type=str(data["type"]),
         name=str(data["name"]),
         description=_optional_str(data.get("description")),
         user_toggleable=bool(data["user_toggleable"]),
@@ -340,6 +344,28 @@ def _parse_step(data: Mapping[str, Any]) -> Step:
         params={str(key): _parse_param_value(value) for key, value in data.get("params", {}).items()},
         verify=tuple(_parse_step_condition(item) for item in data.get("verify", [])),
     )
+
+
+def _unsupported_step_type_errors(recipe: Recipe, *, path: Path) -> tuple[ErrorMessage, ...]:
+    registry = builtin_step_registry()
+    errors: list[ErrorMessage] = []
+    for index, step in enumerate(recipe.steps):
+        if step.type in registry:
+            continue
+        errors.append(
+            ErrorMessage(
+                code=ErrorCode.PARAM_CONTRACT_VIOLATION,
+                message=f"Unsupported step type {step.type!r}.",
+                details={
+                    "path": str(path),
+                    "recipe_ref": recipe.id,
+                    "step_id": step.id,
+                    "step_type": step.type,
+                    "field": f"steps[{index}].type",
+                },
+            )
+        )
+    return tuple(errors)
 
 
 def _parse_recipe(data: Mapping[str, Any]) -> Recipe:

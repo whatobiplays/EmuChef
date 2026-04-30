@@ -34,7 +34,6 @@ from emuchef.domain import (
     Step,
     StepCondition,
     StepConstraints,
-    StepType,
 )
 from emuchef.steps import builtin_step_registry
 from emuchef_editor.core.analysis.usages import UsageTarget, analyze_recipe_usages
@@ -499,7 +498,7 @@ class _NewStepDialog(QDialog):
 
         self._type_combo = create_expanding_combo_box()
         for step_type in SUPPORTED_EDITOR_STEP_TYPES:
-            self._type_combo.addItem(step_type.value, step_type)
+            self._type_combo.addItem(step_type, step_type)
         self._id_edit = create_expanding_line_edit()
         self._name_edit = create_expanding_line_edit()
         self._form = configure_data_entry_form(QFormLayout())
@@ -515,7 +514,7 @@ class _NewStepDialog(QDialog):
         layout.addLayout(self._form)
         layout.addWidget(buttons)
 
-    def values(self) -> tuple[StepType, str, str]:
+    def values(self) -> tuple[str, str, str]:
         return (
             self._type_combo.currentData(),
             self._id_edit.text(),
@@ -523,7 +522,7 @@ class _NewStepDialog(QDialog):
         )
 
     @classmethod
-    def prompt(cls, parent: QWidget | None = None) -> tuple[StepType, str, str] | None:
+    def prompt(cls, parent: QWidget | None = None) -> tuple[str, str, str] | None:
         dialog = cls(parent)
         if dialog.exec() != QDialog.DialogCode.Accepted:
             return None
@@ -611,7 +610,7 @@ class StepsPage(QWidget):
         self._params_placeholder = QLabel("Select a step to edit params.")
         self._params_placeholder.setWordWrap(True)
         self._params_stack.addWidget(self._params_placeholder)
-        self._params_panel_adapters: dict[StepType, _StepParamPanelAdapter] = {}
+        self._params_panel_adapters: dict[str, _StepParamPanelAdapter] = {}
         self._build_param_panels()
         self._params_preserved_label = QLabel("Preserved unsupported params")
         self._params_preserved_view = AutoSizingPlainTextEdit()
@@ -719,7 +718,7 @@ class StepsPage(QWidget):
         self._loading = True
         self._step_list.clear()
         for step in document.working_recipe.steps:
-            item = QListWidgetItem(f"{step.id} · {step.type.value}")
+            item = QListWidgetItem(f"{step.id} · {step.type}")
             item.setData(Qt.ItemDataRole.UserRole, step.id)
             self._step_list.addItem(item)
         self._loading = False
@@ -754,7 +753,7 @@ class StepsPage(QWidget):
         resolve_layout.addWidget(self._resolve_artifact_groups_label)
         resolve_layout.addWidget(self._resolve_artifact_groups_editor)
         self._register_param_panel(
-            StepType.RESOLVE_ARTIFACTS,
+            "resolve_artifacts",
             self._resolve_artifacts_panel,
             self._populate_resolve_artifacts_params,
             self._build_resolve_artifacts_params,
@@ -795,7 +794,7 @@ class StepsPage(QWidget):
         )
         extract_layout.addLayout(extract_form)
         self._register_param_panel(
-            StepType.EXTRACT_ARTIFACTS,
+            "extract_artifacts",
             self._extract_artifacts_panel,
             self._populate_extract_artifacts_params,
             self._build_extract_artifacts_params,
@@ -850,7 +849,7 @@ class StepsPage(QWidget):
         self._extract_archive_device_temp_path_edit.editingFinished.connect(self._commit_step_params)
         self._extract_archive_cleanup_check.toggled.connect(self._commit_step_params)
         self._register_param_panel(
-            StepType.EXTRACT_ARCHIVE,
+            "extract_archive",
             self._extract_archive_panel,
             self._populate_extract_archive_params,
             self._build_extract_archive_params,
@@ -881,7 +880,7 @@ class StepsPage(QWidget):
         self._copy_dest_edit.editingFinished.connect(self._commit_step_params)
         self._copy_policy_combo.currentIndexChanged.connect(self._commit_step_params)
         self._register_param_panel(
-            StepType.COPY_FILES,
+            "copy_files",
             self._copy_files_panel,
             self._populate_copy_files_params,
             self._build_copy_files_params,
@@ -908,7 +907,7 @@ class StepsPage(QWidget):
         self._install_apk_app_combo.currentIndexChanged.connect(self._commit_step_params)
         self._install_apk_replace_existing_check.toggled.connect(self._commit_step_params)
         self._register_param_panel(
-            StepType.INSTALL_APK,
+            "install_apk",
             self._install_apk_panel,
             self._populate_install_apk_params,
             self._build_install_apk_params,
@@ -920,7 +919,7 @@ class StepsPage(QWidget):
         self._grant_permissions_editor.changed.connect(self._commit_step_params)
         grant_layout.addWidget(self._grant_permissions_editor)
         self._register_param_panel(
-            StepType.GRANT_PERMISSIONS,
+            "grant_permissions",
             self._grant_permissions_panel,
             self._populate_grant_permissions_params,
             self._build_grant_permissions_params,
@@ -947,7 +946,7 @@ class StepsPage(QWidget):
         self._launch_package_edit.editingFinished.connect(self._commit_step_params)
         self._launch_activity_edit.editingFinished.connect(self._commit_step_params)
         self._register_param_panel(
-            StepType.LAUNCH_APP,
+            "launch_app",
             self._launch_app_panel,
             self._populate_launch_app_params,
             self._build_launch_app_params,
@@ -969,7 +968,7 @@ class StepsPage(QWidget):
         wait_layout.addLayout(wait_form)
         self._wait_duration_spin.valueChanged.connect(self._commit_step_params)
         self._register_param_panel(
-            StepType.WAIT,
+            "wait",
             self._wait_panel,
             self._populate_wait_params,
             self._build_wait_params,
@@ -988,7 +987,7 @@ class StepsPage(QWidget):
         force_stop_layout.addLayout(force_stop_form)
         self._force_stop_package_edit.editingFinished.connect(self._commit_step_params)
         self._register_param_panel(
-            StepType.FORCE_STOP_APP,
+            "force_stop_app",
             self._force_stop_panel,
             self._populate_force_stop_params,
             self._build_force_stop_params,
@@ -996,7 +995,7 @@ class StepsPage(QWidget):
 
     def _register_param_panel(
         self,
-        step_type: StepType,
+        step_type: str,
         panel: QWidget,
         populate: Callable[[Step], None],
         build_params: Callable[[Step, dict[str, AuthoredParamValue]], dict[str, AuthoredParamValue]],
@@ -1161,7 +1160,7 @@ class StepsPage(QWidget):
             return
         self._loading = True
         self._step_id_value.setText(step.id)
-        self._step_type_value.setText(step.type.value)
+        self._step_type_value.setText(step.type)
         self._step_name_edit.setText(step.name)
         self._step_description_edit.set_committed_text(step.description or "")
         self._step_user_toggleable_check.setChecked(step.user_toggleable)
@@ -1541,7 +1540,7 @@ class StepsPage(QWidget):
             return params
         return adapter.build_params(step, params)
 
-    def _ref_candidates(self, step_type: StepType, param_name: str) -> tuple[tuple[str, str], ...]:
+    def _ref_candidates(self, step_type: str, param_name: str) -> tuple[tuple[str, str], ...]:
         if self._document is None:
             return ()
         allowed_types = REF_VALUE_FILTERS.get((step_type, param_name), ())
@@ -1592,7 +1591,7 @@ class StepsPage(QWidget):
         self._extract_archive_panel.adjustSize()
         self._extract_archive_panel.updateGeometry()
 
-    def _prompt_for_new_step(self) -> tuple[StepType, str, str] | None:
+    def _prompt_for_new_step(self) -> tuple[str, str, str] | None:
         return _NewStepDialog.prompt(self)
 
 

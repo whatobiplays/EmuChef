@@ -6,7 +6,7 @@ from collections.abc import Mapping
 from dataclasses import dataclass, field
 from enum import Enum
 
-from .step_types import StepType
+from .step_types import StepTypeId
 
 
 class ParamMode(str, Enum):
@@ -24,19 +24,19 @@ class ParamSpec:
 
 @dataclass(frozen=True, slots=True)
 class StepSpec:
-    type_name: StepType
+    type_name: StepTypeId
     params: Mapping[str, ParamSpec]
     primary_output_name: str | None = None
     executor_handler: str | None = None
 
 
-def _registry_step_specs() -> dict[StepType, StepSpec]:
+def _registry_step_specs() -> dict[StepTypeId, StepSpec]:
     from emuchef.steps import builtin_step_registry
 
     return dict(builtin_step_registry().step_specs)
 
 
-STEP_SPECS: dict[StepType, StepSpec] = _registry_step_specs()
+STEP_SPECS: dict[StepTypeId, StepSpec] = _registry_step_specs()
 """Compatibility projection of specs from the built-in step plugin registry."""
 
 

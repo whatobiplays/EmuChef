@@ -26,8 +26,8 @@ def validate_step_contract(recipe_ref: str, step: Step, recipe: Recipe | None = 
         return (
             ErrorMessage(
                 code=ErrorCode.PARAM_CONTRACT_VIOLATION,
-                message=f"Unsupported step type {step.type.value!r}.",
-                details={"recipe_ref": recipe_ref, "step_id": step.id, "step_type": step.type.value},
+                message=f"Unsupported step type {step.type!r}.",
+                details={"recipe_ref": recipe_ref, "step_id": step.id, "step_type": step.type},
             ),
         )
 
@@ -40,7 +40,7 @@ def validate_step_contract(recipe_ref: str, step: Step, recipe: Recipe | None = 
         errors.append(
             ErrorMessage(
                 code=ErrorCode.PARAM_CONTRACT_VIOLATION,
-                message=f"Unexpected param {param_name!r} for step type {step.type.value!r}.",
+                message=f"Unexpected param {param_name!r} for step type {step.type!r}.",
                 details={"recipe_ref": recipe_ref, "step_id": step.id, "param": param_name},
             )
         )
@@ -50,10 +50,10 @@ def validate_step_contract(recipe_ref: str, step: Step, recipe: Recipe | None = 
         if param_spec.required and param_name not in normalized:
             errors.append(
                 ErrorMessage(
-                    code=ErrorCode.PARAM_CONTRACT_VIOLATION,
-                    message=f"Missing required param {param_name!r} for step type {step.type.value!r}.",
-                    details={"recipe_ref": recipe_ref, "step_id": step.id, "param": param_name},
-                )
+                code=ErrorCode.PARAM_CONTRACT_VIOLATION,
+                message=f"Missing required param {param_name!r} for step type {step.type!r}.",
+                details={"recipe_ref": recipe_ref, "step_id": step.id, "param": param_name},
+            )
             )
             continue
         if param_name not in normalized:
@@ -62,18 +62,18 @@ def validate_step_contract(recipe_ref: str, step: Step, recipe: Recipe | None = 
         if param_spec.mode is ParamMode.REF and not isinstance(value, RefParamValue):
             errors.append(
                 ErrorMessage(
-                    code=ErrorCode.PARAM_CONTRACT_VIOLATION,
-                    message=f"Param {param_name!r} must use {{ref: ...}} for step type {step.type.value!r}.",
-                    details={"recipe_ref": recipe_ref, "step_id": step.id, "param": param_name},
-                )
+                code=ErrorCode.PARAM_CONTRACT_VIOLATION,
+                message=f"Param {param_name!r} must use {{ref: ...}} for step type {step.type!r}.",
+                details={"recipe_ref": recipe_ref, "step_id": step.id, "param": param_name},
+            )
             )
         if param_spec.mode is ParamMode.LITERAL and isinstance(value, RefParamValue):
             errors.append(
                 ErrorMessage(
-                    code=ErrorCode.PARAM_CONTRACT_VIOLATION,
-                    message=f"Param {param_name!r} must remain a literal for step type {step.type.value!r}.",
-                    details={"recipe_ref": recipe_ref, "step_id": step.id, "param": param_name},
-                )
+                code=ErrorCode.PARAM_CONTRACT_VIOLATION,
+                message=f"Param {param_name!r} must remain a literal for step type {step.type!r}.",
+                details={"recipe_ref": recipe_ref, "step_id": step.id, "param": param_name},
+            )
             )
 
     if plugin.validate is not None:
@@ -146,7 +146,7 @@ def validate_step_references(recipe: Recipe, step: Step) -> tuple[ErrorMessage, 
                 errors.append(
                     ErrorMessage(
                         code=ErrorCode.UNKNOWN_STEP_OUTPUT,
-                        message=f"Step shorthand ref {ref!r} targets step type {target_step.type.value!r}, which has no primary output.",
+                        message=f"Step shorthand ref {ref!r} targets step type {target_step.type!r}, which has no primary output.",
                         details={"recipe_ref": recipe.id, "step_id": step.id, "param": param_name, "ref": ref},
                     )
                 )

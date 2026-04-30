@@ -15,7 +15,6 @@ from emuchef.domain import (
     ExecutionStep,
     LiteralParamValue,
     RuntimeCapabilities,
-    StepType,
 )
 from emuchef.executor import DetectedDevice
 from emuchef.io import dump_yaml, load_authored_catalog
@@ -140,7 +139,7 @@ class CliTests(unittest.TestCase):
                     ExecutionStep(
                         id="example.recipe/wait",
                         recipe_ref="example.recipe",
-                        type=StepType.WAIT,
+                        type="wait",
                         name="Wait",
                         params={"duration_ms": LiteralParamValue(value=10)},
                     ),
@@ -194,14 +193,14 @@ class CliTests(unittest.TestCase):
                     ExecutionStep(
                         id="example.recipe/fail",
                         recipe_ref="example.recipe",
-                        type=StepType.WAIT,
+                        type="wait",
                         name="Fail",
                         params={"duration_ms": LiteralParamValue(value=0)},
                     ),
                     ExecutionStep(
                         id="example.recipe/downstream",
                         recipe_ref="example.recipe",
-                        type=StepType.WAIT,
+                        type="wait",
                         name="Downstream",
                         dependencies=("example.recipe/fail",),
                         params={"duration_ms": LiteralParamValue(value=1)},
@@ -254,7 +253,7 @@ class CliTests(unittest.TestCase):
                     ExecutionStep(
                         id="example.recipe/grant",
                         recipe_ref="example.recipe",
-                        type=StepType.GRANT_PERMISSIONS,
+                        type="grant_permissions",
                         name="Grant",
                         params={
                             "runtime": LiteralParamValue(

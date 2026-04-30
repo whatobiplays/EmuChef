@@ -163,7 +163,7 @@ class ExecutorRunner:
                     step_name=step.name,
                     phase=ProgressPhase.EXECUTING,
                 )
-                logger.info("Executing step %s (%s)", step.id, step.type.value)
+                logger.info("Executing step %s (%s)", step.id, step.type)
                 resolved_params = _resolve_step_params(state, step.params)
                 outputs = execute_step(context, step, resolved_params)
 

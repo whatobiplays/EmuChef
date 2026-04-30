@@ -9,7 +9,7 @@ from tempfile import TemporaryDirectory
 import unittest
 from unittest.mock import Mock, patch
 
-from emuchef.domain import PERMISSION_POLICY_ON_FAILURE_VALUES, RuntimePermissionGrant, StepCondition, StepType
+from emuchef.domain import PERMISSION_POLICY_ON_FAILURE_VALUES, RuntimePermissionGrant, StepCondition
 from support import base_recipe, build_authored_tree, write_yaml
 
 PYSIDE6_AVAILABLE = importlib.util.find_spec("PySide6") is not None
@@ -579,7 +579,7 @@ class EditorAppTests(unittest.TestCase):
             with patch.object(
                 page,
                 "_prompt_for_new_step",
-                return_value=(StepType.COPY_FILES, "copy_assets", "Copy Assets"),
+                return_value=("copy_files", "copy_assets", "Copy Assets"),
             ):
                 page._add_step_button.click()
 
@@ -597,7 +597,7 @@ class EditorAppTests(unittest.TestCase):
             with patch.object(
                 page,
                 "_prompt_for_new_step",
-                return_value=(StepType.WAIT, "pause", "Pause"),
+                return_value=("wait", "pause", "Pause"),
             ):
                 page._add_step_button.click()
 

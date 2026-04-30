@@ -27,7 +27,6 @@ from emuchef.domain import (
     StepConstraints,
     StepRuntimeState,
     StepRuntimeStatus,
-    StepType,
     ExecutionState,
     ArtifactRuntimeState,
     ArtifactRuntimeStatus,
@@ -127,13 +126,47 @@ class ExecutorCoreTests(unittest.TestCase):
             resolve_runtime_ref(state, "steps.example.recipe/extract.outputs.extracted_paths")
         self.assertEqual(context.exception.code.value, "step_output_unavailable")
 
+    def test_executor_resolves_runtime_refs_before_plugin_handler_dispatch(self) -> None:
+        plan = _base_plan(
+            inputs=(
+                ExecutionInputValue(
+                    id="example.recipe/config",
+                    value=RuntimeValue(
+                        type=RuntimeValueType.FILE_PATH,
+                        value="/sdcard/source.cfg",
+                        location="device",
+                    ),
+                ),
+            ),
+            steps=(
+                ExecutionStep(
+                    id="example.recipe/copy",
+                    recipe_ref="example.recipe",
+                    type="copy_files",
+                    name="Copy",
+                    params={
+                        "source": RefParamValue(ref="inputs.example.recipe/config"),
+                        "dest": LiteralParamValue(value="/sdcard/dest.cfg"),
+                    },
+                ),
+            ),
+        )
+        adb = DryRunAdb()
+
+        result = ExecutorRunner(adb=adb).run(plan)
+
+        self.assertTrue(result.success, result)
+        self.assertIn(("copy_on_device", "/sdcard/source.cfg", "/sdcard/dest.cfg", "False", "False"), adb.commands)
+        copied = result.steps[0].outputs["copied_paths"].value
+        self.assertEqual(copied, ["/sdcard/dest.cfg"])
+
     def test_permissions_are_not_executed_without_grant_step_params(self) -> None:
         plan = _base_plan(
             steps=(
                 ExecutionStep(
                     id="example.recipe/wait",
                     recipe_ref="example.recipe",
-                    type=StepType.WAIT,
+                    type="wait",
                     name="Wait",
                     params={"duration_ms": LiteralParamValue(value=1)},
                 ),
@@ -150,7 +183,7 @@ class ExecutorCoreTests(unittest.TestCase):
                 ExecutionStep(
                     id="example.recipe/grant",
                     recipe_ref="example.recipe",
-                    type=StepType.GRANT_PERMISSIONS,
+                    type="grant_permissions",
                     name="Grant",
                 ),
             ),
@@ -167,7 +200,7 @@ class ExecutorCoreTests(unittest.TestCase):
                 ExecutionStep(
                     id="example.recipe/grant",
                     recipe_ref="example.recipe",
-                    type=StepType.GRANT_PERMISSIONS,
+                    type="grant_permissions",
                     name="Grant",
                     params={
                         "runtime": LiteralParamValue(
@@ -225,7 +258,7 @@ class ExecutorCoreTests(unittest.TestCase):
                 ExecutionStep(
                     id="example.recipe/grant_fail",
                     recipe_ref="example.recipe",
-                    type=StepType.GRANT_PERMISSIONS,
+                    type="grant_permissions",
                     name="Grant Fail",
                     params={
                         "runtime": LiteralParamValue(
@@ -243,7 +276,7 @@ class ExecutorCoreTests(unittest.TestCase):
                 ExecutionStep(
                     id="example.recipe/dependent",
                     recipe_ref="example.recipe",
-                    type=StepType.WAIT,
+                    type="wait",
                     name="Dependent",
                     dependencies=("example.recipe/grant_fail",),
                     params={"duration_ms": LiteralParamValue(value=1)},
@@ -251,7 +284,7 @@ class ExecutorCoreTests(unittest.TestCase):
                 ExecutionStep(
                     id="example.recipe/grant_other",
                     recipe_ref="example.recipe",
-                    type=StepType.GRANT_PERMISSIONS,
+                    type="grant_permissions",
                     name="Grant Other",
                     params={
                         "runtime": LiteralParamValue(
@@ -284,7 +317,7 @@ class ExecutorCoreTests(unittest.TestCase):
                 ExecutionStep(
                     id="example.recipe/wait",
                     recipe_ref="example.recipe",
-                    type=StepType.WAIT,
+                    type="wait",
                     name="Wait",
                     params={"duration_ms": LiteralParamValue(value=1500)},
                 ),
@@ -311,14 +344,14 @@ class ExecutorCoreTests(unittest.TestCase):
                     ExecutionStep(
                         id="example.recipe/resolve",
                         recipe_ref="example.recipe",
-                        type=StepType.RESOLVE_ARTIFACTS,
+                        type="resolve_artifacts",
                         name="Resolve",
                         params={"artifacts": LiteralParamValue(value=["example.recipe/a_zip", "example.recipe/b_zip"])},
                     ),
                     ExecutionStep(
                         id="example.recipe/extract",
                         recipe_ref="example.recipe",
-                        type=StepType.EXTRACT_ARTIFACTS,
+                        type="extract_artifacts",
                         name="Extract",
                         dependencies=("example.recipe/resolve",),
                         params={
@@ -329,7 +362,7 @@ class ExecutorCoreTests(unittest.TestCase):
                     ExecutionStep(
                         id="example.recipe/copy",
                         recipe_ref="example.recipe",
-                        type=StepType.COPY_FILES,
+                        type="copy_files",
                         name="Copy",
                         dependencies=("example.recipe/extract",),
                         params={
@@ -358,7 +391,7 @@ class ExecutorCoreTests(unittest.TestCase):
                     ExecutionStep(
                         id="example.recipe/copy",
                         recipe_ref="example.recipe",
-                        type=StepType.COPY_FILES,
+                        type="copy_files",
                         name="Copy",
                         params={
                             "source": LiteralParamValue(
@@ -391,7 +424,7 @@ class ExecutorCoreTests(unittest.TestCase):
                     ExecutionStep(
                         id="example.recipe/copy",
                         recipe_ref="example.recipe",
-                        type=StepType.COPY_FILES,
+                        type="copy_files",
                         name="Copy",
                         params={
                             "source": LiteralParamValue(
@@ -429,7 +462,7 @@ class ExecutorCoreTests(unittest.TestCase):
                     ExecutionStep(
                         id="example.recipe/copy",
                         recipe_ref="example.recipe",
-                        type=StepType.COPY_FILES,
+                        type="copy_files",
                         name="Copy",
                         params={
                             "source": LiteralParamValue(
@@ -464,7 +497,7 @@ class ExecutorCoreTests(unittest.TestCase):
                     ExecutionStep(
                         id="example.recipe/copy",
                         recipe_ref="example.recipe",
-                        type=StepType.COPY_FILES,
+                        type="copy_files",
                         name="Copy",
                         params={
                             "source": LiteralParamValue(
@@ -513,7 +546,7 @@ class ExecutorCoreTests(unittest.TestCase):
                 ExecutionStep(
                     id="example.recipe/copy",
                     recipe_ref="example.recipe",
-                    type=StepType.COPY_FILES,
+                    type="copy_files",
                     name="Copy",
                     params={
                         "source": LiteralParamValue(
@@ -563,7 +596,7 @@ class ExecutorCoreTests(unittest.TestCase):
                     ExecutionStep(
                         id="example.recipe/copy",
                         recipe_ref="example.recipe",
-                        type=StepType.COPY_FILES,
+                        type="copy_files",
                         name="Copy",
                         params={
                             "source": LiteralParamValue(
@@ -593,7 +626,7 @@ class ExecutorCoreTests(unittest.TestCase):
                     ExecutionStep(
                         id="example.recipe/fail",
                         recipe_ref="example.recipe",
-                        type=StepType.COPY_FILES,
+                        type="copy_files",
                         name="Fail",
                         params={
                             "source": RefParamValue(ref="inputs.example.recipe/missing"),
@@ -603,7 +636,7 @@ class ExecutorCoreTests(unittest.TestCase):
                     ExecutionStep(
                         id="example.recipe/downstream",
                         recipe_ref="example.recipe",
-                        type=StepType.COPY_FILES,
+                        type="copy_files",
                         name="Downstream",
                         dependencies=("example.recipe/fail",),
                         params={
@@ -622,14 +655,14 @@ class ExecutorCoreTests(unittest.TestCase):
                 ExecutionStep(
                     id="example.recipe/fail",
                     recipe_ref="example.recipe",
-                    type=StepType.WAIT,
+                    type="wait",
                     name="Fail",
                     params={"duration_ms": LiteralParamValue(value=0)},
                 ),
                 ExecutionStep(
                     id="example.recipe/downstream",
                     recipe_ref="example.recipe",
-                    type=StepType.COPY_FILES,
+                    type="copy_files",
                     name="Downstream",
                     dependencies=("example.recipe/fail",),
                     params={
@@ -655,7 +688,7 @@ class ExecutorCoreTests(unittest.TestCase):
                     ExecutionStep(
                         id="example.recipe/skipped",
                         recipe_ref="example.recipe",
-                        type=StepType.LAUNCH_APP,
+                        type="launch_app",
                         name="Skipped",
                         skip_if=(StepCondition(type="package_installed", params={"package_name": "com.example.skip"}),),
                         params={"package_name": LiteralParamValue(value="com.example.skip")},
@@ -663,7 +696,7 @@ class ExecutorCoreTests(unittest.TestCase):
                     ExecutionStep(
                         id="example.recipe/copy",
                         recipe_ref="example.recipe",
-                        type=StepType.COPY_FILES,
+                        type="copy_files",
                         name="Copy",
                         dependencies=("example.recipe/skipped",),
                         params={
@@ -684,14 +717,14 @@ class ExecutorCoreTests(unittest.TestCase):
                 ExecutionStep(
                     id="example.recipe/fail",
                     recipe_ref="example.recipe",
-                    type=StepType.WAIT,
+                    type="wait",
                     name="Fail",
                     params={"duration_ms": LiteralParamValue(value=0)},
                 ),
                 ExecutionStep(
                     id="example.recipe/downstream",
                     recipe_ref="example.recipe",
-                    type=StepType.WAIT,
+                    type="wait",
                     name="Downstream",
                     dependencies=("example.recipe/fail",),
                     params={"duration_ms": LiteralParamValue(value=10)},
@@ -716,14 +749,14 @@ class ExecutorCoreTests(unittest.TestCase):
                 ExecutionStep(
                     id="example.recipe/resolve",
                     recipe_ref="example.recipe",
-                    type=StepType.RESOLVE_ARTIFACTS,
+                    type="resolve_artifacts",
                     name="Resolve",
                     params={"artifacts": LiteralParamValue(value=["example.recipe/archive"])},
                 ),
                 ExecutionStep(
                     id="example.recipe/grant",
                     recipe_ref="example.recipe",
-                    type=StepType.GRANT_PERMISSIONS,
+                    type="grant_permissions",
                     name="Grant",
                     dependencies=("example.recipe/resolve",),
                     params={
@@ -764,7 +797,7 @@ class ExecutorCoreTests(unittest.TestCase):
                 ExecutionStep(
                     id="example.recipe/resolve",
                     recipe_ref="example.recipe",
-                    type=StepType.RESOLVE_ARTIFACTS,
+                    type="resolve_artifacts",
                     name="Resolve",
                     params={"artifacts": LiteralParamValue(value=["example.recipe/archive"])},
                 ),
@@ -877,7 +910,7 @@ class ExecutorCoreTests(unittest.TestCase):
                     ExecutionStep(
                         id="example.recipe/copy_database_rdb",
                         recipe_ref="example.recipe",
-                        type=StepType.COPY_FILES,
+                        type="copy_files",
                         name="Copy database",
                         params={
                             "source": LiteralParamValue(

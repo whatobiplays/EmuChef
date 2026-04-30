@@ -12,9 +12,10 @@ Supported steps are first-party built-in plugins registered in the in-repo step
 registry. The registry is the source of truth for step specs, planner hooks,
 executor handler lookup, primary outputs, and editor-safe metadata.
 
-`StepType` remains the step identifier model for authored recipes and execution
-plans in this phase. External plugin loading and string/plugin-owned step ids are
-deferred follow-up work.
+Step type ids are plain registry-owned strings. Authored recipes and execution
+plans still use the same visible YAML values, such as `copy_files` and
+`grant_permissions`, and `schema_version: 1` remains current. External plugin
+loading is deferred follow-up work.
 
 ## Editor
 

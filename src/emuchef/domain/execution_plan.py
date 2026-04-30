@@ -14,7 +14,7 @@ from .device_profiles import RuntimeCapabilities
 from .param_values import ParamValue
 from .runtime_state import RuntimeValue
 from .step import StepCondition, StepConstraints
-from .step_types import StepType
+from .step_types import StepTypeId
 
 
 @dataclass(frozen=True, slots=True)
@@ -43,7 +43,7 @@ class ExecutionArtifact:
 class ExecutionStep:
     id: str
     recipe_ref: str
-    type: StepType
+    type: StepTypeId
     name: str
     dependencies: tuple[str, ...] = ()
     constraints: StepConstraints = field(default_factory=StepConstraints)

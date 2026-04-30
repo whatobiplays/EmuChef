@@ -22,8 +22,8 @@ from emuchef.domain import (
     RuntimeValueType,
     StepCondition,
     StepConstraints,
-    StepType,
 )
+from emuchef.steps import builtin_step_registry
 
 from .serde import load_yaml
 
@@ -102,10 +102,15 @@ def _parse_execution_step(data: Mapping[str, Any]) -> ExecutionStep:
     planner_only_fields = set(data) & PLANNER_ONLY_STEP_KEYS
     if planner_only_fields:
         raise ValueError(f"Execution step contains planner-only fields: {sorted(planner_only_fields)}")
+    step_type = str(data["type"])
+    try:
+        builtin_step_registry().require(step_type)
+    except KeyError as exc:
+        raise ValueError(f"Unsupported step type {step_type!r}.") from exc
     return ExecutionStep(
         id=str(data["id"]),
         recipe_ref=str(data["recipe_ref"]),
-        type=StepType(str(data["type"])),
+        type=step_type,
         name=str(data["name"]),
         dependencies=tuple(str(item) for item in data.get("dependencies", [])),
         constraints=StepConstraints(

@@ -1,9 +1,9 @@
 """Contracts for first-party step plugins.
 
-The registry is the canonical source of supported step behavior. Core models
-still use :class:`StepType` identifiers in this pre-external-plugin phase, but
-planner, executor, and editor code should ask the registry for step-specific
-behavior instead of maintaining parallel step maps.
+The registry is the canonical source of supported step behavior. Step type ids
+are plain strings owned by registered plugins, and planner, executor, and editor
+code should ask the registry for step-specific behavior instead of maintaining
+parallel step maps.
 """
 
 from __future__ import annotations
@@ -15,7 +15,7 @@ from typing import Any
 
 from emuchef.domain.runtime_state import RuntimeValueType
 from emuchef.domain.step_specs import StepSpec
-from emuchef.domain.step_types import StepType
+from emuchef.domain.step_types import StepTypeId
 
 StepHandler = Callable[[Any, Any, Mapping[str, object]], dict[str, object]]
 StepValidationHook = Callable[[str, Any, Mapping[str, object], Any | None], tuple[Any, ...]]
@@ -54,7 +54,7 @@ class StepEditorMetadata:
 class StepPlugin:
     """A built-in step plugin with planner, executor, and editor metadata."""
 
-    type: StepType
+    type: StepTypeId
     spec: StepSpec | None
     handler: StepHandler | None
     editor: StepEditorMetadata | None
@@ -69,7 +69,7 @@ class StepPlugin:
     def primary_output(self) -> StepOutputMetadata | None:
         primaries = [output for output in self.outputs if output.primary]
         if len(primaries) > 1:
-            raise ValueError(f"Step plugin {self.type.value!r} declares multiple primary outputs.")
+            raise ValueError(f"Step plugin {self.type!r} declares multiple primary outputs.")
         return primaries[0] if primaries else None
 
 
@@ -78,22 +78,24 @@ class StepRegistry:
 
     def __init__(self, plugins: Iterable[StepPlugin]) -> None:
         ordered = tuple(plugins)
-        by_type: dict[StepType, StepPlugin] = {}
+        by_type: dict[StepTypeId, StepPlugin] = {}
         for plugin in ordered:
+            if not isinstance(plugin.type, str) or not plugin.type.strip():
+                raise ValueError(f"Step plugin has invalid step type id {plugin.type!r}.")
             if plugin.type in by_type:
-                raise ValueError(f"Duplicate step plugin for {plugin.type.value!r}.")
+                raise ValueError(f"Duplicate step plugin for {plugin.type!r}.")
             if plugin.spec is None:
-                raise ValueError(f"Step plugin {plugin.type.value!r} is missing a StepSpec.")
-            if plugin.spec.type_name is not plugin.type:
+                raise ValueError(f"Step plugin {plugin.type!r} is missing a StepSpec.")
+            if plugin.spec.type_name != plugin.type:
                 raise ValueError(
-                    f"Step plugin {plugin.type.value!r} has mismatched StepSpec type {plugin.spec.type_name.value!r}."
+                    f"Step plugin {plugin.type!r} has mismatched StepSpec type {plugin.spec.type_name!r}."
                 )
             if plugin.handler is None:
-                raise ValueError(f"Step plugin {plugin.type.value!r} is missing an executor handler.")
+                raise ValueError(f"Step plugin {plugin.type!r} is missing an executor handler.")
             if plugin.editor is None:
-                raise ValueError(f"Step plugin {plugin.type.value!r} is missing editor metadata.")
+                raise ValueError(f"Step plugin {plugin.type!r} is missing editor metadata.")
             if plugin.primary_output is not None and plugin.spec.primary_output_name != plugin.primary_output.name:
-                raise ValueError(f"Step plugin {plugin.type.value!r} primary output metadata does not match StepSpec.")
+                raise ValueError(f"Step plugin {plugin.type!r} primary output metadata does not match StepSpec.")
             by_type[plugin.type] = plugin
         self._plugins = ordered
         self._by_type = MappingProxyType(by_type)
@@ -117,33 +119,33 @@ class StepRegistry:
         return self._plugins
 
     @property
-    def step_types(self) -> tuple[StepType, ...]:
+    def step_types(self) -> tuple[StepTypeId, ...]:
         return tuple(plugin.type for plugin in self._plugins)
 
     @property
-    def step_specs(self) -> Mapping[StepType, StepSpec]:
+    def step_specs(self) -> Mapping[StepTypeId, StepSpec]:
         return self._step_specs
 
     @property
-    def primary_output_names(self) -> Mapping[StepType, str]:
+    def primary_output_names(self) -> Mapping[StepTypeId, str]:
         return self._primary_output_names
 
-    def get(self, step_type: StepType) -> StepPlugin | None:
+    def get(self, step_type: StepTypeId) -> StepPlugin | None:
         return self._by_type.get(step_type)
 
-    def require(self, step_type: StepType) -> StepPlugin:
+    def require(self, step_type: StepTypeId) -> StepPlugin:
         plugin = self.get(step_type)
         if plugin is None:
-            raise KeyError(f"Unsupported step type {step_type.value!r}.")
+            raise KeyError(f"Unsupported step type {step_type!r}.")
         return plugin
 
-    def primary_output_name(self, step_type: StepType) -> str | None:
+    def primary_output_name(self, step_type: StepTypeId) -> str | None:
         plugin = self.get(step_type)
         if plugin is None:
             return None
         primary = plugin.primary_output
         return primary.name if primary is not None else None
 
-    def editor_metadata(self, step_type: StepType) -> StepEditorMetadata | None:
+    def editor_metadata(self, step_type: StepTypeId) -> StepEditorMetadata | None:
         plugin = self.get(step_type)
         return plugin.editor if plugin is not None else None

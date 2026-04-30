@@ -80,7 +80,7 @@ def validate_artifact_selection(
         errors.append(
             ErrorMessage(
                 code=ErrorCode.PARAM_CONTRACT_VIOLATION,
-                message=f"Param 'artifact_groups' must be a list of strings for step type {step.type.value!r}.",
+                message=f"Param 'artifact_groups' must be a list of strings for step type {step.type!r}.",
                 details={"recipe_ref": recipe_ref, "step_id": step_id, "param": "artifact_groups"},
             )
         )
@@ -165,7 +165,7 @@ def validate_package_name(
         return (
             ErrorMessage(
                 code=ErrorCode.PARAM_CONTRACT_VIOLATION,
-                message=f"Param 'package_name' must be a non-empty string for step type {step.type.value!r}.",
+                message=f"Param 'package_name' must be a non-empty string for step type {step.type!r}.",
                 details={"recipe_ref": recipe_ref, "step_id": step.id, "param": "package_name"},
             ),
         )

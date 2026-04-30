@@ -20,7 +20,6 @@ from emuchef.domain import (
     Step,
     StepCondition,
     StepConstraints,
-    StepType,
     parse_reference,
 )
 from emuchef.steps import builtin_step_registry
@@ -192,7 +191,7 @@ class ReorderArtifactGroupMemberCommand:
 @dataclass(frozen=True, slots=True)
 class AddStepCommand:
     step_id: str
-    step_type: StepType | str
+    step_type: str
     name: str
     index: int | None = None
 
@@ -818,7 +817,7 @@ def _step_index(steps: tuple[Step, ...], step_id: str) -> int:
 
 
 def _normalize_step_params(
-    step_type: StepType,
+    step_type: str,
     params: Mapping[str, AuthoredParamValue],
 ) -> dict[str, AuthoredParamValue]:
     normalized = dict(params)
@@ -1096,10 +1095,10 @@ def _coerce_artifact_cache(value: object) -> ArtifactCacheMode:
     return ArtifactCacheMode(str(value))
 
 
-def _coerce_supported_step_type(value: object) -> StepType:
-    step_type = value if isinstance(value, StepType) else StepType(str(value))
+def _coerce_supported_step_type(value: object) -> str:
+    step_type = str(value)
     if step_type not in builtin_step_registry():
-        raise ValueError(f"Unsupported step type {step_type.value!r}.")
+        raise ValueError(f"Unsupported step type {step_type!r}.")
     return step_type
 
 

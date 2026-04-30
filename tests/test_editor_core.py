@@ -10,7 +10,6 @@ from emuchef.domain import (
     RefParamValue,
     StepCondition,
     StepConstraints,
-    StepType,
 )
 from emuchef.io import load_authored_recipe
 from emuchef_editor.app.workspace.service import open_workspace, resolve_authored_root
@@ -940,15 +939,15 @@ class EditorCoreTests(unittest.TestCase):
             document = load_recipe_document(authored_root / "recipes" / "example_recipe.yaml")
 
             additions = (
-                ("resolve", StepType.RESOLVE_ARTIFACTS, "Resolve Artifacts"),
-                ("extract", StepType.EXTRACT_ARTIFACTS, "Extract Artifacts"),
-                ("unpack", StepType.EXTRACT_ARCHIVE, "Extract Archive"),
-                ("copy", StepType.COPY_FILES, "Copy Files"),
-                ("install", StepType.INSTALL_APK, "Install APK"),
-                ("grant", StepType.GRANT_PERMISSIONS, "Grant Permissions"),
-                ("launch", StepType.LAUNCH_APP, "Launch App"),
-                ("pause", StepType.WAIT, "Wait"),
-                ("stop", StepType.FORCE_STOP_APP, "Force Stop"),
+                ("resolve", "resolve_artifacts", "Resolve Artifacts"),
+                ("extract", "extract_artifacts", "Extract Artifacts"),
+                ("unpack", "extract_archive", "Extract Archive"),
+                ("copy", "copy_files", "Copy Files"),
+                ("install", "install_apk", "Install APK"),
+                ("grant", "grant_permissions", "Grant Permissions"),
+                ("launch", "launch_app", "Launch App"),
+                ("pause", "wait", "Wait"),
+                ("stop", "force_stop_app", "Force Stop"),
             )
             for step_id, step_type, name in additions:
                 self.assertTrue(document.apply_command(AddStepCommand(step_id=step_id, step_type=step_type, name=name)))
@@ -1083,15 +1082,15 @@ class EditorCoreTests(unittest.TestCase):
             self.assertEqual(
                 tuple(step.type for step in document.working_recipe.steps),
                 (
-                    StepType.COPY_FILES,
-                    StepType.RESOLVE_ARTIFACTS,
-                    StepType.EXTRACT_ARTIFACTS,
-                    StepType.EXTRACT_ARCHIVE,
-                    StepType.COPY_FILES,
-                    StepType.INSTALL_APK,
-                    StepType.LAUNCH_APP,
-                    StepType.WAIT,
-                    StepType.FORCE_STOP_APP,
+                    "copy_files",
+                    "resolve_artifacts",
+                    "extract_artifacts",
+                    "extract_archive",
+                    "copy_files",
+                    "install_apk",
+                    "launch_app",
+                    "wait",
+                    "force_stop_app",
                 ),
             )
             copy_step = next(step for step in document.working_recipe.steps if step.id == "copy")

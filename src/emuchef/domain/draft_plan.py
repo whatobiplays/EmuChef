@@ -12,7 +12,7 @@ from .device_context import DeviceContext
 from .device_profiles import RuntimeCapabilities
 from .issues import AvailabilityReason, WarningMessage
 from .param_values import JSONValue
-from .step_types import StepType
+from .step_types import StepTypeId
 
 
 class Availability(str, Enum):
@@ -41,7 +41,7 @@ class DraftRecipeState:
 class DraftStepState:
     id: str
     recipe_ref: str
-    type: StepType
+    type: StepTypeId
     name: str
     selected: bool
     user_toggleable: bool
