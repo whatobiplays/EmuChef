@@ -1,0 +1,39 @@
+schema_version: 1
+kind: app_definition
+id: retroarch
+name: RetroArch (AArch64)
+description: Multi-system emulator frontend.
+category: emulator
+package:
+  primary: com.retroarch
+  aliases: []
+install_source:
+  type: local_placeholder
+  resolver: none
+  options:
+    path: sample_artifacts/RetroArch_aarch64.apk
+tracking_source:
+  type: obtainium_config_snapshot
+  config_snapshot: vendor/obtainium/apps/retroarch.json
+  app_id: retroarch
+artifacts:
+  apk:
+    required: true
+  shared_storage_config:
+    supported: false
+  app_data_config:
+    supported: false
+  byo_apk:
+    required: false
+provisioning:
+  launch_once_recommended: true
+  shared_storage_paths:
+    - /sdcard/RetroArch/
+  app_data_paths: []
+  config_targets: []
+inputs: []
+metadata:
+  homepage: https://www.retroarch.com/
+  tags:
+    - emulator
+    - frontend

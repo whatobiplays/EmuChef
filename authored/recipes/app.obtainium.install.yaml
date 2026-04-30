@@ -1,0 +1,46 @@
+schema_version: 1
+kind: recipe
+id: app.obtainium.install
+name: Install Obtainium
+description: Install Obtainium for tracking emulator APKs.
+recipe_dependencies: []
+provides:
+  features:
+    - obtainium_install
+artifacts:
+  obtainium_apk:
+    type: remote_file
+    url: https://github.com/ImranR98/Obtainium/releases/latest/download/app-release.apk
+    cache: default
+steps:
+  - id: resolve_artifacts
+    type: resolve_artifacts
+    name: Resolve Obtainium APK
+    user_toggleable: false
+    dependencies: []
+    constraints:
+      capabilities: []
+      conflicts_with: []
+    params:
+      artifacts:
+        - obtainium_apk
+    verify: []
+  - id: install_obtainium
+    type: install_apk
+    name: Install Obtainium
+    user_toggleable: false
+    dependencies:
+      - resolve_artifacts
+    constraints:
+      capabilities:
+        - apk_install
+      conflicts_with: []
+    skip_if:
+      - type: package_installed
+        params:
+          package_name: dev.imranr.obtainium
+    params:
+      app:
+        ref: artifacts.obtainium_apk.local_path
+      replace_existing: false
+    verify: []

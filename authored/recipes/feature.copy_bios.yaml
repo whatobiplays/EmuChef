@@ -1,0 +1,46 @@
+schema_version: 1
+kind: recipe
+id: feature.copy_bios
+name: Copy BIOS Files
+description: Copy BIOS files into shared storage.
+recipe_dependencies: []
+provides:
+  features:
+    - bios_copy
+inputs:
+  bios_source_dir:
+    type: directory
+    role: bios
+    label: BIOS Folder
+    description: Folder containing BIOS files to copy.
+    required: true
+    multiple: false
+    validation:
+      must_exist: true
+      allowed_extensions: []
+      path_kind: directory
+    default: null
+    metadata:
+      tags:
+        - byo
+        - bios
+steps:
+  - id: copy_bios_dir
+    type: copy_files
+    name: Copy BIOS folder
+    user_toggleable: true
+    dependencies: []
+    constraints:
+      capabilities:
+        - shared_storage_write
+      conflicts_with: []
+    skip_if: []
+    params:
+      source:
+        ref: inputs.bios_source_dir
+      dest: /sdcard/RetroArch/system
+      copy_policy: sync
+    verify:
+      - type: path_exists
+        params:
+          path: /sdcard/RetroArch/system

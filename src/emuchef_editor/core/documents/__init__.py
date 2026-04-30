@@ -1,0 +1,2 @@
+"""Editor document models."""
+

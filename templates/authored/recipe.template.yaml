@@ -1,0 +1,215 @@
+# Example authored recipe template.
+# Copy this file into authored/recipes/ and replace placeholder values.
+# Files under templates/ are examples only and are never loaded by EmuChef.
+# Accepted top-level values:
+# - schema_version: 1
+# - kind: recipe
+# Author refs stay recipe-local in YAML:
+# - inputs.<id>
+# - artifacts.<id>.<field>
+# - steps.<id>
+# - steps.<id>.outputs.<field>
+# Literal params are authored directly. Only refs use { ref: ... }.
+# For copy_files with a single file source:
+# - use an explicit destination file path when you want a specific filename
+# - use a bare directory path only if you intentionally rely on runtime
+#   directory-existence semantics
+
+schema_version: 1
+kind: recipe
+id: example.recipe.template
+name: Example Recipe Name
+description: Replace with the provisioning behavior this recipe performs.
+recipe_dependencies:
+  - example.dependency.recipe
+provides:
+  features:
+    - example_feature
+inputs:
+  # Accepted input values:
+  # - type: file | directory
+  # - role: apk | bios | roms | config_bundle | generic
+  # Optional inputs (`required: false`) do not fail planning when unbound.
+  # Any selected step with a direct `inputs.<id>` ref to an unbound optional
+  # input is pruned from the draft before final binding enforcement.
+  example_source_dir:
+    type: directory
+    role: generic
+    label: Example Source Directory
+    description: Local directory that will be copied onto the device.
+    required: true
+    multiple: false
+    validation:
+      must_exist: true
+      # If you use allowed_extensions for file inputs, entries may be written
+      # either with or without the leading dot, for example .cfg or cfg.
+      allowed_extensions: []
+      path_kind: directory
+    default: null
+artifacts:
+  example_app_apk:
+    # v1 artifact types:
+    # - remote_file
+    type: remote_file
+    url: https://example.com/example-app.apk
+    # cache: default | none
+    cache: default
+  example_core_zip:
+    type: remote_file
+    url: https://example.com/example-core.zip
+    cache: default
+artifact_groups:
+  example_cores:
+    - example_core_zip
+steps:
+  - id: resolve_example_artifacts
+    # Supported v1 step types:
+    # - resolve_artifacts
+    # - extract_artifacts
+    # - extract_archive
+    # - copy_files
+    # - install_apk
+    # - launch_app
+    # - wait
+    # - force_stop_app
+    # - grant_permissions
+    type: resolve_artifacts
+    name: Resolve example artifacts
+    user_toggleable: false
+    dependencies: []
+    constraints:
+      # Known capability names:
+      # - adb_available
+      # - apk_install
+      # - shared_storage_write
+      # - app_launch
+      # - shell_command
+      # - package_remove_for_user
+      # - root_shell
+      # - app_data_write
+      capabilities: []
+      # conflicts_with contains step ids from this same recipe.
+      conflicts_with: []
+    params:
+      artifacts:
+        - example_app_apk
+      artifact_groups:
+        - example_cores
+    verify: []
+  - id: extract_example_cores
+    type: extract_artifacts
+    name: Extract example cores
+    user_toggleable: false
+    dependencies:
+      - resolve_example_artifacts
+    constraints:
+      capabilities: []
+      conflicts_with: []
+    params:
+      artifact_groups:
+        - example_cores
+      # extract_on: host | device
+      extract_on: host
+    verify: []
+  - id: install_example_app
+    type: install_apk
+    name: Install example app
+    user_toggleable: false
+    dependencies:
+      - resolve_example_artifacts
+    constraints:
+      capabilities:
+        - apk_install
+      conflicts_with: []
+    skip_if:
+      # Current v1 condition types:
+      # - path_exists      params.path
+      # - file_exists      params.path
+      # - package_installed params.package_name
+      - type: package_installed
+        params:
+          package_name: com.example.app
+    params:
+      app:
+        ref: artifacts.example_app_apk.local_path
+      # replace_existing: true | false
+      replace_existing: false
+    verify: []
+  - id: copy_example_assets
+    type: copy_files
+    name: Copy example assets
+    user_toggleable: true
+    dependencies:
+      - extract_example_cores
+    constraints:
+      capabilities:
+        - shared_storage_write
+      conflicts_with: []
+    params:
+      source:
+        ref: steps.extract_example_cores
+      dest: /sdcard/ExampleAssets
+      # copy_policy: merge | sync | replace
+      copy_policy: sync
+    verify:
+      - type: path_exists
+        params:
+          path: /sdcard/ExampleAssets
+  - id: wait_for_example_bootstrap
+    type: wait
+    name: Wait for bootstrap
+    user_toggleable: false
+    dependencies:
+      - install_example_app
+    constraints:
+      capabilities: []
+      conflicts_with: []
+    params:
+      # wait params:
+      # - duration_ms: positive integer milliseconds
+      duration_ms: 1500
+    verify: []
+  - id: force_stop_example_app
+    type: force_stop_app
+    name: Force stop example app
+    user_toggleable: false
+    dependencies:
+      - wait_for_example_bootstrap
+    constraints:
+      capabilities: []
+      conflicts_with: []
+    params:
+      # force_stop_app params:
+      # - package_name: non-empty string
+      package_name: com.example.app
+    verify: []
+  - id: grant_example_permissions
+    type: grant_permissions
+    name: Grant example permissions
+    user_toggleable: false
+    dependencies:
+      - force_stop_example_app
+    constraints:
+      capabilities: []
+      conflicts_with: []
+    # grant_permissions actions are authored on this step. Multiple grant steps
+    # are allowed, and each step applies only the runtime/appops items declared
+    # in its own params.
+    params:
+      runtime:
+        - package_name: com.example.app
+          name: android.permission.POST_NOTIFICATIONS
+          required: false
+          when:
+            android_api_min: 33
+      appops:
+        - package_name: com.example.app
+          op: MANAGE_EXTERNAL_STORAGE
+          mode: allow
+          required: false
+          when:
+            rooted: true
+      policy:
+        on_failure: warn
+        require_all: false
+    verify: []

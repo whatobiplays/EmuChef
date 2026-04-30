@@ -1,0 +1,29 @@
+schema_version: 1
+kind: device_profile
+id: ayaneo.pocket_air_mini
+name: AYANEO Pocket Air Mini
+description: Profile for the AYANEO Pocket Air Mini.
+match:
+  manufacturer_contains:
+    - ARBOR
+  brand_contains:
+    - ARBOR
+    - AYANEO
+  model_patterns:
+    - 'GT78-VN'
+  android_version:
+    min: 11
+capability_defaults:
+  adb_available: true
+  apk_install: true
+  shared_storage_write: true
+  app_launch: true
+  shell_command: true
+  package_remove_for_user: true
+  root_shell: false
+  app_data_write: false
+device_tags:
+  - handheld_android
+  - brand_ayaneo
+metadata:
+  vendor: AYANEO

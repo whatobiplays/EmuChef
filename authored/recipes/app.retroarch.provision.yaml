@@ -1,0 +1,703 @@
+schema_version: 1
+kind: recipe
+id: app.retroarch.provision
+name: Provision RetroArch (AArch64)
+description: Install RetroArch, bootstrap permissions, seed config, copy selected
+  cores, then relaunch.
+recipe_dependencies: []
+provides:
+  features:
+  - retroarch_provision
+inputs:
+  retroarch_cfg:
+    type: file
+    role: generic
+    label: RetroArch config
+    description: RetroArch config file.
+    required: false
+    multiple: false
+    validation:
+      must_exist: true
+      allowed_extensions:
+      - cfg
+      path_kind: file
+    default: null
+artifacts:
+  retroarch_apk:
+    type: remote_file
+    url: https://buildbot.libretro.com/nightly/android/RetroArch_aarch64.apk
+    cache: default
+  asset_assets_zip:
+    type: remote_file
+    url: https://buildbot.libretro.com/assets/frontend/assets.zip
+    cache: default
+  asset_autoconfig_zip:
+    type: remote_file
+    url: https://buildbot.libretro.com/assets/frontend/autoconfig.zip
+    cache: default
+  asset_cheats_zip:
+    type: remote_file
+    url: https://buildbot.libretro.com/assets/frontend/cheats.zip
+    cache: default
+  asset_database_rdb_zip:
+    type: remote_file
+    url: https://buildbot.libretro.com/assets/frontend/database-rdb.zip
+    cache: default
+  asset_info_zip:
+    type: remote_file
+    url: https://buildbot.libretro.com/assets/frontend/info.zip
+    cache: default
+  asset_overlays_zip:
+    type: remote_file
+    url: https://buildbot.libretro.com/assets/frontend/overlays.zip
+    cache: default
+  asset_shaders_glsl_zip:
+    type: remote_file
+    url: https://buildbot.libretro.com/assets/frontend/shaders_glsl.zip
+    cache: default
+  core_dolphin_zip:
+    type: remote_file
+    url: http://buildbot.libretro.com/nightly/android/latest/arm64-v8a/dolphin_libretro_android.so.zip
+    cache: default
+  core_fbneo_zip:
+    type: remote_file
+    url: http://buildbot.libretro.com/nightly/android/latest/arm64-v8a/fbneo_libretro_android.so.zip
+    cache: default
+  core_fceumm_zip:
+    type: remote_file
+    url: http://buildbot.libretro.com/nightly/android/latest/arm64-v8a/fceumm_libretro_android.so.zip
+    cache: default
+  core_flycast_zip:
+    type: remote_file
+    url: http://buildbot.libretro.com/nightly/android/latest/arm64-v8a/flycast_libretro_android.so.zip
+    cache: default
+  core_gambatte_zip:
+    type: remote_file
+    url: http://buildbot.libretro.com/nightly/android/latest/arm64-v8a/gambatte_libretro_android.so.zip
+    cache: default
+  core_genesis_plus_gx_zip:
+    type: remote_file
+    url: http://buildbot.libretro.com/nightly/android/latest/arm64-v8a/genesis_plus_gx_libretro_android.so.zip
+    cache: default
+  core_handy_zip:
+    type: remote_file
+    url: http://buildbot.libretro.com/nightly/android/latest/arm64-v8a/handy_libretro_android.so.zip
+    cache: default
+  core_mednafen_saturn_zip:
+    type: remote_file
+    url: http://buildbot.libretro.com/nightly/android/latest/arm64-v8a/mednafen_saturn_libretro_android.so.zip
+    cache: default
+  core_melondsds_zip:
+    type: remote_file
+    url: http://buildbot.libretro.com/nightly/android/latest/arm64-v8a/melondsds_libretro_android.so.zip
+    cache: default
+  core_mupen64plus_next_gles3_zip:
+    type: remote_file
+    url: http://buildbot.libretro.com/nightly/android/latest/arm64-v8a/mupen64plus_next_gles3_libretro_android.so.zip
+    cache: default
+  core_pokemini_zip:
+    type: remote_file
+    url: http://buildbot.libretro.com/nightly/android/latest/arm64-v8a/pokemini_libretro_android.so.zip
+    cache: default
+  core_ppsspp_zip:
+    type: remote_file
+    url: http://buildbot.libretro.com/nightly/android/latest/arm64-v8a/ppsspp_libretro_android.so.zip
+    cache: default
+  core_snes9x_zip:
+    type: remote_file
+    url: http://buildbot.libretro.com/nightly/android/latest/arm64-v8a/snes9x_libretro_android.so.zip
+    cache: default
+  core_files_dolphin_zip:
+    type: remote_file
+    url: https://buildbot.libretro.com/assets/system/Dolphin.zip
+    cache: default
+  core_files_fbneo_zip:
+    type: remote_file
+    url: https://buildbot.libretro.com/assets/system/FinalBurn%20Neo%20%28hiscore%29.zip
+    cache: default
+  core_files_ppsspp_zip:
+    type: remote_file
+    url: https://buildbot.libretro.com/assets/system/PPSSPP.zip
+    cache: default
+artifact_groups:
+  retroarch_assets:
+  - asset_assets_zip
+  - asset_autoconfig_zip
+  - asset_cheats_zip
+  - asset_database_rdb_zip
+  - asset_info_zip
+  - asset_overlays_zip
+  - asset_shaders_glsl_zip
+  retroarch_cores:
+  - core_dolphin_zip
+  - core_fbneo_zip
+  - core_fceumm_zip
+  - core_flycast_zip
+  - core_gambatte_zip
+  - core_genesis_plus_gx_zip
+  - core_handy_zip
+  - core_mednafen_saturn_zip
+  - core_melondsds_zip
+  - core_mupen64plus_next_gles3_zip
+  - core_pokemini_zip
+  - core_ppsspp_zip
+  - core_snes9x_zip
+  retroarch_core_system_files:
+  - core_files_dolphin_zip
+  - core_files_fbneo_zip
+  - core_files_ppsspp_zip
+steps:
+- id: resolve_artifacts
+  type: resolve_artifacts
+  name: Resolve RetroArch artifacts
+  user_toggleable: false
+  dependencies: []
+  constraints:
+    capabilities: []
+    conflicts_with: []
+  skip_if: []
+  params:
+    artifacts:
+    - retroarch_apk
+    artifact_groups:
+    - retroarch_assets
+    - retroarch_cores
+    - retroarch_core_system_files
+  verify: []
+- id: install_retroarch
+  type: install_apk
+  name: Install RetroArch
+  description: Install the RetroArch APK.
+  user_toggleable: false
+  dependencies:
+  - resolve_artifacts
+  constraints:
+    capabilities:
+    - apk_install
+    conflicts_with: []
+  skip_if:
+  - type: package_installed
+    params:
+      package_name: com.retroarch.aarch64
+  params:
+    app:
+      ref: artifacts.retroarch_apk.local_path
+    replace_existing: false
+  verify: []
+- id: launch_retroarch_bootstrap
+  type: launch_app
+  name: Launch RetroArch for bootstrap
+  description: Launch RetroArch once so it can initialize its storage and defaults.
+  user_toggleable: false
+  dependencies:
+  - install_retroarch
+  constraints:
+    capabilities:
+    - app_launch
+    conflicts_with: []
+  skip_if: []
+  params:
+    package_name: com.retroarch.aarch64
+  verify: []
+- id: wait_for_retroarch_bootstrap
+  type: wait
+  name: Wait for RetroArch bootstrap
+  description: Pause briefly to let RetroArch finish bootstrap work.
+  user_toggleable: false
+  dependencies:
+  - launch_retroarch_bootstrap
+  constraints:
+    capabilities: []
+    conflicts_with: []
+  skip_if: []
+  params:
+    duration_ms: 1500
+  verify: []
+- id: stop_retroarch_after_bootstrap
+  type: force_stop_app
+  name: Force stop RetroArch after bootstrap
+  user_toggleable: false
+  dependencies:
+  - wait_for_retroarch_bootstrap
+  constraints:
+    capabilities: []
+    conflicts_with: []
+  skip_if: []
+  params:
+    package_name: com.retroarch.aarch64
+  verify: []
+- id: grant_retroarch_permissions
+  type: grant_permissions
+  name: Grant RetroArch permissions
+  description: Apply this step's declared RetroArch permissions.
+  user_toggleable: false
+  dependencies:
+  - stop_retroarch_after_bootstrap
+  constraints:
+    capabilities: []
+    conflicts_with: []
+  skip_if: []
+  params:
+    runtime:
+    - package_name: com.retroarch.aarch64
+      name: android.permission.POST_NOTIFICATIONS
+      required: false
+      when:
+        android_api_min: 33
+    - package_name: com.retroarch.aarch64
+      name: android.permission.READ_EXTERNAL_STORAGE
+      required: false
+      when:
+        android_api_min: 33
+    - package_name: com.retroarch.aarch64
+      name: android.permission.READ_MEDIA_IMAGES
+      required: false
+      when:
+        android_api_min: 33
+    - package_name: com.retroarch.aarch64
+      name: android.permission.READ_MEDIA_AUDIO
+      required: false
+      when:
+        android_api_min: 33
+    - package_name: com.retroarch.aarch64
+      name: android.permission.READ_MEDIA_VIDEO
+      required: false
+      when:
+        android_api_min: 33
+    - package_name: com.retroarch.aarch64
+      name: android.permission.WRITE_EXTERNAL_STORAGE
+      required: false
+      when:
+        android_api_min: 33
+    - package_name: com.retroarch.aarch64
+      name: android.permission.ACCESS_MEDIA_LOCATION
+      required: false
+      when:
+        android_api_min: 33
+    appops:
+    - package_name: com.retroarch.aarch64
+      op: MANAGE_EXTERNAL_STORAGE
+      mode: allow
+      required: false
+      when:
+        rooted: true
+    policy:
+      on_failure: warn
+      require_all: false
+  verify: []
+- id: launch_retroarch_permissions
+  type: launch_app
+  name: Launch RetroArch after permissions
+  description: Launch RetroArch once so it can initialize its storage and defaults.
+  user_toggleable: false
+  dependencies:
+  - grant_retroarch_permissions
+  constraints:
+    capabilities:
+    - app_launch
+    conflicts_with: []
+  skip_if: []
+  params:
+    package_name: com.retroarch.aarch64
+  verify: []
+- id: wait_for_retroarch_permissions
+  type: wait
+  name: Wait for RetroArch permissions
+  description: Pause briefly to let RetroArch finish permissions work.
+  user_toggleable: false
+  dependencies:
+  - launch_retroarch_permissions
+  constraints:
+    capabilities: []
+    conflicts_with: []
+  skip_if: []
+  params:
+    duration_ms: 5000
+  verify: []
+- id: stop_retroarch_after_permissions
+  type: force_stop_app
+  name: Force stop RetroArch
+  description: Force stop RetroArch after the permissions launch.
+  user_toggleable: false
+  dependencies:
+  - wait_for_retroarch_permissions
+  constraints:
+    capabilities: []
+    conflicts_with: []
+  skip_if: []
+  params:
+    package_name: com.retroarch.aarch64
+  verify: []
+- id: extract_assets
+  type: extract_archive
+  name: Extract RetroArch assets
+  user_toggleable: false
+  dependencies:
+  - resolve_artifacts
+  constraints:
+    capabilities: []
+    conflicts_with: []
+  skip_if: []
+  params:
+    archive:
+      ref: artifacts.asset_assets_zip.local_path
+    extract_on: host
+  verify: []
+- id: copy_assets
+  type: copy_files
+  name: Copy RetroArch assets
+  user_toggleable: false
+  dependencies:
+  - stop_retroarch_after_permissions
+  - extract_assets
+  constraints:
+    capabilities:
+    - app_data_write
+    conflicts_with: []
+  skip_if: []
+  params:
+    source:
+      ref: steps.extract_assets
+    dest: /data/user/0/com.retroarch.aarch64/assets
+    copy_policy: merge
+  verify:
+  - type: path_exists
+    params:
+      path: /data/user/0/com.retroarch.aarch64/assets
+- id: extract_autoconfig
+  type: extract_archive
+  name: Extract RetroArch autoconfig
+  user_toggleable: false
+  dependencies:
+  - resolve_artifacts
+  constraints:
+    capabilities: []
+    conflicts_with: []
+  skip_if: []
+  params:
+    archive:
+      ref: artifacts.asset_autoconfig_zip.local_path
+    extract_on: host
+  verify: []
+- id: copy_autoconfig
+  type: copy_files
+  name: Copy RetroArch autoconfig
+  user_toggleable: false
+  dependencies:
+  - stop_retroarch_after_permissions
+  - extract_autoconfig
+  constraints:
+    capabilities:
+    - app_data_write
+    conflicts_with: []
+  skip_if: []
+  params:
+    source:
+      ref: steps.extract_assets
+    dest: /data/user/0/com.retroarch.aarch64/autoconfig
+    copy_policy: merge
+  verify:
+  - type: path_exists
+    params:
+      path: /data/user/0/com.retroarch.aarch64/autoconfig
+- id: extract_cheats
+  type: extract_archive
+  name: Extract RetroArch cheats
+  user_toggleable: false
+  dependencies:
+  - resolve_artifacts
+  constraints:
+    capabilities: []
+    conflicts_with: []
+  skip_if: []
+  params:
+    archive:
+      ref: artifacts.asset_cheats_zip.local_path
+    extract_on: host
+  verify: []
+- id: copy_cheats
+  type: copy_files
+  name: Copy RetroArch cheats
+  user_toggleable: false
+  dependencies:
+  - stop_retroarch_after_permissions
+  - extract_cheats
+  constraints:
+    capabilities:
+    - app_data_write
+    conflicts_with: []
+  skip_if: []
+  params:
+    source:
+      ref: steps.extract_cheats
+    dest: /storage/emulated/0/RetroArch/cheats
+    copy_policy: merge
+  verify:
+  - type: path_exists
+    params:
+      path: /storage/emulated/0/RetroArch/cheats
+- id: extract_database_rdb
+  type: extract_archive
+  name: Extract RetroArch database
+  user_toggleable: false
+  dependencies:
+  - resolve_artifacts
+  constraints:
+    capabilities: []
+    conflicts_with: []
+  skip_if: []
+  params:
+    archive:
+      ref: artifacts.asset_database_rdb_zip.local_path
+    extract_on: host
+  verify: []
+- id: copy_database_rdb
+  type: copy_files
+  name: Copy RetroArch database
+  user_toggleable: false
+  dependencies:
+  - stop_retroarch_after_permissions
+  - extract_database_rdb
+  constraints:
+    capabilities:
+    - app_data_write
+    conflicts_with: []
+  skip_if: []
+  params:
+    source:
+      ref: steps.extract_database_rdb
+    dest: /data/user/0/com.retroarch.aarch64/database/rdb
+    copy_policy: merge
+  verify:
+  - type: path_exists
+    params:
+      path: /data/user/0/com.retroarch.aarch64/database/rdb
+- id: extract_info
+  type: extract_archive
+  name: Extract RetroArch info
+  user_toggleable: false
+  dependencies:
+  - resolve_artifacts
+  constraints:
+    capabilities: []
+    conflicts_with: []
+  skip_if: []
+  params:
+    archive:
+      ref: artifacts.asset_info_zip.local_path
+    extract_on: host
+  verify: []
+- id: copy_info
+  type: copy_files
+  name: Copy RetroArch info
+  user_toggleable: false
+  dependencies:
+  - stop_retroarch_after_permissions
+  - extract_info
+  constraints:
+    capabilities:
+    - app_data_write
+    conflicts_with: []
+  skip_if: []
+  params:
+    source:
+      ref: steps.extract_info
+    dest: /data/user/0/com.retroarch.aarch64/info
+    copy_policy: merge
+  verify:
+  - type: path_exists
+    params:
+      path: /data/user/0/com.retroarch.aarch64/info
+- id: extract_overlays
+  type: extract_archive
+  name: Extract RetroArch overlays
+  user_toggleable: false
+  dependencies:
+  - resolve_artifacts
+  constraints:
+    capabilities: []
+    conflicts_with: []
+  skip_if: []
+  params:
+    archive:
+      ref: artifacts.asset_overlays_zip.local_path
+    extract_on: host
+  verify: []
+- id: copy_overlays
+  type: copy_files
+  name: Copy RetroArch overlays
+  user_toggleable: false
+  dependencies:
+  - stop_retroarch_after_permissions
+  - extract_overlays
+  constraints:
+    capabilities:
+    - app_data_write
+    conflicts_with: []
+  skip_if: []
+  params:
+    source:
+      ref: steps.extract_overlays
+    dest: /data/user/0/com.retroarch.aarch64/overlays
+    copy_policy: merge
+  verify:
+  - type: path_exists
+    params:
+      path: /data/user/0/com.retroarch.aarch64/overlays
+- id: extract_shaders_glsl
+  type: extract_archive
+  name: Extract RetroArch GLSL shaders
+  user_toggleable: false
+  dependencies:
+  - resolve_artifacts
+  constraints:
+    capabilities: []
+    conflicts_with: []
+  skip_if: []
+  params:
+    archive:
+      ref: artifacts.asset_shaders_glsl_zip.local_path
+    extract_on: host
+  verify: []
+- id: copy_shaders_glsl
+  type: copy_files
+  name: Copy RetroArch GLSL shaders
+  user_toggleable: false
+  dependencies:
+  - stop_retroarch_after_permissions
+  - extract_shaders_glsl
+  constraints:
+    capabilities:
+    - app_data_write
+    conflicts_with: []
+  skip_if: []
+  params:
+    source:
+      ref: steps.extract_shaders_glsl
+    dest: /data/user/0/com.retroarch.aarch64/shaders/shaders_glsl
+    copy_policy: merge
+  verify:
+  - type: path_exists
+    params:
+      path: /data/user/0/com.retroarch.aarch64/shaders/shaders_glsl
+- id: extract_cores
+  type: extract_artifacts
+  name: Extract selected RetroArch cores
+  user_toggleable: false
+  dependencies:
+  - resolve_artifacts
+  constraints:
+    capabilities: []
+    conflicts_with: []
+  skip_if: []
+  params:
+    artifact_groups:
+    - retroarch_cores
+    extract_on: host
+  verify: []
+- id: copy_cores
+  type: copy_files
+  name: Copy selected RetroArch cores
+  user_toggleable: true
+  dependencies:
+  - stop_retroarch_after_permissions
+  - extract_cores
+  constraints:
+    capabilities:
+    - app_data_write
+    conflicts_with: []
+  skip_if: []
+  params:
+    source:
+      ref: steps.extract_cores
+    dest: /data/user/0/com.retroarch.aarch64/cores
+    copy_policy: merge
+  verify:
+  - type: path_exists
+    params:
+      path: /data/user/0/com.retroarch.aarch64/cores
+- id: extract_core_system_files
+  type: extract_artifacts
+  name: Extract selected RetroArch core system files
+  user_toggleable: false
+  dependencies:
+  - resolve_artifacts
+  constraints:
+    capabilities: []
+    conflicts_with: []
+  skip_if: []
+  params:
+    artifact_groups:
+    - retroarch_core_system_files
+    extract_on: host
+  verify: []
+- id: copy_core_system_files
+  type: copy_files
+  name: Copy selected RetroArch core system files
+  user_toggleable: true
+  dependencies:
+  - stop_retroarch_after_permissions
+  - extract_core_system_files
+  constraints:
+    capabilities:
+    - app_data_write
+    conflicts_with: []
+  skip_if: []
+  params:
+    source:
+      ref: steps.extract_core_system_files
+    dest: /storage/emulated/0/RetroArch/system
+    copy_policy: merge
+  verify:
+  - type: path_exists
+    params:
+      path: /storage/emulated/0/RetroArch/system/dolphin-emu
+  - type: path_exists
+    params:
+      path: /storage/emulated/0/RetroArch/system/fbneo
+  - type: path_exists
+    params:
+      path: /storage/emulated/0/RetroArch/system/PPSSPP
+- id: seed_retroarch_cfg
+  type: copy_files
+  name: Copy RetroArch config
+  description: Copy the config file into Android/data folder.
+  user_toggleable: true
+  dependencies:
+  - stop_retroarch_after_permissions
+  constraints:
+    capabilities:
+    - app_data_write
+    conflicts_with: []
+  skip_if: []
+  params:
+    source:
+      ref: inputs.retroarch_cfg
+    dest: /sdcard/Android/data/com.retroarch.aarch64/files/retroarch.cfg
+    copy_policy: replace
+  verify:
+  - type: file_exists
+    params:
+      path: /sdcard/Android/data/com.retroarch.aarch64/files/retroarch.cfg
+- id: launch_retroarch
+  type: launch_app
+  name: Launch RetroArch
+  description: Launch RetroArch again after permissions and optional config seeding.
+  user_toggleable: true
+  dependencies:
+  - copy_assets
+  - copy_autoconfig
+  - copy_database_rdb
+  - copy_info
+  - copy_overlays
+  - copy_shaders_glsl
+  - copy_cores
+  - copy_core_system_files
+  constraints:
+    capabilities:
+    - app_launch
+    conflicts_with: []
+  skip_if: []
+  params:
+    package_name: com.retroarch.aarch64
+  verify: []

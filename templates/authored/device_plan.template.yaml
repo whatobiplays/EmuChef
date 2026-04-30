@@ -1,0 +1,33 @@
+# Example authored device plan template.
+# Copy this file into authored/device_plans/ and replace placeholder values.
+# Device plans point at a device profile and choose default recipes.
+# Accepted top-level values:
+# - schema_version: 1
+# - kind: device_plan
+
+schema_version: 1
+kind: device_plan
+id: example.device_plan.template
+name: Example Base Setup
+description: Replace with the setup this plan should apply by default.
+# device_profile_ref must reference an authored device profile id.
+device_profile_ref: example.device_profile.template
+recipes:
+  # recipes[].recipe_ref must reference an authored recipe id.
+  # selected_by_default: true | false
+  - recipe_ref: example.recipe.template
+    selected_by_default: true
+defaults:
+  # defaults is planner metadata. Current examples use booleans like:
+  # - show_advanced_steps: true | false
+  show_advanced_steps: false
+overrides:
+  # Top-level full binding refs can participate in planner binding resolution.
+  example.recipe.template.$example_source_dir: /absolute/path/to/example-assets
+  # Nested metadata like config_variants is informational unless wired later.
+  config_variants:
+    vendor_family: example
+metadata:
+  tags:
+    - base_setup
+    - template
