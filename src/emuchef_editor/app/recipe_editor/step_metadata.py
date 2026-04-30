@@ -4,18 +4,11 @@ from __future__ import annotations
 
 from dataclasses import fields
 
-from emuchef.domain import RuntimeCapabilities, RuntimeValueType, StepType
+from emuchef.domain import RuntimeCapabilities, RuntimeValueType
+from emuchef.steps import builtin_step_registry
 
-SUPPORTED_EDITOR_STEP_TYPES: tuple[StepType, ...] = (
-    StepType.RESOLVE_ARTIFACTS,
-    StepType.EXTRACT_ARTIFACTS,
-    StepType.EXTRACT_ARCHIVE,
-    StepType.COPY_FILES,
-    StepType.INSTALL_APK,
-    StepType.GRANT_PERMISSIONS,
-    StepType.LAUNCH_APP,
-    StepType.WAIT,
-    StepType.FORCE_STOP_APP,
+SUPPORTED_EDITOR_STEP_TYPES = tuple(
+    plugin.type for plugin in builtin_step_registry().plugins if plugin.editor.supported
 )
 
 SUPPORTED_CONDITION_TYPES: tuple[str, ...] = (
@@ -32,17 +25,10 @@ CONDITION_PARAM_FIELD: dict[str, tuple[str, str]] = {
 
 KNOWN_CAPABILITIES: tuple[str, ...] = tuple(field.name for field in fields(RuntimeCapabilities))
 
-REF_VALUE_FILTERS: dict[tuple[StepType, str], tuple[RuntimeValueType, ...]] = {
-    (StepType.EXTRACT_ARCHIVE, "archive"): (RuntimeValueType.FILE_PATH,),
-    (
-        StepType.COPY_FILES,
-        "source",
-    ): (
-        RuntimeValueType.FILE_PATH,
-        RuntimeValueType.DIRECTORY_PATH,
-        RuntimeValueType.PATH_LIST,
-    ),
-    (StepType.INSTALL_APK, "app"): (RuntimeValueType.FILE_PATH,),
+REF_VALUE_FILTERS: dict[tuple[object, str], tuple[RuntimeValueType, ...]] = {
+    (plugin.type, param_name): allowed_types
+    for plugin in builtin_step_registry().plugins
+    for param_name, allowed_types in plugin.editor.ref_filters.items()
 }
 
 COPY_FILES_HELP = (

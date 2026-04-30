@@ -21,6 +21,8 @@ The code is intentionally split into:
 - `src/emuchef/io`: authored loading, validation, YAML I/O
 - `src/emuchef/planner`: normalization, draft/session logic, execution-plan emission
 - `src/emuchef/executor`: runtime ref resolution, artifact handling, ADB, step execution
+- `src/emuchef/steps`: first-party built-in step plugins, step specs, planner hooks,
+  executor handler registration, and editor-safe step metadata
 - `src/emuchef/domain`: typed models and enums
 - `src/emuchef_editor/core`: UI-agnostic recipe document, canonical YAML, ref indexing, and validation adapters for the editor
 - `src/emuchef_editor/app`: PySide6 desktop editor for authored recipe files
@@ -75,6 +77,28 @@ The current editor scope is recipe-authoring only. It edits:
 - Artifacts
 - Artifact Groups
 - Steps
+
+## Current Step Plugin Architecture
+
+Supported step behavior is registered through first-party, in-repo step plugins.
+The built-in step registry is the canonical source for:
+
+- supported step specs and params
+- planner validation hooks
+- planner normalization hooks
+- executor handler lookup
+- primary output metadata
+- editor-safe labels, param ordering, and typed ref-filter hints
+
+`StepType` remains the authored and execution-plan step identifier model in the
+current implementation. `STEP_SPECS` and primary-output maps are compatibility
+projections derived from the built-in registry, not independent sources of
+truth. Core plugins do not import PySide or construct editor widgets; Qt-specific
+param panels remain in the editor package and are keyed by step metadata.
+
+External plugin discovery and string/plugin-owned step ids are deferred design
+work. Adding a currently supported in-repo step should start by adding a built-in
+step plugin rather than changing central planner or executor dispatch branches.
 
 The editor supports in-file refactor tooling for authored recipe ids, input ids,
 artifact ids, artifact-group ids, and step ids. Rename, usage analysis, and
@@ -386,6 +410,9 @@ Known intentional gaps:
 - executor remains single-threaded
 - artifact download uses Python stdlib networking only
 - archive extraction is still ZIP-oriented in practice
+- external step plugin discovery is not implemented
+- string or plugin-owned step identifiers are not implemented; built-in steps
+  still use `StepType`
 - `grant_permissions` policy metadata is still relatively minimal
 - app-private write ownership/uid remapping is not implemented yet
 - current CLI bind ids are still normalized internal-style ids rather than a

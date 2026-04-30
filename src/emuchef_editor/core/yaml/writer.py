@@ -18,8 +18,8 @@ from emuchef.domain import (
     Step,
     StepCondition,
     StepConstraints,
-    STEP_SPECS,
 )
+from emuchef.steps import builtin_step_registry
 
 _TOP_LEVEL_FIELDS = (
     "schema_version",
@@ -173,10 +173,11 @@ def _serialize_condition(condition: StepCondition) -> dict[str, Any]:
 
 def _serialize_step_params(step: Step) -> dict[str, Any]:
     payload: dict[str, Any] = {}
-    spec = STEP_SPECS.get(step.type)
     ordered_names: list[str] = []
-    if spec is not None:
-        ordered_names.extend(spec.params.keys())
+    plugin = builtin_step_registry().get(step.type)
+    if plugin is not None:
+        ordered_names.extend(plugin.editor.param_order)
+        ordered_names.extend(param_name for param_name in plugin.spec.params if param_name not in ordered_names)
     ordered_names.extend(sorted(param_name for param_name in step.params if param_name not in ordered_names))
     for param_name in ordered_names:
         if param_name not in step.params:

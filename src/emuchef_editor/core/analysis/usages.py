@@ -17,10 +17,10 @@ from emuchef.domain import (
     RefParamValue,
     Recipe,
     RuntimeCapabilities,
-    STEP_SPECS,
     Step,
     parse_reference,
 )
+from emuchef.steps import builtin_step_registry
 
 UsageTargetKind = Literal["recipe", "input", "artifact", "artifact_group", "step"]
 
@@ -181,8 +181,8 @@ def _collect_artifact_selection_usages(target: UsageTarget, step: Step, step_ind
 def _has_preserved_unsupported_content(recipe: Recipe) -> bool:
     step_ids = {step.id for step in recipe.steps}
     for step in recipe.steps:
-        spec = STEP_SPECS.get(step.type)
-        expected_params = set(spec.params) if spec is not None else set()
+        plugin = builtin_step_registry().get(step.type)
+        expected_params = set(plugin.spec.params) if plugin is not None else set()
         if any(param_name not in expected_params for param_name in step.params):
             return True
         if any(capability not in KNOWN_CAPABILITIES for capability in step.constraints.capabilities):
@@ -197,8 +197,8 @@ def _has_preserved_unsupported_content(recipe: Recipe) -> bool:
 
 
 def _is_supported_param(step: Step, param_name: str) -> bool:
-    spec = STEP_SPECS.get(step.type)
-    return spec is not None and param_name in spec.params
+    plugin = builtin_step_registry().get(step.type)
+    return plugin is not None and param_name in plugin.spec.params
 
 
 def _coerce_string_values(value: object | None) -> tuple[str, ...]:

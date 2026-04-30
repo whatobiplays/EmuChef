@@ -25,8 +25,8 @@ from emuchef.domain import (
     RuntimeCapabilities,
     RuntimeValue,
     RuntimeValueType,
-    StepType,
 )
+from emuchef.steps import builtin_step_registry
 
 from .adb import AdbInterface, AdbResolutionError, is_app_private_path
 
@@ -60,30 +60,8 @@ def execute_step(
     step: ExecutionStep,
     resolved_params: Mapping[str, object],
 ) -> dict[str, RuntimeValue]:
-    if step.type is StepType.RESOLVE_ARTIFACTS:
-        _resolve_artifacts(context, step, resolved_params)
-        return {}
-    if step.type is StepType.EXTRACT_ARTIFACTS:
-        return _extract_artifacts(context, step, resolved_params)
-    if step.type is StepType.EXTRACT_ARCHIVE:
-        return _extract_archive(context, step, resolved_params)
-    if step.type is StepType.COPY_FILES:
-        return _copy_files(context, step, resolved_params)
-    if step.type is StepType.INSTALL_APK:
-        _install_apk(context, resolved_params)
-        return {}
-    if step.type is StepType.GRANT_PERMISSIONS:
-        return _grant_permissions(context, step, resolved_params)
-    if step.type is StepType.LAUNCH_APP:
-        _launch_app(context, resolved_params)
-        return {}
-    if step.type is StepType.WAIT:
-        _wait(context, resolved_params)
-        return {}
-    if step.type is StepType.FORCE_STOP_APP:
-        _force_stop_app(context, resolved_params)
-        return {}
-    raise ValueError(f"Unsupported step type: {step.type.value}")
+    plugin = builtin_step_registry().require(step.type)
+    return plugin.handler(context, step, resolved_params)
 
 
 def _resolve_artifacts(context: ExecutionContext, step: ExecutionStep, resolved_params: Mapping[str, object]) -> None:

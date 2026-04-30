@@ -2,7 +2,8 @@
 
 from __future__ import annotations
 
-from collections.abc import Mapping
+from collections.abc import Callable, Mapping
+from dataclasses import dataclass
 
 import yaml
 from PySide6.QtCore import Qt, Signal
@@ -30,12 +31,12 @@ from PySide6.QtWidgets import (
 from emuchef.domain import (
     AuthoredParamValue,
     RefParamValue,
-    STEP_SPECS,
     Step,
     StepCondition,
     StepConstraints,
     StepType,
 )
+from emuchef.steps import builtin_step_registry
 from emuchef_editor.core.analysis.usages import UsageTarget, analyze_recipe_usages
 from emuchef_editor.core.documents.commands import (
     AddStepCommand,
@@ -77,6 +78,13 @@ from .step_metadata import (
 from .permissions_page import GrantPermissionParamsEditor
 from .tooltips import field_tooltip, prompt_tooltip
 from .usage_dialogs import DeleteWithUsagesDialog, FindUsagesDialog, confirm_preserved_content_warning
+
+
+@dataclass(slots=True)
+class _StepParamPanelAdapter:
+    panel: QWidget
+    populate: Callable[[Step], None]
+    build_params: Callable[[Step, dict[str, AuthoredParamValue]], dict[str, AuthoredParamValue]]
 
 
 def _yaml_block(value: object) -> str:
@@ -603,7 +611,7 @@ class StepsPage(QWidget):
         self._params_placeholder = QLabel("Select a step to edit params.")
         self._params_placeholder.setWordWrap(True)
         self._params_stack.addWidget(self._params_placeholder)
-        self._params_stack_by_type: dict[StepType, QWidget] = {}
+        self._params_panel_adapters: dict[StepType, _StepParamPanelAdapter] = {}
         self._build_param_panels()
         self._params_preserved_label = QLabel("Preserved unsupported params")
         self._params_preserved_view = AutoSizingPlainTextEdit()
@@ -745,7 +753,12 @@ class StepsPage(QWidget):
         apply_tooltip(self._resolve_artifact_groups_label, field_tooltip("steps.resolve_artifacts.artifact_groups"))
         resolve_layout.addWidget(self._resolve_artifact_groups_label)
         resolve_layout.addWidget(self._resolve_artifact_groups_editor)
-        self._register_param_panel(StepType.RESOLVE_ARTIFACTS, self._resolve_artifacts_panel)
+        self._register_param_panel(
+            StepType.RESOLVE_ARTIFACTS,
+            self._resolve_artifacts_panel,
+            self._populate_resolve_artifacts_params,
+            self._build_resolve_artifacts_params,
+        )
 
         self._extract_artifacts_panel = QWidget()
         extract_layout = QVBoxLayout(self._extract_artifacts_panel)
@@ -781,7 +794,12 @@ class StepsPage(QWidget):
             field_tooltip("steps.extract_artifacts.extract_on"),
         )
         extract_layout.addLayout(extract_form)
-        self._register_param_panel(StepType.EXTRACT_ARTIFACTS, self._extract_artifacts_panel)
+        self._register_param_panel(
+            StepType.EXTRACT_ARTIFACTS,
+            self._extract_artifacts_panel,
+            self._populate_extract_artifacts_params,
+            self._build_extract_artifacts_params,
+        )
 
         self._extract_archive_panel = QWidget()
         extract_archive_layout = QVBoxLayout(self._extract_archive_panel)
@@ -831,7 +849,12 @@ class StepsPage(QWidget):
         self._extract_archive_dest_edit.editingFinished.connect(self._commit_step_params)
         self._extract_archive_device_temp_path_edit.editingFinished.connect(self._commit_step_params)
         self._extract_archive_cleanup_check.toggled.connect(self._commit_step_params)
-        self._register_param_panel(StepType.EXTRACT_ARCHIVE, self._extract_archive_panel)
+        self._register_param_panel(
+            StepType.EXTRACT_ARCHIVE,
+            self._extract_archive_panel,
+            self._populate_extract_archive_params,
+            self._build_extract_archive_params,
+        )
 
         self._copy_files_panel = QWidget()
         copy_layout = QVBoxLayout(self._copy_files_panel)
@@ -857,7 +880,12 @@ class StepsPage(QWidget):
         self._copy_source_combo.currentIndexChanged.connect(self._commit_step_params)
         self._copy_dest_edit.editingFinished.connect(self._commit_step_params)
         self._copy_policy_combo.currentIndexChanged.connect(self._commit_step_params)
-        self._register_param_panel(StepType.COPY_FILES, self._copy_files_panel)
+        self._register_param_panel(
+            StepType.COPY_FILES,
+            self._copy_files_panel,
+            self._populate_copy_files_params,
+            self._build_copy_files_params,
+        )
 
         self._install_apk_panel = QWidget()
         install_layout = QVBoxLayout(self._install_apk_panel)
@@ -879,14 +907,24 @@ class StepsPage(QWidget):
         install_layout.addLayout(install_form)
         self._install_apk_app_combo.currentIndexChanged.connect(self._commit_step_params)
         self._install_apk_replace_existing_check.toggled.connect(self._commit_step_params)
-        self._register_param_panel(StepType.INSTALL_APK, self._install_apk_panel)
+        self._register_param_panel(
+            StepType.INSTALL_APK,
+            self._install_apk_panel,
+            self._populate_install_apk_params,
+            self._build_install_apk_params,
+        )
 
         self._grant_permissions_panel = QWidget()
         grant_layout = QVBoxLayout(self._grant_permissions_panel)
         self._grant_permissions_editor = GrantPermissionParamsEditor()
         self._grant_permissions_editor.changed.connect(self._commit_step_params)
         grant_layout.addWidget(self._grant_permissions_editor)
-        self._register_param_panel(StepType.GRANT_PERMISSIONS, self._grant_permissions_panel)
+        self._register_param_panel(
+            StepType.GRANT_PERMISSIONS,
+            self._grant_permissions_panel,
+            self._populate_grant_permissions_params,
+            self._build_grant_permissions_params,
+        )
 
         self._launch_app_panel = QWidget()
         launch_layout = QVBoxLayout(self._launch_app_panel)
@@ -908,7 +946,12 @@ class StepsPage(QWidget):
         launch_layout.addLayout(launch_form)
         self._launch_package_edit.editingFinished.connect(self._commit_step_params)
         self._launch_activity_edit.editingFinished.connect(self._commit_step_params)
-        self._register_param_panel(StepType.LAUNCH_APP, self._launch_app_panel)
+        self._register_param_panel(
+            StepType.LAUNCH_APP,
+            self._launch_app_panel,
+            self._populate_launch_app_params,
+            self._build_launch_app_params,
+        )
 
         self._wait_panel = QWidget()
         wait_layout = QVBoxLayout(self._wait_panel)
@@ -925,7 +968,12 @@ class StepsPage(QWidget):
         )
         wait_layout.addLayout(wait_form)
         self._wait_duration_spin.valueChanged.connect(self._commit_step_params)
-        self._register_param_panel(StepType.WAIT, self._wait_panel)
+        self._register_param_panel(
+            StepType.WAIT,
+            self._wait_panel,
+            self._populate_wait_params,
+            self._build_wait_params,
+        )
 
         self._force_stop_panel = QWidget()
         force_stop_layout = QVBoxLayout(self._force_stop_panel)
@@ -939,11 +987,151 @@ class StepsPage(QWidget):
         )
         force_stop_layout.addLayout(force_stop_form)
         self._force_stop_package_edit.editingFinished.connect(self._commit_step_params)
-        self._register_param_panel(StepType.FORCE_STOP_APP, self._force_stop_panel)
+        self._register_param_panel(
+            StepType.FORCE_STOP_APP,
+            self._force_stop_panel,
+            self._populate_force_stop_params,
+            self._build_force_stop_params,
+        )
 
-    def _register_param_panel(self, step_type: StepType, panel: QWidget) -> None:
-        self._params_stack_by_type[step_type] = panel
+    def _register_param_panel(
+        self,
+        step_type: StepType,
+        panel: QWidget,
+        populate: Callable[[Step], None],
+        build_params: Callable[[Step, dict[str, AuthoredParamValue]], dict[str, AuthoredParamValue]],
+    ) -> None:
+        self._params_panel_adapters[step_type] = _StepParamPanelAdapter(panel, populate, build_params)
         self._params_stack.addWidget(panel)
+
+    def _artifact_choices(self) -> tuple[tuple[str, str], ...]:
+        if self._document is None:
+            return ()
+        return tuple((artifact_id, artifact_id) for artifact_id in self._document.working_recipe.artifacts)
+
+    def _artifact_group_choices(self) -> tuple[tuple[str, str], ...]:
+        if self._document is None:
+            return ()
+        return tuple((group_id, group_id) for group_id in self._document.working_recipe.artifact_groups)
+
+    def _populate_resolve_artifacts_params(self, step: Step) -> None:
+        self._resolve_artifacts_editor.set_state(
+            tuple(_coerce_string_list(step.params.get("artifacts"))),
+            choices=self._artifact_choices(),
+        )
+        self._resolve_artifact_groups_editor.set_state(
+            tuple(_coerce_string_list(step.params.get("artifact_groups"))),
+            choices=self._artifact_group_choices(),
+        )
+
+    def _populate_extract_artifacts_params(self, step: Step) -> None:
+        self._extract_artifacts_editor.set_state(
+            tuple(_coerce_string_list(step.params.get("artifacts"))),
+            choices=self._artifact_choices(),
+        )
+        self._extract_artifact_groups_editor.set_state(
+            tuple(_coerce_string_list(step.params.get("artifact_groups"))),
+            choices=self._artifact_group_choices(),
+        )
+        self._extract_artifacts_extract_on_combo.setCurrentIndex(
+            self._extract_artifacts_extract_on_combo.findData(str(step.params.get("extract_on", "host")))
+        )
+
+    def _populate_extract_archive_params(self, step: Step) -> None:
+        self._populate_ref_combo(
+            self._extract_archive_archive_combo,
+            step.params.get("archive"),
+            self._ref_candidates(step.type, "archive"),
+        )
+        extract_on = str(step.params.get("extract_on", "host"))
+        self._extract_archive_extract_on_combo.setCurrentIndex(self._extract_archive_extract_on_combo.findData(extract_on))
+        self._extract_archive_dest_edit.setText(str(step.params.get("dest", "")))
+        self._extract_archive_device_temp_path_edit.setText(str(step.params.get("device_temp_path", "")))
+        self._extract_archive_cleanup_check.setChecked(bool(step.params.get("cleanup", True)))
+        self._update_extract_archive_device_fields(extract_on == "device")
+
+    def _populate_copy_files_params(self, step: Step) -> None:
+        self._populate_ref_combo(self._copy_source_combo, step.params.get("source"), self._ref_candidates(step.type, "source"))
+        self._copy_dest_edit.setText(str(step.params.get("dest", "")))
+        self._copy_policy_combo.setCurrentIndex(self._copy_policy_combo.findData(str(step.params.get("copy_policy", "merge"))))
+
+    def _populate_install_apk_params(self, step: Step) -> None:
+        self._populate_ref_combo(self._install_apk_app_combo, step.params.get("app"), self._ref_candidates(step.type, "app"))
+        self._install_apk_replace_existing_check.setChecked(bool(step.params.get("replace_existing", False)))
+
+    def _populate_grant_permissions_params(self, step: Step) -> None:
+        self._grant_permissions_editor.set_params(step.params)
+
+    def _populate_launch_app_params(self, step: Step) -> None:
+        self._launch_package_edit.setText(str(step.params.get("package_name", "")))
+        self._launch_activity_edit.setText(str(step.params.get("activity", "")))
+
+    def _populate_wait_params(self, step: Step) -> None:
+        self._wait_duration_spin.setValue(int(step.params.get("duration_ms", 0) or 0))
+
+    def _populate_force_stop_params(self, step: Step) -> None:
+        self._force_stop_package_edit.setText(str(step.params.get("package_name", "")))
+
+    def _build_resolve_artifacts_params(self, _step: Step, params: dict[str, AuthoredParamValue]) -> dict[str, AuthoredParamValue]:
+        _set_non_empty_list_param(params, "artifacts", self._resolve_artifacts_editor.values())
+        _set_non_empty_list_param(params, "artifact_groups", self._resolve_artifact_groups_editor.values())
+        return params
+
+    def _build_extract_artifacts_params(self, _step: Step, params: dict[str, AuthoredParamValue]) -> dict[str, AuthoredParamValue]:
+        _set_non_empty_list_param(params, "artifacts", self._extract_artifacts_editor.values())
+        _set_non_empty_list_param(params, "artifact_groups", self._extract_artifact_groups_editor.values())
+        params["extract_on"] = str(self._extract_artifacts_extract_on_combo.currentData())
+        return params
+
+    def _build_extract_archive_params(self, _step: Step, params: dict[str, AuthoredParamValue]) -> dict[str, AuthoredParamValue]:
+        archive_ref = _combo_ref(self._extract_archive_archive_combo)
+        if archive_ref is not None:
+            params["archive"] = RefParamValue(ref=archive_ref)
+        extract_on = str(self._extract_archive_extract_on_combo.currentData())
+        params["extract_on"] = extract_on
+        if extract_on == "device":
+            if self._extract_archive_dest_edit.text().strip():
+                params["dest"] = self._extract_archive_dest_edit.text()
+            if self._extract_archive_device_temp_path_edit.text().strip():
+                params["device_temp_path"] = self._extract_archive_device_temp_path_edit.text()
+        params["cleanup"] = self._extract_archive_cleanup_check.isChecked()
+        return params
+
+    def _build_copy_files_params(self, _step: Step, params: dict[str, AuthoredParamValue]) -> dict[str, AuthoredParamValue]:
+        source_ref = _combo_ref(self._copy_source_combo)
+        if source_ref is not None:
+            params["source"] = RefParamValue(ref=source_ref)
+        if self._copy_dest_edit.text().strip():
+            params["dest"] = self._copy_dest_edit.text()
+        params["copy_policy"] = str(self._copy_policy_combo.currentData())
+        return params
+
+    def _build_install_apk_params(self, _step: Step, params: dict[str, AuthoredParamValue]) -> dict[str, AuthoredParamValue]:
+        app_ref = _combo_ref(self._install_apk_app_combo)
+        if app_ref is not None:
+            params["app"] = RefParamValue(ref=app_ref)
+        params["replace_existing"] = self._install_apk_replace_existing_check.isChecked()
+        return params
+
+    def _build_grant_permissions_params(self, _step: Step, params: dict[str, AuthoredParamValue]) -> dict[str, AuthoredParamValue]:
+        params.update(self._grant_permissions_editor.params())
+        return params
+
+    def _build_launch_app_params(self, _step: Step, params: dict[str, AuthoredParamValue]) -> dict[str, AuthoredParamValue]:
+        if self._launch_package_edit.text().strip():
+            params["package_name"] = self._launch_package_edit.text()
+        if self._launch_activity_edit.text().strip():
+            params["activity"] = self._launch_activity_edit.text()
+        return params
+
+    def _build_wait_params(self, _step: Step, params: dict[str, AuthoredParamValue]) -> dict[str, AuthoredParamValue]:
+        params["duration_ms"] = self._wait_duration_spin.value()
+        return params
+
+    def _build_force_stop_params(self, _step: Step, params: dict[str, AuthoredParamValue]) -> dict[str, AuthoredParamValue]:
+        if self._force_stop_package_edit.text().strip():
+            params["package_name"] = self._force_stop_package_edit.text()
+        return params
 
     def _on_selection_changed(self, current: QListWidgetItem | None, _previous: QListWidgetItem | None) -> None:
         if self._loading:
@@ -1009,9 +1197,10 @@ class StepsPage(QWidget):
         self._refresh_dependency_buttons()
 
     def _populate_param_panel(self, step: Step) -> None:
-        panel = self._params_stack_by_type.get(step.type, self._params_placeholder)
+        adapter = self._params_panel_adapters.get(step.type)
+        panel = adapter.panel if adapter is not None else self._params_placeholder
         self._params_stack.setCurrentWidget(panel)
-        supported_names = set(STEP_SPECS[step.type].params)
+        supported_names = set(builtin_step_registry().require(step.type).spec.params)
         preserved_params = {name: value for name, value in step.params.items() if name not in supported_names}
         preserved_text = _yaml_block(_serialize_param_mapping(preserved_params))
         self._params_preserved_label.setVisible(bool(preserved_text))
@@ -1019,46 +1208,8 @@ class StepsPage(QWidget):
         self._params_preserved_view.setPlainText(preserved_text)
         self._params_preserved_view.refresh_height()
 
-        artifact_choices = tuple((artifact_id, artifact_id) for artifact_id in self._document.working_recipe.artifacts) if self._document is not None else ()
-        group_choices = tuple((group_id, group_id) for group_id in self._document.working_recipe.artifact_groups) if self._document is not None else ()
-
-        if step.type is StepType.RESOLVE_ARTIFACTS:
-            self._resolve_artifacts_editor.set_state(tuple(_coerce_string_list(step.params.get("artifacts"))), choices=artifact_choices)
-            self._resolve_artifact_groups_editor.set_state(tuple(_coerce_string_list(step.params.get("artifact_groups"))), choices=group_choices)
-        elif step.type is StepType.EXTRACT_ARTIFACTS:
-            self._extract_artifacts_editor.set_state(tuple(_coerce_string_list(step.params.get("artifacts"))), choices=artifact_choices)
-            self._extract_artifact_groups_editor.set_state(tuple(_coerce_string_list(step.params.get("artifact_groups"))), choices=group_choices)
-            self._extract_artifacts_extract_on_combo.setCurrentIndex(
-                self._extract_artifacts_extract_on_combo.findData(str(step.params.get("extract_on", "host")))
-            )
-        elif step.type is StepType.EXTRACT_ARCHIVE:
-            self._populate_ref_combo(
-                self._extract_archive_archive_combo,
-                step.params.get("archive"),
-                self._ref_candidates(step.type, "archive"),
-            )
-            extract_on = str(step.params.get("extract_on", "host"))
-            self._extract_archive_extract_on_combo.setCurrentIndex(self._extract_archive_extract_on_combo.findData(extract_on))
-            self._extract_archive_dest_edit.setText(str(step.params.get("dest", "")))
-            self._extract_archive_device_temp_path_edit.setText(str(step.params.get("device_temp_path", "")))
-            self._extract_archive_cleanup_check.setChecked(bool(step.params.get("cleanup", True)))
-            self._update_extract_archive_device_fields(extract_on == "device")
-        elif step.type is StepType.COPY_FILES:
-            self._populate_ref_combo(self._copy_source_combo, step.params.get("source"), self._ref_candidates(step.type, "source"))
-            self._copy_dest_edit.setText(str(step.params.get("dest", "")))
-            self._copy_policy_combo.setCurrentIndex(self._copy_policy_combo.findData(str(step.params.get("copy_policy", "merge"))))
-        elif step.type is StepType.INSTALL_APK:
-            self._populate_ref_combo(self._install_apk_app_combo, step.params.get("app"), self._ref_candidates(step.type, "app"))
-            self._install_apk_replace_existing_check.setChecked(bool(step.params.get("replace_existing", False)))
-        elif step.type is StepType.GRANT_PERMISSIONS:
-            self._grant_permissions_editor.set_params(step.params)
-        elif step.type is StepType.LAUNCH_APP:
-            self._launch_package_edit.setText(str(step.params.get("package_name", "")))
-            self._launch_activity_edit.setText(str(step.params.get("activity", "")))
-        elif step.type is StepType.WAIT:
-            self._wait_duration_spin.setValue(int(step.params.get("duration_ms", 0) or 0))
-        elif step.type is StepType.FORCE_STOP_APP:
-            self._force_stop_package_edit.setText(str(step.params.get("package_name", "")))
+        if adapter is not None:
+            adapter.populate(step)
         self._refresh_params_section_height()
 
     def _populate_constraints(self, step: Step) -> None:
@@ -1381,62 +1532,14 @@ class StepsPage(QWidget):
         self._command_handler(UpdateStepVerifyCommand(step_id=step.id, verify=conditions))
 
     def _build_supported_params(self, step: Step) -> dict[str, AuthoredParamValue]:
-        spec = STEP_SPECS[step.type]
+        spec = builtin_step_registry().require(step.type).spec
         params: dict[str, AuthoredParamValue] = {
             name: value for name, value in step.params.items() if name not in spec.params
         }
-        if step.type is StepType.RESOLVE_ARTIFACTS:
-            _set_non_empty_list_param(params, "artifacts", self._resolve_artifacts_editor.values())
-            _set_non_empty_list_param(params, "artifact_groups", self._resolve_artifact_groups_editor.values())
+        adapter = self._params_panel_adapters.get(step.type)
+        if adapter is None:
             return params
-        if step.type is StepType.EXTRACT_ARTIFACTS:
-            _set_non_empty_list_param(params, "artifacts", self._extract_artifacts_editor.values())
-            _set_non_empty_list_param(params, "artifact_groups", self._extract_artifact_groups_editor.values())
-            params["extract_on"] = str(self._extract_artifacts_extract_on_combo.currentData())
-            return params
-        if step.type is StepType.EXTRACT_ARCHIVE:
-            archive_ref = _combo_ref(self._extract_archive_archive_combo)
-            if archive_ref is not None:
-                params["archive"] = RefParamValue(ref=archive_ref)
-            extract_on = str(self._extract_archive_extract_on_combo.currentData())
-            params["extract_on"] = extract_on
-            if extract_on == "device":
-                if self._extract_archive_dest_edit.text().strip():
-                    params["dest"] = self._extract_archive_dest_edit.text()
-                if self._extract_archive_device_temp_path_edit.text().strip():
-                    params["device_temp_path"] = self._extract_archive_device_temp_path_edit.text()
-            params["cleanup"] = self._extract_archive_cleanup_check.isChecked()
-            return params
-        if step.type is StepType.COPY_FILES:
-            source_ref = _combo_ref(self._copy_source_combo)
-            if source_ref is not None:
-                params["source"] = RefParamValue(ref=source_ref)
-            if self._copy_dest_edit.text().strip():
-                params["dest"] = self._copy_dest_edit.text()
-            params["copy_policy"] = str(self._copy_policy_combo.currentData())
-            return params
-        if step.type is StepType.INSTALL_APK:
-            app_ref = _combo_ref(self._install_apk_app_combo)
-            if app_ref is not None:
-                params["app"] = RefParamValue(ref=app_ref)
-            params["replace_existing"] = self._install_apk_replace_existing_check.isChecked()
-            return params
-        if step.type is StepType.GRANT_PERMISSIONS:
-            params.update(self._grant_permissions_editor.params())
-            return params
-        if step.type is StepType.LAUNCH_APP:
-            if self._launch_package_edit.text().strip():
-                params["package_name"] = self._launch_package_edit.text()
-            if self._launch_activity_edit.text().strip():
-                params["activity"] = self._launch_activity_edit.text()
-            return params
-        if step.type is StepType.WAIT:
-            params["duration_ms"] = self._wait_duration_spin.value()
-            return params
-        if step.type is StepType.FORCE_STOP_APP:
-            if self._force_stop_package_edit.text().strip():
-                params["package_name"] = self._force_stop_package_edit.text()
-        return params
+        return adapter.build_params(step, params)
 
     def _ref_candidates(self, step_type: StepType, param_name: str) -> tuple[tuple[str, str], ...]:
         if self._document is None:

@@ -6,6 +6,16 @@ CLI-first Android emulation handheld provisioner.
 
 Repository context and current behavior notes live in `CONTEXT.md`.
 
+## Step Architecture
+
+Supported steps are first-party built-in plugins registered in the in-repo step
+registry. The registry is the source of truth for step specs, planner hooks,
+executor handler lookup, primary outputs, and editor-safe metadata.
+
+`StepType` remains the step identifier model for authored recipes and execution
+plans in this phase. External plugin loading and string/plugin-owned step ids are
+deferred follow-up work.
+
 ## Editor
 
 The desktop editor targets authored recipe files only.

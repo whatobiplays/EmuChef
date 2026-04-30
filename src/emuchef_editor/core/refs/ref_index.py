@@ -4,8 +4,9 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
-from emuchef.domain import InputType, PRIMARY_OUTPUT_STEP_TYPES, Recipe, RuntimeValueType, StepType
+from emuchef.domain import InputType, Recipe, RuntimeValueType
 from emuchef.planner.contracts import RUNTIME_ARTIFACT_FIELDS
+from emuchef.steps import builtin_step_registry
 
 
 @dataclass(frozen=True, slots=True)
@@ -60,10 +61,10 @@ def build_ref_index(recipe: Recipe) -> RefIndex:
 
 
 def _step_output_names(step_type) -> tuple[str, ...]:
-    output_name = PRIMARY_OUTPUT_STEP_TYPES.get(step_type)
-    if output_name is None:
+    plugin = builtin_step_registry().get(step_type)
+    if plugin is None:
         return ()
-    return (output_name,)
+    return tuple(output.name for output in plugin.outputs)
 
 
 def _input_candidates(recipe: Recipe) -> tuple[RefCandidate, ...]:
@@ -136,8 +137,8 @@ _ARTIFACT_FIELD_TYPES: dict[str, RuntimeValueType] = {
     "error": RuntimeValueType.STRING,
 }
 
-_PRIMARY_OUTPUT_TYPES: dict[tuple[StepType, str], RuntimeValueType] = {
-    (StepType.EXTRACT_ARTIFACTS, "extracted_paths"): RuntimeValueType.PATH_LIST,
-    (StepType.EXTRACT_ARCHIVE, "extracted_path"): RuntimeValueType.DIRECTORY_PATH,
-    (StepType.COPY_FILES, "copied_paths"): RuntimeValueType.PATH_LIST,
+_PRIMARY_OUTPUT_TYPES: dict[tuple[object, str], RuntimeValueType] = {
+    (plugin.type, output.name): output.value_type
+    for plugin in builtin_step_registry().plugins
+    for output in plugin.outputs
 }

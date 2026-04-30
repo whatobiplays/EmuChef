@@ -17,13 +17,13 @@ from emuchef.domain import (
     RefKind,
     RefParamValue,
     RemoteFileArtifact,
-    STEP_SPECS,
     Step,
     StepCondition,
     StepConstraints,
     StepType,
     parse_reference,
 )
+from emuchef.steps import builtin_step_registry
 
 
 @dataclass(frozen=True, slots=True)
@@ -822,10 +822,10 @@ def _normalize_step_params(
     params: Mapping[str, AuthoredParamValue],
 ) -> dict[str, AuthoredParamValue]:
     normalized = dict(params)
-    spec = STEP_SPECS.get(step_type)
-    if spec is None:
+    plugin = builtin_step_registry().get(step_type)
+    if plugin is None:
         return normalized
-    for param_name, param_spec in spec.params.items():
+    for param_name, param_spec in plugin.spec.params.items():
         if param_name not in normalized or param_spec.default is None:
             continue
         if _param_value_equals_default(normalized[param_name], param_spec.default):
@@ -956,8 +956,8 @@ def _ref_matches(ref: str, target_kind: Literal["input", "artifact", "step"], ta
 
 
 def _is_supported_step_param(step: Step, param_name: str) -> bool:
-    spec = STEP_SPECS.get(step.type)
-    return spec is not None and param_name in spec.params
+    plugin = builtin_step_registry().get(step.type)
+    return plugin is not None and param_name in plugin.spec.params
 
 
 def _rewrite_string_sequence_value(value: object, old_id: str, new_id: str) -> tuple[object, bool]:
@@ -1098,7 +1098,7 @@ def _coerce_artifact_cache(value: object) -> ArtifactCacheMode:
 
 def _coerce_supported_step_type(value: object) -> StepType:
     step_type = value if isinstance(value, StepType) else StepType(str(value))
-    if step_type not in STEP_SPECS:
+    if step_type not in builtin_step_registry():
         raise ValueError(f"Unsupported step type {step_type.value!r}.")
     return step_type
 
