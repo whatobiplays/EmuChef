@@ -9,6 +9,17 @@ from emuchef.domain.runtime_state import RuntimeValueType
 from emuchef.domain.step_specs import ParamMode, ParamSpec, StepSpec
 
 from .contracts import StepEditorMetadata, StepOutputMetadata, StepPlugin, StepRegistry
+from .handlers import (
+    copy_files,
+    extract_archive,
+    extract_artifacts,
+    force_stop_app,
+    grant_permissions,
+    install_apk,
+    launch_app,
+    resolve_artifacts,
+    wait,
+)
 from .planner_hooks import (
     normalize_artifact_selection,
     validate_artifact_selection,
@@ -18,20 +29,6 @@ from .planner_hooks import (
     validate_package_name,
     validate_wait,
 )
-
-
-def _handler(name: str, *, takes_step: bool = True):
-    """Resolve executor implementation lazily to keep plugin metadata Qt/core-safe."""
-
-    def run(context, step, resolved_params):
-        from emuchef.executor import step_handlers
-
-        function = getattr(step_handlers, name)
-        result = function(context, step, resolved_params) if takes_step else function(context, resolved_params)
-        return {} if result is None else result
-
-    run.__name__ = name.removeprefix("_")
-    return run
 
 
 BUILTIN_STEP_PLUGINS: tuple[StepPlugin, ...] = (
@@ -45,7 +42,7 @@ BUILTIN_STEP_PLUGINS: tuple[StepPlugin, ...] = (
             },
             executor_handler="resolve_artifacts",
         ),
-        handler=_handler("_resolve_artifacts"),
+        handler=resolve_artifacts.handle,
         normalize=normalize_artifact_selection,
         validate=validate_artifact_selection,
         editor=StepEditorMetadata(
@@ -66,7 +63,7 @@ BUILTIN_STEP_PLUGINS: tuple[StepPlugin, ...] = (
             primary_output_name="extracted_paths",
             executor_handler="extract_artifacts",
         ),
-        handler=_handler("_extract_artifacts"),
+        handler=extract_artifacts.handle,
         normalize=normalize_artifact_selection,
         validate=validate_artifact_selection,
         outputs=(StepOutputMetadata("extracted_paths", RuntimeValueType.PATH_LIST, primary=True),),
@@ -90,7 +87,7 @@ BUILTIN_STEP_PLUGINS: tuple[StepPlugin, ...] = (
             primary_output_name="extracted_path",
             executor_handler="extract_archive",
         ),
-        handler=_handler("_extract_archive"),
+        handler=extract_archive.handle,
         validate=validate_extract_archive,
         outputs=(StepOutputMetadata("extracted_path", RuntimeValueType.DIRECTORY_PATH, primary=True),),
         editor=StepEditorMetadata(
@@ -117,7 +114,7 @@ BUILTIN_STEP_PLUGINS: tuple[StepPlugin, ...] = (
             primary_output_name="copied_paths",
             executor_handler="copy_files",
         ),
-        handler=_handler("_copy_files"),
+        handler=copy_files.handle,
         validate=validate_copy_files,
         outputs=(StepOutputMetadata("copied_paths", RuntimeValueType.PATH_LIST, primary=True),),
         editor=StepEditorMetadata(
@@ -143,7 +140,7 @@ BUILTIN_STEP_PLUGINS: tuple[StepPlugin, ...] = (
             },
             executor_handler="install_apk",
         ),
-        handler=_handler("_install_apk", takes_step=False),
+        handler=install_apk.handle,
         editor=StepEditorMetadata(
             label="Install APK",
             param_order=("app", "replace_existing"),
@@ -162,7 +159,7 @@ BUILTIN_STEP_PLUGINS: tuple[StepPlugin, ...] = (
             },
             executor_handler="grant_permissions",
         ),
-        handler=_handler("_grant_permissions"),
+        handler=grant_permissions.handle,
         validate=validate_grant_permissions,
         editor=StepEditorMetadata(
             label="Grant Permissions",
@@ -180,7 +177,7 @@ BUILTIN_STEP_PLUGINS: tuple[StepPlugin, ...] = (
             },
             executor_handler="launch_app",
         ),
-        handler=_handler("_launch_app", takes_step=False),
+        handler=launch_app.handle,
         validate=validate_package_name,
         editor=StepEditorMetadata(
             label="Launch App",
@@ -195,7 +192,7 @@ BUILTIN_STEP_PLUGINS: tuple[StepPlugin, ...] = (
             params={"duration_ms": ParamSpec(ParamMode.LITERAL)},
             executor_handler="wait",
         ),
-        handler=_handler("_wait", takes_step=False),
+        handler=wait.handle,
         validate=validate_wait,
         editor=StepEditorMetadata(
             label="Wait",
@@ -210,7 +207,7 @@ BUILTIN_STEP_PLUGINS: tuple[StepPlugin, ...] = (
             params={"package_name": ParamSpec(ParamMode.LITERAL)},
             executor_handler="force_stop_app",
         ),
-        handler=_handler("_force_stop_app", takes_step=False),
+        handler=force_stop_app.handle,
         validate=validate_package_name,
         editor=StepEditorMetadata(
             label="Force Stop",

@@ -9,7 +9,14 @@ from .result import (
     StepRunRecord,
     StepRunStatus,
 )
-from .runner import ExecutorRunner
+
+
+def __getattr__(name: str):
+    if name == "ExecutorRunner":
+        from .runner import ExecutorRunner
+
+        return ExecutorRunner
+    raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
 
 __all__ = [
     "AdbCommandError",

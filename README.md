@@ -10,7 +10,9 @@ Repository context and current behavior notes live in `CONTEXT.md`.
 
 Supported steps are first-party built-in plugins registered in the in-repo step
 registry. The registry is the source of truth for step specs, planner hooks,
-executor handler lookup, primary outputs, and editor-safe metadata.
+direct executor handler callables, primary outputs, and editor-safe metadata.
+Any remaining `StepSpec.executor_handler` values are transitional metadata only;
+runtime dispatch uses the registry plugin handler callable.
 
 Step type ids are plain registry-owned strings. Authored recipes and execution
 plans still use the same visible YAML values, such as `copy_files` and

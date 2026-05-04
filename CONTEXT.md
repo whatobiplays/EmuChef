@@ -20,9 +20,9 @@ The code is intentionally split into:
 
 - `src/emuchef/io`: authored loading, validation, YAML I/O
 - `src/emuchef/planner`: normalization, draft/session logic, execution-plan emission
-- `src/emuchef/executor`: runtime ref resolution, artifact handling, ADB, step execution
+- `src/emuchef/executor`: runtime ref resolution, ADB, shared step runtime, and shared execution helpers
 - `src/emuchef/steps`: first-party built-in step plugins, step specs, planner hooks,
-  executor handler registration, and editor-safe step metadata
+  step-local executor handlers, and editor-safe step metadata
 - `src/emuchef/domain`: typed models and enums
 - `src/emuchef_editor/core`: UI-agnostic recipe document, canonical YAML, ref indexing, and validation adapters for the editor
 - `src/emuchef_editor/app`: PySide6 desktop editor for authored recipe files
@@ -86,7 +86,7 @@ The built-in step registry is the canonical source for:
 - supported step specs and params
 - planner validation hooks
 - planner normalization hooks
-- executor handler lookup
+- direct executor handler callables
 - primary output metadata
 - editor-safe labels, param ordering, and typed ref-filter hints
 
@@ -94,9 +94,11 @@ Step type ids are plain strings owned by the built-in registry. Authored recipes
 and execution plans use the same visible YAML values, such as `copy_files` and
 `grant_permissions`, and `schema_version: 1` remains current. `STEP_SPECS` and
 primary-output maps are compatibility projections derived from the built-in
-registry, not independent sources of truth. Core plugins do not import PySide or
-construct editor widgets; Qt-specific param panels remain in the editor package
-and are keyed by step metadata.
+registry, not independent sources of truth. `StepSpec.executor_handler` is
+transitional metadata only; runtime dispatch uses `StepPlugin.handler` callables
+from step-local handler modules. Core plugins do not import PySide or construct
+editor widgets; Qt-specific param panels remain in the editor package and are
+keyed by step metadata.
 
 External plugin discovery is deferred design work. Adding a currently supported
 in-repo step should start by adding a built-in step plugin rather than changing

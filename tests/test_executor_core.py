@@ -774,7 +774,7 @@ class ExecutorCoreTests(unittest.TestCase):
             ),
         )
         with patch(
-            "emuchef.executor.step_handlers.urllib.request.urlopen",
+            "emuchef.executor.artifact_io.urllib.request.urlopen",
             side_effect=ssl.SSLCertVerificationError("certificate verify failed"),
         ):
             result = ExecutorRunner(adb=DryRunAdb()).run(plan)
@@ -804,7 +804,7 @@ class ExecutorCoreTests(unittest.TestCase):
             ),
         )
         with patch(
-            "emuchef.executor.step_handlers.urllib.request.urlopen",
+            "emuchef.executor.artifact_io.urllib.request.urlopen",
             side_effect=OSError("connection reset"),
         ):
             result = ExecutorRunner(adb=DryRunAdb()).run(plan)

@@ -1,13 +1,14 @@
 from __future__ import annotations
 
+import importlib
 import inspect
 from pathlib import Path
 import re
 from tempfile import TemporaryDirectory
 import unittest
+from unittest.mock import Mock, patch
 
-from emuchef.domain import PRIMARY_OUTPUT_STEP_TYPES, STEP_SPECS, ParamMode, ParamSpec, StepSpec
-from emuchef.executor import step_handlers
+from emuchef.domain import ExecutionStep, PRIMARY_OUTPUT_STEP_TYPES, STEP_SPECS, ParamMode, ParamSpec, RuntimeValue, RuntimeValueType, StepSpec
 from emuchef.io import dump_yaml, load_authored_recipe
 from emuchef.io.execution_plan_io import parse_execution_plan
 from emuchef.planner import contracts
@@ -28,6 +29,18 @@ SUPPORTED_STEP_TYPES = (
     "wait",
     "force_stop_app",
 )
+
+HANDLER_MODULES = {
+    "resolve_artifacts": "resolve_artifacts",
+    "extract_artifacts": "extract_artifacts",
+    "extract_archive": "extract_archive",
+    "copy_files": "copy_files",
+    "install_apk": "install_apk",
+    "grant_permissions": "grant_permissions",
+    "launch_app": "launch_app",
+    "wait": "wait",
+    "force_stop_app": "force_stop_app",
+}
 
 
 def _minimal_spec(step_type: str) -> StepSpec:
@@ -99,6 +112,68 @@ class StepPluginRegistryTests(unittest.TestCase):
         self.assertEqual(PRIMARY_OUTPUT_STEP_TYPES, registry.primary_output_names)
         self.assertEqual(registry.primary_output_name("extract_artifacts"), "extracted_paths")
         self.assertEqual(registry.primary_output_name("grant_permissions"), None)
+
+    def test_builtin_plugins_reference_step_local_handler_callables_directly(self) -> None:
+        registry = builtin_step_registry()
+
+        for step_type, module_name in HANDLER_MODULES.items():
+            with self.subTest(step_type=step_type):
+                module = importlib.import_module(f"emuchef.steps.handlers.{module_name}")
+                self.assertIs(registry.require(step_type).handler, module.handle)
+
+    def test_builtin_registration_has_no_handler_name_indirection(self) -> None:
+        source = inspect.getsource(builtin_steps)
+
+        self.assertNotIn("_handler(", source)
+        self.assertNotIn("getattr(", source)
+        self.assertNotIn("step_handlers", source)
+        self.assertNotIn("executor_handler", inspect.getsource(builtin_steps.builtin_step_registry))
+
+    def test_central_step_handler_warehouse_is_removed_from_production(self) -> None:
+        project_root = Path(__file__).resolve().parents[1]
+        self.assertFalse((project_root / "src" / "emuchef" / "executor" / "step_handlers.py").exists())
+
+        forbidden_patterns = (
+            "emuchef.executor import step_handlers",
+            "emuchef.executor.step_handlers",
+            ".step_handlers import",
+            "import step_handlers",
+        )
+        offenders: list[str] = []
+        for path in sorted((project_root / "src").rglob("*.py")):
+            if "__pycache__" in path.parts:
+                continue
+            source = path.read_text(encoding="utf-8")
+            if any(pattern in source for pattern in forbidden_patterns):
+                offenders.append(str(path.relative_to(project_root)))
+
+        self.assertEqual(offenders, [])
+
+    def test_execute_step_dispatches_only_through_registry_plugin_handler(self) -> None:
+        from emuchef.executor import step_runtime
+
+        sentinel_output = {"done": RuntimeValue(type=RuntimeValueType.BOOLEAN, value=True)}
+        handler = Mock(return_value=sentinel_output)
+        plugin = StepPlugin(
+            type="wait",
+            spec=_minimal_spec("wait"),
+            handler=handler,
+            editor=_minimal_editor("wait"),
+        )
+        registry = StepRegistry((plugin,))
+        context = object()
+        step = ExecutionStep(id="example.recipe/wait", recipe_ref="example.recipe", type="wait", name="Wait")
+        resolved_params = {"duration_ms": 1}
+
+        with patch("emuchef.executor.step_runtime.builtin_step_registry", return_value=registry):
+            result = step_runtime.execute_step(context, step, resolved_params)
+
+        self.assertIs(result, sentinel_output)
+        handler.assert_called_once_with(context, step, resolved_params)
+        source = inspect.getsource(step_runtime.execute_step)
+        self.assertNotIn("getattr", source)
+        self.assertNotIn("executor_handler", source)
+        self.assertNotIn("step_handlers", source)
 
     def test_production_source_no_longer_depends_on_step_type_enum(self) -> None:
         project_root = Path(__file__).resolve().parents[1]
@@ -285,7 +360,9 @@ steps:
             parse_execution_plan(raw_plan)
 
     def test_executor_dispatch_uses_registry_not_step_type_branching(self) -> None:
-        source = inspect.getsource(step_handlers.execute_step)
+        from emuchef.executor import step_runtime
+
+        source = inspect.getsource(step_runtime.execute_step)
 
         self.assertNotIn("StepType.", source)
         self.assertNotIn("if step.type", source)
@@ -315,7 +392,11 @@ steps:
         self.assertNotIn("StepType.", inspect.getsource(step_metadata))
 
     def test_builtin_plugins_do_not_parse_authored_refs(self) -> None:
-        source = inspect.getsource(builtin_steps)
+        sources = [inspect.getsource(builtin_steps)]
+        for module_name in HANDLER_MODULES.values():
+            module = importlib.import_module(f"emuchef.steps.handlers.{module_name}")
+            sources.append(inspect.getsource(module))
+        source = "\n".join(sources)
 
         self.assertNotIn("parse_reference", source)
         self.assertNotIn("RefParamValue", source)

@@ -29,7 +29,7 @@ from .result import (
     StepRunRecord,
     StepRunStatus,
 )
-from .step_handlers import ExecutionContext, execute_step
+from .step_runtime import ExecutionContext, execute_step
 
 logger = logging.getLogger(__name__)
 

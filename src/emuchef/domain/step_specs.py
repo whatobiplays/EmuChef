@@ -27,6 +27,7 @@ class StepSpec:
     type_name: StepTypeId
     params: Mapping[str, ParamSpec]
     primary_output_name: str | None = None
+    # Transitional metadata only. Runtime dispatch is owned by StepPlugin.handler.
     executor_handler: str | None = None
 
 
