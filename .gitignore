@@ -127,6 +127,10 @@ ipython_config.py
 # PEP 582; used by e.g. github.com/David-OConnor/pyflow and github.com/pdm-project/pdm
 __pypackages__/
 
+# Node / Tauri frontend dependencies
+node_modules/
+apps/config-editor/src-tauri/gen/
+
 # Celery stuff
 celerybeat-schedule
 celerybeat.pid

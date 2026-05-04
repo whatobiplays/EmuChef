@@ -1,0 +1,18 @@
+[package]
+name = "emuchef-config-editor"
+version = "0.1.0"
+description = "Read-only EmuChef config editor bridge shell"
+edition = "2021"
+
+[build-dependencies]
+tauri-build = { version = "2.5.1", features = [] }
+
+[dependencies]
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+tauri = { version = "2.11.0", features = [] }
+tauri-plugin-dialog = "2.7.1"
+
+[lib]
+name = "emuchef_config_editor_lib"
+path = "src/lib.rs"

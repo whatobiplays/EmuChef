@@ -27,6 +27,7 @@ The code is intentionally split into:
 - `src/emuchef_editor/core`: UI-agnostic recipe document, canonical YAML, ref indexing, and validation adapters for the editor
 - `src/emuchef_editor/api`: UI-free JSON API adapters over the editor core
 - `src/emuchef_editor/app`: PySide6 desktop editor for authored recipe files
+- `apps/config-editor`: read-only Tauri config editor shell for validating the TypeScript-to-Python editor API bridge
 
 The base Python package contains non-UI runtime dependencies only. The PySide6
 desktop editor is installed with the `pyside-editor` optional dependency extra.
@@ -123,6 +124,43 @@ The one-shot API server supports stateless requests through:
 in-process `DocumentSessionManager` owns reusable document sessions. The server
 does not run as a daemon and does not preserve sessions across process
 invocations.
+
+## Current Tauri Config Editor Shell
+
+`apps/config-editor` is the Phase 2 desktop shell for the config editor
+migration. It uses Tauri v2, React, TypeScript, Vite, Tailwind, npm, and the
+official Tauri dialog plugin.
+
+The shell is read-only. It opens authored recipe YAML files through a native file
+picker, calls the Python editor API, and displays recipe summary data,
+diagnostics, canonical YAML, and available step specs. It does not expose
+recipe-editing forms, command-editing workflows, `applyRecipeCommand`, planner
+or executor behavior, Python sidecar behavior, Python bundling, or installer
+packaging.
+
+The frontend talks to Rust through Tauri `invoke(...)` commands named:
+
+- `list_step_specs`
+- `open_recipe`
+- `validate_recipe_path`
+- `emit_recipe_yaml_from_path`
+
+The Rust bridge calls the Python API as one stateless subprocess per request
+using `python -m emuchef_editor.api.server`. `EMUCHEF_PYTHON` selects the Python
+command when set; otherwise the bridge uses `python`. During development, the
+bridge discovers the repo root and prepends `src/` to `PYTHONPATH` so the
+selected Python command can import the local package.
+
+The Tauri shell uses only these stateless Python API requests:
+
+- `listStepSpecs`
+- `openRecipe`
+- `validateRecipePath`
+- `emitRecipeYamlFromPath`
+
+The frontend passes `authoredRoot: null` for Phase 2. Explicit authored-root and
+workspace selection are deferred editor migration work. Editing remains out of
+scope for the Tauri shell until Phase 3.
 
 ## Current Step Plugin Architecture
 

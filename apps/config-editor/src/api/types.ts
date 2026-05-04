@@ -1,0 +1,156 @@
+export interface ApiError {
+  code: string;
+  message: string;
+  details: Record<string, unknown>;
+}
+
+export type ApiEnvelope<T> =
+  | {
+      ok: true;
+      result: T;
+    }
+  | {
+      ok: false;
+      error: ApiError;
+      debug?: unknown;
+    };
+
+export interface DiagnosticDto {
+  severity: string;
+  code: string;
+  message: string;
+  file: string | null;
+  objectKind: string | null;
+  objectId: string | null;
+  field: string | null;
+}
+
+export interface RefCandidateDto {
+  ref: string;
+  label: string;
+  valueType: string | null;
+  sourceKind: string;
+  sourceId: string;
+}
+
+export interface RefIndexDto {
+  inputRefs: string[];
+  artifactRefs: string[];
+  stepRefs: string[];
+  stepOutputRefs: string[];
+  allRefs: string[];
+  candidates: RefCandidateDto[];
+}
+
+export interface InputDto {
+  id: string;
+  type: string;
+  role: string;
+  label: string;
+  description: string;
+  required: boolean;
+  multiple: boolean;
+  validation: {
+    mustExist: boolean;
+    allowedExtensions: string[];
+    pathKind: string | null;
+  };
+  default: unknown;
+  metadata: Record<string, unknown>;
+}
+
+export interface ArtifactDto {
+  id: string;
+  type: string;
+  url: string;
+  cache: string;
+}
+
+export interface StepConditionDto {
+  type: string;
+  params: Record<string, unknown>;
+}
+
+export interface StepDto {
+  id: string;
+  type: string;
+  name: string;
+  description: string;
+  userToggleable: boolean;
+  dependencies: string[];
+  constraints: {
+    capabilities: string[];
+    conflictsWith: string[];
+  };
+  skipIf: StepConditionDto[];
+  params: Record<string, unknown>;
+  verify: StepConditionDto[];
+}
+
+export interface RecipeDto {
+  schemaVersion: number;
+  kind: string;
+  id: string;
+  name: string;
+  description: string;
+  recipeDependencies: string[];
+  provides: {
+    features: string[];
+  };
+  inputs: Record<string, InputDto>;
+  artifacts: Record<string, ArtifactDto>;
+  artifactGroups: Record<string, string[]>;
+  steps: StepDto[];
+}
+
+export interface RecipeDocumentDto {
+  documentId: string;
+  path: string;
+  authoredRoot: string | null;
+  dirty: boolean;
+  canUndo: boolean;
+  canRedo: boolean;
+  recipe: RecipeDto;
+  yaml: string;
+  diagnostics: DiagnosticDto[];
+  refIndex: RefIndexDto;
+}
+
+export interface StepSpecDto {
+  type: string;
+  label: string;
+  supported: boolean;
+  primaryOutputName: string | null;
+  outputs: Array<{
+    name: string;
+    valueType: string | null;
+    primary: boolean;
+  }>;
+  paramOrder: string[];
+  params: Record<
+    string,
+    {
+      mode: string;
+      required: boolean;
+      enumValues: string[];
+    }
+  >;
+  defaults: Record<string, unknown>;
+  refFilters: Record<string, string[]>;
+}
+
+export interface ListStepSpecsResult {
+  stepSpecs: StepSpecDto[];
+}
+
+export interface OpenRecipeResult {
+  document: RecipeDocumentDto;
+}
+
+export interface ValidateRecipePathResult {
+  diagnostics: DiagnosticDto[];
+}
+
+export interface EmitRecipeYamlFromPathResult {
+  yaml: string;
+}

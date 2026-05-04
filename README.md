@@ -69,6 +69,33 @@ python -m emuchef_editor.api.server '{"type":"listStepSpecs"}'
 echo '{"type":"openRecipe","payload":{"path":"authored/recipes/app.retroarch.provision.yaml","authoredRoot":"authored"}}' | python -m emuchef_editor.api.server
 ```
 
+### Tauri config editor shell
+
+The Phase 2 config editor shell lives in `apps/config-editor`. It is a
+read-only Tauri v2 app that calls the UI-free Python editor API through
+one-shot subprocess requests. Editing workflows remain in the PySide6 editor.
+
+Install frontend dependencies and run the Tauri dev shell with npm:
+
+```bash
+cd apps/config-editor
+npm install
+npm run tauri dev
+```
+
+The app uses the local Python package through `python -m
+emuchef_editor.api.server`. Set `EMUCHEF_PYTHON` when the default `python`
+command is not the interpreter that can import EmuChef:
+
+```bash
+EMUCHEF_PYTHON=../../.venv/bin/python npm run tauri dev
+```
+
+During development, the Rust bridge discovers the repo root and prepends
+`<repo>/src` to `PYTHONPATH`. If repo discovery is unavailable, the selected
+Python environment must already be able to import the local `emuchef_editor`
+package.
+
 Current editor scope notes:
 
 - it edits the shared typed authored recipe model rather than raw YAML text
