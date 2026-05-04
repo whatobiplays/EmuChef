@@ -57,8 +57,16 @@ Install the project in development mode, then launch the editor against either:
 Example:
 
 ```bash
-pip install -e .
+pip install -e ".[pyside-editor]"
 emuchef-editor /path/to/EmuChef
+```
+
+The UI-free editor API is available without the `pyside-editor` extra. It
+accepts one JSON request per process invocation:
+
+```bash
+python -m emuchef_editor.api.server '{"type":"listStepSpecs"}'
+echo '{"type":"openRecipe","payload":{"path":"authored/recipes/app.retroarch.provision.yaml","authoredRoot":"authored"}}' | python -m emuchef_editor.api.server
 ```
 
 Current editor scope notes:

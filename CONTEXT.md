@@ -25,7 +25,11 @@ The code is intentionally split into:
   step-local executor handlers, and editor-safe step metadata
 - `src/emuchef/domain`: typed models and enums
 - `src/emuchef_editor/core`: UI-agnostic recipe document, canonical YAML, ref indexing, and validation adapters for the editor
+- `src/emuchef_editor/api`: UI-free JSON API adapters over the editor core
 - `src/emuchef_editor/app`: PySide6 desktop editor for authored recipe files
+
+The base Python package contains non-UI runtime dependencies only. The PySide6
+desktop editor is installed with the `pyside-editor` optional dependency extra.
 
 ## Current Authored Model
 
@@ -77,6 +81,48 @@ The current editor scope is recipe-authoring only. It edits:
 - Artifacts
 - Artifact Groups
 - Steps
+
+## Current Editor API
+
+`emuchef_editor.api` is the UI-free JSON API surface for editor clients. It
+wraps `src/emuchef_editor/core` and keeps Python authoritative for authored
+recipe loading, command application, validation, ref indexing, canonical YAML
+emission, saving, and step registry metadata.
+
+Every API response uses one of these envelopes:
+
+- `{"ok": true, "result": {...}}`
+- `{"ok": false, "error": {"code": "...", "message": "...", "details": {...}}}`
+
+Failure responses include diagnostic debug details only when a request sets
+`debug: true`. Frontends treat debug details as diagnostics, not behavior
+contracts.
+
+`RecipeDocumentDto` contains document state: document id, path, authored root,
+dirty state, undo/redo availability, recipe DTO, current canonical YAML,
+diagnostics, and ref index. It does not contain step specs.
+
+`RecipeDto` exposes current authored recipe sections for overview, dependencies,
+provided features, inputs, artifacts, artifact groups, and steps. Top-level
+permissions are invalid authored data and are absent from `RecipeDto`.
+Permission authoring appears as normal step data on `grant_permissions` steps.
+
+Step specs are returned only by the `listStepSpecs` API request. Step spec data
+comes from the built-in step registry and includes editor-safe labels, supported
+status, outputs, param ordering, defaults, and typed ref filter hints where the
+registry exposes them.
+
+The one-shot API server supports stateless requests through:
+
+- `listStepSpecs`
+- `openRecipe`
+- `validateRecipePath`
+- `emitRecipeYamlFromPath`
+
+`openRecipe` may return a document id from the one-shot server, but only the
+in-process `DocumentSessionManager` owns reusable document sessions. The server
+does not run as a daemon and does not preserve sessions across process
+invocations.
 
 ## Current Step Plugin Architecture
 
