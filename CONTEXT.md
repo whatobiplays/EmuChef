@@ -27,7 +27,7 @@ The code is intentionally split into:
 - `src/emuchef_editor/core`: UI-agnostic recipe document, canonical YAML, ref indexing, and validation adapters for the editor
 - `src/emuchef_editor/api`: UI-free JSON API adapters over the editor core
 - `src/emuchef_editor/app`: PySide6 desktop editor for authored recipe files
-- `apps/config-editor`: read-only Tauri config editor shell for validating the TypeScript-to-Python editor API bridge
+- `apps/config-editor`: Tauri config editor shell that validates the TypeScript/Rust-to-Python editor API bridge and persistent document sessions
 
 The base Python package contains non-UI runtime dependencies only. The PySide6
 desktop editor is installed with the `pyside-editor` optional dependency extra.
@@ -113,7 +113,7 @@ comes from the built-in step registry and includes editor-safe labels, supported
 status, outputs, param ordering, defaults, and typed ref filter hints where the
 registry exposes them.
 
-The one-shot API server supports stateless requests through:
+The API server supports one-shot stateless requests through:
 
 - `listStepSpecs`
 - `openRecipe`
@@ -121,22 +121,53 @@ The one-shot API server supports stateless requests through:
 - `emitRecipeYamlFromPath`
 
 `openRecipe` may return a document id from the one-shot server, but only the
-in-process `DocumentSessionManager` owns reusable document sessions. The server
-does not run as a daemon and does not preserve sessions across process
-invocations.
+sidecar-backed `DocumentSessionManager` owns reusable document sessions.
+
+The API server also supports a persistent JSON Lines sidecar mode through:
+
+```bash
+python -m emuchef_editor.api.server --sidecar
+```
+
+The sidecar reads one UTF-8 JSON request per stdin line and writes one UTF-8
+JSON response per stdout line. Stdout is machine-readable JSONL only; diagnostics
+and human-readable logs belong on stderr. Every valid sidecar request includes
+an opaque string id, every response echoes that id exactly, and malformed JSON
+lines return `id: null`. Sidecar request-level failures use the same `ok:false`
+API envelope as one-shot requests and do not terminate the process. The sidecar
+exits cleanly when stdin reaches EOF.
+
+The sidecar reuses `DocumentSessionManager` for live document sessions. It
+supports session-backed requests for listing step specs, opening and creating
+documents, getting and closing documents, applying recipe commands, undo, redo,
+saving, Save As, validation, canonical YAML emission, and ref-index retrieval.
+The sidecar protocol has no `protocolVersion` field and no ping request.
+Protocol versioning is deferred until backend replacement or external protocol
+stabilization work.
 
 ## Current Tauri Config Editor Shell
 
-`apps/config-editor` is the Phase 2 desktop shell for the config editor
+`apps/config-editor` is the Phase 3A desktop shell for the config editor
 migration. It uses Tauri v2, React, TypeScript, Vite, Tailwind, npm, and the
 official Tauri dialog plugin.
 
-The shell is read-only. It opens authored recipe YAML files through a native file
-picker, calls the Python editor API, and displays recipe summary data,
-diagnostics, canonical YAML, and available step specs. It does not expose
-recipe-editing forms, command-editing workflows, `applyRecipeCommand`, planner
-or executor behavior, Python sidecar behavior, Python bundling, or installer
-packaging.
+The shell opens authored recipe YAML files through a native file picker, calls
+the Python sidecar through Rust Tauri commands, and displays recipe summary data,
+diagnostics, canonical YAML, sidecar status, and available step specs. It keeps a
+reusable `documentId` for the currently open sidecar document.
+
+The Tauri shell includes only debug/development command controls for persistent
+session proof: refresh document, validate, refresh YAML, undo, redo, Save, and a
+guarded debug-only recipe-name rename command. The debug rename command uses
+`applyRecipeCommand`, changes only in-memory sidecar document state, and does not
+auto-save. Save writes the current sidecar document to its current path and is
+intended for safe or temporary recipe copies during Phase 3A.
+
+The Tauri shell does not expose real overview/input/artifact/artifact-group
+editing screens, the step editor, ref picker UI, dependency picker UI,
+executor/apply-device UI, Save As UI, create-from-template UI, Python bundling,
+installer packaging, or Rust ports of Python editor/planner/executor behavior.
+Full non-step editing in Tauri remains Phase 3B.
 
 The frontend talks to Rust through Tauri `invoke(...)` commands named:
 
@@ -144,23 +175,35 @@ The frontend talks to Rust through Tauri `invoke(...)` commands named:
 - `open_recipe`
 - `validate_recipe_path`
 - `emit_recipe_yaml_from_path`
+- `sidecar_status`
+- `sidecar_list_step_specs`
+- `sidecar_open_recipe`
+- `sidecar_get_document`
+- `sidecar_apply_recipe_command`
+- `sidecar_undo`
+- `sidecar_redo`
+- `sidecar_save_recipe`
+- `sidecar_save_recipe_as`
+- `sidecar_validate`
+- `sidecar_emit_yaml`
+- `sidecar_get_ref_index`
 
-The Rust bridge calls the Python API as one stateless subprocess per request
-using `python -m emuchef_editor.api.server`. `EMUCHEF_PYTHON` selects the Python
-command when set; otherwise the bridge uses `python`. During development, the
-bridge discovers the repo root and prepends `src/` to `PYTHONPATH` so the
-selected Python command can import the local package.
+The Rust bridge keeps the Phase 2 one-shot Python API bridge available and also
+owns one persistent sidecar process for sidecar-backed commands. The sidecar
+client starts Python on the first sidecar request, serializes requests as one
+send-line/read-line operation at a time, and treats API `ok:false` envelopes as
+successful Rust transport results. `EMUCHEF_PYTHON` selects the Python command
+when set; otherwise the bridge uses `python`. During development, the bridge
+discovers the repo root and prepends `src/` to `PYTHONPATH` so the selected
+Python command can import the local package.
 
-The Tauri shell uses only these stateless Python API requests:
+`sidecar_status` reports local Rust process state only and does not send a
+Python request. If the sidecar exits unexpectedly, Phase 3A does not
+automatically restart it; recovery may require restarting the Tauri app, and
+previous document ids are invalid after process loss.
 
-- `listStepSpecs`
-- `openRecipe`
-- `validateRecipePath`
-- `emitRecipeYamlFromPath`
-
-The frontend passes `authoredRoot: null` for Phase 2. Explicit authored-root and
-workspace selection are deferred editor migration work. Editing remains out of
-scope for the Tauri shell until Phase 3.
+The frontend passes `authoredRoot: null` for Phase 3A. Explicit authored-root and
+workspace selection are deferred editor migration work.
 
 ## Current Step Plugin Architecture
 

@@ -3,9 +3,15 @@ import { invoke } from "@tauri-apps/api/core";
 import type {
   ApiEnvelope,
   ApiError,
+  ApplyRecipeCommandResult,
+  DocumentResult,
   EmitRecipeYamlFromPathResult,
+  EmitYamlResult,
+  GetRefIndexResult,
   ListStepSpecsResult,
   OpenRecipeResult,
+  SidecarStatusResult,
+  ValidateResult,
   ValidateRecipePathResult,
 } from "./types";
 
@@ -50,6 +56,63 @@ export async function emitRecipeYamlFromPath(
     path,
     authoredRoot,
   });
+}
+
+export async function sidecarStatus(): Promise<EditorApiResult<SidecarStatusResult>> {
+  return callApi<SidecarStatusResult>("sidecar_status");
+}
+
+export async function sidecarListStepSpecs(): Promise<EditorApiResult<ListStepSpecsResult>> {
+  return callApi<ListStepSpecsResult>("sidecar_list_step_specs");
+}
+
+export async function sidecarOpenRecipe(
+  path: string,
+  authoredRoot: string | null = null,
+): Promise<EditorApiResult<OpenRecipeResult>> {
+  return callApi<OpenRecipeResult>("sidecar_open_recipe", { path, authoredRoot });
+}
+
+export async function sidecarGetDocument(documentId: string): Promise<EditorApiResult<DocumentResult>> {
+  return callApi<DocumentResult>("sidecar_get_document", { documentId });
+}
+
+export async function sidecarApplyRecipeCommand(
+  documentId: string,
+  command: Record<string, unknown>,
+): Promise<EditorApiResult<ApplyRecipeCommandResult>> {
+  return callApi<ApplyRecipeCommandResult>("sidecar_apply_recipe_command", { documentId, command });
+}
+
+export async function sidecarUndo(documentId: string): Promise<EditorApiResult<ApplyRecipeCommandResult>> {
+  return callApi<ApplyRecipeCommandResult>("sidecar_undo", { documentId });
+}
+
+export async function sidecarRedo(documentId: string): Promise<EditorApiResult<ApplyRecipeCommandResult>> {
+  return callApi<ApplyRecipeCommandResult>("sidecar_redo", { documentId });
+}
+
+export async function sidecarSaveRecipe(documentId: string): Promise<EditorApiResult<DocumentResult>> {
+  return callApi<DocumentResult>("sidecar_save_recipe", { documentId });
+}
+
+export async function sidecarSaveRecipeAs(
+  documentId: string,
+  path: string,
+): Promise<EditorApiResult<DocumentResult>> {
+  return callApi<DocumentResult>("sidecar_save_recipe_as", { documentId, path });
+}
+
+export async function sidecarValidate(documentId: string): Promise<EditorApiResult<ValidateResult>> {
+  return callApi<ValidateResult>("sidecar_validate", { documentId });
+}
+
+export async function sidecarEmitYaml(documentId: string): Promise<EditorApiResult<EmitYamlResult>> {
+  return callApi<EmitYamlResult>("sidecar_emit_yaml", { documentId });
+}
+
+export async function sidecarGetRefIndex(documentId: string): Promise<EditorApiResult<GetRefIndexResult>> {
+  return callApi<GetRefIndexResult>("sidecar_get_ref_index", { documentId });
 }
 
 async function callApi<T>(command: string, args?: Record<string, unknown>): Promise<EditorApiResult<T>> {

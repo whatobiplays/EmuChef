@@ -61,19 +61,35 @@ pip install -e ".[pyside-editor]"
 emuchef-editor /path/to/EmuChef
 ```
 
-The UI-free editor API is available without the `pyside-editor` extra. It
-accepts one JSON request per process invocation:
+The UI-free editor API is available without the `pyside-editor` extra. The
+one-shot server accepts one JSON request per process invocation:
 
 ```bash
 python -m emuchef_editor.api.server '{"type":"listStepSpecs"}'
 echo '{"type":"openRecipe","payload":{"path":"authored/recipes/app.retroarch.provision.yaml","authoredRoot":"authored"}}' | python -m emuchef_editor.api.server
 ```
 
+The same entrypoint also supports a persistent JSON Lines sidecar for
+development clients that need reusable document sessions:
+
+```bash
+printf '%s\n' '{"id":"req-1","type":"listStepSpecs","payload":{}}' | python -m emuchef_editor.api.server --sidecar
+```
+
+Sidecar stdin accepts one JSON request per line and stdout returns one JSON
+response per line. Stdout is machine-readable JSONL only; diagnostics belong on
+stderr. Every valid sidecar request includes an opaque string `id`, and every
+response echoes that id. Malformed JSON lines return `id: null`. The sidecar has
+no `protocolVersion` or ping request yet; revisit protocol versioning before
+replacing the Python backend or externalizing the protocol.
+
 ### Tauri config editor shell
 
-The Phase 2 config editor shell lives in `apps/config-editor`. It is a
-read-only Tauri v2 app that calls the UI-free Python editor API through
-one-shot subprocess requests. Editing workflows remain in the PySide6 editor.
+The Phase 3A config editor shell lives in `apps/config-editor`. It is a Tauri
+v2 app that uses the persistent Python JSONL sidecar for session-backed document
+operations. The one-shot Python API remains available for compatibility and
+regression safety. Full editing workflows remain in the PySide6 editor until the
+next migration phase.
 
 Install frontend dependencies and run the Tauri dev shell with npm:
 
@@ -84,8 +100,8 @@ npm run tauri dev
 ```
 
 The app uses the local Python package through `python -m
-emuchef_editor.api.server`. Set `EMUCHEF_PYTHON` when the default `python`
-command is not the interpreter that can import EmuChef:
+emuchef_editor.api.server --sidecar`. Set `EMUCHEF_PYTHON` when the default
+`python` command is not the interpreter that can import EmuChef:
 
 ```bash
 EMUCHEF_PYTHON=../../.venv/bin/python npm run tauri dev
@@ -99,6 +115,10 @@ package.
 Current editor scope notes:
 
 - it edits the shared typed authored recipe model rather than raw YAML text
+- the Tauri shell has only Phase 3A debug/development command controls, not real editing screens
+- the Tauri debug rename control proves `applyRecipeCommand`/undo/redo over the sidecar and does not auto-save
+- the Tauri Save control writes the current sidecar document to disk and should be tested only on safe or temporary recipe copies
+- Save As and create-from-template sidecar capabilities are not exposed in the Tauri UI
 - `kind` and `schema_version` are read-only
 - input, artifact, and group ids are chosen at creation time and then stay read-only
 - step ids and step types are chosen at creation time and then stay read-only

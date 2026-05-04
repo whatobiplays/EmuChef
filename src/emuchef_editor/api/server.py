@@ -42,6 +42,10 @@ def handle_request(request: Mapping[str, Any] | object) -> dict[str, Any]:
 
 def main(argv: list[str] | None = None) -> int:
     args = list(sys.argv[1:] if argv is None else argv)
+    if args == ["--sidecar"]:
+        from .sidecar import run_jsonl_sidecar
+
+        return run_jsonl_sidecar()
     raw_request = args[0] if args else sys.stdin.read()
     try:
         request = json.loads(raw_request)

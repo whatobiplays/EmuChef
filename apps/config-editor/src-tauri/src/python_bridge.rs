@@ -83,7 +83,7 @@ pub fn parse_stdout_envelope(stdout: &str) -> Result<Value, String> {
     }
 }
 
-fn discover_repo_root() -> Option<PathBuf> {
+pub(crate) fn discover_repo_root() -> Option<PathBuf> {
     let starts = [current_exe_start(), env::current_dir().ok()];
     starts
         .into_iter()
@@ -110,7 +110,7 @@ fn walk_up_for_repo_root(start: &Path) -> Option<PathBuf> {
     })
 }
 
-fn python_path_for_repo(repo_root: &Path) -> Result<std::ffi::OsString, String> {
+pub(crate) fn python_path_for_repo(repo_root: &Path) -> Result<std::ffi::OsString, String> {
     let mut paths = vec![repo_root.join("src")];
     if let Some(existing) = env::var_os("PYTHONPATH") {
         paths.extend(env::split_paths(&existing));

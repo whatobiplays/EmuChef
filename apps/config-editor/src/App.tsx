@@ -2,15 +2,22 @@ import { open } from "@tauri-apps/plugin-dialog";
 import { useEffect, useMemo, useState } from "react";
 
 import {
-  emitRecipeYamlFromPath,
-  listStepSpecs,
-  openRecipe,
-  validateRecipePath,
+  sidecarApplyRecipeCommand,
+  sidecarEmitYaml,
+  sidecarGetDocument,
+  sidecarListStepSpecs,
+  sidecarOpenRecipe,
+  sidecarRedo,
+  sidecarSaveRecipe,
+  sidecarStatus,
+  sidecarUndo,
+  sidecarValidate,
   type EditorApiResult,
 } from "./api/editorApi";
 import type {
   DiagnosticDto,
   RecipeDocumentDto,
+  SidecarStatusResult,
   StepSpecDto,
 } from "./api/types";
 import { AppShell } from "./components/AppShell";
@@ -32,15 +39,21 @@ export default function App() {
   const [currentPath, setCurrentPath] = useState<string | null>(null);
   const [diagnostics, setDiagnostics] = useState<DiagnosticDto[]>([]);
   const [yaml, setYaml] = useState("");
+  const [sidecarState, setSidecarState] = useState<SidecarStatusResult | null>(null);
   const [loadingLabel, setLoadingLabel] = useState<string | null>(null);
   const [errorMessage, setErrorMessage] = useState<string | null>(null);
+  const [statusMessage, setStatusMessage] = useState<string | null>(null);
 
   useEffect(() => {
     let cancelled = false;
 
     async function loadSpecs() {
       setStepSpecsLoading(true);
-      const response = await listStepSpecs();
+      const initialStatus = await sidecarStatus();
+      if (!cancelled) {
+        handleStatusResponse(initialStatus);
+      }
+      const response = await sidecarListStepSpecs();
       if (cancelled) {
         return;
       }
@@ -49,6 +62,10 @@ export default function App() {
         setStepSpecsLoaded(true);
       } else {
         setErrorMessage(resultMessage(response, "Step specs failed to load."));
+      }
+      const finalStatus = await sidecarStatus();
+      if (!cancelled) {
+        handleStatusResponse(finalStatus);
       }
       setStepSpecsLoading(false);
     }
@@ -90,50 +107,186 @@ export default function App() {
     }
 
     setLoadingLabel("Opening recipe");
-    const response = await openRecipe(path, null);
+    const response = await sidecarOpenRecipe(path, null);
     if (response.kind === "success") {
-      const document = response.result.document;
-      setCurrentDocument(document);
-      setCurrentPath(document.path || path);
-      setDiagnostics(document.diagnostics);
-      setYaml(document.yaml);
+      applyDocument(response.result.document, path);
       setErrorMessage(null);
+      setStatusMessage(null);
     } else {
       setErrorMessage(resultMessage(response, "Recipe failed to open."));
+      setStatusMessage(null);
+      await refreshSidecarStatus();
+    }
+    setLoadingLabel(null);
+  }
+
+  async function handleRefreshDocument() {
+    if (currentDocument === null) {
+      return;
+    }
+
+    setLoadingLabel("Refreshing document");
+    const response = await sidecarGetDocument(currentDocument.documentId);
+    if (response.kind === "success") {
+      applyDocument(response.result.document);
+      setErrorMessage(null);
+      setStatusMessage("Document refreshed from the sidecar session.");
+    } else {
+      setErrorMessage(resultMessage(response, "Document refresh failed."));
+      setStatusMessage(null);
+      await refreshSidecarStatus();
     }
     setLoadingLabel(null);
   }
 
   async function handleValidate() {
-    if (currentPath === null) {
+    if (currentDocument === null) {
       return;
     }
 
     setLoadingLabel("Validating recipe");
-    const response = await validateRecipePath(currentPath, null);
+    const response = await sidecarValidate(currentDocument.documentId);
     if (response.kind === "success") {
       setDiagnostics(response.result.diagnostics);
       setErrorMessage(null);
+      setStatusMessage("Validation refreshed from the sidecar session.");
     } else {
       setErrorMessage(resultMessage(response, "Validation failed."));
+      setStatusMessage(null);
+      await refreshSidecarStatus();
     }
     setLoadingLabel(null);
   }
 
   async function handleRefreshYaml() {
-    if (currentPath === null) {
+    if (currentDocument === null) {
       return;
     }
 
     setLoadingLabel("Refreshing YAML");
-    const response = await emitRecipeYamlFromPath(currentPath, null);
+    const response = await sidecarEmitYaml(currentDocument.documentId);
     if (response.kind === "success") {
       setYaml(response.result.yaml);
       setErrorMessage(null);
+      setStatusMessage("YAML refreshed from the sidecar session.");
     } else {
       setErrorMessage(resultMessage(response, "YAML refresh failed."));
+      setStatusMessage(null);
+      await refreshSidecarStatus();
     }
     setLoadingLabel(null);
+  }
+
+  async function handleUndo() {
+    if (currentDocument === null) {
+      return;
+    }
+
+    setLoadingLabel("Undoing change");
+    const response = await sidecarUndo(currentDocument.documentId);
+    if (response.kind === "success") {
+      applyDocument(response.result.document);
+      setErrorMessage(null);
+      setStatusMessage(response.result.commandResult.changed ? "Undo applied." : "Nothing to undo.");
+    } else {
+      setErrorMessage(resultMessage(response, "Undo failed."));
+      setStatusMessage(null);
+      await refreshSidecarStatus();
+    }
+    setLoadingLabel(null);
+  }
+
+  async function handleRedo() {
+    if (currentDocument === null) {
+      return;
+    }
+
+    setLoadingLabel("Redoing change");
+    const response = await sidecarRedo(currentDocument.documentId);
+    if (response.kind === "success") {
+      applyDocument(response.result.document);
+      setErrorMessage(null);
+      setStatusMessage(response.result.commandResult.changed ? "Redo applied." : "Nothing to redo.");
+    } else {
+      setErrorMessage(resultMessage(response, "Redo failed."));
+      setStatusMessage(null);
+      await refreshSidecarStatus();
+    }
+    setLoadingLabel(null);
+  }
+
+  async function handleSave() {
+    if (currentDocument === null) {
+      return;
+    }
+    const confirmed = window.confirm(
+      "Phase 3A Save writes canonical YAML to the currently open file. Use only with a safe or temporary recipe copy. Continue?",
+    );
+    if (!confirmed) {
+      return;
+    }
+
+    setLoadingLabel("Saving recipe");
+    const response = await sidecarSaveRecipe(currentDocument.documentId);
+    if (response.kind === "success") {
+      applyDocument(response.result.document);
+      setErrorMessage(null);
+      setStatusMessage("Saved the current sidecar document.");
+    } else {
+      setErrorMessage(resultMessage(response, "Save failed."));
+      setStatusMessage(null);
+      await refreshSidecarStatus();
+    }
+    setLoadingLabel(null);
+  }
+
+  async function handleApplyDebugRename() {
+    if (currentDocument === null) {
+      return;
+    }
+    const confirmed = window.confirm(
+      "Debug-only rename changes the in-memory recipe name and does not save. Use a safe or temporary recipe copy if you plan to save. Continue?",
+    );
+    if (!confirmed) {
+      return;
+    }
+
+    setLoadingLabel("Applying debug rename");
+    const response = await sidecarApplyRecipeCommand(currentDocument.documentId, {
+      type: "SetOverviewField",
+      field: "name",
+      value: `DEBUG Sidecar Rename ${new Date().toISOString()}`,
+    });
+    if (response.kind === "success") {
+      applyDocument(response.result.document);
+      setErrorMessage(null);
+      setStatusMessage("Debug rename applied in memory. Save was not run.");
+    } else {
+      setErrorMessage(resultMessage(response, "Debug rename failed."));
+      setStatusMessage(null);
+      await refreshSidecarStatus();
+    }
+    setLoadingLabel(null);
+  }
+
+  function applyDocument(document: RecipeDocumentDto, fallbackPath: string | null = null) {
+    setCurrentDocument(document);
+    setCurrentPath(document.path || fallbackPath || currentPath);
+    setDiagnostics(document.diagnostics);
+    setYaml(document.yaml);
+  }
+
+  async function refreshSidecarStatus() {
+    const response = await sidecarStatus();
+    handleStatusResponse(response);
+  }
+
+  function handleStatusResponse(response: EditorApiResult<SidecarStatusResult>) {
+    if (response.kind === "success") {
+      setSidecarState(response.result);
+    } else {
+      setErrorMessage(resultMessage(response, "Sidecar status unavailable."));
+    }
   }
 
   return (
@@ -141,16 +294,29 @@ export default function App() {
       toolbar={
         <>
           <Toolbar
+            canRedo={currentDocument?.canRedo ?? false}
+            canUndo={currentDocument?.canUndo ?? false}
             currentPath={currentPath}
             hasDocument={currentDocument !== null}
             loadingLabel={loadingLabel}
+            sidecarStatus={sidecarState}
             stepSpecsCount={stepSpecsCount}
             stepSpecsLoading={stepSpecsLoading}
+            onApplyDebugRename={handleApplyDebugRename}
             onOpenRecipe={handleOpenRecipe}
+            onRedo={handleRedo}
+            onRefreshDocument={handleRefreshDocument}
             onRefreshYaml={handleRefreshYaml}
+            onSave={handleSave}
+            onUndo={handleUndo}
             onValidate={handleValidate}
           />
           {errorMessage ? <ErrorBanner message={errorMessage} onDismiss={() => setErrorMessage(null)} /> : null}
+          {statusMessage ? (
+            <div className="border-b border-emerald-200 bg-emerald-50 px-4 py-2 text-sm text-emerald-800">
+              {statusMessage}
+            </div>
+          ) : null}
           {loadingLabel ? <LoadingState label={loadingLabel} /> : null}
         </>
       }

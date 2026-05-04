@@ -42,6 +42,10 @@ export interface RefIndexDto {
   candidates: RefCandidateDto[];
 }
 
+export interface CommandResultDto {
+  changed: boolean;
+}
+
 export interface InputDto {
   id: string;
   type: string;
@@ -143,7 +147,23 @@ export interface ListStepSpecsResult {
   stepSpecs: StepSpecDto[];
 }
 
+export interface SidecarStatusResult {
+  running: boolean;
+  pid: number | null;
+  state?: string;
+  message?: string;
+}
+
 export interface OpenRecipeResult {
+  document: RecipeDocumentDto;
+}
+
+export interface DocumentResult {
+  document: RecipeDocumentDto;
+}
+
+export interface ApplyRecipeCommandResult {
+  commandResult: CommandResultDto;
   document: RecipeDocumentDto;
 }
 
@@ -151,6 +171,18 @@ export interface ValidateRecipePathResult {
   diagnostics: DiagnosticDto[];
 }
 
+export interface ValidateResult {
+  diagnostics: DiagnosticDto[];
+}
+
 export interface EmitRecipeYamlFromPathResult {
   yaml: string;
+}
+
+export interface EmitYamlResult {
+  yaml: string;
+}
+
+export interface GetRefIndexResult {
+  refIndex: RefIndexDto;
 }
