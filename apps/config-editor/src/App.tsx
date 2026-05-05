@@ -29,7 +29,6 @@ import { DiagnosticsPanel } from "./components/DiagnosticsPanel";
 import { EmptyState } from "./components/EmptyState";
 import { ErrorBanner } from "./components/ErrorBanner";
 import { InputsEditor } from "./components/InputsEditor";
-import { LoadingState } from "./components/LoadingState";
 import { MenuEventBridge, type MenuAction } from "./components/MenuEventBridge";
 import { OverviewEditor } from "./components/OverviewEditor";
 import { ConfirmDialog, TextPromptDialog } from "./components/PromptDialog";
@@ -546,7 +545,6 @@ export default function App() {
                 {statusMessage}
               </div>
             ) : null}
-            {loadingLabel ? <LoadingState label={loadingLabel} /> : null}
           </>
         }
         sidebar={

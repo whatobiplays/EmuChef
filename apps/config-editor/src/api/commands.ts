@@ -23,7 +23,8 @@ export type EditorCommand =
   | { type: "DuplicateStep"; sourceStepId: string; newStepId: string }
   | { type: "ReorderStep"; stepId: string; toIndex: number }
   | { type: "UpdateStepBasics"; stepId: string; name: string; description: string | null }
-  | { type: "SetStepUserToggleable"; stepId: string; userToggleable: boolean };
+  | { type: "SetStepUserToggleable"; stepId: string; userToggleable: boolean }
+  | { type: "UpdateStepDependencies"; stepId: string; dependencies: string[] };
 
 export type InputEditableField =
   | "type"

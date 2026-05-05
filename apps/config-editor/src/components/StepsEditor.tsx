@@ -5,6 +5,7 @@ import type { DiagnosticDto, RecipeDocumentDto, StepDto, StepSpecDto } from "../
 import { EditableTextField } from "./EditableTextField";
 import { ReadOnlyJson } from "./ReadOnlyJson";
 import { ResizableEditorLayout } from "./ResizableEditorLayout";
+import { StepDependenciesEditor } from "./StepDependenciesEditor";
 
 interface StepsEditorProps {
   document: RecipeDocumentDto;
@@ -155,6 +156,14 @@ export function StepsEditor({
       {selectedStep ? (
         <StepDetailPanel
           step={selectedStep}
+          steps={steps}
+          onUpdateDependencies={(dependencies) =>
+            onCommand({
+              type: "UpdateStepDependencies",
+              stepId: selectedStep.id,
+              dependencies,
+            })
+          }
           onUpdateName={(name) =>
             onCommand({
               type: "UpdateStepBasics",
@@ -257,10 +266,14 @@ function StepListRow({
 
 function StepDetailPanel({
   step,
+  steps,
+  onUpdateDependencies,
   onUpdateName,
   onUpdateUserToggleable,
 }: {
   step: StepDto;
+  steps: StepDto[];
+  onUpdateDependencies: (dependencies: string[]) => Promise<boolean>;
   onUpdateName: (name: string) => Promise<boolean>;
   onUpdateUserToggleable: (userToggleable: boolean) => Promise<boolean>;
 }) {
@@ -298,7 +311,7 @@ function StepDetailPanel({
       </div>
 
       <div className="grid gap-4 rounded border border-slate-200 bg-white p-4">
-        <ReadOnlyJson label="Dependencies" value={step.dependencies} />
+        <StepDependenciesEditor step={step} steps={steps} onUpdateDependencies={onUpdateDependencies} />
         <ReadOnlyJson label="Params" value={step.params} />
       </div>
 

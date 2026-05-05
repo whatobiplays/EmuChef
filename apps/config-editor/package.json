@@ -5,6 +5,7 @@
   "type": "module",
   "scripts": {
     "dev": "vite",
+    "test:logic": "tsc --ignoreConfig --module NodeNext --moduleResolution NodeNext --target ES2022 --outDir /tmp/emuchef-config-editor-tests --rootDir . --types node --skipLibCheck --strict tests/stepDependencies.logic.test.ts src/components/stepDependencies.logic.ts && node --test /tmp/emuchef-config-editor-tests/tests/stepDependencies.logic.test.js",
     "typecheck": "tsc --noEmit",
     "build": "tsc && vite build",
     "tauri": "tauri"

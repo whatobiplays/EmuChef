@@ -28,10 +28,10 @@ export function Toolbar({
         <span className="truncate text-xs text-slate-500">{currentPath ?? "No recipe open"}</span>
       </div>
       <div className="flex items-center gap-3 text-xs text-slate-500">
+        {loadingLabel ? <span className="font-medium text-slate-700">{loadingLabel}</span> : null}
         <span className={dirty ? "font-semibold text-amber-700" : "text-slate-500"}>
           {hasDocument ? (dirty ? "Unsaved" : "Saved") : "No document"}
         </span>
-        {loadingLabel ? <span>{loadingLabel}</span> : null}
         <span>{sidecarLabel}</span>
         <span>
           Step specs: {stepSpecsLoading ? "loading" : stepSpecsCount === null ? "unavailable" : stepSpecsCount}

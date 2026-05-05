@@ -114,7 +114,7 @@ package.
 Current editor scope notes:
 
 - it edits the shared typed authored recipe model rather than raw YAML text
-- the Tauri editor supports sidecar-backed editing for Overview, Inputs, Artifacts, Artifact Groups, and basic step lifecycle operations
+- the Tauri editor supports sidecar-backed editing for Overview, Inputs, Artifacts, Artifact Groups, basic step lifecycle operations, and step dependencies
 - primary document actions are exposed through native File, Edit, and Utilities menus
 - temporary development-only actions are exposed through the native Debug menu
 - menu items are context-aware and disabled when a document action is not valid
@@ -126,9 +126,11 @@ Current editor scope notes:
 - artifact groups can be duplicated; the duplicate starts with the same ordered artifact members as the source group
 - step ids and step types are chosen only when adding a step and then stay read-only
 - basic step lifecycle editing uses Python sidecar commands for add, delete, duplicate, reorder, display-name edits, and `user_toggleable` edits
+- step dependency editing uses the Python sidecar `UpdateStepDependencies` command; adding appends a dependency id as authored storage/display order only, and the planner remains authoritative for final execution ordering
+- missing or unknown authored dependency ids remain visible in the step detail panel and can be removed from copied or temporary recipes during repair
 - deleting a step uses the backend safe-delete behavior shared with the PySide editor and removes supported downstream dependencies, conflicts, and refs
-- dependencies, params, constraints, `skip_if`, and `verify` are read-only in the Tauri editor
-- full step params, dependency, and ref editing remain later-phase work
+- params, constraints, `skip_if`, and `verify` are read-only in the Tauri editor
+- full step params and ref editing remain later-phase work
 - Inputs, Artifacts, Artifact Groups, and Steps use independently scrolling list/detail panes with resizable list columns
 - top-level recipe `permissions:` is invalid and is not migrated or ignored by the loader
 - step refs stay in authored-ref space and save explicitly as `{ ref: ... }`
