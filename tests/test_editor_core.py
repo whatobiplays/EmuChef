@@ -26,6 +26,7 @@ from emuchef_editor.core.documents.commands import (
     DeleteInputCommand,
     DeleteStepCommand,
     DuplicateArtifactCommand,
+    DuplicateArtifactGroupCommand,
     DuplicateInputCommand,
     DuplicateStepCommand,
     MoveProvidedFeatureCommand,
@@ -424,11 +425,18 @@ class EditorCoreTests(unittest.TestCase):
                     DuplicateArtifactCommand(source_artifact_id="first_zip", new_artifact_id="first_zip_copy")
                 )
             )
+            self.assertTrue(
+                document.apply_command(
+                    DuplicateArtifactGroupCommand(source_group_id="bundle", new_group_id="bundle_copy")
+                )
+            )
+            self.assertEqual(document.working_recipe.artifact_groups["bundle_copy"], ("first_zip", "second_zip"))
             self.assertTrue(document.apply_command(DeleteArtifactCommand(artifact_id="second_zip")))
 
             self.assertEqual(tuple(document.working_recipe.artifacts), ("first_zip", "third_zip", "first_zip_copy"))
             self.assertEqual(document.working_recipe.artifacts["third_zip"].cache.value, "none")
             self.assertEqual(document.working_recipe.artifact_groups["bundle"], ("first_zip",))
+            self.assertEqual(document.working_recipe.artifact_groups["bundle_copy"], ("first_zip",))
 
     def test_delete_artifact_cleans_group_membership_step_selection_and_param_ref_in_one_command(self) -> None:
         recipe = base_recipe(

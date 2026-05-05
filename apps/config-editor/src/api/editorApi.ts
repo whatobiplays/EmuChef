@@ -1,5 +1,6 @@
 import { invoke } from "@tauri-apps/api/core";
 
+import type { EditorCommand } from "./commands";
 import type {
   ApiEnvelope,
   ApiError,
@@ -79,7 +80,7 @@ export async function sidecarGetDocument(documentId: string): Promise<EditorApiR
 
 export async function sidecarApplyRecipeCommand(
   documentId: string,
-  command: Record<string, unknown>,
+  command: EditorCommand,
 ): Promise<EditorApiResult<ApplyRecipeCommandResult>> {
   return callApi<ApplyRecipeCommandResult>("sidecar_apply_recipe_command", { documentId, command });
 }
@@ -113,6 +114,17 @@ export async function sidecarEmitYaml(documentId: string): Promise<EditorApiResu
 
 export async function sidecarGetRefIndex(documentId: string): Promise<EditorApiResult<GetRefIndexResult>> {
   return callApi<GetRefIndexResult>("sidecar_get_ref_index", { documentId });
+}
+
+export interface MenuState {
+  hasDocument: boolean;
+  dirty: boolean;
+  canUndo: boolean;
+  canRedo: boolean;
+}
+
+export async function updateMenuState(state: MenuState): Promise<void> {
+  await invoke("update_menu_state", { state });
 }
 
 async function callApi<T>(command: string, args?: Record<string, unknown>): Promise<EditorApiResult<T>> {

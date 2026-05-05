@@ -163,6 +163,12 @@ class DeleteArtifactGroupCommand:
 
 
 @dataclass(frozen=True, slots=True)
+class DuplicateArtifactGroupCommand:
+    source_group_id: str
+    new_group_id: str
+
+
+@dataclass(frozen=True, slots=True)
 class ReorderArtifactGroupCommand:
     group_id: str
     to_index: int
@@ -290,6 +296,7 @@ RecipeCommand = (
     | AddArtifactGroupCommand
     | RenameArtifactGroupCommand
     | DeleteArtifactGroupCommand
+    | DuplicateArtifactGroupCommand
     | ReorderArtifactGroupCommand
     | AddArtifactGroupMemberCommand
     | RemoveArtifactGroupMemberCommand
@@ -381,6 +388,11 @@ def apply_recipe_command(recipe: Recipe, command: RecipeCommand) -> tuple[Recipe
         return _rename_artifact_group(recipe, command.group_id, command.new_group_id), f"Rename artifact group {command.group_id}"
     if isinstance(command, DeleteArtifactGroupCommand):
         return _delete_artifact_group(recipe, command.group_id), "Delete artifact group"
+    if isinstance(command, DuplicateArtifactGroupCommand):
+        return (
+            _duplicate_artifact_group(recipe, command.source_group_id, command.new_group_id),
+            "Duplicate artifact group",
+        )
     if isinstance(command, ReorderArtifactGroupCommand):
         return _reorder_artifact_group(recipe, command.group_id, command.to_index), "Reorder artifact group"
     if isinstance(command, AddArtifactGroupMemberCommand):
@@ -635,6 +647,16 @@ def _rename_artifact_group(recipe: Recipe, group_id: str, new_group_id: str) -> 
     artifact_groups = _rename_mapping_key(recipe.artifact_groups, group_id, normalized_id, recipe.artifact_groups[group_id])
     steps = tuple(_rewrite_artifact_group_selection(step, group_id, normalized_id) for step in recipe.steps)
     return replace(recipe, artifact_groups=artifact_groups, steps=steps)
+
+
+def _duplicate_artifact_group(recipe: Recipe, source_group_id: str, new_group_id: str) -> Recipe:
+    _require_known_mapping_key(recipe.artifact_groups, source_group_id, label="artifact group")
+    normalized_id = _normalize_identifier(new_group_id, label="artifact group id")
+    if normalized_id in recipe.artifact_groups:
+        raise ValueError(f"Artifact group {normalized_id!r} already exists.")
+    artifact_groups = dict(recipe.artifact_groups)
+    artifact_groups[normalized_id] = tuple(recipe.artifact_groups[source_group_id])
+    return replace(recipe, artifact_groups=artifact_groups)
 
 
 def _reorder_artifact_group(recipe: Recipe, group_id: str, to_index: int) -> Recipe:

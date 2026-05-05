@@ -11,8 +11,19 @@ from emuchef_editor.core.documents.commands import (
     AddArtifactGroupMemberCommand,
     AddInputCommand,
     AddStepCommand,
+    DeleteArtifactCommand,
+    DeleteArtifactGroupCommand,
+    DeleteInputCommand,
+    DuplicateArtifactCommand,
+    DuplicateArtifactGroupCommand,
+    DuplicateInputCommand,
+    RemoveArtifactGroupMemberCommand,
     RecipeCommand,
+    RenameArtifactCommand,
+    RenameArtifactGroupCommand,
     RenameInputCommand,
+    ReorderArtifactGroupCommand,
+    ReorderArtifactGroupMemberCommand,
     SetOverviewFieldCommand,
     UpdateArtifactFieldCommand,
     UpdateInputFieldCommand,
@@ -61,6 +72,17 @@ def _decode_rename_input(payload: Mapping[str, Any]) -> RenameInputCommand:
     )
 
 
+def _decode_delete_input(payload: Mapping[str, Any]) -> DeleteInputCommand:
+    return DeleteInputCommand(input_id=_required_str(payload, "inputId"))
+
+
+def _decode_duplicate_input(payload: Mapping[str, Any]) -> DuplicateInputCommand:
+    return DuplicateInputCommand(
+        source_input_id=_required_str(payload, "sourceInputId"),
+        new_input_id=_required_str(payload, "newInputId"),
+    )
+
+
 def _decode_update_input_field(payload: Mapping[str, Any]) -> UpdateInputFieldCommand:
     field = _required_str(payload, "field")
     _require_one_of(
@@ -102,8 +124,51 @@ def _decode_update_artifact_field(payload: Mapping[str, Any]) -> UpdateArtifactF
     )
 
 
+def _decode_rename_artifact(payload: Mapping[str, Any]) -> RenameArtifactCommand:
+    return RenameArtifactCommand(
+        artifact_id=_required_str(payload, "artifactId"),
+        new_artifact_id=_required_str(payload, "newArtifactId"),
+    )
+
+
+def _decode_delete_artifact(payload: Mapping[str, Any]) -> DeleteArtifactCommand:
+    return DeleteArtifactCommand(artifact_id=_required_str(payload, "artifactId"))
+
+
+def _decode_duplicate_artifact(payload: Mapping[str, Any]) -> DuplicateArtifactCommand:
+    return DuplicateArtifactCommand(
+        source_artifact_id=_required_str(payload, "sourceArtifactId"),
+        new_artifact_id=_required_str(payload, "newArtifactId"),
+    )
+
+
 def _decode_add_artifact_group(payload: Mapping[str, Any]) -> AddArtifactGroupCommand:
     return AddArtifactGroupCommand(group_id=_required_str(payload, "groupId"))
+
+
+def _decode_rename_artifact_group(payload: Mapping[str, Any]) -> RenameArtifactGroupCommand:
+    return RenameArtifactGroupCommand(
+        group_id=_required_str(payload, "groupId"),
+        new_group_id=_required_str(payload, "newGroupId"),
+    )
+
+
+def _decode_delete_artifact_group(payload: Mapping[str, Any]) -> DeleteArtifactGroupCommand:
+    return DeleteArtifactGroupCommand(group_id=_required_str(payload, "groupId"))
+
+
+def _decode_duplicate_artifact_group(payload: Mapping[str, Any]) -> DuplicateArtifactGroupCommand:
+    return DuplicateArtifactGroupCommand(
+        source_group_id=_required_str(payload, "sourceGroupId"),
+        new_group_id=_required_str(payload, "newGroupId"),
+    )
+
+
+def _decode_reorder_artifact_group(payload: Mapping[str, Any]) -> ReorderArtifactGroupCommand:
+    return ReorderArtifactGroupCommand(
+        group_id=_required_str(payload, "groupId"),
+        to_index=_required_index(payload, "toIndex"),
+    )
 
 
 def _decode_add_artifact_group_member(payload: Mapping[str, Any]) -> AddArtifactGroupMemberCommand:
@@ -111,6 +176,21 @@ def _decode_add_artifact_group_member(payload: Mapping[str, Any]) -> AddArtifact
         group_id=_required_str(payload, "groupId"),
         artifact_id=_required_str(payload, "artifactId"),
         index=_optional_index(payload, "index"),
+    )
+
+
+def _decode_remove_artifact_group_member(payload: Mapping[str, Any]) -> RemoveArtifactGroupMemberCommand:
+    return RemoveArtifactGroupMemberCommand(
+        group_id=_required_str(payload, "groupId"),
+        index=_required_index(payload, "index"),
+    )
+
+
+def _decode_reorder_artifact_group_member(payload: Mapping[str, Any]) -> ReorderArtifactGroupMemberCommand:
+    return ReorderArtifactGroupMemberCommand(
+        group_id=_required_str(payload, "groupId"),
+        index=_required_index(payload, "index"),
+        to_index=_required_index(payload, "toIndex"),
     )
 
 
@@ -147,6 +227,13 @@ def _required_str(payload: Mapping[str, Any], field: str) -> str:
     return value
 
 
+def _required_index(payload: Mapping[str, Any], field: str) -> int:
+    value = _required(payload, field)
+    if not isinstance(value, int):
+        raise ApiError("invalid_command", f"Command field {field!r} must be an integer.", {"field": field})
+    return value
+
+
 def _optional_index(payload: Mapping[str, Any], field: str) -> int | None:
     value = _optional(payload, field)
     if value is None:
@@ -178,11 +265,22 @@ _DECODERS: dict[str, Decoder] = {
     "SetOverviewField": _decode_set_overview_field,
     "AddInput": _decode_add_input,
     "RenameInput": _decode_rename_input,
+    "DeleteInput": _decode_delete_input,
+    "DuplicateInput": _decode_duplicate_input,
     "UpdateInputField": _decode_update_input_field,
     "AddArtifact": _decode_add_artifact,
     "UpdateArtifactField": _decode_update_artifact_field,
+    "RenameArtifact": _decode_rename_artifact,
+    "DeleteArtifact": _decode_delete_artifact,
+    "DuplicateArtifact": _decode_duplicate_artifact,
     "AddArtifactGroup": _decode_add_artifact_group,
+    "RenameArtifactGroup": _decode_rename_artifact_group,
+    "DeleteArtifactGroup": _decode_delete_artifact_group,
+    "DuplicateArtifactGroup": _decode_duplicate_artifact_group,
+    "ReorderArtifactGroup": _decode_reorder_artifact_group,
     "AddArtifactGroupMember": _decode_add_artifact_group_member,
+    "RemoveArtifactGroupMember": _decode_remove_artifact_group_member,
+    "ReorderArtifactGroupMember": _decode_reorder_artifact_group_member,
     "AddStep": _decode_add_step,
     "UpdateStepDependencies": _decode_update_step_dependencies,
 }

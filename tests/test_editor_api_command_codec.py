@@ -10,7 +10,18 @@ from emuchef_editor.core.documents.commands import (
     AddArtifactGroupMemberCommand,
     AddInputCommand,
     AddStepCommand,
+    DeleteArtifactCommand,
+    DeleteArtifactGroupCommand,
+    DeleteInputCommand,
+    DuplicateArtifactCommand,
+    DuplicateArtifactGroupCommand,
+    DuplicateInputCommand,
+    RemoveArtifactGroupMemberCommand,
+    RenameArtifactCommand,
+    RenameArtifactGroupCommand,
     RenameInputCommand,
+    ReorderArtifactGroupCommand,
+    ReorderArtifactGroupMemberCommand,
     SetOverviewFieldCommand,
     UpdateArtifactFieldCommand,
     UpdateInputFieldCommand,
@@ -29,6 +40,11 @@ class EditorApiCommandCodecTests(unittest.TestCase):
             (
                 {"type": "RenameInput", "inputId": "roms_dir", "newInputId": "games_dir"},
                 RenameInputCommand(input_id="roms_dir", new_input_id="games_dir"),
+            ),
+            ({"type": "DeleteInput", "inputId": "roms_dir"}, DeleteInputCommand(input_id="roms_dir")),
+            (
+                {"type": "DuplicateInput", "sourceInputId": "roms_dir", "newInputId": "games_dir"},
+                DuplicateInputCommand(source_input_id="roms_dir", new_input_id="games_dir"),
             ),
             (
                 {"type": "UpdateInputField", "inputId": "roms_dir", "field": "label", "value": "ROMs"},
@@ -51,10 +67,54 @@ class EditorApiCommandCodecTests(unittest.TestCase):
                     value="https://example.com/new.apk",
                 ),
             ),
+            (
+                {"type": "RenameArtifact", "artifactId": "retroarch_apk", "newArtifactId": "retroarch_release_apk"},
+                RenameArtifactCommand(artifact_id="retroarch_apk", new_artifact_id="retroarch_release_apk"),
+            ),
+            (
+                {"type": "DeleteArtifact", "artifactId": "retroarch_apk"},
+                DeleteArtifactCommand(artifact_id="retroarch_apk"),
+            ),
+            (
+                {
+                    "type": "DuplicateArtifact",
+                    "sourceArtifactId": "retroarch_apk",
+                    "newArtifactId": "retroarch_apk_copy",
+                },
+                DuplicateArtifactCommand(source_artifact_id="retroarch_apk", new_artifact_id="retroarch_apk_copy"),
+            ),
             ({"type": "AddArtifactGroup", "groupId": "core_bundle"}, AddArtifactGroupCommand(group_id="core_bundle")),
+            (
+                {"type": "RenameArtifactGroup", "groupId": "core_bundle", "newGroupId": "core_bundle_renamed"},
+                RenameArtifactGroupCommand(group_id="core_bundle", new_group_id="core_bundle_renamed"),
+            ),
+            (
+                {
+                    "type": "DuplicateArtifactGroup",
+                    "sourceGroupId": "core_bundle",
+                    "newGroupId": "core_bundle_copy",
+                },
+                DuplicateArtifactGroupCommand(source_group_id="core_bundle", new_group_id="core_bundle_copy"),
+            ),
+            (
+                {"type": "DeleteArtifactGroup", "groupId": "core_bundle"},
+                DeleteArtifactGroupCommand(group_id="core_bundle"),
+            ),
+            (
+                {"type": "ReorderArtifactGroup", "groupId": "core_bundle", "toIndex": 1},
+                ReorderArtifactGroupCommand(group_id="core_bundle", to_index=1),
+            ),
             (
                 {"type": "AddArtifactGroupMember", "groupId": "core_bundle", "artifactId": "core_zip", "index": 0},
                 AddArtifactGroupMemberCommand(group_id="core_bundle", artifact_id="core_zip", index=0),
+            ),
+            (
+                {"type": "RemoveArtifactGroupMember", "groupId": "core_bundle", "index": 0},
+                RemoveArtifactGroupMemberCommand(group_id="core_bundle", index=0),
+            ),
+            (
+                {"type": "ReorderArtifactGroupMember", "groupId": "core_bundle", "index": 0, "toIndex": 1},
+                ReorderArtifactGroupMemberCommand(group_id="core_bundle", index=0, to_index=1),
             ),
             (
                 {"type": "AddStep", "stepId": "copy_cores", "stepType": "copy_files", "name": "Copy Cores"},
@@ -72,11 +132,13 @@ class EditorApiCommandCodecTests(unittest.TestCase):
 
     def test_invalid_command_type_and_payload_raise_controlled_api_error(self) -> None:
         invalid_payloads = [
-            {"type": "DeleteInput", "inputId": "roms_dir"},
+            {"type": "DeleteRecipe", "recipeId": "example.recipe"},
             {"type": "AddInput"},
             {"type": "AddInput", "inputId": None},
             {"type": "SetOverviewField", "field": "permissions", "value": {}},
             {"type": "UpdateArtifactField", "artifactId": "retroarch_apk", "field": "permissions", "value": {}},
+            {"type": "DuplicateArtifact", "sourceArtifactId": "retroarch_apk"},
+            {"type": "ReorderArtifactGroupMember", "groupId": "core_bundle", "index": 0, "toIndex": "1"},
             {"type": "UpdateStepDependencies", "stepId": "copy_cores", "dependencies": "extract_cores"},
             {"inputId": "roms_dir"},
             "AddInput",

@@ -1,116 +1,36 @@
 import type { SidecarStatusResult } from "../api/types";
 
 interface ToolbarProps {
-  canRedo: boolean;
-  canUndo: boolean;
   currentPath: string | null;
+  dirty: boolean;
   hasDocument: boolean;
   loadingLabel: string | null;
   sidecarStatus: SidecarStatusResult | null;
   stepSpecsCount: number | null;
   stepSpecsLoading: boolean;
-  onApplyDebugRename: () => void;
-  onOpenRecipe: () => void;
-  onRedo: () => void;
-  onRefreshDocument: () => void;
-  onValidate: () => void;
-  onRefreshYaml: () => void;
-  onSave: () => void;
-  onUndo: () => void;
 }
 
 export function Toolbar({
-  canRedo,
-  canUndo,
   currentPath,
+  dirty,
   hasDocument,
   loadingLabel,
   sidecarStatus,
   stepSpecsCount,
   stepSpecsLoading,
-  onApplyDebugRename,
-  onOpenRecipe,
-  onRedo,
-  onRefreshDocument,
-  onValidate,
-  onRefreshYaml,
-  onSave,
-  onUndo,
 }: ToolbarProps) {
-  const busy = loadingLabel !== null;
   const sidecarLabel = formatSidecarStatus(sidecarStatus);
 
   return (
     <div className="flex min-h-14 flex-wrap items-center gap-2 px-4 py-2">
-      <div className="mr-2 flex min-w-0 flex-col">
+      <div className="mr-2 flex min-w-0 flex-1 flex-col">
         <span className="text-sm font-semibold text-slate-950">EmuChef Config Editor</span>
         <span className="truncate text-xs text-slate-500">{currentPath ?? "No recipe open"}</span>
       </div>
-      <button
-        className="rounded border border-slate-300 bg-white px-3 py-1.5 text-sm font-medium text-slate-800 shadow-sm hover:bg-slate-50 disabled:opacity-50"
-        disabled={busy}
-        type="button"
-        onClick={onOpenRecipe}
-      >
-        Open Recipe
-      </button>
-      <button
-        className="rounded border border-slate-300 bg-white px-3 py-1.5 text-sm font-medium text-slate-800 shadow-sm hover:bg-slate-50 disabled:opacity-50"
-        disabled={!hasDocument || busy}
-        type="button"
-        onClick={onRefreshDocument}
-      >
-        Refresh Document
-      </button>
-      <button
-        className="rounded border border-slate-300 bg-white px-3 py-1.5 text-sm font-medium text-slate-800 shadow-sm hover:bg-slate-50 disabled:opacity-50"
-        disabled={!hasDocument || busy}
-        type="button"
-        onClick={onValidate}
-      >
-        Validate
-      </button>
-      <button
-        className="rounded border border-slate-300 bg-white px-3 py-1.5 text-sm font-medium text-slate-800 shadow-sm hover:bg-slate-50 disabled:opacity-50"
-        disabled={!hasDocument || busy}
-        type="button"
-        onClick={onRefreshYaml}
-      >
-        Refresh YAML
-      </button>
-      <button
-        className="rounded border border-slate-300 bg-white px-3 py-1.5 text-sm font-medium text-slate-800 shadow-sm hover:bg-slate-50 disabled:opacity-50"
-        disabled={!hasDocument || !canUndo || busy}
-        type="button"
-        onClick={onUndo}
-      >
-        Undo
-      </button>
-      <button
-        className="rounded border border-slate-300 bg-white px-3 py-1.5 text-sm font-medium text-slate-800 shadow-sm hover:bg-slate-50 disabled:opacity-50"
-        disabled={!hasDocument || !canRedo || busy}
-        type="button"
-        onClick={onRedo}
-      >
-        Redo
-      </button>
-      <button
-        className="rounded border border-slate-300 bg-white px-3 py-1.5 text-sm font-medium text-slate-800 shadow-sm hover:bg-slate-50 disabled:opacity-50"
-        disabled={!hasDocument || busy}
-        type="button"
-        onClick={onSave}
-      >
-        Save
-      </button>
-      <button
-        className="rounded border border-amber-300 bg-amber-50 px-3 py-1.5 text-sm font-medium text-amber-900 shadow-sm hover:bg-amber-100 disabled:opacity-50"
-        disabled={!hasDocument || busy}
-        type="button"
-        onClick={onApplyDebugRename}
-      >
-        Apply Debug Rename
-      </button>
-      <div className="ml-auto flex items-center gap-3 text-xs text-slate-500">
+      <div className="flex items-center gap-3 text-xs text-slate-500">
+        <span className={dirty ? "font-semibold text-amber-700" : "text-slate-500"}>
+          {hasDocument ? (dirty ? "Unsaved" : "Saved") : "No document"}
+        </span>
         {loadingLabel ? <span>{loadingLabel}</span> : null}
         <span>{sidecarLabel}</span>
         <span>

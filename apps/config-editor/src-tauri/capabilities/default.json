@@ -1,7 +1,7 @@
 {
   "$schema": "../gen/schemas/desktop-schema.json",
   "identifier": "default",
-  "description": "Main window permissions for the read-only EmuChef config editor shell.",
+  "description": "Main window permissions for the EmuChef config editor.",
   "windows": ["main"],
   "permissions": ["core:default", "dialog:default"]
 }

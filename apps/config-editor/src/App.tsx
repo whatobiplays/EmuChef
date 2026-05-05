@@ -1,6 +1,7 @@
 import { open } from "@tauri-apps/plugin-dialog";
 import { useEffect, useMemo, useState } from "react";
 
+import type { EditorCommand } from "./api/commands";
 import {
   sidecarApplyRecipeCommand,
   sidecarEmitYaml,
@@ -12,6 +13,7 @@ import {
   sidecarStatus,
   sidecarUndo,
   sidecarValidate,
+  updateMenuState,
   type EditorApiResult,
 } from "./api/editorApi";
 import type {
@@ -21,15 +23,44 @@ import type {
   StepSpecDto,
 } from "./api/types";
 import { AppShell } from "./components/AppShell";
+import { ArtifactGroupsEditor } from "./components/ArtifactGroupsEditor";
+import { ArtifactsEditor } from "./components/ArtifactsEditor";
 import { DiagnosticsPanel } from "./components/DiagnosticsPanel";
 import { EmptyState } from "./components/EmptyState";
 import { ErrorBanner } from "./components/ErrorBanner";
+import { InputsEditor } from "./components/InputsEditor";
 import { LoadingState } from "./components/LoadingState";
+import { MenuEventBridge, type MenuAction } from "./components/MenuEventBridge";
+import { OverviewEditor } from "./components/OverviewEditor";
+import { ConfirmDialog, TextPromptDialog } from "./components/PromptDialog";
 import { RecipeSummary } from "./components/RecipeSummary";
-import { Sidebar } from "./components/Sidebar";
+import { Sidebar, type EditorView } from "./components/Sidebar";
 import { StepSpecsPanel } from "./components/StepSpecsPanel";
 import { Toolbar } from "./components/Toolbar";
 import { YamlPreview } from "./components/YamlPreview";
+
+interface TextPromptRequest {
+  title: string;
+  label: string;
+  initialValue: string;
+  requiredMessage: string;
+  confirmLabel?: string;
+  trimResult: boolean;
+  resolve: (value: string | null) => void;
+}
+
+interface ConfirmRequest {
+  title: string;
+  message: string;
+  confirmLabel?: string;
+  destructive?: boolean;
+  resolve: (confirmed: boolean) => void;
+}
+
+interface ConfirmActionOptions {
+  confirmLabel?: string;
+  destructive?: boolean;
+}
 
 export default function App() {
   const [stepSpecs, setStepSpecs] = useState<StepSpecDto[]>([]);
@@ -40,9 +71,12 @@ export default function App() {
   const [diagnostics, setDiagnostics] = useState<DiagnosticDto[]>([]);
   const [yaml, setYaml] = useState("");
   const [sidecarState, setSidecarState] = useState<SidecarStatusResult | null>(null);
+  const [activeView, setActiveView] = useState<EditorView>("overview");
   const [loadingLabel, setLoadingLabel] = useState<string | null>(null);
   const [errorMessage, setErrorMessage] = useState<string | null>(null);
   const [statusMessage, setStatusMessage] = useState<string | null>(null);
+  const [textPrompt, setTextPrompt] = useState<TextPromptRequest | null>(null);
+  const [confirmPrompt, setConfirmPrompt] = useState<ConfirmRequest | null>(null);
 
   useEffect(() => {
     let cancelled = false;
@@ -77,6 +111,10 @@ export default function App() {
     };
   }, []);
 
+  useEffect(() => {
+    void syncMenuState(currentDocument);
+  }, [currentDocument]);
+
   const stepSpecsCount = useMemo(() => {
     if (!stepSpecsLoaded) {
       return null;
@@ -84,7 +122,30 @@ export default function App() {
     return stepSpecs.length;
   }, [stepSpecs.length, stepSpecsLoaded]);
 
-  async function handleOpenRecipe() {
+  const menuHandlers: Record<MenuAction, () => void> = {
+    openRecipe: () => void openRecipe(),
+    saveRecipe: () => void saveRecipe(),
+    undo: () => void undo(),
+    redo: () => void redo(),
+    validate: () => void validate(),
+    refreshYaml: () => void refreshYaml(),
+    refreshDocument: () => void refreshDocument(),
+    applyDebugRename: () => void applyDebugRename(),
+  };
+
+  async function openRecipe() {
+    if (currentDocument?.dirty) {
+      const confirmed = await confirmAction(
+        "Discard unsaved changes",
+        `Discard unsaved changes to ${currentDocument.recipe.id}?`,
+        { confirmLabel: "Discard", destructive: true },
+      );
+      if (!confirmed) {
+        await syncMenuState(currentDocument);
+        return;
+      }
+    }
+
     let selected: string | string[] | null;
     try {
       selected = await open({
@@ -94,15 +155,19 @@ export default function App() {
       });
     } catch (error) {
       setErrorMessage(`File dialog failed: ${errorMessageFromUnknown(error)}`);
+      setStatusMessage(null);
+      await syncMenuState(currentDocument);
       return;
     }
 
     if (selected === null) {
+      await syncMenuState(currentDocument);
       return;
     }
 
     const path = Array.isArray(selected) ? selected[0] : selected;
     if (!path) {
+      await syncMenuState(currentDocument);
       return;
     }
 
@@ -110,18 +175,22 @@ export default function App() {
     const response = await sidecarOpenRecipe(path, null);
     if (response.kind === "success") {
       applyDocument(response.result.document, path);
+      setActiveView("overview");
       setErrorMessage(null);
       setStatusMessage(null);
+      await syncMenuState(response.result.document);
     } else {
       setErrorMessage(resultMessage(response, "Recipe failed to open."));
       setStatusMessage(null);
       await refreshSidecarStatus();
+      await syncMenuState(currentDocument);
     }
     setLoadingLabel(null);
   }
 
-  async function handleRefreshDocument() {
+  async function refreshDocument() {
     if (currentDocument === null) {
+      await syncMenuState(null);
       return;
     }
 
@@ -131,16 +200,19 @@ export default function App() {
       applyDocument(response.result.document);
       setErrorMessage(null);
       setStatusMessage("Document refreshed from the sidecar session.");
+      await syncMenuState(response.result.document);
     } else {
       setErrorMessage(resultMessage(response, "Document refresh failed."));
       setStatusMessage(null);
       await refreshSidecarStatus();
+      await syncMenuState(currentDocument);
     }
     setLoadingLabel(null);
   }
 
-  async function handleValidate() {
+  async function validate() {
     if (currentDocument === null) {
+      await syncMenuState(null);
       return;
     }
 
@@ -150,16 +222,19 @@ export default function App() {
       setDiagnostics(response.result.diagnostics);
       setErrorMessage(null);
       setStatusMessage("Validation refreshed from the sidecar session.");
+      await syncMenuState(currentDocument);
     } else {
       setErrorMessage(resultMessage(response, "Validation failed."));
       setStatusMessage(null);
       await refreshSidecarStatus();
+      await syncMenuState(currentDocument);
     }
     setLoadingLabel(null);
   }
 
-  async function handleRefreshYaml() {
+  async function refreshYaml() {
     if (currentDocument === null) {
+      await syncMenuState(null);
       return;
     }
 
@@ -169,16 +244,19 @@ export default function App() {
       setYaml(response.result.yaml);
       setErrorMessage(null);
       setStatusMessage("YAML refreshed from the sidecar session.");
+      await syncMenuState(currentDocument);
     } else {
       setErrorMessage(resultMessage(response, "YAML refresh failed."));
       setStatusMessage(null);
       await refreshSidecarStatus();
+      await syncMenuState(currentDocument);
     }
     setLoadingLabel(null);
   }
 
-  async function handleUndo() {
+  async function undo() {
     if (currentDocument === null) {
+      await syncMenuState(null);
       return;
     }
 
@@ -188,16 +266,19 @@ export default function App() {
       applyDocument(response.result.document);
       setErrorMessage(null);
       setStatusMessage(response.result.commandResult.changed ? "Undo applied." : "Nothing to undo.");
+      await syncMenuState(response.result.document);
     } else {
       setErrorMessage(resultMessage(response, "Undo failed."));
       setStatusMessage(null);
       await refreshSidecarStatus();
+      await syncMenuState(currentDocument);
     }
     setLoadingLabel(null);
   }
 
-  async function handleRedo() {
+  async function redo() {
     if (currentDocument === null) {
+      await syncMenuState(null);
       return;
     }
 
@@ -207,22 +288,19 @@ export default function App() {
       applyDocument(response.result.document);
       setErrorMessage(null);
       setStatusMessage(response.result.commandResult.changed ? "Redo applied." : "Nothing to redo.");
+      await syncMenuState(response.result.document);
     } else {
       setErrorMessage(resultMessage(response, "Redo failed."));
       setStatusMessage(null);
       await refreshSidecarStatus();
+      await syncMenuState(currentDocument);
     }
     setLoadingLabel(null);
   }
 
-  async function handleSave() {
+  async function saveRecipe() {
     if (currentDocument === null) {
-      return;
-    }
-    const confirmed = window.confirm(
-      "Phase 3A Save writes canonical YAML to the currently open file. Use only with a safe or temporary recipe copy. Continue?",
-    );
-    if (!confirmed) {
+      await syncMenuState(null);
       return;
     }
 
@@ -232,46 +310,66 @@ export default function App() {
       applyDocument(response.result.document);
       setErrorMessage(null);
       setStatusMessage("Saved the current sidecar document.");
+      await syncMenuState(response.result.document);
     } else {
       setErrorMessage(resultMessage(response, "Save failed."));
       setStatusMessage(null);
       await refreshSidecarStatus();
+      await syncMenuState(currentDocument);
     }
     setLoadingLabel(null);
   }
 
-  async function handleApplyDebugRename() {
+  async function applyDebugRename() {
     if (currentDocument === null) {
+      await syncMenuState(null);
       return;
     }
-    const confirmed = window.confirm(
-      "Debug-only rename changes the in-memory recipe name and does not save. Use a safe or temporary recipe copy if you plan to save. Continue?",
+    const confirmed = await confirmAction(
+      "Debug rename",
+      "Debug-only rename changes the in-memory recipe name and does not save. Continue?",
+      { confirmLabel: "Continue" },
     );
     if (!confirmed) {
+      await syncMenuState(currentDocument);
       return;
     }
 
-    setLoadingLabel("Applying debug rename");
-    const response = await sidecarApplyRecipeCommand(currentDocument.documentId, {
+    await applyCommand({
       type: "SetOverviewField",
       field: "name",
       value: `DEBUG Sidecar Rename ${new Date().toISOString()}`,
     });
+  }
+
+  async function applyCommand(command: EditorCommand): Promise<boolean> {
+    if (currentDocument === null) {
+      await syncMenuState(null);
+      return false;
+    }
+
+    setLoadingLabel("Applying edit");
+    const response = await sidecarApplyRecipeCommand(currentDocument.documentId, command);
     if (response.kind === "success") {
       applyDocument(response.result.document);
       setErrorMessage(null);
-      setStatusMessage("Debug rename applied in memory. Save was not run.");
-    } else {
-      setErrorMessage(resultMessage(response, "Debug rename failed."));
-      setStatusMessage(null);
-      await refreshSidecarStatus();
+      setStatusMessage(response.result.commandResult.changed ? "Edit applied." : "No document change.");
+      setLoadingLabel(null);
+      await syncMenuState(response.result.document);
+      return true;
     }
+
+    setErrorMessage(resultMessage(response, "Edit failed."));
+    setStatusMessage(null);
     setLoadingLabel(null);
+    await refreshSidecarStatus();
+    await syncMenuState(currentDocument);
+    return false;
   }
 
   function applyDocument(document: RecipeDocumentDto, fallbackPath: string | null = null) {
     setCurrentDocument(document);
-    setCurrentPath(document.path || fallbackPath || currentPath);
+    setCurrentPath(document.path || fallbackPath || null);
     setDiagnostics(document.diagnostics);
     setYaml(document.yaml);
   }
@@ -289,48 +387,182 @@ export default function App() {
     }
   }
 
-  return (
-    <AppShell
-      toolbar={
-        <>
-          <Toolbar
-            canRedo={currentDocument?.canRedo ?? false}
-            canUndo={currentDocument?.canUndo ?? false}
-            currentPath={currentPath}
-            hasDocument={currentDocument !== null}
-            loadingLabel={loadingLabel}
-            sidecarStatus={sidecarState}
-            stepSpecsCount={stepSpecsCount}
-            stepSpecsLoading={stepSpecsLoading}
-            onApplyDebugRename={handleApplyDebugRename}
-            onOpenRecipe={handleOpenRecipe}
-            onRedo={handleRedo}
-            onRefreshDocument={handleRefreshDocument}
-            onRefreshYaml={handleRefreshYaml}
-            onSave={handleSave}
-            onUndo={handleUndo}
-            onValidate={handleValidate}
+  async function syncMenuState(document: RecipeDocumentDto | null) {
+    try {
+      await updateMenuState({
+        hasDocument: document !== null,
+        dirty: document?.dirty ?? false,
+        canUndo: document?.canUndo ?? false,
+        canRedo: document?.canRedo ?? false,
+      });
+    } catch (error) {
+      setErrorMessage(`Menu state update failed: ${errorMessageFromUnknown(error)}`);
+    }
+  }
+
+  function promptForId(title: string, initialValue: string): Promise<string | null> {
+    return promptForText({
+      title,
+      label: "ID",
+      initialValue,
+      requiredMessage: "ID must not be empty.",
+      trimResult: true,
+    });
+  }
+
+  function promptForRequiredText(title: string, initialValue: string, label: string): Promise<string | null> {
+    return promptForText({
+      title,
+      label,
+      initialValue,
+      requiredMessage: `${label} must not be empty.`,
+      trimResult: false,
+    });
+  }
+
+  function promptForText(options: Omit<TextPromptRequest, "resolve">): Promise<string | null> {
+    return new Promise((resolve) => {
+      setTextPrompt({ ...options, resolve });
+    });
+  }
+
+  function confirmAction(title: string, message: string, options: ConfirmActionOptions = {}): Promise<boolean> {
+    return new Promise((resolve) => {
+      setConfirmPrompt({
+        title,
+        message,
+        confirmLabel: options.confirmLabel,
+        destructive: options.destructive,
+        resolve,
+      });
+    });
+  }
+
+  function resolveTextPrompt(value: string | null) {
+    if (textPrompt === null) {
+      return;
+    }
+    const resolver = textPrompt.resolve;
+    setTextPrompt(null);
+    resolver(value);
+  }
+
+  function resolveConfirmPrompt(confirmed: boolean) {
+    if (confirmPrompt === null) {
+      return;
+    }
+    const resolver = confirmPrompt.resolve;
+    setConfirmPrompt(null);
+    resolver(confirmed);
+  }
+
+  function renderMainContent() {
+    if (activeView === "stepSpecs") {
+      return <StepSpecsPanel stepSpecs={stepSpecs} />;
+    }
+    if (currentDocument === null) {
+      return <EmptyState />;
+    }
+    switch (activeView) {
+      case "overview":
+        return <OverviewEditor document={currentDocument} onCommand={applyCommand} />;
+      case "inputs":
+        return (
+          <InputsEditor
+            confirmAction={confirmAction}
+            document={currentDocument}
+            promptForId={promptForId}
+            onCommand={applyCommand}
           />
-          {errorMessage ? <ErrorBanner message={errorMessage} onDismiss={() => setErrorMessage(null)} /> : null}
-          {statusMessage ? (
-            <div className="border-b border-emerald-200 bg-emerald-50 px-4 py-2 text-sm text-emerald-800">
-              {statusMessage}
-            </div>
-          ) : null}
-          {loadingLabel ? <LoadingState label={loadingLabel} /> : null}
-        </>
-      }
-      sidebar={<Sidebar document={currentDocument} stepSpecsCount={stepSpecsCount} />}
-      rightPanel={
-        <div className="flex h-full min-h-0 flex-col">
-          <DiagnosticsPanel diagnostics={diagnostics} />
-          <YamlPreview yaml={yaml} />
-        </div>
-      }
-    >
-      {currentDocument ? <RecipeSummary document={currentDocument} /> : <EmptyState />}
-      <StepSpecsPanel stepSpecs={stepSpecs} />
-    </AppShell>
+        );
+      case "artifacts":
+        return (
+          <ArtifactsEditor
+            confirmAction={confirmAction}
+            document={currentDocument}
+            promptForId={promptForId}
+            promptForRequiredText={promptForRequiredText}
+            onCommand={applyCommand}
+          />
+        );
+      case "artifactGroups":
+        return (
+          <ArtifactGroupsEditor
+            confirmAction={confirmAction}
+            document={currentDocument}
+            promptForId={promptForId}
+            onCommand={applyCommand}
+          />
+        );
+      case "steps":
+        return <RecipeSummary document={currentDocument} />;
+    }
+  }
+
+  return (
+    <>
+      {textPrompt ? (
+        <TextPromptDialog
+          confirmLabel={textPrompt.confirmLabel}
+          initialValue={textPrompt.initialValue}
+          label={textPrompt.label}
+          requiredMessage={textPrompt.requiredMessage}
+          title={textPrompt.title}
+          trimResult={textPrompt.trimResult}
+          onCancel={() => resolveTextPrompt(null)}
+          onSubmit={resolveTextPrompt}
+        />
+      ) : null}
+      {confirmPrompt ? (
+        <ConfirmDialog
+          confirmLabel={confirmPrompt.confirmLabel}
+          destructive={confirmPrompt.destructive}
+          message={confirmPrompt.message}
+          title={confirmPrompt.title}
+          onCancel={() => resolveConfirmPrompt(false)}
+          onConfirm={() => resolveConfirmPrompt(true)}
+        />
+      ) : null}
+      <MenuEventBridge handlers={menuHandlers} />
+      <AppShell
+        toolbar={
+          <>
+            <Toolbar
+              currentPath={currentPath}
+              dirty={currentDocument?.dirty ?? false}
+              hasDocument={currentDocument !== null}
+              loadingLabel={loadingLabel}
+              sidecarStatus={sidecarState}
+              stepSpecsCount={stepSpecsCount}
+              stepSpecsLoading={stepSpecsLoading}
+            />
+            {errorMessage ? <ErrorBanner message={errorMessage} onDismiss={() => setErrorMessage(null)} /> : null}
+            {statusMessage ? (
+              <div className="border-b border-emerald-200 bg-emerald-50 px-4 py-2 text-sm text-emerald-800">
+                {statusMessage}
+              </div>
+            ) : null}
+            {loadingLabel ? <LoadingState label={loadingLabel} /> : null}
+          </>
+        }
+        sidebar={
+          <Sidebar
+            activeView={activeView}
+            document={currentDocument}
+            stepSpecsCount={stepSpecsCount}
+            onSelectView={setActiveView}
+          />
+        }
+        rightPanel={
+          <div className="flex h-full min-h-0 flex-col">
+            <DiagnosticsPanel diagnostics={diagnostics} />
+            <YamlPreview yaml={yaml} />
+          </div>
+        }
+      >
+        {renderMainContent()}
+      </AppShell>
+    </>
   );
 }
 

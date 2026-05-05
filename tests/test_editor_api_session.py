@@ -81,10 +81,51 @@ class EditorApiSessionTests(unittest.TestCase):
             opened = manager.open_recipe(str(authored_root / "recipes" / "example_recipe.yaml"), authored_root=str(authored_root))
             document_id = opened["result"]["document"]["documentId"]
 
-            response = manager.apply_recipe_command(document_id, {"type": "DeleteInput", "inputId": "missing"})
+            response = manager.apply_recipe_command(document_id, {"type": "NoSuchCommand", "inputId": "missing"})
 
             self.assertFalse(response["ok"])
             self.assertEqual(response["error"]["code"], "invalid_command")
+
+    def test_section_add_rename_and_duplicate_commands_update_document(self) -> None:
+        recipe = base_recipe(
+            recipe_id="example.recipe",
+            artifacts={
+                "source_zip": {"type": "remote_file", "url": "https://example.com/source.zip"},
+                "member_zip": {"type": "remote_file", "url": "https://example.com/member.zip"},
+            },
+            artifact_groups={"bundle": ["member_zip"]},
+            steps=[],
+        )
+        with TemporaryDirectory() as tmp:
+            authored_root = build_authored_tree(Path(tmp), recipes=[recipe])
+            manager = DocumentSessionManager()
+            opened = manager.open_recipe(str(authored_root / "recipes" / "example_recipe.yaml"), authored_root=str(authored_root))
+            document_id = opened["result"]["document"]["documentId"]
+
+            commands = [
+                {"type": "AddInput", "inputId": "new_input"},
+                {"type": "RenameInput", "inputId": "new_input", "newInputId": "renamed_input"},
+                {"type": "DuplicateInput", "sourceInputId": "renamed_input", "newInputId": "renamed_input_copy"},
+                {"type": "AddArtifact", "artifactId": "new_artifact", "url": "https://example.com/new.zip"},
+                {"type": "RenameArtifact", "artifactId": "new_artifact", "newArtifactId": "renamed_artifact"},
+                {"type": "DuplicateArtifact", "sourceArtifactId": "renamed_artifact", "newArtifactId": "renamed_artifact_copy"},
+                {"type": "AddArtifactGroup", "groupId": "new_bundle"},
+                {"type": "RenameArtifactGroup", "groupId": "new_bundle", "newGroupId": "renamed_bundle"},
+                {"type": "DuplicateArtifactGroup", "sourceGroupId": "bundle", "newGroupId": "bundle_copy"},
+            ]
+
+            for command in commands:
+                response = manager.apply_recipe_command(document_id, command)
+                self.assertTrue(response["ok"], command)
+
+            document = manager.get_document(document_id)["result"]["document"]
+            recipe_dto = document["recipe"]
+            self.assertIn("renamed_input", recipe_dto["inputs"])
+            self.assertIn("renamed_input_copy", recipe_dto["inputs"])
+            self.assertIn("renamed_artifact", recipe_dto["artifacts"])
+            self.assertIn("renamed_artifact_copy", recipe_dto["artifacts"])
+            self.assertIn("renamed_bundle", recipe_dto["artifactGroups"])
+            self.assertEqual(recipe_dto["artifactGroups"]["bundle_copy"], ["member_zip"])
 
 
 if __name__ == "__main__":

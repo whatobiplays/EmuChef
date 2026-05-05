@@ -145,29 +145,50 @@ The sidecar protocol has no `protocolVersion` field and no ping request.
 Protocol versioning is deferred until backend replacement or external protocol
 stabilization work.
 
-## Current Tauri Config Editor Shell
+## Current Tauri Config Editor
 
-`apps/config-editor` is the Phase 3A desktop shell for the config editor
+`apps/config-editor` is the Tauri desktop editor for the config editor
 migration. It uses Tauri v2, React, TypeScript, Vite, Tailwind, npm, and the
 official Tauri dialog plugin.
 
-The shell opens authored recipe YAML files through a native file picker, calls
-the Python sidecar through Rust Tauri commands, and displays recipe summary data,
+The editor opens authored recipe YAML files through a native file picker, calls
+the Python sidecar through Rust Tauri commands, and displays recipe data,
 diagnostics, canonical YAML, sidecar status, and available step specs. It keeps a
-reusable `documentId` for the currently open sidecar document.
+reusable `documentId` for the currently open sidecar document. After a document
+is opened through the sidecar, document-specific actions use document-id-based
+sidecar requests so unsaved in-memory edits remain visible to validation, YAML
+emission, undo, redo, and save.
 
-The Tauri shell includes only debug/development command controls for persistent
-session proof: refresh document, validate, refresh YAML, undo, redo, Save, and a
-guarded debug-only recipe-name rename command. The debug rename command uses
-`applyRecipeCommand`, changes only in-memory sidecar document state, and does not
-auto-save. Save writes the current sidecar document to its current path and is
-intended for safe or temporary recipe copies during Phase 3A.
+The Tauri editor supports sidecar-backed non-step recipe editing. The Overview
+screen edits recipe name and description. Recipe id, schema version, and kind are
+read-only in the Overview screen. Inputs, artifacts, and artifact groups support
+CRUD-style editing where the Python command codec exposes the corresponding
+document command. Add, rename, and duplicate actions collect required text with
+app-owned dialogs, destructive actions require confirmation, and artifact
+creation collects both artifact id and URL before submitting a command. Artifact
+group duplication creates a new group with the same ordered artifact members as
+the source group and does not rewrite step refs or selections.
 
-The Tauri shell does not expose real overview/input/artifact/artifact-group
-editing screens, the step editor, ref picker UI, dependency picker UI,
-executor/apply-device UI, Save As UI, create-from-template UI, Python bundling,
-installer packaging, or Rust ports of Python editor/planner/executor behavior.
-Full non-step editing in Tauri remains Phase 3B.
+The Tauri editor sends explicit editor commands through
+`sidecar_apply_recipe_command`. The frontend treats the returned
+`RecipeDocumentDto` as the replacement document state and uses returned dirty,
+undo, redo, diagnostics, and YAML values. The frontend does not reconstruct YAML
+from DTOs and does not use path-based one-shot validation or YAML emission for
+open sidecar documents.
+
+The Tauri editor exposes primary app actions through native menus. File contains
+Open Recipe and Save. Edit contains Undo and Redo. Utilities contains Validate
+and Refresh YAML. Menu items are context-aware and disabled when a document
+action is not valid. The app follows Tauri v2 desktop menu behavior: macOS uses
+the native app menu convention, while Windows and Linux use native window menu
+bars. Temporary development-only actions live under a Debug menu and are not
+production editing features.
+
+The Tauri editor does not expose the step editor, ref picker UI, dependency
+picker UI, executor/apply-device UI, Save As UI, create-from-template UI, Python
+bundling, installer packaging, or Rust ports of Python editor/planner/executor
+behavior. Step editing remains Phase 4. YAML preview is read-only. Window/app
+close unsaved-change handling remains later-phase work.
 
 The frontend talks to Rust through Tauri `invoke(...)` commands named:
 
@@ -301,6 +322,7 @@ Field-scope rules currently enforced by the editor:
 - deleting an input removes matching supported `inputs.<id>` param refs
 - deleting an artifact removes matching supported artifact refs, artifact-group memberships, and supported step artifact-selection entries
 - deleting an artifact group removes matching supported step artifact-group selection entries
+- duplicating an artifact group copies the ordered artifact membership and leaves supported step artifact-group selections unchanged
 - deleting a step removes matching supported step refs, step-output refs, dependencies, and `conflicts_with` entries
 
 ## Supported CLI

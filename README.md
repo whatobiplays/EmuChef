@@ -83,13 +83,12 @@ response echoes that id. Malformed JSON lines return `id: null`. The sidecar has
 no `protocolVersion` or ping request yet; revisit protocol versioning before
 replacing the Python backend or externalizing the protocol.
 
-### Tauri config editor shell
+### Tauri config editor
 
-The Phase 3A config editor shell lives in `apps/config-editor`. It is a Tauri
-v2 app that uses the persistent Python JSONL sidecar for session-backed document
-operations. The one-shot Python API remains available for compatibility and
-regression safety. Full editing workflows remain in the PySide6 editor until the
-next migration phase.
+The config editor lives in `apps/config-editor`. It is a Tauri v2 app that uses
+the persistent Python JSONL sidecar for session-backed document operations. The
+one-shot Python API remains available for compatibility and regression safety.
+Python remains authoritative for authored recipe mutations.
 
 Install frontend dependencies and run the Tauri dev shell with npm:
 
@@ -115,17 +114,22 @@ package.
 Current editor scope notes:
 
 - it edits the shared typed authored recipe model rather than raw YAML text
-- the Tauri shell has only Phase 3A debug/development command controls, not real editing screens
-- the Tauri debug rename control proves `applyRecipeCommand`/undo/redo over the sidecar and does not auto-save
-- the Tauri Save control writes the current sidecar document to disk and should be tested only on safe or temporary recipe copies
+- the Tauri editor supports sidecar-backed non-step editing for Overview, Inputs, Artifacts, and Artifact Groups
+- primary document actions are exposed through native File, Edit, and Utilities menus
+- temporary development-only actions are exposed through the native Debug menu
+- menu items are context-aware and disabled when a document action is not valid
+- the Tauri Save command writes the current sidecar document to disk and should be tested only on safe or temporary recipe copies during development
+- window/app close unsaved-change handling remains later-phase work
 - Save As and create-from-template sidecar capabilities are not exposed in the Tauri UI
-- `kind` and `schema_version` are read-only
-- input, artifact, and group ids are chosen at creation time and then stay read-only
+- `id`, `kind`, and `schema_version` are read-only in the Overview screen
+- input, artifact, and group ids are changed through explicit Rename actions
+- artifact groups can be duplicated; the duplicate starts with the same ordered artifact members as the source group
 - step ids and step types are chosen at creation time and then stay read-only
 - permission editing lives on `grant_permissions` step params as `runtime`, `appops`, and `policy`
 - top-level recipe `permissions:` is invalid and is not migrated or ignored by the loader
 - step refs stay in authored-ref space and save explicitly as `{ ref: ... }`
-- the Steps page uses structured pickers for dependencies, refs, constraints, `skip_if`, and `verify`
+- steps remain read-only in the Tauri editor until Phase 4
+- the YAML preview remains read-only and is refreshed through the sidecar session
 - unsupported authored step content that the current M4 UI does not edit is preserved rather than dropped
 - deleting a step does not rewrite downstream dependencies or refs; diagnostics surface the resulting breakage
 - ref rewrite after id changes is not implemented
