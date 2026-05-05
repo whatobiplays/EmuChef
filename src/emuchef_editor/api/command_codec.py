@@ -14,9 +14,11 @@ from emuchef_editor.core.documents.commands import (
     DeleteArtifactCommand,
     DeleteArtifactGroupCommand,
     DeleteInputCommand,
+    DeleteStepCommand,
     DuplicateArtifactCommand,
     DuplicateArtifactGroupCommand,
     DuplicateInputCommand,
+    DuplicateStepCommand,
     RemoveArtifactGroupMemberCommand,
     RecipeCommand,
     RenameArtifactCommand,
@@ -24,9 +26,12 @@ from emuchef_editor.core.documents.commands import (
     RenameInputCommand,
     ReorderArtifactGroupCommand,
     ReorderArtifactGroupMemberCommand,
+    ReorderStepCommand,
     SetOverviewFieldCommand,
+    SetStepUserToggleableCommand,
     UpdateArtifactFieldCommand,
     UpdateInputFieldCommand,
+    UpdateStepBasicsCommand,
     UpdateStepDependenciesCommand,
 )
 
@@ -203,6 +208,39 @@ def _decode_add_step(payload: Mapping[str, Any]) -> AddStepCommand:
     )
 
 
+def _decode_delete_step(payload: Mapping[str, Any]) -> DeleteStepCommand:
+    return DeleteStepCommand(step_id=_required_str(payload, "stepId"))
+
+
+def _decode_duplicate_step(payload: Mapping[str, Any]) -> DuplicateStepCommand:
+    return DuplicateStepCommand(
+        source_step_id=_required_str(payload, "sourceStepId"),
+        new_step_id=_required_str(payload, "newStepId"),
+    )
+
+
+def _decode_reorder_step(payload: Mapping[str, Any]) -> ReorderStepCommand:
+    return ReorderStepCommand(
+        step_id=_required_str(payload, "stepId"),
+        to_index=_required_index(payload, "toIndex"),
+    )
+
+
+def _decode_update_step_basics(payload: Mapping[str, Any]) -> UpdateStepBasicsCommand:
+    return UpdateStepBasicsCommand(
+        step_id=_required_str(payload, "stepId"),
+        name=_required_str(payload, "name"),
+        description=_required_optional_str(payload, "description"),
+    )
+
+
+def _decode_set_step_user_toggleable(payload: Mapping[str, Any]) -> SetStepUserToggleableCommand:
+    return SetStepUserToggleableCommand(
+        step_id=_required_str(payload, "stepId"),
+        user_toggleable=_required_bool(payload, "userToggleable"),
+    )
+
+
 def _decode_update_step_dependencies(payload: Mapping[str, Any]) -> UpdateStepDependenciesCommand:
     return UpdateStepDependenciesCommand(
         step_id=_required_str(payload, "stepId"),
@@ -240,6 +278,22 @@ def _optional_index(payload: Mapping[str, Any], field: str) -> int | None:
         return None
     if not isinstance(value, int):
         raise ApiError("invalid_command", f"Command field {field!r} must be an integer.", {"field": field})
+    return value
+
+
+def _required_bool(payload: Mapping[str, Any], field: str) -> bool:
+    value = _required(payload, field)
+    if not isinstance(value, bool):
+        raise ApiError("invalid_command", f"Command field {field!r} must be a boolean.", {"field": field})
+    return value
+
+
+def _required_optional_str(payload: Mapping[str, Any], field: str) -> str | None:
+    value = _required(payload, field)
+    if value is None:
+        return None
+    if not isinstance(value, str):
+        raise ApiError("invalid_command", f"Command field {field!r} must be a string or null.", {"field": field})
     return value
 
 
@@ -282,5 +336,10 @@ _DECODERS: dict[str, Decoder] = {
     "RemoveArtifactGroupMember": _decode_remove_artifact_group_member,
     "ReorderArtifactGroupMember": _decode_reorder_artifact_group_member,
     "AddStep": _decode_add_step,
+    "DeleteStep": _decode_delete_step,
+    "DuplicateStep": _decode_duplicate_step,
+    "ReorderStep": _decode_reorder_step,
+    "UpdateStepBasics": _decode_update_step_basics,
+    "SetStepUserToggleable": _decode_set_step_user_toggleable,
     "UpdateStepDependencies": _decode_update_step_dependencies,
 }

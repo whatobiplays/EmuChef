@@ -3,6 +3,7 @@ import { useState } from "react";
 import type { EditorCommand } from "../api/commands";
 import type { ArtifactDto, RecipeDocumentDto } from "../api/types";
 import { EditableTextField } from "./EditableTextField";
+import { ResizableEditorLayout } from "./ResizableEditorLayout";
 
 const ARTIFACT_CACHE_VALUES = ["default", "none"] as const;
 
@@ -102,14 +103,9 @@ export function ArtifactsEditor({
   }
 
   return (
-    <div className="grid h-full min-h-0 grid-cols-[18rem_minmax(0,1fr)]">
-      <section className="min-h-0 border-r border-slate-200 bg-white p-4">
-        <div className="mb-3 flex items-center justify-between gap-2">
-          <h1 className="text-sm font-semibold uppercase tracking-wide text-slate-500">Artifacts</h1>
-          <button className="rounded border border-slate-300 px-2 py-1 text-sm" type="button" onClick={addArtifact}>
-            Add
-          </button>
-        </div>
+    <ResizableEditorLayout
+      resizeLabel="Resize artifacts list"
+      sidebarBody={
         <div className="space-y-1">
           {artifactIds.length === 0 ? <p className="text-sm text-slate-500">No artifacts</p> : null}
           {artifactIds.map((artifactId) => (
@@ -125,25 +121,32 @@ export function ArtifactsEditor({
             </button>
           ))}
         </div>
-      </section>
-
-      <section className="min-h-0 overflow-y-auto p-6">
-        {selectedId && selectedArtifact ? (
-          <ArtifactDetail
-            artifact={selectedArtifact}
-            artifactId={selectedId}
-            onDelete={() => void deleteArtifact(selectedId)}
-            onDuplicate={() => void duplicateArtifact(selectedId)}
-            onRename={() => void renameArtifact(selectedId)}
-            onUpdateField={(field, value) =>
-              onCommand({ type: "UpdateArtifactField", artifactId: selectedId, field, value })
-            }
-          />
-        ) : (
-          <p className="text-sm text-slate-500">Select or add an artifact.</p>
-        )}
-      </section>
-    </div>
+      }
+      sidebarHeader={
+        <div className="flex items-center justify-between gap-2">
+          <h1 className="text-sm font-semibold uppercase tracking-wide text-slate-500">Artifacts</h1>
+          <button className="rounded border border-slate-300 px-2 py-1 text-sm" type="button" onClick={addArtifact}>
+            Add
+          </button>
+        </div>
+      }
+      storageKey="emuchef.configEditor.artifacts.sidebarWidth"
+    >
+      {selectedId && selectedArtifact ? (
+        <ArtifactDetail
+          artifact={selectedArtifact}
+          artifactId={selectedId}
+          onDelete={() => void deleteArtifact(selectedId)}
+          onDuplicate={() => void duplicateArtifact(selectedId)}
+          onRename={() => void renameArtifact(selectedId)}
+          onUpdateField={(field, value) =>
+            onCommand({ type: "UpdateArtifactField", artifactId: selectedId, field, value })
+          }
+        />
+      ) : (
+        <p className="text-sm text-slate-500">Select or add an artifact.</p>
+      )}
+    </ResizableEditorLayout>
   );
 }
 

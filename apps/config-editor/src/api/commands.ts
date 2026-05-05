@@ -17,7 +17,13 @@ export type EditorCommand =
   | { type: "ReorderArtifactGroup"; groupId: string; toIndex: number }
   | { type: "AddArtifactGroupMember"; groupId: string; artifactId: string; index?: number }
   | { type: "RemoveArtifactGroupMember"; groupId: string; index: number }
-  | { type: "ReorderArtifactGroupMember"; groupId: string; index: number; toIndex: number };
+  | { type: "ReorderArtifactGroupMember"; groupId: string; index: number; toIndex: number }
+  | { type: "AddStep"; stepId: string; stepType: string; name: string; index?: number }
+  | { type: "DeleteStep"; stepId: string }
+  | { type: "DuplicateStep"; sourceStepId: string; newStepId: string }
+  | { type: "ReorderStep"; stepId: string; toIndex: number }
+  | { type: "UpdateStepBasics"; stepId: string; name: string; description: string | null }
+  | { type: "SetStepUserToggleable"; stepId: string; userToggleable: boolean };
 
 export type InputEditableField =
   | "type"

@@ -159,8 +159,8 @@ is opened through the sidecar, document-specific actions use document-id-based
 sidecar requests so unsaved in-memory edits remain visible to validation, YAML
 emission, undo, redo, and save.
 
-The Tauri editor supports sidecar-backed non-step recipe editing. The Overview
-screen edits recipe name and description. Recipe id, schema version, and kind are
+The Tauri editor supports sidecar-backed recipe editing. The Overview screen
+edits recipe name and description. Recipe id, schema version, and kind are
 read-only in the Overview screen. Inputs, artifacts, and artifact groups support
 CRUD-style editing where the Python command codec exposes the corresponding
 document command. Add, rename, and duplicate actions collect required text with
@@ -169,12 +169,40 @@ creation collects both artifact id and URL before submitting a command. Artifact
 group duplication creates a new group with the same ordered artifact members as
 the source group and does not rewrite step refs or selections.
 
+The Tauri Steps screen supports basic step lifecycle editing through the Python
+sidecar. Step add, delete, duplicate, reorder, display-name edits, and
+`user_toggleable` edits are available when the matching backend command codec
+mappings exist. Existing step ids and step types are read-only. Step id and step
+type are chosen only when adding a step. Add Step collects step id, step type,
+and an optional display name, and the frontend does not synthesize params or
+other required runtime fields. Delete Step uses the backend safe-delete behavior
+shared with the PySide editor, so supported downstream step dependencies,
+`conflicts_with` entries, and step refs are removed by Python rather than by
+TypeScript cleanup logic.
+
+Inputs, artifacts, artifact groups, and steps use master-detail panes inside the
+Tauri editor. The editor frame does not scroll when item lists scroll. Each
+screen keeps the list column and detail column in independent scroll regions,
+and the list column can be resized with a vertical separator handle. Resized
+list widths are local UI preferences and do not affect recipe data, dirty state,
+undo, redo, validation, YAML emission, or sidecar commands.
+
 The Tauri editor sends explicit editor commands through
 `sidecar_apply_recipe_command`. The frontend treats the returned
 `RecipeDocumentDto` as the replacement document state and uses returned dirty,
 undo, redo, diagnostics, and YAML values. The frontend does not reconstruct YAML
 from DTOs and does not use path-based one-shot validation or YAML emission for
 open sidecar documents.
+
+Routine edit commands avoid transient loading or success bars that would shift
+the editor layout during normal field and list edits. The `loadingLabel` state
+remains available for explicit app-level operations such as opening recipes,
+saving, undo, redo, validation, YAML refresh, and document refresh, where
+operation feedback is still useful. This is an interim UI stability decision.
+Before the Tauri editor is finalized, the remaining `loadingLabel`,
+`statusMessage`, and `LoadingState` plumbing should be evaluated for whether it
+still provides useful non-disruptive feedback; unused status plumbing should be
+removed when toolbar-only feedback or no feedback is sufficient.
 
 The Tauri editor exposes primary app actions through native menus. File contains
 Open Recipe and Save. Edit contains Undo and Redo. Utilities contains Validate
@@ -184,11 +212,13 @@ the native app menu convention, while Windows and Linux use native window menu
 bars. Temporary development-only actions live under a Debug menu and are not
 production editing features.
 
-The Tauri editor does not expose the step editor, ref picker UI, dependency
-picker UI, executor/apply-device UI, Save As UI, create-from-template UI, Python
-bundling, installer packaging, or Rust ports of Python editor/planner/executor
-behavior. Step editing remains Phase 4. YAML preview is read-only. Window/app
-close unsaved-change handling remains later-phase work.
+The Tauri editor does not expose full step params editing, dependency picker UI,
+ref picker UI, constraints editing, `skip_if` editing, `verify` editing,
+executor/apply-device UI, Save As UI, create-from-template UI, Python bundling,
+installer packaging, or Rust ports of Python editor/planner/executor behavior.
+Advanced step internals remain read-only in the Tauri editor, and full step
+dependency, param, and ref editing remain later-phase work. YAML preview is
+read-only. Window/app close unsaved-change handling remains later-phase work.
 
 The frontend talks to Rust through Tauri `invoke(...)` commands named:
 

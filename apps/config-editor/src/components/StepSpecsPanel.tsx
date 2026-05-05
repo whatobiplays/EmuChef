@@ -6,7 +6,7 @@ interface StepSpecsPanelProps {
 
 export function StepSpecsPanel({ stepSpecs }: StepSpecsPanelProps) {
   return (
-    <section className="border-t border-slate-200 bg-white p-6">
+    <section className="h-full min-h-0 overflow-y-auto border-t border-slate-200 bg-white p-6">
       <details>
         <summary className="cursor-pointer text-sm font-semibold uppercase tracking-wide text-slate-500">
           Step Specs ({stepSpecs.length})

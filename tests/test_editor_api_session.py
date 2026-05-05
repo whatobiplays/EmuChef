@@ -127,6 +127,90 @@ class EditorApiSessionTests(unittest.TestCase):
             self.assertIn("renamed_bundle", recipe_dto["artifactGroups"])
             self.assertEqual(recipe_dto["artifactGroups"]["bundle_copy"], ["member_zip"])
 
+    def test_step_lifecycle_commands_update_document_and_delete_step_safely(self) -> None:
+        recipe = base_recipe(
+            recipe_id="example.recipe",
+            steps=[
+                {
+                    "id": "prepare",
+                    "type": "extract_archive",
+                    "name": "Prepare",
+                    "user_toggleable": False,
+                    "dependencies": [],
+                    "constraints": {"capabilities": [], "conflicts_with": []},
+                    "params": {"archive": {"ref": "steps.seed.outputs.copied_paths"}},
+                    "verify": [],
+                },
+                {
+                    "id": "consume",
+                    "type": "copy_files",
+                    "name": "Consume",
+                    "user_toggleable": False,
+                    "dependencies": ["prepare"],
+                    "constraints": {"capabilities": [], "conflicts_with": ["prepare"]},
+                    "params": {"source": {"ref": "steps.prepare.outputs.extracted_path"}, "dest": "/sdcard/Example"},
+                    "verify": [],
+                },
+                {
+                    "id": "consume_shorthand",
+                    "type": "copy_files",
+                    "name": "Consume Shorthand",
+                    "user_toggleable": False,
+                    "dependencies": [],
+                    "constraints": {"capabilities": [], "conflicts_with": []},
+                    "params": {"source": {"ref": "steps.prepare"}, "dest": "/sdcard/Example2"},
+                    "verify": [],
+                },
+            ],
+        )
+        with TemporaryDirectory() as tmp:
+            authored_root = build_authored_tree(Path(tmp), recipes=[recipe])
+            manager = DocumentSessionManager()
+            opened = manager.open_recipe(
+                str(authored_root / "recipes" / "example_recipe.yaml"),
+                authored_root=str(authored_root),
+            )
+            document_id = opened["result"]["document"]["documentId"]
+
+            commands = [
+                {"type": "AddStep", "stepId": "pause", "stepType": "wait", "name": "Pause", "index": 1},
+                {
+                    "type": "UpdateStepBasics",
+                    "stepId": "pause",
+                    "name": "Wait for boot",
+                    "description": "Delay before launch.",
+                },
+                {"type": "SetStepUserToggleable", "stepId": "pause", "userToggleable": True},
+                {"type": "DuplicateStep", "sourceStepId": "pause", "newStepId": "pause_copy"},
+                {"type": "ReorderStep", "stepId": "pause_copy", "toIndex": 0},
+                {"type": "DeleteStep", "stepId": "prepare"},
+            ]
+
+            for command in commands:
+                response = manager.apply_recipe_command(document_id, command)
+                self.assertTrue(response["ok"], command)
+                self.assertTrue(response["result"]["commandResult"]["changed"], command)
+                self.assertEqual(response["result"]["document"]["documentId"], document_id)
+
+            document = manager.get_document(document_id)["result"]["document"]
+            steps = document["recipe"]["steps"]
+            step_ids = [step["id"] for step in steps]
+            self.assertNotIn("prepare", step_ids)
+            self.assertEqual(step_ids[0], "pause_copy")
+
+            pause_step = next(step for step in steps if step["id"] == "pause")
+            self.assertEqual(pause_step["name"], "Wait for boot")
+            self.assertEqual(pause_step["description"], "Delay before launch.")
+            self.assertTrue(pause_step["userToggleable"])
+
+            consume_step = next(step for step in steps if step["id"] == "consume")
+            shorthand_step = next(step for step in steps if step["id"] == "consume_shorthand")
+            self.assertEqual(consume_step["dependencies"], [])
+            self.assertEqual(consume_step["constraints"]["conflictsWith"], [])
+            self.assertNotIn("source", consume_step["params"])
+            self.assertNotIn("source", shorthand_step["params"])
+            self.assertNotIn("steps.prepare", document["yaml"])
+
 
 if __name__ == "__main__":
     unittest.main()

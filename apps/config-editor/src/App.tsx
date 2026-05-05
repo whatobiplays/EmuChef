@@ -33,9 +33,9 @@ import { LoadingState } from "./components/LoadingState";
 import { MenuEventBridge, type MenuAction } from "./components/MenuEventBridge";
 import { OverviewEditor } from "./components/OverviewEditor";
 import { ConfirmDialog, TextPromptDialog } from "./components/PromptDialog";
-import { RecipeSummary } from "./components/RecipeSummary";
 import { Sidebar, type EditorView } from "./components/Sidebar";
 import { StepSpecsPanel } from "./components/StepSpecsPanel";
+import { StepsEditor } from "./components/StepsEditor";
 import { Toolbar } from "./components/Toolbar";
 import { YamlPreview } from "./components/YamlPreview";
 
@@ -348,20 +348,16 @@ export default function App() {
       return false;
     }
 
-    setLoadingLabel("Applying edit");
     const response = await sidecarApplyRecipeCommand(currentDocument.documentId, command);
     if (response.kind === "success") {
       applyDocument(response.result.document);
       setErrorMessage(null);
-      setStatusMessage(response.result.commandResult.changed ? "Edit applied." : "No document change.");
-      setLoadingLabel(null);
       await syncMenuState(response.result.document);
       return true;
     }
 
     setErrorMessage(resultMessage(response, "Edit failed."));
     setStatusMessage(null);
-    setLoadingLabel(null);
     await refreshSidecarStatus();
     await syncMenuState(currentDocument);
     return false;
@@ -495,7 +491,15 @@ export default function App() {
           />
         );
       case "steps":
-        return <RecipeSummary document={currentDocument} />;
+        return (
+          <StepsEditor
+            confirmAction={confirmAction}
+            document={currentDocument}
+            promptForId={promptForId}
+            stepSpecs={stepSpecs}
+            onCommand={applyCommand}
+          />
+        );
     }
   }
 

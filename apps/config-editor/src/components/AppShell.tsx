@@ -13,7 +13,7 @@ export function AppShell({ toolbar, sidebar, children, rightPanel }: AppShellPro
       <header className="shrink-0 border-b border-slate-200 bg-white">{toolbar}</header>
       <main className="grid min-h-0 flex-1 grid-cols-[16rem_minmax(0,1fr)_26rem]">
         <aside className="min-h-0 border-r border-slate-200 bg-white">{sidebar}</aside>
-        <section className="min-h-0 overflow-y-auto">{children}</section>
+        <section className="min-h-0 overflow-hidden">{children}</section>
         <aside className="min-h-0 border-l border-slate-200 bg-white">{rightPanel}</aside>
       </main>
     </div>

@@ -1,7 +1,7 @@
 [package]
 name = "emuchef-config-editor"
 version = "0.1.0"
-description = "Read-only EmuChef config editor bridge shell"
+description = "EmuChef config editor bridge shell"
 edition = "2021"
 
 [build-dependencies]

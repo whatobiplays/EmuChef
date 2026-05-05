@@ -114,7 +114,7 @@ package.
 Current editor scope notes:
 
 - it edits the shared typed authored recipe model rather than raw YAML text
-- the Tauri editor supports sidecar-backed non-step editing for Overview, Inputs, Artifacts, and Artifact Groups
+- the Tauri editor supports sidecar-backed editing for Overview, Inputs, Artifacts, Artifact Groups, and basic step lifecycle operations
 - primary document actions are exposed through native File, Edit, and Utilities menus
 - temporary development-only actions are exposed through the native Debug menu
 - menu items are context-aware and disabled when a document action is not valid
@@ -124,14 +124,16 @@ Current editor scope notes:
 - `id`, `kind`, and `schema_version` are read-only in the Overview screen
 - input, artifact, and group ids are changed through explicit Rename actions
 - artifact groups can be duplicated; the duplicate starts with the same ordered artifact members as the source group
-- step ids and step types are chosen at creation time and then stay read-only
-- permission editing lives on `grant_permissions` step params as `runtime`, `appops`, and `policy`
+- step ids and step types are chosen only when adding a step and then stay read-only
+- basic step lifecycle editing uses Python sidecar commands for add, delete, duplicate, reorder, display-name edits, and `user_toggleable` edits
+- deleting a step uses the backend safe-delete behavior shared with the PySide editor and removes supported downstream dependencies, conflicts, and refs
+- dependencies, params, constraints, `skip_if`, and `verify` are read-only in the Tauri editor
+- full step params, dependency, and ref editing remain later-phase work
+- Inputs, Artifacts, Artifact Groups, and Steps use independently scrolling list/detail panes with resizable list columns
 - top-level recipe `permissions:` is invalid and is not migrated or ignored by the loader
 - step refs stay in authored-ref space and save explicitly as `{ ref: ... }`
-- steps remain read-only in the Tauri editor until Phase 4
 - the YAML preview remains read-only and is refreshed through the sidecar session
-- unsupported authored step content that the current M4 UI does not edit is preserved rather than dropped
-- deleting a step does not rewrite downstream dependencies or refs; diagnostics surface the resulting breakage
+- unsupported authored step content that the current Tauri UI does not edit is preserved rather than dropped
 - ref rewrite after id changes is not implemented
 
 ## Templates

@@ -2,6 +2,7 @@ import { useMemo, useState } from "react";
 
 import type { EditorCommand } from "../api/commands";
 import type { RecipeDocumentDto } from "../api/types";
+import { ResizableEditorLayout } from "./ResizableEditorLayout";
 
 interface ArtifactGroupsEditorProps {
   document: RecipeDocumentDto;
@@ -115,14 +116,10 @@ export function ArtifactGroupsEditor({ document, promptForId, confirmAction, onC
   }
 
   return (
-    <div className="grid h-full min-h-0 grid-cols-[18rem_minmax(0,1fr)]">
-      <section className="min-h-0 border-r border-slate-200 bg-white p-4">
-        <div className="mb-3 flex items-center justify-between gap-2">
-          <h1 className="text-sm font-semibold uppercase tracking-wide text-slate-500">Artifact Groups</h1>
-          <button className="rounded border border-slate-300 px-2 py-1 text-sm" type="button" onClick={addGroup}>
-            Add
-          </button>
-        </div>
+    <ResizableEditorLayout
+      minSidebarWidth={288}
+      resizeLabel="Resize artifact groups list"
+      sidebarBody={
         <div className="space-y-1">
           {groupIds.length === 0 ? <p className="text-sm text-slate-500">No artifact groups</p> : null}
           {groupIds.map((groupId, index) => (
@@ -157,26 +154,33 @@ export function ArtifactGroupsEditor({ document, promptForId, confirmAction, onC
             </div>
           ))}
         </div>
-      </section>
-
-      <section className="min-h-0 overflow-y-auto p-6">
-        {selectedId ? (
-          <GroupDetail
-            availableMembers={availableMembers}
-            groupId={selectedId}
-            members={members}
-            onAddMember={(artifactId) => addMember(selectedId, artifactId)}
-            onDelete={() => void deleteGroup(selectedId)}
-            onDuplicate={() => void duplicateGroup(selectedId)}
-            onMoveMember={(index, toIndex) => moveMember(selectedId, index, toIndex)}
-            onRemoveMember={(artifactId, index) => removeMember(selectedId, artifactId, index)}
-            onRename={() => void renameGroup(selectedId)}
-          />
-        ) : (
-          <p className="text-sm text-slate-500">Select or add an artifact group.</p>
-        )}
-      </section>
-    </div>
+      }
+      sidebarHeader={
+        <div className="flex items-center justify-between gap-2">
+          <h1 className="text-sm font-semibold uppercase tracking-wide text-slate-500">Artifact Groups</h1>
+          <button className="rounded border border-slate-300 px-2 py-1 text-sm" type="button" onClick={addGroup}>
+            Add
+          </button>
+        </div>
+      }
+      storageKey="emuchef.configEditor.artifactGroups.sidebarWidth"
+    >
+      {selectedId ? (
+        <GroupDetail
+          availableMembers={availableMembers}
+          groupId={selectedId}
+          members={members}
+          onAddMember={(artifactId) => addMember(selectedId, artifactId)}
+          onDelete={() => void deleteGroup(selectedId)}
+          onDuplicate={() => void duplicateGroup(selectedId)}
+          onMoveMember={(index, toIndex) => moveMember(selectedId, index, toIndex)}
+          onRemoveMember={(artifactId, index) => removeMember(selectedId, artifactId, index)}
+          onRename={() => void renameGroup(selectedId)}
+        />
+      ) : (
+        <p className="text-sm text-slate-500">Select or add an artifact group.</p>
+      )}
+    </ResizableEditorLayout>
   );
 }
 

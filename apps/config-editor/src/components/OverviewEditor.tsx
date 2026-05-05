@@ -11,7 +11,7 @@ export function OverviewEditor({ document, onCommand }: OverviewEditorProps) {
   const { recipe } = document;
 
   return (
-    <div className="space-y-6 p-6">
+    <div className="h-full min-h-0 space-y-6 overflow-y-auto p-6">
       <section>
         <h1 className="text-xl font-semibold text-slate-950">Overview</h1>
       </section>
