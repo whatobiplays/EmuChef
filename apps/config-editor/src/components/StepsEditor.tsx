@@ -6,6 +6,7 @@ import { EditableTextField } from "./EditableTextField";
 import { ReadOnlyJson } from "./ReadOnlyJson";
 import { ResizableEditorLayout } from "./ResizableEditorLayout";
 import { StepDependenciesEditor } from "./StepDependenciesEditor";
+import { StepParamsEditor } from "./StepParamsEditor";
 
 interface StepsEditorProps {
   document: RecipeDocumentDto;
@@ -156,7 +157,10 @@ export function StepsEditor({
       {selectedStep ? (
         <StepDetailPanel
           step={selectedStep}
+          stepSpec={stepSpecs.find((spec) => spec.type === selectedStep.type) ?? null}
           steps={steps}
+          refIndex={document.refIndex}
+          onCommand={onCommand}
           onUpdateDependencies={(dependencies) =>
             onCommand({
               type: "UpdateStepDependencies",
@@ -266,13 +270,19 @@ function StepListRow({
 
 function StepDetailPanel({
   step,
+  stepSpec,
   steps,
+  refIndex,
+  onCommand,
   onUpdateDependencies,
   onUpdateName,
   onUpdateUserToggleable,
 }: {
   step: StepDto;
+  stepSpec: StepSpecDto | null;
   steps: StepDto[];
+  refIndex: RecipeDocumentDto["refIndex"];
+  onCommand: (command: EditorCommand) => Promise<boolean>;
   onUpdateDependencies: (dependencies: string[]) => Promise<boolean>;
   onUpdateName: (name: string) => Promise<boolean>;
   onUpdateUserToggleable: (userToggleable: boolean) => Promise<boolean>;
@@ -312,7 +322,7 @@ function StepDetailPanel({
 
       <div className="grid gap-4 rounded border border-slate-200 bg-white p-4">
         <StepDependenciesEditor step={step} steps={steps} onUpdateDependencies={onUpdateDependencies} />
-        <ReadOnlyJson label="Params" value={step.params} />
+        <StepParamsEditor refIndex={refIndex} step={step} stepSpec={stepSpec} onCommand={onCommand} />
       </div>
 
       <div className="grid gap-4 rounded border border-slate-200 bg-white p-4">

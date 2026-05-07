@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import unittest
 
+from emuchef.domain import RefParamValue
 from emuchef_editor.api.command_codec import decode_recipe_command
 from emuchef_editor.api.errors import ApiError
 from emuchef_editor.core.documents.commands import (
@@ -31,6 +32,7 @@ from emuchef_editor.core.documents.commands import (
     UpdateInputFieldCommand,
     UpdateStepBasicsCommand,
     UpdateStepDependenciesCommand,
+    UpdateStepParamsCommand,
 )
 
 
@@ -177,6 +179,54 @@ class EditorApiCommandCodecTests(unittest.TestCase):
                 {"type": "UpdateStepDependencies", "stepId": "copy_cores", "dependencies": ["extract_cores"]},
                 UpdateStepDependenciesCommand(step_id="copy_cores", dependencies=("extract_cores",)),
             ),
+            (
+                {
+                    "type": "UpdateStepParams",
+                    "stepId": "copy_cores",
+                    "params": {
+                        "source": {"ref": "steps.extract_cores.outputs.extracted_paths"},
+                        "dest": "/data/user/0/com.retroarch.aarch64/cores",
+                        "copy_policy": "merge",
+                        "literal_null": None,
+                    },
+                },
+                UpdateStepParamsCommand(
+                    step_id="copy_cores",
+                    params={
+                        "source": RefParamValue(ref="steps.extract_cores.outputs.extracted_paths"),
+                        "dest": "/data/user/0/com.retroarch.aarch64/cores",
+                        "copy_policy": "merge",
+                        "literal_null": None,
+                    },
+                ),
+            ),
+            (
+                {
+                    "type": "UpdateStepParams",
+                    "stepId": "grant",
+                    "params": {
+                        "runtime": [
+                            {
+                                "package_name": "com.example.app",
+                                "name": "POST_NOTIFICATIONS",
+                                "when": {"ref": "nested.literal.object"},
+                            }
+                        ],
+                    },
+                },
+                UpdateStepParamsCommand(
+                    step_id="grant",
+                    params={
+                        "runtime": [
+                            {
+                                "package_name": "com.example.app",
+                                "name": "POST_NOTIFICATIONS",
+                                "when": {"ref": "nested.literal.object"},
+                            }
+                        ],
+                    },
+                ),
+            ),
         ]
 
         for payload, expected in cases:
@@ -198,6 +248,8 @@ class EditorApiCommandCodecTests(unittest.TestCase):
             {"type": "UpdateStepBasics", "stepId": "copy_cores", "name": "Copy Cores"},
             {"type": "SetStepUserToggleable", "stepId": "copy_cores", "userToggleable": "true"},
             {"type": "UpdateStepDependencies", "stepId": "copy_cores", "dependencies": "extract_cores"},
+            {"type": "UpdateStepParams", "stepId": "copy_cores"},
+            {"type": "UpdateStepParams", "stepId": "copy_cores", "params": []},
             {"inputId": "roms_dir"},
             "AddInput",
         ]

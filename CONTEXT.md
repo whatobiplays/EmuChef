@@ -169,14 +169,16 @@ creation collects both artifact id and URL before submitting a command. Artifact
 group duplication creates a new group with the same ordered artifact members as
 the source group and does not rewrite step refs or selections.
 
-The Tauri Steps screen supports basic step lifecycle editing and step dependency
-editing through the Python sidecar. Step add, delete, duplicate, reorder,
-display-name edits, `user_toggleable` edits, and dependency updates are
-available when the matching backend command codec mappings exist. Existing step
-ids and step types are read-only. Step id and step type are chosen only when
-adding a step. Add Step collects step id, step type, and an optional display
-name, and the frontend does not synthesize params or other required runtime
-fields. Dependency updates use `UpdateStepDependencies` with the complete next
+The Tauri Steps screen supports basic step lifecycle editing, step dependency
+editing, and existing step param editing through the Python sidecar. Step add,
+delete, duplicate, reorder, display-name edits, `user_toggleable` edits,
+dependency updates, and param updates are available when the matching backend
+command codec mappings exist. Existing step ids and step types are read-only.
+Step id and step type are chosen only when adding a step. Add Step collects step
+id, step type, and an optional display name, and the frontend does not synthesize
+params or other required runtime fields.
+
+Dependency updates use `UpdateStepDependencies` with the complete next
 dependency id list. The frontend blocks obvious self-dependency and duplicate
 dependency selections, treats missing or null dependency lists as empty for UI
 rendering only, and leaves graph validity, cycles, unknown step ids, and final
@@ -185,6 +187,19 @@ authored dependency ids remain visible as raw ids and can be removed. Delete Ste
 uses the backend safe-delete behavior shared with the PySide editor, so
 supported downstream step dependencies, `conflicts_with` entries, and step refs
 are removed by Python rather than by TypeScript cleanup logic.
+
+Step param updates use `UpdateStepParams` with the complete next params object
+for the selected step. The frontend edits authored step params, keeps literal
+values as JSON primitives, objects, or lists, and sends refs in the authored
+`{ ref: "..." }` shape. A literal JSON `null` param value is distinct from
+clearing a param; clearing removes the param key from the submitted params
+object. The Python backend remains authoritative for command application,
+validation diagnostics, canonical YAML, dirty state, and undo/redo state.
+`StepSpecDto` improves UI rendering for param order, enum controls, and ref
+filters, but it is UI metadata only and is not mutation authority. The ref
+picker uses the current document `refIndex`, prefers `candidates`, falls back to
+`allRefs`, and keeps current missing or incompatible refs visible for repair.
+Selecting a ref does not automatically add or rewrite step dependencies.
 
 Inputs, artifacts, artifact groups, and steps use master-detail panes inside the
 Tauri editor. The editor frame does not scroll when item lists scroll. Each
@@ -215,14 +230,21 @@ the native app menu convention, while Windows and Linux use native window menu
 bars. Temporary development-only actions live under a Debug menu and are not
 production editing features.
 
-The Tauri editor does not expose full step params editing, ref picker UI,
-constraints editing, `skip_if` editing, `verify` editing, dependency graph
-visualization, dependency reorder controls, drag-and-drop, executor/apply-device
-UI, Save As UI, create-from-template UI, Python bundling, installer packaging,
-or Rust ports of Python editor/planner/executor behavior. Advanced step
-internals remain read-only in the Tauri editor, and full step param and ref
-editing remain later-phase work. YAML preview is read-only. Window/app close
-unsaved-change handling remains later-phase work.
+The Tauri editor does not expose constraints editing, `skip_if` editing,
+`verify` editing, dependency graph visualization, dependency reorder controls,
+drag-and-drop, executor/apply-device UI, Save As UI, create-from-template UI,
+Python bundling, installer packaging, or Rust ports of Python
+editor/planner/executor behavior. Advanced step internals remain read-only in
+the Tauri editor, and full advanced step editing remains later-phase work. YAML
+preview is read-only. Window/app close unsaved-change handling remains
+later-phase work.
+
+Future editor UX opportunities:
+
+- when a user selects a ref that points to another step output, the editor may
+  offer to add the producing step as a dependency or warn if the dependency is
+  missing. This should be an explicit user-confirmed action, not automatic
+  mutation.
 
 The frontend talks to Rust through Tauri `invoke(...)` commands named:
 

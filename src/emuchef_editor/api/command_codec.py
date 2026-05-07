@@ -5,6 +5,7 @@ from __future__ import annotations
 from collections.abc import Mapping, Sequence
 from typing import Any, Callable
 
+from emuchef.domain import RefParamValue
 from emuchef_editor.core.documents.commands import (
     AddArtifactCommand,
     AddArtifactGroupCommand,
@@ -33,6 +34,7 @@ from emuchef_editor.core.documents.commands import (
     UpdateInputFieldCommand,
     UpdateStepBasicsCommand,
     UpdateStepDependenciesCommand,
+    UpdateStepParamsCommand,
 )
 
 from .errors import ApiError
@@ -248,6 +250,30 @@ def _decode_update_step_dependencies(payload: Mapping[str, Any]) -> UpdateStepDe
     )
 
 
+def _decode_update_step_params(payload: Mapping[str, Any]) -> UpdateStepParamsCommand:
+    params = _required(payload, "params")
+    if not isinstance(params, Mapping):
+        raise ApiError("invalid_command", "Command field 'params' must be an object.", {"field": "params"})
+    return UpdateStepParamsCommand(
+        step_id=_required_str(payload, "stepId"),
+        params={str(name): _decode_authored_param_value(value) for name, value in params.items()},
+    )
+
+
+def _decode_authored_param_value(value: Any) -> Any:
+    """Decode one top-level authored param value from the JSON command payload.
+
+    Authored refs use the YAML/DTO shape {"ref": "..."} at the top level of an
+    individual param. Nested objects and lists remain literal authored JSON
+    values; the command codec does not recursively interpret arbitrary "ref"
+    keys.
+    """
+
+    if isinstance(value, Mapping) and set(value.keys()) == {"ref"} and isinstance(value.get("ref"), str):
+        return RefParamValue(ref=value["ref"])
+    return value
+
+
 def _required(payload: Mapping[str, Any], field: str) -> Any:
     if field not in payload:
         raise ApiError("invalid_command", f"Command payload is missing required field: {field}", {"field": field})
@@ -342,4 +368,5 @@ _DECODERS: dict[str, Decoder] = {
     "UpdateStepBasics": _decode_update_step_basics,
     "SetStepUserToggleable": _decode_set_step_user_toggleable,
     "UpdateStepDependencies": _decode_update_step_dependencies,
+    "UpdateStepParams": _decode_update_step_params,
 }

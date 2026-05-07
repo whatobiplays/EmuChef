@@ -211,6 +211,68 @@ class EditorApiSessionTests(unittest.TestCase):
             self.assertNotIn("source", shorthand_step["params"])
             self.assertNotIn("steps.prepare", document["yaml"])
 
+    def test_update_step_params_command_returns_updated_document_without_dependency_synthesis(self) -> None:
+        recipe = base_recipe(
+            recipe_id="example.recipe",
+            steps=[
+                {
+                    "id": "extract",
+                    "type": "extract_artifacts",
+                    "name": "Extract",
+                    "user_toggleable": False,
+                    "dependencies": [],
+                    "constraints": {"capabilities": [], "conflicts_with": []},
+                    "params": {"artifacts": []},
+                    "verify": [],
+                },
+                {
+                    "id": "copy",
+                    "type": "copy_files",
+                    "name": "Copy",
+                    "user_toggleable": False,
+                    "dependencies": [],
+                    "constraints": {"capabilities": [], "conflicts_with": []},
+                    "params": {"dest": "/sdcard/Old", "copy_policy": "sync"},
+                    "verify": [],
+                },
+            ],
+        )
+        with TemporaryDirectory() as tmp:
+            authored_root = build_authored_tree(Path(tmp), recipes=[recipe])
+            manager = DocumentSessionManager()
+            opened = manager.open_recipe(
+                str(authored_root / "recipes" / "example_recipe.yaml"),
+                authored_root=str(authored_root),
+            )
+            document_id = opened["result"]["document"]["documentId"]
+
+            response = manager.apply_recipe_command(
+                document_id,
+                {
+                    "type": "UpdateStepParams",
+                    "stepId": "copy",
+                    "params": {
+                        "source": {"ref": "steps.extract.outputs.extracted_paths"},
+                        "dest": "/sdcard/New",
+                        "copy_policy": "sync",
+                    },
+                },
+            )
+
+            self.assertTrue(response["ok"], response)
+            self.assertTrue(response["result"]["commandResult"]["changed"])
+            document = response["result"]["document"]
+            self.assertEqual(document["documentId"], document_id)
+            self.assertTrue(document["dirty"])
+            self.assertTrue(document["canUndo"])
+            copy_step = next(step for step in document["recipe"]["steps"] if step["id"] == "copy")
+            self.assertEqual(copy_step["params"]["source"], {"ref": "steps.extract.outputs.extracted_paths"})
+            self.assertEqual(copy_step["params"]["dest"], "/sdcard/New")
+            self.assertEqual(copy_step["params"]["copy_policy"], "sync")
+            self.assertEqual(copy_step["dependencies"], [])
+            self.assertIn("ref: steps.extract.outputs.extracted_paths", document["yaml"])
+            self.assertIn("dest: /sdcard/New", document["yaml"])
+
 
 if __name__ == "__main__":
     unittest.main()

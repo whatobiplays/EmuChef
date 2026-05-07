@@ -114,7 +114,7 @@ package.
 Current editor scope notes:
 
 - it edits the shared typed authored recipe model rather than raw YAML text
-- the Tauri editor supports sidecar-backed editing for Overview, Inputs, Artifacts, Artifact Groups, basic step lifecycle operations, and step dependencies
+- the Tauri editor supports sidecar-backed editing for Overview, Inputs, Artifacts, Artifact Groups, basic step lifecycle operations, step dependencies, and existing step params
 - primary document actions are exposed through native File, Edit, and Utilities menus
 - temporary development-only actions are exposed through the native Debug menu
 - menu items are context-aware and disabled when a document action is not valid
@@ -129,8 +129,14 @@ Current editor scope notes:
 - step dependency editing uses the Python sidecar `UpdateStepDependencies` command; adding appends a dependency id as authored storage/display order only, and the planner remains authoritative for final execution ordering
 - missing or unknown authored dependency ids remain visible in the step detail panel and can be removed from copied or temporary recipes during repair
 - deleting a step uses the backend safe-delete behavior shared with the PySide editor and removes supported downstream dependencies, conflicts, and refs
-- params, constraints, `skip_if`, and `verify` are read-only in the Tauri editor
-- full step params and ref editing remain later-phase work
+- step params editing uses the Python sidecar `UpdateStepParams` command with full params replacement for the selected step; the frontend submits authored JSON values and replaces local document state with the returned `RecipeDocumentDto`
+- refs use the authored `{ ref: "..." }` shape in DTOs and command payloads; the Python codec converts only top-level exact ref-shaped param values into internal domain refs
+- the ref picker uses the current document `refIndex`, prefers candidate metadata, falls back to raw `allRefs`, and keeps missing or incompatible current refs visible for repair
+- `StepSpecDto` improves param ordering, enum rendering, and ref filtering, but it is UI metadata only and is not mutation authority
+- Python validation remains authoritative for required params, ref validity, and step contract diagnostics
+- selecting a ref does not automatically add or rewrite step dependencies in the Tauri editor
+- constraints, `skip_if`, and `verify` are read-only in the Tauri editor
+- full advanced step editing remains later-phase work
 - Inputs, Artifacts, Artifact Groups, and Steps use independently scrolling list/detail panes with resizable list columns
 - top-level recipe `permissions:` is invalid and is not migrated or ignored by the loader
 - step refs stay in authored-ref space and save explicitly as `{ ref: ... }`
