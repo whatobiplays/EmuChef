@@ -273,6 +273,93 @@ class EditorApiSessionTests(unittest.TestCase):
             self.assertIn("ref: steps.extract.outputs.extracted_paths", document["yaml"])
             self.assertIn("dest: /sdcard/New", document["yaml"])
 
+    def test_advanced_step_internals_commands_return_updated_document(self) -> None:
+        recipe = base_recipe(
+            recipe_id="example.recipe",
+            steps=[
+                {
+                    "id": "copy",
+                    "type": "copy_files",
+                    "name": "Copy",
+                    "user_toggleable": False,
+                    "dependencies": [],
+                    "constraints": {"capabilities": [], "conflicts_with": []},
+                    "params": {"source": "/sdcard/Source", "dest": "/sdcard/Dest"},
+                    "verify": [],
+                },
+            ],
+        )
+        with TemporaryDirectory() as tmp:
+            authored_root = build_authored_tree(Path(tmp), recipes=[recipe])
+            manager = DocumentSessionManager()
+            opened = manager.open_recipe(
+                str(authored_root / "recipes" / "example_recipe.yaml"),
+                authored_root=str(authored_root),
+            )
+            document_id = opened["result"]["document"]["documentId"]
+
+            responses = [
+                manager.apply_recipe_command(
+                    document_id,
+                    {
+                        "type": "UpdateStepConstraints",
+                        "stepId": "copy",
+                        "constraints": {
+                            "capabilities": ["shared_storage_write"],
+                            "conflictsWith": ["prepare"],
+                        },
+                    },
+                ),
+                manager.apply_recipe_command(
+                    document_id,
+                    {
+                        "type": "UpdateStepSkipIf",
+                        "stepId": "copy",
+                        "skipIf": [
+                            {
+                                "type": "package_installed",
+                                "params": {
+                                    "package_name": "com.example.app",
+                                    "nested_ref_is_literal": {"ref": "inputs.source_dir"},
+                                },
+                            }
+                        ],
+                    },
+                ),
+                manager.apply_recipe_command(
+                    document_id,
+                    {
+                        "type": "UpdateStepVerify",
+                        "stepId": "copy",
+                        "verify": [
+                            {
+                                "type": "path_exists",
+                                "params": {"path": "/sdcard/Dest"},
+                            }
+                        ],
+                    },
+                ),
+            ]
+
+            for response in responses:
+                self.assertTrue(response["ok"], response)
+                self.assertTrue(response["result"]["commandResult"]["changed"], response)
+                self.assertEqual(response["result"]["document"]["documentId"], document_id)
+                self.assertTrue(response["result"]["document"]["dirty"])
+                self.assertTrue(response["result"]["document"]["canUndo"])
+
+            document = responses[-1]["result"]["document"]
+            copy_step = document["recipe"]["steps"][0]
+            self.assertEqual(copy_step["constraints"]["capabilities"], ["shared_storage_write"])
+            self.assertEqual(copy_step["constraints"]["conflictsWith"], ["prepare"])
+            self.assertEqual(copy_step["skipIf"][0]["type"], "package_installed")
+            self.assertEqual(copy_step["skipIf"][0]["params"]["nested_ref_is_literal"], {"ref": "inputs.source_dir"})
+            self.assertEqual(copy_step["verify"][0]["type"], "path_exists")
+            self.assertIn("shared_storage_write", document["yaml"])
+            self.assertIn("skip_if:", document["yaml"])
+            self.assertIn("verify:", document["yaml"])
+            self.assertIn("nested_ref_is_literal:", document["yaml"])
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -114,7 +114,7 @@ package.
 Current editor scope notes:
 
 - it edits the shared typed authored recipe model rather than raw YAML text
-- the Tauri editor supports sidecar-backed editing for Overview, Inputs, Artifacts, Artifact Groups, basic step lifecycle operations, step dependencies, and existing step params
+- the Tauri editor supports sidecar-backed editing for Overview, Inputs, Artifacts, Artifact Groups, basic step lifecycle operations, step dependencies, existing step params, and advanced step internals
 - primary document actions are exposed through native File, Edit, and Utilities menus
 - temporary development-only actions are exposed through the native Debug menu
 - menu items are context-aware and disabled when a document action is not valid
@@ -135,8 +135,9 @@ Current editor scope notes:
 - `StepSpecDto` improves param ordering, enum rendering, and ref filtering, but it is UI metadata only and is not mutation authority
 - Python validation remains authoritative for required params, ref validity, and step contract diagnostics
 - selecting a ref does not automatically add or rewrite step dependencies in the Tauri editor
-- constraints, `skip_if`, and `verify` are read-only in the Tauri editor
-- full advanced step editing remains later-phase work
+- constraints, `skip_if`, and `verify` use plain JSON editors in an Advanced step section; each edit parses JSON locally, requires explicit Apply, and submits `UpdateStepConstraints`, `UpdateStepSkipIf`, or `UpdateStepVerify` through the Python sidecar
+- advanced step JSON editors do not provide specialized constraints, condition, or verification builders, and they do not provide a ref picker inside advanced JSON values
+- backend command application and validation remain authoritative for advanced step internals; local frontend checks are limited to JSON parsing and the top-level shape required by the command codec
 - Inputs, Artifacts, Artifact Groups, and Steps use independently scrolling list/detail panes with resizable list columns
 - top-level recipe `permissions:` is invalid and is not migrated or ignored by the loader
 - step refs stay in authored-ref space and save explicitly as `{ ref: ... }`

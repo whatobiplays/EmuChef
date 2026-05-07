@@ -36,8 +36,10 @@ The editor should work with the current authored recipe model:
 - `inputs:` as a map keyed by input id
 - `artifacts:` as a map keyed by artifact id
 - `artifact_groups:` as a map keyed by group id
-- top-level declarative `permissions:`
 - ordered `steps:`
+
+Permissions are authored as `grant_permissions` step params. Top-level
+`permissions:` is not part of the current authored recipe contract.
 
 Author refs must remain recipe-local in YAML:
 
@@ -80,8 +82,7 @@ Recommended top-level key order on write:
 7. `inputs`
 8. `artifacts`
 9. `artifact_groups`
-10. `permissions`
-11. `steps`
+10. `steps`
 
 Explicit step ordering must be preserved.
 
@@ -202,6 +203,7 @@ Deliverables:
 - step-specific forms for current supported step types
 - dependency picker
 - ref picker
+- JSON-backed advanced step internals editors for `constraints`, `skip_if`, and `verify`
 - inline validation/help for common step types
 
 Current supported step types are:

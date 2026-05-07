@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import unittest
 
-from emuchef.domain import RefParamValue
+from emuchef.domain import RefParamValue, StepCondition, StepConstraints
 from emuchef_editor.api.command_codec import decode_recipe_command
 from emuchef_editor.api.errors import ApiError
 from emuchef_editor.core.documents.commands import (
@@ -31,8 +31,11 @@ from emuchef_editor.core.documents.commands import (
     UpdateArtifactFieldCommand,
     UpdateInputFieldCommand,
     UpdateStepBasicsCommand,
+    UpdateStepConstraintsCommand,
     UpdateStepDependenciesCommand,
     UpdateStepParamsCommand,
+    UpdateStepSkipIfCommand,
+    UpdateStepVerifyCommand,
 )
 
 
@@ -227,6 +230,71 @@ class EditorApiCommandCodecTests(unittest.TestCase):
                     },
                 ),
             ),
+            (
+                {
+                    "type": "UpdateStepConstraints",
+                    "stepId": "copy_cores",
+                    "constraints": {
+                        "capabilities": ["shared_storage_write"],
+                        "conflictsWith": ["stop_app"],
+                    },
+                },
+                UpdateStepConstraintsCommand(
+                    step_id="copy_cores",
+                    constraints=StepConstraints(
+                        capabilities=("shared_storage_write",),
+                        conflicts_with=("stop_app",),
+                    ),
+                ),
+            ),
+            (
+                {
+                    "type": "UpdateStepSkipIf",
+                    "stepId": "copy_cores",
+                    "skipIf": [
+                        {
+                            "type": "package_installed",
+                            "params": {
+                                "package_name": "com.example.app",
+                                "nested_ref_is_literal": {"ref": "inputs.source_dir"},
+                            },
+                        }
+                    ],
+                },
+                UpdateStepSkipIfCommand(
+                    step_id="copy_cores",
+                    skip_if=(
+                        StepCondition(
+                            type="package_installed",
+                            params={
+                                "package_name": "com.example.app",
+                                "nested_ref_is_literal": {"ref": "inputs.source_dir"},
+                            },
+                        ),
+                    ),
+                ),
+            ),
+            (
+                {
+                    "type": "UpdateStepVerify",
+                    "stepId": "copy_cores",
+                    "verify": [
+                        {
+                            "type": "path_exists",
+                            "params": {"path": "/sdcard/RetroArch/cores"},
+                        }
+                    ],
+                },
+                UpdateStepVerifyCommand(
+                    step_id="copy_cores",
+                    verify=(
+                        StepCondition(
+                            type="path_exists",
+                            params={"path": "/sdcard/RetroArch/cores"},
+                        ),
+                    ),
+                ),
+            ),
         ]
 
         for payload, expected in cases:
@@ -250,6 +318,20 @@ class EditorApiCommandCodecTests(unittest.TestCase):
             {"type": "UpdateStepDependencies", "stepId": "copy_cores", "dependencies": "extract_cores"},
             {"type": "UpdateStepParams", "stepId": "copy_cores"},
             {"type": "UpdateStepParams", "stepId": "copy_cores", "params": []},
+            {"type": "UpdateStepConstraints", "stepId": "copy_cores", "constraints": None},
+            {
+                "type": "UpdateStepConstraints",
+                "stepId": "copy_cores",
+                "constraints": {"capabilities": "shared_storage_write", "conflictsWith": []},
+            },
+            {"type": "UpdateStepSkipIf", "stepId": "copy_cores", "skipIf": None},
+            {"type": "UpdateStepSkipIf", "stepId": "copy_cores", "skipIf": {"type": "path_exists"}},
+            {"type": "UpdateStepSkipIf", "stepId": "copy_cores", "skipIf": [{"params": {}}]},
+            {"type": "UpdateStepSkipIf", "stepId": "copy_cores", "skipIf": [{"type": "path_exists", "params": []}]},
+            {"type": "UpdateStepVerify", "stepId": "copy_cores", "verify": None},
+            {"type": "UpdateStepVerify", "stepId": "copy_cores", "verify": {"type": "path_exists"}},
+            {"type": "UpdateStepVerify", "stepId": "copy_cores", "verify": [{"params": {}}]},
+            {"type": "UpdateStepVerify", "stepId": "copy_cores", "verify": [{"type": "path_exists", "params": []}]},
             {"inputId": "roms_dir"},
             "AddInput",
         ]

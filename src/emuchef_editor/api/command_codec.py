@@ -5,7 +5,7 @@ from __future__ import annotations
 from collections.abc import Mapping, Sequence
 from typing import Any, Callable
 
-from emuchef.domain import RefParamValue
+from emuchef.domain import RefParamValue, StepCondition, StepConstraints
 from emuchef_editor.core.documents.commands import (
     AddArtifactCommand,
     AddArtifactGroupCommand,
@@ -33,8 +33,11 @@ from emuchef_editor.core.documents.commands import (
     UpdateArtifactFieldCommand,
     UpdateInputFieldCommand,
     UpdateStepBasicsCommand,
+    UpdateStepConstraintsCommand,
     UpdateStepDependenciesCommand,
     UpdateStepParamsCommand,
+    UpdateStepSkipIfCommand,
+    UpdateStepVerifyCommand,
 )
 
 from .errors import ApiError
@@ -260,6 +263,33 @@ def _decode_update_step_params(payload: Mapping[str, Any]) -> UpdateStepParamsCo
     )
 
 
+def _decode_update_step_constraints(payload: Mapping[str, Any]) -> UpdateStepConstraintsCommand:
+    constraints = _required(payload, "constraints")
+    if not isinstance(constraints, Mapping):
+        raise ApiError("invalid_command", "Command field 'constraints' must be an object.", {"field": "constraints"})
+    return UpdateStepConstraintsCommand(
+        step_id=_required_str(payload, "stepId"),
+        constraints=StepConstraints(
+            capabilities=_optional_string_tuple(constraints, "capabilities"),
+            conflicts_with=_optional_string_tuple(constraints, "conflictsWith"),
+        ),
+    )
+
+
+def _decode_update_step_skip_if(payload: Mapping[str, Any]) -> UpdateStepSkipIfCommand:
+    return UpdateStepSkipIfCommand(
+        step_id=_required_str(payload, "stepId"),
+        skip_if=_condition_tuple(_required(payload, "skipIf"), field="skipIf"),
+    )
+
+
+def _decode_update_step_verify(payload: Mapping[str, Any]) -> UpdateStepVerifyCommand:
+    return UpdateStepVerifyCommand(
+        step_id=_required_str(payload, "stepId"),
+        verify=_condition_tuple(_required(payload, "verify"), field="verify"),
+    )
+
+
 def _decode_authored_param_value(value: Any) -> Any:
     """Decode one top-level authored param value from the JSON command payload.
 
@@ -332,6 +362,31 @@ def _string_tuple(value: Any, *, field: str) -> tuple[str, ...]:
     return tuple(value)
 
 
+def _optional_string_tuple(payload: Mapping[str, Any], field: str) -> tuple[str, ...]:
+    value = _optional(payload, field)
+    if value is None:
+        return ()
+    return _string_tuple(value, field=field)
+
+
+def _condition_tuple(value: Any, *, field: str) -> tuple[StepCondition, ...]:
+    if not isinstance(value, Sequence) or isinstance(value, (str, bytes, bytearray)):
+        raise ApiError("invalid_command", f"Command field {field!r} must be a list.", {"field": field})
+    return tuple(_decode_step_condition(item, field=field) for item in value)
+
+
+def _decode_step_condition(value: Any, *, field: str) -> StepCondition:
+    if not isinstance(value, Mapping):
+        raise ApiError("invalid_command", f"Command field {field!r} must contain condition objects.", {"field": field})
+    params = value.get("params", {})
+    if not isinstance(params, Mapping):
+        raise ApiError("invalid_command", "Condition field 'params' must be an object.", {"field": f"{field}.params"})
+    return StepCondition(
+        type=_required_str(value, "type"),
+        params={str(name): item for name, item in params.items()},
+    )
+
+
 def _require_one_of(value: str, field: str, allowed_values: tuple[str, ...]) -> None:
     if value not in allowed_values:
         raise ApiError(
@@ -369,4 +424,7 @@ _DECODERS: dict[str, Decoder] = {
     "SetStepUserToggleable": _decode_set_step_user_toggleable,
     "UpdateStepDependencies": _decode_update_step_dependencies,
     "UpdateStepParams": _decode_update_step_params,
+    "UpdateStepConstraints": _decode_update_step_constraints,
+    "UpdateStepSkipIf": _decode_update_step_skip_if,
+    "UpdateStepVerify": _decode_update_step_verify,
 }

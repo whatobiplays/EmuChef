@@ -25,7 +25,10 @@ export type EditorCommand =
   | { type: "UpdateStepBasics"; stepId: string; name: string; description: string | null }
   | { type: "SetStepUserToggleable"; stepId: string; userToggleable: boolean }
   | { type: "UpdateStepDependencies"; stepId: string; dependencies: string[] }
-  | { type: "UpdateStepParams"; stepId: string; params: Record<string, unknown> };
+  | { type: "UpdateStepParams"; stepId: string; params: Record<string, unknown> }
+  | { type: "UpdateStepConstraints"; stepId: string; constraints: Record<string, unknown> }
+  | { type: "UpdateStepSkipIf"; stepId: string; skipIf: unknown[] }
+  | { type: "UpdateStepVerify"; stepId: string; verify: unknown[] };
 
 export type InputEditableField =
   | "type"

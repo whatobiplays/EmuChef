@@ -2,8 +2,8 @@ import { useEffect, useMemo, useState } from "react";
 
 import type { EditorCommand } from "../api/commands";
 import type { DiagnosticDto, RecipeDocumentDto, StepDto, StepSpecDto } from "../api/types";
+import { AdvancedStepInternalsEditor } from "./AdvancedStepInternalsEditor";
 import { EditableTextField } from "./EditableTextField";
-import { ReadOnlyJson } from "./ReadOnlyJson";
 import { ResizableEditorLayout } from "./ResizableEditorLayout";
 import { StepDependenciesEditor } from "./StepDependenciesEditor";
 import { StepParamsEditor } from "./StepParamsEditor";
@@ -325,11 +325,7 @@ function StepDetailPanel({
         <StepParamsEditor refIndex={refIndex} step={step} stepSpec={stepSpec} onCommand={onCommand} />
       </div>
 
-      <div className="grid gap-4 rounded border border-slate-200 bg-white p-4">
-        <ReadOnlyJson label="Constraints" value={step.constraints} />
-        <ReadOnlyJson label="Skip If" value={step.skipIf} />
-        <ReadOnlyJson label="Verify" value={step.verify} />
-      </div>
+      <AdvancedStepInternalsEditor step={step} onCommand={onCommand} />
     </div>
   );
 }
