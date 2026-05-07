@@ -4,15 +4,22 @@ import type { EditorCommand } from "../api/commands";
 import type { StepDto } from "../api/types";
 import {
   buildAdvancedInternalsCommand,
+  editorValueForAdvancedField,
   formatJsonDraft,
   parseAdvancedJsonDraft,
   revertJsonDraft,
   type AdvancedInternalsField,
 } from "./advancedStepInternals.logic";
+import { normalizeEditableText, textInputGuardProps } from "./textInputGuards.logic";
+
+export interface AdvancedCommandResult {
+  ok: boolean;
+  changed: boolean;
+}
 
 interface AdvancedStepInternalsEditorProps {
   step: StepDto;
-  onCommand: (command: EditorCommand) => Promise<boolean>;
+  onCommand: (command: EditorCommand) => Promise<AdvancedCommandResult>;
 }
 
 interface SectionConfig {
@@ -73,11 +80,12 @@ function AdvancedJsonSectionEditor({
   value: unknown;
   hasValue: boolean;
   unsetInitialValue: unknown;
-  onCommand: (command: EditorCommand) => Promise<boolean>;
+  onCommand: (command: EditorCommand) => Promise<AdvancedCommandResult>;
 }) {
   const [editingUnset, setEditingUnset] = useState(false);
   const activeValue = hasValue ? value : unsetInitialValue;
-  const formattedValue = useMemo(() => formatJsonDraft(activeValue), [activeValue]);
+  const editorValue = useMemo(() => editorValueForAdvancedField(field, activeValue), [activeValue, field]);
+  const formattedValue = useMemo(() => formatJsonDraft(editorValue), [editorValue]);
   const [draft, setDraft] = useState(formattedValue);
   const [error, setError] = useState<string | null>(null);
   const [submitting, setSubmitting] = useState(false);
@@ -99,22 +107,29 @@ function AdvancedJsonSectionEditor({
       setError(parsed.error);
       return;
     }
-    const command = buildAdvancedInternalsCommand(field, stepId, parsed.value, hasValue ? value : undefined);
+    const command = buildAdvancedInternalsCommand(field, stepId, parsed.value, hasValue ? editorValue : undefined);
     if (command === null) {
       setError(null);
       return;
     }
     setSubmitting(true);
-    const ok = await onCommand(command);
+    const result = await onCommand(command);
     setSubmitting(false);
-    if (ok) {
+    if (!result.ok) {
+      return;
+    }
+    if (!result.changed) {
+      setError("No document change was produced.");
+      return;
+    }
+    if (result.changed) {
       setError(null);
       setEditingUnset(false);
     }
   }
 
   function revert() {
-    setDraft(revertJsonDraft(activeValue));
+    setDraft(revertJsonDraft(editorValue));
     setError(null);
     if (!hasValue) {
       setEditingUnset(false);
@@ -147,10 +162,11 @@ function AdvancedJsonSectionEditor({
     <section className="grid gap-2">
       <h3 className="text-xs font-semibold uppercase tracking-wide text-slate-500">{label}</h3>
       <textarea
+        {...textInputGuardProps}
         className="min-h-28 w-full resize-y rounded border border-slate-300 bg-white px-3 py-2 font-mono text-xs text-slate-900 shadow-sm outline-none focus:border-slate-500 focus:ring-2 focus:ring-slate-200"
         value={draft}
         onChange={(event) => {
-          setDraft(event.target.value);
+          setDraft(normalizeEditableText(event.target.value));
           setError(null);
         }}
       />

@@ -1,5 +1,7 @@
 import { useEffect, useState, type ReactNode } from "react";
 
+import { normalizeEditableText, textInputGuardProps } from "./textInputGuards.logic";
+
 interface TextPromptDialogProps {
   title: string;
   label: string;
@@ -58,11 +60,12 @@ export function TextPromptDialog({
         <label className="grid gap-1">
           <span className="text-xs font-semibold uppercase tracking-wide text-slate-500">{label}</span>
           <input
+            {...textInputGuardProps}
             autoFocus
             className="w-full rounded border border-slate-300 bg-white px-3 py-2 text-sm text-slate-900 shadow-sm outline-none focus:border-slate-500 focus:ring-2 focus:ring-slate-200"
             value={value}
             onChange={(event) => {
-              setValue(event.target.value);
+              setValue(normalizeEditableText(event.target.value));
               setValidationMessage(null);
             }}
           />

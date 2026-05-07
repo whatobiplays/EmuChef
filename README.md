@@ -134,10 +134,13 @@ Current editor scope notes:
 - the ref picker uses the current document `refIndex`, prefers candidate metadata, falls back to raw `allRefs`, and keeps missing or incompatible current refs visible for repair
 - `StepSpecDto` improves param ordering, enum rendering, and ref filtering, but it is UI metadata only and is not mutation authority
 - Python validation remains authoritative for required params, ref validity, and step contract diagnostics
+- editable Tauri text controls disable browser writing aids and normalize smart single and double quotes to ASCII quotes before storing local drafts or sending sidecar commands
 - selecting a ref does not automatically add or rewrite step dependencies in the Tauri editor
 - constraints, `skip_if`, and `verify` use plain JSON editors in an Advanced step section; each edit parses JSON locally, requires explicit Apply, and submits `UpdateStepConstraints`, `UpdateStepSkipIf`, or `UpdateStepVerify` through the Python sidecar
+- the constraints JSON editor displays authored/YAML-facing `conflicts_with`; the command payload still uses the API field `conflictsWith`
 - advanced step JSON editors do not provide specialized constraints, condition, or verification builders, and they do not provide a ref picker inside advanced JSON values
-- backend command application and validation remain authoritative for advanced step internals; local frontend checks are limited to JSON parsing and the top-level shape required by the command codec
+- backend command application and validation remain authoritative for advanced step internals; local frontend checks are limited to JSON parsing, representable authored keys, and the top-level shape required by the command codec
+- advanced JSON command success with `changed: false` is treated as a no-op, not an applied edit
 - Inputs, Artifacts, Artifact Groups, and Steps use independently scrolling list/detail panes with resizable list columns
 - top-level recipe `permissions:` is invalid and is not migrated or ignored by the loader
 - step refs stay in authored-ref space and save explicitly as `{ ref: ... }`

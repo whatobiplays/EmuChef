@@ -1,5 +1,7 @@
 import { KeyboardEvent, useEffect, useState } from "react";
 
+import { normalizeEditableText, textInputGuardProps } from "./textInputGuards.logic";
+
 interface EditableTextFieldProps {
   label: string;
   value: string;
@@ -64,17 +66,19 @@ export function EditableTextField({
       <span className="text-xs font-semibold uppercase tracking-wide text-slate-500">{label}</span>
       {multiline ? (
         <textarea
+          {...textInputGuardProps}
           className={`${controlClass} min-h-24 resize-y`}
           disabled={committing}
           placeholder={placeholder}
           readOnly={readOnly}
           value={draft}
           onBlur={() => void commit()}
-          onChange={(event) => setDraft(event.target.value)}
+          onChange={(event) => setDraft(normalizeEditableText(event.target.value))}
           onKeyDown={onKeyDown}
         />
       ) : (
         <input
+          {...textInputGuardProps}
           className={controlClass}
           disabled={committing}
           placeholder={placeholder}
@@ -82,7 +86,7 @@ export function EditableTextField({
           type="text"
           value={draft}
           onBlur={() => void commit()}
-          onChange={(event) => setDraft(event.target.value)}
+          onChange={(event) => setDraft(normalizeEditableText(event.target.value))}
           onKeyDown={onKeyDown}
         />
       )}

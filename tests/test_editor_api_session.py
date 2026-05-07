@@ -360,6 +360,80 @@ class EditorApiSessionTests(unittest.TestCase):
             self.assertIn("verify:", document["yaml"])
             self.assertIn("nested_ref_is_literal:", document["yaml"])
 
+    def test_update_step_constraints_dirty_state_and_noop_behavior(self) -> None:
+        recipe = base_recipe(
+            recipe_id="example.recipe",
+            steps=[
+                {
+                    "id": "copy",
+                    "type": "copy_files",
+                    "name": "Copy",
+                    "user_toggleable": False,
+                    "dependencies": [],
+                    "constraints": {"capabilities": [], "conflicts_with": []},
+                    "params": {"source": "/sdcard/Source", "dest": "/sdcard/Dest"},
+                    "verify": [],
+                },
+            ],
+        )
+        with TemporaryDirectory() as tmp:
+            authored_root = build_authored_tree(Path(tmp), recipes=[recipe])
+            manager = DocumentSessionManager()
+            opened = manager.open_recipe(
+                str(authored_root / "recipes" / "example_recipe.yaml"),
+                authored_root=str(authored_root),
+            )
+            document_id = opened["result"]["document"]["documentId"]
+
+            noop = manager.apply_recipe_command(
+                document_id,
+                {
+                    "type": "UpdateStepConstraints",
+                    "stepId": "copy",
+                    "constraints": {"capabilities": [], "conflictsWith": []},
+                },
+            )
+
+            self.assertTrue(noop["ok"], noop)
+            self.assertFalse(noop["result"]["commandResult"]["changed"])
+            self.assertFalse(noop["result"]["document"]["dirty"])
+            self.assertFalse(noop["result"]["document"]["canUndo"])
+
+            changed = manager.apply_recipe_command(
+                document_id,
+                {
+                    "type": "UpdateStepConstraints",
+                    "stepId": "copy",
+                    "constraints": {
+                        "capabilities": ["shared_storage_write"],
+                        "conflictsWith": ["prepare"],
+                    },
+                },
+            )
+
+            self.assertTrue(changed["ok"], changed)
+            self.assertTrue(changed["result"]["commandResult"]["changed"])
+            document = changed["result"]["document"]
+            self.assertTrue(document["dirty"])
+            self.assertTrue(document["canUndo"])
+            copy_step = document["recipe"]["steps"][0]
+            self.assertEqual(copy_step["constraints"]["capabilities"], ["shared_storage_write"])
+            self.assertEqual(copy_step["constraints"]["conflictsWith"], ["prepare"])
+            self.assertIn("shared_storage_write", document["yaml"])
+            self.assertIn("conflicts_with:", document["yaml"])
+
+            lossy = manager.apply_recipe_command(
+                document_id,
+                {
+                    "type": "UpdateStepConstraints",
+                    "stepId": "copy",
+                    "constraints": {"capabilities": [], "conflicts_with": ["prepare"]},
+                },
+            )
+
+            self.assertFalse(lossy["ok"])
+            self.assertEqual(lossy["error"]["code"], "invalid_command")
+
 
 if __name__ == "__main__":
     unittest.main()

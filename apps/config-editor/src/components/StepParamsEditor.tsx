@@ -13,6 +13,7 @@ import {
   paramValuesEqual,
   type RefPickerOption,
 } from "./stepParams.logic";
+import { normalizeEditableText, textInputGuardProps } from "./textInputGuards.logic";
 
 interface StepParamsEditorProps {
   step: StepDto;
@@ -154,11 +155,12 @@ function StringParamInput({ value, onUpdate }: { value: string; onUpdate: (nextV
   return (
     <div className="grid gap-1">
       <input
+        {...textInputGuardProps}
         className="w-full rounded border border-slate-300 bg-white px-3 py-2 text-sm text-slate-900 shadow-sm outline-none focus:border-slate-500 focus:ring-2 focus:ring-slate-200"
         value={draft}
         onBlur={() => void commit()}
         onChange={(event) => {
-          setDraft(event.target.value);
+          setDraft(normalizeEditableText(event.target.value));
           setError(null);
         }}
         onKeyDown={(event) => {
@@ -211,12 +213,13 @@ function NumberParamInput({ value, onUpdate }: { value: number; onUpdate: (nextV
   return (
     <div className="grid gap-1">
       <input
+        {...textInputGuardProps}
         className="w-full rounded border border-slate-300 bg-white px-3 py-2 text-sm text-slate-900 shadow-sm outline-none focus:border-slate-500 focus:ring-2 focus:ring-slate-200"
         inputMode="decimal"
         value={draft}
         onBlur={() => void commit()}
         onChange={(event) => {
-          setDraft(event.target.value);
+          setDraft(normalizeEditableText(event.target.value));
           setError(null);
         }}
         onKeyDown={(event) => {
@@ -366,10 +369,11 @@ function JsonValueEditor({ value, onUpdate }: { value: unknown; onUpdate: (nextV
   return (
     <div className="grid gap-2">
       <textarea
+        {...textInputGuardProps}
         className="min-h-24 w-full resize-y rounded border border-slate-300 bg-white px-3 py-2 font-mono text-xs text-slate-900 shadow-sm outline-none focus:border-slate-500 focus:ring-2 focus:ring-slate-200"
         value={draft}
         onChange={(event) => {
-          setDraft(event.target.value);
+          setDraft(normalizeEditableText(event.target.value));
           setError(null);
         }}
         onKeyDown={(event) => {

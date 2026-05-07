@@ -206,16 +206,20 @@ Advanced step internals use a collapsed Advanced section with plain JSON
 textarea editors for constraints, `skip_if`, and `verify`. Each editor keeps a
 local draft until the user selects Apply, parses JSON before submitting, and
 then sends `UpdateStepConstraints`, `UpdateStepSkipIf`, or `UpdateStepVerify`
-through `sidecar_apply_recipe_command`. Revert restores the draft from the
-current returned document value. JSON `null` is a literal JSON value and is not a
-clear action; if the command codec requires a different top-level shape, the
-frontend reports a local shape error and does not submit. Advanced JSON values
-that contain objects shaped like `{ "ref": "..." }` are ordinary JSON values in
-this editor. The Tauri editor has no specialized constraints builder, `skip_if`
-condition builder, `verify` builder, or ref picker inside advanced JSON values.
-Python remains authoritative for advanced internals command application,
-canonical YAML, semantic validation diagnostics, dirty state, undo state, and
-redo state.
+through `sidecar_apply_recipe_command`. The constraints editor displays the
+authored/YAML-facing `conflicts_with` key, and the frontend converts that key to
+the API command field `conflictsWith` only when submitting
+`UpdateStepConstraints`. Revert restores the draft from the current returned
+document value. JSON `null` is a literal JSON value and is not a clear action;
+if the command codec requires a different top-level shape, the frontend reports
+a local shape error and does not submit. Advanced JSON values that contain
+objects shaped like `{ "ref": "..." }` are ordinary JSON values in this editor.
+The Tauri editor has no specialized constraints builder, `skip_if` condition
+builder, `verify` builder, or ref picker inside advanced JSON values. Python
+remains authoritative for advanced internals command application, canonical
+YAML, semantic validation diagnostics, dirty state, undo state, and redo state.
+Advanced internals command success with `changed: false` is treated as a no-op
+rather than an applied edit.
 
 Inputs, artifacts, artifact groups, and steps use master-detail panes inside the
 Tauri editor. The editor frame does not scroll when item lists scroll. Each
@@ -230,6 +234,14 @@ The Tauri editor sends explicit editor commands through
 undo, redo, diagnostics, and YAML values. The frontend does not reconstruct YAML
 from DTOs and does not use path-based one-shot validation or YAML emission for
 open sidecar documents.
+
+Editable Tauri text controls disable browser writing aids such as spellcheck,
+autocorrect, and autocapitalization. When a user types or pastes text into an
+editable Tauri input or textarea, smart double quotes and smart single quotes
+are normalized to ASCII quotes before the frontend stores the local draft or
+sends a sidecar command. Read-only surfaces such as the YAML preview,
+diagnostics, and DTO-rendered values are not normalized unless the user edits
+that value through a Tauri text control.
 
 Routine edit commands avoid transient loading or success bars that shift the
 editor layout during normal field and list edits. Explicit app-level operations

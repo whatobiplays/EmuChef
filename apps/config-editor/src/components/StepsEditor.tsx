@@ -2,11 +2,12 @@ import { useEffect, useMemo, useState } from "react";
 
 import type { EditorCommand } from "../api/commands";
 import type { DiagnosticDto, RecipeDocumentDto, StepDto, StepSpecDto } from "../api/types";
-import { AdvancedStepInternalsEditor } from "./AdvancedStepInternalsEditor";
+import { AdvancedStepInternalsEditor, type AdvancedCommandResult } from "./AdvancedStepInternalsEditor";
 import { EditableTextField } from "./EditableTextField";
 import { ResizableEditorLayout } from "./ResizableEditorLayout";
 import { StepDependenciesEditor } from "./StepDependenciesEditor";
 import { StepParamsEditor } from "./StepParamsEditor";
+import { normalizeEditableText, textInputGuardProps } from "./textInputGuards.logic";
 
 interface StepsEditorProps {
   document: RecipeDocumentDto;
@@ -18,6 +19,7 @@ interface StepsEditorProps {
     options?: { confirmLabel?: string; destructive?: boolean },
   ) => Promise<boolean>;
   onCommand: (command: EditorCommand) => Promise<boolean>;
+  onAdvancedCommand: (command: EditorCommand) => Promise<AdvancedCommandResult>;
 }
 
 interface AddStepDraft {
@@ -32,6 +34,7 @@ export function StepsEditor({
   promptForId,
   confirmAction,
   onCommand,
+  onAdvancedCommand,
 }: StepsEditorProps) {
   const steps = document.recipe.steps;
   const stepIds = useMemo(() => steps.map((step) => step.id), [steps]);
@@ -161,6 +164,7 @@ export function StepsEditor({
           steps={steps}
           refIndex={document.refIndex}
           onCommand={onCommand}
+          onAdvancedCommand={onAdvancedCommand}
           onUpdateDependencies={(dependencies) =>
             onCommand({
               type: "UpdateStepDependencies",
@@ -274,6 +278,7 @@ function StepDetailPanel({
   steps,
   refIndex,
   onCommand,
+  onAdvancedCommand,
   onUpdateDependencies,
   onUpdateName,
   onUpdateUserToggleable,
@@ -283,6 +288,7 @@ function StepDetailPanel({
   steps: StepDto[];
   refIndex: RecipeDocumentDto["refIndex"];
   onCommand: (command: EditorCommand) => Promise<boolean>;
+  onAdvancedCommand: (command: EditorCommand) => Promise<AdvancedCommandResult>;
   onUpdateDependencies: (dependencies: string[]) => Promise<boolean>;
   onUpdateName: (name: string) => Promise<boolean>;
   onUpdateUserToggleable: (userToggleable: boolean) => Promise<boolean>;
@@ -325,7 +331,7 @@ function StepDetailPanel({
         <StepParamsEditor refIndex={refIndex} step={step} stepSpec={stepSpec} onCommand={onCommand} />
       </div>
 
-      <AdvancedStepInternalsEditor step={step} onCommand={onCommand} />
+      <AdvancedStepInternalsEditor step={step} onCommand={onAdvancedCommand} />
     </div>
   );
 }
@@ -386,11 +392,12 @@ function AddStepModal({
           <label className="grid gap-1">
             <span className="text-xs font-semibold uppercase tracking-wide text-slate-500">Step ID</span>
             <input
+              {...textInputGuardProps}
               autoFocus
               className="w-full rounded border border-slate-300 bg-white px-3 py-2 text-sm text-slate-900 shadow-sm outline-none focus:border-slate-500 focus:ring-2 focus:ring-slate-200"
               value={stepId}
               onChange={(event) => {
-                setStepId(event.target.value);
+                setStepId(normalizeEditableText(event.target.value));
                 setValidationMessage(null);
               }}
             />
@@ -415,9 +422,10 @@ function AddStepModal({
           <label className="grid gap-1">
             <span className="text-xs font-semibold uppercase tracking-wide text-slate-500">Display Name</span>
             <input
+              {...textInputGuardProps}
               className="w-full rounded border border-slate-300 bg-white px-3 py-2 text-sm text-slate-900 shadow-sm"
               value={name}
-              onChange={(event) => setName(event.target.value)}
+              onChange={(event) => setName(normalizeEditableText(event.target.value))}
             />
           </label>
           {validationMessage ? <p className="text-sm font-medium text-red-700">{validationMessage}</p> : null}

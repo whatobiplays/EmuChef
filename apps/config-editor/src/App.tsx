@@ -61,6 +61,11 @@ interface ConfirmActionOptions {
   destructive?: boolean;
 }
 
+interface CommandApplyOutcome {
+  ok: boolean;
+  changed: boolean;
+}
+
 export default function App() {
   const [stepSpecs, setStepSpecs] = useState<StepSpecDto[]>([]);
   const [stepSpecsLoaded, setStepSpecsLoaded] = useState(false);
@@ -342,9 +347,14 @@ export default function App() {
   }
 
   async function applyCommand(command: EditorCommand): Promise<boolean> {
+    const outcome = await applyCommandDetailed(command);
+    return outcome.ok;
+  }
+
+  async function applyCommandDetailed(command: EditorCommand): Promise<CommandApplyOutcome> {
     if (currentDocument === null) {
       await syncMenuState(null);
-      return false;
+      return { ok: false, changed: false };
     }
 
     const response = await sidecarApplyRecipeCommand(currentDocument.documentId, command);
@@ -352,14 +362,14 @@ export default function App() {
       applyDocument(response.result.document);
       setErrorMessage(null);
       await syncMenuState(response.result.document);
-      return true;
+      return { ok: true, changed: response.result.commandResult.changed };
     }
 
     setErrorMessage(resultMessage(response, "Edit failed."));
     setStatusMessage(null);
     await refreshSidecarStatus();
     await syncMenuState(currentDocument);
-    return false;
+    return { ok: false, changed: false };
   }
 
   function applyDocument(document: RecipeDocumentDto, fallbackPath: string | null = null) {
@@ -497,6 +507,7 @@ export default function App() {
             promptForId={promptForId}
             stepSpecs={stepSpecs}
             onCommand={applyCommand}
+            onAdvancedCommand={applyCommandDetailed}
           />
         );
     }

@@ -3,6 +3,7 @@ import test from "node:test";
 
 import {
   buildAdvancedInternalsCommand,
+  editorValueForAdvancedField,
   formatJsonDraft,
   parseAdvancedJsonDraft,
   revertJsonDraft,
@@ -13,7 +14,7 @@ test("buildAdvancedInternalsCommand builds explicit sidecar payloads", () => {
     buildAdvancedInternalsCommand(
       "constraints",
       "copy",
-      { capabilities: ["shared_storage_write"], conflictsWith: [] },
+      { capabilities: ["shared_storage_write"], conflicts_with: [] },
       {},
     ),
     {
@@ -32,6 +33,19 @@ test("buildAdvancedInternalsCommand builds explicit sidecar payloads", () => {
     stepId: "copy",
     verify: [{ type: "path_exists", params: {} }],
   });
+});
+
+test("editorValueForAdvancedField converts constraints DTO keys to authored keys", () => {
+  assert.deepEqual(
+    editorValueForAdvancedField("constraints", {
+      capabilities: ["shared_storage_write"],
+      conflictsWith: ["stop_app"],
+    }),
+    {
+      capabilities: ["shared_storage_write"],
+      conflicts_with: ["stop_app"],
+    },
+  );
 });
 
 test("invalid JSON does not produce a parsed value", () => {
@@ -56,6 +70,17 @@ test("top-level shape errors do not silently convert null or clear values", () =
   });
 });
 
+test("constraints JSON rejects unrepresentable authored keys before submit", () => {
+  assert.deepEqual(parseAdvancedJsonDraft("constraints", '{"conflictsWith": []}'), {
+    ok: false,
+    error: "Constraints supports only capabilities and conflicts_with.",
+  });
+  assert.deepEqual(parseAdvancedJsonDraft("constraints", '{"capabilities": [], "custom": true}'), {
+    ok: false,
+    error: "Constraints supports only capabilities and conflicts_with.",
+  });
+});
+
 test("nested JSON null remains a literal JSON value", () => {
   assert.deepEqual(parseAdvancedJsonDraft("verify", '[{"type":"custom","params":{"target":null}}]'), {
     ok: true,
@@ -64,10 +89,10 @@ test("nested JSON null remains a literal JSON value", () => {
 });
 
 test("unchanged parsed JSON and whitespace-only edits do not produce commands", () => {
-  const current = { capabilities: [], conflictsWith: ["copy"] };
+  const current = { capabilities: [], conflicts_with: ["copy"] };
   const parsed = parseAdvancedJsonDraft(
     "constraints",
-    '{\n  "capabilities": [],\n  "conflictsWith": ["copy"]\n}',
+    '{\n  "capabilities": [],\n  "conflicts_with": ["copy"]\n}',
   );
 
   assert.deepEqual(parsed, { ok: true, value: current });
