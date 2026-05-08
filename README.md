@@ -21,45 +21,12 @@ loading is deferred follow-up work.
 
 ## Editor
 
-The desktop editor targets authored recipe files only.
+The Tauri config editor in `apps/config-editor` is the primary development UI
+for authored recipe files. It edits the shared typed authored recipe model
+through the Python editor API and does not provide direct YAML editing.
 
-The current editor supports:
-
-- Overview editing
-- Inputs editing
-- Artifacts editing
-- Artifact Groups editing
-- Steps editing for the current supported step types:
-  - `resolve_artifacts`
-  - `extract_artifacts`
-  - `extract_archive`
-  - `copy_files`
-  - `install_apk`
-  - `grant_permissions`
-  - `launch_app`
-  - `wait`
-  - `force_stop_app`
-- template-driven New Recipe creation
-- blank-template New Recipe creation
-- Save As
-- template browsing as creation sources
-- unsaved-changes prompts for open/new/close flows
-- immediate in-memory document updates
-- explicit save-to-disk
-- live diagnostics and canonical YAML preview refresh
-- command-level undo and redo that survives save
-
-Install the project in development mode, then launch the editor against either:
-
-- a repo root that contains `authored/`
-- the `authored/` root itself
-
-Example:
-
-```bash
-pip install -e ".[pyside-editor]"
-emuchef-editor /path/to/EmuChef
-```
+The legacy PySide6 editor remains available as an optional fallback for
+comparison and debugging. It is not the primary editor path.
 
 The UI-free editor API is available without the `pyside-editor` extra. The
 one-shot server accepts one JSON request per process invocation:
@@ -80,15 +47,17 @@ Sidecar stdin accepts one JSON request per line and stdout returns one JSON
 response per line. Stdout is machine-readable JSONL only; diagnostics belong on
 stderr. Every valid sidecar request includes an opaque string `id`, and every
 response echoes that id. Malformed JSON lines return `id: null`. The sidecar has
-no `protocolVersion` or ping request yet; revisit protocol versioning before
-replacing the Python backend or externalizing the protocol.
+no `protocolVersion` or ping request yet. Future protocol stabilization should
+introduce a sidecar `protocolVersion` before replacing the Python backend with
+Rust or treating the sidecar protocol as externally stable.
 
 ### Tauri config editor
 
-The config editor lives in `apps/config-editor`. It is a Tauri v2 app that uses
-the persistent Python JSONL sidecar for session-backed document operations. The
-one-shot Python API remains available for compatibility and regression safety.
-Python remains authoritative for authored recipe mutations.
+The Tauri editor is a Tauri v2 development app that uses the persistent Python
+JSONL sidecar for session-backed document operations. Python remains
+authoritative for authored recipe loading, mutation, validation, YAML emission,
+dirty state, undo/redo, save, and step metadata. The one-shot Python API remains
+available for compatibility and regression safety.
 
 Install frontend dependencies and run the Tauri dev shell with npm:
 
@@ -114,13 +83,15 @@ package.
 Current editor scope notes:
 
 - it edits the shared typed authored recipe model rather than raw YAML text
-- the Tauri editor supports sidecar-backed editing for Overview, Inputs, Artifacts, Artifact Groups, basic step lifecycle operations, step dependencies, existing step params, and advanced step internals
+- the Tauri editor supports sidecar-backed editing for Overview, Inputs, Artifacts, Artifact Groups, basic step lifecycle operations, step dependencies, existing step params, typed ref picking, and advanced JSON-backed step internals for constraints, `skip_if`, and `verify`
 - primary document actions are exposed through native File, Edit, and Utilities menus
-- temporary development-only actions are exposed through the native Debug menu
-- menu items are context-aware and disabled when a document action is not valid
+- menu items are context-aware and disabled when a document action is not valid, a command is in flight, or the sidecar session is invalid
 - the Tauri Save command writes the current sidecar document to disk and should be tested only on safe or temporary recipe copies during development
-- window/app close unsaved-change handling remains later-phase work
+- unsaved-change prompts guard opening another recipe and closing the window/app where Tauri close interception is available
+- if the Python sidecar exits or transport fails, the stale document remains visible for reference, document-specific actions are disabled, and the Tauri app must be restarted before reopening the recipe
 - Save As and create-from-template sidecar capabilities are not exposed in the Tauri UI
+- production installers, Python bundling, notarization/signing, updater support, and production sidecar distribution are not implemented
+- executor/apply-device UI is not implemented
 - `id`, `kind`, and `schema_version` are read-only in the Overview screen
 - input, artifact, and group ids are changed through explicit Rename actions
 - artifact groups can be duplicated; the duplicate starts with the same ordered artifact members as the source group
@@ -148,13 +119,28 @@ Current editor scope notes:
 - unsupported authored step content that the current Tauri UI does not edit is preserved rather than dropped
 - ref rewrite after id changes is not implemented
 
+### Legacy PySide6 editor
+
+The PySide6 editor is installed with the optional `pyside-editor` extra and
+continues to use the existing `emuchef-editor` script entrypoint:
+
+```bash
+pip install -e ".[pyside-editor]"
+emuchef-editor /path/to/EmuChef
+```
+
+Use the PySide6 editor as a legacy/fallback editor for comparison and debugging.
+It remains optional and is not required for the UI-free editor API or the Tauri
+development editor.
+
 ## Templates
 
 Example authored YAML templates live under `templates/authored/`.
 They are examples for authors only and are not loaded by the CLI as real authored inputs.
 
-The editor shows recipe templates separately from authored recipes and uses them as creation sources for `New Recipe...`.
-Template preview in the editor is read-only and informational.
+The legacy PySide6 editor shows recipe templates separately from authored
+recipes and uses them as creation sources for `New Recipe...`. Template preview
+in that editor is read-only and informational.
 
 To create real authored inputs, copy a template into the matching `authored/`
 subdirectory:

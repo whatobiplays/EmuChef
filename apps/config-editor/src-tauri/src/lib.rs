@@ -33,3 +33,36 @@ pub fn run() {
         .run(tauri::generate_context!())
         .expect("error while running EmuChef Config Editor");
 }
+
+#[cfg(test)]
+mod capability_tests {
+    use std::fs;
+    use std::path::Path;
+
+    #[test]
+    fn default_capability_allows_tauri_close_requested_destroy_path() {
+        let capability_path =
+            Path::new(env!("CARGO_MANIFEST_DIR")).join("capabilities/default.json");
+        let capability_json = fs::read_to_string(capability_path)
+            .expect("default Tauri capability should be readable");
+        let capability: serde_json::Value = serde_json::from_str(&capability_json)
+            .expect("default Tauri capability should be JSON");
+
+        let permissions = capability["permissions"]
+            .as_array()
+            .expect("default Tauri capability should list permissions");
+
+        assert!(
+            permissions
+                .iter()
+                .any(|permission| permission == "core:window:allow-destroy"),
+            "Tauri onCloseRequested closes allowed windows through its internal destroy path"
+        );
+        assert!(
+            !permissions
+                .iter()
+                .any(|permission| permission == "core:window:allow-close"),
+            "dirty-close confirmation should not reissue window.close from the frontend"
+        );
+    }
+}

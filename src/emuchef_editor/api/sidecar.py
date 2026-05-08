@@ -168,7 +168,7 @@ def run_jsonl_sidecar(
             response = sidecar.handle_request(request)
 
         try:
-            output_stream.write(json.dumps(response, sort_keys=True, ensure_ascii=False))
+            output_stream.write(json.dumps(response, ensure_ascii=False))
             output_stream.write("\n")
             output_stream.flush()
         except BrokenPipeError:

@@ -64,6 +64,33 @@ class EditorApiServerTests(unittest.TestCase):
             self.assertTrue(emitted["ok"])
             self.assertIn("id: example.recipe", emitted["result"]["yaml"])
 
+    def test_stateless_server_preserves_artifact_group_order_in_document_json(self) -> None:
+        recipe = base_recipe(
+            recipe_id="example.recipe",
+            artifact_groups={
+                "third_group": [],
+                "first_group": [],
+                "second_group": [],
+            },
+            steps=[],
+        )
+        with TemporaryDirectory() as tmp:
+            authored_root = build_authored_tree(Path(tmp), recipes=[recipe])
+            recipe_path = authored_root / "recipes" / "example_recipe.yaml"
+
+            opened = self._run_server(
+                {
+                    "type": "openRecipe",
+                    "payload": {"path": str(recipe_path), "authoredRoot": str(authored_root)},
+                }
+            )
+
+            self.assertTrue(opened["ok"])
+            self.assertEqual(
+                list(opened["result"]["document"]["recipe"]["artifactGroups"]),
+                ["third_group", "first_group", "second_group"],
+            )
+
     def test_server_invalid_json_unknown_request_and_debug_behavior(self) -> None:
         invalid_json = self._run_server("{not-json", stdin=True)
         unknown = self._run_server({"type": "unknownRequest"})

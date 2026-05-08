@@ -18,10 +18,11 @@ interface InputsEditorProps {
     message: string,
     options?: { confirmLabel?: string; destructive?: boolean },
   ) => Promise<boolean>;
+  readOnly?: boolean;
   onCommand: (command: EditorCommand) => Promise<boolean>;
 }
 
-export function InputsEditor({ document, promptForId, confirmAction, onCommand }: InputsEditorProps) {
+export function InputsEditor({ document, promptForId, confirmAction, readOnly = false, onCommand }: InputsEditorProps) {
   const inputs = document.recipe.inputs;
   const inputIds = Object.keys(inputs).sort();
   const [selectedInputId, setSelectedInputId] = useState<string | null>(null);
@@ -119,7 +120,12 @@ export function InputsEditor({ document, promptForId, confirmAction, onCommand }
       sidebarHeader={
         <div className="flex items-center justify-between gap-2">
           <h1 className="text-sm font-semibold uppercase tracking-wide text-slate-500">Inputs</h1>
-          <button className="rounded border border-slate-300 px-2 py-1 text-sm" type="button" onClick={addInput}>
+          <button
+            className="rounded border border-slate-300 px-2 py-1 text-sm disabled:opacity-40"
+            disabled={readOnly}
+            type="button"
+            onClick={addInput}
+          >
             Add
           </button>
         </div>
@@ -130,6 +136,7 @@ export function InputsEditor({ document, promptForId, confirmAction, onCommand }
         <InputDetail
           input={selectedInput}
           inputId={selectedId}
+          readOnly={readOnly}
           onDelete={() => void deleteInput(selectedId)}
           onDuplicate={() => void duplicateInput(selectedId)}
           onRename={() => void renameInput(selectedId)}
@@ -145,13 +152,14 @@ export function InputsEditor({ document, promptForId, confirmAction, onCommand }
 interface InputDetailProps {
   input: InputDto;
   inputId: string;
+  readOnly: boolean;
   onRename: () => void;
   onDelete: () => void;
   onDuplicate: () => void;
   onUpdateField: (field: InputEditableField, value: unknown) => Promise<boolean>;
 }
 
-function InputDetail({ input, inputId, onRename, onDelete, onDuplicate, onUpdateField }: InputDetailProps) {
+function InputDetail({ input, inputId, readOnly, onRename, onDelete, onDuplicate, onUpdateField }: InputDetailProps) {
   return (
     <div className="space-y-5">
       <div className="flex flex-wrap items-center justify-between gap-3">
@@ -160,13 +168,13 @@ function InputDetail({ input, inputId, onRename, onDelete, onDuplicate, onUpdate
           <p className="text-sm text-slate-500">Input id is changed with Rename only.</p>
         </div>
         <div className="flex gap-2">
-          <button className="rounded border border-slate-300 px-3 py-1.5 text-sm" type="button" onClick={onRename}>
+          <button className="rounded border border-slate-300 px-3 py-1.5 text-sm disabled:opacity-40" disabled={readOnly} type="button" onClick={onRename}>
             Rename
           </button>
-          <button className="rounded border border-slate-300 px-3 py-1.5 text-sm" type="button" onClick={onDuplicate}>
+          <button className="rounded border border-slate-300 px-3 py-1.5 text-sm disabled:opacity-40" disabled={readOnly} type="button" onClick={onDuplicate}>
             Duplicate
           </button>
-          <button className="rounded border border-red-300 px-3 py-1.5 text-sm text-red-700" type="button" onClick={onDelete}>
+          <button className="rounded border border-red-300 px-3 py-1.5 text-sm text-red-700 disabled:opacity-40" disabled={readOnly} type="button" onClick={onDelete}>
             Delete
           </button>
         </div>
@@ -176,30 +184,35 @@ function InputDetail({ input, inputId, onRename, onDelete, onDuplicate, onUpdate
         <ReadonlyText label="ID" value={input.id} />
         <SelectField
           label="Type"
+          disabled={readOnly}
           value={input.type}
           values={INPUT_TYPES}
           onChange={(value) => value !== input.type && onUpdateField("type", value)}
         />
         <SelectField
           label="Role"
+          disabled={readOnly}
           value={input.role}
           values={INPUT_ROLES}
           onChange={(value) => value !== input.role && onUpdateField("role", value)}
         />
-        <EditableTextField label="Label" value={input.label} onCommit={(value) => onUpdateField("label", value)} />
+        <EditableTextField label="Label" readOnly={readOnly} value={input.label} onCommit={(value) => onUpdateField("label", value)} />
         <EditableTextField
           label="Description"
           multiline
+          readOnly={readOnly}
           value={input.description}
           onCommit={(value) => onUpdateField("description", value)}
         />
         <CheckboxField
           checked={input.required}
+          disabled={readOnly}
           label="Required"
           onChange={(value) => value !== input.required && onUpdateField("required", value)}
         />
         <CheckboxField
           checked={input.multiple}
+          disabled={readOnly}
           label="Multiple"
           onChange={(value) => value !== input.multiple && onUpdateField("multiple", value)}
         />
@@ -209,16 +222,19 @@ function InputDetail({ input, inputId, onRename, onDelete, onDuplicate, onUpdate
         <h3 className="text-sm font-semibold uppercase tracking-wide text-slate-500">Validation</h3>
         <CheckboxField
           checked={input.validation.mustExist}
+          disabled={readOnly}
           label="Must Exist"
           onChange={(value) => value !== input.validation.mustExist && onUpdateField("validation.must_exist", value)}
         />
         <EditableTextField
           label="Allowed Extensions"
+          readOnly={readOnly}
           value={input.validation.allowedExtensions.join(", ")}
           onCommit={(value) => onUpdateField("validation.allowed_extensions", value)}
         />
         <SelectField
           label="Path Kind"
+          disabled={readOnly}
           value={input.validation.pathKind ?? ""}
           values={PATH_KIND_VALUES}
           onChange={(value) =>
@@ -248,11 +264,13 @@ function SelectField<T extends string>({
   label,
   value,
   values,
+  disabled = false,
   onChange,
 }: {
   label: string;
   value: T;
   values: readonly T[];
+  disabled?: boolean;
   onChange: (value: T) => boolean | void | Promise<boolean>;
 }) {
   return (
@@ -260,6 +278,7 @@ function SelectField<T extends string>({
       <span className="text-xs font-semibold uppercase tracking-wide text-slate-500">{label}</span>
       <select
         className="w-full rounded border border-slate-300 bg-white px-3 py-2 text-sm text-slate-900 shadow-sm"
+        disabled={disabled}
         value={value}
         onChange={(event) => void onChange(event.target.value as T)}
       >
@@ -275,16 +294,18 @@ function SelectField<T extends string>({
 
 function CheckboxField({
   checked,
+  disabled = false,
   label,
   onChange,
 }: {
   checked: boolean;
+  disabled?: boolean;
   label: string;
   onChange: (value: boolean) => boolean | void | Promise<boolean>;
 }) {
   return (
     <label className="flex items-center gap-2 text-sm text-slate-800">
-      <input checked={checked} type="checkbox" onChange={(event) => void onChange(event.target.checked)} />
+      <input checked={checked} disabled={disabled} type="checkbox" onChange={(event) => void onChange(event.target.checked)} />
       <span>{label}</span>
     </label>
   );

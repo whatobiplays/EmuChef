@@ -26,11 +26,12 @@ The code is intentionally split into:
 - `src/emuchef/domain`: typed models and enums
 - `src/emuchef_editor/core`: UI-agnostic recipe document, canonical YAML, ref indexing, and validation adapters for the editor
 - `src/emuchef_editor/api`: UI-free JSON API adapters over the editor core
-- `src/emuchef_editor/app`: PySide6 desktop editor for authored recipe files
-- `apps/config-editor`: Tauri config editor shell that validates the TypeScript/Rust-to-Python editor API bridge and persistent document sessions
+- `src/emuchef_editor/app`: legacy/fallback PySide6 desktop editor for authored recipe files
+- `apps/config-editor`: primary Tauri development/editor UI for authored recipe files
 
 The base Python package contains non-UI runtime dependencies only. The PySide6
-desktop editor is installed with the `pyside-editor` optional dependency extra.
+desktop editor is installed with the `pyside-editor` optional dependency extra
+and remains available for comparison and debugging.
 
 ## Current Authored Model
 
@@ -141,15 +142,17 @@ The sidecar reuses `DocumentSessionManager` for live document sessions. It
 supports session-backed requests for listing step specs, opening and creating
 documents, getting and closing documents, applying recipe commands, undo, redo,
 saving, Save As, validation, canonical YAML emission, and ref-index retrieval.
-The sidecar protocol has no `protocolVersion` field and no ping request.
-Protocol versioning is deferred until backend replacement or external protocol
-stabilization work.
+The sidecar protocol has no `protocolVersion` field and no ping request. Future
+protocol stabilization should introduce a sidecar `protocolVersion` before
+replacing the Python backend with Rust or treating the sidecar protocol as
+externally stable.
 
 ## Current Tauri Config Editor
 
-`apps/config-editor` is the Tauri desktop editor for the config editor
-migration. It uses Tauri v2, React, TypeScript, Vite, Tailwind, npm, and the
-official Tauri dialog plugin.
+`apps/config-editor` is the primary Tauri development/editor UI for authored
+recipe files. It uses Tauri v2, React, TypeScript, Vite, Tailwind, npm, and the
+official Tauri dialog plugin. The app is a development editor shell, not a
+production-packaged application.
 
 The editor opens authored recipe YAML files through a native file picker, calls
 the Python sidecar through Rust Tauri commands, and displays recipe data,
@@ -158,6 +161,14 @@ reusable `documentId` for the currently open sidecar document. After a document
 is opened through the sidecar, document-specific actions use document-id-based
 sidecar requests so unsaved in-memory edits remain visible to validation, YAML
 emission, undo, redo, and save.
+
+The Tauri editor runs in development mode with a local Python interpreter. The
+Rust bridge uses `EMUCHEF_PYTHON` when set and otherwise uses `python`. During
+development it discovers the repo root and prepends `src/` to `PYTHONPATH`; if
+repo discovery is unavailable, the selected Python must already be able to
+import the local `emuchef_editor` package. The editor does not bundle Python,
+create installers, sign/notarize builds, configure updates, or solve production
+sidecar distribution.
 
 The Tauri editor supports sidecar-backed recipe editing. The Overview screen
 edits recipe name and description. Recipe id, schema version, and kind are
@@ -243,26 +254,33 @@ sends a sidecar command. Read-only surfaces such as the YAML preview,
 diagnostics, and DTO-rendered values are not normalized unless the user edits
 that value through a Tauri text control.
 
-Routine edit commands avoid transient loading or success bars that shift the
-editor layout during normal field and list edits. Explicit app-level operations
-such as opening recipes, saving, undo, redo, validation, YAML refresh, and
-document refresh show their transient operation text inline in the toolbar before
-the save status. Success messages remain separate status rows for operations
-that still report completion text.
+The frontend keeps one shared command-in-flight guard for sidecar-backed app and
+document commands. While a command is in flight, conflicting document actions
+are disabled and duplicate submissions are ignored. Explicit operations such as
+opening recipes, saving, undo, redo, validation, YAML refresh, and mutation
+commands show transient operation text inline in the toolbar. Save success
+feedback is UI-only and does not mutate dirty state, undo/redo state, diagnostics,
+YAML, or DTO data beyond the returned document state from Python.
 
 The Tauri editor exposes primary app actions through native menus. File contains
 Open Recipe and Save. Edit contains Undo and Redo. Utilities contains Validate
 and Refresh YAML. Menu items are context-aware and disabled when a document
-action is not valid. The app follows Tauri v2 desktop menu behavior: macOS uses
-the native app menu convention, while Windows and Linux use native window menu
-bars. Temporary development-only actions live under a Debug menu and are not
-production editing features.
+action is not valid, the document session is invalid, or a conflicting command
+is in flight. The app follows Tauri v2 desktop menu behavior: macOS uses the
+native app menu convention, while Windows and Linux use native window menu bars.
+Debug-only controls are not exposed in the normal menu/UI path.
+
+Unsaved-change prompts guard opening another recipe and closing the Tauri window
+when Tauri close-request interception is available. Dirty open confirmation
+happens before the native file picker, file-picker cancellation keeps the
+current document/session unchanged, and failed opens preserve the current
+document when the old session remains valid. Dirty close handling uses frontend
+`RecipeDocumentDto.dirty` state and does not save implicitly.
 
 The Tauri editor does not expose dependency graph visualization, dependency
 reorder controls, drag-and-drop, executor/apply-device UI, Save As UI,
 create-from-template UI, Python bundling, installer packaging, or Rust ports of
-Python editor/planner/executor behavior. YAML preview is read-only. Window/app
-close unsaved-change handling remains later-phase work.
+Python editor/planner/executor behavior. YAML preview is read-only.
 
 Future editor UX opportunities:
 
@@ -300,12 +318,24 @@ discovers the repo root and prepends `src/` to `PYTHONPATH` so the selected
 Python command can import the local package.
 
 `sidecar_status` reports local Rust process state only and does not send a
-Python request. If the sidecar exits unexpectedly, Phase 3A does not
-automatically restart it; recovery may require restarting the Tauri app, and
-previous document ids are invalid after process loss.
+Python request. If the sidecar exits unexpectedly or an unrecoverable transport
+failure occurs, the frontend marks the document session invalid, leaves the
+stale document visible for reference, disables or short-circuits
+document-specific actions, and tells the user to restart the Tauri app and
+reopen the recipe. The sidecar does not automatically restart, and previous
+document ids are invalid after process loss.
 
 The frontend passes `authoredRoot: null` for Phase 3A. Explicit authored-root and
 workspace selection are deferred editor migration work.
+
+## Current PySide6 Legacy Editor
+
+The PySide6 editor remains available through the `pyside-editor` optional
+dependency extra and the existing `emuchef-editor` script entrypoint. It is a
+legacy/fallback editor path for comparison and debugging, not the primary editor
+path. The PySide6 code stays in the repo and continues to use the shared Python
+editor core, authored recipe model, canonical YAML writer, and validation
+adapters.
 
 ## Current Step Plugin Architecture
 

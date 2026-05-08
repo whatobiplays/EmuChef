@@ -121,6 +121,8 @@ export interface MenuState {
   dirty: boolean;
   canUndo: boolean;
   canRedo: boolean;
+  commandInFlight: boolean;
+  documentSessionValid: boolean;
 }
 
 export async function updateMenuState(state: MenuState): Promise<void> {

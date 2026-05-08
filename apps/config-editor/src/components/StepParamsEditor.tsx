@@ -16,13 +16,14 @@ import {
 import { normalizeEditableText, textInputGuardProps } from "./textInputGuards.logic";
 
 interface StepParamsEditorProps {
+  readOnly?: boolean;
   step: StepDto;
   stepSpec: StepSpecDto | null;
   refIndex: RefIndexDto;
   onCommand: (command: EditorCommand) => Promise<boolean>;
 }
 
-export function StepParamsEditor({ step, stepSpec, refIndex, onCommand }: StepParamsEditorProps) {
+export function StepParamsEditor({ readOnly = false, step, stepSpec, refIndex, onCommand }: StepParamsEditorProps) {
   const paramNames = useMemo(() => orderedParamNames(step.params, stepSpec), [step.params, stepSpec]);
 
   async function updateParam(paramName: string, nextValue: unknown): Promise<boolean> {
@@ -54,6 +55,7 @@ export function StepParamsEditor({ step, stepSpec, refIndex, onCommand }: StepPa
             <StepParamRow
               key={paramName}
               paramName={paramName}
+              readOnly={readOnly}
               refIndex={refIndex}
               stepSpec={stepSpec}
               value={step.params[paramName]}
@@ -70,6 +72,7 @@ export function StepParamsEditor({ step, stepSpec, refIndex, onCommand }: StepPa
 function StepParamRow({
   paramName,
   value,
+  readOnly,
   stepSpec,
   refIndex,
   onUpdate,
@@ -77,6 +80,7 @@ function StepParamRow({
 }: {
   paramName: string;
   value: unknown;
+  readOnly: boolean;
   stepSpec: StepSpecDto | null;
   refIndex: RefIndexDto;
   onUpdate: (nextValue: unknown) => Promise<boolean>;
@@ -92,20 +96,21 @@ function StepParamRow({
       <RefPicker
         allowedValueTypes={allowedValueTypes}
         currentRef={value.ref}
+        disabled={readOnly}
         refIndex={refIndex}
         onUpdate={(ref) => onUpdate({ ref })}
       />
     );
   } else if (enumValues.length > 0) {
-    control = <EnumParamInput enumValues={enumValues} value={value} onUpdate={onUpdate} />;
+    control = <EnumParamInput disabled={readOnly} enumValues={enumValues} value={value} onUpdate={onUpdate} />;
   } else if (typeof value === "boolean") {
-    control = <BooleanParamInput value={value} onUpdate={onUpdate} />;
+    control = <BooleanParamInput disabled={readOnly} value={value} onUpdate={onUpdate} />;
   } else if (typeof value === "number") {
-    control = <NumberParamInput value={value} onUpdate={onUpdate} />;
+    control = <NumberParamInput readOnly={readOnly} value={value} onUpdate={onUpdate} />;
   } else if (typeof value === "string") {
-    control = <StringParamInput value={value} onUpdate={onUpdate} />;
+    control = <StringParamInput readOnly={readOnly} value={value} onUpdate={onUpdate} />;
   } else {
-    control = <JsonValueEditor value={value} onUpdate={onUpdate} />;
+    control = <JsonValueEditor readOnly={readOnly} value={value} onUpdate={onUpdate} />;
   }
 
   return (
@@ -121,6 +126,7 @@ function StepParamRow({
       <div className="min-w-0">{control}</div>
       <button
         className="h-9 rounded border border-slate-300 px-2 text-sm text-slate-700 hover:bg-slate-50"
+        disabled={readOnly}
         type="button"
         onClick={() => void onClear()}
       >
@@ -130,7 +136,7 @@ function StepParamRow({
   );
 }
 
-function StringParamInput({ value, onUpdate }: { value: string; onUpdate: (nextValue: string) => Promise<boolean> }) {
+function StringParamInput({ readOnly = false, value, onUpdate }: { readOnly?: boolean; value: string; onUpdate: (nextValue: string) => Promise<boolean> }) {
   const [draft, setDraft] = useState(value);
   const [error, setError] = useState<string | null>(null);
   const [submitting, setSubmitting] = useState(false);
@@ -157,6 +163,7 @@ function StringParamInput({ value, onUpdate }: { value: string; onUpdate: (nextV
       <input
         {...textInputGuardProps}
         className="w-full rounded border border-slate-300 bg-white px-3 py-2 text-sm text-slate-900 shadow-sm outline-none focus:border-slate-500 focus:ring-2 focus:ring-slate-200"
+        readOnly={readOnly}
         value={draft}
         onBlur={() => void commit()}
         onChange={(event) => {
@@ -179,7 +186,7 @@ function StringParamInput({ value, onUpdate }: { value: string; onUpdate: (nextV
   );
 }
 
-function NumberParamInput({ value, onUpdate }: { value: number; onUpdate: (nextValue: number) => Promise<boolean> }) {
+function NumberParamInput({ readOnly = false, value, onUpdate }: { readOnly?: boolean; value: number; onUpdate: (nextValue: number) => Promise<boolean> }) {
   const [draft, setDraft] = useState(String(value));
   const [error, setError] = useState<string | null>(null);
   const [submitting, setSubmitting] = useState(false);
@@ -216,6 +223,7 @@ function NumberParamInput({ value, onUpdate }: { value: number; onUpdate: (nextV
         {...textInputGuardProps}
         className="w-full rounded border border-slate-300 bg-white px-3 py-2 text-sm text-slate-900 shadow-sm outline-none focus:border-slate-500 focus:ring-2 focus:ring-slate-200"
         inputMode="decimal"
+        readOnly={readOnly}
         value={draft}
         onBlur={() => void commit()}
         onChange={(event) => {
@@ -241,10 +249,12 @@ function NumberParamInput({ value, onUpdate }: { value: number; onUpdate: (nextV
 function EnumParamInput({
   value,
   enumValues,
+  disabled = false,
   onUpdate,
 }: {
   value: unknown;
   enumValues: string[];
+  disabled?: boolean;
   onUpdate: (nextValue: string) => Promise<boolean>;
 }) {
   const stringValue = String(value);
@@ -253,6 +263,7 @@ function EnumParamInput({
   return (
     <select
       className="w-full rounded border border-slate-300 bg-white px-3 py-2 text-sm text-slate-900 shadow-sm"
+      disabled={disabled}
       value={stringValue}
       onChange={(event) => {
         if (event.target.value !== stringValue) {
@@ -269,12 +280,13 @@ function EnumParamInput({
   );
 }
 
-function BooleanParamInput({ value, onUpdate }: { value: boolean; onUpdate: (nextValue: boolean) => Promise<boolean> }) {
+function BooleanParamInput({ disabled = false, value, onUpdate }: { disabled?: boolean; value: boolean; onUpdate: (nextValue: boolean) => Promise<boolean> }) {
   return (
     <label className="flex h-9 items-center gap-2 text-sm text-slate-700">
       <input
         checked={value}
         className="h-4 w-4 rounded border-slate-300"
+        disabled={disabled}
         type="checkbox"
         onChange={(event) => {
           if (event.target.checked !== value) {
@@ -290,11 +302,13 @@ function BooleanParamInput({ value, onUpdate }: { value: boolean; onUpdate: (nex
 function RefPicker({
   currentRef,
   allowedValueTypes,
+  disabled = false,
   refIndex,
   onUpdate,
 }: {
   currentRef: string;
   allowedValueTypes: readonly string[];
+  disabled?: boolean;
   refIndex: RefIndexDto;
   onUpdate: (nextRef: string) => Promise<boolean>;
 }) {
@@ -308,6 +322,7 @@ function RefPicker({
     <div className="grid gap-2">
       <select
         className="w-full rounded border border-slate-300 bg-white px-3 py-2 text-sm text-slate-900 shadow-sm"
+        disabled={disabled}
         value={currentRef}
         onChange={(event) => {
           if (event.target.value !== currentRef) {
@@ -324,6 +339,7 @@ function RefPicker({
       {allowedValueTypes.length > 0 ? (
         <button
           className="w-fit rounded border border-slate-300 px-2 py-1 text-xs text-slate-700 hover:bg-slate-50"
+          disabled={disabled}
           type="button"
           onClick={() => setShowAll((current) => !current)}
         >
@@ -334,7 +350,7 @@ function RefPicker({
   );
 }
 
-function JsonValueEditor({ value, onUpdate }: { value: unknown; onUpdate: (nextValue: unknown) => Promise<boolean> }) {
+function JsonValueEditor({ readOnly = false, value, onUpdate }: { readOnly?: boolean; value: unknown; onUpdate: (nextValue: unknown) => Promise<boolean> }) {
   const formattedValue = useMemo(() => JSON.stringify(value, null, 2), [value]);
   const [draft, setDraft] = useState(formattedValue);
   const [error, setError] = useState<string | null>(null);
@@ -371,6 +387,7 @@ function JsonValueEditor({ value, onUpdate }: { value: unknown; onUpdate: (nextV
       <textarea
         {...textInputGuardProps}
         className="min-h-24 w-full resize-y rounded border border-slate-300 bg-white px-3 py-2 font-mono text-xs text-slate-900 shadow-sm outline-none focus:border-slate-500 focus:ring-2 focus:ring-slate-200"
+        readOnly={readOnly}
         value={draft}
         onChange={(event) => {
           setDraft(normalizeEditableText(event.target.value));
@@ -386,7 +403,7 @@ function JsonValueEditor({ value, onUpdate }: { value: unknown; onUpdate: (nextV
       <div className="flex items-center gap-2">
         <button
           className="rounded border border-slate-900 bg-slate-900 px-3 py-1.5 text-sm text-white disabled:opacity-40"
-          disabled={submitting}
+          disabled={readOnly || submitting}
           type="button"
           onClick={() => void apply()}
         >

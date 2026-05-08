@@ -18,6 +18,7 @@ export interface AdvancedCommandResult {
 }
 
 interface AdvancedStepInternalsEditorProps {
+  readOnly?: boolean;
   step: StepDto;
   onCommand: (command: EditorCommand) => Promise<AdvancedCommandResult>;
 }
@@ -35,7 +36,7 @@ const SECTIONS: SectionConfig[] = [
   { field: "verify", property: "verify", label: "Verify", unsetInitialValue: [] },
 ];
 
-export function AdvancedStepInternalsEditor({ step, onCommand }: AdvancedStepInternalsEditorProps) {
+export function AdvancedStepInternalsEditor({ readOnly = false, step, onCommand }: AdvancedStepInternalsEditorProps) {
   return (
     <details className="rounded border border-slate-200 bg-white p-4">
       <summary className="cursor-pointer text-sm font-semibold uppercase tracking-wide text-slate-500">
@@ -53,6 +54,7 @@ export function AdvancedStepInternalsEditor({ step, onCommand }: AdvancedStepInt
               hasValue={hasValue}
               key={`${step.id}:${section.field}`}
               label={section.label}
+              readOnly={readOnly}
               stepId={step.id}
               unsetInitialValue={section.unsetInitialValue}
               value={stepRecord[section.property]}
@@ -68,6 +70,7 @@ export function AdvancedStepInternalsEditor({ step, onCommand }: AdvancedStepInt
 function AdvancedJsonSectionEditor({
   field,
   label,
+  readOnly,
   stepId,
   value,
   hasValue,
@@ -76,6 +79,7 @@ function AdvancedJsonSectionEditor({
 }: {
   field: AdvancedInternalsField;
   label: string;
+  readOnly: boolean;
   stepId: string;
   value: unknown;
   hasValue: boolean;
@@ -143,6 +147,7 @@ function AdvancedJsonSectionEditor({
           <h3 className="text-xs font-semibold uppercase tracking-wide text-slate-500">{label}</h3>
           <button
             className="rounded border border-slate-300 px-2 py-1 text-xs text-slate-700 hover:bg-slate-50"
+            disabled={readOnly}
             type="button"
             onClick={() => {
               setDraft(formatJsonDraft(unsetInitialValue));
@@ -164,6 +169,7 @@ function AdvancedJsonSectionEditor({
       <textarea
         {...textInputGuardProps}
         className="min-h-28 w-full resize-y rounded border border-slate-300 bg-white px-3 py-2 font-mono text-xs text-slate-900 shadow-sm outline-none focus:border-slate-500 focus:ring-2 focus:ring-slate-200"
+        readOnly={readOnly}
         value={draft}
         onChange={(event) => {
           setDraft(normalizeEditableText(event.target.value));
@@ -173,7 +179,7 @@ function AdvancedJsonSectionEditor({
       <div className="flex flex-wrap items-center gap-2">
         <button
           className="rounded border border-slate-900 bg-slate-900 px-3 py-1.5 text-sm text-white disabled:opacity-40"
-          disabled={submitting}
+          disabled={readOnly || submitting}
           type="button"
           onClick={() => void apply()}
         >
@@ -181,7 +187,7 @@ function AdvancedJsonSectionEditor({
         </button>
         <button
           className="rounded border border-slate-300 px-3 py-1.5 text-sm text-slate-700 hover:bg-slate-50"
-          disabled={submitting}
+          disabled={readOnly || submitting}
           type="button"
           onClick={revert}
         >

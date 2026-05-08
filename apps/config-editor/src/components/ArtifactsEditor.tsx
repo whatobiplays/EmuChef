@@ -16,6 +16,7 @@ interface ArtifactsEditorProps {
     message: string,
     options?: { confirmLabel?: string; destructive?: boolean },
   ) => Promise<boolean>;
+  readOnly?: boolean;
   onCommand: (command: EditorCommand) => Promise<boolean>;
 }
 
@@ -24,6 +25,7 @@ export function ArtifactsEditor({
   promptForId,
   promptForRequiredText,
   confirmAction,
+  readOnly = false,
   onCommand,
 }: ArtifactsEditorProps) {
   const artifacts = document.recipe.artifacts;
@@ -125,7 +127,12 @@ export function ArtifactsEditor({
       sidebarHeader={
         <div className="flex items-center justify-between gap-2">
           <h1 className="text-sm font-semibold uppercase tracking-wide text-slate-500">Artifacts</h1>
-          <button className="rounded border border-slate-300 px-2 py-1 text-sm" type="button" onClick={addArtifact}>
+          <button
+            className="rounded border border-slate-300 px-2 py-1 text-sm disabled:opacity-40"
+            disabled={readOnly}
+            type="button"
+            onClick={addArtifact}
+          >
             Add
           </button>
         </div>
@@ -136,6 +143,7 @@ export function ArtifactsEditor({
         <ArtifactDetail
           artifact={selectedArtifact}
           artifactId={selectedId}
+          readOnly={readOnly}
           onDelete={() => void deleteArtifact(selectedId)}
           onDuplicate={() => void duplicateArtifact(selectedId)}
           onRename={() => void renameArtifact(selectedId)}
@@ -153,13 +161,14 @@ export function ArtifactsEditor({
 interface ArtifactDetailProps {
   artifact: ArtifactDto;
   artifactId: string;
+  readOnly: boolean;
   onRename: () => void;
   onDelete: () => void;
   onDuplicate: () => void;
   onUpdateField: (field: "url" | "cache", value: unknown) => Promise<boolean>;
 }
 
-function ArtifactDetail({ artifact, artifactId, onRename, onDelete, onDuplicate, onUpdateField }: ArtifactDetailProps) {
+function ArtifactDetail({ artifact, artifactId, readOnly, onRename, onDelete, onDuplicate, onUpdateField }: ArtifactDetailProps) {
   return (
     <div className="space-y-5">
       <div className="flex flex-wrap items-center justify-between gap-3">
@@ -168,13 +177,13 @@ function ArtifactDetail({ artifact, artifactId, onRename, onDelete, onDuplicate,
           <p className="text-sm text-slate-500">Artifact id is changed with Rename only.</p>
         </div>
         <div className="flex gap-2">
-          <button className="rounded border border-slate-300 px-3 py-1.5 text-sm" type="button" onClick={onRename}>
+          <button className="rounded border border-slate-300 px-3 py-1.5 text-sm disabled:opacity-40" disabled={readOnly} type="button" onClick={onRename}>
             Rename
           </button>
-          <button className="rounded border border-slate-300 px-3 py-1.5 text-sm" type="button" onClick={onDuplicate}>
+          <button className="rounded border border-slate-300 px-3 py-1.5 text-sm disabled:opacity-40" disabled={readOnly} type="button" onClick={onDuplicate}>
             Duplicate
           </button>
-          <button className="rounded border border-red-300 px-3 py-1.5 text-sm text-red-700" type="button" onClick={onDelete}>
+          <button className="rounded border border-red-300 px-3 py-1.5 text-sm text-red-700 disabled:opacity-40" disabled={readOnly} type="button" onClick={onDelete}>
             Delete
           </button>
         </div>
@@ -183,11 +192,12 @@ function ArtifactDetail({ artifact, artifactId, onRename, onDelete, onDuplicate,
       <div className="grid gap-4 rounded border border-slate-200 bg-white p-4">
         <ReadonlyText label="ID" value={artifact.id} />
         <ReadonlyText label="Type" value={artifact.type} />
-        <EditableTextField label="URL" value={artifact.url} onCommit={(value) => onUpdateField("url", value)} />
+        <EditableTextField label="URL" readOnly={readOnly} value={artifact.url} onCommit={(value) => onUpdateField("url", value)} />
         <label className="grid gap-1">
           <span className="text-xs font-semibold uppercase tracking-wide text-slate-500">Cache</span>
           <select
             className="w-full rounded border border-slate-300 bg-white px-3 py-2 text-sm text-slate-900 shadow-sm"
+            disabled={readOnly}
             value={artifact.cache}
             onChange={(event) => {
               const value = event.target.value;

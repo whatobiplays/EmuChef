@@ -3,6 +3,7 @@ import type { SidecarStatusResult } from "../api/types";
 interface ToolbarProps {
   currentPath: string | null;
   dirty: boolean;
+  documentSessionValid: boolean;
   hasDocument: boolean;
   loadingLabel: string | null;
   sidecarStatus: SidecarStatusResult | null;
@@ -13,6 +14,7 @@ interface ToolbarProps {
 export function Toolbar({
   currentPath,
   dirty,
+  documentSessionValid,
   hasDocument,
   loadingLabel,
   sidecarStatus,
@@ -30,7 +32,7 @@ export function Toolbar({
       <div className="flex items-center gap-3 text-xs text-slate-500">
         {loadingLabel ? <span className="font-medium text-slate-700">{loadingLabel}</span> : null}
         <span className={dirty ? "font-semibold text-amber-700" : "text-slate-500"}>
-          {hasDocument ? (dirty ? "Unsaved" : "Saved") : "No document"}
+          {hasDocument ? (documentSessionValid ? (dirty ? "Unsaved" : "Saved") : "Session invalid") : "No document"}
         </span>
         <span>{sidecarLabel}</span>
         <span>

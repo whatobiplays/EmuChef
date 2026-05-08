@@ -10,6 +10,7 @@ import {
 } from "./stepDependencies.logic";
 
 interface StepDependenciesEditorProps {
+  readOnly?: boolean;
   step: StepDto;
   steps: StepDto[];
   onUpdateDependencies: (dependencies: string[]) => Promise<boolean>;
@@ -22,7 +23,7 @@ const validationMessages = {
   "duplicate-dependency": "That dependency is already listed.",
 };
 
-export function StepDependenciesEditor({ step, steps, onUpdateDependencies }: StepDependenciesEditorProps) {
+export function StepDependenciesEditor({ readOnly = false, step, steps, onUpdateDependencies }: StepDependenciesEditorProps) {
   const dependencyIds = stepDependencyIds(step);
   const entries = useMemo(() => dependencyEntries(dependencyIds, steps), [dependencyIds, steps]);
   const selectableSteps = useMemo(
@@ -92,7 +93,8 @@ export function StepDependenciesEditor({ step, steps, onUpdateDependencies }: St
                 )}
               </div>
               <button
-                className="shrink-0 rounded border border-slate-300 bg-white px-2 py-1 text-xs text-slate-700 hover:bg-slate-100"
+                className="shrink-0 rounded border border-slate-300 bg-white px-2 py-1 text-xs text-slate-700 hover:bg-slate-100 disabled:opacity-40"
+                disabled={readOnly}
                 type="button"
                 onClick={() => void removeDependency(entry.id)}
               >
@@ -108,7 +110,7 @@ export function StepDependenciesEditor({ step, steps, onUpdateDependencies }: St
           <span className="text-xs font-semibold uppercase tracking-wide text-slate-500">Add Dependency</span>
           <select
             className="w-full rounded border border-slate-300 bg-white px-3 py-2 text-sm text-slate-900 shadow-sm disabled:bg-slate-100 disabled:text-slate-500"
-            disabled={selectableSteps.length === 0}
+            disabled={readOnly || selectableSteps.length === 0}
             value={selectedDependencyId}
             onChange={(event) => {
               setSelectedDependencyId(event.target.value);
@@ -128,7 +130,7 @@ export function StepDependenciesEditor({ step, steps, onUpdateDependencies }: St
         <div className="flex items-center gap-3">
           <button
             className="rounded border border-slate-900 bg-slate-900 px-3 py-1.5 text-sm text-white disabled:border-slate-300 disabled:bg-slate-200 disabled:text-slate-500"
-            disabled={selectableSteps.length === 0}
+            disabled={readOnly || selectableSteps.length === 0}
             type="button"
             onClick={() => void addDependency()}
           >

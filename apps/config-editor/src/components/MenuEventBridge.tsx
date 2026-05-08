@@ -7,9 +7,7 @@ export type MenuAction =
   | "undo"
   | "redo"
   | "validate"
-  | "refreshYaml"
-  | "refreshDocument"
-  | "applyDebugRename";
+  | "refreshYaml";
 
 type MenuHandlers = Record<MenuAction, () => void>;
 

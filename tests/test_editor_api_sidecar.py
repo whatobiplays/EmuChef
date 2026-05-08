@@ -170,6 +170,50 @@ class EditorApiSidecarTests(unittest.TestCase):
             self.assertFalse(after_close["ok"])
             self.assertEqual(after_close["error"]["code"], "unknown_document")
 
+    def test_subprocess_sidecar_preserves_reordered_artifact_group_order(self) -> None:
+        recipe = base_recipe(
+            recipe_id="example.recipe",
+            artifact_groups={
+                "first_group": [],
+                "second_group": [],
+                "third_group": [],
+            },
+            steps=[],
+        )
+        with TemporaryDirectory() as tmp:
+            authored_root = build_authored_tree(Path(tmp), recipes=[recipe])
+            recipe_path = authored_root / "recipes" / "example_recipe.yaml"
+            sidecar = SidecarProcess()
+            try:
+                opened = sidecar.request(
+                    {
+                        "id": "open",
+                        "type": "openRecipe",
+                        "payload": {"path": str(recipe_path), "authoredRoot": str(authored_root)},
+                    }
+                )
+                document_id = opened["result"]["document"]["documentId"]
+                changed = sidecar.request(
+                    {
+                        "id": "move",
+                        "type": "applyRecipeCommand",
+                        "payload": {
+                            "documentId": document_id,
+                            "command": {"type": "ReorderArtifactGroup", "groupId": "third_group", "toIndex": 0},
+                        },
+                    }
+                )
+                returncode, stderr = sidecar.close()
+            finally:
+                sidecar.kill()
+
+            self.assertEqual(returncode, 0, stderr)
+            self.assertTrue(changed["ok"])
+            self.assertEqual(
+                list(changed["result"]["document"]["recipe"]["artifactGroups"]),
+                ["third_group", "first_group", "second_group"],
+            )
+
     def test_sidecar_returns_structured_errors_and_continues_after_invalid_lines(self) -> None:
         sidecar = SidecarProcess()
         try:

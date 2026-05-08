@@ -10,16 +10,29 @@ const ACTION_UNDO: &str = "undo";
 const ACTION_REDO: &str = "redo";
 const ACTION_VALIDATE: &str = "validate";
 const ACTION_REFRESH_YAML: &str = "refreshYaml";
-const ACTION_REFRESH_DOCUMENT: &str = "refreshDocument";
-const ACTION_APPLY_DEBUG_RENAME: &str = "applyDebugRename";
 
-#[derive(Debug, Clone, Copy, Default, Deserialize)]
+#[derive(Debug, Clone, Copy, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct EditorMenuState {
     has_document: bool,
     dirty: bool,
     can_undo: bool,
     can_redo: bool,
+    command_in_flight: bool,
+    document_session_valid: bool,
+}
+
+impl Default for EditorMenuState {
+    fn default() -> Self {
+        Self {
+            has_document: false,
+            dirty: false,
+            can_undo: false,
+            can_redo: false,
+            command_in_flight: false,
+            document_session_valid: true,
+        }
+    }
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -44,7 +57,6 @@ pub fn build_editor_menu<R: Runtime>(
     let file_menu = build_file_menu(app, state)?;
     let edit_menu = build_edit_menu(app, state)?;
     let utilities_menu = build_utilities_menu(app, state)?;
-    let debug_menu = build_debug_menu(app, state)?;
 
     Menu::with_items(
         app,
@@ -54,7 +66,6 @@ pub fn build_editor_menu<R: Runtime>(
             &file_menu,
             &edit_menu,
             &utilities_menu,
-            &debug_menu,
             #[cfg(not(target_os = "macos"))]
             &build_help_menu(app)?,
         ],
@@ -68,9 +79,7 @@ pub fn handle_menu_event<R: Runtime>(app: &AppHandle<R>, action: &str) {
         | ACTION_UNDO
         | ACTION_REDO
         | ACTION_VALIDATE
-        | ACTION_REFRESH_YAML
-        | ACTION_REFRESH_DOCUMENT
-        | ACTION_APPLY_DEBUG_RENAME => {
+        | ACTION_REFRESH_YAML => {
             if let Err(err) = app.emit("menu-action", MenuActionPayload { action }) {
                 eprintln!("Failed to emit menu action {action}: {err}");
             }
@@ -108,6 +117,7 @@ fn build_file_menu<R: Runtime>(
     app: &AppHandle<R>,
     state: EditorMenuState,
 ) -> tauri::Result<Submenu<R>> {
+    let sidecar_ready = !state.command_in_flight && state.document_session_valid;
     Submenu::with_items(
         app,
         "File",
@@ -117,14 +127,14 @@ fn build_file_menu<R: Runtime>(
                 app,
                 ACTION_OPEN_RECIPE,
                 "Open Recipe",
-                true,
+                sidecar_ready,
                 Some("CmdOrCtrl+O"),
             )?,
             &MenuItem::with_id(
                 app,
                 ACTION_SAVE_RECIPE,
                 "Save",
-                state.has_document && state.dirty,
+                sidecar_ready && state.has_document && state.dirty,
                 Some("CmdOrCtrl+S"),
             )?,
             #[cfg(not(target_os = "macos"))]
@@ -139,6 +149,7 @@ fn build_edit_menu<R: Runtime>(
     app: &AppHandle<R>,
     state: EditorMenuState,
 ) -> tauri::Result<Submenu<R>> {
+    let document_ready = !state.command_in_flight && state.document_session_valid && state.has_document;
     Submenu::with_items(
         app,
         "Edit",
@@ -148,14 +159,14 @@ fn build_edit_menu<R: Runtime>(
                 app,
                 ACTION_UNDO,
                 "Undo",
-                state.has_document && state.can_undo,
+                document_ready && state.can_undo,
                 Some("CmdOrCtrl+Z"),
             )?,
             &MenuItem::with_id(
                 app,
                 ACTION_REDO,
                 "Redo",
-                state.has_document && state.can_redo,
+                document_ready && state.can_redo,
                 Some("CmdOrCtrl+Shift+Z"),
             )?,
             &PredefinedMenuItem::separator(app)?,
@@ -171,6 +182,7 @@ fn build_utilities_menu<R: Runtime>(
     app: &AppHandle<R>,
     state: EditorMenuState,
 ) -> tauri::Result<Submenu<R>> {
+    let document_ready = !state.command_in_flight && state.document_session_valid && state.has_document;
     Submenu::with_items(
         app,
         "Utilities",
@@ -180,41 +192,14 @@ fn build_utilities_menu<R: Runtime>(
                 app,
                 ACTION_VALIDATE,
                 "Validate",
-                state.has_document,
+                document_ready,
                 Some("CmdOrCtrl+Shift+V"),
             )?,
             &MenuItem::with_id(
                 app,
                 ACTION_REFRESH_YAML,
                 "Refresh YAML",
-                state.has_document,
-                None::<&str>,
-            )?,
-        ],
-    )
-}
-
-fn build_debug_menu<R: Runtime>(
-    app: &AppHandle<R>,
-    state: EditorMenuState,
-) -> tauri::Result<Submenu<R>> {
-    Submenu::with_items(
-        app,
-        "Debug (Temporary)",
-        true,
-        &[
-            &MenuItem::with_id(
-                app,
-                ACTION_REFRESH_DOCUMENT,
-                "Refresh Document",
-                state.has_document,
-                None::<&str>,
-            )?,
-            &MenuItem::with_id(
-                app,
-                ACTION_APPLY_DEBUG_RENAME,
-                "Apply Debug Rename",
-                state.has_document,
+                document_ready,
                 None::<&str>,
             )?,
         ],

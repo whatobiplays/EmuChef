@@ -12,10 +12,11 @@ interface ArtifactGroupsEditorProps {
     message: string,
     options?: { confirmLabel?: string; destructive?: boolean },
   ) => Promise<boolean>;
+  readOnly?: boolean;
   onCommand: (command: EditorCommand) => Promise<boolean>;
 }
 
-export function ArtifactGroupsEditor({ document, promptForId, confirmAction, onCommand }: ArtifactGroupsEditorProps) {
+export function ArtifactGroupsEditor({ document, promptForId, confirmAction, readOnly = false, onCommand }: ArtifactGroupsEditorProps) {
   const groups = document.recipe.artifactGroups;
   const groupIds = Object.keys(groups);
   const artifactIds = useMemo(() => Object.keys(document.recipe.artifacts).sort(), [document.recipe.artifacts]);
@@ -135,7 +136,7 @@ export function ArtifactGroupsEditor({ document, promptForId, confirmAction, onC
               </button>
               <button
                 className="rounded border border-slate-300 px-2 text-xs disabled:opacity-40"
-                disabled={index === 0}
+                disabled={readOnly || index === 0}
                 title="Move group up"
                 type="button"
                 onClick={() => void moveGroup(groupId, index - 1)}
@@ -144,7 +145,7 @@ export function ArtifactGroupsEditor({ document, promptForId, confirmAction, onC
               </button>
               <button
                 className="rounded border border-slate-300 px-2 text-xs disabled:opacity-40"
-                disabled={index === groupIds.length - 1}
+                disabled={readOnly || index === groupIds.length - 1}
                 title="Move group down"
                 type="button"
                 onClick={() => void moveGroup(groupId, index + 1)}
@@ -158,7 +159,12 @@ export function ArtifactGroupsEditor({ document, promptForId, confirmAction, onC
       sidebarHeader={
         <div className="flex items-center justify-between gap-2">
           <h1 className="text-sm font-semibold uppercase tracking-wide text-slate-500">Artifact Groups</h1>
-          <button className="rounded border border-slate-300 px-2 py-1 text-sm" type="button" onClick={addGroup}>
+          <button
+            className="rounded border border-slate-300 px-2 py-1 text-sm disabled:opacity-40"
+            disabled={readOnly}
+            type="button"
+            onClick={addGroup}
+          >
             Add
           </button>
         </div>
@@ -170,6 +176,7 @@ export function ArtifactGroupsEditor({ document, promptForId, confirmAction, onC
           availableMembers={availableMembers}
           groupId={selectedId}
           members={members}
+          readOnly={readOnly}
           onAddMember={(artifactId) => addMember(selectedId, artifactId)}
           onDelete={() => void deleteGroup(selectedId)}
           onDuplicate={() => void duplicateGroup(selectedId)}
@@ -188,6 +195,7 @@ interface GroupDetailProps {
   groupId: string;
   members: string[];
   availableMembers: string[];
+  readOnly: boolean;
   onRename: () => void;
   onDelete: () => void;
   onDuplicate: () => void;
@@ -200,6 +208,7 @@ function GroupDetail({
   groupId,
   members,
   availableMembers,
+  readOnly,
   onRename,
   onDelete,
   onDuplicate,
@@ -218,13 +227,13 @@ function GroupDetail({
           <p className="text-sm text-slate-500">Group id is changed with Rename only.</p>
         </div>
         <div className="flex gap-2">
-          <button className="rounded border border-slate-300 px-3 py-1.5 text-sm" type="button" onClick={onRename}>
+          <button className="rounded border border-slate-300 px-3 py-1.5 text-sm disabled:opacity-40" disabled={readOnly} type="button" onClick={onRename}>
             Rename
           </button>
-          <button className="rounded border border-slate-300 px-3 py-1.5 text-sm" type="button" onClick={onDuplicate}>
+          <button className="rounded border border-slate-300 px-3 py-1.5 text-sm disabled:opacity-40" disabled={readOnly} type="button" onClick={onDuplicate}>
             Duplicate
           </button>
-          <button className="rounded border border-red-300 px-3 py-1.5 text-sm text-red-700" type="button" onClick={onDelete}>
+          <button className="rounded border border-red-300 px-3 py-1.5 text-sm text-red-700 disabled:opacity-40" disabled={readOnly} type="button" onClick={onDelete}>
             Delete
           </button>
         </div>
@@ -241,7 +250,7 @@ function GroupDetail({
             <span className="text-xs font-semibold uppercase tracking-wide text-slate-500">Add Member</span>
             <select
               className="mt-1 w-full rounded border border-slate-300 bg-white px-3 py-2 text-sm text-slate-900 shadow-sm"
-              disabled={availableMembers.length === 0}
+              disabled={readOnly || availableMembers.length === 0}
               value={selectedMember}
               onChange={(event) => setMemberToAdd(event.target.value)}
             >
@@ -255,7 +264,7 @@ function GroupDetail({
           </label>
           <button
             className="rounded border border-slate-300 px-3 py-2 text-sm disabled:opacity-40"
-            disabled={!selectedMember}
+            disabled={readOnly || !selectedMember}
             type="button"
             onClick={() => void onAddMember(selectedMember)}
           >
@@ -275,7 +284,7 @@ function GroupDetail({
             <span className="truncate text-sm text-slate-900">{artifactId}</span>
             <button
               className="rounded border border-slate-300 px-2 py-1 text-xs disabled:opacity-40"
-              disabled={index === 0}
+              disabled={readOnly || index === 0}
               type="button"
               onClick={() => void onMoveMember(index, index - 1)}
             >
@@ -283,14 +292,15 @@ function GroupDetail({
             </button>
             <button
               className="rounded border border-slate-300 px-2 py-1 text-xs disabled:opacity-40"
-              disabled={index === members.length - 1}
+              disabled={readOnly || index === members.length - 1}
               type="button"
               onClick={() => void onMoveMember(index, index + 1)}
             >
               Down
             </button>
             <button
-              className="rounded border border-red-300 px-2 py-1 text-xs text-red-700"
+              className="rounded border border-red-300 px-2 py-1 text-xs text-red-700 disabled:opacity-40"
+              disabled={readOnly}
               type="button"
               onClick={() => void onRemoveMember(artifactId, index)}
             >

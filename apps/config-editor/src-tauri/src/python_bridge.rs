@@ -1,6 +1,6 @@
 use std::{
     env,
-    path::{Path, PathBuf},
+    path::{Component, Path, PathBuf},
     process::Command,
 };
 
@@ -26,7 +26,7 @@ pub fn build_request(request_type: &str, payload: Option<Value>) -> Value {
 pub fn run_request(request: Value) -> Result<Value, String> {
     let request_json = serde_json::to_string(&request)
         .map_err(|err| format!("Failed to serialize Python API request: {err}"))?;
-    let python = env::var("EMUCHEF_PYTHON").unwrap_or_else(|_| "python".to_string());
+    let python = configured_python_command();
     let repo_root = discover_repo_root();
 
     let mut command = Command::new(&python);
@@ -42,7 +42,7 @@ pub fn run_request(request: Value) -> Result<Value, String> {
 
     let output = command
         .output()
-        .map_err(|err| format!("Failed to start Python API process with '{python}': {err}"))?;
+        .map_err(|err| format!("Failed to start Python API process with '{python}': {err}. {}", python_start_guidance()))?;
 
     let stdout = String::from_utf8(output.stdout)
         .map_err(|err| format!("Python API stdout was not valid UTF-8: {err}"))?;
@@ -62,6 +62,40 @@ pub fn run_request(request: Value) -> Result<Value, String> {
             Err(message)
         }
     }
+}
+
+fn python_start_guidance() -> &'static str {
+    "Set EMUCHEF_PYTHON to the Python interpreter to use. That Python must be able to import the local emuchef_editor package, usually through the repo src/ directory during development."
+}
+
+pub(crate) fn configured_python_command() -> String {
+    let python = env::var("EMUCHEF_PYTHON").unwrap_or_else(|_| "python".to_string());
+    let launch_cwd = env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
+    resolve_python_command(&python, &launch_cwd)
+}
+
+fn resolve_python_command(python: &str, launch_cwd: &Path) -> String {
+    let path = Path::new(python);
+    if path.is_absolute() || path.components().count() == 1 {
+        return python.to_string();
+    }
+    lexically_normalize(&launch_cwd.join(path))
+        .to_string_lossy()
+        .to_string()
+}
+
+fn lexically_normalize(path: &Path) -> PathBuf {
+    let mut normalized = PathBuf::new();
+    for component in path.components() {
+        match component {
+            Component::CurDir => {}
+            Component::ParentDir => {
+                normalized.pop();
+            }
+            other => normalized.push(other.as_os_str()),
+        }
+    }
+    normalized
 }
 
 pub fn parse_stdout_envelope(stdout: &str) -> Result<Value, String> {
@@ -159,10 +193,47 @@ mod tests {
     }
 
     #[test]
+    fn preserves_nested_document_object_order_when_parsing_stdout_envelopes() {
+        let envelope = parse_stdout_envelope(
+            r#"{"ok":true,"result":{"document":{"recipe":{"artifactGroups":{"third_group":[],"first_group":[],"second_group":[]}}}}}"#,
+        )
+        .expect("valid API envelope should parse");
+
+        let group_ids = envelope["result"]["document"]["recipe"]["artifactGroups"]
+            .as_object()
+            .expect("artifact groups should be a JSON object")
+            .keys()
+            .map(String::as_str)
+            .collect::<Vec<_>>();
+
+        assert_eq!(group_ids, ["third_group", "first_group", "second_group"]);
+    }
+
+    #[test]
     fn rejects_stdout_with_non_json_log_lines() {
         let err = parse_stdout_envelope("log line\n{\"ok\": true, \"result\": {}}")
             .expect_err("stdout log lines should be treated as transport errors");
 
         assert!(err.contains("valid JSON"));
+    }
+
+    #[test]
+    fn resolves_relative_python_override_before_changing_sidecar_cwd() {
+        let launch_cwd = Path::new("/repo/apps/config-editor");
+
+        assert_eq!(
+            resolve_python_command("../../.venv/bin/python", launch_cwd),
+            Path::new("/repo/.venv/bin/python")
+                .to_string_lossy()
+                .to_string()
+        );
+    }
+
+    #[test]
+    fn leaves_pathless_python_command_for_path_lookup() {
+        assert_eq!(
+            resolve_python_command("python3", Path::new("/repo/apps/config-editor")),
+            "python3"
+        );
     }
 }

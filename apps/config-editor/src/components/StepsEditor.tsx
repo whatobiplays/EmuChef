@@ -18,6 +18,7 @@ interface StepsEditorProps {
     message: string,
     options?: { confirmLabel?: string; destructive?: boolean },
   ) => Promise<boolean>;
+  readOnly?: boolean;
   onCommand: (command: EditorCommand) => Promise<boolean>;
   onAdvancedCommand: (command: EditorCommand) => Promise<AdvancedCommandResult>;
 }
@@ -33,6 +34,7 @@ export function StepsEditor({
   stepSpecs,
   promptForId,
   confirmAction,
+  readOnly = false,
   onCommand,
   onAdvancedCommand,
 }: StepsEditorProps) {
@@ -133,6 +135,7 @@ export function StepsEditor({
               key={step.id}
               step={step}
               stepCount={steps.length}
+              readOnly={readOnly}
               onDelete={() => void deleteStep(step)}
               onDuplicate={() => void duplicateStep(step)}
               onMoveDown={() => void moveStep(step, index + 1)}
@@ -147,7 +150,7 @@ export function StepsEditor({
           <h1 className="text-sm font-semibold uppercase tracking-wide text-slate-500">Steps</h1>
           <button
             className="rounded border border-slate-300 px-2 py-1 text-sm disabled:opacity-40"
-            disabled={stepSpecs.length === 0}
+            disabled={readOnly || stepSpecs.length === 0}
             type="button"
             onClick={openAddStep}
           >
@@ -163,6 +166,7 @@ export function StepsEditor({
           stepSpec={stepSpecs.find((spec) => spec.type === selectedStep.type) ?? null}
           steps={steps}
           refIndex={document.refIndex}
+          readOnly={readOnly}
           onCommand={onCommand}
           onAdvancedCommand={onAdvancedCommand}
           onUpdateDependencies={(dependencies) =>
@@ -206,6 +210,7 @@ function StepListRow({
   stepCount,
   isSelected,
   diagnosticCount,
+  readOnly,
   onSelect,
   onMoveUp,
   onMoveDown,
@@ -217,6 +222,7 @@ function StepListRow({
   stepCount: number;
   isSelected: boolean;
   diagnosticCount: number;
+  readOnly: boolean;
   onSelect: () => void;
   onMoveUp: () => void;
   onMoveDown: () => void;
@@ -247,7 +253,7 @@ function StepListRow({
       <div className="mt-2 flex flex-wrap gap-1">
         <button
           className="rounded border border-slate-300 px-2 py-1 text-xs disabled:opacity-40"
-          disabled={index === 0}
+          disabled={readOnly || index === 0}
           type="button"
           onClick={onMoveUp}
         >
@@ -255,16 +261,16 @@ function StepListRow({
         </button>
         <button
           className="rounded border border-slate-300 px-2 py-1 text-xs disabled:opacity-40"
-          disabled={index === stepCount - 1}
+          disabled={readOnly || index === stepCount - 1}
           type="button"
           onClick={onMoveDown}
         >
           Down
         </button>
-        <button className="rounded border border-slate-300 px-2 py-1 text-xs" type="button" onClick={onDuplicate}>
+        <button className="rounded border border-slate-300 px-2 py-1 text-xs disabled:opacity-40" disabled={readOnly} type="button" onClick={onDuplicate}>
           Duplicate
         </button>
-        <button className="rounded border border-red-300 px-2 py-1 text-xs text-red-700" type="button" onClick={onDelete}>
+        <button className="rounded border border-red-300 px-2 py-1 text-xs text-red-700 disabled:opacity-40" disabled={readOnly} type="button" onClick={onDelete}>
           Delete
         </button>
       </div>
@@ -277,6 +283,7 @@ function StepDetailPanel({
   stepSpec,
   steps,
   refIndex,
+  readOnly,
   onCommand,
   onAdvancedCommand,
   onUpdateDependencies,
@@ -287,6 +294,7 @@ function StepDetailPanel({
   stepSpec: StepSpecDto | null;
   steps: StepDto[];
   refIndex: RecipeDocumentDto["refIndex"];
+  readOnly: boolean;
   onCommand: (command: EditorCommand) => Promise<boolean>;
   onAdvancedCommand: (command: EditorCommand) => Promise<AdvancedCommandResult>;
   onUpdateDependencies: (dependencies: string[]) => Promise<boolean>;
@@ -306,6 +314,7 @@ function StepDetailPanel({
         <ReadonlyText label="Type" value={step.type} />
         <EditableTextField
           label="Display Name"
+          readOnly={readOnly}
           value={step.name || step.id}
           onCommit={(value) => {
             if (!value.trim() || value === step.name) {
@@ -320,6 +329,7 @@ function StepDetailPanel({
           <CheckboxField
             checked={userToggleable}
             label="User Toggleable"
+            disabled={readOnly}
             onChange={(value) => value !== userToggleable && onUpdateUserToggleable(value)}
           />
         )}
@@ -327,11 +337,11 @@ function StepDetailPanel({
       </div>
 
       <div className="grid gap-4 rounded border border-slate-200 bg-white p-4">
-        <StepDependenciesEditor step={step} steps={steps} onUpdateDependencies={onUpdateDependencies} />
-        <StepParamsEditor refIndex={refIndex} step={step} stepSpec={stepSpec} onCommand={onCommand} />
+        <StepDependenciesEditor readOnly={readOnly} step={step} steps={steps} onUpdateDependencies={onUpdateDependencies} />
+        <StepParamsEditor readOnly={readOnly} refIndex={refIndex} step={step} stepSpec={stepSpec} onCommand={onCommand} />
       </div>
 
-      <AdvancedStepInternalsEditor step={step} onCommand={onAdvancedCommand} />
+      <AdvancedStepInternalsEditor readOnly={readOnly} step={step} onCommand={onAdvancedCommand} />
     </div>
   );
 }
@@ -473,9 +483,11 @@ function CheckboxField({
   label,
   checked,
   onChange,
+  disabled = false,
 }: {
   label: string;
   checked: boolean;
+  disabled?: boolean;
   onChange: (value: boolean) => boolean | void | Promise<boolean>;
 }) {
   return (
@@ -483,6 +495,7 @@ function CheckboxField({
       <input
         checked={checked}
         className="h-4 w-4 rounded border-slate-300"
+        disabled={disabled}
         type="checkbox"
         onChange={(event) => void onChange(event.target.checked)}
       />

@@ -53,7 +53,7 @@ def main(argv: list[str] | None = None) -> int:
         response = failure(ApiError("invalid_request", f"Invalid JSON request: {exc.msg}", {"position": exc.pos}), exc=exc)
     else:
         response = handle_request(request)
-    sys.stdout.write(json.dumps(response, sort_keys=True))
+    sys.stdout.write(json.dumps(response))
     sys.stdout.write("\n")
     return 0
 

@@ -4,10 +4,11 @@ import { EditableTextField } from "./EditableTextField";
 
 interface OverviewEditorProps {
   document: RecipeDocumentDto;
+  readOnly?: boolean;
   onCommand: (command: EditorCommand) => Promise<boolean>;
 }
 
-export function OverviewEditor({ document, onCommand }: OverviewEditorProps) {
+export function OverviewEditor({ document, readOnly = false, onCommand }: OverviewEditorProps) {
   const { recipe } = document;
 
   return (
@@ -19,12 +20,14 @@ export function OverviewEditor({ document, onCommand }: OverviewEditorProps) {
       <section className="grid gap-4 rounded border border-slate-200 bg-white p-4">
         <EditableTextField
           label="Name"
+          readOnly={readOnly}
           value={recipe.name}
           onCommit={(value) => onCommand({ type: "SetOverviewField", field: "name", value })}
         />
         <EditableTextField
           label="Description"
           multiline
+          readOnly={readOnly}
           value={recipe.description}
           onCommit={(value) => onCommand({ type: "SetOverviewField", field: "description", value })}
         />

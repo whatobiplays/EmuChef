@@ -1,5 +1,4 @@
 use std::{
-    env,
     io::{BufRead, BufReader, Write},
     process::{Child, ChildStdin, ChildStdout, Command, Stdio},
     sync::Mutex,
@@ -7,7 +6,7 @@ use std::{
 
 use serde_json::{json, Map, Value};
 
-use crate::python_bridge::{discover_repo_root, python_path_for_repo};
+use crate::python_bridge::{configured_python_command, discover_repo_root, python_path_for_repo};
 
 /// Shared Tauri state for the persistent Python sidecar.
 ///
@@ -243,7 +242,7 @@ pub fn parse_sidecar_response_line(line: &str, expected_request_id: &str) -> Res
 }
 
 fn start_sidecar() -> Result<RunningSidecar, String> {
-    let python = env::var("EMUCHEF_PYTHON").unwrap_or_else(|_| "python".to_string());
+    let python = configured_python_command();
     let repo_root = discover_repo_root();
 
     let mut command = Command::new(&python);
@@ -262,7 +261,7 @@ fn start_sidecar() -> Result<RunningSidecar, String> {
 
     let mut child = command
         .spawn()
-        .map_err(|err| format!("Failed to start Python sidecar with '{python}': {err}"))?;
+        .map_err(|err| format!("Failed to start Python sidecar with '{python}': {err}. {}", python_start_guidance()))?;
     let stdin = child
         .stdin
         .take()
@@ -277,6 +276,10 @@ fn start_sidecar() -> Result<RunningSidecar, String> {
         stdin,
         stdout: BufReader::new(stdout),
     })
+}
+
+fn python_start_guidance() -> &'static str {
+    "Set EMUCHEF_PYTHON to the Python interpreter to use. That Python must be able to import the local emuchef_editor package, usually through the repo src/ directory during development."
 }
 
 #[cfg(test)]
@@ -318,6 +321,24 @@ mod tests {
 
         assert_eq!(response["ok"], false);
         assert_eq!(response["error"]["code"], "unknown_document");
+    }
+
+    #[test]
+    fn preserves_nested_document_object_order_when_parsing_sidecar_responses() {
+        let response = parse_sidecar_response_line(
+            r#"{"id":"req-1","ok":true,"result":{"document":{"recipe":{"artifactGroups":{"third_group":[],"first_group":[],"second_group":[]}}}}}"#,
+            "req-1",
+        )
+        .expect("valid sidecar response should parse");
+
+        let group_ids = response["result"]["document"]["recipe"]["artifactGroups"]
+            .as_object()
+            .expect("artifact groups should be a JSON object")
+            .keys()
+            .map(String::as_str)
+            .collect::<Vec<_>>();
+
+        assert_eq!(group_ids, ["third_group", "first_group", "second_group"]);
     }
 
     #[test]
