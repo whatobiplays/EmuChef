@@ -108,6 +108,8 @@ def step_spec_to_dto(plugin: StepPlugin) -> dict[str, Any]:
                 "required": param_spec.required,
                 "enumValues": list(param_spec.enum_values),
             }
+            if param_spec.shape is not None:
+                params[param_name]["shape"] = _param_shape_to_dto(param_spec.shape)
             if param_spec.default is not None:
                 defaults[param_name] = _json_safe(param_spec.default)
     return {
@@ -135,6 +137,31 @@ def step_spec_to_dto(plugin: StepPlugin) -> dict[str, Any]:
 
 def command_result_to_dto(*, changed: bool) -> dict[str, Any]:
     return {"changed": bool(changed)}
+
+
+def _param_shape_to_dto(shape: Any) -> dict[str, Any]:
+    result: dict[str, Any] = {
+        "kind": str(shape.kind),
+        "ordered": bool(shape.ordered),
+        "unique": bool(shape.unique),
+        "fields": {str(name): _param_field_to_dto(field) for name, field in shape.fields.items()},
+    }
+    if shape.item_kind is not None:
+        result["itemKind"] = str(shape.item_kind)
+    if shape.target is not None:
+        result["target"] = str(shape.target)
+    return result
+
+
+def _param_field_to_dto(field: Any) -> dict[str, Any]:
+    result: dict[str, Any] = {
+        "kind": str(field.kind),
+        "required": bool(field.required),
+        "enumValues": [str(value) for value in field.enum_values],
+    }
+    if field.default is not None:
+        result["default"] = _json_safe(field.default)
+    return result
 
 
 def _input_to_dto(declaration: InputDeclaration) -> dict[str, Any]:

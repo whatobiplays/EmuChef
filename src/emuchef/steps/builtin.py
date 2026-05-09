@@ -5,8 +5,9 @@ from __future__ import annotations
 from functools import lru_cache
 
 from emuchef.domain.copy_policy import CopyPolicy
+from emuchef.domain.recipe import PERMISSION_POLICY_ON_FAILURE_VALUES
 from emuchef.domain.runtime_state import RuntimeValueType
-from emuchef.domain.step_specs import ParamMode, ParamSpec, StepSpec
+from emuchef.domain.step_specs import ParamFieldSpec, ParamMode, ParamShapeSpec, ParamSpec, StepSpec
 
 from .contracts import StepEditorMetadata, StepOutputMetadata, StepPlugin, StepRegistry
 from .handlers import (
@@ -31,14 +32,64 @@ from .planner_hooks import (
 )
 
 
+ARTIFACT_ID_LIST_SHAPE = ParamShapeSpec(
+    kind="list",
+    item_kind="string",
+    target="artifact",
+    ordered=True,
+    unique=True,
+)
+
+ARTIFACT_GROUP_ID_LIST_SHAPE = ParamShapeSpec(
+    kind="list",
+    item_kind="string",
+    target="artifact_group",
+    ordered=True,
+    unique=True,
+)
+
+RUNTIME_PERMISSION_LIST_SHAPE = ParamShapeSpec(
+    kind="list",
+    item_kind="object",
+    ordered=True,
+    fields={
+        "package_name": ParamFieldSpec(kind="string", required=True),
+        "name": ParamFieldSpec(kind="string", required=True),
+    },
+)
+
+APP_OP_PERMISSION_LIST_SHAPE = ParamShapeSpec(
+    kind="list",
+    item_kind="object",
+    ordered=True,
+    fields={
+        "package_name": ParamFieldSpec(kind="string", required=True),
+        "op": ParamFieldSpec(kind="string", required=True),
+        "mode": ParamFieldSpec(kind="string", required=True),
+    },
+)
+
+PERMISSION_POLICY_SHAPE = ParamShapeSpec(
+    kind="object",
+    fields={
+        "on_failure": ParamFieldSpec(
+            kind="string",
+            enum_values=PERMISSION_POLICY_ON_FAILURE_VALUES,
+            default="warn",
+        ),
+        "require_all": ParamFieldSpec(kind="boolean", default=False),
+    },
+)
+
+
 BUILTIN_STEP_PLUGINS: tuple[StepPlugin, ...] = (
     StepPlugin(
         type="resolve_artifacts",
         spec=StepSpec(
             type_name="resolve_artifacts",
             params={
-                "artifacts": ParamSpec(ParamMode.LITERAL, required=False),
-                "artifact_groups": ParamSpec(ParamMode.LITERAL, required=False),
+                "artifacts": ParamSpec(ParamMode.LITERAL, required=False, shape=ARTIFACT_ID_LIST_SHAPE),
+                "artifact_groups": ParamSpec(ParamMode.LITERAL, required=False, shape=ARTIFACT_GROUP_ID_LIST_SHAPE),
             },
             executor_handler="resolve_artifacts",
         ),
@@ -56,8 +107,8 @@ BUILTIN_STEP_PLUGINS: tuple[StepPlugin, ...] = (
         spec=StepSpec(
             type_name="extract_artifacts",
             params={
-                "artifacts": ParamSpec(ParamMode.LITERAL, required=False),
-                "artifact_groups": ParamSpec(ParamMode.LITERAL, required=False),
+                "artifacts": ParamSpec(ParamMode.LITERAL, required=False, shape=ARTIFACT_ID_LIST_SHAPE),
+                "artifact_groups": ParamSpec(ParamMode.LITERAL, required=False, shape=ARTIFACT_GROUP_ID_LIST_SHAPE),
                 "extract_on": ParamSpec(ParamMode.LITERAL, required=False, default="host", enum_values=("host", "device")),
             },
             primary_output_name="extracted_paths",
@@ -153,9 +204,9 @@ BUILTIN_STEP_PLUGINS: tuple[StepPlugin, ...] = (
         spec=StepSpec(
             type_name="grant_permissions",
             params={
-                "runtime": ParamSpec(ParamMode.LITERAL, required=False),
-                "appops": ParamSpec(ParamMode.LITERAL, required=False),
-                "policy": ParamSpec(ParamMode.LITERAL, required=False),
+                "runtime": ParamSpec(ParamMode.LITERAL, required=False, shape=RUNTIME_PERMISSION_LIST_SHAPE),
+                "appops": ParamSpec(ParamMode.LITERAL, required=False, shape=APP_OP_PERMISSION_LIST_SHAPE),
+                "policy": ParamSpec(ParamMode.LITERAL, required=False, shape=PERMISSION_POLICY_SHAPE),
             },
             executor_handler="grant_permissions",
         ),

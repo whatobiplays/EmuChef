@@ -83,7 +83,7 @@ package.
 Current editor scope notes:
 
 - it edits the shared typed authored recipe model rather than raw YAML text
-- the Tauri editor supports sidecar-backed editing for Overview, Inputs, Artifacts, Artifact Groups, basic step lifecycle operations, step dependencies, existing step params, typed ref picking, and advanced JSON-backed step internals for constraints, `skip_if`, and `verify`
+- the Tauri editor supports sidecar-backed editing for Overview, Inputs, Artifacts, Artifact Groups, basic step lifecycle operations, step dependencies, schema-backed rich step params, typed ref picking, and advanced JSON-backed step internals for constraints, `skip_if`, and `verify`
 - primary document actions are exposed through native File, Edit, and Utilities menus
 - menu items are context-aware and disabled when a document action is not valid, a command is in flight, or the sidecar session is invalid
 - the Tauri Save command writes the current sidecar document to disk and should be tested only on safe or temporary recipe copies during development
@@ -101,9 +101,11 @@ Current editor scope notes:
 - missing or unknown authored dependency ids remain visible in the step detail panel and can be removed from copied or temporary recipes during repair
 - deleting a step uses the backend safe-delete behavior shared with the PySide editor and removes supported downstream dependencies, conflicts, and refs
 - step params editing uses the Python sidecar `UpdateStepParams` command with full params replacement for the selected step; the frontend submits authored JSON values and replaces local document state with the returned `RecipeDocumentDto`
+- step params with known Python schema shapes use rich controls where safe: ordered artifact and artifact-group id list params use add/remove/up/down list controls, runtime and app-op permission params use row editors, and policy params use select/checkbox controls
+- raw JSON remains the editor for free-form, unsupported, incompatible, or schema-less params such as metadata; schema-backed structured editors preserve unknown or extra object keys where the authored value can be copied without data loss
 - refs use the authored `{ ref: "..." }` shape in DTOs and command payloads; the Python codec converts only top-level exact ref-shaped param values into internal domain refs
 - the ref picker uses the current document `refIndex`, prefers candidate metadata, falls back to raw `allRefs`, and keeps missing or incompatible current refs visible for repair
-- `StepSpecDto` improves param ordering, enum rendering, and ref filtering, but it is UI metadata only and is not mutation authority
+- `StepSpecDto` improves param ordering, enum rendering, ref filtering, and known param shape rendering, but it is UI metadata only and is not mutation authority
 - Python validation remains authoritative for required params, ref validity, and step contract diagnostics
 - editable Tauri text controls disable browser writing aids and normalize smart single and double quotes to ASCII quotes before storing local drafts or sending sidecar commands
 - selecting a ref does not automatically add or rewrite step dependencies in the Tauri editor

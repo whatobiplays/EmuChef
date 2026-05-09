@@ -1,7 +1,7 @@
 import { useEffect, useMemo, useState } from "react";
 
 import type { EditorCommand } from "../api/commands";
-import type { DiagnosticDto, RecipeDocumentDto, StepDto, StepSpecDto } from "../api/types";
+import type { DiagnosticDto, RecipeDocumentDto, RecipeDto, StepDto, StepSpecDto } from "../api/types";
 import { AdvancedStepInternalsEditor, type AdvancedCommandResult } from "./AdvancedStepInternalsEditor";
 import { EditableTextField } from "./EditableTextField";
 import { ResizableEditorLayout } from "./ResizableEditorLayout";
@@ -165,6 +165,7 @@ export function StepsEditor({
           step={selectedStep}
           stepSpec={stepSpecs.find((spec) => spec.type === selectedStep.type) ?? null}
           steps={steps}
+          recipe={document.recipe}
           refIndex={document.refIndex}
           readOnly={readOnly}
           onCommand={onCommand}
@@ -282,6 +283,7 @@ function StepDetailPanel({
   step,
   stepSpec,
   steps,
+  recipe,
   refIndex,
   readOnly,
   onCommand,
@@ -293,6 +295,7 @@ function StepDetailPanel({
   step: StepDto;
   stepSpec: StepSpecDto | null;
   steps: StepDto[];
+  recipe: RecipeDto;
   refIndex: RecipeDocumentDto["refIndex"];
   readOnly: boolean;
   onCommand: (command: EditorCommand) => Promise<boolean>;
@@ -338,7 +341,7 @@ function StepDetailPanel({
 
       <div className="grid gap-4 rounded border border-slate-200 bg-white p-4">
         <StepDependenciesEditor readOnly={readOnly} step={step} steps={steps} onUpdateDependencies={onUpdateDependencies} />
-        <StepParamsEditor readOnly={readOnly} refIndex={refIndex} step={step} stepSpec={stepSpec} onCommand={onCommand} />
+        <StepParamsEditor readOnly={readOnly} recipe={recipe} refIndex={refIndex} step={step} stepSpec={stepSpec} onCommand={onCommand} />
       </div>
 
       <AdvancedStepInternalsEditor readOnly={readOnly} step={step} onCommand={onAdvancedCommand} />

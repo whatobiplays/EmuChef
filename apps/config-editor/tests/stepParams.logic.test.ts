@@ -3,13 +3,23 @@ import test from "node:test";
 
 import type { RefIndexDto, StepSpecDto } from "../src/api/types.js";
 import {
+  addObjectListRow,
+  addUniqueStringListValue,
+  buildObjectListRowFieldUpdate,
   buildClearStepParamCommand,
   buildRefPickerOptions,
   buildUpdateStepParamsCommand,
+  displayValueForObjectField,
   isAuthoredRefValue,
+  moveStringListValue,
   orderedParamNames,
   parseJsonParamDraft,
   parseNumberParamDraft,
+  removeStringListValue,
+  structuredParamEditorKind,
+  valueForObjectListRowFieldDraft,
+  updateObjectField,
+  updateObjectListRowField,
 } from "../src/components/stepParams.logic.js";
 
 const copySpec: StepSpecDto = {
@@ -26,6 +36,103 @@ const copySpec: StepSpecDto = {
   },
   defaults: {},
   refFilters: { source: ["path_list"] },
+};
+
+const resolveSpec: StepSpecDto = {
+  type: "resolve_artifacts",
+  label: "Resolve Artifacts",
+  supported: true,
+  primaryOutputName: null,
+  outputs: [],
+  paramOrder: ["artifacts", "artifact_groups"],
+  params: {
+    artifacts: {
+      mode: "literal",
+      required: false,
+      enumValues: [],
+      shape: {
+        kind: "list",
+        itemKind: "string",
+        target: "artifact",
+        ordered: true,
+        unique: true,
+        fields: {},
+      },
+    },
+    artifact_groups: {
+      mode: "literal",
+      required: false,
+      enumValues: [],
+      shape: {
+        kind: "list",
+        itemKind: "string",
+        target: "artifact_group",
+        ordered: true,
+        unique: true,
+        fields: {},
+      },
+    },
+  },
+  defaults: {},
+  refFilters: {},
+};
+
+const grantSpec: StepSpecDto = {
+  type: "grant_permissions",
+  label: "Grant Permissions",
+  supported: true,
+  primaryOutputName: null,
+  outputs: [],
+  paramOrder: ["runtime", "appops", "policy"],
+  params: {
+    runtime: {
+      mode: "literal",
+      required: false,
+      enumValues: [],
+      shape: {
+        kind: "list",
+        itemKind: "object",
+        ordered: true,
+        unique: false,
+        fields: {
+          package_name: { kind: "string", required: true, enumValues: [] },
+          name: { kind: "string", required: true, enumValues: [] },
+        },
+      },
+    },
+    appops: {
+      mode: "literal",
+      required: false,
+      enumValues: [],
+      shape: {
+        kind: "list",
+        itemKind: "object",
+        ordered: true,
+        unique: false,
+        fields: {
+          package_name: { kind: "string", required: true, enumValues: [] },
+          op: { kind: "string", required: true, enumValues: [] },
+          mode: { kind: "string", required: true, enumValues: [] },
+        },
+      },
+    },
+    policy: {
+      mode: "literal",
+      required: false,
+      enumValues: [],
+      shape: {
+        kind: "object",
+        ordered: false,
+        unique: false,
+        fields: {
+          on_failure: { kind: "string", required: false, enumValues: ["warn", "fail"], default: "warn" },
+          require_all: { kind: "boolean", required: false, enumValues: [], default: false },
+        },
+      },
+    },
+  },
+  defaults: {},
+  refFilters: {},
 };
 
 const refIndex: RefIndexDto = {
@@ -78,6 +185,11 @@ test("orderedParamNames renders present spec params first and keeps extra params
   );
 });
 
+test("orderedParamNames includes absent structured params without including absent primitive params", () => {
+  assert.deepEqual(orderedParamNames({}, grantSpec), ["runtime", "appops", "policy"]);
+  assert.deepEqual(orderedParamNames({}, copySpec), []);
+});
+
 test("buildUpdateStepParamsCommand preserves sibling params and literal null values", () => {
   const command = buildUpdateStepParamsCommand(
     "copy",
@@ -97,6 +209,185 @@ test("buildUpdateStepParamsCommand preserves sibling params and literal null val
       source: { ref: "inputs.source_dir" },
       dest: "",
       optional: null,
+    },
+  });
+});
+
+test("structured param classification requires schema metadata and does not infer from value shape alone", () => {
+  assert.equal(structuredParamEditorKind(resolveSpec, "artifacts", ["app_apk"]), "artifact-id-list");
+  assert.equal(structuredParamEditorKind(resolveSpec, "artifact_groups", ["core_bundle"]), "artifact-group-id-list");
+  assert.equal(structuredParamEditorKind(grantSpec, "runtime", [{ package_name: "com.example", name: "POST_NOTIFICATIONS" }]), "object-list");
+  assert.equal(structuredParamEditorKind(grantSpec, "policy", { on_failure: "warn" }), "object");
+  assert.equal(structuredParamEditorKind(copySpec, "metadata", ["app_apk", "core_bundle"]), null);
+});
+
+test("schema-less string arrays do not become artifact or artifact-group editors from matching ids", () => {
+  const schemaLessSpec: StepSpecDto = {
+    ...copySpec,
+    type: "custom_step",
+    paramOrder: ["ids"],
+    params: {
+      ids: { mode: "literal", required: false, enumValues: [] },
+    },
+  };
+
+  assert.equal(structuredParamEditorKind(schemaLessSpec, "ids", ["app_apk", "core_bundle"]), null);
+});
+
+test("artifact and artifact group list helpers add remove and reorder while preserving missing ids", () => {
+  assert.deepEqual(addUniqueStringListValue(["missing_apk"], "app_apk"), {
+    ok: true,
+    value: ["missing_apk", "app_apk"],
+  });
+  assert.deepEqual(addUniqueStringListValue(["app_apk"], "app_apk"), {
+    ok: false,
+    error: "This id is already selected.",
+  });
+  assert.deepEqual(moveStringListValue(["missing_apk", "app_apk", "core_zip"], 0, 2), [
+    "app_apk",
+    "core_zip",
+    "missing_apk",
+  ]);
+  assert.deepEqual(removeStringListValue(["missing_group", "core_group"], 0), ["core_group"]);
+});
+
+test("runtime and app-op row edits preserve extra keys", () => {
+  const runtimeRows = [
+    {
+      package_name: "com.example",
+      name: "READ_MEDIA_VIDEO",
+      when: { rooted: false },
+      custom: "preserved",
+    },
+  ];
+  assert.deepEqual(updateObjectListRowField(runtimeRows, 0, "name", "POST_NOTIFICATIONS"), {
+    ok: true,
+    value: [
+      {
+        package_name: "com.example",
+        name: "POST_NOTIFICATIONS",
+        when: { rooted: false },
+        custom: "preserved",
+      },
+    ],
+  });
+
+  const appopRows = [{ package_name: "com.example", op: "RUN_IN_BACKGROUND", mode: "allow", required: false }];
+  assert.deepEqual(updateObjectListRowField(appopRows, 0, "mode", "deny"), {
+    ok: true,
+    value: [{ package_name: "com.example", op: "RUN_IN_BACKGROUND", mode: "deny", required: false }],
+  });
+});
+
+test("object list row field update returns null for no-op blur or Enter", () => {
+  const runtimeRows = [
+    {
+      package_name: "com.example",
+      name: "READ_MEDIA_VIDEO",
+      when: { rooted: false },
+    },
+  ];
+
+  assert.equal(buildObjectListRowFieldUpdate(runtimeRows, 0, "name", "READ_MEDIA_VIDEO"), null);
+});
+
+test("object list row field update changes only edited field and preserves extra keys", () => {
+  const runtimeRows = [
+    {
+      package_name: "com.example",
+      name: "READ_MEDIA_VIDEO",
+      when: { rooted: false },
+      custom: "preserved",
+    },
+  ];
+
+  assert.deepEqual(buildObjectListRowFieldUpdate(runtimeRows, 0, "name", "POST_NOTIFICATIONS"), {
+    ok: true,
+    value: [
+      {
+        package_name: "com.example",
+        name: "POST_NOTIFICATIONS",
+        when: { rooted: false },
+        custom: "preserved",
+      },
+    ],
+  });
+});
+
+test("object list row field draft value resets from current row for Escape without a command", () => {
+  const row = {
+    package_name: "com.example",
+    name: "READ_MEDIA_VIDEO",
+  };
+  const rows = [row];
+  const escapedDraft = valueForObjectListRowFieldDraft(row, "name");
+
+  assert.equal(escapedDraft, "READ_MEDIA_VIDEO");
+  assert.equal(buildObjectListRowFieldUpdate(rows, 0, "name", escapedDraft), null);
+  assert.equal(valueForObjectListRowFieldDraft(row, "missing"), "");
+});
+
+test("object list helpers reject incompatible row shapes instead of dropping data", () => {
+  assert.equal(structuredParamEditorKind(grantSpec, "runtime", ["READ_MEDIA_VIDEO"]), null);
+  assert.deepEqual(addObjectListRow(["READ_MEDIA_VIDEO"], { package_name: "com.example", name: "POST_NOTIFICATIONS" }), {
+    ok: false,
+    error: "Existing value is not a list of objects.",
+  });
+});
+
+test("policy updates preserve extra keys and defaults remain display-only until changed", () => {
+  assert.deepEqual(displayValueForObjectField({}, "require_all", grantSpec.params.policy.shape?.fields.require_all), {
+    value: false,
+    defaulted: true,
+  });
+  assert.deepEqual(updateObjectField({ custom: "preserved" }, "on_failure", "fail"), {
+    ok: true,
+    value: { custom: "preserved", on_failure: "fail" },
+  });
+  assert.deepEqual(updateObjectField({ on_failure: "fail" }, "require_all", false), {
+    ok: true,
+    value: { on_failure: "fail", require_all: false },
+  });
+});
+
+test("policy-like params remain raw JSON unless schema-backed", () => {
+  const schemaLessSpec: StepSpecDto = {
+    ...copySpec,
+    type: "custom_step",
+    paramOrder: ["policy"],
+    params: {
+      policy: { mode: "literal", required: false, enumValues: [] },
+    },
+  };
+
+  assert.equal(structuredParamEditorKind(schemaLessSpec, "policy", { on_failure: "warn", require_all: false }), null);
+});
+
+test("incompatible or free-form values fall back to raw JSON", () => {
+  assert.equal(structuredParamEditorKind(resolveSpec, "artifacts", ["app_apk", 1]), null);
+  assert.equal(structuredParamEditorKind(grantSpec, "policy", ["warn"]), null);
+  assert.equal(structuredParamEditorKind(copySpec, "metadata", { tags: ["free-form"] }), null);
+});
+
+test("structured param updates produce full UpdateStepParams commands and preserve unrelated params", () => {
+  const current = {
+    artifacts: ["old_apk"],
+    metadata: { tags: ["free-form"] },
+    policy: { on_failure: "warn", extra: true },
+  };
+  const nextArtifacts = addUniqueStringListValue(current.artifacts, "new_apk");
+  assert.equal(nextArtifacts.ok, true);
+  if (!nextArtifacts.ok) {
+    return;
+  }
+
+  assert.deepEqual(buildUpdateStepParamsCommand("resolve", current, "artifacts", nextArtifacts.value), {
+    type: "UpdateStepParams",
+    stepId: "resolve",
+    params: {
+      artifacts: ["old_apk", "new_apk"],
+      metadata: { tags: ["free-form"] },
+      policy: { on_failure: "warn", extra: true },
     },
   });
 });

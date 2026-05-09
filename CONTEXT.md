@@ -207,11 +207,25 @@ values as JSON primitives, objects, or lists, and sends refs in the authored
 clearing a param; clearing removes the param key from the submitted params
 object. The Python backend remains authoritative for command application,
 validation diagnostics, canonical YAML, dirty state, and undo/redo state.
-`StepSpecDto` improves UI rendering for param order, enum controls, and ref
-filters, but it is UI metadata only and is not mutation authority. The ref
-picker uses the current document `refIndex`, prefers `candidates`, falls back to
-`allRefs`, and keeps current missing or incompatible refs visible for repair.
-Selecting a ref does not automatically add or rewrite step dependencies.
+`StepSpecDto` improves UI rendering for param order, enum controls, ref
+filters, and known param shapes, but it is UI metadata only and is not mutation
+authority.
+
+The Tauri Steps screen uses rich structured editors for known-shape step params
+when those shapes are backed by Python `ParamSpec` schema metadata projected
+through `StepSpecDto`. Schema-backed ordered artifact id and artifact-group id
+list params use list controls with add, remove, up, and down actions. Runtime
+and app-op permission params use row editors for the schema fields. Policy
+params use schema-backed select and checkbox controls. Structured object and
+object-list editors preserve unknown or extra keys where the existing authored
+value can be copied and updated without data loss. Raw JSON remains the editor
+for free-form, unknown, unsupported, or incompatible params, including metadata
+unless a Python schema is added for it later.
+
+The ref picker uses the current document `refIndex`, prefers `candidates`,
+falls back to `allRefs`, and keeps current missing or incompatible refs visible
+for repair. Selecting a ref does not automatically add or rewrite step
+dependencies.
 
 Advanced step internals use a collapsed Advanced section with plain JSON
 textarea editors for constraints, `skip_if`, and `verify`. Each editor keeps a
@@ -389,7 +403,7 @@ Editor interaction rules:
   - grouped step detail sections for basics, dependencies, params, constraints / `skip_if`, and `verify`
   - a dependency editor card with add/remove actions over existing step ids only
   - structured ref pickers over typed authored refs only
-  - step-local `grant_permissions` runtime/app-op/policy editors
+  - schema-backed rich step param editors for artifact lists, artifact-group lists, step-local `grant_permissions` runtime/app-op rows, and step-local `grant_permissions` policy fields
   - auto-sizing params content that shrinks and grows with the active step form, visible preserved-content blocks, and `extract_archive.extract_on`
   - auto-sizing ordered lists for dependencies, capabilities, `conflicts_with`, `skip_if`, and `verify`, with one visible empty row when a list has no items
   - live diagnostics and YAML refresh after committed step edits
@@ -675,7 +689,7 @@ Known intentional gaps:
 - artifact download uses Python stdlib networking only
 - archive extraction is still ZIP-oriented in practice
 - external step plugin discovery is not implemented
-- `grant_permissions` policy metadata is still relatively minimal
+- app-op mode and permission-name catalogs are not implemented
 - app-private write ownership/uid remapping is not implemented yet
 - current CLI bind ids are still normalized internal-style ids rather than a
   cleaner authored ref syntax

@@ -137,10 +137,27 @@ export interface StepSpecDto {
       mode: string;
       required: boolean;
       enumValues: string[];
+      shape?: StepParamShapeDto;
     }
   >;
   defaults: Record<string, unknown>;
   refFilters: Record<string, string[]>;
+}
+
+export interface StepParamShapeFieldDto {
+  kind: string;
+  required: boolean;
+  enumValues: string[];
+  default?: unknown;
+}
+
+export interface StepParamShapeDto {
+  kind: string;
+  itemKind?: string;
+  target?: string;
+  ordered: boolean;
+  unique: boolean;
+  fields: Record<string, StepParamShapeFieldDto>;
 }
 
 export interface ListStepSpecsResult {

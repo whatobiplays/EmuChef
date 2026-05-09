@@ -70,7 +70,7 @@ from .runtime_state import (
     StepRuntimeState,
     StepRuntimeStatus,
 )
-from .step_specs import PRIMARY_OUTPUT_STEP_TYPES, ParamMode, ParamSpec, STEP_SPECS, StepSpec
+from .step_specs import PRIMARY_OUTPUT_STEP_TYPES, ParamFieldSpec, ParamMode, ParamShapeSpec, ParamSpec, STEP_SPECS, StepSpec
 from .step import Step, StepCondition, StepConstraints
 from .step_types import StepTypeId
 from .validation_result import ValidationResult, ValidationStatus
@@ -124,6 +124,8 @@ __all__ = [
     "JSONValue",
     "LiteralParamValue",
     "ParamMode",
+    "ParamFieldSpec",
+    "ParamShapeSpec",
     "ParamValue",
     "ParamSpec",
     "PRIMARY_OUTPUT_STEP_TYPES",
