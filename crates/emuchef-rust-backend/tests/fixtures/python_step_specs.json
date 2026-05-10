@@ -1,0 +1,399 @@
+{
+  "stepSpecs": [
+    {
+      "defaults": {},
+      "label": "Resolve Artifacts",
+      "outputs": [],
+      "paramOrder": [
+        "artifacts",
+        "artifact_groups"
+      ],
+      "params": {
+        "artifact_groups": {
+          "enumValues": [],
+          "mode": "literal",
+          "required": false,
+          "shape": {
+            "fields": {},
+            "itemKind": "string",
+            "kind": "list",
+            "ordered": true,
+            "target": "artifact_group",
+            "unique": true
+          }
+        },
+        "artifacts": {
+          "enumValues": [],
+          "mode": "literal",
+          "required": false,
+          "shape": {
+            "fields": {},
+            "itemKind": "string",
+            "kind": "list",
+            "ordered": true,
+            "target": "artifact",
+            "unique": true
+          }
+        }
+      },
+      "primaryOutputName": null,
+      "refFilters": {},
+      "supported": true,
+      "type": "resolve_artifacts"
+    },
+    {
+      "defaults": {
+        "extract_on": "host"
+      },
+      "label": "Extract Artifacts",
+      "outputs": [
+        {
+          "name": "extracted_paths",
+          "primary": true,
+          "valueType": "path_list"
+        }
+      ],
+      "paramOrder": [
+        "artifacts",
+        "artifact_groups",
+        "extract_on"
+      ],
+      "params": {
+        "artifact_groups": {
+          "enumValues": [],
+          "mode": "literal",
+          "required": false,
+          "shape": {
+            "fields": {},
+            "itemKind": "string",
+            "kind": "list",
+            "ordered": true,
+            "target": "artifact_group",
+            "unique": true
+          }
+        },
+        "artifacts": {
+          "enumValues": [],
+          "mode": "literal",
+          "required": false,
+          "shape": {
+            "fields": {},
+            "itemKind": "string",
+            "kind": "list",
+            "ordered": true,
+            "target": "artifact",
+            "unique": true
+          }
+        },
+        "extract_on": {
+          "enumValues": [
+            "host",
+            "device"
+          ],
+          "mode": "literal",
+          "required": false
+        }
+      },
+      "primaryOutputName": "extracted_paths",
+      "refFilters": {},
+      "supported": true,
+      "type": "extract_artifacts"
+    },
+    {
+      "defaults": {
+        "cleanup": true,
+        "extract_on": "host"
+      },
+      "label": "Extract Archive",
+      "outputs": [
+        {
+          "name": "extracted_path",
+          "primary": true,
+          "valueType": "directory_path"
+        }
+      ],
+      "paramOrder": [
+        "archive",
+        "extract_on",
+        "dest",
+        "device_temp_path",
+        "cleanup"
+      ],
+      "params": {
+        "archive": {
+          "enumValues": [],
+          "mode": "ref",
+          "required": true
+        },
+        "cleanup": {
+          "enumValues": [],
+          "mode": "literal",
+          "required": false
+        },
+        "dest": {
+          "enumValues": [],
+          "mode": "literal",
+          "required": false
+        },
+        "device_temp_path": {
+          "enumValues": [],
+          "mode": "literal",
+          "required": false
+        },
+        "extract_on": {
+          "enumValues": [
+            "host",
+            "device"
+          ],
+          "mode": "literal",
+          "required": false
+        }
+      },
+      "primaryOutputName": "extracted_path",
+      "refFilters": {
+        "archive": [
+          "file_path"
+        ]
+      },
+      "supported": true,
+      "type": "extract_archive"
+    },
+    {
+      "defaults": {
+        "copy_policy": "merge"
+      },
+      "label": "Copy Files",
+      "outputs": [
+        {
+          "name": "copied_paths",
+          "primary": true,
+          "valueType": "path_list"
+        }
+      ],
+      "paramOrder": [
+        "source",
+        "dest",
+        "copy_policy"
+      ],
+      "params": {
+        "copy_policy": {
+          "enumValues": [
+            "merge",
+            "sync",
+            "replace"
+          ],
+          "mode": "literal",
+          "required": false
+        },
+        "dest": {
+          "enumValues": [],
+          "mode": "literal",
+          "required": true
+        },
+        "source": {
+          "enumValues": [],
+          "mode": "ref",
+          "required": true
+        }
+      },
+      "primaryOutputName": "copied_paths",
+      "refFilters": {
+        "source": [
+          "file_path",
+          "directory_path",
+          "path_list"
+        ]
+      },
+      "supported": true,
+      "type": "copy_files"
+    },
+    {
+      "defaults": {
+        "replace_existing": false
+      },
+      "label": "Install APK",
+      "outputs": [],
+      "paramOrder": [
+        "app",
+        "replace_existing"
+      ],
+      "params": {
+        "app": {
+          "enumValues": [],
+          "mode": "ref",
+          "required": true
+        },
+        "replace_existing": {
+          "enumValues": [],
+          "mode": "literal",
+          "required": false
+        }
+      },
+      "primaryOutputName": null,
+      "refFilters": {
+        "app": [
+          "file_path"
+        ]
+      },
+      "supported": true,
+      "type": "install_apk"
+    },
+    {
+      "defaults": {},
+      "label": "Grant Permissions",
+      "outputs": [],
+      "paramOrder": [
+        "runtime",
+        "appops",
+        "policy"
+      ],
+      "params": {
+        "appops": {
+          "enumValues": [],
+          "mode": "literal",
+          "required": false,
+          "shape": {
+            "fields": {
+              "mode": {
+                "enumValues": [],
+                "kind": "string",
+                "required": true
+              },
+              "op": {
+                "enumValues": [],
+                "kind": "string",
+                "required": true
+              },
+              "package_name": {
+                "enumValues": [],
+                "kind": "string",
+                "required": true
+              }
+            },
+            "itemKind": "object",
+            "kind": "list",
+            "ordered": true,
+            "unique": false
+          }
+        },
+        "policy": {
+          "enumValues": [],
+          "mode": "literal",
+          "required": false,
+          "shape": {
+            "fields": {
+              "on_failure": {
+                "default": "warn",
+                "enumValues": [
+                  "warn",
+                  "fail"
+                ],
+                "kind": "string",
+                "required": false
+              },
+              "require_all": {
+                "default": false,
+                "enumValues": [],
+                "kind": "boolean",
+                "required": false
+              }
+            },
+            "kind": "object",
+            "ordered": false,
+            "unique": false
+          }
+        },
+        "runtime": {
+          "enumValues": [],
+          "mode": "literal",
+          "required": false,
+          "shape": {
+            "fields": {
+              "name": {
+                "enumValues": [],
+                "kind": "string",
+                "required": true
+              },
+              "package_name": {
+                "enumValues": [],
+                "kind": "string",
+                "required": true
+              }
+            },
+            "itemKind": "object",
+            "kind": "list",
+            "ordered": true,
+            "unique": false
+          }
+        }
+      },
+      "primaryOutputName": null,
+      "refFilters": {},
+      "supported": true,
+      "type": "grant_permissions"
+    },
+    {
+      "defaults": {},
+      "label": "Launch App",
+      "outputs": [],
+      "paramOrder": [
+        "package_name",
+        "activity"
+      ],
+      "params": {
+        "activity": {
+          "enumValues": [],
+          "mode": "literal",
+          "required": false
+        },
+        "package_name": {
+          "enumValues": [],
+          "mode": "literal",
+          "required": true
+        }
+      },
+      "primaryOutputName": null,
+      "refFilters": {},
+      "supported": true,
+      "type": "launch_app"
+    },
+    {
+      "defaults": {},
+      "label": "Wait",
+      "outputs": [],
+      "paramOrder": [
+        "duration_ms"
+      ],
+      "params": {
+        "duration_ms": {
+          "enumValues": [],
+          "mode": "literal",
+          "required": true
+        }
+      },
+      "primaryOutputName": null,
+      "refFilters": {},
+      "supported": true,
+      "type": "wait"
+    },
+    {
+      "defaults": {},
+      "label": "Force Stop",
+      "outputs": [],
+      "paramOrder": [
+        "package_name"
+      ],
+      "params": {
+        "package_name": {
+          "enumValues": [],
+          "mode": "literal",
+          "required": true
+        }
+      },
+      "primaryOutputName": null,
+      "refFilters": {},
+      "supported": true,
+      "type": "force_stop_app"
+    }
+  ]
+}

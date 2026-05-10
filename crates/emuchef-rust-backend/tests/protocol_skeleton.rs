@@ -1,7 +1,7 @@
 use std::io::Write;
 use std::process::{Command, Stdio};
 
-use emuchef_rust_backend::{jsonl, run_with_args_and_input};
+use emuchef_rust_backend::{jsonl, run_with_args_and_input, step_specs};
 use serde_json::{json, Value};
 
 fn parse_stdout_json(stdout: &str) -> Value {
@@ -42,9 +42,70 @@ fn assert_invalid_request(response: &Value) {
     assert_eq!(response["error"]["details"], json!({}));
 }
 
+fn expected_step_specs_result() -> Value {
+    serde_json::from_str(include_str!("fixtures/python_step_specs.json"))
+        .expect("Python StepSpec fixture should be valid JSON")
+}
+
+fn assert_step_specs_surface(result: &Value) {
+    let parsed: step_specs::StepSpecsResult = serde_json::from_value(result.clone())
+        .expect("StepSpec result should match Rust DTO surface");
+    let step_types: Vec<&str> = parsed
+        .step_specs
+        .iter()
+        .map(|spec| spec.type_name.as_str())
+        .collect();
+    assert_eq!(
+        step_types,
+        vec![
+            "resolve_artifacts",
+            "extract_artifacts",
+            "extract_archive",
+            "copy_files",
+            "install_apk",
+            "grant_permissions",
+            "launch_app",
+            "wait",
+            "force_stop_app",
+        ]
+    );
+
+    let copy_files = parsed
+        .step_specs
+        .iter()
+        .find(|spec| spec.type_name == "copy_files")
+        .expect("copy_files StepSpec should be present");
+    assert_eq!(copy_files.label, "Copy Files");
+    assert_eq!(
+        copy_files.primary_output_name.as_deref(),
+        Some("copied_paths")
+    );
+    assert_eq!(
+        copy_files.ref_filters["source"],
+        vec!["file_path", "directory_path", "path_list"]
+    );
+
+    let grant_permissions = parsed
+        .step_specs
+        .iter()
+        .find(|spec| spec.type_name == "grant_permissions")
+        .expect("grant_permissions StepSpec should be present");
+    let policy_shape = grant_permissions.params["policy"]
+        .shape
+        .as_ref()
+        .expect("policy param should expose shape metadata");
+    assert_eq!(policy_shape["fields"]["on_failure"]["default"], "warn");
+}
+
+fn assert_step_specs_response(response: &Value) {
+    assert_eq!(response["ok"], true);
+    assert_eq!(response["result"], expected_step_specs_result());
+    assert_step_specs_surface(&response["result"]);
+}
+
 fn assert_hello_result(result: &Value) {
     assert_eq!(result["protocolVersion"], 1);
-    assert_eq!(result["capabilities"], json!([]));
+    assert_eq!(result["capabilities"], json!(["listStepSpecs"]));
     assert!(!result["capabilities"]
         .as_array()
         .unwrap()
@@ -78,6 +139,32 @@ fn one_shot_hello_accepts_unknown_object_payload_keys() {
 #[test]
 fn one_shot_hello_rejects_non_object_payload() {
     assert_invalid_request(&one_shot_response(r#"{"type":"hello","payload":[]}"#));
+}
+
+#[test]
+fn one_shot_list_step_specs_accepts_omitted_payload_and_matches_python_fixture() {
+    assert_step_specs_response(&one_shot_response(r#"{"type":"listStepSpecs"}"#));
+}
+
+#[test]
+fn one_shot_list_step_specs_accepts_empty_object_payload() {
+    assert_step_specs_response(&one_shot_response(
+        r#"{"type":"listStepSpecs","payload":{}}"#,
+    ));
+}
+
+#[test]
+fn one_shot_list_step_specs_ignores_unknown_object_payload_keys_like_python() {
+    assert_step_specs_response(&one_shot_response(
+        r#"{"type":"listStepSpecs","payload":{"ignored":true}}"#,
+    ));
+}
+
+#[test]
+fn one_shot_list_step_specs_rejects_non_object_payload() {
+    assert_invalid_request(&one_shot_response(
+        r#"{"type":"listStepSpecs","payload":[]}"#,
+    ));
 }
 
 #[test]
@@ -146,6 +233,37 @@ fn sidecar_hello_accepts_unknown_object_payload_keys() {
 fn sidecar_hello_with_non_object_payload_returns_invalid_request() {
     let response = &sidecar_responses(r#"{"id":"hello-bad","type":"hello","payload":[]}"#)[0];
     assert_eq!(response["id"], "hello-bad");
+    assert_invalid_request(response);
+}
+
+#[test]
+fn sidecar_list_step_specs_accepts_omitted_payload_matches_python_fixture_and_echoes_id() {
+    let response = &sidecar_responses(r#"{"id":"specs-1","type":"listStepSpecs"}"#)[0];
+    assert_eq!(response["id"], "specs-1");
+    assert_step_specs_response(response);
+}
+
+#[test]
+fn sidecar_list_step_specs_accepts_empty_object_payload() {
+    let response = &sidecar_responses(r#"{"id":"specs-1","type":"listStepSpecs","payload":{}}"#)[0];
+    assert_eq!(response["id"], "specs-1");
+    assert_step_specs_response(response);
+}
+
+#[test]
+fn sidecar_list_step_specs_ignores_unknown_object_payload_keys_like_python() {
+    let response =
+        &sidecar_responses(r#"{"id":"specs-1","type":"listStepSpecs","payload":{"ignored":true}}"#)
+            [0];
+    assert_eq!(response["id"], "specs-1");
+    assert_step_specs_response(response);
+}
+
+#[test]
+fn sidecar_list_step_specs_rejects_non_object_payload() {
+    let response =
+        &sidecar_responses(r#"{"id":"specs-bad","type":"listStepSpecs","payload":[]}"#)[0];
+    assert_eq!(response["id"], "specs-bad");
     assert_invalid_request(response);
 }
 
@@ -222,6 +340,18 @@ fn sidecar_continues_after_invalid_request_and_handles_next_hello() {
     assert_invalid_request(&responses[0]);
     assert_eq!(responses[1]["id"], "hello-2");
     assert_hello_response(&responses[1]);
+}
+
+#[test]
+fn sidecar_continues_after_invalid_request_and_handles_next_list_step_specs() {
+    let responses = sidecar_responses(
+        "{\"id\":\"bad\",\"type\":\"unknown\"}\n{\"id\":\"specs-2\",\"type\":\"listStepSpecs\"}\n",
+    );
+    assert_eq!(responses.len(), 2);
+    assert_eq!(responses[0]["id"], "bad");
+    assert_invalid_request(&responses[0]);
+    assert_eq!(responses[1]["id"], "specs-2");
+    assert_step_specs_response(&responses[1]);
 }
 
 #[test]

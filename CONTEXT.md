@@ -356,6 +356,17 @@ work. A future Rust backend must implement the same backend-agnostic editor
 protocol rather than changing the Tauri editor to backend-specific request
 shapes.
 
+`crates/emuchef-rust-backend` is an experimental standalone Rust backend
+skeleton for migration work. It currently implements `hello`, response
+envelopes, one-shot requests, JSON Lines sidecar requests, and `listStepSpecs`.
+Its `hello` response reports only `["listStepSpecs"]`, which does not make it
+compatible with the Tauri editor because required document capabilities are
+missing. Rust `listStepSpecs` uses a temporary Python-generated static fixture
+for StepSpec DTO parity; Python remains the reference implementation until a
+Rust backend replacement is explicitly approved. The fixture-backed source is
+scaffolding only and should be replaced with Rust-native schema builders before
+planner or executor behavior is ported.
+
 The frontend passes `authoredRoot: null` for Phase 3A. Explicit authored-root and
 workspace selection are deferred editor migration work.
 

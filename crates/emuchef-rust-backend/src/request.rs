@@ -3,6 +3,7 @@ use serde_json::{Map, Value};
 use crate::envelope;
 use crate::errors::ApiError;
 use crate::protocol;
+use crate::step_specs;
 
 /// Validate and dispatch a one-shot request object.
 pub fn handle_one_shot_value(request: Value) -> Value {
@@ -40,6 +41,7 @@ fn handle_validated_object(object: &Map<String, Value>) -> Result<Value, ApiErro
 
     match request_type {
         "hello" => Ok(envelope::success(protocol::hello_result())),
+        "listStepSpecs" => Ok(envelope::success(step_specs::list_step_specs_result())),
         unknown => Err(ApiError::invalid_request(format!(
             "Unknown request type: {unknown}"
         ))),

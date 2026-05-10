@@ -1,8 +1,9 @@
 //! Standalone protocol skeleton for the experimental Rust editor backend.
 //!
 //! The crate intentionally implements only transport-level behavior for Phase
-//! 6C: request validation, response envelopes, one-shot invocation, JSONL
-//! sidecar invocation, and the `hello` handshake.
+//! 6C and 6D: request validation, response envelopes, one-shot invocation,
+//! JSONL sidecar invocation, the `hello` handshake, and static StepSpec DTO
+//! parity for `listStepSpecs`.
 
 pub mod envelope;
 pub mod errors;
@@ -10,6 +11,7 @@ pub mod jsonl;
 pub mod one_shot;
 pub mod protocol;
 pub mod request;
+pub mod step_specs;
 
 #[derive(Debug, PartialEq, Eq)]
 /// Captured process output used by the binary and process-level tests.
