@@ -29,6 +29,12 @@ At Phase 6B inspection time, `src/emuchef/steps/builtin.py` registers nine
 first-party `StepPlugin(...)` entries. The registry path and plugin metadata are
 the source of truth; future Rust work should not depend on a hard-coded count.
 
+Recommended next phase: Phase 6C should create only a Rust backend skeleton for
+the compatibility surface: `hello`, response envelopes/errors, the JSONL
+sidecar loop, and one-shot `hello`. Phase 6C should not load recipes, create
+document sessions, apply commands, edit documents, validate recipes, emit recipe
+YAML, or change Tauri backend selection.
+
 ## Current Python Backend Inventory
 
 | Subsystem | What it does today | Existing paths | Editor dependency | Planner/executor dependency | Port difficulty | Suggested Rust phase |
@@ -508,6 +514,8 @@ Validation relationship:
 - Pair with `indexmap` support for order-sensitive mappings.
 - Risk: emitter formatting differs from PyYAML. Golden emitted YAML tests must
   decide whether byte-for-byte equality or semantic equality is required.
+- Do not lock this choice until golden canonical-emission tests prove the output
+  parity is acceptable against Python.
 
 `serde_yml`:
 
@@ -533,6 +541,10 @@ Conservative first approach:
 - Emit canonical YAML from a deliberate ordered payload builder that mirrors
   `src/emuchef_editor/core/yaml/writer.py`.
 - Use golden tests for emitted YAML and semantic round-trips before dogfooding.
+- For editor document parity, initially target byte-for-byte canonical YAML
+  equality with Python because `RecipeDocument.apply_command` and dirty state
+  depend on canonical emitted YAML comparison, not just parsed semantic
+  equivalence.
 
 Primary YAML risks:
 
@@ -585,6 +597,8 @@ Rust equivalents:
   current payload validation.
 - Command applier returns `(updated_recipe, operation_label)`.
 - Dirty/no-op detection compares canonical emitted YAML, not structural equality.
+  The initial Rust editor parity target should therefore be byte-for-byte
+  canonical YAML equality with Python for all document and command fixtures.
 - Undo/redo should initially use full recipe snapshots to match Python behavior.
 - Error mapping should preserve `invalid_command`, `command_failed`,
   `unknown_document`, `save_failed`, and `validation_failed`.
@@ -823,7 +837,7 @@ No dependencies are added in Phase 6B. Recommendations are provisional.
 | `serde` | DTOs, YAML/JSON model structs | Standard Rust serialization layer. | Must control rename rules carefully for camelCase DTOs and snake_case YAML. |
 | `serde_json` | API envelopes, command payloads, flexible authored values | Current Tauri crate already uses it with preserve-order feature. | Preserve-order behavior should be explicit in backend crate. |
 | `indexmap` | Ordered authored maps and JSON/YAML payload builders | Required for visible order parity. | Standard maps can cause output drift. |
-| `serde_yaml` | Initial YAML load/emit | Integrates with serde and is fastest to prototype. | Formatting drift; consider `serde_yml` or custom emitter if maintenance/formatting requires. |
+| `serde_yaml` | Candidate initial YAML load/emit | Integrates with serde and is fast to prototype. | Do not lock this choice until golden canonical-emission tests prove acceptable parity with Python; consider `serde_yml` or custom emitter if formatting/order drift is unacceptable. |
 | `serde_yml` | YAML alternative | Possible maintained alternative depending on project preference. | Needs evaluation against PyYAML golden output. |
 | `yaml-rust2` | Lower-level YAML option | More control if canonical emitter becomes difficult. | More manual conversion code. |
 | `thiserror` | Structured internal errors | Good for stable error variants. | `anyhow` is easier for prototypes but less contract-oriented. |
