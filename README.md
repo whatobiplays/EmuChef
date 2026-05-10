@@ -33,6 +33,7 @@ one-shot server accepts one JSON request per process invocation:
 
 ```bash
 python -m emuchef_editor.api.server '{"type":"listStepSpecs"}'
+python -m emuchef_editor.api.server '{"type":"hello"}'
 echo '{"type":"openRecipe","payload":{"path":"authored/recipes/app.retroarch.provision.yaml","authoredRoot":"authored"}}' | python -m emuchef_editor.api.server
 ```
 
@@ -41,15 +42,17 @@ development clients that need reusable document sessions:
 
 ```bash
 printf '%s\n' '{"id":"req-1","type":"listStepSpecs","payload":{}}' | python -m emuchef_editor.api.server --sidecar
+printf '%s\n' '{"id":"req-1","type":"hello","payload":{}}' | python -m emuchef_editor.api.server --sidecar
 ```
 
 Sidecar stdin accepts one JSON request per line and stdout returns one JSON
 response per line. Stdout is machine-readable JSONL only; diagnostics belong on
 stderr. Every valid sidecar request includes an opaque string `id`, and every
-response echoes that id. Malformed JSON lines return `id: null`. The sidecar has
-no `protocolVersion` or ping request yet. Future protocol stabilization should
-introduce a sidecar `protocolVersion` before replacing the Python backend with
-Rust or treating the sidecar protocol as externally stable.
+response echoes that id. Malformed JSON lines return `id: null`. The backend
+protocol includes a `hello` request that returns `protocolVersion: 1` and a
+backend-agnostic `capabilities` string list. The protocol does not expose
+`implementation` or `implementationVersion` fields, and there is no protocol
+negotiation yet. Future Rust backends should implement the same protocol.
 
 ### Tauri config editor
 
@@ -86,11 +89,16 @@ Current editor scope notes:
 - the Tauri editor supports sidecar-backed editing for Overview, Inputs, Artifacts, Artifact Groups, basic step lifecycle operations, step dependencies, schema-backed rich step params, typed ref picking, and advanced JSON-backed step internals for constraints, `skip_if`, and `verify`
 - primary document actions are exposed through native File, Edit, and Utilities menus
 - menu items are context-aware and disabled when a document action is not valid, a command is in flight, or the sidecar session is invalid
+- the Rust sidecar client starts the backend on the first real sidecar request, sends `hello`, requires protocol version 1 and the editor's required capabilities, and then continues the original request without a frontend retry
+- `sidecar_status` is local Rust process/session state; it does not start the sidecar or send `hello`, and it reports cached compatibility metadata after a sidecar process has been started
+- incompatible backends stop normal document requests, mark the session invalid, and leave any stale document visible only as read-only reference
 - the Tauri Save command writes the current sidecar document to disk and should be tested only on safe or temporary recipe copies during development
-- unsaved-change prompts guard opening another recipe and closing the window/app where Tauri close interception is available
+- native confirmation prompts guard opening another recipe with unsaved changes and closing the window/app with unsaved changes or an operation in flight where Tauri close interception is available
 - if the Python sidecar exits or transport fails, the stale document remains visible for reference, document-specific actions are disabled, and the Tauri app must be restarted before reopening the recipe
 - Save As and create-from-template sidecar capabilities are not exposed in the Tauri UI
+- capability names are backend-agnostic protocol strings; optional capabilities are display/status metadata only in the current UI
 - production installers, Python bundling, notarization/signing, updater support, and production sidecar distribution are not implemented
+- a Rust backend replacement is not implemented; the current sidecar implementation is Python and future replacements must implement the same editor protocol
 - executor/apply-device UI is not implemented
 - `id`, `kind`, and `schema_version` are read-only in the Overview screen
 - input, artifact, and group ids are changed through explicit Rename actions

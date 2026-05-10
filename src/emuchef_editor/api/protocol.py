@@ -8,6 +8,38 @@ from typing import Any
 
 from .errors import ApiError, _json_safe
 
+SUPPORTED_PROTOCOL_VERSION = 1
+
+REQUIRED_CAPABILITIES: tuple[str, ...] = (
+    "listStepSpecs",
+    "openRecipe",
+    "getDocument",
+    "applyRecipeCommand",
+    "undo",
+    "redo",
+    "saveRecipe",
+    "validate",
+    "emitYaml",
+    "getRefIndex",
+)
+
+OPTIONAL_CAPABILITIES: tuple[str, ...] = (
+    "createRecipeFromTemplate",
+    "closeDocument",
+    "saveRecipeAs",
+)
+
+REPORTED_CAPABILITIES: tuple[str, ...] = REQUIRED_CAPABILITIES + OPTIONAL_CAPABILITIES
+
+
+def hello_result() -> dict[str, Any]:
+    """Return backend-agnostic editor protocol compatibility metadata."""
+
+    return {
+        "protocolVersion": SUPPORTED_PROTOCOL_VERSION,
+        "capabilities": list(REPORTED_CAPABILITIES),
+    }
+
 
 def success(result: Mapping[str, Any] | None = None) -> dict[str, Any]:
     """Return the stable success envelope."""

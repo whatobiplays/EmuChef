@@ -11,6 +11,24 @@ from support import base_recipe, build_authored_tree
 
 
 class EditorApiServerTests(unittest.TestCase):
+    REQUIRED_HELLO_CAPABILITIES = {
+        "listStepSpecs",
+        "openRecipe",
+        "getDocument",
+        "applyRecipeCommand",
+        "undo",
+        "redo",
+        "saveRecipe",
+        "validate",
+        "emitYaml",
+        "getRefIndex",
+    }
+    OPTIONAL_HELLO_CAPABILITIES = {
+        "createRecipeFromTemplate",
+        "closeDocument",
+        "saveRecipeAs",
+    }
+
     def _run_server(self, request: str | dict, *, stdin: bool = False) -> dict:
         args = [sys.executable, "-m", "emuchef_editor.api.server"]
         input_text = None
@@ -28,6 +46,31 @@ class EditorApiServerTests(unittest.TestCase):
         )
         self.assertEqual(completed.returncode, 0, completed.stderr)
         return json.loads(completed.stdout)
+
+    def assert_hello_response(self, response: dict) -> None:
+        self.assertTrue(response["ok"])
+        result = response["result"]
+        self.assertEqual(result["protocolVersion"], 1)
+        self.assertIsInstance(result["capabilities"], list)
+        self.assertTrue(self.REQUIRED_HELLO_CAPABILITIES.issubset(set(result["capabilities"])))
+        self.assertTrue(self.OPTIONAL_HELLO_CAPABILITIES.issubset(set(result["capabilities"])))
+        self.assertNotIn("implementation", result)
+        self.assertNotIn("implementationVersion", result)
+
+    def test_hello_accepts_omitted_empty_and_unknown_object_payload(self) -> None:
+        omitted = self._run_server({"type": "hello"})
+        empty = self._run_server({"type": "hello", "payload": {}}, stdin=True)
+        unknown_keys = self._run_server({"type": "hello", "payload": {"ignored": True}})
+
+        self.assert_hello_response(omitted)
+        self.assert_hello_response(empty)
+        self.assert_hello_response(unknown_keys)
+
+    def test_hello_rejects_non_object_payload(self) -> None:
+        response = self._run_server({"type": "hello", "payload": []})
+
+        self.assertFalse(response["ok"])
+        self.assertEqual(response["error"]["code"], "invalid_request")
 
     def test_stateless_server_requests_work_through_entrypoint(self) -> None:
         recipe = base_recipe(recipe_id="example.recipe", steps=[])

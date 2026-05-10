@@ -3,9 +3,12 @@ import test from "node:test";
 
 import {
   beginCommand,
+  buildCloseConfirmationCopy,
   buildActionAvailability,
+  classifySidecarStatus,
   classifyOperationFailure,
   decideCloseRequest,
+  formatSidecarStatusLabel,
   resolveClosePromptResult,
   resolveOpenAttempt,
   type CommandName,
@@ -77,6 +80,67 @@ test("buildActionAvailability enables only valid clean-document actions", () => 
   );
 });
 
+test("buildActionAvailability treats compatible backend metadata as editable", () => {
+  assert.deepEqual(
+    buildActionAvailability({
+      hasDocument: true,
+      dirty: true,
+      canUndo: true,
+      canRedo: true,
+      commandInFlight: null,
+      documentSessionValid: true,
+      backendCompatible: true,
+    }),
+    {
+      openRecipe: true,
+      saveRecipe: true,
+      undo: true,
+      redo: true,
+      validate: true,
+      refreshYaml: true,
+      editDocument: true,
+    },
+  );
+});
+
+test("buildActionAvailability disables document actions for incompatible backend metadata", () => {
+  assert.deepEqual(
+    buildActionAvailability({
+      hasDocument: true,
+      dirty: true,
+      canUndo: true,
+      canRedo: true,
+      commandInFlight: null,
+      documentSessionValid: true,
+      backendCompatible: false,
+    }),
+    {
+      openRecipe: false,
+      saveRecipe: false,
+      undo: false,
+      redo: false,
+      validate: false,
+      refreshYaml: false,
+      editDocument: false,
+    },
+  );
+});
+
+test("buildActionAvailability treats unchecked compatibility as neutral", () => {
+  assert.equal(
+    buildActionAvailability({
+      hasDocument: true,
+      dirty: false,
+      canUndo: false,
+      canRedo: false,
+      commandInFlight: null,
+      documentSessionValid: true,
+      backendCompatible: null,
+    }).openRecipe,
+    true,
+  );
+});
+
 test("beginCommand prevents duplicate submissions until the current command completes", () => {
   assert.deepEqual(beginCommand(null, "validate"), { started: true, commandInFlight: "validate" });
   assert.deepEqual(beginCommand("validate", "validate"), { started: false, commandInFlight: "validate" });
@@ -134,6 +198,127 @@ test("classifyOperationFailure distinguishes api errors from fatal sidecar trans
   );
 });
 
+test("classifyOperationFailure invalidates only unknown_document errors for the current document", () => {
+  const failure = {
+    kind: "api-error" as const,
+    error: { code: "unknown_document", message: "Document was closed.", details: {} },
+  };
+
+  assert.deepEqual(classifyOperationFailure(failure, "Save failed."), {
+    message: "Save failed. unknown_document: Document was closed.",
+    sessionInvalid: false,
+  });
+
+  assert.deepEqual(
+    classifyOperationFailure(failure, "Save failed.", {
+      commandDocumentId: "stale-doc",
+      currentDocumentId: "current-doc",
+    }),
+    {
+      message: "Save failed. unknown_document: Document was closed.",
+      sessionInvalid: false,
+    },
+  );
+
+  assert.deepEqual(
+    classifyOperationFailure(failure, "Save failed.", {
+      commandDocumentId: "current-doc",
+      currentDocumentId: "current-doc",
+    }),
+    {
+      message:
+        "Save failed. unknown_document: Document was closed. The editor session is no longer valid. Restart the Tauri app and reopen the recipe.",
+      sessionInvalid: true,
+    },
+  );
+});
+
+test("classifySidecarStatus invalidates only exited error or incompatible states", () => {
+  assert.deepEqual(
+    classifySidecarStatus({
+      running: false,
+      pid: null,
+      state: "notStarted",
+      compatible: null,
+      protocolVersion: null,
+      capabilities: [],
+      lastError: null,
+    }),
+    { sessionInvalid: false, message: null },
+  );
+
+  assert.deepEqual(
+    classifySidecarStatus({
+      running: true,
+      pid: 123,
+      state: "running",
+      compatible: true,
+      protocolVersion: 1,
+      capabilities: ["listStepSpecs"],
+      lastError: null,
+    }),
+    { sessionInvalid: false, message: null },
+  );
+
+  assert.deepEqual(
+    classifySidecarStatus({
+      running: false,
+      pid: null,
+      state: "incompatible",
+      compatible: false,
+      protocolVersion: null,
+      capabilities: [],
+      lastError: "Backend hello response was malformed.",
+    }),
+    {
+      sessionInvalid: true,
+      message:
+        "Backend hello response was malformed. The editor session is no longer valid. Restart the Tauri app and reopen the recipe.",
+    },
+  );
+});
+
+test("formatSidecarStatusLabel handles compatibility metadata safely", () => {
+  assert.equal(formatSidecarStatusLabel(null), "Sidecar: unknown");
+  assert.equal(
+    formatSidecarStatusLabel({
+      running: false,
+      pid: null,
+      state: "notStarted",
+      compatible: null,
+      protocolVersion: null,
+      capabilities: [],
+      lastError: null,
+    }),
+    "Sidecar: not started",
+  );
+  assert.equal(
+    formatSidecarStatusLabel({
+      running: true,
+      pid: 123,
+      state: "running",
+      compatible: true,
+      protocolVersion: 1,
+      capabilities: ["listStepSpecs"],
+      lastError: null,
+    }),
+    "Sidecar: compatible v1 pid 123",
+  );
+  assert.equal(
+    formatSidecarStatusLabel({
+      running: false,
+      pid: null,
+      state: "incompatible",
+      compatible: false,
+      protocolVersion: null,
+      capabilities: [],
+      lastError: "missing capability",
+    }),
+    "Sidecar: incompatible",
+  );
+  assert.equal(formatSidecarStatusLabel({ running: true, pid: 7 }), "Sidecar: running pid 7");
+});
+
 test("command names stay limited to known Phase 5 document operations", () => {
   const names: CommandName[] = ["openRecipe", "saveRecipe", "undo", "redo", "validate", "refreshYaml", "mutation"];
 
@@ -141,21 +326,44 @@ test("command names stay limited to known Phase 5 document operations", () => {
 });
 
 test("decideCloseRequest allows clean windows to close without prompting", () => {
-  assert.deepEqual(decideCloseRequest({ dirty: false, promptInFlight: false }), {
+  assert.deepEqual(decideCloseRequest({ commandInFlight: null, dirty: false, promptInFlight: false }), {
     kind: "allow",
   });
 });
 
 test("decideCloseRequest prompts once for dirty windows", () => {
-  assert.deepEqual(decideCloseRequest({ dirty: true, promptInFlight: false }), {
+  assert.deepEqual(decideCloseRequest({ commandInFlight: null, dirty: true, promptInFlight: false }), {
     kind: "prompt",
+    reason: "dirty",
+  });
+});
+
+test("decideCloseRequest prompts for in-flight commands even when the document is clean", () => {
+  assert.deepEqual(decideCloseRequest({ commandInFlight: "validate", dirty: false, promptInFlight: false }), {
+    kind: "prompt",
+    reason: "command-in-flight",
+  });
+});
+
+test("decideCloseRequest reports both dirty and in-flight close risks together", () => {
+  assert.deepEqual(decideCloseRequest({ commandInFlight: "saveRecipe", dirty: true, promptInFlight: false }), {
+    kind: "prompt",
+    reason: "dirty-and-command-in-flight",
   });
 });
 
 test("decideCloseRequest prevents duplicate close prompts", () => {
-  assert.deepEqual(decideCloseRequest({ dirty: true, promptInFlight: true }), {
+  assert.deepEqual(decideCloseRequest({ commandInFlight: "validate", dirty: true, promptInFlight: true }), {
     kind: "prevent",
   });
+});
+
+test("buildCloseConfirmationCopy mentions both unsaved changes and in-flight work when both are present", () => {
+  const copy = buildCloseConfirmationCopy("dirty-and-command-in-flight", "app.example.recipe");
+
+  assert.match(copy.message, /unsaved changes/i);
+  assert.match(copy.message, /operation is still in progress/i);
+  assert.match(copy.message, /app\.example\.recipe/);
 });
 
 test("resolveClosePromptResult prevents only cancelled dirty closes", () => {

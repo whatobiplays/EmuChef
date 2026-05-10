@@ -66,6 +66,69 @@ class SidecarProcess:
 
 
 class EditorApiSidecarTests(unittest.TestCase):
+    REQUIRED_HELLO_CAPABILITIES = {
+        "listStepSpecs",
+        "openRecipe",
+        "getDocument",
+        "applyRecipeCommand",
+        "undo",
+        "redo",
+        "saveRecipe",
+        "validate",
+        "emitYaml",
+        "getRefIndex",
+    }
+    OPTIONAL_HELLO_CAPABILITIES = {
+        "createRecipeFromTemplate",
+        "closeDocument",
+        "saveRecipeAs",
+    }
+
+    def assert_hello_response(self, response: dict, request_id: str) -> None:
+        self.assertEqual(response["id"], request_id)
+        self.assertTrue(response["ok"])
+        result = response["result"]
+        self.assertEqual(result["protocolVersion"], 1)
+        self.assertIsInstance(result["capabilities"], list)
+        self.assertTrue(self.REQUIRED_HELLO_CAPABILITIES.issubset(set(result["capabilities"])))
+        self.assertTrue(self.OPTIONAL_HELLO_CAPABILITIES.issubset(set(result["capabilities"])))
+        self.assertNotIn("implementation", result)
+        self.assertNotIn("implementationVersion", result)
+
+    def test_hello_requires_no_document_and_can_repeat(self) -> None:
+        sidecar = SidecarProcess()
+        try:
+            first = sidecar.request({"id": "hello-1", "type": "hello"})
+            second = sidecar.request({"id": "hello-2", "type": "hello", "payload": {}})
+            unknown_keys = sidecar.request({"id": "hello-3", "type": "hello", "payload": {"ignored": True}})
+            recovered = sidecar.request({"id": "after-hello", "type": "listStepSpecs", "payload": {}})
+            returncode, stderr = sidecar.close()
+        finally:
+            sidecar.kill()
+
+        self.assertEqual(returncode, 0, stderr)
+        self.assert_hello_response(first, "hello-1")
+        self.assert_hello_response(second, "hello-2")
+        self.assert_hello_response(unknown_keys, "hello-3")
+        self.assertEqual(recovered["id"], "after-hello")
+        self.assertTrue(recovered["ok"])
+
+    def test_hello_rejects_non_object_payload(self) -> None:
+        sidecar = SidecarProcess()
+        try:
+            malformed = sidecar.request({"id": "hello-bad", "type": "hello", "payload": []})
+            recovered = sidecar.request({"id": "after-bad-hello", "type": "listStepSpecs", "payload": {}})
+            returncode, stderr = sidecar.close()
+        finally:
+            sidecar.kill()
+
+        self.assertEqual(returncode, 0, stderr)
+        self.assertEqual(malformed["id"], "hello-bad")
+        self.assertFalse(malformed["ok"])
+        self.assertEqual(malformed["error"]["code"], "invalid_request")
+        self.assertEqual(recovered["id"], "after-bad-hello")
+        self.assertTrue(recovered["ok"])
+
     def test_subprocess_sidecar_preserves_document_session_across_requests(self) -> None:
         recipe = base_recipe(recipe_id="example.recipe", steps=[])
         with TemporaryDirectory() as tmp:

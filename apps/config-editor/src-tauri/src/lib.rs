@@ -40,7 +40,7 @@ mod capability_tests {
     use std::path::Path;
 
     #[test]
-    fn default_capability_allows_tauri_close_requested_destroy_path() {
+    fn default_capability_grants_only_required_window_close_permissions() {
         let capability_path =
             Path::new(env!("CARGO_MANIFEST_DIR")).join("capabilities/default.json");
         let capability_json = fs::read_to_string(capability_path)
@@ -59,10 +59,28 @@ mod capability_tests {
             "Tauri onCloseRequested closes allowed windows through its internal destroy path"
         );
         assert!(
-            !permissions
+            permissions
                 .iter()
                 .any(|permission| permission == "core:window:allow-close"),
-            "dirty-close confirmation should not reissue window.close from the frontend"
+            "confirmed dirty-close handling reissues window.close through a guarded frontend path"
         );
+
+        for broad_permission in [
+            "core:window:allow-create",
+            "core:window:allow-get-all-windows",
+            "core:window:allow-hide",
+            "core:window:allow-show",
+            "core:window:allow-maximize",
+            "core:window:allow-minimize",
+            "core:window:allow-set-title",
+            "core:window:default",
+        ] {
+            assert!(
+                !permissions
+                    .iter()
+                    .any(|permission| permission == broad_permission),
+                "default capability should not add unrelated broad window permission {broad_permission}"
+            );
+        }
     }
 }

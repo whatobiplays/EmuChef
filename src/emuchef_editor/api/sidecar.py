@@ -8,7 +8,7 @@ import sys
 from typing import Any, TextIO
 
 from .errors import ApiError
-from .protocol import failure
+from .protocol import failure, hello_result, success
 from .session import DocumentSessionManager
 
 
@@ -62,6 +62,7 @@ class JsonlSidecar:
 
     def _dispatch(self, request_type: str, payload: Mapping[str, Any]) -> dict[str, Any]:
         handlers: dict[str, Callable[[Mapping[str, Any]], dict[str, Any]]] = {
+            "hello": self._hello,
             "listStepSpecs": self._list_step_specs,
             "openRecipe": self._open_recipe,
             "createRecipeFromTemplate": self._create_recipe_from_template,
@@ -80,6 +81,9 @@ class JsonlSidecar:
         if handler is None:
             raise ApiError("invalid_request", f"Unknown request type: {request_type}", {"requestType": request_type})
         return handler(payload)
+
+    def _hello(self, payload: Mapping[str, Any]) -> dict[str, Any]:
+        return success(hello_result())
 
     def _list_step_specs(self, payload: Mapping[str, Any]) -> dict[str, Any]:
         return self._manager.list_step_specs()

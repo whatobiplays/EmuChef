@@ -15,7 +15,7 @@ export function EmptyState({ sidecarAvailable = true, sidecarMessage = null }: E
         {sidecarAvailable ? null : (
           <p className="mt-3 rounded border border-amber-200 bg-amber-50 px-3 py-2 text-sm leading-6 text-amber-900">
             {sidecarMessage ??
-              "The Python sidecar is unavailable. Restart the Tauri app after confirming EMUCHEF_PYTHON points to a Python that can import the local emuchef_editor package."}
+              "The backend sidecar is unavailable. Restart the Tauri app after confirming the current sidecar command can import the local emuchef_editor package. EMUCHEF_PYTHON remains the development override for the Python sidecar."}
           </p>
         )}
       </div>

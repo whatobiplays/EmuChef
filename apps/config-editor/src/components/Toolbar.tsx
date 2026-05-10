@@ -1,4 +1,5 @@
 import type { SidecarStatusResult } from "../api/types";
+import { formatSidecarStatusLabel } from "./phase5EditorState.logic";
 
 interface ToolbarProps {
   currentPath: string | null;
@@ -21,7 +22,7 @@ export function Toolbar({
   stepSpecsCount,
   stepSpecsLoading,
 }: ToolbarProps) {
-  const sidecarLabel = formatSidecarStatus(sidecarStatus);
+  const sidecarLabel = formatSidecarStatusLabel(sidecarStatus);
 
   return (
     <div className="flex min-h-14 flex-wrap items-center gap-2 px-4 py-2">
@@ -41,17 +42,4 @@ export function Toolbar({
       </div>
     </div>
   );
-}
-
-function formatSidecarStatus(status: SidecarStatusResult | null): string {
-  if (status === null) {
-    return "Sidecar: unknown";
-  }
-  if (status.running) {
-    return `Sidecar: running${status.pid === null ? "" : ` pid ${status.pid}`}`;
-  }
-  if (status.state) {
-    return `Sidecar: ${status.state}`;
-  }
-  return "Sidecar: stopped";
 }

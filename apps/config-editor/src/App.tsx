@@ -1,5 +1,5 @@
 import { getCurrentWindow } from "@tauri-apps/api/window";
-import { open } from "@tauri-apps/plugin-dialog";
+import { confirm as nativeConfirm, open } from "@tauri-apps/plugin-dialog";
 import { useEffect, useMemo, useRef, useState } from "react";
 
 import type { EditorCommand } from "./api/commands";
@@ -33,7 +33,9 @@ import { MenuEventBridge, type MenuAction } from "./components/MenuEventBridge";
 import { OverviewEditor } from "./components/OverviewEditor";
 import {
   beginCommand,
+  buildCloseConfirmationCopy,
   buildActionAvailability,
+  classifySidecarStatus,
   classifyOperationFailure,
   decideCloseRequest,
   invalidSessionMessage,
@@ -41,7 +43,7 @@ import {
   resolveOpenAttempt,
   type CommandName,
 } from "./components/phase5EditorState.logic";
-import { ConfirmDialog, TextPromptDialog } from "./components/PromptDialog";
+import { TextPromptDialog } from "./components/PromptDialog";
 import { Sidebar, type EditorView } from "./components/Sidebar";
 import { StepSpecsPanel } from "./components/StepSpecsPanel";
 import { StepsEditor } from "./components/StepsEditor";
@@ -56,14 +58,6 @@ interface TextPromptRequest {
   confirmLabel?: string;
   trimResult: boolean;
   resolve: (value: string | null) => void;
-}
-
-interface ConfirmRequest {
-  title: string;
-  message: string;
-  confirmLabel?: string;
-  destructive?: boolean;
-  resolve: (confirmed: boolean) => void;
 }
 
 interface ConfirmActionOptions {
@@ -93,14 +87,16 @@ export default function App() {
   const [errorMessage, setErrorMessage] = useState<string | null>(null);
   const [statusMessage, setStatusMessage] = useState<string | null>(null);
   const [textPrompt, setTextPrompt] = useState<TextPromptRequest | null>(null);
-  const [confirmPrompt, setConfirmPrompt] = useState<ConfirmRequest | null>(null);
 
   const currentDocumentRef = useRef<RecipeDocumentDto | null>(null);
   const commandInFlightRef = useRef<CommandName | null>(null);
   const documentSessionValidRef = useRef(true);
   const sessionInvalidReasonRef = useRef<string | null>(null);
   const promptActiveRef = useRef(false);
-  const closePromptInFlightRef = useRef(false);
+  // Confirmed window closes are reissued through Tauri, which emits one more close-request event.
+  // This guard lets only that intentional second event pass without reopening the confirmation.
+  const allowCloseRef = useRef(false);
+  const closePromptOpenRef = useRef(false);
 
   const actionAvailability = useMemo(
     () =>
@@ -111,8 +107,9 @@ export default function App() {
         canRedo: currentDocument?.canRedo ?? false,
         commandInFlight,
         documentSessionValid,
+        backendCompatible: sidecarState?.compatible ?? null,
       }),
-    [commandInFlight, currentDocument, documentSessionValid],
+    [commandInFlight, currentDocument, documentSessionValid, sidecarState?.compatible],
   );
 
   const stepSpecsCount = useMemo(() => {
@@ -156,33 +153,51 @@ export default function App() {
     const windowHandle = getCurrentWindow();
 
     void windowHandle.onCloseRequested(async (event) => {
+      if (allowCloseRef.current) {
+        allowCloseRef.current = false;
+        return;
+      }
+
       const document = currentDocumentRef.current;
       const decision = decideCloseRequest({
+        commandInFlight: commandInFlightRef.current,
         dirty: document?.dirty ?? false,
-        promptInFlight: closePromptInFlightRef.current || promptActiveRef.current,
+        promptInFlight: closePromptOpenRef.current || promptActiveRef.current,
       });
 
       if (decision.kind === "allow") {
         return;
       }
 
-      if (decision.kind === "prevent" || document === null) {
-        event.preventDefault();
+      event.preventDefault();
+
+      if (decision.kind === "prevent") {
         return;
       }
 
-      closePromptInFlightRef.current = true;
+      closePromptOpenRef.current = true;
       try {
-        const confirmed = await confirmAction(
-          "Discard unsaved changes",
-          `Discard unsaved changes to ${document.recipe.id} and close the editor?`,
-          { confirmLabel: "Close", destructive: true },
-        );
-        if (resolveClosePromptResult(confirmed).kind === "prevent") {
-          event.preventDefault();
+        const copy = buildCloseConfirmationCopy(decision.reason, document?.recipe.id ?? null);
+        const confirmed = await confirmAction(copy.title, copy.message, {
+          destructive: decision.reason !== "command-in-flight",
+        });
+        if (resolveClosePromptResult(confirmed).kind === "allow") {
+          allowCloseRef.current = true;
+          try {
+            await windowHandle.close();
+            // If Tauri accepts the close command but the follow-up close event never arrives,
+            // clear the guard so a later unrelated close request cannot bypass confirmation.
+            window.setTimeout(() => {
+              allowCloseRef.current = false;
+            }, 1000);
+          } catch (error) {
+            allowCloseRef.current = false;
+            setErrorMessage(`Window close failed: ${errorMessageFromUnknown(error)}`);
+            setStatusMessage(null);
+          }
         }
       } finally {
-        closePromptInFlightRef.current = false;
+        closePromptOpenRef.current = false;
       }
     }).then((unlisten) => {
       if (disposed) {
@@ -330,7 +345,10 @@ export default function App() {
         setStatusMessage("Validation refreshed from the sidecar session.");
         await syncMenuState(currentDocumentRef.current);
       } else {
-        handleOperationFailure(response, "Validation failed.");
+        handleOperationFailure(response, "Validation failed.", {
+          commandDocumentId: document.documentId,
+          currentDocumentId: currentDocumentRef.current?.documentId ?? null,
+        });
         await refreshSidecarStatus();
         await syncMenuState(currentDocumentRef.current);
       }
@@ -352,7 +370,10 @@ export default function App() {
         setStatusMessage("YAML refreshed from the sidecar session.");
         await syncMenuState(currentDocumentRef.current);
       } else {
-        handleOperationFailure(response, "YAML refresh failed.");
+        handleOperationFailure(response, "YAML refresh failed.", {
+          commandDocumentId: document.documentId,
+          currentDocumentId: currentDocumentRef.current?.documentId ?? null,
+        });
         await refreshSidecarStatus();
         await syncMenuState(currentDocumentRef.current);
       }
@@ -374,7 +395,10 @@ export default function App() {
         setStatusMessage(response.result.commandResult.changed ? "Undo applied." : "Nothing to undo.");
         await syncMenuState(response.result.document);
       } else {
-        handleOperationFailure(response, "Undo failed.");
+        handleOperationFailure(response, "Undo failed.", {
+          commandDocumentId: document.documentId,
+          currentDocumentId: currentDocumentRef.current?.documentId ?? null,
+        });
         await refreshSidecarStatus();
         await syncMenuState(currentDocumentRef.current);
       }
@@ -396,7 +420,10 @@ export default function App() {
         setStatusMessage(response.result.commandResult.changed ? "Redo applied." : "Nothing to redo.");
         await syncMenuState(response.result.document);
       } else {
-        handleOperationFailure(response, "Redo failed.");
+        handleOperationFailure(response, "Redo failed.", {
+          commandDocumentId: document.documentId,
+          currentDocumentId: currentDocumentRef.current?.documentId ?? null,
+        });
         await refreshSidecarStatus();
         await syncMenuState(currentDocumentRef.current);
       }
@@ -418,7 +445,10 @@ export default function App() {
         setStatusMessage("Saved the current sidecar document.");
         await syncMenuState(response.result.document);
       } else {
-        handleOperationFailure(response, "Save failed.");
+        handleOperationFailure(response, "Save failed.", {
+          commandDocumentId: document.documentId,
+          currentDocumentId: currentDocumentRef.current?.documentId ?? null,
+        });
         await refreshSidecarStatus();
         await syncMenuState(currentDocumentRef.current);
       }
@@ -446,7 +476,10 @@ export default function App() {
         return { ok: true, changed: response.result.commandResult.changed };
       }
 
-      handleOperationFailure(response, "Edit failed.");
+      handleOperationFailure(response, "Edit failed.", {
+        commandDocumentId: document.documentId,
+        currentDocumentId: currentDocumentRef.current?.documentId ?? null,
+      });
       await refreshSidecarStatus();
       await syncMenuState(currentDocumentRef.current);
       return { ok: false, changed: false };
@@ -477,6 +510,7 @@ export default function App() {
       canRedo: document.canRedo,
       commandInFlight: commandInFlightRef.current,
       documentSessionValid: documentSessionValidRef.current,
+      backendCompatible: sidecarState?.compatible ?? null,
     });
     if (!availability[action]) {
       void syncMenuState(document);
@@ -523,10 +557,11 @@ export default function App() {
   function handleStatusResponse(response: EditorApiResult<SidecarStatusResult>) {
     if (response.kind === "success") {
       setSidecarState(response.result);
-      if (!response.result.running && (response.result.state === "exited" || response.result.state === "error")) {
-        markDocumentSessionInvalid(
-          invalidSessionMessage(response.result.message ?? "Python sidecar is no longer running."),
-        );
+      const classification = classifySidecarStatus(response.result);
+      if (classification.sessionInvalid && classification.message !== null) {
+        markDocumentSessionInvalid(classification.message);
+        setErrorMessage(classification.message);
+        setStatusMessage(null);
       }
       return;
     }
@@ -540,8 +575,9 @@ export default function App() {
   function handleOperationFailure<T>(
     response: Exclude<EditorApiResult<T>, { kind: "success" }>,
     fallback: string,
+    context: Parameters<typeof classifyOperationFailure>[2] = {},
   ) {
-    const classification = classifyOperationFailure(response, fallback);
+    const classification = classifyOperationFailure(response, fallback, context);
     setErrorMessage(classification.message);
     setStatusMessage(null);
     if (classification.sessionInvalid) {
@@ -619,16 +655,25 @@ export default function App() {
     if (promptActiveRef.current) {
       return Promise.resolve(false);
     }
-    return new Promise((resolve) => {
-      promptActiveRef.current = true;
-      setConfirmPrompt({
+    return confirmNativeAction(title, message, options);
+  }
+
+  async function confirmNativeAction(
+    title: string,
+    message: string,
+    options: ConfirmActionOptions = {},
+  ): Promise<boolean> {
+    promptActiveRef.current = true;
+    try {
+      return await nativeConfirm(message, {
         title,
-        message,
-        confirmLabel: options.confirmLabel,
-        destructive: options.destructive,
-        resolve,
+        kind: options.destructive ? "warning" : "info",
       });
-    });
+    } catch {
+      return window.confirm(`${title}\n\n${message}`);
+    } finally {
+      promptActiveRef.current = false;
+    }
   }
 
   function resolveTextPrompt(value: string | null) {
@@ -639,16 +684,6 @@ export default function App() {
     setTextPrompt(null);
     promptActiveRef.current = false;
     resolver(value);
-  }
-
-  function resolveConfirmPrompt(confirmed: boolean) {
-    if (confirmPrompt === null) {
-      return;
-    }
-    const resolver = confirmPrompt.resolve;
-    setConfirmPrompt(null);
-    promptActiveRef.current = false;
-    resolver(confirmed);
   }
 
   function renderMainContent() {
@@ -724,16 +759,6 @@ export default function App() {
           trimResult={textPrompt.trimResult}
           onCancel={() => resolveTextPrompt(null)}
           onSubmit={resolveTextPrompt}
-        />
-      ) : null}
-      {confirmPrompt ? (
-        <ConfirmDialog
-          confirmLabel={confirmPrompt.confirmLabel}
-          destructive={confirmPrompt.destructive}
-          message={confirmPrompt.message}
-          title={confirmPrompt.title}
-          onCancel={() => resolveConfirmPrompt(false)}
-          onConfirm={() => resolveConfirmPrompt(true)}
         />
       ) : null}
       <MenuEventBridge handlers={menuHandlers} />

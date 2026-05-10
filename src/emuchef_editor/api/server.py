@@ -13,7 +13,7 @@ from emuchef_editor.core.yaml.loader import load_recipe_document
 
 from .dto import diagnostic_to_dto, document_to_dto, step_specs_to_dto
 from .errors import ApiError
-from .protocol import failure, success
+from .protocol import failure, hello_result, success
 
 
 def handle_request(request: Mapping[str, Any] | object) -> dict[str, Any]:
@@ -29,6 +29,8 @@ def handle_request(request: Mapping[str, Any] | object) -> dict[str, Any]:
     if not isinstance(payload, Mapping):
         return failure(ApiError("invalid_request", "Request payload must be an object."))
 
+    if request_type == "hello":
+        return success(hello_result())
     if request_type == "listStepSpecs":
         return _list_step_specs(request_type=request_type, debug=debug)
     if request_type == "openRecipe":

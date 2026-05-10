@@ -142,10 +142,13 @@ The sidecar reuses `DocumentSessionManager` for live document sessions. It
 supports session-backed requests for listing step specs, opening and creating
 documents, getting and closing documents, applying recipe commands, undo, redo,
 saving, Save As, validation, canonical YAML emission, and ref-index retrieval.
-The sidecar protocol has no `protocolVersion` field and no ping request. Future
-protocol stabilization should introduce a sidecar `protocolVersion` before
-replacing the Python backend with Rust or treating the sidecar protocol as
-externally stable.
+The sidecar protocol includes a backend-agnostic `hello` request. `hello`
+returns integer `protocolVersion: 1` and a string `capabilities` list. The
+protocol does not expose `implementation` or `implementationVersion` fields,
+and there is no protocol negotiation. Capability names describe editor protocol
+operations rather than backend implementation details. The current Python
+backend reports the capabilities it supports, including optional protocol
+operations such as create-from-template, document close, and Save As.
 
 ## Current Tauri Config Editor
 
@@ -284,12 +287,14 @@ is in flight. The app follows Tauri v2 desktop menu behavior: macOS uses the
 native app menu convention, while Windows and Linux use native window menu bars.
 Debug-only controls are not exposed in the normal menu/UI path.
 
-Unsaved-change prompts guard opening another recipe and closing the Tauri window
-when Tauri close-request interception is available. Dirty open confirmation
-happens before the native file picker, file-picker cancellation keeps the
-current document/session unchanged, and failed opens preserve the current
-document when the old session remains valid. Dirty close handling uses frontend
-`RecipeDocumentDto.dirty` state and does not save implicitly.
+Native confirmation prompts guard opening another recipe with unsaved changes
+and closing the Tauri window with unsaved changes or an operation in flight when
+Tauri close-request interception is available. Dirty open confirmation happens
+before the native file picker, file-picker cancellation keeps the current
+document/session unchanged, and failed opens preserve the current document when
+the old session remains valid. Dirty close handling uses frontend
+`RecipeDocumentDto.dirty` state and does not save implicitly. Close handling
+does not cancel in-flight operations.
 
 The Tauri editor does not expose dependency graph visualization, dependency
 reorder controls, drag-and-drop, executor/apply-device UI, Save As UI,
@@ -324,20 +329,32 @@ The frontend talks to Rust through Tauri `invoke(...)` commands named:
 
 The Rust bridge keeps the Phase 2 one-shot Python API bridge available and also
 owns one persistent sidecar process for sidecar-backed commands. The sidecar
-client starts Python on the first sidecar request, serializes requests as one
-send-line/read-line operation at a time, and treats API `ok:false` envelopes as
-successful Rust transport results. `EMUCHEF_PYTHON` selects the Python command
-when set; otherwise the bridge uses `python`. During development, the bridge
-discovers the repo root and prepends `src/` to `PYTHONPATH` so the selected
-Python command can import the local package.
+client starts Python on the first sidecar request, sends `hello`, requires
+protocol version 1 and the editor's required capabilities, and then continues
+the original request without a frontend retry. A `Running` Rust sidecar state
+means the process is started and handshake-compatible. The client serializes
+requests as one send-line/read-line operation at a time and treats non-handshake
+API `ok:false` envelopes as successful Rust transport results. `EMUCHEF_PYTHON`
+selects the Python command when set; otherwise the bridge uses `python`. During
+development, the bridge discovers the repo root and prepends `src/` to
+`PYTHONPATH` so the selected Python command can import the local package.
 
-`sidecar_status` reports local Rust process state only and does not send a
-Python request. If the sidecar exits unexpectedly or an unrecoverable transport
-failure occurs, the frontend marks the document session invalid, leaves the
-stale document visible for reference, disables or short-circuits
+`sidecar_status` reports local Rust process and compatibility state only. It
+does not start the sidecar and does not perform a fresh `hello` call. Before the
+first sidecar request, compatibility is unchecked. After a sidecar process has
+started, status reports cached compatibility metadata such as compatibility,
+protocol version, capabilities, and the last compatibility or transport error.
+If the sidecar exits unexpectedly, an unrecoverable transport failure occurs, or
+the backend is incompatible, the frontend marks the document session invalid,
+leaves the stale document visible for reference, disables or short-circuits
 document-specific actions, and tells the user to restart the Tauri app and
 reopen the recipe. The sidecar does not automatically restart, and previous
 document ids are invalid after process loss.
+
+Production packaging, Python bundling, and a Rust backend replacement are future
+work. A future Rust backend must implement the same backend-agnostic editor
+protocol rather than changing the Tauri editor to backend-specific request
+shapes.
 
 The frontend passes `authoredRoot: null` for Phase 3A. Explicit authored-root and
 workspace selection are deferred editor migration work.

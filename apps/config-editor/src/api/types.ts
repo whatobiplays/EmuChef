@@ -168,6 +168,10 @@ export interface SidecarStatusResult {
   running: boolean;
   pid: number | null;
   state?: string;
+  compatible?: boolean | null;
+  protocolVersion?: number | null;
+  capabilities?: string[];
+  lastError?: string | null;
   message?: string;
 }
 
