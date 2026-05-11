@@ -379,9 +379,9 @@ context/capabilities. The Rust executor skeleton is internal test scaffolding
 only: it models selected `wait`, `grant_permissions`, dependency, skip, verify,
 temp-dir-confined filesystem/artifact behavior, fake dry-run device semantics,
 and Phase 6R real-ADB adapter foundations without public API exposure. It does
-not add protocol requests, sidecar capabilities, CLI parity, Tauri integration,
-backend selection, production device discovery, real network downloads,
-production packaging, or Python bundling.
+not add protocol requests, sidecar capabilities, production CLI replacement,
+Tauri integration, backend selection, production device discovery, real network
+downloads, production packaging, or Python bundling.
 It now has crate-internal fake-device/DryRunAdb parity fixtures plus an
 explicitly constructed real-ADB adapter and ignored/manual real-device tests; it
 remains not Tauri-integrated and has no public real-device executor surface.
