@@ -23,7 +23,7 @@ loading is deferred follow-up work.
 
 The Tauri config editor in `apps/config-editor` is the primary development UI
 for authored recipe files. It edits the shared typed authored recipe model
-through the Python editor API and does not provide direct YAML editing.
+through the Rust sidecar and does not provide direct YAML editing.
 
 The legacy PySide6 editor remains available as an optional fallback for
 comparison and debugging. It is not the primary editor path.
@@ -69,16 +69,17 @@ npm install
 npm run tauri dev
 ```
 
-Build the local Rust sidecar binary before starting the Tauri dev shell:
+The Tauri dev/build hooks prepare the Rust sidecar automatically. App-local
+details live in `apps/config-editor/README.md`.
 
 ```bash
-cargo build --manifest-path ../../crates/emuchef-rust-backend/Cargo.toml
-npm run tauri dev
+npm run tauri build
 ```
 
 During development, the Rust bridge discovers the repo root and checks the
 crate-local and repo-root Cargo `target/debug` directories for
-`emuchef-rust-backend`. Production bundled sidecar layout is deferred.
+`emuchef-rust-backend`. Packaged builds bundle the Rust sidecar through Tauri v2
+`externalBin`.
 
 Current editor scope notes:
 
@@ -94,7 +95,7 @@ Current editor scope notes:
 - if the Rust sidecar exits or transport fails, the stale document remains visible for reference, document-specific actions are disabled, and the Tauri app must be restarted before reopening the recipe
 - Save As and create-from-template sidecar capabilities are not exposed in the Tauri UI
 - capability names are backend-agnostic protocol strings; optional capabilities are display/status metadata only in the current UI
-- production installers, Rust sidecar bundling, notarization/signing, updater support, and production sidecar distribution are not implemented
+- production signing, notarization, updater support, and cross-platform release automation are not implemented
 - there is no backend selector, backend toggle, config option, environment variable, UI switch, protocol negotiation path, or Python fallback for the Tauri editor runtime
 - executor/apply-device UI is not implemented
 - `id`, `kind`, and `schema_version` are read-only in the Overview screen

@@ -4,8 +4,8 @@
   "version": "0.1.0",
   "identifier": "com.emuchef.configeditor",
   "build": {
-    "beforeDevCommand": "npm run dev",
-    "beforeBuildCommand": "npm run build",
+    "beforeDevCommand": "npm run sidecar:dev && npm run dev",
+    "beforeBuildCommand": "npm run sidecar:build && npm run build",
     "devUrl": "http://localhost:5173",
     "frontendDist": "../dist"
   },
@@ -27,7 +27,7 @@
     }
   },
   "bundle": {
-    "active": false,
-    "icon": ["icons/icon.png"]
+    "active": true,
+    "externalBin": ["binaries/emuchef-rust-backend"]
   }
 }

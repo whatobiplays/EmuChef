@@ -86,10 +86,10 @@ The current editor scope is recipe-authoring only. It edits:
 
 ## Current Editor API
 
-`emuchef_editor.api` is the UI-free JSON API surface for editor clients. It
-wraps `src/emuchef_editor/core` and keeps Python authoritative for authored
-recipe loading, command application, validation, ref indexing, canonical YAML
-emission, saving, and step registry metadata.
+`emuchef_editor.api` is the legacy/reference UI-free Python JSON API surface. It
+wraps `src/emuchef_editor/core` and remains available for comparison, fixture
+generation, the PySide6 editor, and later Python-deletion work. The primary
+Tauri editor runtime uses the Rust sidecar instead of this Python API.
 
 Every API response uses one of these envelopes:
 
@@ -154,8 +154,9 @@ operations such as create-from-template, document close, and Save As.
 
 `apps/config-editor` is the primary Tauri development/editor UI for authored
 recipe files. It uses Tauri v2, React, TypeScript, Vite, Tailwind, npm, and the
-official Tauri dialog plugin. The app is a development editor shell, not a
-production-packaged application.
+official Tauri dialog plugin. The app now has host-target Tauri packaging for
+the Rust sidecar, while signing, notarization, updater support, cross-platform
+release automation, and public release hardening remain later work.
 
 The editor opens authored recipe YAML files through a native file picker, calls
 the Rust sidecar through Rust Tauri commands, and displays recipe data,
@@ -166,11 +167,15 @@ sidecar requests so unsaved in-memory edits remain visible to validation, YAML
 emission, undo, redo, and save.
 
 The Tauri editor runs in development mode with a local Rust sidecar binary. The
-Rust bridge resolves a previously built `emuchef-rust-backend` binary from the
-crate-local or repo-root Cargo `target/debug` directories and starts it with
-`--sidecar`. The editor does not bundle the Rust binary, create installers,
-sign/notarize builds, configure updates, or solve production sidecar
-distribution; those packaging concerns remain separate work.
+Tauri `beforeDevCommand` runs `npm run sidecar:dev` before Vite, so normal
+`npm run tauri dev` starts by building the debug Rust sidecar with Cargo
+incremental rebuilds and preparing the Tauri v2 `externalBin` input. The Rust
+bridge still resolves development sidecars from the crate-local or repo-root
+Cargo `target/debug` directories and starts the binary with `--sidecar`.
+Packaged release builds run `npm run sidecar:build` before the frontend build,
+copy the release sidecar to `src-tauri/binaries/emuchef-rust-backend-$TARGET_TRIPLE`,
+and let Tauri bundle the target-triple-stripped `emuchef-rust-backend` beside
+the packaged app executable.
 
 The Tauri editor supports sidecar-backed recipe editing. The Overview screen
 edits recipe name and description. Recipe id, schema version, and kind are
@@ -207,7 +212,7 @@ for the selected step. The frontend edits authored step params, keeps literal
 values as JSON primitives, objects, or lists, and sends refs in the authored
 `{ ref: "..." }` shape. A literal JSON `null` param value is distinct from
 clearing a param; clearing removes the param key from the submitted params
-object. The Python backend remains authoritative for command application,
+object. The Rust sidecar backend remains authoritative for command application,
 validation diagnostics, canonical YAML, dirty state, and undo/redo state.
 `StepSpecDto` improves UI rendering for param order, enum controls, ref
 filters, and known param shapes, but it is UI metadata only and is not mutation
@@ -335,8 +340,9 @@ sidecar state means the process is started and handshake-compatible. The client
 serializes requests as one send-line/read-line operation at a time and treats
 non-handshake API `ok:false` envelopes as successful Rust transport results. For
 local development and tests, the bridge resolves a previously built Rust binary
-from the crate-local or repo-root Cargo `target/debug` directories; production
-bundled sidecar layout remains a separate packaging concern.
+from the crate-local or repo-root Cargo `target/debug` directories. In packaged
+release builds, it resolves the Tauri-bundled Rust sidecar from the app
+executable directory and does not fall back to development paths.
 
 `sidecar_status` reports local Rust process and compatibility state only. It
 does not start the sidecar and does not perform a fresh `hello` call. Before the
@@ -380,7 +386,8 @@ only: it models selected `wait`, `grant_permissions`, dependency, skip, verify,
 temp-dir-confined filesystem/artifact behavior, fake dry-run device semantics,
 and Phase 6R real-ADB adapter foundations without public API exposure. It does
 not add production CLI replacement, backend selection, production device
-discovery, real network downloads, production packaging, or Python bundling.
+discovery, real network downloads, signing/notarization, updater support,
+cross-platform release automation, or Python bundling.
 It now has crate-internal fake-device/DryRunAdb parity fixtures plus an
 explicitly constructed real-ADB adapter and ignored/manual real-device tests; it
 still has no public real-device executor surface. Its `hello` response reports

@@ -39,13 +39,17 @@ pub struct SidecarState {
 
 impl Default for SidecarState {
     fn default() -> Self {
-        Self {
-            client: Mutex::new(SidecarClient::new()),
-        }
+        Self::new(SidecarRuntime::Dev)
     }
 }
 
 impl SidecarState {
+    pub fn new(runtime: SidecarRuntime) -> Self {
+        Self {
+            client: Mutex::new(SidecarClient::new(runtime)),
+        }
+    }
+
     pub fn status(&self) -> Result<Value, String> {
         let mut client = self
             .client
@@ -66,7 +70,32 @@ impl SidecarState {
 pub struct SidecarClient {
     next_request_id: u64,
     state: ProcessState,
+    runtime: SidecarRuntime,
     binary_path_override: Option<PathBuf>,
+}
+
+/// Selects the sidecar binary layout used by the Tauri backend bridge.
+///
+/// Development builds intentionally keep the Phase 6U repo-local resolver so
+/// tests and `tauri dev` use deterministic Cargo outputs. Packaged builds use
+/// the Tauri externalBin directory beside the app executable and never fall back
+/// to development paths.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum SidecarRuntime {
+    Dev,
+    Packaged { bundled_dir: Option<PathBuf> },
+}
+
+impl SidecarRuntime {
+    pub fn for_current_process() -> Self {
+        if cfg!(debug_assertions) {
+            Self::Dev
+        } else {
+            Self::Packaged {
+                bundled_dir: current_exe_start(),
+            }
+        }
+    }
 }
 
 enum ProcessState {
@@ -109,10 +138,11 @@ struct HelloCompatibilityError {
 }
 
 impl SidecarClient {
-    pub fn new() -> Self {
+    pub fn new(runtime: SidecarRuntime) -> Self {
         Self {
             next_request_id: 1,
             state: ProcessState::NotStarted,
+            runtime,
             binary_path_override: None,
         }
     }
@@ -122,7 +152,18 @@ impl SidecarClient {
         Self {
             next_request_id: 1,
             state: ProcessState::NotStarted,
+            runtime: SidecarRuntime::Dev,
             binary_path_override: Some(path.into()),
+        }
+    }
+
+    #[cfg(test)]
+    fn with_runtime_for_test(runtime: SidecarRuntime) -> Self {
+        Self {
+            next_request_id: 1,
+            state: ProcessState::NotStarted,
+            runtime,
+            binary_path_override: None,
         }
     }
 
@@ -259,7 +300,8 @@ impl SidecarClient {
     fn ensure_running(&mut self) -> Result<(), String> {
         match &mut self.state {
             ProcessState::NotStarted => {
-                let mut process = start_sidecar(self.binary_path_override.as_deref())?;
+                let mut process =
+                    start_sidecar(self.binary_path_override.as_deref(), &self.runtime)?;
                 match self.perform_hello_handshake(&mut process) {
                     Ok(compatibility) => {
                         self.state = ProcessState::Running(RunningSidecar {
@@ -558,8 +600,11 @@ pub fn parse_sidecar_response_line(line: &str, expected_request_id: &str) -> Res
     }
 }
 
-fn start_sidecar(binary_path_override: Option<&Path>) -> Result<SidecarProcess, String> {
-    let spec = rust_sidecar_command_spec(binary_path_override)?;
+fn start_sidecar(
+    binary_path_override: Option<&Path>,
+    runtime: &SidecarRuntime,
+) -> Result<SidecarProcess, String> {
+    let spec = rust_sidecar_command_spec(binary_path_override, runtime)?;
     let mut command = spec.command();
 
     let mut child = command.spawn().map_err(|err| {
@@ -611,17 +656,34 @@ impl SidecarCommandSpec {
 
 fn rust_sidecar_command_spec(
     binary_path_override: Option<&Path>,
+    runtime: &SidecarRuntime,
 ) -> Result<SidecarCommandSpec, String> {
-    let repo_root = discover_repo_root();
-    let program = match binary_path_override {
-        Some(path) => path.to_path_buf(),
-        None => resolve_dev_rust_sidecar_binary(repo_root.as_deref())?,
-    };
-    Ok(SidecarCommandSpec {
-        program,
-        args: vec!["--sidecar".to_string()],
-        cwd: repo_root,
-    })
+    match binary_path_override {
+        Some(path) => Ok(SidecarCommandSpec {
+            program: path.to_path_buf(),
+            args: vec!["--sidecar".to_string()],
+            cwd: discover_repo_root(),
+        }),
+        None => match runtime {
+            SidecarRuntime::Dev => {
+                let repo_root = discover_repo_root();
+                let program = resolve_dev_rust_sidecar_binary(repo_root.as_deref())?;
+                Ok(SidecarCommandSpec {
+                    program,
+                    args: vec!["--sidecar".to_string()],
+                    cwd: repo_root,
+                })
+            }
+            SidecarRuntime::Packaged { bundled_dir } => {
+                let program = resolve_packaged_rust_sidecar_binary(bundled_dir.as_deref())?;
+                Ok(SidecarCommandSpec {
+                    program,
+                    args: vec!["--sidecar".to_string()],
+                    cwd: None,
+                })
+            }
+        },
+    }
 }
 
 fn resolve_dev_rust_sidecar_binary(repo_root: Option<&Path>) -> Result<PathBuf, String> {
@@ -644,9 +706,28 @@ fn resolve_dev_rust_sidecar_binary(repo_root: Option<&Path>) -> Result<PathBuf, 
                 .join(", ");
             format!(
                 "Rust sidecar binary was not found. Searched: {searched}. {}",
-                rust_sidecar_start_guidance()
+                dev_sidecar_start_guidance()
             )
         })
+}
+
+fn resolve_packaged_rust_sidecar_binary(bundled_dir: Option<&Path>) -> Result<PathBuf, String> {
+    let Some(bundled_dir) = bundled_dir else {
+        return Err(format!(
+            "Tauri bundled sidecar directory was not available while resolving the bundled Rust sidecar. {}",
+            packaged_sidecar_start_guidance()
+        ));
+    };
+    let candidate = bundled_dir.join(rust_backend_binary_name());
+    if candidate.is_file() {
+        Ok(candidate)
+    } else {
+        Err(format!(
+            "The bundled Rust sidecar binary was not found at '{}'. {}",
+            candidate.display(),
+            packaged_sidecar_start_guidance()
+        ))
+    }
 }
 
 fn rust_sidecar_binary_candidates(repo_root: &Path) -> Vec<PathBuf> {
@@ -671,7 +752,15 @@ fn rust_backend_binary_name() -> &'static str {
 }
 
 fn rust_sidecar_start_guidance() -> &'static str {
-    "Build the local development sidecar with `cargo build --manifest-path crates/emuchef-rust-backend/Cargo.toml`. Production bundled sidecar layout is deferred to Phase 6V."
+    "For development, run `npm run sidecar:dev` from apps/config-editor or `cargo build --manifest-path crates/emuchef-rust-backend/Cargo.toml` from the repository root. For packaged builds, run the Tauri build flow so `npm run sidecar:build` prepares the bundled Rust sidecar."
+}
+
+fn dev_sidecar_start_guidance() -> &'static str {
+    "Build the local development sidecar with `npm run sidecar:dev` from apps/config-editor, or run `cargo build --manifest-path crates/emuchef-rust-backend/Cargo.toml` from the repository root."
+}
+
+fn packaged_sidecar_start_guidance() -> &'static str {
+    "Run `npm run sidecar:build` before packaging, or use `npm run tauri build` so Tauri prepares and bundles the Rust sidecar via externalBin."
 }
 
 pub(crate) fn discover_repo_root() -> Option<PathBuf> {
@@ -777,6 +866,21 @@ mod tests {
             .expect("Rust sidecar binary should exist after cargo build")
     }
 
+    fn unique_temp_dir(prefix: &str) -> PathBuf {
+        static NEXT_TEMP_ID: AtomicU64 = AtomicU64::new(0);
+        let unique = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("system clock should be after epoch")
+            .as_nanos();
+        let sequence = NEXT_TEMP_ID.fetch_add(1, Ordering::Relaxed);
+        let dir = std::env::temp_dir().join(format!(
+            "emuchef-tauri-{prefix}-{}-{unique}-{sequence}",
+            std::process::id()
+        ));
+        fs::create_dir_all(&dir).expect("temp directory should be created");
+        dir
+    }
+
     fn assert_no_python_or_uv_spawn(spec: &SidecarCommandSpec) {
         let mut tokens = vec![spec.program.to_string_lossy().to_lowercase()];
         tokens.extend(spec.args.iter().map(|arg| arg.to_lowercase()));
@@ -861,7 +965,8 @@ mod tests {
     #[test]
     fn rust_sidecar_command_uses_only_backend_binary_and_sidecar_arg() {
         let binary = PathBuf::from("/tmp/emuchef-rust-backend");
-        let spec = rust_sidecar_command_spec(Some(&binary)).expect("override should build spec");
+        let spec = rust_sidecar_command_spec(Some(&binary), &SidecarRuntime::Dev)
+            .expect("override should build spec");
 
         assert_eq!(spec.program, binary);
         assert_eq!(spec.args, vec!["--sidecar"]);
@@ -883,6 +988,221 @@ mod tests {
                     .join(rust_backend_binary_name()),
             ]
         );
+    }
+
+    #[test]
+    fn packaged_sidecar_resolver_uses_bundled_directory_binary() {
+        let bundled_dir = unique_temp_dir("packaged-bundled-dir");
+        let binary = bundled_dir.join(rust_backend_binary_name());
+        fs::write(&binary, b"packaged sidecar").expect("packaged binary should be writable");
+
+        let spec = rust_sidecar_command_spec(
+            None,
+            &SidecarRuntime::Packaged {
+                bundled_dir: Some(bundled_dir.clone()),
+            },
+        )
+        .expect("packaged sidecar binary should resolve");
+
+        assert_eq!(spec.program, binary);
+        assert_eq!(spec.args, vec!["--sidecar"]);
+        assert_eq!(spec.cwd, None);
+        assert_no_python_or_uv_spawn(&spec);
+    }
+
+    #[test]
+    fn packaged_sidecar_resolver_does_not_fall_back_to_dev_targets() {
+        let bundled_dir = unique_temp_dir("missing-packaged-bundled-dir");
+
+        let err = rust_sidecar_command_spec(
+            None,
+            &SidecarRuntime::Packaged {
+                bundled_dir: Some(bundled_dir.clone()),
+            },
+        )
+        .expect_err("packaged mode must require the bundled sidecar binary");
+
+        assert!(err.contains("bundled Rust sidecar binary was not found"));
+        assert!(err.contains(&bundled_dir.display().to_string()));
+        assert!(!err.contains("target/debug"));
+    }
+
+    #[test]
+    fn packaged_sidecar_resolver_reports_missing_bundled_directory() {
+        let err = rust_sidecar_command_spec(None, &SidecarRuntime::Packaged { bundled_dir: None })
+            .expect_err("packaged mode should fail clearly without a bundled directory");
+
+        assert!(err.contains("Tauri bundled sidecar directory was not available"));
+        assert!(!err.contains("target/debug"));
+    }
+
+    #[test]
+    fn dev_sidecar_resolver_does_not_require_packaged_bundle_layout() {
+        let repo_root = unique_temp_dir("dev-repo");
+        let binary = repo_root
+            .join("crates")
+            .join("emuchef-rust-backend")
+            .join("target")
+            .join("debug")
+            .join(rust_backend_binary_name());
+        fs::create_dir_all(binary.parent().expect("binary should have parent"))
+            .expect("dev target directory should be created");
+        fs::write(&binary, b"dev sidecar").expect("dev binary should be writable");
+
+        let resolved = resolve_dev_rust_sidecar_binary(Some(&repo_root))
+            .expect("dev resolver should not require packaged resources");
+
+        assert_eq!(resolved, binary);
+    }
+
+    #[test]
+    fn missing_dev_sidecar_error_points_to_sidecar_dev_script() {
+        let repo_root = unique_temp_dir("missing-dev-repo");
+
+        let err = resolve_dev_rust_sidecar_binary(Some(&repo_root))
+            .expect_err("missing dev sidecar should fail clearly");
+
+        assert!(err.contains("Rust sidecar binary was not found"));
+        assert!(err.contains("npm run sidecar:dev"));
+        assert!(err.contains("cargo build --manifest-path"));
+    }
+
+    fn copy_sidecar_to_packaged_bundled_dir(source_binary: &Path) -> (PathBuf, PathBuf) {
+        let bundled_dir = unique_temp_dir("packaged-sidecar-smoke");
+        let packaged_binary = bundled_dir.join(rust_backend_binary_name());
+        fs::copy(source_binary, &packaged_binary)
+            .expect("sidecar binary should copy into simulated resource dir");
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+
+            let mut permissions = fs::metadata(&packaged_binary)
+                .expect("packaged binary metadata should be readable")
+                .permissions();
+            permissions.set_mode(0o755);
+            fs::set_permissions(&packaged_binary, permissions)
+                .expect("packaged binary permissions should be set");
+            let mode = fs::metadata(&packaged_binary)
+                .expect("packaged binary metadata should be readable")
+                .permissions()
+                .mode();
+            assert_ne!(
+                mode & 0o111,
+                0,
+                "packaged Rust sidecar should be executable on Unix/macOS"
+            );
+        }
+
+        assert!(packaged_binary.is_file());
+        assert_eq!(
+            packaged_binary.file_name().and_then(|name| name.to_str()),
+            Some(rust_backend_binary_name())
+        );
+        (bundled_dir, packaged_binary)
+    }
+
+    fn run_editor_sidecar_smoke_sequence(client: &mut SidecarClient) {
+        let temp_recipe = TempRecipe::copy_fixture("minimal_recipe.yaml");
+        let save_as_path = temp_recipe.dir.join("tauri_smoke_saved_as.yaml");
+
+        let specs_before_start = client
+            .request("listStepSpecs", None)
+            .expect("stateless listStepSpecs should start the Rust sidecar");
+        assert_eq!(specs_before_start["ok"], true);
+        assert!(specs_before_start["result"]["stepSpecs"].is_array());
+
+        let hello = client.request("hello", None).expect("hello should succeed");
+        assert_eq!(hello["ok"], true);
+        assert_eq!(hello["result"]["protocolVersion"], 1);
+        assert!(hello["result"]["capabilities"]
+            .as_array()
+            .unwrap()
+            .contains(&json!("saveRecipeAs")));
+
+        let opened = client
+            .request(
+                "openRecipe",
+                Some(json!({"path": temp_recipe.path, "authoredRoot": null})),
+            )
+            .expect("openRecipe should succeed");
+        assert_eq!(opened["ok"], true);
+        let document_id = opened["result"]["document"]["documentId"]
+            .as_str()
+            .unwrap()
+            .to_string();
+
+        let validated_path = client
+            .request(
+                "validateRecipePath",
+                Some(json!({"path": temp_recipe.path, "authoredRoot": null})),
+            )
+            .expect("stateless validateRecipePath should work after sidecar startup");
+        assert_eq!(validated_path["ok"], true);
+
+        let emitted_from_path = client
+            .request(
+                "emitRecipeYamlFromPath",
+                Some(json!({"path": temp_recipe.path, "authoredRoot": null})),
+            )
+            .expect("stateless emitRecipeYamlFromPath should work after sidecar startup");
+        assert_eq!(emitted_from_path["ok"], true);
+        assert!(emitted_from_path["result"]["yaml"]
+            .as_str()
+            .unwrap()
+            .contains("id: phase6e.minimal"));
+
+        let fetched = client
+            .request("getDocument", Some(json!({"documentId": document_id})))
+            .expect("getDocument should succeed");
+        assert_eq!(fetched["ok"], true);
+
+        let changed = client
+            .request(
+                "applyRecipeCommand",
+                Some(json!({
+                    "documentId": document_id,
+                    "command": {"type": "SetOverviewField", "field": "name", "value": "Tauri Rust Smoke"}
+                })),
+            )
+            .expect("applyRecipeCommand should succeed");
+        assert_eq!(changed["ok"], true);
+        assert_eq!(changed["result"]["commandResult"]["changed"], true);
+
+        let validated = client
+            .request("validate", Some(json!({"documentId": document_id})))
+            .expect("validate should succeed");
+        assert_eq!(validated["ok"], true);
+        assert!(validated["result"]["diagnostics"].as_array().is_some());
+
+        let emitted = client
+            .request("emitYaml", Some(json!({"documentId": document_id})))
+            .expect("emitYaml should succeed");
+        assert_eq!(emitted["ok"], true);
+        assert!(emitted["result"]["yaml"]
+            .as_str()
+            .unwrap()
+            .contains("name: Tauri Rust Smoke"));
+
+        let saved = client
+            .request("saveRecipe", Some(json!({"documentId": document_id})))
+            .expect("saveRecipe should succeed");
+        assert_eq!(saved["ok"], true);
+        assert_eq!(saved["result"]["document"]["dirty"], false);
+
+        let saved_as = client
+            .request(
+                "saveRecipeAs",
+                Some(json!({"documentId": document_id, "path": save_as_path})),
+            )
+            .expect("saveRecipeAs should succeed");
+        assert_eq!(saved_as["ok"], true);
+        assert_eq!(saved_as["result"]["document"]["documentId"], document_id);
+        assert!(save_as_path.exists());
+
+        let closed = client
+            .request("closeDocument", Some(json!({"documentId": document_id})))
+            .expect("closeDocument should succeed");
+        assert_eq!(closed["ok"], true);
     }
 
     #[test]
@@ -1008,7 +1328,7 @@ mod tests {
 
     #[test]
     fn status_does_not_start_sidecar() {
-        let mut client = SidecarClient::new();
+        let mut client = SidecarClient::new(SidecarRuntime::Dev);
 
         assert_eq!(
             client.status(),
@@ -1029,7 +1349,7 @@ mod tests {
 
     #[test]
     fn incompatible_sidecar_status_reports_compatibility_failure() {
-        let mut client = SidecarClient::new();
+        let mut client = SidecarClient::new(SidecarRuntime::Dev);
         client.mark_incompatible_for_test(
             "Backend is missing required capabilities: getRefIndex.".to_string(),
             Some(1),
@@ -1060,7 +1380,7 @@ mod tests {
 
     #[test]
     fn exited_sidecar_is_not_restarted_for_requests() {
-        let mut client = SidecarClient::new();
+        let mut client = SidecarClient::new(SidecarRuntime::Dev);
         client.mark_exited_for_test();
 
         let err = client
@@ -1074,106 +1394,17 @@ mod tests {
     fn actual_rust_sidecar_process_handles_editor_smoke_sequence() {
         let binary = rust_backend_binary_for_test();
         let mut client = SidecarClient::with_binary_path_for_test(binary);
-        let temp_recipe = TempRecipe::copy_fixture("minimal_recipe.yaml");
-        let save_as_path = temp_recipe.dir.join("tauri_smoke_saved_as.yaml");
+        run_editor_sidecar_smoke_sequence(&mut client);
+    }
 
-        let specs_before_start = client
-            .request("listStepSpecs", None)
-            .expect("stateless listStepSpecs should start the Rust sidecar");
-        assert_eq!(specs_before_start["ok"], true);
-        assert!(specs_before_start["result"]["stepSpecs"].is_array());
+    #[test]
+    fn packaged_bundled_sidecar_process_handles_editor_smoke_sequence() {
+        let binary = rust_backend_binary_for_test();
+        let (bundled_dir, _packaged_binary) = copy_sidecar_to_packaged_bundled_dir(&binary);
+        let mut client = SidecarClient::with_runtime_for_test(SidecarRuntime::Packaged {
+            bundled_dir: Some(bundled_dir),
+        });
 
-        let hello = client.request("hello", None).expect("hello should succeed");
-        assert_eq!(hello["ok"], true);
-        assert_eq!(hello["result"]["protocolVersion"], 1);
-        assert!(hello["result"]["capabilities"]
-            .as_array()
-            .unwrap()
-            .contains(&json!("saveRecipeAs")));
-
-        let opened = client
-            .request(
-                "openRecipe",
-                Some(json!({"path": temp_recipe.path, "authoredRoot": null})),
-            )
-            .expect("openRecipe should succeed");
-        assert_eq!(opened["ok"], true);
-        let document_id = opened["result"]["document"]["documentId"]
-            .as_str()
-            .unwrap()
-            .to_string();
-
-        let validated_path = client
-            .request(
-                "validateRecipePath",
-                Some(json!({"path": temp_recipe.path, "authoredRoot": null})),
-            )
-            .expect("stateless validateRecipePath should work after sidecar startup");
-        assert_eq!(validated_path["ok"], true);
-
-        let emitted_from_path = client
-            .request(
-                "emitRecipeYamlFromPath",
-                Some(json!({"path": temp_recipe.path, "authoredRoot": null})),
-            )
-            .expect("stateless emitRecipeYamlFromPath should work after sidecar startup");
-        assert_eq!(emitted_from_path["ok"], true);
-        assert!(emitted_from_path["result"]["yaml"]
-            .as_str()
-            .unwrap()
-            .contains("id: phase6e.minimal"));
-
-        let fetched = client
-            .request("getDocument", Some(json!({"documentId": document_id})))
-            .expect("getDocument should succeed");
-        assert_eq!(fetched["ok"], true);
-
-        let changed = client
-            .request(
-                "applyRecipeCommand",
-                Some(json!({
-                    "documentId": document_id,
-                    "command": {"type": "SetOverviewField", "field": "name", "value": "Tauri Rust Smoke"}
-                })),
-            )
-            .expect("applyRecipeCommand should succeed");
-        assert_eq!(changed["ok"], true);
-        assert_eq!(changed["result"]["commandResult"]["changed"], true);
-
-        let validated = client
-            .request("validate", Some(json!({"documentId": document_id})))
-            .expect("validate should succeed");
-        assert_eq!(validated["ok"], true);
-        assert!(validated["result"]["diagnostics"].as_array().is_some());
-
-        let emitted = client
-            .request("emitYaml", Some(json!({"documentId": document_id})))
-            .expect("emitYaml should succeed");
-        assert_eq!(emitted["ok"], true);
-        assert!(emitted["result"]["yaml"]
-            .as_str()
-            .unwrap()
-            .contains("name: Tauri Rust Smoke"));
-
-        let saved = client
-            .request("saveRecipe", Some(json!({"documentId": document_id})))
-            .expect("saveRecipe should succeed");
-        assert_eq!(saved["ok"], true);
-        assert_eq!(saved["result"]["document"]["dirty"], false);
-
-        let saved_as = client
-            .request(
-                "saveRecipeAs",
-                Some(json!({"documentId": document_id, "path": save_as_path})),
-            )
-            .expect("saveRecipeAs should succeed");
-        assert_eq!(saved_as["ok"], true);
-        assert_eq!(saved_as["result"]["document"]["documentId"], document_id);
-        assert!(save_as_path.exists());
-
-        let closed = client
-            .request("closeDocument", Some(json!({"documentId": document_id})))
-            .expect("closeDocument should succeed");
-        assert_eq!(closed["ok"], true);
+        run_editor_sidecar_smoke_sequence(&mut client);
     }
 }

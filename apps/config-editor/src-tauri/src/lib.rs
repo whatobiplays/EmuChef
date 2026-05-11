@@ -5,7 +5,9 @@ pub mod sidecar_client;
 pub fn run() {
     tauri::Builder::default()
         .plugin(tauri_plugin_dialog::init())
-        .manage(sidecar_client::SidecarState::default())
+        .manage(sidecar_client::SidecarState::new(
+            sidecar_client::SidecarRuntime::for_current_process(),
+        ))
         .menu(|app| menu::build_editor_menu(app, menu::EditorMenuState::default()))
         .on_menu_event(|app, event| {
             menu::handle_menu_event(app, event.id().as_ref());

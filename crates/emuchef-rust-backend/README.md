@@ -1,9 +1,10 @@
 # EmuChef Rust Backend Skeleton
 
 This package is an experimental Rust backend for the EmuChef config editor
-protocol. It is runnable independently and is the Phase 6U local/dev sidecar
-runtime used by the Tauri editor. Production bundling and packaging remain
-separate Phase 6V work.
+protocol. It is runnable independently and is the Rust sidecar runtime used by
+the Tauri editor. Phase 6V adds host-target Tauri v2 `externalBin` packaging for
+this process; Python deletion and broad CLI/planner/executor replacement remain
+separate later work.
 
 Through Phase 6U it implements only:
 
@@ -88,17 +89,40 @@ not expose persistent document session APIs.
 Reporting these capabilities does not mean the Rust backend has full product
 parity with Python. Phase 6U hard-wires the Tauri editor runtime to launch this
 Rust sidecar in local/dev flows with no backend selector, toggle, environment
-variable, config option, UI switch, or Python fallback. The local/dev Tauri
-resolver expects a built `emuchef-rust-backend` binary under the crate-local or
-repo-root Cargo `target/debug` output directories; production bundled sidecar
-layout is deferred to Phase 6V.
+variable, config option, UI switch, or Python fallback. Phase 6V keeps that
+hard-cutover policy and packages the same Rust process as a Tauri v2
+`externalBin`. The app-local Tauri hooks build and copy debug or release
+sidecar artifacts before normal Tauri dev/build commands.
 
 The Python backend, Python CLI, and PySide6 editor remain in the repository.
 Python deletion and broad CLI/planner/executor replacement remain later confirmed
 cutover work.
 
+## Tauri Sidecar Packaging
+
+The Tauri config editor packages this crate as a separate sidecar process with
+Tauri v2 `externalBin`; it does not link the backend as a library. App-local
+commands live in `apps/config-editor`:
+
+```bash
+npm run sidecar:dev
+npm run sidecar:build
+npm run tauri build
+```
+
+`sidecar:dev` builds the debug Cargo binary and prepares the Tauri externalBin
+input for development. `sidecar:build` builds the release Cargo binary and
+prepares `src-tauri/binaries/emuchef-rust-backend-$TARGET_TRIPLE`, adding
+`.exe` for Windows triples. The script verifies `rustc --print host-tuple` and
+only supports host-target preparation in Phase 6V; cross-compilation and release
+CI are deferred.
+
+Tauri strips the target triple when bundling. Packaged apps launch
+`emuchef-rust-backend --sidecar` from the app executable directory, while
+development and tests continue to resolve Cargo `target/debug` binaries.
+
 This package does not implement full planner behavior, full executor behavior,
-Python bundling, or production packaging. Phase 6K replaced the earlier basic
+Python bundling, or Python deletion. Phase 6K replaced the earlier basic
 validation skeleton with fixture-covered editor-local validation parity for the
 current Rust recipe model scope. Phase 6L adds fixture-covered
 authoredRoot/catalog-context validation for Python-verified recipe dependency
@@ -114,7 +138,7 @@ confined to explicit test-owned temp roots. Phase 6Q adds selected fake-device
 ADB parity. Phase 6R adds an internal real-ADB adapter foundation and ignored
 manual tests, but normal tests still do not perform real device checks, real
 network downloads, permission grants, ADB/device operations, app lifecycle
-operations, install operations, or production packaging. Python remains the
+operations, or install operations. Python remains the
 reference for broader CLI/planner/executor behavior until parity is confirmed.
 
 ## Phase 6S CLI Scope
@@ -122,7 +146,7 @@ reference for broader CLI/planner/executor behavior until parity is confirmed.
 Phase 6S adds a minimal Rust CLI skeleton inside this standalone crate. It is a
 crate-local experimental parity surface, not the user-facing replacement for the
 Python `emuchef` CLI. The Python CLI entrypoint in `pyproject.toml` remains
-unchanged, production packaging is unchanged, and Phase 6U does not replace the
+unchanged, and the Rust CLI subset is not packaged as a replacement for the
 Python CLI. There is no backend selector, backend toggle, environment variable,
 config option, UI switch, or Python fallback for the Tauri editor runtime.
 
@@ -1605,7 +1629,7 @@ cargo run --manifest-path crates/emuchef-rust-backend/Cargo.toml -- '{"type":"va
 Expected `hello` stdout is one JSON response envelope:
 
 ```json
-{"ok":true,"result":{"protocolVersion":1,"capabilities":["listStepSpecs","emitRecipeYamlFromPath","validateRecipePath","openRecipe","getDocument","saveRecipe","closeDocument","applyRecipeCommand","undo","redo","emitYaml","validate","getRefIndex"]}}
+{"ok":true,"result":{"protocolVersion":1,"capabilities":["listStepSpecs","emitRecipeYamlFromPath","validateRecipePath","openRecipe","getDocument","saveRecipe","saveRecipeAs","closeDocument","applyRecipeCommand","undo","redo","emitYaml","validate","getRefIndex"]}}
 ```
 
 `listStepSpecs` returns `{"stepSpecs":[...]}` inside the success envelope.
@@ -1626,7 +1650,7 @@ printf '%s\n' '{"id":"validate-1","type":"validateRecipePath","payload":{"path":
 Expected `hello` stdout is one JSON response line:
 
 ```json
-{"id":"hello-1","ok":true,"result":{"protocolVersion":1,"capabilities":["listStepSpecs","emitRecipeYamlFromPath","validateRecipePath","openRecipe","getDocument","saveRecipe","closeDocument","applyRecipeCommand","undo","redo","emitYaml","validate","getRefIndex"]}}
+{"id":"hello-1","ok":true,"result":{"protocolVersion":1,"capabilities":["listStepSpecs","emitRecipeYamlFromPath","validateRecipePath","openRecipe","getDocument","saveRecipe","saveRecipeAs","closeDocument","applyRecipeCommand","undo","redo","emitYaml","validate","getRefIndex"]}}
 ```
 
 Session APIs are sidecar-only. A practical manual smoke is:
