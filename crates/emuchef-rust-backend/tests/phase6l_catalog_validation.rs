@@ -1,0 +1,448 @@
+use std::fs;
+use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::time::{SystemTime, UNIX_EPOCH};
+
+use emuchef_rust_backend::{jsonl, protocol, run_with_args_and_input};
+use serde_json::{json, Value};
+
+fn fixture_root() -> PathBuf {
+    Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("tests")
+        .join("fixtures")
+        .join("authored_root")
+}
+
+fn workspace_root(name: &str) -> PathBuf {
+    fixture_root().join(name)
+}
+
+fn authored_root(name: &str) -> PathBuf {
+    workspace_root(name).join("authored")
+}
+
+fn recipe_path(workspace: &str, name: &str) -> PathBuf {
+    authored_root(workspace).join("recipes").join(name)
+}
+
+fn parse_stdout_json(stdout: &str) -> Value {
+    let lines: Vec<&str> = stdout.lines().collect();
+    assert_eq!(lines.len(), 1, "expected exactly one JSON response line");
+    serde_json::from_str(lines[0]).expect("response should be valid JSON")
+}
+
+fn one_shot_response(request: Value) -> Value {
+    let output = run_with_args_and_input(&[request.to_string()], "");
+    assert_eq!(output.exit_code, 0);
+    assert_eq!(output.stderr, "");
+    parse_stdout_json(&output.stdout)
+}
+
+fn sidecar_responses(requests: Vec<Value>) -> Vec<Value> {
+    let input = format!(
+        "{}\n",
+        requests
+            .into_iter()
+            .map(|request| request.to_string())
+            .collect::<Vec<_>>()
+            .join("\n")
+    );
+    jsonl::process_jsonl(&input)
+        .lines()
+        .map(|line| serde_json::from_str(line).expect("sidecar response should be valid JSON"))
+        .collect()
+}
+
+struct TempWorkspace {
+    dir: PathBuf,
+}
+
+impl TempWorkspace {
+    fn copy_fixture(name: &str) -> Self {
+        static NEXT_TEMP_ID: AtomicU64 = AtomicU64::new(0);
+        let unique = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("system clock should be after epoch")
+            .as_nanos();
+        let sequence = NEXT_TEMP_ID.fetch_add(1, Ordering::Relaxed);
+        let dir = std::env::temp_dir().join(format!(
+            "emuchef-rust-backend-phase6l-{}-{unique}-{sequence}",
+            std::process::id()
+        ));
+        copy_dir_all(&workspace_root(name), &dir);
+        Self { dir }
+    }
+
+    fn authored_root(&self) -> PathBuf {
+        self.dir.join("authored")
+    }
+
+    fn recipe_path(&self, name: &str) -> PathBuf {
+        self.authored_root().join("recipes").join(name)
+    }
+}
+
+impl Drop for TempWorkspace {
+    fn drop(&mut self) {
+        let _ = fs::remove_dir_all(&self.dir);
+    }
+}
+
+fn copy_dir_all(source: &Path, destination: &Path) {
+    fs::create_dir_all(destination).expect("destination directory should be created");
+    for entry in fs::read_dir(source).expect("source directory should be readable") {
+        let entry = entry.expect("source entry should be readable");
+        let source_path = entry.path();
+        let destination_path = destination.join(entry.file_name());
+        if source_path.is_dir() {
+            copy_dir_all(&source_path, &destination_path);
+        } else {
+            fs::copy(&source_path, &destination_path).expect("fixture file should copy");
+        }
+    }
+}
+
+fn validate_path(path: &Path, authored_root: Option<&Path>) -> Value {
+    let mut payload = json!({ "path": path });
+    if let Some(root) = authored_root {
+        payload["authoredRoot"] = json!(root);
+    }
+    one_shot_response(json!({
+        "type": "validateRecipePath",
+        "payload": payload
+    }))
+}
+
+fn validate_path_with_null_root(path: &Path) -> Value {
+    one_shot_response(json!({
+        "type": "validateRecipePath",
+        "payload": {"path": path, "authoredRoot": null}
+    }))
+}
+
+fn diagnostic_fields(diagnostic: &Value) -> Value {
+    json!({
+        "severity": diagnostic["severity"],
+        "code": diagnostic["code"],
+        "objectKind": diagnostic["objectKind"],
+        "objectId": diagnostic["objectId"],
+        "field": diagnostic["field"],
+    })
+}
+
+fn diagnostic_set(response: &Value) -> Vec<Value> {
+    response["result"]["diagnostics"]
+        .as_array()
+        .expect("diagnostics should be an array")
+        .iter()
+        .map(diagnostic_fields)
+        .collect()
+}
+
+fn document_diagnostic_set(response: &Value) -> Vec<Value> {
+    response["result"]["document"]["diagnostics"]
+        .as_array()
+        .expect("document diagnostics should be an array")
+        .iter()
+        .map(diagnostic_fields)
+        .collect()
+}
+
+fn assert_recipe_not_found(diagnostics: &[Value], recipe_id: &str, field: &str) {
+    assert!(
+        diagnostics.contains(&json!({
+            "severity": "error",
+            "code": "recipe_not_found",
+            "objectKind": "recipe",
+            "objectId": recipe_id,
+            "field": field,
+        })),
+        "expected recipe_not_found in {diagnostics:#?}"
+    );
+}
+
+fn assert_dependency_cycle(diagnostics: &[Value], recipe_id: &str) {
+    assert!(
+        diagnostics.contains(&json!({
+            "severity": "error",
+            "code": "dependency_cycle",
+            "objectKind": "recipe",
+            "objectId": recipe_id,
+            "field": "recipe_dependencies",
+        })),
+        "expected dependency_cycle in {diagnostics:#?}"
+    );
+}
+
+fn assert_no_limited_context(diagnostics: &[Value]) {
+    assert!(
+        diagnostics
+            .iter()
+            .all(|diagnostic| diagnostic["code"] != "validation_context_limited"),
+        "did not expect limited-context warning in {diagnostics:#?}"
+    );
+}
+
+fn assert_limited_context(diagnostics: &[Value], recipe_id: &str) {
+    assert!(
+        diagnostics.contains(&json!({
+            "severity": "warning",
+            "code": "validation_context_limited",
+            "objectKind": "recipe",
+            "objectId": recipe_id,
+            "field": null,
+        })),
+        "expected limited-context warning in {diagnostics:#?}"
+    );
+}
+
+#[test]
+fn phase6l_capabilities_remain_unchanged() {
+    assert_eq!(
+        protocol::CAPABILITIES,
+        &[
+            "listStepSpecs",
+            "emitRecipeYamlFromPath",
+            "validateRecipePath",
+            "openRecipe",
+            "getDocument",
+            "saveRecipe",
+            "closeDocument",
+            "applyRecipeCommand",
+            "undo",
+            "redo",
+            "emitYaml",
+            "validate",
+            "getRefIndex",
+        ]
+    );
+}
+
+#[test]
+fn validate_recipe_path_uses_explicit_authored_root_but_does_not_infer_it() {
+    let path = recipe_path("complete", "main.yaml");
+    let inferred = validate_path(&path, None);
+    assert_eq!(inferred["ok"], true);
+    let inferred_diagnostics = diagnostic_set(&inferred);
+    assert_limited_context(&inferred_diagnostics, "phase6l.main");
+
+    let null_root = validate_path_with_null_root(&path);
+    assert_eq!(null_root["ok"], true);
+    let null_diagnostics = diagnostic_set(&null_root);
+    assert_limited_context(&null_diagnostics, "phase6l.main");
+
+    let explicit = validate_path(&path, Some(&authored_root("complete")));
+    assert_eq!(explicit["ok"], true);
+    assert_eq!(diagnostic_set(&explicit), Vec::<Value>::new());
+}
+
+#[test]
+fn nonexistent_non_null_authored_root_is_empty_catalog_context_not_request_failure() {
+    let path = recipe_path("complete", "main.yaml");
+    let missing_root = workspace_root("complete").join("missing-authored-root");
+    let response = validate_path(&path, Some(&missing_root));
+
+    assert_eq!(response["ok"], true);
+    let diagnostics = diagnostic_set(&response);
+    assert_no_limited_context(&diagnostics);
+    assert_recipe_not_found(&diagnostics, "phase6l.main", "recipe_dependencies[0]");
+}
+
+#[test]
+fn valid_authored_root_reports_recipe_dependency_diagnostics() {
+    let response = validate_path(
+        &recipe_path("missing_dependency", "missing_dependency.yaml"),
+        Some(&authored_root("missing_dependency")),
+    );
+
+    assert_eq!(response["ok"], true);
+    let diagnostics = diagnostic_set(&response);
+    assert_no_limited_context(&diagnostics);
+    assert_recipe_not_found(
+        &diagnostics,
+        "phase6l.missing_dependency",
+        "recipe_dependencies[0]",
+    );
+}
+
+#[test]
+fn recipe_dependency_cycles_use_validation_local_graph_checks() {
+    let response = validate_path(
+        &recipe_path("dependency_cycle", "cycle_a.yaml"),
+        Some(&authored_root("dependency_cycle")),
+    );
+
+    assert_eq!(response["ok"], true);
+    let diagnostics = diagnostic_set(&response);
+    assert_no_limited_context(&diagnostics);
+    assert_dependency_cycle(&diagnostics, "phase6l.cycle_a");
+}
+
+#[test]
+fn catalog_scan_uses_only_python_verified_top_level_globs() {
+    // Python src/emuchef/io/validation.py scans exactly these top-level globs:
+    // apps/*.y*ml, recipes/*.y*ml, device_profiles/*.y*ml, device_plans/*.y*ml.
+    // This nested recipe is intentionally ignored, so the dependency is missing.
+    let response = validate_path(
+        &recipe_path("nested_ignored", "main.yaml"),
+        Some(&authored_root("nested_ignored")),
+    );
+
+    assert_eq!(response["ok"], true);
+    let diagnostics = diagnostic_set(&response);
+    assert_recipe_not_found(
+        &diagnostics,
+        "phase6l.nested_main",
+        "recipe_dependencies[0]",
+    );
+}
+
+#[test]
+fn open_recipe_infers_and_normalizes_authored_root_like_python() {
+    let inferred_path = recipe_path("complete", "main.yaml");
+    let repo_root = workspace_root("complete");
+    let responses = sidecar_responses(vec![
+        json!({
+            "id": "open-inferred",
+            "type": "openRecipe",
+            "payload": {"path": inferred_path}
+        }),
+        json!({
+            "id": "open-null-inferred",
+            "type": "openRecipe",
+            "payload": {"path": inferred_path, "authoredRoot": null}
+        }),
+        json!({
+            "id": "open-normalized",
+            "type": "openRecipe",
+            "payload": {"path": inferred_path, "authoredRoot": repo_root}
+        }),
+    ]);
+
+    assert_eq!(responses.len(), 3);
+    for response in &responses {
+        assert_eq!(response["ok"], true);
+        assert_eq!(
+            response["result"]["document"]["authoredRoot"],
+            authored_root("complete")
+                .canonicalize()
+                .unwrap()
+                .to_string_lossy()
+                .to_string()
+        );
+        assert_eq!(document_diagnostic_set(response), Vec::<Value>::new());
+    }
+}
+
+#[test]
+fn open_recipe_reports_duplicate_recipe_id_conflict_against_catalog() {
+    let responses = sidecar_responses(vec![json!({
+        "id": "open",
+        "type": "openRecipe",
+        "payload": {
+            "path": recipe_path("duplicate", "target_duplicate.yaml"),
+            "authoredRoot": authored_root("duplicate")
+        }
+    })]);
+
+    assert_eq!(responses.len(), 1);
+    assert_eq!(responses[0]["ok"], true);
+    assert!(document_diagnostic_set(&responses[0]).contains(&json!({
+        "severity": "error",
+        "code": "recipe_id_conflict",
+        "objectKind": "recipe",
+        "objectId": "phase6l.duplicate",
+        "field": "id",
+    })));
+}
+
+#[test]
+fn duplicate_recipe_id_conflict_does_not_depend_on_catalog_file_order() {
+    let responses = sidecar_responses(vec![json!({
+        "id": "open",
+        "type": "openRecipe",
+        "payload": {
+            "path": recipe_path("duplicate_reverse", "a_target_duplicate.yaml"),
+            "authoredRoot": authored_root("duplicate_reverse")
+        }
+    })]);
+
+    assert_eq!(responses.len(), 1);
+    assert_eq!(responses[0]["ok"], true);
+    assert!(document_diagnostic_set(&responses[0]).contains(&json!({
+        "severity": "error",
+        "code": "recipe_id_conflict",
+        "objectKind": "recipe",
+        "objectId": "phase6l.duplicate_reverse",
+        "field": "id",
+    })));
+}
+
+#[test]
+fn commands_undo_redo_save_and_session_validate_reuse_stored_authored_root() {
+    let workspace = TempWorkspace::copy_fixture("missing_dependency");
+    let path = workspace.recipe_path("missing_dependency.yaml");
+    let responses = sidecar_responses(vec![
+        json!({
+            "id": "open",
+            "type": "openRecipe",
+            "payload": {"path": path}
+        }),
+        json!({
+            "id": "command",
+            "type": "applyRecipeCommand",
+            "payload": {
+                "documentId": "doc-1",
+                "command": {"type": "SetOverviewField", "field": "name", "value": "Renamed Missing Dependency"}
+            }
+        }),
+        json!({
+            "id": "validate-after-command",
+            "type": "validate",
+            "payload": {"documentId": "doc-1"}
+        }),
+        json!({
+            "id": "undo",
+            "type": "undo",
+            "payload": {"documentId": "doc-1"}
+        }),
+        json!({
+            "id": "redo",
+            "type": "redo",
+            "payload": {"documentId": "doc-1"}
+        }),
+        json!({
+            "id": "save",
+            "type": "saveRecipe",
+            "payload": {"documentId": "doc-1"}
+        }),
+    ]);
+
+    assert_eq!(responses.len(), 6);
+    for response in &responses {
+        assert_eq!(response["ok"], true, "{response:#?}");
+        let diagnostics = if response["result"].get("document").is_some() {
+            document_diagnostic_set(response)
+        } else {
+            diagnostic_set(response)
+        };
+        assert_no_limited_context(&diagnostics);
+        assert_recipe_not_found(
+            &diagnostics,
+            "phase6l.missing_dependency",
+            "recipe_dependencies[0]",
+        );
+    }
+
+    let expected_root = workspace.authored_root().canonicalize().unwrap();
+    assert_eq!(
+        responses[0]["result"]["document"]["authoredRoot"],
+        expected_root.to_string_lossy().to_string()
+    );
+    for response in [&responses[1], &responses[3], &responses[4], &responses[5]] {
+        assert_eq!(
+            response["result"]["document"]["authoredRoot"],
+            expected_root.to_string_lossy().to_string()
+        );
+    }
+}

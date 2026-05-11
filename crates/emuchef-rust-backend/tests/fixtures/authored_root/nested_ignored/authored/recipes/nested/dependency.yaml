@@ -1,0 +1,11 @@
+schema_version: 1
+kind: recipe
+id: phase6l.nested_dependency
+name: Phase 6L Nested Dependency
+recipe_dependencies: []
+provides:
+  features: []
+inputs: {}
+artifacts: {}
+artifact_groups: {}
+steps: []

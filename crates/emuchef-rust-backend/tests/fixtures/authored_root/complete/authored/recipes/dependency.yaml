@@ -1,0 +1,11 @@
+schema_version: 1
+kind: recipe
+id: phase6l.dependency
+name: Phase 6L Dependency
+recipe_dependencies: []
+provides:
+  features: []
+inputs: {}
+artifacts: {}
+artifact_groups: {}
+steps: []

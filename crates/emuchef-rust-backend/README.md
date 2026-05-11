@@ -4,7 +4,7 @@ This package is an experimental Rust backend skeleton for the EmuChef config
 editor protocol. It is standalone and runnable independently of the Tauri
 editor.
 
-Phase 6J.2 implements only:
+Through Phase 6L it implements only:
 
 - `hello`
 - `listStepSpecs`
@@ -24,8 +24,11 @@ Phase 6J.2 implements only:
 - structured API errors
 - one-shot JSON request handling
 - JSON Lines sidecar request handling
-- authored recipe YAML load/emit skeletons for focused Phase 6E fixtures
-- basic authored recipe validation diagnostics for focused Phase 6E fixtures
+- authored recipe YAML load/emit skeletons for focused migration fixtures
+- editor-local authored recipe validation diagnostics for focused Phase 6K
+  fixtures
+- authoredRoot/catalog-context recipe validation diagnostics for focused Phase
+  6L fixtures
 - in-memory sidecar document sessions backed by the authored recipe model
 - snapshot undo/redo for open document sessions
 - the Python-compatible `SetOverviewField` command for recipe `name` and
@@ -67,22 +70,24 @@ requests in JSONL sidecar mode only. One-shot mode remains stateless and does
 not expose persistent document session APIs.
 
 Reporting these capabilities still does not make this backend compatible with
-the Tauri editor. Phase 6J.2 reports the same ordered capability list as Phase
-6H/6I/6J.1; capability parity is not semantic parity. The Rust backend is still
-not editor-ready and is not wired into Tauri.
+the Tauri editor. Phase 6L reports the same ordered capability list as Phase
+6H/6I/6J.1/6J.2/6K; capability parity is not full backend parity. The Rust
+backend is still not editor-ready and is not wired into Tauri.
 There is no env var, CLI flag, config file, README path, or documented launch
-path for using this Rust backend as the Tauri editor backend in Phase 6J.2.
+path for using this Rust backend as the Tauri editor backend in Phase 6L.
 
 The Python backend remains the reference implementation. This Rust package is
 not a replacement backend and is not selected by the Tauri editor.
 
 This package does not implement planner behavior, executor behavior, Python
-bundling, or production packaging. Its validation is a basic skeleton only; it
-does not perform full catalog-context validation, dependency graph validation,
-planner contract validation, artifact expansion validation, device checks, or
-executor checks. Phase 6J.2 completes the current external Python editor command
-type inventory exposed through `applyRecipeCommand`; semantic parity is still
-fixture-covered and Python remains the reference implementation.
+bundling, or production packaging. Phase 6K replaced the earlier basic
+validation skeleton with fixture-covered editor-local validation parity for the
+current Rust recipe model scope. Phase 6L adds fixture-covered
+authoredRoot/catalog-context validation for Python-verified recipe dependency
+diagnostics. Rust still does not perform planner graph construction, execution
+plan generation, artifact expansion validation, device checks, executor checks,
+or Tauri integration. Python remains the reference implementation until parity
+is confirmed.
 
 ## Document Session Scope
 
@@ -171,8 +176,9 @@ empty DTO string, and omit `description:` from canonical YAML. Step `id` and
 `UpdateStepDependencies` is a full replacement command. It preserves authored
 order, normalizes dependency ids, rejects duplicate dependency ids, and
 intentionally allows missing dependency targets because Python command
-application allows them. The Rust backend does not add planner dependency
-validation, cycle checks, or execution-order inference in Phase 6J.2.
+application allows them. Phase 6K validation reports local missing-target and
+cycle diagnostics after the command applies; command application still does not
+construct a planner graph or infer execution order.
 
 Phase 6J.2 expands `applyRecipeCommand` to the remaining current external
 Python step params and advanced internals command families:
@@ -232,28 +238,29 @@ does not expand skip/verify or advanced internals cleanup in Phase 6J.2.
 Artifact groups are not RefIndex sources; group mutations do not create
 `artifact_groups.*` refs.
 
-Changing commands regenerate canonical YAML first, then rerun the Phase 6E basic
-validation skeleton for the current in-memory recipe. No-op commands return
+Changing commands regenerate canonical YAML first, then rerun the Phase 6K
+editor-local validation checks for the current in-memory recipe. No-op commands return
 `changed: false` and do not push undo history. Invalid commands leave the
 stored document unchanged. Successful changing commands also return a refreshed
 document DTO, including current dirty/canUndo/canRedo state and a RefIndex
 derived from the mutated recipe.
 
 `saveRecipe` writes the current canonical YAML back to the document's current
-path, updates the saved baseline after a successful write, reruns the Phase 6E
-basic validation skeleton, preserves undo/redo stacks, and returns the current
+path, updates the saved baseline after a successful write, reruns Phase 6K
+editor-local validation, preserves undo/redo stacks, and returns the current
 document DTO. Save tests must use temporary copies of fixtures; do not point save
 tests at checked-in fixture files.
 
-Undo/redo use content snapshots of the recipe model, current canonical YAML, and
-diagnostics. The saved baseline is not part of content snapshots; dirty state is
-always recalculated from the current canonical YAML versus the most recent
-opened/saved baseline. Undo and redo on empty stacks match Python behavior by
-returning `changed: false` success responses with the current document.
+Undo/redo use content snapshots of the recipe model and current canonical YAML,
+then rerun validation after restoring changed content. The saved baseline is not
+part of content snapshots; dirty state is always recalculated from the current
+canonical YAML versus the most recent opened/saved baseline. Undo and redo on
+empty stacks match Python behavior by returning `changed: false` success
+responses with the current document.
 
 `emitYaml` returns the current in-memory canonical YAML for an open document.
-`validate` reruns the Phase 6E basic validation skeleton for the current
-in-memory recipe and returns diagnostics only.
+`validate` reruns Phase 6K editor-local validation for the current in-memory
+recipe and returns diagnostics only.
 
 `getRefIndex` returns generated RefIndex data for the current in-memory document
 state. `RecipeDocumentDto.refIndex` is no longer the Phase 6F empty placeholder
@@ -346,14 +353,76 @@ lists, objects, `skip_if`, or `verify` remain literal authored data.
 {"diagnostics":[]}
 ```
 
-For Phase 6E fixtures it mirrors Python diagnostic codes/messages where
-practical. Known skeleton differences:
+For Phase 6K and Phase 6L fixtures it targets functional/semantic parity with Python
+editor-facing diagnostics. Structured diagnostic fields are the primary parity
+contract: `severity`, `code`, `objectKind`, `objectId`, `field`, and diagnostic
+presence. Byte-for-byte `message` equality is best effort and not required when
+the message has the same meaning.
+
+Phase 6K editor-local validation covers only data available from the loaded
+recipe, embedded StepSpecs, and local authored refs:
+
+- load/schema shape diagnostics for the current Rust YAML model
+- removed top-level `permissions`
+- local authored step dependency missing-target and cycle diagnostics
+- StepSpec missing required params and literal/ref mode checks
+- exact top-level `ParamValue::Ref` validation for inputs, artifacts, artifact
+  runtime fields, steps, and primary step outputs
+- nested ref-shaped literals in params, `skip_if`, and `verify` remaining
+  literal data
+
+Known Phase 6K limits:
 
 - Malformed YAML parser messages come from `serde_yaml`, so wording and source
   spans can differ from PyYAML. The diagnostic shape, severity, code, file, and
   object fields are still matched.
-- Supplying a non-null `authoredRoot` is accepted for payload compatibility, but
-  Rust does not load catalogs or perform cross-file validation in Phase 6E.
+- Planner and executor validation remain unimplemented.
+- Broad built-in plugin hook validation is not complete. Phase 6K implements only
+  fixture-required local checks; omitted plugin-hook diagnostics remain future
+  work.
+- Python remains the reference implementation until parity is confirmed. The
+  project direction is a hard Rust cutover after parity, not a user-facing
+  backend selector or long-term dual-backend toggle.
+
+Phase 6L authoredRoot/catalog-context validation covers the Python-verified
+recipe diagnostics needed by the focused Rust fixtures:
+
+- `validateRecipePath` uses an explicit non-null `authoredRoot` as catalog
+  context and does not infer it from the recipe path. Omitted `authoredRoot` and
+  `authoredRoot: null` keep the `validation_context_limited` warning.
+- `openRecipe` normalizes an explicit repo root containing `authored/recipes` to
+  that `authored` directory, accepts an explicit `authored` directory, and infers
+  `authoredRoot` from recipe files under an `authored/recipes` tree.
+- sidecar `validate`, successful changing commands, undo, redo, and save reuse
+  the document's stored authoredRoot. They do not re-infer a root after open.
+- recipe dependency missing-target diagnostics use `recipe_not_found`.
+- recipe dependency cycles use a small validation-local graph walk and report
+  `dependency_cycle`; Rust does not introduce planner module naming, planner
+  data structures, execution plans, step expansion, or apply-device behavior.
+- duplicate recipe ids between the open document and another catalog recipe use
+  `recipe_id_conflict`.
+
+Phase 6L intentionally reads only this Python-verified top-level catalog
+inventory:
+
+```text
+apps/*.y*ml
+recipes/*.y*ml
+device_profiles/*.y*ml
+device_plans/*.y*ml
+```
+
+The Rust Phase 6L fixture implementation models only `recipes/*.yml` and
+`recipes/*.yaml` data because no focused fixture needs app, device profile, or
+device plan diagnostics. It still confines catalog discovery to the verified
+top-level directory inventory and does not scan nested directories, templates,
+alternate file extensions, runtime paths, device paths, network URLs, or Tauri
+workspace metadata. Cross-file `provides.features` availability is not
+implemented because Python validation does not emit provided-feature diagnostics
+in this path. Duplicate recipe-id diagnostics are fixture-scoped to opened
+recipes under the authored catalog root; temp copies opened outside that root do
+not report catalog duplicate-id conflicts so earlier document-session fixture
+flows remain stable.
 
 ## Python Goldens
 
@@ -361,6 +430,12 @@ Recipe fixtures live under:
 
 ```text
 crates/emuchef-rust-backend/tests/fixtures/recipes/
+```
+
+Focused Phase 6L authoredRoot fixture trees live under:
+
+```text
+crates/emuchef-rust-backend/tests/fixtures/authored_root/
 ```
 
 Python-generated goldens live under:
@@ -416,6 +491,8 @@ PY
 
 The emitted YAML goldens store only the Python result string. The validation
 goldens store only the Python result object, not the outer API envelope.
+Phase 6L does not add Python golden files; its tests compare semantic diagnostic
+fields directly and document the Python validation source behavior they mirror.
 
 Phase 6G document sessions are covered by Rust integration tests and focused
 Python-generated result goldens:
@@ -530,9 +607,9 @@ Those goldens cover a representative document open result, sidecar
 `getRefIndex`, overview-only mutation, undo/redo after mutation, and a
 ref-parameter fixture `getRefIndex` result. They normalize `documentId`, paths,
 authored roots, and diagnostic files. The `ref_params` open-document result is
-not used as a full-document golden because Python performs richer validation
-than the Phase 6E Rust validation skeleton; the Phase 6H comparison for that
-fixture is intentionally scoped to `getRefIndex`.
+not used as a full-document golden because Python validation continues to be the
+reference beyond the fixture-scoped Rust validation surface; the Phase 6H
+comparison for that fixture is intentionally scoped to `getRefIndex`.
 
 Regenerate the Phase 6H goldens from the repo root with:
 
@@ -609,7 +686,7 @@ crates/emuchef-rust-backend/tests/fixtures/python_goldens/phase6i_*.result.json
 Those goldens intentionally compare `getRefIndex` results after input, artifact,
 and artifact group mutations. They do not compare full document results for the
 Phase 6I fixture because Python performs richer catalog-context validation than
-the Phase 6E Rust validation skeleton.
+the Rust backend's current fixture-scoped validation surface.
 
 Regenerate the Phase 6I goldens from the repo root with:
 

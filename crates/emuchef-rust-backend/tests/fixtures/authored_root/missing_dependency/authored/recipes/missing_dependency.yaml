@@ -1,0 +1,12 @@
+schema_version: 1
+kind: recipe
+id: phase6l.missing_dependency
+name: Phase 6L Missing Dependency
+recipe_dependencies:
+  - phase6l.absent
+provides:
+  features: []
+inputs: {}
+artifacts: {}
+artifact_groups: {}
+steps: []

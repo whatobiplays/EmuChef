@@ -132,12 +132,10 @@ fn handle_emit_recipe_yaml_from_path(object: &Map<String, Value>) -> Result<Valu
 fn handle_validate_recipe_path(object: &Map<String, Value>) -> Result<Value, ApiError> {
     let payload = payload_object(object)?;
     let path = required_path(payload)?;
-    let authored_root_provided = payload
-        .get("authoredRoot")
-        .is_some_and(|value| !value.is_null());
+    let authored_root = optional_string(payload, "authoredRoot")?;
     Ok(envelope::success(validation::validate_recipe_path_result(
         Path::new(path),
-        authored_root_provided,
+        authored_root.map(Path::new),
     )))
 }
 

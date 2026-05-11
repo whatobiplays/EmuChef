@@ -1,0 +1,12 @@
+schema_version: 1
+kind: recipe
+id: phase6l.cycle_b
+name: Phase 6L Cycle B
+recipe_dependencies:
+  - phase6l.cycle_a
+provides:
+  features: []
+inputs: {}
+artifacts: {}
+artifact_groups: {}
+steps: []

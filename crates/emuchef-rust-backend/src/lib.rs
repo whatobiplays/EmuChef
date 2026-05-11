@@ -1,13 +1,14 @@
 //! Standalone protocol skeleton for the experimental Rust editor backend.
 //!
 //! The crate intentionally implements only the migration surface from Phases 6C
-//! through 6J.2: request validation, response envelopes, one-shot invocation,
+//! through 6L: request validation, response envelopes, one-shot invocation,
 //! JSONL sidecar invocation, the `hello` handshake, static StepSpec DTO parity
 //! for `listStepSpecs`, focused authored recipe YAML load/emit/validation
 //! skeletons, sidecar document sessions, overview/non-step/step lifecycle/step
-//! dependency/step internals commands, undo/redo, and fixture-scoped RefIndex
-//! generation.
+//! dependency/step internals commands, undo/redo, fixture-scoped RefIndex
+//! generation, and focused authoredRoot catalog-context validation.
 
+pub mod catalog;
 pub mod commands;
 pub mod document;
 pub mod dto;

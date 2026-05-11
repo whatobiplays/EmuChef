@@ -1,15 +1,16 @@
 //! In-memory recipe document state for sidecar sessions.
 //!
-//! A document wraps the Phase 6E authored recipe model with the editor-facing
+//! A document wraps the current authored recipe model with the editor-facing
 //! lifecycle state needed for sidecar document sessions. The Rust backend keeps
-//! catalog-context validation, planner behavior, and executor behavior out of
-//! this crate-local migration slice.
+//! planner behavior and executor behavior out of this crate-local migration
+//! slice while preserving the stored authoredRoot needed for validation refresh.
 
 use std::fs;
 use std::path::{Path, PathBuf};
 
 use serde_json::Value;
 
+use crate::catalog;
 use crate::commands::{ArtifactField, InputField, OverviewField, OverviewValue, RecipeCommand};
 use crate::model::{
     InputDeclaration, InputValidation, OrderedMap, ParamValue, Recipe, RemoteFileArtifact, Step,
@@ -47,9 +48,9 @@ impl RecipeDocument {
         let recipe = yaml::load_recipe_from_path(input_path)?;
         let current_yaml = yaml::emit_recipe_yaml(&recipe)?;
         let path = PathBuf::from(yaml::resolved_path_string(input_path));
-        let authored_root =
-            authored_root.map(|root| PathBuf::from(yaml::resolved_path_string(Path::new(root))));
-        let diagnostics = validation_diagnostics(&path, authored_root.is_some());
+        let authored_root = catalog::normalize_authored_root(authored_root, &path);
+        let diagnostics =
+            validation_diagnostics_for_recipe(&recipe, &path, authored_root.as_deref());
 
         Ok(Self {
             path,
@@ -95,6 +96,7 @@ impl RecipeDocument {
         };
         let current = self.content_snapshot();
         self.restore_content(previous);
+        self.refresh_diagnostics();
         self.redo_stack.push(current);
         true
     }
@@ -105,6 +107,7 @@ impl RecipeDocument {
         };
         let current = self.content_snapshot();
         self.restore_content(next);
+        self.refresh_diagnostics();
         self.undo_stack.push(current);
         true
     }
@@ -861,25 +864,17 @@ impl RecipeDocument {
         self.diagnostics = validation_diagnostics_for_recipe(
             &self.recipe,
             &self.path,
-            self.authored_root.is_some(),
+            self.authored_root.as_deref(),
         );
     }
-}
-
-fn validation_diagnostics(path: &Path, authored_root_provided: bool) -> Vec<Value> {
-    validation::validate_recipe_path_result(path, authored_root_provided)
-        .get("diagnostics")
-        .and_then(Value::as_array)
-        .cloned()
-        .unwrap_or_default()
 }
 
 fn validation_diagnostics_for_recipe(
     recipe: &Recipe,
     path: &Path,
-    authored_root_provided: bool,
+    authored_root: Option<&Path>,
 ) -> Vec<Value> {
-    validation::validate_loaded_recipe_result(recipe, path, authored_root_provided)
+    validation::validate_loaded_recipe_result(recipe, path, authored_root)
         .get("diagnostics")
         .and_then(Value::as_array)
         .cloned()

@@ -1,0 +1,11 @@
+schema_version: 1
+kind: recipe
+id: phase6l.duplicate_reverse
+name: Phase 6L Reverse Target Duplicate
+recipe_dependencies: []
+provides:
+  features: []
+inputs: {}
+artifacts: {}
+artifact_groups: {}
+steps: []
