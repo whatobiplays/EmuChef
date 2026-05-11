@@ -1,13 +1,14 @@
 use std::fs;
+use std::io::Write;
 use std::path::{Path, PathBuf};
 
 use serde_json::{json, Value};
 
-use crate::executor::{DryRunExecutorAdapters, ExecutorRunner};
+use crate::executor::{artifact_local_filename, DryRunExecutorAdapters, ExecutorRunner};
 use crate::model::OrderedMap;
 use crate::planner::{
-    DeviceContext, ExecutionParamValue, ExecutionPlan, ExecutionPlanSource, ExecutionStep,
-    ExecutionStepCondition, ExecutionStepConstraints, RuntimeCapabilities,
+    DeviceContext, ExecutionArtifact, ExecutionParamValue, ExecutionPlan, ExecutionPlanSource,
+    ExecutionStep, ExecutionStepCondition, ExecutionStepConstraints, RuntimeCapabilities,
 };
 
 fn golden_path(name: &str) -> PathBuf {
@@ -48,6 +49,13 @@ fn fixture_runtime_capabilities() -> RuntimeCapabilities {
 }
 
 fn plan(steps: Vec<ExecutionStep>) -> ExecutionPlan {
+    plan_with_artifacts(Vec::new(), steps)
+}
+
+fn plan_with_artifacts(
+    artifacts: Vec<ExecutionArtifact>,
+    steps: Vec<ExecutionStep>,
+) -> ExecutionPlan {
     ExecutionPlan {
         id: "plan.test".to_string(),
         source: ExecutionPlanSource {
@@ -59,7 +67,7 @@ fn plan(steps: Vec<ExecutionStep>) -> ExecutionPlan {
         device_context: fixture_device_context(),
         runtime_capabilities: fixture_runtime_capabilities(),
         inputs: Vec::new(),
-        artifacts: Vec::new(),
+        artifacts,
         steps,
         schema_version: 1,
         kind: "execution_plan",
@@ -114,6 +122,96 @@ fn run_value(plan: &ExecutionPlan, adapters: DryRunExecutorAdapters) -> (Value, 
         serde_json::to_value(result).expect("execution result should serialize"),
         runner,
     )
+}
+
+fn sandbox_adapters(
+    runtime_root: &Path,
+    cache_root: &Path,
+    fake_device_root: &Path,
+    read_only_roots: Vec<PathBuf>,
+) -> DryRunExecutorAdapters {
+    DryRunExecutorAdapters::with_sandbox_roots(
+        runtime_root.to_path_buf(),
+        cache_root.to_path_buf(),
+        fake_device_root.to_path_buf(),
+        read_only_roots,
+    )
+}
+
+fn normalize_tmp_paths(value: Value, tmp_root: &Path) -> Value {
+    fn normalize_string(mut value: String, tmp_root: &Path) -> String {
+        let mut roots = vec![tmp_root.to_path_buf()];
+        if let Ok(canonical) = tmp_root.canonicalize() {
+            roots.push(canonical);
+        }
+        roots.sort_by_key(|path| std::cmp::Reverse(path.as_os_str().len()));
+        for root in roots {
+            value = value.replace(&root.to_string_lossy().to_string(), "$TMP");
+        }
+        value
+    }
+
+    match value {
+        Value::String(value) => Value::String(normalize_string(value, tmp_root)),
+        Value::Array(values) => Value::Array(
+            values
+                .into_iter()
+                .map(|value| normalize_tmp_paths(value, tmp_root))
+                .collect(),
+        ),
+        Value::Object(values) => Value::Object(
+            values
+                .into_iter()
+                .map(|(key, value)| (key, normalize_tmp_paths(value, tmp_root)))
+                .collect(),
+        ),
+        other => other,
+    }
+}
+
+fn runtime_value(type_name: &str, value: Value, location: Option<&str>) -> Value {
+    json!({
+        "type": type_name,
+        "value": value,
+        "location": location,
+    })
+}
+
+fn write_zip(path: &Path, members: &[(&str, &str)]) {
+    let file = fs::File::create(path).expect("zip fixture should be writable");
+    let mut zip = zip::ZipWriter::new(file);
+    let options = zip::write::SimpleFileOptions::default();
+    for (name, contents) in members {
+        zip.start_file(*name, options)
+            .expect("zip member should start");
+        zip.write_all(contents.as_bytes())
+            .expect("zip member should be writable");
+    }
+    zip.finish().expect("zip fixture should finish");
+}
+
+fn extract_archive_step(id: &str, archive_path: &Path) -> ExecutionStep {
+    let mut params = OrderedMap::new();
+    params.insert(
+        "archive".to_string(),
+        literal(runtime_value(
+            "file_path",
+            json!(archive_path.to_string_lossy().to_string()),
+            Some("host"),
+        )),
+    );
+    params.insert("extract_on".to_string(), literal(json!("host")));
+    ExecutionStep {
+        id: id.to_string(),
+        recipe_ref: "example.recipe".to_string(),
+        type_name: "extract_archive".to_string(),
+        name: "Extract Archive".to_string(),
+        dependencies: Vec::new(),
+        constraints: constraints(),
+        params,
+        skip_if: Vec::new(),
+        verify: Vec::new(),
+    }
 }
 
 #[test]
@@ -416,4 +514,748 @@ fn require_all_policy_promotes_optional_permission_failure_to_step_failure() {
     assert_eq!(actual["success"], false);
     assert_eq!(actual["steps"][0]["status"], "failed");
     assert_eq!(actual["steps"][0]["message"], "permission denied");
+}
+
+#[test]
+fn phase6p_artifact_filename_algorithm_matches_python_reference() {
+    assert_eq!(
+        artifact_local_filename("example.recipe/archive", "file:///tmp/archive.zip", "none"),
+        "b8fa707d78f0719a711d8ecb5c37a8cc5f2f4e56f69f9f8acd40c7eccd063c79-archive.zip"
+    );
+    assert_eq!(
+        artifact_local_filename(
+            "example.recipe/archive",
+            "file:///tmp/archive.zip",
+            "default"
+        ),
+        "b92b76f1245b8ee58e3187c04b57d954864c55557c4bf885ebad66c9c5aba8a0-archive.zip"
+    );
+    assert_eq!(
+        artifact_local_filename("example.recipe/archive", "file:///tmp/", "none"),
+        "e3d2cb6c819416e48eaaed5ddf2bdee5e099beb502106d7b6ecdfadb4712594a-tmp"
+    );
+    assert_eq!(
+        artifact_local_filename(
+            "example.recipe/archive",
+            "https://example.com/downloads/archive.zip?token=1",
+            "none"
+        ),
+        "6a3cbf4fa3962ac24d057186af9cad0a34b95466596e5393a1f4d53a8b72dfaf-archive.zip"
+    );
+}
+
+#[test]
+fn phase6p_resolve_extract_and_copy_flow_matches_python_and_stays_in_sandbox() {
+    let tmp = tempfile::tempdir().expect("temp root should be created");
+    let fixture_root = tmp.path().join("fixtures");
+    let runtime_root = tmp.path().join(".emuchef_runtime");
+    let cache_root = tmp.path().join(".emuchef_cache").join("artifacts");
+    let fake_device_root = tmp.path().join("fake_device");
+    fs::create_dir_all(&fixture_root).expect("fixture root should be created");
+    let zip_a = fixture_root.join("a.zip");
+    let zip_b = fixture_root.join("b.zip");
+    write_zip(&zip_a, &[("core_a.so", "alpha")]);
+    write_zip(&zip_b, &[("core_b.so", "beta")]);
+    let original_zip_a = fs::read(&zip_a).expect("fixture should be readable");
+    let original_zip_b = fs::read(&zip_b).expect("fixture should be readable");
+
+    let mut resolve_params = OrderedMap::new();
+    resolve_params.insert(
+        "artifacts".to_string(),
+        literal(json!(["example.recipe/a_zip", "example.recipe/b_zip"])),
+    );
+    let mut extract_params = OrderedMap::new();
+    extract_params.insert(
+        "artifacts".to_string(),
+        literal(json!(["example.recipe/a_zip", "example.recipe/b_zip"])),
+    );
+    extract_params.insert("extract_on".to_string(), literal(json!("host")));
+    let mut copy_params = OrderedMap::new();
+    copy_params.insert(
+        "source".to_string(),
+        ExecutionParamValue::Ref {
+            ref_value: "steps.example.recipe/extract.outputs.extracted_paths".to_string(),
+        },
+    );
+    copy_params.insert(
+        "dest".to_string(),
+        literal(json!("/sdcard/RetroArch/cores")),
+    );
+    copy_params.insert("copy_policy".to_string(), literal(json!("sync")));
+
+    let mut extract = ExecutionStep {
+        id: "example.recipe/extract".to_string(),
+        recipe_ref: "example.recipe".to_string(),
+        type_name: "extract_artifacts".to_string(),
+        name: "Extract".to_string(),
+        dependencies: vec!["example.recipe/resolve".to_string()],
+        constraints: constraints(),
+        params: extract_params,
+        skip_if: Vec::new(),
+        verify: Vec::new(),
+    };
+    let mut copy = ExecutionStep {
+        id: "example.recipe/copy".to_string(),
+        recipe_ref: "example.recipe".to_string(),
+        type_name: "copy_files".to_string(),
+        name: "Copy".to_string(),
+        dependencies: vec!["example.recipe/extract".to_string()],
+        constraints: constraints(),
+        params: copy_params,
+        skip_if: Vec::new(),
+        verify: Vec::new(),
+    };
+    extract.dependencies = vec!["example.recipe/resolve".to_string()];
+    copy.dependencies = vec!["example.recipe/extract".to_string()];
+    let execution_plan = plan_with_artifacts(
+        vec![
+            ExecutionArtifact {
+                id: "example.recipe/a_zip".to_string(),
+                type_name: "remote_file".to_string(),
+                url: format!("file://{}", zip_a.canonicalize().unwrap().to_string_lossy()),
+                cache: "none".to_string(),
+            },
+            ExecutionArtifact {
+                id: "example.recipe/b_zip".to_string(),
+                type_name: "remote_file".to_string(),
+                url: format!("file://{}", zip_b.canonicalize().unwrap().to_string_lossy()),
+                cache: "none".to_string(),
+            },
+        ],
+        vec![
+            ExecutionStep {
+                id: "example.recipe/resolve".to_string(),
+                recipe_ref: "example.recipe".to_string(),
+                type_name: "resolve_artifacts".to_string(),
+                name: "Resolve".to_string(),
+                dependencies: Vec::new(),
+                constraints: constraints(),
+                params: resolve_params,
+                skip_if: Vec::new(),
+                verify: Vec::new(),
+            },
+            extract,
+            copy,
+        ],
+    );
+    let original_plan = execution_plan.clone();
+
+    let (actual, _) = run_value(
+        &execution_plan,
+        sandbox_adapters(
+            &runtime_root,
+            &cache_root,
+            &fake_device_root,
+            vec![fixture_root.clone()],
+        ),
+    );
+
+    assert_eq!(
+        normalize_tmp_paths(actual, tmp.path()),
+        read_golden("phase6p_executor_resolve_extract_copy_flow.json")
+    );
+    assert_eq!(execution_plan, original_plan);
+    assert_eq!(fs::read(&zip_a).unwrap(), original_zip_a);
+    assert_eq!(fs::read(&zip_b).unwrap(), original_zip_b);
+    assert_eq!(
+        fs::read_to_string(fake_device_root.join("sdcard/RetroArch/cores/core_a.so")).unwrap(),
+        "alpha"
+    );
+    assert_eq!(
+        fs::read_to_string(fake_device_root.join("sdcard/RetroArch/cores/core_b.so")).unwrap(),
+        "beta"
+    );
+    assert!(runtime_root.join("downloads").exists());
+    assert!(!tmp.path().join("sdcard").exists());
+}
+
+#[test]
+fn phase6p_extract_archive_success_matches_python_golden() {
+    let tmp = tempfile::tempdir().expect("temp root should be created");
+    let fixture_root = tmp.path().join("fixtures");
+    let runtime_root = tmp.path().join(".emuchef_runtime");
+    let cache_root = tmp.path().join(".emuchef_cache").join("artifacts");
+    let fake_device_root = tmp.path().join("fake_device");
+    fs::create_dir_all(&fixture_root).expect("fixture root should be created");
+    let archive = fixture_root.join("archive.zip");
+    write_zip(&archive, &[("single.txt", "hello")]);
+
+    let execution_plan = plan(vec![extract_archive_step(
+        "example.recipe/extract_archive",
+        &archive,
+    )]);
+
+    let (actual, _) = run_value(
+        &execution_plan,
+        sandbox_adapters(
+            &runtime_root,
+            &cache_root,
+            &fake_device_root,
+            vec![fixture_root],
+        ),
+    );
+
+    assert_eq!(
+        normalize_tmp_paths(actual, tmp.path()),
+        read_golden("phase6p_executor_extract_archive_success.json")
+    );
+    assert_eq!(
+        fs::read_to_string(runtime_root.join("extract/example.recipe_extract_archive/single.txt"))
+            .unwrap(),
+        "hello"
+    );
+}
+
+#[test]
+fn phase6p_remote_artifact_resolution_fails_without_network_download_attempt() {
+    let tmp = tempfile::tempdir().expect("temp root should be created");
+    let runtime_root = tmp.path().join(".emuchef_runtime");
+    let cache_root = tmp.path().join(".emuchef_cache").join("artifacts");
+    let fake_device_root = tmp.path().join("fake_device");
+    let mut resolve_params = OrderedMap::new();
+    resolve_params.insert(
+        "artifacts".to_string(),
+        literal(json!(["example.recipe/archive"])),
+    );
+    let mut dependent = wait_step("example.recipe/downstream", "Downstream", 1);
+    dependent.dependencies = vec!["example.recipe/resolve".to_string()];
+    let execution_plan = plan_with_artifacts(
+        vec![ExecutionArtifact {
+            id: "example.recipe/archive".to_string(),
+            type_name: "remote_file".to_string(),
+            url: "https://example.invalid/archive.zip".to_string(),
+            cache: "none".to_string(),
+        }],
+        vec![
+            ExecutionStep {
+                id: "example.recipe/resolve".to_string(),
+                recipe_ref: "example.recipe".to_string(),
+                type_name: "resolve_artifacts".to_string(),
+                name: "Resolve".to_string(),
+                dependencies: Vec::new(),
+                constraints: constraints(),
+                params: resolve_params,
+                skip_if: Vec::new(),
+                verify: Vec::new(),
+            },
+            dependent,
+        ],
+    );
+
+    let (actual, _) = run_value(
+        &execution_plan,
+        sandbox_adapters(&runtime_root, &cache_root, &fake_device_root, Vec::new()),
+    );
+
+    assert_eq!(actual["success"], false);
+    assert_eq!(actual["steps"][0]["status"], "failed");
+    assert!(actual["steps"][0]["message"]
+        .as_str()
+        .unwrap()
+        .contains("artifact_download_failed"));
+    assert!(actual["steps"][0]["message"]
+        .as_str()
+        .unwrap()
+        .contains("network downloads are disabled"));
+    assert_eq!(actual["steps"][1]["status"], "blocked");
+    assert!(!runtime_root.join("downloads").exists());
+}
+
+#[test]
+fn phase6p_extract_archive_invalid_failure_blocks_dependent_like_python() {
+    let tmp = tempfile::tempdir().expect("temp root should be created");
+    let fixture_root = tmp.path().join("fixtures");
+    let runtime_root = tmp.path().join(".emuchef_runtime");
+    let cache_root = tmp.path().join(".emuchef_cache").join("artifacts");
+    let fake_device_root = tmp.path().join("fake_device");
+    fs::create_dir_all(&fixture_root).expect("fixture root should be created");
+    let archive = fixture_root.join("invalid.zip");
+    fs::write(&archive, "not a zip").expect("invalid archive fixture should be writable");
+    let mut dependent = wait_step("example.recipe/downstream", "Downstream", 1);
+    dependent.dependencies = vec!["example.recipe/extract_archive".to_string()];
+
+    let execution_plan = plan(vec![
+        extract_archive_step("example.recipe/extract_archive", &archive),
+        dependent,
+        wait_step("example.recipe/unrelated", "Unrelated", 1),
+    ]);
+
+    let (actual, _) = run_value(
+        &execution_plan,
+        sandbox_adapters(
+            &runtime_root,
+            &cache_root,
+            &fake_device_root,
+            vec![fixture_root],
+        ),
+    );
+
+    assert_eq!(
+        normalize_tmp_paths(actual, tmp.path()),
+        read_golden("phase6p_executor_extract_archive_invalid_failure.json")
+    );
+}
+
+#[test]
+fn phase6p_extract_archive_rejects_traversal_entries_without_writing_outside_temp_root() {
+    let tmp = tempfile::tempdir().expect("temp root should be created");
+    let fixture_root = tmp.path().join("fixtures");
+    let runtime_root = tmp.path().join(".emuchef_runtime");
+    let cache_root = tmp.path().join(".emuchef_cache").join("artifacts");
+    let fake_device_root = tmp.path().join("fake_device");
+    fs::create_dir_all(&fixture_root).expect("fixture root should be created");
+    let archive = fixture_root.join("malicious.zip");
+    write_zip(&archive, &[("../escape.txt", "owned")]);
+
+    let execution_plan = plan(vec![extract_archive_step(
+        "example.recipe/extract_archive",
+        &archive,
+    )]);
+
+    let (actual, _) = run_value(
+        &execution_plan,
+        sandbox_adapters(
+            &runtime_root,
+            &cache_root,
+            &fake_device_root,
+            vec![fixture_root],
+        ),
+    );
+
+    assert_eq!(actual["success"], false);
+    assert_eq!(actual["steps"][0]["status"], "failed");
+    assert!(actual["steps"][0]["message"]
+        .as_str()
+        .unwrap()
+        .contains("unsafe archive entry"));
+    assert!(!tmp.path().join("escape.txt").exists());
+}
+
+#[test]
+fn phase6p_extract_archive_rejects_absolute_entries_before_writing() {
+    let tmp = tempfile::tempdir().expect("temp root should be created");
+    let fixture_root = tmp.path().join("fixtures");
+    let runtime_root = tmp.path().join(".emuchef_runtime");
+    let cache_root = tmp.path().join(".emuchef_cache").join("artifacts");
+    let fake_device_root = tmp.path().join("fake_device");
+    fs::create_dir_all(&fixture_root).expect("fixture root should be created");
+    let archive = fixture_root.join("absolute.zip");
+    write_zip(&archive, &[("/absolute.txt", "owned")]);
+
+    let execution_plan = plan(vec![extract_archive_step(
+        "example.recipe/extract_archive",
+        &archive,
+    )]);
+
+    let (actual, _) = run_value(
+        &execution_plan,
+        sandbox_adapters(
+            &runtime_root,
+            &cache_root,
+            &fake_device_root,
+            vec![fixture_root],
+        ),
+    );
+
+    assert_eq!(actual["success"], false);
+    assert!(actual["steps"][0]["message"]
+        .as_str()
+        .unwrap()
+        .contains("unsafe archive entry"));
+    assert!(!runtime_root
+        .join("extract/example.recipe_extract_archive/absolute.txt")
+        .exists());
+}
+
+#[test]
+fn phase6p_extract_archive_prescans_entries_before_writing_any_member() {
+    let tmp = tempfile::tempdir().expect("temp root should be created");
+    let fixture_root = tmp.path().join("fixtures");
+    let runtime_root = tmp.path().join(".emuchef_runtime");
+    let cache_root = tmp.path().join(".emuchef_cache").join("artifacts");
+    let fake_device_root = tmp.path().join("fake_device");
+    fs::create_dir_all(&fixture_root).expect("fixture root should be created");
+    let archive = fixture_root.join("partially_malicious.zip");
+    write_zip(
+        &archive,
+        &[("safe.txt", "safe"), ("../escape.txt", "owned")],
+    );
+
+    let execution_plan = plan(vec![extract_archive_step(
+        "example.recipe/extract_archive",
+        &archive,
+    )]);
+
+    let (actual, _) = run_value(
+        &execution_plan,
+        sandbox_adapters(
+            &runtime_root,
+            &cache_root,
+            &fake_device_root,
+            vec![fixture_root],
+        ),
+    );
+
+    assert_eq!(actual["success"], false);
+    assert!(!runtime_root
+        .join("extract/example.recipe_extract_archive/safe.txt")
+        .exists());
+    assert!(!tmp.path().join("escape.txt").exists());
+}
+
+#[cfg(unix)]
+#[test]
+fn phase6p_extract_archive_rejects_symlinked_extract_parent_before_writing() {
+    let tmp = tempfile::tempdir().expect("temp root should be created");
+    let fixture_root = tmp.path().join("fixtures");
+    let runtime_root = tmp.path().join(".emuchef_runtime");
+    let cache_root = tmp.path().join(".emuchef_cache").join("artifacts");
+    let fake_device_root = tmp.path().join("fake_device");
+    fs::create_dir_all(&fixture_root).expect("fixture root should be created");
+    let archive = fixture_root.join("archive.zip");
+    write_zip(&archive, &[("safe.txt", "safe")]);
+    let outside = tmp.path().join("outside");
+    fs::create_dir_all(&outside).unwrap();
+    fs::create_dir_all(&runtime_root).unwrap();
+    std::os::unix::fs::symlink(&outside, runtime_root.join("extract")).unwrap();
+
+    let execution_plan = plan(vec![extract_archive_step(
+        "example.recipe/extract_archive",
+        &archive,
+    )]);
+
+    let (actual, _) = run_value(
+        &execution_plan,
+        sandbox_adapters(
+            &runtime_root,
+            &cache_root,
+            &fake_device_root,
+            vec![fixture_root],
+        ),
+    );
+
+    assert_eq!(actual["success"], false);
+    assert!(actual["steps"][0]["message"]
+        .as_str()
+        .unwrap()
+        .contains("symlink"));
+    assert!(!outside
+        .join("example.recipe_extract_archive/safe.txt")
+        .exists());
+}
+
+#[cfg(unix)]
+#[test]
+fn phase6p_extract_archive_rejects_symlinked_runtime_root_before_writing() {
+    let tmp = tempfile::tempdir().expect("temp root should be created");
+    let fixture_root = tmp.path().join("fixtures");
+    let runtime_root = tmp.path().join(".emuchef_runtime");
+    let cache_root = tmp.path().join(".emuchef_cache").join("artifacts");
+    let fake_device_root = tmp.path().join("fake_device");
+    fs::create_dir_all(&fixture_root).expect("fixture root should be created");
+    let archive = fixture_root.join("archive.zip");
+    write_zip(&archive, &[("safe.txt", "safe")]);
+    let outside = tmp.path().join("outside_runtime");
+    fs::create_dir_all(&outside).unwrap();
+    std::os::unix::fs::symlink(&outside, &runtime_root).unwrap();
+
+    let execution_plan = plan(vec![extract_archive_step(
+        "example.recipe/extract_archive",
+        &archive,
+    )]);
+
+    let (actual, _) = run_value(
+        &execution_plan,
+        sandbox_adapters(
+            &runtime_root,
+            &cache_root,
+            &fake_device_root,
+            vec![fixture_root],
+        ),
+    );
+
+    assert_eq!(actual["success"], false);
+    assert!(actual["steps"][0]["message"]
+        .as_str()
+        .unwrap()
+        .contains("symlink"));
+    assert!(!outside
+        .join("extract/example.recipe_extract_archive/safe.txt")
+        .exists());
+}
+
+#[test]
+fn phase6p_copy_replace_deletes_only_inside_fake_device_root() {
+    let tmp = tempfile::tempdir().expect("temp root should be created");
+    let fixture_root = tmp.path().join("fixtures");
+    let runtime_root = tmp.path().join(".emuchef_runtime");
+    let cache_root = tmp.path().join(".emuchef_cache").join("artifacts");
+    let fake_device_root = tmp.path().join("fake_device");
+    fs::create_dir_all(&fixture_root).expect("fixture root should be created");
+    fs::create_dir_all(fake_device_root.join("sdcard/cores")).unwrap();
+    fs::write(fake_device_root.join("sdcard/cores/old.so"), "old").unwrap();
+    let outside = tmp.path().join("outside/keep.txt");
+    fs::create_dir_all(outside.parent().unwrap()).unwrap();
+    fs::write(&outside, "keep").unwrap();
+    let source_dir = fixture_root.join("cores");
+    fs::create_dir_all(&source_dir).unwrap();
+    fs::write(source_dir.join("new.so"), "new").unwrap();
+
+    let mut params = OrderedMap::new();
+    params.insert(
+        "source".to_string(),
+        literal(runtime_value(
+            "directory_path",
+            json!(source_dir.to_string_lossy().to_string()),
+            Some("host"),
+        )),
+    );
+    params.insert("dest".to_string(), literal(json!("/sdcard/cores")));
+    params.insert("copy_policy".to_string(), literal(json!("replace")));
+    let execution_plan = plan(vec![ExecutionStep {
+        id: "example.recipe/copy".to_string(),
+        recipe_ref: "example.recipe".to_string(),
+        type_name: "copy_files".to_string(),
+        name: "Copy".to_string(),
+        dependencies: Vec::new(),
+        constraints: constraints(),
+        params,
+        skip_if: Vec::new(),
+        verify: Vec::new(),
+    }]);
+
+    let (actual, _) = run_value(
+        &execution_plan,
+        sandbox_adapters(
+            &runtime_root,
+            &cache_root,
+            &fake_device_root,
+            vec![fixture_root],
+        ),
+    );
+
+    assert_eq!(actual["success"], true);
+    assert!(!fake_device_root.join("sdcard/cores/old.so").exists());
+    assert_eq!(
+        fs::read_to_string(fake_device_root.join("sdcard/cores/new.so")).unwrap(),
+        "new"
+    );
+    assert_eq!(fs::read_to_string(outside).unwrap(), "keep");
+}
+
+#[test]
+fn phase6p_copy_sync_preserves_stale_files_like_python_push_sync() {
+    let tmp = tempfile::tempdir().expect("temp root should be created");
+    let fixture_root = tmp.path().join("fixtures");
+    let runtime_root = tmp.path().join(".emuchef_runtime");
+    let cache_root = tmp.path().join(".emuchef_cache").join("artifacts");
+    let fake_device_root = tmp.path().join("fake_device");
+    fs::create_dir_all(&fixture_root).expect("fixture root should be created");
+    fs::create_dir_all(fake_device_root.join("sdcard/cores")).unwrap();
+    fs::write(fake_device_root.join("sdcard/cores/stale.so"), "stale").unwrap();
+    let source_dir = fixture_root.join("cores");
+    fs::create_dir_all(&source_dir).unwrap();
+    fs::write(source_dir.join("new.so"), "new").unwrap();
+    let mut params = OrderedMap::new();
+    params.insert(
+        "source".to_string(),
+        literal(runtime_value(
+            "directory_path",
+            json!(source_dir.to_string_lossy().to_string()),
+            Some("host"),
+        )),
+    );
+    params.insert("dest".to_string(), literal(json!("/sdcard/cores")));
+    params.insert("copy_policy".to_string(), literal(json!("sync")));
+    let execution_plan = plan(vec![ExecutionStep {
+        id: "example.recipe/copy".to_string(),
+        recipe_ref: "example.recipe".to_string(),
+        type_name: "copy_files".to_string(),
+        name: "Copy".to_string(),
+        dependencies: Vec::new(),
+        constraints: constraints(),
+        params,
+        skip_if: Vec::new(),
+        verify: Vec::new(),
+    }]);
+
+    let (actual, _) = run_value(
+        &execution_plan,
+        sandbox_adapters(
+            &runtime_root,
+            &cache_root,
+            &fake_device_root,
+            vec![fixture_root],
+        ),
+    );
+
+    assert_eq!(actual["success"], true);
+    assert_eq!(
+        fs::read_to_string(fake_device_root.join("sdcard/cores/stale.so")).unwrap(),
+        "stale"
+    );
+    assert_eq!(
+        fs::read_to_string(fake_device_root.join("sdcard/cores/new.so")).unwrap(),
+        "new"
+    );
+}
+
+#[test]
+fn phase6p_copy_rejects_destination_traversal_before_writing() {
+    let tmp = tempfile::tempdir().expect("temp root should be created");
+    let fixture_root = tmp.path().join("fixtures");
+    let runtime_root = tmp.path().join(".emuchef_runtime");
+    let cache_root = tmp.path().join(".emuchef_cache").join("artifacts");
+    let fake_device_root = tmp.path().join("fake_device");
+    fs::create_dir_all(&fixture_root).expect("fixture root should be created");
+    let source = fixture_root.join("core.so");
+    fs::write(&source, "core").unwrap();
+    let mut params = OrderedMap::new();
+    params.insert(
+        "source".to_string(),
+        literal(runtime_value(
+            "file_path",
+            json!(source.to_string_lossy().to_string()),
+            Some("host"),
+        )),
+    );
+    params.insert("dest".to_string(), literal(json!("/sdcard/../escape.so")));
+
+    let execution_plan = plan(vec![ExecutionStep {
+        id: "example.recipe/copy".to_string(),
+        recipe_ref: "example.recipe".to_string(),
+        type_name: "copy_files".to_string(),
+        name: "Copy".to_string(),
+        dependencies: Vec::new(),
+        constraints: constraints(),
+        params,
+        skip_if: Vec::new(),
+        verify: Vec::new(),
+    }]);
+
+    let (actual, _) = run_value(
+        &execution_plan,
+        sandbox_adapters(
+            &runtime_root,
+            &cache_root,
+            &fake_device_root,
+            vec![fixture_root],
+        ),
+    );
+
+    assert_eq!(actual["success"], false);
+    assert!(actual["steps"][0]["message"]
+        .as_str()
+        .unwrap()
+        .contains("path traversal"));
+    assert!(!fake_device_root.join("escape.so").exists());
+}
+
+#[cfg(unix)]
+#[test]
+fn phase6p_copy_rejects_fake_device_symlink_escape() {
+    let tmp = tempfile::tempdir().expect("temp root should be created");
+    let fixture_root = tmp.path().join("fixtures");
+    let runtime_root = tmp.path().join(".emuchef_runtime");
+    let cache_root = tmp.path().join(".emuchef_cache").join("artifacts");
+    let fake_device_root = tmp.path().join("fake_device");
+    fs::create_dir_all(&fixture_root).expect("fixture root should be created");
+    let source = fixture_root.join("core.so");
+    fs::write(&source, "core").unwrap();
+    let outside = tmp.path().join("outside");
+    fs::create_dir_all(&outside).unwrap();
+    fs::create_dir_all(fake_device_root.join("sdcard")).unwrap();
+    std::os::unix::fs::symlink(&outside, fake_device_root.join("sdcard/cores")).unwrap();
+    let mut params = OrderedMap::new();
+    params.insert(
+        "source".to_string(),
+        literal(runtime_value(
+            "file_path",
+            json!(source.to_string_lossy().to_string()),
+            Some("host"),
+        )),
+    );
+    params.insert("dest".to_string(), literal(json!("/sdcard/cores/core.so")));
+    let execution_plan = plan(vec![ExecutionStep {
+        id: "example.recipe/copy".to_string(),
+        recipe_ref: "example.recipe".to_string(),
+        type_name: "copy_files".to_string(),
+        name: "Copy".to_string(),
+        dependencies: Vec::new(),
+        constraints: constraints(),
+        params,
+        skip_if: Vec::new(),
+        verify: Vec::new(),
+    }]);
+
+    let (actual, _) = run_value(
+        &execution_plan,
+        sandbox_adapters(
+            &runtime_root,
+            &cache_root,
+            &fake_device_root,
+            vec![fixture_root],
+        ),
+    );
+
+    assert_eq!(actual["success"], false);
+    assert!(actual["steps"][0]["message"]
+        .as_str()
+        .unwrap()
+        .contains("symlink"));
+    assert!(!outside.join("core.so").exists());
+}
+
+#[cfg(unix)]
+#[test]
+fn phase6p_copy_rejects_symlinked_fake_device_root_before_writing() {
+    let tmp = tempfile::tempdir().expect("temp root should be created");
+    let fixture_root = tmp.path().join("fixtures");
+    let runtime_root = tmp.path().join(".emuchef_runtime");
+    let cache_root = tmp.path().join(".emuchef_cache").join("artifacts");
+    let fake_device_root = tmp.path().join("fake_device");
+    fs::create_dir_all(&fixture_root).expect("fixture root should be created");
+    let source = fixture_root.join("core.so");
+    fs::write(&source, "core").unwrap();
+    let outside = tmp.path().join("outside_device");
+    fs::create_dir_all(&outside).unwrap();
+    std::os::unix::fs::symlink(&outside, &fake_device_root).unwrap();
+    let mut params = OrderedMap::new();
+    params.insert(
+        "source".to_string(),
+        literal(runtime_value(
+            "file_path",
+            json!(source.to_string_lossy().to_string()),
+            Some("host"),
+        )),
+    );
+    params.insert("dest".to_string(), literal(json!("/sdcard/core.so")));
+    let execution_plan = plan(vec![ExecutionStep {
+        id: "example.recipe/copy".to_string(),
+        recipe_ref: "example.recipe".to_string(),
+        type_name: "copy_files".to_string(),
+        name: "Copy".to_string(),
+        dependencies: Vec::new(),
+        constraints: constraints(),
+        params,
+        skip_if: Vec::new(),
+        verify: Vec::new(),
+    }]);
+
+    let (actual, _) = run_value(
+        &execution_plan,
+        sandbox_adapters(
+            &runtime_root,
+            &cache_root,
+            &fake_device_root,
+            vec![fixture_root],
+        ),
+    );
+
+    assert_eq!(actual["success"], false);
+    assert!(actual["steps"][0]["message"]
+        .as_str()
+        .unwrap()
+        .contains("symlink"));
+    assert!(!outside.join("sdcard/core.so").exists());
 }

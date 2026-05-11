@@ -1,0 +1,42 @@
+{
+  "steps": [
+    {
+      "message": null,
+      "outputs": {},
+      "status": "executed",
+      "step_id": "example.recipe/resolve"
+    },
+    {
+      "message": null,
+      "outputs": {
+        "extracted_paths": {
+          "location": "host",
+          "type": "path_list",
+          "value": [
+            "$TMP/.emuchef_runtime/extract/example.recipe_extract/a_zip/core_a.so",
+            "$TMP/.emuchef_runtime/extract/example.recipe_extract/b_zip/core_b.so"
+          ]
+        }
+      },
+      "status": "executed",
+      "step_id": "example.recipe/extract"
+    },
+    {
+      "message": null,
+      "outputs": {
+        "copied_paths": {
+          "location": "device",
+          "type": "path_list",
+          "value": [
+            "/sdcard/RetroArch/cores/core_a.so",
+            "/sdcard/RetroArch/cores/core_b.so"
+          ]
+        }
+      },
+      "status": "executed",
+      "step_id": "example.recipe/copy"
+    }
+  ],
+  "success": true,
+  "total_steps": 3
+}

@@ -1,18 +1,24 @@
-//! Internal safe executor foundations for fixture-scoped dry-run parity.
+//! Internal safe executor foundations for fixture-scoped dry-run and sandboxed
+//! filesystem/artifact parity.
 //!
 //! Python remains the executor reference. This module intentionally mirrors only
-//! the Python `ExecutionRunResult` shape and selected dry-run behaviors needed by
-//! Phase 6O tests. It does not expose protocol, CLI, Tauri, subprocess, ADB,
-//! network, archive, or real filesystem side-effect implementations.
+//! the Python `ExecutionRunResult` shape and selected behaviors needed by Phase
+//! 6O/6P tests. It does not expose protocol, CLI, Tauri, subprocess, ADB,
+//! network, or unrestricted filesystem side-effect implementations.
 
 use std::collections::{HashMap, HashSet};
+use std::fs;
+use std::io;
+use std::path::{Component, Path, PathBuf};
 
 use serde::Serialize;
 use serde_json::{json, Value};
+use sha2::{Digest, Sha256};
 
 use crate::model::OrderedMap;
 use crate::planner::{
-    ExecutionParamValue, ExecutionPlan, ExecutionStep, ExecutionStepCondition, RuntimeValue,
+    ExecutionArtifact, ExecutionParamValue, ExecutionPlan, ExecutionStep, ExecutionStepCondition,
+    RuntimeValue,
 };
 
 #[derive(Clone, Debug, PartialEq, Serialize)]
@@ -89,7 +95,7 @@ impl ExecutorRunner {
             .iter()
             .map(|step| step.id.clone())
             .collect::<HashSet<_>>();
-        let mut state = ExecutionState::default();
+        let mut state = ExecutionState::from_plan(plan);
         let mut records = Vec::new();
 
         for step in &plan.steps {
@@ -274,8 +280,12 @@ impl ExecutorRunner {
         match step.type_name.as_str() {
             "wait" => self.execute_wait(&resolved_params),
             "grant_permissions" => self.execute_grant_permissions(plan, step, &resolved_params),
+            "resolve_artifacts" => self.execute_resolve_artifacts(plan, state, &resolved_params),
+            "extract_artifacts" => self.execute_extract_artifacts(state, step, &resolved_params),
+            "extract_archive" => self.execute_extract_archive(step, &resolved_params),
+            "copy_files" => self.execute_copy_files(&resolved_params),
             other => Err(StepFailure::new(format!(
-                "Unsupported executor step type in Rust Phase 6O skeleton: {other}"
+                "Unsupported executor step type in Rust Phase 6P skeleton: {other}"
             ))),
         }
     }
@@ -357,6 +367,235 @@ impl ExecutorRunner {
         Ok(outputs)
     }
 
+    fn execute_resolve_artifacts(
+        &mut self,
+        plan: &ExecutionPlan,
+        state: &mut ExecutionState,
+        resolved_params: &OrderedMap<Value>,
+    ) -> Result<OrderedMap<RuntimeValue>, StepFailure> {
+        let artifacts_by_id = plan
+            .artifacts
+            .iter()
+            .map(|artifact| (artifact.id.as_str(), artifact))
+            .collect::<HashMap<_, _>>();
+        for artifact_id in string_list_param(resolved_params.get("artifacts")) {
+            let Some(artifact) = artifacts_by_id.get(artifact_id.as_str()) else {
+                return Err(StepFailure::new(format!(
+                    "unknown_artifact_ref: Unknown artifact ref: 'artifacts.{artifact_id}'."
+                )));
+            };
+            let result = self.resolve_artifact(artifact);
+            let artifact_state = state
+                .artifacts
+                .get_mut(&artifact.id)
+                .expect("artifact runtime state should be initialized from plan");
+            match result {
+                Ok(resolved) => {
+                    artifact_state.status = ArtifactRuntimeStatus::Resolved;
+                    artifact_state.local_path = Some(resolved.local_path);
+                    artifact_state.resolved_url = Some(artifact.url.clone());
+                    artifact_state.filename = Some(resolved.filename);
+                    artifact_state.cache_hit = resolved.cache_hit;
+                    artifact_state.error = None;
+                }
+                Err(failure) => {
+                    let message = failure.message.clone();
+                    artifact_state.status = ArtifactRuntimeStatus::Failed;
+                    artifact_state.error = Some(message);
+                    return Err(failure);
+                }
+            }
+        }
+        Ok(OrderedMap::new())
+    }
+
+    fn resolve_artifact(
+        &mut self,
+        artifact: &ExecutionArtifact,
+    ) -> Result<ResolvedArtifact, StepFailure> {
+        let sandbox = self.adapters.sandbox()?;
+        let filename = artifact_filename(&artifact.id, &artifact.url);
+        let local_filename = artifact_local_filename(&artifact.id, &artifact.url, &artifact.cache);
+        let cache_hit;
+        let local_path = if artifact.cache == "default" {
+            let path = sandbox.cache_root.join(&local_filename);
+            cache_hit = path.exists();
+            path
+        } else {
+            cache_hit = false;
+            sandbox.runtime_root.join("downloads").join(&local_filename)
+        };
+
+        sandbox.ensure_runtime_or_cache_write(&local_path)?;
+        if !local_path.exists() {
+            let Some(source_path) = file_url_to_path(&artifact.url) else {
+                return Err(StepFailure::new(format!(
+                    "artifact_download_failed: Failed to download artifact {:?} from {:?}: network downloads are disabled in Rust Phase 6P",
+                    artifact.id, artifact.url
+                )));
+            };
+            sandbox.ensure_read_allowed(&source_path)?;
+            fs::create_dir_all(local_path.parent().unwrap())
+                .map_err(|error| StepFailure::new(error.to_string()))?;
+            fs::copy(&source_path, &local_path)
+                .map_err(|error| StepFailure::new(error.to_string()))?;
+        }
+
+        Ok(ResolvedArtifact {
+            local_path: local_path.to_string_lossy().to_string(),
+            filename,
+            cache_hit,
+        })
+    }
+
+    fn execute_extract_artifacts(
+        &mut self,
+        state: &ExecutionState,
+        step: &ExecutionStep,
+        resolved_params: &OrderedMap<Value>,
+    ) -> Result<OrderedMap<RuntimeValue>, StepFailure> {
+        let extract_on = resolved_params
+            .get("extract_on")
+            .and_then(Value::as_str)
+            .unwrap_or("host");
+        if extract_on != "host" {
+            return Err(StepFailure::new(
+                "extract_artifacts device extraction is outside Rust Phase 6P".to_string(),
+            ));
+        }
+        let sandbox = self.adapters.sandbox()?;
+        let extract_root = sandbox
+            .runtime_root
+            .join("extract")
+            .join(sanitize_step_id(&step.id));
+        let mut output_paths = Vec::new();
+        for artifact_id in string_list_param(resolved_params.get("artifacts")) {
+            let Some(artifact_state) = state.artifacts.get(&artifact_id) else {
+                return Err(StepFailure::new(format!(
+                    "unknown_artifact_ref: Unknown artifact ref: 'artifacts.{artifact_id}'."
+                )));
+            };
+            if artifact_state.status != ArtifactRuntimeStatus::Resolved {
+                return Err(StepFailure::new(format!(
+                    "artifact_not_resolved: Artifact is not resolved: 'artifacts.{artifact_id}.local_path'."
+                )));
+            }
+            let Some(local_path) = &artifact_state.local_path else {
+                return Err(StepFailure::new(format!(
+                    "artifact_not_resolved: Artifact is not resolved: 'artifacts.{artifact_id}.local_path'."
+                )));
+            };
+            let archive_path = PathBuf::from(local_path);
+            sandbox.ensure_read_allowed(&archive_path)?;
+            let artifact_dir =
+                extract_root.join(artifact_id.rsplit('/').next().unwrap_or(&artifact_id));
+            let members = sandbox.extract_zip_to_directory(&archive_path, &artifact_dir)?;
+            output_paths.extend(
+                members
+                    .into_iter()
+                    .map(|member| json!(member.to_string_lossy().to_string())),
+            );
+        }
+        let mut outputs = OrderedMap::new();
+        outputs.insert(
+            "extracted_paths".to_string(),
+            RuntimeValue {
+                type_name: "path_list".to_string(),
+                value: Value::Array(output_paths),
+                location: Some("host".to_string()),
+            },
+        );
+        Ok(outputs)
+    }
+
+    fn execute_extract_archive(
+        &mut self,
+        step: &ExecutionStep,
+        resolved_params: &OrderedMap<Value>,
+    ) -> Result<OrderedMap<RuntimeValue>, StepFailure> {
+        let extract_on = resolved_params
+            .get("extract_on")
+            .and_then(Value::as_str)
+            .unwrap_or("host");
+        if extract_on != "host" {
+            return Err(StepFailure::new(
+                "extract_archive device extraction is outside Rust Phase 6P".to_string(),
+            ));
+        }
+        let archive = runtime_value_param(resolved_params, "archive")?;
+        if archive.location.as_deref() != Some("host") {
+            return Err(StepFailure::new(
+                "Host extraction requires a host-side archive path.".to_string(),
+            ));
+        }
+        let Some(archive_path) = archive.value.as_str() else {
+            return Err(StepFailure::new(
+                "extract_archive archive runtime value must contain a string path".to_string(),
+            ));
+        };
+        let archive_path = PathBuf::from(archive_path);
+        let sandbox = self.adapters.sandbox()?;
+        sandbox.ensure_read_allowed(&archive_path)?;
+        let extract_root = sandbox
+            .runtime_root
+            .join("extract")
+            .join(sanitize_step_id(&step.id));
+        let members = sandbox.extract_zip_to_directory(&archive_path, &extract_root)?;
+        let (type_name, value) = if members.len() == 1 {
+            let member = &members[0];
+            let type_name = if member.is_dir() {
+                "directory_path"
+            } else {
+                "file_path"
+            };
+            (type_name, member.to_string_lossy().to_string())
+        } else {
+            ("directory_path", extract_root.to_string_lossy().to_string())
+        };
+        let mut outputs = OrderedMap::new();
+        outputs.insert(
+            "extracted_path".to_string(),
+            RuntimeValue {
+                type_name: type_name.to_string(),
+                value: json!(value),
+                location: Some("host".to_string()),
+            },
+        );
+        Ok(outputs)
+    }
+
+    fn execute_copy_files(
+        &mut self,
+        resolved_params: &OrderedMap<Value>,
+    ) -> Result<OrderedMap<RuntimeValue>, StepFailure> {
+        let source = runtime_value_param(resolved_params, "source")?;
+        if source.location.as_deref() != Some("host") {
+            return Err(StepFailure::new(
+                "copy_files device sources are outside Rust Phase 6P".to_string(),
+            ));
+        }
+        let dest = resolved_params
+            .get("dest")
+            .and_then(Value::as_str)
+            .ok_or_else(|| StepFailure::new("copy_files dest must be a string".to_string()))?;
+        let copy_policy = resolved_params
+            .get("copy_policy")
+            .and_then(Value::as_str)
+            .unwrap_or("merge");
+        let sandbox = self.adapters.sandbox()?;
+        let copied_paths = sandbox.copy_host_source_to_fake_device(&source, dest, copy_policy)?;
+        let mut outputs = OrderedMap::new();
+        outputs.insert(
+            "copied_paths".to_string(),
+            RuntimeValue {
+                type_name: "path_list".to_string(),
+                value: Value::Array(copied_paths.into_iter().map(Value::String).collect()),
+                location: Some("device".to_string()),
+            },
+        );
+        Ok(outputs)
+    }
+
     fn evaluate_condition(&mut self, condition: &ExecutionStepCondition) -> Result<bool, String> {
         match condition.type_name.as_str() {
             "package_installed" => {
@@ -381,9 +620,28 @@ impl ExecutorRunner {
 pub struct DryRunExecutorAdapters {
     device: FakeDryRunDevice,
     sleep_calls: Vec<f64>,
+    sandbox: Option<SandboxRoots>,
 }
 
 impl DryRunExecutorAdapters {
+    pub fn with_sandbox_roots(
+        runtime_root: PathBuf,
+        cache_root: PathBuf,
+        fake_device_root: PathBuf,
+        read_only_roots: Vec<PathBuf>,
+    ) -> Self {
+        Self {
+            device: FakeDryRunDevice::default(),
+            sleep_calls: Vec::new(),
+            sandbox: Some(SandboxRoots {
+                runtime_root,
+                cache_root,
+                fake_device_root,
+                read_only_roots,
+            }),
+        }
+    }
+
     pub fn device(&self) -> &FakeDryRunDevice {
         &self.device
     }
@@ -398,6 +656,14 @@ impl DryRunExecutorAdapters {
 
     fn sleep(&mut self, seconds: f64) {
         self.sleep_calls.push(seconds);
+    }
+
+    fn sandbox(&self) -> Result<&SandboxRoots, StepFailure> {
+        self.sandbox.as_ref().ok_or_else(|| {
+            StepFailure::new(
+                "Phase 6P filesystem/artifact handlers require explicit sandbox roots".to_string(),
+            )
+        })
     }
 }
 
@@ -470,9 +736,325 @@ impl FakeDryRunDevice {
     }
 }
 
+#[derive(Clone, Debug)]
+struct SandboxRoots {
+    runtime_root: PathBuf,
+    cache_root: PathBuf,
+    fake_device_root: PathBuf,
+    read_only_roots: Vec<PathBuf>,
+}
+
+impl SandboxRoots {
+    fn ensure_read_allowed(&self, path: &Path) -> Result<(), StepFailure> {
+        let normalized = path
+            .canonicalize()
+            .map(|path| normalize_path(&path))
+            .unwrap_or_else(|_| normalize_path(path));
+        if self
+            .allowed_read_roots()
+            .iter()
+            .any(|root| normalized.starts_with(root))
+        {
+            return Ok(());
+        }
+        Err(StepFailure::new(format!(
+            "sandbox read rejected outside allowed roots: {}",
+            path.display()
+        )))
+    }
+
+    fn ensure_runtime_or_cache_write(&self, path: &Path) -> Result<(), StepFailure> {
+        let normalized = normalize_path(path);
+        let runtime_root = normalize_path(&self.runtime_root);
+        let cache_root = normalize_path(&self.cache_root);
+        if normalized.starts_with(&runtime_root) {
+            reject_symlink_ancestor(&self.runtime_root, path)?;
+            reject_existing_symlink(path)?;
+            return Ok(());
+        }
+        if normalized.starts_with(&cache_root) {
+            reject_symlink_ancestor(&self.cache_root, path)?;
+            reject_existing_symlink(path)?;
+            return Ok(());
+        }
+        Err(StepFailure::new(format!(
+            "sandbox write rejected outside runtime/cache roots: {}",
+            path.display()
+        )))
+    }
+
+    fn fake_device_path(&self, device_path: &str) -> Result<PathBuf, StepFailure> {
+        if !device_path.starts_with('/') {
+            return Err(StepFailure::new(format!(
+                "fake device path must be absolute: {device_path}"
+            )));
+        }
+        let relative = fake_device_relative_components(Path::new(device_path))?;
+        let path = normalize_path(&self.fake_device_root.join(relative));
+        let fake_device_root = normalize_path(&self.fake_device_root);
+        if path.starts_with(&fake_device_root) {
+            Ok(path)
+        } else {
+            Err(StepFailure::new(format!(
+                "path traversal rejected for fake device path: {device_path}"
+            )))
+        }
+    }
+
+    fn extract_zip_to_directory(
+        &self,
+        archive_path: &Path,
+        dest_dir: &Path,
+    ) -> Result<Vec<PathBuf>, StepFailure> {
+        self.ensure_runtime_or_cache_write(dest_dir)?;
+        let file =
+            fs::File::open(archive_path).map_err(|error| StepFailure::new(error.to_string()))?;
+        let mut archive = zip::ZipArchive::new(file)
+            .map_err(|_| StepFailure::new("File is not a zip file".to_string()))?;
+        let mut entries = Vec::new();
+        for index in 0..archive.len() {
+            let file = archive
+                .by_index(index)
+                .map_err(|error| StepFailure::new(error.to_string()))?;
+            let entry_name = file.name().to_string();
+            let relative = archive_relative_components(Path::new(&entry_name))?;
+            let target = normalize_path(&dest_dir.join(relative));
+            if !target.starts_with(&normalize_path(dest_dir)) {
+                return Err(StepFailure::new(format!(
+                    "unsafe archive entry rejected: {entry_name}"
+                )));
+            }
+            self.ensure_runtime_or_cache_write(&target)?;
+            entries.push((entry_name, target, file.is_dir()));
+        }
+        fs::create_dir_all(dest_dir).map_err(|error| StepFailure::new(error.to_string()))?;
+        for (index, (entry_name, target, is_dir)) in entries.into_iter().enumerate() {
+            let mut file = archive
+                .by_index(index)
+                .map_err(|error| StepFailure::new(error.to_string()))?;
+            reject_symlink_ancestor(dest_dir, &target)?;
+            reject_existing_symlink(&target)?;
+            if is_dir || entry_name.ends_with('/') {
+                fs::create_dir_all(&target).map_err(|error| StepFailure::new(error.to_string()))?;
+            } else {
+                if let Some(parent) = target.parent() {
+                    fs::create_dir_all(parent)
+                        .map_err(|error| StepFailure::new(error.to_string()))?;
+                }
+                let mut output = fs::File::create(&target)
+                    .map_err(|error| StepFailure::new(error.to_string()))?;
+                io::copy(&mut file, &mut output)
+                    .map_err(|error| StepFailure::new(error.to_string()))?;
+            }
+        }
+        let mut children = fs::read_dir(dest_dir)
+            .map_err(|error| StepFailure::new(error.to_string()))?
+            .map(|entry| entry.map(|entry| entry.path()))
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(|error| StepFailure::new(error.to_string()))?;
+        children.sort();
+        if children.is_empty() {
+            Ok(vec![dest_dir.to_path_buf()])
+        } else {
+            Ok(children)
+        }
+    }
+
+    fn copy_host_source_to_fake_device(
+        &self,
+        source: &RuntimeValue,
+        dest: &str,
+        copy_policy: &str,
+    ) -> Result<Vec<String>, StepFailure> {
+        match source.type_name.as_str() {
+            "file_path" => {
+                let source_path = source_path_from_value(source)?;
+                self.ensure_read_allowed(&source_path)?;
+                let (target, dest_is_dir) = self.file_target_path(&source_path, dest)?;
+                if copy_policy == "replace" && target.exists() {
+                    self.remove_fake_device_path(&target)?;
+                }
+                self.copy_path(&source_path, &target)?;
+                Ok(vec![device_file_target(&source_path, dest, dest_is_dir)])
+            }
+            "directory_path" => {
+                let source_path = source_path_from_value(source)?;
+                self.ensure_read_allowed(&source_path)?;
+                let target_dir = self.fake_device_path(dest)?;
+                if copy_policy == "replace" && target_dir.exists() {
+                    self.remove_fake_device_path(&target_dir)?;
+                }
+                reject_symlink_ancestor(&self.fake_device_root, &target_dir)?;
+                reject_existing_symlink(&target_dir)?;
+                fs::create_dir_all(&target_dir)
+                    .map_err(|error| StepFailure::new(error.to_string()))?;
+                let mut copied = Vec::new();
+                for child in sorted_children(&source_path)? {
+                    let child_name = child
+                        .file_name()
+                        .expect("source child should have a basename")
+                        .to_string_lossy()
+                        .to_string();
+                    let target = target_dir.join(&child_name);
+                    self.copy_path(&child, &target)?;
+                    copied.push(join_device_path(dest, &child_name));
+                }
+                Ok(copied)
+            }
+            "path_list" => {
+                let target_dir = self.fake_device_path(dest)?;
+                if copy_policy == "replace" && target_dir.exists() {
+                    self.remove_fake_device_path(&target_dir)?;
+                }
+                reject_symlink_ancestor(&self.fake_device_root, &target_dir)?;
+                reject_existing_symlink(&target_dir)?;
+                fs::create_dir_all(&target_dir)
+                    .map_err(|error| StepFailure::new(error.to_string()))?;
+                let mut copied = Vec::new();
+                for item in source.value.as_array().cloned().unwrap_or_default() {
+                    let Some(item) = item.as_str() else {
+                        return Err(StepFailure::new(
+                            "copy_files path_list source values must be strings".to_string(),
+                        ));
+                    };
+                    let source_path = PathBuf::from(item);
+                    self.ensure_read_allowed(&source_path)?;
+                    let child_name = source_path
+                        .file_name()
+                        .ok_or_else(|| {
+                            StepFailure::new(format!(
+                                "copy_files source path has no basename: {item}"
+                            ))
+                        })?
+                        .to_string_lossy()
+                        .to_string();
+                    let target = target_dir.join(&child_name);
+                    self.copy_path(&source_path, &target)?;
+                    copied.push(join_device_path(dest, &child_name));
+                }
+                Ok(copied)
+            }
+            other => Err(StepFailure::new(format!(
+                "copy_files does not support source runtime type {other:?}."
+            ))),
+        }
+    }
+
+    fn file_target_path(
+        &self,
+        source_path: &Path,
+        dest: &str,
+    ) -> Result<(PathBuf, bool), StepFailure> {
+        let dest_path = self.fake_device_path(dest)?;
+        if dest_path.is_dir() {
+            Ok((
+                dest_path.join(
+                    source_path
+                        .file_name()
+                        .expect("source file should have basename"),
+                ),
+                true,
+            ))
+        } else {
+            Ok((dest_path, false))
+        }
+    }
+
+    fn copy_path(&self, source: &Path, target: &Path) -> Result<(), StepFailure> {
+        reject_existing_symlink(source)?;
+        reject_symlink_ancestor(&self.fake_device_root, target)?;
+        reject_existing_symlink(target)?;
+        let fake_device_root = normalize_path(&self.fake_device_root);
+        let normalized_target = normalize_path(target);
+        if !normalized_target.starts_with(&fake_device_root) {
+            return Err(StepFailure::new(format!(
+                "sandbox write rejected outside fake device root: {}",
+                target.display()
+            )));
+        }
+        if source.is_dir() {
+            copy_dir_recursive(source, target, &self.fake_device_root)
+        } else {
+            if let Some(parent) = target.parent() {
+                fs::create_dir_all(parent).map_err(|error| StepFailure::new(error.to_string()))?;
+            }
+            fs::copy(source, target)
+                .map(|_| ())
+                .map_err(|error| StepFailure::new(error.to_string()))
+        }
+    }
+
+    fn remove_fake_device_path(&self, path: &Path) -> Result<(), StepFailure> {
+        let normalized = normalize_path(path);
+        if !normalized.starts_with(&normalize_path(&self.fake_device_root)) {
+            return Err(StepFailure::new(format!(
+                "delete rejected outside fake device root: {}",
+                path.display()
+            )));
+        }
+        reject_symlink_ancestor(&self.fake_device_root, path)?;
+        reject_existing_symlink(path)?;
+        if path.is_dir() {
+            fs::remove_dir_all(path).map_err(|error| StepFailure::new(error.to_string()))
+        } else if path.exists() {
+            fs::remove_file(path).map_err(|error| StepFailure::new(error.to_string()))
+        } else {
+            Ok(())
+        }
+    }
+
+    fn allowed_read_roots(&self) -> Vec<PathBuf> {
+        let mut roots = vec![
+            normalize_path(&self.runtime_root),
+            normalize_path(&self.cache_root),
+            normalize_path(&self.fake_device_root),
+        ];
+        roots.extend(
+            [&self.runtime_root, &self.cache_root, &self.fake_device_root]
+                .into_iter()
+                .filter_map(|root| root.canonicalize().ok())
+                .map(|root| normalize_path(&root)),
+        );
+        roots.extend(self.read_only_roots.iter().map(|root| normalize_path(root)));
+        roots.extend(
+            self.read_only_roots
+                .iter()
+                .filter_map(|root| root.canonicalize().ok())
+                .map(|root| normalize_path(&root)),
+        );
+        roots
+    }
+}
+
 #[derive(Debug, Default)]
 struct ExecutionState {
     steps: HashMap<String, StepRuntimeState>,
+    artifacts: HashMap<String, ArtifactRuntimeState>,
+}
+
+impl ExecutionState {
+    fn from_plan(plan: &ExecutionPlan) -> Self {
+        Self {
+            steps: HashMap::new(),
+            artifacts: plan
+                .artifacts
+                .iter()
+                .map(|artifact| {
+                    (
+                        artifact.id.clone(),
+                        ArtifactRuntimeState {
+                            status: ArtifactRuntimeStatus::Pending,
+                            local_path: None,
+                            resolved_url: None,
+                            filename: None,
+                            cache_hit: false,
+                            error: None,
+                        },
+                    )
+                })
+                .collect(),
+        }
+    }
 }
 
 #[derive(Clone, Debug)]
@@ -487,6 +1069,40 @@ enum StepRuntimeStatus {
     Blocked,
     Succeeded,
     Failed,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+enum ArtifactRuntimeStatus {
+    Pending,
+    Resolved,
+    Failed,
+}
+
+impl ArtifactRuntimeStatus {
+    fn as_python_value(&self) -> &'static str {
+        match self {
+            Self::Pending => "pending",
+            Self::Resolved => "resolved",
+            Self::Failed => "failed",
+        }
+    }
+}
+
+#[derive(Clone, Debug)]
+struct ArtifactRuntimeState {
+    status: ArtifactRuntimeStatus,
+    local_path: Option<String>,
+    resolved_url: Option<String>,
+    filename: Option<String>,
+    cache_hit: bool,
+    error: Option<String>,
+}
+
+#[derive(Clone, Debug)]
+struct ResolvedArtifact {
+    local_path: String,
+    filename: String,
+    cache_hit: bool,
 }
 
 #[derive(Debug)]
@@ -618,6 +1234,62 @@ fn resolve_step_params(
 }
 
 fn resolve_runtime_ref(state: &ExecutionState, ref_value: &str) -> Result<Value, StepFailure> {
+    if let Some(artifact_ref) = ref_value.strip_prefix("artifacts.") {
+        let Some((artifact_id, field)) = artifact_ref.rsplit_once('.') else {
+            return Err(StepFailure::new(format!(
+                "invalid_ref_format: Invalid runtime ref: {ref_value:?}."
+            )));
+        };
+        let Some(artifact) = state.artifacts.get(artifact_id) else {
+            return Err(StepFailure::new(format!(
+                "unknown_artifact_ref: Unknown artifact ref: {ref_value:?}."
+            )));
+        };
+        if artifact.status != ArtifactRuntimeStatus::Resolved {
+            return Err(StepFailure::new(format!(
+                "artifact_not_resolved: Artifact is not resolved: {ref_value:?}."
+            )));
+        }
+        let runtime_value = match field {
+            "status" => RuntimeValue {
+                type_name: "string".to_string(),
+                value: json!(artifact.status.as_python_value()),
+                location: None,
+            },
+            "local_path" => RuntimeValue {
+                type_name: "file_path".to_string(),
+                value: json!(artifact.local_path),
+                location: Some("host".to_string()),
+            },
+            "filename" => RuntimeValue {
+                type_name: "string".to_string(),
+                value: json!(artifact.filename),
+                location: None,
+            },
+            "resolved_url" => RuntimeValue {
+                type_name: "string".to_string(),
+                value: json!(artifact.resolved_url),
+                location: None,
+            },
+            "cache_hit" => RuntimeValue {
+                type_name: "boolean".to_string(),
+                value: json!(artifact.cache_hit),
+                location: None,
+            },
+            "error" => RuntimeValue {
+                type_name: "string".to_string(),
+                value: json!(artifact.error.clone().unwrap_or_default()),
+                location: None,
+            },
+            _ => {
+                return Err(StepFailure::new(format!(
+                    "unknown_artifact_field: Unknown artifact field in ref: {ref_value:?}."
+                )))
+            }
+        };
+        return serde_json::to_value(runtime_value)
+            .map_err(|error| StepFailure::new(error.to_string()));
+    }
     let Some(step_ref) = ref_value.strip_prefix("steps.") else {
         return Err(StepFailure::new(format!(
             "invalid_ref_format: Invalid runtime ref: {ref_value:?}."
@@ -644,6 +1316,264 @@ fn resolve_runtime_ref(state: &ExecutionState, ref_value: &str) -> Result<Value,
         )));
     };
     serde_json::to_value(value).map_err(|error| StepFailure::new(error.to_string()))
+}
+
+pub(crate) fn artifact_local_filename(artifact_id: &str, url: &str, cache: &str) -> String {
+    let filename = artifact_filename(artifact_id, url);
+    let hash_input = if cache == "default" {
+        url.to_string()
+    } else {
+        format!("{artifact_id}{url}")
+    };
+    let digest = Sha256::digest(hash_input.as_bytes());
+    let digest_hex = digest
+        .iter()
+        .map(|byte| format!("{byte:02x}"))
+        .collect::<String>();
+    format!("{digest_hex}-{filename}")
+}
+
+fn artifact_filename(artifact_id: &str, url: &str) -> String {
+    let after_scheme = url.split_once("://").map(|(_, rest)| rest).unwrap_or(url);
+    let path_with_query = if after_scheme.starts_with('/') {
+        after_scheme
+    } else {
+        after_scheme
+            .find('/')
+            .map(|index| &after_scheme[index..])
+            .unwrap_or("")
+    };
+    let path = path_with_query.split(['?', '#']).next().unwrap_or_default();
+    path.rsplit('/')
+        .find(|part| !part.is_empty())
+        .map(percent_decode)
+        .unwrap_or_else(|| {
+            format!(
+                "{}.bin",
+                artifact_id.rsplit('/').next().unwrap_or(artifact_id)
+            )
+        })
+}
+
+fn file_url_to_path(url: &str) -> Option<PathBuf> {
+    let rest = url.strip_prefix("file://")?;
+    let path = if rest.starts_with('/') {
+        rest
+    } else {
+        rest.find('/').map(|index| &rest[index..])?
+    };
+    Some(PathBuf::from(percent_decode(path)))
+}
+
+fn percent_decode(value: &str) -> String {
+    let bytes = value.as_bytes();
+    let mut output = Vec::with_capacity(bytes.len());
+    let mut index = 0;
+    while index < bytes.len() {
+        if bytes[index] == b'%' && index + 2 < bytes.len() {
+            if let Ok(hex) = u8::from_str_radix(&value[index + 1..index + 3], 16) {
+                output.push(hex);
+                index += 3;
+                continue;
+            }
+        }
+        output.push(bytes[index]);
+        index += 1;
+    }
+    String::from_utf8_lossy(&output).to_string()
+}
+
+fn string_list_param(value: Option<&Value>) -> Vec<String> {
+    value
+        .and_then(Value::as_array)
+        .map(|values| {
+            values
+                .iter()
+                .filter_map(Value::as_str)
+                .map(ToString::to_string)
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+fn runtime_value_param(
+    params: &OrderedMap<Value>,
+    name: &str,
+) -> Result<RuntimeValue, StepFailure> {
+    let Some(Value::Object(value)) = params.get(name) else {
+        return Err(StepFailure::new(format!(
+            "{name} must be a runtime value object"
+        )));
+    };
+    Ok(RuntimeValue {
+        type_name: value
+            .get("type")
+            .and_then(Value::as_str)
+            .unwrap_or_default()
+            .to_string(),
+        value: value.get("value").cloned().unwrap_or(Value::Null),
+        location: value
+            .get("location")
+            .and_then(Value::as_str)
+            .map(ToString::to_string),
+    })
+}
+
+fn source_path_from_value(source: &RuntimeValue) -> Result<PathBuf, StepFailure> {
+    source.value.as_str().map(PathBuf::from).ok_or_else(|| {
+        StepFailure::new("copy_files source runtime value must contain a string path".to_string())
+    })
+}
+
+fn fake_device_relative_components(path: &Path) -> Result<PathBuf, StepFailure> {
+    let mut relative = PathBuf::new();
+    for component in path.components() {
+        match component {
+            Component::Normal(part) => relative.push(part),
+            Component::CurDir | Component::RootDir => {}
+            Component::ParentDir | Component::Prefix(_) => {
+                return Err(StepFailure::new(format!(
+                    "path traversal rejected: {}",
+                    path.display()
+                )));
+            }
+        }
+    }
+    Ok(relative)
+}
+
+fn archive_relative_components(path: &Path) -> Result<PathBuf, StepFailure> {
+    let mut relative = PathBuf::new();
+    for component in path.components() {
+        match component {
+            Component::Normal(part) => relative.push(part),
+            Component::CurDir => {}
+            Component::RootDir | Component::ParentDir | Component::Prefix(_) => {
+                return Err(StepFailure::new(format!(
+                    "unsafe archive entry rejected: {}",
+                    path.display()
+                )));
+            }
+        }
+    }
+    if relative.as_os_str().is_empty() {
+        return Err(StepFailure::new(format!(
+            "unsafe archive entry rejected: {}",
+            path.display()
+        )));
+    }
+    Ok(relative)
+}
+
+fn normalize_path(path: &Path) -> PathBuf {
+    let mut normalized = PathBuf::new();
+    for component in path.components() {
+        match component {
+            Component::Prefix(prefix) => normalized.push(prefix.as_os_str()),
+            Component::RootDir => normalized.push(Path::new("/")),
+            Component::CurDir => {}
+            Component::ParentDir => {
+                normalized.pop();
+            }
+            Component::Normal(part) => normalized.push(part),
+        }
+    }
+    normalized
+}
+
+fn sanitize_step_id(step_id: &str) -> String {
+    step_id.replace('/', "_")
+}
+
+fn sorted_children(path: &Path) -> Result<Vec<PathBuf>, StepFailure> {
+    let mut children = fs::read_dir(path)
+        .map_err(|error| StepFailure::new(error.to_string()))?
+        .map(|entry| entry.map(|entry| entry.path()))
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(|error| StepFailure::new(error.to_string()))?;
+    children.sort();
+    Ok(children)
+}
+
+fn reject_existing_symlink(path: &Path) -> Result<(), StepFailure> {
+    if fs::symlink_metadata(path)
+        .map(|metadata| metadata.file_type().is_symlink())
+        .unwrap_or(false)
+    {
+        return Err(StepFailure::new(format!(
+            "symlink paths are not supported in Phase 6P sandbox operations: {}",
+            path.display()
+        )));
+    }
+    Ok(())
+}
+
+fn reject_symlink_ancestor(root: &Path, path: &Path) -> Result<(), StepFailure> {
+    reject_existing_symlink(root)?;
+    let root = normalize_path(root);
+    let path = normalize_path(path);
+    let relative = path.strip_prefix(&root).map_err(|_| {
+        StepFailure::new(format!(
+            "sandbox path is outside root: {}",
+            path.to_string_lossy()
+        ))
+    })?;
+    let mut current = root;
+    for component in relative.components() {
+        current.push(component.as_os_str());
+        reject_existing_symlink(&current)?;
+    }
+    Ok(())
+}
+
+fn copy_dir_recursive(
+    source: &Path,
+    target: &Path,
+    fake_device_root: &Path,
+) -> Result<(), StepFailure> {
+    reject_existing_symlink(source)?;
+    reject_symlink_ancestor(fake_device_root, target)?;
+    reject_existing_symlink(target)?;
+    fs::create_dir_all(target).map_err(|error| StepFailure::new(error.to_string()))?;
+    for child in sorted_children(source)? {
+        reject_existing_symlink(&child)?;
+        let child_target = target.join(
+            child
+                .file_name()
+                .expect("directory child should have a basename"),
+        );
+        reject_symlink_ancestor(fake_device_root, &child_target)?;
+        reject_existing_symlink(&child_target)?;
+        if child.is_dir() {
+            copy_dir_recursive(&child, &child_target, fake_device_root)?;
+        } else {
+            if let Some(parent) = child_target.parent() {
+                fs::create_dir_all(parent).map_err(|error| StepFailure::new(error.to_string()))?;
+            }
+            fs::copy(&child, &child_target)
+                .map(|_| ())
+                .map_err(|error| StepFailure::new(error.to_string()))?;
+        }
+    }
+    Ok(())
+}
+
+fn join_device_path(parent: &str, child: &str) -> String {
+    format!("{}/{}", parent.trim_end_matches('/'), child)
+}
+
+fn device_file_target(source_path: &Path, dest: &str, dest_is_dir: bool) -> String {
+    if dest_is_dir {
+        join_device_path(
+            dest,
+            &source_path
+                .file_name()
+                .expect("source file should have basename")
+                .to_string_lossy(),
+        )
+    } else {
+        dest.to_string()
+    }
 }
 
 fn required_string_param(condition: &ExecutionStepCondition, name: &str) -> Result<String, String> {

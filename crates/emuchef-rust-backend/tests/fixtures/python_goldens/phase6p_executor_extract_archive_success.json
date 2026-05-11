@@ -1,0 +1,18 @@
+{
+  "steps": [
+    {
+      "message": null,
+      "outputs": {
+        "extracted_path": {
+          "location": "host",
+          "type": "file_path",
+          "value": "$TMP/.emuchef_runtime/extract/example.recipe_extract_archive/single.txt"
+        }
+      },
+      "status": "executed",
+      "step_id": "example.recipe/extract_archive"
+    }
+  ],
+  "success": true,
+  "total_steps": 1
+}

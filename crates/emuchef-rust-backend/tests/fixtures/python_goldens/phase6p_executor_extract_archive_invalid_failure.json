@@ -1,0 +1,24 @@
+{
+  "steps": [
+    {
+      "message": "File is not a zip file",
+      "outputs": {},
+      "status": "failed",
+      "step_id": "example.recipe/extract_archive"
+    },
+    {
+      "message": "dependency blocked: example.recipe/extract_archive",
+      "outputs": {},
+      "status": "blocked",
+      "step_id": "example.recipe/downstream"
+    },
+    {
+      "message": null,
+      "outputs": {},
+      "status": "executed",
+      "step_id": "example.recipe/unrelated"
+    }
+  ],
+  "success": false,
+  "total_steps": 3
+}

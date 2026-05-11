@@ -4,7 +4,7 @@ This package is an experimental Rust backend skeleton for the EmuChef config
 editor protocol. It is standalone and runnable independently of the Tauri
 editor.
 
-Through Phase 6O it implements only:
+Through Phase 6P it implements only:
 
 - `hello`
 - `listStepSpecs`
@@ -46,6 +46,8 @@ Through Phase 6O it implements only:
   tests
 - an internal-only, fixture-scoped executor skeleton that emits Python-shaped
   `ExecutionRunResult` values for selected safe dry-run Phase 6O tests
+- temp-dir-confined filesystem/artifact executor behavior for selected Phase 6P
+  fixtures
 
 It reports only capabilities that are implemented in this crate:
 
@@ -75,11 +77,11 @@ requests in JSONL sidecar mode only. One-shot mode remains stateless and does
 not expose persistent document session APIs.
 
 Reporting these capabilities still does not make this backend compatible with
-the Tauri editor. Phase 6O reports the same ordered capability list as Phase
-6H/6I/6J.1/6J.2/6K/6L/6M/6N; capability parity is not full backend parity. The
-Rust backend is still not editor-ready and is not wired into Tauri.
+the Tauri editor. Phase 6P reports the same ordered capability list as Phase
+6H/6I/6J.1/6J.2/6K/6L/6M/6N/6O; capability parity is not full backend parity.
+The Rust backend is still not editor-ready and is not wired into Tauri.
 There is no env var, CLI flag, config file, README path, or documented launch
-path for using this Rust backend as the Tauri editor backend in Phase 6O.
+path for using this Rust backend as the Tauri editor backend in Phase 6P.
 
 The Python backend remains the reference implementation. This Rust package is
 not a replacement backend and is not selected by the Tauri editor.
@@ -95,10 +97,13 @@ Python-golden-backed parity for current built-in planning mappings, dependency
 expansion, input binding/default/multiple values, artifact/group planning,
 StepSpec defaults, refs, `skip_if`, `verify`, and planner result status/error
 shape for selected fixtures. Phase 6O adds a private safe executor skeleton for
-selected Python dry-run result fixtures. Rust still does not perform real device
-checks, artifact downloads, archive extraction, file copies, permission grants,
-subprocess execution, or Tauri integration. Python remains the reference
-implementation until parity is confirmed.
+selected Python dry-run result fixtures. Phase 6P expands that private executor
+with selected filesystem/artifact behavior, but every filesystem mutation is
+confined to explicit test-owned temp roots. Rust still does not perform real
+device checks, real network downloads, permission grants, subprocess execution,
+ADB/device operations, app lifecycle operations, install operations, or Tauri
+integration. Python remains the reference implementation until parity is
+confirmed.
 
 ## Phase 6N Planner Scope
 
@@ -207,6 +212,48 @@ cover filesystem/artifact executor parity. Phase 6Q is expected to cover
 device/ADB/permission executor parity. The final migration direction remains a
 hard Rust cutover after feature parity; no backend selector or long-term
 dual-backend toggle will be added.
+
+## Phase 6P Executor Filesystem/Artifact Scope
+
+Phase 6P keeps `src/executor.rs` internal to crate-local tests and adds selected
+Python-compatible filesystem/artifact behavior behind explicit sandbox roots:
+
+- `runtime_root` for `.emuchef_runtime` downloads and extraction output
+- `cache_root` for `.emuchef_cache/artifacts`
+- `fake_device_root` for `copy_files` fixture output paths such as `/sdcard/...`
+- read-only fixture roots that may be used as source files
+
+Every read or write must be classified under one of those roots. Writes are
+accepted only under the runtime root, cache root, or fake device root. The fake
+device root is a temp filesystem mapping for `copy_files` fixture parity only;
+it is not an ADB adapter, install target, permission target, app lifecycle
+surface, or a design for Phase 6Q device semantics.
+Phase 6P sandbox operations reject symlink paths instead of trying to preserve
+or follow them because no Python fixture currently defines symlink semantics.
+
+The selected Phase 6P handlers are:
+
+| Step type | Phase 6P status | Notes |
+| --- | --- | --- |
+| `resolve_artifacts` | Implemented for local/pre-cached no-network fixtures | Local `file://` URLs are copied only from allowed read-only fixture/temp roots into the runtime/cache root. Python's filename algorithm is mirrored: `cache: none` uses `sha256(artifact_id + url)-filename`; `cache: default` uses `sha256(url)-filename`. Existing default-cache files are treated as cache hits without network access. Missing remote URLs are not downloaded. |
+| `extract_artifacts` | Implemented for host ZIP fixtures | Extracts resolved local artifact ZIPs under `runtime_root/extract/<step_id>/<artifact_basename>` and returns Python-shaped host `path_list` outputs. Device extraction remains out of scope. |
+| `extract_archive` | Implemented for host ZIP fixtures | Extracts host-side ZIP files under `runtime_root/extract/<step_id>` and returns Python-shaped `extracted_path` values. Device extraction and cleanup of device temp files remain out of scope. |
+| `copy_files` | Implemented for host-to-fake-device fixtures | Supports host `file_path`, `directory_path`, and `path_list` sources with fixture-covered `merge`, `sync`, and `replace` behavior. `sync` preserves stale destination files like Python `push_sync`; `replace` deletes only under the fake device root. Device sources and app-private/device semantics remain out of scope. |
+
+Archive extraction intentionally hardens Python behavior. Python currently uses
+`zipfile.ZipFile.extractall`, which does not enforce the Phase 6P sandbox
+boundary by itself. Rust rejects absolute archive entries and `..` traversal
+entries before writing anything. This is a safety hardening, not a public
+behavioral divergence, because the Rust executor is still internal-only and all
+Phase 6P filesystem behavior is test-contained.
+
+Phase 6P still does not add protocol/API/CLI executor routes, capability
+strings, Tauri editor integration, backend selectors/toggles, protocol
+negotiation, production packaging, Python bundling, hard cutover behavior, or
+Python backend deletion. Real network downloads, HTTP clients, subprocesses,
+ADB/device operations, permission grants, app launch/force-stop, and APK install
+behavior remain unimplemented. Phase 6Q is expected to handle device/ADB/
+permission executor parity with a separate design.
 
 ## Document Session Scope
 
@@ -832,6 +879,23 @@ for name, payload in fixtures.items():
     )
 PY
 ```
+
+Phase 6P adds these normalized executor goldens:
+
+```text
+phase6p_executor_resolve_extract_copy_flow.json
+phase6p_executor_extract_archive_success.json
+phase6p_executor_extract_archive_invalid_failure.json
+```
+
+They were generated with the same `PYTHONPATH=src python3 - <<'PY'` pattern,
+using Python `ExecutorRunner(adb=DryRunAdb(), workdir=TemporaryDirectory())`.
+The helper creates only disposable temp files, local `file://` ZIP fixtures, and
+normalizes the temp root to `$TMP` before writing the JSON fixture. No Python
+golden was generated for missing host-copy sources because Python `DryRunAdb`
+records the push without checking host source existence; Rust's temp-root-backed
+filesystem adapter validates real fixture sources and covers that safety behavior
+with Rust-side tests instead.
 
 Regenerate the Phase 6L diagnostic goldens from the repo root with:
 
