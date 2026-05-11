@@ -110,6 +110,14 @@ impl<D: ExecutorDevice> ExecutorRunner<D> {
     }
 
     pub fn run(&mut self, plan: &ExecutionPlan) -> ExecutionRunResult {
+        self.run_with_progress(plan, |_| {})
+    }
+
+    pub fn run_with_progress(
+        &mut self,
+        plan: &ExecutionPlan,
+        mut progress_callback: impl FnMut(ExecutionProgressEvent),
+    ) -> ExecutionRunResult {
         let total_steps = plan.steps.len();
         let step_ids_in_plan = plan
             .steps
@@ -120,6 +128,15 @@ impl<D: ExecutorDevice> ExecutorRunner<D> {
         let mut records = Vec::new();
 
         for step in &plan.steps {
+            progress_callback(progress_event(
+                step,
+                total_steps,
+                plan,
+                ProgressPhase::CheckingSkipConditions,
+                None,
+                None,
+            ));
+
             let blocking_dependencies = blocking_dependencies(&state, &step.dependencies);
             if !blocking_dependencies.is_empty() {
                 let message = format!("dependency blocked: {}", blocking_dependencies.join(", "));
@@ -130,6 +147,14 @@ impl<D: ExecutorDevice> ExecutorRunner<D> {
                         outputs: OrderedMap::new(),
                     },
                 );
+                progress_callback(progress_event(
+                    step,
+                    total_steps,
+                    plan,
+                    ProgressPhase::Finished,
+                    Some(ProgressStatus::Blocked),
+                    Some(message.clone()),
+                ));
                 records.push(record(
                     step,
                     StepRunStatus::Blocked,
@@ -147,6 +172,14 @@ impl<D: ExecutorDevice> ExecutorRunner<D> {
                         outputs: OrderedMap::new(),
                     },
                 );
+                progress_callback(progress_event(
+                    step,
+                    total_steps,
+                    plan,
+                    ProgressPhase::Finished,
+                    Some(ProgressStatus::Failed),
+                    Some(message.clone()),
+                ));
                 records.push(record(
                     step,
                     StepRunStatus::Failed,
@@ -172,6 +205,14 @@ impl<D: ExecutorDevice> ExecutorRunner<D> {
                         outputs: OrderedMap::new(),
                     },
                 );
+                progress_callback(progress_event(
+                    step,
+                    total_steps,
+                    plan,
+                    ProgressPhase::Finished,
+                    Some(ProgressStatus::Failed),
+                    Some(message.clone()),
+                ));
                 records.push(record(
                     step,
                     StepRunStatus::Failed,
@@ -190,6 +231,14 @@ impl<D: ExecutorDevice> ExecutorRunner<D> {
                             outputs: OrderedMap::new(),
                         },
                     );
+                    progress_callback(progress_event(
+                        step,
+                        total_steps,
+                        plan,
+                        ProgressPhase::Finished,
+                        Some(ProgressStatus::Skipped),
+                        Some("skip_if matched".to_string()),
+                    ));
                     records.push(record(
                         step,
                         StepRunStatus::Skipped,
@@ -207,6 +256,14 @@ impl<D: ExecutorDevice> ExecutorRunner<D> {
                             outputs: OrderedMap::new(),
                         },
                     );
+                    progress_callback(progress_event(
+                        step,
+                        total_steps,
+                        plan,
+                        ProgressPhase::Finished,
+                        Some(ProgressStatus::Failed),
+                        Some(message.clone()),
+                    ));
                     records.push(record(
                         step,
                         StepRunStatus::Failed,
@@ -217,9 +274,25 @@ impl<D: ExecutorDevice> ExecutorRunner<D> {
                 }
             }
 
+            progress_callback(progress_event(
+                step,
+                total_steps,
+                plan,
+                ProgressPhase::Executing,
+                None,
+                None,
+            ));
             let run_result = self.run_step(plan, &mut state, step);
             let (status, message, outputs, runtime_status) = match run_result {
                 Ok(outputs) => {
+                    progress_callback(progress_event(
+                        step,
+                        total_steps,
+                        plan,
+                        ProgressPhase::Verifying,
+                        None,
+                        None,
+                    ));
                     let failed_verify = step
                         .verify
                         .iter()
@@ -265,6 +338,20 @@ impl<D: ExecutorDevice> ExecutorRunner<D> {
                     outputs: outputs.clone(),
                 },
             );
+            let progress_status = match status {
+                StepRunStatus::Executed => ProgressStatus::Succeeded,
+                StepRunStatus::Skipped => ProgressStatus::Skipped,
+                StepRunStatus::Blocked => ProgressStatus::Blocked,
+                StepRunStatus::Failed => ProgressStatus::Failed,
+            };
+            progress_callback(progress_event(
+                step,
+                total_steps,
+                plan,
+                ProgressPhase::Finished,
+                Some(progress_status),
+                message.clone(),
+            ));
             records.push(record(step, status, message, outputs));
         }
 
@@ -1404,6 +1491,31 @@ fn record(
         status,
         message,
         outputs,
+    }
+}
+
+fn progress_event(
+    step: &ExecutionStep,
+    total_steps: usize,
+    plan: &ExecutionPlan,
+    phase: ProgressPhase,
+    status: Option<ProgressStatus>,
+    message: Option<String>,
+) -> ExecutionProgressEvent {
+    let step_index = plan
+        .steps
+        .iter()
+        .position(|candidate| candidate.id == step.id)
+        .map(|index| index + 1)
+        .unwrap_or(0);
+    ExecutionProgressEvent {
+        step_index,
+        total_steps,
+        step_id: step.id.clone(),
+        step_name: step.name.clone(),
+        phase,
+        status,
+        message,
     }
 }
 

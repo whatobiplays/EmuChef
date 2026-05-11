@@ -4,7 +4,7 @@ This package is an experimental Rust backend skeleton for the EmuChef config
 editor protocol. It is standalone and runnable independently of the Tauri
 editor.
 
-Through Phase 6R it implements only:
+Through Phase 6S it implements only:
 
 - `hello`
 - `listStepSpecs`
@@ -52,6 +52,8 @@ Through Phase 6R it implements only:
   device/app/permission fixtures
 - internal real-ADB adapter foundations and ignored/manual Phase 6R tests for
   selected device/app/permission behavior
+- a minimal crate-local Phase 6S Rust CLI skeleton for selected Python CLI
+  parity fixtures
 
 It reports only capabilities that are implemented in this crate:
 
@@ -81,11 +83,11 @@ requests in JSONL sidecar mode only. One-shot mode remains stateless and does
 not expose persistent document session APIs.
 
 Reporting these capabilities still does not make this backend compatible with
-the Tauri editor. Phase 6R reports the same ordered capability list as Phase
+the Tauri editor. Phase 6S reports the same ordered capability list as Phase
 6H/6I/6J.1/6J.2/6K/6L/6M/6N/6O/6P/6Q; capability parity is not full backend
 parity. The Rust backend is still not editor-ready and is not wired into Tauri.
 There is no env var, CLI flag, config file, README path, or documented launch
-path for using this Rust backend as the Tauri editor backend in Phase 6R.
+path for using this Rust backend as the Tauri editor backend in Phase 6S.
 
 The Python backend remains the reference implementation. This Rust package is
 not a replacement backend and is not selected by the Tauri editor.
@@ -109,6 +111,82 @@ manual tests, but normal tests still do not perform real device checks, real
 network downloads, permission grants, ADB/device operations, app lifecycle
 operations, install operations, or Tauri integration. Python remains the
 reference implementation until parity is confirmed.
+
+## Phase 6S CLI Scope
+
+Phase 6S adds a minimal Rust CLI skeleton inside this standalone crate. It is a
+crate-local experimental parity surface, not the user-facing replacement for the
+Python `emuchef` CLI. The Python CLI entrypoint in `pyproject.toml` remains
+unchanged, production packaging is unchanged, and the Tauri editor still does
+not use this Rust backend. There is no backend selector, backend toggle,
+environment variable, config option, UI switch, sidecar request, protocol
+capability, or hard cutover in Phase 6S.
+
+The Python CLI inventory verified from `src/emuchef/cli.py` is:
+
+| Python command | Python options verified for Phase 6S | Phase 6S Rust status |
+| --- | --- | --- |
+| `draft` | `--authored-root`, `--device-plan`, `--ops`, `--bind`, device facts, common flags | Deferred; Python resolves ADB device facts. |
+| `plan` | `--authored-root`, `--device-plan`, `--ops`, `--bind`, `--output`, device facts, common flags | Deferred; Python resolves ADB device facts before planning. |
+| `detect` | `--serial`, common flags | Deferred; real ADB/device behavior. |
+| `detect-profiles` | `--authored-root`, `--serial`, common flags | Deferred; real ADB/device behavior. |
+| `validate` | optional `path`, `--authored-root`, common flags | Implemented only for explicit recipe-file paths with optional `--authored-root`; default/catalog validation and verbose/debug/ADB flags are deferred. |
+| `apply` | required `--plan-file`, optional `--serial`, `--dry-run`, common flags | Implemented only for non-verbose `--dry-run` selected fixtures; ADB, verbose/debug, inputs, artifacts, and real execution are deferred. |
+
+Python does not expose an `execute` command. Phase 6S therefore implements the
+Python-backed `apply --plan-file <path> --dry-run` spelling and does not invent
+`execute --dry-run`.
+
+The Python plan-file loader verified from
+`src/emuchef/io/execution_plan_io.py` accepts YAML loaded with `safe_load`.
+Supported Phase 6S Rust fixtures are the same Python-supported representations:
+
+- `kind: execution_plan`
+- `kind: planning_result` with an `execution_plan` mapping
+
+Authored recipe paths are not execution plan files. Rust Phase 6S does not parse
+authored recipes as `apply` input, does not run real execution, and refuses
+non-dry-run `apply` execution. It also rejects plan files with top-level
+`inputs` or `artifacts` instead of silently diverging from Python's broader
+plan-file support; those broader dry-run fixtures remain deferred.
+
+### Phase 6S Output Parity
+
+The Rust CLI tests use checked-in, source-backed expectations from the Python
+CLI. Normal `cargo test` does not invoke Python. The selected parity targets are:
+
+- `validate` text summaries for explicit recipe files: `Validation status: ...`,
+  `Validated paths:`, grouped `Issues:`, issue codes/messages, field lines,
+  stdout/stderr split, and exit status.
+- `apply --dry-run` progress and summary text: checking/executing/verifying/
+  finished lines, `Dry run: success|failed`, count labels, permission summary
+  labels, stderr failure markers, and exit status.
+- legacy Rust binary dispatch: JSON one-shot and `--sidecar` behavior remain
+  unchanged. Single unknown non-JSON arguments such as `foo` and malformed JSON
+  such as `{bad` still use one-shot malformed JSON behavior. The recognized
+  single command `validate` is deliberately classified as the CLI command and
+  reports the Phase 6S explicit-path requirement instead of emitting an API
+  envelope.
+
+Byte-for-byte parity is limited to selected fixture output. Broader Python CLI
+behavior remains the reference and is deferred rather than approximated.
+
+### Phase 6S Safety
+
+Normal Phase 6S tests do not require Python, ADB, Android devices, APKs, network
+access, package metadata changes, install scripts, root Cargo workspace changes,
+Tauri Cargo changes, or editor/frontend changes. Dry-run execution uses the
+existing fake dry-run executor path and test-owned temp files. Real ADB remains
+manual/internal from Phase 6R only.
+
+The Python CLI commands used to verify selected Phase 6S output can be run from
+the repository root with the documented dependency pattern:
+
+```bash
+PYTHONPATH=src uv run --no-project --native-tls --with PyYAML python -m emuchef validate --authored-root authored
+PYTHONPATH=src uv run --no-project --native-tls --with PyYAML python -m emuchef validate crates/emuchef-rust-backend/tests/fixtures/recipes/invalid_top_level_permissions.yaml
+PYTHONPATH=src uv run --no-project --native-tls --with PyYAML python -m emuchef apply --plan-file <temp-plan.yaml> --dry-run
+```
 
 ## Phase 6N Planner Scope
 
@@ -177,10 +255,12 @@ step is unavailable through fixture capabilities.
 
 ## Phase 6O Executor Scope
 
-Phase 6O adds `src/executor.rs`, an internal Rust module used only by crate-local
-tests. It is not a public crate API, protocol request, CLI command, Tauri
-command, TypeScript API, backend selector, config option, environment toggle, or
-public dry-run surface. The parity target is Python's internal
+Phase 6O added `src/executor.rs`, an internal Rust module used only by
+crate-local tests at that phase. It is still not a public crate API, protocol
+request, Tauri command, TypeScript API, backend selector, config option,
+environment toggle, or public dry-run surface. Phase 6S later adds a minimal
+crate-local `apply --dry-run` CLI parity path over selected fixtures only. The
+parity target for Phase 6O itself is Python's internal
 `ExecutorRunner.run(...)->ExecutionRunResult` value from `src/emuchef/executor`,
 not CLI progress text, CLI summary text, `DryRunAdb.commands`, or sidecar
 envelopes.
@@ -251,7 +331,7 @@ entries before writing anything. This is a safety hardening, not a public
 behavioral divergence, because the Rust executor is still internal-only and all
 Phase 6P filesystem behavior is test-contained.
 
-Phase 6P still does not add protocol/API/CLI executor routes, capability
+Phase 6P did not add protocol/API/CLI executor routes, capability
 strings, Tauri editor integration, backend selectors/toggles, protocol
 negotiation, production packaging, Python bundling, hard cutover behavior, or
 Python backend deletion. Real network downloads, HTTP clients, subprocesses,
@@ -286,7 +366,7 @@ The selected Phase 6Q executor behavior is:
 Phase 6Q does not add real ADB traits, configs, environment variables, device
 discovery, subprocess execution, network calls, manual harnesses, production
 packaging, Python bundling, hard cutover behavior, Python backend deletion,
-protocol/API/CLI executor routes, capability strings, public fake-device or
+protocol/API executor routes, capability strings, public fake-device or
 dry-run surfaces, Tauri editor integration, or backend selectors/toggles.
 Python remains the reference implementation until parity is confirmed.
 
@@ -294,10 +374,11 @@ Python remains the reference implementation until parity is confirmed.
 
 Phase 6R keeps the executor internal and adds crate-private foundations for
 real ADB execution. It does not add an executor protocol request, one-shot
-request, JSONL request, CLI surface, Tauri integration, public dry-run surface,
-backend selector, runtime toggle, production packaging, Python bundling, or
-hard cutover from Python. The default executor construction used by normal tests
-continues to use the fake dry-run device adapter.
+request, JSONL request, Tauri integration, public dry-run surface, backend
+selector, runtime toggle, production packaging, Python bundling, or hard cutover
+from Python. Phase 6S later adds only a crate-local dry-run CLI parity path; it
+does not expose real ADB execution. The default executor construction used by
+normal tests continues to use the fake dry-run device adapter.
 
 The Python command inventory mirrored by the Rust adapter is source-backed from
 `src/emuchef/executor/adb.py` and related handlers:
