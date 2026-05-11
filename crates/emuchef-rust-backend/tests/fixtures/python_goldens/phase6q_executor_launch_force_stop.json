@@ -1,0 +1,18 @@
+{
+  "success": true,
+  "total_steps": 2,
+  "steps": [
+    {
+      "step_id": "example.recipe/launch",
+      "status": "executed",
+      "message": null,
+      "outputs": {}
+    },
+    {
+      "step_id": "example.recipe/force_stop",
+      "status": "executed",
+      "message": null,
+      "outputs": {}
+    }
+  ]
+}

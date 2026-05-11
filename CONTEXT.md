@@ -382,6 +382,7 @@ does not add protocol requests, sidecar capabilities, CLI parity, Tauri
 integration, backend selection, device probing, real executor behavior,
 downloads, archive extraction, file copies, real permission grants, subprocess
 execution, production packaging, or Python bundling.
+It now has crate-internal fake-device/DryRunAdb parity fixtures, remains not Tauri-integrated, and has no real ADB/device execution.
 Its `hello` response reports only capabilities implemented in the crate, but
 capability parity is not complete semantic parity and does not make it the Tauri
 editor backend. Rust `listStepSpecs` uses a temporary Python-generated static

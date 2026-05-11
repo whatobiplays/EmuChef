@@ -207,11 +207,10 @@ Phase 6O intentionally does not implement real filesystem, network, archive,
 copy, ADB, device, permission, launch, force-stop, subprocess, packaging, Python
 bundling, or Tauri integration behavior. It also does not add executor request
 routing, capability strings, a one-shot command, a JSONL command, protocol
-negotiation, or unimplemented capability reporting. Phase 6P is expected to
-cover filesystem/artifact executor parity. Phase 6Q is expected to cover
-device/ADB/permission executor parity. The final migration direction remains a
-hard Rust cutover after feature parity; no backend selector or long-term
-dual-backend toggle will be added.
+negotiation, or unimplemented capability reporting. Later phases broaden the
+same internal executor in fixture-backed slices. The final migration direction
+remains a hard Rust cutover after feature parity; no backend selector or
+long-term dual-backend toggle will be added.
 
 ## Phase 6P Executor Filesystem/Artifact Scope
 
@@ -252,8 +251,39 @@ strings, Tauri editor integration, backend selectors/toggles, protocol
 negotiation, production packaging, Python bundling, hard cutover behavior, or
 Python backend deletion. Real network downloads, HTTP clients, subprocesses,
 ADB/device operations, permission grants, app launch/force-stop, and APK install
-behavior remain unimplemented. Phase 6Q is expected to handle device/ADB/
-permission executor parity with a separate design.
+behavior remain unimplemented.
+
+## Phase 6Q Executor Fake-Device/ADB Scope
+
+Phase 6Q keeps the executor internal to `src/executor.rs` and adds selected
+Python `DryRunAdb` parity for device/app/permission fixtures. It is still not
+real-device executor parity. Real ADB/device/app/permission execution, manual
+device testing, and integration parity remain deferred to Phase 6R.
+
+The Python `DryRunAdb` state mirrored by the Rust fake adapter is intentionally
+small: `installed_packages`, `remote_paths`, `remote_dirs`, and an internal
+`commands` log. The mirrored dry-run methods are `install_apk`, `package_installed`,
+`path_exists`, `path_is_dir`, `launch_app`, `force_stop_app`, and
+`run_plan_command` for permission commands. `install_apk.replace_existing`
+affects only the internal dry-run command record; Python `ExecutionRunResult`
+still returns `{}` for install success, and Rust does the same.
+
+The selected Phase 6Q executor behavior is:
+
+| Step/area | Phase 6Q status | Notes |
+| --- | --- | --- |
+| `grant_permissions` | Expanded fixture parity | Runtime permissions, appops, rooted/API `when` filters, `not_applicable`, optional failures, fail policy, `require_all`, partial `permission_results`, and dependency blocking are covered. Permission intent remains step-local; top-level permissions are still invalid authored data. |
+| `install_apk` | DryRunAdb parity only | Requires the same executor-layer host `file_path` runtime value, `.apk` suffix, and existing path checks as Python. Records fake install commands internally and does not mutate fake installed-package state. |
+| `launch_app` | DryRunAdb parity only | Records fake launch commands internally and returns `{}` on success. It does not resolve activities, inspect installed packages, launch apps, or call real ADB. |
+| `force_stop_app` | DryRunAdb parity only | Records fake force-stop commands internally, preserves Python's blank-package executor error, and returns `{}` on success. It does not stop real apps. |
+| `skip_if` / `verify` | Python-backed condition parity | Supports `package_installed`, `path_exists`, and `file_exists` only, evaluated against fake dry-run state. `file_exists` means path exists and is not in `remote_dirs`; missing paths fail existence checks. |
+
+Phase 6Q does not add real ADB traits, configs, environment variables, device
+discovery, subprocess execution, network calls, manual harnesses, production
+packaging, Python bundling, hard cutover behavior, Python backend deletion,
+protocol/API/CLI executor routes, capability strings, public fake-device or
+dry-run surfaces, Tauri editor integration, or backend selectors/toggles.
+Python remains the reference implementation until parity is confirmed.
 
 ## Document Session Scope
 
@@ -896,6 +926,31 @@ golden was generated for missing host-copy sources because Python `DryRunAdb`
 records the push without checking host source existence; Rust's temp-root-backed
 filesystem adapter validates real fixture sources and covers that safety behavior
 with Rust-side tests instead.
+
+Phase 6Q adds these normalized executor goldens:
+
+```text
+phase6q_executor_install_apk_replace_existing.json
+phase6q_executor_launch_force_stop.json
+phase6q_executor_device_app_failure_blocking.json
+phase6q_executor_permission_partial_failure.json
+phase6q_executor_file_dir_conditions.json
+```
+
+They were generated from the repo root with the same safe pattern:
+
+```bash
+PYTHONPATH=src python3 - <<'PY'
+# Build ExecutionPlan values in memory, run ExecutorRunner(adb=DryRunAdb(),
+# sleep_fn=lambda _: None), normalize temp paths to "$TMP", and write
+# crates/emuchef-rust-backend/tests/fixtures/python_goldens/phase6q_executor_*.json.
+PY
+```
+
+The Phase 6Q helper uses only temp-owned APK/text fixtures and Python
+`DryRunAdb`. It does not call real ADB, probe devices, run app lifecycle
+operations, grant permissions, perform network access, or mutate authored
+fixtures.
 
 Regenerate the Phase 6L diagnostic goldens from the repo root with:
 

@@ -1,0 +1,40 @@
+{
+  "success": false,
+  "total_steps": 1,
+  "steps": [
+    {
+      "step_id": "example.recipe/grant_partial",
+      "status": "failed",
+      "message": "permission denied",
+      "outputs": {
+        "permission_results": {
+          "type": "object",
+          "value": {
+            "actions": [
+              {
+                "step_id": "example.recipe/grant_partial",
+                "kind": "runtime_permission",
+                "package_name": "com.example.first",
+                "source_recipe_id": "example.recipe",
+                "source_section": "params.runtime[0]",
+                "permission": "android.permission.POST_NOTIFICATIONS",
+                "status": "executed"
+              },
+              {
+                "step_id": "example.recipe/grant_partial",
+                "kind": "runtime_permission",
+                "package_name": "com.example.fail",
+                "source_recipe_id": "example.recipe",
+                "source_section": "params.runtime[1]",
+                "permission": "android.permission.CAMERA",
+                "status": "failed",
+                "message": "permission denied"
+              }
+            ]
+          },
+          "location": null
+        }
+      }
+    }
+  ]
+}

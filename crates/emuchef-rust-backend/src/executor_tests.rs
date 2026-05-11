@@ -214,6 +214,67 @@ fn extract_archive_step(id: &str, archive_path: &Path) -> ExecutionStep {
     }
 }
 
+fn install_apk_step(id: &str, apk_path: &Path, replace_existing: bool) -> ExecutionStep {
+    let mut params = OrderedMap::new();
+    params.insert(
+        "app".to_string(),
+        literal(runtime_value(
+            "file_path",
+            json!(apk_path.to_string_lossy().to_string()),
+            Some("host"),
+        )),
+    );
+    if replace_existing {
+        params.insert("replace_existing".to_string(), literal(json!(true)));
+    }
+    ExecutionStep {
+        id: id.to_string(),
+        recipe_ref: "example.recipe".to_string(),
+        type_name: "install_apk".to_string(),
+        name: "Install APK".to_string(),
+        dependencies: Vec::new(),
+        constraints: constraints(),
+        params,
+        skip_if: Vec::new(),
+        verify: Vec::new(),
+    }
+}
+
+fn launch_app_step(id: &str, package_name: &str, activity: Option<&str>) -> ExecutionStep {
+    let mut params = OrderedMap::new();
+    params.insert("package_name".to_string(), literal(json!(package_name)));
+    if let Some(activity) = activity {
+        params.insert("activity".to_string(), literal(json!(activity)));
+    }
+    ExecutionStep {
+        id: id.to_string(),
+        recipe_ref: "example.recipe".to_string(),
+        type_name: "launch_app".to_string(),
+        name: "Launch App".to_string(),
+        dependencies: Vec::new(),
+        constraints: constraints(),
+        params,
+        skip_if: Vec::new(),
+        verify: Vec::new(),
+    }
+}
+
+fn force_stop_app_step(id: &str, package_name: &str) -> ExecutionStep {
+    let mut params = OrderedMap::new();
+    params.insert("package_name".to_string(), literal(json!(package_name)));
+    ExecutionStep {
+        id: id.to_string(),
+        recipe_ref: "example.recipe".to_string(),
+        type_name: "force_stop_app".to_string(),
+        name: "Force Stop App".to_string(),
+        dependencies: Vec::new(),
+        constraints: constraints(),
+        params,
+        skip_if: Vec::new(),
+        verify: Vec::new(),
+    }
+}
+
 #[test]
 fn wait_success_matches_python_executor_dry_run_result() {
     let execution_plan = plan(vec![wait_step("example.recipe/wait", "Wait", 10)]);
@@ -514,6 +575,476 @@ fn require_all_policy_promotes_optional_permission_failure_to_step_failure() {
     assert_eq!(actual["success"], false);
     assert_eq!(actual["steps"][0]["status"], "failed");
     assert_eq!(actual["steps"][0]["message"], "permission denied");
+}
+
+#[test]
+fn phase6q_install_apk_dry_run_matches_python_outputs_and_keeps_replace_existing_internal() {
+    let tmp = tempfile::tempdir().expect("temp root should be created");
+    let apk = tmp.path().join("example.apk");
+    fs::write(&apk, "apk").expect("apk fixture should be writable");
+    let execution_plan = plan(vec![install_apk_step("example.recipe/install", &apk, true)]);
+
+    let (actual, runner) = run_value(&execution_plan, DryRunExecutorAdapters::default());
+
+    assert_eq!(
+        normalize_tmp_paths(actual.clone(), tmp.path()),
+        read_golden("phase6q_executor_install_apk_replace_existing.json")
+    );
+    assert_eq!(actual["success"], true);
+    assert_eq!(actual["steps"][0]["status"], "executed");
+    assert_eq!(actual["steps"][0]["outputs"], json!({}));
+    assert_eq!(
+        runner.adapters().device().commands(),
+        &[vec![
+            "install_apk".to_string(),
+            apk.to_string_lossy().to_string(),
+            "True".to_string(),
+        ]]
+    );
+    assert!(!actual.to_string().contains("install_apk"));
+    assert!(!actual.to_string().contains("replace_existing"));
+}
+
+#[test]
+fn phase6q_install_apk_validation_stays_at_python_executor_layer_with_python_messages() {
+    let tmp = tempfile::tempdir().expect("temp root should be created");
+    let non_apk = tmp.path().join("example.txt");
+    fs::write(&non_apk, "not an apk").expect("non-apk fixture should be writable");
+    let missing_apk = tmp.path().join("missing.apk");
+
+    let (non_apk_result, non_apk_runner) = run_value(
+        &plan(vec![install_apk_step(
+            "example.recipe/non_apk",
+            &non_apk,
+            false,
+        )]),
+        DryRunExecutorAdapters::default(),
+    );
+    assert_eq!(non_apk_result["success"], false);
+    assert_eq!(
+        non_apk_result["steps"][0]["message"],
+        format!(
+            "install_apk requires an .apk file, got: {}",
+            non_apk.display()
+        )
+    );
+    assert!(non_apk_runner.adapters().device().commands().is_empty());
+
+    let (missing_result, missing_runner) = run_value(
+        &plan(vec![install_apk_step(
+            "example.recipe/missing",
+            &missing_apk,
+            false,
+        )]),
+        DryRunExecutorAdapters::default(),
+    );
+    assert_eq!(missing_result["success"], false);
+    assert_eq!(
+        missing_result["steps"][0]["message"],
+        format!("APK file not found: {}", missing_apk.display())
+    );
+    assert!(missing_runner.adapters().device().commands().is_empty());
+
+    let mut params = OrderedMap::new();
+    params.insert(
+        "app".to_string(),
+        literal(runtime_value(
+            "directory_path",
+            json!("/sdcard/app.apk"),
+            Some("device"),
+        )),
+    );
+    let invalid_runtime_plan = plan(vec![ExecutionStep {
+        id: "example.recipe/invalid_runtime".to_string(),
+        recipe_ref: "example.recipe".to_string(),
+        type_name: "install_apk".to_string(),
+        name: "Invalid Runtime".to_string(),
+        dependencies: Vec::new(),
+        constraints: constraints(),
+        params,
+        skip_if: Vec::new(),
+        verify: Vec::new(),
+    }]);
+    let (invalid_runtime_result, invalid_runtime_runner) =
+        run_value(&invalid_runtime_plan, DryRunExecutorAdapters::default());
+    assert_eq!(invalid_runtime_result["success"], false);
+    assert_eq!(
+        invalid_runtime_result["steps"][0]["message"],
+        "install_apk requires a host-side file_path runtime value."
+    );
+    assert!(invalid_runtime_runner
+        .adapters()
+        .device()
+        .commands()
+        .is_empty());
+}
+
+#[test]
+fn phase6q_install_apk_does_not_mutate_package_state_for_later_package_installed_checks() {
+    let tmp = tempfile::tempdir().expect("temp root should be created");
+    let apk = tmp.path().join("example.apk");
+    fs::write(&apk, "apk").expect("apk fixture should be writable");
+    let mut downstream = wait_step("example.recipe/downstream", "Downstream", 1);
+    downstream.dependencies = vec!["example.recipe/install".to_string()];
+    downstream.skip_if = vec![condition(
+        "package_installed",
+        json!({"package_name": "com.example.app"}),
+    )];
+    let execution_plan = plan(vec![
+        install_apk_step("example.recipe/install", &apk, false),
+        downstream,
+    ]);
+
+    let (actual, runner) = run_value(&execution_plan, DryRunExecutorAdapters::default());
+
+    assert_eq!(actual["success"], true);
+    assert_eq!(actual["steps"][0]["status"], "executed");
+    assert_eq!(actual["steps"][1]["status"], "executed");
+    assert_eq!(
+        runner.adapters().device().commands(),
+        &[
+            vec![
+                "install_apk".to_string(),
+                apk.to_string_lossy().to_string(),
+                "False".to_string(),
+            ],
+            vec![
+                "package_installed".to_string(),
+                "com.example.app".to_string(),
+            ],
+        ]
+    );
+}
+
+#[test]
+fn phase6q_launch_and_force_stop_dry_run_match_python_empty_outputs_and_internal_logs() {
+    let execution_plan = plan(vec![
+        launch_app_step(
+            "example.recipe/launch",
+            "com.example.missing",
+            Some(".MainActivity"),
+        ),
+        force_stop_app_step("example.recipe/force_stop", "com.example.missing"),
+    ]);
+
+    let (actual, runner) = run_value(&execution_plan, DryRunExecutorAdapters::default());
+
+    assert_eq!(
+        actual,
+        read_golden("phase6q_executor_launch_force_stop.json")
+    );
+    assert_eq!(actual["success"], true);
+    assert_eq!(
+        actual["steps"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|step| step["outputs"].clone())
+            .collect::<Vec<_>>(),
+        vec![json!({}), json!({})]
+    );
+    assert_eq!(
+        runner.adapters().device().commands(),
+        &[
+            vec![
+                "launch_app".to_string(),
+                "com.example.missing".to_string(),
+                ".MainActivity".to_string(),
+            ],
+            vec![
+                "force_stop_app".to_string(),
+                "com.example.missing".to_string(),
+            ],
+        ]
+    );
+    assert!(!actual.to_string().contains("launch_app"));
+    assert!(!actual.to_string().contains("force_stop_app"));
+}
+
+#[test]
+fn phase6q_device_app_failures_block_dependents_but_unrelated_steps_continue() {
+    let mut dependent = wait_step("example.recipe/dependent", "Dependent", 1);
+    dependent.dependencies = vec!["example.recipe/launch".to_string()];
+    let execution_plan = plan(vec![
+        launch_app_step("example.recipe/launch", "com.example.fail", None),
+        dependent,
+        wait_step("example.recipe/unrelated", "Unrelated", 1),
+    ]);
+    let mut adapters = DryRunExecutorAdapters::default();
+    adapters
+        .device_mut()
+        .fail_launch_app("com.example.fail", None, "launch denied");
+
+    let (actual, runner) = run_value(&execution_plan, adapters);
+
+    assert_eq!(
+        actual,
+        read_golden("phase6q_executor_device_app_failure_blocking.json")
+    );
+    assert_eq!(actual["success"], false);
+    assert_eq!(actual["steps"][0]["status"], "failed");
+    assert_eq!(actual["steps"][0]["message"], "launch denied");
+    assert_eq!(actual["steps"][1]["status"], "blocked");
+    assert_eq!(actual["steps"][2]["status"], "executed");
+    assert_eq!(
+        runner.adapters().device().commands(),
+        &[vec![
+            "launch_app".to_string(),
+            "com.example.fail".to_string(),
+            "".to_string(),
+        ]]
+    );
+}
+
+#[test]
+fn phase6q_force_stop_rejects_blank_package_name_with_python_executor_message() {
+    let execution_plan = plan(vec![force_stop_app_step(
+        "example.recipe/force_stop",
+        "   ",
+    )]);
+
+    let (actual, runner) = run_value(&execution_plan, DryRunExecutorAdapters::default());
+
+    assert_eq!(actual["success"], false);
+    assert_eq!(actual["steps"][0]["status"], "failed");
+    assert_eq!(
+        actual["steps"][0]["message"],
+        "force_stop_app step requires a non-empty package_name."
+    );
+    assert!(runner.adapters().device().commands().is_empty());
+}
+
+#[test]
+fn phase6q_permission_required_failure_preserves_partial_permission_results_like_python() {
+    let mut params = OrderedMap::new();
+    params.insert(
+        "runtime".to_string(),
+        literal(json!([
+            {
+                "package_name": "com.example.first",
+                "name": "android.permission.POST_NOTIFICATIONS",
+                "required": false
+            },
+            {
+                "package_name": "com.example.fail",
+                "name": "android.permission.CAMERA",
+                "required": true
+            },
+            {
+                "package_name": "com.example.after",
+                "name": "android.permission.RECORD_AUDIO",
+                "required": false
+            }
+        ])),
+    );
+    let execution_plan = plan(vec![ExecutionStep {
+        id: "example.recipe/grant_partial".to_string(),
+        recipe_ref: "example.recipe".to_string(),
+        type_name: "grant_permissions".to_string(),
+        name: "Grant Partial".to_string(),
+        dependencies: Vec::new(),
+        constraints: constraints(),
+        params,
+        skip_if: Vec::new(),
+        verify: Vec::new(),
+    }]);
+    let mut adapters = DryRunExecutorAdapters::default();
+    adapters.device_mut().fail_run_plan_command(
+        vec![
+            "adb".to_string(),
+            "shell".to_string(),
+            "pm".to_string(),
+            "grant".to_string(),
+            "com.example.fail".to_string(),
+            "android.permission.CAMERA".to_string(),
+        ],
+        "permission denied",
+    );
+
+    let (actual, _) = run_value(&execution_plan, adapters);
+
+    assert_eq!(
+        actual,
+        read_golden("phase6q_executor_permission_partial_failure.json")
+    );
+    assert_eq!(actual["success"], false);
+    assert_eq!(actual["steps"][0]["status"], "failed");
+    assert_eq!(actual["steps"][0]["message"], "permission denied");
+    let actions = actual["steps"][0]["outputs"]["permission_results"]["value"]["actions"]
+        .as_array()
+        .unwrap();
+    assert_eq!(actions.len(), 2);
+    assert_eq!(actions[0]["status"], "executed");
+    assert_eq!(actions[1]["status"], "failed");
+    assert_eq!(actions[1]["message"], "permission denied");
+}
+
+#[test]
+fn phase6q_permission_policy_matrix_covers_appops_api_root_and_failure_policies() {
+    let mut params = OrderedMap::new();
+    params.insert(
+        "runtime".to_string(),
+        literal(json!([
+            {
+                "package_name": "com.example.optional",
+                "name": "android.permission.CAMERA",
+                "required": false
+            },
+            {
+                "package_name": "com.example.api",
+                "name": "android.permission.POST_NOTIFICATIONS",
+                "required": false,
+                "when": {"android_api_min": 34}
+            }
+        ])),
+    );
+    params.insert(
+        "appops".to_string(),
+        literal(json!([
+            {
+                "package_name": "com.example.app",
+                "op": "RUN_IN_BACKGROUND",
+                "mode": "ignore",
+                "required": false
+            },
+            {
+                "package_name": "com.example.root",
+                "op": "MANAGE_EXTERNAL_STORAGE",
+                "mode": "allow",
+                "required": false,
+                "when": {"rooted": false}
+            }
+        ])),
+    );
+    params.insert(
+        "policy".to_string(),
+        literal(json!({"on_failure": "warn", "require_all": false})),
+    );
+    let execution_plan = plan(vec![ExecutionStep {
+        id: "example.recipe/grant_matrix".to_string(),
+        recipe_ref: "example.recipe".to_string(),
+        type_name: "grant_permissions".to_string(),
+        name: "Grant Matrix".to_string(),
+        dependencies: Vec::new(),
+        constraints: constraints(),
+        params,
+        skip_if: Vec::new(),
+        verify: Vec::new(),
+    }]);
+    let mut adapters = DryRunExecutorAdapters::default();
+    adapters.device_mut().fail_run_plan_command(
+        vec![
+            "adb".to_string(),
+            "shell".to_string(),
+            "pm".to_string(),
+            "grant".to_string(),
+            "com.example.optional".to_string(),
+            "android.permission.CAMERA".to_string(),
+        ],
+        "permission denied",
+    );
+
+    let (actual, _) = run_value(&execution_plan, adapters);
+
+    assert_eq!(actual["success"], true);
+    let actions = actual["steps"][0]["outputs"]["permission_results"]["value"]["actions"]
+        .as_array()
+        .unwrap();
+    assert_eq!(
+        actions
+            .iter()
+            .map(|action| action["status"].as_str().unwrap())
+            .collect::<Vec<_>>(),
+        vec!["failed", "not_applicable", "executed", "not_applicable"]
+    );
+    assert_eq!(actions[0]["message"], "permission denied");
+    assert_eq!(actions[1]["reason_code"], "android_api_out_of_range");
+    assert_eq!(actions[2]["kind"], "appop");
+    assert_eq!(actions[2]["desired_mode"], "ignore");
+    assert_eq!(actions[3]["reason_code"], "requires_unrooted");
+}
+
+#[test]
+fn phase6q_path_exists_and_file_exists_match_dry_run_remote_file_dir_and_missing_state() {
+    let mut file_step = wait_step("example.recipe/file", "File", 1);
+    file_step.verify = vec![condition(
+        "file_exists",
+        json!({"path": "/sdcard/file.bin"}),
+    )];
+    let mut directory_step = wait_step("example.recipe/directory", "Directory", 1);
+    directory_step.verify = vec![condition("file_exists", json!({"path": "/sdcard/dir"}))];
+    let mut path_step = wait_step("example.recipe/path", "Path", 1);
+    path_step.verify = vec![condition("path_exists", json!({"path": "/sdcard/dir"}))];
+    let mut missing_step = wait_step("example.recipe/missing", "Missing", 1);
+    missing_step.verify = vec![condition("path_exists", json!({"path": "/sdcard/missing"}))];
+    let execution_plan = plan(vec![file_step, directory_step, path_step, missing_step]);
+    let mut adapters = DryRunExecutorAdapters::default();
+    adapters
+        .device_mut()
+        .remote_paths_mut()
+        .insert("/sdcard/file.bin".to_string());
+    adapters
+        .device_mut()
+        .remote_paths_mut()
+        .insert("/sdcard/dir".to_string());
+    adapters
+        .device_mut()
+        .remote_dirs_mut()
+        .insert("/sdcard/dir".to_string());
+
+    let (actual, runner) = run_value(&execution_plan, adapters);
+
+    assert_eq!(
+        actual,
+        read_golden("phase6q_executor_file_dir_conditions.json")
+    );
+    assert_eq!(actual["success"], false);
+    assert_eq!(
+        actual["steps"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|step| step["status"].as_str().unwrap())
+            .collect::<Vec<_>>(),
+        vec!["executed", "failed", "executed", "failed"]
+    );
+    assert_eq!(actual["steps"][1]["message"], "verify failed: file_exists");
+    assert_eq!(actual["steps"][3]["message"], "verify failed: path_exists");
+    assert_eq!(
+        runner.adapters().device().commands(),
+        &[
+            vec![
+                "path_exists".to_string(),
+                "/sdcard/file.bin".to_string(),
+                "False".to_string(),
+            ],
+            vec![
+                "path_is_dir".to_string(),
+                "/sdcard/file.bin".to_string(),
+                "False".to_string(),
+            ],
+            vec![
+                "path_exists".to_string(),
+                "/sdcard/dir".to_string(),
+                "False".to_string(),
+            ],
+            vec![
+                "path_is_dir".to_string(),
+                "/sdcard/dir".to_string(),
+                "False".to_string(),
+            ],
+            vec![
+                "path_exists".to_string(),
+                "/sdcard/dir".to_string(),
+                "False".to_string(),
+            ],
+            vec![
+                "path_exists".to_string(),
+                "/sdcard/missing".to_string(),
+                "False".to_string(),
+            ],
+        ]
+    );
 }
 
 #[test]

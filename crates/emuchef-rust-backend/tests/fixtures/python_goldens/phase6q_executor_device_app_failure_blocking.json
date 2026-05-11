@@ -1,0 +1,24 @@
+{
+  "success": false,
+  "total_steps": 3,
+  "steps": [
+    {
+      "step_id": "example.recipe/launch",
+      "status": "failed",
+      "message": "launch denied",
+      "outputs": {}
+    },
+    {
+      "step_id": "example.recipe/dependent",
+      "status": "blocked",
+      "message": "dependency blocked: example.recipe/launch",
+      "outputs": {}
+    },
+    {
+      "step_id": "example.recipe/unrelated",
+      "status": "executed",
+      "message": null,
+      "outputs": {}
+    }
+  ]
+}

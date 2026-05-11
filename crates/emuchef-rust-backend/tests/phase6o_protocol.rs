@@ -95,3 +95,40 @@ fn phase6p_keeps_filesystem_executor_internal_and_protocol_capabilities_unchange
     assert_eq!(sidecar["ok"], false);
     assert_eq!(sidecar["error"]["code"], "invalid_request");
 }
+
+#[test]
+fn phase6q_keeps_fake_device_executor_internal_and_protocol_capabilities_unchanged() {
+    assert_eq!(
+        protocol::CAPABILITIES,
+        &[
+            "listStepSpecs",
+            "emitRecipeYamlFromPath",
+            "validateRecipePath",
+            "openRecipe",
+            "getDocument",
+            "saveRecipe",
+            "closeDocument",
+            "applyRecipeCommand",
+            "undo",
+            "redo",
+            "emitYaml",
+            "validate",
+            "getRefIndex",
+        ]
+    );
+
+    let one_shot = one_shot_response(json!({
+        "type": "__testOnlyUnknownPhase6QExecutorRequest",
+        "payload": {}
+    }));
+    assert_eq!(one_shot["ok"], false);
+    assert_eq!(one_shot["error"]["code"], "invalid_request");
+
+    let sidecar = sidecar_response(json!({
+        "id": "executor-phase6q",
+        "type": "__testOnlyUnknownPhase6QExecutorRequest",
+        "payload": {}
+    }));
+    assert_eq!(sidecar["ok"], false);
+    assert_eq!(sidecar["error"]["code"], "invalid_request");
+}

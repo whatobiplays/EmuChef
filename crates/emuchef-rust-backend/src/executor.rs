@@ -284,6 +284,9 @@ impl ExecutorRunner {
             "extract_artifacts" => self.execute_extract_artifacts(state, step, &resolved_params),
             "extract_archive" => self.execute_extract_archive(step, &resolved_params),
             "copy_files" => self.execute_copy_files(&resolved_params),
+            "install_apk" => self.execute_install_apk(&resolved_params),
+            "launch_app" => self.execute_launch_app(&resolved_params),
+            "force_stop_app" => self.execute_force_stop_app(&resolved_params),
             other => Err(StepFailure::new(format!(
                 "Unsupported executor step type in Rust Phase 6P skeleton: {other}"
             ))),
@@ -596,6 +599,79 @@ impl ExecutorRunner {
         Ok(outputs)
     }
 
+    fn execute_install_apk(
+        &mut self,
+        resolved_params: &OrderedMap<Value>,
+    ) -> Result<OrderedMap<RuntimeValue>, StepFailure> {
+        let app = runtime_value_param(resolved_params, "app")?;
+        if app.type_name != "file_path" || app.location.as_deref() != Some("host") {
+            return Err(StepFailure::new(
+                "install_apk requires a host-side file_path runtime value.".to_string(),
+            ));
+        }
+        let apk_path = PathBuf::from(python_value_to_string(&app.value));
+        if apk_path
+            .extension()
+            .and_then(|extension| extension.to_str())
+            .map(|extension| !extension.eq_ignore_ascii_case("apk"))
+            .unwrap_or(true)
+        {
+            return Err(StepFailure::new(format!(
+                "install_apk requires an .apk file, got: {}",
+                apk_path.display()
+            )));
+        }
+        if !apk_path.exists() {
+            return Err(StepFailure::new(format!(
+                "APK file not found: {}",
+                apk_path.display()
+            )));
+        }
+        let replace_existing = resolved_params
+            .get("replace_existing")
+            .map(python_truthy)
+            .unwrap_or(false);
+        self.adapters
+            .device
+            .install_apk(&apk_path, replace_existing)?;
+        Ok(OrderedMap::new())
+    }
+
+    fn execute_launch_app(
+        &mut self,
+        resolved_params: &OrderedMap<Value>,
+    ) -> Result<OrderedMap<RuntimeValue>, StepFailure> {
+        let package_name = resolved_params
+            .get("package_name")
+            .map(python_value_to_string)
+            .unwrap_or_else(|| "None".to_string());
+        let activity = resolved_params
+            .get("activity")
+            .filter(|value| !value.is_null())
+            .map(python_value_to_string);
+        self.adapters
+            .device
+            .launch_app(&package_name, activity.as_deref())?;
+        Ok(OrderedMap::new())
+    }
+
+    fn execute_force_stop_app(
+        &mut self,
+        resolved_params: &OrderedMap<Value>,
+    ) -> Result<OrderedMap<RuntimeValue>, StepFailure> {
+        let package_name = resolved_params
+            .get("package_name")
+            .map(python_value_to_string)
+            .unwrap_or_else(|| "None".to_string());
+        if package_name.trim().is_empty() {
+            return Err(StepFailure::new(
+                "force_stop_app step requires a non-empty package_name.".to_string(),
+            ));
+        }
+        self.adapters.device.force_stop_app(&package_name)?;
+        Ok(OrderedMap::new())
+    }
+
     fn evaluate_condition(&mut self, condition: &ExecutionStepCondition) -> Result<bool, String> {
         match condition.type_name.as_str() {
             "package_installed" => {
@@ -674,6 +750,9 @@ pub struct FakeDryRunDevice {
     remote_dirs: HashSet<String>,
     commands: Vec<Vec<String>>,
     run_plan_failures: HashMap<Vec<String>, String>,
+    install_failures: HashMap<(String, bool), String>,
+    launch_failures: HashMap<(String, String), String>,
+    force_stop_failures: HashMap<String, String>,
 }
 
 impl FakeDryRunDevice {
@@ -695,6 +774,38 @@ impl FakeDryRunDevice {
 
     pub fn fail_run_plan_command(&mut self, command: Vec<String>, message: &str) {
         self.run_plan_failures.insert(command, message.to_string());
+    }
+
+    pub fn fail_install_apk(&mut self, apk_path: &Path, replace_existing: bool, message: &str) {
+        self.install_failures.insert(
+            (apk_path.to_string_lossy().to_string(), replace_existing),
+            message.to_string(),
+        );
+    }
+
+    pub fn fail_launch_app(&mut self, package_name: &str, activity: Option<&str>, message: &str) {
+        self.launch_failures.insert(
+            (package_name.to_string(), activity.unwrap_or("").to_string()),
+            message.to_string(),
+        );
+    }
+
+    pub fn fail_force_stop_app(&mut self, package_name: &str, message: &str) {
+        self.force_stop_failures
+            .insert(package_name.to_string(), message.to_string());
+    }
+
+    fn install_apk(&mut self, apk_path: &Path, replace_existing: bool) -> Result<(), String> {
+        let apk_path = apk_path.to_string_lossy().to_string();
+        self.commands.push(vec![
+            "install_apk".to_string(),
+            apk_path.clone(),
+            py_bool(replace_existing).to_string(),
+        ]);
+        if let Some(message) = self.install_failures.get(&(apk_path, replace_existing)) {
+            return Err(message.clone());
+        }
+        Ok(())
     }
 
     fn package_installed(&mut self, package_name: &str) -> bool {
@@ -730,6 +841,31 @@ impl FakeDryRunDevice {
         recorded.extend(command.iter().cloned());
         self.commands.push(recorded);
         if let Some(message) = self.run_plan_failures.get(&command) {
+            return Err(message.clone());
+        }
+        Ok(())
+    }
+
+    fn launch_app(&mut self, package_name: &str, activity: Option<&str>) -> Result<(), String> {
+        let activity = activity.unwrap_or("");
+        self.commands.push(vec![
+            "launch_app".to_string(),
+            package_name.to_string(),
+            activity.to_string(),
+        ]);
+        if let Some(message) = self
+            .launch_failures
+            .get(&(package_name.to_string(), activity.to_string()))
+        {
+            return Err(message.clone());
+        }
+        Ok(())
+    }
+
+    fn force_stop_app(&mut self, package_name: &str) -> Result<(), String> {
+        self.commands
+            .push(vec!["force_stop_app".to_string(), package_name.to_string()]);
+        if let Some(message) = self.force_stop_failures.get(package_name) {
             return Err(message.clone());
         }
         Ok(())
@@ -1792,6 +1928,27 @@ fn py_bool(value: bool) -> &'static str {
         "True"
     } else {
         "False"
+    }
+}
+
+fn python_truthy(value: &Value) -> bool {
+    match value {
+        Value::Null => false,
+        Value::Bool(value) => *value,
+        Value::Number(value) => value.as_f64().is_some_and(|value| value != 0.0),
+        Value::String(value) => !value.is_empty(),
+        Value::Array(values) => !values.is_empty(),
+        Value::Object(values) => !values.is_empty(),
+    }
+}
+
+fn python_value_to_string(value: &Value) -> String {
+    match value {
+        Value::Null => "None".to_string(),
+        Value::Bool(value) => py_bool(*value).to_string(),
+        Value::String(value) => value.clone(),
+        Value::Number(value) => value.to_string(),
+        other => other.to_string(),
     }
 }
 

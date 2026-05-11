@@ -1,14 +1,15 @@
 //! Standalone protocol skeleton for the experimental Rust editor backend.
 //!
 //! The crate intentionally implements only the migration surface from Phases 6C
-//! through 6P: request validation, response envelopes, one-shot invocation,
+//! through 6Q: request validation, response envelopes, one-shot invocation,
 //! JSONL sidecar invocation, the `hello` handshake, static StepSpec DTO parity,
 //! authored recipe YAML load/emit/validation fixtures, sidecar document
 //! sessions, editor command parity, undo/redo, fixture-scoped RefIndex
 //! generation, authoredRoot catalog-context validation, internal planner
 //! fixtures, and an internal executor with temp-dir-confined filesystem/artifact
-//! fixture behavior. The Rust executor is not exposed through protocol, CLI,
-//! Tauri, backend selection, or public dry-run APIs.
+//! fixture behavior plus selected fake-device/DryRunAdb parity. The Rust
+//! executor is not exposed through protocol, CLI, Tauri, backend selection, or
+//! public dry-run APIs.
 
 pub mod catalog;
 pub mod commands;

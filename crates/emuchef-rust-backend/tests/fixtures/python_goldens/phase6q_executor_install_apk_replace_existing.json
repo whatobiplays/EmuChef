@@ -1,0 +1,12 @@
+{
+  "success": true,
+  "total_steps": 1,
+  "steps": [
+    {
+      "step_id": "example.recipe/install",
+      "status": "executed",
+      "message": null,
+      "outputs": {}
+    }
+  ]
+}

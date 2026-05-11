@@ -1,0 +1,30 @@
+{
+  "success": false,
+  "total_steps": 4,
+  "steps": [
+    {
+      "step_id": "example.recipe/file",
+      "status": "executed",
+      "message": null,
+      "outputs": {}
+    },
+    {
+      "step_id": "example.recipe/directory",
+      "status": "failed",
+      "message": "verify failed: file_exists",
+      "outputs": {}
+    },
+    {
+      "step_id": "example.recipe/path",
+      "status": "executed",
+      "message": null,
+      "outputs": {}
+    },
+    {
+      "step_id": "example.recipe/missing",
+      "status": "failed",
+      "message": "verify failed: path_exists",
+      "outputs": {}
+    }
+  ]
+}
