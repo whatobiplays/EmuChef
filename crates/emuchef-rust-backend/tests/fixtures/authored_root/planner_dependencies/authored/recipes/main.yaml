@@ -1,0 +1,39 @@
+schema_version: 1
+kind: recipe
+id: planner.dependencies
+name: Planner Dependencies
+description: Planner dependency ordering fixture.
+recipe_dependencies:
+  - planner.dependency
+provides:
+  features:
+    - planner_dependencies
+inputs: {}
+artifacts: {}
+artifact_groups: {}
+steps:
+  - id: second
+    type: wait
+    name: Second
+    user_toggleable: false
+    dependencies:
+      - first
+    constraints:
+      capabilities: []
+      conflicts_with: []
+    skip_if: []
+    params:
+      duration_ms: 2
+    verify: []
+  - id: first
+    type: wait
+    name: First
+    user_toggleable: false
+    dependencies: []
+    constraints:
+      capabilities: []
+      conflicts_with: []
+    skip_if: []
+    params:
+      duration_ms: 1
+    verify: []

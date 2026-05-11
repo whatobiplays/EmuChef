@@ -1,0 +1,157 @@
+{
+  "status": "success",
+  "warnings": [],
+  "errors": [],
+  "execution_plan": {
+    "id": "plan.example.device_plan.001",
+    "source": {
+      "device_profile_ref": "example.device_profile",
+      "device_plan_ref": "example.device_plan",
+      "selected_recipe_refs": [
+        "planner.refs_artifacts"
+      ],
+      "expanded_recipe_refs": [
+        "planner.refs_artifacts"
+      ]
+    },
+    "device_context": {
+      "manufacturer": "Example",
+      "model": "Example",
+      "android_version": 13,
+      "android_api_level": 33,
+      "device_tags": [
+        "example_tag"
+      ]
+    },
+    "runtime_capabilities": {
+      "adb_available": true,
+      "apk_install": true,
+      "shared_storage_write": true,
+      "app_launch": true,
+      "shell_command": true,
+      "package_remove_for_user": false,
+      "root_shell": true,
+      "app_data_write": true
+    },
+    "inputs": [],
+    "artifacts": [
+      {
+        "id": "planner.refs_artifacts/app_apk",
+        "type": "remote_file",
+        "url": "https://example.com/app.apk",
+        "cache": "default"
+      },
+      {
+        "id": "planner.refs_artifacts/core_zip",
+        "type": "remote_file",
+        "url": "https://example.com/core.zip",
+        "cache": "default"
+      },
+      {
+        "id": "planner.refs_artifacts/shader_zip",
+        "type": "remote_file",
+        "url": "https://example.com/shader.zip",
+        "cache": "default"
+      }
+    ],
+    "steps": [
+      {
+        "id": "planner.refs_artifacts/resolve",
+        "recipe_ref": "planner.refs_artifacts",
+        "type": "resolve_artifacts",
+        "name": "Resolve Artifacts",
+        "dependencies": [],
+        "constraints": {
+          "capabilities": [],
+          "conflicts_with": []
+        },
+        "params": {
+          "artifacts": {
+            "value": [
+              "planner.refs_artifacts/app_apk",
+              "planner.refs_artifacts/core_zip",
+              "planner.refs_artifacts/shader_zip"
+            ]
+          }
+        },
+        "skip_if": [],
+        "verify": []
+      },
+      {
+        "id": "planner.refs_artifacts/extract",
+        "recipe_ref": "planner.refs_artifacts",
+        "type": "extract_artifacts",
+        "name": "Extract Artifacts",
+        "dependencies": [
+          "planner.refs_artifacts/resolve"
+        ],
+        "constraints": {
+          "capabilities": [],
+          "conflicts_with": []
+        },
+        "params": {
+          "artifacts": {
+            "value": [
+              "planner.refs_artifacts/core_zip",
+              "planner.refs_artifacts/shader_zip"
+            ]
+          },
+          "extract_on": {
+            "value": "host"
+          }
+        },
+        "skip_if": [],
+        "verify": []
+      },
+      {
+        "id": "planner.refs_artifacts/copy",
+        "recipe_ref": "planner.refs_artifacts",
+        "type": "copy_files",
+        "name": "Copy Extracted Files",
+        "dependencies": [
+          "planner.refs_artifacts/extract"
+        ],
+        "constraints": {
+          "capabilities": [
+            "shared_storage_write"
+          ],
+          "conflicts_with": []
+        },
+        "params": {
+          "source": {
+            "ref": "steps.planner.refs_artifacts/extract.outputs.extracted_paths"
+          },
+          "dest": {
+            "value": "/sdcard/Example"
+          },
+          "copy_policy": {
+            "value": "merge"
+          }
+        },
+        "skip_if": [
+          {
+            "type": "file_exists",
+            "params": {
+              "path": "/sdcard/Example/existing.marker"
+            }
+          }
+        ],
+        "verify": [
+          {
+            "type": "file_exists",
+            "params": {
+              "path": "/sdcard/Example/core.bin",
+              "nested": {
+                "ref": "nested.ref.literal"
+              }
+            }
+          }
+        ]
+      }
+    ],
+    "schema_version": 1,
+    "kind": "execution_plan"
+  },
+  "schema_version": 1,
+  "kind": "planning_result"
+}

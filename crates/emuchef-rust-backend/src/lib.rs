@@ -6,7 +6,8 @@
 //! for `listStepSpecs`, focused authored recipe YAML load/emit/validation
 //! skeletons, sidecar document sessions, overview/non-step/step lifecycle/step
 //! dependency/step internals commands, undo/redo, fixture-scoped RefIndex
-//! generation, and focused authoredRoot catalog-context validation.
+//! generation, focused authoredRoot catalog-context validation, and internal
+//! Phase 6M planner fixture foundations.
 
 pub mod catalog;
 pub mod commands;
@@ -17,6 +18,10 @@ pub mod errors;
 pub mod jsonl;
 pub mod model;
 pub mod one_shot;
+#[allow(dead_code)]
+mod planner;
+#[cfg(test)]
+mod planner_tests;
 pub mod protocol;
 pub mod ref_index;
 pub mod request;

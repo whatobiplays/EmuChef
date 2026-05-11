@@ -1,0 +1,85 @@
+{
+  "status": "success",
+  "warnings": [],
+  "errors": [],
+  "execution_plan": {
+    "id": "plan.example.device_plan.001",
+    "source": {
+      "device_profile_ref": "example.device_profile",
+      "device_plan_ref": "example.device_plan",
+      "selected_recipe_refs": [
+        "planner.grant_permissions"
+      ],
+      "expanded_recipe_refs": [
+        "planner.grant_permissions"
+      ]
+    },
+    "device_context": {
+      "manufacturer": "Example",
+      "model": "Example",
+      "android_version": 13,
+      "android_api_level": 33,
+      "device_tags": [
+        "example_tag"
+      ]
+    },
+    "runtime_capabilities": {
+      "adb_available": true,
+      "apk_install": true,
+      "shared_storage_write": true,
+      "app_launch": true,
+      "shell_command": true,
+      "package_remove_for_user": false,
+      "root_shell": true,
+      "app_data_write": true
+    },
+    "inputs": [],
+    "artifacts": [],
+    "steps": [
+      {
+        "id": "planner.grant_permissions/grant",
+        "recipe_ref": "planner.grant_permissions",
+        "type": "grant_permissions",
+        "name": "Grant Permissions",
+        "dependencies": [],
+        "constraints": {
+          "capabilities": [],
+          "conflicts_with": []
+        },
+        "params": {
+          "runtime": {
+            "value": [
+              {
+                "package_name": "com.example.app",
+                "name": "android.permission.POST_NOTIFICATIONS",
+                "required": false
+              }
+            ]
+          },
+          "appops": {
+            "value": [
+              {
+                "package_name": "com.example.app",
+                "op": "MANAGE_EXTERNAL_STORAGE",
+                "mode": "allow",
+                "required": false
+              }
+            ]
+          },
+          "policy": {
+            "value": {
+              "on_failure": "warn",
+              "require_all": false
+            }
+          }
+        },
+        "skip_if": [],
+        "verify": []
+      }
+    ],
+    "schema_version": 1,
+    "kind": "execution_plan"
+  },
+  "schema_version": 1,
+  "kind": "planning_result"
+}

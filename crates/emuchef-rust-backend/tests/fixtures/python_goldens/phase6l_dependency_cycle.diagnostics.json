@@ -1,0 +1,9 @@
+[
+  {
+    "code": "dependency_cycle",
+    "field": "recipe_dependencies",
+    "objectId": "phase6l.cycle_a",
+    "objectKind": "recipe",
+    "severity": "error"
+  }
+]

@@ -1,0 +1,81 @@
+schema_version: 1
+kind: recipe
+id: planner.refs_artifacts
+name: Planner Refs and Artifacts
+description: Planner fixture for refs, artifact groups, defaults, and conditions.
+recipe_dependencies: []
+provides:
+  features:
+    - planner_refs_artifacts
+inputs: {}
+artifacts:
+  app_apk:
+    type: remote_file
+    url: https://example.com/app.apk
+    cache: default
+  core_zip:
+    type: remote_file
+    url: https://example.com/core.zip
+    cache: default
+  shader_zip:
+    type: remote_file
+    url: https://example.com/shader.zip
+    cache: default
+artifact_groups:
+  core_group:
+    - core_zip
+    - shader_zip
+steps:
+  - id: resolve
+    type: resolve_artifacts
+    name: Resolve Artifacts
+    user_toggleable: false
+    dependencies: []
+    constraints:
+      capabilities: []
+      conflicts_with: []
+    skip_if: []
+    params:
+      artifacts:
+        - app_apk
+      artifact_groups:
+        - core_group
+    verify: []
+  - id: extract
+    type: extract_artifacts
+    name: Extract Artifacts
+    user_toggleable: false
+    dependencies:
+      - resolve
+    constraints:
+      capabilities: []
+      conflicts_with: []
+    skip_if: []
+    params:
+      artifact_groups:
+        - core_group
+    verify: []
+  - id: copy
+    type: copy_files
+    name: Copy Extracted Files
+    user_toggleable: true
+    dependencies:
+      - extract
+    constraints:
+      capabilities:
+        - shared_storage_write
+      conflicts_with: []
+    skip_if:
+      - type: file_exists
+        params:
+          path: /sdcard/Example/existing.marker
+    params:
+      source:
+        ref: steps.extract
+      dest: /sdcard/Example
+    verify:
+      - type: file_exists
+        params:
+          path: /sdcard/Example/core.bin
+          nested:
+            ref: nested.ref.literal

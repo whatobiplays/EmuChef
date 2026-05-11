@@ -25,6 +25,20 @@ fn recipe_path(workspace: &str, name: &str) -> PathBuf {
     authored_root(workspace).join("recipes").join(name)
 }
 
+fn golden_path(name: &str) -> PathBuf {
+    Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("tests")
+        .join("fixtures")
+        .join("python_goldens")
+        .join(name)
+}
+
+fn read_diagnostic_golden(name: &str) -> Vec<Value> {
+    let text =
+        fs::read_to_string(golden_path(name)).expect("Python diagnostic golden should exist");
+    serde_json::from_str(&text).expect("Python diagnostic golden should be valid JSON")
+}
+
 fn parse_stdout_json(stdout: &str) -> Value {
     let lines: Vec<&str> = stdout.lines().collect();
     assert_eq!(lines.len(), 1, "expected exactly one JSON response line");
@@ -148,54 +162,6 @@ fn document_diagnostic_set(response: &Value) -> Vec<Value> {
         .collect()
 }
 
-fn assert_recipe_not_found(diagnostics: &[Value], recipe_id: &str, field: &str) {
-    assert!(
-        diagnostics.contains(&json!({
-            "severity": "error",
-            "code": "recipe_not_found",
-            "objectKind": "recipe",
-            "objectId": recipe_id,
-            "field": field,
-        })),
-        "expected recipe_not_found in {diagnostics:#?}"
-    );
-}
-
-fn assert_dependency_cycle(diagnostics: &[Value], recipe_id: &str) {
-    assert!(
-        diagnostics.contains(&json!({
-            "severity": "error",
-            "code": "dependency_cycle",
-            "objectKind": "recipe",
-            "objectId": recipe_id,
-            "field": "recipe_dependencies",
-        })),
-        "expected dependency_cycle in {diagnostics:#?}"
-    );
-}
-
-fn assert_no_limited_context(diagnostics: &[Value]) {
-    assert!(
-        diagnostics
-            .iter()
-            .all(|diagnostic| diagnostic["code"] != "validation_context_limited"),
-        "did not expect limited-context warning in {diagnostics:#?}"
-    );
-}
-
-fn assert_limited_context(diagnostics: &[Value], recipe_id: &str) {
-    assert!(
-        diagnostics.contains(&json!({
-            "severity": "warning",
-            "code": "validation_context_limited",
-            "objectKind": "recipe",
-            "objectId": recipe_id,
-            "field": null,
-        })),
-        "expected limited-context warning in {diagnostics:#?}"
-    );
-}
-
 #[test]
 fn phase6l_capabilities_remain_unchanged() {
     assert_eq!(
@@ -224,16 +190,25 @@ fn validate_recipe_path_uses_explicit_authored_root_but_does_not_infer_it() {
     let inferred = validate_path(&path, None);
     assert_eq!(inferred["ok"], true);
     let inferred_diagnostics = diagnostic_set(&inferred);
-    assert_limited_context(&inferred_diagnostics, "phase6l.main");
+    assert_eq!(
+        inferred_diagnostics,
+        read_diagnostic_golden("phase6l_complete_null_root.diagnostics.json")
+    );
 
     let null_root = validate_path_with_null_root(&path);
     assert_eq!(null_root["ok"], true);
     let null_diagnostics = diagnostic_set(&null_root);
-    assert_limited_context(&null_diagnostics, "phase6l.main");
+    assert_eq!(
+        null_diagnostics,
+        read_diagnostic_golden("phase6l_complete_null_root.diagnostics.json")
+    );
 
     let explicit = validate_path(&path, Some(&authored_root("complete")));
     assert_eq!(explicit["ok"], true);
-    assert_eq!(diagnostic_set(&explicit), Vec::<Value>::new());
+    assert_eq!(
+        diagnostic_set(&explicit),
+        read_diagnostic_golden("phase6l_complete_explicit_root.diagnostics.json")
+    );
 }
 
 #[test]
@@ -244,8 +219,10 @@ fn nonexistent_non_null_authored_root_is_empty_catalog_context_not_request_failu
 
     assert_eq!(response["ok"], true);
     let diagnostics = diagnostic_set(&response);
-    assert_no_limited_context(&diagnostics);
-    assert_recipe_not_found(&diagnostics, "phase6l.main", "recipe_dependencies[0]");
+    assert_eq!(
+        diagnostics,
+        read_diagnostic_golden("phase6l_missing_authored_root.diagnostics.json")
+    );
 }
 
 #[test]
@@ -257,11 +234,9 @@ fn valid_authored_root_reports_recipe_dependency_diagnostics() {
 
     assert_eq!(response["ok"], true);
     let diagnostics = diagnostic_set(&response);
-    assert_no_limited_context(&diagnostics);
-    assert_recipe_not_found(
-        &diagnostics,
-        "phase6l.missing_dependency",
-        "recipe_dependencies[0]",
+    assert_eq!(
+        diagnostics,
+        read_diagnostic_golden("phase6l_missing_dependency.diagnostics.json")
     );
 }
 
@@ -274,8 +249,10 @@ fn recipe_dependency_cycles_use_validation_local_graph_checks() {
 
     assert_eq!(response["ok"], true);
     let diagnostics = diagnostic_set(&response);
-    assert_no_limited_context(&diagnostics);
-    assert_dependency_cycle(&diagnostics, "phase6l.cycle_a");
+    assert_eq!(
+        diagnostics,
+        read_diagnostic_golden("phase6l_dependency_cycle.diagnostics.json")
+    );
 }
 
 #[test]
@@ -290,10 +267,9 @@ fn catalog_scan_uses_only_python_verified_top_level_globs() {
 
     assert_eq!(response["ok"], true);
     let diagnostics = diagnostic_set(&response);
-    assert_recipe_not_found(
-        &diagnostics,
-        "phase6l.nested_main",
-        "recipe_dependencies[0]",
+    assert_eq!(
+        diagnostics,
+        read_diagnostic_golden("phase6l_nested_ignored.diagnostics.json")
     );
 }
 
@@ -330,7 +306,10 @@ fn open_recipe_infers_and_normalizes_authored_root_like_python() {
                 .to_string_lossy()
                 .to_string()
         );
-        assert_eq!(document_diagnostic_set(response), Vec::<Value>::new());
+        assert_eq!(
+            document_diagnostic_set(response),
+            read_diagnostic_golden("phase6l_complete_explicit_root.diagnostics.json")
+        );
     }
 }
 
@@ -347,17 +326,14 @@ fn open_recipe_reports_duplicate_recipe_id_conflict_against_catalog() {
 
     assert_eq!(responses.len(), 1);
     assert_eq!(responses[0]["ok"], true);
-    assert!(document_diagnostic_set(&responses[0]).contains(&json!({
-        "severity": "error",
-        "code": "recipe_id_conflict",
-        "objectKind": "recipe",
-        "objectId": "phase6l.duplicate",
-        "field": "id",
-    })));
+    assert_eq!(
+        document_diagnostic_set(&responses[0]),
+        read_diagnostic_golden("phase6l_duplicate_open.diagnostics.json")
+    );
 }
 
 #[test]
-fn duplicate_recipe_id_conflict_does_not_depend_on_catalog_file_order() {
+fn duplicate_recipe_id_conflict_matches_python_first_file_replacement_semantics() {
     let responses = sidecar_responses(vec![json!({
         "id": "open",
         "type": "openRecipe",
@@ -369,13 +345,10 @@ fn duplicate_recipe_id_conflict_does_not_depend_on_catalog_file_order() {
 
     assert_eq!(responses.len(), 1);
     assert_eq!(responses[0]["ok"], true);
-    assert!(document_diagnostic_set(&responses[0]).contains(&json!({
-        "severity": "error",
-        "code": "recipe_id_conflict",
-        "objectKind": "recipe",
-        "objectId": "phase6l.duplicate_reverse",
-        "field": "id",
-    })));
+    assert_eq!(
+        document_diagnostic_set(&responses[0]),
+        read_diagnostic_golden("phase6l_duplicate_reverse_open.diagnostics.json")
+    );
 }
 
 #[test]
@@ -426,11 +399,9 @@ fn commands_undo_redo_save_and_session_validate_reuse_stored_authored_root() {
         } else {
             diagnostic_set(response)
         };
-        assert_no_limited_context(&diagnostics);
-        assert_recipe_not_found(
-            &diagnostics,
-            "phase6l.missing_dependency",
-            "recipe_dependencies[0]",
+        assert_eq!(
+            diagnostics,
+            read_diagnostic_golden("phase6l_missing_dependency_open.diagnostics.json")
         );
     }
 

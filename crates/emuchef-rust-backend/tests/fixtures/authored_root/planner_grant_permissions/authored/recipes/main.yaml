@@ -1,0 +1,36 @@
+schema_version: 1
+kind: recipe
+id: planner.grant_permissions
+name: Planner Grant Permissions
+description: Planner fixture for declarative permission step params.
+recipe_dependencies: []
+provides:
+  features:
+    - planner_grant_permissions
+inputs: {}
+artifacts: {}
+artifact_groups: {}
+steps:
+  - id: grant
+    type: grant_permissions
+    name: Grant Permissions
+    user_toggleable: false
+    dependencies: []
+    constraints:
+      capabilities: []
+      conflicts_with: []
+    skip_if: []
+    params:
+      runtime:
+        - package_name: com.example.app
+          name: android.permission.POST_NOTIFICATIONS
+          required: false
+      appops:
+        - package_name: com.example.app
+          op: MANAGE_EXTERNAL_STORAGE
+          mode: allow
+          required: false
+      policy:
+        on_failure: warn
+        require_all: false
+    verify: []

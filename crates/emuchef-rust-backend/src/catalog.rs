@@ -118,32 +118,33 @@ impl ValidationCatalog {
         let resolved_authored_root = resolved_path(authored_root);
         let target_in_catalog_root = target_path.starts_with(&resolved_authored_root);
         let mut recipes = self.recipes.clone();
-        let mut recipe_files = self.recipe_files.clone();
 
-        if let Some(existing_id) = recipe_id_for_path(&recipe_files, &target_path) {
-            recipes.remove(&existing_id);
-            remove_recipe_path(&mut recipe_files, &existing_id, &target_path);
+        let replaced_recipe_id = first_recipe_id_for_path(&self.recipe_files, &target_path);
+        if let Some(existing_id) = &replaced_recipe_id {
+            recipes.remove(existing_id);
         }
 
         let mut errors = Vec::new();
-        if let Some(existing_paths) = recipe_files.get(&recipe.id) {
-            if existing_paths.iter().any(|path| path != &target_path) {
-                if target_in_catalog_root {
-                    errors.push(diagnostic(
-                        "error",
-                        "recipe_id_conflict",
-                        &format!("Duplicate recipe id {}.", python_single_quote(&recipe.id)),
-                        file,
-                        Some("recipe"),
-                        Some(&recipe.id),
-                        Some("id"),
-                    ));
-                }
-            }
+        let existing_path = (replaced_recipe_id.as_deref() != Some(recipe.id.as_str()))
+            .then(|| {
+                self.recipe_files
+                    .get(&recipe.id)
+                    .and_then(|paths| paths.first())
+            })
+            .flatten();
+        if target_in_catalog_root && existing_path.is_some_and(|path| path != &target_path) {
+            errors.push(diagnostic(
+                "error",
+                "recipe_id_conflict",
+                &format!("Duplicate recipe id {}.", python_single_quote(&recipe.id)),
+                file,
+                Some("recipe"),
+                Some(&recipe.id),
+                Some("id"),
+            ));
         }
 
         recipes.insert(recipe.id.clone(), recipe.clone());
-        recipe_files.insert(recipe.id.clone(), vec![target_path]);
 
         for (index, dependency_ref) in recipe.recipe_dependencies.iter().enumerate() {
             if !recipes.contains_key(dependency_ref) {
@@ -201,30 +202,16 @@ fn is_yaml_extension(path: &Path) -> bool {
     )
 }
 
-fn recipe_id_for_path(
+fn first_recipe_id_for_path(
     recipe_files: &HashMap<String, Vec<PathBuf>>,
     target_path: &Path,
 ) -> Option<String> {
     recipe_files.iter().find_map(|(recipe_id, recipe_path)| {
         recipe_path
-            .iter()
-            .any(|path| path == target_path)
+            .first()
+            .is_some_and(|path| path == target_path)
             .then(|| recipe_id.clone())
     })
-}
-
-fn remove_recipe_path(
-    recipe_files: &mut HashMap<String, Vec<PathBuf>>,
-    recipe_id: &str,
-    target_path: &Path,
-) {
-    let Some(paths) = recipe_files.get_mut(recipe_id) else {
-        return;
-    };
-    paths.retain(|path| path != target_path);
-    if paths.is_empty() {
-        recipe_files.remove(recipe_id);
-    }
 }
 
 fn dependency_cycle_reachable(recipes: &HashMap<String, Recipe>, selected_recipe_id: &str) -> bool {

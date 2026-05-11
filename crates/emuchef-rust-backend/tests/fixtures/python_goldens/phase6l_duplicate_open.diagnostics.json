@@ -1,0 +1,9 @@
+[
+  {
+    "code": "recipe_id_conflict",
+    "field": "id",
+    "objectId": "phase6l.duplicate",
+    "objectKind": "recipe",
+    "severity": "error"
+  }
+]

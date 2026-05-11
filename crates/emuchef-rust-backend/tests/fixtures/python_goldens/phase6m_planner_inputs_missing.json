@@ -1,0 +1,16 @@
+{
+  "status": "error",
+  "warnings": [],
+  "errors": [
+    {
+      "code": "binding_missing",
+      "message": "Required binding 'planner.inputs/required_cfg' is missing.",
+      "details": {
+        "input_id": "planner.inputs/required_cfg"
+      }
+    }
+  ],
+  "execution_plan": null,
+  "schema_version": 1,
+  "kind": "planning_result"
+}

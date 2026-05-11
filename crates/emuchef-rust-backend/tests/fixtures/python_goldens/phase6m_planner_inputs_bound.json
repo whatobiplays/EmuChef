@@ -1,0 +1,80 @@
+{
+  "status": "success",
+  "warnings": [],
+  "errors": [],
+  "execution_plan": {
+    "id": "plan.example.device_plan.001",
+    "source": {
+      "device_profile_ref": "example.device_profile",
+      "device_plan_ref": "example.device_plan",
+      "selected_recipe_refs": [
+        "planner.inputs"
+      ],
+      "expanded_recipe_refs": [
+        "planner.inputs"
+      ]
+    },
+    "device_context": {
+      "manufacturer": "Example",
+      "model": "Example",
+      "android_version": 13,
+      "android_api_level": 33,
+      "device_tags": [
+        "example_tag"
+      ]
+    },
+    "runtime_capabilities": {
+      "adb_available": true,
+      "apk_install": true,
+      "shared_storage_write": true,
+      "app_launch": true,
+      "shell_command": true,
+      "package_remove_for_user": false,
+      "root_shell": true,
+      "app_data_write": true
+    },
+    "inputs": [
+      {
+        "id": "planner.inputs/required_cfg",
+        "value": {
+          "type": "file_path",
+          "value": "/tmp/example.cfg",
+          "location": "host"
+        }
+      }
+    ],
+    "artifacts": [],
+    "steps": [
+      {
+        "id": "planner.inputs/seed",
+        "recipe_ref": "planner.inputs",
+        "type": "copy_files",
+        "name": "Seed Config",
+        "dependencies": [],
+        "constraints": {
+          "capabilities": [
+            "shared_storage_write"
+          ],
+          "conflicts_with": []
+        },
+        "params": {
+          "source": {
+            "ref": "inputs.planner.inputs/required_cfg"
+          },
+          "dest": {
+            "value": "/sdcard/Example.cfg"
+          },
+          "copy_policy": {
+            "value": "merge"
+          }
+        },
+        "skip_if": [],
+        "verify": []
+      }
+    ],
+    "schema_version": 1,
+    "kind": "execution_plan"
+  },
+  "schema_version": 1,
+  "kind": "planning_result"
+}

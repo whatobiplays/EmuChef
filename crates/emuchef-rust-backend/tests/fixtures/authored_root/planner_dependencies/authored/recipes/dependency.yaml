@@ -1,0 +1,25 @@
+schema_version: 1
+kind: recipe
+id: planner.dependency
+name: Planner Dependency Recipe
+description: Planner fixture dependency recipe.
+recipe_dependencies: []
+provides:
+  features:
+    - planner_dependency
+inputs: {}
+artifacts: {}
+artifact_groups: {}
+steps:
+  - id: dependency_step
+    type: wait
+    name: Dependency Step
+    user_toggleable: false
+    dependencies: []
+    constraints:
+      capabilities: []
+      conflicts_with: []
+    skip_if: []
+    params:
+      duration_ms: 1
+    verify: []

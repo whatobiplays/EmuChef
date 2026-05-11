@@ -1,0 +1,40 @@
+schema_version: 1
+kind: recipe
+id: planner.inputs
+name: Planner Inputs
+description: Planner required input binding fixture.
+recipe_dependencies: []
+provides:
+  features:
+    - planner_inputs
+inputs:
+  required_cfg:
+    type: file
+    role: generic
+    label: Required Config
+    description: Required config file.
+    required: true
+    multiple: false
+    validation:
+      must_exist: false
+      allowed_extensions:
+        - cfg
+      path_kind: file
+artifacts: {}
+artifact_groups: {}
+steps:
+  - id: seed
+    type: copy_files
+    name: Seed Config
+    user_toggleable: true
+    dependencies: []
+    constraints:
+      capabilities:
+        - shared_storage_write
+      conflicts_with: []
+    skip_if: []
+    params:
+      source:
+        ref: inputs.required_cfg
+      dest: /sdcard/Example.cfg
+    verify: []

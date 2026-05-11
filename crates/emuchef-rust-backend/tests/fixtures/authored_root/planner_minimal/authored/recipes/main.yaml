@@ -1,0 +1,25 @@
+schema_version: 1
+kind: recipe
+id: planner.minimal
+name: Planner Minimal
+description: Minimal planner fixture.
+recipe_dependencies: []
+provides:
+  features:
+    - planner_minimal
+inputs: {}
+artifacts: {}
+artifact_groups: {}
+steps:
+  - id: wait
+    type: wait
+    name: Wait
+    user_toggleable: false
+    dependencies: []
+    constraints:
+      capabilities: []
+      conflicts_with: []
+    skip_if: []
+    params:
+      duration_ms: 1
+    verify: []
