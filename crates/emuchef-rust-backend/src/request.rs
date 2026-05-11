@@ -5,6 +5,7 @@ use serde_json::{json, Map, Value};
 use crate::envelope;
 use crate::errors::ApiError;
 use crate::protocol;
+use crate::session::DocumentSessionManager;
 use crate::step_specs;
 use crate::validation;
 use crate::yaml;
@@ -18,13 +19,13 @@ pub fn handle_one_shot_value(request: Value) -> Value {
 }
 
 /// Validate and dispatch a sidecar request object, including sidecar id rules.
-pub fn handle_sidecar_value(request: Value) -> Value {
+pub fn handle_sidecar_value(request: Value, sessions: &mut DocumentSessionManager) -> Value {
     let mut request_id = None;
     let response = match validate_request_object(request) {
         Ok(object) => match validate_sidecar_id(&object) {
             Ok(id) => {
                 request_id = Some(id);
-                handle_validated_object(&object).unwrap_or_else(envelope::failure)
+                handle_validated_sidecar_object(&object, sessions).unwrap_or_else(envelope::failure)
             }
             Err(error) => envelope::failure(error),
         },
@@ -48,6 +49,28 @@ fn handle_validated_object(object: &Map<String, Value>) -> Result<Value, ApiErro
         "listStepSpecs" => Ok(envelope::success(step_specs::list_step_specs_result())),
         "emitRecipeYamlFromPath" => handle_emit_recipe_yaml_from_path(object),
         "validateRecipePath" => handle_validate_recipe_path(object),
+        unknown => Err(ApiError::invalid_request(format!(
+            "Unknown request type: {unknown}"
+        ))),
+    }
+}
+
+fn handle_validated_sidecar_object(
+    object: &Map<String, Value>,
+    sessions: &mut DocumentSessionManager,
+) -> Result<Value, ApiError> {
+    let request_type = validate_request_type(object)?;
+    validate_payload(object)?;
+
+    match request_type {
+        "hello" => Ok(envelope::success(protocol::hello_result())),
+        "listStepSpecs" => Ok(envelope::success(step_specs::list_step_specs_result())),
+        "emitRecipeYamlFromPath" => handle_emit_recipe_yaml_from_path(object),
+        "validateRecipePath" => handle_validate_recipe_path(object),
+        "openRecipe" => handle_open_recipe(object, sessions),
+        "getDocument" => handle_get_document(object, sessions),
+        "saveRecipe" => handle_save_recipe(object, sessions),
+        "closeDocument" => handle_close_document(object, sessions),
         unknown => Err(ApiError::invalid_request(format!(
             "Unknown request type: {unknown}"
         ))),
@@ -112,6 +135,45 @@ fn handle_validate_recipe_path(object: &Map<String, Value>) -> Result<Value, Api
     )))
 }
 
+fn handle_open_recipe(
+    object: &Map<String, Value>,
+    sessions: &mut DocumentSessionManager,
+) -> Result<Value, ApiError> {
+    let payload = payload_object(object)?;
+    let path = required_path(payload)?;
+    let authored_root = optional_string(payload, "authoredRoot")?;
+    Ok(envelope::success(
+        sessions.open_recipe(path, authored_root)?,
+    ))
+}
+
+fn handle_get_document(
+    object: &Map<String, Value>,
+    sessions: &mut DocumentSessionManager,
+) -> Result<Value, ApiError> {
+    let payload = payload_object(object)?;
+    let document_id = required_document_id(payload)?;
+    Ok(envelope::success(sessions.get_document(document_id)?))
+}
+
+fn handle_save_recipe(
+    object: &Map<String, Value>,
+    sessions: &mut DocumentSessionManager,
+) -> Result<Value, ApiError> {
+    let payload = payload_object(object)?;
+    let document_id = required_document_id(payload)?;
+    Ok(envelope::success(sessions.save_recipe(document_id)?))
+}
+
+fn handle_close_document(
+    object: &Map<String, Value>,
+    sessions: &mut DocumentSessionManager,
+) -> Result<Value, ApiError> {
+    let payload = payload_object(object)?;
+    let document_id = required_document_id(payload)?;
+    Ok(envelope::success(sessions.close_document(document_id)?))
+}
+
 fn payload_object(object: &Map<String, Value>) -> Result<&Map<String, Value>, ApiError> {
     match object.get("payload") {
         Some(Value::Object(payload)) => Ok(payload),
@@ -127,10 +189,34 @@ fn payload_object(object: &Map<String, Value>) -> Result<&Map<String, Value>, Ap
 
 fn required_path(payload: &Map<String, Value>) -> Result<&str, ApiError> {
     match payload.get("path") {
-        Some(Value::String(path)) => Ok(path),
+        Some(Value::String(path)) if !path.is_empty() => Ok(path),
         _ => Err(ApiError::invalid_request_with_details(
             "Request payload is missing required field: path",
             json!({ "field": "path" }),
+        )),
+    }
+}
+
+fn required_document_id(payload: &Map<String, Value>) -> Result<&str, ApiError> {
+    match payload.get("documentId") {
+        Some(Value::String(document_id)) if !document_id.is_empty() => Ok(document_id),
+        _ => Err(ApiError::invalid_request_with_details(
+            "Request payload is missing required field: documentId",
+            json!({ "field": "documentId" }),
+        )),
+    }
+}
+
+fn optional_string<'a>(
+    payload: &'a Map<String, Value>,
+    field: &str,
+) -> Result<Option<&'a str>, ApiError> {
+    match payload.get(field) {
+        None | Some(Value::Null) => Ok(None),
+        Some(Value::String(value)) if !value.is_empty() => Ok(Some(value)),
+        _ => Err(ApiError::invalid_request_with_details(
+            format!("Request field '{field}' must be a non-empty string when provided."),
+            json!({ "field": field }),
         )),
     }
 }

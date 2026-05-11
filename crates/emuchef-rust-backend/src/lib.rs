@@ -3,9 +3,11 @@
 //! The crate intentionally implements only the early migration surface from
 //! Phases 6C through 6E: request validation, response envelopes, one-shot
 //! invocation, JSONL sidecar invocation, the `hello` handshake, static StepSpec
-//! DTO parity for `listStepSpecs`, and a focused authored recipe YAML
-//! load/emit/validation skeleton.
+//! DTO parity for `listStepSpecs`, focused authored recipe YAML
+//! load/emit/validation skeletons, and Phase 6F sidecar document sessions.
 
+pub mod document;
+pub mod dto;
 pub mod envelope;
 pub mod errors;
 pub mod jsonl;
@@ -13,6 +15,7 @@ pub mod model;
 pub mod one_shot;
 pub mod protocol;
 pub mod request;
+pub mod session;
 pub mod step_specs;
 pub mod validation;
 pub mod yaml;

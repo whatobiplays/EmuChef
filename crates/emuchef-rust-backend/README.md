@@ -4,43 +4,90 @@ This package is an experimental Rust backend skeleton for the EmuChef config
 editor protocol. It is standalone and runnable independently of the Tauri
 editor.
 
-Phase 6E implements only:
+Phase 6F implements only:
 
 - `hello`
 - `listStepSpecs`
 - `emitRecipeYamlFromPath`
 - `validateRecipePath`
+- sidecar-only `openRecipe`
+- sidecar-only `getDocument`
+- sidecar-only `saveRecipe`
+- sidecar-only `closeDocument`
 - stable success and error envelopes
 - structured API errors
 - one-shot JSON request handling
 - JSON Lines sidecar request handling
 - authored recipe YAML load/emit skeletons for focused Phase 6E fixtures
 - basic authored recipe validation diagnostics for focused Phase 6E fixtures
+- in-memory sidecar document sessions backed by the authored recipe model
 
 It reports only capabilities that are implemented in this crate:
 
 ```json
 {
   "protocolVersion": 1,
-  "capabilities": ["listStepSpecs", "emitRecipeYamlFromPath", "validateRecipePath"]
+  "capabilities": [
+    "listStepSpecs",
+    "emitRecipeYamlFromPath",
+    "validateRecipePath",
+    "openRecipe",
+    "getDocument",
+    "saveRecipe",
+    "closeDocument"
+  ]
 }
 ```
 
-Reporting these capabilities does not make this backend compatible with the
-Tauri editor. The current Tauri compatibility gate still rejects it because
-document/session/editor capabilities such as `openRecipe`, `getDocument`,
-`applyRecipeCommand`, `undo`, `redo`, `saveRecipe`, `validate`, `emitYaml`, and
-`getRefIndex` are missing.
+Reporting `openRecipe`, `getDocument`, `saveRecipe`, and `closeDocument` means
+the Rust backend supports those requests in JSONL sidecar mode only. One-shot
+mode remains stateless and does not expose persistent document session APIs.
+
+Reporting these capabilities still does not make this backend compatible with
+the Tauri editor. The current Tauri compatibility gate still rejects it because
+editor capabilities such as `applyRecipeCommand`, `undo`, `redo`, `validate`,
+`emitYaml`, and `getRefIndex` are missing.
 
 The Python backend remains the reference implementation. This Rust package is
 not a replacement backend and is not selected by the Tauri editor.
 
-This package does not create document sessions, apply editor commands, save
-files, build a ref index, run planner behavior, run executor behavior, bundle
+This package does not apply editor commands, expose undo/redo request handling,
+build a real ref index, run planner behavior, run executor behavior, bundle
 Python, or provide production packaging. Its validation is a basic skeleton only;
 it does not perform full catalog-context validation, dependency graph validation,
 planner contract validation, artifact expansion validation, device checks, or
-executor checks.
+executor checks. Python remains the reference implementation.
+
+## Document Session Scope
+
+Phase 6F document sessions are process-local JSONL sidecar state. Opening a
+recipe loads the Phase 6E authored recipe model, emits canonical YAML, records
+that YAML as the saved baseline, and returns a Python-shaped `RecipeDocumentDto`.
+Because mutation commands are not implemented yet, documents normally remain
+`dirty: false`.
+
+`saveRecipe` writes the current canonical YAML back to the document's current
+path, updates the saved baseline after a successful write, reruns the Phase 6E
+basic validation skeleton, and returns the current document DTO. Save tests must
+use temporary copies of fixtures; do not point save tests at checked-in fixture
+files.
+
+`canUndo` and `canRedo` are always `false` because command history is not exposed
+in Phase 6F. `refIndex` is a temporary empty Python-compatible placeholder:
+
+```json
+{
+  "inputRefs": [],
+  "artifactRefs": [],
+  "stepRefs": [],
+  "stepOutputRefs": [],
+  "allRefs": [],
+  "candidates": []
+}
+```
+
+The placeholder is structural only. It does not derive refs, candidates, or
+partial ref data, and `getRefIndex` is not reported as a capability.
 
 ## StepSpec Source
 
@@ -173,6 +220,11 @@ PY
 The emitted YAML goldens store only the Python result string. The validation
 goldens store only the Python result object, not the outer API envelope.
 
+Phase 6F document sessions are covered by Rust integration tests rather than new
+Python open-document goldens. Python currently returns a populated ref index,
+while Phase 6F intentionally returns an empty structural placeholder until the
+Rust ref index is ported.
+
 ## One-Shot Mode
 
 Run one request as a single JSON argument:
@@ -187,7 +239,7 @@ cargo run --manifest-path crates/emuchef-rust-backend/Cargo.toml -- '{"type":"va
 Expected `hello` stdout is one JSON response envelope:
 
 ```json
-{"ok":true,"result":{"protocolVersion":1,"capabilities":["listStepSpecs","emitRecipeYamlFromPath","validateRecipePath"]}}
+{"ok":true,"result":{"protocolVersion":1,"capabilities":["listStepSpecs","emitRecipeYamlFromPath","validateRecipePath","openRecipe","getDocument","saveRecipe","closeDocument"]}}
 ```
 
 `listStepSpecs` returns `{"stepSpecs":[...]}` inside the success envelope.
@@ -208,8 +260,28 @@ printf '%s\n' '{"id":"validate-1","type":"validateRecipePath","payload":{"path":
 Expected `hello` stdout is one JSON response line:
 
 ```json
-{"id":"hello-1","ok":true,"result":{"protocolVersion":1,"capabilities":["listStepSpecs","emitRecipeYamlFromPath","validateRecipePath"]}}
+{"id":"hello-1","ok":true,"result":{"protocolVersion":1,"capabilities":["listStepSpecs","emitRecipeYamlFromPath","validateRecipePath","openRecipe","getDocument","saveRecipe","closeDocument"]}}
 ```
+
+Session APIs are sidecar-only. A practical manual smoke is:
+
+1. Start an interactive sidecar:
+
+```bash
+cargo run --manifest-path crates/emuchef-rust-backend/Cargo.toml -- --sidecar
+```
+
+2. Paste an `openRecipe` JSON line, then copy the returned `documentId` into
+   `getDocument`, `saveRecipe`, and `closeDocument` JSON lines before sending
+   EOF. Use a temporary copy of a fixture if the smoke includes `saveRecipe`:
+
+```json
+{"id":"open-1","type":"openRecipe","payload":{"path":"crates/emuchef-rust-backend/tests/fixtures/recipes/minimal_recipe.yaml","authoredRoot":null}}
+```
+
+The automated Rust integration tests keep the sidecar process alive and cover
+`openRecipe`, `getDocument`, `saveRecipe`, and `closeDocument` without adding
+any production test-helper command.
 
 Request-level errors are returned as API envelopes and do not terminate the
 sidecar:

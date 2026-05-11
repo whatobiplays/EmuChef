@@ -7,6 +7,8 @@ use serde_json::{json, Value};
 pub enum ApiErrorCode {
     InvalidRequest,
     LoadFailed,
+    SaveFailed,
+    UnknownDocument,
     ValidationFailed,
     InternalError,
 }
@@ -44,6 +46,25 @@ impl ApiError {
             code: ApiErrorCode::LoadFailed,
             message: message.into(),
             details,
+        }
+    }
+
+    /// Build a `save_failed` error for document save failures.
+    pub fn save_failed(message: impl Into<String>, details: Value) -> Self {
+        Self {
+            code: ApiErrorCode::SaveFailed,
+            message: message.into(),
+            details,
+        }
+    }
+
+    /// Build an `unknown_document` error for missing sidecar document sessions.
+    pub fn unknown_document(document_id: impl Into<String>) -> Self {
+        let document_id = document_id.into();
+        Self {
+            code: ApiErrorCode::UnknownDocument,
+            message: format!("Unknown document id: {document_id}"),
+            details: json!({ "documentId": document_id }),
         }
     }
 

@@ -12,6 +12,10 @@ pub const CAPABILITIES: &[&str] = &[
     "listStepSpecs",
     "emitRecipeYamlFromPath",
     "validateRecipePath",
+    "openRecipe",
+    "getDocument",
+    "saveRecipe",
+    "closeDocument",
 ];
 
 /// Return backend compatibility metadata for the `hello` request.

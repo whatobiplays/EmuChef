@@ -110,13 +110,34 @@ fn assert_hello_result(result: &Value) {
         json!([
             "listStepSpecs",
             "emitRecipeYamlFromPath",
-            "validateRecipePath"
+            "validateRecipePath",
+            "openRecipe",
+            "getDocument",
+            "saveRecipe",
+            "closeDocument"
         ])
     );
     assert!(!result["capabilities"]
         .as_array()
         .unwrap()
         .contains(&json!("hello")));
+    for unimplemented in [
+        "applyRecipeCommand",
+        "undo",
+        "redo",
+        "emitYaml",
+        "validate",
+        "getRefIndex",
+        "saveRecipeAs",
+    ] {
+        assert!(
+            !result["capabilities"]
+                .as_array()
+                .unwrap()
+                .contains(&json!(unimplemented)),
+            "{unimplemented} should not be reported until implemented"
+        );
+    }
     assert!(result.get("implementation").is_none());
     assert!(result.get("implementationVersion").is_none());
 }
