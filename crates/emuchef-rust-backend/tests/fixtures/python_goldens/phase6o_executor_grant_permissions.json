@@ -1,0 +1,42 @@
+{
+  "success": true,
+  "total_steps": 1,
+  "steps": [
+    {
+      "step_id": "example.recipe/grant",
+      "status": "executed",
+      "message": null,
+      "outputs": {
+        "permission_results": {
+          "type": "object",
+          "value": {
+            "actions": [
+              {
+                "step_id": "example.recipe/grant",
+                "kind": "runtime_permission",
+                "package_name": "com.example.app",
+                "source_recipe_id": "example.recipe",
+                "source_section": "params.runtime[0]",
+                "permission": "android.permission.POST_NOTIFICATIONS",
+                "status": "executed"
+              },
+              {
+                "step_id": "example.recipe/grant",
+                "kind": "appop",
+                "package_name": "com.example.app",
+                "source_recipe_id": "example.recipe",
+                "source_section": "params.appops[0]",
+                "op": "MANAGE_EXTERNAL_STORAGE",
+                "desired_mode": "allow",
+                "status": "not_applicable",
+                "reason_code": "requires_unrooted",
+                "message": "Device is rooted."
+              }
+            ]
+          },
+          "location": null
+        }
+      }
+    }
+  ]
+}

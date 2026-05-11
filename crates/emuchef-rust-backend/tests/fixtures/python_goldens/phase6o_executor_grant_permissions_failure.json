@@ -1,0 +1,43 @@
+{
+  "success": false,
+  "total_steps": 3,
+  "steps": [
+    {
+      "step_id": "example.recipe/grant_fail",
+      "status": "failed",
+      "message": "permission denied",
+      "outputs": {
+        "permission_results": {
+          "type": "object",
+          "value": {
+            "actions": [
+              {
+                "step_id": "example.recipe/grant_fail",
+                "kind": "runtime_permission",
+                "package_name": "com.example.fail",
+                "source_recipe_id": "example.recipe",
+                "source_section": "params.runtime[0]",
+                "permission": "android.permission.CAMERA",
+                "status": "failed",
+                "message": "permission denied"
+              }
+            ]
+          },
+          "location": null
+        }
+      }
+    },
+    {
+      "step_id": "example.recipe/dependent",
+      "status": "blocked",
+      "message": "dependency blocked: example.recipe/grant_fail",
+      "outputs": {}
+    },
+    {
+      "step_id": "example.recipe/unrelated",
+      "status": "executed",
+      "message": null,
+      "outputs": {}
+    }
+  ]
+}

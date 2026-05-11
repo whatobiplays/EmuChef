@@ -1,0 +1,24 @@
+{
+  "success": false,
+  "total_steps": 3,
+  "steps": [
+    {
+      "step_id": "example.recipe/fail",
+      "status": "failed",
+      "message": "wait step requires a positive integer duration_ms: 0",
+      "outputs": {}
+    },
+    {
+      "step_id": "example.recipe/downstream",
+      "status": "blocked",
+      "message": "dependency blocked: example.recipe/fail",
+      "outputs": {}
+    },
+    {
+      "step_id": "example.recipe/unrelated",
+      "status": "executed",
+      "message": null,
+      "outputs": {}
+    }
+  ]
+}

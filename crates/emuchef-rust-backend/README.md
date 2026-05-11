@@ -4,7 +4,7 @@ This package is an experimental Rust backend skeleton for the EmuChef config
 editor protocol. It is standalone and runnable independently of the Tauri
 editor.
 
-Through Phase 6N it implements only:
+Through Phase 6O it implements only:
 
 - `hello`
 - `listStepSpecs`
@@ -44,6 +44,8 @@ Through Phase 6N it implements only:
 - an internal-only, fixture-scoped declarative planner that emits a
   Python-shaped `PlanningResult`/`ExecutionPlan` for focused Phase 6M and 6N
   tests
+- an internal-only, fixture-scoped executor skeleton that emits Python-shaped
+  `ExecutionRunResult` values for selected safe dry-run Phase 6O tests
 
 It reports only capabilities that are implemented in this crate:
 
@@ -73,16 +75,16 @@ requests in JSONL sidecar mode only. One-shot mode remains stateless and does
 not expose persistent document session APIs.
 
 Reporting these capabilities still does not make this backend compatible with
-the Tauri editor. Phase 6N reports the same ordered capability list as Phase
-6H/6I/6J.1/6J.2/6K/6L/6M; capability parity is not full backend parity. The Rust
-backend is still not editor-ready and is not wired into Tauri.
+the Tauri editor. Phase 6O reports the same ordered capability list as Phase
+6H/6I/6J.1/6J.2/6K/6L/6M/6N; capability parity is not full backend parity. The
+Rust backend is still not editor-ready and is not wired into Tauri.
 There is no env var, CLI flag, config file, README path, or documented launch
-path for using this Rust backend as the Tauri editor backend in Phase 6N.
+path for using this Rust backend as the Tauri editor backend in Phase 6O.
 
 The Python backend remains the reference implementation. This Rust package is
 not a replacement backend and is not selected by the Tauri editor.
 
-This package does not implement full planner behavior, executor behavior,
+This package does not implement full planner behavior, full executor behavior,
 Python bundling, or production packaging. Phase 6K replaced the earlier basic
 validation skeleton with fixture-covered editor-local validation parity for the
 current Rust recipe model scope. Phase 6L adds fixture-covered
@@ -92,7 +94,8 @@ focused fixtures only. Phase 6N expands that private planner to broader
 Python-golden-backed parity for current built-in planning mappings, dependency
 expansion, input binding/default/multiple values, artifact/group planning,
 StepSpec defaults, refs, `skip_if`, `verify`, and planner result status/error
-shape for selected fixtures. Rust still does not perform executor work, device
+shape for selected fixtures. Phase 6O adds a private safe executor skeleton for
+selected Python dry-run result fixtures. Rust still does not perform real device
 checks, artifact downloads, archive extraction, file copies, permission grants,
 subprocess execution, or Tauri integration. Python remains the reference
 implementation until parity is confirmed.
@@ -161,6 +164,49 @@ inference, network or cache inspection, filesystem existence checks, and
 side-effecting artifact/app/permission operations are outside Phase 6N. The
 Phase 6N fixtures cover `conflicts_with` serialization only when the conflicting
 step is unavailable through fixture capabilities.
+
+## Phase 6O Executor Scope
+
+Phase 6O adds `src/executor.rs`, an internal Rust module used only by crate-local
+tests. It is not a public crate API, protocol request, CLI command, Tauri
+command, TypeScript API, backend selector, config option, environment toggle, or
+public dry-run surface. The parity target is Python's internal
+`ExecutorRunner.run(...)->ExecutionRunResult` value from `src/emuchef/executor`,
+not CLI progress text, CLI summary text, `DryRunAdb.commands`, or sidecar
+envelopes.
+
+Python dry-run is dependency injection rather than a distinct result type:
+`ExecutorRunner` receives `DryRunAdb` and, for CLI dry-run, a no-op sleep
+function. Phase 6O mirrors that internal shape for selected fixtures. Step
+statuses remain Python's `executed`, `skipped`, `blocked`, and `failed`; there is
+no Rust-only dry-run status. Executor output parity is functional/semantic for
+selected fixtures. Byte-for-byte JSON equality is useful in tests but is not a
+general guarantee.
+
+The Phase 6O runner preserves Python's supplied plan order and does not re-plan,
+re-toposort, infer dependencies, mutate the input `ExecutionPlan`, or mutate
+fixture documents. Failed and blocked dependency steps block dependents; skipped
+steps do not. The only step handlers modeled are fixture-backed `wait` and
+Python dry-run-shaped `grant_permissions`. The only condition types modeled are
+the Python-backed executor conditions `package_installed`, `path_exists`, and
+`file_exists`, evaluated against fake dry-run device state.
+
+The executor adapters are test doubles. The fake device adapter may record
+dry-run-shaped commands so tests can prove the adapter boundary was crossed, but
+those records are not part of parity output because Python `ExecutionRunResult`
+does not include `DryRunAdb.commands`. `run_plan_command` is a fake dry-run
+adapter method only in Phase 6O. It never calls subprocesses, shell commands,
+ADB, devices, permission APIs, or platform APIs.
+
+Phase 6O intentionally does not implement real filesystem, network, archive,
+copy, ADB, device, permission, launch, force-stop, subprocess, packaging, Python
+bundling, or Tauri integration behavior. It also does not add executor request
+routing, capability strings, a one-shot command, a JSONL command, protocol
+negotiation, or unimplemented capability reporting. Phase 6P is expected to
+cover filesystem/artifact executor parity. Phase 6Q is expected to cover
+device/ADB/permission executor parity. The final migration direction remains a
+hard Rust cutover after feature parity; no backend selector or long-term
+dual-backend toggle will be added.
 
 ## Document Session Scope
 
@@ -575,6 +621,217 @@ the expanded private planner coverage. They are generated from Python
 `Planner(...).start_session(...).emit_execution_plan()` using focused
 authoredRoot recipe fixtures. New Phase 6N goldens normalize absolute repo-root
 paths to `$REPO_ROOT/...` so relative input defaults and bindings remain stable.
+Phase 6O adds `phase6o_executor_*.json` execution-result fixtures generated from
+Python `ExecutorRunner(...).run(...)` with `DryRunAdb` and a no-op sleep
+function. These goldens store only the internal Python `ExecutionRunResult`
+object. They do not store CLI progress text, CLI summary text, sidecar
+envelopes, or `DryRunAdb.commands`.
+
+Regenerate the Phase 6O executor goldens from the repo root with:
+
+```bash
+PYTHONPATH=src python3 - <<'PY'
+from __future__ import annotations
+
+import json
+from collections.abc import Mapping, Sequence
+from dataclasses import fields, is_dataclass
+from enum import Enum
+from pathlib import Path
+
+from emuchef.domain import (
+    DeviceContext,
+    ExecutionPlan,
+    ExecutionPlanSource,
+    ExecutionStep,
+    LiteralParamValue,
+    RuntimeCapabilities,
+    StepCondition,
+)
+from emuchef.executor import DryRunAdb, ExecutorRunner
+
+GOLDENS = Path("crates/emuchef-rust-backend/tests/fixtures/python_goldens")
+GOLDENS.mkdir(parents=True, exist_ok=True)
+
+def to_primitive(value):
+    if is_dataclass(value):
+        return {field.name: to_primitive(getattr(value, field.name)) for field in fields(value)}
+    if isinstance(value, Enum):
+        return value.value
+    if isinstance(value, Mapping):
+        return {str(key): to_primitive(item) for key, item in value.items()}
+    if isinstance(value, Sequence) and not isinstance(value, (str, bytes, bytearray)):
+        return [to_primitive(item) for item in value]
+    return value
+
+def caps() -> RuntimeCapabilities:
+    return RuntimeCapabilities(
+        adb_available=True,
+        apk_install=True,
+        shared_storage_write=True,
+        app_launch=True,
+        shell_command=True,
+        package_remove_for_user=False,
+        root_shell=True,
+        app_data_write=True,
+    )
+
+def context() -> DeviceContext:
+    return DeviceContext(
+        manufacturer="Example",
+        model="Example",
+        android_version=13,
+        android_api_level=33,
+        device_tags=(),
+    )
+
+def plan(*steps: ExecutionStep) -> ExecutionPlan:
+    return ExecutionPlan(
+        id="plan.test",
+        source=ExecutionPlanSource(
+            device_profile_ref="example.device_profile",
+            device_plan_ref="example.device_plan",
+            selected_recipe_refs=("example.recipe",),
+            expanded_recipe_refs=("example.recipe",),
+        ),
+        device_context=context(),
+        runtime_capabilities=caps(),
+        inputs=(),
+        artifacts=(),
+        steps=steps,
+    )
+
+def run(plan_value: ExecutionPlan, adb: DryRunAdb | None = None) -> dict:
+    result = ExecutorRunner(adb=adb or DryRunAdb(), sleep_fn=lambda _: None).run(plan_value)
+    return to_primitive(result)
+
+fixtures = {
+    "phase6o_executor_wait_success.json": run(plan(ExecutionStep(
+        id="example.recipe/wait",
+        recipe_ref="example.recipe",
+        type="wait",
+        name="Wait",
+        params={"duration_ms": LiteralParamValue(value=10)},
+    ))),
+    "phase6o_executor_failure_blocking.json": run(plan(
+        ExecutionStep(
+            id="example.recipe/fail",
+            recipe_ref="example.recipe",
+            type="wait",
+            name="Fail",
+            params={"duration_ms": LiteralParamValue(value=0)},
+        ),
+        ExecutionStep(
+            id="example.recipe/downstream",
+            recipe_ref="example.recipe",
+            type="wait",
+            name="Downstream",
+            dependencies=("example.recipe/fail",),
+            params={"duration_ms": LiteralParamValue(value=1)},
+        ),
+        ExecutionStep(
+            id="example.recipe/unrelated",
+            recipe_ref="example.recipe",
+            type="wait",
+            name="Unrelated",
+            params={"duration_ms": LiteralParamValue(value=1)},
+        ),
+    )),
+    "phase6o_executor_grant_permissions.json": run(plan(ExecutionStep(
+        id="example.recipe/grant",
+        recipe_ref="example.recipe",
+        type="grant_permissions",
+        name="Grant",
+        params={
+            "runtime": LiteralParamValue(value=[{
+                "package_name": "com.example.app",
+                "name": "android.permission.POST_NOTIFICATIONS",
+                "required": False,
+            }]),
+            "appops": LiteralParamValue(value=[{
+                "package_name": "com.example.app",
+                "op": "MANAGE_EXTERNAL_STORAGE",
+                "mode": "allow",
+                "required": False,
+                "when": {"rooted": False},
+            }]),
+        },
+    ))),
+}
+
+adb = DryRunAdb()
+adb.installed_packages.add("com.example.skip")
+fixtures["phase6o_executor_skip_if.json"] = run(plan(
+    ExecutionStep(
+        id="example.recipe/skipped",
+        recipe_ref="example.recipe",
+        type="wait",
+        name="Skipped",
+        skip_if=(StepCondition(type="package_installed", params={"package_name": "com.example.skip"}),),
+        params={"duration_ms": LiteralParamValue(value=1)},
+    ),
+    ExecutionStep(
+        id="example.recipe/downstream",
+        recipe_ref="example.recipe",
+        type="wait",
+        name="Downstream",
+        dependencies=("example.recipe/skipped",),
+        params={"duration_ms": LiteralParamValue(value=1)},
+    ),
+), adb=adb)
+
+class FailingPermissionAdb(DryRunAdb):
+    def run_plan_command(self, command):
+        super().run_plan_command(command)
+        if tuple(command) == (
+            "adb",
+            "shell",
+            "pm",
+            "grant",
+            "com.example.fail",
+            "android.permission.CAMERA",
+        ):
+            raise RuntimeError("permission denied")
+
+fixtures["phase6o_executor_grant_permissions_failure.json"] = run(plan(
+    ExecutionStep(
+        id="example.recipe/grant_fail",
+        recipe_ref="example.recipe",
+        type="grant_permissions",
+        name="Grant Fail",
+        params={
+            "runtime": LiteralParamValue(value=[{
+                "package_name": "com.example.fail",
+                "name": "android.permission.CAMERA",
+                "required": True,
+            }]),
+            "policy": LiteralParamValue(value={"on_failure": "warn", "require_all": False}),
+        },
+    ),
+    ExecutionStep(
+        id="example.recipe/dependent",
+        recipe_ref="example.recipe",
+        type="wait",
+        name="Dependent",
+        dependencies=("example.recipe/grant_fail",),
+        params={"duration_ms": LiteralParamValue(value=1)},
+    ),
+    ExecutionStep(
+        id="example.recipe/unrelated",
+        recipe_ref="example.recipe",
+        type="wait",
+        name="Unrelated",
+        params={"duration_ms": LiteralParamValue(value=1)},
+    ),
+), adb=FailingPermissionAdb())
+
+for name, payload in fixtures.items():
+    (GOLDENS / name).write_text(
+        json.dumps(payload, indent=2, sort_keys=False) + "\n",
+        encoding="utf-8",
+    )
+PY
+```
 
 Regenerate the Phase 6L diagnostic goldens from the repo root with:
 

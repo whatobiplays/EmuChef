@@ -1,0 +1,18 @@
+{
+  "success": true,
+  "total_steps": 2,
+  "steps": [
+    {
+      "step_id": "example.recipe/skipped",
+      "status": "skipped",
+      "message": "skip_if matched",
+      "outputs": {}
+    },
+    {
+      "step_id": "example.recipe/downstream",
+      "status": "executed",
+      "message": null,
+      "outputs": {}
+    }
+  ]
+}

@@ -369,23 +369,28 @@ command families include add, rename,
 update-field, delete, and duplicate for inputs and artifacts, plus add, rename,
 delete, duplicate, reorder, add member, remove member, and reorder member for
 artifact groups. It also has fixture-covered authoredRoot/catalog-context
-validation and a private, crate-internal Phase 6M planner skeleton that emits a
-minimal declarative Python-shaped `PlanningResult`/`ExecutionPlan` for focused
-fixtures only. The Rust planner skeleton reads only loaded/top-level authored
-recipe fixture data, namespaced refs, StepSpec defaults, explicit recipe and
-step dependencies, and supplied fixture device context/capabilities. It does not
-add protocol requests, sidecar capabilities, CLI parity, Tauri integration,
-backend selection, device probing, executor behavior, downloads, archive
-extraction, file copies, permission grants, subprocess execution, production
-packaging, or Python bundling.
+validation, a private crate-internal planner skeleton that emits Python-shaped
+`PlanningResult`/`ExecutionPlan` values for focused fixtures, and a private
+crate-internal Phase 6O executor skeleton that emits Python-shaped
+`ExecutionRunResult` values for selected safe dry-run fixtures. The Rust planner
+skeleton reads only loaded/top-level authored recipe fixture data, namespaced
+refs, StepSpec defaults, explicit recipe and step dependencies, and supplied
+fixture device context/capabilities. The Rust executor skeleton is internal test
+scaffolding only: it models selected `wait`, `grant_permissions`, dependency,
+skip, verify, and fake dry-run device semantics without public API exposure. It
+does not add protocol requests, sidecar capabilities, CLI parity, Tauri
+integration, backend selection, device probing, real executor behavior,
+downloads, archive extraction, file copies, real permission grants, subprocess
+execution, production packaging, or Python bundling.
 Its `hello` response reports only capabilities implemented in the crate, but
 capability parity is not complete semantic parity and does not make it the Tauri
 editor backend. Rust `listStepSpecs` uses a temporary Python-generated static
 fixture for StepSpec DTO parity; Python remains the reference implementation
 until a Rust backend replacement is explicitly approved. The fixture-backed
-StepSpec source and private planner skeleton are scaffolding only and should be
-replaced with Rust-native schema builders and broader parity tests before any
-executor behavior or backend cutover is attempted.
+StepSpec source, private planner skeleton, and private safe executor skeleton are
+scaffolding only and should be replaced or broadened with Rust-native schema
+builders, full executor parity, and broader parity tests before any backend
+cutover is attempted.
 
 The frontend passes `authoredRoot: null` for Phase 3A. Explicit authored-root and
 workspace selection are deferred editor migration work.

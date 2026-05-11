@@ -15,6 +15,10 @@ pub mod document;
 pub mod dto;
 pub mod envelope;
 pub mod errors;
+#[allow(dead_code)]
+mod executor;
+#[cfg(test)]
+mod executor_tests;
 pub mod jsonl;
 pub mod model;
 pub mod one_shot;
