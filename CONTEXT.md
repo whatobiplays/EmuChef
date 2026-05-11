@@ -360,15 +360,22 @@ shapes.
 skeleton for migration work. It currently implements `hello`, response
 envelopes, one-shot requests, JSON Lines sidecar requests, `listStepSpecs`,
 path-based recipe YAML emit/validation, sidecar document open/get/save/close,
-sidecar document `emitYaml`/`validate`, snapshot undo/redo, and the
-`SetOverviewField` command for recipe `name` and `description`. Its `hello`
-response reports only capabilities implemented in the crate and still does not
-make it compatible with the Tauri editor because `getRefIndex` is missing. Rust
-`listStepSpecs` uses a temporary Python-generated static fixture for StepSpec DTO
-parity; Python remains the reference implementation until a Rust backend
-replacement is explicitly approved. The fixture-backed source is scaffolding
-only and should be replaced with Rust-native schema builders before planner or
-executor behavior is ported.
+sidecar document `emitYaml`/`validate`, sidecar `getRefIndex`, snapshot
+undo/redo, `SetOverviewField` for recipe `name` and `description`, and
+fixture-covered non-step `applyRecipeCommand` mutations for inputs, artifacts,
+and artifact groups. Supported non-step command families include add, rename,
+update-field, delete, and duplicate for inputs and artifacts, plus add, rename,
+delete, duplicate, reorder, add member, remove member, and reorder member for
+artifact groups. The Rust backend still does not implement step lifecycle,
+dependency, params, or advanced internals commands; planner or executor
+behavior; full validation; packaging; backend selection; or Tauri integration.
+Its `hello` response reports only capabilities implemented in the crate, but
+capability parity is not complete semantic parity and does not make it the Tauri
+editor backend. Rust `listStepSpecs` uses a temporary Python-generated static
+fixture for StepSpec DTO parity; Python remains the reference implementation
+until a Rust backend replacement is explicitly approved. The fixture-backed
+source is scaffolding only and should be replaced with Rust-native schema
+builders before planner or executor behavior is ported.
 
 The frontend passes `authoredRoot: null` for Phase 3A. Explicit authored-root and
 workspace selection are deferred editor migration work.

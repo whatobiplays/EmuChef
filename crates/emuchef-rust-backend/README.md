@@ -4,7 +4,7 @@ This package is an experimental Rust backend skeleton for the EmuChef config
 editor protocol. It is standalone and runnable independently of the Tauri
 editor.
 
-Phase 6H implements only:
+Phase 6I implements only:
 
 - `hello`
 - `listStepSpecs`
@@ -30,6 +30,8 @@ Phase 6H implements only:
 - snapshot undo/redo for open document sessions
 - the Python-compatible `SetOverviewField` command for recipe `name` and
   `description`
+- Python-compatible non-step `applyRecipeCommand` mutations for the currently
+  modeled input, artifact, and artifact group command families
 - generated `RecipeDocumentDto.refIndex` data for the currently modeled
   authored recipe features
 
@@ -61,31 +63,30 @@ requests in JSONL sidecar mode only. One-shot mode remains stateless and does
 not expose persistent document session APIs.
 
 Reporting these capabilities still does not make this backend compatible with
-the Tauri editor. Phase 6H may report the same required protocol capabilities as
+the Tauri editor. Phase 6I may report the same required protocol capabilities as
 the current Tauri editor gate expects, but capability parity is not semantic
 parity. The Rust backend is still not editor-ready and is not wired into Tauri.
 There is no env var, CLI flag, config file, README path, or documented launch
-path for using this Rust backend as the Tauri editor backend in Phase 6H.
+path for using this Rust backend as the Tauri editor backend in Phase 6I.
 
 The Python backend remains the reference implementation. This Rust package is
 not a replacement backend and is not selected by the Tauri editor.
 
-This package does not implement input commands, artifact commands, artifact
-group commands, step lifecycle commands, step dependency commands, step params
-commands, advanced internals commands, safe-delete behavior, planner behavior,
+This package does not implement step lifecycle commands, step dependency
+commands, step params commands, advanced internals commands, planner behavior,
 executor behavior, Python bundling, or production packaging. Its validation is a
 basic skeleton only; it does not perform full catalog-context validation,
 dependency graph validation, planner contract validation, artifact expansion
 validation, device checks, or executor checks. Semantic command parity is still
-incomplete because only the overview field mutation command exists. Python
-remains the reference implementation.
+incomplete outside the fixture-covered overview/input/artifact/artifact group
+surface. Python remains the reference implementation.
 
 ## Document Session Scope
 
-Phase 6H document sessions are process-local JSONL sidecar state. Opening a
+Phase 6I document sessions are process-local JSONL sidecar state. Opening a
 recipe loads the Phase 6E authored recipe model, emits canonical YAML, records
 that YAML as the saved baseline, and returns a Python-shaped `RecipeDocumentDto`.
-`applyRecipeCommand` supports only:
+`applyRecipeCommand` supports the overview commands added in Phase 6G:
 
 ```json
 {"type":"SetOverviewField","field":"name","value":"New Name"}
@@ -100,10 +101,67 @@ string, and omits the top-level `description:` key from canonical YAML. Empty or
 whitespace-only `description` values also clear the field. Empty or
 whitespace-only `name` values fail command execution.
 
+Phase 6I expands `applyRecipeCommand` to these non-step command families:
+
+```text
+AddInput
+RenameInput
+UpdateInputField
+DeleteInput
+DuplicateInput
+AddArtifact
+UpdateArtifactField
+RenameArtifact
+DeleteArtifact
+DuplicateArtifact
+AddArtifactGroup
+RenameArtifactGroup
+DeleteArtifactGroup
+DuplicateArtifactGroup
+ReorderArtifactGroup
+AddArtifactGroupMember
+RemoveArtifactGroupMember
+ReorderArtifactGroupMember
+```
+
+Input mutations cover the fields currently decoded by Python:
+
+```text
+type
+role
+label
+description
+required
+multiple
+validation.must_exist
+validation.allowed_extensions
+validation.path_kind
+```
+
+Artifact mutations cover Python's current authored `remote_file` fixture surface:
+`url` and `cache`. Artifact `type` remains authored as `remote_file` in the Rust
+model and is not editable through a Phase 6I command. This is fixture-scoped
+artifact parity, not a claim of broader artifact kind support.
+
+Input, artifact, and artifact group rename/delete commands perform the same
+tested safe cleanup as Python for supported immediate step params:
+
+- input refs such as `inputs.source_dir`
+- artifact field refs such as `artifacts.target_zip.local_path`
+- supported `artifacts` string-list params
+- supported `artifact_groups` string-list params
+- artifact group membership when artifacts are renamed or deleted
+
+Nested literal ref-shaped data, `skip_if`, `verify`, unsupported step types, and
+custom params remain preserved instead of recursively rewritten. Artifact groups
+are not RefIndex sources; group mutations do not create `artifact_groups.*` refs.
+
 Changing commands regenerate canonical YAML first, then rerun the Phase 6E basic
 validation skeleton for the current in-memory recipe. No-op commands return
 `changed: false` and do not push undo history. Invalid commands leave the
-stored document unchanged.
+stored document unchanged. Successful changing commands also return a refreshed
+document DTO, including current dirty/canUndo/canRedo state and a RefIndex
+derived from the mutated recipe.
 
 `saveRecipe` writes the current canonical YAML back to the document's current
 path, updates the saved baseline after a successful write, reruns the Phase 6E
@@ -462,6 +520,82 @@ if not opened["ok"]:
     raise SystemExit(json.dumps(opened, indent=2))
 document_id = opened["result"]["document"]["documentId"]
 write("phase6h_ref_params_get_ref_index.result.json", manager.get_ref_index(document_id)["result"])
+PY
+```
+
+Phase 6I non-step command RefIndex parity is covered by focused
+Python-generated result goldens:
+
+```text
+crates/emuchef-rust-backend/tests/fixtures/python_goldens/phase6i_*.result.json
+```
+
+Those goldens intentionally compare `getRefIndex` results after input, artifact,
+and artifact group mutations. They do not compare full document results for the
+Phase 6I fixture because Python performs richer catalog-context validation than
+the Phase 6E Rust validation skeleton.
+
+Regenerate the Phase 6I goldens from the repo root with:
+
+```bash
+PYTHONPATH=src:tests uv run --no-project --native-tls --with PyYAML python - <<'PY'
+from __future__ import annotations
+import json
+from pathlib import Path
+from emuchef_editor.api.session import DocumentSessionManager
+
+fixtures = Path("crates/emuchef-rust-backend/tests/fixtures")
+recipes = fixtures / "recipes"
+goldens = fixtures / "python_goldens"
+goldens.mkdir(parents=True, exist_ok=True)
+
+def write(name, value):
+    (goldens / name).write_text(
+        json.dumps(value, indent=2, sort_keys=True) + "\n",
+        encoding="utf-8",
+    )
+
+def opened_manager():
+    manager = DocumentSessionManager()
+    opened = manager.open_recipe(recipes / "phase6i_commands.yaml", authored_root=fixtures)
+    if not opened["ok"]:
+        raise SystemExit(json.dumps(opened, indent=2))
+    return manager, opened["result"]["document"]["documentId"]
+
+manager, document_id = opened_manager()
+for command in [
+    {"type": "AddInput", "inputId": "gold_input"},
+    {"type": "RenameInput", "inputId": "source_dir", "newInputId": "src_dir"},
+    {"type": "DuplicateInput", "sourceInputId": "bios_file", "newInputId": "bios_copy"},
+    {"type": "DeleteInput", "inputId": "gold_input"},
+]:
+    result = manager.apply_recipe_command(document_id, command)
+    if not result["ok"]:
+        raise SystemExit(json.dumps(result, indent=2))
+write("phase6i_after_inputs_get_ref_index.result.json", manager.get_ref_index(document_id)["result"])
+
+manager, document_id = opened_manager()
+for command in [
+    {"type": "AddArtifact", "artifactId": "new_zip", "url": "https://example.com/new.zip"},
+    {"type": "RenameArtifact", "artifactId": "target_zip", "newArtifactId": "renamed_zip"},
+    {"type": "DeleteArtifact", "artifactId": "renamed_zip"},
+]:
+    result = manager.apply_recipe_command(document_id, command)
+    if not result["ok"]:
+        raise SystemExit(json.dumps(result, indent=2))
+write("phase6i_after_artifacts_get_ref_index.result.json", manager.get_ref_index(document_id)["result"])
+
+manager, document_id = opened_manager()
+for command in [
+    {"type": "AddArtifactGroup", "groupId": "gold_group"},
+    {"type": "AddArtifactGroupMember", "groupId": "gold_group", "artifactId": "other_zip"},
+    {"type": "RenameArtifactGroup", "groupId": "bundle", "newGroupId": "renamed_bundle"},
+    {"type": "DeleteArtifactGroup", "groupId": "renamed_bundle"},
+]:
+    result = manager.apply_recipe_command(document_id, command)
+    if not result["ok"]:
+        raise SystemExit(json.dumps(result, indent=2))
+write("phase6i_after_groups_get_ref_index.result.json", manager.get_ref_index(document_id)["result"])
 PY
 ```
 

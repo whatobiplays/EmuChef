@@ -1,0 +1,166 @@
+{
+  "refIndex": {
+    "allRefs": [
+      "inputs.bios_file",
+      "inputs.source_dir",
+      "artifacts.new_zip.cache_hit",
+      "artifacts.new_zip.error",
+      "artifacts.new_zip.filename",
+      "artifacts.new_zip.local_path",
+      "artifacts.new_zip.resolved_url",
+      "artifacts.new_zip.status",
+      "artifacts.other_zip.cache_hit",
+      "artifacts.other_zip.error",
+      "artifacts.other_zip.filename",
+      "artifacts.other_zip.local_path",
+      "artifacts.other_zip.resolved_url",
+      "artifacts.other_zip.status",
+      "steps.resolve",
+      "steps.extract",
+      "steps.copy_input",
+      "steps.extract.outputs.extracted_path",
+      "steps.copy_input.outputs.copied_paths"
+    ],
+    "artifactRefs": [
+      "artifacts.new_zip.cache_hit",
+      "artifacts.new_zip.error",
+      "artifacts.new_zip.filename",
+      "artifacts.new_zip.local_path",
+      "artifacts.new_zip.resolved_url",
+      "artifacts.new_zip.status",
+      "artifacts.other_zip.cache_hit",
+      "artifacts.other_zip.error",
+      "artifacts.other_zip.filename",
+      "artifacts.other_zip.local_path",
+      "artifacts.other_zip.resolved_url",
+      "artifacts.other_zip.status"
+    ],
+    "candidates": [
+      {
+        "label": "Input \u00b7 source_dir",
+        "ref": "inputs.source_dir",
+        "sourceId": "source_dir",
+        "sourceKind": "input",
+        "valueType": "directory_path"
+      },
+      {
+        "label": "Input \u00b7 bios_file",
+        "ref": "inputs.bios_file",
+        "sourceId": "bios_file",
+        "sourceKind": "input",
+        "valueType": "file_path"
+      },
+      {
+        "label": "Artifact \u00b7 other_zip.cache_hit",
+        "ref": "artifacts.other_zip.cache_hit",
+        "sourceId": "other_zip",
+        "sourceKind": "artifact",
+        "valueType": "boolean"
+      },
+      {
+        "label": "Artifact \u00b7 other_zip.error",
+        "ref": "artifacts.other_zip.error",
+        "sourceId": "other_zip",
+        "sourceKind": "artifact",
+        "valueType": "string"
+      },
+      {
+        "label": "Artifact \u00b7 other_zip.filename",
+        "ref": "artifacts.other_zip.filename",
+        "sourceId": "other_zip",
+        "sourceKind": "artifact",
+        "valueType": "string"
+      },
+      {
+        "label": "Artifact \u00b7 other_zip.local_path",
+        "ref": "artifacts.other_zip.local_path",
+        "sourceId": "other_zip",
+        "sourceKind": "artifact",
+        "valueType": "file_path"
+      },
+      {
+        "label": "Artifact \u00b7 other_zip.resolved_url",
+        "ref": "artifacts.other_zip.resolved_url",
+        "sourceId": "other_zip",
+        "sourceKind": "artifact",
+        "valueType": "string"
+      },
+      {
+        "label": "Artifact \u00b7 other_zip.status",
+        "ref": "artifacts.other_zip.status",
+        "sourceId": "other_zip",
+        "sourceKind": "artifact",
+        "valueType": "string"
+      },
+      {
+        "label": "Artifact \u00b7 new_zip.cache_hit",
+        "ref": "artifacts.new_zip.cache_hit",
+        "sourceId": "new_zip",
+        "sourceKind": "artifact",
+        "valueType": "boolean"
+      },
+      {
+        "label": "Artifact \u00b7 new_zip.error",
+        "ref": "artifacts.new_zip.error",
+        "sourceId": "new_zip",
+        "sourceKind": "artifact",
+        "valueType": "string"
+      },
+      {
+        "label": "Artifact \u00b7 new_zip.filename",
+        "ref": "artifacts.new_zip.filename",
+        "sourceId": "new_zip",
+        "sourceKind": "artifact",
+        "valueType": "string"
+      },
+      {
+        "label": "Artifact \u00b7 new_zip.local_path",
+        "ref": "artifacts.new_zip.local_path",
+        "sourceId": "new_zip",
+        "sourceKind": "artifact",
+        "valueType": "file_path"
+      },
+      {
+        "label": "Artifact \u00b7 new_zip.resolved_url",
+        "ref": "artifacts.new_zip.resolved_url",
+        "sourceId": "new_zip",
+        "sourceKind": "artifact",
+        "valueType": "string"
+      },
+      {
+        "label": "Artifact \u00b7 new_zip.status",
+        "ref": "artifacts.new_zip.status",
+        "sourceId": "new_zip",
+        "sourceKind": "artifact",
+        "valueType": "string"
+      },
+      {
+        "label": "Step Output \u00b7 extract.extracted_path",
+        "ref": "steps.extract.outputs.extracted_path",
+        "sourceId": "extract",
+        "sourceKind": "step_output",
+        "valueType": "directory_path"
+      },
+      {
+        "label": "Step Output \u00b7 copy_input.copied_paths",
+        "ref": "steps.copy_input.outputs.copied_paths",
+        "sourceId": "copy_input",
+        "sourceKind": "step_output",
+        "valueType": "path_list"
+      }
+    ],
+    "inputRefs": [
+      "inputs.bios_file",
+      "inputs.source_dir"
+    ],
+    "stepOutputRefs": [
+      "steps.extract.outputs.extracted_path",
+      "steps.copy_input.outputs.copied_paths"
+    ],
+    "stepRefs": [
+      "steps.resolve",
+      "steps.extract",
+      "steps.copy_input"
+    ]
+  }
+}

@@ -1,0 +1,94 @@
+schema_version: 1
+kind: recipe
+id: phase6i.commands
+name: Phase 6I Commands
+recipe_dependencies: []
+provides:
+  features: []
+inputs:
+  source_dir:
+    type: directory
+    role: generic
+    label: Source Directory
+    required: true
+    multiple: false
+    validation:
+      must_exist: true
+      allowed_extensions: []
+      path_kind: directory
+    default: null
+    metadata:
+      origin: fixture
+  bios_file:
+    type: file
+    role: bios
+    label: BIOS File
+    required: false
+    multiple: false
+    validation:
+      must_exist: false
+      allowed_extensions:
+        - bin
+      path_kind: file
+    default: null
+artifacts:
+  target_zip:
+    type: remote_file
+    url: https://example.com/target.zip
+    cache: default
+  other_zip:
+    type: remote_file
+    url: https://example.com/other.zip
+    cache: default
+artifact_groups:
+  bundle:
+    - target_zip
+    - other_zip
+  other_bundle:
+    - other_zip
+steps:
+  - id: resolve
+    type: resolve_artifacts
+    name: Resolve
+    user_toggleable: false
+    dependencies: []
+    constraints:
+      capabilities: []
+      conflicts_with: []
+    skip_if: []
+    params:
+      artifacts:
+        - target_zip
+        - other_zip
+      artifact_groups:
+        - bundle
+        - other_bundle
+    verify: []
+  - id: extract
+    type: extract_archive
+    name: Extract
+    user_toggleable: false
+    dependencies: []
+    constraints:
+      capabilities: []
+      conflicts_with: []
+    skip_if: []
+    params:
+      archive:
+        ref: artifacts.target_zip.local_path
+      dest: /tmp/extracted
+    verify: []
+  - id: copy_input
+    type: copy_files
+    name: Copy Input
+    user_toggleable: false
+    dependencies: []
+    constraints:
+      capabilities: []
+      conflicts_with: []
+    skip_if: []
+    params:
+      source:
+        ref: inputs.source_dir
+      dest: /sdcard/Input
+    verify: []
