@@ -1,8 +1,8 @@
-//! Authored recipe YAML loading and canonical emission for Phase 6E.
+//! Authored recipe YAML loading and canonical emission for the Rust migration.
 //!
 //! Python remains the reference implementation. This module mirrors the narrow
-//! load/emit behavior covered by Phase 6E fixtures without introducing editor
-//! sessions, planner contracts, catalog validation, or executor behavior.
+//! load/emit behavior covered by Rust backend fixtures without introducing
+//! editor sessions, planner contracts, catalog validation, or executor behavior.
 
 use std::fmt;
 use std::fs;
@@ -16,15 +16,6 @@ use crate::model::{
     RemoteFileArtifact, Step, StepCondition, StepConstraints,
 };
 use crate::step_specs;
-
-const RUNTIME_ARTIFACT_FIELDS: &[&str] = &[
-    "status",
-    "local_path",
-    "resolved_url",
-    "filename",
-    "cache_hit",
-    "error",
-];
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct LoadIssue {
@@ -402,14 +393,24 @@ fn parse_step(value: &YamlValue) -> Result<Step, String> {
 }
 
 fn parse_constraints(value: Option<&YamlValue>) -> Result<StepConstraints, String> {
-    let mapping = value.and_then(YamlValue::as_mapping);
+    let Some(value) = value else {
+        return Ok(StepConstraints {
+            capabilities: Vec::new(),
+            conflicts_with: Vec::new(),
+        });
+    };
+    if value.is_null() {
+        return Ok(StepConstraints {
+            capabilities: Vec::new(),
+            conflicts_with: Vec::new(),
+        });
+    }
+    let YamlValue::Mapping(mapping) = value else {
+        return Err("step constraints must be a mapping".to_string());
+    };
     Ok(StepConstraints {
-        capabilities: mapping
-            .and_then(|mapping| parse_string_vec(get_yaml(mapping, "capabilities")).ok())
-            .unwrap_or_default(),
-        conflicts_with: mapping
-            .and_then(|mapping| parse_string_vec(get_yaml(mapping, "conflicts_with")).ok())
-            .unwrap_or_default(),
+        capabilities: parse_string_vec(get_yaml(mapping, "capabilities"))?,
+        conflicts_with: parse_string_vec(get_yaml(mapping, "conflicts_with"))?,
     })
 }
 
@@ -475,7 +476,7 @@ fn validate_ref_syntax(ref_value: &str) -> Result<(), String> {
     }
     if let Some(rest) = ref_value.strip_prefix("artifacts.") {
         if let Some((artifact_id, field)) = rest.rsplit_once('.') {
-            if !artifact_id.is_empty() && RUNTIME_ARTIFACT_FIELDS.contains(&field) {
+            if !artifact_id.is_empty() && !field.is_empty() {
                 return Ok(());
             }
         }

@@ -363,13 +363,14 @@ path-based recipe YAML emit/validation, sidecar document open/get/save/close,
 sidecar document `emitYaml`/`validate`, sidecar `getRefIndex`, snapshot
 undo/redo, `SetOverviewField` for recipe `name` and `description`, and
 fixture-covered `applyRecipeCommand` mutations for inputs, artifacts,
-artifact groups, step lifecycle, and step dependencies. Supported non-step
+artifact groups, step lifecycle, step dependencies, step params, and advanced
+internals. Supported non-step
 command families include add, rename,
 update-field, delete, and duplicate for inputs and artifacts, plus add, rename,
 delete, duplicate, reorder, add member, remove member, and reorder member for
-artifact groups. The Rust backend still does not implement step params,
-advanced internals commands, planner or executor
-behavior; full validation; packaging; backend selection; or Tauri integration.
+artifact groups. The Rust backend still does not implement catalog/authoredRoot
+validation, planner or executor behavior, packaging, backend selection, or Tauri
+integration.
 Its `hello` response reports only capabilities implemented in the crate, but
 capability parity is not complete semantic parity and does not make it the Tauri
 editor backend. Rust `listStepSpecs` uses a temporary Python-generated static

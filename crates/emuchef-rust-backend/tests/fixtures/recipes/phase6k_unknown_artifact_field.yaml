@@ -1,0 +1,28 @@
+schema_version: 1
+kind: recipe
+id: phase6k.unknown_artifact_field
+name: Phase 6K Unknown Artifact Field
+recipe_dependencies: []
+provides:
+  features: []
+inputs: {}
+artifacts:
+  app_apk:
+    type: remote_file
+    url: https://example.com/app.apk
+    cache: default
+artifact_groups: {}
+steps:
+  - id: install
+    type: install_apk
+    name: Install
+    user_toggleable: false
+    dependencies: []
+    constraints:
+      capabilities: []
+      conflicts_with: []
+    skip_if: []
+    params:
+      app:
+        ref: artifacts.app_apk.not_a_runtime_field
+    verify: []

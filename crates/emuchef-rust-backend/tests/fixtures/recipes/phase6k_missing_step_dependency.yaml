@@ -1,0 +1,24 @@
+schema_version: 1
+kind: recipe
+id: phase6k.missing_dependency
+name: Phase 6K Missing Dependency
+recipe_dependencies: []
+provides:
+  features: []
+inputs: {}
+artifacts: {}
+artifact_groups: {}
+steps:
+  - id: consumer
+    type: wait
+    name: Consumer
+    user_toggleable: false
+    dependencies:
+      - missing_step
+    constraints:
+      capabilities: []
+      conflicts_with: []
+    skip_if: []
+    params:
+      duration_ms: 1000
+    verify: []

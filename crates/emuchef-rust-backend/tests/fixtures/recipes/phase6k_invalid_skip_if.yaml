@@ -1,0 +1,24 @@
+schema_version: 1
+kind: recipe
+id: phase6k.invalid_skip_if
+name: Phase 6K Invalid Skip If
+recipe_dependencies: []
+provides:
+  features: []
+inputs: {}
+artifacts: {}
+artifact_groups: {}
+steps:
+  - id: wait
+    type: wait
+    name: Wait
+    user_toggleable: false
+    dependencies: []
+    constraints:
+      capabilities: []
+      conflicts_with: []
+    skip_if:
+      type: path_exists
+    params:
+      duration_ms: 1000
+    verify: []

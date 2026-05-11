@@ -1,0 +1,24 @@
+schema_version: 1
+kind: recipe
+id: phase6k.unknown_artifact_ref
+name: Phase 6K Unknown Artifact Ref
+recipe_dependencies: []
+provides:
+  features: []
+inputs: {}
+artifacts: {}
+artifact_groups: {}
+steps:
+  - id: install
+    type: install_apk
+    name: Install
+    user_toggleable: false
+    dependencies: []
+    constraints:
+      capabilities: []
+      conflicts_with: []
+    skip_if: []
+    params:
+      app:
+        ref: artifacts.missing_apk.local_path
+    verify: []

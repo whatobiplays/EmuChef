@@ -1,0 +1,22 @@
+schema_version: 1
+kind: recipe
+id: phase6k.missing_required_param
+name: Phase 6K Missing Required Param
+recipe_dependencies: []
+provides:
+  features: []
+inputs: {}
+artifacts: {}
+artifact_groups: {}
+steps:
+  - id: wait
+    type: wait
+    name: Wait
+    user_toggleable: false
+    dependencies: []
+    constraints:
+      capabilities: []
+      conflicts_with: []
+    skip_if: []
+    params: {}
+    verify: []

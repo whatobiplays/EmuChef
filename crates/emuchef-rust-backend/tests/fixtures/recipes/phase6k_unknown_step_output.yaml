@@ -1,0 +1,38 @@
+schema_version: 1
+kind: recipe
+id: phase6k.unknown_step_output
+name: Phase 6K Unknown Step Output
+recipe_dependencies: []
+provides:
+  features: []
+inputs: {}
+artifacts: {}
+artifact_groups: {}
+steps:
+  - id: wait
+    type: wait
+    name: Wait
+    user_toggleable: false
+    dependencies: []
+    constraints:
+      capabilities: []
+      conflicts_with: []
+    skip_if: []
+    params:
+      duration_ms: 1000
+    verify: []
+  - id: copy
+    type: copy_files
+    name: Copy
+    user_toggleable: false
+    dependencies:
+      - wait
+    constraints:
+      capabilities: []
+      conflicts_with: []
+    skip_if: []
+    params:
+      source:
+        ref: steps.wait.outputs.value
+      dest: /sdcard/out
+    verify: []

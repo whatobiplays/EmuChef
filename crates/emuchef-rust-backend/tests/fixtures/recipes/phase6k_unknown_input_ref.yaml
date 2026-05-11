@@ -1,0 +1,24 @@
+schema_version: 1
+kind: recipe
+id: phase6k.unknown_input_ref
+name: Phase 6K Unknown Input Ref
+recipe_dependencies: []
+provides:
+  features: []
+inputs: {}
+artifacts: {}
+artifact_groups: {}
+steps:
+  - id: install
+    type: install_apk
+    name: Install
+    user_toggleable: false
+    dependencies: []
+    constraints:
+      capabilities: []
+      conflicts_with: []
+    skip_if: []
+    params:
+      app:
+        ref: inputs.missing_apk
+    verify: []
