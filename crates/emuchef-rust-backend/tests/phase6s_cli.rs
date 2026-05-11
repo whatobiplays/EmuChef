@@ -208,6 +208,7 @@ fn phase6s_preserves_one_shot_json_and_sidecar_dispatch() {
             "openRecipe",
             "getDocument",
             "saveRecipe",
+            "saveRecipeAs",
             "closeDocument",
             "applyRecipeCommand",
             "undo",

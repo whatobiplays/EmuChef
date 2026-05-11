@@ -1,10 +1,11 @@
 # EmuChef Rust Backend Skeleton
 
-This package is an experimental Rust backend skeleton for the EmuChef config
-editor protocol. It is standalone and runnable independently of the Tauri
-editor.
+This package is an experimental Rust backend for the EmuChef config editor
+protocol. It is runnable independently and is the Phase 6U local/dev sidecar
+runtime used by the Tauri editor. Production bundling and packaging remain
+separate Phase 6V work.
 
-Through Phase 6S it implements only:
+Through Phase 6U it implements only:
 
 - `hello`
 - `listStepSpecs`
@@ -13,6 +14,7 @@ Through Phase 6S it implements only:
 - sidecar-only `openRecipe`
 - sidecar-only `getDocument`
 - sidecar-only `saveRecipe`
+- sidecar-only `saveRecipeAs`
 - sidecar-only `closeDocument`
 - sidecar-only `applyRecipeCommand`
 - sidecar-only `undo`
@@ -67,6 +69,7 @@ It reports only capabilities that are implemented in this crate:
     "openRecipe",
     "getDocument",
     "saveRecipe",
+    "saveRecipeAs",
     "closeDocument",
     "applyRecipeCommand",
     "undo",
@@ -82,15 +85,17 @@ Reporting document-session capabilities means the Rust backend supports those
 requests in JSONL sidecar mode only. One-shot mode remains stateless and does
 not expose persistent document session APIs.
 
-Reporting these capabilities still does not make this backend compatible with
-the Tauri editor. Phase 6S reports the same ordered capability list as Phase
-6H/6I/6J.1/6J.2/6K/6L/6M/6N/6O/6P/6Q; capability parity is not full backend
-parity. The Rust backend is still not editor-ready and is not wired into Tauri.
-There is no env var, CLI flag, config file, README path, or documented launch
-path for using this Rust backend as the Tauri editor backend in Phase 6S.
+Reporting these capabilities does not mean the Rust backend has full product
+parity with Python. Phase 6U hard-wires the Tauri editor runtime to launch this
+Rust sidecar in local/dev flows with no backend selector, toggle, environment
+variable, config option, UI switch, or Python fallback. The local/dev Tauri
+resolver expects a built `emuchef-rust-backend` binary under the crate-local or
+repo-root Cargo `target/debug` output directories; production bundled sidecar
+layout is deferred to Phase 6V.
 
-The Python backend remains the reference implementation. This Rust package is
-not a replacement backend and is not selected by the Tauri editor.
+The Python backend, Python CLI, and PySide6 editor remain in the repository.
+Python deletion and broad CLI/planner/executor replacement remain later confirmed
+cutover work.
 
 This package does not implement full planner behavior, full executor behavior,
 Python bundling, or production packaging. Phase 6K replaced the earlier basic
@@ -109,18 +114,17 @@ confined to explicit test-owned temp roots. Phase 6Q adds selected fake-device
 ADB parity. Phase 6R adds an internal real-ADB adapter foundation and ignored
 manual tests, but normal tests still do not perform real device checks, real
 network downloads, permission grants, ADB/device operations, app lifecycle
-operations, install operations, or Tauri integration. Python remains the
-reference implementation until parity is confirmed.
+operations, install operations, or production packaging. Python remains the
+reference for broader CLI/planner/executor behavior until parity is confirmed.
 
 ## Phase 6S CLI Scope
 
 Phase 6S adds a minimal Rust CLI skeleton inside this standalone crate. It is a
 crate-local experimental parity surface, not the user-facing replacement for the
 Python `emuchef` CLI. The Python CLI entrypoint in `pyproject.toml` remains
-unchanged, production packaging is unchanged, and the Tauri editor still does
-not use this Rust backend. There is no backend selector, backend toggle,
-environment variable, config option, UI switch, sidecar request, protocol
-capability, or hard cutover in Phase 6S.
+unchanged, production packaging is unchanged, and Phase 6U does not replace the
+Python CLI. There is no backend selector, backend toggle, environment variable,
+config option, UI switch, or Python fallback for the Tauri editor runtime.
 
 The Python CLI inventory verified from `src/emuchef/cli.py` is:
 

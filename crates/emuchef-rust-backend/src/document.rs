@@ -73,6 +73,17 @@ impl RecipeDocument {
         Ok(())
     }
 
+    pub fn save_as(&mut self, path: impl AsRef<Path>) -> Result<(), String> {
+        let current_yaml =
+            yaml::emit_recipe_yaml(&self.recipe).map_err(|error| error.to_string())?;
+        fs::write(path.as_ref(), &current_yaml).map_err(|error| error.to_string())?;
+        self.path = PathBuf::from(yaml::resolved_path_string(path.as_ref()));
+        self.current_yaml = current_yaml;
+        self.saved_yaml = self.current_yaml.clone();
+        self.refresh_diagnostics();
+        Ok(())
+    }
+
     pub fn apply_command(&mut self, command: RecipeCommand) -> Result<bool, String> {
         let updated_recipe = self.updated_recipe(command)?;
         let updated_yaml =

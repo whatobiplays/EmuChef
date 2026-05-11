@@ -157,6 +157,7 @@ fn phase6j2_capabilities_remain_unchanged() {
             "openRecipe",
             "getDocument",
             "saveRecipe",
+            "saveRecipeAs",
             "closeDocument",
             "applyRecipeCommand",
             "undo",

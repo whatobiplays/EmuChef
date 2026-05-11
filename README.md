@@ -56,11 +56,10 @@ negotiation yet. Future Rust backends should implement the same protocol.
 
 ### Tauri config editor
 
-The Tauri editor is a Tauri v2 development app that uses the persistent Python
-JSONL sidecar for session-backed document operations. Python remains
-authoritative for authored recipe loading, mutation, validation, YAML emission,
-dirty state, undo/redo, save, and step metadata. The one-shot Python API remains
-available for compatibility and regression safety.
+The Tauri editor is a Tauri v2 development app that uses the experimental Rust
+JSONL sidecar for session-backed document operations. Python remains in the repo
+for the legacy PySide editor, the Python CLI, fixture/golden generation, and
+later confirmed-cutover work.
 
 Install frontend dependencies and run the Tauri dev shell with npm:
 
@@ -70,18 +69,16 @@ npm install
 npm run tauri dev
 ```
 
-The app uses the local Python package through `python -m
-emuchef_editor.api.server --sidecar`. Set `EMUCHEF_PYTHON` when the default
-`python` command is not the interpreter that can import EmuChef:
+Build the local Rust sidecar binary before starting the Tauri dev shell:
 
 ```bash
-EMUCHEF_PYTHON=../../.venv/bin/python npm run tauri dev
+cargo build --manifest-path ../../crates/emuchef-rust-backend/Cargo.toml
+npm run tauri dev
 ```
 
-During development, the Rust bridge discovers the repo root and prepends
-`<repo>/src` to `PYTHONPATH`. If repo discovery is unavailable, the selected
-Python environment must already be able to import the local `emuchef_editor`
-package.
+During development, the Rust bridge discovers the repo root and checks the
+crate-local and repo-root Cargo `target/debug` directories for
+`emuchef-rust-backend`. Production bundled sidecar layout is deferred.
 
 Current editor scope notes:
 
@@ -94,30 +91,30 @@ Current editor scope notes:
 - incompatible backends stop normal document requests, mark the session invalid, and leave any stale document visible only as read-only reference
 - the Tauri Save command writes the current sidecar document to disk and should be tested only on safe or temporary recipe copies during development
 - native confirmation prompts guard opening another recipe with unsaved changes and closing the window/app with unsaved changes or an operation in flight where Tauri close interception is available
-- if the Python sidecar exits or transport fails, the stale document remains visible for reference, document-specific actions are disabled, and the Tauri app must be restarted before reopening the recipe
+- if the Rust sidecar exits or transport fails, the stale document remains visible for reference, document-specific actions are disabled, and the Tauri app must be restarted before reopening the recipe
 - Save As and create-from-template sidecar capabilities are not exposed in the Tauri UI
 - capability names are backend-agnostic protocol strings; optional capabilities are display/status metadata only in the current UI
-- production installers, Python bundling, notarization/signing, updater support, and production sidecar distribution are not implemented
-- a Rust backend replacement is not implemented; the current sidecar implementation is Python and future replacements must implement the same editor protocol
+- production installers, Rust sidecar bundling, notarization/signing, updater support, and production sidecar distribution are not implemented
+- there is no backend selector, backend toggle, config option, environment variable, UI switch, protocol negotiation path, or Python fallback for the Tauri editor runtime
 - executor/apply-device UI is not implemented
 - `id`, `kind`, and `schema_version` are read-only in the Overview screen
 - input, artifact, and group ids are changed through explicit Rename actions
 - artifact groups can be duplicated; the duplicate starts with the same ordered artifact members as the source group
 - step ids and step types are chosen only when adding a step and then stay read-only
-- basic step lifecycle editing uses Python sidecar commands for add, delete, duplicate, reorder, display-name edits, and `user_toggleable` edits
-- step dependency editing uses the Python sidecar `UpdateStepDependencies` command; adding appends a dependency id as authored storage/display order only, and the planner remains authoritative for final execution ordering
+- basic step lifecycle editing uses Rust sidecar commands for add, delete, duplicate, reorder, display-name edits, and `user_toggleable` edits
+- step dependency editing uses the Rust sidecar `UpdateStepDependencies` command; adding appends a dependency id as authored storage/display order only, and the planner remains authoritative for final execution ordering
 - missing or unknown authored dependency ids remain visible in the step detail panel and can be removed from copied or temporary recipes during repair
 - deleting a step uses the backend safe-delete behavior shared with the PySide editor and removes supported downstream dependencies, conflicts, and refs
-- step params editing uses the Python sidecar `UpdateStepParams` command with full params replacement for the selected step; the frontend submits authored JSON values and replaces local document state with the returned `RecipeDocumentDto`
+- step params editing uses the Rust sidecar `UpdateStepParams` command with full params replacement for the selected step; the frontend submits authored JSON values and replaces local document state with the returned `RecipeDocumentDto`
 - step params with known Python schema shapes use rich controls where safe: ordered artifact and artifact-group id list params use add/remove/up/down list controls, runtime and app-op permission params use row editors, and policy params use select/checkbox controls
 - raw JSON remains the editor for free-form, unsupported, incompatible, or schema-less params such as metadata; schema-backed structured editors preserve unknown or extra object keys where the authored value can be copied without data loss
-- refs use the authored `{ ref: "..." }` shape in DTOs and command payloads; the Python codec converts only top-level exact ref-shaped param values into internal domain refs
+- refs use the authored `{ ref: "..." }` shape in DTOs and command payloads; the backend codec converts only top-level exact ref-shaped param values into internal domain refs
 - the ref picker uses the current document `refIndex`, prefers candidate metadata, falls back to raw `allRefs`, and keeps missing or incompatible current refs visible for repair
 - `StepSpecDto` improves param ordering, enum rendering, ref filtering, and known param shape rendering, but it is UI metadata only and is not mutation authority
-- Python validation remains authoritative for required params, ref validity, and step contract diagnostics
+- backend validation remains authoritative for required params, ref validity, and step contract diagnostics
 - editable Tauri text controls disable browser writing aids and normalize smart single and double quotes to ASCII quotes before storing local drafts or sending sidecar commands
 - selecting a ref does not automatically add or rewrite step dependencies in the Tauri editor
-- constraints, `skip_if`, and `verify` use plain JSON editors in an Advanced step section; each edit parses JSON locally, requires explicit Apply, and submits `UpdateStepConstraints`, `UpdateStepSkipIf`, or `UpdateStepVerify` through the Python sidecar
+- constraints, `skip_if`, and `verify` use plain JSON editors in an Advanced step section; each edit parses JSON locally, requires explicit Apply, and submits `UpdateStepConstraints`, `UpdateStepSkipIf`, or `UpdateStepVerify` through the Rust sidecar
 - the constraints JSON editor displays authored/YAML-facing `conflicts_with`; the command payload still uses the API field `conflictsWith`
 - advanced step JSON editors do not provide specialized constraints, condition, or verification builders, and they do not provide a ref picker inside advanced JSON values
 - backend command application and validation remain authoritative for advanced step internals; local frontend checks are limited to JSON parsing, representable authored keys, and the top-level shape required by the command codec

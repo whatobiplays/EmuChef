@@ -207,6 +207,7 @@ fn phase6k_capabilities_remain_unchanged() {
             "openRecipe",
             "getDocument",
             "saveRecipe",
+            "saveRecipeAs",
             "closeDocument",
             "applyRecipeCommand",
             "undo",

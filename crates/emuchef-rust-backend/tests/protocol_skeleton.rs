@@ -1,4 +1,4 @@
-use std::io::Write;
+use std::io::{BufRead, BufReader, Write};
 use std::process::{Command, Stdio};
 
 use emuchef_rust_backend::{jsonl, run_with_args_and_input, step_specs};
@@ -114,6 +114,7 @@ fn assert_hello_result(result: &Value) {
             "openRecipe",
             "getDocument",
             "saveRecipe",
+            "saveRecipeAs",
             "closeDocument",
             "applyRecipeCommand",
             "undo",
@@ -127,15 +128,6 @@ fn assert_hello_result(result: &Value) {
         .as_array()
         .unwrap()
         .contains(&json!("hello")));
-    for unimplemented in ["saveRecipeAs"] {
-        assert!(
-            !result["capabilities"]
-                .as_array()
-                .unwrap()
-                .contains(&json!(unimplemented)),
-            "{unimplemented} should not be reported until implemented"
-        );
-    }
     assert!(result.get("implementation").is_none());
     assert!(result.get("implementationVersion").is_none());
 }
@@ -435,6 +427,58 @@ fn process_jsonl_sidecar_responds_line_by_line_with_json_only_stdout() {
     assert_eq!(responses[1]["id"], "hello-2");
     assert_hello_response(&responses[0]);
     assert_hello_response(&responses[1]);
+}
+
+#[test]
+fn process_jsonl_sidecar_flushes_each_response_before_stdin_eof_and_continues_after_errors() {
+    let mut child = Command::new(env!("CARGO_BIN_EXE_emuchef-rust-backend"))
+        .arg("--sidecar")
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("sidecar should start");
+
+    let mut stdin = child.stdin.take().expect("stdin should be piped");
+    let stdout = child.stdout.take().expect("stdout should be piped");
+    let mut stdout = BufReader::new(stdout);
+
+    writeln!(stdin, r#"{{"id":"hello-1","type":"hello","payload":{{}}}}"#).unwrap();
+    stdin.flush().unwrap();
+    let mut hello_line = String::new();
+    stdout
+        .read_line(&mut hello_line)
+        .expect("hello response should be readable before stdin EOF");
+    let hello: Value = serde_json::from_str(hello_line.trim_end()).unwrap();
+    assert_eq!(hello["id"], "hello-1");
+    assert_hello_response(&hello);
+
+    writeln!(stdin, "{{not-json").unwrap();
+    stdin.flush().unwrap();
+    let mut malformed_line = String::new();
+    stdout
+        .read_line(&mut malformed_line)
+        .expect("malformed response should be readable before stdin EOF");
+    let malformed: Value = serde_json::from_str(malformed_line.trim_end()).unwrap();
+    assert_eq!(malformed["id"], Value::Null);
+    assert_invalid_request(&malformed);
+
+    writeln!(stdin, r#"{{"id":"after-error","type":"listStepSpecs"}}"#).unwrap();
+    stdin.flush().unwrap();
+    let mut recovered_line = String::new();
+    stdout
+        .read_line(&mut recovered_line)
+        .expect("sidecar should continue after request-level errors");
+    let recovered: Value = serde_json::from_str(recovered_line.trim_end()).unwrap();
+    assert_eq!(recovered["id"], "after-error");
+    assert_step_specs_response(&recovered);
+
+    drop(stdin);
+    let output = child
+        .wait_with_output()
+        .expect("sidecar should exit on EOF");
+    assert!(output.status.success());
+    assert!(output.stderr.is_empty());
 }
 
 #[test]

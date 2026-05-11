@@ -158,20 +158,19 @@ official Tauri dialog plugin. The app is a development editor shell, not a
 production-packaged application.
 
 The editor opens authored recipe YAML files through a native file picker, calls
-the Python sidecar through Rust Tauri commands, and displays recipe data,
+the Rust sidecar through Rust Tauri commands, and displays recipe data,
 diagnostics, canonical YAML, sidecar status, and available step specs. It keeps a
 reusable `documentId` for the currently open sidecar document. After a document
 is opened through the sidecar, document-specific actions use document-id-based
 sidecar requests so unsaved in-memory edits remain visible to validation, YAML
 emission, undo, redo, and save.
 
-The Tauri editor runs in development mode with a local Python interpreter. The
-Rust bridge uses `EMUCHEF_PYTHON` when set and otherwise uses `python`. During
-development it discovers the repo root and prepends `src/` to `PYTHONPATH`; if
-repo discovery is unavailable, the selected Python must already be able to
-import the local `emuchef_editor` package. The editor does not bundle Python,
-create installers, sign/notarize builds, configure updates, or solve production
-sidecar distribution.
+The Tauri editor runs in development mode with a local Rust sidecar binary. The
+Rust bridge resolves a previously built `emuchef-rust-backend` binary from the
+crate-local or repo-root Cargo `target/debug` directories and starts it with
+`--sidecar`. The editor does not bundle the Rust binary, create installers,
+sign/notarize builds, configure updates, or solve production sidecar
+distribution; those packaging concerns remain separate work.
 
 The Tauri editor supports sidecar-backed recipe editing. The Overview screen
 edits recipe name and description. Recipe id, schema version, and kind are
@@ -185,7 +184,7 @@ the source group and does not rewrite step refs or selections.
 
 The Tauri Steps screen supports basic step lifecycle editing, step dependency
 editing, existing step param editing, and JSON-backed advanced step internals
-editing through the Python sidecar. Step add, delete, duplicate, reorder,
+editing through the Rust sidecar. Step add, delete, duplicate, reorder,
 display-name edits, `user_toggleable` edits, dependency updates, param updates,
 and advanced internals updates are available when the matching backend command
 codec mappings exist. Existing step ids and step types are read-only. Step id
@@ -327,17 +326,17 @@ The frontend talks to Rust through Tauri `invoke(...)` commands named:
 - `sidecar_emit_yaml`
 - `sidecar_get_ref_index`
 
-The Rust bridge keeps the Phase 2 one-shot Python API bridge available and also
-owns one persistent sidecar process for sidecar-backed commands. The sidecar
-client starts Python on the first sidecar request, sends `hello`, requires
-protocol version 1 and the editor's required capabilities, and then continues
-the original request without a frontend retry. A `Running` Rust sidecar state
-means the process is started and handshake-compatible. The client serializes
-requests as one send-line/read-line operation at a time and treats non-handshake
-API `ok:false` envelopes as successful Rust transport results. `EMUCHEF_PYTHON`
-selects the Python command when set; otherwise the bridge uses `python`. During
-development, the bridge discovers the repo root and prepends `src/` to
-`PYTHONPATH` so the selected Python command can import the local package.
+The Tauri editor runtime launches the experimental Rust backend sidecar directly
+for editor protocol requests. The sidecar client starts
+`emuchef-rust-backend --sidecar` on the first sidecar request, sends `hello`,
+requires protocol version 1 plus the editor's required capabilities, and then
+continues the original request without a frontend retry. A `Running` Rust
+sidecar state means the process is started and handshake-compatible. The client
+serializes requests as one send-line/read-line operation at a time and treats
+non-handshake API `ok:false` envelopes as successful Rust transport results. For
+local development and tests, the bridge resolves a previously built Rust binary
+from the crate-local or repo-root Cargo `target/debug` directories; production
+bundled sidecar layout remains a separate packaging concern.
 
 `sidecar_status` reports local Rust process and compatibility state only. It
 does not start the sidecar and does not perform a fresh `hello` call. Before the
@@ -351,17 +350,18 @@ document-specific actions, and tells the user to restart the Tauri app and
 reopen the recipe. The sidecar does not automatically restart, and previous
 document ids are invalid after process loss.
 
-Production packaging, Python bundling, and a Rust backend replacement are future
-work. A future Rust backend must implement the same backend-agnostic editor
-protocol rather than changing the Tauri editor to backend-specific request
-shapes.
+There is no backend selector, runtime backend toggle, environment variable,
+config option, UI switch, protocol negotiation path, or Python fallback in the
+Tauri editor runtime. Python, PySide6, and the Python CLI remain in the repo for
+later confirmed-cutover and deletion phases.
 
 `crates/emuchef-rust-backend` is an experimental standalone Rust backend
 skeleton for migration work. It currently implements `hello`, response
 envelopes, one-shot requests, JSON Lines sidecar requests, `listStepSpecs`,
 path-based recipe YAML emit/validation, sidecar document open/get/save/close,
-sidecar document `emitYaml`/`validate`, sidecar `getRefIndex`, snapshot
-undo/redo, `SetOverviewField` for recipe `name` and `description`, and
+sidecar document Save As, sidecar document `emitYaml`/`validate`, sidecar
+`getRefIndex`, snapshot undo/redo, `SetOverviewField` for recipe `name` and
+`description`, and
 fixture-covered `applyRecipeCommand` mutations for inputs, artifacts,
 artifact groups, step lifecycle, step dependencies, step params, and advanced
 internals. Supported non-step
@@ -379,18 +379,17 @@ context/capabilities. The Rust executor skeleton is internal test scaffolding
 only: it models selected `wait`, `grant_permissions`, dependency, skip, verify,
 temp-dir-confined filesystem/artifact behavior, fake dry-run device semantics,
 and Phase 6R real-ADB adapter foundations without public API exposure. It does
-not add protocol requests, sidecar capabilities, production CLI replacement,
-Tauri integration, backend selection, production device discovery, real network
-downloads, production packaging, or Python bundling.
+not add production CLI replacement, backend selection, production device
+discovery, real network downloads, production packaging, or Python bundling.
 It now has crate-internal fake-device/DryRunAdb parity fixtures plus an
 explicitly constructed real-ADB adapter and ignored/manual real-device tests; it
-remains not Tauri-integrated and has no public real-device executor surface.
-Its `hello` response reports only capabilities implemented in the crate, but
-capability parity is not complete semantic parity and does not make it the Tauri
-editor backend. Rust `listStepSpecs` uses a temporary Python-generated static
-fixture for StepSpec DTO parity; Python remains the reference implementation
-until a Rust backend replacement is explicitly approved. The fixture-backed
-StepSpec source, private planner skeleton, and private safe executor skeleton are
+still has no public real-device executor surface. Its `hello` response reports
+only capabilities implemented in the crate, but capability parity is not full
+product parity. Rust `listStepSpecs` uses a temporary Python-generated static
+fixture for StepSpec DTO parity; Python remains the reference implementation for
+broader non-editor behavior until later replacement work is explicitly approved.
+The fixture-backed StepSpec source, private planner skeleton, and private safe
+executor skeleton are
 scaffolding only and should be replaced or broadened with Rust-native schema
 builders, full executor parity, and broader parity tests before any backend
 cutover is attempted.

@@ -15,6 +15,7 @@ pub const CAPABILITIES: &[&str] = &[
     "openRecipe",
     "getDocument",
     "saveRecipe",
+    "saveRecipeAs",
     "closeDocument",
     "applyRecipeCommand",
     "undo",

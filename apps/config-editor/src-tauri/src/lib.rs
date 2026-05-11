@@ -1,6 +1,5 @@
 pub mod commands;
 pub mod menu;
-pub mod python_bridge;
 pub mod sidecar_client;
 
 pub fn run() {

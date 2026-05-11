@@ -70,6 +70,7 @@ fn handle_validated_sidecar_object(
         "openRecipe" => handle_open_recipe(object, sessions),
         "getDocument" => handle_get_document(object, sessions),
         "saveRecipe" => handle_save_recipe(object, sessions),
+        "saveRecipeAs" => handle_save_recipe_as(object, sessions),
         "applyRecipeCommand" => handle_apply_recipe_command(object, sessions),
         "undo" => handle_undo(object, sessions),
         "redo" => handle_redo(object, sessions),
@@ -167,6 +168,18 @@ fn handle_save_recipe(
     let payload = payload_object(object)?;
     let document_id = required_document_id(payload)?;
     Ok(envelope::success(sessions.save_recipe(document_id)?))
+}
+
+fn handle_save_recipe_as(
+    object: &Map<String, Value>,
+    sessions: &mut DocumentSessionManager,
+) -> Result<Value, ApiError> {
+    let payload = payload_object(object)?;
+    let document_id = required_document_id(payload)?;
+    let path = required_path(payload)?;
+    Ok(envelope::success(
+        sessions.save_recipe_as(document_id, path)?,
+    ))
 }
 
 fn handle_apply_recipe_command(

@@ -98,7 +98,13 @@ fn assert_unknown_document(response: &Value, document_id: &str) {
 
 #[test]
 fn one_shot_session_requests_are_not_exposed() {
-    for request_type in ["openRecipe", "getDocument", "saveRecipe", "closeDocument"] {
+    for request_type in [
+        "openRecipe",
+        "getDocument",
+        "saveRecipe",
+        "saveRecipeAs",
+        "closeDocument",
+    ] {
         let response = one_shot_response(json!({
             "type": request_type,
             "payload": {}
@@ -110,6 +116,227 @@ fn one_shot_session_requests_are_not_exposed() {
             "{request_type}"
         );
     }
+}
+
+#[test]
+fn save_recipe_as_writes_target_updates_path_and_preserves_history() {
+    let temp_recipe = TempRecipe::copy_fixture("minimal_recipe.yaml");
+    let original_source = fs::read_to_string(&temp_recipe.path).expect("source should be readable");
+    let save_as_path = temp_recipe.dir.join("saved_as.yaml");
+    let input = format!(
+        "{}\n{}\n{}\n{}\n{}\n",
+        json!({
+            "id": "open",
+            "type": "openRecipe",
+            "payload": {"path": temp_recipe.path, "authoredRoot": fixture_root()}
+        }),
+        json!({
+            "id": "rename",
+            "type": "applyRecipeCommand",
+            "payload": {
+                "documentId": "doc-1",
+                "command": {"type": "SetOverviewField", "field": "name", "value": "Save As Name"}
+            }
+        }),
+        json!({
+            "id": "save-as",
+            "type": "saveRecipeAs",
+            "payload": {"documentId": "doc-1", "path": save_as_path, "ignored": true}
+        }),
+        json!({
+            "id": "undo-after-save-as",
+            "type": "undo",
+            "payload": {"documentId": "doc-1"}
+        }),
+        json!({
+            "id": "redo-after-save-as",
+            "type": "redo",
+            "payload": {"documentId": "doc-1"}
+        }),
+    );
+
+    let responses = sidecar_responses(&input);
+
+    assert_eq!(responses.len(), 5);
+    assert_eq!(responses[0]["ok"], true);
+    assert_eq!(responses[1]["ok"], true);
+    assert_eq!(responses[2]["id"], "save-as");
+    assert_eq!(responses[2]["ok"], true);
+    let saved_as = &responses[2]["result"]["document"];
+    assert_eq!(saved_as["documentId"], "doc-1");
+    assert_eq!(
+        saved_as["path"],
+        save_as_path
+            .canonicalize()
+            .unwrap()
+            .to_string_lossy()
+            .to_string()
+    );
+    assert_eq!(
+        saved_as["authoredRoot"],
+        Path::new(&fixture_root())
+            .canonicalize()
+            .unwrap()
+            .to_string_lossy()
+            .to_string()
+    );
+    assert_eq!(saved_as["dirty"], false);
+    assert_eq!(saved_as["canUndo"], true);
+    assert_eq!(saved_as["canRedo"], false);
+    assert!(saved_as["diagnostics"].as_array().is_some());
+    assert!(save_as_path.exists());
+    assert_eq!(
+        fs::read_to_string(&save_as_path).expect("save-as target should be readable"),
+        saved_as["yaml"].as_str().unwrap()
+    );
+    assert!(saved_as["yaml"]
+        .as_str()
+        .unwrap()
+        .contains("name: Save As Name"));
+    assert_eq!(
+        fs::read_to_string(&temp_recipe.path).expect("source should remain readable"),
+        original_source,
+        "Save As should not mutate the previous source file"
+    );
+
+    assert_eq!(
+        responses[3]["result"]["commandResult"],
+        json!({"changed": true})
+    );
+    assert_eq!(responses[3]["result"]["document"]["dirty"], true);
+    assert_eq!(responses[3]["result"]["document"]["path"], saved_as["path"]);
+
+    assert_eq!(
+        responses[4]["result"]["commandResult"],
+        json!({"changed": true})
+    );
+    assert_eq!(responses[4]["result"]["document"]["dirty"], false);
+    assert_eq!(responses[4]["result"]["document"]["path"], saved_as["path"]);
+}
+
+#[test]
+fn save_recipe_as_validates_payload_and_unknown_documents() {
+    let temp_recipe = TempRecipe::copy_fixture("minimal_recipe.yaml");
+    let input = format!(
+        "{}\n{}\n{}\n{}\n{}\n{}\n{}\n",
+        json!({
+            "id": "open",
+            "type": "openRecipe",
+            "payload": {"path": temp_recipe.path, "authoredRoot": null}
+        }),
+        json!({
+            "id": "missing-document-id",
+            "type": "saveRecipeAs",
+            "payload": {"path": temp_recipe.dir.join("ignored.yaml")}
+        }),
+        json!({
+            "id": "wrong-document-id",
+            "type": "saveRecipeAs",
+            "payload": {"documentId": 123, "path": temp_recipe.dir.join("ignored.yaml")}
+        }),
+        json!({
+            "id": "missing-path",
+            "type": "saveRecipeAs",
+            "payload": {"documentId": "doc-1"}
+        }),
+        json!({
+            "id": "wrong-path",
+            "type": "saveRecipeAs",
+            "payload": {"documentId": "doc-1", "path": 123}
+        }),
+        json!({
+            "id": "non-object-payload",
+            "type": "saveRecipeAs",
+            "payload": []
+        }),
+        json!({
+            "id": "unknown-document",
+            "type": "saveRecipeAs",
+            "payload": {"documentId": "missing-document", "path": temp_recipe.dir.join("ignored.yaml")}
+        }),
+    );
+
+    let responses = sidecar_responses(&input);
+
+    assert_eq!(responses.len(), 7);
+    assert_eq!(responses[0]["ok"], true);
+    assert_invalid_field(&responses[1], "documentId");
+    assert_invalid_field(&responses[2], "documentId");
+    assert_invalid_field(&responses[3], "path");
+    assert_invalid_field(&responses[4], "path");
+    assert_eq!(responses[5]["ok"], false);
+    assert_eq!(responses[5]["error"]["code"], "invalid_request");
+    assert_unknown_document(&responses[6], "missing-document");
+}
+
+#[test]
+fn save_recipe_as_missing_parent_does_not_create_dirs_or_mutate_session() {
+    let temp_recipe = TempRecipe::copy_fixture("minimal_recipe.yaml");
+    let original_path = temp_recipe.path.canonicalize().unwrap();
+    let missing_parent = temp_recipe.dir.join("missing").join("parent");
+    let save_as_path = missing_parent.join("saved.yaml");
+    let input = format!(
+        "{}\n{}\n{}\n{}\n{}\n",
+        json!({
+            "id": "open",
+            "type": "openRecipe",
+            "payload": {"path": temp_recipe.path, "authoredRoot": null}
+        }),
+        json!({
+            "id": "rename",
+            "type": "applyRecipeCommand",
+            "payload": {
+                "documentId": "doc-1",
+                "command": {"type": "SetOverviewField", "field": "name", "value": "Unsaved Name"}
+            }
+        }),
+        json!({
+            "id": "save-as-missing-parent",
+            "type": "saveRecipeAs",
+            "payload": {"documentId": "doc-1", "path": save_as_path}
+        }),
+        json!({
+            "id": "get-after-failure",
+            "type": "getDocument",
+            "payload": {"documentId": "doc-1"}
+        }),
+        json!({
+            "id": "specs-after-failure",
+            "type": "listStepSpecs",
+            "payload": {}
+        }),
+    );
+
+    let responses = sidecar_responses(&input);
+
+    assert_eq!(responses.len(), 5);
+    assert_eq!(responses[0]["ok"], true);
+    assert_eq!(responses[1]["ok"], true);
+    assert_eq!(responses[2]["id"], "save-as-missing-parent");
+    assert_eq!(responses[2]["ok"], false);
+    assert_eq!(responses[2]["error"]["code"], "save_failed");
+    assert_eq!(
+        responses[2]["error"]["details"],
+        json!({"documentId": "doc-1", "path": save_as_path})
+    );
+    assert!(
+        !missing_parent.exists(),
+        "Save As should not create missing parent directories"
+    );
+    assert_eq!(responses[3]["id"], "get-after-failure");
+    assert_eq!(responses[3]["ok"], true);
+    let after_failure = &responses[3]["result"]["document"];
+    assert_eq!(
+        after_failure["path"],
+        original_path.to_string_lossy().to_string()
+    );
+    assert_eq!(after_failure["dirty"], true);
+    assert!(after_failure["yaml"]
+        .as_str()
+        .unwrap()
+        .contains("name: Unsaved Name"));
+    assert_eq!(responses[4]["id"], "specs-after-failure");
+    assert_eq!(responses[4]["ok"], true);
 }
 
 #[test]

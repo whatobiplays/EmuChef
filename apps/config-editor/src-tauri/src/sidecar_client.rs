@@ -1,12 +1,12 @@
 use std::{
+    env,
     io::{BufRead, BufReader, Read, Write},
+    path::{Path, PathBuf},
     process::{Child, ChildStderr, ChildStdin, ChildStdout, Command, Stdio},
     sync::Mutex,
 };
 
 use serde_json::{json, Map, Value};
-
-use crate::python_bridge::{configured_python_command, discover_repo_root, python_path_for_repo};
 
 const SUPPORTED_PROTOCOL_VERSION: i64 = 1;
 const REQUIRED_CAPABILITIES: &[&str] = &[
@@ -17,15 +17,20 @@ const REQUIRED_CAPABILITIES: &[&str] = &[
     "undo",
     "redo",
     "saveRecipe",
+    // The Tauri command is registered, so compatibility must fail before any
+    // command can forward to a backend that does not support it.
+    "saveRecipeAs",
     "validate",
     "emitYaml",
     "getRefIndex",
 ];
+const RUST_BACKEND_MANIFEST: &str = "crates/emuchef-rust-backend/Cargo.toml";
+const TAURI_MANIFEST: &str = "apps/config-editor/src-tauri/Cargo.toml";
 const STDERR_EXCERPT_BYTES: u64 = 4096;
 
-/// Shared Tauri state for the persistent Python sidecar.
+/// Shared Tauri state for the persistent Rust sidecar.
 ///
-/// Phase 3A keeps sidecar request handling deliberately serial. The mutex is
+/// Sidecar request handling is deliberately serial. The mutex is
 /// held for the full send-line/read-line exchange so requests cannot interleave
 /// on the JSONL protocol.
 pub struct SidecarState {
@@ -61,6 +66,7 @@ impl SidecarState {
 pub struct SidecarClient {
     next_request_id: u64,
     state: ProcessState,
+    binary_path_override: Option<PathBuf>,
 }
 
 enum ProcessState {
@@ -107,6 +113,16 @@ impl SidecarClient {
         Self {
             next_request_id: 1,
             state: ProcessState::NotStarted,
+            binary_path_override: None,
+        }
+    }
+
+    #[cfg(test)]
+    fn with_binary_path_for_test(path: impl Into<PathBuf>) -> Self {
+        Self {
+            next_request_id: 1,
+            state: ProcessState::NotStarted,
+            binary_path_override: Some(path.into()),
         }
     }
 
@@ -243,7 +259,7 @@ impl SidecarClient {
     fn ensure_running(&mut self) -> Result<(), String> {
         match &mut self.state {
             ProcessState::NotStarted => {
-                let mut process = start_sidecar()?;
+                let mut process = start_sidecar(self.binary_path_override.as_deref())?;
                 match self.perform_hello_handshake(&mut process) {
                     Ok(compatibility) => {
                         self.state = ProcessState::Running(RunningSidecar {
@@ -297,7 +313,7 @@ impl SidecarClient {
         let response_line = exchange_sidecar_request(process, &request).map_err(|err| {
             hello_error(format!(
                 "Backend hello transport failed: {err}. {}",
-                python_start_guidance()
+                rust_sidecar_start_guidance()
             ))
         })?;
         let response = parse_sidecar_response_line(&response_line, &request_id)
@@ -542,38 +558,25 @@ pub fn parse_sidecar_response_line(line: &str, expected_request_id: &str) -> Res
     }
 }
 
-fn start_sidecar() -> Result<SidecarProcess, String> {
-    let python = configured_python_command();
-    let repo_root = discover_repo_root();
-
-    let mut command = Command::new(&python);
-    command
-        .arg("-m")
-        .arg("emuchef_editor.api.server")
-        .arg("--sidecar")
-        .stdin(Stdio::piped())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped());
-
-    if let Some(root) = repo_root.as_ref() {
-        command.current_dir(root);
-        command.env("PYTHONPATH", python_path_for_repo(root)?);
-    }
+fn start_sidecar(binary_path_override: Option<&Path>) -> Result<SidecarProcess, String> {
+    let spec = rust_sidecar_command_spec(binary_path_override)?;
+    let mut command = spec.command();
 
     let mut child = command.spawn().map_err(|err| {
         format!(
-            "Failed to start Python sidecar with '{python}': {err}. {}",
-            python_start_guidance()
+            "Failed to start Rust sidecar at '{}': {err}. {}",
+            spec.program.display(),
+            rust_sidecar_start_guidance()
         )
     })?;
     let stdin = child
         .stdin
         .take()
-        .ok_or_else(|| "Failed to capture Python sidecar stdin".to_string())?;
+        .ok_or_else(|| "Failed to capture Rust sidecar stdin".to_string())?;
     let stdout = child
         .stdout
         .take()
-        .ok_or_else(|| "Failed to capture Python sidecar stdout".to_string())?;
+        .ok_or_else(|| "Failed to capture Rust sidecar stdout".to_string())?;
     let stderr = child.stderr.take();
 
     Ok(SidecarProcess {
@@ -584,14 +587,206 @@ fn start_sidecar() -> Result<SidecarProcess, String> {
     })
 }
 
-fn python_start_guidance() -> &'static str {
-    "Set EMUCHEF_PYTHON to the Python interpreter to use. That Python must be able to import the local emuchef_editor package, usually through the repo src/ directory during development."
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct SidecarCommandSpec {
+    program: PathBuf,
+    args: Vec<String>,
+    cwd: Option<PathBuf>,
+}
+
+impl SidecarCommandSpec {
+    fn command(&self) -> Command {
+        let mut command = Command::new(&self.program);
+        command
+            .args(&self.args)
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped());
+        if let Some(cwd) = &self.cwd {
+            command.current_dir(cwd);
+        }
+        command
+    }
+}
+
+fn rust_sidecar_command_spec(
+    binary_path_override: Option<&Path>,
+) -> Result<SidecarCommandSpec, String> {
+    let repo_root = discover_repo_root();
+    let program = match binary_path_override {
+        Some(path) => path.to_path_buf(),
+        None => resolve_dev_rust_sidecar_binary(repo_root.as_deref())?,
+    };
+    Ok(SidecarCommandSpec {
+        program,
+        args: vec!["--sidecar".to_string()],
+        cwd: repo_root,
+    })
+}
+
+fn resolve_dev_rust_sidecar_binary(repo_root: Option<&Path>) -> Result<PathBuf, String> {
+    let Some(repo_root) = repo_root else {
+        return Err(format!(
+            "Could not locate the EmuChef repository root. {}",
+            rust_sidecar_start_guidance()
+        ));
+    };
+    let candidates = rust_sidecar_binary_candidates(repo_root);
+    candidates
+        .iter()
+        .find(|candidate| candidate.is_file())
+        .cloned()
+        .ok_or_else(|| {
+            let searched = candidates
+                .iter()
+                .map(|path| format!("'{}'", path.display()))
+                .collect::<Vec<_>>()
+                .join(", ");
+            format!(
+                "Rust sidecar binary was not found. Searched: {searched}. {}",
+                rust_sidecar_start_guidance()
+            )
+        })
+}
+
+fn rust_sidecar_binary_candidates(repo_root: &Path) -> Vec<PathBuf> {
+    let binary = rust_backend_binary_name();
+    vec![
+        repo_root
+            .join("crates")
+            .join("emuchef-rust-backend")
+            .join("target")
+            .join("debug")
+            .join(binary),
+        repo_root.join("target").join("debug").join(binary),
+    ]
+}
+
+fn rust_backend_binary_name() -> &'static str {
+    if cfg!(windows) {
+        "emuchef-rust-backend.exe"
+    } else {
+        "emuchef-rust-backend"
+    }
+}
+
+fn rust_sidecar_start_guidance() -> &'static str {
+    "Build the local development sidecar with `cargo build --manifest-path crates/emuchef-rust-backend/Cargo.toml`. Production bundled sidecar layout is deferred to Phase 6V."
+}
+
+pub(crate) fn discover_repo_root() -> Option<PathBuf> {
+    let starts = [current_exe_start(), env::current_dir().ok()];
+    starts
+        .into_iter()
+        .flatten()
+        .find_map(|start| walk_up_for_repo_root(&start))
+}
+
+fn current_exe_start() -> Option<PathBuf> {
+    let exe = env::current_exe().ok()?;
+    if exe.is_dir() {
+        Some(exe)
+    } else {
+        exe.parent().map(Path::to_path_buf)
+    }
+}
+
+fn walk_up_for_repo_root(start: &Path) -> Option<PathBuf> {
+    start.ancestors().find_map(|candidate| {
+        if candidate.join(RUST_BACKEND_MANIFEST).is_file()
+            && candidate.join(TAURI_MANIFEST).is_file()
+        {
+            Some(candidate.to_path_buf())
+        } else {
+            None
+        }
+    })
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
     use serde_json::json;
+    use std::fs;
+    use std::sync::atomic::{AtomicU64, Ordering};
+    use std::time::{SystemTime, UNIX_EPOCH};
+
+    struct TempRecipe {
+        dir: PathBuf,
+        path: PathBuf,
+    }
+
+    impl TempRecipe {
+        fn copy_fixture(name: &str) -> Self {
+            static NEXT_TEMP_ID: AtomicU64 = AtomicU64::new(0);
+            let root = repo_root_for_test();
+            let fixture = root
+                .join("crates")
+                .join("emuchef-rust-backend")
+                .join("tests")
+                .join("fixtures")
+                .join("recipes")
+                .join(name);
+            let unique = SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .expect("system clock should be after epoch")
+                .as_nanos();
+            let sequence = NEXT_TEMP_ID.fetch_add(1, Ordering::Relaxed);
+            let dir = std::env::temp_dir().join(format!(
+                "emuchef-tauri-sidecar-{}-{unique}-{sequence}",
+                std::process::id()
+            ));
+            fs::create_dir_all(&dir).expect("temp directory should be created");
+            let path = dir.join(name);
+            fs::copy(fixture, &path).expect("fixture should copy to temp path");
+            Self { dir, path }
+        }
+    }
+
+    impl Drop for TempRecipe {
+        fn drop(&mut self) {
+            let _ = fs::remove_dir_all(&self.dir);
+        }
+    }
+
+    fn repo_root_for_test() -> PathBuf {
+        Path::new(env!("CARGO_MANIFEST_DIR"))
+            .ancestors()
+            .find(|candidate| {
+                candidate.join(RUST_BACKEND_MANIFEST).is_file()
+                    && candidate.join(TAURI_MANIFEST).is_file()
+            })
+            .expect("test should run inside the EmuChef repo")
+            .to_path_buf()
+    }
+
+    fn rust_backend_binary_for_test() -> PathBuf {
+        let root = repo_root_for_test();
+        let manifest = root.join(RUST_BACKEND_MANIFEST);
+        let status = Command::new("cargo")
+            .arg("build")
+            .arg("--manifest-path")
+            .arg(&manifest)
+            .status()
+            .expect("cargo build should start for Rust sidecar test binary");
+        assert!(status.success(), "Rust sidecar test binary should build");
+
+        rust_sidecar_binary_candidates(&root)
+            .into_iter()
+            .find(|candidate| candidate.is_file())
+            .expect("Rust sidecar binary should exist after cargo build")
+    }
+
+    fn assert_no_python_or_uv_spawn(spec: &SidecarCommandSpec) {
+        let mut tokens = vec![spec.program.to_string_lossy().to_lowercase()];
+        tokens.extend(spec.args.iter().map(|arg| arg.to_lowercase()));
+        for forbidden in ["python", "python3", "uv"] {
+            assert!(
+                !tokens.iter().any(|token| token == forbidden),
+                "sidecar command must not spawn {forbidden}: {tokens:?}"
+            );
+        }
+    }
 
     #[test]
     fn builds_sidecar_request_with_opaque_id_and_payload() {
@@ -664,6 +859,33 @@ mod tests {
     }
 
     #[test]
+    fn rust_sidecar_command_uses_only_backend_binary_and_sidecar_arg() {
+        let binary = PathBuf::from("/tmp/emuchef-rust-backend");
+        let spec = rust_sidecar_command_spec(Some(&binary)).expect("override should build spec");
+
+        assert_eq!(spec.program, binary);
+        assert_eq!(spec.args, vec!["--sidecar"]);
+        assert_no_python_or_uv_spawn(&spec);
+    }
+
+    #[test]
+    fn rust_sidecar_resolver_checks_crate_local_and_repo_root_targets() {
+        let candidates = rust_sidecar_binary_candidates(Path::new("/repo"));
+
+        assert_eq!(
+            candidates,
+            vec![
+                Path::new("/repo")
+                    .join("crates/emuchef-rust-backend/target/debug")
+                    .join(rust_backend_binary_name()),
+                Path::new("/repo")
+                    .join("target/debug")
+                    .join(rust_backend_binary_name()),
+            ]
+        );
+    }
+
+    #[test]
     fn validates_successful_hello_with_extra_capabilities() {
         let compatibility = validate_hello_response(&json!({
             "id": "req-1",
@@ -678,6 +900,7 @@ mod tests {
                     "undo",
                     "redo",
                     "saveRecipe",
+                    "saveRecipeAs",
                     "validate",
                     "emitYaml",
                     "getRefIndex",
@@ -709,6 +932,7 @@ mod tests {
                     "undo",
                     "redo",
                     "saveRecipe",
+                    "saveRecipeAs",
                     "validate",
                     "emitYaml",
                     "getRefIndex"
@@ -745,6 +969,7 @@ mod tests {
 
         assert_eq!(err.protocol_version, Some(1));
         assert!(err.message.contains("applyRecipeCommand"));
+        assert!(err.message.contains("saveRecipeAs"));
         assert!(err.message.contains("getRefIndex"));
     }
 
@@ -843,5 +1068,112 @@ mod tests {
             .expect_err("exited sidecar should not auto-restart");
 
         assert!(err.contains("exited"));
+    }
+
+    #[test]
+    fn actual_rust_sidecar_process_handles_editor_smoke_sequence() {
+        let binary = rust_backend_binary_for_test();
+        let mut client = SidecarClient::with_binary_path_for_test(binary);
+        let temp_recipe = TempRecipe::copy_fixture("minimal_recipe.yaml");
+        let save_as_path = temp_recipe.dir.join("tauri_smoke_saved_as.yaml");
+
+        let specs_before_start = client
+            .request("listStepSpecs", None)
+            .expect("stateless listStepSpecs should start the Rust sidecar");
+        assert_eq!(specs_before_start["ok"], true);
+        assert!(specs_before_start["result"]["stepSpecs"].is_array());
+
+        let hello = client.request("hello", None).expect("hello should succeed");
+        assert_eq!(hello["ok"], true);
+        assert_eq!(hello["result"]["protocolVersion"], 1);
+        assert!(hello["result"]["capabilities"]
+            .as_array()
+            .unwrap()
+            .contains(&json!("saveRecipeAs")));
+
+        let opened = client
+            .request(
+                "openRecipe",
+                Some(json!({"path": temp_recipe.path, "authoredRoot": null})),
+            )
+            .expect("openRecipe should succeed");
+        assert_eq!(opened["ok"], true);
+        let document_id = opened["result"]["document"]["documentId"]
+            .as_str()
+            .unwrap()
+            .to_string();
+
+        let validated_path = client
+            .request(
+                "validateRecipePath",
+                Some(json!({"path": temp_recipe.path, "authoredRoot": null})),
+            )
+            .expect("stateless validateRecipePath should work after sidecar startup");
+        assert_eq!(validated_path["ok"], true);
+
+        let emitted_from_path = client
+            .request(
+                "emitRecipeYamlFromPath",
+                Some(json!({"path": temp_recipe.path, "authoredRoot": null})),
+            )
+            .expect("stateless emitRecipeYamlFromPath should work after sidecar startup");
+        assert_eq!(emitted_from_path["ok"], true);
+        assert!(emitted_from_path["result"]["yaml"]
+            .as_str()
+            .unwrap()
+            .contains("id: phase6e.minimal"));
+
+        let fetched = client
+            .request("getDocument", Some(json!({"documentId": document_id})))
+            .expect("getDocument should succeed");
+        assert_eq!(fetched["ok"], true);
+
+        let changed = client
+            .request(
+                "applyRecipeCommand",
+                Some(json!({
+                    "documentId": document_id,
+                    "command": {"type": "SetOverviewField", "field": "name", "value": "Tauri Rust Smoke"}
+                })),
+            )
+            .expect("applyRecipeCommand should succeed");
+        assert_eq!(changed["ok"], true);
+        assert_eq!(changed["result"]["commandResult"]["changed"], true);
+
+        let validated = client
+            .request("validate", Some(json!({"documentId": document_id})))
+            .expect("validate should succeed");
+        assert_eq!(validated["ok"], true);
+        assert!(validated["result"]["diagnostics"].as_array().is_some());
+
+        let emitted = client
+            .request("emitYaml", Some(json!({"documentId": document_id})))
+            .expect("emitYaml should succeed");
+        assert_eq!(emitted["ok"], true);
+        assert!(emitted["result"]["yaml"]
+            .as_str()
+            .unwrap()
+            .contains("name: Tauri Rust Smoke"));
+
+        let saved = client
+            .request("saveRecipe", Some(json!({"documentId": document_id})))
+            .expect("saveRecipe should succeed");
+        assert_eq!(saved["ok"], true);
+        assert_eq!(saved["result"]["document"]["dirty"], false);
+
+        let saved_as = client
+            .request(
+                "saveRecipeAs",
+                Some(json!({"documentId": document_id, "path": save_as_path})),
+            )
+            .expect("saveRecipeAs should succeed");
+        assert_eq!(saved_as["ok"], true);
+        assert_eq!(saved_as["result"]["document"]["documentId"], document_id);
+        assert!(save_as_path.exists());
+
+        let closed = client
+            .request("closeDocument", Some(json!({"documentId": document_id})))
+            .expect("closeDocument should succeed");
+        assert_eq!(closed["ok"], true);
     }
 }

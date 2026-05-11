@@ -33,6 +33,7 @@ fn phase6m_capabilities_remain_unchanged_and_planner_requests_are_not_routed() {
             "openRecipe",
             "getDocument",
             "saveRecipe",
+            "saveRecipeAs",
             "closeDocument",
             "applyRecipeCommand",
             "undo",

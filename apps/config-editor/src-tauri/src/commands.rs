@@ -1,48 +1,76 @@
 use serde_json::{json, Value};
 use tauri::State;
 
-use crate::python_bridge::{build_request, run_request};
 use crate::sidecar_client::SidecarState;
 
 #[tauri::command]
-pub fn list_step_specs() -> Result<Value, String> {
-    run_request(build_request("listStepSpecs", None))
+pub fn list_step_specs(state: State<'_, SidecarState>) -> Result<Value, String> {
+    stateless_request(&state, "listStepSpecs", None)
 }
 
 #[tauri::command]
-pub fn open_recipe(path: String, authored_root: Option<String>) -> Result<Value, String> {
-    run_request(build_request(
+pub fn open_recipe(
+    state: State<'_, SidecarState>,
+    path: String,
+    authored_root: Option<String>,
+) -> Result<Value, String> {
+    stateless_request(
+        &state,
         "openRecipe",
         Some(json!({
             "path": path,
             "authoredRoot": authored_root,
         })),
-    ))
+    )
 }
 
 #[tauri::command]
-pub fn validate_recipe_path(path: String, authored_root: Option<String>) -> Result<Value, String> {
-    run_request(build_request(
+pub fn validate_recipe_path(
+    state: State<'_, SidecarState>,
+    path: String,
+    authored_root: Option<String>,
+) -> Result<Value, String> {
+    stateless_request(
+        &state,
         "validateRecipePath",
         Some(json!({
             "path": path,
             "authoredRoot": authored_root,
         })),
-    ))
+    )
 }
 
 #[tauri::command]
 pub fn emit_recipe_yaml_from_path(
+    state: State<'_, SidecarState>,
     path: String,
     authored_root: Option<String>,
 ) -> Result<Value, String> {
-    run_request(build_request(
+    stateless_request(
+        &state,
         "emitRecipeYamlFromPath",
         Some(json!({
             "path": path,
             "authoredRoot": authored_root,
         })),
-    ))
+    )
+}
+
+fn stateless_request(
+    state: &SidecarState,
+    request_type: &str,
+    payload: Option<Value>,
+) -> Result<Value, String> {
+    state
+        .request(request_type, payload)
+        .map(strip_sidecar_transport_id)
+}
+
+fn strip_sidecar_transport_id(mut response: Value) -> Value {
+    if let Some(object) = response.as_object_mut() {
+        object.remove("id");
+    }
+    response
 }
 
 #[tauri::command]
@@ -183,4 +211,51 @@ pub fn sidecar_get_ref_index(
             "documentId": document_id,
         })),
     )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn former_one_shot_responses_do_not_expose_sidecar_transport_id() {
+        let response = strip_sidecar_transport_id(json!({
+            "id": "req-1",
+            "ok": true,
+            "result": {"stepSpecs": []}
+        }));
+
+        assert_eq!(
+            response,
+            json!({
+                "ok": true,
+                "result": {"stepSpecs": []}
+            })
+        );
+    }
+
+    #[test]
+    fn sidecar_failure_envelope_shape_is_preserved_without_transport_id() {
+        let response = strip_sidecar_transport_id(json!({
+            "id": "req-1",
+            "ok": false,
+            "error": {
+                "code": "load_failed",
+                "message": "bad recipe",
+                "details": {"path": "missing.yaml"}
+            }
+        }));
+
+        assert_eq!(
+            response,
+            json!({
+                "ok": false,
+                "error": {
+                    "code": "load_failed",
+                    "message": "bad recipe",
+                    "details": {"path": "missing.yaml"}
+                }
+            })
+        );
+    }
 }

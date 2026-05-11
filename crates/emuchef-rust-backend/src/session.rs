@@ -57,6 +57,19 @@ impl DocumentSessionManager {
         }))
     }
 
+    pub fn save_recipe_as(&mut self, document_id: &str, path: &str) -> Result<Value, ApiError> {
+        let document = self.document_mut(document_id)?;
+        document.save_as(path).map_err(|error| {
+            ApiError::save_failed(
+                format!("Failed to save recipe as: {error}"),
+                json!({ "documentId": document_id, "path": path }),
+            )
+        })?;
+        Ok(json!({
+            "document": dto::document_to_dto(document, document_id)
+        }))
+    }
+
     pub fn apply_recipe_command(
         &mut self,
         document_id: &str,
