@@ -257,10 +257,14 @@ fn malformed_or_out_of_scope_step_commands_are_invalid_command() {
         json!({"type": "SetStepUserToggleable", "stepId": "pause", "userToggleable": "true"}),
         json!({"type": "UpdateStepDependencies", "stepId": "pause", "dependencies": "resolve"}),
         json!({"type": "UpdateStepDependencies", "stepId": "pause", "dependencies": ["resolve", ""]}),
-        json!({"type": "UpdateStepParams", "stepId": "pause", "params": {}}),
-        json!({"type": "UpdateStepConstraints", "stepId": "pause", "constraints": {}}),
-        json!({"type": "UpdateStepSkipIf", "stepId": "pause", "skipIf": []}),
-        json!({"type": "UpdateStepVerify", "stepId": "pause", "verify": []}),
+        json!({"type": "UpdateStepParams", "stepId": "pause"}),
+        json!({"type": "UpdateStepParams", "stepId": "pause", "params": []}),
+        json!({"type": "UpdateStepConstraints", "stepId": "pause", "constraints": null}),
+        json!({"type": "UpdateStepConstraints", "stepId": "pause", "constraints": {"capabilities": "shared_storage_write"}}),
+        json!({"type": "UpdateStepSkipIf", "stepId": "pause", "skipIf": null}),
+        json!({"type": "UpdateStepSkipIf", "stepId": "pause", "skipIf": {"type": "path_exists"}}),
+        json!({"type": "UpdateStepVerify", "stepId": "pause", "verify": null}),
+        json!({"type": "UpdateStepVerify", "stepId": "pause", "verify": {"type": "path_exists"}}),
     ] {
         let error = decode_recipe_command(&payload).expect_err("payload should be invalid");
         assert_eq!(error.code, ApiErrorCode::InvalidCommand);
@@ -612,7 +616,7 @@ fn step_command_failures_leave_document_and_history_unchanged() {
         open_request(&temp_recipe.path),
         command_request(
             "invalid-step-params",
-            json!({"type": "UpdateStepParams", "stepId": "resolve", "params": {}}),
+            json!({"type": "UpdateStepParams", "stepId": "resolve", "params": []}),
         ),
         command_request(
             "duplicate-step-id",

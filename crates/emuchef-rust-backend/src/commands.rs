@@ -7,8 +7,9 @@
 use serde_json::{json, Map, Value};
 
 use crate::errors::ApiError;
+use crate::model::{OrderedMap, ParamValue, StepCondition, StepConstraints};
 
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, PartialEq)]
 pub enum RecipeCommand {
     SetOverviewField {
         field: OverviewField,
@@ -115,6 +116,22 @@ pub enum RecipeCommand {
         step_id: String,
         dependencies: Vec<String>,
     },
+    UpdateStepParams {
+        step_id: String,
+        params: OrderedMap<ParamValue>,
+    },
+    UpdateStepConstraints {
+        step_id: String,
+        constraints: StepConstraints,
+    },
+    UpdateStepSkipIf {
+        step_id: String,
+        skip_if: Vec<StepCondition>,
+    },
+    UpdateStepVerify {
+        step_id: String,
+        verify: Vec<StepCondition>,
+    },
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -196,6 +213,10 @@ pub fn decode_recipe_command(payload: &Value) -> Result<RecipeCommand, ApiError>
         "UpdateStepBasics" => decode_update_step_basics(object),
         "SetStepUserToggleable" => decode_set_step_user_toggleable(object),
         "UpdateStepDependencies" => decode_update_step_dependencies(object),
+        "UpdateStepParams" => decode_update_step_params(object),
+        "UpdateStepConstraints" => decode_update_step_constraints(object),
+        "UpdateStepSkipIf" => decode_update_step_skip_if(object),
+        "UpdateStepVerify" => decode_update_step_verify(object),
         unknown => Err(ApiError::invalid_command_with_details(
             format!("Unsupported command type: {unknown}"),
             json!({ "commandType": unknown }),
@@ -482,6 +503,90 @@ fn decode_update_step_dependencies(object: &Map<String, Value>) -> Result<Recipe
     })
 }
 
+fn decode_update_step_params(object: &Map<String, Value>) -> Result<RecipeCommand, ApiError> {
+    let params = match required_value(object, "params", "UpdateStepParams")? {
+        Value::Object(params) => params
+            .iter()
+            .map(|(name, value)| (name.clone(), decode_authored_param_value(value)))
+            .collect(),
+        value => {
+            return Err(ApiError::invalid_command_with_details(
+                "Command field 'params' must be an object.",
+                json!({
+                    "commandType": "UpdateStepParams",
+                    "field": "params",
+                    "value": value,
+                }),
+            ));
+        }
+    };
+    Ok(RecipeCommand::UpdateStepParams {
+        step_id: required_str(object, "stepId", "UpdateStepParams")?,
+        params,
+    })
+}
+
+fn decode_update_step_constraints(object: &Map<String, Value>) -> Result<RecipeCommand, ApiError> {
+    let constraints = match required_value(object, "constraints", "UpdateStepConstraints")? {
+        Value::Object(constraints) => constraints,
+        value => {
+            return Err(ApiError::invalid_command_with_details(
+                "Command field 'constraints' must be an object.",
+                json!({
+                    "commandType": "UpdateStepConstraints",
+                    "field": "constraints",
+                    "value": value,
+                }),
+            ));
+        }
+    };
+    reject_unexpected_fields(
+        constraints,
+        &["capabilities", "conflictsWith"],
+        "constraints",
+    )?;
+    Ok(RecipeCommand::UpdateStepConstraints {
+        step_id: required_str(object, "stepId", "UpdateStepConstraints")?,
+        constraints: StepConstraints {
+            capabilities: optional_string_list(
+                constraints,
+                "capabilities",
+                "UpdateStepConstraints",
+            )?,
+            conflicts_with: optional_string_list(
+                constraints,
+                "conflictsWith",
+                "UpdateStepConstraints",
+            )?,
+        },
+    })
+}
+
+fn decode_update_step_skip_if(object: &Map<String, Value>) -> Result<RecipeCommand, ApiError> {
+    Ok(RecipeCommand::UpdateStepSkipIf {
+        step_id: required_str(object, "stepId", "UpdateStepSkipIf")?,
+        skip_if: required_condition_list(object, "skipIf", "UpdateStepSkipIf")?,
+    })
+}
+
+fn decode_update_step_verify(object: &Map<String, Value>) -> Result<RecipeCommand, ApiError> {
+    Ok(RecipeCommand::UpdateStepVerify {
+        step_id: required_str(object, "stepId", "UpdateStepVerify")?,
+        verify: required_condition_list(object, "verify", "UpdateStepVerify")?,
+    })
+}
+
+fn decode_authored_param_value(value: &Value) -> ParamValue {
+    if let Value::Object(object) = value {
+        if object.len() == 1 {
+            if let Some(Value::String(ref_value)) = object.get("ref") {
+                return ParamValue::Ref(ref_value.clone());
+            }
+        }
+    }
+    ParamValue::Literal(value.clone())
+}
+
 fn reject_unexpected_fields(
     object: &Map<String, Value>,
     allowed_fields: &[&str],
@@ -631,7 +736,29 @@ fn required_string_list(
     field: &str,
     command_type: &str,
 ) -> Result<Vec<String>, ApiError> {
-    let value = required_value(object, field, command_type)?;
+    string_list_value(
+        required_value(object, field, command_type)?,
+        field,
+        command_type,
+    )
+}
+
+fn optional_string_list(
+    object: &Map<String, Value>,
+    field: &str,
+    command_type: &str,
+) -> Result<Vec<String>, ApiError> {
+    match object.get(field) {
+        None | Some(Value::Null) => Ok(Vec::new()),
+        Some(value) => string_list_value(value, field, command_type),
+    }
+}
+
+fn string_list_value(
+    value: &Value,
+    field: &str,
+    command_type: &str,
+) -> Result<Vec<String>, ApiError> {
     let Value::Array(items) = value else {
         return Err(ApiError::invalid_command_with_details(
             format!("Command field '{field}' must be a list."),
@@ -659,4 +786,65 @@ fn required_string_list(
         }
     }
     Ok(strings)
+}
+
+fn required_condition_list(
+    object: &Map<String, Value>,
+    field: &str,
+    command_type: &str,
+) -> Result<Vec<StepCondition>, ApiError> {
+    let value = required_value(object, field, command_type)?;
+    let Value::Array(items) = value else {
+        return Err(ApiError::invalid_command_with_details(
+            format!("Command field '{field}' must be a list."),
+            json!({
+                "commandType": command_type,
+                "field": field,
+                "value": value,
+            }),
+        ));
+    };
+    items
+        .iter()
+        .map(|item| decode_step_condition(item, field, command_type))
+        .collect()
+}
+
+fn decode_step_condition(
+    value: &Value,
+    field: &str,
+    command_type: &str,
+) -> Result<StepCondition, ApiError> {
+    let Value::Object(condition) = value else {
+        return Err(ApiError::invalid_command_with_details(
+            format!("Command field '{field}' must contain condition objects."),
+            json!({
+                "commandType": command_type,
+                "field": field,
+                "value": value,
+            }),
+        ));
+    };
+    reject_unexpected_fields(condition, &["type", "params"], field)?;
+    let params = match condition.get("params") {
+        None | Some(Value::Null) => OrderedMap::new(),
+        Some(Value::Object(params)) => params
+            .iter()
+            .map(|(name, value)| (name.clone(), value.clone()))
+            .collect(),
+        Some(value) => {
+            return Err(ApiError::invalid_command_with_details(
+                "Condition field 'params' must be an object.",
+                json!({
+                    "commandType": command_type,
+                    "field": format!("{field}.params"),
+                    "value": value,
+                }),
+            ));
+        }
+    };
+    Ok(StepCondition {
+        type_name: required_str(condition, "type", command_type)?,
+        params,
+    })
 }

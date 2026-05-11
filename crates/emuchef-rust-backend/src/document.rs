@@ -2,9 +2,8 @@
 //!
 //! A document wraps the Phase 6E authored recipe model with the editor-facing
 //! lifecycle state needed for sidecar document sessions. The Rust backend keeps
-//! catalog-context validation, step params and advanced internals commands,
-//! planner behavior, and executor behavior out of this crate-local migration
-//! slice.
+//! catalog-context validation, planner behavior, and executor behavior out of
+//! this crate-local migration slice.
 
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -14,7 +13,7 @@ use serde_json::Value;
 use crate::commands::{ArtifactField, InputField, OverviewField, OverviewValue, RecipeCommand};
 use crate::model::{
     InputDeclaration, InputValidation, OrderedMap, ParamValue, Recipe, RemoteFileArtifact, Step,
-    StepConstraints,
+    StepCondition, StepConstraints,
 };
 use crate::step_specs;
 use crate::validation;
@@ -242,6 +241,19 @@ impl RecipeDocument {
                 step_id,
                 dependencies,
             } => self.updated_step_dependencies_recipe(step_id, dependencies),
+            RecipeCommand::UpdateStepParams { step_id, params } => {
+                self.updated_step_params_recipe(step_id, params)
+            }
+            RecipeCommand::UpdateStepConstraints {
+                step_id,
+                constraints,
+            } => self.updated_step_constraints_recipe(step_id, constraints),
+            RecipeCommand::UpdateStepSkipIf { step_id, skip_if } => {
+                self.updated_step_skip_if_recipe(step_id, skip_if)
+            }
+            RecipeCommand::UpdateStepVerify { step_id, verify } => {
+                self.updated_step_verify_recipe(step_id, verify)
+            }
         }
     }
 
@@ -783,6 +795,54 @@ impl RecipeDocument {
         Ok(recipe)
     }
 
+    fn updated_step_params_recipe(
+        &self,
+        step_id: String,
+        params: OrderedMap<ParamValue>,
+    ) -> Result<Recipe, String> {
+        let mut recipe = self.recipe.clone();
+        let index = step_index(&recipe.steps, &step_id)?;
+        let step_type = recipe.steps[index].type_name.clone();
+        recipe.steps[index].params = normalize_step_params(&step_type, params);
+        Ok(recipe)
+    }
+
+    fn updated_step_constraints_recipe(
+        &self,
+        step_id: String,
+        constraints: StepConstraints,
+    ) -> Result<Recipe, String> {
+        let mut recipe = self.recipe.clone();
+        let index = step_index(&recipe.steps, &step_id)?;
+        recipe.steps[index].constraints = StepConstraints {
+            capabilities: normalize_identifier_list(constraints.capabilities, "step capability")?,
+            conflicts_with: normalize_identifier_list(constraints.conflicts_with, "step conflict")?,
+        };
+        Ok(recipe)
+    }
+
+    fn updated_step_skip_if_recipe(
+        &self,
+        step_id: String,
+        skip_if: Vec<StepCondition>,
+    ) -> Result<Recipe, String> {
+        let mut recipe = self.recipe.clone();
+        let index = step_index(&recipe.steps, &step_id)?;
+        recipe.steps[index].skip_if = skip_if;
+        Ok(recipe)
+    }
+
+    fn updated_step_verify_recipe(
+        &self,
+        step_id: String,
+        verify: Vec<StepCondition>,
+    ) -> Result<Recipe, String> {
+        let mut recipe = self.recipe.clone();
+        let index = step_index(&recipe.steps, &step_id)?;
+        recipe.steps[index].verify = verify;
+        Ok(recipe)
+    }
+
     fn content_snapshot(&self) -> ContentSnapshot {
         ContentSnapshot {
             recipe: self.recipe.clone(),
@@ -1126,6 +1186,67 @@ fn normalize_identifier_list(values: Vec<String>, label: &str) -> Result<Vec<Str
         return Err(format!("{label}s must be unique."));
     }
     Ok(normalized)
+}
+
+fn normalize_step_params(
+    step_type: &str,
+    params: OrderedMap<ParamValue>,
+) -> OrderedMap<ParamValue> {
+    let mut normalized = params;
+    let Some(spec) = step_specs::step_spec_for(step_type) else {
+        return normalized;
+    };
+    for (param_name, default) in spec.defaults {
+        let should_remove = normalized
+            .get(&param_name)
+            .is_some_and(|value| param_value_equals_python_default(value, &default));
+        if should_remove {
+            normalized.shift_remove(&param_name);
+        }
+    }
+    normalized
+}
+
+fn param_value_equals_python_default(value: &ParamValue, default: &Value) -> bool {
+    match value {
+        ParamValue::Ref(_) => false,
+        ParamValue::Literal(value) => python_json_equal(value, default),
+    }
+}
+
+fn python_json_equal(left: &Value, right: &Value) -> bool {
+    match (left, right) {
+        (Value::Null, Value::Null) => true,
+        (Value::Bool(left), Value::Bool(right)) => left == right,
+        (Value::Bool(left), Value::Number(right)) => bool_equals_python_number(*left, right),
+        (Value::Number(left), Value::Bool(right)) => bool_equals_python_number(*right, left),
+        (Value::Number(left), Value::Number(right)) => match (left.as_f64(), right.as_f64()) {
+            (Some(left), Some(right)) => left == right,
+            _ => left == right,
+        },
+        (Value::String(left), Value::String(right)) => left == right,
+        (Value::Array(left), Value::Array(right)) => {
+            left.len() == right.len()
+                && left
+                    .iter()
+                    .zip(right.iter())
+                    .all(|(left, right)| python_json_equal(left, right))
+        }
+        (Value::Object(left), Value::Object(right)) => {
+            left.len() == right.len()
+                && left.iter().all(|(key, left_value)| {
+                    right
+                        .get(key)
+                        .is_some_and(|right_value| python_json_equal(left_value, right_value))
+                })
+        }
+        _ => false,
+    }
+}
+
+fn bool_equals_python_number(bool_value: bool, number: &serde_json::Number) -> bool {
+    let expected = if bool_value { 1.0 } else { 0.0 };
+    number.as_f64() == Some(expected)
 }
 
 fn step_index(steps: &[Step], step_id: &str) -> Result<usize, String> {

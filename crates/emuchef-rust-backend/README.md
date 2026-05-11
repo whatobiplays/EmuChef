@@ -4,7 +4,7 @@ This package is an experimental Rust backend skeleton for the EmuChef config
 editor protocol. It is standalone and runnable independently of the Tauri
 editor.
 
-Phase 6J.1 implements only:
+Phase 6J.2 implements only:
 
 - `hello`
 - `listStepSpecs`
@@ -33,6 +33,8 @@ Phase 6J.1 implements only:
 - Python-compatible non-step `applyRecipeCommand` mutations for the currently
   modeled input, artifact, and artifact group command families
 - Python-compatible step lifecycle and dependency `applyRecipeCommand`
+  mutations for the currently modeled step fields
+- Python-compatible step params and advanced internals `applyRecipeCommand`
   mutations for the currently modeled step fields
 - generated `RecipeDocumentDto.refIndex` data for the currently modeled
   authored recipe features
@@ -65,27 +67,26 @@ requests in JSONL sidecar mode only. One-shot mode remains stateless and does
 not expose persistent document session APIs.
 
 Reporting these capabilities still does not make this backend compatible with
-the Tauri editor. Phase 6J.1 reports the same ordered capability list as Phase
-6H/6I; capability parity is not semantic parity. The Rust backend is still not
-editor-ready and is not wired into Tauri.
+the Tauri editor. Phase 6J.2 reports the same ordered capability list as Phase
+6H/6I/6J.1; capability parity is not semantic parity. The Rust backend is still
+not editor-ready and is not wired into Tauri.
 There is no env var, CLI flag, config file, README path, or documented launch
-path for using this Rust backend as the Tauri editor backend in Phase 6J.1.
+path for using this Rust backend as the Tauri editor backend in Phase 6J.2.
 
 The Python backend remains the reference implementation. This Rust package is
 not a replacement backend and is not selected by the Tauri editor.
 
-This package does not implement step params commands, advanced internals
-commands, planner behavior, executor behavior, Python bundling, or production
-packaging. Its validation is a basic skeleton only; it does not perform full
-catalog-context validation, dependency graph validation, planner contract
-validation, artifact expansion validation, device checks, or executor checks.
-Semantic command parity is still incomplete outside the fixture-covered
-overview/input/artifact/artifact group/step lifecycle/step dependency surface.
-Python remains the reference implementation.
+This package does not implement planner behavior, executor behavior, Python
+bundling, or production packaging. Its validation is a basic skeleton only; it
+does not perform full catalog-context validation, dependency graph validation,
+planner contract validation, artifact expansion validation, device checks, or
+executor checks. Phase 6J.2 completes the current external Python editor command
+type inventory exposed through `applyRecipeCommand`; semantic parity is still
+fixture-covered and Python remains the reference implementation.
 
 ## Document Session Scope
 
-Phase 6J.1 document sessions are process-local JSONL sidecar state. Opening a
+Phase 6J.2 document sessions are process-local JSONL sidecar state. Opening a
 recipe loads the Phase 6E authored recipe model, emits canonical YAML, records
 that YAML as the saved baseline, and returns a Python-shaped `RecipeDocumentDto`.
 `applyRecipeCommand` supports the overview commands added in Phase 6G:
@@ -171,10 +172,10 @@ empty DTO string, and omit `description:` from canonical YAML. Step `id` and
 order, normalizes dependency ids, rejects duplicate dependency ids, and
 intentionally allows missing dependency targets because Python command
 application allows them. The Rust backend does not add planner dependency
-validation, cycle checks, or execution-order inference in Phase 6J.1.
+validation, cycle checks, or execution-order inference in Phase 6J.2.
 
-Step params and advanced internals commands remain unsupported and return
-`invalid_command` in this Rust backend slice:
+Phase 6J.2 expands `applyRecipeCommand` to the remaining current external
+Python step params and advanced internals command families:
 
 ```text
 UpdateStepParams
@@ -182,6 +183,34 @@ UpdateStepConstraints
 UpdateStepSkipIf
 UpdateStepVerify
 ```
+
+`UpdateStepParams` is a full replacement command. It preserves submitted param
+object order in the in-memory model, converts only an immediate param value with
+the exact JSON shape `{"ref":"..."}` and a string ref into an authored ref, and
+keeps nested or list-contained ref-shaped objects literal. It removes builtin
+StepSpec default literals only when the authored value compares equal under the
+Python command semantics used by the editor. It does not infer missing params,
+materialize defaults, validate ref existence, or add dependencies from refs.
+
+`UpdateStepConstraints` is a full replacement command. The JSON command shape
+uses `conflictsWith`; emitted authored YAML uses `conflicts_with`; DTOs continue
+to use `conflictsWith`. Constraint object keys other than `capabilities` and
+`conflictsWith` are rejected as `invalid_command`. Duplicate or blank-after-trim
+identifiers decode successfully when they are non-empty JSON strings, then fail
+application as `command_failed`, matching the Python command path.
+
+`UpdateStepSkipIf` and `UpdateStepVerify` are full replacement commands for
+condition lists. Each condition accepts only `type` and optional `params`;
+unknown condition types pass through; `params` defaults to an empty object and
+must be an object when present. Ref-shaped values inside condition params remain
+literal JSON/YAML values and do not affect dependencies or RefIndex.
+
+The current external Python `command_codec.py` `_DECODERS` inventory contains 30
+command types. Phase 6J.2 supports all 30 command type strings through Rust
+`applyRecipeCommand`. Internal/core-only Python command dataclasses that are not
+present in `_DECODERS` are not external sidecar commands and remain outside this
+Rust backend slice: recipe dependency list commands, provided feature list
+commands, `RenameRecipeIdCommand`, and `RenameStepCommand`.
 
 Input, artifact, and artifact group rename/delete commands perform the same
 tested safe cleanup as Python for supported immediate step params:
@@ -199,7 +228,7 @@ refs such as `steps.prepare` and `steps.prepare.outputs.extracted_path`.
 
 Nested literal ref-shaped data, `skip_if`, `verify`, unsupported step types, and
 custom params remain preserved instead of recursively rewritten. Step delete
-does not expand skip/verify or advanced internals cleanup in Phase 6J.1.
+does not expand skip/verify or advanced internals cleanup in Phase 6J.2.
 Artifact groups are not RefIndex sources; group mutations do not create
 `artifact_groups.*` refs.
 
@@ -646,11 +675,12 @@ write("phase6i_after_groups_get_ref_index.result.json", manager.get_ref_index(do
 PY
 ```
 
-Phase 6J.1 does not add Python-generated result goldens. Its Rust tests mirror
-the verified Python command codec and document behavior directly, with comments
-pointing to the Python source/tests for non-obvious rules such as missing
+Phase 6J.1 and Phase 6J.2 do not add Python-generated result goldens. Their Rust
+tests mirror the verified Python command codec and document behavior directly,
+with comments or test names covering non-obvious rules such as missing
 dependency target allowance, `AddStep` empty param initialization, description
-clearing, and delete-step cleanup.
+clearing, delete-step cleanup, params-only ref lifting, StepSpec default
+omission, constraints application failures, and literal condition params.
 
 ## One-Shot Mode
 
