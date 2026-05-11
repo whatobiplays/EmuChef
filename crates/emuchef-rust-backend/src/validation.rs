@@ -8,6 +8,7 @@ use std::path::Path;
 
 use serde_json::{json, Value};
 
+use crate::model::Recipe;
 use crate::yaml::{self, LoadErrorKind, LoadIssue, RecipeLoadError};
 
 pub fn validate_recipe_path_result(path: impl AsRef<Path>, authored_root_provided: bool) -> Value {
@@ -19,16 +20,9 @@ pub fn validate_recipe_path_result(path: impl AsRef<Path>, authored_root_provide
     match yaml::load_yaml_mapping(path) {
         Ok(raw) => match yaml::parse_recipe_mapping(&raw, path) {
             Ok(recipe) => {
-                if !authored_root_provided {
-                    warnings.push(limited_context_warning(
-                        &file,
-                        Some("recipe"),
-                        Some(recipe.id.as_str()),
-                    ));
-                }
-                if let Some(issue) = yaml::unsupported_step_issue(&recipe) {
-                    errors.push(issue_to_diagnostic("error", &file, &issue));
-                }
+                return json!({
+                    "diagnostics": diagnostics_for_loaded_recipe(&file, &recipe, authored_root_provided)
+                });
             }
             Err(error) => {
                 if !authored_root_provided {
@@ -47,6 +41,37 @@ pub fn validate_recipe_path_result(path: impl AsRef<Path>, authored_root_provide
 
     let diagnostics: Vec<Value> = warnings.into_iter().chain(errors).collect();
     json!({ "diagnostics": diagnostics })
+}
+
+pub fn validate_loaded_recipe_result(
+    recipe: &Recipe,
+    path: impl AsRef<Path>,
+    authored_root_provided: bool,
+) -> Value {
+    let file = yaml::resolved_path_string(path.as_ref());
+    json!({ "diagnostics": diagnostics_for_loaded_recipe(&file, recipe, authored_root_provided) })
+}
+
+fn diagnostics_for_loaded_recipe(
+    file: &str,
+    recipe: &Recipe,
+    authored_root_provided: bool,
+) -> Vec<Value> {
+    let mut warnings = Vec::new();
+    let mut errors = Vec::new();
+
+    if !authored_root_provided {
+        warnings.push(limited_context_warning(
+            file,
+            Some("recipe"),
+            Some(recipe.id.as_str()),
+        ));
+    }
+    if let Some(issue) = yaml::unsupported_step_issue(recipe) {
+        errors.push(issue_to_diagnostic("error", file, &issue));
+    }
+
+    warnings.into_iter().chain(errors).collect()
 }
 
 fn limited_context_warning(

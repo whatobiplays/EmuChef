@@ -16,6 +16,11 @@ pub const CAPABILITIES: &[&str] = &[
     "getDocument",
     "saveRecipe",
     "closeDocument",
+    "applyRecipeCommand",
+    "undo",
+    "redo",
+    "emitYaml",
+    "validate",
 ];
 
 /// Return backend compatibility metadata for the `hello` request.

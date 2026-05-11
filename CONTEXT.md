@@ -358,14 +358,17 @@ shapes.
 
 `crates/emuchef-rust-backend` is an experimental standalone Rust backend
 skeleton for migration work. It currently implements `hello`, response
-envelopes, one-shot requests, JSON Lines sidecar requests, and `listStepSpecs`.
-Its `hello` response reports only `["listStepSpecs"]`, which does not make it
-compatible with the Tauri editor because required document capabilities are
-missing. Rust `listStepSpecs` uses a temporary Python-generated static fixture
-for StepSpec DTO parity; Python remains the reference implementation until a
-Rust backend replacement is explicitly approved. The fixture-backed source is
-scaffolding only and should be replaced with Rust-native schema builders before
-planner or executor behavior is ported.
+envelopes, one-shot requests, JSON Lines sidecar requests, `listStepSpecs`,
+path-based recipe YAML emit/validation, sidecar document open/get/save/close,
+sidecar document `emitYaml`/`validate`, snapshot undo/redo, and the
+`SetOverviewField` command for recipe `name` and `description`. Its `hello`
+response reports only capabilities implemented in the crate and still does not
+make it compatible with the Tauri editor because `getRefIndex` is missing. Rust
+`listStepSpecs` uses a temporary Python-generated static fixture for StepSpec DTO
+parity; Python remains the reference implementation until a Rust backend
+replacement is explicitly approved. The fixture-backed source is scaffolding
+only and should be replaced with Rust-native schema builders before planner or
+executor behavior is ported.
 
 The frontend passes `authoredRoot: null` for Phase 3A. Explicit authored-root and
 workspace selection are deferred editor migration work.

@@ -70,6 +70,11 @@ fn handle_validated_sidecar_object(
         "openRecipe" => handle_open_recipe(object, sessions),
         "getDocument" => handle_get_document(object, sessions),
         "saveRecipe" => handle_save_recipe(object, sessions),
+        "applyRecipeCommand" => handle_apply_recipe_command(object, sessions),
+        "undo" => handle_undo(object, sessions),
+        "redo" => handle_redo(object, sessions),
+        "emitYaml" => handle_emit_yaml(object, sessions),
+        "validate" => handle_validate(object, sessions),
         "closeDocument" => handle_close_document(object, sessions),
         unknown => Err(ApiError::invalid_request(format!(
             "Unknown request type: {unknown}"
@@ -163,6 +168,54 @@ fn handle_save_recipe(
     let payload = payload_object(object)?;
     let document_id = required_document_id(payload)?;
     Ok(envelope::success(sessions.save_recipe(document_id)?))
+}
+
+fn handle_apply_recipe_command(
+    object: &Map<String, Value>,
+    sessions: &mut DocumentSessionManager,
+) -> Result<Value, ApiError> {
+    let payload = payload_object(object)?;
+    let document_id = required_document_id(payload)?;
+    let command = payload.get("command").unwrap_or(&Value::Null);
+    Ok(envelope::success(
+        sessions.apply_recipe_command(document_id, command)?,
+    ))
+}
+
+fn handle_undo(
+    object: &Map<String, Value>,
+    sessions: &mut DocumentSessionManager,
+) -> Result<Value, ApiError> {
+    let payload = payload_object(object)?;
+    let document_id = required_document_id(payload)?;
+    Ok(envelope::success(sessions.undo(document_id)?))
+}
+
+fn handle_redo(
+    object: &Map<String, Value>,
+    sessions: &mut DocumentSessionManager,
+) -> Result<Value, ApiError> {
+    let payload = payload_object(object)?;
+    let document_id = required_document_id(payload)?;
+    Ok(envelope::success(sessions.redo(document_id)?))
+}
+
+fn handle_emit_yaml(
+    object: &Map<String, Value>,
+    sessions: &mut DocumentSessionManager,
+) -> Result<Value, ApiError> {
+    let payload = payload_object(object)?;
+    let document_id = required_document_id(payload)?;
+    Ok(envelope::success(sessions.emit_yaml(document_id)?))
+}
+
+fn handle_validate(
+    object: &Map<String, Value>,
+    sessions: &mut DocumentSessionManager,
+) -> Result<Value, ApiError> {
+    let payload = payload_object(object)?;
+    let document_id = required_document_id(payload)?;
+    Ok(envelope::success(sessions.validate(document_id)?))
 }
 
 fn handle_close_document(

@@ -1,4 +1,4 @@
-//! JSON DTO projection for Phase 6F recipe documents.
+//! JSON DTO projection for Phase 6G recipe documents.
 //!
 //! These projections mirror the Python editor API shape for the authored recipe
 //! fields modeled in Phase 6E. Fields outside that model are intentionally left
@@ -111,7 +111,7 @@ fn map_values<'a>(values: impl IntoIterator<Item = (&'a String, Value)>) -> Valu
 }
 
 fn empty_ref_index_to_dto() -> Value {
-    // Temporary Phase 6F placeholder. Phase 6H will replace this with a real
+    // Temporary placeholder. Phase 6H will replace this with a real
     // RefIndex implementation once ref derivation semantics are ported.
     json!({
         "inputRefs": [],

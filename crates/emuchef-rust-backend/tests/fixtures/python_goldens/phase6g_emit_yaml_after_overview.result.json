@@ -1,0 +1,3 @@
+{
+  "yaml": "schema_version: 1\nkind: recipe\nid: phase6g.golden\nname: Python Golden Name\nrecipe_dependencies: []\nprovides:\n  features: []\ninputs: {}\nartifacts: {}\nartifact_groups: {}\nsteps: []\n"
+}

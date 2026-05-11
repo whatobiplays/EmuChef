@@ -6,6 +6,8 @@ use serde_json::{json, Value};
 #[serde(rename_all = "snake_case")]
 pub enum ApiErrorCode {
     InvalidRequest,
+    InvalidCommand,
+    CommandFailed,
     LoadFailed,
     SaveFailed,
     UnknownDocument,
@@ -35,6 +37,24 @@ impl ApiError {
     pub fn invalid_request_with_details(message: impl Into<String>, details: Value) -> Self {
         Self {
             code: ApiErrorCode::InvalidRequest,
+            message: message.into(),
+            details,
+        }
+    }
+
+    /// Build an `invalid_command` error with Python-compatible structured details.
+    pub fn invalid_command_with_details(message: impl Into<String>, details: Value) -> Self {
+        Self {
+            code: ApiErrorCode::InvalidCommand,
+            message: message.into(),
+            details,
+        }
+    }
+
+    /// Build a `command_failed` error for command execution failures.
+    pub fn command_failed(message: impl Into<String>, details: Value) -> Self {
+        Self {
+            code: ApiErrorCode::CommandFailed,
             message: message.into(),
             details,
         }

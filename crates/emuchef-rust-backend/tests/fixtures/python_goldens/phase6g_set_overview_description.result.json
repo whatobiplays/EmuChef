@@ -1,0 +1,38 @@
+{
+  "commandResult": {
+    "changed": true
+  },
+  "document": {
+    "authoredRoot": "<authoredRoot>",
+    "canRedo": false,
+    "canUndo": true,
+    "diagnostics": [],
+    "dirty": true,
+    "documentId": "<documentId>",
+    "path": "<path>",
+    "recipe": {
+      "artifactGroups": {},
+      "artifacts": {},
+      "description": "Python Golden Description",
+      "id": "phase6g.golden",
+      "inputs": {},
+      "kind": "recipe",
+      "name": "Python Golden Name",
+      "provides": {
+        "features": []
+      },
+      "recipeDependencies": [],
+      "schemaVersion": 1,
+      "steps": []
+    },
+    "refIndex": {
+      "allRefs": [],
+      "artifactRefs": [],
+      "candidates": [],
+      "inputRefs": [],
+      "stepOutputRefs": [],
+      "stepRefs": []
+    },
+    "yaml": "schema_version: 1\nkind: recipe\nid: phase6g.golden\nname: Python Golden Name\ndescription: Python Golden Description\nrecipe_dependencies: []\nprovides:\n  features: []\ninputs: {}\nartifacts: {}\nartifact_groups: {}\nsteps: []\n"
+  }
+}

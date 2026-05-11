@@ -4,7 +4,7 @@ This package is an experimental Rust backend skeleton for the EmuChef config
 editor protocol. It is standalone and runnable independently of the Tauri
 editor.
 
-Phase 6F implements only:
+Phase 6G implements only:
 
 - `hello`
 - `listStepSpecs`
@@ -14,6 +14,11 @@ Phase 6F implements only:
 - sidecar-only `getDocument`
 - sidecar-only `saveRecipe`
 - sidecar-only `closeDocument`
+- sidecar-only `applyRecipeCommand`
+- sidecar-only `undo`
+- sidecar-only `redo`
+- sidecar-only `emitYaml`
+- sidecar-only `validate`
 - stable success and error envelopes
 - structured API errors
 - one-shot JSON request handling
@@ -21,6 +26,9 @@ Phase 6F implements only:
 - authored recipe YAML load/emit skeletons for focused Phase 6E fixtures
 - basic authored recipe validation diagnostics for focused Phase 6E fixtures
 - in-memory sidecar document sessions backed by the authored recipe model
+- snapshot undo/redo for open document sessions
+- the Python-compatible `SetOverviewField` command for recipe `name` and
+  `description`
 
 It reports only capabilities that are implemented in this crate:
 
@@ -34,46 +42,78 @@ It reports only capabilities that are implemented in this crate:
     "openRecipe",
     "getDocument",
     "saveRecipe",
-    "closeDocument"
+    "closeDocument",
+    "applyRecipeCommand",
+    "undo",
+    "redo",
+    "emitYaml",
+    "validate"
   ]
 }
 ```
 
-Reporting `openRecipe`, `getDocument`, `saveRecipe`, and `closeDocument` means
-the Rust backend supports those requests in JSONL sidecar mode only. One-shot
-mode remains stateless and does not expose persistent document session APIs.
+Reporting document-session capabilities means the Rust backend supports those
+requests in JSONL sidecar mode only. One-shot mode remains stateless and does
+not expose persistent document session APIs.
 
 Reporting these capabilities still does not make this backend compatible with
 the Tauri editor. The current Tauri compatibility gate still rejects it because
-editor capabilities such as `applyRecipeCommand`, `undo`, `redo`, `validate`,
-`emitYaml`, and `getRefIndex` are missing.
+`getRefIndex` is missing.
 
 The Python backend remains the reference implementation. This Rust package is
 not a replacement backend and is not selected by the Tauri editor.
 
-This package does not apply editor commands, expose undo/redo request handling,
-build a real ref index, run planner behavior, run executor behavior, bundle
-Python, or provide production packaging. Its validation is a basic skeleton only;
-it does not perform full catalog-context validation, dependency graph validation,
-planner contract validation, artifact expansion validation, device checks, or
-executor checks. Python remains the reference implementation.
+This package does not implement input commands, artifact commands, artifact
+group commands, step lifecycle commands, step dependency commands, step params
+commands, advanced internals commands, safe-delete behavior, a real ref index,
+planner behavior, executor behavior, Python bundling, or production packaging.
+Its validation is a basic skeleton only; it does not perform full
+catalog-context validation, dependency graph validation, planner contract
+validation, artifact expansion validation, device checks, or executor checks.
+Python remains the reference implementation.
 
 ## Document Session Scope
 
-Phase 6F document sessions are process-local JSONL sidecar state. Opening a
+Phase 6G document sessions are process-local JSONL sidecar state. Opening a
 recipe loads the Phase 6E authored recipe model, emits canonical YAML, records
 that YAML as the saved baseline, and returns a Python-shaped `RecipeDocumentDto`.
-Because mutation commands are not implemented yet, documents normally remain
-`dirty: false`.
+`applyRecipeCommand` supports only:
+
+```json
+{"type":"SetOverviewField","field":"name","value":"New Name"}
+{"type":"SetOverviewField","field":"description","value":"New description"}
+{"type":"SetOverviewField","field":"description","value":null}
+```
+
+Recipe `id`, `kind`, `schemaVersion`, and `schema_version` are read-only in this
+Phase 6G slice and are rejected. `description: null` matches Python behavior:
+it clears the description, projects the DTO description as an empty string, and
+omits the top-level `description:` key from canonical YAML. Empty or
+whitespace-only `description` values also clear the field. Empty or
+whitespace-only `name` values fail command execution.
+
+Changing commands regenerate canonical YAML first, then rerun the Phase 6E basic
+validation skeleton for the current in-memory recipe. No-op commands return
+`changed: false` and do not push undo history. Invalid commands leave the
+stored document unchanged.
 
 `saveRecipe` writes the current canonical YAML back to the document's current
 path, updates the saved baseline after a successful write, reruns the Phase 6E
-basic validation skeleton, and returns the current document DTO. Save tests must
-use temporary copies of fixtures; do not point save tests at checked-in fixture
-files.
+basic validation skeleton, preserves undo/redo stacks, and returns the current
+document DTO. Save tests must use temporary copies of fixtures; do not point save
+tests at checked-in fixture files.
 
-`canUndo` and `canRedo` are always `false` because command history is not exposed
-in Phase 6F. `refIndex` is a temporary empty Python-compatible placeholder:
+Undo/redo use content snapshots of the recipe model, current canonical YAML, and
+diagnostics. The saved baseline is not part of content snapshots; dirty state is
+always recalculated from the current canonical YAML versus the most recent
+opened/saved baseline. Undo and redo on empty stacks match Python behavior by
+returning `changed: false` success responses with the current document.
+
+`emitYaml` returns the current in-memory canonical YAML for an open document.
+`validate` reruns the Phase 6E basic validation skeleton for the current
+in-memory recipe and returns diagnostics only.
+
+`refIndex` is a temporary empty Python-compatible placeholder:
 
 ```json
 {
@@ -220,10 +260,107 @@ PY
 The emitted YAML goldens store only the Python result string. The validation
 goldens store only the Python result object, not the outer API envelope.
 
-Phase 6F document sessions are covered by Rust integration tests rather than new
-Python open-document goldens. Python currently returns a populated ref index,
-while Phase 6F intentionally returns an empty structural placeholder until the
-Rust ref index is ported.
+Phase 6G document sessions are covered by Rust integration tests and focused
+Python-generated result goldens:
+
+```text
+crates/emuchef-rust-backend/tests/fixtures/python_goldens/phase6g_*.result.json
+```
+
+Those goldens cover overview name changes, description changes,
+`description:null`, no-op commands, empty undo/redo, undo/redo after mutation,
+open-document `emitYaml`, and open-document `validate`. They normalize
+`documentId`, paths, authored roots, and diagnostic files. Python currently
+returns a populated ref index for richer recipes, while Phase 6G intentionally
+returns an empty structural placeholder until the Rust ref index is ported.
+
+Regenerate the Phase 6G goldens from the repo root with:
+
+```bash
+PYTHONPATH=src:tests uv run --no-project --native-tls --with PyYAML python - <<'PY'
+from __future__ import annotations
+import json
+from pathlib import Path
+from tempfile import TemporaryDirectory
+from support import build_authored_tree
+from emuchef_editor.api.session import DocumentSessionManager
+
+fixtures = Path("crates/emuchef-rust-backend/tests/fixtures")
+goldens = fixtures / "python_goldens"
+goldens.mkdir(parents=True, exist_ok=True)
+
+recipe = {
+    "schema_version": 1,
+    "kind": "recipe",
+    "id": "phase6g.golden",
+    "name": "Phase 6G Golden",
+    "description": "Original description.",
+    "recipe_dependencies": [],
+    "provides": {"features": []},
+    "inputs": {},
+    "artifacts": {},
+    "artifact_groups": {},
+    "steps": [],
+}
+
+def normalize(value):
+    if isinstance(value, dict):
+        out = {}
+        for key, item in value.items():
+            if key == "documentId":
+                out[key] = "<documentId>"
+            elif key == "path":
+                out[key] = "<path>"
+            elif key == "authoredRoot":
+                out[key] = "<authoredRoot>" if item is not None else None
+            elif key == "file":
+                out[key] = "<path>" if item is not None else None
+            else:
+                out[key] = normalize(item)
+        return out
+    if isinstance(value, list):
+        return [normalize(item) for item in value]
+    return value
+
+with TemporaryDirectory() as tmp:
+    root = build_authored_tree(Path(tmp), recipes=[recipe])
+    path = root / "recipes" / "phase6g_golden.yaml"
+    manager = DocumentSessionManager()
+    opened = manager.open_recipe(path, authored_root=root)
+    document_id = opened["result"]["document"]["documentId"]
+
+    responses = {
+        "phase6g_empty_undo.result.json": manager.undo(document_id)["result"],
+        "phase6g_empty_redo.result.json": manager.redo(document_id)["result"],
+        "phase6g_set_overview_name.result.json": manager.apply_recipe_command(
+            document_id,
+            {"type": "SetOverviewField", "field": "name", "value": "Python Golden Name"},
+        )["result"],
+        "phase6g_set_overview_description.result.json": manager.apply_recipe_command(
+            document_id,
+            {"type": "SetOverviewField", "field": "description", "value": "Python Golden Description"},
+        )["result"],
+        "phase6g_set_overview_description_null.result.json": manager.apply_recipe_command(
+            document_id,
+            {"type": "SetOverviewField", "field": "description", "value": None},
+        )["result"],
+        "phase6g_set_overview_noop.result.json": manager.apply_recipe_command(
+            document_id,
+            {"type": "SetOverviewField", "field": "name", "value": "Python Golden Name"},
+        )["result"],
+        "phase6g_undo_after_overview.result.json": manager.undo(document_id)["result"],
+        "phase6g_redo_after_overview.result.json": manager.redo(document_id)["result"],
+        "phase6g_emit_yaml_after_overview.result.json": manager.emit_yaml(document_id)["result"],
+        "phase6g_validate_after_overview.result.json": manager.validate(document_id)["result"],
+    }
+
+for filename, result in responses.items():
+    (goldens / filename).write_text(
+        json.dumps(normalize(result), indent=2, sort_keys=True) + "\n",
+        encoding="utf-8",
+    )
+PY
+```
 
 ## One-Shot Mode
 
@@ -239,7 +376,7 @@ cargo run --manifest-path crates/emuchef-rust-backend/Cargo.toml -- '{"type":"va
 Expected `hello` stdout is one JSON response envelope:
 
 ```json
-{"ok":true,"result":{"protocolVersion":1,"capabilities":["listStepSpecs","emitRecipeYamlFromPath","validateRecipePath","openRecipe","getDocument","saveRecipe","closeDocument"]}}
+{"ok":true,"result":{"protocolVersion":1,"capabilities":["listStepSpecs","emitRecipeYamlFromPath","validateRecipePath","openRecipe","getDocument","saveRecipe","closeDocument","applyRecipeCommand","undo","redo","emitYaml","validate"]}}
 ```
 
 `listStepSpecs` returns `{"stepSpecs":[...]}` inside the success envelope.
@@ -260,7 +397,7 @@ printf '%s\n' '{"id":"validate-1","type":"validateRecipePath","payload":{"path":
 Expected `hello` stdout is one JSON response line:
 
 ```json
-{"id":"hello-1","ok":true,"result":{"protocolVersion":1,"capabilities":["listStepSpecs","emitRecipeYamlFromPath","validateRecipePath","openRecipe","getDocument","saveRecipe","closeDocument"]}}
+{"id":"hello-1","ok":true,"result":{"protocolVersion":1,"capabilities":["listStepSpecs","emitRecipeYamlFromPath","validateRecipePath","openRecipe","getDocument","saveRecipe","closeDocument","applyRecipeCommand","undo","redo","emitYaml","validate"]}}
 ```
 
 Session APIs are sidecar-only. A practical manual smoke is:
@@ -272,16 +409,18 @@ cargo run --manifest-path crates/emuchef-rust-backend/Cargo.toml -- --sidecar
 ```
 
 2. Paste an `openRecipe` JSON line, then copy the returned `documentId` into
-   `getDocument`, `saveRecipe`, and `closeDocument` JSON lines before sending
-   EOF. Use a temporary copy of a fixture if the smoke includes `saveRecipe`:
+   `applyRecipeCommand`, `undo`, `redo`, `emitYaml`, `validate`, `saveRecipe`,
+   `getDocument`, or `closeDocument` JSON lines before sending EOF. Use a
+   temporary copy of a fixture if the smoke includes `saveRecipe`:
 
 ```json
 {"id":"open-1","type":"openRecipe","payload":{"path":"crates/emuchef-rust-backend/tests/fixtures/recipes/minimal_recipe.yaml","authoredRoot":null}}
 ```
 
 The automated Rust integration tests keep the sidecar process alive and cover
-`openRecipe`, `getDocument`, `saveRecipe`, and `closeDocument` without adding
-any production test-helper command.
+`openRecipe`, `getDocument`, `applyRecipeCommand`, `undo`, `redo`, `emitYaml`,
+`validate`, `saveRecipe`, and `closeDocument` without adding any production
+test-helper command.
 
 Request-level errors are returned as API envelopes and do not terminate the
 sidecar:

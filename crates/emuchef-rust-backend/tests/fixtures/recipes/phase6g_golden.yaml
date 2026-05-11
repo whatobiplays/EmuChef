@@ -1,0 +1,12 @@
+schema_version: 1
+kind: recipe
+id: phase6g.golden
+name: Phase 6G Golden
+description: Original description.
+recipe_dependencies: []
+provides:
+  features: []
+inputs: {}
+artifacts: {}
+artifact_groups: {}
+steps: []

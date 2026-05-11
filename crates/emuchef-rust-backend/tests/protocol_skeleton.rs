@@ -114,22 +114,19 @@ fn assert_hello_result(result: &Value) {
             "openRecipe",
             "getDocument",
             "saveRecipe",
-            "closeDocument"
+            "closeDocument",
+            "applyRecipeCommand",
+            "undo",
+            "redo",
+            "emitYaml",
+            "validate"
         ])
     );
     assert!(!result["capabilities"]
         .as_array()
         .unwrap()
         .contains(&json!("hello")));
-    for unimplemented in [
-        "applyRecipeCommand",
-        "undo",
-        "redo",
-        "emitYaml",
-        "validate",
-        "getRefIndex",
-        "saveRecipeAs",
-    ] {
+    for unimplemented in ["getRefIndex", "saveRecipeAs"] {
         assert!(
             !result["capabilities"]
                 .as_array()

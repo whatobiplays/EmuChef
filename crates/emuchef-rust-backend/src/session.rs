@@ -1,4 +1,4 @@
-//! Sidecar-only document session manager for Phase 6F.
+//! Sidecar-only document session manager for Phase 6G.
 //!
 //! Session state is intentionally in-memory and process-local. It persists
 //! across JSONL requests handled by one sidecar process and is never shared with
@@ -7,6 +7,7 @@
 use indexmap::IndexMap;
 use serde_json::{json, Value};
 
+use crate::commands;
 use crate::document::RecipeDocument;
 use crate::dto;
 use crate::errors::ApiError;
@@ -53,6 +54,54 @@ impl DocumentSessionManager {
         Ok(json!({
             "document": dto::document_to_dto(document, document_id)
         }))
+    }
+
+    pub fn apply_recipe_command(
+        &mut self,
+        document_id: &str,
+        command: &Value,
+    ) -> Result<Value, ApiError> {
+        let document = self.document_mut(document_id)?;
+        let command = commands::decode_recipe_command(command)?;
+        let changed = document.apply_command(command).map_err(|error| {
+            ApiError::command_failed(
+                format!("Command failed: {error}"),
+                json!({ "documentId": document_id }),
+            )
+        })?;
+        Ok(json!({
+            "commandResult": {"changed": changed},
+            "document": dto::document_to_dto(document, document_id),
+        }))
+    }
+
+    pub fn undo(&mut self, document_id: &str) -> Result<Value, ApiError> {
+        let document = self.document_mut(document_id)?;
+        let changed = document.undo();
+        Ok(json!({
+            "commandResult": {"changed": changed},
+            "document": dto::document_to_dto(document, document_id),
+        }))
+    }
+
+    pub fn redo(&mut self, document_id: &str) -> Result<Value, ApiError> {
+        let document = self.document_mut(document_id)?;
+        let changed = document.redo();
+        Ok(json!({
+            "commandResult": {"changed": changed},
+            "document": dto::document_to_dto(document, document_id),
+        }))
+    }
+
+    pub fn emit_yaml(&self, document_id: &str) -> Result<Value, ApiError> {
+        let document = self.document(document_id)?;
+        Ok(json!({ "yaml": document.yaml() }))
+    }
+
+    pub fn validate(&mut self, document_id: &str) -> Result<Value, ApiError> {
+        let document = self.document_mut(document_id)?;
+        document.validate();
+        Ok(json!({ "diagnostics": document.diagnostics() }))
     }
 
     pub fn close_document(&mut self, document_id: &str) -> Result<Value, ApiError> {
