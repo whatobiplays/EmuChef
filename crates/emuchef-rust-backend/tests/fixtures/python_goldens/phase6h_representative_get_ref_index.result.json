@@ -1,0 +1,35 @@
+{
+  "refIndex": {
+    "allRefs": [
+      "inputs.bios_source_dir",
+      "steps.copy_bios_dir",
+      "steps.copy_bios_dir.outputs.copied_paths"
+    ],
+    "artifactRefs": [],
+    "candidates": [
+      {
+        "label": "Input \u00b7 bios_source_dir",
+        "ref": "inputs.bios_source_dir",
+        "sourceId": "bios_source_dir",
+        "sourceKind": "input",
+        "valueType": "directory_path"
+      },
+      {
+        "label": "Step Output \u00b7 copy_bios_dir.copied_paths",
+        "ref": "steps.copy_bios_dir.outputs.copied_paths",
+        "sourceId": "copy_bios_dir",
+        "sourceKind": "step_output",
+        "valueType": "path_list"
+      }
+    ],
+    "inputRefs": [
+      "inputs.bios_source_dir"
+    ],
+    "stepOutputRefs": [
+      "steps.copy_bios_dir.outputs.copied_paths"
+    ],
+    "stepRefs": [
+      "steps.copy_bios_dir"
+    ]
+  }
+}

@@ -21,6 +21,7 @@ pub const CAPABILITIES: &[&str] = &[
     "redo",
     "emitYaml",
     "validate",
+    "getRefIndex",
 ];
 
 /// Return backend compatibility metadata for the `hello` request.

@@ -1,0 +1,118 @@
+{
+  "commandResult": {
+    "changed": true
+  },
+  "document": {
+    "authoredRoot": "<authoredRoot>",
+    "canRedo": false,
+    "canUndo": true,
+    "diagnostics": [],
+    "dirty": true,
+    "documentId": "<documentId>",
+    "path": "<path>",
+    "recipe": {
+      "artifactGroups": {},
+      "artifacts": {},
+      "description": "Copy BIOS files into shared storage.",
+      "id": "phase6e.copy_bios",
+      "inputs": {
+        "bios_source_dir": {
+          "default": null,
+          "description": "Folder containing BIOS files to copy.",
+          "id": "bios_source_dir",
+          "label": "BIOS Folder",
+          "metadata": {
+            "tags": [
+              "byo",
+              "bios"
+            ]
+          },
+          "multiple": false,
+          "required": true,
+          "role": "bios",
+          "type": "directory",
+          "validation": {
+            "allowedExtensions": [],
+            "mustExist": true,
+            "pathKind": "directory"
+          }
+        }
+      },
+      "kind": "recipe",
+      "name": "Phase 6H Renamed",
+      "provides": {
+        "features": [
+          "bios_copy"
+        ]
+      },
+      "recipeDependencies": [],
+      "schemaVersion": 1,
+      "steps": [
+        {
+          "constraints": {
+            "capabilities": [
+              "shared_storage_write"
+            ],
+            "conflictsWith": []
+          },
+          "dependencies": [],
+          "description": "",
+          "id": "copy_bios_dir",
+          "name": "Copy BIOS folder",
+          "params": {
+            "copy_policy": "sync",
+            "dest": "/sdcard/RetroArch/system",
+            "source": {
+              "ref": "inputs.bios_source_dir"
+            }
+          },
+          "skipIf": [],
+          "type": "copy_files",
+          "userToggleable": true,
+          "verify": [
+            {
+              "params": {
+                "path": "<path>"
+              },
+              "type": "path_exists"
+            }
+          ]
+        }
+      ]
+    },
+    "refIndex": {
+      "allRefs": [
+        "inputs.bios_source_dir",
+        "steps.copy_bios_dir",
+        "steps.copy_bios_dir.outputs.copied_paths"
+      ],
+      "artifactRefs": [],
+      "candidates": [
+        {
+          "label": "Input \u00b7 bios_source_dir",
+          "ref": "inputs.bios_source_dir",
+          "sourceId": "bios_source_dir",
+          "sourceKind": "input",
+          "valueType": "directory_path"
+        },
+        {
+          "label": "Step Output \u00b7 copy_bios_dir.copied_paths",
+          "ref": "steps.copy_bios_dir.outputs.copied_paths",
+          "sourceId": "copy_bios_dir",
+          "sourceKind": "step_output",
+          "valueType": "path_list"
+        }
+      ],
+      "inputRefs": [
+        "inputs.bios_source_dir"
+      ],
+      "stepOutputRefs": [
+        "steps.copy_bios_dir.outputs.copied_paths"
+      ],
+      "stepRefs": [
+        "steps.copy_bios_dir"
+      ]
+    },
+    "yaml": "schema_version: 1\nkind: recipe\nid: phase6e.copy_bios\nname: Phase 6H Renamed\ndescription: Copy BIOS files into shared storage.\nrecipe_dependencies: []\nprovides:\n  features:\n  - bios_copy\ninputs:\n  bios_source_dir:\n    type: directory\n    role: bios\n    label: BIOS Folder\n    description: Folder containing BIOS files to copy.\n    required: true\n    multiple: false\n    validation:\n      must_exist: true\n      allowed_extensions: []\n      path_kind: directory\n    default: null\n    metadata:\n      tags:\n      - byo\n      - bios\nartifacts: {}\nartifact_groups: {}\nsteps:\n- id: copy_bios_dir\n  type: copy_files\n  name: Copy BIOS folder\n  user_toggleable: true\n  dependencies: []\n  constraints:\n    capabilities:\n    - shared_storage_write\n    conflicts_with: []\n  skip_if: []\n  params:\n    source:\n      ref: inputs.bios_source_dir\n    dest: /sdcard/RetroArch/system\n    copy_policy: sync\n  verify:\n  - type: path_exists\n    params:\n      path: /sdcard/RetroArch/system\n"
+  }
+}

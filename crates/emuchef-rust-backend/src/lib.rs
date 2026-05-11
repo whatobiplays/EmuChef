@@ -4,7 +4,8 @@
 //! Phases 6C through 6G: request validation, response envelopes, one-shot
 //! invocation, JSONL sidecar invocation, the `hello` handshake, static StepSpec
 //! DTO parity for `listStepSpecs`, focused authored recipe YAML
-//! load/emit/validation skeletons, and Phase 6G sidecar document sessions.
+//! load/emit/validation skeletons, sidecar document sessions, overview commands,
+//! undo/redo, and fixture-scoped RefIndex generation.
 
 pub mod commands;
 pub mod document;
@@ -15,6 +16,7 @@ pub mod jsonl;
 pub mod model;
 pub mod one_shot;
 pub mod protocol;
+pub mod ref_index;
 pub mod request;
 pub mod session;
 pub mod step_specs;

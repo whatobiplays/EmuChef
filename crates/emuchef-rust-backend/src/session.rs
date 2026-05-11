@@ -1,4 +1,4 @@
-//! Sidecar-only document session manager for Phase 6G.
+//! Sidecar-only document session manager for the experimental Rust backend.
 //!
 //! Session state is intentionally in-memory and process-local. It persists
 //! across JSONL requests handled by one sidecar process and is never shared with
@@ -11,6 +11,7 @@ use crate::commands;
 use crate::document::RecipeDocument;
 use crate::dto;
 use crate::errors::ApiError;
+use crate::ref_index;
 
 #[derive(Debug, Default)]
 pub struct DocumentSessionManager {
@@ -102,6 +103,13 @@ impl DocumentSessionManager {
         let document = self.document_mut(document_id)?;
         document.validate();
         Ok(json!({ "diagnostics": document.diagnostics() }))
+    }
+
+    pub fn get_ref_index(&self, document_id: &str) -> Result<Value, ApiError> {
+        let document = self.document(document_id)?;
+        Ok(json!({
+            "refIndex": ref_index::ref_index_to_dto(document.recipe())
+        }))
     }
 
     pub fn close_document(&mut self, document_id: &str) -> Result<Value, ApiError> {

@@ -4,7 +4,7 @@ This package is an experimental Rust backend skeleton for the EmuChef config
 editor protocol. It is standalone and runnable independently of the Tauri
 editor.
 
-Phase 6G implements only:
+Phase 6H implements only:
 
 - `hello`
 - `listStepSpecs`
@@ -19,6 +19,7 @@ Phase 6G implements only:
 - sidecar-only `redo`
 - sidecar-only `emitYaml`
 - sidecar-only `validate`
+- sidecar-only `getRefIndex`
 - stable success and error envelopes
 - structured API errors
 - one-shot JSON request handling
@@ -29,6 +30,8 @@ Phase 6G implements only:
 - snapshot undo/redo for open document sessions
 - the Python-compatible `SetOverviewField` command for recipe `name` and
   `description`
+- generated `RecipeDocumentDto.refIndex` data for the currently modeled
+  authored recipe features
 
 It reports only capabilities that are implemented in this crate:
 
@@ -47,7 +50,8 @@ It reports only capabilities that are implemented in this crate:
     "undo",
     "redo",
     "emitYaml",
-    "validate"
+    "validate",
+    "getRefIndex"
   ]
 }
 ```
@@ -57,24 +61,28 @@ requests in JSONL sidecar mode only. One-shot mode remains stateless and does
 not expose persistent document session APIs.
 
 Reporting these capabilities still does not make this backend compatible with
-the Tauri editor. The current Tauri compatibility gate still rejects it because
-`getRefIndex` is missing.
+the Tauri editor. Phase 6H may report the same required protocol capabilities as
+the current Tauri editor gate expects, but capability parity is not semantic
+parity. The Rust backend is still not editor-ready and is not wired into Tauri.
+There is no env var, CLI flag, config file, README path, or documented launch
+path for using this Rust backend as the Tauri editor backend in Phase 6H.
 
 The Python backend remains the reference implementation. This Rust package is
 not a replacement backend and is not selected by the Tauri editor.
 
 This package does not implement input commands, artifact commands, artifact
 group commands, step lifecycle commands, step dependency commands, step params
-commands, advanced internals commands, safe-delete behavior, a real ref index,
-planner behavior, executor behavior, Python bundling, or production packaging.
-Its validation is a basic skeleton only; it does not perform full
-catalog-context validation, dependency graph validation, planner contract
-validation, artifact expansion validation, device checks, or executor checks.
-Python remains the reference implementation.
+commands, advanced internals commands, safe-delete behavior, planner behavior,
+executor behavior, Python bundling, or production packaging. Its validation is a
+basic skeleton only; it does not perform full catalog-context validation,
+dependency graph validation, planner contract validation, artifact expansion
+validation, device checks, or executor checks. Semantic command parity is still
+incomplete because only the overview field mutation command exists. Python
+remains the reference implementation.
 
 ## Document Session Scope
 
-Phase 6G document sessions are process-local JSONL sidecar state. Opening a
+Phase 6H document sessions are process-local JSONL sidecar state. Opening a
 recipe loads the Phase 6E authored recipe model, emits canonical YAML, records
 that YAML as the saved baseline, and returns a Python-shaped `RecipeDocumentDto`.
 `applyRecipeCommand` supports only:
@@ -86,9 +94,9 @@ that YAML as the saved baseline, and returns a Python-shaped `RecipeDocumentDto`
 ```
 
 Recipe `id`, `kind`, `schemaVersion`, and `schema_version` are read-only in this
-Phase 6G slice and are rejected. `description: null` matches Python behavior:
-it clears the description, projects the DTO description as an empty string, and
-omits the top-level `description:` key from canonical YAML. Empty or
+Rust backend slice and are rejected. `description: null` matches Python
+behavior: it clears the description, projects the DTO description as an empty
+string, and omits the top-level `description:` key from canonical YAML. Empty or
 whitespace-only `description` values also clear the field. Empty or
 whitespace-only `name` values fail command execution.
 
@@ -113,21 +121,36 @@ returning `changed: false` success responses with the current document.
 `validate` reruns the Phase 6E basic validation skeleton for the current
 in-memory recipe and returns diagnostics only.
 
-`refIndex` is a temporary empty Python-compatible placeholder:
+`getRefIndex` returns generated RefIndex data for the current in-memory document
+state. `RecipeDocumentDto.refIndex` is no longer the Phase 6F empty placeholder
+for modeled Phase 6H recipe features. The generated index is fixture-scoped and
+limited to the currently modeled Rust authored recipe data: inputs, runtime
+artifact fields, authored step ids, and declared StepSpec outputs from the
+embedded Python StepSpec fixture. It does not derive planner, catalog-context,
+executor/device, artifact group, recipe `provides`, or missing-param refs.
 
 ```json
 {
-  "inputRefs": [],
+  "inputRefs": ["inputs.bios_source_dir"],
   "artifactRefs": [],
-  "stepRefs": [],
-  "stepOutputRefs": [],
-  "allRefs": [],
-  "candidates": []
+  "stepRefs": ["steps.copy_bios_dir"],
+  "stepOutputRefs": ["steps.copy_bios_dir.outputs.copied_paths"],
+  "allRefs": [
+    "inputs.bios_source_dir",
+    "steps.copy_bios_dir",
+    "steps.copy_bios_dir.outputs.copied_paths"
+  ],
+  "candidates": [
+    {
+      "ref": "inputs.bios_source_dir",
+      "label": "Input · bios_source_dir",
+      "valueType": "directory_path",
+      "sourceKind": "input",
+      "sourceId": "bios_source_dir"
+    }
+  ]
 }
 ```
-
-The placeholder is structural only. It does not derive refs, candidates, or
-partial ref data, and `getRefIndex` is not reported as a capability.
 
 ## StepSpec Source
 
@@ -270,9 +293,10 @@ crates/emuchef-rust-backend/tests/fixtures/python_goldens/phase6g_*.result.json
 Those goldens cover overview name changes, description changes,
 `description:null`, no-op commands, empty undo/redo, undo/redo after mutation,
 open-document `emitYaml`, and open-document `validate`. They normalize
-`documentId`, paths, authored roots, and diagnostic files. Python currently
-returns a populated ref index for richer recipes, while Phase 6G intentionally
-returns an empty structural placeholder until the Rust ref index is ported.
+`documentId`, paths, authored roots, and diagnostic files. The Phase 6G golden
+recipe has no inputs, artifacts, or steps, so its generated RefIndex is empty
+even after Phase 6H replaces the former placeholder behavior for richer
+modeled recipes.
 
 Regenerate the Phase 6G goldens from the repo root with:
 
@@ -362,6 +386,85 @@ for filename, result in responses.items():
 PY
 ```
 
+Phase 6H RefIndex parity is covered by focused Python-generated result goldens:
+
+```text
+crates/emuchef-rust-backend/tests/fixtures/python_goldens/phase6h_*.result.json
+```
+
+Those goldens cover a representative document open result, sidecar
+`getRefIndex`, overview-only mutation, undo/redo after mutation, and a
+ref-parameter fixture `getRefIndex` result. They normalize `documentId`, paths,
+authored roots, and diagnostic files. The `ref_params` open-document result is
+not used as a full-document golden because Python performs richer validation
+than the Phase 6E Rust validation skeleton; the Phase 6H comparison for that
+fixture is intentionally scoped to `getRefIndex`.
+
+Regenerate the Phase 6H goldens from the repo root with:
+
+```bash
+PYTHONPATH=src:tests uv run --no-project --native-tls --with PyYAML python - <<'PY'
+from __future__ import annotations
+import json
+from pathlib import Path
+from emuchef_editor.api.session import DocumentSessionManager
+
+fixtures = Path("crates/emuchef-rust-backend/tests/fixtures")
+recipes = fixtures / "recipes"
+goldens = fixtures / "python_goldens"
+goldens.mkdir(parents=True, exist_ok=True)
+
+def normalize(value):
+    if isinstance(value, dict):
+        out = {}
+        for key, item in value.items():
+            if key == "documentId":
+                out[key] = "<documentId>"
+            elif key == "path":
+                out[key] = "<path>"
+            elif key == "authoredRoot":
+                out[key] = "<authoredRoot>" if item is not None else None
+            elif key == "file":
+                out[key] = "<path>" if item is not None else None
+            else:
+                out[key] = normalize(item)
+        return out
+    if isinstance(value, list):
+        return [normalize(item) for item in value]
+    return value
+
+def write(name, value):
+    (goldens / name).write_text(
+        json.dumps(normalize(value), indent=2, sort_keys=True) + "\n",
+        encoding="utf-8",
+    )
+
+manager = DocumentSessionManager()
+opened = manager.open_recipe(recipes / "representative_recipe.yaml", authored_root=fixtures)
+if not opened["ok"]:
+    raise SystemExit(json.dumps(opened, indent=2))
+document_id = opened["result"]["document"]["documentId"]
+write("phase6h_representative_open.result.json", opened["result"])
+write("phase6h_representative_get_ref_index.result.json", manager.get_ref_index(document_id)["result"])
+write(
+    "phase6h_representative_set_overview.result.json",
+    manager.apply_recipe_command(
+        document_id,
+        {"type": "SetOverviewField", "field": "name", "value": "Phase 6H Renamed"},
+    )["result"],
+)
+write("phase6h_representative_undo.result.json", manager.undo(document_id)["result"])
+write("phase6h_representative_redo.result.json", manager.redo(document_id)["result"])
+
+manager = DocumentSessionManager()
+opened = manager.open_recipe(recipes / "ref_params.yaml", authored_root=fixtures)
+if not opened["ok"]:
+    raise SystemExit(json.dumps(opened, indent=2))
+document_id = opened["result"]["document"]["documentId"]
+write("phase6h_ref_params_get_ref_index.result.json", manager.get_ref_index(document_id)["result"])
+PY
+```
+
 ## One-Shot Mode
 
 Run one request as a single JSON argument:
@@ -376,7 +479,7 @@ cargo run --manifest-path crates/emuchef-rust-backend/Cargo.toml -- '{"type":"va
 Expected `hello` stdout is one JSON response envelope:
 
 ```json
-{"ok":true,"result":{"protocolVersion":1,"capabilities":["listStepSpecs","emitRecipeYamlFromPath","validateRecipePath","openRecipe","getDocument","saveRecipe","closeDocument","applyRecipeCommand","undo","redo","emitYaml","validate"]}}
+{"ok":true,"result":{"protocolVersion":1,"capabilities":["listStepSpecs","emitRecipeYamlFromPath","validateRecipePath","openRecipe","getDocument","saveRecipe","closeDocument","applyRecipeCommand","undo","redo","emitYaml","validate","getRefIndex"]}}
 ```
 
 `listStepSpecs` returns `{"stepSpecs":[...]}` inside the success envelope.
@@ -397,7 +500,7 @@ printf '%s\n' '{"id":"validate-1","type":"validateRecipePath","payload":{"path":
 Expected `hello` stdout is one JSON response line:
 
 ```json
-{"id":"hello-1","ok":true,"result":{"protocolVersion":1,"capabilities":["listStepSpecs","emitRecipeYamlFromPath","validateRecipePath","openRecipe","getDocument","saveRecipe","closeDocument","applyRecipeCommand","undo","redo","emitYaml","validate"]}}
+{"id":"hello-1","ok":true,"result":{"protocolVersion":1,"capabilities":["listStepSpecs","emitRecipeYamlFromPath","validateRecipePath","openRecipe","getDocument","saveRecipe","closeDocument","applyRecipeCommand","undo","redo","emitYaml","validate","getRefIndex"]}}
 ```
 
 Session APIs are sidecar-only. A practical manual smoke is:
@@ -409,8 +512,8 @@ cargo run --manifest-path crates/emuchef-rust-backend/Cargo.toml -- --sidecar
 ```
 
 2. Paste an `openRecipe` JSON line, then copy the returned `documentId` into
-   `applyRecipeCommand`, `undo`, `redo`, `emitYaml`, `validate`, `saveRecipe`,
-   `getDocument`, or `closeDocument` JSON lines before sending EOF. Use a
+   `applyRecipeCommand`, `undo`, `redo`, `emitYaml`, `validate`, `getRefIndex`,
+   `saveRecipe`, `getDocument`, or `closeDocument` JSON lines before sending EOF. Use a
    temporary copy of a fixture if the smoke includes `saveRecipe`:
 
 ```json
@@ -419,7 +522,7 @@ cargo run --manifest-path crates/emuchef-rust-backend/Cargo.toml -- --sidecar
 
 The automated Rust integration tests keep the sidecar process alive and cover
 `openRecipe`, `getDocument`, `applyRecipeCommand`, `undo`, `redo`, `emitYaml`,
-`validate`, `saveRecipe`, and `closeDocument` without adding any production
+`validate`, `getRefIndex`, `saveRecipe`, and `closeDocument` without adding any production
 test-helper command.
 
 Request-level errors are returned as API envelopes and do not terminate the

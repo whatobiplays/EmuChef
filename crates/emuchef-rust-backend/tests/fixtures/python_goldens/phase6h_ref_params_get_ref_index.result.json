@@ -1,0 +1,91 @@
+{
+  "refIndex": {
+    "allRefs": [
+      "artifacts.assets_zip.cache_hit",
+      "artifacts.assets_zip.error",
+      "artifacts.assets_zip.filename",
+      "artifacts.assets_zip.local_path",
+      "artifacts.assets_zip.resolved_url",
+      "artifacts.assets_zip.status",
+      "steps.extract_assets",
+      "steps.copy_assets",
+      "steps.extract_assets.outputs.extracted_paths",
+      "steps.copy_assets.outputs.copied_paths"
+    ],
+    "artifactRefs": [
+      "artifacts.assets_zip.cache_hit",
+      "artifacts.assets_zip.error",
+      "artifacts.assets_zip.filename",
+      "artifacts.assets_zip.local_path",
+      "artifacts.assets_zip.resolved_url",
+      "artifacts.assets_zip.status"
+    ],
+    "candidates": [
+      {
+        "label": "Artifact \u00b7 assets_zip.cache_hit",
+        "ref": "artifacts.assets_zip.cache_hit",
+        "sourceId": "assets_zip",
+        "sourceKind": "artifact",
+        "valueType": "boolean"
+      },
+      {
+        "label": "Artifact \u00b7 assets_zip.error",
+        "ref": "artifacts.assets_zip.error",
+        "sourceId": "assets_zip",
+        "sourceKind": "artifact",
+        "valueType": "string"
+      },
+      {
+        "label": "Artifact \u00b7 assets_zip.filename",
+        "ref": "artifacts.assets_zip.filename",
+        "sourceId": "assets_zip",
+        "sourceKind": "artifact",
+        "valueType": "string"
+      },
+      {
+        "label": "Artifact \u00b7 assets_zip.local_path",
+        "ref": "artifacts.assets_zip.local_path",
+        "sourceId": "assets_zip",
+        "sourceKind": "artifact",
+        "valueType": "file_path"
+      },
+      {
+        "label": "Artifact \u00b7 assets_zip.resolved_url",
+        "ref": "artifacts.assets_zip.resolved_url",
+        "sourceId": "assets_zip",
+        "sourceKind": "artifact",
+        "valueType": "string"
+      },
+      {
+        "label": "Artifact \u00b7 assets_zip.status",
+        "ref": "artifacts.assets_zip.status",
+        "sourceId": "assets_zip",
+        "sourceKind": "artifact",
+        "valueType": "string"
+      },
+      {
+        "label": "Step Output \u00b7 extract_assets.extracted_paths",
+        "ref": "steps.extract_assets.outputs.extracted_paths",
+        "sourceId": "extract_assets",
+        "sourceKind": "step_output",
+        "valueType": "path_list"
+      },
+      {
+        "label": "Step Output \u00b7 copy_assets.copied_paths",
+        "ref": "steps.copy_assets.outputs.copied_paths",
+        "sourceId": "copy_assets",
+        "sourceKind": "step_output",
+        "valueType": "path_list"
+      }
+    ],
+    "inputRefs": [],
+    "stepOutputRefs": [
+      "steps.extract_assets.outputs.extracted_paths",
+      "steps.copy_assets.outputs.copied_paths"
+    ],
+    "stepRefs": [
+      "steps.extract_assets",
+      "steps.copy_assets"
+    ]
+  }
+}

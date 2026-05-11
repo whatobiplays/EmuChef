@@ -1,9 +1,9 @@
-//! Editor command decoding for the Phase 6G Rust backend slice.
+//! Editor command decoding for the experimental Rust backend slice.
 //!
 //! Python remains the reference implementation. This module intentionally
-//! accepts only the overview field command needed for Phase 6G so the Rust
-//! backend does not imply support for input, artifact, step, safe-delete, or ref
-//! index command parity before those behaviors are ported and tested.
+//! accepts only the overview field command so the Rust backend does not imply
+//! support for input, artifact, step, safe-delete, or other mutation command
+//! parity before those behaviors are ported and tested.
 
 use serde_json::{json, Map, Value};
 

@@ -75,6 +75,7 @@ fn handle_validated_sidecar_object(
         "redo" => handle_redo(object, sessions),
         "emitYaml" => handle_emit_yaml(object, sessions),
         "validate" => handle_validate(object, sessions),
+        "getRefIndex" => handle_get_ref_index(object, sessions),
         "closeDocument" => handle_close_document(object, sessions),
         unknown => Err(ApiError::invalid_request(format!(
             "Unknown request type: {unknown}"
@@ -216,6 +217,15 @@ fn handle_validate(
     let payload = payload_object(object)?;
     let document_id = required_document_id(payload)?;
     Ok(envelope::success(sessions.validate(document_id)?))
+}
+
+fn handle_get_ref_index(
+    object: &Map<String, Value>,
+    sessions: &mut DocumentSessionManager,
+) -> Result<Value, ApiError> {
+    let payload = payload_object(object)?;
+    let document_id = required_document_id(payload)?;
+    Ok(envelope::success(sessions.get_ref_index(document_id)?))
 }
 
 fn handle_close_document(

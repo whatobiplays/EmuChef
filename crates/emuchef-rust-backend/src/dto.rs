@@ -1,13 +1,14 @@
-//! JSON DTO projection for Phase 6G recipe documents.
+//! JSON DTO projection for Phase 6H recipe documents.
 //!
 //! These projections mirror the Python editor API shape for the authored recipe
 //! fields modeled in Phase 6E. Fields outside that model are intentionally left
-//! as empty Python-compatible placeholders instead of adding new semantics.
+//! out of scope instead of adding new semantics.
 
 use serde_json::{json, Map, Value};
 
 use crate::document::RecipeDocument;
 use crate::model::{InputDeclaration, ParamValue, Recipe, RemoteFileArtifact, Step, StepCondition};
+use crate::ref_index;
 
 pub fn document_to_dto(document: &RecipeDocument, document_id: &str) -> Value {
     json!({
@@ -22,7 +23,7 @@ pub fn document_to_dto(document: &RecipeDocument, document_id: &str) -> Value {
         "recipe": recipe_to_dto(document.recipe()),
         "yaml": document.yaml(),
         "diagnostics": document.diagnostics(),
-        "refIndex": empty_ref_index_to_dto(),
+        "refIndex": ref_index::ref_index_to_dto(document.recipe()),
     })
 }
 
@@ -108,17 +109,4 @@ fn map_values<'a>(values: impl IntoIterator<Item = (&'a String, Value)>) -> Valu
         object.insert(key.clone(), value);
     }
     Value::Object(object)
-}
-
-fn empty_ref_index_to_dto() -> Value {
-    // Temporary placeholder. Phase 6H will replace this with a real
-    // RefIndex implementation once ref derivation semantics are ported.
-    json!({
-        "inputRefs": [],
-        "artifactRefs": [],
-        "stepRefs": [],
-        "stepOutputRefs": [],
-        "allRefs": [],
-        "candidates": [],
-    })
 }

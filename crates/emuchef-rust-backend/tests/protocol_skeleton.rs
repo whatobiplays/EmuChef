@@ -119,14 +119,15 @@ fn assert_hello_result(result: &Value) {
             "undo",
             "redo",
             "emitYaml",
-            "validate"
+            "validate",
+            "getRefIndex"
         ])
     );
     assert!(!result["capabilities"]
         .as_array()
         .unwrap()
         .contains(&json!("hello")));
-    for unimplemented in ["getRefIndex", "saveRecipeAs"] {
+    for unimplemented in ["saveRecipeAs"] {
         assert!(
             !result["capabilities"]
                 .as_array()

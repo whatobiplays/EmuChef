@@ -1,9 +1,9 @@
-//! In-memory recipe document state for Phase 6G sidecar sessions.
+//! In-memory recipe document state for sidecar sessions.
 //!
 //! A document wraps the Phase 6E authored recipe model with the editor-facing
-//! lifecycle state needed for sidecar document sessions. Phase 6G adds a narrow
-//! command slice and snapshot undo/redo while still omitting catalog-context
-//! validation, step command parity, and real ref indexing.
+//! lifecycle state needed for sidecar document sessions. The Rust backend keeps
+//! catalog-context validation, step command parity, planner behavior, and
+//! executor behavior out of this crate-local migration slice.
 
 use std::fs;
 use std::path::{Path, PathBuf};
