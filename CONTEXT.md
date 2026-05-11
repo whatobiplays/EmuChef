@@ -371,18 +371,20 @@ delete, duplicate, reorder, add member, remove member, and reorder member for
 artifact groups. It also has fixture-covered authoredRoot/catalog-context
 validation, a private crate-internal planner skeleton that emits Python-shaped
 `PlanningResult`/`ExecutionPlan` values for focused fixtures, and a private
-crate-internal Phase 6O executor skeleton that emits Python-shaped
-`ExecutionRunResult` values for selected safe dry-run fixtures. The Rust planner
-skeleton reads only loaded/top-level authored recipe fixture data, namespaced
-refs, StepSpec defaults, explicit recipe and step dependencies, and supplied
-fixture device context/capabilities. The Rust executor skeleton is internal test
-scaffolding only: it models selected `wait`, `grant_permissions`, dependency,
-skip, verify, and fake dry-run device semantics without public API exposure. It
-does not add protocol requests, sidecar capabilities, CLI parity, Tauri
-integration, backend selection, device probing, real executor behavior,
-downloads, archive extraction, file copies, real permission grants, subprocess
-execution, production packaging, or Python bundling.
-It now has crate-internal fake-device/DryRunAdb parity fixtures, remains not Tauri-integrated, and has no real ADB/device execution.
+crate-internal executor skeleton that emits Python-shaped `ExecutionRunResult`
+values for selected safe dry-run fixtures. The Rust planner skeleton reads only
+loaded/top-level authored recipe fixture data, namespaced refs, StepSpec
+defaults, explicit recipe and step dependencies, and supplied fixture device
+context/capabilities. The Rust executor skeleton is internal test scaffolding
+only: it models selected `wait`, `grant_permissions`, dependency, skip, verify,
+temp-dir-confined filesystem/artifact behavior, fake dry-run device semantics,
+and Phase 6R real-ADB adapter foundations without public API exposure. It does
+not add protocol requests, sidecar capabilities, CLI parity, Tauri integration,
+backend selection, production device discovery, real network downloads,
+production packaging, or Python bundling.
+It now has crate-internal fake-device/DryRunAdb parity fixtures plus an
+explicitly constructed real-ADB adapter and ignored/manual real-device tests; it
+remains not Tauri-integrated and has no public real-device executor surface.
 Its `hello` response reports only capabilities implemented in the crate, but
 capability parity is not complete semantic parity and does not make it the Tauri
 editor backend. Rust `listStepSpecs` uses a temporary Python-generated static

@@ -3,8 +3,11 @@
 //!
 //! Python remains the executor reference. This module intentionally mirrors only
 //! the Python `ExecutionRunResult` shape and selected behaviors needed by Phase
-//! 6O/6P tests. It does not expose protocol, CLI, Tauri, subprocess, ADB,
-//! network, or unrestricted filesystem side-effect implementations.
+//! 6O/6P tests. Phase 6R adds crate-private real-ADB adapter foundations
+//! without protocol, CLI, Tauri, network, or unrestricted filesystem
+//! side-effect surfaces.
+
+pub mod adb;
 
 use std::collections::{HashMap, HashSet};
 use std::fs;
@@ -74,17 +77,35 @@ pub struct ExecutionProgressEvent {
     pub message: Option<String>,
 }
 
-#[derive(Debug, Default)]
-pub struct ExecutorRunner {
-    adapters: DryRunExecutorAdapters,
+pub trait ExecutorDevice: std::fmt::Debug {
+    fn install_apk(&mut self, apk_path: &Path, replace_existing: bool) -> Result<(), String>;
+    fn package_installed(&mut self, package_name: &str) -> Result<bool, String>;
+    fn path_exists(&mut self, path: &str) -> Result<bool, String>;
+    fn path_is_dir(&mut self, path: &str) -> Result<bool, String>;
+    fn run_plan_command(&mut self, command: Vec<String>) -> Result<(), String>;
+    fn launch_app(&mut self, package_name: &str, activity: Option<&str>) -> Result<(), String>;
+    fn force_stop_app(&mut self, package_name: &str) -> Result<(), String>;
 }
 
-impl ExecutorRunner {
-    pub fn new(adapters: DryRunExecutorAdapters) -> Self {
+#[derive(Debug)]
+pub struct ExecutorRunner<D: ExecutorDevice = FakeDryRunDevice> {
+    adapters: ExecutorAdapters<D>,
+}
+
+impl Default for ExecutorRunner<FakeDryRunDevice> {
+    fn default() -> Self {
+        Self {
+            adapters: ExecutorAdapters::default(),
+        }
+    }
+}
+
+impl<D: ExecutorDevice> ExecutorRunner<D> {
+    pub fn new(adapters: ExecutorAdapters<D>) -> Self {
         Self { adapters }
     }
 
-    pub fn adapters(&self) -> &DryRunExecutorAdapters {
+    pub fn adapters(&self) -> &ExecutorAdapters<D> {
         &self.adapters
     }
 
@@ -676,53 +697,55 @@ impl ExecutorRunner {
         match condition.type_name.as_str() {
             "package_installed" => {
                 let package_name = required_string_param(condition, "package_name")?;
-                Ok(self.adapters.device.package_installed(&package_name))
+                self.adapters.device.package_installed(&package_name)
             }
             "path_exists" => {
                 let path = required_string_param(condition, "path")?;
-                Ok(self.adapters.device.path_exists(&path))
+                self.adapters.device.path_exists(&path)
             }
             "file_exists" => {
                 let path = required_string_param(condition, "path")?;
-                Ok(self.adapters.device.path_exists(&path)
-                    && !self.adapters.device.path_is_dir(&path))
+                Ok(self.adapters.device.path_exists(&path)?
+                    && !self.adapters.device.path_is_dir(&path)?)
             }
             other => Err(format!("Unsupported condition type: {other}")),
         }
     }
 }
 
-#[derive(Debug, Default)]
-pub struct DryRunExecutorAdapters {
-    device: FakeDryRunDevice,
+pub type DryRunExecutorAdapters = ExecutorAdapters<FakeDryRunDevice>;
+
+#[derive(Debug)]
+pub struct ExecutorAdapters<D: ExecutorDevice = FakeDryRunDevice> {
+    device: D,
     sleep_calls: Vec<f64>,
     sandbox: Option<SandboxRoots>,
 }
 
-impl DryRunExecutorAdapters {
-    pub fn with_sandbox_roots(
-        runtime_root: PathBuf,
-        cache_root: PathBuf,
-        fake_device_root: PathBuf,
-        read_only_roots: Vec<PathBuf>,
-    ) -> Self {
+impl Default for ExecutorAdapters<FakeDryRunDevice> {
+    fn default() -> Self {
         Self {
             device: FakeDryRunDevice::default(),
             sleep_calls: Vec::new(),
-            sandbox: Some(SandboxRoots {
-                runtime_root,
-                cache_root,
-                fake_device_root,
-                read_only_roots,
-            }),
+            sandbox: None,
+        }
+    }
+}
+
+impl<D: ExecutorDevice> ExecutorAdapters<D> {
+    pub fn with_device(device: D) -> Self {
+        Self {
+            device,
+            sleep_calls: Vec::new(),
+            sandbox: None,
         }
     }
 
-    pub fn device(&self) -> &FakeDryRunDevice {
+    pub fn device(&self) -> &D {
         &self.device
     }
 
-    pub fn device_mut(&mut self) -> &mut FakeDryRunDevice {
+    pub fn device_mut(&mut self) -> &mut D {
         &mut self.device
     }
 
@@ -740,6 +763,26 @@ impl DryRunExecutorAdapters {
                 "Phase 6P filesystem/artifact handlers require explicit sandbox roots".to_string(),
             )
         })
+    }
+}
+
+impl ExecutorAdapters<FakeDryRunDevice> {
+    pub fn with_sandbox_roots(
+        runtime_root: PathBuf,
+        cache_root: PathBuf,
+        fake_device_root: PathBuf,
+        read_only_roots: Vec<PathBuf>,
+    ) -> Self {
+        Self {
+            device: FakeDryRunDevice::default(),
+            sleep_calls: Vec::new(),
+            sandbox: Some(SandboxRoots {
+                runtime_root,
+                cache_root,
+                fake_device_root,
+                read_only_roots,
+            }),
+        }
     }
 }
 
@@ -869,6 +912,66 @@ impl FakeDryRunDevice {
             return Err(message.clone());
         }
         Ok(())
+    }
+}
+
+impl ExecutorDevice for FakeDryRunDevice {
+    fn install_apk(&mut self, apk_path: &Path, replace_existing: bool) -> Result<(), String> {
+        FakeDryRunDevice::install_apk(self, apk_path, replace_existing)
+    }
+
+    fn package_installed(&mut self, package_name: &str) -> Result<bool, String> {
+        Ok(FakeDryRunDevice::package_installed(self, package_name))
+    }
+
+    fn path_exists(&mut self, path: &str) -> Result<bool, String> {
+        Ok(FakeDryRunDevice::path_exists(self, path))
+    }
+
+    fn path_is_dir(&mut self, path: &str) -> Result<bool, String> {
+        Ok(FakeDryRunDevice::path_is_dir(self, path))
+    }
+
+    fn run_plan_command(&mut self, command: Vec<String>) -> Result<(), String> {
+        FakeDryRunDevice::run_plan_command(self, command)
+    }
+
+    fn launch_app(&mut self, package_name: &str, activity: Option<&str>) -> Result<(), String> {
+        FakeDryRunDevice::launch_app(self, package_name, activity)
+    }
+
+    fn force_stop_app(&mut self, package_name: &str) -> Result<(), String> {
+        FakeDryRunDevice::force_stop_app(self, package_name)
+    }
+}
+
+impl<E: adb::AdbCommandExecutor> ExecutorDevice for adb::RealAdbDevice<E> {
+    fn install_apk(&mut self, apk_path: &Path, replace_existing: bool) -> Result<(), String> {
+        adb::RealAdbDevice::install_apk(self, apk_path, replace_existing)
+    }
+
+    fn package_installed(&mut self, package_name: &str) -> Result<bool, String> {
+        adb::RealAdbDevice::package_installed(self, package_name)
+    }
+
+    fn path_exists(&mut self, path: &str) -> Result<bool, String> {
+        adb::RealAdbDevice::path_exists(self, path)
+    }
+
+    fn path_is_dir(&mut self, path: &str) -> Result<bool, String> {
+        adb::RealAdbDevice::path_is_dir(self, path)
+    }
+
+    fn run_plan_command(&mut self, command: Vec<String>) -> Result<(), String> {
+        adb::RealAdbDevice::run_plan_command(self, command)
+    }
+
+    fn launch_app(&mut self, package_name: &str, activity: Option<&str>) -> Result<(), String> {
+        adb::RealAdbDevice::launch_app(self, package_name, activity)
+    }
+
+    fn force_stop_app(&mut self, package_name: &str) -> Result<(), String> {
+        adb::RealAdbDevice::force_stop_app(self, package_name)
     }
 }
 

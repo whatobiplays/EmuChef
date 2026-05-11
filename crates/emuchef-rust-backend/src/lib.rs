@@ -20,6 +20,8 @@ pub mod errors;
 #[allow(dead_code)]
 mod executor;
 #[cfg(test)]
+mod executor_real_adb_tests;
+#[cfg(test)]
 mod executor_tests;
 pub mod jsonl;
 pub mod model;

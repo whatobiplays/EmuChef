@@ -4,7 +4,7 @@ This package is an experimental Rust backend skeleton for the EmuChef config
 editor protocol. It is standalone and runnable independently of the Tauri
 editor.
 
-Through Phase 6P it implements only:
+Through Phase 6R it implements only:
 
 - `hello`
 - `listStepSpecs`
@@ -48,6 +48,10 @@ Through Phase 6P it implements only:
   `ExecutionRunResult` values for selected safe dry-run Phase 6O tests
 - temp-dir-confined filesystem/artifact executor behavior for selected Phase 6P
   fixtures
+- selected fake-device/DryRunAdb executor behavior for Phase 6Q
+  device/app/permission fixtures
+- internal real-ADB adapter foundations and ignored/manual Phase 6R tests for
+  selected device/app/permission behavior
 
 It reports only capabilities that are implemented in this crate:
 
@@ -77,11 +81,11 @@ requests in JSONL sidecar mode only. One-shot mode remains stateless and does
 not expose persistent document session APIs.
 
 Reporting these capabilities still does not make this backend compatible with
-the Tauri editor. Phase 6P reports the same ordered capability list as Phase
-6H/6I/6J.1/6J.2/6K/6L/6M/6N/6O; capability parity is not full backend parity.
-The Rust backend is still not editor-ready and is not wired into Tauri.
+the Tauri editor. Phase 6R reports the same ordered capability list as Phase
+6H/6I/6J.1/6J.2/6K/6L/6M/6N/6O/6P/6Q; capability parity is not full backend
+parity. The Rust backend is still not editor-ready and is not wired into Tauri.
 There is no env var, CLI flag, config file, README path, or documented launch
-path for using this Rust backend as the Tauri editor backend in Phase 6P.
+path for using this Rust backend as the Tauri editor backend in Phase 6R.
 
 The Python backend remains the reference implementation. This Rust package is
 not a replacement backend and is not selected by the Tauri editor.
@@ -99,11 +103,12 @@ StepSpec defaults, refs, `skip_if`, `verify`, and planner result status/error
 shape for selected fixtures. Phase 6O adds a private safe executor skeleton for
 selected Python dry-run result fixtures. Phase 6P expands that private executor
 with selected filesystem/artifact behavior, but every filesystem mutation is
-confined to explicit test-owned temp roots. Rust still does not perform real
-device checks, real network downloads, permission grants, subprocess execution,
-ADB/device operations, app lifecycle operations, install operations, or Tauri
-integration. Python remains the reference implementation until parity is
-confirmed.
+confined to explicit test-owned temp roots. Phase 6Q adds selected fake-device
+ADB parity. Phase 6R adds an internal real-ADB adapter foundation and ignored
+manual tests, but normal tests still do not perform real device checks, real
+network downloads, permission grants, ADB/device operations, app lifecycle
+operations, install operations, or Tauri integration. Python remains the
+reference implementation until parity is confirmed.
 
 ## Phase 6N Planner Scope
 
@@ -284,6 +289,76 @@ packaging, Python bundling, hard cutover behavior, Python backend deletion,
 protocol/API/CLI executor routes, capability strings, public fake-device or
 dry-run surfaces, Tauri editor integration, or backend selectors/toggles.
 Python remains the reference implementation until parity is confirmed.
+
+## Phase 6R Real-ADB Adapter Foundations
+
+Phase 6R keeps the executor internal and adds crate-private foundations for
+real ADB execution. It does not add an executor protocol request, one-shot
+request, JSONL request, CLI surface, Tauri integration, public dry-run surface,
+backend selector, runtime toggle, production packaging, Python bundling, or
+hard cutover from Python. The default executor construction used by normal tests
+continues to use the fake dry-run device adapter.
+
+The Python command inventory mirrored by the Rust adapter is source-backed from
+`src/emuchef/executor/adb.py` and related handlers:
+
+| Area | Python-backed command shape |
+| --- | --- |
+| Host process execution | `subprocess.run(args, check=False, text=True, capture_output=True)` with an argv list, never a host shell. |
+| Serial selection | Insert `-s <serial>` immediately after the ADB executable when a serial is configured. `run_plan_command` injects `-s <serial>` only when the command begins with `adb` and the tail does not already begin with `-s`. |
+| Package check | `adb [-s serial] shell pm path <package>` with `check=False`; installed means exit code `0` and stdout containing `package:`. |
+| Path check | `adb [-s serial] shell "<shlex-joined test -e command>"` with `check=False`; app-private paths wrap the inner command with Python-compatible `su -c` quoting. |
+| File check | `path_exists(path) && !path_is_dir(path)`, matching Python condition behavior. |
+| APK install | `adb [-s serial] install [-r] <apk-path>`. |
+| Runtime permission | `adb [-s serial] shell pm grant <package> <permission>`. |
+| Appop | `adb [-s serial] shell appops set <package> <op> <mode>`. |
+| Launch explicit activity | `adb [-s serial] shell am start -n <package>/<activity>`. |
+| Launch resolved activity | Try `shell cmd package resolve-activity --brief <package>`, then `shell pm resolve-activity --brief <package>`, then `shell am start -n <resolved-component>`. |
+| Launch fallback | `adb [-s serial] shell monkey -p <package> -c android.intent.category.LAUNCHER 1`. |
+| Force stop | `adb [-s serial] shell am force-stop <package>`. |
+
+Rust keeps host-side ADB invocation as structured argv. For device-side `adb
+shell` snippets, Rust constructs the same single shell payload string that
+Python builds with `shlex.join`; it does not split or reinterpret that shell
+snippet after construction. Unit tests cover spaces, quotes, backslashes,
+`$`, glob characters, leading dashes, and nested `su -c` quoting for
+app-private paths.
+
+Phase 6R does not add a production timeout wrapper around ADB commands because
+the Python reference path does not pass a timeout. Normal tests simulate
+missing-binary and non-zero behavior through the fake ADB executor/result layer;
+they do not attempt to launch a missing executable with `std::process::Command`.
+The real process runner is ADB-specific and is the only code path that uses
+`std::process::Command`.
+
+Real-device tests are ignored/manual only. They are compiled with crate tests
+but are marked `#[ignore]`, require `EMUCHEF_RUN_REAL_ADB_TESTS=1` before
+constructing a real ADB device, and never run as part of normal `cargo test`.
+Environment variables listed below are test-only controls and are not runtime
+backend selectors:
+
+| Variable | Purpose |
+| --- | --- |
+| `EMUCHEF_RUN_REAL_ADB_TESTS=1` | Global manual-test opt-in required by every real-device test. |
+| `EMUCHEF_TEST_DEVICE_SERIAL=<serial>` | Optional serial passed explicitly to the manual-test `RealAdbDevice`. |
+| `EMUCHEF_TEST_PACKAGE=<package>` | Test-owned package used by package, launch, force-stop, permission, or appops tests. |
+| `EMUCHEF_TEST_DEVICE_PATH=<path>` | Optional benign path for the manual path-exists check; defaults to `/sdcard`. |
+| `EMUCHEF_TEST_APK=<path>` | Explicit test-owned APK path for the install test. |
+| `EMUCHEF_TEST_ACTIVITY=<activity>` | Optional explicit activity for the launch test. |
+| `EMUCHEF_TEST_PACKAGE_ALLOWLIST=<package>` | Required exact allowlist for force-stop, permission, and appops tests. Comma-separated values are accepted. |
+| `EMUCHEF_TEST_RUNTIME_PERMISSION=<permission>` | Runtime permission used only by the permission manual test. |
+| `EMUCHEF_TEST_APPOP=<op>` and `EMUCHEF_TEST_APPOP_MODE=<mode>` | Appop and mode used only by the appops manual test. |
+| `EMUCHEF_RUN_REAL_ADB_INSTALL_TEST=1` | Per-test opt-in for installing the explicit test APK. |
+| `EMUCHEF_RUN_REAL_ADB_LAUNCH_TEST=1` | Per-test opt-in for launching the explicit test package. |
+| `EMUCHEF_RUN_REAL_ADB_FORCE_STOP_TEST=1` | Per-test opt-in for force-stopping the explicit allowlisted test package. |
+| `EMUCHEF_RUN_REAL_ADB_PERMISSION_TEST=1` | Per-test opt-in for granting the explicit permission to the allowlisted test package. |
+| `EMUCHEF_RUN_REAL_ADB_APPOPS_TEST=1` | Per-test opt-in for applying the explicit appop to the allowlisted test package. |
+
+Permission and appops manual tests refuse system-like packages such as
+`android`, `android.*`, `com.android.*`, and `com.google.android.*`. They are
+intended only for operator-provided test packages. Manual tests do not wipe
+device data, reboot devices, uninstall packages, modify global settings, perform
+network downloads, or clean up arbitrary packages.
 
 ## Document Session Scope
 
@@ -1513,4 +1588,38 @@ Run the crate tests with:
 
 ```bash
 cargo test --manifest-path crates/emuchef-rust-backend/Cargo.toml
+```
+
+That command does not require ADB, an emulator, a physical Android device, an
+APK, or any Phase 6R manual-test environment variables. Ignored real-device
+tests can be listed with:
+
+```bash
+cargo test --manifest-path crates/emuchef-rust-backend/Cargo.toml phase6r_manual -- --ignored
+```
+
+Run a real-device test only after deliberately setting the global opt-in and any
+per-test opt-in variables described in the Phase 6R section. For example, a
+read-only package check can be run with:
+
+```bash
+EMUCHEF_RUN_REAL_ADB_TESTS=1 \
+EMUCHEF_TEST_DEVICE_SERIAL=emulator-5554 \
+EMUCHEF_TEST_PACKAGE=com.example.testapp \
+cargo test --manifest-path crates/emuchef-rust-backend/Cargo.toml \
+  phase6r_manual_real_adb_package_installed_check -- --ignored --nocapture
+```
+
+A device-affecting permission test requires both the global opt-in and an exact
+test-package allowlist:
+
+```bash
+EMUCHEF_RUN_REAL_ADB_TESTS=1 \
+EMUCHEF_RUN_REAL_ADB_PERMISSION_TEST=1 \
+EMUCHEF_TEST_DEVICE_SERIAL=emulator-5554 \
+EMUCHEF_TEST_PACKAGE=com.example.testapp \
+EMUCHEF_TEST_PACKAGE_ALLOWLIST=com.example.testapp \
+EMUCHEF_TEST_RUNTIME_PERMISSION=android.permission.POST_NOTIFICATIONS \
+cargo test --manifest-path crates/emuchef-rust-backend/Cargo.toml \
+  phase6r_manual_real_adb_runtime_permission_requires_allowlist -- --ignored --nocapture
 ```

@@ -4,7 +4,10 @@ use std::path::{Path, PathBuf};
 
 use serde_json::{json, Value};
 
-use crate::executor::{artifact_local_filename, DryRunExecutorAdapters, ExecutorRunner};
+use crate::executor::{
+    adb::{FakeAdbCommandExecutor, RealAdbDevice},
+    artifact_local_filename, DryRunExecutorAdapters, ExecutorAdapters, ExecutorRunner,
+};
 use crate::model::OrderedMap;
 use crate::planner::{
     DeviceContext, ExecutionArtifact, ExecutionParamValue, ExecutionPlan, ExecutionPlanSource,
@@ -117,6 +120,18 @@ fn condition(type_name: &str, params: Value) -> ExecutionStepCondition {
 
 fn run_value(plan: &ExecutionPlan, adapters: DryRunExecutorAdapters) -> (Value, ExecutorRunner) {
     let mut runner = ExecutorRunner::new(adapters);
+    let result = runner.run(plan);
+    (
+        serde_json::to_value(result).expect("execution result should serialize"),
+        runner,
+    )
+}
+
+fn run_real_adb_value(
+    plan: &ExecutionPlan,
+    device: RealAdbDevice<FakeAdbCommandExecutor>,
+) -> (Value, ExecutorRunner<RealAdbDevice<FakeAdbCommandExecutor>>) {
+    let mut runner = ExecutorRunner::new(ExecutorAdapters::with_device(device));
     let result = runner.run(plan);
     (
         serde_json::to_value(result).expect("execution result should serialize"),
@@ -1042,6 +1057,383 @@ fn phase6q_path_exists_and_file_exists_match_dry_run_remote_file_dir_and_missing
                 "path_exists".to_string(),
                 "/sdcard/missing".to_string(),
                 "False".to_string(),
+            ],
+        ]
+    );
+}
+
+#[test]
+fn phase6r_real_adb_device_construction_does_not_run_commands() {
+    let executor = FakeAdbCommandExecutor::default();
+    let device = RealAdbDevice::with_executor("adb", Some("emulator-5554"), executor);
+
+    assert!(device.command_executor().calls().is_empty());
+}
+
+#[test]
+fn phase6r_adb_shell_payload_quoting_matches_python_shlex_join() {
+    let mut executor = FakeAdbCommandExecutor::default();
+    for _ in 0..5 {
+        executor.push_completed(0, "", "");
+    }
+    let mut device = RealAdbDevice::with_executor("adb", Some("emulator-5554"), executor);
+
+    assert!(device.path_exists("/sdcard/My File.txt").unwrap());
+    assert!(device.path_exists("/sdcard/has'quote.txt").unwrap());
+    assert!(device
+        .path_exists("/sdcard/double\"quote $dollar *glob [x] semi; slash\\")
+        .unwrap());
+    assert!(device.path_exists("-leading-dash").unwrap());
+    assert!(device
+        .path_exists("/data/data/com.example/weird path")
+        .unwrap());
+
+    assert_eq!(
+        device.command_executor().calls(),
+        &[
+            vec![
+                "adb".to_string(),
+                "-s".to_string(),
+                "emulator-5554".to_string(),
+                "shell".to_string(),
+                "test -e '/sdcard/My File.txt'".to_string(),
+            ],
+            vec![
+                "adb".to_string(),
+                "-s".to_string(),
+                "emulator-5554".to_string(),
+                "shell".to_string(),
+                r#"test -e '/sdcard/has'"'"'quote.txt'"#.to_string(),
+            ],
+            vec![
+                "adb".to_string(),
+                "-s".to_string(),
+                "emulator-5554".to_string(),
+                "shell".to_string(),
+                r#"test -e '/sdcard/double"quote $dollar *glob [x] semi; slash\'"#.to_string(),
+            ],
+            vec![
+                "adb".to_string(),
+                "-s".to_string(),
+                "emulator-5554".to_string(),
+                "shell".to_string(),
+                "test -e -leading-dash".to_string(),
+            ],
+            vec![
+                "adb".to_string(),
+                "-s".to_string(),
+                "emulator-5554".to_string(),
+                "shell".to_string(),
+                r#"su -c 'test -e '"'"'/data/data/com.example/weird path'"'"''"#.to_string(),
+            ],
+        ]
+    );
+}
+
+#[test]
+fn phase6r_run_plan_command_serial_injection_matches_python() {
+    let mut executor = FakeAdbCommandExecutor::default();
+    executor.push_completed(0, "", "");
+    executor.push_completed(0, "", "");
+    let mut device = RealAdbDevice::with_executor("adb", Some("emulator-5554"), executor);
+
+    device
+        .run_plan_command(vec![
+            "adb".to_string(),
+            "shell".to_string(),
+            "pm".to_string(),
+            "grant".to_string(),
+            "com.example.app".to_string(),
+            "android.permission.CAMERA".to_string(),
+        ])
+        .unwrap();
+    device
+        .run_plan_command(vec![
+            "adb".to_string(),
+            "-s".to_string(),
+            "already-selected".to_string(),
+            "shell".to_string(),
+            "appops".to_string(),
+            "set".to_string(),
+            "com.example.app".to_string(),
+            "RUN_IN_BACKGROUND".to_string(),
+            "ignore".to_string(),
+        ])
+        .unwrap();
+
+    assert_eq!(
+        device.command_executor().calls(),
+        &[
+            vec![
+                "adb".to_string(),
+                "-s".to_string(),
+                "emulator-5554".to_string(),
+                "shell".to_string(),
+                "pm".to_string(),
+                "grant".to_string(),
+                "com.example.app".to_string(),
+                "android.permission.CAMERA".to_string(),
+            ],
+            vec![
+                "adb".to_string(),
+                "-s".to_string(),
+                "already-selected".to_string(),
+                "shell".to_string(),
+                "appops".to_string(),
+                "set".to_string(),
+                "com.example.app".to_string(),
+                "RUN_IN_BACKGROUND".to_string(),
+                "ignore".to_string(),
+            ],
+        ]
+    );
+
+    let err = device
+        .run_plan_command(vec!["pm".to_string(), "path".to_string()])
+        .unwrap_err();
+    assert_eq!(err, "Plan command must start with 'adb': ['pm', 'path']");
+
+    let err = device.run_plan_command(Vec::new()).unwrap_err();
+    assert_eq!(err, "Plan command must not be empty.");
+}
+
+#[test]
+fn phase6r_adb_result_mapping_uses_fake_executor_without_launching_processes() {
+    let mut executor = FakeAdbCommandExecutor::default();
+    executor.push_completed(1, "", "Failure [INSTALL_FAILED_ALREADY_EXISTS]\n");
+    let mut device = RealAdbDevice::with_executor("adb", None, executor);
+
+    let err = device
+        .install_apk(Path::new("/tmp/example app.apk"), true)
+        .unwrap_err();
+
+    assert_eq!(
+        err,
+        "ADB command failed (1): adb install -r /tmp/example app.apk\nFailure [INSTALL_FAILED_ALREADY_EXISTS]"
+    );
+    assert_eq!(
+        device.command_executor().calls(),
+        &[vec![
+            "adb".to_string(),
+            "install".to_string(),
+            "-r".to_string(),
+            "/tmp/example app.apk".to_string(),
+        ]]
+    );
+
+    let mut executor = FakeAdbCommandExecutor::default();
+    executor.push_missing_binary();
+    let mut device = RealAdbDevice::with_executor("adb", None, executor);
+    let err = device.force_stop_app("com.example.app").unwrap_err();
+
+    assert_eq!(
+        err,
+        "The configured ADB executable could not be started. Ensure adb is available on PATH or pass an explicit executable when constructing RealAdbDevice."
+    );
+    assert_eq!(
+        device.command_executor().calls(),
+        &[vec![
+            "adb".to_string(),
+            "shell".to_string(),
+            "am".to_string(),
+            "force-stop".to_string(),
+            "com.example.app".to_string(),
+        ]]
+    );
+}
+
+#[test]
+fn phase6r_package_installed_maps_python_stdout_and_exit_code() {
+    let mut executor = FakeAdbCommandExecutor::default();
+    executor.push_completed(0, "package:/data/app/com.example/base.apk\n", "");
+    executor.push_completed(1, "", "package not found");
+    let mut device = RealAdbDevice::with_executor("adb", Some("emulator-5554"), executor);
+
+    assert!(device.package_installed("com.example.present").unwrap());
+    assert!(!device.package_installed("com.example.missing").unwrap());
+    assert_eq!(
+        device.command_executor().calls(),
+        &[
+            vec![
+                "adb".to_string(),
+                "-s".to_string(),
+                "emulator-5554".to_string(),
+                "shell".to_string(),
+                "pm".to_string(),
+                "path".to_string(),
+                "com.example.present".to_string(),
+            ],
+            vec![
+                "adb".to_string(),
+                "-s".to_string(),
+                "emulator-5554".to_string(),
+                "shell".to_string(),
+                "pm".to_string(),
+                "path".to_string(),
+                "com.example.missing".to_string(),
+            ],
+        ]
+    );
+}
+
+#[test]
+fn phase6r_launch_app_command_shapes_match_python_explicit_resolved_and_fallback_paths() {
+    let mut explicit_executor = FakeAdbCommandExecutor::default();
+    explicit_executor.push_completed(0, "", "");
+    let mut explicit_device = RealAdbDevice::with_executor("adb", None, explicit_executor);
+
+    explicit_device
+        .launch_app("com.example.app", Some(".MainActivity"))
+        .unwrap();
+    assert_eq!(
+        explicit_device.command_executor().calls(),
+        &[vec![
+            "adb".to_string(),
+            "shell".to_string(),
+            "am".to_string(),
+            "start".to_string(),
+            "-n".to_string(),
+            "com.example.app/.MainActivity".to_string(),
+        ]]
+    );
+
+    let mut resolved_executor = FakeAdbCommandExecutor::default();
+    resolved_executor.push_completed(0, "priority=0\ncom.example.app/.ResolvedActivity\n", "");
+    resolved_executor.push_completed(0, "", "");
+    let mut resolved_device =
+        RealAdbDevice::with_executor("adb", Some("emulator-5554"), resolved_executor);
+
+    resolved_device.launch_app("com.example.app", None).unwrap();
+    assert_eq!(
+        resolved_device.command_executor().calls(),
+        &[
+            vec![
+                "adb".to_string(),
+                "-s".to_string(),
+                "emulator-5554".to_string(),
+                "shell".to_string(),
+                "cmd".to_string(),
+                "package".to_string(),
+                "resolve-activity".to_string(),
+                "--brief".to_string(),
+                "com.example.app".to_string(),
+            ],
+            vec![
+                "adb".to_string(),
+                "-s".to_string(),
+                "emulator-5554".to_string(),
+                "shell".to_string(),
+                "am".to_string(),
+                "start".to_string(),
+                "-n".to_string(),
+                "com.example.app/.ResolvedActivity".to_string(),
+            ],
+        ]
+    );
+
+    let mut fallback_executor = FakeAdbCommandExecutor::default();
+    fallback_executor.push_completed(1, "", "cmd failed");
+    fallback_executor.push_completed(0, "no component here\n", "");
+    fallback_executor.push_completed(0, "", "");
+    let mut fallback_device = RealAdbDevice::with_executor("adb", None, fallback_executor);
+
+    fallback_device.launch_app("com.example.app", None).unwrap();
+    assert_eq!(
+        fallback_device.command_executor().calls(),
+        &[
+            vec![
+                "adb".to_string(),
+                "shell".to_string(),
+                "cmd".to_string(),
+                "package".to_string(),
+                "resolve-activity".to_string(),
+                "--brief".to_string(),
+                "com.example.app".to_string(),
+            ],
+            vec![
+                "adb".to_string(),
+                "shell".to_string(),
+                "pm".to_string(),
+                "resolve-activity".to_string(),
+                "--brief".to_string(),
+                "com.example.app".to_string(),
+            ],
+            vec![
+                "adb".to_string(),
+                "shell".to_string(),
+                "monkey".to_string(),
+                "-p".to_string(),
+                "com.example.app".to_string(),
+                "-c".to_string(),
+                "android.intent.category.LAUNCHER".to_string(),
+                "1".to_string(),
+            ],
+        ]
+    );
+}
+
+#[test]
+fn phase6r_executor_can_use_explicit_real_adb_device_for_selected_handlers() {
+    let tmp = tempfile::tempdir().expect("temp root should be created");
+    let apk = tmp.path().join("example app.apk");
+    fs::write(&apk, "apk").expect("apk fixture should be writable");
+
+    let mut params = OrderedMap::new();
+    params.insert(
+        "runtime".to_string(),
+        literal(json!([
+            {
+                "package_name": "com.example.app",
+                "name": "android.permission.POST_NOTIFICATIONS"
+            }
+        ])),
+    );
+    let grant_step = ExecutionStep {
+        id: "example.recipe/grant".to_string(),
+        recipe_ref: "example.recipe".to_string(),
+        type_name: "grant_permissions".to_string(),
+        name: "Grant".to_string(),
+        dependencies: Vec::new(),
+        constraints: constraints(),
+        params,
+        skip_if: Vec::new(),
+        verify: Vec::new(),
+    };
+    let execution_plan = plan(vec![
+        install_apk_step("example.recipe/install", &apk, true),
+        grant_step,
+    ]);
+
+    let mut executor = FakeAdbCommandExecutor::default();
+    executor.push_completed(0, "", "");
+    executor.push_completed(0, "", "");
+    let device = RealAdbDevice::with_executor("adb", Some("emulator-5554"), executor);
+
+    let (actual, runner) = run_real_adb_value(&execution_plan, device);
+
+    assert_eq!(actual["success"], true);
+    assert_eq!(actual["steps"][0]["status"], "executed");
+    assert_eq!(actual["steps"][1]["status"], "executed");
+    assert_eq!(
+        runner.adapters().device().command_executor().calls(),
+        &[
+            vec![
+                "adb".to_string(),
+                "-s".to_string(),
+                "emulator-5554".to_string(),
+                "install".to_string(),
+                "-r".to_string(),
+                apk.to_string_lossy().to_string(),
+            ],
+            vec![
+                "adb".to_string(),
+                "-s".to_string(),
+                "emulator-5554".to_string(),
+                "shell".to_string(),
+                "pm".to_string(),
+                "grant".to_string(),
+                "com.example.app".to_string(),
+                "android.permission.POST_NOTIFICATIONS".to_string(),
             ],
         ]
     );
