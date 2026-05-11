@@ -362,12 +362,13 @@ envelopes, one-shot requests, JSON Lines sidecar requests, `listStepSpecs`,
 path-based recipe YAML emit/validation, sidecar document open/get/save/close,
 sidecar document `emitYaml`/`validate`, sidecar `getRefIndex`, snapshot
 undo/redo, `SetOverviewField` for recipe `name` and `description`, and
-fixture-covered non-step `applyRecipeCommand` mutations for inputs, artifacts,
-and artifact groups. Supported non-step command families include add, rename,
+fixture-covered `applyRecipeCommand` mutations for inputs, artifacts,
+artifact groups, step lifecycle, and step dependencies. Supported non-step
+command families include add, rename,
 update-field, delete, and duplicate for inputs and artifacts, plus add, rename,
 delete, duplicate, reorder, add member, remove member, and reorder member for
-artifact groups. The Rust backend still does not implement step lifecycle,
-dependency, params, or advanced internals commands; planner or executor
+artifact groups. The Rust backend still does not implement step params,
+advanced internals commands, planner or executor
 behavior; full validation; packaging; backend selection; or Tauri integration.
 Its `hello` response reports only capabilities implemented in the crate, but
 capability parity is not complete semantic parity and does not make it the Tauri

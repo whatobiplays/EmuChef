@@ -85,6 +85,36 @@ pub enum RecipeCommand {
         index: i64,
         to_index: i64,
     },
+    AddStep {
+        step_id: String,
+        step_type: String,
+        name: String,
+        index: Option<i64>,
+    },
+    DeleteStep {
+        step_id: String,
+    },
+    DuplicateStep {
+        source_step_id: String,
+        new_step_id: String,
+    },
+    ReorderStep {
+        step_id: String,
+        to_index: i64,
+    },
+    UpdateStepBasics {
+        step_id: String,
+        name: String,
+        description: Value,
+    },
+    SetStepUserToggleable {
+        step_id: String,
+        user_toggleable: bool,
+    },
+    UpdateStepDependencies {
+        step_id: String,
+        dependencies: Vec<String>,
+    },
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -159,6 +189,13 @@ pub fn decode_recipe_command(payload: &Value) -> Result<RecipeCommand, ApiError>
         "AddArtifactGroupMember" => decode_add_artifact_group_member(object),
         "RemoveArtifactGroupMember" => decode_remove_artifact_group_member(object),
         "ReorderArtifactGroupMember" => decode_reorder_artifact_group_member(object),
+        "AddStep" => decode_add_step(object),
+        "DeleteStep" => decode_delete_step(object),
+        "DuplicateStep" => decode_duplicate_step(object),
+        "ReorderStep" => decode_reorder_step(object),
+        "UpdateStepBasics" => decode_update_step_basics(object),
+        "SetStepUserToggleable" => decode_set_step_user_toggleable(object),
+        "UpdateStepDependencies" => decode_update_step_dependencies(object),
         unknown => Err(ApiError::invalid_command_with_details(
             format!("Unsupported command type: {unknown}"),
             json!({ "commandType": unknown }),
@@ -394,6 +431,57 @@ fn decode_reorder_artifact_group_member(
     })
 }
 
+fn decode_add_step(object: &Map<String, Value>) -> Result<RecipeCommand, ApiError> {
+    Ok(RecipeCommand::AddStep {
+        step_id: required_str(object, "stepId", "AddStep")?,
+        step_type: required_str(object, "stepType", "AddStep")?,
+        name: required_str(object, "name", "AddStep")?,
+        index: optional_index(object, "index", "AddStep")?,
+    })
+}
+
+fn decode_delete_step(object: &Map<String, Value>) -> Result<RecipeCommand, ApiError> {
+    Ok(RecipeCommand::DeleteStep {
+        step_id: required_str(object, "stepId", "DeleteStep")?,
+    })
+}
+
+fn decode_duplicate_step(object: &Map<String, Value>) -> Result<RecipeCommand, ApiError> {
+    Ok(RecipeCommand::DuplicateStep {
+        source_step_id: required_str(object, "sourceStepId", "DuplicateStep")?,
+        new_step_id: required_str(object, "newStepId", "DuplicateStep")?,
+    })
+}
+
+fn decode_reorder_step(object: &Map<String, Value>) -> Result<RecipeCommand, ApiError> {
+    Ok(RecipeCommand::ReorderStep {
+        step_id: required_str(object, "stepId", "ReorderStep")?,
+        to_index: required_index(object, "toIndex", "ReorderStep")?,
+    })
+}
+
+fn decode_update_step_basics(object: &Map<String, Value>) -> Result<RecipeCommand, ApiError> {
+    Ok(RecipeCommand::UpdateStepBasics {
+        step_id: required_str(object, "stepId", "UpdateStepBasics")?,
+        name: required_str(object, "name", "UpdateStepBasics")?,
+        description: required_optional_str(object, "description", "UpdateStepBasics")?,
+    })
+}
+
+fn decode_set_step_user_toggleable(object: &Map<String, Value>) -> Result<RecipeCommand, ApiError> {
+    Ok(RecipeCommand::SetStepUserToggleable {
+        step_id: required_str(object, "stepId", "SetStepUserToggleable")?,
+        user_toggleable: required_bool(object, "userToggleable", "SetStepUserToggleable")?,
+    })
+}
+
+fn decode_update_step_dependencies(object: &Map<String, Value>) -> Result<RecipeCommand, ApiError> {
+    Ok(RecipeCommand::UpdateStepDependencies {
+        step_id: required_str(object, "stepId", "UpdateStepDependencies")?,
+        dependencies: required_string_list(object, "dependencies", "UpdateStepDependencies")?,
+    })
+}
+
 fn reject_unexpected_fields(
     object: &Map<String, Value>,
     allowed_fields: &[&str],
@@ -499,4 +587,76 @@ fn optional_index(
             }),
         )),
     }
+}
+
+fn required_bool(
+    object: &Map<String, Value>,
+    field: &str,
+    command_type: &str,
+) -> Result<bool, ApiError> {
+    match required_value(object, field, command_type)? {
+        Value::Bool(value) => Ok(*value),
+        value => Err(ApiError::invalid_command_with_details(
+            format!("Command field '{field}' must be a boolean."),
+            json!({
+                "commandType": command_type,
+                "field": field,
+                "value": value,
+            }),
+        )),
+    }
+}
+
+fn required_optional_str(
+    object: &Map<String, Value>,
+    field: &str,
+    command_type: &str,
+) -> Result<Value, ApiError> {
+    match required_value(object, field, command_type)? {
+        Value::Null => Ok(Value::Null),
+        Value::String(value) => Ok(Value::String(value.clone())),
+        value => Err(ApiError::invalid_command_with_details(
+            format!("Command field '{field}' must be a string or null."),
+            json!({
+                "commandType": command_type,
+                "field": field,
+                "value": value,
+            }),
+        )),
+    }
+}
+
+fn required_string_list(
+    object: &Map<String, Value>,
+    field: &str,
+    command_type: &str,
+) -> Result<Vec<String>, ApiError> {
+    let value = required_value(object, field, command_type)?;
+    let Value::Array(items) = value else {
+        return Err(ApiError::invalid_command_with_details(
+            format!("Command field '{field}' must be a list."),
+            json!({
+                "commandType": command_type,
+                "field": field,
+                "value": value,
+            }),
+        ));
+    };
+    let mut strings = Vec::with_capacity(items.len());
+    for item in items {
+        match item {
+            Value::String(value) if !value.is_empty() => strings.push(value.clone()),
+            _ => {
+                return Err(ApiError::invalid_command_with_details(
+                    format!("Command field '{field}' must contain only non-empty strings."),
+                    json!({
+                        "commandType": command_type,
+                        "field": field,
+                        "value": value,
+                    }),
+                ));
+            }
+        }
+    }
+    Ok(strings)
 }

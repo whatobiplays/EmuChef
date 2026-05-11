@@ -4,7 +4,7 @@ This package is an experimental Rust backend skeleton for the EmuChef config
 editor protocol. It is standalone and runnable independently of the Tauri
 editor.
 
-Phase 6I implements only:
+Phase 6J.1 implements only:
 
 - `hello`
 - `listStepSpecs`
@@ -32,6 +32,8 @@ Phase 6I implements only:
   `description`
 - Python-compatible non-step `applyRecipeCommand` mutations for the currently
   modeled input, artifact, and artifact group command families
+- Python-compatible step lifecycle and dependency `applyRecipeCommand`
+  mutations for the currently modeled step fields
 - generated `RecipeDocumentDto.refIndex` data for the currently modeled
   authored recipe features
 
@@ -63,27 +65,27 @@ requests in JSONL sidecar mode only. One-shot mode remains stateless and does
 not expose persistent document session APIs.
 
 Reporting these capabilities still does not make this backend compatible with
-the Tauri editor. Phase 6I may report the same required protocol capabilities as
-the current Tauri editor gate expects, but capability parity is not semantic
-parity. The Rust backend is still not editor-ready and is not wired into Tauri.
+the Tauri editor. Phase 6J.1 reports the same ordered capability list as Phase
+6H/6I; capability parity is not semantic parity. The Rust backend is still not
+editor-ready and is not wired into Tauri.
 There is no env var, CLI flag, config file, README path, or documented launch
-path for using this Rust backend as the Tauri editor backend in Phase 6I.
+path for using this Rust backend as the Tauri editor backend in Phase 6J.1.
 
 The Python backend remains the reference implementation. This Rust package is
 not a replacement backend and is not selected by the Tauri editor.
 
-This package does not implement step lifecycle commands, step dependency
-commands, step params commands, advanced internals commands, planner behavior,
-executor behavior, Python bundling, or production packaging. Its validation is a
-basic skeleton only; it does not perform full catalog-context validation,
-dependency graph validation, planner contract validation, artifact expansion
-validation, device checks, or executor checks. Semantic command parity is still
-incomplete outside the fixture-covered overview/input/artifact/artifact group
-surface. Python remains the reference implementation.
+This package does not implement step params commands, advanced internals
+commands, planner behavior, executor behavior, Python bundling, or production
+packaging. Its validation is a basic skeleton only; it does not perform full
+catalog-context validation, dependency graph validation, planner contract
+validation, artifact expansion validation, device checks, or executor checks.
+Semantic command parity is still incomplete outside the fixture-covered
+overview/input/artifact/artifact group/step lifecycle/step dependency surface.
+Python remains the reference implementation.
 
 ## Document Session Scope
 
-Phase 6I document sessions are process-local JSONL sidecar state. Opening a
+Phase 6J.1 document sessions are process-local JSONL sidecar state. Opening a
 recipe loads the Phase 6E authored recipe model, emits canonical YAML, records
 that YAML as the saved baseline, and returns a Python-shaped `RecipeDocumentDto`.
 `applyRecipeCommand` supports the overview commands added in Phase 6G:
@@ -143,6 +145,44 @@ Artifact mutations cover Python's current authored `remote_file` fixture surface
 model and is not editable through a Phase 6I command. This is fixture-scoped
 artifact parity, not a claim of broader artifact kind support.
 
+Phase 6J.1 expands `applyRecipeCommand` to these step lifecycle and dependency
+command families:
+
+```text
+AddStep
+DeleteStep
+DuplicateStep
+ReorderStep
+UpdateStepBasics
+SetStepUserToggleable
+UpdateStepDependencies
+```
+
+`AddStep` creates the same verified authored step shape as Python for this
+migration slice: normalized id/name, supported `stepType`, `user_toggleable:
+false`, empty `dependencies`, empty `constraints`, empty `skip_if`, empty
+`params`, empty `verify`, and no description. It does not materialize StepSpec
+default params. `UpdateStepBasics` edits only `name` and `description`; `null`,
+empty, and whitespace-only descriptions clear the description, project as an
+empty DTO string, and omit `description:` from canonical YAML. Step `id` and
+`type` remain read-only.
+
+`UpdateStepDependencies` is a full replacement command. It preserves authored
+order, normalizes dependency ids, rejects duplicate dependency ids, and
+intentionally allows missing dependency targets because Python command
+application allows them. The Rust backend does not add planner dependency
+validation, cycle checks, or execution-order inference in Phase 6J.1.
+
+Step params and advanced internals commands remain unsupported and return
+`invalid_command` in this Rust backend slice:
+
+```text
+UpdateStepParams
+UpdateStepConstraints
+UpdateStepSkipIf
+UpdateStepVerify
+```
+
 Input, artifact, and artifact group rename/delete commands perform the same
 tested safe cleanup as Python for supported immediate step params:
 
@@ -152,9 +192,16 @@ tested safe cleanup as Python for supported immediate step params:
 - supported `artifact_groups` string-list params
 - artifact group membership when artifacts are renamed or deleted
 
+`DeleteStep` performs only the Python-verified cleanup targets that the Rust
+model already represents faithfully for Phase 6J.1 fixtures: other steps'
+`dependencies`, `constraints.conflicts_with`, and supported top-level step param
+refs such as `steps.prepare` and `steps.prepare.outputs.extracted_path`.
+
 Nested literal ref-shaped data, `skip_if`, `verify`, unsupported step types, and
-custom params remain preserved instead of recursively rewritten. Artifact groups
-are not RefIndex sources; group mutations do not create `artifact_groups.*` refs.
+custom params remain preserved instead of recursively rewritten. Step delete
+does not expand skip/verify or advanced internals cleanup in Phase 6J.1.
+Artifact groups are not RefIndex sources; group mutations do not create
+`artifact_groups.*` refs.
 
 Changing commands regenerate canonical YAML first, then rerun the Phase 6E basic
 validation skeleton for the current in-memory recipe. No-op commands return
@@ -598,6 +645,12 @@ for command in [
 write("phase6i_after_groups_get_ref_index.result.json", manager.get_ref_index(document_id)["result"])
 PY
 ```
+
+Phase 6J.1 does not add Python-generated result goldens. Its Rust tests mirror
+the verified Python command codec and document behavior directly, with comments
+pointing to the Python source/tests for non-obvious rules such as missing
+dependency target allowance, `AddStep` empty param initialization, description
+clearing, and delete-step cleanup.
 
 ## One-Shot Mode
 

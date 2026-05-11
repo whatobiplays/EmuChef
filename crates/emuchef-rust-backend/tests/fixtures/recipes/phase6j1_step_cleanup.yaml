@@ -1,0 +1,59 @@
+schema_version: 1
+kind: recipe
+id: phase6j1.step_cleanup
+name: Phase 6J.1 Step Cleanup
+recipe_dependencies: []
+provides:
+  features: []
+inputs: {}
+artifacts:
+  archive_zip:
+    type: remote_file
+    url: https://example.com/archive.zip
+    cache: default
+artifact_groups: {}
+steps:
+  - id: prepare
+    type: extract_archive
+    name: Prepare
+    user_toggleable: false
+    dependencies: []
+    constraints:
+      capabilities: []
+      conflicts_with: []
+    skip_if: []
+    params:
+      archive:
+        ref: artifacts.archive_zip.local_path
+      dest: /tmp/prepared
+    verify: []
+  - id: consume
+    type: copy_files
+    name: Consume
+    user_toggleable: false
+    dependencies:
+      - prepare
+    constraints:
+      capabilities: []
+      conflicts_with:
+        - prepare
+    skip_if: []
+    params:
+      source:
+        ref: steps.prepare.outputs.extracted_path
+      dest: /sdcard/Example
+    verify: []
+  - id: consume_shorthand
+    type: copy_files
+    name: Consume Shorthand
+    user_toggleable: false
+    dependencies: []
+    constraints:
+      capabilities: []
+      conflicts_with: []
+    skip_if: []
+    params:
+      source:
+        ref: steps.prepare
+      dest: /sdcard/Example2
+    verify: []

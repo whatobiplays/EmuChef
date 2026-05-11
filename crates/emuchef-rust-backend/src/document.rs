@@ -2,8 +2,9 @@
 //!
 //! A document wraps the Phase 6E authored recipe model with the editor-facing
 //! lifecycle state needed for sidecar document sessions. The Rust backend keeps
-//! catalog-context validation, step command parity, planner behavior, and
-//! executor behavior out of this crate-local migration slice.
+//! catalog-context validation, step params and advanced internals commands,
+//! planner behavior, and executor behavior out of this crate-local migration
+//! slice.
 
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -13,6 +14,7 @@ use serde_json::Value;
 use crate::commands::{ArtifactField, InputField, OverviewField, OverviewValue, RecipeCommand};
 use crate::model::{
     InputDeclaration, InputValidation, OrderedMap, ParamValue, Recipe, RemoteFileArtifact, Step,
+    StepConstraints,
 };
 use crate::step_specs;
 use crate::validation;
@@ -213,6 +215,33 @@ impl RecipeDocument {
                 index,
                 to_index,
             } => self.updated_reorder_artifact_group_member_recipe(group_id, index, to_index),
+            RecipeCommand::AddStep {
+                step_id,
+                step_type,
+                name,
+                index,
+            } => self.updated_add_step_recipe(step_id, step_type, name, index),
+            RecipeCommand::DeleteStep { step_id } => self.updated_delete_step_recipe(step_id),
+            RecipeCommand::DuplicateStep {
+                source_step_id,
+                new_step_id,
+            } => self.updated_duplicate_step_recipe(source_step_id, new_step_id),
+            RecipeCommand::ReorderStep { step_id, to_index } => {
+                self.updated_reorder_step_recipe(step_id, to_index)
+            }
+            RecipeCommand::UpdateStepBasics {
+                step_id,
+                name,
+                description,
+            } => self.updated_step_basics_recipe(step_id, name, description),
+            RecipeCommand::SetStepUserToggleable {
+                step_id,
+                user_toggleable,
+            } => self.updated_step_user_toggleable_recipe(step_id, user_toggleable),
+            RecipeCommand::UpdateStepDependencies {
+                step_id,
+                dependencies,
+            } => self.updated_step_dependencies_recipe(step_id, dependencies),
         }
     }
 
@@ -631,6 +660,129 @@ impl RecipeDocument {
         Ok(recipe)
     }
 
+    fn updated_add_step_recipe(
+        &self,
+        step_id: String,
+        step_type: String,
+        name: String,
+        index: Option<i64>,
+    ) -> Result<Recipe, String> {
+        let step_id = normalize_identifier(&step_id, "step id")?;
+        let mut recipe = self.recipe.clone();
+        if recipe.steps.iter().any(|step| step.id == step_id) {
+            return Err(format!("Step {step_id:?} already exists."));
+        }
+        if step_specs::step_spec_for(&step_type).is_none() {
+            return Err(format!("Unsupported step type {step_type:?}."));
+        }
+        let insertion_index = match index {
+            Some(index) => validate_insert_index(index, recipe.steps.len(), "step")?,
+            None => recipe.steps.len(),
+        };
+        recipe.steps.insert(
+            insertion_index,
+            Step {
+                id: step_id,
+                type_name: step_type,
+                name: required_text(&Value::String(name), "step name")?,
+                description: None,
+                user_toggleable: false,
+                dependencies: Vec::new(),
+                constraints: StepConstraints {
+                    capabilities: Vec::new(),
+                    conflicts_with: Vec::new(),
+                },
+                skip_if: Vec::new(),
+                params: OrderedMap::new(),
+                verify: Vec::new(),
+            },
+        );
+        Ok(recipe)
+    }
+
+    fn updated_delete_step_recipe(&self, step_id: String) -> Result<Recipe, String> {
+        let mut recipe = self.recipe.clone();
+        let index = step_index(&recipe.steps, &step_id)?;
+        recipe.steps.remove(index);
+        // Mirrors Python commands.py _delete_step/_remove_step_refs and
+        // tests/test_editor_core.py test_step_delete_removes_supported_dependencies_conflicts_and_refs.
+        recipe.steps = recipe
+            .steps
+            .iter()
+            .map(|step| remove_step_refs(step, RefTargetKind::Step, &step_id))
+            .collect();
+        Ok(recipe)
+    }
+
+    fn updated_duplicate_step_recipe(
+        &self,
+        source_step_id: String,
+        new_step_id: String,
+    ) -> Result<Recipe, String> {
+        let new_step_id = normalize_identifier(&new_step_id, "step id")?;
+        let mut recipe = self.recipe.clone();
+        if recipe.steps.iter().any(|step| step.id == new_step_id) {
+            return Err(format!("Step {new_step_id:?} already exists."));
+        }
+        let source_index = step_index(&recipe.steps, &source_step_id)?;
+        let mut copied = recipe.steps[source_index].clone();
+        copied.id = new_step_id;
+        recipe.steps.insert(source_index + 1, copied);
+        Ok(recipe)
+    }
+
+    fn updated_reorder_step_recipe(
+        &self,
+        step_id: String,
+        to_index: i64,
+    ) -> Result<Recipe, String> {
+        let mut recipe = self.recipe.clone();
+        let from_index = step_index(&recipe.steps, &step_id)?;
+        let to_index = validate_index(to_index, recipe.steps.len(), "reorder target")?;
+        let step = recipe.steps.remove(from_index);
+        recipe.steps.insert(to_index, step);
+        Ok(recipe)
+    }
+
+    fn updated_step_basics_recipe(
+        &self,
+        step_id: String,
+        name: String,
+        description: Value,
+    ) -> Result<Recipe, String> {
+        let mut recipe = self.recipe.clone();
+        let index = step_index(&recipe.steps, &step_id)?;
+        let step = &mut recipe.steps[index];
+        step.name = required_text(&Value::String(name), "step name")?;
+        step.description = optional_text(&description);
+        Ok(recipe)
+    }
+
+    fn updated_step_user_toggleable_recipe(
+        &self,
+        step_id: String,
+        user_toggleable: bool,
+    ) -> Result<Recipe, String> {
+        let mut recipe = self.recipe.clone();
+        let index = step_index(&recipe.steps, &step_id)?;
+        recipe.steps[index].user_toggleable = user_toggleable;
+        Ok(recipe)
+    }
+
+    fn updated_step_dependencies_recipe(
+        &self,
+        step_id: String,
+        dependencies: Vec<String>,
+    ) -> Result<Recipe, String> {
+        let mut recipe = self.recipe.clone();
+        let index = step_index(&recipe.steps, &step_id)?;
+        // Python command application only normalizes and deduplicates dependency
+        // ids; planner/catalog existence checks are intentionally out of scope.
+        recipe.steps[index].dependencies =
+            normalize_identifier_list(dependencies, "step dependency id")?;
+        Ok(recipe)
+    }
+
     fn content_snapshot(&self) -> ContentSnapshot {
         ContentSnapshot {
             recipe: self.recipe.clone(),
@@ -678,6 +830,7 @@ fn validation_diagnostics_for_recipe(
 enum RefTargetKind {
     Input,
     Artifact,
+    Step,
 }
 
 fn rename_ordered_map_key<T: Clone>(
@@ -744,6 +897,38 @@ fn rewrite_step_refs(step: &Step, target_kind: RefTargetKind, old_id: &str, new_
     if changed {
         updated.params = params;
     }
+    if matches!(target_kind, RefTargetKind::Step) {
+        let mut changed = false;
+        let dependencies = updated
+            .dependencies
+            .iter()
+            .map(|dependency| {
+                if dependency == old_id {
+                    changed = true;
+                    new_id.to_string()
+                } else {
+                    dependency.clone()
+                }
+            })
+            .collect::<Vec<_>>();
+        let conflicts_with = updated
+            .constraints
+            .conflicts_with
+            .iter()
+            .map(|conflict| {
+                if conflict == old_id {
+                    changed = true;
+                    new_id.to_string()
+                } else {
+                    conflict.clone()
+                }
+            })
+            .collect::<Vec<_>>();
+        if changed {
+            updated.dependencies = dependencies;
+            updated.constraints.conflicts_with = conflicts_with;
+        }
+    }
     updated
 }
 
@@ -773,6 +958,27 @@ fn remove_step_refs(step: &Step, target_kind: RefTargetKind, target_id: &str) ->
     }
     if changed {
         updated.params = params;
+    }
+    if matches!(target_kind, RefTargetKind::Step) {
+        let dependencies = updated
+            .dependencies
+            .iter()
+            .filter(|dependency| dependency.as_str() != target_id)
+            .cloned()
+            .collect::<Vec<_>>();
+        let conflicts_with = updated
+            .constraints
+            .conflicts_with
+            .iter()
+            .filter(|conflict| conflict.as_str() != target_id)
+            .cloned()
+            .collect::<Vec<_>>();
+        if dependencies != updated.dependencies
+            || conflicts_with != updated.constraints.conflicts_with
+        {
+            updated.dependencies = dependencies;
+            updated.constraints.conflicts_with = conflicts_with;
+        }
     }
     updated
 }
@@ -827,6 +1033,14 @@ fn rewrite_ref(
             let rest = ref_value.strip_prefix("artifacts.")?;
             let (artifact_id, field) = rest.rsplit_once('.')?;
             (artifact_id == old_id).then(|| format!("artifacts.{new_id}.{field}"))
+        }
+        RefTargetKind::Step => {
+            if ref_value == format!("steps.{old_id}") {
+                return Some(format!("steps.{new_id}"));
+            }
+            let output_prefix = format!("steps.{old_id}.outputs.");
+            let output_name = ref_value.strip_prefix(&output_prefix)?;
+            (!output_name.is_empty()).then(|| format!("steps.{new_id}.outputs.{output_name}"))
         }
     }
 }
@@ -898,6 +1112,27 @@ fn normalize_identifier(value: &str, label: &str) -> Result<String, String> {
         return Err(format!("{label} must not be empty."));
     }
     Ok(normalized.to_string())
+}
+
+fn normalize_identifier_list(values: Vec<String>, label: &str) -> Result<Vec<String>, String> {
+    let normalized = values
+        .iter()
+        .map(|value| normalize_identifier(value, label))
+        .collect::<Result<Vec<_>, _>>()?;
+    let mut unique = normalized.clone();
+    unique.sort();
+    unique.dedup();
+    if unique.len() != normalized.len() {
+        return Err(format!("{label}s must be unique."));
+    }
+    Ok(normalized)
+}
+
+fn step_index(steps: &[Step], step_id: &str) -> Result<usize, String> {
+    steps
+        .iter()
+        .position(|step| step.id == step_id)
+        .ok_or_else(|| format!("Unknown step {step_id:?}."))
 }
 
 fn required_text(value: &Value, label: &str) -> Result<String, String> {
