@@ -1,4 +1,4 @@
-//! Minimal declarative execution-plan emission for Phase 6M planner fixtures.
+//! Declarative execution-plan emission for Phase 6M/6N planner fixtures.
 //!
 //! Python remains the reference planner. This module intentionally models only
 //! the fixture-covered `PlanningResult`/`ExecutionPlan` emission shape and does
@@ -210,14 +210,24 @@ pub fn plan_execution(input: PlannerInput) -> PlanningResult {
         return error_result(dependency_errors);
     }
 
-    let selected_input_ids = selected_input_ids(&recipes, &expanded_recipe_refs);
+    let (selected_step_ids, selection_errors) = selected_step_ids(
+        &recipes,
+        &expanded_recipe_refs,
+        &input.input_bindings,
+        &input.runtime_capabilities,
+    );
+    if !selection_errors.is_empty() {
+        return error_result(selection_errors);
+    }
+    let selected_input_ids =
+        selected_input_ids(&recipes, &expanded_recipe_refs, &selected_step_ids);
     let input_errors =
-        validate_required_bindings(&recipes, &selected_input_ids, &input.input_bindings);
+        validate_input_bindings(&recipes, &selected_input_ids, &input.input_bindings);
     if !input_errors.is_empty() {
         return error_result(input_errors);
     }
 
-    let authored_steps = authored_steps(&recipes, &expanded_recipe_refs);
+    let authored_steps = authored_steps(&recipes, &expanded_recipe_refs, &selected_step_ids);
     let (ordered_steps, step_errors) = topologically_sort_steps(authored_steps);
     if !step_errors.is_empty() {
         return error_result(step_errors);
@@ -399,6 +409,7 @@ fn visit_recipe_dependency(
 fn authored_steps(
     recipes: &HashMap<String, Recipe>,
     expanded_recipe_refs: &[String],
+    selected_step_ids: &HashSet<String>,
 ) -> Vec<(String, String, Step)> {
     let mut result = Vec::new();
     for recipe_id in expanded_recipe_refs {
@@ -406,11 +417,11 @@ fn authored_steps(
             continue;
         };
         for step in &recipe.steps {
-            result.push((
-                make_execution_step_id(recipe_id, &step.id),
-                recipe_id.clone(),
-                step.clone(),
-            ));
+            let step_id = make_execution_step_id(recipe_id, &step.id);
+            if !selected_step_ids.contains(&step_id) {
+                continue;
+            }
+            result.push((step_id, recipe_id.clone(), step.clone()));
         }
     }
     result
@@ -487,9 +498,281 @@ fn topologically_sort_steps(
     (result, Vec::new())
 }
 
+fn selected_step_ids(
+    recipes: &HashMap<String, Recipe>,
+    expanded_recipe_refs: &[String],
+    input_bindings: &OrderedMap<Value>,
+    runtime_capabilities: &RuntimeCapabilities,
+) -> (HashSet<String>, Vec<PlannerMessage>) {
+    let mut selected = HashSet::new();
+    let mut availability_by_step_id = HashMap::new();
+    let mut errors = Vec::new();
+
+    for recipe_id in expanded_recipe_refs {
+        let Some(recipe) = recipes.get(recipe_id) else {
+            continue;
+        };
+        let mut available_by_local_step_id = HashMap::new();
+        let mut requested_local_step_ids = Vec::new();
+
+        for step in &recipe.steps {
+            let available =
+                step.constraints.capabilities.iter().all(|capability| {
+                    runtime_capability_available(runtime_capabilities, capability)
+                });
+            let step_id = make_execution_step_id(recipe_id, &step.id);
+            availability_by_step_id.insert(step_id, available);
+            available_by_local_step_id.insert(step.id.clone(), available);
+            if available {
+                requested_local_step_ids.push(step.id.clone());
+            }
+        }
+
+        let (local_step_ids, selection_errors) = select_local_step_ids(
+            recipe,
+            &requested_local_step_ids,
+            &available_by_local_step_id,
+        );
+        errors.extend(selection_errors);
+        for local_step_id in local_step_ids {
+            selected.insert(make_execution_step_id(recipe_id, &local_step_id));
+        }
+    }
+
+    if !errors.is_empty() {
+        return (HashSet::new(), errors);
+    }
+
+    (
+        prune_optional_input_steps(
+            recipes,
+            expanded_recipe_refs,
+            selected,
+            &availability_by_step_id,
+            input_bindings,
+        ),
+        Vec::new(),
+    )
+}
+
+fn runtime_capability_available(capabilities: &RuntimeCapabilities, capability: &str) -> bool {
+    match capability {
+        "adb_available" => capabilities.adb_available,
+        "apk_install" => capabilities.apk_install,
+        "shared_storage_write" => capabilities.shared_storage_write,
+        "app_launch" => capabilities.app_launch,
+        "shell_command" => capabilities.shell_command,
+        "package_remove_for_user" => capabilities.package_remove_for_user,
+        "root_shell" => capabilities.root_shell,
+        "app_data_write" => capabilities.app_data_write,
+        _ => false,
+    }
+}
+
+fn select_local_step_ids(
+    recipe: &Recipe,
+    requested_local_step_ids: &[String],
+    available_by_local_step_id: &HashMap<String, bool>,
+) -> (HashSet<String>, Vec<PlannerMessage>) {
+    let by_id = recipe
+        .steps
+        .iter()
+        .map(|step| (step.id.clone(), step))
+        .collect::<HashMap<_, _>>();
+    let mut selected = HashSet::new();
+    let mut can_select_cache = HashMap::new();
+    let mut errors = Vec::new();
+
+    for requested_id in requested_local_step_ids {
+        if can_select_local_step(
+            recipe,
+            requested_id,
+            &by_id,
+            available_by_local_step_id,
+            &mut can_select_cache,
+            &mut HashSet::new(),
+            &mut errors,
+        ) {
+            add_local_step_with_dependencies(requested_id, &by_id, &mut selected);
+        }
+    }
+
+    if errors.is_empty() {
+        (selected, Vec::new())
+    } else {
+        (HashSet::new(), errors)
+    }
+}
+
+fn can_select_local_step(
+    recipe: &Recipe,
+    step_id: &str,
+    by_id: &HashMap<String, &Step>,
+    available_by_local_step_id: &HashMap<String, bool>,
+    cache: &mut HashMap<String, bool>,
+    temporary: &mut HashSet<String>,
+    errors: &mut Vec<PlannerMessage>,
+) -> bool {
+    if let Some(cached) = cache.get(step_id) {
+        return *cached;
+    }
+    if !temporary.insert(step_id.to_string()) {
+        if errors.is_empty() {
+            errors.push(PlannerMessage {
+                code: "dependency_cycle".to_string(),
+                message: format!("Step dependency cycle detected in recipe '{}'.", recipe.id),
+                details: json!({ "recipe_ref": recipe.id, "step_id": step_id }),
+            });
+        }
+        return false;
+    }
+    let Some(step) = by_id.get(step_id) else {
+        temporary.remove(step_id);
+        cache.insert(step_id.to_string(), false);
+        return false;
+    };
+    let allowed = *available_by_local_step_id.get(step_id).unwrap_or(&false)
+        && step.dependencies.iter().all(|dependency| {
+            can_select_local_step(
+                recipe,
+                dependency,
+                by_id,
+                available_by_local_step_id,
+                cache,
+                temporary,
+                errors,
+            )
+        });
+    temporary.remove(step_id);
+    cache.insert(step_id.to_string(), allowed);
+    allowed
+}
+
+fn add_local_step_with_dependencies(
+    step_id: &str,
+    by_id: &HashMap<String, &Step>,
+    selected: &mut HashSet<String>,
+) {
+    if selected.contains(step_id) {
+        return;
+    }
+    let Some(step) = by_id.get(step_id) else {
+        return;
+    };
+    for dependency in &step.dependencies {
+        add_local_step_with_dependencies(dependency, by_id, selected);
+    }
+    selected.insert(step_id.to_string());
+}
+
+fn prune_optional_input_steps(
+    recipes: &HashMap<String, Recipe>,
+    expanded_recipe_refs: &[String],
+    selected_step_ids: HashSet<String>,
+    availability_by_step_id: &HashMap<String, bool>,
+    input_bindings: &OrderedMap<Value>,
+) -> HashSet<String> {
+    let mut selected = selected_step_ids;
+
+    loop {
+        let mut removed_step_ids = HashSet::new();
+        for recipe_id in expanded_recipe_refs {
+            let Some(recipe) = recipes.get(recipe_id) else {
+                continue;
+            };
+            for step in &recipe.steps {
+                let step_id = make_execution_step_id(recipe_id, &step.id);
+                if !selected.contains(&step_id)
+                    || !availability_by_step_id
+                        .get(&step_id)
+                        .copied()
+                        .unwrap_or(false)
+                {
+                    continue;
+                }
+                let unbound_optional_inputs = referenced_input_ids(recipe_id, step)
+                    .into_iter()
+                    .filter(|input_id| optional_input_is_unbound(recipes, input_id, input_bindings))
+                    .collect::<Vec<_>>();
+                if unbound_optional_inputs.is_empty() {
+                    continue;
+                }
+                removed_step_ids.insert(step_id);
+                for dependent_id in dependent_step_ids(recipe, &step.id) {
+                    removed_step_ids.insert(make_execution_step_id(recipe_id, &dependent_id));
+                }
+            }
+        }
+
+        if removed_step_ids.is_empty() {
+            return selected;
+        }
+        for step_id in removed_step_ids {
+            selected.remove(&step_id);
+        }
+    }
+}
+
+fn optional_input_is_unbound(
+    recipes: &HashMap<String, Recipe>,
+    input_id: &str,
+    input_bindings: &OrderedMap<Value>,
+) -> bool {
+    let Some((recipe_id, local_input_id)) = input_id.split_once('/') else {
+        return false;
+    };
+    let Some(declaration) = recipes
+        .get(recipe_id)
+        .and_then(|recipe| recipe.inputs.get(local_input_id))
+    else {
+        return false;
+    };
+    !declaration.required && !input_bindings.contains_key(input_id) && declaration.default.is_null()
+}
+
+fn referenced_input_ids(recipe_id: &str, step: &Step) -> Vec<String> {
+    let mut input_ids = Vec::new();
+    for value in step.params.values() {
+        let ParamValue::Ref(ref_value) = value else {
+            continue;
+        };
+        if let RuntimeRef::Input { target_id } = parse_reference(ref_value) {
+            let input_id = make_execution_input_id(recipe_id, &target_id);
+            if !input_ids.iter().any(|existing| existing == &input_id) {
+                input_ids.push(input_id);
+            }
+        }
+    }
+    input_ids
+}
+
+fn dependent_step_ids(recipe: &Recipe, dependency_id: &str) -> HashSet<String> {
+    let mut dependents = HashSet::new();
+    let mut changed = true;
+    while changed {
+        changed = false;
+        for step in &recipe.steps {
+            if step.id == dependency_id || dependents.contains(&step.id) {
+                continue;
+            }
+            if step.dependencies.iter().any(|item| item == dependency_id)
+                || step
+                    .dependencies
+                    .iter()
+                    .any(|item| dependents.contains(item))
+            {
+                dependents.insert(step.id.clone());
+                changed = true;
+            }
+        }
+    }
+    dependents
+}
+
 fn selected_input_ids(
     recipes: &HashMap<String, Recipe>,
     expanded_recipe_refs: &[String],
+    selected_step_ids: &HashSet<String>,
 ) -> Vec<String> {
     let mut input_ids = Vec::new();
     for recipe_id in expanded_recipe_refs {
@@ -497,15 +780,13 @@ fn selected_input_ids(
             continue;
         };
         for step in &recipe.steps {
-            for value in step.params.values() {
-                let ParamValue::Ref(ref_value) = value else {
-                    continue;
-                };
-                if let RuntimeRef::Input { target_id } = parse_reference(ref_value) {
-                    let input_id = make_execution_input_id(recipe_id, &target_id);
-                    if !input_ids.iter().any(|existing| existing == &input_id) {
-                        input_ids.push(input_id);
-                    }
+            let step_id = make_execution_step_id(recipe_id, &step.id);
+            if !selected_step_ids.contains(&step_id) {
+                continue;
+            }
+            for input_id in referenced_input_ids(recipe_id, step) {
+                if !input_ids.iter().any(|existing| existing == &input_id) {
+                    input_ids.push(input_id);
                 }
             }
         }
@@ -513,7 +794,7 @@ fn selected_input_ids(
     input_ids
 }
 
-fn validate_required_bindings(
+fn validate_input_bindings(
     recipes: &HashMap<String, Recipe>,
     input_ids: &[String],
     input_bindings: &OrderedMap<Value>,
@@ -529,14 +810,73 @@ fn validate_required_bindings(
         else {
             continue;
         };
-        if declaration.required
-            && !input_bindings.contains_key(input_id)
-            && declaration.default.is_null()
-        {
+        let Some(value) = binding_value(declaration, input_id, input_bindings) else {
+            if !declaration.required {
+                continue;
+            }
             errors.push(PlannerMessage {
                 code: "binding_missing".to_string(),
                 message: format!("Required binding '{input_id}' is missing."),
                 details: json!({ "input_id": input_id }),
+            });
+            continue;
+        };
+        errors.extend(validate_binding_value(input_id, declaration, &value));
+    }
+    errors
+}
+
+fn validate_binding_value(
+    input_id: &str,
+    declaration: &crate::model::InputDeclaration,
+    value: &Value,
+) -> Vec<PlannerMessage> {
+    let mut errors = Vec::new();
+    let values = if declaration.multiple {
+        let Some(values) = value.as_array() else {
+            return vec![PlannerMessage {
+                code: "binding_validation_failed".to_string(),
+                message: format!("Input '{input_id}' requires multiple values."),
+                details: json!({ "input_id": input_id }),
+            }];
+        };
+        values.iter().collect::<Vec<_>>()
+    } else {
+        if !value.is_string() {
+            return vec![PlannerMessage {
+                code: "binding_validation_failed".to_string(),
+                message: format!("Input '{input_id}' requires a single string path value."),
+                details: json!({ "input_id": input_id }),
+            }];
+        }
+        vec![value]
+    };
+
+    if declaration.required && values.is_empty() {
+        errors.push(PlannerMessage {
+            code: "binding_validation_failed".to_string(),
+            message: format!("Input '{input_id}' requires at least one value."),
+            details: json!({ "input_id": input_id }),
+        });
+        return errors;
+    }
+
+    for raw_value in values {
+        let Some(raw_path) = raw_value.as_str() else {
+            errors.push(PlannerMessage {
+                code: "binding_validation_failed".to_string(),
+                message: format!("Input '{input_id}' values must be string paths."),
+                details: json!({ "input_id": input_id }),
+            });
+            continue;
+        };
+        if !declaration.validation.allowed_extensions.is_empty()
+            && extension_is_disallowed(raw_path, &declaration.validation.allowed_extensions)
+        {
+            errors.push(PlannerMessage {
+                code: "binding_validation_failed".to_string(),
+                message: format!("Input path '{raw_path}' has an unsupported extension."),
+                details: json!({ "input_id": input_id, "path": raw_path }),
             });
         }
     }
@@ -553,9 +893,7 @@ fn emit_execution_inputs(
         .filter_map(|input_id| {
             let (recipe_id, local_input_id) = input_id.split_once('/')?;
             let declaration = recipes.get(recipe_id)?.inputs.get(local_input_id)?;
-            let value = input_bindings.get(input_id).cloned().or_else(|| {
-                (!declaration.default.is_null()).then(|| declaration.default.clone())
-            })?;
+            let value = binding_value(declaration, input_id, input_bindings)?;
             Some(ExecutionInputValue {
                 id: input_id.clone(),
                 value: binding_to_runtime_value(
@@ -566,6 +904,92 @@ fn emit_execution_inputs(
             })
         })
         .collect()
+}
+
+fn binding_value(
+    declaration: &crate::model::InputDeclaration,
+    input_id: &str,
+    input_bindings: &OrderedMap<Value>,
+) -> Option<Value> {
+    let value = input_bindings
+        .get(input_id)
+        .cloned()
+        .or_else(|| (!declaration.default.is_null()).then(|| declaration.default.clone()))?;
+    Some(normalize_binding_value(declaration, value))
+}
+
+fn normalize_binding_value(declaration: &crate::model::InputDeclaration, value: Value) -> Value {
+    let expected_kind = declaration_type(declaration);
+    if expected_kind != "file" && expected_kind != "directory" {
+        return value;
+    }
+    if declaration.multiple {
+        let Value::Array(items) = value else {
+            return value;
+        };
+        return Value::Array(
+            items
+                .into_iter()
+                .map(|item| match item {
+                    Value::String(path) => Value::String(normalize_path_string(&path)),
+                    other => other,
+                })
+                .collect(),
+        );
+    }
+    match value {
+        Value::String(path) => Value::String(normalize_path_string(&path)),
+        other => other,
+    }
+}
+
+fn normalize_path_string(raw_value: &str) -> String {
+    let expanded = expand_user_path(raw_value);
+    let path = Path::new(&expanded);
+    if path.is_absolute() {
+        return expanded;
+    }
+    std::env::current_dir()
+        .map(|current_dir| current_dir.join(path).to_string_lossy().to_string())
+        .unwrap_or(expanded)
+}
+
+fn expand_user_path(raw_value: &str) -> String {
+    if raw_value == "~" {
+        return std::env::var("HOME").unwrap_or_else(|_| raw_value.to_string());
+    }
+    let Some(rest) = raw_value.strip_prefix("~/") else {
+        return raw_value.to_string();
+    };
+    std::env::var("HOME")
+        .map(|home| Path::new(&home).join(rest).to_string_lossy().to_string())
+        .unwrap_or_else(|_| raw_value.to_string())
+}
+
+fn extension_is_disallowed(raw_path: &str, allowed_extensions: &[String]) -> bool {
+    let Some(extension) = Path::new(raw_path)
+        .extension()
+        .and_then(|extension| extension.to_str())
+    else {
+        return false;
+    };
+    let normalized = format!(".{}", extension.to_lowercase());
+    !allowed_extensions
+        .iter()
+        .filter_map(|allowed| normalize_allowed_extension(allowed))
+        .any(|allowed| allowed == normalized)
+}
+
+fn normalize_allowed_extension(extension: &str) -> Option<String> {
+    let normalized = extension.trim().to_lowercase();
+    if normalized.is_empty() {
+        return None;
+    }
+    if normalized.starts_with('.') {
+        Some(normalized)
+    } else {
+        Some(format!(".{normalized}"))
+    }
 }
 
 fn declaration_type(declaration: &crate::model::InputDeclaration) -> &str {

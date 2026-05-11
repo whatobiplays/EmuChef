@@ -1,0 +1,98 @@
+schema_version: 1
+kind: recipe
+id: planner.phase6n.input_defaults_multiple
+name: Planner Phase 6N Input Defaults and Multiple
+description: Planner fixture covering default and multiple input runtime values.
+recipe_dependencies: []
+provides:
+  features:
+    - planner_phase6n_input_defaults_multiple
+inputs:
+  default_cfg:
+    type: file
+    role: generic
+    label: Default Config
+    description: Required config with a default relative path.
+    required: true
+    multiple: false
+    default: relative/default.cfg
+    validation:
+      must_exist: false
+      allowed_extensions:
+        - cfg
+      path_kind: file
+  default_dir:
+    type: directory
+    role: generic
+    label: Default Directory
+    description: Optional directory with a default relative path.
+    required: false
+    multiple: false
+    default: relative/data
+    validation:
+      must_exist: false
+      allowed_extensions: []
+      path_kind: directory
+  multi_cfgs:
+    type: file
+    role: generic
+    label: Multiple Configs
+    description: Multiple config files with default relative paths.
+    required: true
+    multiple: true
+    default:
+      - relative/a.cfg
+      - relative/b.cfg
+    validation:
+      must_exist: false
+      allowed_extensions:
+        - cfg
+      path_kind: file
+artifacts: {}
+artifact_groups: {}
+steps:
+  - id: copy_default
+    type: copy_files
+    name: Copy Default Config
+    user_toggleable: true
+    dependencies: []
+    constraints:
+      capabilities:
+        - shared_storage_write
+      conflicts_with: []
+    skip_if: []
+    params:
+      source:
+        ref: inputs.default_cfg
+      dest: /sdcard/Default.cfg
+    verify: []
+  - id: copy_dir
+    type: copy_files
+    name: Copy Default Directory
+    user_toggleable: true
+    dependencies: []
+    constraints:
+      capabilities:
+        - shared_storage_write
+      conflicts_with: []
+    skip_if: []
+    params:
+      source:
+        ref: inputs.default_dir
+      dest: /sdcard/Data
+    verify: []
+  - id: copy_multi
+    type: copy_files
+    name: Copy Multiple Configs
+    user_toggleable: true
+    dependencies: []
+    constraints:
+      capabilities:
+        - shared_storage_write
+      conflicts_with: []
+    skip_if: []
+    params:
+      source:
+        ref: inputs.multi_cfgs
+      dest: /sdcard/Multi
+    verify: []

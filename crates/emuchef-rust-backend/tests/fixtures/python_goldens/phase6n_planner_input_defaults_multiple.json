@@ -1,0 +1,151 @@
+{
+  "status": "success",
+  "warnings": [],
+  "errors": [],
+  "execution_plan": {
+    "id": "plan.example.device_plan.001",
+    "source": {
+      "device_profile_ref": "example.device_profile",
+      "device_plan_ref": "example.device_plan",
+      "selected_recipe_refs": [
+        "planner.phase6n.input_defaults_multiple"
+      ],
+      "expanded_recipe_refs": [
+        "planner.phase6n.input_defaults_multiple"
+      ]
+    },
+    "device_context": {
+      "manufacturer": "Example",
+      "model": "Example",
+      "android_version": 13,
+      "android_api_level": 33,
+      "device_tags": [
+        "example_tag"
+      ]
+    },
+    "runtime_capabilities": {
+      "adb_available": true,
+      "apk_install": true,
+      "shared_storage_write": true,
+      "app_launch": true,
+      "shell_command": true,
+      "package_remove_for_user": false,
+      "root_shell": true,
+      "app_data_write": true
+    },
+    "inputs": [
+      {
+        "id": "planner.phase6n.input_defaults_multiple/default_cfg",
+        "value": {
+          "type": "file_path",
+          "value": "$REPO_ROOT/relative/default.cfg",
+          "location": "host"
+        }
+      },
+      {
+        "id": "planner.phase6n.input_defaults_multiple/default_dir",
+        "value": {
+          "type": "directory_path",
+          "value": "$REPO_ROOT/relative/data",
+          "location": "host"
+        }
+      },
+      {
+        "id": "planner.phase6n.input_defaults_multiple/multi_cfgs",
+        "value": {
+          "type": "path_list",
+          "value": [
+            "$REPO_ROOT/relative/a.cfg",
+            "$REPO_ROOT/relative/b.cfg"
+          ],
+          "location": "host"
+        }
+      }
+    ],
+    "artifacts": [],
+    "steps": [
+      {
+        "id": "planner.phase6n.input_defaults_multiple/copy_default",
+        "recipe_ref": "planner.phase6n.input_defaults_multiple",
+        "type": "copy_files",
+        "name": "Copy Default Config",
+        "dependencies": [],
+        "constraints": {
+          "capabilities": [
+            "shared_storage_write"
+          ],
+          "conflicts_with": []
+        },
+        "params": {
+          "source": {
+            "ref": "inputs.planner.phase6n.input_defaults_multiple/default_cfg"
+          },
+          "dest": {
+            "value": "/sdcard/Default.cfg"
+          },
+          "copy_policy": {
+            "value": "merge"
+          }
+        },
+        "skip_if": [],
+        "verify": []
+      },
+      {
+        "id": "planner.phase6n.input_defaults_multiple/copy_dir",
+        "recipe_ref": "planner.phase6n.input_defaults_multiple",
+        "type": "copy_files",
+        "name": "Copy Default Directory",
+        "dependencies": [],
+        "constraints": {
+          "capabilities": [
+            "shared_storage_write"
+          ],
+          "conflicts_with": []
+        },
+        "params": {
+          "source": {
+            "ref": "inputs.planner.phase6n.input_defaults_multiple/default_dir"
+          },
+          "dest": {
+            "value": "/sdcard/Data"
+          },
+          "copy_policy": {
+            "value": "merge"
+          }
+        },
+        "skip_if": [],
+        "verify": []
+      },
+      {
+        "id": "planner.phase6n.input_defaults_multiple/copy_multi",
+        "recipe_ref": "planner.phase6n.input_defaults_multiple",
+        "type": "copy_files",
+        "name": "Copy Multiple Configs",
+        "dependencies": [],
+        "constraints": {
+          "capabilities": [
+            "shared_storage_write"
+          ],
+          "conflicts_with": []
+        },
+        "params": {
+          "source": {
+            "ref": "inputs.planner.phase6n.input_defaults_multiple/multi_cfgs"
+          },
+          "dest": {
+            "value": "/sdcard/Multi"
+          },
+          "copy_policy": {
+            "value": "merge"
+          }
+        },
+        "skip_if": [],
+        "verify": []
+      }
+    ],
+    "schema_version": 1,
+    "kind": "execution_plan"
+  },
+  "schema_version": 1,
+  "kind": "planning_result"
+}

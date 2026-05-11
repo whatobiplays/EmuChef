@@ -1,0 +1,59 @@
+schema_version: 1
+kind: recipe
+id: planner.phase6n.dep_a
+name: Planner Phase 6N Dependency A
+description: First dependency recipe for planner ordering and namespacing.
+recipe_dependencies: []
+provides:
+  features:
+    - planner_phase6n_dep_a
+inputs:
+  cfg:
+    type: file
+    role: generic
+    label: Dependency Config
+    description: Dependency recipe config.
+    required: true
+    multiple: false
+    default: dependency-a.cfg
+    validation:
+      must_exist: false
+      allowed_extensions:
+        - cfg
+      path_kind: file
+artifacts:
+  shared_asset:
+    type: remote_file
+    url: https://example.com/dependency-a.zip
+    cache: default
+artifact_groups: {}
+steps:
+  - id: resolve
+    type: resolve_artifacts
+    name: Resolve Dependency A
+    user_toggleable: false
+    dependencies: []
+    constraints:
+      capabilities: []
+      conflicts_with: []
+    skip_if: []
+    params:
+      artifacts:
+        - shared_asset
+    verify: []
+  - id: seed
+    type: copy_files
+    name: Seed Dependency A
+    user_toggleable: true
+    dependencies:
+      - resolve
+    constraints:
+      capabilities:
+        - shared_storage_write
+      conflicts_with: []
+    skip_if: []
+    params:
+      source:
+        ref: inputs.cfg
+      dest: /sdcard/DepA.cfg
+    verify: []

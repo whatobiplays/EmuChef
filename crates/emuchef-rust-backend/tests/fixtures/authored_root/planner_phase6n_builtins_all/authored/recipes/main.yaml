@@ -1,0 +1,165 @@
+schema_version: 1
+kind: recipe
+id: planner.phase6n.builtins_all
+name: Planner Phase 6N Built-ins
+description: Planner fixture covering declarative built-in step mappings.
+recipe_dependencies: []
+provides:
+  features:
+    - planner_phase6n_builtins_all
+inputs: {}
+artifacts:
+  app_apk:
+    type: remote_file
+    url: https://example.com/app.apk
+    cache: default
+  archive_zip:
+    type: remote_file
+    url: https://example.com/archive.zip
+    cache: default
+artifact_groups:
+  install_group:
+    - app_apk
+steps:
+  - id: resolve
+    type: resolve_artifacts
+    name: Resolve Artifacts
+    user_toggleable: false
+    dependencies: []
+    constraints:
+      capabilities: []
+      conflicts_with: []
+    skip_if: []
+    params:
+      artifact_groups:
+        - install_group
+      artifacts:
+        - archive_zip
+    verify: []
+  - id: extract_artifacts
+    type: extract_artifacts
+    name: Extract Artifacts
+    user_toggleable: false
+    dependencies:
+      - resolve
+    constraints:
+      capabilities: []
+      conflicts_with: []
+    skip_if: []
+    params:
+      artifacts:
+        - archive_zip
+    verify: []
+  - id: extract_archive
+    type: extract_archive
+    name: Extract Archive
+    user_toggleable: false
+    dependencies:
+      - resolve
+    constraints:
+      capabilities: []
+      conflicts_with: []
+    skip_if: []
+    params:
+      archive:
+        ref: artifacts.archive_zip.local_path
+      extract_on: device
+      dest: /sdcard/Extracted
+    verify: []
+  - id: copy
+    type: copy_files
+    name: Copy Extracted Files
+    user_toggleable: true
+    dependencies:
+      - extract_artifacts
+    constraints:
+      capabilities:
+        - shared_storage_write
+      conflicts_with: []
+    skip_if: []
+    params:
+      source:
+        ref: steps.extract_artifacts
+      dest: /sdcard/Example
+    verify: []
+  - id: install
+    type: install_apk
+    name: Install APK
+    user_toggleable: false
+    dependencies:
+      - resolve
+    constraints:
+      capabilities:
+        - apk_install
+      conflicts_with: []
+    skip_if: []
+    params:
+      app:
+        ref: artifacts.app_apk.local_path
+    verify: []
+  - id: grant
+    type: grant_permissions
+    name: Grant Permissions
+    user_toggleable: false
+    dependencies:
+      - install
+    constraints:
+      capabilities: []
+      conflicts_with: []
+    skip_if: []
+    params:
+      runtime:
+        - package_name: com.example.app
+          name: android.permission.POST_NOTIFICATIONS
+          required: false
+      appops:
+        - package_name: com.example.app
+          op: MANAGE_EXTERNAL_STORAGE
+          mode: allow
+          required: false
+      policy:
+        on_failure: fail
+        require_all: true
+    verify: []
+  - id: launch
+    type: launch_app
+    name: Launch App
+    user_toggleable: true
+    dependencies:
+      - grant
+    constraints:
+      capabilities:
+        - app_launch
+      conflicts_with: []
+    skip_if: []
+    params:
+      package_name: com.example.app
+      activity: .MainActivity
+    verify: []
+  - id: wait
+    type: wait
+    name: Wait
+    user_toggleable: false
+    dependencies:
+      - launch
+    constraints:
+      capabilities: []
+      conflicts_with: []
+    skip_if: []
+    params:
+      duration_ms: 250
+    verify: []
+  - id: force_stop
+    type: force_stop_app
+    name: Force Stop
+    user_toggleable: true
+    dependencies:
+      - wait
+    constraints:
+      capabilities:
+        - shell_command
+      conflicts_with: []
+    skip_if: []
+    params:
+      package_name: com.example.app
+    verify: []

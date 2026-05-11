@@ -4,7 +4,7 @@ This package is an experimental Rust backend skeleton for the EmuChef config
 editor protocol. It is standalone and runnable independently of the Tauri
 editor.
 
-Through Phase 6M it implements only:
+Through Phase 6N it implements only:
 
 - `hello`
 - `listStepSpecs`
@@ -41,8 +41,9 @@ Through Phase 6M it implements only:
   mutations for the currently modeled step fields
 - generated `RecipeDocumentDto.refIndex` data for the currently modeled
   authored recipe features
-- an internal-only, fixture-scoped declarative planner skeleton that emits a
-  Python-shaped `PlanningResult`/`ExecutionPlan` for focused Phase 6M tests
+- an internal-only, fixture-scoped declarative planner that emits a
+  Python-shaped `PlanningResult`/`ExecutionPlan` for focused Phase 6M and 6N
+  tests
 
 It reports only capabilities that are implemented in this crate:
 
@@ -72,11 +73,11 @@ requests in JSONL sidecar mode only. One-shot mode remains stateless and does
 not expose persistent document session APIs.
 
 Reporting these capabilities still does not make this backend compatible with
-the Tauri editor. Phase 6M reports the same ordered capability list as Phase
-6H/6I/6J.1/6J.2/6K/6L; capability parity is not full backend parity. The Rust
+the Tauri editor. Phase 6N reports the same ordered capability list as Phase
+6H/6I/6J.1/6J.2/6K/6L/6M; capability parity is not full backend parity. The Rust
 backend is still not editor-ready and is not wired into Tauri.
 There is no env var, CLI flag, config file, README path, or documented launch
-path for using this Rust backend as the Tauri editor backend in Phase 6M.
+path for using this Rust backend as the Tauri editor backend in Phase 6N.
 
 The Python backend remains the reference implementation. This Rust package is
 not a replacement backend and is not selected by the Tauri editor.
@@ -87,20 +88,24 @@ validation skeleton with fixture-covered editor-local validation parity for the
 current Rust recipe model scope. Phase 6L adds fixture-covered
 authoredRoot/catalog-context validation for Python-verified recipe dependency
 diagnostics. Phase 6M adds a minimal internal declarative planner skeleton for
-focused fixtures only. Rust still does not perform executor work, device checks,
-artifact downloads, archive extraction, file copies, permission grants,
+focused fixtures only. Phase 6N expands that private planner to broader
+Python-golden-backed parity for current built-in planning mappings, dependency
+expansion, input binding/default/multiple values, artifact/group planning,
+StepSpec defaults, refs, `skip_if`, `verify`, and planner result status/error
+shape for selected fixtures. Rust still does not perform executor work, device
+checks, artifact downloads, archive extraction, file copies, permission grants,
 subprocess execution, or Tauri integration. Python remains the reference
 implementation until parity is confirmed.
 
-## Phase 6M Planner Scope
+## Phase 6N Planner Scope
 
-Phase 6M adds `src/planner.rs`, an internal Rust module used only by crate-local
-tests. It emits the Python planner's serialized `PlanningResult` shape with a
-nested `ExecutionPlan` for narrow fixtures. The parity target is Python's
-`Planner.start_session(...).emit_execution_plan()` path, not CLI summary text.
-The current editor protocol does not expose a planner request, so Phase 6M does
-not add a one-shot request, JSONL sidecar request, capability string, Tauri
-command, TypeScript API, backend selector, or config/env toggle.
+Phase 6M added `src/planner.rs`, an internal Rust module used only by
+crate-local tests. Phase 6N expands that same private module; it is still not a
+public crate API, protocol request, CLI command, Tauri command, TypeScript API,
+backend selector, or config/env toggle. It emits the Python planner's serialized
+`PlanningResult` shape with a nested `ExecutionPlan` for focused fixtures. The
+parity target is Python's `Planner.start_session(...).emit_execution_plan()`
+path, not CLI summary text or executor behavior.
 
 The planner input is explicit fixture data: loaded Rust `Recipe` values, selected
 recipe refs, a supplied device-plan ref, a supplied device-profile ref, a supplied
@@ -117,32 +122,45 @@ templates, project roots, or runtime filesystem state. Dependency expansion uses
 only the loaded recipe metadata and preserves Python's dependency-before-selected
 recipe order for the covered fixtures.
 
-Phase 6M planner output parity is functional/semantic. Byte-for-byte JSON output
+Phase 6N planner output parity is functional/semantic. Byte-for-byte JSON output
 is not a guarantee, but the tests compare structured `PlanningResult` fields,
 execution step order, ids, dependencies, refs, materialized StepSpec defaults,
-artifact expansion, input binding errors, and no-side-effect behavior. The Phase
-6M JSON fixtures under `tests/fixtures/python_goldens/phase6m_*` are generated
-from the actual Python planner API.
+artifact expansion, input binding/default values, optional-input pruning,
+warnings/errors/status, and no-side-effect behavior. The Phase 6M and 6N JSON
+fixtures under `tests/fixtures/python_goldens/phase6m_*` and
+`tests/fixtures/python_goldens/phase6n_*` are generated from the actual Python
+planner API. Phase 6N normalizes absolute repo-root paths in new goldens to
+`$REPO_ROOT/...`.
 
-Phase 6M does not execute steps. It does not create output directories, mutate
+Phase 6N does not execute steps. It does not create output directories, mutate
 authored YAML, mutate document-session state, copy files, download artifacts,
 extract archives, inspect devices, call ADB, grant permissions, run subprocesses,
 perform network checks, add production packaging, bundle Python, or replace the
-Python backend.
+Python backend. Dependency cycles and missing recipe dependencies are still
+covered at the authoredRoot/catalog validation boundary when Python catches them
+before planning.
 
 ### Built-In Planner Behavior
 
-| Step type | Phase 6M status | Notes |
+| Step type | Phase 6N status | Notes |
 | --- | --- | --- |
-| `wait` | Implemented for fixture coverage | Emits literal params and supports authored/dependency ordering tests. |
-| `resolve_artifacts` | Implemented for fixture coverage | Expands `artifacts` and `artifact_groups` into execution artifact ids. Does not download or resolve files. |
-| `extract_artifacts` | Implemented for fixture coverage | Expands artifact selections and materializes Python StepSpec default `extract_on: host`. Does not extract archives or touch host/device files. |
-| `copy_files` | Implemented for fixture coverage | Normalizes top-level refs, materializes Python StepSpec default `copy_policy: merge`, and emits declarative params only. Does not copy files. |
-| `grant_permissions` | Implemented for fixture coverage | Keeps permission params step-local and does not emit a separate permission plan or grant permissions. |
-| `extract_archive` | Deferred | Default behavior is inspected but not part of Phase 6M Rust fixtures. No archive extraction is implemented. |
-| `install_apk` | Deferred | Ref/default normalization may be added in a later fixture-backed planner phase. No install behavior is implemented. |
-| `launch_app` | Deferred | Not needed for Phase 6M fixtures. No app launch behavior is implemented. |
-| `force_stop_app` | Deferred | Not needed for Phase 6M fixtures. No device operation is implemented. |
+| `wait` | Implemented for fixture coverage | Emits literal params, participates in selected-step and dependency ordering tests, and does not sleep or run subprocesses. |
+| `resolve_artifacts` | Implemented for fixture coverage | Expands `artifacts` and `artifact_groups` into execution artifact ids. Does not download, resolve URLs, or inspect caches. |
+| `extract_artifacts` | Implemented for fixture coverage | Expands artifact selections and materializes Python StepSpec default `extract_on: host`, with explicit overrides preserved. Does not extract archives or touch host/device files. |
+| `extract_archive` | Implemented for fixture coverage | Normalizes top-level artifact refs and materializes Python StepSpec default `cleanup: true`. Does not extract archives. |
+| `copy_files` | Implemented for fixture coverage | Normalizes top-level refs, supports shorthand step-output refs, materializes Python StepSpec default `copy_policy: merge`, preserves explicit overrides, and emits declarative params only. Does not copy files. |
+| `install_apk` | Implemented for fixture coverage | Normalizes the `app` artifact ref and materializes Python StepSpec default `replace_existing: false`. Does not install APKs. |
+| `grant_permissions` | Implemented for fixture coverage | Keeps runtime/appops/policy params step-local and does not emit a separate permission plan or grant permissions. |
+| `launch_app` | Implemented for fixture coverage | Emits literal package/activity params only. Does not launch apps. |
+| `force_stop_app` | Implemented for fixture coverage | Emits literal package params and participates in capability pruning tests. Does not inspect or stop apps. |
+
+Deferred planner gaps remain intentionally narrow: broad template expansion,
+full Python draft conflict resolution for mutually selected `conflicts_with`
+steps, executor/runtime `skip_if` and `verify` evaluation, device/profile
+inference, network or cache inspection, filesystem existence checks, and
+side-effecting artifact/app/permission operations are outside Phase 6N. The
+Phase 6N fixtures cover `conflicts_with` serialization only when the conflicting
+step is unavailable through fixture capabilities.
 
 ## Document Session Scope
 
@@ -431,7 +449,9 @@ Known Phase 6K limits:
 - Malformed YAML parser messages come from `serde_yaml`, so wording and source
   spans can differ from PyYAML. The diagnostic shape, severity, code, file, and
   object fields are still matched.
-- Planner and executor validation remain unimplemented.
+- Broad planner and executor validation remain incomplete. Phase 6N planner
+  behavior is limited to Python-golden-backed internal fixtures and does not
+  replace executor validation.
 - Broad built-in plugin hook validation is not complete. Phase 6K implements only
   fixture-required local checks; omitted plugin-hook diagnostics remain future
   work.
@@ -550,8 +570,11 @@ Phase 6L adds Python-generated diagnostic goldens named
 `phase6l_*.diagnostics.json`. They store the semantic diagnostic fields the Rust
 tests compare: severity, code, objectKind, objectId, and field.
 Phase 6M adds `phase6m_planner_*.json` planning-result fixtures in this
-directory. They are generated from Python `Planner(...).start_session(...).emit_execution_plan()`
-using the focused Phase 6M authoredRoot recipe fixtures.
+directory. Phase 6N adds `phase6n_planner_*.json` planning-result fixtures for
+the expanded private planner coverage. They are generated from Python
+`Planner(...).start_session(...).emit_execution_plan()` using focused
+authoredRoot recipe fixtures. New Phase 6N goldens normalize absolute repo-root
+paths to `$REPO_ROOT/...` so relative input defaults and bindings remain stable.
 
 Regenerate the Phase 6L diagnostic goldens from the repo root with:
 
@@ -620,6 +643,83 @@ write("phase6l_nested_ignored.diagnostics.json", validate(recipe_path("nested_ig
 write("phase6l_duplicate_open.diagnostics.json", open_document(recipe_path("duplicate", "target_duplicate.yaml"), authored_root("duplicate")))
 write("phase6l_duplicate_reverse_open.diagnostics.json", open_document(recipe_path("duplicate_reverse", "a_target_duplicate.yaml"), authored_root("duplicate_reverse")))
 write("phase6l_missing_dependency_open.diagnostics.json", open_document(recipe_path("missing_dependency", "missing_dependency.yaml"), "omitted"))
+PY
+```
+
+Regenerate the Phase 6N planner goldens from the repo root with:
+
+```bash
+PYTHONPATH=src:tests .venv/bin/python - <<'PY'
+from __future__ import annotations
+
+import json
+import tempfile
+from pathlib import Path
+
+import yaml
+
+from emuchef.domain import DeviceContext
+from emuchef.io import load_authored_catalog
+from emuchef.io.serde import to_primitive
+from emuchef.planner import Planner
+from support import build_authored_tree
+
+REPO_ROOT = str(Path.cwd())
+ROOT = Path("crates/emuchef-rust-backend/tests/fixtures/authored_root")
+GOLDENS = Path("crates/emuchef-rust-backend/tests/fixtures/python_goldens")
+GOLDENS.mkdir(parents=True, exist_ok=True)
+
+CASES = [
+    ("planner_phase6n_builtins_all", ["main.yaml"], ["planner.phase6n.builtins_all"], "phase6n_planner_builtins_all.json", None),
+    ("planner_phase6n_optional_inputs", ["main.yaml"], ["planner.phase6n.optional_inputs"], "phase6n_planner_optional_inputs_omitted.json", None),
+    ("planner_phase6n_optional_inputs", ["main.yaml"], ["planner.phase6n.optional_inputs"], "phase6n_planner_optional_inputs_bound.json", {"planner.phase6n.optional_inputs/optional_cfg": "relative/optional.cfg"}),
+    ("planner_phase6n_input_defaults_multiple", ["main.yaml"], ["planner.phase6n.input_defaults_multiple"], "phase6n_planner_input_defaults_multiple.json", None),
+    ("planner_phase6n_dependency_graph", ["dependency_a.yaml", "dependency_b.yaml", "main.yaml"], ["planner.phase6n.dependency_graph"], "phase6n_planner_dependency_graph.json", None),
+    ("planner_phase6n_step_data", ["main.yaml"], ["planner.phase6n.step_data"], "phase6n_planner_step_data.json", None),
+]
+
+def normalize(value):
+    if isinstance(value, dict):
+        return {key: normalize(item) for key, item in value.items()}
+    if isinstance(value, list):
+        return [normalize(item) for item in value]
+    if isinstance(value, str) and value.startswith(REPO_ROOT + "/"):
+        return "$REPO_ROOT/" + value[len(REPO_ROOT) + 1:]
+    return value
+
+for fixture, recipe_files, selected_recipe_refs, golden_name, bindings in CASES:
+    recipes = []
+    for recipe_file in recipe_files:
+        with (ROOT / fixture / "authored" / "recipes" / recipe_file).open(encoding="utf-8") as handle:
+            recipes.append(yaml.safe_load(handle))
+
+    with tempfile.TemporaryDirectory() as tmp:
+        authored_root = build_authored_tree(
+            Path(tmp),
+            recipes=recipes,
+            selected_recipe_refs=selected_recipe_refs,
+        )
+        session = Planner(load_authored_catalog(authored_root)).start_session(
+            "example.device_plan",
+            DeviceContext(
+                manufacturer="Example",
+                model="Example",
+                android_version=13,
+                android_api_level=33,
+                device_tags=(),
+            ),
+        )
+        if bindings:
+            for input_id, value in bindings.items():
+                update = session.bind_input(input_id, value)
+                if update.errors:
+                    raise RuntimeError(update.errors)
+
+        result = normalize(to_primitive(session.emit_execution_plan()))
+        (GOLDENS / golden_name).write_text(
+            json.dumps(result, indent=2, sort_keys=False) + "\n",
+            encoding="utf-8",
+        )
 PY
 ```
 

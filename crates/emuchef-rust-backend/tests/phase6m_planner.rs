@@ -44,7 +44,7 @@ fn phase6m_capabilities_remain_unchanged_and_planner_requests_are_not_routed() {
     );
 
     let one_shot = one_shot_response(json!({
-        "type": "planExecution",
+        "type": "__testOnlyUnknownPlannerRequest",
         "payload": {}
     }));
     assert_eq!(one_shot["ok"], false);
@@ -52,7 +52,7 @@ fn phase6m_capabilities_remain_unchanged_and_planner_requests_are_not_routed() {
 
     let sidecar = sidecar_response(json!({
         "id": "plan",
-        "type": "planExecution",
+        "type": "__testOnlyUnknownPlannerRequest",
         "payload": {}
     }));
     assert_eq!(sidecar["ok"], false);

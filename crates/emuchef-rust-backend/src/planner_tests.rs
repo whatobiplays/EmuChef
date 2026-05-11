@@ -75,6 +75,33 @@ fn planning_result_value(input: PlannerInput) -> Value {
     serde_json::to_value(plan_execution(input)).expect("planning result should serialize")
 }
 
+fn normalized_planning_result_value(input: PlannerInput) -> Value {
+    normalize_paths(planning_result_value(input))
+}
+
+fn normalize_paths(value: Value) -> Value {
+    match value {
+        Value::Array(items) => Value::Array(items.into_iter().map(normalize_paths).collect()),
+        Value::Object(entries) => Value::Object(
+            entries
+                .into_iter()
+                .map(|(key, value)| (key, normalize_paths(value)))
+                .collect(),
+        ),
+        Value::String(value) => Value::String(normalize_path_string(value)),
+        other => other,
+    }
+}
+
+fn normalize_path_string(value: String) -> String {
+    for marker in ["/relative/", "/dependency-a.cfg", "/main.cfg"] {
+        if let Some(index) = value.find(marker) {
+            return format!("$REPO_ROOT{}", &value[index..]);
+        }
+    }
+    value
+}
+
 #[test]
 fn minimal_plan_matches_python_planning_result_shape() {
     let actual = planning_result_value(planner_input("planner_minimal", &["planner.minimal"]));
@@ -229,6 +256,187 @@ fn grant_permissions_stays_step_local_without_permission_plan() {
     assert_eq!(
         grant["params"]["policy"]["value"],
         json!({"on_failure": "warn", "require_all": false})
+    );
+}
+
+#[test]
+fn phase6n_builtin_planner_mappings_match_python_goldens() {
+    let actual = normalized_planning_result_value(planner_input(
+        "planner_phase6n_builtins_all",
+        &["planner.phase6n.builtins_all"],
+    ));
+    let expected = read_golden("phase6n_planner_builtins_all.json");
+
+    assert_eq!(actual, expected);
+    let steps = actual["execution_plan"]["steps"].as_array().unwrap();
+    let step_ids = steps
+        .iter()
+        .map(|step| step["id"].as_str().unwrap())
+        .collect::<Vec<_>>();
+    assert_eq!(
+        step_ids,
+        vec![
+            "planner.phase6n.builtins_all/resolve",
+            "planner.phase6n.builtins_all/extract_artifacts",
+            "planner.phase6n.builtins_all/extract_archive",
+            "planner.phase6n.builtins_all/install",
+            "planner.phase6n.builtins_all/copy",
+            "planner.phase6n.builtins_all/grant",
+            "planner.phase6n.builtins_all/launch",
+            "planner.phase6n.builtins_all/wait",
+            "planner.phase6n.builtins_all/force_stop",
+        ]
+    );
+    let install = steps
+        .iter()
+        .find(|step| step["id"] == "planner.phase6n.builtins_all/install")
+        .unwrap();
+    assert_eq!(
+        install["params"]["replace_existing"],
+        json!({"value": false})
+    );
+    let archive = steps
+        .iter()
+        .find(|step| step["id"] == "planner.phase6n.builtins_all/extract_archive")
+        .unwrap();
+    assert_eq!(archive["params"]["cleanup"], json!({"value": true}));
+}
+
+#[test]
+fn phase6n_optional_inputs_prune_and_rebind_like_python() {
+    let omitted = normalized_planning_result_value(planner_input(
+        "planner_phase6n_optional_inputs",
+        &["planner.phase6n.optional_inputs"],
+    ));
+    assert_eq!(
+        omitted,
+        read_golden("phase6n_planner_optional_inputs_omitted.json")
+    );
+    assert_eq!(omitted["execution_plan"]["inputs"], json!([]));
+    assert_eq!(
+        omitted["execution_plan"]["steps"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|step| step["id"].as_str().unwrap())
+            .collect::<Vec<_>>(),
+        vec!["planner.phase6n.optional_inputs/prepare"]
+    );
+
+    let mut bound = planner_input(
+        "planner_phase6n_optional_inputs",
+        &["planner.phase6n.optional_inputs"],
+    );
+    bound.input_bindings.insert(
+        "planner.phase6n.optional_inputs/optional_cfg".to_string(),
+        json!("relative/optional.cfg"),
+    );
+    let actual_bound = normalized_planning_result_value(bound);
+    assert_eq!(
+        actual_bound,
+        read_golden("phase6n_planner_optional_inputs_bound.json")
+    );
+    assert_eq!(
+        actual_bound["execution_plan"]["inputs"][0]["value"],
+        json!({"type": "file_path", "value": "$REPO_ROOT/relative/optional.cfg", "location": "host"})
+    );
+}
+
+#[test]
+fn phase6n_input_defaults_and_multiple_values_match_python() {
+    let actual = normalized_planning_result_value(planner_input(
+        "planner_phase6n_input_defaults_multiple",
+        &["planner.phase6n.input_defaults_multiple"],
+    ));
+    let expected = read_golden("phase6n_planner_input_defaults_multiple.json");
+
+    assert_eq!(actual, expected);
+    assert_eq!(
+        actual["execution_plan"]["inputs"],
+        json!([
+            {
+                "id": "planner.phase6n.input_defaults_multiple/default_cfg",
+                "value": {"type": "file_path", "value": "$REPO_ROOT/relative/default.cfg", "location": "host"}
+            },
+            {
+                "id": "planner.phase6n.input_defaults_multiple/default_dir",
+                "value": {"type": "directory_path", "value": "$REPO_ROOT/relative/data", "location": "host"}
+            },
+            {
+                "id": "planner.phase6n.input_defaults_multiple/multi_cfgs",
+                "value": {
+                    "type": "path_list",
+                    "value": ["$REPO_ROOT/relative/a.cfg", "$REPO_ROOT/relative/b.cfg"],
+                    "location": "host"
+                }
+            }
+        ])
+    );
+}
+
+#[test]
+fn phase6n_dependency_expansion_and_namespacing_match_python() {
+    let actual = normalized_planning_result_value(planner_input(
+        "planner_phase6n_dependency_graph",
+        &["planner.phase6n.dependency_graph"],
+    ));
+    let expected = read_golden("phase6n_planner_dependency_graph.json");
+
+    assert_eq!(actual, expected);
+    assert_eq!(
+        actual["execution_plan"]["source"]["expanded_recipe_refs"],
+        json!([
+            "planner.phase6n.dep_a",
+            "planner.phase6n.dep_b",
+            "planner.phase6n.dependency_graph"
+        ])
+    );
+    assert_eq!(
+        actual["execution_plan"]["artifacts"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|artifact| artifact["id"].as_str().unwrap())
+            .collect::<Vec<_>>(),
+        vec![
+            "planner.phase6n.dep_a/shared_asset",
+            "planner.phase6n.dep_b/shared_asset",
+            "planner.phase6n.dependency_graph/shared_asset",
+        ]
+    );
+}
+
+#[test]
+fn phase6n_step_data_refs_conditions_and_constraints_match_python() {
+    let actual = normalized_planning_result_value(planner_input(
+        "planner_phase6n_step_data",
+        &["planner.phase6n.step_data"],
+    ));
+    let expected = read_golden("phase6n_planner_step_data.json");
+
+    assert_eq!(actual, expected);
+    let copy = actual["execution_plan"]["steps"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|step| step["id"] == "planner.phase6n.step_data/copy")
+        .unwrap()
+        .clone();
+    assert_eq!(
+        copy["constraints"]["conflicts_with"],
+        json!(["planner.phase6n.step_data/cleanup"])
+    );
+    assert_eq!(
+        copy["params"]["source"],
+        json!({"ref": "steps.planner.phase6n.step_data/extract.outputs.extracted_paths"})
+    );
+    assert_eq!(
+        copy["skip_if"][0]["params"]["nested"],
+        json!({"ref": "nested.skip.literal"})
+    );
+    assert_eq!(
+        copy["verify"][0]["params"]["nested"],
+        json!({"ref": "nested.verify.literal"})
     );
 }
 

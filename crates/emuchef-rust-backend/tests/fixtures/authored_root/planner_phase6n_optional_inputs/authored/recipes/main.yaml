@@ -1,0 +1,66 @@
+schema_version: 1
+kind: recipe
+id: planner.phase6n.optional_inputs
+name: Planner Phase 6N Optional Inputs
+description: Planner fixture covering optional input pruning and rebinding.
+recipe_dependencies: []
+provides:
+  features:
+    - planner_phase6n_optional_inputs
+inputs:
+  optional_cfg:
+    type: file
+    role: generic
+    label: Optional Config
+    description: Optional config file.
+    required: false
+    multiple: false
+    validation:
+      must_exist: false
+      allowed_extensions:
+        - cfg
+      path_kind: file
+artifacts: {}
+artifact_groups: {}
+steps:
+  - id: prepare
+    type: wait
+    name: Prepare
+    user_toggleable: false
+    dependencies: []
+    constraints:
+      capabilities: []
+      conflicts_with: []
+    skip_if: []
+    params:
+      duration_ms: 1
+    verify: []
+  - id: seed
+    type: copy_files
+    name: Seed Optional Config
+    user_toggleable: true
+    dependencies:
+      - prepare
+    constraints:
+      capabilities:
+        - shared_storage_write
+      conflicts_with: []
+    skip_if: []
+    params:
+      source:
+        ref: inputs.optional_cfg
+      dest: /sdcard/Optional.cfg
+    verify: []
+  - id: after_seed
+    type: wait
+    name: After Seed
+    user_toggleable: false
+    dependencies:
+      - seed
+    constraints:
+      capabilities: []
+      conflicts_with: []
+    skip_if: []
+    params:
+      duration_ms: 2
+    verify: []

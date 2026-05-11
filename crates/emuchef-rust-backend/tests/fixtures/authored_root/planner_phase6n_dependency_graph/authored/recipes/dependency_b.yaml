@@ -1,0 +1,44 @@
+schema_version: 1
+kind: recipe
+id: planner.phase6n.dep_b
+name: Planner Phase 6N Dependency B
+description: Second dependency recipe for planner ordering and namespacing.
+recipe_dependencies:
+  - planner.phase6n.dep_a
+provides:
+  features:
+    - planner_phase6n_dep_b
+inputs: {}
+artifacts:
+  shared_asset:
+    type: remote_file
+    url: https://example.com/dependency-b.zip
+    cache: default
+artifact_groups: {}
+steps:
+  - id: resolve
+    type: resolve_artifacts
+    name: Resolve Dependency B
+    user_toggleable: false
+    dependencies: []
+    constraints:
+      capabilities: []
+      conflicts_with: []
+    skip_if: []
+    params:
+      artifacts:
+        - shared_asset
+    verify: []
+  - id: wait
+    type: wait
+    name: Wait Dependency B
+    user_toggleable: false
+    dependencies:
+      - resolve
+    constraints:
+      capabilities: []
+      conflicts_with: []
+    skip_if: []
+    params:
+      duration_ms: 3
+    verify: []

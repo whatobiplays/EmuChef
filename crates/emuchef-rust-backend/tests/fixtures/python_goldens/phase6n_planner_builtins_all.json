@@ -1,0 +1,295 @@
+{
+  "status": "success",
+  "warnings": [],
+  "errors": [],
+  "execution_plan": {
+    "id": "plan.example.device_plan.001",
+    "source": {
+      "device_profile_ref": "example.device_profile",
+      "device_plan_ref": "example.device_plan",
+      "selected_recipe_refs": [
+        "planner.phase6n.builtins_all"
+      ],
+      "expanded_recipe_refs": [
+        "planner.phase6n.builtins_all"
+      ]
+    },
+    "device_context": {
+      "manufacturer": "Example",
+      "model": "Example",
+      "android_version": 13,
+      "android_api_level": 33,
+      "device_tags": [
+        "example_tag"
+      ]
+    },
+    "runtime_capabilities": {
+      "adb_available": true,
+      "apk_install": true,
+      "shared_storage_write": true,
+      "app_launch": true,
+      "shell_command": true,
+      "package_remove_for_user": false,
+      "root_shell": true,
+      "app_data_write": true
+    },
+    "inputs": [],
+    "artifacts": [
+      {
+        "id": "planner.phase6n.builtins_all/app_apk",
+        "type": "remote_file",
+        "url": "https://example.com/app.apk",
+        "cache": "default"
+      },
+      {
+        "id": "planner.phase6n.builtins_all/archive_zip",
+        "type": "remote_file",
+        "url": "https://example.com/archive.zip",
+        "cache": "default"
+      }
+    ],
+    "steps": [
+      {
+        "id": "planner.phase6n.builtins_all/resolve",
+        "recipe_ref": "planner.phase6n.builtins_all",
+        "type": "resolve_artifacts",
+        "name": "Resolve Artifacts",
+        "dependencies": [],
+        "constraints": {
+          "capabilities": [],
+          "conflicts_with": []
+        },
+        "params": {
+          "artifacts": {
+            "value": [
+              "planner.phase6n.builtins_all/archive_zip",
+              "planner.phase6n.builtins_all/app_apk"
+            ]
+          }
+        },
+        "skip_if": [],
+        "verify": []
+      },
+      {
+        "id": "planner.phase6n.builtins_all/extract_artifacts",
+        "recipe_ref": "planner.phase6n.builtins_all",
+        "type": "extract_artifacts",
+        "name": "Extract Artifacts",
+        "dependencies": [
+          "planner.phase6n.builtins_all/resolve"
+        ],
+        "constraints": {
+          "capabilities": [],
+          "conflicts_with": []
+        },
+        "params": {
+          "artifacts": {
+            "value": [
+              "planner.phase6n.builtins_all/archive_zip"
+            ]
+          },
+          "extract_on": {
+            "value": "host"
+          }
+        },
+        "skip_if": [],
+        "verify": []
+      },
+      {
+        "id": "planner.phase6n.builtins_all/extract_archive",
+        "recipe_ref": "planner.phase6n.builtins_all",
+        "type": "extract_archive",
+        "name": "Extract Archive",
+        "dependencies": [
+          "planner.phase6n.builtins_all/resolve"
+        ],
+        "constraints": {
+          "capabilities": [],
+          "conflicts_with": []
+        },
+        "params": {
+          "archive": {
+            "ref": "artifacts.planner.phase6n.builtins_all/archive_zip.local_path"
+          },
+          "extract_on": {
+            "value": "device"
+          },
+          "dest": {
+            "value": "/sdcard/Extracted"
+          },
+          "cleanup": {
+            "value": true
+          }
+        },
+        "skip_if": [],
+        "verify": []
+      },
+      {
+        "id": "planner.phase6n.builtins_all/install",
+        "recipe_ref": "planner.phase6n.builtins_all",
+        "type": "install_apk",
+        "name": "Install APK",
+        "dependencies": [
+          "planner.phase6n.builtins_all/resolve"
+        ],
+        "constraints": {
+          "capabilities": [
+            "apk_install"
+          ],
+          "conflicts_with": []
+        },
+        "params": {
+          "app": {
+            "ref": "artifacts.planner.phase6n.builtins_all/app_apk.local_path"
+          },
+          "replace_existing": {
+            "value": false
+          }
+        },
+        "skip_if": [],
+        "verify": []
+      },
+      {
+        "id": "planner.phase6n.builtins_all/copy",
+        "recipe_ref": "planner.phase6n.builtins_all",
+        "type": "copy_files",
+        "name": "Copy Extracted Files",
+        "dependencies": [
+          "planner.phase6n.builtins_all/extract_artifacts"
+        ],
+        "constraints": {
+          "capabilities": [
+            "shared_storage_write"
+          ],
+          "conflicts_with": []
+        },
+        "params": {
+          "source": {
+            "ref": "steps.planner.phase6n.builtins_all/extract_artifacts.outputs.extracted_paths"
+          },
+          "dest": {
+            "value": "/sdcard/Example"
+          },
+          "copy_policy": {
+            "value": "merge"
+          }
+        },
+        "skip_if": [],
+        "verify": []
+      },
+      {
+        "id": "planner.phase6n.builtins_all/grant",
+        "recipe_ref": "planner.phase6n.builtins_all",
+        "type": "grant_permissions",
+        "name": "Grant Permissions",
+        "dependencies": [
+          "planner.phase6n.builtins_all/install"
+        ],
+        "constraints": {
+          "capabilities": [],
+          "conflicts_with": []
+        },
+        "params": {
+          "runtime": {
+            "value": [
+              {
+                "package_name": "com.example.app",
+                "name": "android.permission.POST_NOTIFICATIONS",
+                "required": false
+              }
+            ]
+          },
+          "appops": {
+            "value": [
+              {
+                "package_name": "com.example.app",
+                "op": "MANAGE_EXTERNAL_STORAGE",
+                "mode": "allow",
+                "required": false
+              }
+            ]
+          },
+          "policy": {
+            "value": {
+              "on_failure": "fail",
+              "require_all": true
+            }
+          }
+        },
+        "skip_if": [],
+        "verify": []
+      },
+      {
+        "id": "planner.phase6n.builtins_all/launch",
+        "recipe_ref": "planner.phase6n.builtins_all",
+        "type": "launch_app",
+        "name": "Launch App",
+        "dependencies": [
+          "planner.phase6n.builtins_all/grant"
+        ],
+        "constraints": {
+          "capabilities": [
+            "app_launch"
+          ],
+          "conflicts_with": []
+        },
+        "params": {
+          "package_name": {
+            "value": "com.example.app"
+          },
+          "activity": {
+            "value": ".MainActivity"
+          }
+        },
+        "skip_if": [],
+        "verify": []
+      },
+      {
+        "id": "planner.phase6n.builtins_all/wait",
+        "recipe_ref": "planner.phase6n.builtins_all",
+        "type": "wait",
+        "name": "Wait",
+        "dependencies": [
+          "planner.phase6n.builtins_all/launch"
+        ],
+        "constraints": {
+          "capabilities": [],
+          "conflicts_with": []
+        },
+        "params": {
+          "duration_ms": {
+            "value": 250
+          }
+        },
+        "skip_if": [],
+        "verify": []
+      },
+      {
+        "id": "planner.phase6n.builtins_all/force_stop",
+        "recipe_ref": "planner.phase6n.builtins_all",
+        "type": "force_stop_app",
+        "name": "Force Stop",
+        "dependencies": [
+          "planner.phase6n.builtins_all/wait"
+        ],
+        "constraints": {
+          "capabilities": [
+            "shell_command"
+          ],
+          "conflicts_with": []
+        },
+        "params": {
+          "package_name": {
+            "value": "com.example.app"
+          }
+        },
+        "skip_if": [],
+        "verify": []
+      }
+    ],
+    "schema_version": 1,
+    "kind": "execution_plan"
+  },
+  "schema_version": 1,
+  "kind": "planning_result"
+}

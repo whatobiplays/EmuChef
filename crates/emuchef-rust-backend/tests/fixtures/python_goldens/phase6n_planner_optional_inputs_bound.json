@@ -1,0 +1,120 @@
+{
+  "status": "success",
+  "warnings": [],
+  "errors": [],
+  "execution_plan": {
+    "id": "plan.example.device_plan.001",
+    "source": {
+      "device_profile_ref": "example.device_profile",
+      "device_plan_ref": "example.device_plan",
+      "selected_recipe_refs": [
+        "planner.phase6n.optional_inputs"
+      ],
+      "expanded_recipe_refs": [
+        "planner.phase6n.optional_inputs"
+      ]
+    },
+    "device_context": {
+      "manufacturer": "Example",
+      "model": "Example",
+      "android_version": 13,
+      "android_api_level": 33,
+      "device_tags": [
+        "example_tag"
+      ]
+    },
+    "runtime_capabilities": {
+      "adb_available": true,
+      "apk_install": true,
+      "shared_storage_write": true,
+      "app_launch": true,
+      "shell_command": true,
+      "package_remove_for_user": false,
+      "root_shell": true,
+      "app_data_write": true
+    },
+    "inputs": [
+      {
+        "id": "planner.phase6n.optional_inputs/optional_cfg",
+        "value": {
+          "type": "file_path",
+          "value": "$REPO_ROOT/relative/optional.cfg",
+          "location": "host"
+        }
+      }
+    ],
+    "artifacts": [],
+    "steps": [
+      {
+        "id": "planner.phase6n.optional_inputs/prepare",
+        "recipe_ref": "planner.phase6n.optional_inputs",
+        "type": "wait",
+        "name": "Prepare",
+        "dependencies": [],
+        "constraints": {
+          "capabilities": [],
+          "conflicts_with": []
+        },
+        "params": {
+          "duration_ms": {
+            "value": 1
+          }
+        },
+        "skip_if": [],
+        "verify": []
+      },
+      {
+        "id": "planner.phase6n.optional_inputs/seed",
+        "recipe_ref": "planner.phase6n.optional_inputs",
+        "type": "copy_files",
+        "name": "Seed Optional Config",
+        "dependencies": [
+          "planner.phase6n.optional_inputs/prepare"
+        ],
+        "constraints": {
+          "capabilities": [
+            "shared_storage_write"
+          ],
+          "conflicts_with": []
+        },
+        "params": {
+          "source": {
+            "ref": "inputs.planner.phase6n.optional_inputs/optional_cfg"
+          },
+          "dest": {
+            "value": "/sdcard/Optional.cfg"
+          },
+          "copy_policy": {
+            "value": "merge"
+          }
+        },
+        "skip_if": [],
+        "verify": []
+      },
+      {
+        "id": "planner.phase6n.optional_inputs/after_seed",
+        "recipe_ref": "planner.phase6n.optional_inputs",
+        "type": "wait",
+        "name": "After Seed",
+        "dependencies": [
+          "planner.phase6n.optional_inputs/seed"
+        ],
+        "constraints": {
+          "capabilities": [],
+          "conflicts_with": []
+        },
+        "params": {
+          "duration_ms": {
+            "value": 2
+          }
+        },
+        "skip_if": [],
+        "verify": []
+      }
+    ],
+    "schema_version": 1,
+    "kind": "execution_plan"
+  },
+  "schema_version": 1,
+  "kind": "planning_result"
+}

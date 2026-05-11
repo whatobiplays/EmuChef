@@ -1,0 +1,87 @@
+schema_version: 1
+kind: recipe
+id: planner.phase6n.step_data
+name: Planner Phase 6N Step Data
+description: Planner fixture for refs, defaults, overrides, constraints, skip, and verify.
+recipe_dependencies: []
+provides:
+  features:
+    - planner_phase6n_step_data
+inputs: {}
+artifacts:
+  core_zip:
+    type: remote_file
+    url: https://example.com/core.zip
+    cache: default
+artifact_groups: {}
+steps:
+  - id: resolve
+    type: resolve_artifacts
+    name: Resolve Core
+    user_toggleable: false
+    dependencies: []
+    constraints:
+      capabilities: []
+      conflicts_with: []
+    skip_if: []
+    params:
+      artifacts:
+        - core_zip
+    verify: []
+  - id: extract
+    type: extract_artifacts
+    name: Extract Core
+    user_toggleable: false
+    dependencies:
+      - resolve
+    constraints:
+      capabilities: []
+      conflicts_with: []
+    skip_if: []
+    params:
+      artifacts:
+        - core_zip
+      extract_on: device
+    verify: []
+  - id: copy
+    type: copy_files
+    name: Copy Core
+    user_toggleable: true
+    dependencies:
+      - extract
+    constraints:
+      capabilities:
+        - shared_storage_write
+      conflicts_with:
+        - cleanup
+    skip_if:
+      - type: file_exists
+        params:
+          path: /sdcard/Phase6N/core.bin
+          nested:
+            ref: nested.skip.literal
+    params:
+      source:
+        ref: steps.extract.outputs.extracted_paths
+      dest: /sdcard/Phase6N
+      copy_policy: replace
+    verify:
+      - type: file_exists
+        params:
+          path: /sdcard/Phase6N/core.bin
+          nested:
+            ref: nested.verify.literal
+  - id: cleanup
+    type: force_stop_app
+    name: Cleanup App
+    user_toggleable: true
+    dependencies:
+      - copy
+    constraints:
+      capabilities:
+        - package_remove_for_user
+      conflicts_with: []
+    skip_if: []
+    params:
+      package_name: com.example.app
+    verify: []
