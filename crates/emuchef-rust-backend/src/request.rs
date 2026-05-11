@@ -1,9 +1,13 @@
-use serde_json::{Map, Value};
+use std::path::Path;
+
+use serde_json::{json, Map, Value};
 
 use crate::envelope;
 use crate::errors::ApiError;
 use crate::protocol;
 use crate::step_specs;
+use crate::validation;
+use crate::yaml;
 
 /// Validate and dispatch a one-shot request object.
 pub fn handle_one_shot_value(request: Value) -> Value {
@@ -42,6 +46,8 @@ fn handle_validated_object(object: &Map<String, Value>) -> Result<Value, ApiErro
     match request_type {
         "hello" => Ok(envelope::success(protocol::hello_result())),
         "listStepSpecs" => Ok(envelope::success(step_specs::list_step_specs_result())),
+        "emitRecipeYamlFromPath" => handle_emit_recipe_yaml_from_path(object),
+        "validateRecipePath" => handle_validate_recipe_path(object),
         unknown => Err(ApiError::invalid_request(format!(
             "Unknown request type: {unknown}"
         ))),
@@ -78,6 +84,53 @@ fn validate_payload(object: &Map<String, Value>) -> Result<(), ApiError> {
         None | Some(Value::Null) | Some(Value::Object(_)) => Ok(()),
         _ => Err(ApiError::invalid_request(
             "Request payload must be an object.",
+        )),
+    }
+}
+
+fn handle_emit_recipe_yaml_from_path(object: &Map<String, Value>) -> Result<Value, ApiError> {
+    let payload = payload_object(object)?;
+    let path = required_path(payload)?;
+    match yaml::emit_recipe_yaml_from_path(Path::new(path)) {
+        Ok(yaml) => Ok(envelope::success(json!({ "yaml": yaml }))),
+        Err(error) => Err(ApiError::load_failed(
+            format!("Failed to emit recipe YAML: {error}"),
+            json!({ "path": path }),
+        )),
+    }
+}
+
+fn handle_validate_recipe_path(object: &Map<String, Value>) -> Result<Value, ApiError> {
+    let payload = payload_object(object)?;
+    let path = required_path(payload)?;
+    let authored_root_provided = payload
+        .get("authoredRoot")
+        .is_some_and(|value| !value.is_null());
+    Ok(envelope::success(validation::validate_recipe_path_result(
+        Path::new(path),
+        authored_root_provided,
+    )))
+}
+
+fn payload_object(object: &Map<String, Value>) -> Result<&Map<String, Value>, ApiError> {
+    match object.get("payload") {
+        Some(Value::Object(payload)) => Ok(payload),
+        None | Some(Value::Null) => {
+            static EMPTY: std::sync::OnceLock<Map<String, Value>> = std::sync::OnceLock::new();
+            Ok(EMPTY.get_or_init(Map::new))
+        }
+        _ => Err(ApiError::invalid_request(
+            "Request payload must be an object.",
+        )),
+    }
+}
+
+fn required_path(payload: &Map<String, Value>) -> Result<&str, ApiError> {
+    match payload.get("path") {
+        Some(Value::String(path)) => Ok(path),
+        _ => Err(ApiError::invalid_request_with_details(
+            "Request payload is missing required field: path",
+            json!({ "field": "path" }),
         )),
     }
 }

@@ -1,0 +1,11 @@
+schema_version: 1
+kind: recipe
+id: phase6e.minimal
+name: Phase 6E Minimal
+recipe_dependencies: []
+provides:
+  features: []
+inputs: {}
+artifacts: {}
+artifact_groups: {}
+steps: []

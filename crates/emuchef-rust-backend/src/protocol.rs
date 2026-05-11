@@ -8,7 +8,11 @@ pub const SUPPORTED_PROTOCOL_VERSION: u64 = 1;
 /// `hello` is the handshake request and is intentionally not listed as a
 /// capability. Future phases should add capability names only after the
 /// corresponding editor operation is implemented.
-pub const CAPABILITIES: &[&str] = &["listStepSpecs"];
+pub const CAPABILITIES: &[&str] = &[
+    "listStepSpecs",
+    "emitRecipeYamlFromPath",
+    "validateRecipePath",
+];
 
 /// Return backend compatibility metadata for the `hello` request.
 pub fn hello_result() -> Value {

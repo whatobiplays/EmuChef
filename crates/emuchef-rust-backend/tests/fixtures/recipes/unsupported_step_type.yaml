@@ -1,0 +1,21 @@
+schema_version: 1
+kind: recipe
+id: phase6e.unsupported_step
+name: Unsupported Step Type
+recipe_dependencies: []
+provides:
+  features: []
+inputs: {}
+artifacts: {}
+artifact_groups: {}
+steps:
+  - id: custom
+    type: custom_plugin_step
+    name: Custom Step
+    user_toggleable: false
+    dependencies: []
+    constraints:
+      capabilities: []
+      conflicts_with: []
+    params: {}
+    verify: []

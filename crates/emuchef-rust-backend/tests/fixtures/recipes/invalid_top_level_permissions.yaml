@@ -1,0 +1,30 @@
+schema_version: 1
+kind: recipe
+id: phase6e.invalid_permissions
+name: Invalid Top-Level Permissions
+recipe_dependencies: []
+provides:
+  features: []
+inputs: {}
+artifacts: {}
+artifact_groups: {}
+permissions:
+  runtime:
+    - package_name: com.example.app
+      name: android.permission.POST_NOTIFICATIONS
+      required: false
+steps:
+  - id: grant
+    type: grant_permissions
+    name: Grant Permissions
+    user_toggleable: false
+    dependencies: []
+    constraints:
+      capabilities: []
+      conflicts_with: []
+    params:
+      runtime:
+        - package_name: com.example.app
+          name: android.permission.CAMERA
+          required: false
+    verify: []

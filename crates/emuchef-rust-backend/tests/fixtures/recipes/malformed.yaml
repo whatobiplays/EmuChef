@@ -1,0 +1,9 @@
+schema_version: 1
+kind: recipe
+id: phase6e.malformed
+name: Malformed
+steps:
+  - id: bad
+    type: wait
+    params:
+      duration_ms: [1000

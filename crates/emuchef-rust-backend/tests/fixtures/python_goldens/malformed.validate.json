@@ -1,0 +1,22 @@
+{
+  "diagnostics": [
+    {
+      "code": "validation_context_limited",
+      "field": null,
+      "file": "/Users/daniel.byon/Downloads/Projects/EmuChef/crates/emuchef-rust-backend/tests/fixtures/recipes/malformed.yaml",
+      "message": "Cross-file validation was limited because no authored_root was provided.",
+      "objectId": null,
+      "objectKind": null,
+      "severity": "warning"
+    },
+    {
+      "code": "authored_data_invalid",
+      "field": null,
+      "file": "/Users/daniel.byon/Downloads/Projects/EmuChef/crates/emuchef-rust-backend/tests/fixtures/recipes/malformed.yaml",
+      "message": "File 'malformed.yaml' could not be parsed as YAML: while parsing a flow sequence\n  in \"crates/emuchef-rust-backend/tests/fixtures/recipes/malformed.yaml\", line 9, column 20\nexpected ',' or ']', but got '<stream end>'\n  in \"crates/emuchef-rust-backend/tests/fixtures/recipes/malformed.yaml\", line 10, column 1.",
+      "objectId": null,
+      "objectKind": null,
+      "severity": "error"
+    }
+  ]
+}

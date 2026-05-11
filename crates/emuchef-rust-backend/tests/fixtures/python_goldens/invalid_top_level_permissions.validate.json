@@ -1,0 +1,22 @@
+{
+  "diagnostics": [
+    {
+      "code": "validation_context_limited",
+      "field": null,
+      "file": "/Users/daniel.byon/Downloads/Projects/EmuChef/crates/emuchef-rust-backend/tests/fixtures/recipes/invalid_top_level_permissions.yaml",
+      "message": "Cross-file validation was limited because no authored_root was provided.",
+      "objectId": null,
+      "objectKind": null,
+      "severity": "warning"
+    },
+    {
+      "code": "authored_data_invalid",
+      "field": "permissions",
+      "file": "/Users/daniel.byon/Downloads/Projects/EmuChef/crates/emuchef-rust-backend/tests/fixtures/recipes/invalid_top_level_permissions.yaml",
+      "message": "Recipe top-level 'permissions' is no longer supported; author permissions under grant_permissions.params.",
+      "objectId": "phase6e.invalid_permissions",
+      "objectKind": "recipe",
+      "severity": "error"
+    }
+  ]
+}

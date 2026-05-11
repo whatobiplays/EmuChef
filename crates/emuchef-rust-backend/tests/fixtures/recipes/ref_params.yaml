@@ -1,0 +1,58 @@
+schema_version: 1
+kind: recipe
+id: phase6e.ref_params
+name: Ref Param Semantics
+recipe_dependencies: []
+provides:
+  features: []
+inputs: {}
+artifacts:
+  assets_zip:
+    type: remote_file
+    url: https://example.com/assets.zip
+    cache: default
+artifact_groups:
+  asset_group:
+    - assets_zip
+steps:
+  - id: extract_assets
+    type: extract_artifacts
+    name: Extract Assets
+    user_toggleable: false
+    dependencies: []
+    constraints:
+      capabilities: []
+      conflicts_with: []
+    skip_if: []
+    params:
+      artifacts:
+        - assets_zip
+      extract_on: host
+    verify: []
+  - id: copy_assets
+    type: copy_files
+    name: Copy Assets
+    user_toggleable: true
+    dependencies:
+      - extract_assets
+    constraints:
+      capabilities:
+        - shared_storage_write
+      conflicts_with: []
+    skip_if:
+      - type: path_exists
+        params:
+          path:
+            ref: nested.literal.in.condition
+    params:
+      source:
+        ref: steps.extract_assets.outputs.extracted_paths
+      dest: /sdcard/Example/assets
+      copy_policy: overwrite
+      literal_nested:
+        wrapper:
+          ref: nested.literal.in.params
+    verify:
+      - type: path_exists
+        params:
+          path: /sdcard/Example/assets

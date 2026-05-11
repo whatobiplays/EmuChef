@@ -58,7 +58,22 @@ pub struct StepParamDto {
 }
 
 pub fn list_step_specs_result() -> Value {
-    let result: StepSpecsResult = serde_json::from_str(PYTHON_STEP_SPECS_RESULT)
-        .expect("embedded Python StepSpec fixture must match the Rust DTO surface");
-    serde_json::to_value(result).expect("StepSpec DTO surface should serialize to JSON")
+    serde_json::to_value(step_specs_result())
+        .expect("StepSpec DTO surface should serialize to JSON")
+}
+
+pub fn step_specs_result() -> StepSpecsResult {
+    serde_json::from_str(PYTHON_STEP_SPECS_RESULT)
+        .expect("embedded Python StepSpec fixture must match the Rust DTO surface")
+}
+
+pub fn step_spec_for(type_name: &str) -> Option<StepSpecDto> {
+    step_specs_result()
+        .step_specs
+        .into_iter()
+        .find(|spec| spec.type_name == type_name)
+}
+
+pub fn is_supported_step_type(type_name: &str) -> bool {
+    step_spec_for(type_name).is_some()
 }

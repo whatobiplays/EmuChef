@@ -105,7 +105,14 @@ fn assert_step_specs_response(response: &Value) {
 
 fn assert_hello_result(result: &Value) {
     assert_eq!(result["protocolVersion"], 1);
-    assert_eq!(result["capabilities"], json!(["listStepSpecs"]));
+    assert_eq!(
+        result["capabilities"],
+        json!([
+            "listStepSpecs",
+            "emitRecipeYamlFromPath",
+            "validateRecipePath"
+        ])
+    );
     assert!(!result["capabilities"]
         .as_array()
         .unwrap()
