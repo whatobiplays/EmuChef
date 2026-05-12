@@ -1,5 +1,11 @@
 # Rust Backend Port Assessment and Parity Plan
 
+> Historical note: this Phase 6B plan is superseded for current runtime status by
+> `docs/rust-backend-cutover-readiness.md`. Paths and bridge descriptions below
+> describe the migration snapshot at planning time unless explicitly marked as
+> updated. The current Tauri editor runtime launches the Rust sidecar directly
+> and has no Python bridge, Python fallback, backend selector, or backend toggle.
+
 ## Summary
 
 Phase 6B is a planning-only assessment for a future Rust implementation of the
@@ -18,8 +24,9 @@ Current backend truth is spread across these existing repo areas:
   validation adapters, ref indexing, and command application.
 - `src/emuchef_editor/api/`: JSON DTOs, command codec, one-shot server,
   session manager, structured errors, protocol metadata, and JSONL sidecar.
-- `apps/config-editor/src-tauri/`: Tauri v2 Rust bridge, Python one-shot bridge,
-  persistent sidecar client, protocol compatibility gate, commands, and menus.
+- `apps/config-editor/src-tauri/`: historical Tauri v2 bridge and persistent
+  sidecar client planning area; the current runtime bridge now launches the Rust
+  sidecar directly.
 - `apps/config-editor/src/`: React/TypeScript editor API types, command payload
   types, sidecar API calls, and editor UI behavior.
 - `tests/` and `apps/config-editor/tests/`: current Python and frontend parity
@@ -58,9 +65,9 @@ YAML, or change Tauri backend selection.
 | Command codec | Decodes external JSON command payloads into Python command dataclasses and maps invalid shapes to structured `invalid_command` errors. | `src/emuchef_editor/api/command_codec.py`, `apps/config-editor/src/api/commands.ts` | Direct. | None. | Medium | 6G |
 | Structured API errors | Defines stable editor API error codes and JSON-safe error details. | `src/emuchef_editor/api/errors.py` | Direct. | None. | Low | 6C |
 | Protocol metadata | Defines protocol version 1 and required/optional/reported backend-agnostic capabilities. | `src/emuchef_editor/api/protocol.py` | Direct through Tauri compatibility gate. | None. | Low | 6C |
-| One-shot API server | Handles stateless `hello`, `listStepSpecs`, `openRecipe`, `validateRecipePath`, and `emitRecipeYamlFromPath` requests. | `src/emuchef_editor/api/server.py`, `apps/config-editor/src-tauri/src/python_bridge.rs` | Kept for compatibility and regression safety. | None. | Low to medium | 6C to 6E |
-| JSONL sidecar | Handles persistent request sessions over stdin/stdout JSON Lines, one request per line, one response per line, stderr for diagnostics, EOF clean exit, and session-backed document operations. | `src/emuchef_editor/api/sidecar.py`, `src/emuchef_editor/api/session.py`, `apps/config-editor/src-tauri/src/sidecar_client.rs` | Direct current Tauri backend. | None. | Medium | 6C, 6F, 6G |
-| Tauri Rust bridge | Starts Python sidecar, sends `hello`, gates compatibility on protocol version and required capabilities, serializes one JSONL request at a time, exposes Tauri invoke commands. | `apps/config-editor/src-tauri/src/python_bridge.rs`, `apps/config-editor/src-tauri/src/sidecar_client.rs`, `apps/config-editor/src-tauri/src/commands.rs`, `apps/config-editor/src-tauri/src/lib.rs` | Direct. | None. | Medium | 6K only after Rust parity |
+| One-shot API server | Handles stateless `hello`, `listStepSpecs`, `openRecipe`, `validateRecipePath`, and `emitRecipeYamlFromPath` requests. | `src/emuchef_editor/api/server.py`; historical `python_bridge.rs` reference is superseded and removed from the current Tauri runtime. | Kept only for compatibility, reference, and golden workflows. | None. | Low to medium | 6C to 6E |
+| JSONL sidecar | Handles persistent request sessions over stdin/stdout JSON Lines, one request per line, one response per line, stderr for diagnostics, EOF clean exit, and session-backed document operations. | `src/emuchef_editor/api/sidecar.py`, `src/emuchef_editor/api/session.py`; current Tauri `sidecar_client.rs` launches the Rust sidecar instead. | Historical Python backend; no longer direct current Tauri backend. | None. | Medium | 6C, 6F, 6G |
+| Tauri Rust bridge | Historical planning row. The current bridge starts `emuchef-rust-backend --sidecar`, sends `hello`, gates compatibility on protocol version and required capabilities, serializes one JSONL request at a time, and exposes Tauri invoke commands. | `apps/config-editor/src-tauri/src/sidecar_client.rs`, `apps/config-editor/src-tauri/src/commands.rs`, `apps/config-editor/src-tauri/src/lib.rs` | Direct current Tauri runtime, Rust only. | None. | Medium | 6K only after Rust parity |
 | Tauri frontend API | Defines TypeScript DTOs, command union, sidecar API calls, transport/API error split, action gating, and command-in-flight behavior. | `apps/config-editor/src/api/types.ts`, `apps/config-editor/src/api/commands.ts`, `apps/config-editor/src/api/editorApi.ts`, `apps/config-editor/src/components/phase5EditorState.logic.ts` | Direct. | None. | Medium if changed, but should not change early. | 6K |
 | CLI | Supports `draft`, `plan`, `apply`, `detect`, `detect-profiles`, and `validate`; uses Python loader/planner/executor/serde. | `src/emuchef/cli.py`, `pyproject.toml` | No direct Tauri editor dependency. | Direct top-level runtime surface. | High | After 6I/6J |
 | Templates | Provides authored YAML examples and PySide creation sources; not loaded by CLI as authored inputs. | `templates/authored/`, `tests/test_templates.py` | PySide fallback and template creation API depend on recipe templates. | No direct planner dependency unless copied into `authored/`. | Low to medium | Defer unless template creation is included |
@@ -901,7 +908,7 @@ future location: `tests/parity/` for Python-driven orchestration, or a proposed
 Rust integration test area under `crates/emuchef-rust-backend/tests/` once that
 crate exists.
 
-Harness requirements:
+Historical harness requirements:
 
 - Start the Python sidecar with `python -m emuchef_editor.api.server --sidecar`.
 - Start the Rust sidecar through the proposed Rust binary.
@@ -1026,10 +1033,11 @@ Do not port these in early editor backend phases:
 
 ## Parity Before Replacement Rule
 
-Python remains the reference backend until Rust passes agreed dual-backend
-parity tests. Rust must not replace Python by default during early port phases.
-The current Tauri backend selection and sidecar protocol remain unchanged until
-a later cutover phase explicitly approves replacement.
+At Phase 6B planning time, Python remained the reference backend until Rust
+passed agreed dual-backend parity tests. Rust was not to replace Python by
+default during early port phases, and the then-current Tauri backend selection
+and sidecar protocol were to remain unchanged until a later cutover phase
+explicitly approved replacement.
 
 ## Phase 6B Validation Notes
 

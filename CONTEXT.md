@@ -25,13 +25,17 @@ The code is intentionally split into:
   step-local executor handlers, and editor-safe step metadata
 - `src/emuchef/domain`: typed models and enums
 - `src/emuchef_editor/core`: UI-agnostic recipe document, canonical YAML, ref indexing, and validation adapters for the editor
-- `src/emuchef_editor/api`: UI-free JSON API adapters over the editor core
-- `src/emuchef_editor/app`: legacy/fallback PySide6 desktop editor for authored recipe files
+- `src/emuchef_editor/api`: legacy/reference UI-free Python JSON API adapters
+  over the editor core for comparison and golden-generation workflows
+- `src/emuchef_editor/app`: legacy/reference PySide6 desktop editor for authored
+  recipe files
 - `apps/config-editor`: primary Tauri development/editor UI for authored recipe files
 
-The base Python package contains non-UI runtime dependencies only. The PySide6
-desktop editor is installed with the `pyside-editor` optional dependency extra
-and remains available for comparison and debugging.
+The base Python package is retained temporarily for legacy/reference/developer
+workflows, including the Python CLI reference implementation and golden
+generation. The PySide6 desktop editor is installed with the `pyside-editor`
+optional dependency extra and remains available only as legacy/reference tooling
+for comparison and debugging, not as the active Tauri editor runtime or fallback.
 
 ## Current Authored Model
 
@@ -88,8 +92,9 @@ The current editor scope is recipe-authoring only. It edits:
 
 `emuchef_editor.api` is the legacy/reference UI-free Python JSON API surface. It
 wraps `src/emuchef_editor/core` and remains available for comparison, fixture
-generation, the PySide6 editor, and later Python-deletion work. The primary
-Tauri editor runtime uses the Rust sidecar instead of this Python API.
+generation, the PySide6 editor, and later Python-deletion work. It is not a
+packaged editor backend fallback. The primary Tauri editor runtime uses the Rust
+sidecar instead of this Python API.
 
 Every API response uses one of these envelopes:
 
@@ -146,8 +151,8 @@ The sidecar protocol includes a backend-agnostic `hello` request. `hello`
 returns integer `protocolVersion: 1` and a string `capabilities` list. The
 protocol does not expose `implementation` or `implementationVersion` fields,
 and there is no protocol negotiation. Capability names describe editor protocol
-operations rather than backend implementation details. The current Python
-backend reports the capabilities it supports, including optional protocol
+operations rather than backend implementation details. The legacy/reference
+Python API reports the capabilities it supports, including optional protocol
 operations such as create-from-template, document close, and Save As.
 
 ## Current Tauri Config Editor
@@ -180,8 +185,8 @@ the packaged app executable.
 The Tauri editor supports sidecar-backed recipe editing. The Overview screen
 edits recipe name and description. Recipe id, schema version, and kind are
 read-only in the Overview screen. Inputs, artifacts, and artifact groups support
-CRUD-style editing where the Python command codec exposes the corresponding
-document command. Add, rename, and duplicate actions collect required text with
+CRUD-style editing where the Rust sidecar exposes the corresponding document
+command. Add, rename, and duplicate actions collect required text with
 app-owned dialogs, destructive actions require confirmation, and artifact
 creation collects both artifact id and URL before submitting a command. Artifact
 group duplication creates a new group with the same ordered artifact members as
@@ -201,11 +206,11 @@ Dependency updates use `UpdateStepDependencies` with the complete next
 dependency id list. The frontend blocks obvious self-dependency and duplicate
 dependency selections, treats missing or null dependency lists as empty for UI
 rendering only, and leaves graph validity, cycles, unknown step ids, and final
-execution ordering to Python validation and planning. Missing or unknown
+execution ordering to backend validation and planning. Missing or unknown
 authored dependency ids remain visible as raw ids and can be removed. Delete Step
-uses the backend safe-delete behavior shared with the PySide editor, so
+uses the backend safe-delete behavior shared with the legacy PySide editor, so
 supported downstream step dependencies, `conflicts_with` entries, and step refs
-are removed by Python rather than by TypeScript cleanup logic.
+are removed by the sidecar rather than by TypeScript cleanup logic.
 
 Step param updates use `UpdateStepParams` with the complete next params object
 for the selected step. The frontend edits authored step params, keeps literal
@@ -227,7 +232,7 @@ params use schema-backed select and checkbox controls. Structured object and
 object-list editors preserve unknown or extra keys where the existing authored
 value can be copied and updated without data loss. Raw JSON remains the editor
 for free-form, unknown, unsupported, or incompatible params, including metadata
-unless a Python schema is added for it later.
+unless schema metadata is added for it later.
 
 The ref picker uses the current document `refIndex`, prefers `candidates`,
 falls back to `allRefs`, and keeps current missing or incompatible refs visible
@@ -247,9 +252,10 @@ if the command codec requires a different top-level shape, the frontend reports
 a local shape error and does not submit. Advanced JSON values that contain
 objects shaped like `{ "ref": "..." }` are ordinary JSON values in this editor.
 The Tauri editor has no specialized constraints builder, `skip_if` condition
-builder, `verify` builder, or ref picker inside advanced JSON values. Python
-remains authoritative for advanced internals command application, canonical
-YAML, semantic validation diagnostics, dirty state, undo state, and redo state.
+builder, `verify` builder, or ref picker inside advanced JSON values. The Rust
+sidecar remains authoritative for advanced internals command application,
+canonical YAML, semantic validation diagnostics, dirty state, undo state, and
+redo state.
 Advanced internals command success with `changed: false` is treated as a no-op
 rather than an applied edit.
 
@@ -281,7 +287,7 @@ are disabled and duplicate submissions are ignored. Explicit operations such as
 opening recipes, saving, undo, redo, validation, YAML refresh, and mutation
 commands show transient operation text inline in the toolbar. Save success
 feedback is UI-only and does not mutate dirty state, undo/redo state, diagnostics,
-YAML, or DTO data beyond the returned document state from Python.
+YAML, or DTO data beyond the returned document state from the Rust sidecar.
 
 The Tauri editor exposes primary app actions through native menus. File contains
 Open Recipe and Save. Edit contains Undo and Redo. Utilities contains Validate
@@ -302,8 +308,8 @@ does not cancel in-flight operations.
 
 The Tauri editor does not expose dependency graph visualization, dependency
 reorder controls, drag-and-drop, executor/apply-device UI, Save As UI,
-create-from-template UI, Python bundling, installer packaging, or Rust ports of
-Python editor/planner/executor behavior. YAML preview is read-only.
+create-from-template UI, Python bundling, installer packaging, or broad Rust
+ports of Python planner/executor behavior. YAML preview is read-only.
 
 Future editor UX opportunities:
 
@@ -358,8 +364,9 @@ document ids are invalid after process loss.
 
 There is no backend selector, runtime backend toggle, environment variable,
 config option, UI switch, protocol negotiation path, or Python fallback in the
-Tauri editor runtime. Python, PySide6, and the Python CLI remain in the repo for
-later confirmed-cutover and deletion phases.
+Tauri editor runtime. Python, PySide6, and the Python CLI remain in the repo only
+for legacy/reference/developer/golden workflows until later confirmed
+replacement or retirement phases.
 
 `crates/emuchef-rust-backend` is an experimental standalone Rust backend
 skeleton for migration work. It currently implements `hello`, response
@@ -407,11 +414,12 @@ workspace selection are deferred editor migration work.
 ## Current PySide6 Legacy Editor
 
 The PySide6 editor remains available through the `pyside-editor` optional
-dependency extra and the existing `emuchef-editor` script entrypoint. It is a
-legacy/fallback editor path for comparison and debugging, not the primary editor
-path. The PySide6 code stays in the repo and continues to use the shared Python
-editor core, authored recipe model, canonical YAML writer, and validation
-adapters.
+dependency extra and the existing `emuchef-editor` script entrypoint. It is
+legacy/reference/developer tooling for comparison and debugging, not the active
+Tauri editor runtime or a fallback backend. The PySide6 code stays in the repo
+and continues to use the shared Python editor core, authored recipe model,
+canonical YAML writer, and validation adapters until that workflow is replaced or
+intentionally retired.
 
 ## Current Step Plugin Architecture
 

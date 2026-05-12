@@ -189,10 +189,10 @@ test("classifyOperationFailure distinguishes api errors from fatal sidecar trans
   );
 
   assert.deepEqual(
-    classifyOperationFailure({ kind: "transport-error", message: "Python sidecar exited unexpectedly" }, "Save failed."),
+    classifyOperationFailure({ kind: "transport-error", message: "Rust sidecar exited unexpectedly" }, "Save failed."),
     {
       message:
-        "Save failed. Python sidecar exited unexpectedly The editor session is no longer valid. Restart the Tauri app and reopen the recipe.",
+        "Save failed. Rust sidecar exited unexpectedly The editor session is no longer valid. Restart the Tauri app and reopen the recipe.",
       sessionInvalid: true,
     },
   );

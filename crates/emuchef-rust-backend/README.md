@@ -3,8 +3,10 @@
 This package is an experimental Rust backend for the EmuChef config editor
 protocol. It is runnable independently and is the Rust sidecar runtime used by
 the Tauri editor. Phase 6V adds host-target Tauri v2 `externalBin` packaging for
-this process; Python deletion and broad CLI/planner/executor replacement remain
-separate later work.
+this process. Phase 6W retires Python from the Tauri runtime path but keeps
+Python CLI, PySide6, and golden-generation code temporarily as
+legacy/reference/developer tooling. Broad CLI/planner/executor replacement and
+full Python deletion remain separate later work.
 
 Through Phase 6U it implements only:
 
@@ -94,9 +96,10 @@ hard-cutover policy and packages the same Rust process as a Tauri v2
 `externalBin`. The app-local Tauri hooks build and copy debug or release
 sidecar artifacts before normal Tauri dev/build commands.
 
-The Python backend, Python CLI, and PySide6 editor remain in the repository.
-Python deletion and broad CLI/planner/executor replacement remain later confirmed
-cutover work.
+The Python backend, Python CLI, and PySide6 editor remain in the repository only
+as legacy/reference/developer/golden tooling. They are not Tauri editor runtime
+backends or packaged-editor fallbacks. Python deletion and broad
+CLI/planner/executor replacement remain later confirmed cutover work.
 
 ## Tauri Sidecar Packaging
 
@@ -138,17 +141,19 @@ confined to explicit test-owned temp roots. Phase 6Q adds selected fake-device
 ADB parity. Phase 6R adds an internal real-ADB adapter foundation and ignored
 manual tests, but normal tests still do not perform real device checks, real
 network downloads, permission grants, ADB/device operations, app lifecycle
-operations, or install operations. Python remains the
-reference for broader CLI/planner/executor behavior until parity is confirmed.
+operations, or install operations. Python remains the legacy/reference source
+for broader CLI/planner/executor behavior until parity or retirement is
+confirmed.
 
 ## Phase 6S CLI Scope
 
 Phase 6S adds a minimal Rust CLI skeleton inside this standalone crate. It is a
 crate-local experimental parity surface, not the user-facing replacement for the
 Python `emuchef` CLI. The Python CLI entrypoint in `pyproject.toml` remains
-unchanged, and the Rust CLI subset is not packaged as a replacement for the
-Python CLI. There is no backend selector, backend toggle, environment variable,
-config option, UI switch, or Python fallback for the Tauri editor runtime.
+unchanged temporarily for legacy/reference/developer/golden workflows, and the
+Rust CLI subset is not packaged as a replacement for the Python CLI. There is no
+backend selector, backend toggle, environment variable, config option, UI switch,
+or Python fallback for the Tauri editor runtime.
 
 The Python CLI inventory verified from `src/emuchef/cli.py` is:
 
@@ -207,8 +212,8 @@ Tauri Cargo changes, or editor/frontend changes. Dry-run execution uses the
 existing fake dry-run executor path and test-owned temp files. Real ADB remains
 manual/internal from Phase 6R only.
 
-The Python CLI commands used to verify selected Phase 6S output can be run from
-the repository root with the documented dependency pattern:
+The Python CLI reference commands used to verify selected Phase 6S output can be
+run from the repository root with the documented dependency pattern:
 
 ```bash
 PYTHONPATH=src uv run --no-project --native-tls --with PyYAML python -m emuchef validate --authored-root authored
@@ -396,7 +401,8 @@ discovery, subprocess execution, network calls, manual harnesses, production
 packaging, Python bundling, hard cutover behavior, Python backend deletion,
 protocol/API executor routes, capability strings, public fake-device or
 dry-run surfaces, Tauri editor integration, or backend selectors/toggles.
-Python remains the reference implementation until parity is confirmed.
+Python remains the legacy/reference implementation until parity or retirement is
+confirmed.
 
 ## Phase 6R Real-ADB Adapter Foundations
 
@@ -687,7 +693,9 @@ registry. Later phases should replace it with Rust-native schema builders before
 planner or executor behavior is ported. Regenerate and compare the fixture any
 time Python step specs change.
 
-Regenerate the fixture from the repo root with:
+Regenerate the fixture from the repo root with this Python reference/golden
+tooling command. Normal Rust and Tauri runtime tests use the committed fixture
+and do not invoke Python:
 
 ```bash
 PYTHONPATH=src uv run --no-project --native-tls --with PyYAML python -m emuchef_editor.api.server '{"type":"listStepSpecs"}' \
@@ -762,9 +770,9 @@ Known Phase 6K limits:
 - Broad built-in plugin hook validation is not complete. Phase 6K implements only
   fixture-required local checks; omitted plugin-hook diagnostics remain future
   work.
-- Python remains the reference implementation until parity is confirmed. The
-  project direction is a hard Rust cutover after parity, not a user-facing
-  backend selector or long-term dual-backend toggle.
+- Python remains the legacy/reference implementation until parity or retirement
+  is confirmed. The project direction is a hard Rust cutover after parity, not a
+  user-facing backend selector or long-term dual-backend toggle.
 
 Phase 6L authoredRoot/catalog-context validation covers the Python-verified
 recipe diagnostics needed by the focused Rust fixtures:

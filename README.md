@@ -25,11 +25,14 @@ The Tauri config editor in `apps/config-editor` is the primary development UI
 for authored recipe files. It edits the shared typed authored recipe model
 through the Rust sidecar and does not provide direct YAML editing.
 
-The legacy PySide6 editor remains available as an optional fallback for
-comparison and debugging. It is not the primary editor path.
+The legacy PySide6 editor remains available only as temporary
+legacy/reference/developer tooling for comparison and debugging. It is not the
+active editor runtime or a Tauri fallback.
 
-The UI-free editor API is available without the `pyside-editor` extra. The
-one-shot server accepts one JSON request per process invocation:
+The UI-free Python editor API is available without the `pyside-editor` extra for
+legacy/reference and golden-generation workflows. It is not used by the Tauri
+editor runtime. The one-shot server accepts one JSON request per process
+invocation:
 
 ```bash
 python -m emuchef_editor.api.server '{"type":"listStepSpecs"}'
@@ -37,8 +40,8 @@ python -m emuchef_editor.api.server '{"type":"hello"}'
 echo '{"type":"openRecipe","payload":{"path":"authored/recipes/app.retroarch.provision.yaml","authoredRoot":"authored"}}' | python -m emuchef_editor.api.server
 ```
 
-The same entrypoint also supports a persistent JSON Lines sidecar for
-development clients that need reusable document sessions:
+The same Python reference entrypoint also supports a persistent JSON Lines
+sidecar for development clients that need reusable document sessions:
 
 ```bash
 printf '%s\n' '{"id":"req-1","type":"listStepSpecs","payload":{}}' | python -m emuchef_editor.api.server --sidecar
@@ -58,8 +61,9 @@ negotiation yet. Future Rust backends should implement the same protocol.
 
 The Tauri editor is a Tauri v2 development app that uses the experimental Rust
 JSONL sidecar for session-backed document operations. Python remains in the repo
-for the legacy PySide editor, the Python CLI, fixture/golden generation, and
-later confirmed-cutover work.
+only for legacy/reference/developer/golden workflows such as the PySide editor,
+Python CLI reference behavior, fixture/golden generation, and later
+confirmed-cutover work.
 
 Install frontend dependencies and run the Tauri dev shell with npm:
 
@@ -137,9 +141,9 @@ pip install -e ".[pyside-editor]"
 emuchef-editor /path/to/EmuChef
 ```
 
-Use the PySide6 editor as a legacy/fallback editor for comparison and debugging.
-It remains optional and is not required for the UI-free editor API or the Tauri
-development editor.
+Use the PySide6 editor only as legacy/reference/developer tooling for comparison
+and debugging. It remains optional and is not required for the UI-free editor API
+or the Tauri development editor.
 
 ## Templates
 

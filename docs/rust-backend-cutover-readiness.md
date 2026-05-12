@@ -42,9 +42,10 @@ history, RefIndex, internal planner and executor scaffolding, selected fake and
 manual real-ADB foundations, and a crate-local CLI subset.
 
 The Tauri editor runtime now uses the Rust sidecar for local/dev and host-target
-packaged editor backend requests. Python remains in the repo and remains the
-reference for broader CLI/planner/executor behavior until later replacement work
-is confirmed.
+packaged editor backend requests. Python remains in the repo only for
+legacy/reference/developer/golden workflows such as the Python CLI reference,
+PySide6 legacy editor, parity tests, and fixture regeneration until later
+replacement or retirement work is confirmed.
 
 ## Hard Cutover Policy
 
@@ -111,7 +112,7 @@ runtime option.
 | CLI | `src/emuchef/cli.py`, `src/emuchef/io/execution_plan_io.py`, `pyproject.toml` | `crates/emuchef-rust-backend/src/cli.rs`, `crates/emuchef-rust-backend/tests/phase6s_cli.rs` | Partial | Tests and smokes cover Rust `validate` file mode, `apply --dry-run` selected plans, stdout/stderr/exit codes, and legacy JSON/sidecar dispatch preservation. | Rust lacks `draft`, `plan`, `detect`, `detect-profiles`, full catalog validation, real apply, ADB, verbose/debug, broad plan inputs/artifacts. | `Python deletion blocker`, `release confidence risk`, `accepted limitation` | Not a Tauri cutover blocker; blocks replacing/deleting Python CLI. |
 | Tauri integration | `apps/config-editor/src-tauri/src/sidecar_client.rs`, `src-tauri/src/commands.rs`, `apps/config-editor/src/App.tsx` | `crates/emuchef-rust-backend` dev binary and Tauri v2 `externalBin` package artifact | 6U local/dev integrated; 6V host packaged sidecar integrated | Tauri Rust tests launch the actual Rust sidecar binary, verify the compatibility gate, cover stateless requests before/after sidecar startup, exercise open/get/apply/validate/emit/save/saveAs/close, assert the runtime command path does not spawn Python/uv, and run the same sequence through a simulated packaged sidecar directory. | GUI packaged E2E, signing/notarization, updater support, cross-platform package matrix, and public release hardening remain deferred. | `release confidence risk` | 6U resolves local/dev hard integration; 6V resolves host-target bundled sidecar launchability without claiming public release readiness. |
 | Packaging / distribution | `apps/config-editor/src-tauri/tauri.conf.json`, `apps/config-editor/scripts/prepare-rust-sidecar.mjs`, Tauri v2 docs | `crates/emuchef-rust-backend/Cargo.toml` | Host-target sidecar bundling ready | `npm run tauri build` passed on macOS aarch64, produced `EmuChef Config Editor.app`, bundled `Contents/MacOS/emuchef-rust-backend`, and the bundled backend returned a successful `hello` response. The app-local script validates `rustc --print host-tuple`, builds debug/release sidecars, writes target-triple-suffixed `externalBin` inputs, and checks artifact freshness. | Cross-platform package verification, signing/notarization, installer/update behavior, release CI, and full GUI packaged E2E remain deferred. | `release confidence risk` | Host-target 6V packaging is no longer blocked for the Tauri editor sidecar; public release packaging remains incomplete. |
-| Python / PySide6 removal | `src/emuchef`, `src/emuchef_editor`, `tests/test_editor_app.py`, `pyproject.toml` | Rust crate only partially replaces surfaces | Blocked | Python CLI entrypoints remain `emuchef` and `emuchef-editor`; PySide6 optional extra remains; Python goldens still regenerate Rust fixtures. | CLI, planner/executor breadth, PySide editor, templates, tests, docs, and golden generation still depend on Python. | `Python deletion blocker` | Deletion is a later confirmed-cutover phase, not 6T or 6U. |
+| Python / PySide6 removal | `src/emuchef`, `src/emuchef_editor`, `tests/test_editor_app.py`, `pyproject.toml` | Rust crate only partially replaces surfaces | Runtime retired; deletion deferred | Python CLI entrypoints remain `emuchef` and `emuchef-editor`; PySide6 optional extra remains; Python goldens still regenerate Rust fixtures. | CLI, planner/executor breadth, PySide editor, templates, tests, docs, and golden generation still depend on Python. | `Python deletion blocker` | Phase 6W retires Python from Tauri runtime/editor paths and classifies remaining Python as legacy/reference/developer/golden tooling; full deletion remains later work. |
 | CI / tests | `tests/`, `apps/config-editor/tests`, Tauri Rust tests | Rust crate tests and Tauri Rust tests | Ready with fixture-scoped coverage | `cargo test --manifest-path crates/emuchef-rust-backend/Cargo.toml` passed; `cd apps/config-editor/src-tauri && cargo test` passed. | Manual real-ADB not run; Python golden regeneration not run; fixture breadth still limited. | `release confidence risk` | Good enough to proceed to 6U; not enough for public release alone. |
 
 ## Test Evidence
@@ -161,10 +162,10 @@ crates/emuchef-rust-backend/Cargo.toml -- apply --plan-file "$tmp_plan"
 | Tauri local/dev runtime sidecar launch now uses Rust. | Resolved 6U local/dev blocker | N/A | Keep the hard-cutover sidecar process path; no selector or Python fallback is present. |
 | Rust implements `saveRecipeAs` while Tauri registers `sidecar_save_recipe_as`. | Resolved 6U Tauri blocker | N/A | Keep `saveRecipeAs` in Tauri required capabilities because the command is registered; continue deferring `createRecipeFromTemplate` unless a Tauri caller is added. |
 | Rust binary is bundled for the host-target Tauri editor build. | Resolved 6V host packaging blocker | N/A | Keep cross-platform package verification, signing/notarization, installer/update behavior, release CI, and GUI packaged E2E in 6X/release-hardening work. |
-| Rust CLI is only a selected `validate` / `apply --dry-run` subset. | `Python deletion blocker` | 1 before Python deletion | Phase 6W or earlier CLI parity phase: replace `emuchef` CLI behavior or explicitly retire commands. |
+| Rust CLI is only a selected `validate` / `apply --dry-run` subset. | `Python deletion blocker` | 1 before Python deletion | Replace `emuchef` CLI behavior or explicitly retire commands before deleting the Python CLI entrypoint. Phase 6W keeps it as non-production reference/developer tooling. |
 | Planner and executor are internal fixture-scoped surfaces. | `Python deletion blocker`, `release confidence risk` | 2 before Python deletion | Broaden tests and production surfaces before removing Python planner/executor. |
 | Real-ADB behavior is manual-gated and not run in normal tests. | `release confidence risk` | 1 before public apply release | Run manual real-device matrix before exposing production apply/device behavior. |
-| Python-generated fixtures and goldens can drift. | `release confidence risk` | 2 before release confidence | Before merging 6U, regenerate StepSpec and editor-protocol goldens or record why committed fixtures remain authoritative; defer planner/executor/CLI golden refreshes to release-confidence or Python-deletion work unless 6U changes those surfaces. |
+| Python-generated fixtures and goldens can drift. | `release confidence risk` | 2 before release confidence | Keep Python golden-generation commands explicitly documented as developer/reference tooling until a Rust replacement or intentional fixture freeze exists. |
 | `createRecipeFromTemplate` is Python-only. | `Python deletion blocker`, `accepted limitation for Tauri cutover` | 3 before Python deletion | Preserve, replace, or intentionally retire template creation before deleting Python/PySide6. Do not implement `createRecipeFromTemplate` in 6U unless Tauri integration discovers an active frontend/menu caller. |
 
 ## Ranked Cutover Blockers
@@ -237,18 +238,41 @@ crates/emuchef-rust-backend/Cargo.toml -- apply --plan-file "$tmp_plan"
 | CLI checked expectations | `tests/phase6s_cli.rs` | Python CLI commands documented in crate README | No | Medium; refresh after CLI text changes. |
 
 No fixture or golden regeneration was run in Phase 6T. Normal Rust tests used
-the committed fixtures and did not require Python at runtime. Before merging 6U,
-regenerate StepSpec and editor-protocol goldens, or explicitly record why the
-committed fixtures remain authoritative for 6U. Planner, executor, and CLI golden
-refreshes remain release-confidence and Python-deletion work unless 6U changes
-those surfaces.
+the committed fixtures and did not require Python at runtime. Phase 6W keeps
+these regeneration paths as developer/reference tooling because no Rust-native
+replacement or intentional fixture-freeze policy exists yet. Planner, executor,
+and CLI golden refreshes remain release-confidence and Python-deletion work
+unless a later phase changes those surfaces.
+
+## Python Runtime / Reference Inventory
+
+Phase 6W audited Python, PySide6, packaging, docs, tests, and Tauri runtime
+references. Remaining Python references are allowed only when classified as
+legacy/reference/developer/golden tooling; they are not Tauri editor runtime
+dependencies and are not packaged editor backend fallbacks.
+
+| Reference/path | Classification | Action taken in 6W | Remaining owner/follow-up | Status |
+| --- | --- | --- | --- | --- |
+| `apps/config-editor/src-tauri/src/sidecar_client.rs` | Tauri runtime/editor path | Preserved Rust-only sidecar launch; existing tests assert sidecar command specs do not spawn `python`, `python3`, or `uv`. | Keep this as the only Tauri editor backend path. | Runtime: Rust only. |
+| `apps/config-editor/scripts/prepare-rust-sidecar.mjs`, `apps/config-editor/src-tauri/tauri.conf.json`, `apps/config-editor/package.json` | Build/package path | Preserved Rust sidecar build/copy hooks and Tauri `externalBin`; no Python build/runtime dependency added. | Cross-platform package verification remains 6X/release-hardening work. | Runtime package: Rust only. |
+| `pyproject.toml` `emuchef` | Legacy/reference/developer CLI entrypoint | Retained temporarily and labeled as non-Tauri, non-production reference/developer tooling because Rust only covers selected `validate` and `apply --dry-run` fixtures. | Replace or explicitly retire full CLI commands before Python deletion. | Legacy/reference. |
+| `pyproject.toml` `emuchef-editor` and `pyside-editor` extra | Legacy PySide6 editor entrypoint/dependency | Retained temporarily and labeled as non-Tauri, non-production legacy/reference/developer tooling because PySide template/editor behavior and tests still exist. | Replace or explicitly retire PySide Save As/template/editor behavior before removing PySide6. | Legacy/reference. |
+| `src/emuchef/` | Python CLI/planner/executor reference implementation | Preserved; no runtime editor dependency added. | Replace or retire CLI, planner, executor, and real-device behavior before full Python deletion. | Reference/developer. |
+| `src/emuchef_editor/api/` | Python UI-free editor API and JSONL sidecar | Preserved for golden generation, Python tests, and legacy/reference comparison. Documented as not used by the Tauri runtime. | Remove only after golden/reference workflows have Rust replacements or are intentionally retired. | Reference/golden. |
+| `src/emuchef_editor/app/` | PySide6 desktop editor | Preserved as legacy/reference tooling, not active Tauri runtime or fallback. | Retire or replace PySide editor/template workflows before removing `PySide6` and `emuchef-editor`. | Legacy/reference. |
+| `tests/test_*.py` | Python behavior and golden/reference tests | Preserved because they remain the only executable reference for Python CLI, planner, executor, editor API, PySide, and templates. | Replace with Rust tests or archive intentionally before deleting Python. | Test reference. |
+| `crates/emuchef-rust-backend/tests/fixtures/python_step_specs.json`, `crates/emuchef-rust-backend/tests/fixtures/python_goldens/` | Rust parity fixtures generated from Python | Preserved; normal Rust tests consume checked-in fixtures and do not invoke Python. | Replace generators, freeze fixtures intentionally, or keep a documented generator-only Python owner. | Golden/reference. |
+| `crates/emuchef-rust-backend/README.md` Python commands | Golden/reference documentation | Relabeled commands as Python reference/golden tooling, not runtime or Tauri app prerequisites. | Keep exact regeneration ownership current until replaced or retired. | Developer/golden. |
+| `README.md`, `CONTEXT.md` | User/developer docs | Updated to distinguish Rust Tauri runtime from Python legacy/reference/golden tooling and remove fallback wording. | Keep docs aligned whenever runtime/editor ownership changes. | Documentation. |
+| `docs/rust-backend-port-plan.md` | Historical migration plan | Marked superseded and corrected stale Python bridge wording so it cannot be read as current runtime truth. | Keep historical; use this readiness doc for current cutover state. | Historical. |
+| `.github/`, top-level `scripts/` | CI/scripts audit scope | No in-repo `.github/` workflows or top-level `scripts/` tree found. | Document external CI separately if it exists. | No active in-repo path. |
 
 ## Binary / Entrypoint Inventory
 
 | Entrypoint | Path/source | Status | Notes |
 | --- | --- | --- | --- |
-| Python CLI `emuchef` | `pyproject.toml` -> `src/emuchef/cli.py` | Production/current | Owns full CLI surface. |
-| Python PySide editor `emuchef-editor` | `pyproject.toml` -> `src/emuchef_editor/app/app.py` | Legacy/current | Depends on PySide6 optional extra. |
+| Python CLI `emuchef` | `pyproject.toml` -> `src/emuchef/cli.py` | Legacy/reference/developer | Retained temporarily for CLI reference and golden workflows; not a Tauri runtime backend or supported production path. |
+| Python PySide editor `emuchef-editor` | `pyproject.toml` -> `src/emuchef_editor/app/app.py` | Legacy/reference/developer | Retained temporarily for comparison, template/editor reference behavior, and tests; not a Tauri runtime backend or supported production path. |
 | Python one-shot editor API | `python -m emuchef_editor.api.server '<json>'` | Legacy/reference | No longer used by Tauri editor runtime after 6U; Python remains for CLI/PySide/golden work. |
 | Python JSONL sidecar | `python -m emuchef_editor.api.server --sidecar` | Legacy/reference | No Tauri runtime fallback after 6U; deletion remains a later 6W concern. |
 | Rust crate binary | `crates/emuchef-rust-backend/src/main.rs` | Experimental | Cargo package binary name is `emuchef-rust-backend`. |
@@ -273,7 +297,7 @@ removing or replacing the Rust sidecar binary from packaged assets.
 | --- | --- |
 | Tauri hard cutover | Phase 6U resolves local/dev editor runtime blockers: Rust sidecar launch path, `saveRecipeAs` registered-command gap, Tauri-launched Rust binary smoke, compatibility verification against the real Rust binary, and command/API regression coverage. Phase 6V adds host-target bundled sidecar launchability. GUI packaged E2E remains release-confidence work. |
 | Production packaging | Host-target Tauri sidecar bundling is resolved for the editor path. Cross-platform binary/package verification, signing/notarization, installer/update path, release CI, and package rollback plan remain. |
-| Python/PySide6 deletion | Full CLI replacement/retirement, planner/executor breadth, template creation and Save As disposition, Python golden-generation strategy, Python tests/docs/scripts cleanup. |
+| Python/PySide6 deletion | Runtime/editor-path retirement is handled by the Rust Tauri sidecar cutover and 6W classification. Full deletion remains blocked by CLI replacement/retirement, planner/executor breadth, template creation and Save As disposition, Python golden-generation strategy, Python tests/docs/scripts cleanup. |
 | Public release confidence | Manual real-device matrix, broader authoredRoot coverage, fixture/golden refresh, cross-platform filesystem/path validation, packaged-app E2E tests. |
 
 ## Recommended Next Phases
@@ -282,7 +306,7 @@ removing or replacing the Rust sidecar binary from packaged assets.
 | --- | --- | --- | --- | --- |
 | 6U | Hard-integrate Tauri with Rust sidecar, no selector | Replace Python sidecar launch with Rust, resolve `saveRecipeAs`, verify required capabilities, and run a Tauri-launched Rust binary smoke covering `hello`, `openRecipe`, `getDocument`, `applyRecipeCommand`, `validate`, `emitYaml`, `saveRecipe`, `saveRecipeAs`, and `closeDocument` | No packaging overhaul, no Python deletion, no backend toggle | Tauri local/dev hard-cutover blockers. |
 | 6V | Package and bundle Rust backend | Build host-target sidecar binary, bundle in Tauri via v2 `externalBin`, document dev/build packaging commands and evidence | No Python deletion, no backend selector, no broad release hardening | Host-target Tauri sidecar packaging blockers. |
-| 6W | Remove or retire Python backend/PySide6 after verified Rust cutover | Replace/retire Python CLI, PySide editor, Python sidecar, tests/docs/scripts, golden strategy | No runtime backend selector | Python deletion blockers. |
+| 6W | Retire Python/PySide6 from runtime/editor paths after verified Rust cutover | Classify remaining Python references, relabel Python CLI/PySide/API as legacy/reference/developer/golden tooling, and preserve golden workflows unless replacement or retirement is explicit | No runtime backend selector; no Python fallback; no broad parity work | Runtime Python/PySide retirement and Python deletion inventory. |
 | 6X | Cleanup, CI, and release hardening | Broaden CI, refresh goldens, cross-platform package verification, signing/notarization/update docs, GUI packaged E2E, release documentation | No new broad product features | Release confidence risks. |
 
 ## Risk Register
@@ -304,7 +328,9 @@ removing or replacing the Rust sidecar binary from packaged assets.
 
 Phase 6T made no Rust behavior changes. Phase 6V changes are limited to Tauri
 sidecar packaging, app-local build orchestration, sidecar path resolution,
-packaging smoke coverage, and documentation updates. They do not add a backend
+packaging smoke coverage, and documentation updates. Phase 6W records the
+Python/PySide6 runtime/reference inventory and relabels remaining Python surfaces
+as legacy/reference/developer/golden tooling. These phases do not add a backend
 selector, Python fallback, Python deletion, protocol negotiation, direct-library
 integration, or broad planner/executor/CLI behavior.
 
@@ -331,8 +357,9 @@ Top 5 blockers:
 3. Cross-platform packaging, signing/notarization, installer/update behavior,
    release CI, and GUI packaged E2E are still incomplete. Next action: 6X
    release hardening.
-4. Python CLI/planner/executor breadth is not replaced. Next action: 6W or a
-   dedicated CLI/planner/executor parity phase. Prevents Python deletion.
+4. Python CLI/planner/executor breadth is not replaced. Phase 6W keeps those
+   paths as non-production reference/developer/golden tooling. A later parity or
+   explicit retirement phase is required before Python deletion.
 5. Manual real-device executor evidence is absent. Next action: run the
    Phase 6R manual matrix before exposing production apply/device behavior.
    Affects release confidence.
