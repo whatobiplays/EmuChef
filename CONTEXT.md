@@ -160,8 +160,11 @@ operations such as create-from-template, document close, and Save As.
 `apps/config-editor` is the primary Tauri development/editor UI for authored
 recipe files. It uses Tauri v2, React, TypeScript, Vite, Tailwind, npm, and the
 official Tauri dialog plugin. The app now has host-target Tauri packaging for
-the Rust sidecar, while signing, notarization, updater support, cross-platform
-release automation, and public release hardening remain later work.
+the Rust sidecar and Phase 6X app-local release-hardening checks for Rust runtime
+scripts, no-Python-runtime assurance, sidecar bundle-input inspection, and
+simulated-packaged sidecar smoke coverage. Signing, notarization, updater
+support, real packaged GUI E2E, cross-platform release automation, and public
+release readiness remain later work.
 
 The editor opens authored recipe YAML files through a native file picker, calls
 the Rust sidecar through Rust Tauri commands, and displays recipe data,
@@ -181,6 +184,14 @@ Packaged release builds run `npm run sidecar:build` before the frontend build,
 copy the release sidecar to `src-tauri/binaries/emuchef-rust-backend-$TARGET_TRIPLE`,
 and let Tauri bundle the target-triple-stripped `emuchef-rust-backend` beside
 the packaged app executable.
+
+Routine local runtime verification can use `npm run check:rust-runtime` from
+`apps/config-editor`. That aggregate runs app-local naming/unit checks,
+no-Python-runtime scanning, TypeScript typecheck, and frontend logic tests; it
+does not run Python golden regeneration, ADB/device tests, release builds, or a
+real Tauri package build. Packaging-specific checks remain explicit through
+`npm run check:sidecar:bundle-input:debug`, `npm run check:sidecar:bundle-input`,
+and `npm run smoke:sidecar:simulated-packaged`.
 
 The Tauri editor supports sidecar-backed recipe editing. The Overview screen
 edits recipe name and description. Recipe id, schema version, and kind are

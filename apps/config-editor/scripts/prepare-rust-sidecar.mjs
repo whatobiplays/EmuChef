@@ -5,7 +5,13 @@ import fs from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 
-const BINARY_BASENAME = "emuchef-rust-backend";
+import {
+  BINARY_BASENAME,
+  binaryExtensionForTargetTriple,
+  externalBinArtifactName,
+  isWindowsTargetTriple,
+  validateTargetTriple,
+} from "./sidecar-packaging.mjs";
 
 function fail(message) {
   console.error(`prepare-rust-sidecar: ${message}`);
@@ -54,19 +60,6 @@ function parseArgs(argv) {
   return options;
 }
 
-function validateTargetTriple(value, source) {
-  if (typeof value !== "string" || value.length === 0) {
-    fail(`${source} returned an empty target triple`);
-  }
-  if (!/^[A-Za-z0-9_.-]+$/.test(value) || value.split("-").length < 3) {
-    fail(`${source} returned unexpected target triple '${value}'`);
-  }
-  if (value.includes("/") || value.includes("\\") || /\s/.test(value)) {
-    fail(`${source} returned unsafe target triple '${value}'`);
-  }
-  return value;
-}
-
 function hostTargetTriple() {
   const result = spawnSync("rustc", ["--print", "host-tuple"], {
     encoding: "utf8",
@@ -79,7 +72,7 @@ function hostTargetTriple() {
       `'rustc --print host-tuple' exited ${result.status}: ${result.stderr.trim()}`,
     );
   }
-  return validateTargetTriple(result.stdout.trim(), "rustc --print host-tuple");
+  return checkedTargetTriple(result.stdout.trim(), "rustc --print host-tuple");
 }
 
 function runCargoBuild({ manifestPath, profile }) {
@@ -96,12 +89,12 @@ function runCargoBuild({ manifestPath, profile }) {
   }
 }
 
-function isWindowsTriple(targetTriple) {
-  return targetTriple.includes("windows");
-}
-
-function binaryExtension(targetTriple) {
-  return isWindowsTriple(targetTriple) ? ".exe" : "";
+function checkedTargetTriple(value, source) {
+  try {
+    return validateTargetTriple(value, source);
+  } catch (error) {
+    fail(error.message);
+  }
 }
 
 function ensureFreshCopy({ source, destination, targetTriple, profile }) {
@@ -130,7 +123,7 @@ function ensureFreshCopy({ source, destination, targetTriple, profile }) {
     copied = true;
   }
 
-  if (!isWindowsTriple(targetTriple)) {
+  if (!isWindowsTargetTriple(targetTriple)) {
     fs.chmodSync(destination, 0o755);
   }
 
@@ -173,7 +166,7 @@ const repoRoot = path.resolve(appDir, "../..");
 const crateDir = path.join(repoRoot, "crates", "emuchef-rust-backend");
 const manifestPath = path.join(crateDir, "Cargo.toml");
 const hostTriple = hostTargetTriple();
-const targetTriple = validateTargetTriple(
+const targetTriple = checkedTargetTriple(
   options.targetTriple ?? hostTriple,
   options.targetTriple ? "command line" : "rustc --print host-tuple",
 );
@@ -187,13 +180,13 @@ if (targetTriple !== hostTriple) {
 runCargoBuild({ manifestPath, profile: options.profile });
 
 const profileDir = options.profile === "release" ? "release" : "debug";
-const extension = binaryExtension(targetTriple);
+const extension = binaryExtensionForTargetTriple(targetTriple);
 const source = path.join(crateDir, "target", profileDir, `${BINARY_BASENAME}${extension}`);
 const destination = path.join(
   appDir,
   "src-tauri",
   "binaries",
-  `${BINARY_BASENAME}-${targetTriple}${extension}`,
+  externalBinArtifactName(targetTriple),
 );
 const copied = ensureFreshCopy({
   source,

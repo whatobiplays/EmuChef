@@ -703,6 +703,22 @@ PYTHONPATH=src uv run --no-project --native-tls --with PyYAML python -m emuchef_
   > crates/emuchef-rust-backend/tests/fixtures/python_step_specs.json
 ```
 
+For release-hardening checks, generate to a temporary file first, diff it against
+the committed fixture, and overwrite only after accepting the generated result:
+
+```bash
+tmp=$(mktemp)
+PYTHONPATH=src uv run --no-project --native-tls --with PyYAML python -m emuchef_editor.api.server '{"type":"listStepSpecs"}' \
+  | python3 -c 'import json,sys; print(json.dumps(json.load(sys.stdin)["result"], indent=2, sort_keys=True))' \
+  > "$tmp"
+diff -u crates/emuchef-rust-backend/tests/fixtures/python_step_specs.json "$tmp"
+```
+
+Phase 6X ran this temporary-file refresh and the generated output matched the
+committed fixture, so no fixture rewrite was needed. This command remains
+explicit reference/golden tooling and is not part of normal Rust, Tauri, or
+no-Python-runtime verification.
+
 The fixture stores only the Python response `result` object, not the outer
 `{"ok": true, "result": ...}` envelope.
 

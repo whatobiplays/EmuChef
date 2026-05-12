@@ -32,6 +32,34 @@ To prepare the debug sidecar without starting Tauri:
 npm run sidecar:dev
 ```
 
+## Runtime Verification
+
+Phase 6X adds app-local release-hardening checks for the Rust-sidecar runtime.
+The fast aggregate check is deterministic and does not invoke Python, ADB, a
+release build, golden regeneration, or a real Tauri package build:
+
+```bash
+npm run check:rust-runtime
+```
+
+It runs the pure sidecar naming tests, bundle-inspection unit tests, the
+no-Python-runtime scan, TypeScript typecheck, and frontend logic tests. The
+subcommands are also available directly:
+
+```bash
+npm run test:sidecar-packaging
+npm run test:sidecar-bundle-inspection
+npm run check:no-python-runtime
+npm run typecheck
+npm run test:logic
+```
+
+`check:no-python-runtime` scans only active Tauri runtime/build files for
+forbidden command/runtime tokens, including Windows `.exe` spellings, or explicit
+module names. It does not require Python to be absent from the repository; Python
+remains available only for legacy/reference/developer/golden tooling outside the
+Tauri runtime path.
+
 ## Packaged Build
 
 Build the frontend, Rust Tauri shell, and bundled Rust sidecar:
@@ -60,6 +88,29 @@ the packaged sidecar by looking for `emuchef-rust-backend` or
 The generated `src-tauri/binaries` artifacts are ignored source-control outputs.
 The preparation script writes metadata next to the generated binary and verifies
 the copied artifact is at least as fresh as the Cargo-built sidecar.
+
+To inspect prepared sidecar bundle inputs without building a full Tauri package:
+
+```bash
+npm run check:sidecar:bundle-input:debug
+npm run check:sidecar:bundle-input
+```
+
+The debug variant runs `sidecar:dev` and is intended for routine local checks.
+The release variant runs `sidecar:build`, so it may perform a release Rust build
+before inspecting the host-target `externalBin` source artifact, metadata,
+packaged launch name, and Unix executable bit.
+
+The targeted simulated-packaged sidecar smoke is:
+
+```bash
+npm run smoke:sidecar:simulated-packaged
+```
+
+This smoke copies the real Rust backend to a temporary simulated bundled
+directory and runs the editor JSONL request sequence through packaged-mode
+resolution. It is not a real packaged app, installed bundle, signing,
+notarization, updater, or GUI E2E test.
 
 `tauri.conf.json` does not point at a custom app icon in Phase 6V. The previous
 placeholder `icons/icon.png` path had no corresponding app-local file, so the
