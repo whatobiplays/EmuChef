@@ -113,6 +113,13 @@ contracts.
 dirty state, undo/redo availability, recipe DTO, current canonical YAML,
 diagnostics, and ref index. It does not contain step specs.
 
+The Rust sidecar stores `authoredRoot` as open-document session context. The
+`setDocumentAuthoredRoot` sidecar request updates that context for an existing
+document, refreshes derived diagnostics and DTO metadata, and returns a full
+document DTO without reloading recipe YAML from disk. `authoredRoot: null`
+clears the stored context for that document. Non-null authored roots follow the
+same normalization rules used when opening a recipe.
+
 `RecipeDto` exposes current authored recipe sections for overview, dependencies,
 provided features, inputs, artifacts, artifact groups, and steps. Top-level
 permissions are invalid authored data and are absent from `RecipeDto`.
@@ -423,8 +430,9 @@ scaffolding only and should be replaced or broadened with Rust-native schema
 builders, full executor parity, and broader parity tests before any backend
 cutover is attempted.
 
-The frontend passes `authoredRoot: null` for Phase 3A. Explicit authored-root and
-workspace selection are deferred editor migration work.
+The frontend open flow passes `authoredRoot: null`. The Tauri API exposes an
+API-only document-session authored-root update command for later UI workflows;
+the editor does not currently present a visible authored-root picker or control.
 
 ## Current PySide6 Legacy Editor
 
@@ -666,6 +674,9 @@ Default CLI output groups issues by file.
 
 The editor reuses the same validation path in-process and maps shared warnings/errors into diagnostics for the open recipe document.
 When validating an open unsaved recipe against an authored root, the in-memory document replaces the current file's on-disk authored contribution for catalog-context checks.
+Changing the authored root of an open document changes validation and catalog
+context only; it does not change authored recipe YAML, saved YAML state, the
+document path, dirty state, or undo/redo history.
 Unknown step dependencies are validation errors, not typed-model construction errors, so the editor can still preserve authored broken dependency state and surface it through diagnostics.
 
 ## Device/Profile Behavior

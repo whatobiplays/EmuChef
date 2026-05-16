@@ -23,6 +23,7 @@ const REQUIRED_CAPABILITIES: &[&str] = &[
     "validate",
     "emitYaml",
     "getRefIndex",
+    "setDocumentAuthoredRoot",
 ];
 const RUST_BACKEND_MANIFEST: &str = "crates/emuchef-rust-backend/Cargo.toml";
 const TAURI_MANIFEST: &str = "apps/config-editor/src-tauri/Cargo.toml";
@@ -1118,6 +1119,10 @@ mod tests {
             .as_array()
             .unwrap()
             .contains(&json!("saveRecipeAs")));
+        assert!(hello["result"]["capabilities"]
+            .as_array()
+            .unwrap()
+            .contains(&json!("setDocumentAuthoredRoot")));
 
         let opened = client
             .request(
@@ -1155,6 +1160,18 @@ mod tests {
             .request("getDocument", Some(json!({"documentId": document_id})))
             .expect("getDocument should succeed");
         assert_eq!(fetched["ok"], true);
+
+        let context_updated = client
+            .request(
+                "setDocumentAuthoredRoot",
+                Some(json!({"documentId": document_id, "authoredRoot": null})),
+            )
+            .expect("setDocumentAuthoredRoot should succeed");
+        assert_eq!(context_updated["ok"], true);
+        assert_eq!(
+            context_updated["result"]["document"]["documentId"],
+            document_id
+        );
 
         let changed = client
             .request(
@@ -1224,6 +1241,7 @@ mod tests {
                     "validate",
                     "emitYaml",
                     "getRefIndex",
+                    "setDocumentAuthoredRoot",
                     "futureCapability"
                 ]
             }
@@ -1255,7 +1273,8 @@ mod tests {
                     "saveRecipeAs",
                     "validate",
                     "emitYaml",
-                    "getRefIndex"
+                    "getRefIndex",
+                    "setDocumentAuthoredRoot"
                 ]
             }
         }))
@@ -1291,6 +1310,7 @@ mod tests {
         assert!(err.message.contains("applyRecipeCommand"));
         assert!(err.message.contains("saveRecipeAs"));
         assert!(err.message.contains("getRefIndex"));
+        assert!(err.message.contains("setDocumentAuthoredRoot"));
     }
 
     #[test]

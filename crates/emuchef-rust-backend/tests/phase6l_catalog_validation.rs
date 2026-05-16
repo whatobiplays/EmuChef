@@ -3,7 +3,9 @@ use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use emuchef_rust_backend::{jsonl, protocol, run_with_args_and_input};
+use emuchef_rust_backend::{
+    jsonl, protocol, request, run_with_args_and_input, session::DocumentSessionManager,
+};
 use serde_json::{json, Value};
 
 fn fixture_root() -> PathBuf {
@@ -11,6 +13,16 @@ fn fixture_root() -> PathBuf {
         .join("tests")
         .join("fixtures")
         .join("authored_root")
+}
+
+fn backend_fixture_root() -> PathBuf {
+    Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("tests")
+        .join("fixtures")
+}
+
+fn plain_recipe_path(name: &str) -> PathBuf {
+    backend_fixture_root().join("recipes").join(name)
 }
 
 fn workspace_root(name: &str) -> PathBuf {
@@ -162,8 +174,12 @@ fn document_diagnostic_set(response: &Value) -> Vec<Value> {
         .collect()
 }
 
+fn normalized_path(path: &Path) -> Value {
+    json!(path.canonicalize().unwrap().to_string_lossy().to_string())
+}
+
 #[test]
-fn phase6l_capabilities_remain_unchanged() {
+fn phase6l_capabilities_include_catalog_context_session_update() {
     assert_eq!(
         protocol::CAPABILITIES,
         &[
@@ -181,6 +197,7 @@ fn phase6l_capabilities_remain_unchanged() {
             "emitYaml",
             "validate",
             "getRefIndex",
+            "setDocumentAuthoredRoot",
         ]
     );
 }
@@ -312,6 +329,220 @@ fn open_recipe_infers_and_normalizes_authored_root_like_python() {
             read_diagnostic_golden("phase6l_complete_explicit_root.diagnostics.json")
         );
     }
+}
+
+#[test]
+fn set_document_authored_root_updates_null_session_context_without_reopening() {
+    let responses = sidecar_responses(vec![
+        json!({
+            "id": "open",
+            "type": "openRecipe",
+            "payload": {"path": plain_recipe_path("minimal_recipe.yaml"), "authoredRoot": null}
+        }),
+        json!({
+            "id": "set-root",
+            "type": "setDocumentAuthoredRoot",
+            "payload": {"documentId": "doc-1", "authoredRoot": backend_fixture_root()}
+        }),
+    ]);
+
+    assert_eq!(responses.len(), 2);
+    assert_eq!(responses[0]["ok"], true);
+    assert_eq!(
+        responses[0]["result"]["document"]["authoredRoot"],
+        Value::Null
+    );
+    assert_eq!(responses[1]["ok"], true);
+    assert_eq!(
+        responses[1]["result"]["document"]["authoredRoot"],
+        normalized_path(&backend_fixture_root())
+    );
+    assert_eq!(document_diagnostic_set(&responses[1]), Vec::<Value>::new());
+    assert_eq!(
+        responses[1]["result"]["document"]["refIndex"]["allRefs"],
+        json!([])
+    );
+}
+
+#[test]
+fn set_document_authored_root_switches_catalog_context() {
+    let responses = sidecar_responses(vec![
+        json!({
+            "id": "open",
+            "type": "openRecipe",
+            "payload": {
+                "path": recipe_path("complete", "main.yaml"),
+                "authoredRoot": authored_root("complete")
+            }
+        }),
+        json!({
+            "id": "switch-root",
+            "type": "setDocumentAuthoredRoot",
+            "payload": {
+                "documentId": "doc-1",
+                "authoredRoot": authored_root("missing_dependency")
+            }
+        }),
+    ]);
+
+    assert_eq!(responses.len(), 2);
+    assert_eq!(responses[0]["ok"], true);
+    assert_eq!(responses[1]["ok"], true);
+    assert_eq!(
+        responses[1]["result"]["document"]["authoredRoot"],
+        normalized_path(&authored_root("missing_dependency"))
+    );
+    assert_eq!(
+        document_diagnostic_set(&responses[1]),
+        vec![json!({
+            "severity": "error",
+            "code": "recipe_not_found",
+            "objectKind": "recipe",
+            "objectId": "phase6l.main",
+            "field": "recipe_dependencies[0]",
+        })]
+    );
+}
+
+#[test]
+fn set_document_authored_root_null_clears_context_without_inference() {
+    let responses = sidecar_responses(vec![
+        json!({
+            "id": "open",
+            "type": "openRecipe",
+            "payload": {
+                "path": recipe_path("complete", "main.yaml"),
+                "authoredRoot": authored_root("complete")
+            }
+        }),
+        json!({
+            "id": "clear-root",
+            "type": "setDocumentAuthoredRoot",
+            "payload": {"documentId": "doc-1", "authoredRoot": null}
+        }),
+    ]);
+
+    assert_eq!(responses.len(), 2);
+    assert_eq!(responses[0]["ok"], true);
+    assert_eq!(responses[1]["ok"], true);
+    assert_eq!(
+        responses[1]["result"]["document"]["authoredRoot"],
+        Value::Null
+    );
+    assert_eq!(
+        document_diagnostic_set(&responses[1]),
+        read_diagnostic_golden("phase6l_complete_null_root.diagnostics.json")
+    );
+}
+
+#[test]
+fn set_document_authored_root_preserves_clean_dirty_and_history_state() {
+    let clean_responses = sidecar_responses(vec![
+        json!({
+            "id": "open",
+            "type": "openRecipe",
+            "payload": {"path": recipe_path("complete", "main.yaml"), "authoredRoot": null}
+        }),
+        json!({
+            "id": "set-root",
+            "type": "setDocumentAuthoredRoot",
+            "payload": {"documentId": "doc-1", "authoredRoot": authored_root("complete")}
+        }),
+    ]);
+    let clean_document = &clean_responses[1]["result"]["document"];
+    assert_eq!(clean_document["dirty"], false);
+    assert_eq!(clean_document["canUndo"], false);
+    assert_eq!(clean_document["canRedo"], false);
+
+    let dirty_responses = sidecar_responses(vec![
+        json!({
+            "id": "open",
+            "type": "openRecipe",
+            "payload": {"path": recipe_path("complete", "main.yaml"), "authoredRoot": null}
+        }),
+        json!({
+            "id": "edit",
+            "type": "applyRecipeCommand",
+            "payload": {
+                "documentId": "doc-1",
+                "command": {"type": "SetOverviewField", "field": "name", "value": "Unsaved Name"}
+            }
+        }),
+        json!({
+            "id": "set-root",
+            "type": "setDocumentAuthoredRoot",
+            "payload": {"documentId": "doc-1", "authoredRoot": authored_root("complete")}
+        }),
+    ]);
+    let dirty_document = &dirty_responses[2]["result"]["document"];
+    assert_eq!(dirty_document["dirty"], true);
+    assert_eq!(dirty_document["canUndo"], true);
+    assert_eq!(dirty_document["canRedo"], false);
+    assert_eq!(dirty_document["recipe"]["name"], "Unsaved Name");
+}
+
+#[test]
+fn set_document_authored_root_preserves_in_memory_content_when_disk_changes() {
+    let workspace = TempWorkspace::copy_fixture("complete");
+    let recipe_path = workspace.recipe_path("main.yaml");
+    let original_disk_yaml =
+        fs::read_to_string(&recipe_path).expect("copied recipe should be readable");
+    let mut sessions = DocumentSessionManager::default();
+
+    let opened = request::handle_sidecar_value(
+        json!({
+            "id": "open",
+            "type": "openRecipe",
+            "payload": {"path": recipe_path, "authoredRoot": null}
+        }),
+        &mut sessions,
+    );
+    assert_eq!(opened["ok"], true);
+
+    let edited = request::handle_sidecar_value(
+        json!({
+            "id": "edit",
+            "type": "applyRecipeCommand",
+            "payload": {
+                "documentId": "doc-1",
+                "command": {"type": "AddInput", "inputId": "unsaved_input"}
+            }
+        }),
+        &mut sessions,
+    );
+    assert_eq!(edited["ok"], true);
+
+    fs::write(
+        &recipe_path,
+        original_disk_yaml.replace("Phase 6L Main", "Disk Reloaded Name"),
+    )
+    .expect("backing file should be mutable");
+
+    let response = request::handle_sidecar_value(
+        json!({
+            "id": "set-root",
+            "type": "setDocumentAuthoredRoot",
+            "payload": {"documentId": "doc-1", "authoredRoot": workspace.authored_root()}
+        }),
+        &mut sessions,
+    );
+
+    assert_eq!(response["ok"], true);
+    let document = &response["result"]["document"];
+    assert_eq!(document["dirty"], true);
+    assert_eq!(document["recipe"]["name"], "Phase 6L Main");
+    assert!(document["yaml"]
+        .as_str()
+        .unwrap()
+        .contains("unsaved_input:"));
+    assert!(!document["yaml"]
+        .as_str()
+        .unwrap()
+        .contains("Disk Reloaded Name"));
+    assert!(document["refIndex"]["inputRefs"]
+        .as_array()
+        .unwrap()
+        .contains(&json!("inputs.unsaved_input")));
 }
 
 #[test]

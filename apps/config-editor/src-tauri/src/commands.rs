@@ -213,6 +213,21 @@ pub fn sidecar_get_ref_index(
     )
 }
 
+#[tauri::command]
+pub fn sidecar_set_document_authored_root(
+    state: State<'_, SidecarState>,
+    document_id: String,
+    authored_root: Option<String>,
+) -> Result<Value, String> {
+    state.request(
+        "setDocumentAuthoredRoot",
+        Some(json!({
+            "documentId": document_id,
+            "authoredRoot": authored_root,
+        })),
+    )
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

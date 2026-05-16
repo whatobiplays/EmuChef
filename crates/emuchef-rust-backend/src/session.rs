@@ -125,6 +125,18 @@ impl DocumentSessionManager {
         }))
     }
 
+    pub fn set_document_authored_root(
+        &mut self,
+        document_id: &str,
+        authored_root: Option<&str>,
+    ) -> Result<Value, ApiError> {
+        let document = self.document_mut(document_id)?;
+        document.set_authored_root(authored_root);
+        Ok(json!({
+            "document": dto::document_to_dto(document, document_id)
+        }))
+    }
+
     pub fn close_document(&mut self, document_id: &str) -> Result<Value, ApiError> {
         if self.documents.shift_remove(document_id).is_none() {
             return Err(ApiError::unknown_document(document_id));

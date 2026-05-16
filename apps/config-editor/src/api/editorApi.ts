@@ -116,6 +116,13 @@ export async function sidecarGetRefIndex(documentId: string): Promise<EditorApiR
   return callApi<GetRefIndexResult>("sidecar_get_ref_index", { documentId });
 }
 
+export async function sidecarSetDocumentAuthoredRoot(
+  documentId: string,
+  authoredRoot: string | null,
+): Promise<EditorApiResult<DocumentResult>> {
+  return callApi<DocumentResult>("sidecar_set_document_authored_root", { documentId, authoredRoot });
+}
+
 export interface MenuState {
   hasDocument: boolean;
   dirty: boolean;

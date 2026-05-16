@@ -23,7 +23,7 @@ fn sidecar_response(request: Value) -> Value {
 }
 
 #[test]
-fn phase6o_keeps_executor_internal_and_protocol_capabilities_unchanged() {
+fn phase6o_keeps_executor_internal_and_protocol_capabilities_editor_scoped() {
     assert_eq!(
         protocol::CAPABILITIES,
         &[
@@ -41,6 +41,7 @@ fn phase6o_keeps_executor_internal_and_protocol_capabilities_unchanged() {
             "emitYaml",
             "validate",
             "getRefIndex",
+            "setDocumentAuthoredRoot",
         ]
     );
 
@@ -61,7 +62,7 @@ fn phase6o_keeps_executor_internal_and_protocol_capabilities_unchanged() {
 }
 
 #[test]
-fn phase6p_keeps_filesystem_executor_internal_and_protocol_capabilities_unchanged() {
+fn phase6p_keeps_filesystem_executor_internal_and_protocol_capabilities_editor_scoped() {
     assert_eq!(
         protocol::CAPABILITIES,
         &[
@@ -79,6 +80,7 @@ fn phase6p_keeps_filesystem_executor_internal_and_protocol_capabilities_unchange
             "emitYaml",
             "validate",
             "getRefIndex",
+            "setDocumentAuthoredRoot",
         ]
     );
 
@@ -99,7 +101,7 @@ fn phase6p_keeps_filesystem_executor_internal_and_protocol_capabilities_unchange
 }
 
 #[test]
-fn phase6q_keeps_fake_device_executor_internal_and_protocol_capabilities_unchanged() {
+fn phase6q_keeps_fake_device_executor_internal_and_protocol_capabilities_editor_scoped() {
     assert_eq!(
         protocol::CAPABILITIES,
         &[
@@ -117,6 +119,7 @@ fn phase6q_keeps_fake_device_executor_internal_and_protocol_capabilities_unchang
             "emitYaml",
             "validate",
             "getRefIndex",
+            "setDocumentAuthoredRoot",
         ]
     );
 
@@ -137,7 +140,7 @@ fn phase6q_keeps_fake_device_executor_internal_and_protocol_capabilities_unchang
 }
 
 #[test]
-fn phase6r_keeps_real_adb_executor_internal_and_protocol_capabilities_unchanged() {
+fn phase6r_keeps_real_adb_executor_internal_and_protocol_capabilities_editor_scoped() {
     assert_eq!(
         protocol::CAPABILITIES,
         &[
@@ -155,6 +158,7 @@ fn phase6r_keeps_real_adb_executor_internal_and_protocol_capabilities_unchanged(
             "emitYaml",
             "validate",
             "getRefIndex",
+            "setDocumentAuthoredRoot",
         ]
     );
 

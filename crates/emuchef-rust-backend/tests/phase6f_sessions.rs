@@ -104,6 +104,7 @@ fn one_shot_session_requests_are_not_exposed() {
         "saveRecipe",
         "saveRecipeAs",
         "closeDocument",
+        "setDocumentAuthoredRoot",
     ] {
         let response = one_shot_response(json!({
             "type": request_type,
@@ -562,7 +563,12 @@ fn session_requests_validate_payloads_and_ignore_unknown_payload_keys() {
     assert_eq!(non_object_payload["ok"], false);
     assert_eq!(non_object_payload["error"]["code"], "invalid_request");
 
-    for request_type in ["getDocument", "saveRecipe", "closeDocument"] {
+    for request_type in [
+        "getDocument",
+        "saveRecipe",
+        "closeDocument",
+        "setDocumentAuthoredRoot",
+    ] {
         let missing = sidecar_response(json!({
             "id": format!("{request_type}-missing"),
             "type": request_type,
@@ -578,6 +584,34 @@ fn session_requests_validate_payloads_and_ignore_unknown_payload_keys() {
         assert_invalid_field(&wrong_type, "documentId");
     }
 
+    let open = sidecar_response(json!({
+        "id": "open",
+        "type": "openRecipe",
+        "payload": {"path": fixture_path("minimal_recipe.yaml"), "authoredRoot": null}
+    }));
+    assert_eq!(open["ok"], true);
+
+    let missing_authored_root = sidecar_response(json!({
+        "id": "missing-authored-root",
+        "type": "setDocumentAuthoredRoot",
+        "payload": {"documentId": "doc-1"}
+    }));
+    assert_invalid_field(&missing_authored_root, "authoredRoot");
+
+    let wrong_authored_root_type = sidecar_response(json!({
+        "id": "wrong-authored-root",
+        "type": "setDocumentAuthoredRoot",
+        "payload": {"documentId": "doc-1", "authoredRoot": 123}
+    }));
+    assert_invalid_field(&wrong_authored_root_type, "authoredRoot");
+
+    let empty_authored_root = sidecar_response(json!({
+        "id": "empty-authored-root",
+        "type": "setDocumentAuthoredRoot",
+        "payload": {"documentId": "doc-1", "authoredRoot": ""}
+    }));
+    assert_invalid_field(&empty_authored_root, "authoredRoot");
+
     let unknown_key = sidecar_response(json!({
         "id": "unknown-key",
         "type": "openRecipe",
@@ -592,11 +626,19 @@ fn session_requests_validate_payloads_and_ignore_unknown_payload_keys() {
 
 #[test]
 fn unknown_document_errors_match_python_shape() {
-    for request_type in ["getDocument", "saveRecipe", "closeDocument"] {
+    for request_type in [
+        "getDocument",
+        "saveRecipe",
+        "closeDocument",
+        "setDocumentAuthoredRoot",
+    ] {
         let response = sidecar_response(json!({
             "id": format!("{request_type}-unknown"),
             "type": request_type,
-            "payload": {"documentId": "missing-document"}
+            "payload": {
+                "documentId": "missing-document",
+                "authoredRoot": null
+            }
         }));
 
         assert_unknown_document(&response, "missing-document");

@@ -147,7 +147,7 @@ fn all_refs(document: &Value) -> Vec<String> {
 }
 
 #[test]
-fn phase6j2_capabilities_remain_unchanged() {
+fn phase6j2_capabilities_stay_on_editor_session_surface() {
     assert_eq!(
         protocol::CAPABILITIES,
         &[
@@ -165,6 +165,7 @@ fn phase6j2_capabilities_remain_unchanged() {
             "emitYaml",
             "validate",
             "getRefIndex",
+            "setDocumentAuthoredRoot",
         ]
     );
 }

@@ -197,7 +197,7 @@ fn assert_editor_local_fixture_diagnostics(
 }
 
 #[test]
-fn phase6k_capabilities_remain_unchanged() {
+fn phase6k_capabilities_stay_on_editor_session_surface() {
     assert_eq!(
         protocol::CAPABILITIES,
         &[
@@ -215,6 +215,7 @@ fn phase6k_capabilities_remain_unchanged() {
             "emitYaml",
             "validate",
             "getRefIndex",
+            "setDocumentAuthoredRoot",
         ]
     );
 }

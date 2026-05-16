@@ -29,6 +29,7 @@ pub fn run() {
             commands::sidecar_validate,
             commands::sidecar_emit_yaml,
             commands::sidecar_get_ref_index,
+            commands::sidecar_set_document_authored_root,
             menu::update_menu_state
         ])
         .run(tauri::generate_context!())

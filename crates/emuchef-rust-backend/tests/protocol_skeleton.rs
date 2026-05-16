@@ -121,7 +121,8 @@ fn assert_hello_result(result: &Value) {
             "redo",
             "emitYaml",
             "validate",
-            "getRefIndex"
+            "getRefIndex",
+            "setDocumentAuthoredRoot"
         ])
     );
     assert!(!result["capabilities"]

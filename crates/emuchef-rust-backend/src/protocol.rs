@@ -23,6 +23,7 @@ pub const CAPABILITIES: &[&str] = &[
     "emitYaml",
     "validate",
     "getRefIndex",
+    "setDocumentAuthoredRoot",
 ];
 
 /// Return backend compatibility metadata for the `hello` request.

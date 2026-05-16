@@ -77,6 +77,7 @@ fn handle_validated_sidecar_object(
         "emitYaml" => handle_emit_yaml(object, sessions),
         "validate" => handle_validate(object, sessions),
         "getRefIndex" => handle_get_ref_index(object, sessions),
+        "setDocumentAuthoredRoot" => handle_set_document_authored_root(object, sessions),
         "closeDocument" => handle_close_document(object, sessions),
         unknown => Err(ApiError::invalid_request(format!(
             "Unknown request type: {unknown}"
@@ -239,6 +240,18 @@ fn handle_get_ref_index(
     Ok(envelope::success(sessions.get_ref_index(document_id)?))
 }
 
+fn handle_set_document_authored_root(
+    object: &Map<String, Value>,
+    sessions: &mut DocumentSessionManager,
+) -> Result<Value, ApiError> {
+    let payload = payload_object(object)?;
+    let document_id = required_document_id(payload)?;
+    let authored_root = required_nullable_string(payload, "authoredRoot")?;
+    Ok(envelope::success(
+        sessions.set_document_authored_root(document_id, authored_root)?,
+    ))
+}
+
 fn handle_close_document(
     object: &Map<String, Value>,
     sessions: &mut DocumentSessionManager,
@@ -287,6 +300,24 @@ fn optional_string<'a>(
 ) -> Result<Option<&'a str>, ApiError> {
     match payload.get(field) {
         None | Some(Value::Null) => Ok(None),
+        Some(Value::String(value)) if !value.is_empty() => Ok(Some(value)),
+        _ => Err(ApiError::invalid_request_with_details(
+            format!("Request field '{field}' must be a non-empty string when provided."),
+            json!({ "field": field }),
+        )),
+    }
+}
+
+fn required_nullable_string<'a>(
+    payload: &'a Map<String, Value>,
+    field: &str,
+) -> Result<Option<&'a str>, ApiError> {
+    match payload.get(field) {
+        None => Err(ApiError::invalid_request_with_details(
+            format!("Request payload is missing required field: {field}"),
+            json!({ "field": field }),
+        )),
+        Some(Value::Null) => Ok(None),
         Some(Value::String(value)) if !value.is_empty() => Ok(Some(value)),
         _ => Err(ApiError::invalid_request_with_details(
             format!("Request field '{field}' must be a non-empty string when provided."),

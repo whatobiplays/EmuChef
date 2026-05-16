@@ -127,6 +127,19 @@ impl RecipeDocument {
         self.refresh_diagnostics();
     }
 
+    /// Replace only the catalog-validation context for the open document.
+    ///
+    /// Authored root is session metadata, not authored YAML. Clearing it leaves
+    /// the in-memory recipe, YAML text, dirty state, path, and history stacks
+    /// unchanged while forcing diagnostics to reflect the new catalog context.
+    pub fn set_authored_root(&mut self, authored_root: Option<&str>) {
+        self.authored_root = match authored_root {
+            Some(root) => catalog::normalize_authored_root(Some(root), &self.path),
+            None => None,
+        };
+        self.refresh_diagnostics();
+    }
+
     pub fn path(&self) -> &Path {
         &self.path
     }

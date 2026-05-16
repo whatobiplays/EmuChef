@@ -3,7 +3,7 @@
     {
       "code": "validation_context_limited",
       "field": null,
-      "file": "/Users/daniel.byon/Downloads/Projects/EmuChef/crates/emuchef-rust-backend/tests/fixtures/recipes/minimal_recipe.yaml",
+      "file": "/Users/daniel/Projects/EmuChef/crates/emuchef-rust-backend/tests/fixtures/recipes/minimal_recipe.yaml",
       "message": "Cross-file validation was limited because no authored_root was provided.",
       "objectId": "phase6e.minimal",
       "objectKind": "recipe",
