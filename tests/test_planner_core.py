@@ -678,6 +678,13 @@ class PlannerCoreTests(unittest.TestCase):
                 plan.artifacts,
             )
             seed_step = next(step for step in plan.steps if step.id == "app.retroarch.provision/seed_retroarch_cfg")
+            launch_step = next(step for step in plan.steps if step.id == "app.retroarch.provision/launch_retroarch")
+            self.assertIn("app.retroarch.provision/copy_cheats", launch_step.dependencies)
+            self.assertNotIn(
+                "app.retroarch.provision/seed_retroarch_cfg",
+                launch_step.dependencies,
+                "RetroArch config seeding is optional; launch must remain runnable when the config input is absent.",
+            )
             self.assertEqual(
                 seed_step.params["dest"],
                 LiteralParamValue(value="/sdcard/Android/data/com.retroarch.aarch64/files/retroarch.cfg"),
@@ -715,8 +722,14 @@ class PlannerCoreTests(unittest.TestCase):
         assert plan is not None
 
         step_ids = [step.id for step in plan.steps]
+        launch_step = next(step for step in plan.steps if step.id == "app.retroarch.provision/launch_retroarch")
         self.assertIn("app.retroarch.provision/launch_retroarch", step_ids)
         self.assertNotIn("app.retroarch.provision/seed_retroarch_cfg", step_ids)
+        self.assertNotIn(
+            "app.retroarch.provision/seed_retroarch_cfg",
+            launch_step.dependencies,
+            "A pruned optional config copy must not become a required launch prerequisite.",
+        )
         self.assertEqual(tuple(item.id for item in plan.inputs), ())
 
 

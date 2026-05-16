@@ -687,6 +687,7 @@ steps:
   dependencies:
   - copy_assets
   - copy_autoconfig
+  - copy_cheats
   - copy_database_rdb
   - copy_info
   - copy_overlays
