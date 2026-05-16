@@ -16,6 +16,10 @@ The current flow is:
 3. Emit a normalized execution plan
 4. Apply that plan through a single-threaded executor
 
+Generated execution-plan YAML is an output artifact, not a maintained source
+fixture. The repository root does not contain tracked `*.plan.yaml` examples;
+current plans are generated on demand from authored YAML under `authored/`.
+
 The code is intentionally split into:
 
 - `src/emuchef/io`: authored loading, validation, YAML I/O

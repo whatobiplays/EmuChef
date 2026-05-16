@@ -6,6 +6,10 @@ CLI-first Android emulation handheld provisioner.
 
 Repository context and current behavior notes live in `CONTEXT.md`.
 
+Authored YAML under `authored/` is the source for current planning behavior.
+Generated execution-plan YAML is emitted on demand and is not maintained as
+root-level `*.plan.yaml` examples.
+
 ## Step Architecture
 
 Supported steps are first-party built-in plugins registered in the in-repo step
