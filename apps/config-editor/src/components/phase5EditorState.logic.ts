@@ -1,6 +1,14 @@
 import type { ApiError, SidecarStatusResult } from "../api/types.js";
 
-export type CommandName = "openRecipe" | "saveRecipe" | "undo" | "redo" | "validate" | "refreshYaml" | "mutation";
+export type CommandName =
+  | "openRecipe"
+  | "saveRecipe"
+  | "saveRecipeAs"
+  | "undo"
+  | "redo"
+  | "validate"
+  | "refreshYaml"
+  | "mutation";
 
 export interface ActionAvailabilityState {
   hasDocument: boolean;
@@ -15,6 +23,7 @@ export interface ActionAvailabilityState {
 export interface ActionAvailability {
   openRecipe: boolean;
   saveRecipe: boolean;
+  saveRecipeAs: boolean;
   undo: boolean;
   redo: boolean;
   validate: boolean;
@@ -93,6 +102,7 @@ export function buildActionAvailability(state: ActionAvailabilityState): ActionA
   return {
     openRecipe: sessionReady,
     saveRecipe: documentReady && state.dirty,
+    saveRecipeAs: documentReady,
     undo: documentReady && state.canUndo,
     redo: documentReady && state.canRedo,
     validate: documentReady,

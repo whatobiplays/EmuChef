@@ -6,6 +6,7 @@ use tauri::{
 
 const ACTION_OPEN_RECIPE: &str = "openRecipe";
 const ACTION_SAVE_RECIPE: &str = "saveRecipe";
+const ACTION_SAVE_RECIPE_AS: &str = "saveRecipeAs";
 const ACTION_UNDO: &str = "undo";
 const ACTION_REDO: &str = "redo";
 const ACTION_VALIDATE: &str = "validate";
@@ -76,6 +77,7 @@ pub fn handle_menu_event<R: Runtime>(app: &AppHandle<R>, action: &str) {
     match action {
         ACTION_OPEN_RECIPE
         | ACTION_SAVE_RECIPE
+        | ACTION_SAVE_RECIPE_AS
         | ACTION_UNDO
         | ACTION_REDO
         | ACTION_VALIDATE
@@ -136,6 +138,13 @@ fn build_file_menu<R: Runtime>(
                 "Save",
                 sidecar_ready && state.has_document && state.dirty,
                 Some("CmdOrCtrl+S"),
+            )?,
+            &MenuItem::with_id(
+                app,
+                ACTION_SAVE_RECIPE_AS,
+                "Save As…",
+                sidecar_ready && state.has_document,
+                None::<&str>,
             )?,
             #[cfg(not(target_os = "macos"))]
             &PredefinedMenuItem::separator(app)?,

@@ -1,5 +1,5 @@
 import { getCurrentWindow } from "@tauri-apps/api/window";
-import { confirm as nativeConfirm, open } from "@tauri-apps/plugin-dialog";
+import { confirm as nativeConfirm, open, save as saveFile } from "@tauri-apps/plugin-dialog";
 import { useEffect, useMemo, useRef, useState } from "react";
 
 import type { EditorCommand } from "./api/commands";
@@ -10,6 +10,7 @@ import {
   sidecarOpenRecipe,
   sidecarRedo,
   sidecarSaveRecipe,
+  sidecarSaveRecipeAs,
   sidecarStatus,
   sidecarUndo,
   sidecarValidate,
@@ -249,6 +250,7 @@ export default function App() {
   const menuHandlers: Record<MenuAction, () => void> = {
     openRecipe: () => void openRecipe(),
     saveRecipe: () => void saveRecipe(),
+    saveRecipeAs: () => void saveRecipeAs(),
     undo: () => void undo(),
     redo: () => void redo(),
     validate: () => void validate(),
@@ -446,6 +448,74 @@ export default function App() {
         await syncMenuState(response.result.document);
       } else {
         handleOperationFailure(response, "Save failed.", {
+          commandDocumentId: document.documentId,
+          currentDocumentId: currentDocumentRef.current?.documentId ?? null,
+        });
+        await refreshSidecarStatus();
+        await syncMenuState(currentDocumentRef.current);
+      }
+    } finally {
+      finishAppCommand();
+    }
+  }
+
+  async function saveRecipeAs() {
+    const document = currentDocumentRef.current;
+    if (document === null) {
+      await syncMenuState(null);
+      return;
+    }
+    if (!documentSessionValidRef.current) {
+      showInvalidSessionMessage();
+      await syncMenuState(document);
+      return;
+    }
+
+    const availability = buildActionAvailability({
+      hasDocument: true,
+      dirty: document.dirty,
+      canUndo: document.canUndo,
+      canRedo: document.canRedo,
+      commandInFlight: commandInFlightRef.current,
+      documentSessionValid: documentSessionValidRef.current,
+      backendCompatible: sidecarState?.compatible ?? null,
+    });
+    if (!availability.saveRecipeAs) {
+      await syncMenuState(document);
+      return;
+    }
+
+    let selectedPath: string | null;
+    try {
+      selectedPath = await saveFile({
+        defaultPath: document.path || `${document.recipe.id || "recipe"}.yaml`,
+        filters: [{ name: "YAML recipes", extensions: ["yaml", "yml"] }],
+      });
+    } catch (error) {
+      setErrorMessage(`File dialog failed: ${errorMessageFromUnknown(error)}`);
+      setStatusMessage(null);
+      await syncMenuState(currentDocumentRef.current);
+      return;
+    }
+
+    if (!selectedPath) {
+      await syncMenuState(currentDocumentRef.current);
+      return;
+    }
+
+    if (!beginAppCommand("saveRecipeAs", "Saving recipe as")) {
+      await syncMenuState(currentDocumentRef.current);
+      return;
+    }
+    try {
+      const response = await sidecarSaveRecipeAs(document.documentId, selectedPath);
+      if (response.kind === "success") {
+        applyDocument(response.result.document);
+        setErrorMessage(null);
+        setStatusMessage(null);
+        await syncMenuState(response.result.document);
+      } else {
+        handleOperationFailure(response, "Save As failed.", {
           commandDocumentId: document.documentId,
           currentDocumentId: currentDocumentRef.current?.documentId ?? null,
         });
