@@ -393,7 +393,7 @@ steps:
   skip_if: []
   params:
     source:
-      ref: steps.extract_assets
+      ref: steps.extract_autoconfig
     dest: /data/user/0/com.retroarch.aarch64/autoconfig
     copy_policy: merge
   verify:

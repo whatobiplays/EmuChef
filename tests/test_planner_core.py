@@ -633,6 +633,11 @@ class PlannerCoreTests(unittest.TestCase):
             cfg.write_text("video_driver = gl\n", encoding="utf-8")
 
             catalog = load_authored_catalog("authored")
+            recipe = catalog.recipes["app.retroarch.provision"]
+            authored_copy_autoconfig = next(step for step in recipe.steps if step.id == "copy_autoconfig")
+            self.assertIn("extract_autoconfig", authored_copy_autoconfig.dependencies)
+            self.assertEqual(authored_copy_autoconfig.params["source"], RefParamValue(ref="steps.extract_autoconfig"))
+
             planner = Planner(catalog)
             session = planner.start_session(
                 "ayaneo.pocket_s_mini.base",
@@ -650,6 +655,12 @@ class PlannerCoreTests(unittest.TestCase):
             self.assertIn("app.retroarch.provision/extract_cores", step_ids)
             self.assertIn("app.retroarch.provision/copy_cores", step_ids)
             self.assertIn("app.retroarch.provision/grant_retroarch_permissions", step_ids)
+            copy_autoconfig_step = next(step for step in plan.steps if step.id == "app.retroarch.provision/copy_autoconfig")
+            self.assertIn("app.retroarch.provision/extract_autoconfig", copy_autoconfig_step.dependencies)
+            self.assertEqual(
+                copy_autoconfig_step.params["source"],
+                RefParamValue(ref="steps.app.retroarch.provision/extract_autoconfig.outputs.extracted_path"),
+            )
             self.assertLess(
                 step_ids.index("app.retroarch.provision/extract_cores"),
                 step_ids.index("app.retroarch.provision/copy_cores"),
