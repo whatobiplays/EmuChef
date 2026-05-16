@@ -305,8 +305,8 @@ feedback is UI-only and does not mutate dirty state, undo/redo state, diagnostic
 YAML, or DTO data beyond the returned document state from the Rust sidecar.
 
 The Tauri editor exposes primary app actions through native menus. File contains
-Open Recipe and Save. Edit contains Undo and Redo. Utilities contains Validate
-and Refresh YAML. Menu items are context-aware and disabled when a document
+Open Recipe, Save, and Save As. Edit contains Undo and Redo. Utilities contains
+Validate and Refresh YAML. Menu items are context-aware and disabled when a document
 action is not valid, the document session is invalid, or a conflicting command
 is in flight. The app follows Tauri v2 desktop menu behavior: macOS uses the
 native app menu convention, while Windows and Linux use native window menu bars.
@@ -322,7 +322,7 @@ the old session remains valid. Dirty close handling uses frontend
 does not cancel in-flight operations.
 
 The Tauri editor does not expose dependency graph visualization, dependency
-reorder controls, drag-and-drop, executor/apply-device UI, Save As UI,
+reorder controls, drag-and-drop, executor/apply-device UI,
 create-from-template UI, Python bundling, installer packaging, or broad Rust
 ports of Python planner/executor behavior. YAML preview is read-only.
 

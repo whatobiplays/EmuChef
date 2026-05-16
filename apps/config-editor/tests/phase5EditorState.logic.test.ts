@@ -27,6 +27,7 @@ test("buildActionAvailability gates document actions on session validity indepen
     {
       openRecipe: false,
       saveRecipe: false,
+      saveRecipeAs: false,
       undo: false,
       redo: false,
       validate: false,
@@ -49,6 +50,7 @@ test("buildActionAvailability disables conflicting actions while a command is in
     {
       openRecipe: false,
       saveRecipe: false,
+      saveRecipeAs: false,
       undo: false,
       redo: false,
       validate: false,
@@ -71,6 +73,7 @@ test("buildActionAvailability enables only valid clean-document actions", () => 
     {
       openRecipe: true,
       saveRecipe: false,
+      saveRecipeAs: true,
       undo: true,
       redo: false,
       validate: true,
@@ -94,6 +97,7 @@ test("buildActionAvailability treats compatible backend metadata as editable", (
     {
       openRecipe: true,
       saveRecipe: true,
+      saveRecipeAs: true,
       undo: true,
       redo: true,
       validate: true,
@@ -117,6 +121,7 @@ test("buildActionAvailability disables document actions for incompatible backend
     {
       openRecipe: false,
       saveRecipe: false,
+      saveRecipeAs: false,
       undo: false,
       redo: false,
       validate: false,
@@ -138,6 +143,82 @@ test("buildActionAvailability treats unchecked compatibility as neutral", () => 
       backendCompatible: null,
     }).openRecipe,
     true,
+  );
+});
+
+test("buildActionAvailability disables Save As when no document is open", () => {
+  assert.equal(
+    buildActionAvailability({
+      hasDocument: false,
+      dirty: false,
+      canUndo: false,
+      canRedo: false,
+      commandInFlight: null,
+      documentSessionValid: true,
+    }).saveRecipeAs,
+    false,
+  );
+});
+
+test("buildActionAvailability enables Save As for clean and dirty valid documents", () => {
+  assert.equal(
+    buildActionAvailability({
+      hasDocument: true,
+      dirty: false,
+      canUndo: false,
+      canRedo: false,
+      commandInFlight: null,
+      documentSessionValid: true,
+    }).saveRecipeAs,
+    true,
+  );
+  assert.equal(
+    buildActionAvailability({
+      hasDocument: true,
+      dirty: true,
+      canUndo: false,
+      canRedo: false,
+      commandInFlight: null,
+      documentSessionValid: true,
+    }).saveRecipeAs,
+    true,
+  );
+});
+
+test("buildActionAvailability gates Save As on in-flight commands and backend readiness", () => {
+  assert.equal(
+    buildActionAvailability({
+      hasDocument: true,
+      dirty: true,
+      canUndo: true,
+      canRedo: true,
+      commandInFlight: "saveRecipe",
+      documentSessionValid: true,
+    }).saveRecipeAs,
+    false,
+  );
+  assert.equal(
+    buildActionAvailability({
+      hasDocument: true,
+      dirty: true,
+      canUndo: true,
+      canRedo: true,
+      commandInFlight: null,
+      documentSessionValid: false,
+    }).saveRecipeAs,
+    false,
+  );
+  assert.equal(
+    buildActionAvailability({
+      hasDocument: true,
+      dirty: true,
+      canUndo: true,
+      canRedo: true,
+      commandInFlight: null,
+      documentSessionValid: true,
+      backendCompatible: false,
+    }).saveRecipeAs,
+    false,
   );
 });
 
@@ -320,9 +401,18 @@ test("formatSidecarStatusLabel handles compatibility metadata safely", () => {
 });
 
 test("command names stay limited to known Phase 5 document operations", () => {
-  const names: CommandName[] = ["openRecipe", "saveRecipe", "undo", "redo", "validate", "refreshYaml", "mutation"];
+  const names: CommandName[] = [
+    "openRecipe",
+    "saveRecipe",
+    "saveRecipeAs",
+    "undo",
+    "redo",
+    "validate",
+    "refreshYaml",
+    "mutation",
+  ];
 
-  assert.equal(names.length, 7);
+  assert.equal(names.length, 8);
 });
 
 test("decideCloseRequest allows clean windows to close without prompting", () => {
