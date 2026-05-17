@@ -341,7 +341,15 @@ function StepDetailPanel({
 
       <div className="grid gap-4 rounded border border-slate-200 bg-white p-4">
         <StepDependenciesEditor readOnly={readOnly} step={step} steps={steps} onUpdateDependencies={onUpdateDependencies} />
-        <StepParamsEditor readOnly={readOnly} recipe={recipe} refIndex={refIndex} step={step} stepSpec={stepSpec} onCommand={onCommand} />
+        <StepParamsEditor
+          readOnly={readOnly}
+          recipe={recipe}
+          refIndex={refIndex}
+          step={step}
+          stepSpec={stepSpec}
+          onCommand={onCommand}
+          onUpdateDependencies={onUpdateDependencies}
+        />
       </div>
 
       <AdvancedStepInternalsEditor readOnly={readOnly} step={step} onCommand={onAdvancedCommand} />
