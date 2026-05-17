@@ -8,7 +8,9 @@ export type MenuAction =
   | "undo"
   | "redo"
   | "validate"
-  | "refreshYaml";
+  | "refreshYaml"
+  | "setAuthoredRoot"
+  | "clearAuthoredRoot";
 
 type MenuHandlers = Record<MenuAction, () => void>;
 

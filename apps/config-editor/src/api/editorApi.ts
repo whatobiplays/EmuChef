@@ -125,11 +125,14 @@ export async function sidecarSetDocumentAuthoredRoot(
 
 export interface MenuState {
   hasDocument: boolean;
+  hasSelectedAuthoredRoot: boolean;
+  hasDocumentAuthoredRoot: boolean;
   dirty: boolean;
   canUndo: boolean;
   canRedo: boolean;
   commandInFlight: boolean;
   documentSessionValid: boolean;
+  backendCompatible: boolean | null;
 }
 
 export async function updateMenuState(state: MenuState): Promise<void> {

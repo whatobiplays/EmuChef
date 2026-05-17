@@ -11,6 +11,7 @@ import {
   sidecarRedo,
   sidecarSaveRecipe,
   sidecarSaveRecipeAs,
+  sidecarSetDocumentAuthoredRoot,
   sidecarStatus,
   sidecarUndo,
   sidecarValidate,
@@ -40,6 +41,7 @@ import {
   classifyOperationFailure,
   decideCloseRequest,
   invalidSessionMessage,
+  resolveAuthoredRootSelectionAttempt,
   resolveClosePromptResult,
   resolveOpenAttempt,
   type CommandName,
@@ -77,6 +79,7 @@ export default function App() {
   const [stepSpecsLoading, setStepSpecsLoading] = useState(true);
   const [currentDocument, setCurrentDocument] = useState<RecipeDocumentDto | null>(null);
   const [currentPath, setCurrentPath] = useState<string | null>(null);
+  const [selectedAuthoredRoot, setSelectedAuthoredRoot] = useState<string | null>(null);
   const [diagnostics, setDiagnostics] = useState<DiagnosticDto[]>([]);
   const [yaml, setYaml] = useState("");
   const [sidecarState, setSidecarState] = useState<SidecarStatusResult | null>(null);
@@ -90,6 +93,7 @@ export default function App() {
   const [textPrompt, setTextPrompt] = useState<TextPromptRequest | null>(null);
 
   const currentDocumentRef = useRef<RecipeDocumentDto | null>(null);
+  const selectedAuthoredRootRef = useRef<string | null>(null);
   const commandInFlightRef = useRef<CommandName | null>(null);
   const documentSessionValidRef = useRef(true);
   const sessionInvalidReasonRef = useRef<string | null>(null);
@@ -103,6 +107,8 @@ export default function App() {
     () =>
       buildActionAvailability({
         hasDocument: currentDocument !== null,
+        hasSelectedAuthoredRoot: selectedAuthoredRoot !== null,
+        hasDocumentAuthoredRoot: currentDocument?.authoredRoot !== null && currentDocument?.authoredRoot !== undefined,
         dirty: currentDocument?.dirty ?? false,
         canUndo: currentDocument?.canUndo ?? false,
         canRedo: currentDocument?.canRedo ?? false,
@@ -110,7 +116,7 @@ export default function App() {
         documentSessionValid,
         backendCompatible: sidecarState?.compatible ?? null,
       }),
-    [commandInFlight, currentDocument, documentSessionValid, sidecarState?.compatible],
+    [commandInFlight, currentDocument, documentSessionValid, selectedAuthoredRoot, sidecarState?.compatible],
   );
 
   const stepSpecsCount = useMemo(() => {
@@ -123,6 +129,10 @@ export default function App() {
   useEffect(() => {
     currentDocumentRef.current = currentDocument;
   }, [currentDocument]);
+
+  useEffect(() => {
+    selectedAuthoredRootRef.current = selectedAuthoredRoot;
+  }, [selectedAuthoredRoot]);
 
   useEffect(() => {
     commandInFlightRef.current = commandInFlight;
@@ -138,7 +148,7 @@ export default function App() {
 
   useEffect(() => {
     void syncMenuState(currentDocument, commandInFlight, documentSessionValid);
-  }, [commandInFlight, currentDocument, documentSessionValid]);
+  }, [commandInFlight, currentDocument, documentSessionValid, selectedAuthoredRoot, sidecarState?.compatible]);
 
   useEffect(() => {
     if (!statusMessage) {
@@ -255,6 +265,8 @@ export default function App() {
     redo: () => void redo(),
     validate: () => void validate(),
     refreshYaml: () => void refreshYaml(),
+    setAuthoredRoot: () => void setAuthoredRootFromDialog(),
+    clearAuthoredRoot: () => void clearAuthoredRoot(),
   };
 
   async function openRecipe() {
@@ -308,7 +320,7 @@ export default function App() {
       return;
     }
     try {
-      const response = await sidecarOpenRecipe(path, null);
+      const response = await sidecarOpenRecipe(path, selectedAuthoredRootRef.current);
       if (response.kind === "success") {
         applyDocument(response.result.document, path);
         setDocumentSessionValid(true);
@@ -328,6 +340,97 @@ export default function App() {
         }
         await refreshSidecarStatus();
         await syncMenuState(resolution.document, commandInFlightRef.current, resolution.sessionValid);
+      }
+    } finally {
+      finishAppCommand();
+    }
+  }
+
+  async function setAuthoredRootFromDialog() {
+    if (!actionAvailability.setAuthoredRoot) {
+      await syncMenuState(currentDocumentRef.current);
+      return;
+    }
+
+    let selected: string | string[] | null;
+    try {
+      selected = await open({
+        multiple: false,
+        directory: true,
+      });
+    } catch (error) {
+      setErrorMessage(`Directory dialog failed: ${errorMessageFromUnknown(error)}`);
+      setStatusMessage(null);
+      await syncMenuState(currentDocumentRef.current);
+      return;
+    }
+
+    const path = Array.isArray(selected) ? selected[0] : selected;
+    if (!path) {
+      await syncMenuState(currentDocumentRef.current);
+      return;
+    }
+
+    await updateAuthoredRootSelection(path);
+  }
+
+  async function clearAuthoredRoot() {
+    if (!actionAvailability.clearAuthoredRoot) {
+      await syncMenuState(currentDocumentRef.current);
+      return;
+    }
+
+    await updateAuthoredRootSelection(null);
+  }
+
+  async function updateAuthoredRootSelection(nextAuthoredRoot: string | null) {
+    const document = currentDocumentRef.current;
+    if (document === null) {
+      const resolution = resolveAuthoredRootSelectionAttempt(selectedAuthoredRootRef.current, null, {
+        kind: "no-document",
+        authoredRoot: nextAuthoredRoot,
+      });
+      selectedAuthoredRootRef.current = resolution.selectedAuthoredRoot;
+      setSelectedAuthoredRoot(resolution.selectedAuthoredRoot);
+      setErrorMessage(null);
+      setStatusMessage(nextAuthoredRoot === null ? "Authored root selection cleared." : "Authored root selected.");
+      await syncMenuState(null);
+      return;
+    }
+
+    if (!documentSessionValidRef.current) {
+      showInvalidSessionMessage();
+      await syncMenuState(document);
+      return;
+    }
+
+    if (!beginAppCommand("setAuthoredRoot", "Updating authored root")) {
+      await syncMenuState(document);
+      return;
+    }
+    try {
+      const response = await sidecarSetDocumentAuthoredRoot(document.documentId, nextAuthoredRoot);
+      if (response.kind === "success") {
+        const resolution = resolveAuthoredRootSelectionAttempt(selectedAuthoredRootRef.current, document, {
+          kind: "updated",
+          authoredRoot: nextAuthoredRoot,
+          document: response.result.document,
+        });
+        selectedAuthoredRootRef.current = resolution.selectedAuthoredRoot;
+        setSelectedAuthoredRoot(resolution.selectedAuthoredRoot);
+        if (resolution.document !== null) {
+          applyDocument(resolution.document);
+        }
+        setErrorMessage(null);
+        setStatusMessage(nextAuthoredRoot === null ? "Authored root cleared." : "Authored root updated.");
+        await syncMenuState(response.result.document);
+      } else {
+        handleOperationFailure(response, "Authored root update failed.", {
+          commandDocumentId: document.documentId,
+          currentDocumentId: currentDocumentRef.current?.documentId ?? null,
+        });
+        await refreshSidecarStatus();
+        await syncMenuState(currentDocumentRef.current);
       }
     } finally {
       finishAppCommand();
@@ -473,6 +576,8 @@ export default function App() {
 
     const availability = buildActionAvailability({
       hasDocument: true,
+      hasSelectedAuthoredRoot: selectedAuthoredRootRef.current !== null,
+      hasDocumentAuthoredRoot: document.authoredRoot !== null,
       dirty: document.dirty,
       canUndo: document.canUndo,
       canRedo: document.canRedo,
@@ -575,6 +680,8 @@ export default function App() {
     }
     const availability = buildActionAvailability({
       hasDocument: true,
+      hasSelectedAuthoredRoot: selectedAuthoredRootRef.current !== null,
+      hasDocumentAuthoredRoot: document.authoredRoot !== null,
       dirty: document.dirty,
       canUndo: document.canUndo,
       canRedo: document.canRedo,
@@ -676,11 +783,14 @@ export default function App() {
     try {
       await updateMenuState({
         hasDocument: document !== null,
+        hasSelectedAuthoredRoot: selectedAuthoredRootRef.current !== null,
+        hasDocumentAuthoredRoot: document?.authoredRoot !== null && document?.authoredRoot !== undefined,
         dirty: document?.dirty ?? false,
         canUndo: document?.canUndo ?? false,
         canRedo: document?.canRedo ?? false,
         commandInFlight: menuCommandInFlight !== null,
         documentSessionValid: menuDocumentSessionValid,
+        backendCompatible: sidecarState?.compatible ?? null,
       });
     } catch (error) {
       setErrorMessage(`Menu state update failed: ${errorMessageFromUnknown(error)}`);
@@ -837,10 +947,12 @@ export default function App() {
           <>
             <Toolbar
               currentPath={currentPath}
+              documentAuthoredRoot={currentDocument?.authoredRoot ?? null}
               dirty={currentDocument?.dirty ?? false}
               documentSessionValid={documentSessionValid}
               hasDocument={currentDocument !== null}
               loadingLabel={loadingLabel}
+              selectedAuthoredRoot={selectedAuthoredRoot}
               sidecarStatus={sidecarState}
               stepSpecsCount={stepSpecsCount}
               stepSpecsLoading={stepSpecsLoading}

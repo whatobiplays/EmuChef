@@ -9,6 +9,7 @@ import {
   classifyOperationFailure,
   decideCloseRequest,
   formatSidecarStatusLabel,
+  resolveAuthoredRootSelectionAttempt,
   resolveClosePromptResult,
   resolveOpenAttempt,
   type CommandName,
@@ -18,6 +19,8 @@ test("buildActionAvailability gates document actions on session validity indepen
   assert.deepEqual(
     buildActionAvailability({
       hasDocument: true,
+      hasSelectedAuthoredRoot: false,
+      hasDocumentAuthoredRoot: false,
       dirty: true,
       canUndo: true,
       canRedo: true,
@@ -32,6 +35,8 @@ test("buildActionAvailability gates document actions on session validity indepen
       redo: false,
       validate: false,
       refreshYaml: false,
+      setAuthoredRoot: false,
+      clearAuthoredRoot: false,
       editDocument: false,
     },
   );
@@ -41,6 +46,8 @@ test("buildActionAvailability disables conflicting actions while a command is in
   assert.deepEqual(
     buildActionAvailability({
       hasDocument: true,
+      hasSelectedAuthoredRoot: true,
+      hasDocumentAuthoredRoot: true,
       dirty: true,
       canUndo: true,
       canRedo: true,
@@ -55,6 +62,8 @@ test("buildActionAvailability disables conflicting actions while a command is in
       redo: false,
       validate: false,
       refreshYaml: false,
+      setAuthoredRoot: false,
+      clearAuthoredRoot: false,
       editDocument: false,
     },
   );
@@ -64,6 +73,8 @@ test("buildActionAvailability enables only valid clean-document actions", () => 
   assert.deepEqual(
     buildActionAvailability({
       hasDocument: true,
+      hasSelectedAuthoredRoot: false,
+      hasDocumentAuthoredRoot: true,
       dirty: false,
       canUndo: true,
       canRedo: false,
@@ -78,6 +89,8 @@ test("buildActionAvailability enables only valid clean-document actions", () => 
       redo: false,
       validate: true,
       refreshYaml: true,
+      setAuthoredRoot: true,
+      clearAuthoredRoot: true,
       editDocument: true,
     },
   );
@@ -87,6 +100,8 @@ test("buildActionAvailability treats compatible backend metadata as editable", (
   assert.deepEqual(
     buildActionAvailability({
       hasDocument: true,
+      hasSelectedAuthoredRoot: true,
+      hasDocumentAuthoredRoot: false,
       dirty: true,
       canUndo: true,
       canRedo: true,
@@ -102,6 +117,8 @@ test("buildActionAvailability treats compatible backend metadata as editable", (
       redo: true,
       validate: true,
       refreshYaml: true,
+      setAuthoredRoot: true,
+      clearAuthoredRoot: true,
       editDocument: true,
     },
   );
@@ -111,6 +128,8 @@ test("buildActionAvailability disables document actions for incompatible backend
   assert.deepEqual(
     buildActionAvailability({
       hasDocument: true,
+      hasSelectedAuthoredRoot: true,
+      hasDocumentAuthoredRoot: true,
       dirty: true,
       canUndo: true,
       canRedo: true,
@@ -126,6 +145,8 @@ test("buildActionAvailability disables document actions for incompatible backend
       redo: false,
       validate: false,
       refreshYaml: false,
+      setAuthoredRoot: false,
+      clearAuthoredRoot: false,
       editDocument: false,
     },
   );
@@ -135,6 +156,8 @@ test("buildActionAvailability treats unchecked compatibility as neutral", () => 
   assert.equal(
     buildActionAvailability({
       hasDocument: true,
+      hasSelectedAuthoredRoot: false,
+      hasDocumentAuthoredRoot: false,
       dirty: false,
       canUndo: false,
       canRedo: false,
@@ -150,6 +173,8 @@ test("buildActionAvailability disables Save As when no document is open", () => 
   assert.equal(
     buildActionAvailability({
       hasDocument: false,
+      hasSelectedAuthoredRoot: false,
+      hasDocumentAuthoredRoot: false,
       dirty: false,
       canUndo: false,
       canRedo: false,
@@ -164,6 +189,8 @@ test("buildActionAvailability enables Save As for clean and dirty valid document
   assert.equal(
     buildActionAvailability({
       hasDocument: true,
+      hasSelectedAuthoredRoot: false,
+      hasDocumentAuthoredRoot: false,
       dirty: false,
       canUndo: false,
       canRedo: false,
@@ -175,6 +202,8 @@ test("buildActionAvailability enables Save As for clean and dirty valid document
   assert.equal(
     buildActionAvailability({
       hasDocument: true,
+      hasSelectedAuthoredRoot: false,
+      hasDocumentAuthoredRoot: false,
       dirty: true,
       canUndo: false,
       canRedo: false,
@@ -189,6 +218,8 @@ test("buildActionAvailability gates Save As on in-flight commands and backend re
   assert.equal(
     buildActionAvailability({
       hasDocument: true,
+      hasSelectedAuthoredRoot: false,
+      hasDocumentAuthoredRoot: false,
       dirty: true,
       canUndo: true,
       canRedo: true,
@@ -200,6 +231,8 @@ test("buildActionAvailability gates Save As on in-flight commands and backend re
   assert.equal(
     buildActionAvailability({
       hasDocument: true,
+      hasSelectedAuthoredRoot: false,
+      hasDocumentAuthoredRoot: false,
       dirty: true,
       canUndo: true,
       canRedo: true,
@@ -211,6 +244,8 @@ test("buildActionAvailability gates Save As on in-flight commands and backend re
   assert.equal(
     buildActionAvailability({
       hasDocument: true,
+      hasSelectedAuthoredRoot: false,
+      hasDocumentAuthoredRoot: false,
       dirty: true,
       canUndo: true,
       canRedo: true,
@@ -218,6 +253,82 @@ test("buildActionAvailability gates Save As on in-flight commands and backend re
       documentSessionValid: true,
       backendCompatible: false,
     }).saveRecipeAs,
+    false,
+  );
+});
+
+test("buildActionAvailability enables authored-root selection without an open document", () => {
+  const availability = buildActionAvailability({
+    hasDocument: false,
+    hasSelectedAuthoredRoot: false,
+    hasDocumentAuthoredRoot: false,
+    dirty: false,
+    canUndo: false,
+    canRedo: false,
+    commandInFlight: null,
+    documentSessionValid: true,
+  });
+
+  assert.equal(availability.setAuthoredRoot, true);
+  assert.equal(availability.clearAuthoredRoot, false);
+  assert.equal(availability.editDocument, false);
+});
+
+test("buildActionAvailability enables clearing selected or document authored roots", () => {
+  assert.equal(
+    buildActionAvailability({
+      hasDocument: false,
+      hasSelectedAuthoredRoot: true,
+      hasDocumentAuthoredRoot: false,
+      dirty: false,
+      canUndo: false,
+      canRedo: false,
+      commandInFlight: null,
+      documentSessionValid: true,
+    }).clearAuthoredRoot,
+    true,
+  );
+  assert.equal(
+    buildActionAvailability({
+      hasDocument: true,
+      hasSelectedAuthoredRoot: false,
+      hasDocumentAuthoredRoot: true,
+      dirty: false,
+      canUndo: false,
+      canRedo: false,
+      commandInFlight: null,
+      documentSessionValid: true,
+    }).clearAuthoredRoot,
+    true,
+  );
+});
+
+test("buildActionAvailability gates authored-root actions on backend readiness", () => {
+  assert.equal(
+    buildActionAvailability({
+      hasDocument: false,
+      hasSelectedAuthoredRoot: true,
+      hasDocumentAuthoredRoot: false,
+      dirty: false,
+      canUndo: false,
+      canRedo: false,
+      commandInFlight: null,
+      documentSessionValid: true,
+      backendCompatible: false,
+    }).setAuthoredRoot,
+    false,
+  );
+  assert.equal(
+    buildActionAvailability({
+      hasDocument: false,
+      hasSelectedAuthoredRoot: true,
+      hasDocumentAuthoredRoot: false,
+      dirty: false,
+      canUndo: false,
+      canRedo: false,
+      commandInFlight: "setAuthoredRoot",
+      documentSessionValid: true,
+    }).clearAuthoredRoot,
     false,
   );
 });
@@ -251,6 +362,38 @@ test("resolveOpenAttempt preserves the existing document for picker cancel or fa
     document: next,
     replaced: true,
     sessionValid: true,
+  });
+});
+
+test("resolveAuthoredRootSelectionAttempt updates selected root only for no-document or successful updates", () => {
+  const current = { documentId: "doc-1", authoredRoot: "/old/root" };
+  const next = { documentId: "doc-1", authoredRoot: "/new/root" };
+
+  assert.deepEqual(
+    resolveAuthoredRootSelectionAttempt("/selected/root", current, { kind: "picker-cancelled" }),
+    {
+      selectedAuthoredRoot: "/selected/root",
+      document: current,
+      changed: false,
+    },
+  );
+  assert.deepEqual(
+    resolveAuthoredRootSelectionAttempt("/selected/root", current, { kind: "update-failed" }),
+    {
+      selectedAuthoredRoot: "/selected/root",
+      document: current,
+      changed: false,
+    },
+  );
+  assert.deepEqual(resolveAuthoredRootSelectionAttempt(null, null, { kind: "no-document", authoredRoot: "/new/root" }), {
+    selectedAuthoredRoot: "/new/root",
+    document: null,
+    changed: true,
+  });
+  assert.deepEqual(resolveAuthoredRootSelectionAttempt("/old/root", current, { kind: "updated", authoredRoot: null, document: next }), {
+    selectedAuthoredRoot: null,
+    document: next,
+    changed: true,
   });
 });
 
@@ -409,10 +552,11 @@ test("command names stay limited to known Phase 5 document operations", () => {
     "redo",
     "validate",
     "refreshYaml",
+    "setAuthoredRoot",
     "mutation",
   ];
 
-  assert.equal(names.length, 8);
+  assert.equal(names.length, 9);
 });
 
 test("decideCloseRequest allows clean windows to close without prompting", () => {

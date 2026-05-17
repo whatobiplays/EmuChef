@@ -312,12 +312,31 @@ feedback is UI-only and does not mutate dirty state, undo/redo state, diagnostic
 YAML, or DTO data beyond the returned document state from the Rust sidecar.
 
 The Tauri editor exposes primary app actions through native menus. File contains
-Open Recipe, Save, and Save As. Edit contains Undo and Redo. Utilities contains
-Validate and Refresh YAML. Menu items are context-aware and disabled when a document
-action is not valid, the document session is invalid, or a conflicting command
-is in flight. The app follows Tauri v2 desktop menu behavior: macOS uses the
-native app menu convention, while Windows and Linux use native window menu bars.
+Open Recipe, Set Authored Root, Clear Authored Root, Save, and Save As. Edit
+contains Undo and Redo. Utilities contains Validate and Refresh YAML. Menu items
+are context-aware and disabled when an action is not valid, the backend is known
+to be incompatible, the document session is invalid, or a conflicting command is
+in flight. The app follows Tauri v2 desktop menu behavior: macOS uses the native
+app menu convention, while Windows and Linux use native window menu bars.
 Debug-only controls are not exposed in the normal menu/UI path.
+
+The Tauri editor keeps a frontend-owned selected authored-root preference for
+future recipe opens. `null` means no explicit authored root is selected, so the
+backend default or inference behavior applies. Selecting a directory with Set
+Authored Root does not validate the path in TypeScript; the directory picker only
+collects the user's selected directory. Opening a recipe passes the selected
+authored root to the Rust sidecar. The editor displays this selected root
+separately from the current document's returned `authoredRoot` because inferred
+or normalized document context does not become the frontend preference for future
+opens.
+
+Authored root is validation and catalog context for the editor session, not
+recipe YAML content. When a document is open, Set Authored Root and Clear
+Authored Root call the Rust sidecar `setDocumentAuthoredRoot` request and replace
+local document state with the returned `RecipeDocumentDto`. This updates derived
+diagnostics, canonical YAML, ref index, dirty state, and undo/redo metadata from
+the backend DTO without reloading recipe YAML from disk. A failed backend
+context update leaves the selected frontend authored-root preference unchanged.
 
 Native confirmation prompts guard opening another recipe with unsaved changes
 and closing the Tauri window with unsaved changes or an operation in flight when
@@ -358,6 +377,7 @@ The frontend talks to Rust through Tauri `invoke(...)` commands named:
 - `sidecar_validate`
 - `sidecar_emit_yaml`
 - `sidecar_get_ref_index`
+- `sidecar_set_document_authored_root`
 
 The Tauri editor runtime launches the experimental Rust backend sidecar directly
 for editor protocol requests. The sidecar client starts
@@ -430,9 +450,9 @@ scaffolding only and should be replaced or broadened with Rust-native schema
 builders, full executor parity, and broader parity tests before any backend
 cutover is attempted.
 
-The frontend open flow passes `authoredRoot: null`. The Tauri API exposes an
-API-only document-session authored-root update command for later UI workflows;
-the editor does not currently present a visible authored-root picker or control.
+The Tauri editor presents authored-root selection in the normal UI and native
+menu path. There is no backend selector, runtime backend toggle, execution/apply
+UI, or Python fallback in this workflow.
 
 ## Current PySide6 Legacy Editor
 

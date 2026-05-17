@@ -11,27 +11,35 @@ const ACTION_UNDO: &str = "undo";
 const ACTION_REDO: &str = "redo";
 const ACTION_VALIDATE: &str = "validate";
 const ACTION_REFRESH_YAML: &str = "refreshYaml";
+const ACTION_SET_AUTHORED_ROOT: &str = "setAuthoredRoot";
+const ACTION_CLEAR_AUTHORED_ROOT: &str = "clearAuthoredRoot";
 
 #[derive(Debug, Clone, Copy, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct EditorMenuState {
     has_document: bool,
+    has_selected_authored_root: bool,
+    has_document_authored_root: bool,
     dirty: bool,
     can_undo: bool,
     can_redo: bool,
     command_in_flight: bool,
     document_session_valid: bool,
+    backend_compatible: Option<bool>,
 }
 
 impl Default for EditorMenuState {
     fn default() -> Self {
         Self {
             has_document: false,
+            has_selected_authored_root: false,
+            has_document_authored_root: false,
             dirty: false,
             can_undo: false,
             can_redo: false,
             command_in_flight: false,
             document_session_valid: true,
+            backend_compatible: None,
         }
     }
 }
@@ -81,7 +89,9 @@ pub fn handle_menu_event<R: Runtime>(app: &AppHandle<R>, action: &str) {
         | ACTION_UNDO
         | ACTION_REDO
         | ACTION_VALIDATE
-        | ACTION_REFRESH_YAML => {
+        | ACTION_REFRESH_YAML
+        | ACTION_SET_AUTHORED_ROOT
+        | ACTION_CLEAR_AUTHORED_ROOT => {
             if let Err(err) = app.emit("menu-action", MenuActionPayload { action }) {
                 eprintln!("Failed to emit menu action {action}: {err}");
             }
@@ -120,6 +130,9 @@ fn build_file_menu<R: Runtime>(
     state: EditorMenuState,
 ) -> tauri::Result<Submenu<R>> {
     let sidecar_ready = !state.command_in_flight && state.document_session_valid;
+    let backend_ready = sidecar_ready && state.backend_compatible != Some(false);
+    let has_root_to_clear = state.has_selected_authored_root
+        || (state.has_document && state.has_document_authored_root);
     Submenu::with_items(
         app,
         "File",
@@ -129,21 +142,37 @@ fn build_file_menu<R: Runtime>(
                 app,
                 ACTION_OPEN_RECIPE,
                 "Open Recipe",
-                sidecar_ready,
+                backend_ready,
                 Some("CmdOrCtrl+O"),
             )?,
+            &PredefinedMenuItem::separator(app)?,
+            &MenuItem::with_id(
+                app,
+                ACTION_SET_AUTHORED_ROOT,
+                "Set Authored Root...",
+                backend_ready,
+                None::<&str>,
+            )?,
+            &MenuItem::with_id(
+                app,
+                ACTION_CLEAR_AUTHORED_ROOT,
+                "Clear Authored Root",
+                backend_ready && has_root_to_clear,
+                None::<&str>,
+            )?,
+            &PredefinedMenuItem::separator(app)?,
             &MenuItem::with_id(
                 app,
                 ACTION_SAVE_RECIPE,
                 "Save",
-                sidecar_ready && state.has_document && state.dirty,
+                backend_ready && state.has_document && state.dirty,
                 Some("CmdOrCtrl+S"),
             )?,
             &MenuItem::with_id(
                 app,
                 ACTION_SAVE_RECIPE_AS,
                 "Save As…",
-                sidecar_ready && state.has_document,
+                backend_ready && state.has_document,
                 None::<&str>,
             )?,
             #[cfg(not(target_os = "macos"))]
@@ -158,7 +187,10 @@ fn build_edit_menu<R: Runtime>(
     app: &AppHandle<R>,
     state: EditorMenuState,
 ) -> tauri::Result<Submenu<R>> {
-    let document_ready = !state.command_in_flight && state.document_session_valid && state.has_document;
+    let document_ready = !state.command_in_flight
+        && state.document_session_valid
+        && state.backend_compatible != Some(false)
+        && state.has_document;
     Submenu::with_items(
         app,
         "Edit",
@@ -191,7 +223,10 @@ fn build_utilities_menu<R: Runtime>(
     app: &AppHandle<R>,
     state: EditorMenuState,
 ) -> tauri::Result<Submenu<R>> {
-    let document_ready = !state.command_in_flight && state.document_session_valid && state.has_document;
+    let document_ready = !state.command_in_flight
+        && state.document_session_valid
+        && state.backend_compatible != Some(false)
+        && state.has_document;
     Submenu::with_items(
         app,
         "Utilities",
@@ -236,7 +271,11 @@ fn about_metadata<R: Runtime>(app: &AppHandle<R>) -> AboutMetadata<'static> {
         name: Some(package_info.name.clone()),
         version: Some(package_info.version.to_string()),
         copyright: config.bundle.copyright.clone(),
-        authors: config.bundle.publisher.clone().map(|publisher| vec![publisher]),
+        authors: config
+            .bundle
+            .publisher
+            .clone()
+            .map(|publisher| vec![publisher]),
         ..Default::default()
     }
 }

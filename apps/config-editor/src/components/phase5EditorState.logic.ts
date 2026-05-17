@@ -8,10 +8,13 @@ export type CommandName =
   | "redo"
   | "validate"
   | "refreshYaml"
+  | "setAuthoredRoot"
   | "mutation";
 
 export interface ActionAvailabilityState {
   hasDocument: boolean;
+  hasSelectedAuthoredRoot: boolean;
+  hasDocumentAuthoredRoot: boolean;
   dirty: boolean;
   canUndo: boolean;
   canRedo: boolean;
@@ -28,6 +31,8 @@ export interface ActionAvailability {
   redo: boolean;
   validate: boolean;
   refreshYaml: boolean;
+  setAuthoredRoot: boolean;
+  clearAuthoredRoot: boolean;
   editDocument: boolean;
 }
 
@@ -45,6 +50,18 @@ export interface OpenAttemptResolution<TDocument> {
   document: TDocument | null;
   replaced: boolean;
   sessionValid: boolean;
+}
+
+export type AuthoredRootSelectionAttempt<TDocument> =
+  | { kind: "picker-cancelled" }
+  | { kind: "no-document"; authoredRoot: string | null }
+  | { kind: "updated"; authoredRoot: string | null; document: TDocument }
+  | { kind: "update-failed" };
+
+export interface AuthoredRootSelectionResolution<TDocument> {
+  selectedAuthoredRoot: string | null;
+  document: TDocument | null;
+  changed: boolean;
 }
 
 export type OperationFailure =
@@ -107,6 +124,8 @@ export function buildActionAvailability(state: ActionAvailabilityState): ActionA
     redo: documentReady && state.canRedo,
     validate: documentReady,
     refreshYaml: documentReady,
+    setAuthoredRoot: sessionReady,
+    clearAuthoredRoot: sessionReady && (state.hasSelectedAuthoredRoot || state.hasDocumentAuthoredRoot),
     editDocument: documentReady,
   };
 }
@@ -175,6 +194,32 @@ export function resolveOpenAttempt<TDocument>(
     return { document: currentDocument, replaced: false, sessionValid: !attempt.sessionInvalid };
   }
   return { document: currentDocument, replaced: false, sessionValid: true };
+}
+
+export function resolveAuthoredRootSelectionAttempt<TDocument>(
+  currentSelectedAuthoredRoot: string | null,
+  currentDocument: TDocument | null,
+  attempt: AuthoredRootSelectionAttempt<TDocument>,
+): AuthoredRootSelectionResolution<TDocument> {
+  if (attempt.kind === "no-document") {
+    return {
+      selectedAuthoredRoot: attempt.authoredRoot,
+      document: currentDocument,
+      changed: attempt.authoredRoot !== currentSelectedAuthoredRoot,
+    };
+  }
+  if (attempt.kind === "updated") {
+    return {
+      selectedAuthoredRoot: attempt.authoredRoot,
+      document: attempt.document,
+      changed: true,
+    };
+  }
+  return {
+    selectedAuthoredRoot: currentSelectedAuthoredRoot,
+    document: currentDocument,
+    changed: false,
+  };
 }
 
 export function classifyOperationFailure(

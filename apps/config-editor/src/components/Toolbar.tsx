@@ -3,10 +3,12 @@ import { formatSidecarStatusLabel } from "./phase5EditorState.logic";
 
 interface ToolbarProps {
   currentPath: string | null;
+  documentAuthoredRoot: string | null;
   dirty: boolean;
   documentSessionValid: boolean;
   hasDocument: boolean;
   loadingLabel: string | null;
+  selectedAuthoredRoot: string | null;
   sidecarStatus: SidecarStatusResult | null;
   stepSpecsCount: number | null;
   stepSpecsLoading: boolean;
@@ -14,10 +16,12 @@ interface ToolbarProps {
 
 export function Toolbar({
   currentPath,
+  documentAuthoredRoot,
   dirty,
   documentSessionValid,
   hasDocument,
   loadingLabel,
+  selectedAuthoredRoot,
   sidecarStatus,
   stepSpecsCount,
   stepSpecsLoading,
@@ -29,6 +33,10 @@ export function Toolbar({
       <div className="mr-2 flex min-w-0 flex-1 flex-col">
         <span className="text-sm font-semibold text-slate-950">EmuChef Config Editor</span>
         <span className="truncate text-xs text-slate-500">{currentPath ?? "No recipe open"}</span>
+        <span className="truncate text-xs text-slate-500">
+          Root for new opens: {selectedAuthoredRoot ?? "Not set"} | Current document root:{" "}
+          {hasDocument ? (documentAuthoredRoot ?? "None") : "None"}
+        </span>
       </div>
       <div className="flex items-center gap-3 text-xs text-slate-500">
         {loadingLabel ? <span className="font-medium text-slate-700">{loadingLabel}</span> : null}
