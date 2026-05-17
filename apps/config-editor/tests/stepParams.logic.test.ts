@@ -7,6 +7,8 @@ import {
   addUniqueStringListValue,
   buildObjectListRowFieldUpdate,
   buildClearStepParamCommand,
+  buildRefDependencyAction,
+  buildStepRefDependencyWarning,
   buildRefPickerOptions,
   buildUpdateStepParamsCommand,
   displayValueForObjectField,
@@ -16,6 +18,7 @@ import {
   parseJsonParamDraft,
   parseNumberParamDraft,
   removeStringListValue,
+  stepProducerRefInfo,
   structuredParamEditorKind,
   valueForObjectListRowFieldDraft,
   updateObjectField,
@@ -475,5 +478,101 @@ test("buildRefPickerOptions keeps current incompatible and missing refs visible"
     current: true,
     missing: true,
     incompatible: false,
+  });
+});
+
+test("stepProducerRefInfo detects bare step refs and step output refs", () => {
+  assert.deepEqual(stepProducerRefInfo(refIndex, "steps.extract_assets"), {
+    kind: "step",
+    producerStepId: "extract_assets",
+    outputName: null,
+    shorthandStepRef: true,
+  });
+  assert.deepEqual(stepProducerRefInfo(refIndex, "steps.extract_assets.outputs.extracted_path"), {
+    kind: "step",
+    producerStepId: "extract_assets",
+    outputName: "extracted_path",
+    shorthandStepRef: false,
+  });
+});
+
+test("stepProducerRefInfo prefers structured step-output candidate metadata", () => {
+  assert.deepEqual(stepProducerRefInfo(refIndex, "steps.extract.outputs.extracted_paths"), {
+    kind: "step",
+    producerStepId: "extract",
+    outputName: "extracted_paths",
+    shorthandStepRef: false,
+  });
+});
+
+test("stepProducerRefInfo ignores input refs artifact refs literals and malformed refs", () => {
+  assert.deepEqual(stepProducerRefInfo(refIndex, { ref: "steps.extract.outputs.extracted_paths" }), { kind: "non-step" });
+  assert.deepEqual(stepProducerRefInfo(refIndex, "inputs.source_dir"), { kind: "non-step" });
+  assert.deepEqual(stepProducerRefInfo(refIndex, "artifacts.archive.local_path"), { kind: "non-step" });
+  assert.deepEqual(stepProducerRefInfo(refIndex, "/literal/path"), { kind: "non-step" });
+  assert.deepEqual(stepProducerRefInfo(refIndex, "steps."), { kind: "non-step" });
+  assert.deepEqual(stepProducerRefInfo(refIndex, "steps.extract.outputs"), { kind: "non-step" });
+  assert.deepEqual(stepProducerRefInfo(refIndex, "unknown.extract.outputs.path"), { kind: "non-step" });
+});
+
+test("buildStepRefDependencyWarning reports missing producer dependencies for current values", () => {
+  assert.deepEqual(
+    buildStepRefDependencyWarning({
+      refIndex,
+      currentStepId: "copy",
+      dependencyIds: ["prepare"],
+      value: { ref: "steps.extract_assets.outputs.extracted_path" },
+    }),
+    {
+      producerStepId: "extract_assets",
+      outputName: "extracted_path",
+      shorthandStepRef: false,
+      message: 'This ref is produced by step "extract_assets", but the current step does not depend on it.',
+    },
+  );
+});
+
+test("buildStepRefDependencyWarning is absent for existing dependencies self refs and ignored refs", () => {
+  assert.equal(
+    buildStepRefDependencyWarning({
+      refIndex,
+      currentStepId: "copy",
+      dependencyIds: ["extract_assets"],
+      value: { ref: "steps.extract_assets.outputs.extracted_path" },
+    }),
+    null,
+  );
+  assert.equal(
+    buildStepRefDependencyWarning({
+      refIndex,
+      currentStepId: "extract_assets",
+      dependencyIds: [],
+      value: { ref: "steps.extract_assets.outputs.extracted_path" },
+    }),
+    null,
+  );
+  assert.equal(
+    buildStepRefDependencyWarning({
+      refIndex,
+      currentStepId: "copy",
+      dependencyIds: [],
+      value: { ref: "inputs.source_dir" },
+    }),
+    null,
+  );
+});
+
+test("buildRefDependencyAction appends producer ids and avoids duplicates or self dependencies", () => {
+  assert.deepEqual(buildRefDependencyAction(["prepare"], "copy", "extract_assets"), {
+    ok: true,
+    dependencies: ["prepare", "extract_assets"],
+  });
+  assert.deepEqual(buildRefDependencyAction(["prepare", "extract_assets"], "copy", "extract_assets"), {
+    ok: false,
+    reason: "duplicate-dependency",
+  });
+  assert.deepEqual(buildRefDependencyAction(["prepare"], "copy", "copy"), {
+    ok: false,
+    reason: "self-dependency",
   });
 });

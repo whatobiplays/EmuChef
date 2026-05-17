@@ -15,7 +15,9 @@ import {
   addUniqueStringListValue,
   buildObjectListRowFieldUpdate,
   buildClearStepParamCommand,
+  buildRefDependencyAction,
   buildRefPickerOptions,
+  buildStepRefDependencyWarning,
   buildUpdateStepParamsCommand,
   displayValueForObjectField,
   isAuthoredRefValue,
@@ -34,6 +36,7 @@ import {
   updateObjectField,
   valueForObjectListRowFieldDraft,
   type RefPickerOption,
+  type StepRefDependencyWarning,
 } from "./stepParams.logic";
 import { normalizeEditableText, textInputGuardProps } from "./textInputGuards.logic";
 
@@ -44,9 +47,18 @@ interface StepParamsEditorProps {
   stepSpec: StepSpecDto | null;
   refIndex: RefIndexDto;
   onCommand: (command: EditorCommand) => Promise<boolean>;
+  onUpdateDependencies: (dependencies: string[]) => Promise<boolean>;
 }
 
-export function StepParamsEditor({ readOnly = false, recipe, step, stepSpec, refIndex, onCommand }: StepParamsEditorProps) {
+export function StepParamsEditor({
+  readOnly = false,
+  recipe,
+  step,
+  stepSpec,
+  refIndex,
+  onCommand,
+  onUpdateDependencies,
+}: StepParamsEditorProps) {
   const paramNames = useMemo(() => orderedParamNames(step.params, stepSpec), [step.params, stepSpec]);
 
   async function updateParam(paramName: string, nextValue: unknown): Promise<boolean> {
@@ -81,11 +93,13 @@ export function StepParamsEditor({ readOnly = false, recipe, step, stepSpec, ref
               readOnly={readOnly}
               recipe={recipe}
               refIndex={refIndex}
+              step={step}
               stepSpec={stepSpec}
               value={Object.prototype.hasOwnProperty.call(step.params, paramName) ? step.params[paramName] : undefined}
               hasParam={Object.prototype.hasOwnProperty.call(step.params, paramName)}
               onClear={() => clearParam(paramName)}
               onUpdate={(nextValue) => updateParam(paramName, nextValue)}
+              onUpdateDependencies={onUpdateDependencies}
             />
           ))}
         </div>
@@ -100,20 +114,24 @@ function StepParamRow({
   hasParam,
   readOnly,
   recipe,
+  step,
   stepSpec,
   refIndex,
   onUpdate,
   onClear,
+  onUpdateDependencies,
 }: {
   paramName: string;
   value: unknown;
   hasParam: boolean;
   readOnly: boolean;
   recipe: RecipeDto;
+  step: StepDto;
   stepSpec: StepSpecDto | null;
   refIndex: RefIndexDto;
   onUpdate: (nextValue: unknown) => Promise<boolean>;
   onClear: () => Promise<boolean>;
+  onUpdateDependencies: (dependencies: string[]) => Promise<boolean>;
 }) {
   const paramSpec = stepSpec?.params[paramName] ?? null;
   const shape = paramSpec?.shape;
@@ -152,12 +170,20 @@ function StepParamRow({
   } else if (structuredKind === "object" && shape) {
     control = <ObjectParamInput disabled={readOnly} shape={shape} value={value} onUpdate={onUpdate} />;
   } else if (isAuthoredRefValue(value)) {
+    const dependencyWarning = buildStepRefDependencyWarning({
+      refIndex,
+      currentStepId: step.id,
+      dependencyIds: step.dependencies,
+      value,
+    });
     control = (
       <RefPicker
         allowedValueTypes={allowedValueTypes}
         currentRef={value.ref}
+        dependencyWarning={dependencyWarning}
         disabled={readOnly}
         refIndex={refIndex}
+        onAddDependency={() => addRefDependency(step, dependencyWarning, onUpdateDependencies)}
         onUpdate={(ref) => onUpdate({ ref })}
       />
     );
@@ -1064,14 +1090,18 @@ function BooleanParamInput({ disabled = false, value, onUpdate }: { disabled?: b
 function RefPicker({
   currentRef,
   allowedValueTypes,
+  dependencyWarning,
   disabled = false,
   refIndex,
+  onAddDependency,
   onUpdate,
 }: {
   currentRef: string;
   allowedValueTypes: readonly string[];
+  dependencyWarning: StepRefDependencyWarning | null;
   disabled?: boolean;
   refIndex: RefIndexDto;
+  onAddDependency: () => Promise<boolean>;
   onUpdate: (nextRef: string) => Promise<boolean>;
 }) {
   const [showAll, setShowAll] = useState(false);
@@ -1108,8 +1138,36 @@ function RefPicker({
           {showAll ? "Filter refs" : "Show all refs"}
         </button>
       ) : null}
+      {dependencyWarning ? (
+        <div className="grid gap-2 rounded border border-amber-200 bg-amber-50 px-3 py-2">
+          <p className="text-sm text-amber-900">{dependencyWarning.message}</p>
+          <button
+            className="w-fit rounded border border-amber-700 bg-white px-2 py-1 text-xs font-medium text-amber-900 hover:bg-amber-100 disabled:opacity-40"
+            disabled={disabled}
+            type="button"
+            onClick={() => void onAddDependency()}
+          >
+            Add dependency
+          </button>
+        </div>
+      ) : null}
     </div>
   );
+}
+
+async function addRefDependency(
+  step: StepDto,
+  dependencyWarning: StepRefDependencyWarning | null,
+  onUpdateDependencies: (dependencies: string[]) => Promise<boolean>,
+): Promise<boolean> {
+  if (dependencyWarning === null) {
+    return false;
+  }
+  const result = buildRefDependencyAction(step.dependencies, step.id, dependencyWarning.producerStepId);
+  if (!result.ok) {
+    return false;
+  }
+  return onUpdateDependencies(result.dependencies);
 }
 
 function JsonValueEditor({ readOnly = false, value, onUpdate }: { readOnly?: boolean; value: unknown; onUpdate: (nextValue: unknown) => Promise<boolean> }) {

@@ -1,5 +1,6 @@
 import type { EditorCommand } from "../api/commands.js";
 import type { RefCandidateDto, RefIndexDto, StepParamShapeFieldDto, StepSpecDto } from "../api/types.js";
+import { buildAddDependencyList, type AddDependencyResult } from "./stepDependencies.logic.js";
 
 export interface AuthoredRefValue {
   ref: string;
@@ -14,6 +15,22 @@ export interface RefPickerOption {
   current: boolean;
   missing: boolean;
   incompatible: boolean;
+}
+
+export type StepProducerRefInfo =
+  | {
+      kind: "step";
+      producerStepId: string;
+      outputName: string | null;
+      shorthandStepRef: boolean;
+    }
+  | { kind: "non-step" };
+
+export interface StepRefDependencyWarning {
+  producerStepId: string;
+  outputName: string | null;
+  shorthandStepRef: boolean;
+  message: string;
 }
 
 export type ParseResult = { ok: true; value: unknown } | { ok: false; error: string };
@@ -312,6 +329,79 @@ export function buildRefPickerOptions(
   });
 }
 
+export function stepProducerRefInfo(refIndex: RefIndexDto, ref: unknown): StepProducerRefInfo {
+  if (typeof ref !== "string") {
+    return { kind: "non-step" };
+  }
+
+  const candidate = refIndex.candidates.find((item) => item.ref === ref);
+  if (candidate) {
+    const structured = structuredStepProducerInfo(candidate);
+    if (structured.kind === "step") {
+      return structured;
+    }
+  }
+
+  const stepOutputRef = parseStepOutputRef(ref);
+  if (stepOutputRef !== null) {
+    return {
+      kind: "step",
+      producerStepId: stepOutputRef.producerStepId,
+      outputName: stepOutputRef.outputName,
+      shorthandStepRef: false,
+    };
+  }
+
+  const bareStepRef = parseBareStepRef(ref);
+  if (bareStepRef !== null) {
+    return {
+      kind: "step",
+      producerStepId: bareStepRef,
+      outputName: null,
+      shorthandStepRef: true,
+    };
+  }
+
+  return { kind: "non-step" };
+}
+
+export function buildStepRefDependencyWarning({
+  refIndex,
+  currentStepId,
+  dependencyIds,
+  value,
+}: {
+  refIndex: RefIndexDto;
+  currentStepId: string;
+  dependencyIds: readonly string[];
+  value: unknown;
+}): StepRefDependencyWarning | null {
+  if (!isAuthoredRefValue(value)) {
+    return null;
+  }
+  const info = stepProducerRefInfo(refIndex, value.ref);
+  if (info.kind !== "step") {
+    return null;
+  }
+  if (info.producerStepId === currentStepId || dependencyIds.includes(info.producerStepId)) {
+    return null;
+  }
+  return {
+    producerStepId: info.producerStepId,
+    outputName: info.outputName,
+    shorthandStepRef: info.shorthandStepRef,
+    message: `This ref is produced by step "${info.producerStepId}", but the current step does not depend on it.`,
+  };
+}
+
+export function buildRefDependencyAction(
+  dependencyIds: readonly string[],
+  currentStepId: string,
+  producerStepId: string,
+): AddDependencyResult {
+  return buildAddDependencyList(dependencyIds, currentStepId, producerStepId);
+}
+
 function shouldPreserveInteger(currentValue: unknown): boolean {
   return typeof currentValue === "number" && Number.isInteger(currentValue);
 }
@@ -343,6 +433,45 @@ function candidateOptions(candidates: readonly RefCandidateDto[]): RefPickerOpti
     missing: false,
     incompatible: false,
   }));
+}
+
+function structuredStepProducerInfo(candidate: RefCandidateDto): StepProducerRefInfo {
+  if (!candidate.sourceId) {
+    return { kind: "non-step" };
+  }
+  if (candidate.sourceKind === "step_output") {
+    return {
+      kind: "step",
+      producerStepId: candidate.sourceId,
+      outputName: parseStepOutputRef(candidate.ref)?.outputName ?? null,
+      shorthandStepRef: false,
+    };
+  }
+  if (candidate.sourceKind === "step" || candidate.sourceKind === "step_ref") {
+    return {
+      kind: "step",
+      producerStepId: candidate.sourceId,
+      outputName: null,
+      shorthandStepRef: true,
+    };
+  }
+  return { kind: "non-step" };
+}
+
+function parseBareStepRef(ref: string): string | null {
+  const match = /^steps\.([^.]+)$/.exec(ref);
+  return match?.[1] ?? null;
+}
+
+function parseStepOutputRef(ref: string): { producerStepId: string; outputName: string } | null {
+  const match = /^steps\.([^.]+)\.outputs\.([^.]+)$/.exec(ref);
+  if (!match) {
+    return null;
+  }
+  return {
+    producerStepId: match[1],
+    outputName: match[2],
+  };
 }
 
 function rawRefOption(ref: string, missing = false): RefPickerOption {
