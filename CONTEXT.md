@@ -261,23 +261,29 @@ falls back to `allRefs`, and keeps current missing or incompatible refs visible
 for repair. Selecting a ref does not automatically add or rewrite step
 dependencies.
 
-Advanced step internals use a collapsed Advanced section with plain JSON
-textarea editors for constraints, `skip_if`, and `verify`. Each editor keeps a
-local draft until the user selects Apply, parses JSON before submitting, and
-then sends `UpdateStepConstraints`, `UpdateStepSkipIf`, or `UpdateStepVerify`
-through `sidecar_apply_recipe_command`. The constraints editor displays the
+Advanced step internals use a collapsed Advanced section. Constraints and
+`skip_if` use plain JSON textarea editors. `verify` uses a structured list
+editor for condition entries whose top-level shape is exactly `{ type, params }`
+and whose supported known field is a string: `path_exists.params.path`,
+`file_exists.params.path`, and `package_installed.params.package_name`.
+Structured verify edits preserve unknown keys inside `params`. Unsupported,
+malformed, or future-shaped verify entries remain editable as per-entry JSON
+and are submitted without frontend normalization when their shape is accepted by
+the existing `UpdateStepVerify` command codec. Advanced internals editors keep
+local drafts until the user applies or commits an edit, then send
+`UpdateStepConstraints`, `UpdateStepSkipIf`, or `UpdateStepVerify` through
+`sidecar_apply_recipe_command`. The constraints editor displays the
 authored/YAML-facing `conflicts_with` key, and the frontend converts that key to
 the API command field `conflictsWith` only when submitting
-`UpdateStepConstraints`. Revert restores the draft from the current returned
+`UpdateStepConstraints`. Revert restores drafts from the current returned
 document value. JSON `null` is a literal JSON value and is not a clear action;
 if the command codec requires a different top-level shape, the frontend reports
 a local shape error and does not submit. Advanced JSON values that contain
 objects shaped like `{ "ref": "..." }` are ordinary JSON values in this editor.
 The Tauri editor has no specialized constraints builder, `skip_if` condition
-builder, `verify` builder, or ref picker inside advanced JSON values. The Rust
-sidecar remains authoritative for advanced internals command application,
-canonical YAML, semantic validation diagnostics, dirty state, undo state, and
-redo state.
+builder, or ref picker inside advanced internals. The Rust sidecar remains
+authoritative for advanced internals command application, canonical YAML,
+semantic validation diagnostics, dirty state, undo state, and redo state.
 Advanced internals command success with `changed: false` is treated as a no-op
 rather than an applied edit.
 
