@@ -5,6 +5,7 @@ export type MenuAction =
   | "openRecipe"
   | "saveRecipe"
   | "saveRecipeAs"
+  | "restartSidecar"
   | "undo"
   | "redo"
   | "validate"

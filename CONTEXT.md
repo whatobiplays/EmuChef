@@ -429,6 +429,18 @@ recipe reopen to create a fresh document session. Normal document and sidecar
 request paths do not automatically restart an exited sidecar. Previous document
 ids are invalid after process loss or explicit sidecar restart.
 
+The Tauri editor exposes an explicit Restart Sidecar recovery action. A
+successful restart replaces the Rust sidecar process and does not preserve
+backend document sessions. If a document is visible when the sidecar restarts,
+the editor keeps the current `RecipeDocumentDto`, diagnostics, canonical YAML
+preview, path, and dirty flag visible as a stale read-only reference. A
+compatible running sidecar allows path-backed stale documents to be explicitly
+reopened from disk to create a new document session. Dirty stale documents
+require explicit confirmation before reopening from disk, and stale documents
+without a disk path do not offer Reopen from Disk. The editor does not silently
+save, replay commands, reload, reopen, or discard stale in-memory document
+state after sidecar loss or restart.
+
 There is no backend selector, runtime backend toggle, environment variable,
 config option, UI switch, protocol negotiation path, or Python fallback in the
 Tauri editor runtime. Python, PySide6, and the Python CLI remain in the repo only

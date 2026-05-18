@@ -7,6 +7,7 @@ use tauri::{
 const ACTION_OPEN_RECIPE: &str = "openRecipe";
 const ACTION_SAVE_RECIPE: &str = "saveRecipe";
 const ACTION_SAVE_RECIPE_AS: &str = "saveRecipeAs";
+const ACTION_RESTART_SIDECAR: &str = "restartSidecar";
 const ACTION_UNDO: &str = "undo";
 const ACTION_REDO: &str = "redo";
 const ACTION_VALIDATE: &str = "validate";
@@ -26,6 +27,7 @@ pub struct EditorMenuState {
     command_in_flight: bool,
     document_session_valid: bool,
     backend_compatible: Option<bool>,
+    sidecar_running: Option<bool>,
 }
 
 impl Default for EditorMenuState {
@@ -40,6 +42,7 @@ impl Default for EditorMenuState {
             command_in_flight: false,
             document_session_valid: true,
             backend_compatible: None,
+            sidecar_running: None,
         }
     }
 }
@@ -86,6 +89,7 @@ pub fn handle_menu_event<R: Runtime>(app: &AppHandle<R>, action: &str) {
         ACTION_OPEN_RECIPE
         | ACTION_SAVE_RECIPE
         | ACTION_SAVE_RECIPE_AS
+        | ACTION_RESTART_SIDECAR
         | ACTION_UNDO
         | ACTION_REDO
         | ACTION_VALIDATE
@@ -129,8 +133,13 @@ fn build_file_menu<R: Runtime>(
     app: &AppHandle<R>,
     state: EditorMenuState,
 ) -> tauri::Result<Submenu<R>> {
-    let sidecar_ready = !state.command_in_flight && state.document_session_valid;
-    let backend_ready = sidecar_ready && state.backend_compatible != Some(false);
+    let command_idle = !state.command_in_flight;
+    let backend_ready = state.backend_compatible != Some(false);
+    let backend_usable =
+        state.backend_compatible == Some(true) && state.sidecar_running == Some(true);
+    let session_ready = command_idle && state.document_session_valid && backend_ready;
+    let open_recipe_ready =
+        command_idle && backend_ready && (state.document_session_valid || backend_usable);
     let has_root_to_clear = state.has_selected_authored_root
         || (state.has_document && state.has_document_authored_root);
     Submenu::with_items(
@@ -142,7 +151,7 @@ fn build_file_menu<R: Runtime>(
                 app,
                 ACTION_OPEN_RECIPE,
                 "Open Recipe",
-                backend_ready,
+                open_recipe_ready,
                 Some("CmdOrCtrl+O"),
             )?,
             &PredefinedMenuItem::separator(app)?,
@@ -150,14 +159,14 @@ fn build_file_menu<R: Runtime>(
                 app,
                 ACTION_SET_AUTHORED_ROOT,
                 "Set Authored Root...",
-                backend_ready,
+                session_ready,
                 None::<&str>,
             )?,
             &MenuItem::with_id(
                 app,
                 ACTION_CLEAR_AUTHORED_ROOT,
                 "Clear Authored Root",
-                backend_ready && has_root_to_clear,
+                session_ready && has_root_to_clear,
                 None::<&str>,
             )?,
             &PredefinedMenuItem::separator(app)?,
@@ -165,14 +174,14 @@ fn build_file_menu<R: Runtime>(
                 app,
                 ACTION_SAVE_RECIPE,
                 "Save",
-                backend_ready && state.has_document && state.dirty,
+                session_ready && state.has_document && state.dirty,
                 Some("CmdOrCtrl+S"),
             )?,
             &MenuItem::with_id(
                 app,
                 ACTION_SAVE_RECIPE_AS,
                 "Save As…",
-                backend_ready && state.has_document,
+                session_ready && state.has_document,
                 None::<&str>,
             )?,
             #[cfg(not(target_os = "macos"))]
@@ -223,6 +232,7 @@ fn build_utilities_menu<R: Runtime>(
     app: &AppHandle<R>,
     state: EditorMenuState,
 ) -> tauri::Result<Submenu<R>> {
+    let restart_ready = !state.command_in_flight;
     let document_ready = !state.command_in_flight
         && state.document_session_valid
         && state.backend_compatible != Some(false)
@@ -244,6 +254,14 @@ fn build_utilities_menu<R: Runtime>(
                 ACTION_REFRESH_YAML,
                 "Refresh YAML",
                 document_ready,
+                None::<&str>,
+            )?,
+            &PredefinedMenuItem::separator(app)?,
+            &MenuItem::with_id(
+                app,
+                ACTION_RESTART_SIDECAR,
+                "Restart Sidecar",
+                restart_ready,
                 None::<&str>,
             )?,
         ],

@@ -5,15 +5,187 @@ import {
   beginCommand,
   buildCloseConfirmationCopy,
   buildActionAvailability,
+  buildInvalidSessionRecovery,
   classifySidecarStatus,
   classifyOperationFailure,
+  classifyRestartFailure,
   decideCloseRequest,
   formatSidecarStatusLabel,
   resolveAuthoredRootSelectionAttempt,
   resolveClosePromptResult,
   resolveOpenAttempt,
+  resolveReopenAttempt,
+  resolveRestartSuccess,
+  type ActionAvailabilityState,
   type CommandName,
 } from "../src/components/phase5EditorState.logic.js";
+
+function recoveryState(overrides: Partial<ActionAvailabilityState>): ActionAvailabilityState {
+  return {
+    hasDocument: true,
+    hasSelectedAuthoredRoot: false,
+    hasDocumentAuthoredRoot: false,
+    hasDocumentPath: true,
+    dirty: false,
+    canUndo: false,
+    canRedo: false,
+    commandInFlight: null,
+    documentSessionValid: false,
+    backendCompatible: true,
+    sidecarRunning: true,
+    ...overrides,
+  };
+}
+
+test("restart recovery offers clean path-backed stale documents for read-only reopen without confirmation", () => {
+  const recovery = buildInvalidSessionRecovery(recoveryState({ dirty: false, hasDocumentPath: true }));
+
+  assert.equal(recovery.readOnly, true);
+  assert.equal(recovery.reopenFromDisk, true);
+  assert.equal(recovery.reopenRequiresConfirmation, false);
+  assert.match(recovery.message ?? "", /read-only/i);
+});
+
+test("restart recovery warns before reopening dirty path-backed stale documents", () => {
+  const recovery = buildInvalidSessionRecovery(recoveryState({ dirty: true, hasDocumentPath: true }));
+
+  assert.equal(recovery.readOnly, true);
+  assert.equal(recovery.reopenFromDisk, true);
+  assert.equal(recovery.reopenRequiresConfirmation, true);
+  assert.match(recovery.message ?? "", /unsaved/i);
+});
+
+test("restart recovery keeps untitled stale documents read-only without reopen from disk", () => {
+  const recovery = buildInvalidSessionRecovery(recoveryState({ dirty: true, hasDocumentPath: false }));
+
+  assert.equal(recovery.readOnly, true);
+  assert.equal(recovery.reopenFromDisk, false);
+  assert.equal(recovery.reopenRequiresConfirmation, false);
+  assert.match(recovery.message ?? "", /no disk path/i);
+});
+
+test("restart success invalidates displayed document sessions and enables recovery only for usable sidecars", () => {
+  assert.deepEqual(
+    resolveRestartSuccess(
+      {
+        running: true,
+        pid: 123,
+        state: "running",
+        compatible: true,
+        protocolVersion: 1,
+        capabilities: ["listStepSpecs"],
+        lastError: null,
+      },
+      true,
+    ),
+    {
+      sessionValid: false,
+      message:
+        "The sidecar was restarted. The displayed recipe is a stale read-only reference; reopen it from disk to create a new document session.",
+      sidecarUsable: true,
+      stepSpecsRefreshAllowed: true,
+    },
+  );
+
+  assert.deepEqual(
+    resolveRestartSuccess(
+      {
+        running: false,
+        pid: null,
+        state: "incompatible",
+        compatible: false,
+        protocolVersion: null,
+        capabilities: [],
+        lastError: "Backend is missing required capabilities.",
+      },
+      true,
+    ),
+    {
+      sessionValid: false,
+      message:
+        "Backend is missing required capabilities. The editor session is no longer valid. Restart the sidecar and reopen the recipe.",
+      sidecarUsable: false,
+      stepSpecsRefreshAllowed: false,
+    },
+  );
+});
+
+test("restart failure preserves current session validity and returns a surfaced error", () => {
+  assert.deepEqual(
+    classifyRestartFailure({ kind: "transport-error", message: "failed to start sidecar" }, "Sidecar restart failed."),
+    {
+      message: "Sidecar restart failed. failed to start sidecar",
+      sessionInvalid: false,
+    },
+  );
+});
+
+test("action availability allows compatible sidecar recovery while keeping invalid documents read-only", () => {
+  const availability = buildActionAvailability(
+    recoveryState({
+      dirty: true,
+      hasDocumentPath: true,
+      documentSessionValid: false,
+      backendCompatible: true,
+      sidecarRunning: true,
+    }),
+  );
+
+  assert.equal(availability.openRecipe, true);
+  assert.equal(availability.reopenFromDisk, true);
+  assert.equal(availability.restartSidecar, true);
+  assert.equal(availability.editDocument, false);
+  assert.equal(availability.saveRecipe, false);
+  assert.equal(availability.saveRecipeAs, false);
+  assert.equal(availability.validate, false);
+  assert.equal(availability.undo, false);
+  assert.equal(availability.redo, false);
+});
+
+test("action availability keeps recovery opens disabled for incompatible restarted sidecars", () => {
+  const availability = buildActionAvailability(
+    recoveryState({
+      hasDocumentPath: true,
+      documentSessionValid: false,
+      backendCompatible: false,
+      sidecarRunning: false,
+    }),
+  );
+
+  assert.equal(availability.openRecipe, false);
+  assert.equal(availability.reopenFromDisk, false);
+  assert.equal(availability.restartSidecar, true);
+});
+
+test("action availability disables restart during any in-flight command", () => {
+  assert.equal(
+    buildActionAvailability(
+      recoveryState({
+        commandInFlight: "validate",
+        documentSessionValid: false,
+        backendCompatible: true,
+        sidecarRunning: true,
+      }),
+    ).restartSidecar,
+    false,
+  );
+});
+
+test("reopen resolution replaces stale state only after successful reopen", () => {
+  const stale = { documentId: "stale" };
+  const reopened = { documentId: "reopened" };
+
+  assert.deepEqual(resolveReopenAttempt(stale, { kind: "opened", document: reopened }), {
+    document: reopened,
+    sessionValid: true,
+    replaced: true,
+  });
+  assert.deepEqual(resolveReopenAttempt(stale, { kind: "open-failed", sessionInvalid: false }), {
+    document: stale,
+    sessionValid: false,
+    replaced: false,
+  });
+});
 
 test("buildActionAvailability gates document actions on session validity independently of dirty state", () => {
   assert.deepEqual(
@@ -29,6 +201,8 @@ test("buildActionAvailability gates document actions on session validity indepen
     }),
     {
       openRecipe: false,
+      restartSidecar: true,
+      reopenFromDisk: false,
       saveRecipe: false,
       saveRecipeAs: false,
       undo: false,
@@ -56,6 +230,8 @@ test("buildActionAvailability disables conflicting actions while a command is in
     }),
     {
       openRecipe: false,
+      restartSidecar: false,
+      reopenFromDisk: false,
       saveRecipe: false,
       saveRecipeAs: false,
       undo: false,
@@ -83,6 +259,8 @@ test("buildActionAvailability enables only valid clean-document actions", () => 
     }),
     {
       openRecipe: true,
+      restartSidecar: true,
+      reopenFromDisk: false,
       saveRecipe: false,
       saveRecipeAs: true,
       undo: true,
@@ -111,6 +289,8 @@ test("buildActionAvailability treats compatible backend metadata as editable", (
     }),
     {
       openRecipe: true,
+      restartSidecar: true,
+      reopenFromDisk: false,
       saveRecipe: true,
       saveRecipeAs: true,
       undo: true,
@@ -139,6 +319,8 @@ test("buildActionAvailability disables document actions for incompatible backend
     }),
     {
       openRecipe: false,
+      restartSidecar: true,
+      reopenFromDisk: false,
       saveRecipe: false,
       saveRecipeAs: false,
       undo: false,
@@ -416,7 +598,7 @@ test("classifyOperationFailure distinguishes api errors from fatal sidecar trans
     classifyOperationFailure({ kind: "transport-error", message: "Rust sidecar exited unexpectedly" }, "Save failed."),
     {
       message:
-        "Save failed. Rust sidecar exited unexpectedly The editor session is no longer valid. Restart the Tauri app and reopen the recipe.",
+        "Save failed. Rust sidecar exited unexpectedly The editor session is no longer valid. Restart the sidecar and reopen the recipe.",
       sessionInvalid: true,
     },
   );
@@ -451,7 +633,7 @@ test("classifyOperationFailure invalidates only unknown_document errors for the 
     }),
     {
       message:
-        "Save failed. unknown_document: Document was closed. The editor session is no longer valid. Restart the Tauri app and reopen the recipe.",
+        "Save failed. unknown_document: Document was closed. The editor session is no longer valid. Restart the sidecar and reopen the recipe.",
       sessionInvalid: true,
     },
   );
@@ -497,7 +679,7 @@ test("classifySidecarStatus invalidates only exited error or incompatible states
     {
       sessionInvalid: true,
       message:
-        "Backend hello response was malformed. The editor session is no longer valid. Restart the Tauri app and reopen the recipe.",
+        "Backend hello response was malformed. The editor session is no longer valid. Restart the sidecar and reopen the recipe.",
     },
   );
 });
@@ -548,6 +730,7 @@ test("command names stay limited to known Phase 5 document operations", () => {
     "openRecipe",
     "saveRecipe",
     "saveRecipeAs",
+    "restartSidecar",
     "undo",
     "redo",
     "validate",
@@ -556,7 +739,7 @@ test("command names stay limited to known Phase 5 document operations", () => {
     "mutation",
   ];
 
-  assert.equal(names.length, 9);
+  assert.equal(names.length, 10);
 });
 
 test("decideCloseRequest allows clean windows to close without prompting", () => {

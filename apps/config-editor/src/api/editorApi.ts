@@ -140,9 +140,11 @@ export interface MenuState {
   dirty: boolean;
   canUndo: boolean;
   canRedo: boolean;
+  hasDocumentPath: boolean;
   commandInFlight: boolean;
   documentSessionValid: boolean;
   backendCompatible: boolean | null;
+  sidecarRunning: boolean | null;
 }
 
 export async function updateMenuState(state: MenuState): Promise<void> {

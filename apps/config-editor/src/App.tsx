@@ -9,6 +9,7 @@ import {
   sidecarListStepSpecs,
   sidecarOpenRecipe,
   sidecarRedo,
+  sidecarRestart,
   sidecarSaveRecipe,
   sidecarSaveRecipeAs,
   sidecarSetDocumentAuthoredRoot,
@@ -37,13 +38,17 @@ import {
   beginCommand,
   buildCloseConfirmationCopy,
   buildActionAvailability,
+  buildInvalidSessionRecovery,
   classifySidecarStatus,
   classifyOperationFailure,
+  classifyRestartFailure,
   decideCloseRequest,
   invalidSessionMessage,
   resolveAuthoredRootSelectionAttempt,
   resolveClosePromptResult,
   resolveOpenAttempt,
+  resolveReopenAttempt,
+  resolveRestartSuccess,
   type CommandName,
 } from "./components/phase5EditorState.logic";
 import { TextPromptDialog } from "./components/PromptDialog";
@@ -94,6 +99,7 @@ export default function App() {
 
   const currentDocumentRef = useRef<RecipeDocumentDto | null>(null);
   const selectedAuthoredRootRef = useRef<string | null>(null);
+  const sidecarStateRef = useRef<SidecarStatusResult | null>(null);
   const commandInFlightRef = useRef<CommandName | null>(null);
   const documentSessionValidRef = useRef(true);
   const sessionInvalidReasonRef = useRef<string | null>(null);
@@ -109,14 +115,48 @@ export default function App() {
         hasDocument: currentDocument !== null,
         hasSelectedAuthoredRoot: selectedAuthoredRoot !== null,
         hasDocumentAuthoredRoot: currentDocument?.authoredRoot !== null && currentDocument?.authoredRoot !== undefined,
+        hasDocumentPath: Boolean(currentDocument?.path),
         dirty: currentDocument?.dirty ?? false,
         canUndo: currentDocument?.canUndo ?? false,
         canRedo: currentDocument?.canRedo ?? false,
         commandInFlight,
         documentSessionValid,
         backendCompatible: sidecarState?.compatible ?? null,
+        sidecarRunning: sidecarState?.running ?? null,
       }),
-    [commandInFlight, currentDocument, documentSessionValid, selectedAuthoredRoot, sidecarState?.compatible],
+    [
+      commandInFlight,
+      currentDocument,
+      documentSessionValid,
+      selectedAuthoredRoot,
+      sidecarState?.compatible,
+      sidecarState?.running,
+    ],
+  );
+
+  const invalidSessionRecovery = useMemo(
+    () =>
+      buildInvalidSessionRecovery({
+        hasDocument: currentDocument !== null,
+        hasSelectedAuthoredRoot: selectedAuthoredRoot !== null,
+        hasDocumentAuthoredRoot: currentDocument?.authoredRoot !== null && currentDocument?.authoredRoot !== undefined,
+        hasDocumentPath: Boolean(currentDocument?.path),
+        dirty: currentDocument?.dirty ?? false,
+        canUndo: currentDocument?.canUndo ?? false,
+        canRedo: currentDocument?.canRedo ?? false,
+        commandInFlight,
+        documentSessionValid,
+        backendCompatible: sidecarState?.compatible ?? null,
+        sidecarRunning: sidecarState?.running ?? null,
+      }),
+    [
+      commandInFlight,
+      currentDocument,
+      documentSessionValid,
+      selectedAuthoredRoot,
+      sidecarState?.compatible,
+      sidecarState?.running,
+    ],
   );
 
   const stepSpecsCount = useMemo(() => {
@@ -135,6 +175,10 @@ export default function App() {
   }, [selectedAuthoredRoot]);
 
   useEffect(() => {
+    sidecarStateRef.current = sidecarState;
+  }, [sidecarState]);
+
+  useEffect(() => {
     commandInFlightRef.current = commandInFlight;
   }, [commandInFlight]);
 
@@ -148,7 +192,14 @@ export default function App() {
 
   useEffect(() => {
     void syncMenuState(currentDocument, commandInFlight, documentSessionValid);
-  }, [commandInFlight, currentDocument, documentSessionValid, selectedAuthoredRoot, sidecarState?.compatible]);
+  }, [
+    commandInFlight,
+    currentDocument,
+    documentSessionValid,
+    selectedAuthoredRoot,
+    sidecarState?.compatible,
+    sidecarState?.running,
+  ]);
 
   useEffect(() => {
     if (!statusMessage) {
@@ -261,6 +312,7 @@ export default function App() {
     openRecipe: () => void openRecipe(),
     saveRecipe: () => void saveRecipe(),
     saveRecipeAs: () => void saveRecipeAs(),
+    restartSidecar: () => void restartSidecar(),
     undo: () => void undo(),
     redo: () => void redo(),
     validate: () => void validate(),
@@ -270,17 +322,20 @@ export default function App() {
   };
 
   async function openRecipe() {
-    if (!documentSessionValidRef.current) {
-      showInvalidSessionMessage();
-      await syncMenuState(currentDocumentRef.current);
-      return;
-    }
     if (commandInFlightRef.current !== null) {
       await syncMenuState(currentDocumentRef.current);
       return;
     }
 
     const current = currentDocumentRef.current;
+    if (!currentActionAvailability(current).openRecipe) {
+      if (!documentSessionValidRef.current) {
+        showInvalidSessionMessage();
+      }
+      await syncMenuState(current);
+      return;
+    }
+
     if (current?.dirty) {
       const confirmed = await confirmAction(
         "Discard unsaved changes",
@@ -315,20 +370,27 @@ export default function App() {
       return;
     }
 
+    await openRecipeAtPath(path);
+  }
+
+  async function openRecipeAtPath(path: string): Promise<boolean> {
     if (!beginAppCommand("openRecipe", "Opening recipe")) {
       await syncMenuState(currentDocumentRef.current);
-      return;
+      return false;
     }
     try {
       const response = await sidecarOpenRecipe(path, selectedAuthoredRootRef.current);
       if (response.kind === "success") {
         applyDocument(response.result.document, path);
+        documentSessionValidRef.current = true;
         setDocumentSessionValid(true);
+        sessionInvalidReasonRef.current = null;
         setSessionInvalidReason(null);
         setActiveView("overview");
         setErrorMessage(null);
         setStatusMessage(null);
         await syncMenuState(response.result.document, commandInFlightRef.current, true);
+        return true;
       } else {
         const classification = handleOperationFailure(response, "Recipe failed to open.");
         const resolution = resolveOpenAttempt(currentDocumentRef.current, {
@@ -339,11 +401,136 @@ export default function App() {
           markDocumentSessionInvalid(classification.message);
         }
         await refreshSidecarStatus();
-        await syncMenuState(resolution.document, commandInFlightRef.current, resolution.sessionValid);
+        await syncMenuState(resolution.document, commandInFlightRef.current, documentSessionValidRef.current && resolution.sessionValid);
+        return false;
       }
     } finally {
       finishAppCommand();
     }
+  }
+
+  async function reopenFromDisk() {
+    const document = currentDocumentRef.current;
+    const path = document?.path;
+    const availability = currentActionAvailability(document).reopenFromDisk;
+    if (document === null || !path || !availability) {
+      await syncMenuState(document);
+      return;
+    }
+
+    if (document.dirty) {
+      const confirmed = await confirmAction(
+        "Reopen saved file",
+        `Reopen ${document.recipe.id} from disk? The stale in-memory edits cannot be saved through the invalid sidecar session and will not be replayed.`,
+        { confirmLabel: "Reopen", destructive: true },
+      );
+      if (!confirmed) {
+        await syncMenuState(currentDocumentRef.current);
+        return;
+      }
+    }
+
+    if (!beginAppCommand("openRecipe", "Reopening recipe")) {
+      await syncMenuState(currentDocumentRef.current);
+      return;
+    }
+    try {
+      const response = await sidecarOpenRecipe(path, selectedAuthoredRootRef.current);
+      if (response.kind === "success") {
+        const resolution = resolveReopenAttempt(document, { kind: "opened", document: response.result.document });
+        applyDocument(response.result.document, path);
+        setDocumentSessionValid(resolution.sessionValid);
+        documentSessionValidRef.current = resolution.sessionValid;
+        setSessionInvalidReason(null);
+        sessionInvalidReasonRef.current = null;
+        setActiveView("overview");
+        setErrorMessage(null);
+        setStatusMessage(null);
+        await syncMenuState(response.result.document, commandInFlightRef.current, resolution.sessionValid);
+      } else {
+        const classification = handleOperationFailure(response, "Recipe failed to reopen.");
+        const resolution = resolveReopenAttempt(document, {
+          kind: "open-failed",
+          sessionInvalid: classification.sessionInvalid,
+        });
+        if (!resolution.sessionValid) {
+          markDocumentSessionInvalid(sessionInvalidReasonRef.current ?? classification.message);
+        }
+        await refreshSidecarStatus();
+        await syncMenuState(resolution.document, commandInFlightRef.current, false);
+      }
+    } finally {
+      finishAppCommand();
+    }
+  }
+
+  async function restartSidecar() {
+    if (!currentActionAvailability(currentDocumentRef.current).restartSidecar) {
+      await syncMenuState(currentDocumentRef.current);
+      return;
+    }
+    if (!beginAppCommand("restartSidecar", "Restarting sidecar")) {
+      await syncMenuState(currentDocumentRef.current);
+      return;
+    }
+
+    try {
+      const response = await sidecarRestart();
+      if (response.kind !== "success") {
+        const classification = classifyRestartFailure(response, "Sidecar restart failed.");
+        setErrorMessage(classification.message);
+        setStatusMessage(null);
+        await syncMenuState(currentDocumentRef.current);
+        return;
+      }
+
+      const status = response.result.status;
+      sidecarStateRef.current = status;
+      setSidecarState(status);
+      const document = currentDocumentRef.current;
+      const restartResolution = resolveRestartSuccess(status, document !== null);
+
+      if (document !== null) {
+        const message = restartResolution.message ?? invalidSessionMessage();
+        markDocumentSessionInvalid(message);
+      } else {
+        documentSessionValidRef.current = restartResolution.sessionValid;
+        setDocumentSessionValid(restartResolution.sessionValid);
+        sessionInvalidReasonRef.current = restartResolution.message;
+        setSessionInvalidReason(restartResolution.message);
+      }
+
+      if (!restartResolution.sidecarUsable) {
+        setErrorMessage(restartResolution.message);
+        setStatusMessage(null);
+        await syncMenuState(document, commandInFlightRef.current, restartResolution.sessionValid);
+        return;
+      }
+
+      const specsRefreshed = await refreshStepSpecsAfterRestart();
+      if (specsRefreshed) {
+        setErrorMessage(null);
+        setStatusMessage(document === null ? "Sidecar restarted." : "Sidecar restarted. Reopen the stale recipe from disk to edit it.");
+      }
+      await syncMenuState(document, commandInFlightRef.current, restartResolution.sessionValid);
+    } finally {
+      finishAppCommand();
+    }
+  }
+
+  async function refreshStepSpecsAfterRestart(): Promise<boolean> {
+    setStepSpecsLoading(true);
+    const response = await sidecarListStepSpecs();
+    if (response.kind === "success") {
+      setStepSpecs(response.result.stepSpecs);
+      setStepSpecsLoaded(true);
+      setStepSpecsLoading(false);
+      return true;
+    }
+
+    handleOperationFailure(response, "Step specs failed to refresh after sidecar restart.");
+    setStepSpecsLoading(false);
+    return false;
   }
 
   async function setAuthoredRootFromDialog() {
@@ -574,17 +761,7 @@ export default function App() {
       return;
     }
 
-    const availability = buildActionAvailability({
-      hasDocument: true,
-      hasSelectedAuthoredRoot: selectedAuthoredRootRef.current !== null,
-      hasDocumentAuthoredRoot: document.authoredRoot !== null,
-      dirty: document.dirty,
-      canUndo: document.canUndo,
-      canRedo: document.canRedo,
-      commandInFlight: commandInFlightRef.current,
-      documentSessionValid: documentSessionValidRef.current,
-      backendCompatible: sidecarState?.compatible ?? null,
-    });
+    const availability = currentActionAvailability(document);
     if (!availability.saveRecipeAs) {
       await syncMenuState(document);
       return;
@@ -663,6 +840,27 @@ export default function App() {
     }
   }
 
+  function currentActionAvailability(
+    document: RecipeDocumentDto | null,
+    sessionValid: boolean = documentSessionValidRef.current,
+    command: CommandName | null = commandInFlightRef.current,
+  ) {
+    const status = sidecarStateRef.current;
+    return buildActionAvailability({
+      hasDocument: document !== null,
+      hasSelectedAuthoredRoot: selectedAuthoredRootRef.current !== null,
+      hasDocumentAuthoredRoot: document?.authoredRoot !== null && document?.authoredRoot !== undefined,
+      hasDocumentPath: Boolean(document?.path),
+      dirty: document?.dirty ?? false,
+      canUndo: document?.canUndo ?? false,
+      canRedo: document?.canRedo ?? false,
+      commandInFlight: command,
+      documentSessionValid: sessionValid,
+      backendCompatible: status?.compatible ?? null,
+      sidecarRunning: status?.running ?? null,
+    });
+  }
+
   function beginDocumentCommand(
     command: CommandName,
     label: string,
@@ -678,17 +876,7 @@ export default function App() {
       void syncMenuState(document);
       return null;
     }
-    const availability = buildActionAvailability({
-      hasDocument: true,
-      hasSelectedAuthoredRoot: selectedAuthoredRootRef.current !== null,
-      hasDocumentAuthoredRoot: document.authoredRoot !== null,
-      dirty: document.dirty,
-      canUndo: document.canUndo,
-      canRedo: document.canRedo,
-      commandInFlight: commandInFlightRef.current,
-      documentSessionValid: documentSessionValidRef.current,
-      backendCompatible: sidecarState?.compatible ?? null,
-    });
+    const availability = currentActionAvailability(document);
     if (!availability[action]) {
       void syncMenuState(document);
       return null;
@@ -733,6 +921,7 @@ export default function App() {
 
   function handleStatusResponse(response: EditorApiResult<SidecarStatusResult>) {
     if (response.kind === "success") {
+      sidecarStateRef.current = response.result;
       setSidecarState(response.result);
       const classification = classifySidecarStatus(response.result);
       if (classification.sessionInvalid && classification.message !== null) {
@@ -781,16 +970,19 @@ export default function App() {
     menuDocumentSessionValid: boolean = documentSessionValidRef.current,
   ) {
     try {
+      const status = sidecarStateRef.current;
       await updateMenuState({
         hasDocument: document !== null,
         hasSelectedAuthoredRoot: selectedAuthoredRootRef.current !== null,
         hasDocumentAuthoredRoot: document?.authoredRoot !== null && document?.authoredRoot !== undefined,
+        hasDocumentPath: Boolean(document?.path),
         dirty: document?.dirty ?? false,
         canUndo: document?.canUndo ?? false,
         canRedo: document?.canRedo ?? false,
         commandInFlight: menuCommandInFlight !== null,
         documentSessionValid: menuDocumentSessionValid,
-        backendCompatible: sidecarState?.compatible ?? null,
+        backendCompatible: status?.compatible ?? null,
+        sidecarRunning: status?.running ?? null,
       });
     } catch (error) {
       setErrorMessage(`Menu state update failed: ${errorMessageFromUnknown(error)}`);
@@ -959,7 +1151,21 @@ export default function App() {
             />
             {!documentSessionValid && currentDocument !== null ? (
               <div className="border-b border-amber-200 bg-amber-50 px-4 py-2 text-sm text-amber-900">
-                Editor session invalid. The open recipe is read-only for reference; restart the Tauri app and reopen it.
+                <div className="flex flex-wrap items-center gap-3">
+                  <p className="min-w-0 flex-1">
+                    {invalidSessionRecovery.message ??
+                      "The displayed recipe is a stale read-only reference. Restart the sidecar, then reopen the recipe from disk to create a new document session."}
+                  </p>
+                  {invalidSessionRecovery.reopenFromDisk ? (
+                    <button
+                      className="rounded border border-amber-300 bg-white px-3 py-1 text-sm font-medium text-amber-950 hover:bg-amber-100 disabled:opacity-40"
+                      type="button"
+                      onClick={() => void reopenFromDisk()}
+                    >
+                      Reopen from Disk
+                    </button>
+                  ) : null}
+                </div>
               </div>
             ) : null}
             {errorMessage ? <ErrorBanner message={errorMessage} onDismiss={() => setErrorMessage(null)} /> : null}

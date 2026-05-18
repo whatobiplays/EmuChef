@@ -4,6 +4,7 @@ export type CommandName =
   | "openRecipe"
   | "saveRecipe"
   | "saveRecipeAs"
+  | "restartSidecar"
   | "undo"
   | "redo"
   | "validate"
@@ -18,13 +19,17 @@ export interface ActionAvailabilityState {
   dirty: boolean;
   canUndo: boolean;
   canRedo: boolean;
+  hasDocumentPath?: boolean;
   commandInFlight: CommandName | null;
   documentSessionValid: boolean;
   backendCompatible?: boolean | null;
+  sidecarRunning?: boolean | null;
 }
 
 export interface ActionAvailability {
   openRecipe: boolean;
+  restartSidecar: boolean;
+  reopenFromDisk: boolean;
   saveRecipe: boolean;
   saveRecipeAs: boolean;
   undo: boolean;
@@ -51,6 +56,10 @@ export interface OpenAttemptResolution<TDocument> {
   replaced: boolean;
   sessionValid: boolean;
 }
+
+export type ReopenAttempt<TDocument> =
+  | { kind: "opened"; document: TDocument }
+  | { kind: "open-failed"; sessionInvalid: boolean };
 
 export type AuthoredRootSelectionAttempt<TDocument> =
   | { kind: "picker-cancelled" }
@@ -84,6 +93,20 @@ export interface SidecarStatusClassification {
   sessionInvalid: boolean;
 }
 
+export interface RestartSuccessResolution {
+  sessionValid: boolean;
+  message: string | null;
+  sidecarUsable: boolean;
+  stepSpecsRefreshAllowed: boolean;
+}
+
+export interface InvalidSessionRecovery {
+  readOnly: boolean;
+  reopenFromDisk: boolean;
+  reopenRequiresConfirmation: boolean;
+  message: string | null;
+}
+
 export interface OperationFailureContext {
   commandDocumentId?: string | null;
   currentDocumentId?: string | null;
@@ -108,16 +131,29 @@ export interface CloseConfirmationCopy {
 }
 
 const INVALID_SESSION_GUIDANCE =
-  "The editor session is no longer valid. Restart the Tauri app and reopen the recipe.";
+  "The editor session is no longer valid. Restart the sidecar and reopen the recipe.";
+
+const SIDECAR_RESTARTED_MESSAGE =
+  "The sidecar was restarted. The displayed recipe is a stale read-only reference; reopen it from disk to create a new document session.";
 
 export function buildActionAvailability(state: ActionAvailabilityState): ActionAvailability {
   const commandIdle = state.commandInFlight === null;
   const backendReady = state.backendCompatible !== false;
+  const backendUsable = state.backendCompatible === true && state.sidecarRunning === true;
   const sessionReady = state.documentSessionValid && backendReady && commandIdle;
   const documentReady = state.hasDocument && sessionReady;
+  const openRecipeReady = commandIdle && backendReady && (state.documentSessionValid || backendUsable);
+  const reopenFromDiskReady =
+    commandIdle &&
+    state.hasDocument &&
+    state.hasDocumentPath === true &&
+    !state.documentSessionValid &&
+    backendUsable;
 
   return {
-    openRecipe: sessionReady,
+    openRecipe: openRecipeReady,
+    restartSidecar: commandIdle,
+    reopenFromDisk: reopenFromDiskReady,
     saveRecipe: documentReady && state.dirty,
     saveRecipeAs: documentReady,
     undo: documentReady && state.canUndo,
@@ -196,6 +232,16 @@ export function resolveOpenAttempt<TDocument>(
   return { document: currentDocument, replaced: false, sessionValid: true };
 }
 
+export function resolveReopenAttempt<TDocument>(
+  currentDocument: TDocument,
+  attempt: ReopenAttempt<TDocument>,
+): OpenAttemptResolution<TDocument> {
+  if (attempt.kind === "opened") {
+    return { document: attempt.document, replaced: true, sessionValid: true };
+  }
+  return { document: currentDocument, replaced: false, sessionValid: false };
+}
+
 export function resolveAuthoredRootSelectionAttempt<TDocument>(
   currentSelectedAuthoredRoot: string | null,
   currentDocument: TDocument | null,
@@ -249,6 +295,86 @@ export function classifyOperationFailure(
   return {
     message: `${fallback} ${failure.message} ${INVALID_SESSION_GUIDANCE}`,
     sessionInvalid: true,
+  };
+}
+
+export function classifyRestartFailure(failure: OperationFailure, fallback: string): OperationFailureClassification {
+  if (failure.kind === "api-error") {
+    return {
+      message: `${fallback} ${failure.error.code}: ${failure.error.message}`,
+      sessionInvalid: false,
+    };
+  }
+
+  return {
+    message: `${fallback} ${failure.message}`,
+    sessionInvalid: false,
+  };
+}
+
+export function isSidecarUsable(status: SidecarStatusResult): boolean {
+  return status.running === true && status.compatible === true;
+}
+
+export function resolveRestartSuccess(status: SidecarStatusResult, hasDisplayedDocument: boolean): RestartSuccessResolution {
+  const sidecarUsable = isSidecarUsable(status);
+  if (sidecarUsable) {
+    return {
+      sessionValid: !hasDisplayedDocument,
+      message: hasDisplayedDocument ? SIDECAR_RESTARTED_MESSAGE : null,
+      sidecarUsable: true,
+      stepSpecsRefreshAllowed: true,
+    };
+  }
+
+  const classification = classifySidecarStatus(status);
+  return {
+    sessionValid: !hasDisplayedDocument,
+    message:
+      classification.message ??
+      invalidSessionMessage(status.lastError ?? status.message ?? "Backend sidecar is not usable after restart."),
+    sidecarUsable: false,
+    stepSpecsRefreshAllowed: false,
+  };
+}
+
+export function buildInvalidSessionRecovery(state: ActionAvailabilityState): InvalidSessionRecovery {
+  if (!state.hasDocument || state.documentSessionValid) {
+    return {
+      readOnly: false,
+      reopenFromDisk: false,
+      reopenRequiresConfirmation: false,
+      message: null,
+    };
+  }
+
+  const availability = buildActionAvailability(state);
+  if (state.hasDocumentPath !== true) {
+    return {
+      readOnly: true,
+      reopenFromDisk: false,
+      reopenRequiresConfirmation: false,
+      message:
+        "The displayed recipe is a stale read-only reference. It has no disk path, so use Open Recipe after sidecar recovery to create a new document session.",
+    };
+  }
+
+  if (state.dirty) {
+    return {
+      readOnly: true,
+      reopenFromDisk: availability.reopenFromDisk,
+      reopenRequiresConfirmation: availability.reopenFromDisk,
+      message:
+        "The displayed recipe is a stale read-only reference with unsaved in-memory edits. Reopen from Disk loads the saved file and does not save or replay those stale edits.",
+    };
+  }
+
+  return {
+    readOnly: true,
+    reopenFromDisk: availability.reopenFromDisk,
+    reopenRequiresConfirmation: false,
+    message:
+      "The displayed recipe is a stale read-only reference. Reopen from Disk creates a fresh document session from the saved file.",
   };
 }
 

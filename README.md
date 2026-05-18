@@ -100,8 +100,8 @@ Current editor scope notes:
 - incompatible backends stop normal document requests, mark the session invalid, and leave any stale document visible only as read-only reference
 - the Tauri Save command writes the current sidecar document to disk and should be tested only on safe or temporary recipe copies during development
 - native confirmation prompts guard opening another recipe with unsaved changes and closing the window/app with unsaved changes or an operation in flight where Tauri close interception is available
-- if the Rust sidecar exits or transport fails, the stale document remains visible for reference, document-specific actions are disabled, and the Tauri app must be restarted before reopening the recipe
-- Save As and create-from-template sidecar capabilities are not exposed in the Tauri UI
+- if the Rust sidecar exits or transport fails, the stale document remains visible for reference, document-specific actions are disabled, and the explicit Restart Sidecar action can recover a compatible running sidecar before the recipe is explicitly reopened
+- create-from-template sidecar capabilities are not exposed in the Tauri UI
 - capability names are backend-agnostic protocol strings; optional capabilities are display/status metadata only in the current UI
 - production signing, notarization, updater support, and cross-platform release automation are not implemented
 - there is no backend selector, backend toggle, config option, environment variable, UI switch, protocol negotiation path, or Python fallback for the Tauri editor runtime
