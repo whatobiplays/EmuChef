@@ -261,31 +261,37 @@ falls back to `allRefs`, and keeps current missing or incompatible refs visible
 for repair. Selecting a ref does not automatically add or rewrite step
 dependencies.
 
-Advanced step internals use a collapsed Advanced section. Constraints and
-`skip_if` use plain JSON textarea editors. `verify` uses a structured list
-editor for condition entries whose top-level shape is exactly `{ type, params }`
-and whose supported known field is a string: `path_exists.params.path`,
-`file_exists.params.path`, and `package_installed.params.package_name`.
-Structured verify edits preserve unknown keys inside `params`. Unsupported,
-malformed, or future-shaped verify entries remain editable as per-entry JSON
-and are submitted without frontend normalization when their shape is accepted by
-the existing `UpdateStepVerify` command codec. Advanced internals editors keep
-local drafts until the user applies or commits an edit, then send
-`UpdateStepConstraints`, `UpdateStepSkipIf`, or `UpdateStepVerify` through
-`sidecar_apply_recipe_command`. The constraints editor displays the
-authored/YAML-facing `conflicts_with` key, and the frontend converts that key to
-the API command field `conflictsWith` only when submitting
-`UpdateStepConstraints`. Revert restores drafts from the current returned
+Advanced step internals use a collapsed Advanced section. Constraints use a
+structured editor when the sidecar DTO shape is a lossless object with optional
+`capabilities` and `conflictsWith` string arrays. Constraint edits use DTO/API
+naming internally and submit through the existing `UpdateStepConstraints`
+command with `conflictsWith`. The raw JSON fallback displays authored-facing
+`conflicts_with`, converts that key back to `conflictsWith` before command
+submission, and rejects drafts that contain both conflict-field spellings.
+Unsupported, malformed, or future-shaped constraint objects remain editable as
+raw JSON instead of being normalized by the frontend. `skip_if` remains a plain
+JSON textarea editor.
+
+`verify` uses a structured list editor for condition entries whose top-level
+shape is exactly `{ type, params }` and whose supported known field is a string:
+`path_exists.params.path`, `file_exists.params.path`, and
+`package_installed.params.package_name`. Structured verify edits preserve
+unknown keys inside `params`. Unsupported, malformed, or future-shaped verify
+entries remain editable as per-entry JSON and are submitted without frontend
+normalization when their shape is accepted by the existing `UpdateStepVerify`
+command codec. Advanced internals editors keep local drafts until the user
+applies or commits an edit, then send `UpdateStepConstraints`,
+`UpdateStepSkipIf`, or `UpdateStepVerify` through
+`sidecar_apply_recipe_command`. Revert restores drafts from the current returned
 document value. JSON `null` is a literal JSON value and is not a clear action;
 if the command codec requires a different top-level shape, the frontend reports
 a local shape error and does not submit. Advanced JSON values that contain
 objects shaped like `{ "ref": "..." }` are ordinary JSON values in this editor.
-The Tauri editor has no specialized constraints builder, `skip_if` condition
-builder, or ref picker inside advanced internals. The Rust sidecar remains
-authoritative for advanced internals command application, canonical YAML,
-semantic validation diagnostics, dirty state, undo state, and redo state.
-Advanced internals command success with `changed: false` is treated as a no-op
-rather than an applied edit.
+The Tauri editor has no specialized `skip_if` condition builder or ref picker
+inside advanced internals. The Rust sidecar remains authoritative for advanced
+internals command application, canonical YAML, semantic validation diagnostics,
+dirty state, undo state, and redo state. Advanced internals command success with
+`changed: false` is treated as a no-op rather than an applied edit.
 
 Inputs, artifacts, artifact groups, and steps use master-detail panes inside the
 Tauri editor. The editor frame does not scroll when item lists scroll. Each

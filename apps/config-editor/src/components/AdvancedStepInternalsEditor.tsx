@@ -3,17 +3,23 @@ import { useEffect, useMemo, useState } from "react";
 import type { EditorCommand } from "../api/commands";
 import type { StepDto } from "../api/types";
 import {
+  buildAddConstraintValue,
   buildAddVerifyEntry,
   buildAdvancedInternalsCommand,
+  buildUpdateConstraintValue,
+  classifyConstraintsDto,
   buildVerifyEntryJsonUpdate,
   buildVerifyKnownFieldUpdate,
   classifyVerifyEntry,
+  constraintsCommandValue,
   editorValueForAdvancedField,
   formatJsonDraft,
   moveVerifyEntry,
   parseAdvancedJsonDraft,
+  removeConstraintValue,
   removeVerifyEntry,
   revertJsonDraft,
+  type SupportedConstraintsDto,
   type SupportedVerifyType,
   type AdvancedInternalsField,
 } from "./advancedStepInternals.logic";
@@ -27,6 +33,7 @@ export interface AdvancedCommandResult {
 interface AdvancedStepInternalsEditorProps {
   readOnly?: boolean;
   step: StepDto;
+  steps?: StepDto[];
   onCommand: (command: EditorCommand) => Promise<AdvancedCommandResult>;
 }
 
@@ -43,7 +50,16 @@ const SECTIONS: SectionConfig[] = [
   { field: "verify", property: "verify", label: "Verify", unsetInitialValue: [] },
 ];
 
-export function AdvancedStepInternalsEditor({ readOnly = false, step, onCommand }: AdvancedStepInternalsEditorProps) {
+export function AdvancedStepInternalsEditor({
+  readOnly = false,
+  step,
+  steps = [],
+  onCommand,
+}: AdvancedStepInternalsEditorProps) {
+  const conflictSuggestions = useMemo(
+    () => steps.filter((candidate) => candidate.id !== step.id).map((candidate) => candidate.id),
+    [step.id, steps],
+  );
   return (
     <details className="rounded border border-slate-200 bg-white p-4">
       <summary className="cursor-pointer text-sm font-semibold uppercase tracking-wide text-slate-500">
@@ -58,6 +74,16 @@ export function AdvancedStepInternalsEditor({ readOnly = false, step, onCommand 
           return (
             section.field === "verify" ? (
               <VerifySectionEditor
+                hasValue={hasValue}
+                key={`${step.id}:${section.field}`}
+                readOnly={readOnly}
+                stepId={step.id}
+                value={stepRecord[section.property]}
+                onCommand={onCommand}
+              />
+            ) : section.field === "constraints" ? (
+              <ConstraintsSectionEditor
+                conflictSuggestions={conflictSuggestions}
                 hasValue={hasValue}
                 key={`${step.id}:${section.field}`}
                 readOnly={readOnly}
@@ -82,6 +108,277 @@ export function AdvancedStepInternalsEditor({ readOnly = false, step, onCommand 
         })}
       </div>
     </details>
+  );
+}
+
+function ConstraintsSectionEditor({
+  readOnly,
+  stepId,
+  value,
+  hasValue,
+  conflictSuggestions,
+  onCommand,
+}: {
+  readOnly: boolean;
+  stepId: string;
+  value: unknown;
+  hasValue: boolean;
+  conflictSuggestions: string[];
+  onCommand: (command: EditorCommand) => Promise<AdvancedCommandResult>;
+}) {
+  const classification = classifyConstraintsDto(hasValue ? value : {});
+  const [error, setError] = useState<string | null>(null);
+  const [submitting, setSubmitting] = useState(false);
+
+  useEffect(() => {
+    setError(null);
+  }, [value]);
+
+  if (classification.kind === "raw") {
+    return (
+      <AdvancedJsonSectionEditor
+        field="constraints"
+        hasValue={hasValue}
+        label="Constraints"
+        readOnly={readOnly}
+        stepId={stepId}
+        unsetInitialValue={{}}
+        value={value}
+        onCommand={onCommand}
+      />
+    );
+  }
+
+  const constraints = classification.value;
+
+  async function submit(nextConstraints: SupportedConstraintsDto) {
+    if (submitting) {
+      return false;
+    }
+    const command = buildAdvancedInternalsCommand(
+      "constraints",
+      stepId,
+      nextConstraints,
+      hasValue ? constraints : undefined,
+    );
+    if (command === null) {
+      setError(null);
+      return true;
+    }
+    setSubmitting(true);
+    const result = await onCommand(command);
+    setSubmitting(false);
+    if (!result.ok) {
+      return false;
+    }
+    if (!result.changed) {
+      setError("No document change was produced.");
+      return false;
+    }
+    setError(null);
+    return true;
+  }
+
+  async function updateValue(field: "capabilities" | "conflictsWith", index: number, nextValue: string) {
+    const nextConstraints = buildUpdateConstraintValue(constraints, field, index, nextValue);
+    if (nextConstraints === null) {
+      setError(null);
+      return true;
+    }
+    return submit(nextConstraints);
+  }
+
+  async function removeValue(field: "capabilities" | "conflictsWith", index: number) {
+    const nextConstraints = removeConstraintValue(constraints, field, index);
+    if (nextConstraints === null) {
+      setError(null);
+      return true;
+    }
+    return submit(nextConstraints);
+  }
+
+  return (
+    <section className="grid gap-3">
+      <h3 className="text-xs font-semibold uppercase tracking-wide text-slate-500">Constraints</h3>
+      <ConstraintStringListEditor
+        addLabel="Add capability"
+        disabled={readOnly || submitting}
+        field="capabilities"
+        label="Capabilities"
+        values={constraints.capabilities}
+        onAdd={(nextValue) => submit(buildAddConstraintValue(constraints, "capabilities", nextValue))}
+        onRemove={(index) => removeValue("capabilities", index)}
+        onUpdate={(index, nextValue) => updateValue("capabilities", index, nextValue)}
+      />
+      <ConstraintStringListEditor
+        addLabel="Add conflict"
+        datalistId={`constraints-${stepId}-conflicts`}
+        disabled={readOnly || submitting}
+        field="conflictsWith"
+        label="Conflicts With"
+        suggestions={conflictSuggestions}
+        values={constraints.conflictsWith}
+        onAdd={(nextValue) => submit(buildAddConstraintValue(constraints, "conflictsWith", nextValue))}
+        onRemove={(index) => removeValue("conflictsWith", index)}
+        onUpdate={(index, nextValue) => updateValue("conflictsWith", index, nextValue)}
+      />
+      {error ? <p className="text-sm font-medium text-red-700">{error}</p> : null}
+    </section>
+  );
+}
+
+function ConstraintStringListEditor({
+  label,
+  addLabel,
+  field,
+  values,
+  disabled,
+  suggestions = [],
+  datalistId,
+  onAdd,
+  onUpdate,
+  onRemove,
+}: {
+  label: string;
+  addLabel: string;
+  field: "capabilities" | "conflictsWith";
+  values: string[];
+  disabled: boolean;
+  suggestions?: string[];
+  datalistId?: string;
+  onAdd: (value: string) => Promise<boolean>;
+  onUpdate: (index: number, value: string) => Promise<boolean>;
+  onRemove: (index: number) => Promise<boolean>;
+}) {
+  const [addDraft, setAddDraft] = useState("");
+
+  async function addValue() {
+    const ok = await onAdd(addDraft);
+    if (ok) {
+      setAddDraft("");
+    }
+  }
+
+  return (
+    <div className="grid gap-2 rounded border border-slate-200 bg-slate-50 p-2">
+      <div className="flex items-center justify-between gap-2">
+        <div>
+          <div className="text-sm font-medium text-slate-900">{label}</div>
+          {values.length === 0 ? <div className="text-xs text-slate-500">No values</div> : null}
+        </div>
+      </div>
+      <div className="grid gap-2">
+        {values.map((value, index) => (
+          <ConstraintStringRow
+            datalistId={datalistId}
+            disabled={disabled}
+            field={field}
+            index={index}
+            key={index}
+            value={value}
+            onRemove={() => onRemove(index)}
+            onUpdate={(nextValue) => onUpdate(index, nextValue)}
+          />
+        ))}
+      </div>
+      <div className="flex flex-wrap items-center gap-2">
+        <input
+          {...textInputGuardProps}
+          className="min-w-48 flex-1 rounded border border-slate-300 bg-white px-3 py-2 text-sm text-slate-900 shadow-sm outline-none focus:border-slate-500 focus:ring-2 focus:ring-slate-200"
+          disabled={disabled}
+          list={datalistId}
+          value={addDraft}
+          onChange={(event) => setAddDraft(normalizeEditableText(event.target.value))}
+          onKeyDown={(event) => {
+            if (event.key === "Enter") {
+              event.preventDefault();
+              void addValue();
+            }
+          }}
+        />
+        <button
+          className="rounded border border-slate-900 bg-slate-900 px-3 py-2 text-sm text-white disabled:opacity-40"
+          disabled={disabled}
+          type="button"
+          onClick={() => void addValue()}
+        >
+          {addLabel}
+        </button>
+      </div>
+      {datalistId ? (
+        <datalist id={datalistId}>
+          {suggestions.map((suggestion) => (
+            <option key={suggestion} value={suggestion} />
+          ))}
+        </datalist>
+      ) : null}
+    </div>
+  );
+}
+
+function ConstraintStringRow({
+  value,
+  index,
+  field,
+  datalistId,
+  disabled,
+  onUpdate,
+  onRemove,
+}: {
+  value: string;
+  index: number;
+  field: "capabilities" | "conflictsWith";
+  datalistId?: string;
+  disabled: boolean;
+  onUpdate: (nextValue: string) => Promise<boolean>;
+  onRemove: () => Promise<boolean>;
+}) {
+  const [draft, setDraft] = useState(value);
+
+  useEffect(() => {
+    setDraft(value);
+  }, [value]);
+
+  async function commit() {
+    if (draft === value) {
+      return;
+    }
+    const ok = await onUpdate(draft);
+    if (!ok) {
+      setDraft(value);
+    }
+  }
+
+  return (
+    <div className="grid gap-2 sm:grid-cols-[minmax(0,1fr)_auto]">
+      <input
+        {...textInputGuardProps}
+        aria-label={`${field} ${index + 1}`}
+        className="w-full rounded border border-slate-300 bg-white px-3 py-2 text-sm text-slate-900 shadow-sm outline-none focus:border-slate-500 focus:ring-2 focus:ring-slate-200"
+        disabled={disabled}
+        list={datalistId}
+        value={draft}
+        onBlur={() => void commit()}
+        onChange={(event) => setDraft(normalizeEditableText(event.target.value))}
+        onKeyDown={(event) => {
+          if (event.key === "Enter") {
+            event.preventDefault();
+            void commit();
+          }
+          if (event.key === "Escape") {
+            setDraft(value);
+          }
+        }}
+      />
+      <button
+        className="w-fit rounded border border-red-300 px-2 py-1.5 text-sm text-red-700 disabled:opacity-40 sm:w-auto"
+        disabled={disabled}
+        type="button"
+        onClick={() => void onRemove()}
+      >
+        Remove
+      </button>
+    </div>
   );
 }
 
@@ -529,7 +826,10 @@ function AdvancedJsonSectionEditor({
       setError(parsed.error);
       return;
     }
-    const command = buildAdvancedInternalsCommand(field, stepId, parsed.value, hasValue ? editorValue : undefined);
+    const currentConstraints = field === "constraints" && hasValue ? constraintsCommandValue(editorValue) : null;
+    const currentValue =
+      currentConstraints !== null ? (currentConstraints.ok ? currentConstraints.value : editorValue) : hasValue ? editorValue : undefined;
+    const command = buildAdvancedInternalsCommand(field, stepId, parsed.value, currentValue);
     if (command === null) {
       setError(null);
       return;

@@ -352,7 +352,7 @@ function StepDetailPanel({
         />
       </div>
 
-      <AdvancedStepInternalsEditor readOnly={readOnly} step={step} onCommand={onAdvancedCommand} />
+      <AdvancedStepInternalsEditor readOnly={readOnly} step={step} steps={steps} onCommand={onAdvancedCommand} />
     </div>
   );
 }

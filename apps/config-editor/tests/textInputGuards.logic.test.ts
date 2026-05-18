@@ -23,7 +23,7 @@ test("advanced JSON parsing accepts smart-quoted drafts after input normalizatio
     ok: true,
     value: {
       capabilities: [],
-      conflicts_with: ["install_retroarch"],
+      conflictsWith: ["install_retroarch"],
     },
   });
 });

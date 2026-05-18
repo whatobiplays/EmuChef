@@ -3,6 +3,24 @@ import type { EditorCommand } from "../api/commands.js";
 export type AdvancedInternalsField = "constraints" | "skipIf" | "verify";
 
 export type AdvancedParseResult = { ok: true; value: unknown } | { ok: false; error: string };
+export type AdvancedConversionResult<T> = { ok: true; value: T } | { ok: false; error: string };
+export interface SupportedConstraintsDto {
+  capabilities: string[];
+  conflictsWith: string[];
+}
+export type ConstraintsClassification =
+  | { kind: "structured"; value: SupportedConstraintsDto }
+  | {
+      kind: "raw";
+      authoredJsonValue: unknown;
+      reason:
+        | "not_object"
+        | "unknown_top_level_key"
+        | "non_string_capabilities"
+        | "non_string_conflictsWith"
+        | "unsupported_field_shape"
+        | "ambiguous_conflict_fields";
+    };
 export type SupportedVerifyType = "path_exists" | "file_exists" | "package_installed";
 export type VerifyClassification =
   | { kind: "structured"; type: SupportedVerifyType; fieldName: "path" | "package_name"; fieldValue: string }
@@ -24,14 +42,10 @@ export function revertJsonDraft(value: unknown): string {
 }
 
 export function editorValueForAdvancedField(field: AdvancedInternalsField, value: unknown): unknown {
-  if (field !== "constraints" || !isJsonObject(value)) {
+  if (field !== "constraints") {
     return value;
   }
-  return {
-    ...("capabilities" in value ? { capabilities: value.capabilities } : {}),
-    ...("conflictsWith" in value ? { conflicts_with: value.conflictsWith } : {}),
-    ...("conflicts_with" in value ? { conflicts_with: value.conflicts_with } : {}),
-  };
+  return toAuthoredConstraintsJsonValue(value);
 }
 
 export function parseAdvancedJsonDraft(field: AdvancedInternalsField, draft: string): AdvancedParseResult {
@@ -45,8 +59,12 @@ export function parseAdvancedJsonDraft(field: AdvancedInternalsField, draft: str
   if (field === "constraints" && !isJsonObject(value)) {
     return { ok: false, error: "Constraints must be a JSON object." };
   }
-  if (field === "constraints" && hasUnsupportedKeys(value, ["capabilities", "conflicts_with"])) {
-    return { ok: false, error: "Constraints supports only capabilities and conflicts_with." };
+  if (field === "constraints") {
+    const converted = constraintsCommandValue(value);
+    if (!converted.ok) {
+      return converted;
+    }
+    return { ok: true, value: converted.value };
   }
   if (field === "skipIf" && !Array.isArray(value)) {
     return { ok: false, error: "skip_if must be a JSON array." };
@@ -67,10 +85,14 @@ export function buildAdvancedInternalsCommand(
     return null;
   }
   if (field === "constraints") {
+    const converted = constraintsCommandValue(nextValue);
+    if (!converted.ok) {
+      return null;
+    }
     return {
       type: "UpdateStepConstraints",
       stepId,
-      constraints: constraintsCommandValue(nextValue),
+      constraints: converted.value,
     };
   }
   if (field === "skipIf") {
@@ -113,6 +135,139 @@ export function classifyVerifyEntry(entry: unknown): VerifyClassification {
     type: entry.type as SupportedVerifyType,
     fieldName,
     fieldValue: entry.params[fieldName],
+  };
+}
+
+export function classifyConstraintsDto(value: unknown): ConstraintsClassification {
+  if (!isJsonObject(value)) {
+    return { kind: "raw", authoredJsonValue: value, reason: "not_object" };
+  }
+  if ("conflicts_with" in value && "conflictsWith" in value) {
+    return {
+      kind: "raw",
+      authoredJsonValue: toAuthoredConstraintsJsonValue(value),
+      reason: "ambiguous_conflict_fields",
+    };
+  }
+  if (hasUnsupportedKeys(value, ["capabilities", "conflictsWith"])) {
+    return {
+      kind: "raw",
+      authoredJsonValue: toAuthoredConstraintsJsonValue(value),
+      reason: "unknown_top_level_key",
+    };
+  }
+  if ("capabilities" in value && !Array.isArray(value.capabilities)) {
+    return {
+      kind: "raw",
+      authoredJsonValue: toAuthoredConstraintsJsonValue(value),
+      reason: "unsupported_field_shape",
+    };
+  }
+  if ("conflictsWith" in value && !Array.isArray(value.conflictsWith)) {
+    return {
+      kind: "raw",
+      authoredJsonValue: toAuthoredConstraintsJsonValue(value),
+      reason: "unsupported_field_shape",
+    };
+  }
+  const capabilities = "capabilities" in value && Array.isArray(value.capabilities) ? value.capabilities : [];
+  const conflictsWith = "conflictsWith" in value && Array.isArray(value.conflictsWith) ? value.conflictsWith : [];
+  if (!capabilities.every((item: unknown) => typeof item === "string")) {
+    return {
+      kind: "raw",
+      authoredJsonValue: toAuthoredConstraintsJsonValue(value),
+      reason: "non_string_capabilities",
+    };
+  }
+  if (!conflictsWith.every((item: unknown) => typeof item === "string")) {
+    return {
+      kind: "raw",
+      authoredJsonValue: toAuthoredConstraintsJsonValue(value),
+      reason: "non_string_conflictsWith",
+    };
+  }
+  return {
+    kind: "structured",
+    value: {
+      capabilities: [...capabilities],
+      conflictsWith: [...conflictsWith],
+    },
+  };
+}
+
+export function toAuthoredConstraintsJsonValue(dtoValue: unknown): unknown {
+  if (!isJsonObject(dtoValue)) {
+    return dtoValue;
+  }
+  const result: Record<string, unknown> = {};
+  for (const [key, value] of Object.entries(dtoValue)) {
+    if (key === "conflictsWith" && !("conflicts_with" in dtoValue)) {
+      result.conflicts_with = value;
+    } else {
+      result[key] = value;
+    }
+  }
+  return result;
+}
+
+export function constraintsCommandValue(
+  authoredJsonValue: unknown,
+): AdvancedConversionResult<Record<string, unknown>> {
+  if (!isJsonObject(authoredJsonValue)) {
+    return { ok: false, error: "Constraints must be a JSON object." };
+  }
+  if ("conflicts_with" in authoredJsonValue && "conflictsWith" in authoredJsonValue) {
+    return { ok: false, error: "Use either conflicts_with or conflictsWith, not both." };
+  }
+  const result: Record<string, unknown> = {};
+  for (const [key, value] of Object.entries(authoredJsonValue)) {
+    result[key === "conflicts_with" ? "conflictsWith" : key] = value;
+  }
+  return { ok: true, value: result };
+}
+
+export function buildAddConstraintValue(
+  current: SupportedConstraintsDto,
+  field: "capabilities" | "conflictsWith",
+  value: string,
+): SupportedConstraintsDto {
+  return {
+    capabilities: field === "capabilities" ? [...current.capabilities, value] : [...current.capabilities],
+    conflictsWith: field === "conflictsWith" ? [...current.conflictsWith, value] : [...current.conflictsWith],
+  };
+}
+
+export function buildUpdateConstraintValue(
+  current: SupportedConstraintsDto,
+  field: "capabilities" | "conflictsWith",
+  index: number,
+  value: string,
+): SupportedConstraintsDto | null {
+  const values = current[field];
+  if (index < 0 || index >= values.length || values[index] === value) {
+    return null;
+  }
+  const nextValues = [...values];
+  nextValues[index] = value;
+  return {
+    capabilities: field === "capabilities" ? nextValues : [...current.capabilities],
+    conflictsWith: field === "conflictsWith" ? nextValues : [...current.conflictsWith],
+  };
+}
+
+export function removeConstraintValue(
+  current: SupportedConstraintsDto,
+  field: "capabilities" | "conflictsWith",
+  index: number,
+): SupportedConstraintsDto | null {
+  const values = current[field];
+  if (index < 0 || index >= values.length) {
+    return null;
+  }
+  const nextValues = values.filter((_, itemIndex) => itemIndex !== index);
+  return {
+    capabilities: field === "capabilities" ? nextValues : [...current.capabilities],
+    conflictsWith: field === "conflictsWith" ? nextValues : [...current.conflictsWith],
   };
 }
 
@@ -206,16 +361,6 @@ export function moveVerifyEntry(currentVerify: unknown[], index: number, toIndex
 
 function isJsonObject(value: unknown): value is Record<string, unknown> {
   return value !== null && typeof value === "object" && !Array.isArray(value);
-}
-
-function constraintsCommandValue(value: unknown): Record<string, unknown> {
-  if (!isJsonObject(value)) {
-    return {};
-  }
-  return {
-    ...("capabilities" in value ? { capabilities: value.capabilities } : {}),
-    ...("conflicts_with" in value ? { conflictsWith: value.conflicts_with } : {}),
-  };
 }
 
 function hasUnsupportedKeys(value: unknown, allowedKeys: readonly string[]): boolean {

@@ -3,7 +3,11 @@ import test from "node:test";
 
 import {
   buildAdvancedInternalsCommand,
+  buildAddConstraintValue,
   buildAddVerifyEntry,
+  buildUpdateConstraintValue,
+  classifyConstraintsDto,
+  constraintsCommandValue,
   buildVerifyEntryJsonUpdate,
   buildVerifyKnownFieldUpdate,
   classifyVerifyEntry,
@@ -11,8 +15,10 @@ import {
   formatJsonDraft,
   moveVerifyEntry,
   parseAdvancedJsonDraft,
+  removeConstraintValue,
   removeVerifyEntry,
   revertJsonDraft,
+  toAuthoredConstraintsJsonValue,
   verifyFieldForType,
 } from "../src/components/advancedStepInternals.logic.js";
 
@@ -21,7 +27,7 @@ test("buildAdvancedInternalsCommand builds explicit sidecar payloads", () => {
     buildAdvancedInternalsCommand(
       "constraints",
       "copy",
-      { capabilities: ["shared_storage_write"], conflicts_with: [] },
+      { capabilities: ["shared_storage_write"], conflictsWith: [] },
       {},
     ),
     {
@@ -55,6 +61,136 @@ test("editorValueForAdvancedField converts constraints DTO keys to authored keys
   );
 });
 
+test("classifyConstraintsDto accepts only lossless supported DTO shapes", () => {
+  assert.deepEqual(classifyConstraintsDto({}), {
+    kind: "structured",
+    value: { capabilities: [], conflictsWith: [] },
+  });
+  assert.deepEqual(classifyConstraintsDto({ capabilities: [] }), {
+    kind: "structured",
+    value: { capabilities: [], conflictsWith: [] },
+  });
+  assert.deepEqual(classifyConstraintsDto({ conflictsWith: [] }), {
+    kind: "structured",
+    value: { capabilities: [], conflictsWith: [] },
+  });
+  assert.deepEqual(
+    classifyConstraintsDto({
+      capabilities: ["app_data_write"],
+      conflictsWith: ["step_a"],
+    }),
+    {
+      kind: "structured",
+      value: {
+        capabilities: ["app_data_write"],
+        conflictsWith: ["step_a"],
+      },
+    },
+  );
+});
+
+test("classifyConstraintsDto routes unsupported constraints to raw JSON fallback", () => {
+  assert.deepEqual(classifyConstraintsDto(null), {
+    kind: "raw",
+    authoredJsonValue: null,
+    reason: "not_object",
+  });
+  assert.deepEqual(classifyConstraintsDto({ custom: true }), {
+    kind: "raw",
+    authoredJsonValue: { custom: true },
+    reason: "unknown_top_level_key",
+  });
+  assert.deepEqual(classifyConstraintsDto({ capabilities: "app_data_write" }), {
+    kind: "raw",
+    authoredJsonValue: { capabilities: "app_data_write" },
+    reason: "unsupported_field_shape",
+  });
+  assert.deepEqual(classifyConstraintsDto({ conflictsWith: "step_a" }), {
+    kind: "raw",
+    authoredJsonValue: { conflicts_with: "step_a" },
+    reason: "unsupported_field_shape",
+  });
+  assert.deepEqual(classifyConstraintsDto({ capabilities: ["app_data_write", 42] }), {
+    kind: "raw",
+    authoredJsonValue: { capabilities: ["app_data_write", 42] },
+    reason: "non_string_capabilities",
+  });
+  assert.deepEqual(classifyConstraintsDto({ conflictsWith: ["step_a", 42] }), {
+    kind: "raw",
+    authoredJsonValue: { conflicts_with: ["step_a", 42] },
+    reason: "non_string_conflictsWith",
+  });
+  assert.deepEqual(classifyConstraintsDto({ conflicts_with: [], conflictsWith: [] }), {
+    kind: "raw",
+    authoredJsonValue: { conflicts_with: [], conflictsWith: [] },
+    reason: "ambiguous_conflict_fields",
+  });
+});
+
+test("constraint structured edits preserve sibling fields and explicit empty arrays", () => {
+  const current = { capabilities: ["app_data_write"], conflictsWith: ["step_a"] };
+
+  assert.deepEqual(buildAddConstraintValue(current, "capabilities", "root_shell"), {
+    capabilities: ["app_data_write", "root_shell"],
+    conflictsWith: ["step_a"],
+  });
+  assert.deepEqual(buildAddConstraintValue(current, "conflictsWith", "step_b"), {
+    capabilities: ["app_data_write"],
+    conflictsWith: ["step_a", "step_b"],
+  });
+  assert.deepEqual(buildUpdateConstraintValue(current, "capabilities", 0, "shared_storage_write"), {
+    capabilities: ["shared_storage_write"],
+    conflictsWith: ["step_a"],
+  });
+  assert.deepEqual(buildUpdateConstraintValue(current, "conflictsWith", 0, "step_b"), {
+    capabilities: ["app_data_write"],
+    conflictsWith: ["step_b"],
+  });
+  assert.equal(buildUpdateConstraintValue(current, "conflictsWith", 0, "step_a"), null);
+  assert.deepEqual(removeConstraintValue(current, "capabilities", 0), {
+    capabilities: [],
+    conflictsWith: ["step_a"],
+  });
+  assert.deepEqual(removeConstraintValue(current, "conflictsWith", 0), {
+    capabilities: ["app_data_write"],
+    conflictsWith: [],
+  });
+});
+
+test("constraint JSON conversion maps DTO conflictsWith to authored conflicts_with without dropping raw fields", () => {
+  assert.deepEqual(toAuthoredConstraintsJsonValue({ capabilities: [], conflictsWith: ["step_a"] }), {
+    capabilities: [],
+    conflicts_with: ["step_a"],
+  });
+  assert.deepEqual(
+    toAuthoredConstraintsJsonValue({
+      capabilities: ["app_data_write", 42],
+      conflictsWith: ["step_a", 42],
+      custom: { keep: true },
+    }),
+    {
+      capabilities: ["app_data_write", 42],
+      conflicts_with: ["step_a", 42],
+      custom: { keep: true },
+    },
+  );
+});
+
+test("constraintsCommandValue maps authored conflicts_with to command conflictsWith", () => {
+  assert.deepEqual(constraintsCommandValue({ capabilities: [], conflicts_with: ["step_a"] }), {
+    ok: true,
+    value: { capabilities: [], conflictsWith: ["step_a"] },
+  });
+  assert.deepEqual(constraintsCommandValue({ capabilities: [], custom: true }), {
+    ok: true,
+    value: { capabilities: [], custom: true },
+  });
+  assert.deepEqual(constraintsCommandValue({ conflicts_with: [], conflictsWith: [] }), {
+    ok: false,
+    error: "Use either conflicts_with or conflictsWith, not both.",
+  });
+});
+
 test("invalid JSON does not produce a parsed value", () => {
   assert.deepEqual(parseAdvancedJsonDraft("constraints", "{"), {
     ok: false,
@@ -77,14 +213,14 @@ test("top-level shape errors do not silently convert null or clear values", () =
   });
 });
 
-test("constraints JSON rejects unrepresentable authored keys before submit", () => {
-  assert.deepEqual(parseAdvancedJsonDraft("constraints", '{"conflictsWith": []}'), {
-    ok: false,
-    error: "Constraints supports only capabilities and conflicts_with.",
-  });
+test("constraints JSON accepts unsupported raw shapes and rejects ambiguous conflict fields", () => {
   assert.deepEqual(parseAdvancedJsonDraft("constraints", '{"capabilities": [], "custom": true}'), {
+    ok: true,
+    value: { capabilities: [], custom: true },
+  });
+  assert.deepEqual(parseAdvancedJsonDraft("constraints", '{"capabilities": [], "conflicts_with": [], "conflictsWith": []}'), {
     ok: false,
-    error: "Constraints supports only capabilities and conflicts_with.",
+    error: "Use either conflicts_with or conflictsWith, not both.",
   });
 });
 
@@ -96,13 +232,13 @@ test("nested JSON null remains a literal JSON value", () => {
 });
 
 test("unchanged parsed JSON and whitespace-only edits do not produce commands", () => {
-  const current = { capabilities: [], conflicts_with: ["copy"] };
+  const current = { capabilities: [], conflictsWith: ["copy"] };
   const parsed = parseAdvancedJsonDraft(
     "constraints",
     '{\n  "capabilities": [],\n  "conflicts_with": ["copy"]\n}',
   );
 
-  assert.deepEqual(parsed, { ok: true, value: current });
+  assert.deepEqual(parsed, { ok: true, value: { capabilities: [], conflictsWith: ["copy"] } });
   assert.equal(buildAdvancedInternalsCommand("constraints", "copy", parsed.ok ? parsed.value : null, current), null);
 });
 
