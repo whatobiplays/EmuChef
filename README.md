@@ -5,6 +5,8 @@ CLI-first Android emulation handheld provisioner.
 ## Context
 
 Repository context and current behavior notes live in `CONTEXT.md`.
+The current Rust/Python ownership decision is recorded in
+[ADR 0001](docs/adr/0001-rust-tauri-editor-runtime-ownership.md).
 
 Authored YAML under `authored/` is the source for current planning behavior.
 Generated execution-plan YAML is emitted on demand and is not maintained as

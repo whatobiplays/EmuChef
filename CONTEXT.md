@@ -41,6 +41,9 @@ generation. The PySide6 desktop editor is installed with the `pyside-editor`
 optional dependency extra and remains available only as legacy/reference tooling
 for comparison and debugging, not as the active Tauri editor runtime or fallback.
 
+The current Rust/Python ownership decision is recorded in
+[ADR 0001](docs/adr/0001-rust-tauri-editor-runtime-ownership.md).
+
 ## Current Authored Model
 
 Recipes now use:

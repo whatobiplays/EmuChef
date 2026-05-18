@@ -5,6 +5,9 @@ runtime launches the Rust JSONL sidecar directly; it has no backend selector,
 backend toggle, environment-variable backend choice, protocol negotiation path,
 or Python fallback.
 
+The current runtime ownership decision is recorded in
+[ADR 0001](../../docs/adr/0001-rust-tauri-editor-runtime-ownership.md).
+
 ## Development
 
 Install frontend dependencies once:
