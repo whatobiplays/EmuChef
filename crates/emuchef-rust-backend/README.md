@@ -693,30 +693,29 @@ registry. Later phases should replace it with Rust-native schema builders before
 planner or executor behavior is ported. Regenerate and compare the fixture any
 time Python step specs change.
 
-Regenerate the fixture from the repo root with this Python reference/golden
-tooling command. Normal Rust and Tauri runtime tests use the committed fixture
-and do not invoke Python:
+Check the fixture from the repo root with this Python reference/golden tooling
+command. Normal Rust and Tauri runtime tests use the committed fixture and do
+not invoke Python:
 
 ```bash
-PYTHONPATH=src uv run --no-project --native-tls --with PyYAML python -m emuchef_editor.api.server '{"type":"listStepSpecs"}' \
-  | python3 -c 'import json,sys; print(json.dumps(json.load(sys.stdin)["result"], indent=2, sort_keys=True))' \
-  > crates/emuchef-rust-backend/tests/fixtures/python_step_specs.json
+PYTHONPATH=src ./.venv/bin/python scripts/step_specs_fixture.py check
 ```
 
-For release-hardening checks, generate to a temporary file first, diff it against
-the committed fixture, and overwrite only after accepting the generated result:
+The check command generates canonical StepSpec JSON to a temporary file, diffs
+it against the committed fixture, and exits non-zero on drift. It does not
+modify the committed fixture or any path passed through `--fixture`.
+
+Regenerate the committed fixture intentionally with:
 
 ```bash
-tmp=$(mktemp)
-PYTHONPATH=src uv run --no-project --native-tls --with PyYAML python -m emuchef_editor.api.server '{"type":"listStepSpecs"}' \
-  | python3 -c 'import json,sys; print(json.dumps(json.load(sys.stdin)["result"], indent=2, sort_keys=True))' \
-  > "$tmp"
-diff -u crates/emuchef-rust-backend/tests/fixtures/python_step_specs.json "$tmp"
+PYTHONPATH=src ./.venv/bin/python scripts/step_specs_fixture.py write
 ```
 
-Phase 6X ran this temporary-file refresh and the generated output matched the
-committed fixture, so no fixture rewrite was needed. This command remains
-explicit reference/golden tooling and is not part of normal Rust, Tauri, or
+The write command updates
+`crates/emuchef-rust-backend/tests/fixtures/python_step_specs.json` only when
+the generated content differs and reports `unchanged` or `updated`. These
+commands protect the Python DTO to Rust fixture contract; they are explicit
+developer/golden tooling and are not part of normal Rust, Tauri, packaging, or
 no-Python-runtime verification.
 
 The fixture stores only the Python response `result` object, not the outer

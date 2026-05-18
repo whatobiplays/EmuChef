@@ -133,6 +133,14 @@ comes from the built-in step registry and includes editor-safe labels, supported
 status, outputs, param ordering, defaults, and typed ref filter hints where the
 registry exposes them.
 
+The Rust backend consumes a committed Python-generated StepSpec fixture at
+`crates/emuchef-rust-backend/tests/fixtures/python_step_specs.json`. The
+repo-level `scripts/step_specs_fixture.py` tool checks or intentionally updates
+that fixture from `emuchef_editor.api.dto.step_specs_to_dto()`. This is
+developer/golden tooling for the Python DTO to Rust fixture contract; it is not
+part of the Tauri runtime, Rust sidecar packaging, or no-Python-runtime check
+path.
+
 The API server supports one-shot stateless requests through:
 
 - `listStepSpecs`
