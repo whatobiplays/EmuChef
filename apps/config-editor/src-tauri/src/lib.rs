@@ -18,6 +18,8 @@ pub fn run() {
             commands::validate_recipe_path,
             commands::emit_recipe_yaml_from_path,
             commands::sidecar_status,
+            commands::sidecar_ping,
+            commands::sidecar_restart,
             commands::sidecar_list_step_specs,
             commands::sidecar_open_recipe,
             commands::sidecar_get_document,

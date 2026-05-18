@@ -24,6 +24,7 @@ const REQUIRED_CAPABILITIES: &[&str] = &[
     "emitYaml",
     "getRefIndex",
     "setDocumentAuthoredRoot",
+    "ping",
 ];
 const RUST_BACKEND_MANIFEST: &str = "crates/emuchef-rust-backend/Cargo.toml";
 const TAURI_MANIFEST: &str = "apps/config-editor/src-tauri/Cargo.toml";
@@ -57,6 +58,14 @@ impl SidecarState {
             .lock()
             .map_err(|_| "Sidecar client lock is poisoned".to_string())?;
         Ok(client.status())
+    }
+
+    pub fn restart(&self) -> Result<Value, String> {
+        let mut client = self
+            .client
+            .lock()
+            .map_err(|_| "Sidecar client lock is poisoned".to_string())?;
+        client.restart()
     }
 
     pub fn request(&self, request_type: &str, payload: Option<Value>) -> Result<Value, String> {
@@ -169,52 +178,50 @@ impl SidecarClient {
     }
 
     pub fn status(&mut self) -> Value {
+        json!({
+            "ok": true,
+            "result": self.status_result(),
+        })
+    }
+
+    fn status_result(&mut self) -> Value {
         match &mut self.state {
             ProcessState::NotStarted => json!({
-                "ok": true,
-                "result": {
-                    "running": false,
-                    "pid": null,
-                    "state": "notStarted",
-                    "compatible": null,
-                    "protocolVersion": null,
-                    "capabilities": [],
-                    "lastError": null,
-                },
+                "running": false,
+                "pid": null,
+                "state": "notStarted",
+                "compatible": null,
+                "protocolVersion": null,
+                "capabilities": [],
+                "lastError": null,
             }),
             ProcessState::Exited {
                 last_error,
                 compatibility,
             } => json!({
-                "ok": true,
-                "result": {
-                    "running": false,
-                    "pid": null,
-                    "state": "exited",
-                    "compatible": compatibility.as_ref().map(|_| true),
-                    "protocolVersion": compatibility.as_ref().map(|item| item.protocol_version),
-                    "capabilities": compatibility
-                        .as_ref()
-                        .map(|item| item.capabilities.clone())
-                        .unwrap_or_default(),
-                    "lastError": last_error,
-                },
+                "running": false,
+                "pid": null,
+                "state": "exited",
+                "compatible": compatibility.as_ref().map(|_| true),
+                "protocolVersion": compatibility.as_ref().map(|item| item.protocol_version),
+                "capabilities": compatibility
+                    .as_ref()
+                    .map(|item| item.capabilities.clone())
+                    .unwrap_or_default(),
+                "lastError": last_error,
             }),
             ProcessState::Incompatible {
                 last_error,
                 protocol_version,
                 capabilities,
             } => json!({
-                "ok": true,
-                "result": {
-                    "running": false,
-                    "pid": null,
-                    "state": "incompatible",
-                    "compatible": false,
-                    "protocolVersion": protocol_version,
-                    "capabilities": capabilities,
-                    "lastError": last_error,
-                },
+                "running": false,
+                "pid": null,
+                "state": "incompatible",
+                "compatible": false,
+                "protocolVersion": protocol_version,
+                "capabilities": capabilities,
+                "lastError": last_error,
             }),
             ProcessState::Running(running) => match running.process.child.try_wait() {
                 Ok(Some(_status)) => {
@@ -224,44 +231,65 @@ impl SidecarClient {
                         compatibility: Some(compatibility.clone()),
                     };
                     json!({
-                        "ok": true,
-                        "result": {
-                            "running": false,
-                            "pid": null,
-                            "state": "exited",
-                            "compatible": true,
-                            "protocolVersion": compatibility.protocol_version,
-                            "capabilities": compatibility.capabilities,
-                            "lastError": null,
-                        },
+                        "running": false,
+                        "pid": null,
+                        "state": "exited",
+                        "compatible": true,
+                        "protocolVersion": compatibility.protocol_version,
+                        "capabilities": compatibility.capabilities,
+                        "lastError": null,
                     })
                 }
                 Ok(None) => json!({
-                    "ok": true,
-                    "result": {
-                        "running": true,
-                        "pid": running.process.child.id(),
-                        "state": "running",
-                        "compatible": true,
-                        "protocolVersion": running.compatibility.protocol_version,
-                        "capabilities": running.compatibility.capabilities.clone(),
-                        "lastError": null,
-                    },
+                    "running": true,
+                    "pid": running.process.child.id(),
+                    "state": "running",
+                    "compatible": true,
+                    "protocolVersion": running.compatibility.protocol_version,
+                    "capabilities": running.compatibility.capabilities.clone(),
+                    "lastError": null,
                 }),
                 Err(err) => json!({
-                    "ok": true,
-                    "result": {
-                        "running": false,
-                        "pid": null,
-                        "state": "error",
-                        "compatible": true,
-                        "protocolVersion": running.compatibility.protocol_version,
-                        "capabilities": running.compatibility.capabilities.clone(),
-                        "lastError": format!("Failed to inspect backend sidecar process: {err}"),
-                    },
+                    "running": false,
+                    "pid": null,
+                    "state": "error",
+                    "compatible": true,
+                    "protocolVersion": running.compatibility.protocol_version,
+                    "capabilities": running.compatibility.capabilities.clone(),
+                    "lastError": format!("Failed to inspect backend sidecar process: {err}"),
                 }),
             },
         }
+    }
+
+    pub fn restart(&mut self) -> Result<Value, String> {
+        self.stop_owned_process();
+        let mut process = start_sidecar(self.binary_path_override.as_deref(), &self.runtime)?;
+
+        match self.perform_hello_handshake(&mut process) {
+            Ok(compatibility) => {
+                self.state = ProcessState::Running(RunningSidecar {
+                    process,
+                    compatibility,
+                });
+            }
+            Err(err) => {
+                let err = stop_after_failed_handshake(process, err);
+                self.state = ProcessState::Incompatible {
+                    last_error: err.message,
+                    protocol_version: err.protocol_version,
+                    capabilities: err.capabilities,
+                };
+            }
+        }
+
+        Ok(json!({
+            "ok": true,
+            "result": {
+                "status": self.status_result(),
+                "documentSessionsPreserved": false,
+            },
+        }))
     }
 
     pub fn request(&mut self, request_type: &str, payload: Option<Value>) -> Result<Value, String> {
@@ -326,7 +354,7 @@ impl SidecarClient {
                 Ok(Some(status)) => {
                     let compatibility = running.compatibility.clone();
                     let last_error = format!(
-                        "Backend sidecar exited unexpectedly with status {status}; restart the Tauri app to create a new sidecar session."
+                        "Backend sidecar exited unexpectedly with status {status}; explicitly restart the sidecar and reopen the recipe to create a new document session."
                     );
                     self.state = ProcessState::Exited {
                         last_error: Some(last_error.clone()),
@@ -338,7 +366,7 @@ impl SidecarClient {
                 Err(err) => Err(format!("Failed to inspect backend sidecar process: {err}")),
             },
             ProcessState::Exited { .. } => Err(
-                "Backend sidecar has exited and is not restarted automatically; restart the Tauri app to create a new session."
+                "Backend sidecar has exited and is not restarted automatically; explicitly restart the sidecar and reopen the recipe to create a new document session."
                     .to_string(),
             ),
             ProcessState::Incompatible { last_error, .. } => {
@@ -370,6 +398,13 @@ impl SidecarClient {
         request_id
     }
 
+    fn stop_owned_process(&mut self) {
+        let state = std::mem::replace(&mut self.state, ProcessState::NotStarted);
+        if let ProcessState::Running(mut running) = state {
+            stop_sidecar_process(&mut running.process);
+        }
+    }
+
     #[cfg(test)]
     fn mark_exited_for_test(&mut self) {
         self.state = ProcessState::Exited {
@@ -396,10 +431,14 @@ impl SidecarClient {
 impl Drop for SidecarClient {
     fn drop(&mut self) {
         if let ProcessState::Running(running) = &mut self.state {
-            let _ = running.process.child.kill();
-            let _ = running.process.child.wait();
+            stop_sidecar_process(&mut running.process);
         }
     }
+}
+
+fn stop_sidecar_process(process: &mut SidecarProcess) {
+    let _ = process.child.kill();
+    let _ = process.child.wait();
 }
 
 fn exchange_sidecar_request(
@@ -423,7 +462,7 @@ fn exchange_sidecar_request(
         .map_err(|err| format!("Failed to read backend sidecar stdout: {err}"))?;
     if bytes_read == 0 {
         return Err(
-            "Backend sidecar exited before writing a response; restart the Tauri app to create a new sidecar session."
+            "Backend sidecar exited before writing a response; explicitly restart the sidecar and reopen the recipe to create a new document session."
                 .to_string(),
         );
     }
@@ -538,8 +577,7 @@ fn stop_after_failed_handshake(
     mut process: SidecarProcess,
     mut err: HelloCompatibilityError,
 ) -> HelloCompatibilityError {
-    let _ = process.child.kill();
-    let _ = process.child.wait();
+    stop_sidecar_process(&mut process);
     if let Some(stderr) = stderr_excerpt(process.stderr.take()) {
         err.message = format!("{} Backend stderr: {stderr}", err.message);
     }
@@ -1242,6 +1280,7 @@ mod tests {
                     "emitYaml",
                     "getRefIndex",
                     "setDocumentAuthoredRoot",
+                    "ping",
                     "futureCapability"
                 ]
             }
@@ -1274,7 +1313,8 @@ mod tests {
                     "validate",
                     "emitYaml",
                     "getRefIndex",
-                    "setDocumentAuthoredRoot"
+                    "setDocumentAuthoredRoot",
+                    "ping"
                 ]
             }
         }))
@@ -1311,6 +1351,7 @@ mod tests {
         assert!(err.message.contains("saveRecipeAs"));
         assert!(err.message.contains("getRefIndex"));
         assert!(err.message.contains("setDocumentAuthoredRoot"));
+        assert!(err.message.contains("ping"));
     }
 
     #[test]
@@ -1408,6 +1449,117 @@ mod tests {
             .expect_err("exited sidecar should not auto-restart");
 
         assert!(err.contains("exited"));
+    }
+
+    #[test]
+    fn restart_starts_fresh_sidecar_from_not_started() {
+        let binary = rust_backend_binary_for_test();
+        let mut client = SidecarClient::with_binary_path_for_test(binary);
+
+        let restarted = client
+            .restart()
+            .expect("restart should start a fresh Rust sidecar");
+
+        assert_eq!(restarted["ok"], true);
+        assert_eq!(restarted["result"]["documentSessionsPreserved"], false);
+        assert_eq!(restarted["result"]["status"]["running"], true);
+        assert_eq!(restarted["result"]["status"]["state"], "running");
+        assert!(restarted["result"]["status"]["capabilities"]
+            .as_array()
+            .unwrap()
+            .contains(&json!("ping")));
+    }
+
+    #[test]
+    fn explicit_restart_replaces_running_process_without_preserving_document_sessions() {
+        let binary = rust_backend_binary_for_test();
+        let mut client = SidecarClient::with_binary_path_for_test(binary);
+        let temp_recipe = TempRecipe::copy_fixture("minimal_recipe.yaml");
+
+        let opened = client
+            .request(
+                "openRecipe",
+                Some(json!({"path": temp_recipe.path, "authoredRoot": null})),
+            )
+            .expect("openRecipe should start the sidecar and open a document");
+        let old_document_id = opened["result"]["document"]["documentId"]
+            .as_str()
+            .unwrap()
+            .to_string();
+        let old_status = client.status();
+        let old_pid = old_status["result"]["pid"]
+            .as_u64()
+            .expect("running sidecar should report a pid");
+
+        let restarted = client
+            .restart()
+            .expect("restart should replace the running sidecar");
+        let new_pid = restarted["result"]["status"]["pid"]
+            .as_u64()
+            .expect("restarted sidecar should report a pid");
+
+        assert_ne!(new_pid, old_pid);
+        assert_eq!(restarted["result"]["documentSessionsPreserved"], false);
+
+        let fetched = client
+            .request("getDocument", Some(json!({"documentId": old_document_id})))
+            .expect("unknown document is an API envelope, not a transport failure");
+        assert_eq!(fetched["ok"], false);
+        assert_eq!(fetched["error"]["code"], "unknown_document");
+    }
+
+    #[test]
+    fn explicit_restart_replaces_exited_state_without_enabling_normal_auto_restart() {
+        let binary = rust_backend_binary_for_test();
+        let mut client = SidecarClient::with_binary_path_for_test(binary);
+        client.mark_exited_for_test();
+
+        let normal_request_error = client
+            .request("ping", None)
+            .expect_err("normal requests must not auto-restart an exited sidecar");
+        assert!(normal_request_error.contains("exited"));
+
+        let restarted = client
+            .restart()
+            .expect("explicit restart should replace exited state");
+        assert_eq!(restarted["ok"], true);
+        assert_eq!(restarted["result"]["status"]["state"], "running");
+        assert_eq!(restarted["result"]["documentSessionsPreserved"], false);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn explicit_restart_returns_envelope_for_new_incompatible_sidecar() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let dir = unique_temp_dir("incompatible-sidecar");
+        let binary = dir.join("fake-incompatible-sidecar");
+        fs::write(
+            &binary,
+            "#!/bin/sh\nIFS= read line\nprintf '%s\\n' '{\"id\":\"req-1\",\"ok\":true,\"result\":{\"protocolVersion\":1,\"capabilities\":[]}}'\n",
+        )
+        .expect("fake incompatible sidecar should be writable");
+        let mut permissions = fs::metadata(&binary)
+            .expect("fake incompatible sidecar metadata should be readable")
+            .permissions();
+        permissions.set_mode(0o755);
+        fs::set_permissions(&binary, permissions)
+            .expect("fake incompatible sidecar should be executable");
+
+        let mut client = SidecarClient::with_binary_path_for_test(binary);
+
+        let restarted = client
+            .restart()
+            .expect("compatibility failure should still produce a restart envelope");
+
+        assert_eq!(restarted["ok"], true);
+        assert_eq!(restarted["result"]["documentSessionsPreserved"], false);
+        assert_eq!(restarted["result"]["status"]["state"], "incompatible");
+        assert_eq!(restarted["result"]["status"]["compatible"], false);
+        assert!(restarted["result"]["status"]["lastError"]
+            .as_str()
+            .unwrap()
+            .contains("missing required capabilities"));
     }
 
     #[test]

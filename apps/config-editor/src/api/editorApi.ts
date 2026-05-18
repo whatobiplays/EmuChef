@@ -11,6 +11,8 @@ import type {
   GetRefIndexResult,
   ListStepSpecsResult,
   OpenRecipeResult,
+  SidecarPingResult,
+  SidecarRestartResult,
   SidecarStatusResult,
   ValidateResult,
   ValidateRecipePathResult,
@@ -61,6 +63,14 @@ export async function emitRecipeYamlFromPath(
 
 export async function sidecarStatus(): Promise<EditorApiResult<SidecarStatusResult>> {
   return callApi<SidecarStatusResult>("sidecar_status");
+}
+
+export async function sidecarPing(): Promise<EditorApiResult<SidecarPingResult>> {
+  return callApi<SidecarPingResult>("sidecar_ping");
+}
+
+export async function sidecarRestart(): Promise<EditorApiResult<SidecarRestartResult>> {
+  return callApi<SidecarRestartResult>("sidecar_restart");
 }
 
 export async function sidecarListStepSpecs(): Promise<EditorApiResult<ListStepSpecsResult>> {

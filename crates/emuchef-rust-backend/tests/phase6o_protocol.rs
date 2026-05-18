@@ -42,6 +42,7 @@ fn phase6o_keeps_executor_internal_and_protocol_capabilities_editor_scoped() {
             "validate",
             "getRefIndex",
             "setDocumentAuthoredRoot",
+            "ping",
         ]
     );
 
@@ -81,6 +82,7 @@ fn phase6p_keeps_filesystem_executor_internal_and_protocol_capabilities_editor_s
             "validate",
             "getRefIndex",
             "setDocumentAuthoredRoot",
+            "ping",
         ]
     );
 
@@ -120,6 +122,7 @@ fn phase6q_keeps_fake_device_executor_internal_and_protocol_capabilities_editor_
             "validate",
             "getRefIndex",
             "setDocumentAuthoredRoot",
+            "ping",
         ]
     );
 
@@ -159,6 +162,7 @@ fn phase6r_keeps_real_adb_executor_internal_and_protocol_capabilities_editor_sco
             "validate",
             "getRefIndex",
             "setDocumentAuthoredRoot",
+            "ping",
         ]
     );
 

@@ -79,6 +79,16 @@ pub fn sidecar_status(state: State<'_, SidecarState>) -> Result<Value, String> {
 }
 
 #[tauri::command]
+pub fn sidecar_ping(state: State<'_, SidecarState>) -> Result<Value, String> {
+    state.request("ping", None)
+}
+
+#[tauri::command]
+pub fn sidecar_restart(state: State<'_, SidecarState>) -> Result<Value, String> {
+    state.restart()
+}
+
+#[tauri::command]
 pub fn sidecar_list_step_specs(state: State<'_, SidecarState>) -> Result<Value, String> {
     state.request("listStepSpecs", None)
 }

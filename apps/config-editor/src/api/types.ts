@@ -175,6 +175,15 @@ export interface SidecarStatusResult {
   message?: string;
 }
 
+export interface SidecarPingResult {
+  healthy: true;
+}
+
+export interface SidecarRestartResult {
+  status: SidecarStatusResult;
+  documentSessionsPreserved: false;
+}
+
 export interface OpenRecipeResult {
   document: RecipeDocumentDto;
 }

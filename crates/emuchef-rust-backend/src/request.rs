@@ -46,6 +46,7 @@ fn handle_validated_object(object: &Map<String, Value>) -> Result<Value, ApiErro
 
     match request_type {
         "hello" => Ok(envelope::success(protocol::hello_result())),
+        "ping" => Ok(envelope::success(protocol::ping_result())),
         "listStepSpecs" => Ok(envelope::success(step_specs::list_step_specs_result())),
         "emitRecipeYamlFromPath" => handle_emit_recipe_yaml_from_path(object),
         "validateRecipePath" => handle_validate_recipe_path(object),
@@ -64,6 +65,7 @@ fn handle_validated_sidecar_object(
 
     match request_type {
         "hello" => Ok(envelope::success(protocol::hello_result())),
+        "ping" => Ok(envelope::success(protocol::ping_result())),
         "listStepSpecs" => Ok(envelope::success(step_specs::list_step_specs_result())),
         "emitRecipeYamlFromPath" => handle_emit_recipe_yaml_from_path(object),
         "validateRecipePath" => handle_validate_recipe_path(object),

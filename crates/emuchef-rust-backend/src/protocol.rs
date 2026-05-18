@@ -24,6 +24,7 @@ pub const CAPABILITIES: &[&str] = &[
     "validate",
     "getRefIndex",
     "setDocumentAuthoredRoot",
+    "ping",
 ];
 
 /// Return backend compatibility metadata for the `hello` request.
@@ -31,5 +32,12 @@ pub fn hello_result() -> Value {
     json!({
         "protocolVersion": SUPPORTED_PROTOCOL_VERSION,
         "capabilities": CAPABILITIES,
+    })
+}
+
+/// Return lightweight sidecar health metadata for the `ping` request.
+pub fn ping_result() -> Value {
+    json!({
+        "healthy": true,
     })
 }

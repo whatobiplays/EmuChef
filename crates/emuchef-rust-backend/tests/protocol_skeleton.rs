@@ -122,7 +122,8 @@ fn assert_hello_result(result: &Value) {
             "emitYaml",
             "validate",
             "getRefIndex",
-            "setDocumentAuthoredRoot"
+            "setDocumentAuthoredRoot",
+            "ping"
         ])
     );
     assert!(!result["capabilities"]
@@ -153,6 +154,33 @@ fn one_shot_hello_accepts_unknown_object_payload_keys() {
     assert_hello_response(&one_shot_response(
         r#"{"type":"hello","payload":{"ignored":true}}"#,
     ));
+}
+
+#[test]
+fn one_shot_ping_reports_healthy_without_extra_fields() {
+    let response = one_shot_response(r#"{"type":"ping"}"#);
+
+    assert_eq!(
+        response,
+        json!({
+            "ok": true,
+            "result": {"healthy": true}
+        })
+    );
+}
+
+#[test]
+fn sidecar_ping_reports_healthy_and_preserves_request_id() {
+    let responses = sidecar_responses(r#"{"id":"ping-1","type":"ping"}"#);
+
+    assert_eq!(
+        responses,
+        vec![json!({
+            "id": "ping-1",
+            "ok": true,
+            "result": {"healthy": true}
+        })]
+    );
 }
 
 #[test]

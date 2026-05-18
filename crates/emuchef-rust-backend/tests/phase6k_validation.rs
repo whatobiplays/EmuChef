@@ -216,6 +216,7 @@ fn phase6k_capabilities_stay_on_editor_session_surface() {
             "validate",
             "getRefIndex",
             "setDocumentAuthoredRoot",
+            "ping",
         ]
     );
 }

@@ -198,6 +198,7 @@ fn phase6l_capabilities_include_catalog_context_session_update() {
             "validate",
             "getRefIndex",
             "setDocumentAuthoredRoot",
+            "ping",
         ]
     );
 }

@@ -378,6 +378,8 @@ The frontend talks to Rust through Tauri `invoke(...)` commands named:
 - `validate_recipe_path`
 - `emit_recipe_yaml_from_path`
 - `sidecar_status`
+- `sidecar_ping`
+- `sidecar_restart`
 - `sidecar_list_step_specs`
 - `sidecar_open_recipe`
 - `sidecar_get_document`
@@ -409,12 +411,23 @@ does not start the sidecar and does not perform a fresh `hello` call. Before the
 first sidecar request, compatibility is unchecked. After a sidecar process has
 started, status reports cached compatibility metadata such as compatibility,
 protocol version, capabilities, and the last compatibility or transport error.
+
+`sidecar_ping` sends a lightweight `ping` request to the current Rust sidecar
+and receives `{ "healthy": true }` when the sidecar transport and protocol
+dispatcher are responsive. `sidecar_restart` is an explicit process reset path:
+it kills any owned Rust sidecar process directly, starts a fresh
+`emuchef-rust-backend --sidecar` process, performs the `hello` compatibility
+handshake, and reports the resulting status with
+`documentSessionsPreserved: false`. Restart does not send `ping`, `shutdown`,
+`hello`, or any other request to the old process.
+
 If the sidecar exits unexpectedly, an unrecoverable transport failure occurs, or
 the backend is incompatible, the frontend marks the document session invalid,
 leaves the stale document visible for reference, disables or short-circuits
-document-specific actions, and tells the user to restart the Tauri app and
-reopen the recipe. The sidecar does not automatically restart, and previous
-document ids are invalid after process loss.
+document-specific actions, and requires an explicit sidecar restart plus a
+recipe reopen to create a fresh document session. Normal document and sidecar
+request paths do not automatically restart an exited sidecar. Previous document
+ids are invalid after process loss or explicit sidecar restart.
 
 There is no backend selector, runtime backend toggle, environment variable,
 config option, UI switch, protocol negotiation path, or Python fallback in the
@@ -424,7 +437,8 @@ replacement or retirement phases.
 
 `crates/emuchef-rust-backend` is an experimental standalone Rust backend
 skeleton for migration work. It currently implements `hello`, response
-envelopes, one-shot requests, JSON Lines sidecar requests, `listStepSpecs`,
+envelopes, one-shot requests, JSON Lines sidecar requests, `ping`,
+`listStepSpecs`,
 path-based recipe YAML emit/validation, sidecar document open/get/save/close,
 sidecar document Save As, sidecar document `emitYaml`/`validate`, sidecar
 `getRefIndex`, snapshot undo/redo, `SetOverviewField` for recipe `name` and
