@@ -7,6 +7,10 @@ CLI-first Android emulation handheld provisioner.
 Repository context and current behavior notes live in `CONTEXT.md`.
 The current Rust/Python ownership decision is recorded in
 [ADR 0001](docs/adr/0001-rust-tauri-editor-runtime-ownership.md).
+[`docs/manual/real-device-retroarch-matrix.md`](docs/manual/real-device-retroarch-matrix.md)
+contains a manual, opt-in RetroArch real-device validation checklist. It is not
+part of normal CI and does not represent completed validation unless a filled
+result record is attached.
 
 Authored YAML under `authored/` is the source for current planning behavior.
 Generated execution-plan YAML is emitted on demand and is not maintained as

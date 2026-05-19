@@ -20,6 +20,11 @@ Generated execution-plan YAML is an output artifact, not a maintained source
 fixture. The repository root does not contain tracked `*.plan.yaml` examples;
 current plans are generated on demand from authored YAML under `authored/`.
 
+A manual checklist for opt-in RetroArch real-device validation lives under
+`docs/manual/`. Device, network, and ADB validation remains explicit, mutating
+apply is not part of normal CI, and the checklist itself is not completed
+validation evidence.
+
 The code is intentionally split into:
 
 - `src/emuchef/io`: authored loading, validation, YAML I/O
