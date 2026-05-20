@@ -223,6 +223,10 @@ real Tauri package build. Packaging-specific checks remain explicit through
 `npm run check:sidecar:bundle-input:debug`, `npm run check:sidecar:bundle-input`,
 and `npm run smoke:sidecar:simulated-packaged`.
 
+Real packaged GUI E2E has a manual checklist at
+[docs/manual/packaged-gui-e2e.md](docs/manual/packaged-gui-e2e.md); the
+checklist is a manual validation procedure, not completed validation evidence.
+
 The Tauri editor supports sidecar-backed recipe editing. The Overview screen
 edits recipe name and description. Recipe id, schema version, and kind are
 read-only in the Overview screen. Inputs, artifacts, and artifact groups support

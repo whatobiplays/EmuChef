@@ -115,6 +115,10 @@ directory and runs the editor JSONL request sequence through packaged-mode
 resolution. It is not a real packaged app, installed bundle, signing,
 notarization, updater, or GUI E2E test.
 
+Real packaged GUI E2E requires launching the packaged app artifact and
+completing the manual checklist in
+[docs/manual/packaged-gui-e2e.md](../../docs/manual/packaged-gui-e2e.md).
+
 `tauri.conf.json` does not point at a custom app icon in Phase 6V. The previous
 placeholder `icons/icon.png` path had no corresponding app-local file, so the
 packaging config stays minimal until real branding assets are added.
