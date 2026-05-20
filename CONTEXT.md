@@ -48,6 +48,9 @@ for comparison and debugging, not as the active Tauri editor runtime or fallback
 
 The current Rust/Python ownership decision is recorded in
 [ADR 0001](docs/adr/0001-rust-tauri-editor-runtime-ownership.md).
+CLI/planner/executor/apply parity strategy is documented in
+[docs/rust-cli-executor-parity.md](docs/rust-cli-executor-parity.md); this is a
+documentation clarification and does not change current runtime ownership.
 
 ## Current Authored Model
 

@@ -22,6 +22,9 @@ Python remains reference/developer/golden tooling and still owns unproven or
 retained non-editor-runtime surfaces unless those surfaces are separately
 replaced, intentionally retained, or retired.
 
+For CLI, planner, executor, and real-device apply ownership/parity strategy, see
+`docs/rust-cli-executor-parity.md`.
+
 ## Decision
 
 The Tauri config editor must treat the Rust sidecar as the only active editor
