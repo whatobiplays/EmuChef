@@ -35,27 +35,27 @@ The Tauri config editor in `apps/config-editor` is the primary development UI
 for authored recipe files. It edits the shared typed authored recipe model
 through the Rust sidecar and does not provide direct YAML editing.
 
-The legacy PySide6 editor remains available only as temporary
-legacy/reference/developer tooling for comparison and debugging. It is not the
-active editor runtime or a Tauri fallback.
+The legacy PySide6 editor source, tests, optional dependency extra, and Python
+GUI console script have been removed. The Tauri config editor is the only GUI
+editor path, and it is not backed by Python or PySide6.
 
-The UI-free Python editor API is available without the `pyside-editor` extra for
-legacy/reference and golden-generation workflows. It is not used by the Tauri
-editor runtime. The one-shot server accepts one JSON request per process
-invocation:
+The Python editor API source and tests are not present. The Rust backend owns
+the editor protocol for both one-shot protocol checks and JSONL sidecar
+sessions. From a source checkout, the Rust backend accepts one JSON request per
+process invocation:
 
 ```bash
-python -m emuchef_editor.api.server '{"type":"listStepSpecs"}'
-python -m emuchef_editor.api.server '{"type":"hello"}'
-echo '{"type":"openRecipe","payload":{"path":"authored/recipes/app.retroarch.provision.yaml","authoredRoot":"authored"}}' | python -m emuchef_editor.api.server
+cargo run --manifest-path crates/emuchef-rust-backend/Cargo.toml -- '{"type":"listStepSpecs"}'
+cargo run --manifest-path crates/emuchef-rust-backend/Cargo.toml -- '{"type":"hello"}'
+cargo run --manifest-path crates/emuchef-rust-backend/Cargo.toml -- '{"type":"validateRecipePath","payload":{"path":"authored/recipes/app.retroarch.provision.yaml","authoredRoot":"authored"}}'
 ```
 
-The same Python reference entrypoint also supports a persistent JSON Lines
-sidecar for development clients that need reusable document sessions:
+The same Rust backend supports a persistent JSON Lines sidecar for development
+clients that need reusable document sessions:
 
 ```bash
-printf '%s\n' '{"id":"req-1","type":"listStepSpecs","payload":{}}' | python -m emuchef_editor.api.server --sidecar
-printf '%s\n' '{"id":"req-1","type":"hello","payload":{}}' | python -m emuchef_editor.api.server --sidecar
+printf '%s\n' '{"id":"req-1","type":"listStepSpecs","payload":{}}' | cargo run --manifest-path crates/emuchef-rust-backend/Cargo.toml -- --sidecar
+printf '%s\n' '{"id":"req-1","type":"hello","payload":{}}' | cargo run --manifest-path crates/emuchef-rust-backend/Cargo.toml -- --sidecar
 ```
 
 Sidecar stdin accepts one JSON request per line and stdout returns one JSON
@@ -71,9 +71,11 @@ negotiation yet. Future Rust backends should implement the same protocol.
 
 The Tauri editor is a Tauri v2 development app that uses the experimental Rust
 JSONL sidecar for session-backed document operations. Python remains in the repo
-only for legacy/reference/developer/golden workflows such as the PySide editor,
-Python CLI reference behavior, fixture/golden generation, and later
-confirmed-cutover work.
+only for legacy/reference/developer/golden workflows such as Python CLI
+reference behavior, fixture/golden generation, and later confirmed-cutover work.
+Fixture/golden ownership and remaining dev-only/reference-only regeneration
+paths are classified in
+[`docs/python-fixture-golden-ownership.md`](docs/python-fixture-golden-ownership.md).
 
 Install frontend dependencies and run the Tauri dev shell with npm:
 
@@ -107,7 +109,7 @@ Current editor scope notes:
 - the Tauri Save command writes the current sidecar document to disk and should be tested only on safe or temporary recipe copies during development
 - native confirmation prompts guard opening another recipe with unsaved changes and closing the window/app with unsaved changes or an operation in flight where Tauri close interception is available
 - if the Rust sidecar exits or transport fails, the stale document remains visible for reference, document-specific actions are disabled, and the explicit Restart Sidecar action can recover a compatible running sidecar before the recipe is explicitly reopened
-- create-from-template sidecar capabilities are not exposed in the Tauri UI
+- create-from-template sidecar capabilities are not exposed in the Tauri UI, and GUI create-from-template is retired from the normal editor path
 - capability names are backend-agnostic protocol strings; optional capabilities are display/status metadata only in the current UI
 - production signing, notarization, updater support, and cross-platform release automation are not implemented
 - there is no backend selector, backend toggle, config option, environment variable, UI switch, protocol negotiation path, or Python fallback for the Tauri editor runtime
@@ -119,7 +121,7 @@ Current editor scope notes:
 - basic step lifecycle editing uses Rust sidecar commands for add, delete, duplicate, reorder, display-name edits, and `user_toggleable` edits
 - step dependency editing uses the Rust sidecar `UpdateStepDependencies` command; adding appends a dependency id as authored storage/display order only, and the planner remains authoritative for final execution ordering
 - missing or unknown authored dependency ids remain visible in the step detail panel and can be removed from copied or temporary recipes during repair
-- deleting a step uses the backend safe-delete behavior shared with the PySide editor and removes supported downstream dependencies, conflicts, and refs
+- deleting a step uses backend safe-delete behavior and removes supported downstream dependencies, conflicts, and refs
 - step params editing uses the Rust sidecar `UpdateStepParams` command with full params replacement for the selected step; the frontend submits authored JSON values and replaces local document state with the returned `RecipeDocumentDto`
 - step params with known Python schema shapes use rich controls where safe: ordered artifact and artifact-group id list params use add/remove/up/down list controls, runtime and app-op permission params use row editors, and policy params use select/checkbox controls
 - raw JSON remains the editor for free-form, unsupported, incompatible, or schema-less params such as metadata; schema-backed structured editors preserve unknown or extra object keys where the authored value can be copied without data loss
@@ -141,28 +143,22 @@ Current editor scope notes:
 - unsupported authored step content that the current Tauri UI does not edit is preserved rather than dropped
 - ref rewrite after id changes is not implemented
 
-### Legacy PySide6 editor
+### Removed PySide6 editor
 
-The PySide6 editor is installed with the optional `pyside-editor` extra and
-continues to use the existing `emuchef-editor` script entrypoint:
-
-```bash
-pip install -e ".[pyside-editor]"
-emuchef-editor /path/to/EmuChef
-```
-
-Use the PySide6 editor only as legacy/reference/developer tooling for comparison
-and debugging. It remains optional and is not required for the UI-free editor API
-or the Tauri development editor.
+The legacy PySide6 editor source under `src/emuchef_editor/app`, its legacy
+tests, the `pyside-editor` optional dependency extra, and the `emuchef-editor`
+console script are not present. Normal source and test paths must not import
+PySide6 or `emuchef_editor.app`.
 
 ## Templates
 
 Example authored YAML templates live under `templates/authored/`.
 They are examples for authors only and are not loaded by the CLI as real authored inputs.
 
-The legacy PySide6 editor shows recipe templates separately from authored
-recipes and uses them as creation sources for `New Recipe...`. Template preview
-in that editor is read-only and informational.
+`createRecipeFromTemplate` is implemented by the Rust sidecar backend for
+protocol parity. The normal Tauri editor path does not expose a GUI
+create-from-template flow. GUI template creation remains retired unless a future
+product requirement reintroduces it.
 
 To create real authored inputs, copy a template into the matching `authored/`
 subdirectory:

@@ -1,176 +1,82 @@
-# PySide6 Retirement / Quarantine Plan
+# PySide6 Removal Status
 
 ## Purpose
 
-This document records the PySide6 retirement and quarantine plan for EmuChef.
-It is a planning and classification document only.
+This document records the current PySide6 removal state for EmuChef. It does not
+claim Python deletion, full Rust parity, public release readiness, or removal of
+Python CLI/planner/executor/golden tooling.
 
-This document does not retire PySide6, change entrypoints, remove dependencies,
-move source files, quarantine tests, change the Tauri runtime, or certify full
-Tauri feature parity.
+## Current Invariant
 
-## Current Status
+A clean default install and normal active runtime/test path do not require,
+import, or launch PySide6.
 
-- `pyproject.toml` declares `PySide6>=6.8` only in the optional
-  `pyside-editor` extra. The base Python dependencies do not include PySide6.
-- `pyproject.toml` still publishes the `emuchef-editor` script entrypoint, and
-  that script points at `emuchef_editor.app.app:main`.
-- `src/emuchef_editor/app/app.py` is the current `emuchef-editor` launch path.
-  It imports `PySide6.QtWidgets.QApplication` at runtime, writes an error to
-  stderr, and returns exit code `1` when PySide6 is unavailable.
-- The active Tauri editor runtime is Rust-sidecar-only. The current ownership
-  docs state that the Tauri config editor has no Python fallback, backend
-  selector, backend toggle, environment-variable backend choice, or protocol
-  negotiation path.
-- `src/emuchef_editor/core` and `src/emuchef_editor/api` remain Python
-  editor-core and editor-API reference surfaces. They support comparison,
-  developer, golden-generation, and legacy workflows. They are not retired by
-  PySide6 retirement, and they are not part of the packaged Tauri editor
-  runtime.
-- Python CLI, planner, executor, and golden-generation tooling remain separate
-  Python-owned or Python-reference surfaces unless later work explicitly ports,
-  retains, or retires them.
+Python remains in the repository for CLI, planner, executor, fixture/golden
+generation, and real-device apply until later parity or retirement work
+explicitly replaces or removes those surfaces.
 
-## Non-Goals
+## Removed PySide Surfaces
 
-This task does not:
+- `pyproject.toml` does not declare PySide6 in base dependencies or optional
+  dependencies.
+- The default Python package does not publish an `emuchef-editor` console script.
+- The legacy PySide source package `src/emuchef_editor/app` is removed.
+- The legacy PySide test package `tests/legacy` is removed.
+- There is no `pyside-editor` optional dependency extra.
 
-1. Remove PySide6 from packaging.
-2. Change or remove `emuchef-editor`.
-3. Delete, move, or rename PySide source files.
-4. Port, quarantine, delete, or rename tests.
-5. Claim Tauri feature parity is complete.
-6. Retire Python editor API, editor core, golden-generation, or reference
-   tooling.
-7. Change Rust, Tauri, frontend, package, schema, or runtime behavior.
+## Supported PySide-Free Surfaces
 
-## PySide-Only / PySide-Coupled Behavior
+These modules are supported PySide-free import surfaces and must not import
+PySide6, `emuchef_editor.app`, or Qt-specific types:
 
-The following behavior is PySide-only or PySide-coupled today:
+- `emuchef_editor.core.workspace`
+- `emuchef_editor.core.metadata.tooltips`
+- `emuchef_editor.core.metadata.step_metadata`
 
-- The Qt desktop shell in `src/emuchef_editor/app`, including
-  `MainWindow`, menus, toolbars, splitters, tabs, status messages, and close
-  handling.
-- Workspace list and open-workspace behavior in the PySide shell, including
-  keyboard activation, double-click handling, workspace refresh, and template
-  listing.
-- Qt dialogs, layouts, form controls, and tooltips used by the PySide editor
-  pages.
-- PySide Save and Save As UI behavior, including file dialogs, overwrite
-  confirmation, dirty state display, and undo/redo state refresh.
-- Unsaved-change prompts before opening another recipe, starting a new recipe,
-  or closing the window.
-- New Recipe from `templates/authored/`, including the PySide dialog that
-  collects template, recipe id, destination directory, and output filename.
-- Read-only template preview in the PySide New Recipe dialog.
-- Workspace template discovery and refresh behavior that shows recipe templates
-  separately from authored recipes.
+Normal core/API tests import these modules directly.
 
-Create-from-template requires an explicit port/retire/no-parity decision before
-PySide deletion. If accepted ADR/docs keep it as developer/reference tooling,
-full PySide deletion must either port the workflow to Tauri, retire it, or move
-it to non-PySide tooling.
+## Template Creation Disposition
 
-## Related Documents
-
-- [ADR 0001: Rust Tauri Editor Runtime Ownership](docs/adr/0001-rust-tauri-editor-runtime-ownership.md)
-- [Rust Backend Cutover Readiness Audit](docs/rust-backend-cutover-readiness.md)
-- [Rust CLI and Executor Parity Strategy](docs/rust-cli-executor-parity.md)
-- [Tauri Packaging Readiness](docs/release/tauri-packaging-readiness.md)
-- [EmuChef Config Editor README](apps/config-editor/README.md)
-
-## Retirement Criteria
-
-These criteria must be rechecked during the implementation phase that actually
-retires or quarantines PySide6. Existing Tauri evidence does not mean PySide6 is
-retired.
-
-- [ ] Tauri can open existing recipes. Evidence exists; reverify during
-  retirement.
-- [ ] Tauri can save canonical YAML. Evidence exists; reverify during
-  retirement.
-- [ ] Tauri can Save As canonical YAML. Evidence exists; reverify during
-  retirement.
-- [ ] Tauri can select and clear authored root. Evidence exists; reverify during
-  retirement.
-- [ ] Tauri can edit non-step sections. Evidence exists; reverify during
-  retirement.
-- [ ] Tauri can edit step params. Evidence exists; reverify during retirement.
-- [ ] Tauri can edit step dependencies. Evidence exists; reverify during
-  retirement.
-- [ ] Tauri can show diagnostics. Evidence exists; reverify during retirement.
-- [ ] Tauri can show ref index and ref picker behavior. Evidence exists;
-  reverify during retirement.
-- [ ] Create-from-template has an explicit port/retire/no-parity decision.
-- [ ] PySide-dependent tests are ported, quarantined, or removed.
-- [ ] The `emuchef-editor` strategy is implemented.
-- [ ] Packaging and release docs are updated after entrypoint decision
-  execution.
-
-## Blockers
-
-These blockers must be resolved before deleting PySide6 or the PySide app code:
-
-1. Create-from-template requires an explicit port/retire/no-parity decision
-   before PySide deletion. If accepted ADR/docs keep it as developer/reference
-   tooling, full PySide deletion must either port the workflow to Tauri, retire
-   it, or move it to non-PySide tooling.
-2. PySide-dependent tests must be ported, quarantined, or removed in a scoped
-   follow-up task.
-3. The `emuchef-editor` entrypoint strategy must be implemented in a scoped
-   follow-up task.
-4. Package and release documentation must be updated after the entrypoint
-   strategy is executed.
-5. Python editor API, editor core, CLI, planner, executor, and golden-generation
-   ownership must remain separately classified. PySide deletion must not imply
-   Python deletion.
-6. Any retained developer/reference workflow that currently depends on PySide
-   must either move to Tauri, move to non-PySide tooling, remain intentionally
-   quarantined, or be explicitly retired.
-
-## Entrypoint Strategy
-
-Current:
-
-- `emuchef-editor` launches the PySide app through
-  `src/emuchef_editor/app/app.py`.
-
-Desired future:
-
-- The packaged Tauri app is the editor path.
-- The Python `emuchef-editor` script is no longer published, or it is replaced
-  with an explicit documented strategy.
-
-Required before changing it:
-
-1. The Tauri template creation decision is executed.
-2. PySide test quarantine, ports, or removals are complete.
-3. Package and release docs are updated.
-4. An explicit scoped implementation task is approved.
-
-No entrypoint changes are made by this document.
+`createRecipeFromTemplate` is implemented by the Rust sidecar backend for
+protocol parity. GUI create-from-template is retired from the normal editor
+path, and no Tauri UI flow is present unless a future product requirement
+reintroduces GUI template creation.
 
 ## Test Classification
 
-| Test / Area | PySide6 Required? | Classification | Future Action |
-| --- | --- | --- | --- |
-| `tests/test_editor_app.py` | Yes | Direct Qt app/widget coverage for the PySide app, including Save As, templates, workspace open paths, dialogs, tooltips, and close prompts. | Port, quarantine, or delete later after replacement evidence exists. |
-| `tests/test_editor_tooltips.py` | Indirectly coupled today | Imports `emuchef_editor.app.recipe_editor`; that package initializer imports Qt widget modules through `editor.py` and `new_recipe_dialog.py`. | Port metadata import path away from the Qt package or quarantine. |
-| `tests/test_step_plugins.py` | Indirectly coupled today | Imports editor metadata through `emuchef_editor.app.recipe_editor`, which couples the test to the Qt package initializer. | Move or port editor metadata to a PySide-free path, or quarantine. |
-| `tests/test_editor_core.py` | No direct PySide requirement | Exercises editor core, workspace service, canonical YAML, ref index, validation, Save As, and template document creation. It imports the PySide-free workspace service under `emuchef_editor.app.workspace`. | Keep selected core, workspace, and template coverage. |
-| `tests/test_editor_api_*.py` | No | Exercises Python editor API, DTOs, command codec, session manager, server, sidecar, and step-spec DTO behavior. | Keep until Python API and golden tooling are retired or replaced. |
-| `tests/test_step_specs_fixture_tool.py` | No | Verifies StepSpec fixture generation and asserts generation does not load PySide or the app package. | Keep as golden/reference guard. |
-| `tests/test_templates.py` | No | Verifies templates stay outside authored loading and match current schema shape. | Keep until the template workflow decision is executed. |
-| `tests/test_cli.py`, `tests/test_validation.py`, `tests/test_planner_core.py`, `tests/test_executor_core.py` | No | Python CLI, validation, planner, and executor reference coverage. | Keep as Python CLI/planner/executor/reference tests. |
-| `apps/config-editor/tests/*.ts` | No | Frontend logic coverage for Tauri editor behavior. | Keep and expand as Tauri retirement evidence. |
-| Rust sidecar and Tauri Rust tests | No | Rust backend and Tauri bridge coverage for sidecar runtime, protocol, Save As, authored root, diagnostics, ref index, commands, packaging, and no-Python-runtime checks. | Keep and expand as Tauri retirement evidence. |
+| Test / Area | PySide6 Required? | Classification |
+| --- | --- | --- |
+| `tests/test_editor_tooltips.py` | No | PySide-free metadata coverage through `emuchef_editor.core.metadata.tooltips`. |
+| `tests/test_step_plugins.py` | No | Step plugin and PySide-free metadata coverage through `emuchef_editor.core.metadata.step_metadata`. |
+| `tests/test_editor_core.py` | No | Editor core, workspace, canonical YAML, ref index, validation, Save As, and template document creation coverage. |
+| `tests/test_templates.py` | No | Template schema and authored-loader isolation coverage. |
+| Rust and Tauri tests | No | Active Rust sidecar and Tauri bridge/runtime coverage. |
 
-## Future Work
+Normal Python test discovery or targeted non-legacy editor tests must not import
+PySide6, even on machines where PySide6 happens to be installed.
 
-1. Execute the Tauri/create-from-template port, retire, or no-parity decision.
-2. Port or quarantine PySide-dependent and PySide-coupled tests.
-3. Implement the `emuchef-editor` entrypoint migration strategy.
-4. Remove or quarantine PySide package/dependency declarations only after the
-   entrypoint and test strategy is implemented.
-5. Update package, release, and readiness docs after entrypoint and dependency
-   cleanup decisions are executed.
+## Guard
+
+`npm run check:no-pyside-runtime` fails on:
+
+- PySide6 in base Python dependencies.
+- PySide6 in optional Python dependencies.
+- A published `emuchef-editor` console script.
+- Active source imports of PySide6.
+- Active source imports of `emuchef_editor.app`.
+- Normal test imports of PySide6.
+- Normal test imports of `emuchef_editor.app`.
+- Any Python files under the removed legacy PySide source path
+  `src/emuchef_editor/app`.
+- Any Python files under the removed legacy PySide test path `tests/legacy`.
+- Qt-specific names in supported PySide-free core metadata modules.
+
+The guard allows documentation references that describe removed PySide status.
+
+## Remaining Python Deletion Work
+
+PySide6 removal is not Python deletion. Full Python removal remains blocked by
+Python CLI replacement/retirement, planner/executor breadth, real-device apply
+ownership, fixture/golden generation ownership, Python tests/docs/scripts
+cleanup, and Rust-native ownership for any behavior still proven only by Python
+reference tests.

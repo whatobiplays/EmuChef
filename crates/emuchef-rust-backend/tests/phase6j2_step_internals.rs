@@ -155,6 +155,7 @@ fn phase6j2_capabilities_stay_on_editor_session_surface() {
             "emitRecipeYamlFromPath",
             "validateRecipePath",
             "openRecipe",
+            "createRecipeFromTemplate",
             "getDocument",
             "saveRecipe",
             "saveRecipeAs",
@@ -172,9 +173,9 @@ fn phase6j2_capabilities_stay_on_editor_session_surface() {
 }
 
 #[test]
-fn command_inventory_covers_current_external_python_apply_recipe_command_decoders() {
-    // Mirrors src/emuchef_editor/api/command_codec.py _DECODERS. Core-only
-    // dataclasses absent from _DECODERS are intentionally excluded here.
+fn command_inventory_covers_current_external_apply_recipe_command_decoders() {
+    // Mirrors the external applyRecipeCommand decoder inventory. Core-only
+    // document commands absent from that wire protocol are intentionally excluded here.
     let samples = [
         (
             "SetOverviewField",

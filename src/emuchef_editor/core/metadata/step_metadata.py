@@ -1,4 +1,4 @@
-"""Shared UI metadata for the Milestone 4 step editor."""
+"""PySide-free step metadata shared by editor reference and runtime tests."""
 
 from __future__ import annotations
 

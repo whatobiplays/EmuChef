@@ -34,8 +34,8 @@ commands.
 
 Python-owned surfaces must not be deleted without a separate parity or
 retirement decision. Python remains available for reference, developer, golden,
-legacy editor, and retained CLI/planner/executor workflows until each surface is
-covered by verified Rust parity, explicitly kept in Python, or retired.
+and retained CLI/planner/executor workflows until each surface is covered by
+verified Rust parity, explicitly kept in Python, or retired.
 
 ## Ownership
 
@@ -46,8 +46,8 @@ covered by verified Rust parity, explicitly kept in Python, or retired.
 | Editor document session | Rust sidecar | Sessions are sidecar-owned and invalidated by sidecar restart |
 | CLI plan/apply/detect | Python unless proven otherwise | Do not claim Rust ownership without verified parity or retirement |
 | Planner/executor | Python unless proven otherwise | Rust parity may be partial/editor-specific unless separately proven |
-| StepSpec fixture generation | Python/golden tooling unless proven otherwise | Ownership remains until the generation flow is replaced or retired |
-| PySide6 editor | Legacy Python surface; cleanup pending | Not the active Tauri runtime |
+| StepSpec DTO metadata | Rust sidecar | `listStepSpecs` uses Rust-owned static metadata; no Python StepSpec fixture generation remains in the normal editor path |
+| PySide6 editor source | Removed | No active source, tests, optional dependency extra, or `emuchef-editor` console script |
 
 ## Python Deletion Blockers
 
@@ -57,10 +57,9 @@ verified Rust parity, intentionally retained as Python, or retired:
 1. CLI parity or CLI retirement.
 2. Planner/executor parity, or an explicit keep-Python decision.
 3. Real-device apply strategy.
-4. Template/create-from-template ownership decision.
+4. Broad CLI `draft`/template workflow ownership decision.
 5. StepSpec/golden fixture ownership.
-6. PySide6 cleanup/removal decision.
-7. Packaged Tauri release evidence.
+6. Packaged Tauri release evidence.
 
 ## Consequences
 
@@ -68,8 +67,7 @@ The current editor runtime ownership is intentionally narrow: Rust owns the
 active Tauri config-editor backend runtime, while Python continues to own or
 support non-editor-runtime surfaces unless proven otherwise. This keeps the
 Tauri runtime free of Python fallback paths without implying that Rust fully
-replaces the Python CLI, planner, executor, template, golden, or legacy editor
-surfaces.
+replaces the Python CLI, planner, executor, template, or golden surfaces.
 
 Historical migration plans remain useful as evidence and context, but this ADR
 is the current ownership decision for the active Tauri editor runtime.

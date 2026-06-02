@@ -33,18 +33,15 @@ The code is intentionally split into:
 - `src/emuchef/steps`: first-party built-in step plugins, step specs, planner hooks,
   step-local executor handlers, and editor-safe step metadata
 - `src/emuchef/domain`: typed models and enums
-- `src/emuchef_editor/core`: UI-agnostic recipe document, canonical YAML, ref indexing, and validation adapters for the editor
-- `src/emuchef_editor/api`: legacy/reference UI-free Python JSON API adapters
-  over the editor core for comparison and golden-generation workflows
-- `src/emuchef_editor/app`: legacy/reference PySide6 desktop editor for authored
-  recipe files
+- `src/emuchef_editor/core`: UI-agnostic recipe document, canonical YAML, ref indexing, validation adapters, workspace discovery, and PySide-free editor metadata
 - `apps/config-editor`: primary Tauri development/editor UI for authored recipe files
 
 The base Python package is retained temporarily for legacy/reference/developer
-workflows, including the Python CLI reference implementation and golden
-generation. The PySide6 desktop editor is installed with the `pyside-editor`
-optional dependency extra and remains available only as legacy/reference tooling
-for comparison and debugging, not as the active Tauri editor runtime or fallback.
+workflows, including the Python CLI/planner/executor reference implementation
+and golden generation. A clean default install and the normal active
+runtime/test path do not require, import, or launch PySide6. The legacy PySide6
+editor source, Python editor API source, corresponding normal tests, optional
+dependency extra, and Python GUI console script are not present.
 
 The current Rust/Python ownership decision is recorded in
 [ADR 0001](docs/adr/0001-rust-tauri-editor-runtime-ownership.md).
@@ -103,13 +100,13 @@ The current editor scope is recipe-authoring only. It edits:
 - Artifact Groups
 - Steps
 
-## Current Editor API
+## Current Editor Protocol
 
-`emuchef_editor.api` is the legacy/reference UI-free Python JSON API surface. It
-wraps `src/emuchef_editor/core` and remains available for comparison, fixture
-generation, the PySide6 editor, and later Python-deletion work. It is not a
-packaged editor backend fallback. The primary Tauri editor runtime uses the Rust
-sidecar instead of this Python API.
+The Rust backend is the active editor JSON protocol owner. It provides one-shot
+JSON requests for stateless protocol operations and a persistent JSON Lines
+sidecar for document sessions. The Python `emuchef_editor.api` package is not
+present in active source, normal tests, default Python distributions, or Tauri
+runtime paths.
 
 Every API response uses one of these envelopes:
 
@@ -141,28 +138,30 @@ comes from the built-in step registry and includes editor-safe labels, supported
 status, outputs, param ordering, defaults, and typed ref filter hints where the
 registry exposes them.
 
-The Rust backend consumes a committed Python-generated StepSpec fixture at
-`crates/emuchef-rust-backend/tests/fixtures/python_step_specs.json`. The
-repo-level `scripts/step_specs_fixture.py` tool checks or intentionally updates
-that fixture from `emuchef_editor.api.dto.step_specs_to_dto()`. This is
-developer/golden tooling for the Python DTO to Rust fixture contract; it is not
-part of the Tauri runtime, Rust sidecar packaging, or no-Python-runtime check
-path.
+The Rust backend owns the static StepSpec DTO metadata returned by
+`listStepSpecs` in `crates/emuchef-rust-backend/src/step_specs.rs`. Normal Rust,
+Tauri, and default package verification do not consume a Python-generated
+StepSpec fixture or invoke Python to serve StepSpec metadata.
 
-The API server supports one-shot stateless requests through:
+Fixture and golden ownership is classified in
+`docs/python-fixture-golden-ownership.md`. Normal Rust/Tauri active checks may
+consume checked-in fixtures and goldens, but they do not invoke Python fixture
+or golden regeneration. Remaining Python regeneration commands are
+dev-only/reference-only and are not setup, runtime, packaging, or Rust/Tauri
+verification prerequisites.
 
+The Rust backend supports one-shot stateless requests through:
+
+- `hello`
+- `ping`
 - `listStepSpecs`
-- `openRecipe`
 - `validateRecipePath`
 - `emitRecipeYamlFromPath`
 
-`openRecipe` may return a document id from the one-shot server, but only the
-sidecar-backed `DocumentSessionManager` owns reusable document sessions.
-
-The API server also supports a persistent JSON Lines sidecar mode through:
+The Rust backend supports a persistent JSON Lines sidecar mode through:
 
 ```bash
-python -m emuchef_editor.api.server --sidecar
+cargo run --manifest-path crates/emuchef-rust-backend/Cargo.toml -- --sidecar
 ```
 
 The sidecar reads one UTF-8 JSON request per stdin line and writes one UTF-8
@@ -173,11 +172,12 @@ lines return `id: null`. Sidecar request-level failures use the same `ok:false`
 API envelope as one-shot requests and do not terminate the process. The sidecar
 exits cleanly when stdin reaches EOF.
 
-The sidecar reuses `DocumentSessionManager` for live document sessions. It
-supports session-backed requests for listing step specs, opening and creating
-documents, getting and closing documents, applying recipe commands, undo, redo,
-saving, Save As, validation, canonical YAML emission, and ref-index retrieval.
-The sidecar protocol includes a backend-agnostic `hello` request. `hello`
+The sidecar uses the Rust `DocumentSessionManager` for live document sessions.
+It supports session-backed requests for listing step specs, opening documents,
+creating documents from templates, getting and closing documents, applying
+recipe commands, undo, redo, saving, Save As, validation, canonical YAML
+emission, authored-root context updates, and ref-index retrieval. The sidecar
+protocol includes a backend-agnostic `hello` request. `hello`
 returns integer `protocolVersion: 1` and a string `capabilities` list. The
 protocol does not expose `implementation` or `implementationVersion` fields,
 and there is no protocol negotiation. Capability names describe editor protocol
@@ -217,9 +217,12 @@ the packaged app executable.
 
 Routine local runtime verification can use `npm run check:rust-runtime` from
 `apps/config-editor`. That aggregate runs app-local naming/unit checks,
-no-Python-runtime scanning, TypeScript typecheck, and frontend logic tests; it
+no-Python-runtime scanning, no-Python-editor-API scanning,
+no-Python-fixture-regeneration scanning, no-PySide-runtime scanning, TypeScript
+typecheck, and frontend logic tests; it
 does not run Python golden regeneration, ADB/device tests, release builds, or a
-real Tauri package build. Packaging-specific checks remain explicit through
+real Tauri package build.
+Packaging-specific checks remain explicit through
 `npm run check:sidecar:bundle-input:debug`, `npm run check:sidecar:bundle-input`,
 and `npm run smoke:sidecar:simulated-packaged`.
 
@@ -253,9 +256,9 @@ dependency selections, treats missing or null dependency lists as empty for UI
 rendering only, and leaves graph validity, cycles, unknown step ids, and final
 execution ordering to backend validation and planning. Missing or unknown
 authored dependency ids remain visible as raw ids and can be removed. Delete Step
-uses the backend safe-delete behavior shared with the legacy PySide editor, so
-supported downstream step dependencies, `conflicts_with` entries, and step refs
-are removed by the sidecar rather than by TypeScript cleanup logic.
+uses backend safe-delete behavior, so supported downstream step dependencies,
+`conflicts_with` entries, and step refs are removed by the sidecar rather than by
+TypeScript cleanup logic.
 
 Step param updates use `UpdateStepParams` with the complete next params object
 for the selected step. The frontend edits authored step params, keeps literal
@@ -466,9 +469,31 @@ state after sidecar loss or restart.
 
 There is no backend selector, runtime backend toggle, environment variable,
 config option, UI switch, protocol negotiation path, or Python fallback in the
-Tauri editor runtime. Python, PySide6, and the Python CLI remain in the repo only
-for legacy/reference/developer/golden workflows until later confirmed
-replacement or retirement phases.
+Tauri editor runtime. Python and the Python CLI remain in the repo only for
+legacy/reference/developer/golden workflows until later confirmed replacement or
+retirement phases. PySide6 editor source, Python editor API source, and their
+normal tests are not present.
+
+The active PySide removal invariant is that a clean default install and normal
+active runtime/test path do not require, import, or launch PySide6. `npm run
+check:no-pyside-runtime` enforces this by rejecting PySide6 in base or optional
+Python dependencies, a published Python `emuchef-editor` console script, active
+source imports of PySide6 or `emuchef_editor.app`, normal test imports of
+PySide6 or `emuchef_editor.app`, and any Python files under the removed legacy
+PySide source/test paths.
+
+The active Python editor API removal invariant is that normal source, test, and
+distribution entrypoint paths do not expose `emuchef_editor.api`. `npm run
+check:no-python-editor-api` enforces this by rejecting Python editor API source
+files, normal Python source/test imports of `emuchef_editor.api`, and console
+scripts that publish `emuchef_editor.api` entrypoints.
+
+The active Python fixture/golden regeneration invariant is that normal
+Rust/Tauri active checks consume checked-in fixture data only. `npm run
+check:no-python-fixture-regeneration` enforces this by scanning the active
+`check:rust-runtime` npm script closure, app-local runtime/packaging guard
+scripts, Tauri Rust sources/tests, and Rust backend test files for Python
+fixture/golden generator invocations.
 
 `crates/emuchef-rust-backend` is an experimental standalone Rust backend
 skeleton for migration work. It currently implements `hello`, response
@@ -476,8 +501,8 @@ envelopes, one-shot requests, JSON Lines sidecar requests, `ping`,
 `listStepSpecs`,
 path-based recipe YAML emit/validation, sidecar document open/get/save/close,
 sidecar document Save As, sidecar document `emitYaml`/`validate`, sidecar
-`getRefIndex`, snapshot undo/redo, `SetOverviewField` for recipe `name` and
-`description`, and
+`getRefIndex`, sidecar `createRecipeFromTemplate`, snapshot undo/redo,
+`SetOverviewField` for recipe `name` and `description`, and
 fixture-covered `applyRecipeCommand` mutations for inputs, artifacts,
 artifact groups, step lifecycle, step dependencies, step params, and advanced
 internals. Supported non-step
@@ -502,11 +527,10 @@ It now has crate-internal fake-device/DryRunAdb parity fixtures plus an
 explicitly constructed real-ADB adapter and ignored/manual real-device tests; it
 still has no public real-device executor surface. Its `hello` response reports
 only capabilities implemented in the crate, but capability parity is not full
-product parity. Rust `listStepSpecs` uses a temporary Python-generated static
-fixture for StepSpec DTO parity; Python remains the reference implementation for
-broader non-editor behavior until later replacement work is explicitly approved.
-The fixture-backed StepSpec source, private planner skeleton, and private safe
-executor skeleton are
+product parity. Rust `listStepSpecs` uses Rust-owned static DTO metadata; Python
+remains the reference implementation for broader non-editor behavior until later
+replacement work is explicitly approved. The private planner skeleton and
+private safe executor skeleton are
 scaffolding only and should be replaced or broadened with Rust-native schema
 builders, full executor parity, and broader parity tests before any backend
 cutover is attempted.
@@ -515,15 +539,18 @@ The Tauri editor presents authored-root selection in the normal UI and native
 menu path. There is no backend selector, runtime backend toggle, execution/apply
 UI, or Python fallback in this workflow.
 
-## Current PySide6 Legacy Editor
+## Current PySide6 Status
 
-The PySide6 editor remains available through the `pyside-editor` optional
-dependency extra and the existing `emuchef-editor` script entrypoint. It is
-legacy/reference/developer tooling for comparison and debugging, not the active
-Tauri editor runtime or a fallback backend. The PySide6 code stays in the repo
-and continues to use the shared Python editor core, authored recipe model,
-canonical YAML writer, and validation adapters until that workflow is replaced or
-intentionally retired.
+PySide6 is removed from the Python dependency metadata, active source tree, and
+normal test tree. The legacy `src/emuchef_editor/app` source package,
+`tests/legacy` PySide tests, `pyside-editor` optional dependency extra, and
+`emuchef-editor` console script are not present. The Python editor API source
+package is also not present. The Tauri editor is the only GUI editor path.
+
+`createRecipeFromTemplate` is implemented by the Rust sidecar backend for
+protocol parity. GUI create-from-template is not part of the normal Tauri editor
+path unless a future product requirement reintroduces a GUI template-creation
+workflow.
 
 ## Current Step Plugin Architecture
 
@@ -560,12 +587,11 @@ Editor interaction rules:
 - edits apply immediately to the in-memory recipe document
 - save is explicit and writes canonical YAML to disk
 - Save As writes canonical YAML to a new path, updates the open document path and saved baseline, and keeps undo/redo history intact
-- new recipes are created from recipe templates under `templates/authored/`, including a blank recipe template
-- template preview is read-only and informational
+- template-backed document creation is available through the PySide-free Python core helper and Rust sidecar protocol, but the normal Tauri editor UI does not expose a create-from-template flow
 - the workspace lists authored recipes separately from recipe templates
 - the workspace list auto-refreshes when authored recipe files or recipe template files are added, removed, or renamed on disk while the workspace is open
 - if an open recipe file disappears from the workspace because of an external remove or rename, the in-memory document stays open and the workspace selection clears until that exact path reappears
-- unsaved-changes prompts gate opening another recipe, starting a new recipe, and closing the window
+- unsaved-changes prompts gate opening another recipe and closing the window
 - diagnostics and YAML preview refresh after each committed edit
 - undo and redo operate at command granularity and persist across saves for the open document
 - dirty state is a semantic comparison against the last saved canonical YAML baseline
@@ -814,8 +840,9 @@ Example authored templates live under `templates/authored/`.
 They are intentionally outside `authored/` so the loader never treats them as
 real authored inputs.
 
-The recipe editor treats recipe templates as creation sources, not as normal
-editable authored recipe documents.
+Template-backed document creation treats recipe templates as creation sources,
+not as normal editable authored recipe documents. The normal Tauri editor UI
+does not expose template creation.
 Recipe template choices currently include:
 
 - `recipe.template.yaml`

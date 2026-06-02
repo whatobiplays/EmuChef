@@ -1,4 +1,4 @@
-"""Workspace discovery helpers for the editor shell."""
+"""PySide-free workspace discovery helpers for authored recipe tooling."""
 
 from __future__ import annotations
 

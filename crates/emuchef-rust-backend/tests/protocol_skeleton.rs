@@ -42,11 +42,6 @@ fn assert_invalid_request(response: &Value) {
     assert_eq!(response["error"]["details"], json!({}));
 }
 
-fn expected_step_specs_result() -> Value {
-    serde_json::from_str(include_str!("fixtures/python_step_specs.json"))
-        .expect("Python StepSpec fixture should be valid JSON")
-}
-
 fn assert_step_specs_surface(result: &Value) {
     let parsed: step_specs::StepSpecsResult = serde_json::from_value(result.clone())
         .expect("StepSpec result should match Rust DTO surface");
@@ -99,7 +94,7 @@ fn assert_step_specs_surface(result: &Value) {
 
 fn assert_step_specs_response(response: &Value) {
     assert_eq!(response["ok"], true);
-    assert_eq!(response["result"], expected_step_specs_result());
+    assert_eq!(response["result"], step_specs::list_step_specs_result());
     assert_step_specs_surface(&response["result"]);
 }
 
@@ -112,6 +107,7 @@ fn assert_hello_result(result: &Value) {
             "emitRecipeYamlFromPath",
             "validateRecipePath",
             "openRecipe",
+            "createRecipeFromTemplate",
             "getDocument",
             "saveRecipe",
             "saveRecipeAs",
@@ -189,7 +185,7 @@ fn one_shot_hello_rejects_non_object_payload() {
 }
 
 #[test]
-fn one_shot_list_step_specs_accepts_omitted_payload_and_matches_python_fixture() {
+fn one_shot_list_step_specs_accepts_omitted_payload_and_returns_rust_native_specs() {
     assert_step_specs_response(&one_shot_response(r#"{"type":"listStepSpecs"}"#));
 }
 
@@ -201,7 +197,7 @@ fn one_shot_list_step_specs_accepts_empty_object_payload() {
 }
 
 #[test]
-fn one_shot_list_step_specs_ignores_unknown_object_payload_keys_like_python() {
+fn one_shot_list_step_specs_ignores_unknown_object_payload_keys() {
     assert_step_specs_response(&one_shot_response(
         r#"{"type":"listStepSpecs","payload":{"ignored":true}}"#,
     ));
@@ -284,7 +280,7 @@ fn sidecar_hello_with_non_object_payload_returns_invalid_request() {
 }
 
 #[test]
-fn sidecar_list_step_specs_accepts_omitted_payload_matches_python_fixture_and_echoes_id() {
+fn sidecar_list_step_specs_accepts_omitted_payload_returns_rust_native_specs_and_echoes_id() {
     let response = &sidecar_responses(r#"{"id":"specs-1","type":"listStepSpecs"}"#)[0];
     assert_eq!(response["id"], "specs-1");
     assert_step_specs_response(response);
@@ -298,7 +294,7 @@ fn sidecar_list_step_specs_accepts_empty_object_payload() {
 }
 
 #[test]
-fn sidecar_list_step_specs_ignores_unknown_object_payload_keys_like_python() {
+fn sidecar_list_step_specs_ignores_unknown_object_payload_keys() {
     let response =
         &sidecar_responses(r#"{"id":"specs-1","type":"listStepSpecs","payload":{"ignored":true}}"#)
             [0];

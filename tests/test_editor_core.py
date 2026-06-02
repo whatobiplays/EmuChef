@@ -12,7 +12,7 @@ from emuchef.domain import (
     StepConstraints,
 )
 from emuchef.io import load_authored_recipe
-from emuchef_editor.app.workspace.service import open_workspace, resolve_authored_root
+from emuchef_editor.core.workspace import open_workspace, resolve_authored_root
 from emuchef_editor.core.documents.commands import (
     AddArtifactCommand,
     AddArtifactGroupCommand,

@@ -37,6 +37,31 @@ impl DocumentSessionManager {
         Ok(json!({ "document": document_dto }))
     }
 
+    pub fn create_recipe_from_template(
+        &mut self,
+        template_path: &str,
+        destination_path: &str,
+        recipe_id: &str,
+        authored_root: Option<&str>,
+    ) -> Result<Value, ApiError> {
+        let document = RecipeDocument::create_from_template(
+            template_path,
+            destination_path,
+            recipe_id,
+            authored_root,
+        )
+        .map_err(|error| {
+            ApiError::load_failed(
+                format!("Failed to create recipe from template: {error}"),
+                json!({ "templatePath": template_path, "destinationPath": destination_path }),
+            )
+        })?;
+        let document_id = self.next_document_id();
+        let document_dto = dto::document_to_dto(&document, &document_id);
+        self.documents.insert(document_id, document);
+        Ok(json!({ "document": document_dto }))
+    }
+
     pub fn get_document(&self, document_id: &str) -> Result<Value, ApiError> {
         let document = self.document(document_id)?;
         Ok(json!({

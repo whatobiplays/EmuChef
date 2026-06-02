@@ -2,7 +2,7 @@
 //!
 //! The crate intentionally implements only the migration surface from Phases 6C
 //! through 6S: request validation, response envelopes, one-shot invocation,
-//! JSONL sidecar invocation, the `hello` handshake, static StepSpec DTO parity,
+//! JSONL sidecar invocation, the `hello` handshake, Rust-owned StepSpec DTOs,
 //! authored recipe YAML load/emit/validation fixtures, sidecar document
 //! sessions, editor command parity, undo/redo, fixture-scoped RefIndex
 //! generation, authoredRoot catalog-context validation, internal planner
