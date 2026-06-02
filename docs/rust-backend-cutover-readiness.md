@@ -132,10 +132,11 @@ runtime option.
 | Rust CLI `apply --dry-run` success smoke | Yes | No | No | Pass | Passed | Temp execution plan created with `mktemp` plus `printf` fixture lines; command exited 0 with dry-run success summary. |
 | Rust CLI `apply --dry-run` failure smoke | Yes | No | No | Pass | Passed | Same temp plan run without `--dry-run`; exited 1 with deferred real-apply error. |
 | `cd apps/config-editor/src-tauri && cargo test` | Yes | No | No | Pass | Passed in Phase 6X | 25 Tauri Rust tests passed, including sidecar compatibility, packaged/dev resolver, and bundled sidecar smoke tests. |
-| `cd apps/config-editor && npm run check:rust-runtime` | Yes for app-local runtime checks | No | No | Pass | Passed in Phase 6X | Runs pure sidecar naming tests, bundle-inspection unit tests, no-Python-runtime check, no-Python-editor-API check, no-PySide-runtime check, TypeScript typecheck, and frontend logic tests. It intentionally excludes release builds and golden refresh. |
+| `cd apps/config-editor && npm run check:rust-runtime` | Yes for app-local runtime checks | No | No | Pass | Passed in Phase 6X, expanded in Phase 6Z | Runs pure sidecar naming tests, bundle-inspection unit tests, no-Python-runtime check, no-Python-editor-API check, no-Python-fixture-regeneration check, no-PySide-runtime check, TypeScript typecheck, and frontend logic tests. It intentionally excludes release builds and golden refresh. |
 | `cd apps/config-editor && npm run test:sidecar-packaging` | Yes | No | No | Pass | Passed in Phase 6X | Pure Node tests for Tauri externalBin source names, packaged sidecar names, Windows `.exe` naming, and unsafe target-triple rejection. Does not build Cargo artifacts or run Tauri packaging. |
 | `cd apps/config-editor && npm run check:no-python-runtime` | Yes | No | No | Pass | Passed in Phase 6X | Checks active Tauri runtime/build files for forbidden runtime command tokens or explicit module names: `python`, `python.exe`, `python3`, `python3.exe`, `uv`, `uv.exe`, `emuchef_editor.api.server`, and `python_bridge`. It ignores Rust `#[cfg(test)]` items and does not scan docs/golden/reference tooling. |
 | `cd apps/config-editor && npm run check:no-python-editor-api` | Yes | No | No | Pass | Added after Python editor API removal | Checks active Python source/test paths and Python entrypoints for forbidden `emuchef_editor.api` source, imports, or scripts. |
+| `cd apps/config-editor && npm run check:no-python-fixture-regeneration` | Yes | No | No | Pass | Added in Phase 6Z | Checks normal Rust/Tauri active surfaces for Python fixture/golden generator invocations while allowing checked-in fixture/golden consumption. |
 | `cd apps/config-editor && npm run check:no-pyside-runtime` | Yes | No | No | Pass | Updated after PySide removal | Checks Python package metadata plus active Python source/test paths for PySide6 removal. It rejects PySide6 in base or optional dependencies, `emuchef-editor`, active imports of PySide6 or `emuchef_editor.app`, and recreated Python files under removed legacy PySide source/test paths. |
 | `cd apps/config-editor && npm run check:sidecar:bundle-input:debug` | Optional fast local packaging inspection | No | No | Pass | Passed in Phase 6X | Runs bundle-inspection unit tests, then `sidecar:dev`, then verifies the debug host-target `externalBin` source artifact, metadata, packaged launch name, and Unix executable bit. |
 | `cd apps/config-editor && npm run check:sidecar:bundle-input` | Yes for release packaging input inspection | No | No | Pass | Passed in Phase 6X | Runs bundle-inspection unit tests, then `sidecar:build`, then verifies the release host-target `externalBin` source artifact, metadata, packaged launch name, and Unix executable bit. This command may perform a release Rust build. |
@@ -146,7 +147,7 @@ runtime option.
 | `cd apps/config-editor && npm run smoke:sidecar:simulated-packaged` | Yes | No | No | Pass | Passed in Phase 6X | Runs the targeted Tauri Rust simulated-packaged smoke. It copies the real Rust backend to a temp bundled directory, verifies platform name/Unix executable bit, and exercises `hello`, open/get/apply/validate/emit/save/saveAs/close through packaged resolution. This is not a real packaged GUI E2E. |
 | Manual real-ADB tests | No | No | Yes | Not run by default | Not run | Ignored tests require explicit env/device/test package configuration. |
 | Rust-native StepSpec ownership guard | Yes | No | No | Pass | Added in Phase 6Y | Asserts Rust StepSpec metadata is not backed by `python_step_specs`, `PYTHON_STEP_SPECS`, or `include_str!`. |
-| Other Python golden generation commands | No | Yes | No for most goldens | Classified, not required in normal verification | Not run in Phase 6X | Existing committed fixtures were used; non-StepSpec goldens remain active/reference regeneration inputs and release-confidence or Python-deletion work unless a later phase changes those surfaces. |
+| Other Python golden generation commands | No | Yes | No for most goldens | Dev-only/reference-only, not required in normal verification | Not run in Phase 6Z | Existing committed fixtures are consumed by Rust tests. Concrete ownership and retirement criteria are recorded in `docs/python-fixture-golden-ownership.md`. |
 
 For the CLI dry-run smoke, the exact setup was a shell-created temp file:
 `tmp_plan=$(mktemp)` followed by `printf` lines for a minimal `kind:
@@ -237,33 +238,21 @@ crates/emuchef-rust-backend/Cargo.toml -- apply --plan-file "$tmp_plan"
 
 ## Fixture And Golden Freshness
 
-| Fixture/golden | Location | Regeneration | Runtime Python required by normal Rust tests? | Freshness risk |
-| --- | --- | --- | --- | --- |
-| StepSpec metadata | `crates/emuchef-rust-backend/src/step_specs.rs` | Update Rust metadata directly and keep protocol/shape tests passing | No | Medium if Python reference StepSpecs change before those Python surfaces are retired. |
-| YAML emit/validate goldens | `tests/fixtures/python_goldens/*.emit.yaml`, `*.validate.json` | README Python snippets invoking Python API/server behavior | No | Medium; serde_yaml/PyYAML differences can hide outside fixtures. |
-| Session/command/RefIndex goldens | `phase6g_*`, `phase6h_*`, `phase6i_*` files | README Python scripts using `PYTHONPATH=src:tests` | No | Medium; refresh after command or DTO changes. |
-| Planner goldens | `phase6m_*`, `phase6n_*` JSON files | README planner golden generation commands | No | High before Python deletion because planner remains internal/fixture-scoped. |
-| Executor goldens | `phase6o_*`, `phase6p_*`, `phase6q_*` JSON files | README executor golden generation commands | No | High before production apply/device behavior. |
-| CLI checked expectations | `tests/phase6s_cli.rs` | Python CLI commands documented in crate README | No | Medium; refresh after CLI text changes. |
+Concrete fixture/golden ownership lives in
+`docs/python-fixture-golden-ownership.md`. That document records each group,
+paths, current owner, consumers, regeneration command if one exists, whether
+normal Rust/Tauri checks require Python regeneration, target classification, and
+retirement/deletion criteria.
 
-No fixture or golden regeneration was run in Phase 6T. Normal Rust tests used
-the committed fixtures and did not require Python at runtime. Phase 6W keeps
-these regeneration paths as developer/reference tooling because no Rust-native
-replacement or intentional fixture-freeze policy exists yet. Planner, executor,
-and CLI golden refreshes remain release-confidence and Python-deletion work
-unless a later phase changes those surfaces.
+Normal Rust/Tauri active checks consume checked-in fixtures and goldens only.
+They do not invoke Python fixture or golden regeneration. Remaining Python
+regeneration commands are dev-only/reference-only and are not setup, runtime,
+packaging, or Rust/Tauri verification instructions.
 
 Phase 6Y moves StepSpec DTO ownership into Rust without broad golden churn.
-Other fixture/golden groups remain classified rather than regenerated:
-
-| Fixture/golden group | Current classification | Current action | Pre-release expectation |
-| --- | --- | --- | --- |
-| StepSpec metadata | Rust-owned for the normal Tauri editor path | Python fixture and generator removed; Rust guard prevents fixture reintroduction | Update Rust metadata directly when StepSpec DTO requirements change. |
-| YAML emit/validate goldens | Active/regenerable; stale-risk outside focused fixtures | Not regenerated in Phase 6X | Refresh when YAML loader/writer/validation behavior changes or before a broader release candidate. |
-| Session/command/RefIndex goldens | Active/regenerable; stale-risk for editor protocol DTO changes | Not regenerated in Phase 6X | Refresh after command, DTO, RefIndex, or session behavior changes. |
-| Planner goldens | Reference-only for current Tauri cutover; Python deletion blocker | Not regenerated in Phase 6X | Refresh or replace before deleting Python planner/reference tooling. |
-| Executor goldens | Reference-only for current Tauri cutover; Python deletion blocker and release-confidence risk | Not regenerated in Phase 6X | Refresh or replace before production apply/device release. |
-| CLI checked expectations | Reference-only for current Tauri cutover; selected Rust CLI parity | Not regenerated in Phase 6X | Refresh when CLI output behavior changes or before replacing Python CLI surfaces. |
+Phase 6Z adds `npm run check:no-python-fixture-regeneration` to enforce that
+normal Rust/Tauri active checks do not add Python fixture/golden generator
+invocations.
 
 ## Phase 6X Cross-Platform And Packaging Confidence
 
@@ -319,8 +308,8 @@ dependencies and are not packaged editor backend fallbacks.
 | PySide6 editor source/tests/extra | Removed PySide surface | Removed `src/emuchef_editor/app`, `tests/legacy`, the `pyside-editor` optional extra, and `emuchef-editor`. | No PySide follow-up remains; keep the no-PySide guard active. | Removed. |
 | `tests/test_*.py` | Python behavior and golden/reference tests | Normal tests preserve Python CLI, planner, executor, editor core, and template behavior without importing PySide or the removed Python editor API. | Replace with Rust tests or archive intentionally before deleting Python. | Test reference. |
 | `crates/emuchef-rust-backend/src/step_specs.rs` | Rust-owned StepSpec DTO metadata | Preserved as the normal `listStepSpecs` metadata source; no Python StepSpec fixture is consumed. | Keep this metadata aligned with supported editor DTO requirements until Python StepSpec surfaces are retired. | Rust-owned editor metadata. |
-| `crates/emuchef-rust-backend/tests/fixtures/python_goldens/` | Rust parity fixtures generated from Python | Preserved; normal Rust tests consume checked-in fixtures and do not invoke Python. | Replace generators, freeze fixtures intentionally, or keep a documented generator-only Python owner. | Golden/reference. |
-| `crates/emuchef-rust-backend/README.md` Python commands | Golden/reference documentation | Relabeled commands as Python reference/golden tooling, not runtime or Tauri app prerequisites. | Keep exact regeneration ownership current until replaced or retired. | Developer/golden. |
+| `crates/emuchef-rust-backend/tests/fixtures/python_goldens/` | Rust parity fixtures generated from Python | Preserved; normal Rust tests consume checked-in fixtures and do not invoke Python. | Use `docs/python-fixture-golden-ownership.md` for concrete owner, consumer, classification, and retirement criteria. | Golden/reference. |
+| `crates/emuchef-rust-backend/README.md` Python commands | Golden/reference documentation | Labeled commands as dev-only/reference-only Python golden tooling, not setup, runtime, packaging, or Rust/Tauri verification prerequisites. | Keep exact regeneration ownership current in `docs/python-fixture-golden-ownership.md` until replaced or retired. | Developer/golden. |
 | `README.md`, `CONTEXT.md` | User/developer docs | Updated to distinguish Rust Tauri runtime from Python legacy/reference/golden tooling and remove fallback wording. | Keep docs aligned whenever runtime/editor ownership changes. | Documentation. |
 | `docs/rust-backend-port-plan.md` | Historical migration plan | Marked superseded and corrected stale Python bridge wording so it cannot be read as current runtime truth. | Keep historical; use this readiness doc for current cutover state. | Historical. |
 | `.github/`, top-level `scripts/` | CI/scripts audit scope | No in-repo `.github/` workflows or top-level `scripts/` tree found. | Document external CI separately if it exists. | No active in-repo path. |
@@ -338,7 +327,7 @@ dependencies and are not packaged editor backend fallbacks.
 | Rust CLI `validate` | `emuchef-rust-backend validate <recipe>` | Experimental crate-local | Selected explicit-file parity only. |
 | Rust CLI `apply --dry-run` | `emuchef-rust-backend apply --plan-file <path> --dry-run` | Experimental crate-local | Selected plan fixtures only; not production apply. |
 | Tauri command bridge | `apps/config-editor/src-tauri/src/commands.rs` | Local/dev Rust sidecar runtime | Former one-shot and persistent editor commands route through the Rust sidecar state. |
-| Fixture/golden generation commands | crate README Python snippets | Test/developer-only | Python remains required to regenerate goldens. |
+| Fixture/golden generation commands | crate README Python snippets | Dev-only/reference-only | Python remains required only for manually invoked regeneration commands classified in `docs/python-fixture-golden-ownership.md`. |
 
 ## Rollback
 
@@ -375,7 +364,7 @@ removing or replacing the Rust sidecar binary from packaged assets.
 | Manual real-device coverage is incomplete. | Production apply/device behavior can regress. | High | Keep manual tests out of normal CI but require a pre-release manual matrix. | 6X |
 | Tauri sidecar launch assumptions differ from crate-local process tests. | Rust binary can work in tests but fail in app launch context. | Medium | 6U must test the actual Tauri-launched binary. | 6U |
 | Packaging/codesigning complexity delays release. | Rust cutover may work locally but still not meet public release requirements. | Medium | 6V proves host-target bundled sidecar viability; keep signing/notarization, package rollback, updater, and cross-platform CI in 6X. | 6X |
-| Python golden generation still depends on Python. | Python deletion can remove test regeneration path. | High | Decide whether to preserve a generator tool, replace goldens, or freeze fixtures. | 6W |
+| Python golden generation still depends on Python for dev-only/reference-only refreshes. | Python deletion can remove manually invoked regeneration paths. | High | Follow `docs/python-fixture-golden-ownership.md`: preserve a generator tool, replace goldens, or freeze fixtures before deleting Python. | 6Z+ |
 | Hidden Python-only scripts or docs remain. | Deleting Python breaks developer workflows. | Medium | Search scripts/docs before 6W; update or remove references. | 6W |
 | No selector means rollback requires revert/package rollback. | Failed release cannot be fixed by flipping config. | High | Keep cutover commits small and release rollback package ready. | 6U/6V |
 | Cross-platform filesystem/path behavior differs. | Windows/macOS/Linux bugs in YAML, executor, or CLI paths. | Medium | Add platform CI and path fixtures. | 6X |

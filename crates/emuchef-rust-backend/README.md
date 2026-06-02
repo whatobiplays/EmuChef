@@ -823,6 +823,11 @@ Python-generated parity fixtures live under:
 crates/emuchef-rust-backend/tests/fixtures/python_goldens/
 ```
 
+Fixture/golden ownership, consumers, classifications, and retirement criteria
+are tracked in `docs/python-fixture-golden-ownership.md`. Any Python
+regeneration command in this README is dev-only/reference-only and is not part
+of normal setup, runtime, packaging, or Rust/Tauri verification.
+
 The former Phase 6E regeneration command used the removed Python editor API.
 These checked-in goldens remain parity evidence. Refresh them only after adding
 Rust-native fixture tooling or an explicitly retained non-editor Python owner.
@@ -844,7 +849,8 @@ function. These goldens store only the internal Python `ExecutionRunResult`
 object. They do not store CLI progress text, CLI summary text, sidecar
 envelopes, or `DryRunAdb.commands`.
 
-Regenerate the Phase 6O executor goldens from the repo root with:
+Dev-only/reference-only: regenerate the Phase 6O executor goldens from the repo
+root with:
 
 ```bash
 PYTHONPATH=src python3 - <<'PY'
@@ -1058,8 +1064,9 @@ phase6p_executor_extract_archive_success.json
 phase6p_executor_extract_archive_invalid_failure.json
 ```
 
-They were generated with the same `PYTHONPATH=src python3 - <<'PY'` pattern,
-using Python `ExecutorRunner(adb=DryRunAdb(), workdir=TemporaryDirectory())`.
+They were generated with the same dev-only/reference-only
+`PYTHONPATH=src python3 - <<'PY'` pattern, using Python
+`ExecutorRunner(adb=DryRunAdb(), workdir=TemporaryDirectory())`.
 The helper creates only disposable temp files, local `file://` ZIP fixtures, and
 normalizes the temp root to `$TMP` before writing the JSON fixture. No Python
 golden was generated for missing host-copy sources because Python `DryRunAdb`
@@ -1077,7 +1084,8 @@ phase6q_executor_permission_partial_failure.json
 phase6q_executor_file_dir_conditions.json
 ```
 
-They were generated from the repo root with the same safe pattern:
+They were generated from the repo root with the same dev-only/reference-only
+safe pattern:
 
 ```bash
 PYTHONPATH=src python3 - <<'PY'
@@ -1097,7 +1105,8 @@ editor API. These checked-in diagnostic goldens remain parity evidence. Refresh
 them only after adding Rust-native fixture tooling or an explicitly retained
 non-editor Python owner.
 
-Regenerate the Phase 6N planner goldens from the repo root with:
+Dev-only/reference-only: regenerate the Phase 6N planner goldens from the repo
+root with:
 
 ```bash
 PYTHONPATH=src:tests .venv/bin/python - <<'PY'
@@ -1174,7 +1183,8 @@ for fixture, recipe_files, selected_recipe_refs, golden_name, bindings in CASES:
 PY
 ```
 
-Regenerate the Phase 6M planner goldens from the repo root with:
+Dev-only/reference-only: regenerate the Phase 6M planner goldens from the repo
+root with:
 
 ```bash
 PYTHONPATH=tests .venv/bin/python - <<'PY'

@@ -1,0 +1,43 @@
+# Python Fixture And Golden Ownership
+
+This document classifies fixture and golden ownership for the Rust/Tauri
+migration. Python is not deleted. Python CLI, planner, executor, real-device
+apply, and some dev-only/reference-only golden regeneration paths remain until
+explicit replacement or retirement work proves they can be removed.
+
+Normal Rust/Tauri active checks consume checked-in fixture data only. They must
+not invoke Python to regenerate fixtures or goldens.
+
+For this phase, normal Rust/Tauri active checks include:
+
+- `apps/config-editor/package.json` `check:rust-runtime`
+- every npm script transitively invoked by `check:rust-runtime`
+- app-local runtime guard scripts under `apps/config-editor/scripts`
+- Tauri Rust tests under `apps/config-editor/src-tauri`
+- Rust backend tests under `crates/emuchef-rust-backend`
+- packaging/readiness scripts invoked by the Tauri app check path
+
+The active-check definition excludes documentation, README dev-only/reference-only
+snippets, Python unit tests, and manually invoked fixture refresh tools.
+
+| group | paths | current owner | consumers | regeneration command, if any | normal Rust/Tauri checks require Python regeneration? | target classification | retirement/deletion criteria |
+| --- | --- | --- | --- | --- | --- | --- | --- |
+| Rust StepSpec DTO metadata | `crates/emuchef-rust-backend/src/step_specs.rs`; `crates/emuchef-rust-backend/tests/phase6y_step_specs_native.rs` | Rust backend | `crates/emuchef-rust-backend/tests/protocol_skeleton.rs`; `crates/emuchef-rust-backend/tests/phase6y_step_specs_native.rs`; Tauri `listStepSpecs` startup path | None. Update Rust metadata directly. | No | `rust-owned` | Keep until the Rust editor protocol is retired or replaced. Do not recreate Python StepSpec fixtures. |
+| Authored recipe input fixtures | `crates/emuchef-rust-backend/tests/fixtures/recipes/*.yaml` | Rust backend tests / checked-in authored evidence | `phase6e_yaml.rs`; `phase6f_sessions.rs`; `phase6g_commands.rs`; `phase6h_ref_index.rs`; `phase6i_non_step_commands.rs`; `phase6j*.rs`; `phase6k_validation.rs`; `phase6s_cli.rs`; `phase6t_authored_corpus.rs` | None. These files are hand-authored test inputs. | No | `frozen-evidence` | Update only when the exact fixture scenario changes; do not use Python regeneration. |
+| AuthoredRoot catalog fixture trees | `crates/emuchef-rust-backend/tests/fixtures/authored_root/**` | Rust backend tests / checked-in authored evidence | `phase6l_catalog_validation.rs`; `planner_tests.rs`; `phase6m_planner.rs` | None. These files are hand-authored catalog inputs. | No | `frozen-evidence` | Update only when the exact catalog scenario changes; do not use Python regeneration. |
+| YAML emit goldens | `crates/emuchef-rust-backend/tests/fixtures/python_goldens/minimal_recipe.emit.yaml`; `representative_recipe.emit.yaml`; `ref_params.emit.yaml` | Checked-in Python reference evidence; former Python editor API regeneration is removed | `crates/emuchef-rust-backend/tests/phase6e_yaml.rs` | None active. Historical Python editor API refresh is retired. | No | `frozen-evidence` | Replace with Rust-native fixture tooling or intentionally refresh when YAML semantics change. |
+| YAML validation goldens | `crates/emuchef-rust-backend/tests/fixtures/python_goldens/*.validate.json` | Checked-in Python reference evidence; former Python editor API regeneration is removed | `crates/emuchef-rust-backend/tests/phase6e_yaml.rs` | None active. Historical Python editor API refresh is retired. | No | `frozen-evidence` | Replace with Rust-native fixture tooling or intentionally refresh when validation semantics change. |
+| Phase 6G session/command result goldens | `crates/emuchef-rust-backend/tests/fixtures/python_goldens/phase6g_*.result.json` | Checked-in Python reference evidence; former Python editor API regeneration is removed | `crates/emuchef-rust-backend/tests/phase6g_commands.rs` | None active. Historical Python editor API refresh is retired. | No | `frozen-evidence` | Replace with Rust-native fixture tooling or intentionally refresh when session/command DTO semantics change. |
+| Phase 6H RefIndex result goldens | `crates/emuchef-rust-backend/tests/fixtures/python_goldens/phase6h_*.result.json` | Checked-in Python reference evidence; former Python editor API regeneration is removed | `crates/emuchef-rust-backend/tests/phase6h_ref_index.rs` | None active. Historical Python editor API refresh is retired. | No | `frozen-evidence` | Replace with Rust-native fixture tooling or intentionally refresh when RefIndex DTO semantics change. |
+| Phase 6I non-step command RefIndex goldens | `crates/emuchef-rust-backend/tests/fixtures/python_goldens/phase6i_*.result.json` | Checked-in Python reference evidence; former Python editor API regeneration is removed | `crates/emuchef-rust-backend/tests/phase6i_non_step_commands.rs` | None active. Historical Python editor API refresh is retired. | No | `frozen-evidence` | Replace with Rust-native fixture tooling or intentionally refresh when input/artifact/artifact-group RefIndex semantics change. |
+| Phase 6L catalog diagnostics goldens | `crates/emuchef-rust-backend/tests/fixtures/python_goldens/phase6l_*.diagnostics.json` | Checked-in Python reference evidence; former Python editor API regeneration is removed | `crates/emuchef-rust-backend/tests/phase6l_catalog_validation.rs` | None active. Historical Python editor API refresh is retired. | No | `frozen-evidence` | Replace with Rust-native fixture tooling or intentionally refresh when catalog diagnostic semantics change. |
+| Phase 6M planner goldens | `crates/emuchef-rust-backend/tests/fixtures/python_goldens/phase6m_planner_*.json` | Python planner reference, dev-only/reference-only generator | `crates/emuchef-rust-backend/src/planner_tests.rs` | Dev-only/reference-only command in `crates/emuchef-rust-backend/README.md`: `PYTHONPATH=tests .venv/bin/python - <<'PY' ... PY` | No | `temporary-python-dev-only` | Replace planner generation with Rust-native tooling, freeze these fixtures intentionally, or replace/retire Python planner ownership before deleting Python. |
+| Phase 6N planner goldens | `crates/emuchef-rust-backend/tests/fixtures/python_goldens/phase6n_planner_*.json` | Python planner reference, dev-only/reference-only generator | `crates/emuchef-rust-backend/src/planner_tests.rs` | Dev-only/reference-only command in `crates/emuchef-rust-backend/README.md`: `PYTHONPATH=src:tests .venv/bin/python - <<'PY' ... PY` | No | `temporary-python-dev-only` | Replace planner generation with Rust-native tooling, freeze these fixtures intentionally, or replace/retire Python planner ownership before deleting Python. |
+| Phase 6O executor goldens | `crates/emuchef-rust-backend/tests/fixtures/python_goldens/phase6o_executor_*.json` | Python executor reference, dev-only/reference-only generator | `crates/emuchef-rust-backend/src/executor_tests.rs` | Dev-only/reference-only command in `crates/emuchef-rust-backend/README.md`: `PYTHONPATH=src python3 - <<'PY' ... PY` | No | `temporary-python-dev-only` | Replace executor generation with Rust-native tooling, freeze these fixtures intentionally, or replace/retire Python executor ownership before deleting Python. |
+| Phase 6P executor goldens | `crates/emuchef-rust-backend/tests/fixtures/python_goldens/phase6p_executor_*.json` | Python executor reference, dev-only/reference-only generator | `crates/emuchef-rust-backend/src/executor_tests.rs` | Dev-only/reference-only pattern in `crates/emuchef-rust-backend/README.md`: same `PYTHONPATH=src python3 - <<'PY'` generator pattern as Phase 6O | No | `temporary-python-dev-only` | Replace executor generation with Rust-native tooling, freeze these fixtures intentionally, or replace/retire Python executor ownership before deleting Python. |
+| Phase 6Q executor goldens | `crates/emuchef-rust-backend/tests/fixtures/python_goldens/phase6q_executor_*.json` | Python executor reference, dev-only/reference-only generator | `crates/emuchef-rust-backend/src/executor_tests.rs` | Dev-only/reference-only command in `crates/emuchef-rust-backend/README.md`: `PYTHONPATH=src python3 - <<'PY' ... PY` | No | `temporary-python-dev-only` | Replace executor generation with Rust-native tooling, freeze these fixtures intentionally, or replace/retire Python executor ownership before deleting Python. |
+
+`npm run check:no-python-fixture-regeneration` enforces that normal Rust/Tauri
+active checks do not invoke Python fixture/golden regeneration. Documentation may
+describe Python regeneration only when it is clearly labeled
+dev-only/reference-only.

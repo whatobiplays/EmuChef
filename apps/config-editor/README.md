@@ -46,15 +46,17 @@ npm run check:rust-runtime
 ```
 
 It runs the pure sidecar naming tests, bundle-inspection unit tests, the
-no-Python-runtime scan, the no-Python-editor-API scan, the no-PySide-runtime
-scan, TypeScript typecheck, and frontend logic tests. The subcommands are also
-available directly:
+no-Python-runtime scan, the no-Python-editor-API scan, the
+no-Python-fixture-regeneration scan, the no-PySide-runtime scan, TypeScript
+typecheck, and frontend logic tests. The subcommands are also available
+directly:
 
 ```bash
 npm run test:sidecar-packaging
 npm run test:sidecar-bundle-inspection
 npm run check:no-python-runtime
 npm run check:no-python-editor-api
+npm run check:no-python-fixture-regeneration
 npm run check:no-pyside-runtime
 npm run typecheck
 npm run test:logic
@@ -70,6 +72,12 @@ Tauri runtime path.
 out of active source, normal tests, and Python script entrypoints. It rejects
 Python files under `src/emuchef_editor/api`, normal Python source/test imports
 of `emuchef_editor.api`, and published `emuchef_editor.api` script entrypoints.
+
+`check:no-python-fixture-regeneration` verifies that normal Rust/Tauri active
+checks consume checked-in fixtures and goldens without invoking Python fixture
+or golden regeneration. Remaining Python refresh commands are
+dev-only/reference-only and are classified in the repository fixture/golden
+ownership document.
 
 `check:no-pyside-runtime` verifies that Python package metadata and normal active
 source/test paths do not require, import, or launch PySide6. It rejects PySide6

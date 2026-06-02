@@ -143,6 +143,13 @@ The Rust backend owns the static StepSpec DTO metadata returned by
 Tauri, and default package verification do not consume a Python-generated
 StepSpec fixture or invoke Python to serve StepSpec metadata.
 
+Fixture and golden ownership is classified in
+`docs/python-fixture-golden-ownership.md`. Normal Rust/Tauri active checks may
+consume checked-in fixtures and goldens, but they do not invoke Python fixture
+or golden regeneration. Remaining Python regeneration commands are
+dev-only/reference-only and are not setup, runtime, packaging, or Rust/Tauri
+verification prerequisites.
+
 The Rust backend supports one-shot stateless requests through:
 
 - `hello`
@@ -210,8 +217,9 @@ the packaged app executable.
 
 Routine local runtime verification can use `npm run check:rust-runtime` from
 `apps/config-editor`. That aggregate runs app-local naming/unit checks,
-no-Python-runtime scanning, no-PySide-runtime scanning, TypeScript typecheck, and
-frontend logic tests; it
+no-Python-runtime scanning, no-Python-editor-API scanning,
+no-Python-fixture-regeneration scanning, no-PySide-runtime scanning, TypeScript
+typecheck, and frontend logic tests; it
 does not run Python golden regeneration, ADB/device tests, release builds, or a
 real Tauri package build.
 Packaging-specific checks remain explicit through
@@ -479,6 +487,13 @@ distribution entrypoint paths do not expose `emuchef_editor.api`. `npm run
 check:no-python-editor-api` enforces this by rejecting Python editor API source
 files, normal Python source/test imports of `emuchef_editor.api`, and console
 scripts that publish `emuchef_editor.api` entrypoints.
+
+The active Python fixture/golden regeneration invariant is that normal
+Rust/Tauri active checks consume checked-in fixture data only. `npm run
+check:no-python-fixture-regeneration` enforces this by scanning the active
+`check:rust-runtime` npm script closure, app-local runtime/packaging guard
+scripts, Tauri Rust sources/tests, and Rust backend test files for Python
+fixture/golden generator invocations.
 
 `crates/emuchef-rust-backend` is an experimental standalone Rust backend
 skeleton for migration work. It currently implements `hello`, response

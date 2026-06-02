@@ -73,6 +73,9 @@ The Tauri editor is a Tauri v2 development app that uses the experimental Rust
 JSONL sidecar for session-backed document operations. Python remains in the repo
 only for legacy/reference/developer/golden workflows such as Python CLI
 reference behavior, fixture/golden generation, and later confirmed-cutover work.
+Fixture/golden ownership and remaining dev-only/reference-only regeneration
+paths are classified in
+[`docs/python-fixture-golden-ownership.md`](docs/python-fixture-golden-ownership.md).
 
 Install frontend dependencies and run the Tauri dev shell with npm:
 
