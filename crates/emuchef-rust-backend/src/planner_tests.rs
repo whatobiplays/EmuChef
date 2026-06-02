@@ -1,4 +1,4 @@
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
 use std::path::{Path, PathBuf};
 
@@ -21,6 +21,13 @@ fn golden_path(name: &str) -> PathBuf {
         .join("fixtures")
         .join("python_goldens")
         .join(name)
+}
+
+fn golden_dir() -> PathBuf {
+    Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("tests")
+        .join("fixtures")
+        .join("python_goldens")
 }
 
 fn read_golden(name: &str) -> Value {
@@ -452,6 +459,217 @@ fn planner_does_not_mutate_authored_fixture_files() {
 
     assert_eq!(actual["status"], "success");
     assert_eq!(snapshot_files(&root), before);
+}
+
+#[test]
+fn planner_parity_fixture_inventory_consumes_checked_in_evidence_only() {
+    let inventory = planner_parity_fixture_inventory();
+    let inventory_goldens = inventory
+        .iter()
+        .map(|entry| entry.golden.to_string())
+        .collect::<BTreeSet<_>>();
+    let discovered_goldens = discovered_planner_golden_names();
+
+    assert_eq!(
+        discovered_goldens, inventory_goldens,
+        "Planner parity goldens must be intentionally classified. Add new phase6m/phase6n planner goldens to the P7A inventory, or explain why they are outside P7A planner parity scope.",
+    );
+
+    for entry in inventory {
+        assert!(
+            authored_root(entry.fixture).is_dir(),
+            "planner parity authored fixture should exist: {}",
+            entry.fixture
+        );
+        let parsed = read_golden(entry.golden);
+        assert_planner_golden_shape(entry.golden, &parsed);
+    }
+}
+
+struct PlannerParityFixtureEntry {
+    fixture: &'static str,
+    golden: &'static str,
+}
+
+fn planner_parity_fixture_inventory() -> &'static [PlannerParityFixtureEntry] {
+    &[
+        PlannerParityFixtureEntry {
+            fixture: "planner_minimal",
+            golden: "phase6m_planner_minimal.json",
+        },
+        PlannerParityFixtureEntry {
+            fixture: "planner_dependencies",
+            golden: "phase6m_planner_dependencies.json",
+        },
+        PlannerParityFixtureEntry {
+            fixture: "planner_refs_artifacts",
+            golden: "phase6m_planner_refs_artifacts.json",
+        },
+        PlannerParityFixtureEntry {
+            fixture: "planner_inputs",
+            golden: "phase6m_planner_inputs_bound.json",
+        },
+        PlannerParityFixtureEntry {
+            fixture: "planner_inputs",
+            golden: "phase6m_planner_inputs_missing.json",
+        },
+        PlannerParityFixtureEntry {
+            fixture: "planner_grant_permissions",
+            golden: "phase6m_planner_grant_permissions.json",
+        },
+        PlannerParityFixtureEntry {
+            fixture: "planner_phase6n_builtins_all",
+            golden: "phase6n_planner_builtins_all.json",
+        },
+        PlannerParityFixtureEntry {
+            fixture: "planner_phase6n_optional_inputs",
+            golden: "phase6n_planner_optional_inputs_omitted.json",
+        },
+        PlannerParityFixtureEntry {
+            fixture: "planner_phase6n_optional_inputs",
+            golden: "phase6n_planner_optional_inputs_bound.json",
+        },
+        PlannerParityFixtureEntry {
+            fixture: "planner_phase6n_input_defaults_multiple",
+            golden: "phase6n_planner_input_defaults_multiple.json",
+        },
+        PlannerParityFixtureEntry {
+            fixture: "planner_phase6n_dependency_graph",
+            golden: "phase6n_planner_dependency_graph.json",
+        },
+        PlannerParityFixtureEntry {
+            fixture: "planner_phase6n_step_data",
+            golden: "phase6n_planner_step_data.json",
+        },
+    ]
+}
+
+fn discovered_planner_golden_names() -> BTreeSet<String> {
+    fs::read_dir(golden_dir())
+        .expect("planner golden directory should be readable")
+        .map(|entry| {
+            entry
+                .expect("planner golden directory entry should be readable")
+                .file_name()
+                .to_string_lossy()
+                .into_owned()
+        })
+        .filter(|name| {
+            name.ends_with(".json")
+                && (name.starts_with("phase6m_planner_") || name.starts_with("phase6n_planner_"))
+        })
+        .collect()
+}
+
+fn assert_planner_golden_shape(name: &str, parsed: &Value) {
+    assert_eq!(
+        parsed["schema_version"], 1,
+        "{name} should use schema version 1"
+    );
+    assert_eq!(
+        parsed["kind"], "planning_result",
+        "{name} should be a planning result"
+    );
+    assert!(
+        matches!(
+            parsed["status"].as_str(),
+            Some("success" | "warning" | "error")
+        ),
+        "{name} should have a valid planning status"
+    );
+    assert!(
+        parsed["warnings"].as_array().is_some(),
+        "{name} should have a warnings array"
+    );
+    let errors = parsed["errors"]
+        .as_array()
+        .expect("planner golden should have an errors array");
+
+    match &parsed["execution_plan"] {
+        Value::Object(plan) => assert_execution_plan_shape(name, plan),
+        Value::Null => assert!(
+            !errors.is_empty(),
+            "{name} should include errors when execution_plan is null"
+        ),
+        _ => panic!("{name} should have an execution_plan object or null"),
+    }
+}
+
+fn assert_execution_plan_shape(name: &str, plan: &serde_json::Map<String, Value>) {
+    assert_non_empty_string(name, plan.get("id"), "execution_plan.id");
+    assert_eq!(
+        plan.get("schema_version"),
+        Some(&json!(1)),
+        "{name} execution_plan should use schema version 1"
+    );
+    assert_eq!(
+        plan.get("kind"),
+        Some(&json!("execution_plan")),
+        "{name} execution_plan should have kind execution_plan"
+    );
+    let source = plan
+        .get("source")
+        .and_then(Value::as_object)
+        .expect("planner execution_plan should include source object");
+    assert_non_empty_string(
+        name,
+        source.get("device_profile_ref"),
+        "execution_plan.source.device_profile_ref",
+    );
+    assert_non_empty_string(
+        name,
+        source.get("device_plan_ref"),
+        "execution_plan.source.device_plan_ref",
+    );
+    assert!(
+        source
+            .get("selected_recipe_refs")
+            .and_then(Value::as_array)
+            .is_some_and(|items| !items.is_empty()),
+        "{name} should include selected recipe refs"
+    );
+    assert!(
+        source
+            .get("expanded_recipe_refs")
+            .and_then(Value::as_array)
+            .is_some_and(|items| !items.is_empty()),
+        "{name} should include expanded recipe refs"
+    );
+
+    let steps = plan
+        .get("steps")
+        .and_then(Value::as_array)
+        .expect("planner execution_plan should include steps array");
+    assert!(!steps.is_empty(), "{name} should include at least one step");
+    for (index, step) in steps.iter().enumerate() {
+        let step = step
+            .as_object()
+            .expect("planner execution_plan step should be an object");
+        assert_non_empty_string(name, step.get("id"), &format!("steps[{index}].id"));
+        assert_non_empty_string(
+            name,
+            step.get("recipe_ref"),
+            &format!("steps[{index}].recipe_ref"),
+        );
+        assert_non_empty_string(name, step.get("type"), &format!("steps[{index}].type"));
+        assert!(
+            step.get("dependencies").and_then(Value::as_array).is_some(),
+            "{name} steps[{index}].dependencies should be an array"
+        );
+        assert!(
+            step.get("params").and_then(Value::as_object).is_some(),
+            "{name} steps[{index}].params should be an object"
+        );
+    }
+}
+
+fn assert_non_empty_string(name: &str, value: Option<&Value>, field: &str) {
+    assert!(
+        value
+            .and_then(Value::as_str)
+            .is_some_and(|text| !text.is_empty()),
+        "{name} should include non-empty {field}"
+    );
 }
 
 fn snapshot_files(root: &Path) -> BTreeMap<String, String> {
