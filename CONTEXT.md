@@ -150,6 +150,13 @@ or golden regeneration. Remaining Python regeneration commands are
 dev-only/reference-only and are not setup, runtime, packaging, or Rust/Tauri
 verification prerequisites.
 
+The Rust planner parity boundary is documented in
+`docs/rust-planner-parity-boundary.md`. Python remains the CLI/reference owner
+for planner behavior. Rust planner coverage remains crate-internal and
+fixture-scoped. The Rust planner tests include an intentional Phase 6M/6N
+fixture inventory/parsing guard that consumes checked-in authored fixtures and
+planner goldens only.
+
 The Rust backend supports one-shot stateless requests through:
 
 - `hello`
@@ -516,13 +523,15 @@ crate-internal executor skeleton that emits Python-shaped `ExecutionRunResult`
 values for selected safe dry-run fixtures. The Rust planner skeleton reads only
 loaded/top-level authored recipe fixture data, namespaced refs, StepSpec
 defaults, explicit recipe and step dependencies, and supplied fixture device
-context/capabilities. The Rust executor skeleton is internal test scaffolding
-only: it models selected `wait`, `grant_permissions`, dependency, skip, verify,
+context/capabilities. Its Phase 6M/6N planner parity evidence is inventoried and
+parsed by Rust tests so new checked-in planner goldens must be classified
+intentionally. The Rust executor skeleton is internal test scaffolding only: it
+models selected `wait`, `grant_permissions`, dependency, skip, verify,
 temp-dir-confined filesystem/artifact behavior, fake dry-run device semantics,
 and Phase 6R real-ADB adapter foundations without public API exposure. It does
-not add production CLI replacement, backend selection, production device
-discovery, real network downloads, signing/notarization, updater support,
-cross-platform release automation, or Python bundling.
+not add production planner or CLI replacement, backend selection, production
+device discovery, real network downloads, signing/notarization, updater
+support, cross-platform release automation, or Python bundling.
 It now has crate-internal fake-device/DryRunAdb parity fixtures plus an
 explicitly constructed real-ADB adapter and ignored/manual real-device tests; it
 still has no public real-device executor surface. Its `hello` response reports
