@@ -341,6 +341,95 @@ fn save_recipe_as_missing_parent_does_not_create_dirs_or_mutate_session() {
 }
 
 #[test]
+fn create_recipe_from_template_writes_destination_and_opens_clean_document() {
+    let unique = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .expect("system clock should be after epoch")
+        .as_nanos();
+    let dir = std::env::temp_dir().join(format!(
+        "emuchef-rust-backend-create-template-{}-{unique}",
+        std::process::id()
+    ));
+    let authored_root = dir.join("authored");
+    let template_root = dir.join("templates").join("authored");
+    fs::create_dir_all(authored_root.join("recipes")).expect("authored recipes directory");
+    fs::create_dir_all(&template_root).expect("template directory");
+    let template_path = template_root.join("recipe.template.yaml");
+    fs::write(
+        &template_path,
+        r#"schema_version: 1
+kind: recipe
+id: template.recipe
+name: Template Recipe
+inputs: {}
+artifacts: {}
+artifact_groups: {}
+steps: []
+"#,
+    )
+    .expect("template should be written");
+    let destination_path = authored_root.join("recipes").join("created_recipe.yaml");
+    let input = format!(
+        "{}\n{}\n",
+        json!({
+            "id": "create-template",
+            "type": "createRecipeFromTemplate",
+            "payload": {
+                "templatePath": template_path,
+                "destinationPath": destination_path,
+                "recipeId": "created.recipe",
+                "authoredRoot": authored_root,
+            }
+        }),
+        json!({
+            "id": "get-created",
+            "type": "getDocument",
+            "payload": {"documentId": "doc-1"}
+        }),
+    );
+
+    let responses = sidecar_responses(&input);
+
+    assert_eq!(responses.len(), 2);
+    assert_eq!(responses[0]["id"], "create-template");
+    assert_eq!(responses[0]["ok"], true);
+    let created = &responses[0]["result"]["document"];
+    assert_eq!(created["documentId"], "doc-1");
+    assert_eq!(created["recipe"]["id"], "created.recipe");
+    assert_eq!(created["recipe"]["name"], "Template Recipe");
+    assert_eq!(
+        created["path"],
+        destination_path
+            .canonicalize()
+            .unwrap()
+            .to_string_lossy()
+            .to_string()
+    );
+    assert_eq!(
+        created["authoredRoot"],
+        authored_root
+            .canonicalize()
+            .unwrap()
+            .to_string_lossy()
+            .to_string()
+    );
+    assert_eq!(created["dirty"], false);
+    assert_eq!(created["canUndo"], false);
+    assert_eq!(created["canRedo"], false);
+    assert!(destination_path.exists());
+    let written = fs::read_to_string(&destination_path).expect("created recipe should be readable");
+    assert!(written.contains("id: created.recipe"));
+    assert!(written.contains("name: Template Recipe"));
+
+    assert_eq!(responses[1]["id"], "get-created");
+    assert_eq!(responses[1]["ok"], true);
+    assert_eq!(responses[1]["result"]["document"]["documentId"], "doc-1");
+    assert_eq!(responses[1]["result"]["document"], *created);
+
+    let _ = fs::remove_dir_all(&dir);
+}
+
+#[test]
 fn sidecar_open_get_save_close_lifecycle_persists_document_state() {
     let temp_recipe = TempRecipe::copy_fixture("minimal_recipe.yaml");
     let input = format!(

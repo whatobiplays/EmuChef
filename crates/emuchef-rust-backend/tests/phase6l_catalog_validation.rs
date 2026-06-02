@@ -187,6 +187,7 @@ fn phase6l_capabilities_include_catalog_context_session_update() {
             "emitRecipeYamlFromPath",
             "validateRecipePath",
             "openRecipe",
+            "createRecipeFromTemplate",
             "getDocument",
             "saveRecipe",
             "saveRecipeAs",

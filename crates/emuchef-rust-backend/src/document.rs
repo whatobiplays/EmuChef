@@ -64,6 +64,43 @@ impl RecipeDocument {
         })
     }
 
+    /// Create a clean document by copying authored recipe content from a template.
+    ///
+    /// Template creation is a backend document operation: the template is parsed
+    /// with the normal authored recipe loader, only the recipe id is replaced,
+    /// and the canonical YAML is written to the requested destination. The
+    /// document starts clean because the saved baseline is the newly written
+    /// destination content.
+    pub fn create_from_template(
+        template_path: impl AsRef<Path>,
+        destination_path: impl AsRef<Path>,
+        recipe_id: &str,
+        authored_root: Option<&str>,
+    ) -> Result<Self, String> {
+        let template_path = template_path.as_ref();
+        let destination_path = destination_path.as_ref();
+        let mut recipe =
+            yaml::load_recipe_from_path(template_path).map_err(|error| error.to_string())?;
+        recipe.id = recipe_id.to_string();
+        let current_yaml = yaml::emit_recipe_yaml(&recipe).map_err(|error| error.to_string())?;
+        fs::write(destination_path, &current_yaml).map_err(|error| error.to_string())?;
+        let path = PathBuf::from(yaml::resolved_path_string(destination_path));
+        let authored_root = catalog::normalize_authored_root(authored_root, &path);
+        let diagnostics =
+            validation_diagnostics_for_recipe(&recipe, &path, authored_root.as_deref());
+
+        Ok(Self {
+            path,
+            authored_root,
+            recipe,
+            saved_yaml: current_yaml.clone(),
+            current_yaml,
+            diagnostics,
+            undo_stack: Vec::new(),
+            redo_stack: Vec::new(),
+        })
+    }
+
     pub fn save(&mut self) -> Result<(), String> {
         self.current_yaml =
             yaml::emit_recipe_yaml(&self.recipe).map_err(|error| error.to_string())?;

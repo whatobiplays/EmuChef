@@ -52,7 +52,7 @@ manual real-device evidence.
 | Area | Current production/reference owner | Current Rust status | Gap before Rust can claim parity | Promotion/retirement notes |
 | --- | --- | --- | --- | --- |
 | `validate` | Python CLI owns full catalog, directory, and path validation. | Rust supports selected explicit recipe-file validation paths and editor-backend validation fixtures. Rust CLI rejects default/catalog validation and deferred flags such as `--verbose`, `--debug`, and `--adb`. | Match Python CLI arguments, default catalog behavior, diagnostics, stdout/stderr, exit codes, authoredRoot coverage, and broader corpus behavior. | Do not treat editor validation or selected CLI fixtures as production CLI replacement. |
-| `draft` / create-from-template workflows | Python planner/session and legacy PySide/reference template flows. | Rust has no `draft` CLI command. Tauri does not expose create-from-template UI; Rust does not report `createRecipeFromTemplate`. | Implement or intentionally retire draft CLI behavior, operation replay, input binding, device fact handling, and template creation behavior. | Create-from-template is a Python/PySide deletion blocker unless explicitly retired. |
+| `draft` / create-from-template workflows | Python planner/CLI still owns `draft` behavior. | Rust has no `draft` CLI command. The Rust sidecar implements `createRecipeFromTemplate` for backend protocol parity, but Tauri does not expose a create-from-template UI. | Implement or intentionally retire CLI draft behavior, operation replay, input binding, and device fact handling before Rust can claim CLI parity. | GUI create-from-template is retired from the normal editor path unless a future product requirement reintroduces it. |
 | `plan` | Python planner/CLI owns planning result emission. | Rust planner is an internal fixture-backed module that emits Python-shaped `PlanningResult`/`ExecutionPlan` values for selected tests. It is not exposed as a protocol request, Tauri command, or production CLI command. | Full authored catalog loading, device profile/plan behavior, draft operations, bindings, diagnostics, output YAML/text, and CLI `--output`/verbose parity. | Keep planner declarative; do not add runtime behavior to planning parity work. |
 | `apply` | Python CLI and executor own dry-run and real execution. | Rust CLI supports only selected non-verbose `apply --plan-file ... --dry-run` fixtures. Non-dry-run apply is refused. | Full execution plan IO, dry-run semantics, real executor behavior, step handlers, artifact behavior, device selection, ADB, stdout/stderr, exit codes, and failure propagation. | Selected dry-run fixture behavior is not production apply parity. |
 | `detect` | Python CLI owns ADB device fact detection. | No Rust production CLI command or Tauri/API replacement. | ADB executable resolution, selected serial handling, device fact parsing, error behavior, stdout/stderr, and exit code parity. | Do not expose real-device behavior without explicit device targeting rules. |
@@ -62,7 +62,7 @@ manual real-device evidence.
 | ADB install/copy/launch | Python executor and ADB abstraction own production install, push/copy, launch, force-stop, path checks, and app-private command handling. | Rust has fake dry-run behavior, crate-private real-ADB adapter foundations, and ignored/manual tests. No production real apply surface uses them. | Real ADB command parity, serial selection, app-private path behavior, copy policies, install/launch/force-stop failure handling, and manual evidence. | Fake/manual/internal foundations do not equal production parity. |
 | Permission/appops | Python `grant_permissions` step handler owns step-local runtime permission and appops behavior. | Rust has selected fake/manual/internal coverage for step-local permission/appops behavior. | Command parity, policy parity, `when` filters, API/root behavior, optional failure behavior, summaries, dependency blocking, and real-device evidence. | Permission intent stays on `grant_permissions` steps; do not revive a planner-owned runtime permission phase. |
 | Real-device apply | Python CLI/executor owns mutating apply against selected devices. | Rust real-ADB tests are ignored/manual and require explicit environment opt-ins. Rust CLI refuses non-dry-run apply. | Explicit production CLI/API surface, mandatory selected-device targeting, all mutating step behavior, safety gates, and completed manual matrix records. | Rust real-device apply requires a deliberate product decision before promotion. |
-| Fixture/golden generation | Python remains the reference/golden owner for StepSpec, planner, executor, CLI, and editor-protocol fixtures. | Rust normal tests consume checked-in fixtures and goldens. Some fixtures are generated from Python reference commands. | Replace generation with Rust-native tooling, freeze fixtures intentionally, or keep a documented generator-only Python owner. | Deleting Python requires a fixture/golden ownership decision. |
+| Fixture/golden generation | Python remains the reference/golden owner for planner, executor, CLI, and non-StepSpec editor-protocol fixtures. StepSpec DTO metadata is Rust-owned for the normal Tauri editor path. | Rust normal tests consume checked-in fixtures and goldens. Some fixtures are generated from Python reference commands. | Replace generation with Rust-native tooling, freeze fixtures intentionally, or keep a documented generator-only Python owner. | Deleting Python requires fixture/golden ownership decisions outside StepSpec metadata. |
 | Stdout/stderr/exit-code behavior | Python CLI owns broad user-facing CLI output behavior. | Rust checks selected `validate` and `apply --dry-run` output shapes and exit codes in crate-local tests. | Full command matrix parity, verbose/debug modes, error text semantics, usage errors, progress output, summaries, and stderr failure markers. | Output compatibility must be intentionally accepted or intentionally changed before ownership changes. |
 | Execution plan IO compatibility | Python `src/emuchef/io/execution_plan_io.py` owns production plan-file loading. | Rust accepts selected `kind: execution_plan` and `kind: planning_result` fixtures for dry-run CLI tests. Broader inputs/artifacts and unsupported shapes are deferred. | YAML loading breadth, schema rejection behavior, planner-only field rejection, runtime value/ref compatibility, diagnostics, and fixture coverage. | Plan IO parity is required before Rust can replace Python `apply`. |
 
@@ -105,14 +105,12 @@ exists for:
 Do not retire any of these surfaces without an explicit product decision and
 replacement evidence:
 
-1. PySide editor retirement, which is governed by the editor migration/cutover
-   plan rather than Rust executor parity alone.
-2. Create-from-template flows.
-3. Python CLI commands.
-4. Python planner.
-5. Python executor.
-6. Fixture/golden generation.
-7. Real-device apply surface.
+1. Create-from-template flows.
+2. Python CLI commands.
+3. Python planner.
+4. Python executor.
+5. Fixture/golden generation.
+6. Real-device apply surface.
 
 Ownership may change only after:
 

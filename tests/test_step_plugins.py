@@ -13,7 +13,7 @@ from emuchef.io import dump_yaml, load_authored_recipe
 from emuchef.io.execution_plan_io import parse_execution_plan
 from emuchef.planner import contracts
 from emuchef.planner.catalog import CatalogLoadError
-from emuchef_editor.app.recipe_editor import step_metadata
+from emuchef_editor.core.metadata import step_metadata
 from emuchef.steps import builtin as builtin_steps
 from emuchef.steps import StepEditorMetadata, StepPlugin, StepRegistry, builtin_step_registry
 
@@ -390,6 +390,9 @@ steps:
         self.assertEqual(step_metadata.SUPPORTED_EDITOR_STEP_TYPES, SUPPORTED_STEP_TYPES)
         self.assertEqual(step_metadata.REF_VALUE_FILTERS, expected_ref_filters)
         self.assertNotIn("StepType.", inspect.getsource(step_metadata))
+        self.assertNotIn("PySide6", inspect.getsource(step_metadata))
+        self.assertNotIn("emuchef_editor.app", inspect.getsource(step_metadata))
+        self.assertNotIn("QtWidgets", inspect.getsource(step_metadata))
 
     def test_builtin_plugins_do_not_parse_authored_refs(self) -> None:
         sources = [inspect.getsource(builtin_steps)]

@@ -1,15 +1,22 @@
 from __future__ import annotations
 
+import sys
 import unittest
 from unittest.mock import patch
 
 from emuchef.domain import ArtifactCacheMode, InputRole, InputType, PERMISSION_POLICY_ON_FAILURE_VALUES
 from emuchef.domain.constants import SCHEMA_VERSION
-from emuchef_editor.app.recipe_editor import tooltips
-from emuchef_editor.app.recipe_editor.tooltips import field_tooltip, prompt_tooltip
+from emuchef_editor.core.metadata import tooltips
+from emuchef_editor.core.metadata.tooltips import field_tooltip, prompt_tooltip
 
 
 class EditorTooltipTests(unittest.TestCase):
+    def test_tooltip_metadata_import_does_not_load_pyside_or_legacy_app(self) -> None:
+        loaded_modules = set(sys.modules)
+
+        self.assertFalse(any(name == "PySide6" or name.startswith("PySide6.") for name in loaded_modules))
+        self.assertFalse(any(name == "emuchef_editor.app" or name.startswith("emuchef_editor.app.") for name in loaded_modules))
+
     def test_input_type_tooltip_tracks_current_enum_values(self) -> None:
         tooltip = field_tooltip("inputs.type")
         for value in InputType:

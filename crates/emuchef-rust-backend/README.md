@@ -270,10 +270,10 @@ before planning.
 | --- | --- | --- |
 | `wait` | Implemented for fixture coverage | Emits literal params, participates in selected-step and dependency ordering tests, and does not sleep or run subprocesses. |
 | `resolve_artifacts` | Implemented for fixture coverage | Expands `artifacts` and `artifact_groups` into execution artifact ids. Does not download, resolve URLs, or inspect caches. |
-| `extract_artifacts` | Implemented for fixture coverage | Expands artifact selections and materializes Python StepSpec default `extract_on: host`, with explicit overrides preserved. Does not extract archives or touch host/device files. |
-| `extract_archive` | Implemented for fixture coverage | Normalizes top-level artifact refs and materializes Python StepSpec default `cleanup: true`. Does not extract archives. |
-| `copy_files` | Implemented for fixture coverage | Normalizes top-level refs, supports shorthand step-output refs, materializes Python StepSpec default `copy_policy: merge`, preserves explicit overrides, and emits declarative params only. Does not copy files. |
-| `install_apk` | Implemented for fixture coverage | Normalizes the `app` artifact ref and materializes Python StepSpec default `replace_existing: false`. Does not install APKs. |
+| `extract_artifacts` | Implemented for fixture coverage | Expands artifact selections and materializes StepSpec default `extract_on: host`, with explicit overrides preserved. Does not extract archives or touch host/device files. |
+| `extract_archive` | Implemented for fixture coverage | Normalizes top-level artifact refs and materializes StepSpec default `cleanup: true`. Does not extract archives. |
+| `copy_files` | Implemented for fixture coverage | Normalizes top-level refs, supports shorthand step-output refs, materializes StepSpec default `copy_policy: merge`, preserves explicit overrides, and emits declarative params only. Does not copy files. |
+| `install_apk` | Implemented for fixture coverage | Normalizes the `app` artifact ref and materializes StepSpec default `replace_existing: false`. Does not install APKs. |
 | `grant_permissions` | Implemented for fixture coverage | Keeps runtime/appops/policy params step-local and does not emit a separate permission plan or grant permissions. |
 | `launch_app` | Implemented for fixture coverage | Emits literal package/activity params only. Does not launch apps. |
 | `force_stop_app` | Implemented for fixture coverage | Emits literal package params and participates in capability pruning tests. Does not inspect or stop apps. |
@@ -653,7 +653,7 @@ state. `RecipeDocumentDto.refIndex` is no longer the Phase 6F empty placeholder
 for modeled Phase 6H recipe features. The generated index is fixture-scoped and
 limited to the currently modeled Rust authored recipe data: inputs, runtime
 artifact fields, authored step ids, and declared StepSpec outputs from the
-embedded Python StepSpec fixture. It does not derive planner, catalog-context,
+Rust-owned StepSpec metadata. It does not derive planner, catalog-context,
 executor/device, artifact group, recipe `provides`, or missing-param refs.
 
 ```json
@@ -681,42 +681,16 @@ executor/device, artifact group, recipe `provides`, or missing-param refs.
 
 ## StepSpec Source
 
-`listStepSpecs` returns a static parity copy of the current Python built-in step
-spec metadata. The fixture lives at:
+`listStepSpecs` returns Rust-owned static StepSpec DTO metadata from
+`src/step_specs.rs`. The data includes editor-safe labels, supported status,
+primary outputs, param ordering, defaults, ref filters, enum values, and known
+param shape metadata for the built-in step types.
 
-```text
-crates/emuchef-rust-backend/tests/fixtures/python_step_specs.json
-```
-
-That fixture is temporary Phase 6D scaffolding, not the final Rust step
-registry. Later phases should replace it with Rust-native schema builders before
-planner or executor behavior is ported. Regenerate and compare the fixture any
-time Python step specs change.
-
-Check the fixture from the repo root with this Python reference/golden tooling
-command. Normal Rust and Tauri runtime tests use the committed fixture and do
-not invoke Python:
-
-```bash
-PYTHONPATH=src ./.venv/bin/python scripts/step_specs_fixture.py check
-```
-
-The check command generates canonical StepSpec JSON to a temporary file, diffs
-it against the committed fixture, and exits non-zero on drift. It does not
-modify the committed fixture or any path passed through `--fixture`.
-
-Regenerate the committed fixture intentionally with:
-
-```bash
-PYTHONPATH=src ./.venv/bin/python scripts/step_specs_fixture.py write
-```
-
-The write command updates
-`crates/emuchef-rust-backend/tests/fixtures/python_step_specs.json` only when
-the generated content differs and reports `unchanged` or `updated`. These
-commands protect the Python DTO to Rust fixture contract; they are explicit
-developer/golden tooling and are not part of normal Rust, Tauri, packaging, or
-no-Python-runtime verification.
+The Rust backend does not embed a Python-generated StepSpec fixture and normal
+Rust/Tauri runtime tests do not invoke Python for StepSpec metadata. Python
+still retains broader CLI, planner, executor, editor API/reference, and other
+golden-generation responsibilities until those surfaces are replaced or retired
+explicitly.
 
 The fixture stores only the Python response `result` object, not the outer
 `{"ok": true, "result": ...}` envelope.
@@ -849,50 +823,9 @@ Python-generated parity fixtures live under:
 crates/emuchef-rust-backend/tests/fixtures/python_goldens/
 ```
 
-Regenerate the Phase 6E goldens from the repo root with:
-
-```bash
-PYTHONPATH=src uv run --no-project --native-tls --with PyYAML python - <<'PY'
-from __future__ import annotations
-import json
-from pathlib import Path
-from emuchef_editor.api.server import handle_request
-
-fixtures = Path("crates/emuchef-rust-backend/tests/fixtures")
-recipes = fixtures / "recipes"
-goldens = fixtures / "python_goldens"
-goldens.mkdir(parents=True, exist_ok=True)
-
-emit_names = ["minimal_recipe", "representative_recipe", "ref_params"]
-validate_names = [
-    "minimal_recipe",
-    "invalid_top_level_permissions",
-    "unsupported_step_type",
-    "malformed",
-]
-
-for name in emit_names:
-    response = handle_request({
-        "type": "emitRecipeYamlFromPath",
-        "payload": {"path": str(recipes / f"{name}.yaml"), "authoredRoot": None},
-    })
-    if not response["ok"]:
-        raise SystemExit(json.dumps(response, indent=2))
-    (goldens / f"{name}.emit.yaml").write_text(response["result"]["yaml"], encoding="utf-8")
-
-for name in validate_names:
-    response = handle_request({
-        "type": "validateRecipePath",
-        "payload": {"path": str(recipes / f"{name}.yaml"), "authoredRoot": None},
-    })
-    if not response["ok"]:
-        raise SystemExit(json.dumps(response, indent=2))
-    (goldens / f"{name}.validate.json").write_text(
-        json.dumps(response["result"], indent=2, sort_keys=True) + "\n",
-        encoding="utf-8",
-    )
-PY
-```
+The former Phase 6E regeneration command used the removed Python editor API.
+These checked-in goldens remain parity evidence. Refresh them only after adding
+Rust-native fixture tooling or an explicitly retained non-editor Python owner.
 
 The emitted YAML goldens store only the Python result string. The validation
 goldens store only the Python result object, not the outer API envelope.
@@ -1159,75 +1092,10 @@ The Phase 6Q helper uses only temp-owned APK/text fixtures and Python
 operations, grant permissions, perform network access, or mutate authored
 fixtures.
 
-Regenerate the Phase 6L diagnostic goldens from the repo root with:
-
-```bash
-PYTHONPATH=tests .venv/bin/python - <<'PY'
-from __future__ import annotations
-
-import json
-from pathlib import Path
-
-from emuchef_editor.api.server import handle_request
-from emuchef_editor.api.session import DocumentSessionManager
-
-ROOT = Path("crates/emuchef-rust-backend/tests/fixtures/authored_root")
-GOLDENS = Path("crates/emuchef-rust-backend/tests/fixtures/python_goldens")
-GOLDENS.mkdir(parents=True, exist_ok=True)
-
-def workspace_root(name: str) -> Path:
-    return ROOT / name
-
-def authored_root(name: str) -> Path:
-    return workspace_root(name) / "authored"
-
-def recipe_path(workspace: str, name: str) -> Path:
-    return authored_root(workspace) / "recipes" / name
-
-def diagnostic_fields(diagnostic: dict) -> dict:
-    return {
-        "severity": diagnostic.get("severity"),
-        "code": diagnostic.get("code"),
-        "objectKind": diagnostic.get("objectKind"),
-        "objectId": diagnostic.get("objectId"),
-        "field": diagnostic.get("field"),
-    }
-
-def write(name: str, diagnostics: list[dict]) -> None:
-    payload = [diagnostic_fields(item) for item in diagnostics]
-    (GOLDENS / name).write_text(
-        json.dumps(payload, indent=2, sort_keys=True) + "\n",
-        encoding="utf-8",
-    )
-
-def validate(path: Path, root_marker) -> list[dict]:
-    payload = {"path": str(path)}
-    if root_marker != "omitted":
-        payload["authoredRoot"] = None if root_marker is None else str(root_marker)
-    response = handle_request({"type": "validateRecipePath", "payload": payload})
-    if not response["ok"]:
-        raise SystemExit(json.dumps(response, indent=2))
-    return response["result"]["diagnostics"]
-
-def open_document(path: Path, root_marker="omitted") -> list[dict]:
-    manager = DocumentSessionManager()
-    authored = None if root_marker == "omitted" else root_marker
-    response = manager.open_recipe(path, authored_root=authored)
-    if not response["ok"]:
-        raise SystemExit(json.dumps(response, indent=2))
-    return response["result"]["document"]["diagnostics"]
-
-write("phase6l_complete_null_root.diagnostics.json", validate(recipe_path("complete", "main.yaml"), None))
-write("phase6l_complete_explicit_root.diagnostics.json", validate(recipe_path("complete", "main.yaml"), authored_root("complete")))
-write("phase6l_missing_authored_root.diagnostics.json", validate(recipe_path("complete", "main.yaml"), workspace_root("complete") / "missing-authored-root"))
-write("phase6l_missing_dependency.diagnostics.json", validate(recipe_path("missing_dependency", "missing_dependency.yaml"), authored_root("missing_dependency")))
-write("phase6l_dependency_cycle.diagnostics.json", validate(recipe_path("dependency_cycle", "cycle_a.yaml"), authored_root("dependency_cycle")))
-write("phase6l_nested_ignored.diagnostics.json", validate(recipe_path("nested_ignored", "main.yaml"), authored_root("nested_ignored")))
-write("phase6l_duplicate_open.diagnostics.json", open_document(recipe_path("duplicate", "target_duplicate.yaml"), authored_root("duplicate")))
-write("phase6l_duplicate_reverse_open.diagnostics.json", open_document(recipe_path("duplicate_reverse", "a_target_duplicate.yaml"), authored_root("duplicate_reverse")))
-write("phase6l_missing_dependency_open.diagnostics.json", open_document(recipe_path("missing_dependency", "missing_dependency.yaml"), "omitted"))
-PY
-```
+The former Phase 6L diagnostic regeneration command used the removed Python
+editor API. These checked-in diagnostic goldens remain parity evidence. Refresh
+them only after adding Rust-native fixture tooling or an explicitly retained
+non-editor Python owner.
 
 Regenerate the Phase 6N planner goldens from the repo root with:
 
@@ -1388,93 +1256,10 @@ recipe has no inputs, artifacts, or steps, so its generated RefIndex is empty
 even after Phase 6H replaces the former placeholder behavior for richer
 modeled recipes.
 
-Regenerate the Phase 6G goldens from the repo root with:
-
-```bash
-PYTHONPATH=src:tests uv run --no-project --native-tls --with PyYAML python - <<'PY'
-from __future__ import annotations
-import json
-from pathlib import Path
-from tempfile import TemporaryDirectory
-from support import build_authored_tree
-from emuchef_editor.api.session import DocumentSessionManager
-
-fixtures = Path("crates/emuchef-rust-backend/tests/fixtures")
-goldens = fixtures / "python_goldens"
-goldens.mkdir(parents=True, exist_ok=True)
-
-recipe = {
-    "schema_version": 1,
-    "kind": "recipe",
-    "id": "phase6g.golden",
-    "name": "Phase 6G Golden",
-    "description": "Original description.",
-    "recipe_dependencies": [],
-    "provides": {"features": []},
-    "inputs": {},
-    "artifacts": {},
-    "artifact_groups": {},
-    "steps": [],
-}
-
-def normalize(value):
-    if isinstance(value, dict):
-        out = {}
-        for key, item in value.items():
-            if key == "documentId":
-                out[key] = "<documentId>"
-            elif key == "path":
-                out[key] = "<path>"
-            elif key == "authoredRoot":
-                out[key] = "<authoredRoot>" if item is not None else None
-            elif key == "file":
-                out[key] = "<path>" if item is not None else None
-            else:
-                out[key] = normalize(item)
-        return out
-    if isinstance(value, list):
-        return [normalize(item) for item in value]
-    return value
-
-with TemporaryDirectory() as tmp:
-    root = build_authored_tree(Path(tmp), recipes=[recipe])
-    path = root / "recipes" / "phase6g_golden.yaml"
-    manager = DocumentSessionManager()
-    opened = manager.open_recipe(path, authored_root=root)
-    document_id = opened["result"]["document"]["documentId"]
-
-    responses = {
-        "phase6g_empty_undo.result.json": manager.undo(document_id)["result"],
-        "phase6g_empty_redo.result.json": manager.redo(document_id)["result"],
-        "phase6g_set_overview_name.result.json": manager.apply_recipe_command(
-            document_id,
-            {"type": "SetOverviewField", "field": "name", "value": "Python Golden Name"},
-        )["result"],
-        "phase6g_set_overview_description.result.json": manager.apply_recipe_command(
-            document_id,
-            {"type": "SetOverviewField", "field": "description", "value": "Python Golden Description"},
-        )["result"],
-        "phase6g_set_overview_description_null.result.json": manager.apply_recipe_command(
-            document_id,
-            {"type": "SetOverviewField", "field": "description", "value": None},
-        )["result"],
-        "phase6g_set_overview_noop.result.json": manager.apply_recipe_command(
-            document_id,
-            {"type": "SetOverviewField", "field": "name", "value": "Python Golden Name"},
-        )["result"],
-        "phase6g_undo_after_overview.result.json": manager.undo(document_id)["result"],
-        "phase6g_redo_after_overview.result.json": manager.redo(document_id)["result"],
-        "phase6g_emit_yaml_after_overview.result.json": manager.emit_yaml(document_id)["result"],
-        "phase6g_validate_after_overview.result.json": manager.validate(document_id)["result"],
-    }
-
-for filename, result in responses.items():
-    (goldens / filename).write_text(
-        json.dumps(normalize(result), indent=2, sort_keys=True) + "\n",
-        encoding="utf-8",
-    )
-PY
-```
+The former Phase 6G regeneration command used the removed Python editor API.
+These checked-in result goldens remain parity evidence. Refresh them only after
+adding Rust-native fixture tooling or an explicitly retained non-editor Python
+owner.
 
 Phase 6H RefIndex parity is covered by focused Python-generated result goldens:
 
@@ -1490,70 +1275,10 @@ not used as a full-document golden because Python validation continues to be the
 reference beyond the fixture-scoped Rust validation surface; the Phase 6H
 comparison for that fixture is intentionally scoped to `getRefIndex`.
 
-Regenerate the Phase 6H goldens from the repo root with:
-
-```bash
-PYTHONPATH=src:tests uv run --no-project --native-tls --with PyYAML python - <<'PY'
-from __future__ import annotations
-import json
-from pathlib import Path
-from emuchef_editor.api.session import DocumentSessionManager
-
-fixtures = Path("crates/emuchef-rust-backend/tests/fixtures")
-recipes = fixtures / "recipes"
-goldens = fixtures / "python_goldens"
-goldens.mkdir(parents=True, exist_ok=True)
-
-def normalize(value):
-    if isinstance(value, dict):
-        out = {}
-        for key, item in value.items():
-            if key == "documentId":
-                out[key] = "<documentId>"
-            elif key == "path":
-                out[key] = "<path>"
-            elif key == "authoredRoot":
-                out[key] = "<authoredRoot>" if item is not None else None
-            elif key == "file":
-                out[key] = "<path>" if item is not None else None
-            else:
-                out[key] = normalize(item)
-        return out
-    if isinstance(value, list):
-        return [normalize(item) for item in value]
-    return value
-
-def write(name, value):
-    (goldens / name).write_text(
-        json.dumps(normalize(value), indent=2, sort_keys=True) + "\n",
-        encoding="utf-8",
-    )
-
-manager = DocumentSessionManager()
-opened = manager.open_recipe(recipes / "representative_recipe.yaml", authored_root=fixtures)
-if not opened["ok"]:
-    raise SystemExit(json.dumps(opened, indent=2))
-document_id = opened["result"]["document"]["documentId"]
-write("phase6h_representative_open.result.json", opened["result"])
-write("phase6h_representative_get_ref_index.result.json", manager.get_ref_index(document_id)["result"])
-write(
-    "phase6h_representative_set_overview.result.json",
-    manager.apply_recipe_command(
-        document_id,
-        {"type": "SetOverviewField", "field": "name", "value": "Phase 6H Renamed"},
-    )["result"],
-)
-write("phase6h_representative_undo.result.json", manager.undo(document_id)["result"])
-write("phase6h_representative_redo.result.json", manager.redo(document_id)["result"])
-
-manager = DocumentSessionManager()
-opened = manager.open_recipe(recipes / "ref_params.yaml", authored_root=fixtures)
-if not opened["ok"]:
-    raise SystemExit(json.dumps(opened, indent=2))
-document_id = opened["result"]["document"]["documentId"]
-write("phase6h_ref_params_get_ref_index.result.json", manager.get_ref_index(document_id)["result"])
-PY
-```
+The former Phase 6H regeneration command used the removed Python editor API.
+These checked-in result goldens remain parity evidence. Refresh them only after
+adding Rust-native fixture tooling or an explicitly retained non-editor Python
+owner.
 
 Phase 6I non-step command RefIndex parity is covered by focused
 Python-generated result goldens:
@@ -1567,69 +1292,10 @@ and artifact group mutations. They do not compare full document results for the
 Phase 6I fixture because Python performs richer catalog-context validation than
 the Rust backend's current fixture-scoped validation surface.
 
-Regenerate the Phase 6I goldens from the repo root with:
-
-```bash
-PYTHONPATH=src:tests uv run --no-project --native-tls --with PyYAML python - <<'PY'
-from __future__ import annotations
-import json
-from pathlib import Path
-from emuchef_editor.api.session import DocumentSessionManager
-
-fixtures = Path("crates/emuchef-rust-backend/tests/fixtures")
-recipes = fixtures / "recipes"
-goldens = fixtures / "python_goldens"
-goldens.mkdir(parents=True, exist_ok=True)
-
-def write(name, value):
-    (goldens / name).write_text(
-        json.dumps(value, indent=2, sort_keys=True) + "\n",
-        encoding="utf-8",
-    )
-
-def opened_manager():
-    manager = DocumentSessionManager()
-    opened = manager.open_recipe(recipes / "phase6i_commands.yaml", authored_root=fixtures)
-    if not opened["ok"]:
-        raise SystemExit(json.dumps(opened, indent=2))
-    return manager, opened["result"]["document"]["documentId"]
-
-manager, document_id = opened_manager()
-for command in [
-    {"type": "AddInput", "inputId": "gold_input"},
-    {"type": "RenameInput", "inputId": "source_dir", "newInputId": "src_dir"},
-    {"type": "DuplicateInput", "sourceInputId": "bios_file", "newInputId": "bios_copy"},
-    {"type": "DeleteInput", "inputId": "gold_input"},
-]:
-    result = manager.apply_recipe_command(document_id, command)
-    if not result["ok"]:
-        raise SystemExit(json.dumps(result, indent=2))
-write("phase6i_after_inputs_get_ref_index.result.json", manager.get_ref_index(document_id)["result"])
-
-manager, document_id = opened_manager()
-for command in [
-    {"type": "AddArtifact", "artifactId": "new_zip", "url": "https://example.com/new.zip"},
-    {"type": "RenameArtifact", "artifactId": "target_zip", "newArtifactId": "renamed_zip"},
-    {"type": "DeleteArtifact", "artifactId": "renamed_zip"},
-]:
-    result = manager.apply_recipe_command(document_id, command)
-    if not result["ok"]:
-        raise SystemExit(json.dumps(result, indent=2))
-write("phase6i_after_artifacts_get_ref_index.result.json", manager.get_ref_index(document_id)["result"])
-
-manager, document_id = opened_manager()
-for command in [
-    {"type": "AddArtifactGroup", "groupId": "gold_group"},
-    {"type": "AddArtifactGroupMember", "groupId": "gold_group", "artifactId": "other_zip"},
-    {"type": "RenameArtifactGroup", "groupId": "bundle", "newGroupId": "renamed_bundle"},
-    {"type": "DeleteArtifactGroup", "groupId": "renamed_bundle"},
-]:
-    result = manager.apply_recipe_command(document_id, command)
-    if not result["ok"]:
-        raise SystemExit(json.dumps(result, indent=2))
-write("phase6i_after_groups_get_ref_index.result.json", manager.get_ref_index(document_id)["result"])
-PY
-```
+The former Phase 6I regeneration command used the removed Python editor API.
+These checked-in result goldens remain parity evidence. Refresh them only after
+adding Rust-native fixture tooling or an explicitly retained non-editor Python
+owner.
 
 Phase 6J.1 and Phase 6J.2 do not add Python-generated result goldens. Their Rust
 tests mirror the verified Python command codec and document behavior directly,

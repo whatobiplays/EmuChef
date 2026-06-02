@@ -1,6 +1,6 @@
 //! JSON DTO projection for Phase 6H recipe documents.
 //!
-//! These projections mirror the Python editor API shape for the authored recipe
+//! These projections preserve the editor protocol shape for the authored recipe
 //! fields modeled in Phase 6E. Fields outside that model are intentionally left
 //! out of scope instead of adding new semantics.
 

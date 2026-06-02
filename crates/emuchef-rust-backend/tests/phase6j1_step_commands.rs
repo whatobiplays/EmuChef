@@ -162,6 +162,7 @@ fn phase6j1_capabilities_stay_on_editor_session_surface() {
             "emitRecipeYamlFromPath",
             "validateRecipePath",
             "openRecipe",
+            "createRecipeFromTemplate",
             "getDocument",
             "saveRecipe",
             "saveRecipeAs",

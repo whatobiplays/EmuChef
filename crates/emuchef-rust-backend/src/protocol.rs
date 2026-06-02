@@ -13,6 +13,7 @@ pub const CAPABILITIES: &[&str] = &[
     "emitRecipeYamlFromPath",
     "validateRecipePath",
     "openRecipe",
+    "createRecipeFromTemplate",
     "getDocument",
     "saveRecipe",
     "saveRecipeAs",

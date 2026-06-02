@@ -6,8 +6,10 @@ document only. It does not certify untested platforms, real packaged GUI E2E,
 signing, notarization, updater support, or public release readiness.
 
 The active package path is the Rust-sidecar Tauri editor path. It does not use a
-Python runtime for packaged editor backend execution, but the repository still
-contains Python legacy/reference/developer/golden tooling.
+Python runtime or PySide6 for packaged editor backend execution. The repository
+still contains Python legacy/reference/developer/golden tooling, but the legacy
+PySide6 editor source, tests, optional dependency extra, and Python GUI console
+script have been removed.
 
 ## Readiness Boundaries
 
@@ -16,7 +18,8 @@ These checks prove different things and must not be treated as equivalent:
 | Boundary | Command or source | What it proves | What it does not prove |
 | --- | --- | --- | --- |
 | Host-target sidecar preparation | `npm run sidecar:build` | Builds the Rust backend for the current host target and prepares the Tauri v2 `externalBin` input name. | Cross-compilation, installer output, GUI launch, signing, notarization, or updater readiness. |
-| Bundle-input inspection | `npm run check:sidecar:bundle-input` | Runs bundle-input unit checks, prepares the release sidecar, and inspects the host-target `externalBin` source artifact and metadata. | Real packaged app behavior, generated installer correctness, GUI E2E, signing, notarization, or updater readiness. |
+| Bundle-input inspection | `npm run check:sidecar:bundle-input` | Runs bundle-input unit checks, prepares the release sidecar, and inspects the host-target `externalBin` source artifact and metadata. | Real packaged app behavior, generated installer correctness, GUI E2E, signing, notarization, updater readiness, or Python/PySide deletion. |
+| Runtime quarantine checks | `npm run check:rust-runtime` | Runs app-local runtime checks, including no-Python-runtime, no-Python-editor-API, and no-PySide-runtime scans for active editor paths and default distribution metadata. | Release builds, real packaged GUI behavior, signing, notarization, updater readiness, or full repo Python deletion. |
 | Simulated packaged sidecar smoke | `npm run smoke:sidecar:simulated-packaged` | Exercises packaged-mode sidecar path resolution against a temporary simulated bundle directory. | A real packaged GUI artifact, installed app, installer, signing, notarization, updater, or GUI E2E. |
 | Tauri package build | `cd apps/config-editor && npm run tauri build` | Runs the configured Tauri build for the current host target. | Cross-platform support from another host, signed/notarized release readiness, updater readiness, or completed GUI E2E. |
 | Generated platform artifacts | Tauri build output | Produces platform-specific artifacts for the host target when the local platform prerequisites are present. | Artifact quality on untested targets or release readiness without platform-local verification. |
@@ -47,7 +50,7 @@ commands. They do not prove cross-compilation.
 - Sidecar input name: `emuchef-rust-backend-aarch64-apple-darwin`
 - Packaged sidecar name: `emuchef-rust-backend`
 - Expected artifact types: macOS `.app` bundle and DMG output when Tauri's macOS bundler prerequisites are installed.
-- Required prerequisites: frontend npm dependencies, Rust toolchain, Tauri macOS prerequisites, matching macOS arm64 host/target, and the packaged Tauri Rust-sidecar path. Python is not required for the packaged Tauri editor runtime.
+- Required prerequisites: frontend npm dependencies, Rust toolchain, Tauri macOS prerequisites, matching macOS arm64 host/target, and the packaged Tauri Rust-sidecar path. Python and PySide6 are not required for the packaged Tauri editor runtime.
 - Current blockers and unknowns: the readiness audit records prior macOS arm64 package and bundled-sidecar evidence, but this document does not contain a completed real packaged GUI E2E result record, signing evidence, notarization evidence, updater evidence, or public release approval.
 
 ### macOS x64
@@ -60,7 +63,7 @@ commands. They do not prove cross-compilation.
 - Sidecar input name: `emuchef-rust-backend-x86_64-apple-darwin`
 - Packaged sidecar name: `emuchef-rust-backend`
 - Expected artifact types: macOS `.app` bundle and DMG output when Tauri's macOS bundler prerequisites are installed.
-- Required prerequisites: frontend npm dependencies, Rust toolchain, Tauri macOS prerequisites, matching macOS x64 host/target, and the packaged Tauri Rust-sidecar path. Python is not required for the packaged Tauri editor runtime.
+- Required prerequisites: frontend npm dependencies, Rust toolchain, Tauri macOS prerequisites, matching macOS x64 host/target, and the packaged Tauri Rust-sidecar path. Python and PySide6 are not required for the packaged Tauri editor runtime.
 - Current blockers and unknowns: no macOS x64 sidecar input inspection, Tauri bundle build, generated artifact inspection, packaged GUI E2E, signing, notarization, or updater evidence is recorded here.
 
 ### Windows x64
@@ -73,7 +76,7 @@ commands. They do not prove cross-compilation.
 - Sidecar input name: `emuchef-rust-backend-x86_64-pc-windows-msvc.exe`
 - Packaged sidecar name: `emuchef-rust-backend.exe`
 - Expected artifact types: Windows bundle or installer outputs configured by apps/config-editor/src-tauri/tauri.conf.json and supported by the local Tauri toolchain. This document does not claim that any Windows artifact has been produced or verified.
-- Required prerequisites: frontend npm dependencies, Rust toolchain, Tauri Windows prerequisites, matching Windows x64 host/target, and the packaged Tauri Rust-sidecar path. Python is not required for the packaged Tauri editor runtime.
+- Required prerequisites: frontend npm dependencies, Rust toolchain, Tauri Windows prerequisites, matching Windows x64 host/target, and the packaged Tauri Rust-sidecar path. Python and PySide6 are not required for the packaged Tauri editor runtime.
 - Current blockers and unknowns: pure naming logic covers the `.exe` convention, but no Windows sidecar input inspection, Tauri bundle build, generated artifact inspection, packaged GUI E2E, code-signing, installer behavior, or updater evidence is recorded here.
 
 ### Linux x64
@@ -86,13 +89,15 @@ commands. They do not prove cross-compilation.
 - Sidecar input name: `emuchef-rust-backend-x86_64-unknown-linux-gnu`
 - Packaged sidecar name: `emuchef-rust-backend`
 - Expected artifact types: Linux bundle outputs configured by apps/config-editor/src-tauri/tauri.conf.json and supported by the local Tauri toolchain. This document does not claim that any specific Linux artifact type has been produced or verified.
-- Required prerequisites: frontend npm dependencies, Rust toolchain, Tauri Linux prerequisites, matching Linux x64 host/target, and the packaged Tauri Rust-sidecar path. Python is not required for the packaged Tauri editor runtime.
+- Required prerequisites: frontend npm dependencies, Rust toolchain, Tauri Linux prerequisites, matching Linux x64 host/target, and the packaged Tauri Rust-sidecar path. Python and PySide6 are not required for the packaged Tauri editor runtime.
 - Current blockers and unknowns: no Linux sidecar input inspection, Tauri bundle build, generated artifact inspection, packaged GUI E2E, distribution package policy, signing policy, or updater evidence is recorded here.
 
 ## Evidence Sources
 
 - [`apps/config-editor/README.md` Packaged Build](../../apps/config-editor/README.md#packaged-build) describes `npm run tauri build`, `sidecar:build`, Tauri v2 `externalBin` source names, target-triple stripping in packaged apps, bundle-input checks, simulated packaged smoke, and the manual packaged GUI E2E boundary.
 - [`apps/config-editor/package.json`](../../apps/config-editor/package.json) defines `sidecar:build`, `check:sidecar:bundle-input`, `smoke:sidecar:simulated-packaged`, `test:sidecar-packaging`, `test:sidecar-bundle-inspection`, and related runtime checks.
+- [`apps/config-editor/scripts/check-no-python-editor-api.mjs`](../../apps/config-editor/scripts/check-no-python-editor-api.mjs) verifies that the Python editor API is absent from active source/test paths and Python script entrypoints.
+- [`apps/config-editor/scripts/check-no-pyside-runtime.mjs`](../../apps/config-editor/scripts/check-no-pyside-runtime.mjs) verifies that default install metadata and normal active runtime/test paths do not require, import, or launch PySide6.
 - [`apps/config-editor/scripts/sidecar-packaging.mjs`](../../apps/config-editor/scripts/sidecar-packaging.mjs) defines the sidecar base name, target-triple-suffixed `externalBin` source name, Windows `.exe` behavior, and packaged sidecar launch name.
 - [`apps/config-editor/scripts/prepare-rust-sidecar.mjs`](../../apps/config-editor/scripts/prepare-rust-sidecar.mjs) builds the Rust backend, reads `rustc --print host-tuple`, rejects non-host target requests, copies the host-target sidecar to `src-tauri/binaries`, and writes metadata.
 - [`apps/config-editor/src-tauri/tauri.conf.json`](../../apps/config-editor/src-tauri/tauri.conf.json) configures `beforeBuildCommand` as `npm run sidecar:build && npm run build` and enables bundling with `externalBin`.

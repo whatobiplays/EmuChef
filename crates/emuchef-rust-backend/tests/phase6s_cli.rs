@@ -206,6 +206,7 @@ fn phase6s_preserves_one_shot_json_and_sidecar_dispatch() {
             "emitRecipeYamlFromPath",
             "validateRecipePath",
             "openRecipe",
+            "createRecipeFromTemplate",
             "getDocument",
             "saveRecipe",
             "saveRecipeAs",

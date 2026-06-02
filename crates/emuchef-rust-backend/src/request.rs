@@ -70,6 +70,7 @@ fn handle_validated_sidecar_object(
         "emitRecipeYamlFromPath" => handle_emit_recipe_yaml_from_path(object),
         "validateRecipePath" => handle_validate_recipe_path(object),
         "openRecipe" => handle_open_recipe(object, sessions),
+        "createRecipeFromTemplate" => handle_create_recipe_from_template(object, sessions),
         "getDocument" => handle_get_document(object, sessions),
         "saveRecipe" => handle_save_recipe(object, sessions),
         "saveRecipeAs" => handle_save_recipe_as(object, sessions),
@@ -153,6 +154,23 @@ fn handle_open_recipe(
     Ok(envelope::success(
         sessions.open_recipe(path, authored_root)?,
     ))
+}
+
+fn handle_create_recipe_from_template(
+    object: &Map<String, Value>,
+    sessions: &mut DocumentSessionManager,
+) -> Result<Value, ApiError> {
+    let payload = payload_object(object)?;
+    let template_path = required_string(payload, "templatePath")?;
+    let destination_path = required_string(payload, "destinationPath")?;
+    let recipe_id = required_string(payload, "recipeId")?;
+    let authored_root = optional_string(payload, "authoredRoot")?;
+    Ok(envelope::success(sessions.create_recipe_from_template(
+        template_path,
+        destination_path,
+        recipe_id,
+        authored_root,
+    )?))
 }
 
 fn handle_get_document(
@@ -277,23 +295,21 @@ fn payload_object(object: &Map<String, Value>) -> Result<&Map<String, Value>, Ap
 }
 
 fn required_path(payload: &Map<String, Value>) -> Result<&str, ApiError> {
-    match payload.get("path") {
-        Some(Value::String(path)) if !path.is_empty() => Ok(path),
+    required_string(payload, "path")
+}
+
+fn required_string<'a>(payload: &'a Map<String, Value>, field: &str) -> Result<&'a str, ApiError> {
+    match payload.get(field) {
+        Some(Value::String(value)) if !value.is_empty() => Ok(value),
         _ => Err(ApiError::invalid_request_with_details(
-            "Request payload is missing required field: path",
-            json!({ "field": "path" }),
+            format!("Request payload is missing required field: {field}"),
+            json!({ "field": field }),
         )),
     }
 }
 
 fn required_document_id(payload: &Map<String, Value>) -> Result<&str, ApiError> {
-    match payload.get("documentId") {
-        Some(Value::String(document_id)) if !document_id.is_empty() => Ok(document_id),
-        _ => Err(ApiError::invalid_request_with_details(
-            "Request payload is missing required field: documentId",
-            json!({ "field": "documentId" }),
-        )),
-    }
+    required_string(payload, "documentId")
 }
 
 fn optional_string<'a>(
