@@ -4,6 +4,10 @@ use std::path::{Path, PathBuf};
 
 use serde_json::{json, Value};
 
+use crate::model::{
+    OrderedMap, ParamValue, Recipe, RecipeProvides, RemoteFileArtifact, Step, StepCondition,
+    StepConstraints,
+};
 use crate::planner::{plan_execution, DeviceContext, PlannerInput, RuntimeCapabilities};
 
 fn authored_root(name: &str) -> PathBuf {
@@ -448,6 +452,205 @@ fn phase6n_step_data_refs_conditions_and_constraints_match_python() {
 }
 
 #[test]
+fn artifact_selection_explicit_and_groups_preserve_normalized_order() {
+    let actual = planning_result_value(artifact_selection_input(
+        "resolve_artifacts",
+        Some(vec!["archive_zip"]),
+        Some(vec!["install_group", "extras_group"]),
+        vec![
+            ("app_apk", "https://example.com/app.apk"),
+            ("archive_zip", "https://example.com/archive.zip"),
+            ("shader_zip", "https://example.com/shader.zip"),
+            ("core_zip", "https://example.com/core.zip"),
+        ],
+        vec![
+            ("install_group", vec!["app_apk"]),
+            ("extras_group", vec!["shader_zip", "core_zip"]),
+        ],
+    ));
+
+    assert_normalized_artifacts(
+        &actual,
+        "resolve",
+        &[
+            "planner.artifact_selection/archive_zip",
+            "planner.artifact_selection/app_apk",
+            "planner.artifact_selection/shader_zip",
+            "planner.artifact_selection/core_zip",
+        ],
+    );
+}
+
+#[test]
+fn artifact_selection_explicit_only_and_group_only_are_supported() {
+    let explicit_only = planning_result_value(artifact_selection_input(
+        "resolve_artifacts",
+        Some(vec!["app_apk", "archive_zip"]),
+        None,
+        artifact_selection_artifacts(),
+        vec![],
+    ));
+    assert_normalized_artifacts(
+        &explicit_only,
+        "resolve",
+        &[
+            "planner.artifact_selection/app_apk",
+            "planner.artifact_selection/archive_zip",
+        ],
+    );
+
+    let group_only = planning_result_value(artifact_selection_input(
+        "resolve_artifacts",
+        None,
+        Some(vec!["install_group"]),
+        artifact_selection_artifacts(),
+        vec![("install_group", vec!["app_apk", "archive_zip"])],
+    ));
+    assert_normalized_artifacts(
+        &group_only,
+        "resolve",
+        &[
+            "planner.artifact_selection/app_apk",
+            "planner.artifact_selection/archive_zip",
+        ],
+    );
+}
+
+#[test]
+fn artifact_selection_extract_artifacts_success_and_invalid_selection_are_validated() {
+    let success = planning_result_value(artifact_selection_input(
+        "extract_artifacts",
+        None,
+        Some(vec!["install_group"]),
+        artifact_selection_artifacts(),
+        vec![("install_group", vec!["archive_zip"])],
+    ));
+    assert_normalized_artifacts(
+        &success,
+        "extract",
+        &["planner.artifact_selection/archive_zip"],
+    );
+    assert_eq!(
+        artifact_selection_step(&success, "extract")["params"]["extract_on"],
+        json!({"value": "host"})
+    );
+
+    let invalid = planning_result_value(artifact_selection_input(
+        "extract_artifacts",
+        Some(vec!["missing_zip"]),
+        None,
+        artifact_selection_artifacts(),
+        vec![],
+    ));
+    assert_planner_error(
+        &invalid,
+        "unknown_artifact_ref",
+        "extract",
+        "artifacts",
+        "missing_zip",
+    );
+}
+
+#[test]
+fn artifact_selection_reports_unknown_explicit_artifact_group_and_group_member() {
+    let unknown_artifact = planning_result_value(artifact_selection_input(
+        "resolve_artifacts",
+        Some(vec!["missing_zip"]),
+        None,
+        artifact_selection_artifacts(),
+        vec![],
+    ));
+    assert_planner_error(
+        &unknown_artifact,
+        "unknown_artifact_ref",
+        "resolve",
+        "artifacts",
+        "missing_zip",
+    );
+
+    let unknown_group = planning_result_value(artifact_selection_input(
+        "resolve_artifacts",
+        None,
+        Some(vec!["missing_group"]),
+        artifact_selection_artifacts(),
+        vec![],
+    ));
+    assert_planner_error(
+        &unknown_group,
+        "unknown_artifact_group_ref",
+        "resolve",
+        "artifact_groups",
+        "missing_group",
+    );
+
+    let unknown_group_member = planning_result_value(artifact_selection_input(
+        "resolve_artifacts",
+        None,
+        Some(vec!["broken_group"]),
+        artifact_selection_artifacts(),
+        vec![("broken_group", vec!["missing_member"])],
+    ));
+    assert_planner_error(
+        &unknown_group_member,
+        "unknown_artifact_ref",
+        "resolve",
+        "artifact_groups",
+        "missing_member",
+    );
+}
+
+#[test]
+fn artifact_selection_reports_duplicate_explicit_group_and_mixed_expansion() {
+    let duplicate_explicit = planning_result_value(artifact_selection_input(
+        "resolve_artifacts",
+        Some(vec!["app_apk", "app_apk"]),
+        None,
+        artifact_selection_artifacts(),
+        vec![],
+    ));
+    assert_planner_error(
+        &duplicate_explicit,
+        "duplicate_artifact_selection",
+        "resolve",
+        "artifacts",
+        "app_apk",
+    );
+
+    let duplicate_groups = planning_result_value(artifact_selection_input(
+        "resolve_artifacts",
+        None,
+        Some(vec!["install_group", "extras_group"]),
+        artifact_selection_artifacts(),
+        vec![
+            ("install_group", vec!["app_apk"]),
+            ("extras_group", vec!["app_apk"]),
+        ],
+    ));
+    assert_planner_error(
+        &duplicate_groups,
+        "duplicate_artifact_selection",
+        "resolve",
+        "artifact_groups",
+        "app_apk",
+    );
+
+    let duplicate_mixed = planning_result_value(artifact_selection_input(
+        "resolve_artifacts",
+        Some(vec!["archive_zip"]),
+        Some(vec!["install_group"]),
+        artifact_selection_artifacts(),
+        vec![("install_group", vec!["archive_zip"])],
+    ));
+    assert_planner_error(
+        &duplicate_mixed,
+        "duplicate_artifact_selection",
+        "resolve",
+        "artifact_groups",
+        "archive_zip",
+    );
+}
+
+#[test]
 fn planner_does_not_mutate_authored_fixture_files() {
     let root = authored_root("planner_refs_artifacts");
     let before = snapshot_files(&root);
@@ -484,6 +687,145 @@ fn planner_parity_fixture_inventory_consumes_checked_in_evidence_only() {
         let parsed = read_golden(entry.golden);
         assert_planner_golden_shape(entry.golden, &parsed);
     }
+}
+
+fn artifact_selection_input(
+    step_type: &str,
+    artifacts: Option<Vec<&str>>,
+    artifact_groups: Option<Vec<&str>>,
+    artifact_defs: Vec<(&str, &str)>,
+    group_defs: Vec<(&str, Vec<&str>)>,
+) -> PlannerInput {
+    let mut params = OrderedMap::new();
+    if let Some(artifacts) = artifacts {
+        params.insert(
+            "artifacts".to_string(),
+            ParamValue::Literal(json!(artifacts)),
+        );
+    }
+    if let Some(artifact_groups) = artifact_groups {
+        params.insert(
+            "artifact_groups".to_string(),
+            ParamValue::Literal(json!(artifact_groups)),
+        );
+    }
+
+    PlannerInput {
+        recipes: vec![Recipe {
+            schema_version: 1,
+            kind: "recipe".to_string(),
+            id: "planner.artifact_selection".to_string(),
+            name: "Planner Artifact Selection".to_string(),
+            description: None,
+            recipe_dependencies: Vec::new(),
+            provides: RecipeProvides {
+                features: Vec::new(),
+            },
+            inputs: OrderedMap::new(),
+            artifacts: artifact_defs
+                .into_iter()
+                .map(|(id, url)| {
+                    (
+                        id.to_string(),
+                        RemoteFileArtifact {
+                            type_name: "remote_file".to_string(),
+                            url: url.to_string(),
+                            cache: "default".to_string(),
+                        },
+                    )
+                })
+                .collect(),
+            artifact_groups: group_defs
+                .into_iter()
+                .map(|(id, members)| {
+                    (
+                        id.to_string(),
+                        members.into_iter().map(ToString::to_string).collect(),
+                    )
+                })
+                .collect(),
+            steps: vec![Step {
+                id: if step_type == "extract_artifacts" {
+                    "extract".to_string()
+                } else {
+                    "resolve".to_string()
+                },
+                type_name: step_type.to_string(),
+                name: "Artifact Selection".to_string(),
+                description: None,
+                user_toggleable: false,
+                dependencies: Vec::new(),
+                constraints: StepConstraints {
+                    capabilities: Vec::new(),
+                    conflicts_with: Vec::new(),
+                },
+                skip_if: Vec::<StepCondition>::new(),
+                params,
+                verify: Vec::<StepCondition>::new(),
+            }],
+        }],
+        selected_recipe_refs: vec!["planner.artifact_selection".to_string()],
+        input_bindings: OrderedMap::new(),
+        plan_id: "plan.artifact_selection.001".to_string(),
+        device_plan_ref: "example.device_plan".to_string(),
+        device_profile_ref: "example.device_profile".to_string(),
+        device_context: fixture_device_context(),
+        runtime_capabilities: fixture_runtime_capabilities(),
+    }
+}
+
+fn artifact_selection_artifacts() -> Vec<(&'static str, &'static str)> {
+    vec![
+        ("app_apk", "https://example.com/app.apk"),
+        ("archive_zip", "https://example.com/archive.zip"),
+    ]
+}
+
+fn assert_normalized_artifacts(actual: &Value, step_id: &str, expected: &[&str]) {
+    assert_eq!(actual["status"], "success", "{actual:#}");
+    assert_eq!(actual["errors"], json!([]));
+    assert_eq!(
+        artifact_selection_step(actual, step_id)["params"]["artifacts"],
+        json!({"value": expected})
+    );
+}
+
+fn artifact_selection_step<'a>(actual: &'a Value, step_id: &str) -> &'a Value {
+    let execution_step_id = format!("planner.artifact_selection/{step_id}");
+    actual["execution_plan"]["steps"]
+        .as_array()
+        .expect("execution plan should include steps")
+        .iter()
+        .find(|step| step["id"] == execution_step_id)
+        .expect("artifact selection step should exist")
+}
+
+fn assert_planner_error(
+    actual: &Value,
+    code: &str,
+    step_id: &str,
+    param: &str,
+    offending_id: &str,
+) {
+    assert_eq!(actual["status"], "error", "{actual:#}");
+    assert_eq!(actual["execution_plan"], Value::Null);
+    let errors = actual["errors"]
+        .as_array()
+        .expect("planner result should include errors");
+    assert!(
+        errors.iter().any(|error| {
+            error["code"] == code
+                && error["details"]["step_id"] == step_id
+                && error["details"]["param"] == param
+                && (error["details"]["artifact_id"] == offending_id
+                    || error["details"]["group_id"] == offending_id
+                    || error["details"]["duplicate_artifact_id"] == offending_id)
+                && error["message"]
+                    .as_str()
+                    .is_some_and(|message| message.contains(offending_id))
+        }),
+        "expected planner error code={code} step_id={step_id} param={param} offending_id={offending_id}; actual errors: {errors:#?}",
+    );
 }
 
 struct PlannerParityFixtureEntry {

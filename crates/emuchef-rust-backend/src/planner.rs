@@ -228,6 +228,10 @@ pub fn plan_execution(input: PlannerInput) -> PlanningResult {
     }
 
     let authored_steps = authored_steps(&recipes, &expanded_recipe_refs, &selected_step_ids);
+    let artifact_selection_errors = validate_artifact_selections(&recipes, &authored_steps);
+    if !artifact_selection_errors.is_empty() {
+        return error_result(artifact_selection_errors);
+    }
     let (ordered_steps, step_errors) = topologically_sort_steps(authored_steps);
     if !step_errors.is_empty() {
         return error_result(step_errors);
@@ -1080,6 +1084,112 @@ fn execution_condition(condition: &StepCondition) -> ExecutionStepCondition {
         type_name: condition.type_name.clone(),
         params: condition.params.clone(),
     }
+}
+
+fn validate_artifact_selections(
+    recipes: &HashMap<String, Recipe>,
+    steps: &[(String, String, Step)],
+) -> Vec<PlannerMessage> {
+    let mut errors = Vec::new();
+    for (_, recipe_id, step) in steps {
+        if !matches!(
+            step.type_name.as_str(),
+            "resolve_artifacts" | "extract_artifacts"
+        ) {
+            continue;
+        }
+        let Some(recipe) = recipes.get(recipe_id) else {
+            continue;
+        };
+        errors.extend(validate_artifact_selection(recipe, step));
+    }
+    errors
+}
+
+fn validate_artifact_selection(recipe: &Recipe, step: &Step) -> Vec<PlannerMessage> {
+    let mut errors = Vec::new();
+    let mut expanded = Vec::<(String, &'static str)>::new();
+
+    for artifact_id in string_list(step.params.get("artifacts")) {
+        if !recipe.artifacts.contains_key(&artifact_id) {
+            errors.push(PlannerMessage {
+                code: "unknown_artifact_ref".to_string(),
+                message: format!(
+                    "Step '{}' references unknown artifact '{}'.",
+                    step.id, artifact_id
+                ),
+                details: json!({
+                    "recipe_ref": recipe.id,
+                    "step_id": step.id,
+                    "param": "artifacts",
+                    "artifact_id": artifact_id,
+                }),
+            });
+        }
+        expanded.push((artifact_id, "artifacts"));
+    }
+
+    for group_id in string_list(step.params.get("artifact_groups")) {
+        let Some(group_artifacts) = recipe.artifact_groups.get(&group_id) else {
+            errors.push(PlannerMessage {
+                code: "unknown_artifact_group_ref".to_string(),
+                message: format!(
+                    "Step '{}' references unknown artifact group '{}'.",
+                    step.id, group_id
+                ),
+                details: json!({
+                    "recipe_ref": recipe.id,
+                    "step_id": step.id,
+                    "param": "artifact_groups",
+                    "group_id": group_id,
+                }),
+            });
+            continue;
+        };
+        for artifact_id in group_artifacts {
+            if !recipe.artifacts.contains_key(artifact_id) {
+                errors.push(PlannerMessage {
+                    code: "unknown_artifact_ref".to_string(),
+                    message: format!(
+                        "Step '{}' references unknown artifact '{}' in artifact group '{}'.",
+                        step.id, artifact_id, group_id
+                    ),
+                    details: json!({
+                        "recipe_ref": recipe.id,
+                        "step_id": step.id,
+                        "param": "artifact_groups",
+                        "group_id": group_id,
+                        "artifact_id": artifact_id,
+                    }),
+                });
+            }
+            expanded.push((artifact_id.clone(), "artifact_groups"));
+        }
+    }
+
+    let mut seen = HashMap::<String, &'static str>::new();
+    let mut duplicate_ids = HashSet::<String>::new();
+    for (artifact_id, param) in expanded {
+        if seen.insert(artifact_id.clone(), param).is_some()
+            && duplicate_ids.insert(artifact_id.clone())
+        {
+            errors.push(PlannerMessage {
+                code: "duplicate_artifact_selection".to_string(),
+                message: format!(
+                    "Step '{}' resolves duplicate artifact id '{}' after artifact group expansion.",
+                    step.id, artifact_id
+                ),
+                details: json!({
+                    "recipe_ref": recipe.id,
+                    "step_id": step.id,
+                    "param": param,
+                    "duplicate_artifact_id": artifact_id,
+                }),
+            });
+        }
+    }
+
+    errors
 }
 
 fn normalize_step_params_for_execution(
