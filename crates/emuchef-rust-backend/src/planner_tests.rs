@@ -651,6 +651,150 @@ fn artifact_selection_reports_duplicate_explicit_group_and_mixed_expansion() {
 }
 
 #[test]
+fn step_ref_validation_preserves_explicit_refs_and_rewrites_shorthand_refs() {
+    let explicit = planning_result_value(ref_validation_input(vec![
+        ref_validation_step("extract", "extract_artifacts", vec![], OrderedMap::new()),
+        ref_validation_step(
+            "copy",
+            "copy_files",
+            vec!["extract"],
+            ref_params(vec![(
+                "source",
+                ParamValue::Ref("steps.extract.outputs.extracted_paths".to_string()),
+            )]),
+        ),
+    ]));
+    assert_eq!(explicit["status"], "success", "{explicit:#}");
+    assert_eq!(
+        *execution_step_param(&explicit, "copy", "source"),
+        json!({"ref": "steps.planner.ref_validation/extract.outputs.extracted_paths"})
+    );
+
+    let shorthand = planning_result_value(ref_validation_input(vec![
+        ref_validation_step(
+            "copy",
+            "copy_files",
+            vec![],
+            ref_params(vec![(
+                "source",
+                ParamValue::Ref("steps.extract".to_string()),
+            )]),
+        ),
+        ref_validation_step("extract", "extract_artifacts", vec![], OrderedMap::new()),
+    ]));
+    assert_eq!(shorthand["status"], "success", "{shorthand:#}");
+    assert_eq!(
+        *execution_step_param(&shorthand, "copy", "source"),
+        json!({"ref": "steps.planner.ref_validation/extract.outputs.extracted_paths"})
+    );
+}
+
+#[test]
+fn step_ref_validation_reports_invalid_targets_outputs_and_formats() {
+    let unknown_step = planning_result_value(ref_validation_input(vec![ref_validation_step(
+        "copy",
+        "copy_files",
+        vec![],
+        ref_params(vec![(
+            "source",
+            ParamValue::Ref("steps.missing".to_string()),
+        )]),
+    )]));
+    assert_step_ref_error(
+        &unknown_step,
+        "unknown_step_ref",
+        "copy",
+        "source",
+        "steps.missing",
+    );
+
+    let unknown_output = planning_result_value(ref_validation_input(vec![
+        ref_validation_step("extract", "extract_artifacts", vec![], OrderedMap::new()),
+        ref_validation_step(
+            "copy",
+            "copy_files",
+            vec![],
+            ref_params(vec![(
+                "source",
+                ParamValue::Ref("steps.extract.outputs.missing".to_string()),
+            )]),
+        ),
+    ]));
+    assert_step_ref_error(
+        &unknown_output,
+        "unknown_step_output",
+        "copy",
+        "source",
+        "steps.extract.outputs.missing",
+    );
+
+    let no_primary_output = planning_result_value(ref_validation_input(vec![
+        ref_validation_step(
+            "install",
+            "install_apk",
+            vec![],
+            ref_params(vec![(
+                "app",
+                ParamValue::Ref("artifacts.app_apk.local_path".to_string()),
+            )]),
+        ),
+        ref_validation_step(
+            "copy",
+            "copy_files",
+            vec![],
+            ref_params(vec![(
+                "source",
+                ParamValue::Ref("steps.install".to_string()),
+            )]),
+        ),
+    ]));
+    assert_step_ref_error(
+        &no_primary_output,
+        "step_ref_has_no_primary_output",
+        "copy",
+        "source",
+        "steps.install",
+    );
+
+    let malformed = planning_result_value(ref_validation_input(vec![ref_validation_step(
+        "copy",
+        "copy_files",
+        vec![],
+        ref_params(vec![("source", ParamValue::Ref("steps.".to_string()))]),
+    )]));
+    assert_step_ref_error(&malformed, "invalid_ref_format", "copy", "source", "steps.");
+}
+
+#[test]
+fn step_ref_validation_uses_emitted_selected_step_universe() {
+    let actual = planning_result_value(ref_validation_input(vec![
+        ref_validation_step(
+            "unavailable_extract",
+            "extract_artifacts",
+            vec![],
+            OrderedMap::new(),
+        ),
+        ref_validation_step(
+            "copy",
+            "copy_files",
+            vec![],
+            ref_params(vec![(
+                "source",
+                ParamValue::Ref("steps.unavailable_extract".to_string()),
+            )]),
+        ),
+    ]));
+
+    assert_step_ref_error(
+        &actual,
+        "unknown_step_ref",
+        "copy",
+        "source",
+        "steps.unavailable_extract",
+    );
+}
+
+#[test]
 fn planner_does_not_mutate_authored_fixture_files() {
     let root = authored_root("planner_refs_artifacts");
     let before = snapshot_files(&root);
@@ -781,6 +925,86 @@ fn artifact_selection_artifacts() -> Vec<(&'static str, &'static str)> {
     ]
 }
 
+fn ref_validation_input(steps: Vec<Step>) -> PlannerInput {
+    PlannerInput {
+        recipes: vec![Recipe {
+            schema_version: 1,
+            kind: "recipe".to_string(),
+            id: "planner.ref_validation".to_string(),
+            name: "Planner Ref Validation".to_string(),
+            description: None,
+            recipe_dependencies: Vec::new(),
+            provides: RecipeProvides {
+                features: Vec::new(),
+            },
+            inputs: OrderedMap::new(),
+            artifacts: vec![(
+                "app_apk".to_string(),
+                RemoteFileArtifact {
+                    type_name: "remote_file".to_string(),
+                    url: "https://example.com/app.apk".to_string(),
+                    cache: "default".to_string(),
+                },
+            )]
+            .into_iter()
+            .collect(),
+            artifact_groups: OrderedMap::new(),
+            steps,
+        }],
+        selected_recipe_refs: vec!["planner.ref_validation".to_string()],
+        input_bindings: OrderedMap::new(),
+        plan_id: "plan.ref_validation.001".to_string(),
+        device_plan_ref: "example.device_plan".to_string(),
+        device_profile_ref: "example.device_profile".to_string(),
+        device_context: fixture_device_context(),
+        runtime_capabilities: fixture_runtime_capabilities(),
+    }
+}
+
+fn ref_validation_step(
+    id: &str,
+    step_type: &str,
+    dependencies: Vec<&str>,
+    params: OrderedMap<ParamValue>,
+) -> Step {
+    Step {
+        id: id.to_string(),
+        type_name: step_type.to_string(),
+        name: id.to_string(),
+        description: None,
+        user_toggleable: false,
+        dependencies: dependencies.into_iter().map(ToString::to_string).collect(),
+        constraints: StepConstraints {
+            capabilities: if id == "unavailable_extract" {
+                vec!["unavailable_capability".to_string()]
+            } else {
+                Vec::new()
+            },
+            conflicts_with: Vec::new(),
+        },
+        skip_if: Vec::<StepCondition>::new(),
+        params,
+        verify: Vec::<StepCondition>::new(),
+    }
+}
+
+fn ref_params(entries: Vec<(&str, ParamValue)>) -> OrderedMap<ParamValue> {
+    entries
+        .into_iter()
+        .map(|(key, value)| (key.to_string(), value))
+        .collect()
+}
+
+fn execution_step_param<'a>(actual: &'a Value, step_id: &str, param: &str) -> &'a Value {
+    let execution_step_id = format!("planner.ref_validation/{step_id}");
+    &actual["execution_plan"]["steps"]
+        .as_array()
+        .expect("execution plan should include steps")
+        .iter()
+        .find(|step| step["id"] == execution_step_id)
+        .expect("ref validation step should exist")["params"][param]
+}
+
 fn assert_normalized_artifacts(actual: &Value, step_id: &str, expected: &[&str]) {
     assert_eq!(actual["status"], "success", "{actual:#}");
     assert_eq!(actual["errors"], json!([]));
@@ -798,6 +1022,27 @@ fn artifact_selection_step<'a>(actual: &'a Value, step_id: &str) -> &'a Value {
         .iter()
         .find(|step| step["id"] == execution_step_id)
         .expect("artifact selection step should exist")
+}
+
+fn assert_step_ref_error(actual: &Value, code: &str, step_id: &str, param: &str, ref_value: &str) {
+    assert_eq!(actual["status"], "error", "{actual:#}");
+    assert_eq!(actual["execution_plan"], Value::Null);
+    let errors = actual["errors"]
+        .as_array()
+        .expect("planner result should include errors");
+    assert!(
+        errors.iter().any(|error| {
+            error["code"] == code
+                && error["details"]["recipe_ref"] == "planner.ref_validation"
+                && error["details"]["step_id"] == step_id
+                && error["details"]["param"] == param
+                && error["details"]["ref"] == ref_value
+                && error["message"]
+                    .as_str()
+                    .is_some_and(|message| message.contains(ref_value))
+        }),
+        "expected step ref error code={code} step_id={step_id} param={param} ref={ref_value}; actual errors: {errors:#?}",
+    );
 }
 
 fn assert_planner_error(

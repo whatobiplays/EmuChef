@@ -155,7 +155,8 @@ The Rust planner parity boundary is documented in
 for planner behavior. Rust planner coverage remains crate-internal and
 fixture-scoped. The Rust planner tests include an intentional Phase 6M/6N
 fixture inventory/parsing guard that consumes checked-in authored fixtures and
-planner goldens only.
+planner goldens only, plus focused coverage for selected emitted step-output
+ref validation and shorthand step-ref rewriting.
 
 The Rust backend supports one-shot stateless requests through:
 
@@ -525,7 +526,10 @@ loaded/top-level authored recipe fixture data, namespaced refs, StepSpec
 defaults, explicit recipe and step dependencies, and supplied fixture device
 context/capabilities. Its Phase 6M/6N planner parity evidence is inventoried and
 parsed by Rust tests so new checked-in planner goldens must be classified
-intentionally. The Rust executor skeleton is internal test scaffolding only: it
+intentionally. It validates malformed `steps.*` refs, unknown selected step
+targets, unknown step outputs, and shorthand refs to selected steps without
+primary outputs for emitted planner steps; non-step refs remain outside that
+validation slice. The Rust executor skeleton is internal test scaffolding only: it
 models selected `wait`, `grant_permissions`, dependency, skip, verify,
 temp-dir-confined filesystem/artifact behavior, fake dry-run device semantics,
 and Phase 6R real-ADB adapter foundations without public API exposure. It does

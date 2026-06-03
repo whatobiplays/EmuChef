@@ -232,6 +232,10 @@ pub fn plan_execution(input: PlannerInput) -> PlanningResult {
     if !artifact_selection_errors.is_empty() {
         return error_result(artifact_selection_errors);
     }
+    let step_ref_errors = validate_step_refs(&authored_steps);
+    if !step_ref_errors.is_empty() {
+        return error_result(step_ref_errors);
+    }
     let (ordered_steps, step_errors) = topologically_sort_steps(authored_steps);
     if !step_errors.is_empty() {
         return error_result(step_errors);
@@ -1190,6 +1194,144 @@ fn validate_artifact_selection(recipe: &Recipe, step: &Step) -> Vec<PlannerMessa
     }
 
     errors
+}
+
+fn validate_step_refs(steps: &[(String, String, Step)]) -> Vec<PlannerMessage> {
+    let selected_steps_by_recipe = steps.iter().fold(
+        HashMap::<String, HashMap<String, Step>>::new(),
+        |mut acc, (_, recipe_id, step)| {
+            acc.entry(recipe_id.clone())
+                .or_default()
+                .insert(step.id.clone(), step.clone());
+            acc
+        },
+    );
+
+    let mut errors = Vec::new();
+    for (_, recipe_id, step) in steps {
+        let Some(selected_steps) = selected_steps_by_recipe.get(recipe_id) else {
+            continue;
+        };
+        for (param_name, value) in &step.params {
+            let ParamValue::Ref(ref_value) = value else {
+                continue;
+            };
+            if !ref_value.starts_with("steps.") {
+                continue;
+            }
+            errors.extend(validate_step_ref(
+                recipe_id,
+                step,
+                param_name,
+                ref_value,
+                selected_steps,
+            ));
+        }
+    }
+    errors
+}
+
+fn validate_step_ref(
+    recipe_id: &str,
+    step: &Step,
+    param_name: &str,
+    ref_value: &str,
+    selected_steps: &HashMap<String, Step>,
+) -> Vec<PlannerMessage> {
+    match parse_reference(ref_value) {
+        RuntimeRef::StepShorthand { target_id } => {
+            let Some(target_step) = selected_steps.get(&target_id) else {
+                return vec![unknown_step_ref_message(
+                    recipe_id, step, param_name, ref_value, &target_id,
+                )];
+            };
+            if step_specs::step_spec_for(&target_step.type_name)
+                .and_then(|spec| spec.primary_output_name)
+                .is_none()
+            {
+                return vec![PlannerMessage {
+                    code: "step_ref_has_no_primary_output".to_string(),
+                    message: format!(
+                        "Step '{}' uses shorthand ref '{}', but target step '{}' has no primary output.",
+                        step.id, ref_value, target_id
+                    ),
+                    details: json!({
+                        "recipe_ref": recipe_id,
+                        "step_id": step.id,
+                        "param": param_name,
+                        "ref": ref_value,
+                        "target_step_id": target_id,
+                    }),
+                }];
+            };
+            Vec::new()
+        }
+        RuntimeRef::StepOutput { target_id, field } => {
+            let Some(target_step) = selected_steps.get(&target_id) else {
+                return vec![unknown_step_ref_message(
+                    recipe_id, step, param_name, ref_value, &target_id,
+                )];
+            };
+            let output_exists = step_specs::step_spec_for(&target_step.type_name)
+                .is_some_and(|spec| spec.outputs.iter().any(|output| output.name == field));
+            if output_exists {
+                Vec::new()
+            } else {
+                vec![PlannerMessage {
+                    code: "unknown_step_output".to_string(),
+                    message: format!(
+                        "Step '{}' references unknown step output '{}'.",
+                        step.id, ref_value
+                    ),
+                    details: json!({
+                        "recipe_ref": recipe_id,
+                        "step_id": step.id,
+                        "param": param_name,
+                        "ref": ref_value,
+                        "target_step_id": target_id,
+                        "output_name": field,
+                    }),
+                }]
+            }
+        }
+        RuntimeRef::Invalid => vec![PlannerMessage {
+            code: "invalid_ref_format".to_string(),
+            message: format!(
+                "Step '{}' param '{}' has invalid ref '{}'.",
+                step.id, param_name, ref_value
+            ),
+            details: json!({
+                "recipe_ref": recipe_id,
+                "step_id": step.id,
+                "param": param_name,
+                "ref": ref_value,
+            }),
+        }],
+        RuntimeRef::Input { .. } | RuntimeRef::ArtifactField { .. } => Vec::new(),
+    }
+}
+
+fn unknown_step_ref_message(
+    recipe_id: &str,
+    step: &Step,
+    param_name: &str,
+    ref_value: &str,
+    target_id: &str,
+) -> PlannerMessage {
+    PlannerMessage {
+        code: "unknown_step_ref".to_string(),
+        message: format!(
+            "Step '{}' references unknown step '{}'.",
+            step.id, ref_value
+        ),
+        details: json!({
+            "recipe_ref": recipe_id,
+            "step_id": step.id,
+            "param": param_name,
+            "ref": ref_value,
+            "target_step_id": target_id,
+        }),
+    }
 }
 
 fn normalize_step_params_for_execution(
