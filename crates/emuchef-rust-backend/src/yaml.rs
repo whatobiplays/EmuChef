@@ -939,3 +939,31 @@ fn path_file_name(path: &Path) -> String {
 fn single_quote(value: &str) -> String {
     format!("'{}'", value.replace('\'', "\\'"))
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+
+    fn yaml_value(text: &str) -> YamlValue {
+        serde_yaml::from_str(text).expect("test YAML value should parse")
+    }
+
+    #[test]
+    fn exact_single_key_ref_mapping_becomes_ref_param() {
+        assert_eq!(
+            parse_param_value(&yaml_value("ref: steps.extract")).unwrap(),
+            ParamValue::Ref("steps.extract".to_string())
+        );
+
+        assert_eq!(
+            parse_param_value(&yaml_value("{ref: steps.extract, label: literal}")).unwrap(),
+            ParamValue::Literal(json!({"label": "literal", "ref": "steps.extract"}))
+        );
+
+        assert_eq!(
+            parse_param_value(&yaml_value("wrapper:\n  ref: steps.extract")).unwrap(),
+            ParamValue::Literal(json!({"wrapper": {"ref": "steps.extract"}}))
+        );
+    }
+}
