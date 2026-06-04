@@ -156,8 +156,12 @@ for planner behavior. Rust planner coverage remains crate-internal and
 fixture-scoped. The Rust planner tests include an intentional Phase 6M/6N
 fixture inventory/parsing guard that consumes checked-in authored fixtures and
 planner goldens only, plus focused coverage for selected emitted step-output
-ref validation, shorthand step-ref rewriting, and selected/emitted step
-dependency validation.
+ref validation, shorthand step-ref rewriting, selected/emitted step dependency
+validation, and emitted-step param contract validation for `copy_files`,
+`extract_artifacts`, `extract_archive`, `install_apk`, and `wait`. Focused Rust
+planner param contract diagnostics include recipe, step, step type, param,
+expected value/mode, and actual value context. Unknown param rejection in this
+planner parity slice is limited to those focused step types.
 
 The Rust backend supports one-shot stateless requests through:
 

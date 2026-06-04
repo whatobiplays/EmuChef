@@ -228,6 +228,10 @@ pub fn plan_execution(input: PlannerInput) -> PlanningResult {
     }
 
     let authored_steps = authored_steps(&recipes, &expanded_recipe_refs, &selected_step_ids);
+    let step_param_errors = validate_step_param_contracts(&recipes, &authored_steps);
+    if !step_param_errors.is_empty() {
+        return error_result(step_param_errors);
+    }
     let step_dependency_errors = validate_emitted_step_dependencies(&authored_steps);
     if !step_dependency_errors.is_empty() {
         return error_result(step_dependency_errors);
@@ -1210,6 +1214,550 @@ fn validate_artifact_selection(recipe: &Recipe, step: &Step) -> Vec<PlannerMessa
     }
 
     errors
+}
+
+fn validate_step_param_contracts(
+    recipes: &HashMap<String, Recipe>,
+    steps: &[(String, String, Step)],
+) -> Vec<PlannerMessage> {
+    // P7E validates only the emitted-step contract matrix. Ref-valued params are
+    // checked for authored `{ref: ...}` shape here; target parsing, shorthand
+    // refs, and explicit output rewrites remain owned by the P7C ref pass.
+    let mut errors = Vec::new();
+    for (_, recipe_id, step) in steps {
+        if !is_p7e_step_type(&step.type_name) {
+            continue;
+        }
+        let Some(spec) = step_specs::step_spec_for(&step.type_name) else {
+            continue;
+        };
+        let normalized = params_with_defaults(step);
+        errors.extend(validate_unknown_params(recipe_id, step, &spec));
+        errors.extend(validate_spec_param_modes(
+            recipe_id,
+            step,
+            &spec,
+            &normalized,
+        ));
+        errors.extend(validate_focused_param_values(
+            recipes,
+            recipe_id,
+            step,
+            &normalized,
+        ));
+    }
+    errors
+}
+
+fn is_p7e_step_type(step_type: &str) -> bool {
+    matches!(
+        step_type,
+        "copy_files" | "extract_artifacts" | "extract_archive" | "install_apk" | "wait"
+    )
+}
+
+fn validate_unknown_params(
+    recipe_id: &str,
+    step: &Step,
+    spec: &step_specs::StepSpecDto,
+) -> Vec<PlannerMessage> {
+    let expected = spec.params.keys().cloned().collect::<HashSet<_>>();
+    let mut unexpected = step
+        .params
+        .keys()
+        .filter(|param_name| !expected.contains(*param_name))
+        .cloned()
+        .collect::<Vec<_>>();
+    unexpected.sort();
+
+    unexpected
+        .into_iter()
+        .map(|param_name| {
+            param_contract_message(
+                "unknown_param",
+                format!(
+                    "Param '{}' is not supported for step type '{}'.",
+                    param_name, step.type_name
+                ),
+                recipe_id,
+                step,
+                &param_name,
+                expected_param_names(spec),
+                step.params
+                    .get(&param_name)
+                    .map(param_value_to_json)
+                    .unwrap_or(Value::Null),
+            )
+        })
+        .collect()
+}
+
+fn validate_spec_param_modes(
+    recipe_id: &str,
+    step: &Step,
+    spec: &step_specs::StepSpecDto,
+    normalized: &OrderedMap<ParamValue>,
+) -> Vec<PlannerMessage> {
+    let mut errors = Vec::new();
+    for (param_name, param_spec) in &spec.params {
+        let Some(value) = normalized.get(param_name) else {
+            continue;
+        };
+        match (param_spec.mode.as_str(), value) {
+            ("ref", ParamValue::Literal(_)) => errors.push(param_contract_message(
+                "invalid_param_mode",
+                format!(
+                    "Param '{}' must be a ref for step type '{}'.",
+                    param_name, step.type_name
+                ),
+                recipe_id,
+                step,
+                param_name,
+                json!("ref"),
+                param_value_to_json(value),
+            )),
+            ("literal", ParamValue::Ref(_)) => errors.push(param_contract_message(
+                "invalid_param_mode",
+                format!(
+                    "Param '{}' must be a literal for step type '{}'.",
+                    param_name, step.type_name
+                ),
+                recipe_id,
+                step,
+                param_name,
+                json!("literal"),
+                param_value_to_json(value),
+            )),
+            _ => {}
+        }
+    }
+    errors
+}
+
+fn validate_focused_param_values(
+    recipes: &HashMap<String, Recipe>,
+    recipe_id: &str,
+    step: &Step,
+    normalized: &OrderedMap<ParamValue>,
+) -> Vec<PlannerMessage> {
+    match step.type_name.as_str() {
+        "copy_files" => validate_copy_files_param_values(recipe_id, step, normalized),
+        "extract_artifacts" => {
+            validate_extract_artifacts_param_values(recipes, recipe_id, step, normalized)
+        }
+        "extract_archive" => validate_extract_archive_param_values(recipe_id, step, normalized),
+        "install_apk" => validate_install_apk_param_values(recipe_id, step, normalized),
+        "wait" => validate_wait_param_values(recipe_id, step, normalized),
+        _ => Vec::new(),
+    }
+}
+
+fn validate_copy_files_param_values(
+    recipe_id: &str,
+    step: &Step,
+    normalized: &OrderedMap<ParamValue>,
+) -> Vec<PlannerMessage> {
+    let mut errors = Vec::new();
+    errors.extend(require_param(
+        recipe_id,
+        step,
+        normalized,
+        "source",
+        json!("ref"),
+    ));
+    errors.extend(require_param(
+        recipe_id,
+        step,
+        normalized,
+        "dest",
+        json!("literal"),
+    ));
+    errors.extend(validate_enum_param(
+        recipe_id,
+        step,
+        normalized,
+        "copy_policy",
+        &["merge", "replace", "sync"],
+    ));
+    errors
+}
+
+fn validate_extract_artifacts_param_values(
+    recipes: &HashMap<String, Recipe>,
+    recipe_id: &str,
+    step: &Step,
+    normalized: &OrderedMap<ParamValue>,
+) -> Vec<PlannerMessage> {
+    let mut errors = Vec::new();
+    errors.extend(validate_literal_list_param(
+        recipe_id,
+        step,
+        normalized,
+        "artifacts",
+    ));
+    errors.extend(validate_literal_list_param(
+        recipe_id,
+        step,
+        normalized,
+        "artifact_groups",
+    ));
+    errors.extend(validate_enum_param(
+        recipe_id,
+        step,
+        normalized,
+        "extract_on",
+        &["host", "device"],
+    ));
+    if errors.is_empty() && normalized_artifact_selection_is_empty(recipes, recipe_id, normalized) {
+        errors.push(param_contract_message(
+            "missing_required_param",
+            "Param 'artifacts' must select at least one artifact directly or through artifact_groups."
+                .to_string(),
+            recipe_id,
+            step,
+            "artifacts",
+            json!("literal list via artifacts or artifact_groups"),
+            Value::Null,
+        ));
+    }
+    errors
+}
+
+fn validate_extract_archive_param_values(
+    recipe_id: &str,
+    step: &Step,
+    normalized: &OrderedMap<ParamValue>,
+) -> Vec<PlannerMessage> {
+    let mut errors = Vec::new();
+    errors.extend(require_param(
+        recipe_id,
+        step,
+        normalized,
+        "archive",
+        json!("ref"),
+    ));
+    errors.extend(validate_enum_param(
+        recipe_id,
+        step,
+        normalized,
+        "extract_on",
+        &["host", "device"],
+    ));
+    errors.extend(validate_bool_param(recipe_id, step, normalized, "cleanup"));
+
+    match literal_string(normalized.get("extract_on")).as_deref() {
+        Some("device") => {
+            errors.extend(require_param(
+                recipe_id,
+                step,
+                normalized,
+                "dest",
+                json!("literal when extract_on is device"),
+            ));
+            errors.extend(validate_literal_mode_if_present(
+                recipe_id,
+                step,
+                normalized,
+                "dest",
+                json!("literal when extract_on is device"),
+            ));
+            errors.extend(validate_literal_mode_if_present(
+                recipe_id,
+                step,
+                normalized,
+                "device_temp_path",
+                json!("literal"),
+            ));
+        }
+        Some("host") => {
+            for param_name in ["dest", "device_temp_path"] {
+                if let Some(value) = step.params.get(param_name) {
+                    errors.push(param_contract_message(
+                        "invalid_param_value",
+                        format!(
+                            "Param '{}' is only valid when extract_archive.extract_on is 'device'.",
+                            param_name
+                        ),
+                        recipe_id,
+                        step,
+                        param_name,
+                        json!("only valid when extract_on is device"),
+                        param_value_to_json(value),
+                    ));
+                }
+            }
+        }
+        _ => {}
+    }
+
+    errors
+}
+
+fn validate_install_apk_param_values(
+    recipe_id: &str,
+    step: &Step,
+    normalized: &OrderedMap<ParamValue>,
+) -> Vec<PlannerMessage> {
+    let mut errors = Vec::new();
+    errors.extend(require_param(
+        recipe_id,
+        step,
+        normalized,
+        "app",
+        json!("ref"),
+    ));
+    errors.extend(validate_bool_param(
+        recipe_id,
+        step,
+        normalized,
+        "replace_existing",
+    ));
+    errors
+}
+
+fn validate_wait_param_values(
+    recipe_id: &str,
+    step: &Step,
+    normalized: &OrderedMap<ParamValue>,
+) -> Vec<PlannerMessage> {
+    let mut errors = Vec::new();
+    errors.extend(require_param(
+        recipe_id,
+        step,
+        normalized,
+        "duration_ms",
+        json!("literal positive integer"),
+    ));
+    if let Some(value) = normalized.get("duration_ms") {
+        if matches!(value, ParamValue::Ref(_)) {
+            return errors;
+        }
+        if !matches!(value, ParamValue::Literal(value) if is_positive_integer(value)) {
+            errors.push(param_contract_message(
+                "invalid_param_value",
+                "Param 'duration_ms' must be a positive integer for step type 'wait'.".to_string(),
+                recipe_id,
+                step,
+                "duration_ms",
+                json!("literal positive integer"),
+                param_value_to_json(value),
+            ));
+        }
+    }
+    errors
+}
+
+fn require_param(
+    recipe_id: &str,
+    step: &Step,
+    normalized: &OrderedMap<ParamValue>,
+    param_name: &str,
+    expected: Value,
+) -> Vec<PlannerMessage> {
+    if normalized.contains_key(param_name) {
+        return Vec::new();
+    }
+    vec![param_contract_message(
+        "missing_required_param",
+        format!(
+            "Param '{}' is required for step type '{}'.",
+            param_name, step.type_name
+        ),
+        recipe_id,
+        step,
+        param_name,
+        expected,
+        Value::Null,
+    )]
+}
+
+fn validate_literal_mode_if_present(
+    recipe_id: &str,
+    step: &Step,
+    normalized: &OrderedMap<ParamValue>,
+    param_name: &str,
+    expected: Value,
+) -> Vec<PlannerMessage> {
+    let Some(value) = normalized.get(param_name) else {
+        return Vec::new();
+    };
+    if matches!(value, ParamValue::Literal(_)) {
+        return Vec::new();
+    }
+    vec![param_contract_message(
+        "invalid_param_mode",
+        format!(
+            "Param '{}' must be a literal for step type '{}'.",
+            param_name, step.type_name
+        ),
+        recipe_id,
+        step,
+        param_name,
+        expected,
+        param_value_to_json(value),
+    )]
+}
+
+fn validate_literal_list_param(
+    recipe_id: &str,
+    step: &Step,
+    normalized: &OrderedMap<ParamValue>,
+    param_name: &str,
+) -> Vec<PlannerMessage> {
+    let Some(value) = normalized.get(param_name) else {
+        return Vec::new();
+    };
+    if matches!(value, ParamValue::Ref(_)) {
+        return Vec::new();
+    }
+    if matches!(value, ParamValue::Literal(Value::Array(_))) {
+        return Vec::new();
+    }
+    vec![param_contract_message(
+        "invalid_param_value",
+        format!(
+            "Param '{}' must be a literal list for step type '{}'.",
+            param_name, step.type_name
+        ),
+        recipe_id,
+        step,
+        param_name,
+        json!("literal list"),
+        param_value_to_json(value),
+    )]
+}
+
+fn validate_bool_param(
+    recipe_id: &str,
+    step: &Step,
+    normalized: &OrderedMap<ParamValue>,
+    param_name: &str,
+) -> Vec<PlannerMessage> {
+    let Some(value) = normalized.get(param_name) else {
+        return Vec::new();
+    };
+    if matches!(value, ParamValue::Ref(_)) {
+        return Vec::new();
+    }
+    if matches!(value, ParamValue::Literal(Value::Bool(_))) {
+        return Vec::new();
+    }
+    vec![param_contract_message(
+        "invalid_param_value",
+        format!(
+            "Param '{}' must be a literal bool for step type '{}'.",
+            param_name, step.type_name
+        ),
+        recipe_id,
+        step,
+        param_name,
+        json!("literal bool"),
+        param_value_to_json(value),
+    )]
+}
+
+fn validate_enum_param(
+    recipe_id: &str,
+    step: &Step,
+    normalized: &OrderedMap<ParamValue>,
+    param_name: &str,
+    allowed: &[&str],
+) -> Vec<PlannerMessage> {
+    let Some(value) = normalized.get(param_name) else {
+        return Vec::new();
+    };
+    if matches!(value, ParamValue::Ref(_)) {
+        return Vec::new();
+    }
+    if let Some(raw_value) = literal_string(Some(value)) {
+        if allowed
+            .iter()
+            .any(|allowed_value| *allowed_value == raw_value)
+        {
+            return Vec::new();
+        }
+    }
+    vec![param_contract_message(
+        "invalid_enum_value",
+        format!(
+            "Param '{}' must be one of {} for step type '{}'.",
+            param_name,
+            allowed.join(", "),
+            step.type_name
+        ),
+        recipe_id,
+        step,
+        param_name,
+        json!(allowed),
+        param_value_to_json(value),
+    )]
+}
+
+fn normalized_artifact_selection_is_empty(
+    recipes: &HashMap<String, Recipe>,
+    recipe_id: &str,
+    normalized: &OrderedMap<ParamValue>,
+) -> bool {
+    let mut selected = string_list(normalized.get("artifacts"));
+    if let Some(recipe) = recipes.get(recipe_id) {
+        for group_id in string_list(normalized.get("artifact_groups")) {
+            if let Some(group_artifacts) = recipe.artifact_groups.get(&group_id) {
+                selected.extend(group_artifacts.clone());
+            } else {
+                selected.push(group_id);
+            }
+        }
+    } else {
+        selected.extend(string_list(normalized.get("artifact_groups")));
+    }
+    selected.is_empty()
+}
+
+fn literal_string(value: Option<&ParamValue>) -> Option<String> {
+    let Some(ParamValue::Literal(Value::String(value))) = value else {
+        return None;
+    };
+    Some(value.clone())
+}
+
+fn is_positive_integer(value: &Value) -> bool {
+    value.as_i64().is_some_and(|value| value > 0) || value.as_u64().is_some_and(|value| value > 0)
+}
+
+fn expected_param_names(spec: &step_specs::StepSpecDto) -> Value {
+    let mut params = spec.params.keys().cloned().collect::<Vec<_>>();
+    params.sort();
+    json!(params)
+}
+
+fn param_value_to_json(value: &ParamValue) -> Value {
+    match value {
+        ParamValue::Ref(ref_value) => json!({ "ref": ref_value }),
+        ParamValue::Literal(value) => value.clone(),
+    }
+}
+
+fn param_contract_message(
+    code: &str,
+    message: String,
+    recipe_id: &str,
+    step: &Step,
+    param_name: &str,
+    expected: Value,
+    actual: Value,
+) -> PlannerMessage {
+    PlannerMessage {
+        code: code.to_string(),
+        message,
+        details: json!({
+            "recipe_ref": recipe_id,
+            "step_id": step.id,
+            "step_type": step.type_name,
+            "param": param_name,
+            "expected": expected,
+            "actual": actual,
+        }),
+    }
 }
 
 fn validate_available_step_dependencies(

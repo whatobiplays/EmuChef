@@ -891,6 +891,440 @@ fn dependency_validation_reports_cycles_deterministically_without_cascading_unkn
 }
 
 #[test]
+fn param_contract_defaults_preserve_group_only_selection_order_and_shorthand_refs() {
+    let actual = planning_result_value(param_contract_input(vec![
+        param_contract_step(
+            "extract",
+            "extract_artifacts",
+            vec![],
+            ref_params(vec![(
+                "artifact_groups",
+                ParamValue::Literal(json!(["archives"])),
+            )]),
+        ),
+        param_contract_step(
+            "copy",
+            "copy_files",
+            vec!["extract"],
+            ref_params(vec![
+                ("source", ParamValue::Ref("steps.extract".to_string())),
+                ("dest", ParamValue::Literal(json!("/sdcard/Extracted"))),
+            ]),
+        ),
+        param_contract_step(
+            "archive",
+            "extract_archive",
+            vec![],
+            ref_params(vec![
+                (
+                    "archive",
+                    ParamValue::Ref("artifacts.archive_zip.local_path".to_string()),
+                ),
+                ("extract_on", ParamValue::Literal(json!("device"))),
+                ("dest", ParamValue::Literal(json!("/sdcard/Archive"))),
+            ]),
+        ),
+        param_contract_step(
+            "install",
+            "install_apk",
+            vec![],
+            ref_params(vec![(
+                "app",
+                ParamValue::Ref("artifacts.app_apk.local_path".to_string()),
+            )]),
+        ),
+        param_contract_step(
+            "wait",
+            "wait",
+            vec![],
+            ref_params(vec![("duration_ms", ParamValue::Literal(json!(1)))]),
+        ),
+    ]));
+
+    assert_eq!(actual["status"], "success", "{actual:#}");
+    assert_eq!(
+        param_contract_step_ids(&actual),
+        vec![
+            "planner.param_contract/extract",
+            "planner.param_contract/archive",
+            "planner.param_contract/install",
+            "planner.param_contract/wait",
+            "planner.param_contract/copy",
+        ]
+    );
+    assert_eq!(
+        *param_contract_step_param(&actual, "extract", "artifacts"),
+        json!({"value": ["planner.param_contract/archive_zip"]})
+    );
+    assert_eq!(
+        *param_contract_step_param(&actual, "extract", "extract_on"),
+        json!({"value": "host"})
+    );
+    assert_eq!(
+        *param_contract_step_param(&actual, "copy", "source"),
+        json!({"ref": "steps.planner.param_contract/extract.outputs.extracted_paths"})
+    );
+    assert_eq!(
+        *param_contract_step_param(&actual, "copy", "copy_policy"),
+        json!({"value": "merge"})
+    );
+    assert_eq!(
+        *param_contract_step_param(&actual, "archive", "cleanup"),
+        json!({"value": true})
+    );
+    assert_eq!(
+        *param_contract_step_param(&actual, "install", "replace_existing"),
+        json!({"value": false})
+    );
+}
+
+#[test]
+fn param_contract_accepts_valid_enum_and_bool_values() {
+    let actual = planning_result_value(param_contract_input(vec![
+        param_contract_step(
+            "extract",
+            "extract_artifacts",
+            vec![],
+            ref_params(vec![
+                ("artifact_groups", ParamValue::Literal(json!(["archives"]))),
+                ("extract_on", ParamValue::Literal(json!("device"))),
+            ]),
+        ),
+        param_contract_step(
+            "archive",
+            "extract_archive",
+            vec![],
+            ref_params(vec![
+                (
+                    "archive",
+                    ParamValue::Ref("artifacts.archive_zip.local_path".to_string()),
+                ),
+                ("extract_on", ParamValue::Literal(json!("device"))),
+                ("dest", ParamValue::Literal(json!("/sdcard/Archive"))),
+                (
+                    "device_temp_path",
+                    ParamValue::Literal(json!("/sdcard/tmp/archive.zip")),
+                ),
+                ("cleanup", ParamValue::Literal(json!(false))),
+            ]),
+        ),
+        param_contract_step(
+            "copy",
+            "copy_files",
+            vec![],
+            ref_params(vec![
+                (
+                    "source",
+                    ParamValue::Ref("artifacts.archive_zip.local_path".to_string()),
+                ),
+                ("dest", ParamValue::Literal(json!("/sdcard/Out"))),
+                ("copy_policy", ParamValue::Literal(json!("sync"))),
+            ]),
+        ),
+        param_contract_step(
+            "install",
+            "install_apk",
+            vec![],
+            ref_params(vec![
+                (
+                    "app",
+                    ParamValue::Ref("artifacts.app_apk.local_path".to_string()),
+                ),
+                ("replace_existing", ParamValue::Literal(json!(true))),
+            ]),
+        ),
+    ]));
+
+    assert_eq!(actual["status"], "success", "{actual:#}");
+    assert_eq!(
+        *param_contract_step_param(&actual, "extract", "extract_on"),
+        json!({"value": "device"})
+    );
+    assert_eq!(
+        *param_contract_step_param(&actual, "archive", "cleanup"),
+        json!({"value": false})
+    );
+    assert_eq!(
+        *param_contract_step_param(&actual, "copy", "copy_policy"),
+        json!({"value": "sync"})
+    );
+    assert_eq!(
+        *param_contract_step_param(&actual, "install", "replace_existing"),
+        json!({"value": true})
+    );
+}
+
+#[test]
+fn param_contract_reports_required_mode_enum_bool_and_integer_violations() {
+    let cases = vec![
+        (
+            param_contract_step(
+                "copy",
+                "copy_files",
+                vec![],
+                ref_params(vec![("dest", ParamValue::Literal(json!("/sdcard/Out")))]),
+            ),
+            "copy",
+            "source",
+            "missing_required_param",
+            json!("ref"),
+            Value::Null,
+        ),
+        (
+            param_contract_step(
+                "copy",
+                "copy_files",
+                vec![],
+                ref_params(vec![
+                    ("source", ParamValue::Ref("steps.extract".to_string())),
+                    ("dest", ParamValue::Ref("inputs.output_dir".to_string())),
+                ]),
+            ),
+            "copy",
+            "dest",
+            "invalid_param_mode",
+            json!("literal"),
+            json!({"ref": "inputs.output_dir"}),
+        ),
+        (
+            param_contract_step(
+                "copy",
+                "copy_files",
+                vec![],
+                ref_params(vec![
+                    ("source", ParamValue::Ref("steps.extract".to_string())),
+                    ("dest", ParamValue::Literal(json!("/sdcard/Out"))),
+                    ("copy_policy", ParamValue::Literal(json!("overwrite"))),
+                ]),
+            ),
+            "copy",
+            "copy_policy",
+            "invalid_enum_value",
+            json!(["merge", "replace", "sync"]),
+            json!("overwrite"),
+        ),
+        (
+            param_contract_step("extract", "extract_artifacts", vec![], OrderedMap::new()),
+            "extract",
+            "artifacts",
+            "missing_required_param",
+            json!("literal list via artifacts or artifact_groups"),
+            Value::Null,
+        ),
+        (
+            param_contract_step(
+                "extract",
+                "extract_artifacts",
+                vec![],
+                ref_params(vec![(
+                    "artifacts",
+                    ParamValue::Literal(json!("archive_zip")),
+                )]),
+            ),
+            "extract",
+            "artifacts",
+            "invalid_param_value",
+            json!("literal list"),
+            json!("archive_zip"),
+        ),
+        (
+            param_contract_step(
+                "extract",
+                "extract_artifacts",
+                vec![],
+                ref_params(vec![
+                    ("artifact_groups", ParamValue::Literal(json!(["archives"]))),
+                    ("extract_on", ParamValue::Literal(json!("target"))),
+                ]),
+            ),
+            "extract",
+            "extract_on",
+            "invalid_enum_value",
+            json!(["host", "device"]),
+            json!("target"),
+        ),
+        (
+            param_contract_step("archive", "extract_archive", vec![], OrderedMap::new()),
+            "archive",
+            "archive",
+            "missing_required_param",
+            json!("ref"),
+            Value::Null,
+        ),
+        (
+            param_contract_step(
+                "archive",
+                "extract_archive",
+                vec![],
+                ref_params(vec![
+                    (
+                        "archive",
+                        ParamValue::Ref("artifacts.archive_zip.local_path".to_string()),
+                    ),
+                    ("extract_on", ParamValue::Literal(json!("device"))),
+                ]),
+            ),
+            "archive",
+            "dest",
+            "missing_required_param",
+            json!("literal when extract_on is device"),
+            Value::Null,
+        ),
+        (
+            param_contract_step(
+                "archive",
+                "extract_archive",
+                vec![],
+                ref_params(vec![
+                    (
+                        "archive",
+                        ParamValue::Ref("artifacts.archive_zip.local_path".to_string()),
+                    ),
+                    ("dest", ParamValue::Literal(json!("/sdcard/Out"))),
+                ]),
+            ),
+            "archive",
+            "dest",
+            "invalid_param_value",
+            json!("only valid when extract_on is device"),
+            json!("/sdcard/Out"),
+        ),
+        (
+            param_contract_step(
+                "archive",
+                "extract_archive",
+                vec![],
+                ref_params(vec![
+                    (
+                        "archive",
+                        ParamValue::Ref("artifacts.archive_zip.local_path".to_string()),
+                    ),
+                    ("cleanup", ParamValue::Literal(json!("yes"))),
+                ]),
+            ),
+            "archive",
+            "cleanup",
+            "invalid_param_value",
+            json!("literal bool"),
+            json!("yes"),
+        ),
+        (
+            param_contract_step(
+                "install",
+                "install_apk",
+                vec![],
+                ref_params(vec![
+                    (
+                        "app",
+                        ParamValue::Ref("artifacts.app_apk.local_path".to_string()),
+                    ),
+                    ("replace_existing", ParamValue::Literal(json!("false"))),
+                ]),
+            ),
+            "install",
+            "replace_existing",
+            "invalid_param_value",
+            json!("literal bool"),
+            json!("false"),
+        ),
+        (
+            param_contract_step("install", "install_apk", vec![], OrderedMap::new()),
+            "install",
+            "app",
+            "missing_required_param",
+            json!("ref"),
+            Value::Null,
+        ),
+        (
+            param_contract_step("wait", "wait", vec![], OrderedMap::new()),
+            "wait",
+            "duration_ms",
+            "missing_required_param",
+            json!("literal positive integer"),
+            Value::Null,
+        ),
+        (
+            param_contract_step(
+                "wait",
+                "wait",
+                vec![],
+                ref_params(vec![("duration_ms", ParamValue::Literal(json!(0)))]),
+            ),
+            "wait",
+            "duration_ms",
+            "invalid_param_value",
+            json!("literal positive integer"),
+            json!(0),
+        ),
+    ];
+
+    for (step, step_id, param, code, expected, actual_value) in cases {
+        let actual = planning_result_value(param_contract_input(vec![step]));
+        assert_param_contract_error(&actual, code, step_id, param, expected, actual_value);
+    }
+}
+
+#[test]
+fn param_contract_reports_unknown_params_only_for_focused_step_types() {
+    let focused = planning_result_value(param_contract_input(vec![param_contract_step(
+        "copy",
+        "copy_files",
+        vec![],
+        ref_params(vec![
+            ("source", ParamValue::Ref("steps.extract".to_string())),
+            ("dest", ParamValue::Literal(json!("/sdcard/Out"))),
+            ("extra", ParamValue::Literal(json!(true))),
+        ]),
+    )]));
+    assert_param_contract_error(
+        &focused,
+        "unknown_param",
+        "copy",
+        "extra",
+        json!(["copy_policy", "dest", "source"]),
+        json!(true),
+    );
+
+    let non_focused = planning_result_value(param_contract_input(vec![param_contract_step(
+        "launch",
+        "launch_app",
+        vec![],
+        ref_params(vec![
+            (
+                "package_name",
+                ParamValue::Literal(json!("com.example.app")),
+            ),
+            ("extra", ParamValue::Literal(json!(true))),
+        ]),
+    )]));
+    assert_eq!(non_focused["status"], "success", "{non_focused:#}");
+}
+
+#[test]
+fn param_contract_wait_duration_rejects_negative_and_non_integer_values() {
+    for (step_id, value) in [
+        ("negative", json!(-1)),
+        ("float", json!(1.5)),
+        ("bool", json!(true)),
+    ] {
+        let actual = planning_result_value(param_contract_input(vec![param_contract_step(
+            step_id,
+            "wait",
+            vec![],
+            ref_params(vec![("duration_ms", ParamValue::Literal(value.clone()))]),
+        )]));
+        assert_param_contract_error(
+            &actual,
+            "invalid_param_value",
+            step_id,
+            "duration_ms",
+            json!("literal positive integer"),
+            value,
+        );
+    }
+}
+
+#[test]
 fn dependency_validation_ignores_invalid_dependencies_on_unavailable_steps() {
     let actual = planning_result_value(dependency_validation_input(vec![
         unavailable_dependency_step("unavailable"),
@@ -1077,6 +1511,23 @@ fn ref_validation_step(
     dependencies: Vec<&str>,
     params: OrderedMap<ParamValue>,
 ) -> Step {
+    let mut params = params;
+    if step_type == "extract_artifacts"
+        && !params.contains_key("artifacts")
+        && !params.contains_key("artifact_groups")
+    {
+        params.insert(
+            "artifacts".to_string(),
+            ParamValue::Literal(json!(["app_apk"])),
+        );
+    }
+    if step_type == "copy_files" && !params.contains_key("dest") {
+        params.insert(
+            "dest".to_string(),
+            ParamValue::Literal(json!("/sdcard/Copy")),
+        );
+    }
+
     Step {
         id: id.to_string(),
         type_name: step_type.to_string(),
@@ -1191,6 +1642,126 @@ fn dependency_step_dependencies<'a>(actual: &'a Value, step_id: &str) -> &'a Val
         .iter()
         .find(|step| step["id"] == execution_step_id)
         .expect("dependency validation step should exist")["dependencies"]
+}
+
+fn param_contract_input(steps: Vec<Step>) -> PlannerInput {
+    PlannerInput {
+        recipes: vec![Recipe {
+            schema_version: 1,
+            kind: "recipe".to_string(),
+            id: "planner.param_contract".to_string(),
+            name: "Planner Param Contract".to_string(),
+            description: None,
+            recipe_dependencies: Vec::new(),
+            provides: RecipeProvides {
+                features: Vec::new(),
+            },
+            inputs: OrderedMap::new(),
+            artifacts: vec![
+                (
+                    "app_apk".to_string(),
+                    RemoteFileArtifact {
+                        type_name: "remote_file".to_string(),
+                        url: "https://example.com/app.apk".to_string(),
+                        cache: "default".to_string(),
+                    },
+                ),
+                (
+                    "archive_zip".to_string(),
+                    RemoteFileArtifact {
+                        type_name: "remote_file".to_string(),
+                        url: "https://example.com/archive.zip".to_string(),
+                        cache: "default".to_string(),
+                    },
+                ),
+            ]
+            .into_iter()
+            .collect(),
+            artifact_groups: vec![("archives".to_string(), vec!["archive_zip".to_string()])]
+                .into_iter()
+                .collect(),
+            steps,
+        }],
+        selected_recipe_refs: vec!["planner.param_contract".to_string()],
+        input_bindings: OrderedMap::new(),
+        plan_id: "plan.param_contract.001".to_string(),
+        device_plan_ref: "example.device_plan".to_string(),
+        device_profile_ref: "example.device_profile".to_string(),
+        device_context: fixture_device_context(),
+        runtime_capabilities: fixture_runtime_capabilities(),
+    }
+}
+
+fn param_contract_step(
+    id: &str,
+    step_type: &str,
+    dependencies: Vec<&str>,
+    params: OrderedMap<ParamValue>,
+) -> Step {
+    Step {
+        id: id.to_string(),
+        type_name: step_type.to_string(),
+        name: id.to_string(),
+        description: None,
+        user_toggleable: false,
+        dependencies: dependencies.into_iter().map(ToString::to_string).collect(),
+        constraints: StepConstraints {
+            capabilities: Vec::new(),
+            conflicts_with: Vec::new(),
+        },
+        skip_if: Vec::<StepCondition>::new(),
+        params,
+        verify: Vec::<StepCondition>::new(),
+    }
+}
+
+fn param_contract_step_ids(actual: &Value) -> Vec<&str> {
+    actual["execution_plan"]["steps"]
+        .as_array()
+        .expect("execution plan should include steps")
+        .iter()
+        .map(|step| step["id"].as_str().unwrap())
+        .collect()
+}
+
+fn param_contract_step_param<'a>(actual: &'a Value, step_id: &str, param: &str) -> &'a Value {
+    let execution_step_id = format!("planner.param_contract/{step_id}");
+    &actual["execution_plan"]["steps"]
+        .as_array()
+        .expect("execution plan should include steps")
+        .iter()
+        .find(|step| step["id"] == execution_step_id)
+        .expect("param contract step should exist")["params"][param]
+}
+
+fn assert_param_contract_error(
+    actual: &Value,
+    code: &str,
+    step_id: &str,
+    param: &str,
+    expected: Value,
+    actual_value: Value,
+) {
+    assert_eq!(actual["status"], "error", "{actual:#}");
+    assert_eq!(actual["execution_plan"], Value::Null);
+    let errors = actual["errors"]
+        .as_array()
+        .expect("planner result should include errors");
+    assert!(
+        errors.iter().any(|error| {
+            error["code"] == code
+                && error["details"]["recipe_ref"] == "planner.param_contract"
+                && error["details"]["step_id"] == step_id
+                && error["details"]["step_type"].is_string()
+                && error["details"]["param"] == param
+                && error["details"]["expected"] == expected
+                && error["details"]["actual"] == actual_value
+                && error["message"]
+                    .as_str()
+                    .is_some_and(|message| message.contains(param))
+        }),
+        "expected param contract error code={code} step_id={step_id} param={param} expected={expected} actual={actual_value}; actual errors: {errors:#?}",
+    );
 }
 
 fn assert_normalized_artifacts(actual: &Value, step_id: &str, expected: &[&str]) {
