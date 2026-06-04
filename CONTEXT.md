@@ -156,7 +156,8 @@ for planner behavior. Rust planner coverage remains crate-internal and
 fixture-scoped. The Rust planner tests include an intentional Phase 6M/6N
 fixture inventory/parsing guard that consumes checked-in authored fixtures and
 planner goldens only, plus focused coverage for selected emitted step-output
-ref validation and shorthand step-ref rewriting.
+ref validation, shorthand step-ref rewriting, and selected/emitted step
+dependency validation.
 
 The Rust backend supports one-shot stateless requests through:
 
@@ -529,7 +530,11 @@ parsed by Rust tests so new checked-in planner goldens must be classified
 intentionally. It validates malformed `steps.*` refs, unknown selected step
 targets, unknown step outputs, and shorthand refs to selected steps without
 primary outputs for emitted planner steps; non-step refs remain outside that
-validation slice. The Rust executor skeleton is internal test scaffolding only: it
+validation slice. It also validates selected/emitted step dependencies for
+unknown or non-emitted targets, self-dependencies, and static dependency
+cycles while preserving duplicate authored dependencies in emitted execution
+steps. Runtime dependency outcomes such as blocked, skipped, or failed step
+propagation remain executor behavior. The Rust executor skeleton is internal test scaffolding only: it
 models selected `wait`, `grant_permissions`, dependency, skip, verify,
 temp-dir-confined filesystem/artifact behavior, fake dry-run device semantics,
 and Phase 6R real-ADB adapter foundations without public API exposure. It does

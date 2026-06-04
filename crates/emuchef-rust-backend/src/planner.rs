@@ -228,6 +228,10 @@ pub fn plan_execution(input: PlannerInput) -> PlanningResult {
     }
 
     let authored_steps = authored_steps(&recipes, &expanded_recipe_refs, &selected_step_ids);
+    let step_dependency_errors = validate_emitted_step_dependencies(&authored_steps);
+    if !step_dependency_errors.is_empty() {
+        return error_result(step_dependency_errors);
+    }
     let artifact_selection_errors = validate_artifact_selections(&recipes, &authored_steps);
     if !artifact_selection_errors.is_empty() {
         return error_result(artifact_selection_errors);
@@ -435,6 +439,12 @@ fn authored_steps(
     result
 }
 
+// P7D terminology follows the current Rust planner pipeline:
+// - available steps satisfy static runtime capability constraints;
+// - selected steps are available steps retained after dependency expansion and
+//   optional-input pruning;
+// - emitted steps are selected authored steps materialized by `authored_steps`
+//   and serialized into the execution plan.
 fn topologically_sort_steps(
     steps: Vec<(String, String, Step)>,
 ) -> (Vec<(String, String, Step)>, Vec<PlannerMessage>) {
@@ -451,9 +461,10 @@ fn topologically_sort_steps(
     let mut indegree: HashMap<String, usize> = HashMap::new();
 
     for (step_id, recipe_id, step) in &steps {
-        indegree.insert(step_id.clone(), step.dependencies.len());
+        let dependency_ids = unique_dependency_ids(&step.dependencies);
+        indegree.insert(step_id.clone(), dependency_ids.len());
         reverse_graph.entry(step_id.clone()).or_default();
-        for dependency in &step.dependencies {
+        for dependency in dependency_ids {
             let dependency_id = make_execution_step_id(recipe_id, dependency);
             reverse_graph
                 .entry(dependency_id)
@@ -587,6 +598,11 @@ fn select_local_step_ids(
         .iter()
         .map(|step| (step.id.clone(), step))
         .collect::<HashMap<_, _>>();
+    let dependency_errors =
+        validate_available_step_dependencies(recipe, requested_local_step_ids, &by_id);
+    if !dependency_errors.is_empty() {
+        return (HashSet::new(), dependency_errors);
+    }
     let mut selected = HashSet::new();
     let mut can_select_cache = HashMap::new();
     let mut errors = Vec::new();
@@ -1194,6 +1210,176 @@ fn validate_artifact_selection(recipe: &Recipe, step: &Step) -> Vec<PlannerMessa
     }
 
     errors
+}
+
+fn validate_available_step_dependencies(
+    recipe: &Recipe,
+    available_step_ids: &[String],
+    by_id: &HashMap<String, &Step>,
+) -> Vec<PlannerMessage> {
+    let steps = available_step_ids
+        .iter()
+        .filter_map(|step_id| {
+            by_id
+                .get(step_id)
+                .map(|step| (step_id.clone(), (*step).clone()))
+        })
+        .collect::<Vec<_>>();
+    validate_local_step_dependencies(&recipe.id, &steps)
+}
+
+fn validate_emitted_step_dependencies(steps: &[(String, String, Step)]) -> Vec<PlannerMessage> {
+    let mut grouped_steps = Vec::<(String, Vec<(String, Step)>)>::new();
+    for (_, recipe_id, step) in steps {
+        let local_step = (step.id.clone(), step.clone());
+        if let Some((_, recipe_steps)) = grouped_steps
+            .iter_mut()
+            .find(|(existing_recipe_id, _)| existing_recipe_id == recipe_id)
+        {
+            recipe_steps.push(local_step);
+        } else {
+            grouped_steps.push((recipe_id.clone(), vec![local_step]));
+        }
+    }
+
+    let mut errors = Vec::new();
+    for (recipe_id, recipe_steps) in grouped_steps {
+        errors.extend(validate_local_step_dependencies(&recipe_id, &recipe_steps));
+    }
+    errors
+}
+
+fn validate_local_step_dependencies(
+    recipe_id: &str,
+    steps: &[(String, Step)],
+) -> Vec<PlannerMessage> {
+    let step_ids = steps
+        .iter()
+        .map(|(step_id, _)| step_id.clone())
+        .collect::<HashSet<_>>();
+    let mut errors = Vec::new();
+
+    for (step_id, step) in steps {
+        let mut reported = HashSet::<(&str, &str)>::new();
+        for dependency in &step.dependencies {
+            if dependency == step_id {
+                if reported.insert(("self_step_dependency", dependency.as_str())) {
+                    errors.push(PlannerMessage {
+                        code: "self_step_dependency".to_string(),
+                        message: format!(
+                            "Step '{}' may not depend on itself via dependency '{}'.",
+                            step.id, dependency
+                        ),
+                        details: json!({
+                            "recipe_ref": recipe_id,
+                            "step_id": step.id,
+                            "dependency": dependency,
+                        }),
+                    });
+                }
+                continue;
+            }
+            if !step_ids.contains(dependency)
+                && reported.insert(("unknown_step_dependency", dependency.as_str()))
+            {
+                errors.push(PlannerMessage {
+                    code: "unknown_step_dependency".to_string(),
+                    message: format!(
+                        "Step '{}' depends on unknown or non-emitted step '{}'.",
+                        step.id, dependency
+                    ),
+                    details: json!({
+                        "recipe_ref": recipe_id,
+                        "step_id": step.id,
+                        "dependency": dependency,
+                    }),
+                });
+            }
+        }
+    }
+
+    if errors.is_empty() {
+        errors.extend(validate_step_dependency_cycles(recipe_id, steps));
+    }
+    errors
+}
+
+fn validate_step_dependency_cycles(
+    recipe_id: &str,
+    steps: &[(String, Step)],
+) -> Vec<PlannerMessage> {
+    let step_by_id = steps
+        .iter()
+        .map(|(step_id, step)| (step_id.as_str(), step))
+        .collect::<HashMap<_, _>>();
+    let mut permanent = HashSet::<String>::new();
+    let mut temporary = HashSet::<String>::new();
+    let mut stack = Vec::<String>::new();
+
+    for (step_id, _) in steps {
+        if let Some(cycle) = visit_step_dependency_cycle(
+            step_id,
+            &step_by_id,
+            &mut permanent,
+            &mut temporary,
+            &mut stack,
+        ) {
+            return vec![PlannerMessage {
+                code: "dependency_cycle".to_string(),
+                message: format!("Step dependency cycle detected in recipe '{}'.", recipe_id),
+                details: json!({
+                    "recipe_ref": recipe_id,
+                    "cycle": cycle,
+                }),
+            }];
+        }
+    }
+
+    Vec::new()
+}
+
+fn visit_step_dependency_cycle(
+    step_id: &str,
+    step_by_id: &HashMap<&str, &Step>,
+    permanent: &mut HashSet<String>,
+    temporary: &mut HashSet<String>,
+    stack: &mut Vec<String>,
+) -> Option<Vec<String>> {
+    if permanent.contains(step_id) {
+        return None;
+    }
+    if temporary.contains(step_id) {
+        let start = stack.iter().position(|item| item == step_id).unwrap_or(0);
+        let mut cycle = stack[start..].to_vec();
+        cycle.push(step_id.to_string());
+        return Some(cycle);
+    }
+    let step = step_by_id.get(step_id)?;
+
+    temporary.insert(step_id.to_string());
+    stack.push(step_id.to_string());
+    for dependency in unique_dependency_ids(&step.dependencies) {
+        if let Some(cycle) =
+            visit_step_dependency_cycle(dependency, step_by_id, permanent, temporary, stack)
+        {
+            return Some(cycle);
+        }
+    }
+    stack.pop();
+    temporary.remove(step_id);
+    permanent.insert(step_id.to_string());
+    None
+}
+
+fn unique_dependency_ids(dependencies: &[String]) -> Vec<&str> {
+    let mut seen = HashSet::new();
+    let mut result = Vec::new();
+    for dependency in dependencies {
+        if seen.insert(dependency.as_str()) {
+            result.push(dependency.as_str());
+        }
+    }
+    result
 }
 
 fn validate_step_refs(steps: &[(String, String, Step)]) -> Vec<PlannerMessage> {
