@@ -8,7 +8,9 @@ use crate::model::{
     OrderedMap, ParamValue, Recipe, RecipeProvides, RemoteFileArtifact, Step, StepCondition,
     StepConstraints,
 };
-use crate::planner::{plan_execution, DeviceContext, PlannerInput, RuntimeCapabilities};
+use crate::planner::{
+    build_permission_intent, plan_execution, DeviceContext, PlannerInput, RuntimeCapabilities,
+};
 
 fn authored_root(name: &str) -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR"))
@@ -268,6 +270,267 @@ fn grant_permissions_stays_step_local_without_permission_plan() {
         grant["params"]["policy"]["value"],
         json!({"on_failure": "warn", "require_all": false})
     );
+}
+
+#[test]
+fn permission_intent_builds_structured_runtime_and_appop_actions_from_selected_grant_steps() {
+    let steps = permission_intent_steps(vec![param_contract_step(
+        "grant",
+        "grant_permissions",
+        vec![],
+        ref_params(vec![
+            (
+                "runtime",
+                ParamValue::Literal(json!([
+                    {
+                        "package_name": "com.example.app",
+                        "name": "android.permission.POST_NOTIFICATIONS",
+                        "required": false,
+                        "when": {"android_api_min": 33}
+                    }
+                ])),
+            ),
+            (
+                "appops",
+                ParamValue::Literal(json!([
+                    {
+                        "package_name": "com.example.app",
+                        "op": "MANAGE_EXTERNAL_STORAGE",
+                        "mode": "allow",
+                        "required": true,
+                        "when": {"rooted": false}
+                    }
+                ])),
+            ),
+            (
+                "policy",
+                ParamValue::Literal(json!({"on_failure": "fail", "require_all": true})),
+            ),
+        ]),
+    )]);
+
+    let intent = serde_json::to_value(build_permission_intent(&steps))
+        .expect("internal permission intent should serialize for tests");
+
+    assert_eq!(
+        intent,
+        json!({
+            "grants": [
+                {
+                    "recipe_ref": "planner.permission_intent",
+                    "step_id": "grant",
+                    "execution_step_id": "planner.permission_intent/grant",
+                    "policy": {"on_failure": "fail", "require_all": true},
+                    "actions": [
+                        {
+                            "kind": "runtime_permission",
+                            "package_name": "com.example.app",
+                            "permission": "android.permission.POST_NOTIFICATIONS",
+                            "required": false,
+                            "when": {"android_api_min": 33},
+                            "source_section": "params.runtime[0]"
+                        },
+                        {
+                            "kind": "appop",
+                            "package_name": "com.example.app",
+                            "op": "MANAGE_EXTERNAL_STORAGE",
+                            "desired_mode": "allow",
+                            "required": true,
+                            "when": {"rooted": false},
+                            "source_section": "params.appops[0]"
+                        }
+                    ]
+                }
+            ]
+        })
+    );
+}
+
+#[test]
+fn permission_intent_defaults_policy_required_and_empty_grants_without_serialized_plan_field() {
+    let grant_with_defaults = param_contract_step(
+        "grant_defaults",
+        "grant_permissions",
+        vec![],
+        ref_params(vec![(
+            "runtime",
+            ParamValue::Literal(json!([
+                {
+                    "package_name": "com.example.defaults",
+                    "name": "android.permission.CAMERA"
+                }
+            ])),
+        )]),
+    );
+    let empty_grant = param_contract_step(
+        "grant_empty",
+        "grant_permissions",
+        vec![],
+        OrderedMap::new(),
+    );
+    let steps = permission_intent_steps(vec![grant_with_defaults.clone(), empty_grant]);
+
+    let first = serde_json::to_value(build_permission_intent(&steps))
+        .expect("internal permission intent should serialize for tests");
+    let second = serde_json::to_value(build_permission_intent(&steps))
+        .expect("internal permission intent should serialize for tests");
+
+    assert_eq!(first, second);
+    assert_eq!(first["grants"].as_array().unwrap().len(), 1);
+    assert_eq!(
+        first["grants"][0]["policy"],
+        json!({"on_failure": "warn", "require_all": false})
+    );
+    assert_eq!(first["grants"][0]["actions"][0]["required"], true);
+
+    let no_actions = serde_json::to_value(build_permission_intent(&permission_intent_steps(vec![
+        grant_empty_permission_step("grant_empty"),
+    ])))
+    .expect("internal permission intent should serialize for tests");
+    assert_eq!(no_actions, json!({"grants": []}));
+
+    let plan = planning_result_value(PlannerInput {
+        recipes: vec![Recipe {
+            schema_version: 1,
+            kind: "recipe".to_string(),
+            id: "planner.permission_intent".to_string(),
+            name: "Planner Permission Intent".to_string(),
+            description: None,
+            recipe_dependencies: Vec::new(),
+            provides: RecipeProvides {
+                features: Vec::new(),
+            },
+            inputs: OrderedMap::new(),
+            artifacts: OrderedMap::new(),
+            artifact_groups: OrderedMap::new(),
+            steps: vec![grant_with_defaults],
+        }],
+        selected_recipe_refs: vec!["planner.permission_intent".to_string()],
+        input_bindings: OrderedMap::new(),
+        plan_id: "plan.permission_intent.001".to_string(),
+        device_plan_ref: "example.device_plan".to_string(),
+        device_profile_ref: "example.device_profile".to_string(),
+        device_context: fixture_device_context(),
+        runtime_capabilities: fixture_runtime_capabilities(),
+    });
+    assert!(!plan["execution_plan"]
+        .as_object()
+        .unwrap()
+        .contains_key("permission_plan"));
+}
+
+#[test]
+fn permission_intent_serialized_for_tests_contains_no_shell_or_adb_command_strings() {
+    let steps = permission_intent_steps(vec![param_contract_step(
+        "grant",
+        "grant_permissions",
+        vec![],
+        ref_params(vec![
+            (
+                "runtime",
+                ParamValue::Literal(json!([
+                    {"package_name": "com.example.app", "name": "android.permission.CAMERA"}
+                ])),
+            ),
+            (
+                "appops",
+                ParamValue::Literal(json!([
+                    {"package_name": "com.example.app", "op": "MANAGE_EXTERNAL_STORAGE", "mode": "allow"}
+                ])),
+            ),
+        ]),
+    )]);
+
+    let serialized = serde_json::to_string(&build_permission_intent(&steps))
+        .expect("internal permission intent should serialize for tests");
+
+    for forbidden in ["adb", "shell", "pm grant", "appops set", "run_plan_command"] {
+        assert!(
+            !serialized.contains(forbidden),
+            "internal planner intent must not contain executable command text {forbidden:?}: {serialized}"
+        );
+    }
+}
+
+#[test]
+fn permission_intent_validation_rejects_obvious_malformed_step_local_inputs() {
+    let cases = vec![
+        (
+            param_contract_step(
+                "manual",
+                "grant_permissions",
+                vec![],
+                ref_params(vec![("manual", ParamValue::Literal(json!([])))]),
+            ),
+            "manual",
+            "manual",
+            "unknown_param",
+            json!(["appops", "policy", "runtime"]),
+            json!([]),
+        ),
+        (
+            param_contract_step(
+                "bad_policy",
+                "grant_permissions",
+                vec![],
+                ref_params(vec![(
+                    "policy",
+                    ParamValue::Literal(json!({"on_failure": "explode"})),
+                )]),
+            ),
+            "bad_policy",
+            "policy.on_failure",
+            "invalid_enum_value",
+            json!(["warn", "fail"]),
+            json!("explode"),
+        ),
+        (
+            param_contract_step(
+                "bad_runtime",
+                "grant_permissions",
+                vec![],
+                ref_params(vec![(
+                    "runtime",
+                    ParamValue::Literal(json!([
+                        {"package_name": "com.example.app", "required": "yes"}
+                    ])),
+                )]),
+            ),
+            "bad_runtime",
+            "runtime[0].name",
+            "missing_required_param",
+            json!("non-empty string"),
+            Value::Null,
+        ),
+        (
+            param_contract_step(
+                "bad_appop",
+                "grant_permissions",
+                vec![],
+                ref_params(vec![(
+                    "appops",
+                    ParamValue::Literal(json!([
+                        {
+                            "package_name": "com.example.app",
+                            "op": "MANAGE_EXTERNAL_STORAGE",
+                            "mode": "allow",
+                            "when": {"android_api_min": 35, "android_api_max": 34}
+                        }
+                    ])),
+                )]),
+            ),
+            "bad_appop",
+            "appops[0].when",
+            "invalid_param_value",
+            json!("android_api_min <= android_api_max"),
+            json!({"android_api_max": 34, "android_api_min": 35}),
+        ),
+    ];
+
+    for (step, step_id, param, code, expected, actual_value) in cases {
+        let actual = planning_result_value(param_contract_input(vec![step]));
+        assert_param_contract_error(&actual, code, step_id, param, expected, actual_value);
+    }
 }
 
 #[test]
@@ -1713,6 +1976,23 @@ fn param_contract_step(
         params,
         verify: Vec::<StepCondition>::new(),
     }
+}
+
+fn permission_intent_steps(steps: Vec<Step>) -> Vec<(String, String, Step)> {
+    steps
+        .into_iter()
+        .map(|step| {
+            (
+                format!("planner.permission_intent/{}", step.id),
+                "planner.permission_intent".to_string(),
+                step,
+            )
+        })
+        .collect()
+}
+
+fn grant_empty_permission_step(id: &str) -> Step {
+    param_contract_step(id, "grant_permissions", vec![], OrderedMap::new())
 }
 
 fn param_contract_step_ids(actual: &Value) -> Vec<&str> {

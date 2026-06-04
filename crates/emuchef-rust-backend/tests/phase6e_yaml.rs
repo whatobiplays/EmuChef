@@ -81,6 +81,22 @@ fn assert_invalid_path_payload(response: &Value) {
     assert_eq!(response["error"]["details"], json!({"field": "path"}));
 }
 
+fn normalize_validation_file_paths(mut value: Value) -> Value {
+    if let Some(diagnostics) = value.get_mut("diagnostics").and_then(Value::as_array_mut) {
+        for diagnostic in diagnostics {
+            let Some(file) = diagnostic.get("file").and_then(Value::as_str) else {
+                continue;
+            };
+            let fixture_name = Path::new(file)
+                .file_name()
+                .and_then(|name| name.to_str())
+                .unwrap_or(file);
+            diagnostic["file"] = json!(format!("$FIXTURE/{fixture_name}"));
+        }
+    }
+    value
+}
+
 #[test]
 fn one_shot_emit_recipe_yaml_from_path_matches_minimal_python_golden_byte_for_byte() {
     let response = one_shot_response(emit_request(&fixture_path("minimal_recipe.yaml")));
@@ -142,7 +158,10 @@ fn validate_recipe_path_valid_fixture_matches_python_diagnostics() {
         serde_json::from_str(&read_golden("minimal_recipe.validate.json")).unwrap();
 
     assert_eq!(response["ok"], true);
-    assert_eq!(response["result"], expected);
+    assert_eq!(
+        normalize_validation_file_paths(response["result"].clone()),
+        normalize_validation_file_paths(expected)
+    );
 }
 
 #[test]
@@ -154,7 +173,10 @@ fn validate_recipe_path_top_level_permissions_matches_python_diagnostics() {
         serde_json::from_str(&read_golden("invalid_top_level_permissions.validate.json")).unwrap();
 
     assert_eq!(response["ok"], true);
-    assert_eq!(response["result"], expected);
+    assert_eq!(
+        normalize_validation_file_paths(response["result"].clone()),
+        normalize_validation_file_paths(expected)
+    );
 }
 
 #[test]
@@ -166,7 +188,10 @@ fn validate_recipe_path_unsupported_step_type_matches_python_diagnostics() {
         serde_json::from_str(&read_golden("unsupported_step_type.validate.json")).unwrap();
 
     assert_eq!(response["ok"], true);
-    assert_eq!(response["result"], expected);
+    assert_eq!(
+        normalize_validation_file_paths(response["result"].clone()),
+        normalize_validation_file_paths(expected)
+    );
 }
 
 #[test]

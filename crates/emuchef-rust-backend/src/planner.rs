@@ -10,6 +10,7 @@ use std::fs;
 use std::path::Path;
 
 use serde::Serialize;
+use serde_json::Map;
 use serde_json::{json, Value};
 
 use crate::model::{OrderedMap, ParamValue, Recipe, Step, StepCondition, StepConstraints};
@@ -144,6 +145,48 @@ pub enum ExecutionParamValue {
     },
     Literal {
         value: Value,
+    },
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize)]
+pub(crate) struct PermissionIntentPlan {
+    pub grants: Vec<PermissionIntentGrant>,
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize)]
+pub(crate) struct PermissionIntentGrant {
+    pub recipe_ref: String,
+    pub step_id: String,
+    pub execution_step_id: String,
+    pub policy: PermissionIntentPolicy,
+    pub actions: Vec<PermissionIntentAction>,
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize)]
+pub(crate) struct PermissionIntentPolicy {
+    pub on_failure: String,
+    pub require_all: bool,
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub(crate) enum PermissionIntentAction {
+    RuntimePermission {
+        package_name: String,
+        permission: String,
+        required: bool,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        when: Option<Value>,
+        source_section: String,
+    },
+    Appop {
+        package_name: String,
+        op: String,
+        desired_mode: String,
+        required: bool,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        when: Option<Value>,
+        source_section: String,
     },
 }
 
@@ -441,6 +484,99 @@ fn authored_steps(
         }
     }
     result
+}
+
+pub(crate) fn build_permission_intent(steps: &[(String, String, Step)]) -> PermissionIntentPlan {
+    let mut grants = Vec::new();
+
+    for (execution_step_id, recipe_id, step) in steps {
+        if step.type_name != "grant_permissions" {
+            continue;
+        }
+
+        let normalized = params_with_defaults(step);
+        let mut actions = Vec::new();
+
+        for (index, item) in literal_object_items(normalized.get("runtime"))
+            .iter()
+            .enumerate()
+        {
+            actions.push(PermissionIntentAction::RuntimePermission {
+                package_name: string_field(item, "package_name"),
+                permission: string_field(item, "name"),
+                required: bool_field(item, "required").unwrap_or(true),
+                when: item.get("when").cloned(),
+                source_section: format!("params.runtime[{index}]"),
+            });
+        }
+
+        for (index, item) in literal_object_items(normalized.get("appops"))
+            .iter()
+            .enumerate()
+        {
+            actions.push(PermissionIntentAction::Appop {
+                package_name: string_field(item, "package_name"),
+                op: string_field(item, "op"),
+                desired_mode: string_field(item, "mode"),
+                required: bool_field(item, "required").unwrap_or(true),
+                when: item.get("when").cloned(),
+                source_section: format!("params.appops[{index}]"),
+            });
+        }
+
+        if actions.is_empty() {
+            continue;
+        }
+
+        grants.push(PermissionIntentGrant {
+            recipe_ref: recipe_id.clone(),
+            step_id: step.id.clone(),
+            execution_step_id: execution_step_id.clone(),
+            policy: permission_intent_policy(normalized.get("policy")),
+            actions,
+        });
+    }
+
+    PermissionIntentPlan { grants }
+}
+
+fn permission_intent_policy(value: Option<&ParamValue>) -> PermissionIntentPolicy {
+    let Some(ParamValue::Literal(Value::Object(policy))) = value else {
+        return PermissionIntentPolicy {
+            on_failure: "warn".to_string(),
+            require_all: false,
+        };
+    };
+
+    PermissionIntentPolicy {
+        on_failure: policy
+            .get("on_failure")
+            .and_then(Value::as_str)
+            .unwrap_or("warn")
+            .to_string(),
+        require_all: policy
+            .get("require_all")
+            .and_then(Value::as_bool)
+            .unwrap_or(false),
+    }
+}
+
+fn literal_object_items(value: Option<&ParamValue>) -> Vec<&Map<String, Value>> {
+    let Some(ParamValue::Literal(Value::Array(items))) = value else {
+        return Vec::new();
+    };
+    items.iter().filter_map(Value::as_object).collect()
+}
+
+fn string_field(item: &Map<String, Value>, field: &str) -> String {
+    item.get(field)
+        .and_then(Value::as_str)
+        .unwrap_or_default()
+        .to_string()
+}
+
+fn bool_field(item: &Map<String, Value>, field: &str) -> Option<bool> {
+    item.get(field).and_then(Value::as_bool)
 }
 
 // P7D terminology follows the current Rust planner pipeline:
@@ -1252,7 +1388,12 @@ fn validate_step_param_contracts(
 fn is_p7e_step_type(step_type: &str) -> bool {
     matches!(
         step_type,
-        "copy_files" | "extract_artifacts" | "extract_archive" | "install_apk" | "wait"
+        "copy_files"
+            | "extract_artifacts"
+            | "extract_archive"
+            | "install_apk"
+            | "wait"
+            | "grant_permissions"
     )
 }
 
@@ -1347,6 +1488,7 @@ fn validate_focused_param_values(
         }
         "extract_archive" => validate_extract_archive_param_values(recipe_id, step, normalized),
         "install_apk" => validate_install_apk_param_values(recipe_id, step, normalized),
+        "grant_permissions" => validate_grant_permissions_param_values(recipe_id, step, normalized),
         "wait" => validate_wait_param_values(recipe_id, step, normalized),
         _ => Vec::new(),
     }
@@ -1545,6 +1687,301 @@ fn validate_wait_param_values(
         }
     }
     errors
+}
+
+fn validate_grant_permissions_param_values(
+    recipe_id: &str,
+    step: &Step,
+    normalized: &OrderedMap<ParamValue>,
+) -> Vec<PlannerMessage> {
+    let mut errors = Vec::new();
+    errors.extend(validate_permission_items(
+        recipe_id,
+        step,
+        normalized,
+        "runtime",
+        &["package_name", "name"],
+        &["package_name", "name", "required", "when"],
+    ));
+    errors.extend(validate_permission_items(
+        recipe_id,
+        step,
+        normalized,
+        "appops",
+        &["package_name", "op", "mode"],
+        &["package_name", "op", "mode", "required", "when"],
+    ));
+    errors.extend(validate_permission_policy(recipe_id, step, normalized));
+    errors
+}
+
+fn validate_permission_items(
+    recipe_id: &str,
+    step: &Step,
+    normalized: &OrderedMap<ParamValue>,
+    param_name: &str,
+    required_fields: &[&str],
+    allowed_fields: &[&str],
+) -> Vec<PlannerMessage> {
+    let Some(value) = normalized.get(param_name) else {
+        return Vec::new();
+    };
+    if matches!(value, ParamValue::Ref(_)) {
+        return Vec::new();
+    }
+    let ParamValue::Literal(Value::Array(items)) = value else {
+        return vec![param_contract_message(
+            "invalid_param_value",
+            format!(
+                "Param '{}' must be a literal list for step type 'grant_permissions'.",
+                param_name
+            ),
+            recipe_id,
+            step,
+            param_name,
+            json!("literal list"),
+            param_value_to_json(value),
+        )];
+    };
+
+    let mut errors = Vec::new();
+    for (index, item) in items.iter().enumerate() {
+        let field_prefix = format!("{param_name}[{index}]");
+        let Some(item) = item.as_object() else {
+            errors.push(param_contract_message(
+                "invalid_param_value",
+                format!(
+                    "Param '{field_prefix}' must be an object for step type 'grant_permissions'."
+                ),
+                recipe_id,
+                step,
+                &field_prefix,
+                json!("object"),
+                item.clone(),
+            ));
+            continue;
+        };
+
+        for field_name in sorted_unsupported_fields(item, allowed_fields) {
+            errors.push(param_contract_message(
+                "invalid_param_value",
+                format!("Param '{field_prefix}' contains unsupported field '{field_name}'."),
+                recipe_id,
+                step,
+                &format!("{field_prefix}.{field_name}"),
+                json!(allowed_fields),
+                item.get(&field_name).cloned().unwrap_or(Value::Null),
+            ));
+        }
+
+        for field_name in required_fields {
+            let param = format!("{field_prefix}.{field_name}");
+            match item.get(*field_name) {
+                Some(Value::String(value)) if !value.trim().is_empty() => {}
+                Some(actual) => errors.push(param_contract_message(
+                    "invalid_param_value",
+                    format!("Param '{param}' must be a non-empty string."),
+                    recipe_id,
+                    step,
+                    &param,
+                    json!("non-empty string"),
+                    actual.clone(),
+                )),
+                None => errors.push(param_contract_message(
+                    "missing_required_param",
+                    format!("Param '{param}' is required for step type 'grant_permissions'."),
+                    recipe_id,
+                    step,
+                    &param,
+                    json!("non-empty string"),
+                    Value::Null,
+                )),
+            }
+        }
+
+        if let Some(required) = item.get("required") {
+            if !required.is_boolean() {
+                errors.push(param_contract_message(
+                    "invalid_param_value",
+                    format!("Param '{field_prefix}.required' must be a boolean."),
+                    recipe_id,
+                    step,
+                    &format!("{field_prefix}.required"),
+                    json!("literal bool"),
+                    required.clone(),
+                ));
+            }
+        }
+
+        if let Some(when) = item.get("when") {
+            errors.extend(validate_permission_when(
+                recipe_id,
+                step,
+                &format!("{field_prefix}.when"),
+                when,
+            ));
+        }
+    }
+    errors
+}
+
+fn validate_permission_policy(
+    recipe_id: &str,
+    step: &Step,
+    normalized: &OrderedMap<ParamValue>,
+) -> Vec<PlannerMessage> {
+    let Some(value) = normalized.get("policy") else {
+        return Vec::new();
+    };
+    if matches!(value, ParamValue::Ref(_)) {
+        return Vec::new();
+    }
+    let ParamValue::Literal(Value::Object(policy)) = value else {
+        return vec![param_contract_message(
+            "invalid_param_value",
+            "Param 'policy' must be an object for step type 'grant_permissions'.".to_string(),
+            recipe_id,
+            step,
+            "policy",
+            json!("object"),
+            param_value_to_json(value),
+        )];
+    };
+
+    let mut errors = Vec::new();
+    for field_name in sorted_unsupported_fields(policy, &["on_failure", "require_all"]) {
+        errors.push(param_contract_message(
+            "invalid_param_value",
+            format!("Param 'policy' contains unsupported field '{field_name}'."),
+            recipe_id,
+            step,
+            &format!("policy.{field_name}"),
+            json!(["on_failure", "require_all"]),
+            policy.get(&field_name).cloned().unwrap_or(Value::Null),
+        ));
+    }
+    if let Some(on_failure) = policy.get("on_failure") {
+        if !matches!(on_failure.as_str(), Some("warn" | "fail")) {
+            errors.push(param_contract_message(
+                "invalid_enum_value",
+                "Param 'policy.on_failure' must be one of warn, fail for step type 'grant_permissions'.".to_string(),
+                recipe_id,
+                step,
+                "policy.on_failure",
+                json!(["warn", "fail"]),
+                on_failure.clone(),
+            ));
+        }
+    }
+    if let Some(require_all) = policy.get("require_all") {
+        if !require_all.is_boolean() {
+            errors.push(param_contract_message(
+                "invalid_param_value",
+                "Param 'policy.require_all' must be a boolean.".to_string(),
+                recipe_id,
+                step,
+                "policy.require_all",
+                json!("literal bool"),
+                require_all.clone(),
+            ));
+        }
+    }
+    errors
+}
+
+fn validate_permission_when(
+    recipe_id: &str,
+    step: &Step,
+    param_name: &str,
+    value: &Value,
+) -> Vec<PlannerMessage> {
+    let Some(when) = value.as_object() else {
+        return vec![param_contract_message(
+            "invalid_param_value",
+            format!("Param '{param_name}' must be an object."),
+            recipe_id,
+            step,
+            param_name,
+            json!("object"),
+            value.clone(),
+        )];
+    };
+
+    let mut errors = Vec::new();
+    for field_name in
+        sorted_unsupported_fields(when, &["rooted", "android_api_min", "android_api_max"])
+    {
+        errors.push(param_contract_message(
+            "invalid_param_value",
+            format!("Param '{param_name}' contains unsupported field '{field_name}'."),
+            recipe_id,
+            step,
+            &format!("{param_name}.{field_name}"),
+            json!(["rooted", "android_api_min", "android_api_max"]),
+            when.get(&field_name).cloned().unwrap_or(Value::Null),
+        ));
+    }
+
+    if let Some(rooted) = when.get("rooted") {
+        if !rooted.is_boolean() {
+            errors.push(param_contract_message(
+                "invalid_param_value",
+                format!("Param '{param_name}.rooted' must be a boolean."),
+                recipe_id,
+                step,
+                &format!("{param_name}.rooted"),
+                json!("literal bool"),
+                rooted.clone(),
+            ));
+        }
+    }
+
+    for field_name in ["android_api_min", "android_api_max"] {
+        if let Some(value) = when.get(field_name) {
+            if !is_integer_value(value) {
+                errors.push(param_contract_message(
+                    "invalid_param_value",
+                    format!("Param '{param_name}.{field_name}' must be an integer."),
+                    recipe_id,
+                    step,
+                    &format!("{param_name}.{field_name}"),
+                    json!("integer"),
+                    value.clone(),
+                ));
+            }
+        }
+    }
+
+    let api_min = when.get("android_api_min").and_then(Value::as_i64);
+    let api_max = when.get("android_api_max").and_then(Value::as_i64);
+    if api_min.zip(api_max).is_some_and(|(min, max)| min > max) {
+        errors.push(param_contract_message(
+            "invalid_param_value",
+            format!("Param '{param_name}' must not set android_api_min above android_api_max."),
+            recipe_id,
+            step,
+            param_name,
+            json!("android_api_min <= android_api_max"),
+            value.clone(),
+        ));
+    }
+
+    errors
+}
+
+fn sorted_unsupported_fields(item: &Map<String, Value>, allowed_fields: &[&str]) -> Vec<String> {
+    let allowed = allowed_fields.iter().copied().collect::<HashSet<_>>();
+    let mut unsupported = item
+        .keys()
+        .filter(|field_name| !allowed.contains(field_name.as_str()))
+        .cloned()
+        .collect::<Vec<_>>();
+    unsupported.sort();
+    unsupported
+}
+
+fn is_integer_value(value: &Value) -> bool {
+    !value.is_boolean() && (value.as_i64().is_some() || value.as_u64().is_some())
 }
 
 fn require_param(
