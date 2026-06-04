@@ -795,6 +795,116 @@ fn step_ref_validation_uses_emitted_selected_step_universe() {
 }
 
 #[test]
+fn dependency_validation_orders_valid_forward_and_duplicate_dependencies() {
+    let forward = planning_result_value(dependency_validation_input(vec![
+        dependency_step("consumer", vec!["producer"]),
+        dependency_step("producer", vec![]),
+        dependency_step("independent", vec![]),
+    ]));
+    assert_eq!(forward["status"], "success", "{forward:#}");
+    assert_eq!(
+        dependency_step_ids(&forward),
+        vec![
+            "planner.dependency_validation/producer",
+            "planner.dependency_validation/independent",
+            "planner.dependency_validation/consumer",
+        ]
+    );
+
+    let duplicate = planning_result_value(dependency_validation_input(vec![
+        dependency_step("seed", vec![]),
+        dependency_step("consumer", vec!["seed", "seed"]),
+    ]));
+    assert_eq!(duplicate["status"], "success", "{duplicate:#}");
+    assert_eq!(
+        *dependency_step_dependencies(&duplicate, "consumer"),
+        json!([
+            "planner.dependency_validation/seed",
+            "planner.dependency_validation/seed"
+        ])
+    );
+}
+
+#[test]
+fn dependency_validation_reports_unknown_self_and_non_emitted_dependencies() {
+    let unknown = planning_result_value(dependency_validation_input(vec![dependency_step(
+        "consumer",
+        vec!["missing"],
+    )]));
+    assert_dependency_error(
+        &unknown,
+        "unknown_step_dependency",
+        "consumer",
+        Some("missing"),
+    );
+
+    let self_dependency =
+        planning_result_value(dependency_validation_input(vec![dependency_step(
+            "selfish",
+            vec!["selfish"],
+        )]));
+    assert_dependency_error(
+        &self_dependency,
+        "self_step_dependency",
+        "selfish",
+        Some("selfish"),
+    );
+
+    let unavailable_target = planning_result_value(dependency_validation_input(vec![
+        unavailable_dependency_step("unavailable"),
+        dependency_step("consumer", vec!["unavailable"]),
+    ]));
+    assert_dependency_error(
+        &unavailable_target,
+        "unknown_step_dependency",
+        "consumer",
+        Some("unavailable"),
+    );
+}
+
+#[test]
+fn dependency_validation_reports_cycles_deterministically_without_cascading_unknowns() {
+    let simple_cycle = planning_result_value(dependency_validation_input(vec![
+        dependency_step("a", vec!["b"]),
+        dependency_step("b", vec!["a"]),
+    ]));
+    assert_dependency_cycle(&simple_cycle, &["a", "b", "a"]);
+
+    let multi_step_cycle = planning_result_value(dependency_validation_input(vec![
+        dependency_step("a", vec!["b"]),
+        dependency_step("b", vec!["c"]),
+        dependency_step("c", vec!["a"]),
+    ]));
+    assert_dependency_cycle(&multi_step_cycle, &["a", "b", "c", "a"]);
+
+    let unknown = planning_result_value(dependency_validation_input(vec![dependency_step(
+        "consumer",
+        vec!["missing"],
+    )]));
+    let errors = unknown["errors"].as_array().unwrap();
+    assert!(
+        !errors
+            .iter()
+            .any(|error| error["code"] == "dependency_cycle"),
+        "unknown dependency should not cascade into cycle errors: {errors:#?}"
+    );
+}
+
+#[test]
+fn dependency_validation_ignores_invalid_dependencies_on_unavailable_steps() {
+    let actual = planning_result_value(dependency_validation_input(vec![
+        unavailable_dependency_step("unavailable"),
+        dependency_step("available", vec![]),
+    ]));
+
+    assert_eq!(actual["status"], "success", "{actual:#}");
+    assert_eq!(
+        dependency_step_ids(&actual),
+        vec!["planner.dependency_validation/available"]
+    );
+}
+
+#[test]
 fn planner_does_not_mutate_authored_fixture_files() {
     let root = authored_root("planner_refs_artifacts");
     let before = snapshot_files(&root);
@@ -1005,6 +1115,84 @@ fn execution_step_param<'a>(actual: &'a Value, step_id: &str, param: &str) -> &'
         .expect("ref validation step should exist")["params"][param]
 }
 
+fn dependency_validation_input(steps: Vec<Step>) -> PlannerInput {
+    PlannerInput {
+        recipes: vec![Recipe {
+            schema_version: 1,
+            kind: "recipe".to_string(),
+            id: "planner.dependency_validation".to_string(),
+            name: "Planner Dependency Validation".to_string(),
+            description: None,
+            recipe_dependencies: Vec::new(),
+            provides: RecipeProvides {
+                features: Vec::new(),
+            },
+            inputs: OrderedMap::new(),
+            artifacts: OrderedMap::new(),
+            artifact_groups: OrderedMap::new(),
+            steps,
+        }],
+        selected_recipe_refs: vec!["planner.dependency_validation".to_string()],
+        input_bindings: OrderedMap::new(),
+        plan_id: "plan.dependency_validation.001".to_string(),
+        device_plan_ref: "example.device_plan".to_string(),
+        device_profile_ref: "example.device_profile".to_string(),
+        device_context: fixture_device_context(),
+        runtime_capabilities: fixture_runtime_capabilities(),
+    }
+}
+
+fn dependency_step(id: &str, dependencies: Vec<&str>) -> Step {
+    dependency_step_with_capabilities(id, dependencies, Vec::new())
+}
+
+fn unavailable_dependency_step(id: &str) -> Step {
+    dependency_step_with_capabilities(id, vec!["missing"], vec!["unavailable_capability"])
+}
+
+fn dependency_step_with_capabilities(
+    id: &str,
+    dependencies: Vec<&str>,
+    capabilities: Vec<&str>,
+) -> Step {
+    let mut params = OrderedMap::new();
+    params.insert("duration_ms".to_string(), ParamValue::Literal(json!(1)));
+    Step {
+        id: id.to_string(),
+        type_name: "wait".to_string(),
+        name: id.to_string(),
+        description: None,
+        user_toggleable: false,
+        dependencies: dependencies.into_iter().map(ToString::to_string).collect(),
+        constraints: StepConstraints {
+            capabilities: capabilities.into_iter().map(ToString::to_string).collect(),
+            conflicts_with: Vec::new(),
+        },
+        skip_if: Vec::<StepCondition>::new(),
+        params,
+        verify: Vec::<StepCondition>::new(),
+    }
+}
+
+fn dependency_step_ids(actual: &Value) -> Vec<&str> {
+    actual["execution_plan"]["steps"]
+        .as_array()
+        .expect("execution plan should include steps")
+        .iter()
+        .map(|step| step["id"].as_str().unwrap())
+        .collect()
+}
+
+fn dependency_step_dependencies<'a>(actual: &'a Value, step_id: &str) -> &'a Value {
+    let execution_step_id = format!("planner.dependency_validation/{step_id}");
+    &actual["execution_plan"]["steps"]
+        .as_array()
+        .expect("execution plan should include steps")
+        .iter()
+        .find(|step| step["id"] == execution_step_id)
+        .expect("dependency validation step should exist")["dependencies"]
+}
+
 fn assert_normalized_artifacts(actual: &Value, step_id: &str, expected: &[&str]) {
     assert_eq!(actual["status"], "success", "{actual:#}");
     assert_eq!(actual["errors"], json!([]));
@@ -1042,6 +1230,44 @@ fn assert_step_ref_error(actual: &Value, code: &str, step_id: &str, param: &str,
                     .is_some_and(|message| message.contains(ref_value))
         }),
         "expected step ref error code={code} step_id={step_id} param={param} ref={ref_value}; actual errors: {errors:#?}",
+    );
+}
+
+fn assert_dependency_error(actual: &Value, code: &str, step_id: &str, dependency: Option<&str>) {
+    assert_eq!(actual["status"], "error", "{actual:#}");
+    assert_eq!(actual["execution_plan"], Value::Null);
+    let errors = actual["errors"]
+        .as_array()
+        .expect("planner result should include errors");
+    assert!(
+        errors.iter().any(|error| {
+            error["code"] == code
+                && error["details"]["recipe_ref"] == "planner.dependency_validation"
+                && error["details"]["step_id"] == step_id
+                && dependency.is_none_or(|dependency| {
+                    error["details"]["dependency"] == dependency
+                        && error["message"]
+                            .as_str()
+                            .is_some_and(|message| message.contains(dependency))
+                })
+        }),
+        "expected dependency error code={code} step_id={step_id} dependency={dependency:?}; actual errors: {errors:#?}",
+    );
+}
+
+fn assert_dependency_cycle(actual: &Value, expected_cycle: &[&str]) {
+    assert_eq!(actual["status"], "error", "{actual:#}");
+    assert_eq!(actual["execution_plan"], Value::Null);
+    let errors = actual["errors"]
+        .as_array()
+        .expect("planner result should include errors");
+    assert!(
+        errors.iter().any(|error| {
+            error["code"] == "dependency_cycle"
+                && error["details"]["recipe_ref"] == "planner.dependency_validation"
+                && error["details"]["cycle"] == json!(expected_cycle)
+        }),
+        "expected dependency cycle {expected_cycle:?}; actual errors: {errors:#?}",
     );
 }
 
