@@ -172,9 +172,28 @@ explicit, every recipe parses through the Rust domain model, supported
 manually-selected synthetic contexts emit execution plans, required unbound
 inputs produce classified `binding_missing` errors, and RetroArch's optional
 config step is pruned when unbound and included when bound. This authored-corpus
-coverage does not parse repo device plans or profiles, invoke Python, call
-executor/apply paths, resolve remote URLs, download artifacts, use ADB, or
-validate real APK/BIOS payloads. DTO shape coverage asserts successful and error
+coverage also has private checked-in device-plan/profile ingestion for Rust
+planner inputs: device plan/profile inventory is path/id explicit, selected
+recipe refs are loaded from required `selected_by_default: true` entries in
+authored order, profile `capability_defaults` and `device_tags` are mapped into
+planner input, and planner-only synthetic `DeviceContext` values are derived
+from profile fields. The synthetic context uses the first declared
+`match.manufacturer_contains` value or `profile:<profile_id>`, the profile name
+or `profile:<profile_id>`, `match.android_version.min` or `0`, and no API level
+unless a future authored field explicitly supplies one. Private Rust
+device-plan ingestion parses checked-in `defaults.show_advanced_steps` and
+`overrides.config_variants` as inactive metadata; current checked-in device
+plans do not contain ref-shaped override binding keys. In temporary
+authored-root planner tests, private Rust ingestion accepts only strict
+`<recipe_ref>/<input_id>` top-level `device_plan.overrides` keys as planner
+input bindings, inserts those bindings in YAML order, and applies explicit test
+bindings afterward so explicit bindings take precedence. Device-plan defaults
+as bindings, config variant selection, broader Python override key forms such
+as `inputs.<id>`, profile matching against detected facts, real device facts,
+CLI operation replay, executor/apply behavior, Python invocation, ADB, remote
+URL resolution, downloads, artifact materialization, and real APK/BIOS payload
+validation remain outside this Rust planner slice. DTO shape coverage asserts
+successful and error
 `PlanningResult`/`ExecutionPlan` key sets, selected normalized params, semantic
 list ordering, and the absence of a serialized `permission_plan` field without
 turning arbitrary JSON object key order into a public contract. Focused Rust
@@ -554,8 +573,12 @@ parsed by Rust tests so new checked-in planner goldens must be classified
 intentionally. It also has authored-corpus tests for the checked-in
 `authored/recipes` files that use manually supplied selected recipe refs and
 synthetic fixture context; those tests classify required binding gaps and cover
-RetroArch optional-input pruning, but they do not prove repo
-device-plan/profile ingestion parity. It validates malformed `steps.*` refs,
+RetroArch optional-input pruning. It also has private checked-in
+device-plan/profile ingestion coverage that parses repo `device_plans` and
+`device_profiles`, freezes path/id/profile/selected-ref inventory, maps
+selected recipe refs in authored order, maps profile capabilities/tags, accepts
+supplied test bindings, and emits at least one deterministic plan from a
+checked-in profile/plan context. It validates malformed `steps.*` refs,
 unknown selected step targets, unknown step outputs, and shorthand refs to
 selected steps without primary outputs for emitted planner steps; non-step refs
 remain outside that validation slice. It asserts focused execution-plan DTO

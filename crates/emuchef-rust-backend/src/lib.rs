@@ -30,6 +30,8 @@ pub mod model;
 pub mod one_shot;
 #[allow(dead_code)]
 mod planner;
+#[allow(dead_code)]
+pub(crate) mod planner_device_plan;
 #[cfg(test)]
 mod planner_tests;
 pub mod protocol;
