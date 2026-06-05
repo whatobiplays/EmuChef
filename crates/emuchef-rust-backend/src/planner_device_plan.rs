@@ -10,8 +10,10 @@ use std::fs;
 use std::path::{Path, PathBuf};
 
 use serde::Deserialize;
+use serde_json::Value as JsonValue;
 use serde_yaml::{Mapping, Value as YamlValue};
 
+use crate::model::{OrderedMap, Recipe};
 use crate::planner::{DeviceContext, PlannerLoadError, RuntimeCapabilities};
 
 #[derive(Clone, Debug, PartialEq)]
@@ -36,6 +38,7 @@ pub(crate) struct PlannerInputParts {
     pub device_profile_ref: String,
     pub recipe_refs: Vec<String>,
     pub selected_recipe_refs: Vec<String>,
+    pub override_input_bindings: OrderedMap<JsonValue>,
     pub device_context: DeviceContext,
     pub runtime_capabilities: RuntimeCapabilities,
 }
@@ -94,6 +97,10 @@ struct DevicePlanYaml {
     device_profile_ref: String,
     #[serde(default)]
     recipes: Vec<DevicePlanRecipeYaml>,
+    #[serde(default)]
+    defaults: Mapping,
+    #[serde(default)]
+    overrides: Mapping,
 }
 
 #[derive(Clone, Debug, Deserialize)]
@@ -127,6 +134,7 @@ pub(crate) fn discover_device_plan_inventory(
 pub(crate) fn load_planner_input_parts(
     authored_root: &Path,
     device_plan_ref: &str,
+    recipes: &[Recipe],
 ) -> Result<PlannerInputParts, PlannerLoadError> {
     let profile_records = load_device_profiles(authored_root)?;
     let plan_records = load_device_plans(authored_root)?;
@@ -169,6 +177,7 @@ pub(crate) fn load_planner_input_parts(
             .map(|selection| selection.recipe_ref.clone())
             .collect(),
         selected_recipe_refs: selected_recipe_refs(&plan.plan),
+        override_input_bindings: override_input_bindings(&plan.plan, recipes)?,
         device_context: synthetic_device_context(&profile.profile),
         runtime_capabilities: runtime_capabilities(&profile.profile.capability_defaults),
     })
@@ -319,6 +328,124 @@ fn selected_recipe_refs(plan: &DevicePlanYaml) -> Vec<String> {
         .filter(|selection| selection.selected_by_default)
         .map(|selection| selection.recipe_ref.clone())
         .collect()
+}
+
+fn override_input_bindings(
+    plan: &DevicePlanYaml,
+    recipes: &[Recipe],
+) -> Result<OrderedMap<JsonValue>, PlannerLoadError> {
+    // P7J parses defaults so the current authored shape is classified, but
+    // device-plan defaults remain inactive private planner metadata.
+    let _inactive_defaults = &plan.defaults;
+    let mut bindings = OrderedMap::new();
+    for (raw_key, raw_value) in &plan.overrides {
+        let Some((binding_ref, value)) =
+            normalize_override_binding(plan, raw_key, raw_value, recipes)?
+        else {
+            continue;
+        };
+        bindings.insert(binding_ref, value);
+    }
+    Ok(bindings)
+}
+
+fn normalize_override_binding(
+    plan: &DevicePlanYaml,
+    raw_key: &YamlValue,
+    raw_value: &YamlValue,
+    recipes: &[Recipe],
+) -> Result<Option<(String, JsonValue)>, PlannerLoadError> {
+    let Some(key) = raw_key.as_str() else {
+        return Err(PlannerLoadError::new(
+            "device_plan_override_malformed",
+            format!(
+                "Device plan '{}' override key {} must be a string.",
+                plan.id,
+                override_key_label(raw_key)
+            ),
+        ));
+    };
+    if key == "config_variants" {
+        return Ok(None);
+    }
+
+    let slash_count = key.matches('/').count();
+    if slash_count == 0 {
+        return Err(PlannerLoadError::new(
+            "device_plan_override_unsupported",
+            format!(
+                "Device plan '{}' override key '{}' is unsupported. P7J supports only 'config_variants' metadata or '<recipe_ref>/<input_id>' binding keys.",
+                plan.id, key
+            ),
+        ));
+    }
+    if slash_count != 1 {
+        return Err(PlannerLoadError::new(
+            "device_plan_override_malformed",
+            format!(
+                "Device plan '{}' override key '{}' must contain exactly one slash.",
+                plan.id, key
+            ),
+        ));
+    }
+
+    let (recipe_ref, input_id) = key
+        .split_once('/')
+        .expect("slash count was checked before split");
+    if recipe_ref.is_empty() {
+        return Err(PlannerLoadError::new(
+            "device_plan_override_malformed",
+            format!(
+                "Device plan '{}' override key '{}' has an empty recipe segment.",
+                plan.id, key
+            ),
+        ));
+    }
+    if input_id.is_empty() {
+        return Err(PlannerLoadError::new(
+            "device_plan_override_malformed",
+            format!(
+                "Device plan '{}' override key '{}' has an empty input segment.",
+                plan.id, key
+            ),
+        ));
+    }
+
+    let Some(recipe) = recipes.iter().find(|recipe| recipe.id == recipe_ref) else {
+        return Err(PlannerLoadError::new(
+            "device_plan_override_unknown_binding",
+            format!(
+                "Device plan '{}' override key '{}' references unknown recipe '{}'.",
+                plan.id, key, recipe_ref
+            ),
+        ));
+    };
+    if !recipe.inputs.contains_key(input_id) {
+        return Err(PlannerLoadError::new(
+            "device_plan_override_unknown_binding",
+            format!(
+                "Device plan '{}' override key '{}' references unknown input '{}'.",
+                plan.id, key, input_id
+            ),
+        ));
+    }
+
+    let value = serde_json::to_value(raw_value).map_err(|error| {
+        PlannerLoadError::new(
+            "authored_data_invalid",
+            format!(
+                "Device plan '{}' override key '{}' value could not be converted to JSON: {error}.",
+                plan.id, key
+            ),
+        )
+    })?;
+    Ok(Some((key.to_string(), value)))
+}
+
+fn override_key_label(key: &YamlValue) -> String {
+    key.as_str()
+        .map(|value| format!("'{value}'"))
+        .unwrap_or_else(|| format!("{key:?}"))
 }
 
 fn synthetic_device_context(profile: &DeviceProfileYaml) -> DeviceContext {

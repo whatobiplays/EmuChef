@@ -2338,7 +2338,7 @@ fn repo_device_plan_context_builds_planner_input_from_profile_data() {
 }
 
 #[test]
-fn repo_device_plan_ingestion_accepts_supplied_bindings_without_applying_overrides() {
+fn repo_device_plan_ingestion_accepts_supplied_bindings_without_applying_metadata_overrides() {
     let input = repo_device_plan_planner_input_with_bindings(
         "ayaneo.pocket_s2.base",
         &[
@@ -2377,6 +2377,274 @@ fn repo_device_plan_ingestion_accepts_supplied_bindings_without_applying_overrid
         !input.input_bindings.contains_key("config_variants"),
         "metadata-only device plan overrides must not become bindings"
     );
+}
+
+#[test]
+fn repo_device_plan_defaults_and_config_variants_are_checked_in_metadata_only() {
+    let mut actual = Vec::new();
+    for plan in discover_device_plan_inventory(&repo_authored_root())
+        .expect("repo device plan inventory should parse")
+    {
+        let yaml =
+            fs::read_to_string(&plan.path).expect("checked-in device plan should be readable");
+        let parsed: serde_yaml::Value =
+            serde_yaml::from_str(&yaml).expect("checked-in device plan should be valid YAML");
+
+        actual.push((
+            plan.id.clone(),
+            parsed["defaults"]["show_advanced_steps"]
+                .as_bool()
+                .expect("checked-in default should be a bool"),
+            parsed["overrides"]["config_variants"]["vendor_family"]
+                .as_str()
+                .expect("checked-in vendor family should be a string")
+                .to_string(),
+            parsed["overrides"]["config_variants"]["screen_class"]
+                .as_str()
+                .expect("checked-in screen class should be a string")
+                .to_string(),
+        ));
+
+        let input = repo_device_plan_planner_input_with_bindings(&plan.id, &[]);
+        assert!(
+            !input.input_bindings.contains_key("show_advanced_steps"),
+            "{} defaults.show_advanced_steps must not become a planner binding",
+            plan.id
+        );
+        assert!(
+            !input.input_bindings.contains_key("config_variants"),
+            "{} overrides.config_variants must not become a planner binding",
+            plan.id
+        );
+    }
+
+    assert_eq!(
+        actual,
+        vec![
+            (
+                "ayaneo.generic.base".to_string(),
+                false,
+                "ayaneo".to_string(),
+                "handheld_16_9".to_string(),
+            ),
+            (
+                "ayaneo.konkr_pocket_fit.base".to_string(),
+                false,
+                "ayaneo".to_string(),
+                "handheld_16_9".to_string(),
+            ),
+            (
+                "ayaneo.pocket_air_mini.base".to_string(),
+                false,
+                "ayaneo".to_string(),
+                "handheld_4_3".to_string(),
+            ),
+            (
+                "ayaneo.pocket_s2.base".to_string(),
+                false,
+                "ayaneo".to_string(),
+                "handheld_16_9".to_string(),
+            ),
+            (
+                "ayaneo.pocket_s_mini.base".to_string(),
+                false,
+                "ayaneo".to_string(),
+                "handheld_16_9".to_string(),
+            ),
+        ]
+    );
+}
+
+#[test]
+fn temp_device_plan_override_bindings_merge_before_explicit_bindings() {
+    let root = temp_authored_root_with_device_plan_selection_yaml(
+        r#"
+schema_version: 1
+kind: device_plan
+id: override.binding_merge
+name: Override Binding Merge
+device_profile_ref: ayaneo.konkr_pocket_fit
+recipes:
+  - recipe_ref: app.retroarch.provision
+    selected_by_default: true
+  - recipe_ref: feature.copy_bios
+    selected_by_default: true
+  - recipe_ref: app.xaniteog.install
+    selected_by_default: true
+defaults:
+  feature.copy_bios/bios_source_dir: /tmp/default-bios
+overrides:
+  feature.copy_bios/bios_source_dir: /tmp/override-bios
+  config_variants:
+    vendor_family: test
+    screen_class: test_screen
+  app.xaniteog.install/xaniteog_apk: /tmp/override-xaniteog.apk
+metadata: {}
+"#,
+    );
+    let mut explicit = OrderedMap::new();
+    explicit.insert(
+        "feature.copy_bios/bios_source_dir".to_string(),
+        json!("/tmp/explicit-bios"),
+    );
+    explicit.insert(
+        "app.retroarch.provision/retroarch_cfg".to_string(),
+        json!("/tmp/explicit-retroarch.cfg"),
+    );
+
+    let input = PlannerInput::from_authored_device_plan(
+        root.path().join("authored"),
+        "override.binding_merge",
+        "plan.p7j.binding_merge.001".to_string(),
+        explicit,
+    )
+    .expect("ref-shaped override bindings should merge into private planner input");
+
+    assert_eq!(
+        input
+            .input_bindings
+            .keys()
+            .map(String::as_str)
+            .collect::<Vec<_>>(),
+        vec![
+            "feature.copy_bios/bios_source_dir",
+            "app.xaniteog.install/xaniteog_apk",
+            "app.retroarch.provision/retroarch_cfg",
+        ]
+    );
+    assert_eq!(
+        input
+            .input_bindings
+            .get("feature.copy_bios/bios_source_dir"),
+        Some(&json!("/tmp/explicit-bios"))
+    );
+    assert_eq!(
+        input
+            .input_bindings
+            .get("app.xaniteog.install/xaniteog_apk"),
+        Some(&json!("/tmp/override-xaniteog.apk"))
+    );
+    assert_eq!(
+        input
+            .input_bindings
+            .get("app.retroarch.provision/retroarch_cfg"),
+        Some(&json!("/tmp/explicit-retroarch.cfg"))
+    );
+    assert!(
+        !input.input_bindings.contains_key("config_variants"),
+        "config variant metadata must not become a binding"
+    );
+}
+
+#[test]
+fn temp_device_plan_defaults_remain_inactive_even_when_ref_shaped() {
+    let root = temp_authored_root_with_device_plan_selection_yaml(
+        r#"
+schema_version: 1
+kind: device_plan
+id: defaults.inactive
+name: Defaults Inactive
+device_profile_ref: ayaneo.konkr_pocket_fit
+recipes:
+  - recipe_ref: feature.copy_bios
+    selected_by_default: true
+defaults:
+  feature.copy_bios/bios_source_dir: /tmp/default-bios
+overrides: {}
+metadata: {}
+"#,
+    );
+
+    let input = PlannerInput::from_authored_device_plan(
+        root.path().join("authored"),
+        "defaults.inactive",
+        "plan.p7j.defaults_inactive.001".to_string(),
+        OrderedMap::new(),
+    )
+    .expect("ref-shaped defaults should stay inactive in P7J");
+
+    assert!(
+        input.input_bindings.is_empty(),
+        "device_plan.defaults must not populate Rust planner bindings in P7J"
+    );
+}
+
+#[test]
+fn temp_device_plan_override_keys_are_strictly_classified() {
+    let cases = [
+        (
+            "unsupported.metadata",
+            "show_advanced_steps: false",
+            "device_plan_override_unsupported",
+            "show_advanced_steps",
+        ),
+        (
+            "empty.recipe",
+            "/bios_source_dir: /tmp/bios",
+            "device_plan_override_malformed",
+            "empty recipe",
+        ),
+        (
+            "empty.input",
+            "feature.copy_bios/: /tmp/bios",
+            "device_plan_override_malformed",
+            "empty input",
+        ),
+        (
+            "too.many.slashes",
+            "feature.copy_bios/bios/source_dir: /tmp/bios",
+            "device_plan_override_malformed",
+            "exactly one slash",
+        ),
+        (
+            "unknown.recipe",
+            "missing.recipe/bios_source_dir: /tmp/bios",
+            "device_plan_override_unknown_binding",
+            "missing.recipe",
+        ),
+        (
+            "unknown.input",
+            "feature.copy_bios/missing_input: /tmp/bios",
+            "device_plan_override_unknown_binding",
+            "missing_input",
+        ),
+    ];
+
+    for (id_suffix, override_yaml, expected_code, expected_message) in cases {
+        let plan_id = format!("override.{id_suffix}");
+        let root = temp_authored_root_with_device_plan_selection_yaml(&format!(
+            r#"
+schema_version: 1
+kind: device_plan
+id: {plan_id}
+name: Override Strict Classification
+device_profile_ref: ayaneo.konkr_pocket_fit
+recipes:
+  - recipe_ref: feature.copy_bios
+    selected_by_default: true
+defaults: {{}}
+overrides:
+  {override_yaml}
+metadata: {{}}
+"#
+        ));
+
+        let err = match PlannerInput::from_authored_device_plan(
+            root.path().join("authored"),
+            &plan_id,
+            "plan.p7j.strict_override.001".to_string(),
+            OrderedMap::new(),
+        ) {
+            Ok(_) => panic!("{override_yaml} should be classified as an ingestion error"),
+            Err(error) => error,
+        };
+        assert_eq!(err.code(), expected_code, "{override_yaml}");
+        assert!(
+            err.to_string().contains(expected_message),
+            "{override_yaml}: {}",
+            err
+        );
+    }
 }
 
 #[test]

@@ -240,8 +240,12 @@ impl PlannerInput {
         input_bindings: OrderedMap<Value>,
     ) -> Result<Self, PlannerLoadError> {
         let authored_root = authored_root.as_ref();
-        let parts = planner_device_plan::load_planner_input_parts(authored_root, device_plan_ref)?;
         let recipes = load_top_level_recipes(authored_root)?;
+        let parts = planner_device_plan::load_planner_input_parts(
+            authored_root,
+            device_plan_ref,
+            &recipes,
+        )?;
         let recipe_ids = recipes
             .iter()
             .map(|recipe| recipe.id.as_str())
@@ -257,11 +261,15 @@ impl PlannerInput {
                 ));
             }
         }
+        let mut merged_input_bindings = parts.override_input_bindings;
+        for (input_id, value) in input_bindings {
+            merged_input_bindings.insert(input_id, value);
+        }
 
         Ok(Self {
             recipes,
             selected_recipe_refs: parts.selected_recipe_refs,
-            input_bindings,
+            input_bindings: merged_input_bindings,
             plan_id,
             device_plan_ref: parts.device_plan_ref,
             device_profile_ref: parts.device_profile_ref,

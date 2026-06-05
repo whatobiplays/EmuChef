@@ -180,12 +180,20 @@ planner input, and planner-only synthetic `DeviceContext` values are derived
 from profile fields. The synthetic context uses the first declared
 `match.manufacturer_contains` value or `profile:<profile_id>`, the profile name
 or `profile:<profile_id>`, `match.android_version.min` or `0`, and no API level
-unless a future authored field explicitly supplies one. Device-plan defaults,
-config variants, override binding semantics, profile matching against detected
-facts, real device facts, CLI operation replay, executor/apply behavior, Python
-invocation, ADB, remote URL resolution, downloads, artifact materialization, and
-real APK/BIOS payload validation remain outside this Rust planner slice. DTO
-shape coverage asserts successful and error
+unless a future authored field explicitly supplies one. Private Rust
+device-plan ingestion parses checked-in `defaults.show_advanced_steps` and
+`overrides.config_variants` as inactive metadata; current checked-in device
+plans do not contain ref-shaped override binding keys. In temporary
+authored-root planner tests, private Rust ingestion accepts only strict
+`<recipe_ref>/<input_id>` top-level `device_plan.overrides` keys as planner
+input bindings, inserts those bindings in YAML order, and applies explicit test
+bindings afterward so explicit bindings take precedence. Device-plan defaults
+as bindings, config variant selection, broader Python override key forms such
+as `inputs.<id>`, profile matching against detected facts, real device facts,
+CLI operation replay, executor/apply behavior, Python invocation, ADB, remote
+URL resolution, downloads, artifact materialization, and real APK/BIOS payload
+validation remain outside this Rust planner slice. DTO shape coverage asserts
+successful and error
 `PlanningResult`/`ExecutionPlan` key sets, selected normalized params, semantic
 list ordering, and the absence of a serialized `permission_plan` field without
 turning arbitrary JSON object key order into a public contract. Focused Rust
