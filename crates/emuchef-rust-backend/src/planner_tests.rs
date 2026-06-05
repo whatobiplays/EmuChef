@@ -715,6 +715,252 @@ fn phase6n_step_data_refs_conditions_and_constraints_match_python() {
 }
 
 #[test]
+fn dto_success_result_shape_is_stable_for_supported_fixture_surface() {
+    let first = normalized_planning_result_value(planner_input(
+        "planner_phase6n_builtins_all",
+        &["planner.phase6n.builtins_all"],
+    ));
+    let second = normalized_planning_result_value(planner_input(
+        "planner_phase6n_builtins_all",
+        &["planner.phase6n.builtins_all"],
+    ));
+
+    assert_eq!(first, second);
+    assert_planning_result_shape("dto success result", &first);
+    assert_eq!(first["status"], "success");
+    assert_eq!(first["warnings"], json!([]));
+    assert_eq!(first["errors"], json!([]));
+
+    let plan = first["execution_plan"]
+        .as_object()
+        .expect("dto success result should include an execution plan");
+    assert_object_keys(
+        "dto success execution_plan",
+        plan,
+        &[
+            "id",
+            "source",
+            "device_context",
+            "runtime_capabilities",
+            "inputs",
+            "artifacts",
+            "steps",
+            "schema_version",
+            "kind",
+        ],
+    );
+    assert!(!plan.contains_key("permission_plan"));
+    assert_eq!(plan["id"], "plan.example.device_plan.001");
+    assert_eq!(plan["schema_version"], 1);
+    assert_eq!(plan["kind"], "execution_plan");
+
+    assert_eq!(
+        plan["source"],
+        json!({
+            "device_profile_ref": "example.device_profile",
+            "device_plan_ref": "example.device_plan",
+            "selected_recipe_refs": ["planner.phase6n.builtins_all"],
+            "expanded_recipe_refs": ["planner.phase6n.builtins_all"]
+        })
+    );
+    assert_eq!(
+        plan["steps"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|step| step["id"].as_str().unwrap())
+            .collect::<Vec<_>>(),
+        vec![
+            "planner.phase6n.builtins_all/resolve",
+            "planner.phase6n.builtins_all/extract_artifacts",
+            "planner.phase6n.builtins_all/extract_archive",
+            "planner.phase6n.builtins_all/install",
+            "planner.phase6n.builtins_all/copy",
+            "planner.phase6n.builtins_all/grant",
+            "planner.phase6n.builtins_all/launch",
+            "planner.phase6n.builtins_all/wait",
+            "planner.phase6n.builtins_all/force_stop",
+        ]
+    );
+
+    let steps = plan["steps"].as_array().unwrap();
+    for (index, step) in steps.iter().enumerate() {
+        let step = step
+            .as_object()
+            .expect("dto execution plan step should be an object");
+        assert_object_keys(
+            &format!("dto success steps[{index}]"),
+            step,
+            &[
+                "id",
+                "recipe_ref",
+                "type",
+                "name",
+                "dependencies",
+                "constraints",
+                "params",
+                "skip_if",
+                "verify",
+            ],
+        );
+        assert_object_keys(
+            &format!("dto success steps[{index}].constraints"),
+            step["constraints"]
+                .as_object()
+                .expect("step constraints should be an object"),
+            &["capabilities", "conflicts_with"],
+        );
+        assert!(step["dependencies"].as_array().is_some());
+        assert!(step["params"].as_object().is_some());
+        assert!(step["skip_if"].as_array().is_some());
+        assert!(step["verify"].as_array().is_some());
+    }
+}
+
+#[test]
+fn dto_normalized_params_ref_defaults_and_permission_surface_are_stable() {
+    let actual = normalized_planning_result_value(planner_input(
+        "planner_phase6n_builtins_all",
+        &["planner.phase6n.builtins_all"],
+    ));
+    let plan = actual["execution_plan"].as_object().unwrap();
+    assert!(!plan.contains_key("permission_plan"));
+
+    let resolve = planner_step(&actual, "planner.phase6n.builtins_all/resolve");
+    assert_object_keys(
+        "dto resolve params",
+        resolve["params"].as_object().unwrap(),
+        &["artifacts"],
+    );
+    assert_eq!(
+        resolve["params"]["artifacts"],
+        json!({"value": [
+            "planner.phase6n.builtins_all/archive_zip",
+            "planner.phase6n.builtins_all/app_apk"
+        ]})
+    );
+
+    let extract = planner_step(&actual, "planner.phase6n.builtins_all/extract_artifacts");
+    assert_eq!(extract["params"]["extract_on"], json!({"value": "host"}));
+    assert_eq!(
+        extract["params"]["artifacts"],
+        json!({"value": ["planner.phase6n.builtins_all/archive_zip"]})
+    );
+
+    let archive = planner_step(&actual, "planner.phase6n.builtins_all/extract_archive");
+    assert_eq!(archive["params"]["cleanup"], json!({"value": true}));
+    assert_eq!(
+        archive["params"]["archive"],
+        json!({"ref": "artifacts.planner.phase6n.builtins_all/archive_zip.local_path"})
+    );
+
+    let install = planner_step(&actual, "planner.phase6n.builtins_all/install");
+    assert_eq!(
+        install["params"]["replace_existing"],
+        json!({"value": false})
+    );
+
+    let copy = planner_step(&actual, "planner.phase6n.builtins_all/copy");
+    assert_eq!(
+        copy["dependencies"],
+        json!(["planner.phase6n.builtins_all/extract_artifacts"])
+    );
+    assert_eq!(
+        copy["params"]["source"],
+        json!({"ref": "steps.planner.phase6n.builtins_all/extract_artifacts.outputs.extracted_paths"})
+    );
+    assert_eq!(copy["params"]["copy_policy"], json!({"value": "merge"}));
+
+    let grant = planner_step(&actual, "planner.phase6n.builtins_all/grant");
+    assert_object_keys(
+        "dto grant params",
+        grant["params"].as_object().unwrap(),
+        &["runtime", "appops", "policy"],
+    );
+    assert_eq!(
+        grant["params"]["runtime"]["value"][0]["package_name"],
+        "com.example.app"
+    );
+    assert_eq!(
+        grant["params"]["appops"]["value"][0]["op"],
+        "MANAGE_EXTERNAL_STORAGE"
+    );
+    assert_eq!(
+        grant["params"]["policy"],
+        json!({"value": {"on_failure": "fail", "require_all": true}})
+    );
+}
+
+#[test]
+fn dto_error_result_shape_uses_current_focused_step_param_diagnostic() {
+    let first = planning_result_value(param_contract_input(vec![param_contract_step(
+        "copy",
+        "copy_files",
+        vec![],
+        ref_params(vec![("dest", ParamValue::Literal(json!("/sdcard/Out")))]),
+    )]));
+    let second = planning_result_value(param_contract_input(vec![param_contract_step(
+        "copy",
+        "copy_files",
+        vec![],
+        ref_params(vec![("dest", ParamValue::Literal(json!("/sdcard/Out")))]),
+    )]));
+
+    assert_eq!(first, second);
+    assert_planning_result_shape("dto error result", &first);
+    assert_eq!(first["status"], "error");
+    assert_eq!(first["warnings"], json!([]));
+    assert_eq!(first["execution_plan"], Value::Null);
+    assert_eq!(
+        first["errors"],
+        json!([
+            {
+                "code": "missing_required_param",
+                "message": "Param 'source' is required for step type 'copy_files'.",
+                "details": {
+                    "recipe_ref": "planner.param_contract",
+                    "step_id": "copy",
+                    "step_type": "copy_files",
+                    "param": "source",
+                    "expected": "ref",
+                    "actual": null
+                }
+            }
+        ])
+    );
+}
+
+#[test]
+fn dto_multiple_error_order_is_deterministic_for_existing_unknown_param_slice() {
+    let actual = planning_result_value(param_contract_input(vec![param_contract_step(
+        "copy",
+        "copy_files",
+        vec![],
+        ref_params(vec![
+            ("source", ParamValue::Ref("steps.extract".to_string())),
+            ("dest", ParamValue::Literal(json!("/sdcard/Out"))),
+            ("z_extra", ParamValue::Literal(json!(true))),
+            ("a_extra", ParamValue::Literal(json!(false))),
+        ]),
+    )]));
+
+    assert_eq!(actual["status"], "error", "{actual:#}");
+    assert_eq!(actual["execution_plan"], Value::Null);
+    let errors = actual["errors"].as_array().unwrap();
+    assert_eq!(errors.len(), 2, "{errors:#?}");
+    assert_eq!(
+        errors
+            .iter()
+            .map(|error| (
+                error["code"].as_str().unwrap(),
+                error["details"]["param"].as_str().unwrap()
+            ))
+            .collect::<Vec<_>>(),
+        vec![("unknown_param", "a_extra"), ("unknown_param", "z_extra")]
+    );
+}
+
+#[test]
 fn artifact_selection_explicit_and_groups_preserve_normalized_order() {
     let actual = planning_result_value(artifact_selection_input(
         "resolve_artifacts",
@@ -2014,6 +2260,15 @@ fn param_contract_step_param<'a>(actual: &'a Value, step_id: &str, param: &str) 
         .expect("param contract step should exist")["params"][param]
 }
 
+fn planner_step<'a>(actual: &'a Value, execution_step_id: &str) -> &'a Value {
+    actual["execution_plan"]["steps"]
+        .as_array()
+        .expect("execution plan should include steps")
+        .iter()
+        .find(|step| step["id"] == execution_step_id)
+        .expect("planner execution step should exist")
+}
+
 fn assert_param_contract_error(
     actual: &Value,
     code: &str,
@@ -2226,6 +2481,25 @@ fn discovered_planner_golden_names() -> BTreeSet<String> {
 }
 
 fn assert_planner_golden_shape(name: &str, parsed: &Value) {
+    assert_planning_result_shape(name, parsed);
+}
+
+fn assert_planning_result_shape(name: &str, parsed: &Value) {
+    let parsed_object = parsed
+        .as_object()
+        .expect("planner result should be a JSON object");
+    assert_object_keys(
+        name,
+        parsed_object,
+        &[
+            "status",
+            "warnings",
+            "errors",
+            "execution_plan",
+            "schema_version",
+            "kind",
+        ],
+    );
     assert_eq!(
         parsed["schema_version"], 1,
         "{name} should use schema version 1"
@@ -2245,21 +2519,52 @@ fn assert_planner_golden_shape(name: &str, parsed: &Value) {
         parsed["warnings"].as_array().is_some(),
         "{name} should have a warnings array"
     );
+    assert_planner_message_array_shape(name, "warnings", &parsed["warnings"]);
     let errors = parsed["errors"]
         .as_array()
         .expect("planner golden should have an errors array");
+    assert_planner_message_array_shape(name, "errors", &parsed["errors"]);
 
-    match &parsed["execution_plan"] {
-        Value::Object(plan) => assert_execution_plan_shape(name, plan),
-        Value::Null => assert!(
-            !errors.is_empty(),
-            "{name} should include errors when execution_plan is null"
-        ),
-        _ => panic!("{name} should have an execution_plan object or null"),
+    match parsed["status"].as_str() {
+        Some("success" | "warning") => match &parsed["execution_plan"] {
+            Value::Object(plan) => assert_execution_plan_shape(name, plan),
+            _ => panic!("{name} should include an execution_plan object for non-error status"),
+        },
+        Some("error") => {
+            assert_eq!(
+                parsed["execution_plan"],
+                Value::Null,
+                "{name} error results should not include an execution_plan"
+            );
+            assert!(
+                !errors.is_empty(),
+                "{name} should include errors when execution_plan is null"
+            );
+        }
+        _ => panic!("{name} should have a valid planning status"),
     }
 }
 
 fn assert_execution_plan_shape(name: &str, plan: &serde_json::Map<String, Value>) {
+    assert_object_keys(
+        &format!("{name}.execution_plan"),
+        plan,
+        &[
+            "id",
+            "source",
+            "device_context",
+            "runtime_capabilities",
+            "inputs",
+            "artifacts",
+            "steps",
+            "schema_version",
+            "kind",
+        ],
+    );
+    assert!(
+        !plan.contains_key("permission_plan"),
+        "{name} execution_plan should not serialize permission_plan"
+    );
     assert_non_empty_string(name, plan.get("id"), "execution_plan.id");
     assert_eq!(
         plan.get("schema_version"),
@@ -2275,6 +2580,16 @@ fn assert_execution_plan_shape(name: &str, plan: &serde_json::Map<String, Value>
         .get("source")
         .and_then(Value::as_object)
         .expect("planner execution_plan should include source object");
+    assert_object_keys(
+        &format!("{name}.execution_plan.source"),
+        source,
+        &[
+            "device_profile_ref",
+            "device_plan_ref",
+            "selected_recipe_refs",
+            "expanded_recipe_refs",
+        ],
+    );
     assert_non_empty_string(
         name,
         source.get("device_profile_ref"),
@@ -2299,6 +2614,26 @@ fn assert_execution_plan_shape(name: &str, plan: &serde_json::Map<String, Value>
             .is_some_and(|items| !items.is_empty()),
         "{name} should include expanded recipe refs"
     );
+    assert!(
+        plan.get("device_context")
+            .and_then(Value::as_object)
+            .is_some(),
+        "{name} execution_plan.device_context should be an object"
+    );
+    assert!(
+        plan.get("runtime_capabilities")
+            .and_then(Value::as_object)
+            .is_some(),
+        "{name} execution_plan.runtime_capabilities should be an object"
+    );
+    assert!(
+        plan.get("inputs").and_then(Value::as_array).is_some(),
+        "{name} execution_plan.inputs should be an array"
+    );
+    assert!(
+        plan.get("artifacts").and_then(Value::as_array).is_some(),
+        "{name} execution_plan.artifacts should be an array"
+    );
 
     let steps = plan
         .get("steps")
@@ -2309,6 +2644,21 @@ fn assert_execution_plan_shape(name: &str, plan: &serde_json::Map<String, Value>
         let step = step
             .as_object()
             .expect("planner execution_plan step should be an object");
+        assert_object_keys(
+            &format!("{name}.execution_plan.steps[{index}]"),
+            step,
+            &[
+                "id",
+                "recipe_ref",
+                "type",
+                "name",
+                "dependencies",
+                "constraints",
+                "params",
+                "skip_if",
+                "verify",
+            ],
+        );
         assert_non_empty_string(name, step.get("id"), &format!("steps[{index}].id"));
         assert_non_empty_string(
             name,
@@ -2316,15 +2666,72 @@ fn assert_execution_plan_shape(name: &str, plan: &serde_json::Map<String, Value>
             &format!("steps[{index}].recipe_ref"),
         );
         assert_non_empty_string(name, step.get("type"), &format!("steps[{index}].type"));
+        assert_non_empty_string(name, step.get("name"), &format!("steps[{index}].name"));
         assert!(
             step.get("dependencies").and_then(Value::as_array).is_some(),
             "{name} steps[{index}].dependencies should be an array"
+        );
+        let constraints = step
+            .get("constraints")
+            .and_then(Value::as_object)
+            .expect("planner execution_plan step constraints should be an object");
+        assert_object_keys(
+            &format!("{name}.execution_plan.steps[{index}].constraints"),
+            constraints,
+            &["capabilities", "conflicts_with"],
+        );
+        assert!(
+            constraints
+                .get("capabilities")
+                .and_then(Value::as_array)
+                .is_some(),
+            "{name} steps[{index}].constraints.capabilities should be an array"
+        );
+        assert!(
+            constraints
+                .get("conflicts_with")
+                .and_then(Value::as_array)
+                .is_some(),
+            "{name} steps[{index}].constraints.conflicts_with should be an array"
         );
         assert!(
             step.get("params").and_then(Value::as_object).is_some(),
             "{name} steps[{index}].params should be an object"
         );
+        assert!(
+            step.get("skip_if").and_then(Value::as_array).is_some(),
+            "{name} steps[{index}].skip_if should be an array"
+        );
+        assert!(
+            step.get("verify").and_then(Value::as_array).is_some(),
+            "{name} steps[{index}].verify should be an array"
+        );
     }
+}
+
+fn assert_planner_message_array_shape(name: &str, field: &str, messages: &Value) {
+    let messages = messages
+        .as_array()
+        .expect("planner message collection should be an array");
+    for (index, message) in messages.iter().enumerate() {
+        let message = message
+            .as_object()
+            .expect("planner message should be an object");
+        let context = format!("{name}.{field}[{index}]");
+        assert_object_keys(&context, message, &["code", "message", "details"]);
+        assert_non_empty_string(&context, message.get("code"), "code");
+        assert_non_empty_string(&context, message.get("message"), "message");
+        assert!(
+            message.get("details").and_then(Value::as_object).is_some(),
+            "{context}.details should be an object"
+        );
+    }
+}
+
+fn assert_object_keys(name: &str, object: &serde_json::Map<String, Value>, expected: &[&str]) {
+    let actual = object.keys().map(String::as_str).collect::<BTreeSet<_>>();
+    let expected = expected.iter().copied().collect::<BTreeSet<_>>();
+    assert_eq!(actual, expected, "{name} should have expected key set");
 }
 
 fn assert_non_empty_string(name: &str, value: Option<&Value>, field: &str) {

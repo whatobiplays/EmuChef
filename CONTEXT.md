@@ -163,12 +163,17 @@ fixture inventory/parsing guard that consumes checked-in authored fixtures and
 planner goldens only, plus focused coverage for selected emitted step-output
 ref validation, shorthand step-ref rewriting, selected/emitted step dependency
 validation, internal permission-intent construction from selected
-`grant_permissions` step params, and emitted-step param contract validation for
+`grant_permissions` step params, execution-plan DTO shape/normalization for the
+supported fixture-scoped surface, and emitted-step param contract validation for
 `copy_files`, `extract_artifacts`, `extract_archive`, `install_apk`, `wait`, and
-`grant_permissions`. Focused Rust planner param contract diagnostics include
-recipe, step, step type, param, expected value/mode, and actual value context.
-Unknown param rejection in this planner parity slice is limited to those focused
-step types.
+`grant_permissions`. DTO shape coverage asserts successful and error
+`PlanningResult`/`ExecutionPlan` key sets, selected normalized params, semantic
+list ordering, and the absence of a serialized `permission_plan` field without
+turning arbitrary JSON object key order into a public contract. Focused Rust
+planner param contract diagnostics include recipe, step, step type, param,
+expected value/mode, and actual value context. Unknown param rejection in this
+planner parity slice is limited to those focused step types, and deterministic
+multi-error ordering is covered only for an existing focused unknown-param path.
 
 The Rust backend supports one-shot stateless requests through:
 
@@ -541,14 +546,17 @@ parsed by Rust tests so new checked-in planner goldens must be classified
 intentionally. It validates malformed `steps.*` refs, unknown selected step
 targets, unknown step outputs, and shorthand refs to selected steps without
 primary outputs for emitted planner steps; non-step refs remain outside that
-validation slice. It builds internal structured permission intent from selected
-step-local `grant_permissions` runtime/app-op/policy params without serializing a
-plan-level `permission_plan` field. It also validates selected/emitted step
-dependencies for unknown or non-emitted targets, self-dependencies, static
-dependency cycles, and focused `grant_permissions` param shapes while preserving
-duplicate authored dependencies in emitted execution steps. Runtime dependency
-outcomes such as blocked, skipped, or failed step propagation remain executor
-behavior. The Rust executor skeleton is internal test scaffolding only: it
+validation slice. It asserts focused execution-plan DTO shape for successful and
+error planner results, selected normalized params, semantic list ordering, and
+stable internal error-message shape for the supported fixture-scoped surface. It
+builds internal structured permission intent from selected step-local
+`grant_permissions` runtime/app-op/policy params without serializing a plan-level
+`permission_plan` field. It also validates selected/emitted step dependencies
+for unknown or non-emitted targets, self-dependencies, static dependency cycles,
+and focused `grant_permissions` param shapes while preserving duplicate authored
+dependencies in emitted execution steps. Runtime dependency outcomes such as
+blocked, skipped, or failed step propagation remain executor behavior. The Rust
+executor skeleton is internal test scaffolding only: it
 models selected `wait`, `grant_permissions`, dependency, skip, verify,
 temp-dir-confined filesystem/artifact behavior, fake dry-run device semantics,
 and Phase 6R real-ADB adapter foundations without public API exposure. It does
