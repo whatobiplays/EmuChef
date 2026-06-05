@@ -14,6 +14,7 @@ use serde_json::Map;
 use serde_json::{json, Value};
 
 use crate::model::{OrderedMap, ParamValue, Recipe, Step, StepCondition, StepConstraints};
+use crate::planner_device_plan;
 use crate::step_specs;
 use crate::yaml;
 
@@ -202,8 +203,9 @@ pub struct PlannerInput {
     pub runtime_capabilities: RuntimeCapabilities,
 }
 
-#[derive(Debug)]
+#[derive(Clone, Debug, Eq, PartialEq)]
 pub struct PlannerLoadError {
+    code: String,
     message: String,
 }
 
@@ -229,6 +231,56 @@ impl PlannerInput {
             device_context,
             runtime_capabilities,
         })
+    }
+
+    pub(crate) fn from_authored_device_plan(
+        authored_root: impl AsRef<Path>,
+        device_plan_ref: &str,
+        plan_id: String,
+        input_bindings: OrderedMap<Value>,
+    ) -> Result<Self, PlannerLoadError> {
+        let authored_root = authored_root.as_ref();
+        let parts = planner_device_plan::load_planner_input_parts(authored_root, device_plan_ref)?;
+        let recipes = load_top_level_recipes(authored_root)?;
+        let recipe_ids = recipes
+            .iter()
+            .map(|recipe| recipe.id.as_str())
+            .collect::<HashSet<_>>();
+        for recipe_ref in &parts.recipe_refs {
+            if !recipe_ids.contains(recipe_ref.as_str()) {
+                return Err(PlannerLoadError::new(
+                    "recipe_not_found",
+                    format!(
+                        "Recipe '{recipe_ref}' referenced by device plan '{}' was not found.",
+                        parts.device_plan_ref
+                    ),
+                ));
+            }
+        }
+
+        Ok(Self {
+            recipes,
+            selected_recipe_refs: parts.selected_recipe_refs,
+            input_bindings,
+            plan_id,
+            device_plan_ref: parts.device_plan_ref,
+            device_profile_ref: parts.device_profile_ref,
+            device_context: parts.device_context,
+            runtime_capabilities: parts.runtime_capabilities,
+        })
+    }
+}
+
+impl PlannerLoadError {
+    pub(crate) fn new(code: impl Into<String>, message: impl Into<String>) -> Self {
+        Self {
+            code: code.into(),
+            message: message.into(),
+        }
+    }
+
+    pub(crate) fn code(&self) -> &str {
+        &self.code
     }
 }
 
@@ -348,11 +400,14 @@ pub fn plan_execution(input: PlannerInput) -> PlanningResult {
 
 fn load_top_level_recipes(authored_root: &Path) -> Result<Vec<Recipe>, PlannerLoadError> {
     let recipe_root = authored_root.join("recipes");
-    let entries = fs::read_dir(&recipe_root).map_err(|error| PlannerLoadError {
-        message: format!(
-            "Failed to read recipe directory {}: {error}",
-            recipe_root.display()
-        ),
+    let entries = fs::read_dir(&recipe_root).map_err(|error| {
+        PlannerLoadError::new(
+            "io",
+            format!(
+                "Failed to read recipe directory {}: {error}",
+                recipe_root.display()
+            ),
+        )
     })?;
     let mut paths = entries
         .filter_map(Result::ok)
@@ -364,8 +419,11 @@ fn load_top_level_recipes(authored_root: &Path) -> Result<Vec<Recipe>, PlannerLo
     paths
         .into_iter()
         .map(|path| {
-            yaml::load_recipe_from_path(&path).map_err(|error| PlannerLoadError {
-                message: format!("Failed to load planner recipe {}: {error}", path.display()),
+            yaml::load_recipe_from_path(&path).map_err(|error| {
+                PlannerLoadError::new(
+                    "authored_data_invalid",
+                    format!("Failed to load planner recipe {}: {error}", path.display()),
+                )
             })
         })
         .collect()

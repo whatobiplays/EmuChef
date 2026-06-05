@@ -1,0 +1,386 @@
+//! Private checked-in device-plan/profile ingestion for Rust planner tests.
+//!
+//! This module intentionally models only the current authored
+//! `device_profiles/*.y*ml` and `device_plans/*.y*ml` shapes needed to build
+//! crate-internal `PlannerInput` values. It does not expose protocol, CLI,
+//! executor, apply, ADB, or real-device profile-matching behavior.
+
+use std::collections::HashSet;
+use std::fs;
+use std::path::{Path, PathBuf};
+
+use serde::Deserialize;
+use serde_yaml::{Mapping, Value as YamlValue};
+
+use crate::planner::{DeviceContext, PlannerLoadError, RuntimeCapabilities};
+
+#[derive(Clone, Debug, PartialEq)]
+pub(crate) struct DeviceProfileInventoryEntry {
+    pub path: PathBuf,
+    pub id: String,
+    pub runtime_capabilities: RuntimeCapabilities,
+    pub device_tags: Vec<String>,
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub(crate) struct DevicePlanInventoryEntry {
+    pub path: PathBuf,
+    pub id: String,
+    pub device_profile_ref: String,
+    pub selected_recipe_refs: Vec<String>,
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub(crate) struct PlannerInputParts {
+    pub device_plan_ref: String,
+    pub device_profile_ref: String,
+    pub recipe_refs: Vec<String>,
+    pub selected_recipe_refs: Vec<String>,
+    pub device_context: DeviceContext,
+    pub runtime_capabilities: RuntimeCapabilities,
+}
+
+#[derive(Clone, Debug)]
+struct DeviceProfileRecord {
+    path: PathBuf,
+    profile: DeviceProfileYaml,
+}
+
+#[derive(Clone, Debug)]
+struct DevicePlanRecord {
+    path: PathBuf,
+    plan: DevicePlanYaml,
+}
+
+#[derive(Clone, Debug, Deserialize)]
+struct DeviceProfileYaml {
+    id: String,
+    name: String,
+    #[serde(rename = "match", default)]
+    match_criteria: DeviceMatchYaml,
+    capability_defaults: RuntimeCapabilitiesYaml,
+    #[serde(default)]
+    device_tags: Vec<String>,
+}
+
+#[derive(Clone, Debug, Default, Deserialize)]
+struct DeviceMatchYaml {
+    #[serde(default)]
+    manufacturer_contains: Vec<String>,
+    #[serde(default)]
+    android_version: Option<AndroidVersionRangeYaml>,
+}
+
+#[derive(Clone, Debug, Deserialize)]
+struct AndroidVersionRangeYaml {
+    min: Option<i64>,
+}
+
+#[derive(Clone, Debug, Deserialize)]
+struct RuntimeCapabilitiesYaml {
+    adb_available: bool,
+    apk_install: bool,
+    shared_storage_write: bool,
+    app_launch: bool,
+    shell_command: bool,
+    package_remove_for_user: bool,
+    root_shell: bool,
+    app_data_write: bool,
+}
+
+#[derive(Clone, Debug, Deserialize)]
+struct DevicePlanYaml {
+    id: String,
+    device_profile_ref: String,
+    #[serde(default)]
+    recipes: Vec<DevicePlanRecipeYaml>,
+}
+
+#[derive(Clone, Debug, Deserialize)]
+struct DevicePlanRecipeYaml {
+    recipe_ref: String,
+    selected_by_default: bool,
+}
+
+pub(crate) fn discover_device_profile_inventory(
+    authored_root: impl AsRef<Path>,
+) -> Result<Vec<DeviceProfileInventoryEntry>, PlannerLoadError> {
+    load_device_profiles(authored_root.as_ref()).map(|records| {
+        records
+            .into_iter()
+            .map(DeviceProfileInventoryEntry::from)
+            .collect()
+    })
+}
+
+pub(crate) fn discover_device_plan_inventory(
+    authored_root: impl AsRef<Path>,
+) -> Result<Vec<DevicePlanInventoryEntry>, PlannerLoadError> {
+    load_device_plans(authored_root.as_ref()).map(|records| {
+        records
+            .into_iter()
+            .map(DevicePlanInventoryEntry::from)
+            .collect()
+    })
+}
+
+pub(crate) fn load_planner_input_parts(
+    authored_root: &Path,
+    device_plan_ref: &str,
+) -> Result<PlannerInputParts, PlannerLoadError> {
+    let profile_records = load_device_profiles(authored_root)?;
+    let plan_records = load_device_plans(authored_root)?;
+    let plan = plan_records
+        .iter()
+        .find(|record| record.plan.id == device_plan_ref)
+        .ok_or_else(|| {
+            let available = plan_records
+                .iter()
+                .map(|record| record.plan.id.as_str())
+                .collect::<Vec<_>>()
+                .join(", ");
+            PlannerLoadError::new(
+                "device_plan_not_found",
+                format!(
+                    "Unknown device plan '{device_plan_ref}'. Available device plans: {available}"
+                ),
+            )
+        })?;
+    let profile = profile_records
+        .iter()
+        .find(|record| record.profile.id == plan.plan.device_profile_ref)
+        .ok_or_else(|| {
+            PlannerLoadError::new(
+                "device_profile_not_found",
+                format!(
+                    "Device profile '{}' referenced by device plan '{}' was not found.",
+                    plan.plan.device_profile_ref, plan.plan.id
+                ),
+            )
+        })?;
+
+    Ok(PlannerInputParts {
+        device_plan_ref: plan.plan.id.clone(),
+        device_profile_ref: profile.profile.id.clone(),
+        recipe_refs: plan
+            .plan
+            .recipes
+            .iter()
+            .map(|selection| selection.recipe_ref.clone())
+            .collect(),
+        selected_recipe_refs: selected_recipe_refs(&plan.plan),
+        device_context: synthetic_device_context(&profile.profile),
+        runtime_capabilities: runtime_capabilities(&profile.profile.capability_defaults),
+    })
+}
+
+impl From<DeviceProfileRecord> for DeviceProfileInventoryEntry {
+    fn from(record: DeviceProfileRecord) -> Self {
+        Self {
+            path: record.path,
+            id: record.profile.id,
+            runtime_capabilities: runtime_capabilities(&record.profile.capability_defaults),
+            device_tags: record.profile.device_tags,
+        }
+    }
+}
+
+impl From<DevicePlanRecord> for DevicePlanInventoryEntry {
+    fn from(record: DevicePlanRecord) -> Self {
+        Self {
+            path: record.path,
+            id: record.plan.id.clone(),
+            device_profile_ref: record.plan.device_profile_ref.clone(),
+            selected_recipe_refs: selected_recipe_refs(&record.plan),
+        }
+    }
+}
+
+fn load_device_profiles(
+    authored_root: &Path,
+) -> Result<Vec<DeviceProfileRecord>, PlannerLoadError> {
+    let mut seen_ids = HashSet::new();
+    top_level_yaml_files(&authored_root.join("device_profiles"))?
+        .into_iter()
+        .map(|path| {
+            let profile = parse_authored_yaml::<DeviceProfileYaml>(&path, "device_profile")?;
+            if !seen_ids.insert(profile.id.clone()) {
+                return Err(PlannerLoadError::new(
+                    "device_profile_id_conflict",
+                    format!("Duplicate device_profile id '{}'.", profile.id),
+                ));
+            }
+            Ok(DeviceProfileRecord { path, profile })
+        })
+        .collect()
+}
+
+fn load_device_plans(authored_root: &Path) -> Result<Vec<DevicePlanRecord>, PlannerLoadError> {
+    let mut seen_ids = HashSet::new();
+    top_level_yaml_files(&authored_root.join("device_plans"))?
+        .into_iter()
+        .map(|path| {
+            let plan = parse_authored_yaml::<DevicePlanYaml>(&path, "device_plan")?;
+            if !seen_ids.insert(plan.id.clone()) {
+                return Err(PlannerLoadError::new(
+                    "device_plan_id_conflict",
+                    format!("Duplicate device_plan id '{}'.", plan.id),
+                ));
+            }
+            Ok(DevicePlanRecord { path, plan })
+        })
+        .collect()
+}
+
+fn top_level_yaml_files(directory: &Path) -> Result<Vec<PathBuf>, PlannerLoadError> {
+    if !directory.exists() {
+        return Ok(Vec::new());
+    }
+    let entries = fs::read_dir(directory).map_err(|error| {
+        PlannerLoadError::new(
+            "io",
+            format!("Failed to read directory {}: {error}", directory.display()),
+        )
+    })?;
+    let mut paths = entries
+        .filter_map(Result::ok)
+        .map(|entry| entry.path())
+        .filter(|path| path.is_file() && is_yaml_extension(path))
+        .collect::<Vec<_>>();
+    paths.sort();
+    Ok(paths)
+}
+
+fn parse_authored_yaml<T>(path: &Path, expected_kind: &str) -> Result<T, PlannerLoadError>
+where
+    T: for<'de> Deserialize<'de>,
+{
+    let text = fs::read_to_string(path).map_err(|error| {
+        PlannerLoadError::new("io", format!("Failed to read {}: {error}", path.display()))
+    })?;
+    let value = serde_yaml::from_str::<YamlValue>(&text).map_err(|error| {
+        PlannerLoadError::new(
+            "authored_data_invalid",
+            format!(
+                "File '{}' is not valid YAML: {error}.",
+                path_file_name(path)
+            ),
+        )
+    })?;
+    let empty_mapping = Mapping::new();
+    let mapping = match &value {
+        YamlValue::Mapping(mapping) => mapping,
+        YamlValue::Null => &empty_mapping,
+        _ => {
+            return Err(PlannerLoadError::new(
+                "authored_data_invalid",
+                format!(
+                    "File '{}' must contain a top-level mapping.",
+                    path_file_name(path)
+                ),
+            ));
+        }
+    };
+    if yaml_i64(mapping, "schema_version") != Some(1) {
+        return Err(PlannerLoadError::new(
+            "authored_data_invalid",
+            format!(
+                "File '{}' has unsupported schema_version.",
+                path_file_name(path)
+            ),
+        ));
+    }
+    if yaml_string(mapping, "kind").as_deref() != Some(expected_kind) {
+        return Err(PlannerLoadError::new(
+            "authored_data_invalid",
+            format!(
+                "File '{}' has kind {:?}, expected '{}'.",
+                path_file_name(path),
+                yaml_string(mapping, "kind"),
+                expected_kind
+            ),
+        ));
+    }
+
+    serde_yaml::from_value(value).map_err(|error| {
+        PlannerLoadError::new(
+            "authored_data_invalid",
+            format!(
+                "File '{}' has an invalid schema shape: {error}.",
+                path_file_name(path)
+            ),
+        )
+    })
+}
+
+fn selected_recipe_refs(plan: &DevicePlanYaml) -> Vec<String> {
+    plan.recipes
+        .iter()
+        .filter(|selection| selection.selected_by_default)
+        .map(|selection| selection.recipe_ref.clone())
+        .collect()
+}
+
+fn synthetic_device_context(profile: &DeviceProfileYaml) -> DeviceContext {
+    DeviceContext {
+        manufacturer: profile
+            .match_criteria
+            .manufacturer_contains
+            .first()
+            .cloned()
+            .unwrap_or_else(|| format!("profile:{}", profile.id)),
+        model: if profile.name.is_empty() {
+            format!("profile:{}", profile.id)
+        } else {
+            profile.name.clone()
+        },
+        android_version: profile
+            .match_criteria
+            .android_version
+            .as_ref()
+            .and_then(|version| version.min)
+            .unwrap_or(0),
+        android_api_level: None,
+        device_tags: profile.device_tags.clone(),
+    }
+}
+
+fn runtime_capabilities(capabilities: &RuntimeCapabilitiesYaml) -> RuntimeCapabilities {
+    RuntimeCapabilities {
+        adb_available: capabilities.adb_available,
+        apk_install: capabilities.apk_install,
+        shared_storage_write: capabilities.shared_storage_write,
+        app_launch: capabilities.app_launch,
+        shell_command: capabilities.shell_command,
+        package_remove_for_user: capabilities.package_remove_for_user,
+        root_shell: capabilities.root_shell,
+        app_data_write: capabilities.app_data_write,
+    }
+}
+
+fn yaml_i64(mapping: &Mapping, key: &str) -> Option<i64> {
+    mapping
+        .get(&YamlValue::String(key.to_string()))
+        .and_then(YamlValue::as_i64)
+}
+
+fn yaml_string(mapping: &Mapping, key: &str) -> Option<String> {
+    mapping
+        .get(&YamlValue::String(key.to_string()))
+        .and_then(YamlValue::as_str)
+        .map(ToString::to_string)
+}
+
+fn path_file_name(path: &Path) -> String {
+    path.file_name()
+        .and_then(|name| name.to_str())
+        .unwrap_or("<unknown>")
+        .to_string()
+}
+
+fn is_yaml_extension(path: &Path) -> bool {
+    matches!(
+        path.extension().and_then(|extension| extension.to_str()),
+        Some("yaml" | "yml")
+    )
+}

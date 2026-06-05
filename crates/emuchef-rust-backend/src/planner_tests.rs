@@ -3,6 +3,7 @@ use std::fs;
 use std::path::{Path, PathBuf};
 
 use serde_json::{json, Value};
+use tempfile::TempDir;
 
 use crate::model::{
     OrderedMap, ParamValue, Recipe, RecipeProvides, RemoteFileArtifact, Step, StepCondition,
@@ -10,6 +11,9 @@ use crate::model::{
 };
 use crate::planner::{
     build_permission_intent, plan_execution, DeviceContext, PlannerInput, RuntimeCapabilities,
+};
+use crate::planner_device_plan::{
+    discover_device_plan_inventory, discover_device_profile_inventory,
 };
 
 fn authored_root(name: &str) -> PathBuf {
@@ -126,6 +130,23 @@ fn authored_corpus_planner_input_with_bindings(
             .insert((*input_id).to_string(), value.clone());
     }
     input
+}
+
+fn repo_device_plan_planner_input_with_bindings(
+    device_plan_ref: &str,
+    input_bindings: &[(&str, Value)],
+) -> PlannerInput {
+    let mut bindings = OrderedMap::new();
+    for (input_id, value) in input_bindings {
+        bindings.insert((*input_id).to_string(), value.clone());
+    }
+    PlannerInput::from_authored_device_plan(
+        repo_authored_root(),
+        device_plan_ref,
+        format!("plan.p7i.{device_plan_ref}.001"),
+        bindings,
+    )
+    .unwrap_or_else(|error| panic!("{device_plan_ref} should build PlannerInput: {error}"))
 }
 
 fn planning_result_value(input: PlannerInput) -> Value {
@@ -2154,6 +2175,332 @@ fn authored_corpus_planner_uses_rust_inputs_and_preserves_checked_in_evidence() 
     assert_eq!(snapshot_files(&golden_dir()), goldens_before);
 }
 
+#[test]
+fn repo_device_profile_inventory_is_explicit_by_path_and_id() {
+    let actual = discover_device_profile_inventory(&repo_authored_root())
+        .expect("repo device profile inventory should parse")
+        .into_iter()
+        .map(|entry| {
+            (
+                repo_relative_path(&entry.path),
+                entry.id,
+                entry.runtime_capabilities.adb_available,
+                entry.runtime_capabilities.app_data_write,
+                entry.device_tags,
+            )
+        })
+        .collect::<Vec<_>>();
+
+    assert_eq!(
+        actual,
+        vec![
+            (
+                "authored/device_profiles/ayaneo.generic.yaml".to_string(),
+                "ayaneo.generic".to_string(),
+                true,
+                false,
+                vec!["handheld_android".to_string(), "brand_ayaneo".to_string()],
+            ),
+            (
+                "authored/device_profiles/ayaneo.konkr_pocket_fit.yaml".to_string(),
+                "ayaneo.konkr_pocket_fit".to_string(),
+                true,
+                true,
+                vec!["handheld_android".to_string(), "brand_ayaneo".to_string()],
+            ),
+            (
+                "authored/device_profiles/ayaneo.pocket_air_mini.yaml".to_string(),
+                "ayaneo.pocket_air_mini".to_string(),
+                true,
+                false,
+                vec!["handheld_android".to_string(), "brand_ayaneo".to_string()],
+            ),
+            (
+                "authored/device_profiles/ayaneo.pocket_s2.yaml".to_string(),
+                "ayaneo.pocket_s2".to_string(),
+                true,
+                false,
+                vec!["handheld_android".to_string(), "brand_ayaneo".to_string()],
+            ),
+            (
+                "authored/device_profiles/ayaneo.pocket_s_mini.yaml".to_string(),
+                "ayaneo.pocket_s_mini".to_string(),
+                true,
+                true,
+                vec!["handheld_android".to_string(), "brand_ayaneo".to_string()],
+            ),
+        ]
+    );
+}
+
+#[test]
+fn repo_device_plan_inventory_is_explicit_by_path_id_profile_and_selected_order() {
+    let actual = discover_device_plan_inventory(&repo_authored_root())
+        .expect("repo device plan inventory should parse")
+        .into_iter()
+        .map(|entry| {
+            (
+                repo_relative_path(&entry.path),
+                entry.id,
+                entry.device_profile_ref,
+                entry.selected_recipe_refs,
+            )
+        })
+        .collect::<Vec<_>>();
+
+    assert_eq!(
+        actual,
+        vec![
+            (
+                "authored/device_plans/ayaneo.generic.base.yaml".to_string(),
+                "ayaneo.generic.base".to_string(),
+                "ayaneo.generic".to_string(),
+                vec![
+                    "app.retroarch.provision".to_string(),
+                    "feature.copy_bios".to_string(),
+                ],
+            ),
+            (
+                "authored/device_plans/ayaneo.konkr_pocket_fit.base.yaml".to_string(),
+                "ayaneo.konkr_pocket_fit.base".to_string(),
+                "ayaneo.konkr_pocket_fit".to_string(),
+                vec!["app.retroarch.provision".to_string()],
+            ),
+            (
+                "authored/device_plans/ayaneo.pocket_air_mini.base.yaml".to_string(),
+                "ayaneo.pocket_air_mini.base".to_string(),
+                "ayaneo.pocket_air_mini".to_string(),
+                vec![
+                    "app.retroarch.provision".to_string(),
+                    "feature.copy_bios".to_string(),
+                ],
+            ),
+            (
+                "authored/device_plans/ayaneo.pocket_s2.base.yaml".to_string(),
+                "ayaneo.pocket_s2.base".to_string(),
+                "ayaneo.pocket_s2".to_string(),
+                vec![
+                    "app.retroarch.provision".to_string(),
+                    "feature.copy_bios".to_string(),
+                    "app.xaniteog.install".to_string(),
+                ],
+            ),
+            (
+                "authored/device_plans/ayaneo.pocket_s_mini.base.yaml".to_string(),
+                "ayaneo.pocket_s_mini.base".to_string(),
+                "ayaneo.pocket_s_mini".to_string(),
+                vec!["app.retroarch.provision".to_string()],
+            ),
+        ]
+    );
+}
+
+#[test]
+fn repo_device_plan_selected_refs_map_to_existing_authored_recipes() {
+    let recipes = authored_corpus_recipe_inventory()
+        .iter()
+        .map(|entry| entry.recipe_id)
+        .collect::<BTreeSet<_>>();
+    for plan in discover_device_plan_inventory(&repo_authored_root())
+        .expect("repo device plan inventory should parse")
+    {
+        for recipe_ref in &plan.selected_recipe_refs {
+            assert!(
+                recipes.contains(recipe_ref.as_str()),
+                "{} selected unknown recipe {}",
+                plan.id,
+                recipe_ref
+            );
+        }
+    }
+}
+
+#[test]
+fn repo_device_plan_context_builds_planner_input_from_profile_data() {
+    let input = repo_device_plan_planner_input_with_bindings("ayaneo.konkr_pocket_fit.base", &[]);
+
+    assert_eq!(input.device_plan_ref, "ayaneo.konkr_pocket_fit.base");
+    assert_eq!(input.device_profile_ref, "ayaneo.konkr_pocket_fit");
+    assert_eq!(
+        input.selected_recipe_refs,
+        vec!["app.retroarch.provision".to_string()]
+    );
+    assert_eq!(input.device_context.manufacturer, "AYANEO");
+    assert_eq!(input.device_context.model, "AYANEO KONKR Pocket FIT");
+    assert_eq!(input.device_context.android_version, 14);
+    assert_eq!(input.device_context.android_api_level, None);
+    assert_eq!(
+        input.device_context.device_tags,
+        vec!["handheld_android".to_string(), "brand_ayaneo".to_string()]
+    );
+    assert!(input.runtime_capabilities.app_data_write);
+    assert!(input.runtime_capabilities.root_shell);
+}
+
+#[test]
+fn repo_device_plan_ingestion_accepts_supplied_bindings_without_applying_overrides() {
+    let input = repo_device_plan_planner_input_with_bindings(
+        "ayaneo.pocket_s2.base",
+        &[
+            (
+                "feature.copy_bios/bios_source_dir",
+                json!("/tmp/emuchef-p7i-bios"),
+            ),
+            (
+                "app.xaniteog.install/xaniteog_apk",
+                json!("/tmp/emuchef-p7i-xaniteog.apk"),
+            ),
+        ],
+    );
+
+    assert_eq!(
+        input.selected_recipe_refs,
+        vec![
+            "app.retroarch.provision".to_string(),
+            "feature.copy_bios".to_string(),
+            "app.xaniteog.install".to_string(),
+        ]
+    );
+    assert_eq!(
+        input
+            .input_bindings
+            .get("feature.copy_bios/bios_source_dir"),
+        Some(&json!("/tmp/emuchef-p7i-bios"))
+    );
+    assert_eq!(
+        input
+            .input_bindings
+            .get("app.xaniteog.install/xaniteog_apk"),
+        Some(&json!("/tmp/emuchef-p7i-xaniteog.apk"))
+    );
+    assert!(
+        !input.input_bindings.contains_key("config_variants"),
+        "metadata-only device plan overrides must not become bindings"
+    );
+}
+
+#[test]
+fn repo_device_plan_profile_context_can_plan_successfully_without_python_or_devices() {
+    let first = planning_result_value(repo_device_plan_planner_input_with_bindings(
+        "ayaneo.pocket_s_mini.base",
+        &[(
+            "app.retroarch.provision/retroarch_cfg",
+            json!("/tmp/emuchef-p7i-retroarch.cfg"),
+        )],
+    ));
+    let second = planning_result_value(repo_device_plan_planner_input_with_bindings(
+        "ayaneo.pocket_s_mini.base",
+        &[(
+            "app.retroarch.provision/retroarch_cfg",
+            json!("/tmp/emuchef-p7i-retroarch.cfg"),
+        )],
+    ));
+
+    assert_eq!(first, second);
+    assert_planning_result_shape("repo device plan/profile context", &first);
+    assert_eq!(first["status"], "success", "{first:#}");
+    assert_eq!(
+        first["execution_plan"]["source"]["device_plan_ref"],
+        "ayaneo.pocket_s_mini.base"
+    );
+    assert_eq!(
+        first["execution_plan"]["source"]["device_profile_ref"],
+        "ayaneo.pocket_s_mini"
+    );
+    assert_eq!(
+        first["execution_plan"]["source"]["selected_recipe_refs"],
+        json!(["app.retroarch.provision"])
+    );
+    assert_eq!(
+        execution_input_ids(&first),
+        vec!["app.retroarch.provision/retroarch_cfg"]
+    );
+    let step_ids = execution_step_ids(&first);
+    assert!(
+        step_ids.contains(&"app.retroarch.provision/seed_retroarch_cfg"),
+        "{step_ids:#?}"
+    );
+    assert!(!serde_json::to_string(&first)
+        .expect("planning result should serialize")
+        .contains("permission_plan"));
+}
+
+#[test]
+fn repo_device_plan_ingestion_errors_are_classified_and_deterministic() {
+    let missing_plan = PlannerInput::from_authored_device_plan(
+        repo_authored_root(),
+        "missing.device_plan",
+        "plan.p7i.missing.001".to_string(),
+        OrderedMap::new(),
+    )
+    .expect_err("missing device plan should be classified");
+    assert_eq!(missing_plan.code(), "device_plan_not_found");
+    assert!(missing_plan
+        .to_string()
+        .contains("Unknown device plan 'missing.device_plan'"));
+
+    let missing_profile_root = temp_authored_root_with_device_plan(
+        "broken.missing_profile",
+        "missing.profile",
+        &[("app.retroarch.provision", true)],
+    );
+    let first = PlannerInput::from_authored_device_plan(
+        missing_profile_root.path().join("authored"),
+        "broken.missing_profile",
+        "plan.p7i.missing_profile.001".to_string(),
+        OrderedMap::new(),
+    )
+    .expect_err("missing profile should be classified");
+    let second = PlannerInput::from_authored_device_plan(
+        missing_profile_root.path().join("authored"),
+        "broken.missing_profile",
+        "plan.p7i.missing_profile.001".to_string(),
+        OrderedMap::new(),
+    )
+    .expect_err("missing profile should be deterministic");
+    assert_eq!(first, second);
+    assert_eq!(first.code(), "device_profile_not_found");
+
+    let missing_recipe_root = temp_authored_root_with_device_plan(
+        "broken.missing_recipe",
+        "ayaneo.konkr_pocket_fit",
+        &[("missing.recipe", true)],
+    );
+    let err = PlannerInput::from_authored_device_plan(
+        missing_recipe_root.path().join("authored"),
+        "broken.missing_recipe",
+        "plan.p7i.missing_recipe.001".to_string(),
+        OrderedMap::new(),
+    )
+    .expect_err("missing recipe should be classified");
+    assert_eq!(err.code(), "recipe_not_found");
+    assert!(err.to_string().contains("missing.recipe"));
+
+    let missing_selected_flag_root = temp_authored_root_with_device_plan_selection_yaml(
+        r#"
+schema_version: 1
+kind: device_plan
+id: broken.missing_selected_flag
+name: Broken Missing Selected Flag
+device_profile_ref: ayaneo.konkr_pocket_fit
+recipes:
+  - recipe_ref: app.retroarch.provision
+defaults: {}
+overrides: {}
+metadata: {}
+"#,
+    );
+    let err = PlannerInput::from_authored_device_plan(
+        missing_selected_flag_root.path().join("authored"),
+        "broken.missing_selected_flag",
+        "plan.p7i.missing_selected_flag.001".to_string(),
+        OrderedMap::new(),
+    )
+    .expect_err("selected_by_default is required by current Python parser semantics");
+    assert_eq!(err.code(), "authored_data_invalid");
+    assert!(err.to_string().contains("selected_by_default"));
+}
+
 fn artifact_selection_input(
     step_type: &str,
     artifacts: Option<Vec<&str>>,
@@ -2747,6 +3094,72 @@ fn discovered_authored_corpus_recipe_paths() -> Vec<String> {
         .collect::<Vec<_>>();
     paths.sort();
     paths
+}
+
+fn repo_relative_path(path: &Path) -> String {
+    path.strip_prefix(repo_root())
+        .expect("repo inventory path should live under repo root")
+        .to_string_lossy()
+        .replace('\\', "/")
+}
+
+fn temp_authored_root_with_device_plan(
+    device_plan_id: &str,
+    device_profile_ref: &str,
+    selections: &[(&str, bool)],
+) -> TempDir {
+    let recipes = selections
+        .iter()
+        .map(|(recipe_ref, selected)| {
+            format!("  - recipe_ref: {recipe_ref}\n    selected_by_default: {selected}\n")
+        })
+        .collect::<String>();
+    temp_authored_root_with_device_plan_selection_yaml(&format!(
+        r#"
+schema_version: 1
+kind: device_plan
+id: {device_plan_id}
+name: Test Device Plan
+device_profile_ref: {device_profile_ref}
+recipes:
+{recipes}defaults: {{}}
+overrides: {{}}
+metadata: {{}}
+"#
+    ))
+}
+
+fn temp_authored_root_with_device_plan_selection_yaml(device_plan_yaml: &str) -> TempDir {
+    let temp = TempDir::new().expect("temp authored root should be created");
+    let authored_root = temp.path().join("authored");
+    for directory in ["apps", "recipes", "device_profiles", "device_plans"] {
+        fs::create_dir_all(authored_root.join(directory))
+            .expect("temp authored directory should be created");
+    }
+
+    for entry in authored_corpus_recipe_inventory() {
+        let source = repo_root().join(entry.path);
+        let target = authored_root.join(entry.path.strip_prefix("authored/").unwrap());
+        fs::copy(&source, &target).unwrap_or_else(|error| {
+            panic!(
+                "should copy {} to {}: {error}",
+                source.display(),
+                target.display()
+            )
+        });
+    }
+    fs::copy(
+        repo_root().join("authored/device_profiles/ayaneo.konkr_pocket_fit.yaml"),
+        authored_root.join("device_profiles/ayaneo.konkr_pocket_fit.yaml"),
+    )
+    .expect("profile fixture should copy");
+    fs::write(
+        authored_root.join("device_plans/test_device_plan.yaml"),
+        device_plan_yaml.trim_start(),
+    )
+    .expect("temp device plan should be written");
+
+    temp
 }
 
 fn planner_parity_fixture_inventory() -> &'static [PlannerParityFixtureEntry] {
