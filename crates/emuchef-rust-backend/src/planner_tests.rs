@@ -21,6 +21,21 @@ fn authored_root(name: &str) -> PathBuf {
         .join("authored")
 }
 
+fn repo_root() -> PathBuf {
+    Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("../..")
+        .canonicalize()
+        .expect("repo root should resolve from crate manifest dir")
+}
+
+fn repo_authored_root() -> PathBuf {
+    repo_root().join("authored")
+}
+
+fn repo_authored_recipes_dir() -> PathBuf {
+    repo_authored_root().join("recipes")
+}
+
 fn golden_path(name: &str) -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR"))
         .join("tests")
@@ -82,6 +97,35 @@ fn planner_input(fixture: &str, selected_recipe_refs: &[&str]) -> PlannerInput {
         fixture_runtime_capabilities(),
     )
     .expect("planner fixture recipes should load")
+}
+
+fn authored_corpus_planner_input(selected_recipe_refs: &[&str]) -> PlannerInput {
+    PlannerInput::from_authored_root(
+        repo_authored_root(),
+        selected_recipe_refs
+            .iter()
+            .map(|item| item.to_string())
+            .collect(),
+        "plan.p7h.authored_corpus.001".to_string(),
+        "p7h.synthetic.device_plan".to_string(),
+        "p7h.synthetic.device_profile".to_string(),
+        fixture_device_context(),
+        fixture_runtime_capabilities(),
+    )
+    .expect("repo authored corpus recipes should load through the Rust planner model")
+}
+
+fn authored_corpus_planner_input_with_bindings(
+    selected_recipe_refs: &[&str],
+    input_bindings: &[(&str, Value)],
+) -> PlannerInput {
+    let mut input = authored_corpus_planner_input(selected_recipe_refs);
+    for (input_id, value) in input_bindings {
+        input
+            .input_bindings
+            .insert((*input_id).to_string(), value.clone());
+    }
+    input
 }
 
 fn planning_result_value(input: PlannerInput) -> Value {
@@ -1886,6 +1930,230 @@ fn planner_parity_fixture_inventory_consumes_checked_in_evidence_only() {
     }
 }
 
+#[test]
+fn authored_corpus_planner_recipe_inventory_is_explicit() {
+    let expected = authored_corpus_recipe_inventory()
+        .iter()
+        .map(|entry| entry.path.to_string())
+        .collect::<Vec<_>>();
+
+    assert_eq!(discovered_authored_corpus_recipe_paths(), expected);
+}
+
+#[test]
+fn authored_corpus_recipes_parse_through_rust_domain_model() {
+    for entry in authored_corpus_recipe_inventory() {
+        let path = repo_root().join(entry.path);
+        let recipe = crate::yaml::load_recipe_from_path(&path)
+            .unwrap_or_else(|error| panic!("{} should parse: {error}", entry.path));
+
+        assert_eq!(recipe.schema_version, 1, "{}", entry.path);
+        assert_eq!(recipe.kind, "recipe", "{}", entry.path);
+        assert_eq!(recipe.id, entry.recipe_id, "{}", entry.path);
+        assert!(!recipe.name.is_empty(), "{} should have a name", entry.path);
+        assert!(!recipe.steps.is_empty(), "{} should have steps", entry.path);
+        for step in recipe.steps {
+            assert!(
+                crate::step_specs::is_supported_step_type(&step.type_name),
+                "{} step {} should use a Rust-known StepSpec type, got {}",
+                entry.path,
+                step.id,
+                step.type_name
+            );
+        }
+    }
+}
+
+#[test]
+fn authored_corpus_unbound_required_inputs_emit_classified_errors() {
+    for (recipe_ref, input_id) in [
+        ("app.xaniteog.install", "app.xaniteog.install/xaniteog_apk"),
+        ("feature.copy_bios", "feature.copy_bios/bios_source_dir"),
+    ] {
+        let first = planning_result_value(authored_corpus_planner_input(&[recipe_ref]));
+        let second = planning_result_value(authored_corpus_planner_input(&[recipe_ref]));
+
+        assert_eq!(
+            first, second,
+            "{recipe_ref} error output should be deterministic"
+        );
+        assert_eq!(first["status"], "error", "{recipe_ref}: {first:#}");
+        assert_eq!(first["execution_plan"], Value::Null, "{recipe_ref}");
+
+        let errors = first["errors"]
+            .as_array()
+            .expect("required-input planner result should include errors");
+        assert_eq!(errors.len(), 1, "{recipe_ref}: {errors:#?}");
+        assert_eq!(errors[0]["code"], "binding_missing", "{recipe_ref}");
+        assert_eq!(errors[0]["details"]["input_id"], input_id, "{recipe_ref}");
+        assert!(
+            errors[0]["message"]
+                .as_str()
+                .is_some_and(|message| message.contains(input_id)),
+            "{recipe_ref}: {errors:#?}"
+        );
+    }
+}
+
+#[test]
+fn authored_corpus_retroarch_optional_cfg_omitted_and_bound_are_deterministic() {
+    let omitted =
+        planning_result_value(authored_corpus_planner_input(&["app.retroarch.provision"]));
+    let omitted_repeat =
+        planning_result_value(authored_corpus_planner_input(&["app.retroarch.provision"]));
+
+    assert_eq!(omitted, omitted_repeat);
+    assert_planning_result_shape("authored corpus retroarch omitted", &omitted);
+    assert_eq!(omitted["status"], "success", "{omitted:#}");
+    assert_eq!(omitted["execution_plan"]["inputs"], json!([]));
+    let omitted_step_ids = execution_step_ids(&omitted);
+    assert!(
+        omitted_step_ids.contains(&"app.retroarch.provision/launch_retroarch"),
+        "{omitted_step_ids:#?}"
+    );
+    assert!(
+        !omitted_step_ids.contains(&"app.retroarch.provision/seed_retroarch_cfg"),
+        "{omitted_step_ids:#?}"
+    );
+    let omitted_launch = planner_step(&omitted, "app.retroarch.provision/launch_retroarch");
+    assert!(
+        !omitted_launch["dependencies"]
+            .as_array()
+            .expect("launch dependencies should be an array")
+            .iter()
+            .any(|dependency| dependency == "app.retroarch.provision/seed_retroarch_cfg"),
+        "{omitted_launch:#}"
+    );
+
+    let bound = planning_result_value(authored_corpus_planner_input_with_bindings(
+        &["app.retroarch.provision"],
+        &[(
+            "app.retroarch.provision/retroarch_cfg",
+            json!("/tmp/emuchef-p7h-retroarch.cfg"),
+        )],
+    ));
+    let bound_repeat = planning_result_value(authored_corpus_planner_input_with_bindings(
+        &["app.retroarch.provision"],
+        &[(
+            "app.retroarch.provision/retroarch_cfg",
+            json!("/tmp/emuchef-p7h-retroarch.cfg"),
+        )],
+    ));
+
+    assert_eq!(bound, bound_repeat);
+    assert_planning_result_shape("authored corpus retroarch bound", &bound);
+    assert_eq!(bound["status"], "success", "{bound:#}");
+    assert_eq!(
+        execution_input_ids(&bound),
+        vec!["app.retroarch.provision/retroarch_cfg"]
+    );
+    let bound_step_ids = execution_step_ids(&bound);
+    assert!(
+        bound_step_ids.contains(&"app.retroarch.provision/seed_retroarch_cfg"),
+        "{bound_step_ids:#?}"
+    );
+    let seed = planner_step(&bound, "app.retroarch.provision/seed_retroarch_cfg");
+    assert_eq!(
+        seed["params"]["source"],
+        json!({"ref": "inputs.app.retroarch.provision/retroarch_cfg"})
+    );
+}
+
+#[test]
+fn authored_corpus_supported_synthetic_context_emits_execution_plan() {
+    let selected_recipe_refs = [
+        "app.obtainium.install",
+        "app.retroarch.provision",
+        "app.xaniteog.install",
+        "feature.copy_bios",
+    ];
+    let input_bindings = [
+        (
+            "app.retroarch.provision/retroarch_cfg",
+            json!("/tmp/emuchef-p7h-retroarch.cfg"),
+        ),
+        (
+            "app.xaniteog.install/xaniteog_apk",
+            json!("/tmp/emuchef-p7h-xaniteog.apk"),
+        ),
+        (
+            "feature.copy_bios/bios_source_dir",
+            json!("/tmp/emuchef-p7h-bios"),
+        ),
+    ];
+
+    let first = planning_result_value(authored_corpus_planner_input_with_bindings(
+        &selected_recipe_refs,
+        &input_bindings,
+    ));
+    let second = planning_result_value(authored_corpus_planner_input_with_bindings(
+        &selected_recipe_refs,
+        &input_bindings,
+    ));
+
+    assert_eq!(first, second);
+    assert_planning_result_shape("authored corpus supported synthetic context", &first);
+    assert_eq!(first["status"], "success", "{first:#}");
+    assert_eq!(
+        first["execution_plan"]["source"]["device_plan_ref"],
+        "p7h.synthetic.device_plan"
+    );
+    assert_eq!(
+        first["execution_plan"]["source"]["device_profile_ref"],
+        "p7h.synthetic.device_profile"
+    );
+    assert_eq!(
+        first["execution_plan"]["source"]["selected_recipe_refs"],
+        json!(selected_recipe_refs)
+    );
+    assert_eq!(
+        first["execution_plan"]["source"]["expanded_recipe_refs"],
+        json!(selected_recipe_refs)
+    );
+    assert_eq!(
+        execution_input_ids(&first),
+        vec![
+            "app.retroarch.provision/retroarch_cfg",
+            "app.xaniteog.install/xaniteog_apk",
+            "feature.copy_bios/bios_source_dir",
+        ]
+    );
+
+    let step_ids = execution_step_ids(&first);
+    for expected_step_id in [
+        "app.obtainium.install/resolve_artifacts",
+        "app.obtainium.install/install_obtainium",
+        "app.retroarch.provision/seed_retroarch_cfg",
+        "app.retroarch.provision/launch_retroarch",
+        "app.xaniteog.install/install_xaniteog",
+        "feature.copy_bios/copy_bios_dir",
+    ] {
+        assert!(
+            step_ids.contains(&expected_step_id),
+            "missing {expected_step_id}; actual: {step_ids:#?}"
+        );
+    }
+}
+
+#[test]
+fn authored_corpus_planner_uses_rust_inputs_and_preserves_checked_in_evidence() {
+    let recipes_before = snapshot_files(&repo_authored_recipes_dir());
+    let goldens_before = snapshot_files(&golden_dir());
+
+    let input = authored_corpus_planner_input(&["app.obtainium.install"]);
+    assert_eq!(
+        input.recipes.len(),
+        authored_corpus_recipe_inventory().len()
+    );
+    assert_eq!(input.selected_recipe_refs, vec!["app.obtainium.install"]);
+
+    let actual = planning_result_value(input);
+
+    assert_eq!(actual["status"], "success", "{actual:#}");
+    assert_eq!(snapshot_files(&repo_authored_recipes_dir()), recipes_before);
+    assert_eq!(snapshot_files(&golden_dir()), goldens_before);
+}
+
 fn artifact_selection_input(
     step_type: &str,
     artifacts: Option<Vec<&str>>,
@@ -2250,6 +2518,24 @@ fn param_contract_step_ids(actual: &Value) -> Vec<&str> {
         .collect()
 }
 
+fn execution_step_ids(actual: &Value) -> Vec<&str> {
+    actual["execution_plan"]["steps"]
+        .as_array()
+        .expect("execution plan should include steps")
+        .iter()
+        .map(|step| step["id"].as_str().unwrap())
+        .collect()
+}
+
+fn execution_input_ids(actual: &Value) -> Vec<&str> {
+    actual["execution_plan"]["inputs"]
+        .as_array()
+        .expect("execution plan should include inputs")
+        .iter()
+        .map(|input| input["id"].as_str().unwrap())
+        .collect()
+}
+
 fn param_contract_step_param<'a>(actual: &'a Value, step_id: &str, param: &str) -> &'a Value {
     let execution_step_id = format!("planner.param_contract/{step_id}");
     &actual["execution_plan"]["steps"]
@@ -2408,6 +2694,59 @@ fn assert_planner_error(
 struct PlannerParityFixtureEntry {
     fixture: &'static str,
     golden: &'static str,
+}
+
+struct AuthoredCorpusRecipeEntry {
+    path: &'static str,
+    recipe_id: &'static str,
+}
+
+fn authored_corpus_recipe_inventory() -> &'static [AuthoredCorpusRecipeEntry] {
+    &[
+        AuthoredCorpusRecipeEntry {
+            path: "authored/recipes/app.obtainium.install.yaml",
+            recipe_id: "app.obtainium.install",
+        },
+        AuthoredCorpusRecipeEntry {
+            path: "authored/recipes/app.retroarch.provision.yaml",
+            recipe_id: "app.retroarch.provision",
+        },
+        AuthoredCorpusRecipeEntry {
+            path: "authored/recipes/app.xaniteog.install.yaml",
+            recipe_id: "app.xaniteog.install",
+        },
+        AuthoredCorpusRecipeEntry {
+            path: "authored/recipes/feature.copy_bios.yaml",
+            recipe_id: "feature.copy_bios",
+        },
+    ]
+}
+
+fn discovered_authored_corpus_recipe_paths() -> Vec<String> {
+    let root = repo_root();
+    let mut paths = fs::read_dir(repo_authored_recipes_dir())
+        .expect("repo authored recipes directory should be readable")
+        .map(|entry| {
+            entry
+                .expect("repo authored recipe entry should be readable")
+                .path()
+        })
+        .filter(|path| {
+            path.is_file()
+                && path
+                    .extension()
+                    .and_then(|extension| extension.to_str())
+                    .is_some_and(|extension| matches!(extension, "yaml" | "yml"))
+        })
+        .map(|path| {
+            path.strip_prefix(&root)
+                .expect("authored corpus recipe should live under repo root")
+                .to_string_lossy()
+                .replace('\\', "/")
+        })
+        .collect::<Vec<_>>();
+    paths.sort();
+    paths
 }
 
 fn planner_parity_fixture_inventory() -> &'static [PlannerParityFixtureEntry] {

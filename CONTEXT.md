@@ -166,7 +166,15 @@ validation, internal permission-intent construction from selected
 `grant_permissions` step params, execution-plan DTO shape/normalization for the
 supported fixture-scoped surface, and emitted-step param contract validation for
 `copy_files`, `extract_artifacts`, `extract_archive`, `install_apk`, `wait`, and
-`grant_permissions`. DTO shape coverage asserts successful and error
+`grant_permissions`. Rust planner tests also cover the checked-in
+`authored/recipes` corpus through private planner inputs: recipe discovery is
+explicit, every recipe parses through the Rust domain model, supported
+manually-selected synthetic contexts emit execution plans, required unbound
+inputs produce classified `binding_missing` errors, and RetroArch's optional
+config step is pruned when unbound and included when bound. This authored-corpus
+coverage does not parse repo device plans or profiles, invoke Python, call
+executor/apply paths, resolve remote URLs, download artifacts, use ADB, or
+validate real APK/BIOS payloads. DTO shape coverage asserts successful and error
 `PlanningResult`/`ExecutionPlan` key sets, selected normalized params, semantic
 list ordering, and the absence of a serialized `permission_plan` field without
 turning arbitrary JSON object key order into a public contract. Focused Rust
@@ -543,12 +551,17 @@ loaded/top-level authored recipe fixture data, namespaced refs, StepSpec
 defaults, explicit recipe and step dependencies, and supplied fixture device
 context/capabilities. Its Phase 6M/6N planner parity evidence is inventoried and
 parsed by Rust tests so new checked-in planner goldens must be classified
-intentionally. It validates malformed `steps.*` refs, unknown selected step
-targets, unknown step outputs, and shorthand refs to selected steps without
-primary outputs for emitted planner steps; non-step refs remain outside that
-validation slice. It asserts focused execution-plan DTO shape for successful and
-error planner results, selected normalized params, semantic list ordering, and
-stable internal error-message shape for the supported fixture-scoped surface. It
+intentionally. It also has authored-corpus tests for the checked-in
+`authored/recipes` files that use manually supplied selected recipe refs and
+synthetic fixture context; those tests classify required binding gaps and cover
+RetroArch optional-input pruning, but they do not prove repo
+device-plan/profile ingestion parity. It validates malformed `steps.*` refs,
+unknown selected step targets, unknown step outputs, and shorthand refs to
+selected steps without primary outputs for emitted planner steps; non-step refs
+remain outside that validation slice. It asserts focused execution-plan DTO
+shape for successful and error planner results, selected normalized params,
+semantic list ordering, and stable internal error-message shape for the
+supported fixture-scoped surface. It
 builds internal structured permission intent from selected step-local
 `grant_permissions` runtime/app-op/policy params without serializing a plan-level
 `permission_plan` field. It also validates selected/emitted step dependencies

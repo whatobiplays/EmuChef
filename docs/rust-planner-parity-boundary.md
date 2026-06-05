@@ -9,7 +9,8 @@ Rust planner tests include an intentional fixture inventory/parsing guard for
 the existing Phase 6M/6N planner parity evidence. The guard consumes checked-in
 files only; it does not invoke Python or regenerate fixtures. The Rust tests
 also include focused execution-plan DTO shape and normalization assertions for
-the supported fixture-scoped surface.
+the supported fixture-scoped surface, plus authored-corpus coverage for the
+checked-in recipe files under `authored/recipes`.
 
 ## Current Owners And Evidence
 
@@ -41,9 +42,14 @@ Rust planner-adjacent coverage is internal and fixture-scoped:
   Phase 6M/6N planning output to checked-in Python planner goldens, including
   the P7A fixture inventory/parsing guard, focused planner-only param contract
   coverage for selected emitted step types, and P7G execution-plan DTO
-  shape/normalization assertions. P7F permission-intent tests serialize the
-  internal Rust helper output only for assertions; that serialized helper output
-  is not an execution-plan DTO surface.
+  shape/normalization assertions. P7H tests discover the checked-in authored
+  recipe corpus, parse each recipe through the Rust domain model, exercise
+  manually supplied selected-recipe contexts, assert optional-input pruning and
+  bound-input inclusion for RetroArch, classify required-input gaps as
+  `binding_missing`, and assert checked-in authored recipe/golden evidence is
+  not rewritten. P7F permission-intent tests serialize the internal Rust helper
+  output only for assertions; that serialized helper output is not an
+  execution-plan DTO surface.
 - `crates/emuchef-rust-backend/tests/phase6m_planner.rs`: protocol guard that
   keeps planner requests unrouted and capabilities editor-scoped.
 - `crates/emuchef-rust-backend/tests/fixtures/authored_root/planner_*`;
@@ -55,7 +61,7 @@ Rust planner-adjacent coverage is internal and fixture-scoped:
 
 | Planner area | Current Python owner | Rust evidence | Current status | Before Python planner deletion |
 | --- | --- | --- | --- | --- |
-| Authored YAML loading/parsing | `src/emuchef/io/loader.py`; `src/emuchef/io/validation.py` | `crates/emuchef-rust-backend/src/yaml.rs`; `phase6e_yaml.rs`; `planner_tests.rs` loading fixture roots | Fixture-scoped Rust parsing exists for selected authored roots. | Prove all required authored corpus and planner inputs parse with matching semantics. |
+| Authored YAML loading/parsing | `src/emuchef/io/loader.py`; `src/emuchef/io/validation.py` | `crates/emuchef-rust-backend/src/yaml.rs`; `phase6e_yaml.rs`; `planner_tests.rs` loading fixture roots and checked-in authored corpus | Fixture-scoped Rust parsing exists for selected authored roots and the checked-in `authored/recipes` corpus. | Prove all required authored corpus and planner inputs parse with matching semantics. |
 | Schema/domain validation | `src/emuchef/io/validation.py`; `src/emuchef/planner/contracts.py`; domain modules under `src/emuchef/domain/` | `validation.rs`; `phase6k_validation.rs`; `phase6l_catalog_validation.rs`; planner golden comparisons | Rust validates selected editor/planner rules only. | Port or retire Python planner-owned diagnostics and validation rules with parity tests. |
 | Input binding/default handling | `src/emuchef/planner/bindings.py`; `draft_builder.py`; `emitter.py` | `required_input_bindings_match_python_success_and_missing_error`; `phase6n_optional_inputs_prune_and_rebind_like_python`; `phase6n_input_defaults_and_multiple_values_match_python` | Covered for selected required, optional, default, and multiple input fixtures. | Cover device plans, overrides, operation replay, validation errors, and broader input declarations. |
 | Selected recipe expansion | `src/emuchef/planner/service.py`; `dependencies.py`; `draft_builder.py` | `recipe_and_step_dependencies_match_python_ordering`; `phase6n_dependency_expansion_and_namespacing_match_python` | Covered for focused recipe dependency fixtures. | Prove selected recipe expansion across the required authored catalog and CLI workflows. |
@@ -70,7 +76,23 @@ Rust planner-adjacent coverage is internal and fixture-scoped:
 | Execution plan DTO/schema emission | `src/emuchef/domain/execution_plan.py`; `src/emuchef/planner/emitter.py`; `src/emuchef/io/serde.py` | `PlanningResult`/`ExecutionPlan` structs in `planner.rs`; Phase 6M/6N golden comparisons; P7G DTO shape tests | Rust emits matching DTOs for selected frozen flows only. P7G asserts exact key sets and values for successful and error planning results without treating arbitrary JSON object key order as a public contract. | Prove all required plan DTO fields, schema handling, output formats, and CLI `--output` behavior. |
 | Deterministic output ordering | `src/emuchef/planner/dependencies.py`; `emitter.py`; Python ordered domain models | `recipe_and_step_dependencies_match_python_ordering`; `phase6n_dependency_expansion_and_namespacing_match_python`; `dto_success_result_shape_is_stable_for_supported_fixture_surface`; P7A inventory guard | Fixture-scoped ordering parity exists for selected dependencies, inputs, artifacts, and steps. List ordering is semantic in the DTO tests; object key ordering is not broadened into a contract unless the Rust surface intentionally models ordering. | Prove deterministic ordering for all required catalog/plan combinations. |
 | Diagnostics/error model | `src/emuchef/domain/errors.py`; `src/emuchef/planner/*`; `src/emuchef/io/validation.py` | Required binding missing, dependency cycle, catalog validation tests, focused P7E param contract diagnostics, P7G DTO error-result tests | Rust covers selected error/status shapes. Focused Rust planner param contract diagnostics include recipe, step, step type, param, expected value/mode, and actual value context. P7G asserts deterministic error-result shape for the current focused step-param slice and deterministic ordering only for an existing multi-error unknown-param path; it does not broaden planner error accumulation. | Port or retire all planner-facing diagnostics, details fields, CLI output, and exit-code expectations. |
-| Corpus/golden coverage | `tests/test_planner_core.py`; `tests/test_cli.py`; dev-only/reference-only golden generation in `crates/emuchef-rust-backend/README.md` | `planner_tests.rs`; `phase6m_planner.rs`; `phase6m_planner_*.json`; `phase6n_planner_*.json` | P7A guards the current frozen inventory and parses every planner golden. | Broaden corpus coverage or reclassify historical tests before deleting Python planner code. |
+| Corpus/golden coverage | `tests/test_planner_core.py`; `tests/test_cli.py`; dev-only/reference-only golden generation in `crates/emuchef-rust-backend/README.md` | `planner_tests.rs`; `phase6t_authored_corpus.rs`; `phase6m_planner.rs`; `phase6m_planner_*.json`; `phase6n_planner_*.json` | P7A guards the current frozen inventory and parses every planner golden. P7H guards the checked-in authored recipe inventory and exercises the internal Rust planner against manually supplied corpus contexts. | Broaden corpus coverage or reclassify historical tests before deleting Python planner code. |
+
+## Authored-Corpus Support Matrix
+
+P7H authored-corpus planning uses `PlannerInput::from_authored_root("authored")`
+with manually supplied selected recipe refs, fixture device context, and fixture
+runtime capabilities. It does not parse repo `device_plans` or
+`device_profiles`, does not resolve remote URLs, does not download or
+materialize artifacts, does not invoke ADB, and does not call executor/apply
+paths.
+
+| Path | Recipe id | Parse status | Planner/emission status | Context source | Unsupported gap | Test/evidence path |
+| --- | --- | --- | --- | --- | --- | --- |
+| `authored/recipes/app.obtainium.install.yaml` | `app.obtainium.install` | Success through Rust domain model. | Success for synthetic selected-recipe context. | Manual selected ref plus synthetic fixture device context/capabilities. | Repo device-plan/profile ingestion is not covered; remote APK URL remains declarative planner data only. | `planner_tests::authored_corpus_recipes_parse_through_rust_domain_model`; `planner_tests::authored_corpus_supported_synthetic_context_emits_execution_plan` |
+| `authored/recipes/app.retroarch.provision.yaml` | `app.retroarch.provision` | Success through Rust domain model. | Success with optional `retroarch_cfg` omitted; `seed_retroarch_cfg` is pruned. Success with placeholder `retroarch_cfg` binding; `seed_retroarch_cfg` is included. | Manual selected ref plus synthetic fixture device context/capabilities. | Repo device-plan/profile ingestion is not covered; placeholder binding is planner-only; remote artifact URLs remain declarative planner data only. | `planner_tests::authored_corpus_recipes_parse_through_rust_domain_model`; `planner_tests::authored_corpus_retroarch_optional_cfg_omitted_and_bound_are_deterministic` |
+| `authored/recipes/app.xaniteog.install.yaml` | `app.xaniteog.install` | Success through Rust domain model. | Unbound synthetic context emits deterministic `binding_missing` for `app.xaniteog.install/xaniteog_apk`; placeholder `.apk` binding emits successfully in the bound synthetic corpus context. | Manual selected ref plus synthetic fixture device context/capabilities. | Repo device-plan/profile ingestion is not covered; placeholder binding is planner-only and does not validate APK payloads. | `planner_tests::authored_corpus_unbound_required_inputs_emit_classified_errors`; `planner_tests::authored_corpus_supported_synthetic_context_emits_execution_plan` |
+| `authored/recipes/feature.copy_bios.yaml` | `feature.copy_bios` | Success through Rust domain model. | Unbound synthetic context emits deterministic `binding_missing` for `feature.copy_bios/bios_source_dir`; placeholder directory binding emits successfully in the bound synthetic corpus context. | Manual selected ref plus synthetic fixture device context/capabilities. | Repo device-plan/profile ingestion is not covered; placeholder binding is planner-only and does not inspect BIOS contents. | `planner_tests::authored_corpus_unbound_required_inputs_emit_classified_errors`; `planner_tests::authored_corpus_supported_synthetic_context_emits_execution_plan` |
 
 ## Python Planner Paths Required Today
 
