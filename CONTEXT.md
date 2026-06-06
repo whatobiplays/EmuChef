@@ -172,11 +172,23 @@ explicit, every recipe parses through the Rust domain model, supported
 manually-selected synthetic contexts emit execution plans, required unbound
 inputs produce classified `binding_missing` errors, and RetroArch's optional
 config step is pruned when unbound and included when bound. This authored-corpus
-coverage also has private checked-in device-plan/profile ingestion for Rust
-planner inputs: device plan/profile inventory is path/id explicit, selected
-recipe refs are loaded from required `selected_by_default: true` entries in
-authored order, profile `capability_defaults` and `device_tags` are mapped into
-planner input, and planner-only synthetic `DeviceContext` values are derived
+coverage also pins private Rust selected-recipe expansion semantics for direct
+`recipe_dependencies`: dependencies appear before dependents, sibling
+dependencies preserve authored order, explicit selected recipe closures expand
+in selected-ref order, and duplicate dependencies are suppressed without moving
+their first occurrence. Unknown selected recipe refs and unknown dependency refs
+produce classified error results with source-specific diagnostic context, and
+dependency cycles produce classified error results with cycle context. The
+current checked-in recipe corpus has no non-empty `recipe_dependencies`
+metadata, so current checked-in corpus and device-plan selected refs match
+expanded refs as current-state evidence only. Future non-empty checked-in recipe
+dependencies require intentional test and documentation updates. This
+authored-corpus coverage also has private checked-in device-plan/profile
+ingestion for Rust planner inputs: device plan/profile inventory is path/id
+explicit, selected recipe refs are loaded from required
+`selected_by_default: true` entries in authored order, profile
+`capability_defaults` and `device_tags` are mapped into planner input, and
+planner-only synthetic `DeviceContext` values are derived
 from profile fields. The synthetic context uses the first declared
 `match.manufacturer_contains` value or `profile:<profile_id>`, the profile name
 or `profile:<profile_id>`, `match.android_version.min` or `0`, and no API level
@@ -572,8 +584,14 @@ context/capabilities. Its Phase 6M/6N planner parity evidence is inventoried and
 parsed by Rust tests so new checked-in planner goldens must be classified
 intentionally. It also has authored-corpus tests for the checked-in
 `authored/recipes` files that use manually supplied selected recipe refs and
-synthetic fixture context; those tests classify required binding gaps and cover
-RetroArch optional-input pruning. It also has private checked-in
+synthetic fixture context; those tests classify required binding gaps, cover
+RetroArch optional-input pruning, and guard current selected-recipe expansion
+evidence. Current checked-in recipes either declare an empty
+`recipe_dependencies` list or omit the field so it parses as empty, and current
+Rust corpus/device-plan selected refs match expanded refs for that reason only.
+The Rust planner parses `provides.features` as recipe metadata but does not
+resolve recipe dependencies from `provides` or an active `requires` field. It
+also has private checked-in
 device-plan/profile ingestion coverage that parses repo `device_plans` and
 `device_profiles`, freezes path/id/profile/selected-ref inventory, maps
 selected recipe refs in authored order, maps profile capabilities/tags, accepts

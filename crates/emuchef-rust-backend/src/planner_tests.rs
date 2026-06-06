@@ -746,6 +746,238 @@ fn phase6n_dependency_expansion_and_namespacing_match_python() {
 }
 
 #[test]
+fn recipe_expansion_explicit_selected_refs_preserve_order_without_dependencies() {
+    let actual = planning_result_value(recipe_expansion_input(
+        vec![
+            recipe_expansion_recipe("planner.recipe_expansion.alpha", vec![]),
+            recipe_expansion_recipe("planner.recipe_expansion.beta", vec![]),
+            recipe_expansion_recipe("planner.recipe_expansion.gamma", vec![]),
+        ],
+        vec![
+            "planner.recipe_expansion.gamma",
+            "planner.recipe_expansion.alpha",
+            "planner.recipe_expansion.beta",
+        ],
+    ));
+
+    assert_eq!(actual["status"], "success", "{actual:#}");
+    assert_eq!(
+        actual["execution_plan"]["source"]["selected_recipe_refs"],
+        json!([
+            "planner.recipe_expansion.gamma",
+            "planner.recipe_expansion.alpha",
+            "planner.recipe_expansion.beta"
+        ])
+    );
+    assert_eq!(
+        actual["execution_plan"]["source"]["expanded_recipe_refs"],
+        json!([
+            "planner.recipe_expansion.gamma",
+            "planner.recipe_expansion.alpha",
+            "planner.recipe_expansion.beta"
+        ])
+    );
+}
+
+#[test]
+fn recipe_expansion_order_is_dependency_first_authored_and_first_occurrence_stable() {
+    let actual = planning_result_value(recipe_expansion_input(
+        vec![
+            recipe_expansion_recipe("planner.recipe_expansion.dep_shared", vec![]),
+            recipe_expansion_recipe(
+                "planner.recipe_expansion.dep_b",
+                vec!["planner.recipe_expansion.dep_shared"],
+            ),
+            recipe_expansion_recipe("planner.recipe_expansion.dep_a", vec![]),
+            recipe_expansion_recipe(
+                "planner.recipe_expansion.selected_a",
+                vec![
+                    "planner.recipe_expansion.dep_b",
+                    "planner.recipe_expansion.dep_a",
+                ],
+            ),
+            recipe_expansion_recipe("planner.recipe_expansion.dep_c", vec![]),
+            recipe_expansion_recipe(
+                "planner.recipe_expansion.selected_b",
+                vec![
+                    "planner.recipe_expansion.dep_a",
+                    "planner.recipe_expansion.dep_c",
+                ],
+            ),
+        ],
+        vec![
+            "planner.recipe_expansion.selected_a",
+            "planner.recipe_expansion.selected_b",
+        ],
+    ));
+
+    assert_eq!(actual["status"], "success", "{actual:#}");
+    assert_eq!(
+        actual["execution_plan"]["source"]["selected_recipe_refs"],
+        json!([
+            "planner.recipe_expansion.selected_a",
+            "planner.recipe_expansion.selected_b"
+        ])
+    );
+    assert_eq!(
+        actual["execution_plan"]["source"]["expanded_recipe_refs"],
+        json!([
+            "planner.recipe_expansion.dep_shared",
+            "planner.recipe_expansion.dep_b",
+            "planner.recipe_expansion.dep_a",
+            "planner.recipe_expansion.selected_a",
+            "planner.recipe_expansion.dep_c",
+            "planner.recipe_expansion.selected_b"
+        ])
+    );
+}
+
+#[test]
+fn recipe_expansion_unknown_selected_ref_error_shape_has_selected_context() {
+    let actual = planning_result_value(recipe_expansion_input(
+        vec![recipe_expansion_recipe(
+            "planner.recipe_expansion.known",
+            vec![],
+        )],
+        vec!["planner.recipe_expansion.missing_selected"],
+    ));
+
+    let error = assert_recipe_expansion_error(&actual, "recipe_not_found");
+    assert_eq!(
+        error["details"],
+        json!({
+            "recipe_ref": "planner.recipe_expansion.missing_selected",
+            "selected_recipe_ref": "planner.recipe_expansion.missing_selected",
+            "source": "selected_recipe_refs"
+        })
+    );
+}
+
+#[test]
+fn recipe_expansion_unknown_dependency_ref_error_shape_has_dependency_context() {
+    let actual = planning_result_value(recipe_expansion_input(
+        vec![recipe_expansion_recipe(
+            "planner.recipe_expansion.selected",
+            vec!["planner.recipe_expansion.missing_dependency"],
+        )],
+        vec!["planner.recipe_expansion.selected"],
+    ));
+
+    let error = assert_recipe_expansion_error(&actual, "recipe_not_found");
+    assert_eq!(
+        error["details"],
+        json!({
+            "recipe_ref": "planner.recipe_expansion.missing_dependency",
+            "dependency_ref": "planner.recipe_expansion.missing_dependency",
+            "dependent_recipe_ref": "planner.recipe_expansion.selected",
+            "source": "recipe_dependencies"
+        })
+    );
+}
+
+#[test]
+fn recipe_expansion_dependency_cycle_error_shape_has_cycle_context() {
+    let actual = planning_result_value(recipe_expansion_input(
+        vec![
+            recipe_expansion_recipe(
+                "planner.recipe_expansion.cycle_a",
+                vec!["planner.recipe_expansion.cycle_b"],
+            ),
+            recipe_expansion_recipe(
+                "planner.recipe_expansion.cycle_b",
+                vec!["planner.recipe_expansion.cycle_a"],
+            ),
+        ],
+        vec!["planner.recipe_expansion.cycle_a"],
+    ));
+
+    let error = assert_recipe_expansion_error(&actual, "dependency_cycle");
+    assert_eq!(
+        error["details"]["cycle"],
+        json!([
+            "planner.recipe_expansion.cycle_a",
+            "planner.recipe_expansion.cycle_b",
+            "planner.recipe_expansion.cycle_a"
+        ])
+    );
+}
+
+#[test]
+fn recipe_expansion_current_authored_corpus_has_no_non_empty_recipe_dependencies() {
+    for entry in authored_corpus_recipe_inventory() {
+        let path = repo_root().join(entry.path);
+        let recipe = crate::yaml::load_recipe_from_path(&path)
+            .unwrap_or_else(|error| panic!("{} should parse: {error}", entry.path));
+
+        assert!(
+            recipe.recipe_dependencies.is_empty(),
+            "{} currently has no non-empty recipe_dependencies metadata",
+            entry.path
+        );
+    }
+}
+
+#[test]
+fn recipe_expansion_current_corpus_selected_and_expanded_refs_match() {
+    let selected_recipe_refs = [
+        "app.obtainium.install",
+        "app.retroarch.provision",
+        "app.xaniteog.install",
+        "feature.copy_bios",
+    ];
+    let first = planning_result_value(authored_corpus_planner_input_with_bindings(
+        &selected_recipe_refs,
+        &p7k_corpus_recipe_expansion_bindings(),
+    ));
+    let second = planning_result_value(authored_corpus_planner_input_with_bindings(
+        &selected_recipe_refs,
+        &p7k_corpus_recipe_expansion_bindings(),
+    ));
+
+    assert_eq!(first, second);
+    assert_eq!(first["status"], "success", "{first:#}");
+    assert_eq!(
+        first["execution_plan"]["source"]["selected_recipe_refs"],
+        json!(selected_recipe_refs)
+    );
+    assert_eq!(
+        first["execution_plan"]["source"]["expanded_recipe_refs"],
+        json!(selected_recipe_refs)
+    );
+}
+
+#[test]
+fn recipe_expansion_checked_in_device_plan_selected_sets_match_expanded_refs_for_current_corpus() {
+    for plan in discover_device_plan_inventory(&repo_authored_root())
+        .expect("repo device plan inventory should parse")
+    {
+        let selected_recipe_refs = plan
+            .selected_recipe_refs
+            .iter()
+            .map(String::as_str)
+            .collect::<Vec<_>>();
+        let actual = planning_result_value(authored_corpus_planner_input_with_bindings(
+            &selected_recipe_refs,
+            &p7k_corpus_recipe_expansion_bindings(),
+        ));
+
+        assert_eq!(actual["status"], "success", "{}: {actual:#}", plan.id);
+        assert_eq!(
+            actual["execution_plan"]["source"]["selected_recipe_refs"],
+            json!(plan.selected_recipe_refs),
+            "{}",
+            plan.id
+        );
+        assert_eq!(
+            actual["execution_plan"]["source"]["expanded_recipe_refs"],
+            json!(plan.selected_recipe_refs),
+            "{}",
+            plan.id
+        );
+    }
+}
+
+#[test]
 fn phase6n_step_data_refs_conditions_and_constraints_match_python() {
     let actual = normalized_planning_result_value(planner_input(
         "planner_phase6n_step_data",
@@ -3034,6 +3266,91 @@ fn dependency_step_dependencies<'a>(actual: &'a Value, step_id: &str) -> &'a Val
         .iter()
         .find(|step| step["id"] == execution_step_id)
         .expect("dependency validation step should exist")["dependencies"]
+}
+
+fn recipe_expansion_input(recipes: Vec<Recipe>, selected_recipe_refs: Vec<&str>) -> PlannerInput {
+    PlannerInput {
+        recipes,
+        selected_recipe_refs: selected_recipe_refs
+            .into_iter()
+            .map(ToString::to_string)
+            .collect(),
+        input_bindings: OrderedMap::new(),
+        plan_id: "plan.recipe_expansion.001".to_string(),
+        device_plan_ref: "example.device_plan".to_string(),
+        device_profile_ref: "example.device_profile".to_string(),
+        device_context: fixture_device_context(),
+        runtime_capabilities: fixture_runtime_capabilities(),
+    }
+}
+
+fn recipe_expansion_recipe(id: &str, recipe_dependencies: Vec<&str>) -> Recipe {
+    Recipe {
+        schema_version: 1,
+        kind: "recipe".to_string(),
+        id: id.to_string(),
+        name: id.to_string(),
+        description: None,
+        recipe_dependencies: recipe_dependencies
+            .into_iter()
+            .map(ToString::to_string)
+            .collect(),
+        provides: RecipeProvides {
+            features: Vec::new(),
+        },
+        inputs: OrderedMap::new(),
+        artifacts: OrderedMap::new(),
+        artifact_groups: OrderedMap::new(),
+        steps: vec![recipe_expansion_wait_step()],
+    }
+}
+
+fn recipe_expansion_wait_step() -> Step {
+    let mut params = OrderedMap::new();
+    params.insert("duration_ms".to_string(), ParamValue::Literal(json!(1)));
+    Step {
+        id: "wait".to_string(),
+        type_name: "wait".to_string(),
+        name: "Wait".to_string(),
+        description: None,
+        user_toggleable: false,
+        dependencies: Vec::new(),
+        constraints: StepConstraints {
+            capabilities: Vec::new(),
+            conflicts_with: Vec::new(),
+        },
+        skip_if: Vec::<StepCondition>::new(),
+        params,
+        verify: Vec::<StepCondition>::new(),
+    }
+}
+
+fn assert_recipe_expansion_error<'a>(actual: &'a Value, expected_code: &str) -> &'a Value {
+    assert_eq!(actual["status"], "error", "{actual:#}");
+    assert_eq!(actual["execution_plan"], Value::Null, "{actual:#}");
+    let errors = actual["errors"]
+        .as_array()
+        .expect("recipe expansion error result should include errors");
+    assert_eq!(errors.len(), 1, "{errors:#?}");
+    assert_eq!(errors[0]["code"], expected_code, "{errors:#?}");
+    &errors[0]
+}
+
+fn p7k_corpus_recipe_expansion_bindings() -> Vec<(&'static str, Value)> {
+    vec![
+        (
+            "app.retroarch.provision/retroarch_cfg",
+            json!("/tmp/emuchef-p7k-retroarch.cfg"),
+        ),
+        (
+            "app.xaniteog.install/xaniteog_apk",
+            json!("/tmp/emuchef-p7k-xaniteog.apk"),
+        ),
+        (
+            "feature.copy_bios/bios_source_dir",
+            json!("/tmp/emuchef-p7k-bios"),
+        ),
+    ]
 }
 
 fn param_contract_input(steps: Vec<Step>) -> PlannerInput {
