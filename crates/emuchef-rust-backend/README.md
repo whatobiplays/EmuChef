@@ -49,6 +49,8 @@ Through Phase 6U it implements only:
 - an internal-only, fixture-scoped declarative planner that emits a
   Python-shaped `PlanningResult`/`ExecutionPlan` for focused Phase 6M and 6N
   tests
+- a dev-only Rust planner shadow binary that emits the private Rust
+  `PlanningResult` as pretty JSON for explicit authored-root/device-plan inputs
 - an internal-only, fixture-scoped executor skeleton that emits Python-shaped
   `ExecutionRunResult` values for selected safe dry-run Phase 6O tests
 - temp-dir-confined filesystem/artifact executor behavior for selected Phase 6P
@@ -285,6 +287,44 @@ inference, network or cache inspection, filesystem existence checks, and
 side-effecting artifact/app/permission operations are outside Phase 6N. The
 Phase 6N fixtures cover `conflicts_with` serialization only when the conflicting
 step is unavailable through fixture capabilities.
+
+## Dev-Only Planner Shadow Command
+
+The crate includes a developer-only `emuchef-plan-shadow` binary for manual Rust
+planner migration inspection:
+
+```bash
+cargo run --manifest-path crates/emuchef-rust-backend/Cargo.toml --bin emuchef-plan-shadow -- \
+  --authored-root authored \
+  --device-plan ayaneo.pocket_s_mini.base
+```
+
+The command loads checked-in authored recipe, device-plan, and device-profile
+inputs through `PlannerInput::from_authored_device_plan(...)`, calls the private
+Rust `plan_execution(...)` path, and writes pretty JSON `PlanningResult` output
+to stdout. Planner success exits `0`; planner error results exit non-zero while
+still writing the structured result to stdout. Argument/usage errors and
+authored-root/device-plan load failures are process errors: they write stable
+stderr text and no stdout JSON.
+
+Bindings use the explicit form:
+
+```bash
+--bind app.retroarch.provision/retroarch_cfg=/tmp/retroarch.cfg
+```
+
+For this shadow slice, binding values are strings only. Repeated binds for the
+same ref are grouped into a string array because the current Python CLI parser
+groups repeated `--bind REF=VALUE` entries that way. This is dev-only shadow
+behavior, not full future Rust planner CLI binding type parity.
+
+The shadow command does not replace the Python `emuchef plan` CLI. It does not
+run executor/apply, inspect or probe devices, invoke ADB, access the network,
+download or materialize artifacts, regenerate checked-in goldens, invoke Python,
+expose Tauri commands, expose sidecar protocol requests, or alter the default
+`emuchef-rust-backend` sidecar binary. `default-run = "emuchef-rust-backend"` is
+set so existing `cargo run --manifest-path crates/emuchef-rust-backend/Cargo.toml -- --sidecar`
+and one-shot development workflows remain unambiguous.
 
 ## Phase 6O Executor Scope
 

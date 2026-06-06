@@ -28,6 +28,7 @@ mod executor_tests;
 pub mod jsonl;
 pub mod model;
 pub mod one_shot;
+pub mod plan_shadow;
 #[allow(dead_code)]
 mod planner;
 #[allow(dead_code)]

@@ -4,6 +4,7 @@ version = "0.1.0"
 edition = "2021"
 description = "Experimental EmuChef Rust backend protocol skeleton"
 license = "GPL-3.0-only"
+default-run = "emuchef-rust-backend"
 
 [dependencies]
 indexmap = { version = "2.14.0", features = ["serde"] }
