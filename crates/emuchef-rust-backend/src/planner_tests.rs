@@ -252,7 +252,7 @@ fn repo_plan_e2e_cases() -> Vec<RepoPlanE2eCase> {
     ]
 }
 
-fn repo_plan_e2e_gap_cases() -> Vec<RepoPlanE2eCase> {
+fn repo_plan_e2e_no_app_data_write_cases() -> Vec<RepoPlanE2eCase> {
     vec![
         RepoPlanE2eCase {
             device_plan_ref: "ayaneo.generic.base",
@@ -1781,16 +1781,21 @@ fn dependency_validation_reports_unknown_self_and_non_emitted_dependencies() {
         "selfish",
         Some("selfish"),
     );
+}
 
-    let unavailable_target = planning_result_value(dependency_validation_input(vec![
+#[test]
+fn selection_time_pruning_removes_dependents_of_capability_unavailable_steps() {
+    let actual = planning_result_value(dependency_validation_input(vec![
         unavailable_dependency_step("unavailable"),
         dependency_step("consumer", vec!["unavailable"]),
+        dependency_step("independent", vec![]),
     ]));
-    assert_dependency_error(
-        &unavailable_target,
-        "unknown_step_dependency",
-        "consumer",
-        Some("unavailable"),
+
+    assert_eq!(actual["status"], "success", "{actual:#}");
+    assert_eq!(
+        dependency_step_ids(&actual),
+        vec!["planner.dependency_validation/independent"],
+        "known but unavailable dependencies should prune dependents without weakening true missing-dependency diagnostics"
     );
 }
 
@@ -3268,32 +3273,26 @@ fn repo_plan_e2e_requires_only_explicit_external_bindings_for_unbound_inputs() {
 }
 
 #[test]
-fn repo_plan_e2e_checked_in_context_gaps_are_classified_without_expanding_scope() {
-    for case in repo_plan_e2e_gap_cases() {
+fn repo_plan_e2e_no_app_data_write_contexts_prune_app_data_dependents() {
+    for case in repo_plan_e2e_no_app_data_write_cases() {
         let temp = TempDir::new().expect("repo plan e2e temp root should be created");
         let actual = planning_result_value(repo_plan_e2e_input(&case, &temp));
 
         assert_eq!(
-            actual["status"], "error",
+            actual["status"], "success",
             "{}: {actual:#}",
             case.device_plan_ref
         );
-        assert_eq!(actual["execution_plan"], Value::Null, "{actual:#}");
-        let errors = actual["errors"]
-            .as_array()
-            .expect("gap result should include planner errors");
         assert!(
-            errors.iter().all(|error| error["code"] == "unknown_step_dependency"),
-            "{} should remain a current Rust planner dependency/capability gap, not a binding or executor path: {actual:#}",
+            actual["errors"].as_array().is_some_and(Vec::is_empty),
+            "{} should not report stale unknown dependency errors after app-data pruning: {actual:#}",
             case.device_plan_ref
         );
+        assert_planning_result_shape(case.device_plan_ref, &actual);
         assert!(
-            errors.iter().any(|error| {
-                error["details"]["recipe_ref"] == "app.retroarch.provision"
-                    && error["details"]["step_id"] == "launch_retroarch"
-                    && error["details"]["dependency"] == "copy_assets"
-            }),
-            "{} should document the missing app-data copy dependency gap: {actual:#}",
+            !execution_step_ids(&actual)
+                .contains(&"app.retroarch.provision/launch_retroarch"),
+            "{} should prune launch_retroarch when app-data copy dependencies are unavailable: {actual:#}",
             case.device_plan_ref
         );
     }

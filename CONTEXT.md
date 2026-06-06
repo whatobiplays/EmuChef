@@ -207,14 +207,12 @@ produce private Rust planner success results without required external
 bindings; optional `app.retroarch.provision/retroarch_cfg` remains optional,
 and a planner-only temporary `.cfg` binding includes `seed_retroarch_cfg`.
 `ayaneo.generic.base`, `ayaneo.pocket_air_mini.base`, and
-`ayaneo.pocket_s2.base` are current Rust planner bug/gap contexts even when
+`ayaneo.pocket_s2.base` also produce private Rust planner success results when
 their required planner-only BIOS directory or XaniteOG `.apk` bindings are
-supplied. Python planner API succeeds under the same profile-derived planner
-context by pruning RetroArch app-data copy steps and `launch_retroarch`. Rust
-currently returns `unknown_step_dependency` because `app_data_write: false`
-prevents the app-data copy steps from being emitted while `launch_retroarch`
-still reaches dependency validation. P7N classifies this as
-`rust_optional_step_pruning_dependency_bug`, not an intentional `known_gap`.
+supplied. For profiles where `app_data_write: false` prevents RetroArch
+app-data copy steps from being available, Rust selection-time pruning removes
+dependent steps such as `launch_retroarch` instead of reporting
+`unknown_step_dependency` for authored step ids that exist but are unavailable.
 Device-plan defaults as bindings, config variant selection, broader Python
 override key forms such as `inputs.<id>`, profile matching against detected
 facts, real device facts, CLI operation replay, executor/apply behavior, Python

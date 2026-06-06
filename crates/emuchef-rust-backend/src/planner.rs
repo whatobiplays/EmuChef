@@ -2282,15 +2282,68 @@ fn validate_available_step_dependencies(
     available_step_ids: &[String],
     by_id: &HashMap<String, &Step>,
 ) -> Vec<PlannerMessage> {
-    let steps = available_step_ids
-        .iter()
-        .filter_map(|step_id| {
-            by_id
-                .get(step_id)
-                .map(|step| (step_id.clone(), (*step).clone()))
-        })
-        .collect::<Vec<_>>();
-    validate_local_step_dependencies(&recipe.id, &steps)
+    // Selection-time validation rejects authored typos, but known unavailable
+    // dependencies are handled by recursive selection pruning.
+    let mut errors = Vec::new();
+
+    for step_id in available_step_ids {
+        let Some(step) = by_id.get(step_id) else {
+            continue;
+        };
+        let mut reported = HashSet::<(&str, &str)>::new();
+        for dependency in &step.dependencies {
+            if dependency == step_id {
+                if reported.insert(("self_step_dependency", dependency.as_str())) {
+                    errors.push(PlannerMessage {
+                        code: "self_step_dependency".to_string(),
+                        message: format!(
+                            "Step '{}' may not depend on itself via dependency '{}'.",
+                            step.id, dependency
+                        ),
+                        details: json!({
+                            "recipe_ref": recipe.id,
+                            "step_id": step.id,
+                            "dependency": dependency,
+                        }),
+                    });
+                }
+                continue;
+            }
+            if !by_id.contains_key(dependency)
+                && reported.insert(("unknown_step_dependency", dependency.as_str()))
+            {
+                errors.push(PlannerMessage {
+                    code: "unknown_step_dependency".to_string(),
+                    message: format!(
+                        "Step '{}' depends on unknown authored step '{}'.",
+                        step.id, dependency
+                    ),
+                    details: json!({
+                        "recipe_ref": recipe.id,
+                        "step_id": step.id,
+                        "dependency": dependency,
+                    }),
+                });
+            }
+        }
+    }
+
+    if errors.is_empty() {
+        let requested_steps = available_step_ids
+            .iter()
+            .filter_map(|step_id| {
+                by_id
+                    .get(step_id)
+                    .map(|step| (step_id.clone(), (*step).clone()))
+            })
+            .collect::<Vec<_>>();
+        errors.extend(validate_step_dependency_cycles(
+            &recipe.id,
+            &requested_steps,
+        ));
+    }
+
+    errors
 }
 
 fn validate_emitted_step_dependencies(steps: &[(String, String, Step)]) -> Vec<PlannerMessage> {
