@@ -47,6 +47,10 @@ Rust planner-adjacent coverage is internal and fixture-scoped:
   planner command support for manual migration inspection. The command emits
   pretty JSON `PlanningResult` values from explicit authored-root/device-plan
   inputs, but it is not the user-facing planner CLI.
+- `tools/compare_rust_python_plan.py`: dev-only comparison harness for Python
+  planner API output versus Rust shadow planner output. The harness emits a
+  deterministic JSON classification report and is not part of normal
+  Rust/Tauri runtime checks.
 - `crates/emuchef-rust-backend/src/planner_device_plan.rs`: private
   checked-in device-plan/profile ingestion for crate-internal planner inputs.
   It parses only the current authored profile/plan YAML surface, maps selected
@@ -97,7 +101,7 @@ Rust planner-adjacent coverage is internal and fixture-scoped:
 | --- | --- | --- | --- | --- |
 | Authored YAML loading/parsing | `src/emuchef/io/loader.py`; `src/emuchef/io/validation.py` | `crates/emuchef-rust-backend/src/yaml.rs`; `phase6e_yaml.rs`; `planner_tests.rs` loading fixture roots and checked-in authored corpus | Fixture-scoped Rust parsing exists for selected authored roots and the checked-in `authored/recipes` corpus. | Prove all required authored corpus and planner inputs parse with matching semantics. |
 | Schema/domain validation | `src/emuchef/io/validation.py`; `src/emuchef/planner/contracts.py`; domain modules under `src/emuchef/domain/` | `validation.rs`; `phase6k_validation.rs`; `phase6l_catalog_validation.rs`; planner golden comparisons | Rust validates selected editor/planner rules only. | Port or retire Python planner-owned diagnostics and validation rules with parity tests. |
-| Device plan/profile ingestion | `src/emuchef/io/loader.py`; `src/emuchef/planner/service.py`; `src/emuchef/cli.py`; `profile_matching.py` | `planner_device_plan.rs`; `repo_device_profile_inventory_is_explicit_by_path_and_id`; `repo_device_plan_inventory_is_explicit_by_path_id_profile_and_selected_order`; `repo_device_plan_profile_context_can_plan_successfully_without_python_or_devices`; P7J defaults/override classification tests; P7L `repo_plan_e2e_*` tests | Rust has private checked-in repo device-plan/profile ingestion coverage. It parses current YAML profiles/plans, requires `selected_by_default` where current Python parsing requires it, maps selected recipe refs in authored order, maps profile `capability_defaults` and `device_tags`, and builds synthetic planner-only context from profile fields. P7L proves private repo-plan success for `ayaneo.konkr_pocket_fit.base` and `ayaneo.pocket_s_mini.base`. P7L also records `ayaneo.generic.base`, `ayaneo.pocket_air_mini.base`, and `ayaneo.pocket_s2.base` as current Rust planner gaps because their profiles do not expose `app_data_write`, so selected RetroArch app-data copy steps are not emitted while `launch_retroarch` still depends on them. P7J additionally classifies checked-in `defaults.show_advanced_steps` and `overrides.config_variants` as inactive metadata, and supports strict private `<recipe_ref>/<input_id>` override binding merge in temporary authored-root tests. Config variant selection, plan defaults as bindings, broader Python override key forms, profile matching, real detected facts, CLI operation replay, and device probing remain out of scope. | Prove or deliberately retire full Python planner plan/profile behavior, including CLI context resolution, profile matching, broader defaults/overrides, and diagnostics. |
+| Device plan/profile ingestion | `src/emuchef/io/loader.py`; `src/emuchef/planner/service.py`; `src/emuchef/cli.py`; `profile_matching.py` | `planner_device_plan.rs`; `repo_device_profile_inventory_is_explicit_by_path_and_id`; `repo_device_plan_inventory_is_explicit_by_path_id_profile_and_selected_order`; `repo_device_plan_profile_context_can_plan_successfully_without_python_or_devices`; P7J defaults/override classification tests; P7L `repo_plan_e2e_*` tests; P7N comparison harness | Rust has private checked-in repo device-plan/profile ingestion coverage. It parses current YAML profiles/plans, requires `selected_by_default` where current Python parsing requires it, maps selected recipe refs in authored order, maps profile `capability_defaults` and `device_tags`, and builds synthetic planner-only context from profile fields. P7L proves private repo-plan success for `ayaneo.konkr_pocket_fit.base` and `ayaneo.pocket_s_mini.base`. P7N compares Python planner API output against Rust shadow output and classifies `ayaneo.generic.base`, `ayaneo.pocket_air_mini.base`, and `ayaneo.pocket_s2.base` app-data-write failures as `rust_optional_step_pruning_dependency_bug`: Python planner API succeeds under the same profile-derived planner context by pruning RetroArch app-data copy steps and `launch_retroarch`, while Rust shadow planner returns `unknown_step_dependency`. P7J additionally classifies checked-in `defaults.show_advanced_steps` and `overrides.config_variants` as inactive metadata, and supports strict private `<recipe_ref>/<input_id>` override binding merge in temporary authored-root tests. Config variant selection, plan defaults as bindings, broader Python override key forms, profile matching, real detected facts, CLI operation replay, and device probing remain out of scope. | Prove or deliberately retire full Python planner plan/profile behavior, including CLI context resolution, profile matching, broader defaults/overrides, and diagnostics. |
 | Input binding/default handling | `src/emuchef/planner/bindings.py`; `draft_builder.py`; `emitter.py` | `required_input_bindings_match_python_success_and_missing_error`; `phase6n_optional_inputs_prune_and_rebind_like_python`; `phase6n_input_defaults_and_multiple_values_match_python`; `temp_device_plan_override_bindings_merge_before_explicit_bindings` | Covered for selected required, optional, default, and multiple input fixtures. P7J covers private device-plan override binding merge for strict `<recipe_ref>/<input_id>` keys with explicit test bindings taking precedence. | Cover operation replay, validation errors, broader Python override key forms such as `inputs.<id>`, and broader input declarations before planner cutover. |
 | Selected recipe expansion | `src/emuchef/planner/service.py`; `dependencies.py`; `draft_builder.py` | `recipe_and_step_dependencies_match_python_ordering`; `phase6n_dependency_expansion_and_namespacing_match_python`; P7K `recipe_expansion_*` tests | Private Rust planner expansion follows direct `recipe_dependencies` evidence: dependencies before dependents, sibling dependencies in authored order, selected recipe closure expansion in selected order, and duplicate suppression without moving the first occurrence. Current checked-in recipes have no non-empty dependency metadata, so current corpus selected and expanded refs match as current-state evidence only. | Prove selected recipe expansion across the required authored catalog and CLI workflows, including any future non-empty checked-in dependencies. |
 | Dependency validation | `src/emuchef/planner/dependencies.py`; `src/emuchef/io/validation.py` | `phase6l_catalog_validation.rs`; planner dependency tests; `dependency_validation_*` planner tests | Rust validates selected/emitted step dependencies for unknown or non-emitted targets, self-dependencies, and static cycles. Duplicate authored dependencies remain allowed and are preserved in emitted execution steps. Runtime dependency outcomes remain executor behavior. | Match Python planner diagnostics, ordering, and failure behavior for broader planner-facing dependency cases. |
@@ -145,9 +149,9 @@ ADB, network access, executor code, or artifact downloads.
 | --- | --- | --- | --- | --- | --- |
 | `authored/device_plans/ayaneo.konkr_pocket_fit.base.yaml` | `ayaneo.konkr_pocket_fit` | `app.retroarch.provision` | Success. `repo_plan_e2e_*` tests build input from checked-in plan/profile YAML, emit deterministic selected/expanded refs and step order, and assert normalized RetroArch params. | None. Optional `app.retroarch.provision/retroarch_cfg` may be omitted, which prunes `seed_retroarch_cfg`; a temp `.cfg` binding includes that step. | Not a user-facing planner path. |
 | `authored/device_plans/ayaneo.pocket_s_mini.base.yaml` | `ayaneo.pocket_s_mini` | `app.retroarch.provision` | Success. `repo_plan_e2e_*` tests use this app-data-capable context for normalized artifact selection, default params, dependency ordering, shorthand step-ref rewriting, and optional config pruning/binding assertions. | None. Optional `app.retroarch.provision/retroarch_cfg` may be omitted or supplied as a planner-only temp `.cfg` path. | Not a user-facing planner path. |
-| `authored/device_plans/ayaneo.generic.base.yaml` | `ayaneo.generic` | `app.retroarch.provision`, `feature.copy_bios` | Current Rust planner gap. Even with the required BIOS temp directory binding supplied, the private planner returns `unknown_step_dependency`. | `feature.copy_bios/bios_source_dir` is required by the selected BIOS recipe, but supplying it is not enough for success in this context. | `app_data_write: false` prevents RetroArch app-data copy steps from being emitted while `launch_retroarch` still depends on them. |
-| `authored/device_plans/ayaneo.pocket_air_mini.base.yaml` | `ayaneo.pocket_air_mini` | `app.retroarch.provision`, `feature.copy_bios` | Current Rust planner gap. Even with the required BIOS temp directory binding supplied, the private planner returns `unknown_step_dependency`. | `feature.copy_bios/bios_source_dir` is required by the selected BIOS recipe, but supplying it is not enough for success in this context. | `app_data_write: false` prevents RetroArch app-data copy steps from being emitted while `launch_retroarch` still depends on them. |
-| `authored/device_plans/ayaneo.pocket_s2.base.yaml` | `ayaneo.pocket_s2` | `app.retroarch.provision`, `feature.copy_bios`, `app.xaniteog.install` | Current Rust planner gap. Even with required BIOS temp directory and XaniteOG temp `.apk` bindings supplied, the private planner returns `unknown_step_dependency`. | `feature.copy_bios/bios_source_dir` and `app.xaniteog.install/xaniteog_apk` are required by selected recipes, but supplying them is not enough for success in this context. | `app_data_write: false` prevents RetroArch app-data copy steps from being emitted while `launch_retroarch` still depends on them. |
+| `authored/device_plans/ayaneo.generic.base.yaml` | `ayaneo.generic` | `app.retroarch.provision`, `feature.copy_bios` | Current Rust planner bug/gap. Even with the required BIOS temp directory binding supplied, the private planner returns `unknown_step_dependency`. | `feature.copy_bios/bios_source_dir` is required by the selected BIOS recipe, but supplying it is not enough for success in this context. | Python planner API succeeds under the same profile-derived planner context by pruning RetroArch app-data copy steps and `launch_retroarch`. Rust currently leaves `launch_retroarch` in the dependency validation path after `app_data_write: false` prevents those copy steps from being emitted. P7N classifies this as `rust_optional_step_pruning_dependency_bug`, not an intentional `known_gap`. |
+| `authored/device_plans/ayaneo.pocket_air_mini.base.yaml` | `ayaneo.pocket_air_mini` | `app.retroarch.provision`, `feature.copy_bios` | Current Rust planner bug/gap. Even with the required BIOS temp directory binding supplied, the private planner returns `unknown_step_dependency`. | `feature.copy_bios/bios_source_dir` is required by the selected BIOS recipe, but supplying it is not enough for success in this context. | Python planner API succeeds under the same profile-derived planner context by pruning RetroArch app-data copy steps and `launch_retroarch`. Rust currently leaves `launch_retroarch` in the dependency validation path after `app_data_write: false` prevents those copy steps from being emitted. P7N classifies this as `rust_optional_step_pruning_dependency_bug`, not an intentional `known_gap`. |
+| `authored/device_plans/ayaneo.pocket_s2.base.yaml` | `ayaneo.pocket_s2` | `app.retroarch.provision`, `feature.copy_bios`, `app.xaniteog.install` | Current Rust planner bug/gap. Even with required BIOS temp directory and XaniteOG temp `.apk` bindings supplied, the private planner returns `unknown_step_dependency`. | `feature.copy_bios/bios_source_dir` and `app.xaniteog.install/xaniteog_apk` are required by selected recipes, but supplying them is not enough for success in this context. | Python planner API succeeds under the same profile-derived planner context by pruning RetroArch app-data copy steps and `launch_retroarch`. Rust currently leaves `launch_retroarch` in the dependency validation path after `app_data_write: false` prevents those copy steps from being emitted. P7N classifies this as `rust_optional_step_pruning_dependency_bug`, not an intentional `known_gap`. |
 
 | Path | Recipe id | Parse status | Planner/emission status | Context source | Unsupported gap | Test/evidence path |
 | --- | --- | --- | --- | --- | --- | --- |
@@ -287,6 +291,77 @@ The shadow command does not execute plans, probe devices, invoke ADB, access the
 network, download or materialize artifacts, regenerate goldens, invoke Python,
 expose Tauri commands, expose sidecar protocol requests, or replace the Python
 `emuchef plan` CLI. Planner CLI cutover remains a future explicit phase.
+
+## Dev-Only Python Planner API Vs Rust Shadow Comparison
+
+`tools/compare_rust_python_plan.py` compares Python planner API output with the
+Rust `emuchef-plan-shadow` output for an explicit authored root, device plan,
+and repeated `<recipe_ref>/<input_id>=<value>` bindings. It is a reporting tool,
+not a cutover path. The harness does not call the user-facing Python
+`emuchef plan` CLI because that CLI resolves ADB and probes device facts before
+planning.
+
+The Python worker uses the closest current planner API path:
+`load_authored_catalog(...)`, `Planner.start_session(...)`, optional
+`session.bind_input(...)`, and `session.emit_execution_plan()`. Because
+`Planner.start_session(...)` requires an explicit `DeviceContext`, the harness
+uses a shared synthetic/profile-derived planner context for both sides:
+manufacturer comes from the first profile `match.manufacturer_contains` value
+or `profile:<profile_id>`, model comes from the profile name or
+`profile:<profile_id>`, Android version comes from `match.android_version.min`
+or `0`, API level is `null`, device tags come from the profile, and runtime
+capabilities come from `capability_defaults`. This proves Python planner API
+versus Rust shadow behavior under that planner context only. It does not prove
+Python CLI/device-probing parity.
+
+The report is deterministic JSON with classification buckets for `match`,
+`rust_missing`, `python_missing`, `value_mismatch`, `known_gap`,
+`intentional_shape_difference`, and `unsupported`. It compares top-level status,
+selected refs, expanded refs, execution-plan presence, step count, step ids and
+order, step types, dependencies, normalized params, warning/error shape, and
+serialized `permission_plan` presence. JSON object key order is ignored;
+semantic list order remains compared.
+
+The default Rust command mode is offline Cargo:
+
+```bash
+cargo run --offline --quiet --manifest-path crates/emuchef-rust-backend/Cargo.toml --bin emuchef-plan-shadow -- ...
+```
+
+Offline mode may fail on a fresh checkout when Cargo dependencies are not
+prefetched. Developers can pass `--cargo-online`, set
+`EMUCHEF_PLAN_COMPARE_CARGO_OFFLINE=0`, or pass `--rust-bin <path>` for a
+prebuilt shadow binary. Command-construction tests cover these modes without
+requiring network access.
+
+Example successful comparison:
+
+```bash
+.venv/bin/python tools/compare_rust_python_plan.py \
+  --authored-root authored \
+  --device-plan ayaneo.pocket_s_mini.base
+```
+
+Required file/directory bindings must satisfy Python planner validation. Use
+planner-only local placeholders; the harness does not download or materialize
+artifact payloads:
+
+```bash
+mkdir -p /tmp/emuchef-p7n-bios
+: > /tmp/emuchef-p7n-xaniteog.apk
+.venv/bin/python tools/compare_rust_python_plan.py \
+  --authored-root authored \
+  --device-plan ayaneo.pocket_s2.base \
+  --bind feature.copy_bios/bios_source_dir=/tmp/emuchef-p7n-bios \
+  --bind app.xaniteog.install/xaniteog_apk=/tmp/emuchef-p7n-xaniteog.apk
+```
+
+The Pocket S2 comparison currently reports a `value_mismatch` with diagnostic
+category `rust_optional_step_pruning_dependency_bug`. It is not classified as an
+intentional `known_gap`: Python planner API succeeds by pruning RetroArch
+app-data copy steps and `launch_retroarch`, while Rust shadow planner returns
+`unknown_step_dependency` for `launch_retroarch` after those dependencies are
+not emitted because `app_data_write` is false.
 
 ## Deletion-Readiness Ladder
 

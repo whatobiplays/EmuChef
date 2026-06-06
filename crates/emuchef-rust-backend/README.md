@@ -326,6 +326,68 @@ expose Tauri commands, expose sidecar protocol requests, or alter the default
 set so existing `cargo run --manifest-path crates/emuchef-rust-backend/Cargo.toml -- --sidecar`
 and one-shot development workflows remain unambiguous.
 
+## Python Planner API Vs Rust Shadow Comparison
+
+The repository includes a developer-only comparison/reporting harness:
+
+```bash
+.venv/bin/python tools/compare_rust_python_plan.py \
+  --authored-root authored \
+  --device-plan ayaneo.pocket_s_mini.base
+```
+
+This compares Python planner API output with Rust `emuchef-plan-shadow` output.
+It does not compare Python CLI behavior, because the user-facing
+`emuchef plan` CLI probes device facts through ADB before planning. The Python
+worker uses `load_authored_catalog(...)`, `Planner.start_session(...)`,
+optional `session.bind_input(...)`, and `session.emit_execution_plan()` under a
+shared synthetic/profile-derived planner context. That context uses profile
+match/name/version/tags and `capability_defaults`; it does not prove full
+Python CLI or real-device parity.
+
+The report is deterministic JSON. It classifies differences as `match`,
+`rust_missing`, `python_missing`, `value_mismatch`, `known_gap`,
+`intentional_shape_difference`, or `unsupported`, and compares top-level status,
+selected recipe refs, expanded recipe refs, execution step count, step ids and
+order, step types, dependencies, normalized params, warning/error shape, and
+serialized `permission_plan` presence.
+
+By default the harness launches Rust with offline Cargo:
+
+```bash
+cargo run --offline --quiet --manifest-path crates/emuchef-rust-backend/Cargo.toml --bin emuchef-plan-shadow -- ...
+```
+
+Offline mode may fail on a fresh checkout without prefetched Cargo
+dependencies. Pass `--cargo-online`, set
+`EMUCHEF_PLAN_COMPARE_CARGO_OFFLINE=0`, or pass `--rust-bin <path>` to use a
+prebuilt shadow binary.
+
+Bindings that require existing local paths must use planner-only placeholders
+that satisfy Python validation:
+
+```bash
+mkdir -p /tmp/emuchef-p7n-bios
+: > /tmp/emuchef-p7n-xaniteog.apk
+.venv/bin/python tools/compare_rust_python_plan.py \
+  --authored-root authored \
+  --device-plan ayaneo.pocket_s2.base \
+  --bind feature.copy_bios/bios_source_dir=/tmp/emuchef-p7n-bios \
+  --bind app.xaniteog.install/xaniteog_apk=/tmp/emuchef-p7n-xaniteog.apk
+```
+
+The Pocket S2 comparison currently reports `value_mismatch` with diagnostic
+category `rust_optional_step_pruning_dependency_bug`, not an intentional
+`known_gap`. Python planner API succeeds under the shared profile-derived
+context by pruning RetroArch app-data copy steps and `launch_retroarch`; Rust
+shadow planner returns `unknown_step_dependency` after `app_data_write: false`
+prevents those copy steps from being emitted.
+
+The comparison harness is not part of normal Rust/Tauri runtime checks. It does
+not execute plans, probe devices, invoke ADB, access the network, download or
+materialize artifacts, regenerate checked-in goldens, expose Tauri commands, or
+alter user-facing CLI routing. Planner cutover remains a future explicit phase.
+
 ## Phase 6O Executor Scope
 
 Phase 6O added `src/executor.rs`, an internal Rust module used only by
