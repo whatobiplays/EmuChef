@@ -376,12 +376,11 @@ mkdir -p /tmp/emuchef-p7n-bios
   --bind app.xaniteog.install/xaniteog_apk=/tmp/emuchef-p7n-xaniteog.apk
 ```
 
-The Pocket S2 comparison currently reports `value_mismatch` with diagnostic
-category `rust_optional_step_pruning_dependency_bug`, not an intentional
-`known_gap`. Python planner API succeeds under the shared profile-derived
-context by pruning RetroArch app-data copy steps and `launch_retroarch`; Rust
-shadow planner returns `unknown_step_dependency` after `app_data_write: false`
-prevents those copy steps from being emitted.
+The Pocket S2 comparison currently reports `match` when required planner-only
+BIOS and XaniteOG bindings are supplied. The comparison harness still has a
+synthetic unit test for stale or future Rust outputs that return the old
+`rust_optional_step_pruning_dependency_bug`, but that diagnostic is not a
+current checked-in repo-plan comparison gap.
 
 The comparison harness is not part of normal Rust/Tauri runtime checks. It does
 not execute plans, probe devices, invoke ADB, access the network, download or
