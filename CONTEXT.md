@@ -207,10 +207,14 @@ produce private Rust planner success results without required external
 bindings; optional `app.retroarch.provision/retroarch_cfg` remains optional,
 and a planner-only temporary `.cfg` binding includes `seed_retroarch_cfg`.
 `ayaneo.generic.base`, `ayaneo.pocket_air_mini.base`, and
-`ayaneo.pocket_s2.base` are current Rust planner gaps even when their required
-planner-only BIOS directory or XaniteOG `.apk` bindings are supplied, because
-their profiles do not expose `app_data_write`, so selected RetroArch app-data
-copy steps are not emitted while `launch_retroarch` still depends on them.
+`ayaneo.pocket_s2.base` are current Rust planner bug/gap contexts even when
+their required planner-only BIOS directory or XaniteOG `.apk` bindings are
+supplied. Python planner API succeeds under the same profile-derived planner
+context by pruning RetroArch app-data copy steps and `launch_retroarch`. Rust
+currently returns `unknown_step_dependency` because `app_data_write: false`
+prevents the app-data copy steps from being emitted while `launch_retroarch`
+still reaches dependency validation. P7N classifies this as
+`rust_optional_step_pruning_dependency_bug`, not an intentional `known_gap`.
 Device-plan defaults as bindings, config variant selection, broader Python
 override key forms such as `inputs.<id>`, profile matching against detected
 facts, real device facts, CLI operation replay, executor/apply behavior, Python
@@ -236,6 +240,25 @@ the same `<recipe_ref>/<input_id>` are grouped into a string array to match the
 current Python CLI parser. The shadow binary does not execute plans, probe
 devices, invoke ADB, access the network, materialize artifacts, expose Tauri or
 sidecar protocol commands, or replace the Python planner CLI.
+
+`tools/compare_rust_python_plan.py` is a dev-only deterministic comparison
+harness for Python planner API output versus Rust shadow planner output. It uses
+the current Python planner API path (`load_authored_catalog`,
+`Planner.start_session`, `session.bind_input`, and `session.emit_execution_plan`)
+under the same synthetic/profile-derived planner context used by Rust shadow
+planning. This comparison does not call `emuchef plan`, does not prove Python
+CLI/device-probing parity, and does not execute plans, probe devices, invoke
+ADB, access the network, download or materialize artifacts, expose Tauri or
+sidecar protocol commands, update checked-in fixtures/goldens, or participate in
+normal Rust/Tauri runtime checks. Reports classify differences as `match`,
+`rust_missing`, `python_missing`, `value_mismatch`, `known_gap`,
+`intentional_shape_difference`, or `unsupported`, and compare top-level status,
+selected and expanded refs, execution-plan presence, step count, step ids/order,
+step types, dependencies, normalized params, warning/error shape, and serialized
+`permission_plan` presence. The default Rust command mode uses offline Cargo;
+developers can pass `--cargo-online`, set
+`EMUCHEF_PLAN_COMPARE_CARGO_OFFLINE=0`, or pass `--rust-bin <path>` for local
+development.
 
 The Rust backend supports one-shot stateless requests through:
 
@@ -619,7 +642,9 @@ device-plan/profile ingestion coverage that parses repo `device_plans` and
 `device_profiles`, freezes path/id/profile/selected-ref inventory, maps
 selected recipe refs in authored order, maps profile capabilities/tags, accepts
 supplied test bindings, and emits at least one deterministic plan from a
-checked-in profile/plan context. It validates malformed `steps.*` refs,
+checked-in profile/plan context. The dev-only comparison harness reports Python
+planner API versus Rust shadow planner classifications for those contexts
+without making Rust planner authoritative. It validates malformed `steps.*` refs,
 unknown selected step targets, unknown step outputs, and shorthand refs to
 selected steps without primary outputs for emitted planner steps; non-step refs
 remain outside that validation slice. It asserts focused execution-plan DTO
