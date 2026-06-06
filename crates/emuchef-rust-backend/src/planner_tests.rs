@@ -16,6 +16,36 @@ use crate::planner_device_plan::{
     discover_device_plan_inventory, discover_device_profile_inventory,
 };
 
+const P7L_RETROARCH_ONLY_REFS: &[&str] = &["app.retroarch.provision"];
+const P7L_RETROARCH_BIOS_REFS: &[&str] = &["app.retroarch.provision", "feature.copy_bios"];
+const P7L_RETROARCH_BIOS_XANITEOG_REFS: &[&str] = &[
+    "app.retroarch.provision",
+    "feature.copy_bios",
+    "app.xaniteog.install",
+];
+const P7L_NO_REQUIRED_BINDINGS: &[RepoPlanE2eBinding] = &[];
+const P7L_BIOS_BINDINGS: &[RepoPlanE2eBinding] = &[RepoPlanE2eBinding::BiosSourceDir];
+const P7L_BIOS_XANITEOG_BINDINGS: &[RepoPlanE2eBinding] = &[
+    RepoPlanE2eBinding::BiosSourceDir,
+    RepoPlanE2eBinding::XaniteogApk,
+];
+const P7L_RETROARCH_CFG_BINDINGS: &[RepoPlanE2eBinding] = &[RepoPlanE2eBinding::RetroarchCfg];
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum RepoPlanE2eBinding {
+    BiosSourceDir,
+    XaniteogApk,
+    RetroarchCfg,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct RepoPlanE2eCase {
+    device_plan_ref: &'static str,
+    device_profile_ref: &'static str,
+    selected_recipe_refs: &'static [&'static str],
+    required_bindings: &'static [RepoPlanE2eBinding],
+}
+
 fn authored_root(name: &str) -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR"))
         .join("tests")
@@ -147,6 +177,102 @@ fn repo_device_plan_planner_input_with_bindings(
         bindings,
     )
     .unwrap_or_else(|error| panic!("{device_plan_ref} should build PlannerInput: {error}"))
+}
+
+fn repo_plan_e2e_input(case: &RepoPlanE2eCase, temp: &TempDir) -> PlannerInput {
+    repo_plan_e2e_input_for_device_plan(case.device_plan_ref, temp, case.required_bindings)
+}
+
+fn repo_plan_e2e_input_for_device_plan(
+    device_plan_ref: &str,
+    temp: &TempDir,
+    binding_kinds: &[RepoPlanE2eBinding],
+) -> PlannerInput {
+    PlannerInput::from_authored_device_plan(
+        repo_authored_root(),
+        device_plan_ref,
+        format!("plan.p7l.{device_plan_ref}.001"),
+        repo_plan_e2e_bindings(temp, binding_kinds),
+    )
+    .unwrap_or_else(|error| panic!("{device_plan_ref} should build P7L PlannerInput: {error}"))
+}
+
+fn repo_plan_e2e_bindings(
+    temp: &TempDir,
+    binding_kinds: &[RepoPlanE2eBinding],
+) -> OrderedMap<Value> {
+    let mut bindings = OrderedMap::new();
+    for binding_kind in binding_kinds {
+        let (input_id, path) = repo_plan_e2e_binding_path(temp, *binding_kind);
+        bindings.insert(
+            input_id.to_string(),
+            json!(path.to_string_lossy().to_string()),
+        );
+    }
+    bindings
+}
+
+fn repo_plan_e2e_binding_path(
+    temp: &TempDir,
+    binding_kind: RepoPlanE2eBinding,
+) -> (&'static str, PathBuf) {
+    match binding_kind {
+        RepoPlanE2eBinding::BiosSourceDir => {
+            let path = temp.path().join("bios-source");
+            fs::create_dir_all(&path).expect("P7L BIOS source temp directory should be created");
+            ("feature.copy_bios/bios_source_dir", path)
+        }
+        RepoPlanE2eBinding::XaniteogApk => {
+            let path = temp.path().join("xaniteog.apk");
+            fs::write(&path, []).expect("P7L XaniteOG placeholder APK path should be created");
+            ("app.xaniteog.install/xaniteog_apk", path)
+        }
+        RepoPlanE2eBinding::RetroarchCfg => {
+            let path = temp.path().join("retroarch.cfg");
+            fs::write(&path, []).expect("P7L RetroArch placeholder config path should be created");
+            ("app.retroarch.provision/retroarch_cfg", path)
+        }
+    }
+}
+
+fn repo_plan_e2e_cases() -> Vec<RepoPlanE2eCase> {
+    vec![
+        RepoPlanE2eCase {
+            device_plan_ref: "ayaneo.konkr_pocket_fit.base",
+            device_profile_ref: "ayaneo.konkr_pocket_fit",
+            selected_recipe_refs: P7L_RETROARCH_ONLY_REFS,
+            required_bindings: P7L_NO_REQUIRED_BINDINGS,
+        },
+        RepoPlanE2eCase {
+            device_plan_ref: "ayaneo.pocket_s_mini.base",
+            device_profile_ref: "ayaneo.pocket_s_mini",
+            selected_recipe_refs: P7L_RETROARCH_ONLY_REFS,
+            required_bindings: P7L_NO_REQUIRED_BINDINGS,
+        },
+    ]
+}
+
+fn repo_plan_e2e_gap_cases() -> Vec<RepoPlanE2eCase> {
+    vec![
+        RepoPlanE2eCase {
+            device_plan_ref: "ayaneo.generic.base",
+            device_profile_ref: "ayaneo.generic",
+            selected_recipe_refs: P7L_RETROARCH_BIOS_REFS,
+            required_bindings: P7L_BIOS_BINDINGS,
+        },
+        RepoPlanE2eCase {
+            device_plan_ref: "ayaneo.pocket_air_mini.base",
+            device_profile_ref: "ayaneo.pocket_air_mini",
+            selected_recipe_refs: P7L_RETROARCH_BIOS_REFS,
+            required_bindings: P7L_BIOS_BINDINGS,
+        },
+        RepoPlanE2eCase {
+            device_plan_ref: "ayaneo.pocket_s2.base",
+            device_profile_ref: "ayaneo.pocket_s2",
+            selected_recipe_refs: P7L_RETROARCH_BIOS_XANITEOG_REFS,
+            required_bindings: P7L_BIOS_XANITEOG_BINDINGS,
+        },
+    ]
 }
 
 fn planning_result_value(input: PlannerInput) -> Value {
@@ -2926,6 +3052,254 @@ fn repo_device_plan_profile_context_can_plan_successfully_without_python_or_devi
 }
 
 #[test]
+fn repo_plan_e2e_from_checked_in_device_plan_succeeds() {
+    for case in repo_plan_e2e_cases() {
+        let temp = TempDir::new().expect("repo plan e2e temp root should be created");
+        let actual = planning_result_value(repo_plan_e2e_input(&case, &temp));
+
+        assert_eq!(
+            actual["status"], "success",
+            "{}: {actual:#}",
+            case.device_plan_ref
+        );
+        assert_planning_result_shape(case.device_plan_ref, &actual);
+        assert_eq!(
+            actual["execution_plan"]["source"]["device_plan_ref"],
+            case.device_plan_ref
+        );
+        assert_eq!(
+            actual["execution_plan"]["source"]["device_profile_ref"],
+            case.device_profile_ref
+        );
+        assert_eq!(
+            actual["execution_plan"]["source"]["selected_recipe_refs"],
+            json!(case.selected_recipe_refs)
+        );
+        assert_eq!(
+            actual["execution_plan"]["source"]["expanded_recipe_refs"],
+            json!(case.selected_recipe_refs),
+            "{} currently has no non-empty checked-in recipe dependency closure",
+            case.device_plan_ref
+        );
+    }
+}
+
+#[test]
+fn repo_plan_e2e_selected_and_expanded_refs_are_deterministic() {
+    for case in repo_plan_e2e_cases() {
+        let temp = TempDir::new().expect("repo plan e2e temp root should be created");
+        let first = planning_result_value(repo_plan_e2e_input(&case, &temp));
+        let second = planning_result_value(repo_plan_e2e_input(&case, &temp));
+
+        assert_eq!(
+            first, second,
+            "{} should emit the same private planner result for repeated runs with the same bindings",
+            case.device_plan_ref
+        );
+        assert_eq!(
+            first["execution_plan"]["source"]["selected_recipe_refs"],
+            json!(case.selected_recipe_refs)
+        );
+        assert_eq!(
+            first["execution_plan"]["source"]["expanded_recipe_refs"],
+            json!(case.selected_recipe_refs)
+        );
+        assert_eq!(
+            execution_step_ids(&first),
+            execution_step_ids(&second),
+            "{} execution step order should be deterministic",
+            case.device_plan_ref
+        );
+    }
+}
+
+#[test]
+fn repo_plan_e2e_normalized_steps_reflect_prior_p7_slices() {
+    let temp = TempDir::new().expect("repo plan e2e temp root should be created");
+    let actual = planning_result_value(repo_plan_e2e_input_for_device_plan(
+        "ayaneo.pocket_s_mini.base",
+        &temp,
+        P7L_NO_REQUIRED_BINDINGS,
+    ));
+
+    assert_eq!(actual["status"], "success", "{actual:#}");
+    assert!(!actual["execution_plan"]
+        .as_object()
+        .expect("repo plan e2e should include execution_plan")
+        .contains_key("permission_plan"));
+    let step_ids = execution_step_ids(&actual);
+    assert!(
+        !step_ids.contains(&"app.retroarch.provision/seed_retroarch_cfg"),
+        "optional RetroArch config step should be pruned when retroarch_cfg is unbound: {step_ids:#?}"
+    );
+    assert_step_before(
+        &step_ids,
+        "app.retroarch.provision/extract_assets",
+        "app.retroarch.provision/copy_assets",
+    );
+    assert_step_before(
+        &step_ids,
+        "app.retroarch.provision/copy_assets",
+        "app.retroarch.provision/launch_retroarch",
+    );
+
+    let resolve = planner_step(&actual, "app.retroarch.provision/resolve_artifacts");
+    assert_object_keys(
+        "repo plan e2e resolve params",
+        resolve["params"].as_object().unwrap(),
+        &["artifacts"],
+    );
+    let resolved_artifacts = string_array(
+        &resolve["params"]["artifacts"]["value"],
+        "repo plan e2e resolve artifacts",
+    );
+    assert_eq!(resolved_artifacts.len(), 24);
+    assert_eq!(
+        resolved_artifacts[0],
+        "app.retroarch.provision/retroarch_apk"
+    );
+    for expected in [
+        "app.retroarch.provision/asset_assets_zip",
+        "app.retroarch.provision/core_ppsspp_zip",
+        "app.retroarch.provision/core_files_ppsspp_zip",
+    ] {
+        assert!(
+            resolved_artifacts.contains(&expected),
+            "resolved artifacts should include {expected}: {resolved_artifacts:#?}"
+        );
+    }
+
+    let extract_cores = planner_step(&actual, "app.retroarch.provision/extract_cores");
+    assert_object_keys(
+        "repo plan e2e extract_cores params",
+        extract_cores["params"].as_object().unwrap(),
+        &["artifacts", "extract_on"],
+    );
+    assert_eq!(
+        extract_cores["params"]["extract_on"],
+        json!({"value": "host"})
+    );
+    assert_eq!(
+        string_array(
+            &extract_cores["params"]["artifacts"]["value"],
+            "repo plan e2e extracted core artifacts",
+        )
+        .len(),
+        13
+    );
+
+    let extract_assets = planner_step(&actual, "app.retroarch.provision/extract_assets");
+    assert_eq!(
+        extract_assets["params"]["archive"],
+        json!({"ref": "artifacts.app.retroarch.provision/asset_assets_zip.local_path"})
+    );
+    assert_eq!(extract_assets["params"]["cleanup"], json!({"value": true}));
+
+    let copy_assets = planner_step(&actual, "app.retroarch.provision/copy_assets");
+    assert_eq!(
+        copy_assets["dependencies"],
+        json!([
+            "app.retroarch.provision/stop_retroarch_after_permissions",
+            "app.retroarch.provision/extract_assets"
+        ])
+    );
+    assert_eq!(
+        copy_assets["params"]["source"],
+        json!({"ref": "steps.app.retroarch.provision/extract_assets.outputs.extracted_path"})
+    );
+    assert_eq!(
+        copy_assets["params"]["copy_policy"],
+        json!({"value": "merge"})
+    );
+
+    let install = planner_step(&actual, "app.retroarch.provision/install_retroarch");
+    assert_eq!(
+        install["params"]["replace_existing"],
+        json!({"value": false})
+    );
+
+    let config_temp = TempDir::new().expect("repo plan e2e config temp root should be created");
+    let bound_config = planning_result_value(repo_plan_e2e_input_for_device_plan(
+        "ayaneo.pocket_s_mini.base",
+        &config_temp,
+        P7L_RETROARCH_CFG_BINDINGS,
+    ));
+    assert_eq!(bound_config["status"], "success", "{bound_config:#}");
+    assert_eq!(
+        execution_input_ids(&bound_config),
+        vec!["app.retroarch.provision/retroarch_cfg"]
+    );
+    let bound_step_ids = execution_step_ids(&bound_config);
+    assert!(
+        bound_step_ids.contains(&"app.retroarch.provision/seed_retroarch_cfg"),
+        "bound retroarch_cfg should include the seed step: {bound_step_ids:#?}"
+    );
+    let seed = planner_step(&bound_config, "app.retroarch.provision/seed_retroarch_cfg");
+    assert_eq!(
+        seed["params"]["source"],
+        json!({"ref": "inputs.app.retroarch.provision/retroarch_cfg"})
+    );
+    assert_eq!(seed["params"]["copy_policy"], json!({"value": "replace"}));
+}
+
+#[test]
+fn repo_plan_e2e_requires_only_explicit_external_bindings_for_unbound_inputs() {
+    for case in repo_plan_e2e_cases() {
+        assert!(
+            case.required_bindings.is_empty(),
+            "{} should not need required external bindings in the current P7L success set",
+            case.device_plan_ref
+        );
+        let temp = TempDir::new().expect("repo plan e2e temp root should be created");
+        let actual = planning_result_value(repo_plan_e2e_input(&case, &temp));
+
+        assert_eq!(
+            actual["status"], "success",
+            "{}: {actual:#}",
+            case.device_plan_ref
+        );
+        assert_eq!(
+            execution_input_ids(&actual),
+            Vec::<&str>::new(),
+            "{} should not synthesize optional input bindings",
+            case.device_plan_ref
+        );
+    }
+}
+
+#[test]
+fn repo_plan_e2e_checked_in_context_gaps_are_classified_without_expanding_scope() {
+    for case in repo_plan_e2e_gap_cases() {
+        let temp = TempDir::new().expect("repo plan e2e temp root should be created");
+        let actual = planning_result_value(repo_plan_e2e_input(&case, &temp));
+
+        assert_eq!(
+            actual["status"], "error",
+            "{}: {actual:#}",
+            case.device_plan_ref
+        );
+        assert_eq!(actual["execution_plan"], Value::Null, "{actual:#}");
+        let errors = actual["errors"]
+            .as_array()
+            .expect("gap result should include planner errors");
+        assert!(
+            errors.iter().all(|error| error["code"] == "unknown_step_dependency"),
+            "{} should remain a current Rust planner dependency/capability gap, not a binding or executor path: {actual:#}",
+            case.device_plan_ref
+        );
+        assert!(
+            errors.iter().any(|error| {
+                error["details"]["recipe_ref"] == "app.retroarch.provision"
+                    && error["details"]["step_id"] == "launch_retroarch"
+                    && error["details"]["dependency"] == "copy_assets"
+            }),
+            "{} should document the missing app-data copy dependency gap: {actual:#}",
+            case.device_plan_ref
+        );
+    }
+}
+
+#[test]
 fn repo_device_plan_ingestion_errors_are_classified_and_deterministic() {
     let missing_plan = PlannerInput::from_authored_device_plan(
         repo_authored_root(),
@@ -3466,6 +3840,33 @@ fn execution_input_ids(actual: &Value) -> Vec<&str> {
         .iter()
         .map(|input| input["id"].as_str().unwrap())
         .collect()
+}
+
+fn string_array<'a>(actual: &'a Value, name: &str) -> Vec<&'a str> {
+    actual
+        .as_array()
+        .unwrap_or_else(|| panic!("{name} should be an array"))
+        .iter()
+        .map(|item| {
+            item.as_str()
+                .unwrap_or_else(|| panic!("{name} items should be strings"))
+        })
+        .collect()
+}
+
+fn assert_step_before(step_ids: &[&str], earlier: &str, later: &str) {
+    let earlier_index = step_ids
+        .iter()
+        .position(|step_id| *step_id == earlier)
+        .unwrap_or_else(|| panic!("{earlier} should be present in {step_ids:#?}"));
+    let later_index = step_ids
+        .iter()
+        .position(|step_id| *step_id == later)
+        .unwrap_or_else(|| panic!("{later} should be present in {step_ids:#?}"));
+    assert!(
+        earlier_index < later_index,
+        "{earlier} should appear before {later}: {step_ids:#?}"
+    );
 }
 
 fn param_contract_step_param<'a>(actual: &'a Value, step_id: &str, param: &str) -> &'a Value {
