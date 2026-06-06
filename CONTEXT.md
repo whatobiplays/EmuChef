@@ -199,12 +199,24 @@ plans do not contain ref-shaped override binding keys. In temporary
 authored-root planner tests, private Rust ingestion accepts only strict
 `<recipe_ref>/<input_id>` top-level `device_plan.overrides` keys as planner
 input bindings, inserts those bindings in YAML order, and applies explicit test
-bindings afterward so explicit bindings take precedence. Device-plan defaults
-as bindings, config variant selection, broader Python override key forms such
-as `inputs.<id>`, profile matching against detected facts, real device facts,
-CLI operation replay, executor/apply behavior, Python invocation, ADB, remote
-URL resolution, downloads, artifact materialization, and real APK/BIOS payload
-validation remain outside this Rust planner slice. DTO shape coverage asserts
+bindings afterward so explicit bindings take precedence. Private Rust repo-plan
+tests run checked-in device-plan/profile contexts through
+`PlannerInput::from_authored_device_plan(...)` and the internal Rust planner.
+`ayaneo.konkr_pocket_fit.base` and `ayaneo.pocket_s_mini.base` currently
+produce private Rust planner success results without required external
+bindings; optional `app.retroarch.provision/retroarch_cfg` remains optional,
+and a planner-only temporary `.cfg` binding includes `seed_retroarch_cfg`.
+`ayaneo.generic.base`, `ayaneo.pocket_air_mini.base`, and
+`ayaneo.pocket_s2.base` are current Rust planner gaps even when their required
+planner-only BIOS directory or XaniteOG `.apk` bindings are supplied, because
+their profiles do not expose `app_data_write`, so selected RetroArch app-data
+copy steps are not emitted while `launch_retroarch` still depends on them.
+Device-plan defaults as bindings, config variant selection, broader Python
+override key forms such as `inputs.<id>`, profile matching against detected
+facts, real device facts, CLI operation replay, executor/apply behavior, Python
+invocation, ADB, remote URL resolution, downloads, artifact materialization,
+and real APK/BIOS payload validation remain outside this Rust planner slice.
+DTO shape coverage asserts
 successful and error
 `PlanningResult`/`ExecutionPlan` key sets, selected normalized params, semantic
 list ordering, and the absence of a serialized `permission_plan` field without
