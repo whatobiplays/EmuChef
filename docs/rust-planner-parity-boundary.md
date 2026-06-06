@@ -3,7 +3,8 @@
 This document defines the current planner ownership boundary for the
 Python-to-Rust/Tauri migration. Python planner behavior is not deleted,
 deprecated, or ready for cutover. Rust planner coverage remains crate-internal
-and fixture-scoped.
+and fixture-scoped, with a dev-only shadow Cargo command for manual emission of
+the current private Rust `PlanningResult`.
 
 Rust planner tests include an intentional fixture inventory/parsing guard for
 the existing Phase 6M/6N planner parity evidence. The guard consumes checked-in
@@ -41,6 +42,11 @@ Rust planner-adjacent coverage is internal and fixture-scoped:
 - `crates/emuchef-rust-backend/src/planner.rs`: private planner skeleton for
   focused `PlanningResult`/`ExecutionPlan` fixture parity and internal
   permission-intent construction.
+- `crates/emuchef-rust-backend/src/plan_shadow.rs` and
+  `crates/emuchef-rust-backend/src/bin/emuchef-plan-shadow.rs`: dev-only shadow
+  planner command support for manual migration inspection. The command emits
+  pretty JSON `PlanningResult` values from explicit authored-root/device-plan
+  inputs, but it is not the user-facing planner CLI.
 - `crates/emuchef-rust-backend/src/planner_device_plan.rs`: private
   checked-in device-plan/profile ingestion for crate-internal planner inputs.
   It parses only the current authored profile/plan YAML surface, maps selected
@@ -251,6 +257,36 @@ as a Tauri command, sidecar protocol request, production CLI command, backend
 selector, or runtime fallback. Its internal permission-intent helper is not a
 serialized execution-plan field and is not consumed by executor/apply behavior.
 P7G DTO coverage does not change those boundaries.
+
+## Dev-Only Shadow Emission
+
+The Rust backend crate provides a developer-only Cargo binary named
+`emuchef-plan-shadow` for manual migration inspection:
+
+```bash
+cargo run --manifest-path crates/emuchef-rust-backend/Cargo.toml --bin emuchef-plan-shadow -- \
+  --authored-root authored \
+  --device-plan ayaneo.pocket_s_mini.base
+```
+
+The shadow command builds `PlannerInput` through the private
+`PlannerInput::from_authored_device_plan(...)` path and then calls
+`plan_execution(...)`. Explicit `--bind <recipe_ref>/<input_id>=<value>` values
+are string-only in this slice. Repeated binds for the same ref are grouped into
+a string array because the current Python CLI parser groups repeated
+`--bind REF=VALUE` entries that way. This is a shadow-command limitation and is
+not full future Rust planner CLI binding type parity.
+
+Planner success and planner validation failures, including missing required
+bindings, emit deterministic pretty JSON `PlanningResult` values to stdout.
+Success exits `0`; planner error results exit non-zero. Argument/usage failures
+and authored-root/device-plan load failures write stable text to stderr and do
+not emit stdout JSON.
+
+The shadow command does not execute plans, probe devices, invoke ADB, access the
+network, download or materialize artifacts, regenerate goldens, invoke Python,
+expose Tauri commands, expose sidecar protocol requests, or replace the Python
+`emuchef plan` CLI. Planner CLI cutover remains a future explicit phase.
 
 ## Deletion-Readiness Ladder
 

@@ -225,6 +225,17 @@ planner param contract diagnostics include recipe, step, step type, param,
 expected value/mode, and actual value context. Unknown param rejection in this
 planner parity slice is limited to those focused step types, and deterministic
 multi-error ordering is covered only for an existing focused unknown-param path.
+The crate also provides a dev-only `emuchef-plan-shadow` Cargo binary for
+manual Rust planner inspection. The shadow binary builds a private
+`PlanningResult` from an explicit authored root and checked-in device plan,
+emits deterministic pretty JSON to stdout for planner success and planner error
+results, and exits non-zero for planner error results. Argument errors and
+authored-root/device-plan load errors write stable process text to stderr with
+no stdout JSON. Shadow `--bind` values are parsed as strings; repeated binds for
+the same `<recipe_ref>/<input_id>` are grouped into a string array to match the
+current Python CLI parser. The shadow binary does not execute plans, probe
+devices, invoke ADB, access the network, materialize artifacts, expose Tauri or
+sidecar protocol commands, or replace the Python planner CLI.
 
 The Rust backend supports one-shot stateless requests through:
 
