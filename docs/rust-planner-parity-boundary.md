@@ -64,7 +64,11 @@ Rust planner-adjacent coverage is internal and fixture-scoped:
   `<recipe_ref>/<input_id>` override binding merge behavior. P7F
   permission-intent tests serialize the
   internal Rust helper output only for assertions; that serialized helper output
-  is not an execution-plan DTO surface.
+  is not an execution-plan DTO surface. P7K tests pin private Rust selected
+  recipe expansion ordering, unknown selected/dependency ref diagnostics,
+  dependency-cycle error shape, and current checked-in corpus evidence that
+  selected refs and expanded refs are identical only because current authored
+  recipes have no non-empty `recipe_dependencies` metadata.
 - `crates/emuchef-rust-backend/tests/phase6m_planner.rs`: protocol guard that
   keeps planner requests unrouted and capabilities editor-scoped.
 - `crates/emuchef-rust-backend/tests/fixtures/authored_root/planner_*`;
@@ -80,7 +84,7 @@ Rust planner-adjacent coverage is internal and fixture-scoped:
 | Schema/domain validation | `src/emuchef/io/validation.py`; `src/emuchef/planner/contracts.py`; domain modules under `src/emuchef/domain/` | `validation.rs`; `phase6k_validation.rs`; `phase6l_catalog_validation.rs`; planner golden comparisons | Rust validates selected editor/planner rules only. | Port or retire Python planner-owned diagnostics and validation rules with parity tests. |
 | Device plan/profile ingestion | `src/emuchef/io/loader.py`; `src/emuchef/planner/service.py`; `src/emuchef/cli.py`; `profile_matching.py` | `planner_device_plan.rs`; `repo_device_profile_inventory_is_explicit_by_path_and_id`; `repo_device_plan_inventory_is_explicit_by_path_id_profile_and_selected_order`; `repo_device_plan_profile_context_can_plan_successfully_without_python_or_devices`; P7J defaults/override classification tests | Rust has private checked-in repo device-plan/profile ingestion coverage. It parses current YAML profiles/plans, requires `selected_by_default` where current Python parsing requires it, maps selected recipe refs in authored order, maps profile `capability_defaults` and `device_tags`, and builds synthetic planner-only context from profile fields. P7J additionally classifies checked-in `defaults.show_advanced_steps` and `overrides.config_variants` as inactive metadata, and supports strict private `<recipe_ref>/<input_id>` override binding merge in temporary authored-root tests. Config variant selection, plan defaults as bindings, broader Python override key forms, profile matching, real detected facts, CLI operation replay, and device probing remain out of scope. | Prove or deliberately retire full Python planner plan/profile behavior, including CLI context resolution, profile matching, broader defaults/overrides, and diagnostics. |
 | Input binding/default handling | `src/emuchef/planner/bindings.py`; `draft_builder.py`; `emitter.py` | `required_input_bindings_match_python_success_and_missing_error`; `phase6n_optional_inputs_prune_and_rebind_like_python`; `phase6n_input_defaults_and_multiple_values_match_python`; `temp_device_plan_override_bindings_merge_before_explicit_bindings` | Covered for selected required, optional, default, and multiple input fixtures. P7J covers private device-plan override binding merge for strict `<recipe_ref>/<input_id>` keys with explicit test bindings taking precedence. | Cover operation replay, validation errors, broader Python override key forms such as `inputs.<id>`, and broader input declarations before planner cutover. |
-| Selected recipe expansion | `src/emuchef/planner/service.py`; `dependencies.py`; `draft_builder.py` | `recipe_and_step_dependencies_match_python_ordering`; `phase6n_dependency_expansion_and_namespacing_match_python` | Covered for focused recipe dependency fixtures. | Prove selected recipe expansion across the required authored catalog and CLI workflows. |
+| Selected recipe expansion | `src/emuchef/planner/service.py`; `dependencies.py`; `draft_builder.py` | `recipe_and_step_dependencies_match_python_ordering`; `phase6n_dependency_expansion_and_namespacing_match_python`; P7K `recipe_expansion_*` tests | Private Rust planner expansion follows direct `recipe_dependencies` evidence: dependencies before dependents, sibling dependencies in authored order, selected recipe closure expansion in selected order, and duplicate suppression without moving the first occurrence. Current checked-in recipes have no non-empty dependency metadata, so current corpus selected and expanded refs match as current-state evidence only. | Prove selected recipe expansion across the required authored catalog and CLI workflows, including any future non-empty checked-in dependencies. |
 | Dependency validation | `src/emuchef/planner/dependencies.py`; `src/emuchef/io/validation.py` | `phase6l_catalog_validation.rs`; planner dependency tests; `dependency_validation_*` planner tests | Rust validates selected/emitted step dependencies for unknown or non-emitted targets, self-dependencies, and static cycles. Duplicate authored dependencies remain allowed and are preserved in emitted execution steps. Runtime dependency outcomes remain executor behavior. | Match Python planner diagnostics, ordering, and failure behavior for broader planner-facing dependency cases. |
 | Artifact group expansion | `src/emuchef/steps/planner_hooks.py`; `src/emuchef/planner/emitter.py` | `refs_artifacts_defaults_and_conditions_match_python_execution_plan` | Covered for focused `resolve_artifacts` and `extract_archive` fixture behavior. | Cover all planner hook cases and invalid artifact/group diagnostics. |
 | Duplicate detection | `src/emuchef/io/validation.py`; `src/emuchef/planner/catalog.py` | `phase6l_catalog_validation.rs` duplicate fixture cases | Catalog duplicate diagnostics are fixture-scoped; planner replacement is not complete. | Prove duplicate behavior for all catalog/planner inputs or explicitly retire unsupported shapes. |
@@ -121,6 +125,72 @@ do not contain ref-shaped override binding keys.
 | `authored/recipes/app.retroarch.provision.yaml` | `app.retroarch.provision` | Success through Rust domain model. | Success with optional `retroarch_cfg` omitted; `seed_retroarch_cfg` is pruned. Success with placeholder `retroarch_cfg` binding; `seed_retroarch_cfg` is included. At least one checked-in repo device plan/profile context emits successfully through private P7I ingestion with a supplied placeholder `retroarch_cfg` binding. | Manual selected ref plus synthetic fixture context in P7H; checked-in repo device plan/profile ingestion in P7I with synthetic planner-only context derived from profile fields. | Placeholder binding is planner-only; remote artifact URLs remain declarative planner data only. | `planner_tests::authored_corpus_recipes_parse_through_rust_domain_model`; `planner_tests::authored_corpus_retroarch_optional_cfg_omitted_and_bound_are_deterministic`; `planner_tests::repo_device_plan_profile_context_can_plan_successfully_without_python_or_devices` |
 | `authored/recipes/app.xaniteog.install.yaml` | `app.xaniteog.install` | Success through Rust domain model. | Unbound synthetic context emits deterministic `binding_missing` for `app.xaniteog.install/xaniteog_apk`; placeholder `.apk` binding emits successfully in the bound synthetic corpus context. P7I/P7J verifies supplied binding ingestion for a checked-in device plan that selects this recipe, but full emitted success for that plan is not broadened because the current selected profile lacks app-data capability required by the selected RetroArch flow. | Manual selected ref plus synthetic fixture context in P7H; checked-in repo device plan/profile selected-ref ingestion in P7I/P7J. | Placeholder binding is planner-only and does not validate APK payloads; broader current-plan success depends on profile capability coverage. | `planner_tests::authored_corpus_unbound_required_inputs_emit_classified_errors`; `planner_tests::authored_corpus_supported_synthetic_context_emits_execution_plan`; `planner_tests::repo_device_plan_ingestion_accepts_supplied_bindings_without_applying_metadata_overrides` |
 | `authored/recipes/feature.copy_bios.yaml` | `feature.copy_bios` | Success through Rust domain model. | Unbound synthetic context emits deterministic `binding_missing` for `feature.copy_bios/bios_source_dir`; placeholder directory binding emits successfully in the bound synthetic corpus context. P7I/P7J verifies supplied binding ingestion for checked-in device plans that select this recipe, but full emitted success for those plans is not broadened when the selected profile lacks app-data capability required by the selected RetroArch flow. | Manual selected ref plus synthetic fixture context in P7H; checked-in repo device plan/profile selected-ref ingestion in P7I/P7J. | Placeholder binding is planner-only and does not inspect BIOS contents; broader current-plan success depends on profile capability coverage. | `planner_tests::authored_corpus_unbound_required_inputs_emit_classified_errors`; `planner_tests::authored_corpus_supported_synthetic_context_emits_execution_plan`; `planner_tests::repo_device_plan_ingestion_accepts_supplied_bindings_without_applying_metadata_overrides` |
+
+## Selected-Recipe Expansion Classification
+
+The current authored recipe dependency field is the top-level
+`recipe_dependencies` sequence. Python parses an omitted field as an empty
+tuple, and Rust parses an omitted field as an empty vector. The current
+checked-in recipe corpus contains no non-empty recipe dependency metadata:
+`authored/recipes/app.obtainium.install.yaml`,
+`authored/recipes/app.retroarch.provision.yaml`, and
+`authored/recipes/feature.copy_bios.yaml` declare `recipe_dependencies: []`;
+`authored/recipes/app.xaniteog.install.yaml` omits the field and therefore
+parses as empty. P7K guards this current-state evidence with
+`recipe_expansion_current_authored_corpus_has_no_non_empty_recipe_dependencies`.
+
+Python planner expansion is owned by
+`src/emuchef/planner/dependencies.py::expand_recipe_dependencies`, called from
+`src/emuchef/planner/draft_builder.py::build_draft_plan`. It performs a DFS
+over selected recipes and direct `recipe_dependencies`: dependencies are added
+before their dependent, sibling dependencies follow authored
+`recipe_dependencies` order, selected recipes are expanded in selected-ref
+order, transitive dependencies are supported, and already-expanded recipes are
+not moved when referenced again. Python returns `recipe_not_found` for unknown
+selected refs or dependency refs and `dependency_cycle` for recipe cycles.
+
+Before P7K, `crates/emuchef-rust-backend/src/planner.rs` already used the same
+private DFS expansion in fixture-scoped `plan_execution`, with Phase 6M/6N
+golden coverage in `recipe_and_step_dependencies_match_python_ordering` and
+`phase6n_dependency_expansion_and_namespacing_match_python`. P7K pins that
+ordering in `recipe_expansion_explicit_selected_refs_preserve_order_without_dependencies`
+and
+`recipe_expansion_order_is_dependency_first_authored_and_first_occurrence_stable`.
+P7K also distinguishes unknown explicit selected refs from unknown dependency
+refs in Rust planner diagnostics by preserving `recipe_ref` and adding a
+`source` field plus `selected_recipe_ref` or `dependency_ref` /
+`dependent_recipe_ref` context. `recipe_expansion_unknown_selected_ref_error_shape_has_selected_context`,
+`recipe_expansion_unknown_dependency_ref_error_shape_has_dependency_context`,
+and `recipe_expansion_dependency_cycle_error_shape_has_cycle_context` assert
+`status: error`, `execution_plan: null`, the diagnostic code, and relevant
+context.
+
+Current checked-in device plans select only recipes with empty dependency
+closures. P7K treats selected/expanded equality as evidence for the current
+corpus, not a future invariant:
+`recipe_expansion_current_corpus_selected_and_expanded_refs_match` and
+`recipe_expansion_checked_in_device_plan_selected_sets_match_expanded_refs_for_current_corpus`
+assert that checked-in corpus/device-plan selected sets currently produce
+matching `selected_recipe_refs` and `expanded_recipe_refs`. Adding non-empty
+checked-in `recipe_dependencies` should intentionally update these tests and
+this section.
+
+The current schema parses `provides.features`, and current recipes use it for
+feature metadata such as `retroarch_provision`, `bios_copy`,
+`xaniteog_install`, and `obtainium_install`. The searched current source and
+fixtures do not define an active top-level `requires` field, and neither Python
+nor Rust planner expansion resolves recipe dependencies from `provides` /
+`requires` capabilities. Capability/service resolution remains unsupported in
+this slice and is a planner cutover gap if later product requirements depend on
+it.
+
+P7K does not expose Rust planner expansion through CLI, Tauri, sidecar
+protocol, executor/apply behavior, real-device flows, Python invocation, ADB,
+network access, artifact materialization, or fixture/golden regeneration.
+Python remains the CLI/reference planner owner. For current checked-in plans,
+selected-recipe expansion is not a cutover blocker because there are no
+non-empty checked-in dependency closures; broader CLI/reference cutover still
+requires proving or retiring the remaining Python planner behavior.
 
 ## Device-Plan Defaults/Overrides Classification
 

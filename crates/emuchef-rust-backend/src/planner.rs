@@ -502,10 +502,24 @@ fn visit_recipe_dependency(
         return;
     }
     let Some(recipe) = recipes.get(recipe_ref) else {
+        let details = if let Some(dependent_recipe_ref) = stack.last() {
+            json!({
+                "recipe_ref": recipe_ref,
+                "dependency_ref": recipe_ref,
+                "dependent_recipe_ref": dependent_recipe_ref,
+                "source": "recipe_dependencies"
+            })
+        } else {
+            json!({
+                "recipe_ref": recipe_ref,
+                "selected_recipe_ref": recipe_ref,
+                "source": "selected_recipe_refs"
+            })
+        };
         errors.push(PlannerMessage {
             code: "recipe_not_found".to_string(),
             message: format!("Recipe '{recipe_ref}' was not found."),
-            details: json!({ "recipe_ref": recipe_ref }),
+            details,
         });
         return;
     };
