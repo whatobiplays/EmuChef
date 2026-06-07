@@ -13,6 +13,7 @@ import json
 import os
 import subprocess
 import sys
+import tempfile
 from collections import Counter, OrderedDict
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
@@ -22,7 +23,17 @@ from typing import Any
 
 EMUCHEF_IMPORTED_AT_MODULE_LOAD = "emuchef" in sys.modules
 REPORT_SCHEMA_VERSION = 1
+SCENARIO_MATRIX_SCHEMA_VERSION = 1
 MISSING = object()
+
+# Narrow P7P definition. This does not claim Python CLI parity, real-device
+# parity, executor/apply parity, artifact/network/materialization parity, full
+# schema parity, future scenario parity, or Rust planner cutover readiness.
+MATCH_CLASSIFICATION_DEFINITION = (
+    "The dev-only comparison harness found no unclassified differences for "
+    "the compared fields under the supplied planner-only bindings and shared "
+    "planner context."
+)
 
 CLASSIFICATIONS = (
     "match",
@@ -89,6 +100,42 @@ class KnownGapRule:
     description: str
 
 
+@dataclass(frozen=True, slots=True)
+class PlanParityBindingSpec:
+    ref: str
+    kind: str
+    suffix: str | None = None
+
+
+@dataclass(frozen=True, slots=True)
+class PlanParityScenario:
+    id: str
+    device_plan: str
+    expected_classification: str
+    bindings: tuple[PlanParityBindingSpec, ...]
+    notes: str
+    known_gap_ids: tuple[str, ...]
+
+
+@dataclass(frozen=True, slots=True)
+class PlanParityScenarioMatrix:
+    schema_version: int
+    scenarios: tuple[PlanParityScenario, ...]
+
+
+@dataclass(frozen=True, slots=True)
+class PreparedScenarioBindings:
+    raw_cli_binds: list[str]
+    report_bindings: list[dict[str, str]]
+
+
+@dataclass(frozen=True, slots=True)
+class MatrixScenarioResult:
+    scenario: PlanParityScenario
+    binding_specs: list[dict[str, str]]
+    comparison_report: Mapping[str, Any]
+
+
 def parse_bindings(raw_bindings: Sequence[str]) -> OrderedDict[str, object]:
     """Parse repeated CLI bind arguments using the planner-visible ref syntax."""
 
@@ -121,6 +168,193 @@ def _parse_binding(raw_binding: str) -> tuple[str, str]:
             "Expected <recipe_ref>/<input_id>=<value>."
         )
     return binding_ref, raw_value
+
+
+def load_scenario_matrix(path: Path) -> PlanParityScenarioMatrix:
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+    except OSError as exc:
+        raise ValueError(f"Could not read scenario matrix {path}: {exc}") from exc
+    except json.JSONDecodeError as exc:
+        raise ValueError(f"Scenario matrix {path} is not valid JSON: {exc}") from exc
+    return parse_scenario_matrix_payload(payload, source=str(path))
+
+
+def parse_scenario_matrix_payload(
+    payload: object,
+    *,
+    source: str,
+) -> PlanParityScenarioMatrix:
+    if not isinstance(payload, Mapping):
+        raise ValueError(f"{source}: root must be a JSON object")
+    schema_version = payload.get("schema_version")
+    if schema_version != SCENARIO_MATRIX_SCHEMA_VERSION:
+        raise ValueError(f"{source}: schema_version must be 1")
+    raw_scenarios = payload.get("scenarios")
+    if not isinstance(raw_scenarios, list):
+        raise ValueError(f"{source}: scenarios must be a list")
+
+    scenarios: list[PlanParityScenario] = []
+    seen_ids: set[str] = set()
+    for index, raw_scenario in enumerate(raw_scenarios):
+        scenario = _parse_scenario(raw_scenario, source=source, index=index)
+        if scenario.id in seen_ids:
+            raise ValueError(f"{source}: scenarios[{index}].id duplicates {scenario.id!r}")
+        seen_ids.add(scenario.id)
+        scenarios.append(scenario)
+
+    return PlanParityScenarioMatrix(
+        schema_version=SCENARIO_MATRIX_SCHEMA_VERSION,
+        scenarios=tuple(scenarios),
+    )
+
+
+def _parse_scenario(
+    raw_scenario: object,
+    *,
+    source: str,
+    index: int,
+) -> PlanParityScenario:
+    prefix = f"{source}: scenarios[{index}]"
+    if not isinstance(raw_scenario, Mapping):
+        raise ValueError(f"{prefix} must be an object")
+
+    scenario_id = _required_string(raw_scenario, "id", f"{prefix}.id")
+    device_plan = _required_string(raw_scenario, "device_plan", f"{prefix}.device_plan")
+    expected_classification = _required_string(
+        raw_scenario,
+        "expected_classification",
+        f"{prefix}.expected_classification",
+    )
+    if expected_classification not in CLASSIFICATIONS:
+        raise ValueError(
+            f"{prefix}.expected_classification must be one of: {', '.join(CLASSIFICATIONS)}"
+        )
+
+    raw_bindings = raw_scenario.get("bindings", MISSING)
+    if not isinstance(raw_bindings, list):
+        raise ValueError(f"{prefix}.bindings must be a list")
+    bindings = tuple(
+        _parse_binding_spec(raw_binding, source=source, scenario_index=index, binding_index=binding_index)
+        for binding_index, raw_binding in enumerate(raw_bindings)
+    )
+
+    known_gap_ids = _string_tuple(
+        raw_scenario.get("known_gap_ids", []),
+        f"{prefix}.known_gap_ids",
+    )
+    notes = raw_scenario.get("notes", "")
+    if not isinstance(notes, str):
+        raise ValueError(f"{prefix}.notes must be a string")
+
+    return PlanParityScenario(
+        id=scenario_id,
+        device_plan=device_plan,
+        expected_classification=expected_classification,
+        bindings=bindings,
+        notes=notes,
+        known_gap_ids=known_gap_ids,
+    )
+
+
+def _parse_binding_spec(
+    raw_binding: object,
+    *,
+    source: str,
+    scenario_index: int,
+    binding_index: int,
+) -> PlanParityBindingSpec:
+    prefix = f"{source}: scenarios[{scenario_index}].bindings[{binding_index}]"
+    if not isinstance(raw_binding, Mapping):
+        raise ValueError(f"{prefix} must be an object")
+    binding_ref = _required_string(raw_binding, "ref", f"{prefix}.ref")
+    _validate_binding_ref(binding_ref, field=f"{prefix}.ref")
+    kind = _required_string(raw_binding, "kind", f"{prefix}.kind")
+    if kind not in {"directory", "file"}:
+        raise ValueError(f"{prefix}.kind must be one of: directory, file")
+    suffix = raw_binding.get("suffix")
+    if suffix is not None and not isinstance(suffix, str):
+        raise ValueError(f"{prefix}.suffix must be a string")
+    if kind == "directory":
+        if suffix is not None:
+            raise ValueError(f"{prefix}.suffix is only valid for file bindings")
+        return PlanParityBindingSpec(ref=binding_ref, kind=kind, suffix=None)
+    if suffix not in {".apk", ".cfg"}:
+        raise ValueError(f"{prefix}.suffix must be one of: .apk, .cfg")
+    return PlanParityBindingSpec(ref=binding_ref, kind=kind, suffix=suffix)
+
+
+def _required_string(raw: Mapping[str, object], key: str, field: str) -> str:
+    value = raw.get(key)
+    if not isinstance(value, str) or not value:
+        raise ValueError(f"{field} must be a non-empty string")
+    return value
+
+
+def _string_tuple(raw: object, field: str) -> tuple[str, ...]:
+    if not isinstance(raw, list):
+        raise ValueError(f"{field} must be a list")
+    result: list[str] = []
+    for index, value in enumerate(raw):
+        if not isinstance(value, str) or not value:
+            raise ValueError(f"{field}[{index}] must be a non-empty string")
+        result.append(value)
+    return tuple(result)
+
+
+def _validate_binding_ref(binding_ref: str, *, field: str) -> None:
+    if binding_ref.count("/") != 1:
+        raise ValueError(f"{field} must use <recipe_ref>/<input_id>")
+    recipe_ref, input_id = binding_ref.split("/", 1)
+    if not recipe_ref or not input_id:
+        raise ValueError(f"{field} must use <recipe_ref>/<input_id>")
+
+
+def prepare_scenario_bindings(
+    scenario: PlanParityScenario,
+    temp_root: Path,
+) -> PreparedScenarioBindings:
+    raw_cli_binds: list[str] = []
+    report_bindings: list[dict[str, str]] = []
+    scenario_root = temp_root / _stable_path_token(scenario.id)
+    scenario_root.mkdir(parents=True, exist_ok=True)
+
+    for index, binding in enumerate(scenario.bindings):
+        path = _binding_temp_path(scenario_root, index, binding)
+        if binding.kind == "directory":
+            path.mkdir(parents=True, exist_ok=True)
+        else:
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_bytes(b"")
+        raw_cli_binds.append(f"{binding.ref}={path}")
+        report_binding = {
+            "ref": binding.ref,
+            "kind": binding.kind,
+        }
+        if binding.suffix is not None:
+            report_binding["suffix"] = binding.suffix
+        report_bindings.append(report_binding)
+
+    return PreparedScenarioBindings(
+        raw_cli_binds=raw_cli_binds,
+        report_bindings=report_bindings,
+    )
+
+
+def _binding_temp_path(
+    scenario_root: Path,
+    index: int,
+    binding: PlanParityBindingSpec,
+) -> Path:
+    name = f"{index:02d}_{_stable_path_token(binding.ref)}"
+    if binding.kind == "directory":
+        return scenario_root / name
+    assert binding.suffix is not None
+    return scenario_root / f"{name}{binding.suffix}"
+
+
+def _stable_path_token(value: str) -> str:
+    return "".join(char if char.isalnum() or char in "._-" else "_" for char in value)
 
 
 def build_python_worker_command(
@@ -473,6 +707,133 @@ def build_unsupported_report(
     }
 
 
+def build_matrix_report(
+    *,
+    authored_root: str,
+    matrix_path: str,
+    matrix: PlanParityScenarioMatrix,
+    scenario_results: Sequence[MatrixScenarioResult],
+) -> dict[str, Any]:
+    scenarios: list[dict[str, Any]] = []
+    known_gaps: list[dict[str, Any]] = []
+    expectation_statuses: list[str] = []
+    expected_classifications: list[str] = []
+    actual_classifications: list[str] = []
+    aggregate_mismatch_counts: Counter[str] = Counter()
+
+    for result in scenario_results:
+        scenario = result.scenario
+        comparison_summary = result.comparison_report.get("summary", {})
+        actual_classification = comparison_summary.get("classification", "unsupported")
+        expected_classification = scenario.expected_classification
+        expectation_status = (
+            "pass" if actual_classification == expected_classification else "fail"
+        )
+        expectation_statuses.append(expectation_status)
+        expected_classifications.append(expected_classification)
+        actual_classifications.append(actual_classification)
+
+        counts = comparison_summary.get("counts", {})
+        mismatch_buckets = _mismatch_buckets(counts)
+        aggregate_mismatch_counts.update(mismatch_buckets)
+
+        for known_gap in result.comparison_report.get("known_gaps", []):
+            gap_item = {
+                "scenario_id": scenario.id,
+                "device_plan": scenario.device_plan,
+            }
+            if isinstance(known_gap, Mapping):
+                for key in ("path", "code", "description"):
+                    if key in known_gap:
+                        gap_item[key] = known_gap[key]
+            known_gaps.append(gap_item)
+
+        scenarios.append(
+            {
+                "scenario_id": scenario.id,
+                "device_plan": scenario.device_plan,
+                "bindings": result.binding_specs,
+                "expected_classification": expected_classification,
+                "actual_classification": actual_classification,
+                "expectation_status": expectation_status,
+                "known_gap_ids": list(scenario.known_gap_ids),
+                "notes": scenario.notes,
+                "summary_counts": _ordered_count_mapping(counts),
+                "mismatch_buckets": mismatch_buckets,
+                "known_gaps": result.comparison_report.get("known_gaps", []),
+                "diagnostics": result.comparison_report.get("diagnostics", []),
+            }
+        )
+
+    expectation_counts = Counter(expectation_statuses)
+    return {
+        "kind": "rust_python_planner_parity_matrix_report",
+        "schema_version": REPORT_SCHEMA_VERSION,
+        "matrix_schema_version": matrix.schema_version,
+        "inputs": {
+            "comparison": "Python planner API vs Rust shadow planner",
+            "authored_root": authored_root,
+            "scenario_matrix": matrix_path,
+        },
+        "metadata": {
+            "match_classification": MATCH_CLASSIFICATION_DEFINITION,
+            "normalizations": list(NORMALIZATIONS),
+            "exit_semantics": (
+                "Matrix mode exits 0 only when every scenario actual classification "
+                "matches its expected classification."
+            ),
+        },
+        "summary": {
+            "scenario_count": len(scenarios),
+            "expectation_counts": {
+                "pass": expectation_counts.get("pass", 0),
+                "fail": expectation_counts.get("fail", 0),
+            },
+            "expected_classification_counts": _classification_counts(expected_classifications),
+            "actual_classification_counts": _classification_counts(actual_classifications),
+            "mismatch_buckets": _nonzero_ordered_counts(aggregate_mismatch_counts),
+        },
+        "scenarios": scenarios,
+        "known_gaps": known_gaps,
+    }
+
+
+def matrix_exit_code(report: Mapping[str, Any]) -> int:
+    summary = report.get("summary", {})
+    expectation_counts = summary.get("expectation_counts", {})
+    if not isinstance(expectation_counts, Mapping):
+        return 1
+    return 0 if expectation_counts.get("fail") == 0 else 1
+
+
+def _classification_counts(classifications: Sequence[str]) -> OrderedDict[str, int]:
+    counts = Counter(classifications)
+    return OrderedDict((name, counts.get(name, 0)) for name in CLASSIFICATIONS)
+
+
+def _ordered_count_mapping(counts: object) -> OrderedDict[str, int]:
+    if not isinstance(counts, Mapping):
+        counts = {}
+    return OrderedDict((name, int(counts.get(name, 0))) for name in CLASSIFICATIONS)
+
+
+def _mismatch_buckets(counts: object) -> OrderedDict[str, int]:
+    ordered_counts = _ordered_count_mapping(counts)
+    return OrderedDict(
+        (name, count)
+        for name, count in ordered_counts.items()
+        if name in NON_MATCH_CLASSIFICATIONS and count
+    )
+
+
+def _nonzero_ordered_counts(counts: Counter[str]) -> OrderedDict[str, int]:
+    return OrderedDict(
+        (name, counts.get(name, 0))
+        for name in CLASSIFICATIONS
+        if counts.get(name, 0)
+    )
+
+
 def diagnose_results(python_result: Mapping[str, Any], rust_result: Mapping[str, Any]) -> list[dict[str, Any]]:
     if _is_retroarch_app_data_write_rust_bug(python_result, rust_result):
         return [
@@ -588,42 +949,31 @@ def _cargo_offline_default() -> bool:
     return value.strip().lower() not in {"0", "false", "no", "off"}
 
 
-def compare_main(argv: Sequence[str]) -> int:
-    parser = argparse.ArgumentParser(
-        description="Compare Python planner API output with Rust shadow planner output."
-    )
-    parser.add_argument("--authored-root", required=True)
-    parser.add_argument("--device-plan", required=True)
-    parser.add_argument("--bind", action="append", default=[])
-    parser.add_argument("--rust-bin")
-    parser.add_argument("--python-executable", default=sys.executable)
-    parser.add_argument(
-        "--cargo-online",
-        action="store_true",
-        help="Allow Cargo network/index access instead of the default --offline mode.",
-    )
-    args = parser.parse_args(argv)
-
-    try:
-        bindings = parse_bindings(args.bind)
-    except ValueError as exc:
-        parser.error(str(exc))
-
-    repo_root = _repo_root_from_script()
-    script_path = Path(__file__).resolve()
+def run_single_comparison_report(
+    *,
+    authored_root: str,
+    device_plan: str,
+    raw_binds: Sequence[str],
+    rust_bin: str | None,
+    python_executable: str,
+    cargo_online: bool,
+    repo_root: Path,
+    script_path: Path,
+) -> dict[str, Any]:
+    bindings = parse_bindings(raw_binds)
     python_spec = build_python_worker_command(
-        python_executable=args.python_executable,
+        python_executable=python_executable,
         script_path=script_path,
-        authored_root=args.authored_root,
-        device_plan=args.device_plan,
-        binds=args.bind,
+        authored_root=authored_root,
+        device_plan=device_plan,
+        binds=raw_binds,
     )
     rust_spec = build_rust_command(
-        authored_root=args.authored_root,
-        device_plan=args.device_plan,
-        binds=args.bind,
-        rust_bin=args.rust_bin,
-        cargo_offline=_cargo_offline_default() and not args.cargo_online,
+        authored_root=authored_root,
+        device_plan=device_plan,
+        binds=raw_binds,
+        rust_bin=rust_bin,
+        cargo_offline=_cargo_offline_default() and not cargo_online,
         repo_root=repo_root,
     )
 
@@ -637,27 +987,128 @@ def compare_main(argv: Sequence[str]) -> int:
         if issue is not None
     ]
     if issues:
-        report = build_unsupported_report(
-            authored_root=args.authored_root,
-            device_plan=args.device_plan,
+        return build_unsupported_report(
+            authored_root=authored_root,
+            device_plan=device_plan,
             bindings=bindings,
             python_mode=python_spec.mode,
             rust_mode=rust_spec.mode,
             issues=issues,
         )
-    else:
-        assert python_parsed.result is not None
-        assert rust_parsed.result is not None
-        report = build_report(
+
+    assert python_parsed.result is not None
+    assert rust_parsed.result is not None
+    return build_report(
+        authored_root=authored_root,
+        device_plan=device_plan,
+        bindings=bindings,
+        python_result=python_parsed.result,
+        rust_result=rust_parsed.result,
+        python_mode=python_spec.mode,
+        rust_mode=rust_spec.mode,
+        known_gap_rules=[],
+    )
+
+
+def run_scenario_matrix_report(
+    *,
+    authored_root: str,
+    matrix_path: Path,
+    matrix: PlanParityScenarioMatrix,
+    rust_bin: str | None,
+    python_executable: str,
+    cargo_online: bool,
+    repo_root: Path,
+    script_path: Path,
+) -> dict[str, Any]:
+    scenario_results: list[MatrixScenarioResult] = []
+    with tempfile.TemporaryDirectory(prefix="emuchef-plan-parity-") as temp_dir:
+        temp_root = Path(temp_dir)
+        for scenario in matrix.scenarios:
+            prepared = prepare_scenario_bindings(scenario, temp_root)
+            comparison_report = run_single_comparison_report(
+                authored_root=authored_root,
+                device_plan=scenario.device_plan,
+                raw_binds=prepared.raw_cli_binds,
+                rust_bin=rust_bin,
+                python_executable=python_executable,
+                cargo_online=cargo_online,
+                repo_root=repo_root,
+                script_path=script_path,
+            )
+            scenario_results.append(
+                MatrixScenarioResult(
+                    scenario=scenario,
+                    binding_specs=prepared.report_bindings,
+                    comparison_report=comparison_report,
+                )
+            )
+
+    return build_matrix_report(
+        authored_root=authored_root,
+        matrix_path=str(matrix_path),
+        matrix=matrix,
+        scenario_results=scenario_results,
+    )
+
+
+def compare_main(argv: Sequence[str]) -> int:
+    parser = argparse.ArgumentParser(
+        description="Compare Python planner API output with Rust shadow planner output."
+    )
+    parser.add_argument("--authored-root", required=True)
+    parser.add_argument("--device-plan")
+    parser.add_argument("--scenario-matrix")
+    parser.add_argument("--bind", action="append", default=[])
+    parser.add_argument("--rust-bin")
+    parser.add_argument("--python-executable", default=sys.executable)
+    parser.add_argument(
+        "--cargo-online",
+        action="store_true",
+        help="Allow Cargo network/index access instead of the default --offline mode.",
+    )
+    args = parser.parse_args(argv)
+
+    if bool(args.device_plan) == bool(args.scenario_matrix):
+        parser.error("exactly one of --device-plan or --scenario-matrix is required")
+    if args.scenario_matrix and args.bind:
+        parser.error("--bind is only supported with --device-plan")
+
+    repo_root = _repo_root_from_script()
+    script_path = Path(__file__).resolve()
+
+    if args.scenario_matrix:
+        try:
+            matrix_path = Path(args.scenario_matrix)
+            matrix = load_scenario_matrix(matrix_path)
+        except ValueError as exc:
+            parser.error(str(exc))
+        report = run_scenario_matrix_report(
+            authored_root=args.authored_root,
+            matrix_path=matrix_path,
+            matrix=matrix,
+            rust_bin=args.rust_bin,
+            python_executable=args.python_executable,
+            cargo_online=args.cargo_online,
+            repo_root=repo_root,
+            script_path=script_path,
+        )
+        sys.stdout.write(dumps_report(report))
+        return matrix_exit_code(report)
+
+    try:
+        report = run_single_comparison_report(
             authored_root=args.authored_root,
             device_plan=args.device_plan,
-            bindings=bindings,
-            python_result=python_parsed.result,
-            rust_result=rust_parsed.result,
-            python_mode=python_spec.mode,
-            rust_mode=rust_spec.mode,
-            known_gap_rules=[],
+            raw_binds=args.bind,
+            rust_bin=args.rust_bin,
+            python_executable=args.python_executable,
+            cargo_online=args.cargo_online,
+            repo_root=repo_root,
+            script_path=script_path,
         )
+    except ValueError as exc:
+        parser.error(str(exc))
     sys.stdout.write(dumps_report(report))
     return 0 if report["summary"]["classification"] == "match" else 1
 

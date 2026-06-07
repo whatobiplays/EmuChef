@@ -14,7 +14,9 @@ the supported fixture-scoped surface, plus authored-corpus coverage for the
 checked-in recipe files under `authored/recipes`, `authored/device_plans`, and
 `authored/device_profiles`, plus internal repo-plan composition evidence for
 the checked-in device-plan/profile contexts that currently succeed through the
-private Rust planner.
+private Rust planner. The dev-only P7P scenario matrix records the current
+Python planner API versus Rust shadow comparison status for the checked-in
+device plans without changing planner ownership.
 
 ## Current Owners And Evidence
 
@@ -49,8 +51,12 @@ Rust planner-adjacent coverage is internal and fixture-scoped:
   inputs, but it is not the user-facing planner CLI.
 - `tools/compare_rust_python_plan.py`: dev-only comparison harness for Python
   planner API output versus Rust shadow planner output. The harness emits a
-  deterministic JSON classification report and is not part of normal
-  Rust/Tauri runtime checks.
+  deterministic JSON classification report or matrix report and is not part of
+  normal Rust/Tauri runtime checks.
+- `tools/plan_parity_scenarios.json`: dev-only P7P comparison scenario
+  manifest for current checked-in device-plan comparisons. It is not a Python
+  golden, regenerated evidence, normal Rust/Tauri check input, or user-facing
+  planner behavior.
 - `crates/emuchef-rust-backend/src/planner_device_plan.rs`: private
   checked-in device-plan/profile ingestion for crate-internal planner inputs.
   It parses only the current authored profile/plan YAML surface, maps selected
@@ -83,11 +89,12 @@ Rust planner-adjacent coverage is internal and fixture-scoped:
   recipes have no non-empty `recipe_dependencies` metadata. P7L tests run
   private Rust repo-plan composition from checked-in device-plan/profile YAML
   through `PlannerInput::from_authored_device_plan(...)` and `plan_execution(...)`
-  for the currently successful checked-in contexts, assert deterministic
-  selected/expanded refs and execution step order, assert normalized params from
-  prior P7 slices, and classify the remaining checked-in contexts as current
-  Rust planner gaps without broadening CLI, Tauri, executor/apply, ADB, network,
-  artifact, or Python behavior.
+  for checked-in contexts, assert deterministic selected/expanded refs and
+  execution step order, assert normalized params from prior P7 slices, and keep
+  no-`app_data_write` pruning private to planner selection without broadening
+  CLI, Tauri, executor/apply, ADB, network, artifact, or Python behavior. P7P
+  tests cover the dev-only scenario matrix parsing and deterministic matrix
+  report aggregation.
 - `crates/emuchef-rust-backend/tests/phase6m_planner.rs`: protocol guard that
   keeps planner requests unrouted and capabilities editor-scoped.
 - `crates/emuchef-rust-backend/tests/fixtures/authored_root/planner_*`;
@@ -101,7 +108,7 @@ Rust planner-adjacent coverage is internal and fixture-scoped:
 | --- | --- | --- | --- | --- |
 | Authored YAML loading/parsing | `src/emuchef/io/loader.py`; `src/emuchef/io/validation.py` | `crates/emuchef-rust-backend/src/yaml.rs`; `phase6e_yaml.rs`; `planner_tests.rs` loading fixture roots and checked-in authored corpus | Fixture-scoped Rust parsing exists for selected authored roots and the checked-in `authored/recipes` corpus. | Prove all required authored corpus and planner inputs parse with matching semantics. |
 | Schema/domain validation | `src/emuchef/io/validation.py`; `src/emuchef/planner/contracts.py`; domain modules under `src/emuchef/domain/` | `validation.rs`; `phase6k_validation.rs`; `phase6l_catalog_validation.rs`; planner golden comparisons | Rust validates selected editor/planner rules only. | Port or retire Python planner-owned diagnostics and validation rules with parity tests. |
-| Device plan/profile ingestion | `src/emuchef/io/loader.py`; `src/emuchef/planner/service.py`; `src/emuchef/cli.py`; `profile_matching.py` | `planner_device_plan.rs`; `repo_device_profile_inventory_is_explicit_by_path_and_id`; `repo_device_plan_inventory_is_explicit_by_path_id_profile_and_selected_order`; `repo_device_plan_profile_context_can_plan_successfully_without_python_or_devices`; P7J defaults/override classification tests; P7L/P7O `repo_plan_e2e_*` tests; P7N comparison harness | Rust has private checked-in repo device-plan/profile ingestion coverage. It parses current YAML profiles/plans, requires `selected_by_default` where current Python parsing requires it, maps selected recipe refs in authored order, maps profile `capability_defaults` and `device_tags`, and builds synthetic planner-only context from profile fields. Private repo-plan success covers `ayaneo.konkr_pocket_fit.base`, `ayaneo.pocket_s_mini.base`, `ayaneo.generic.base`, `ayaneo.pocket_air_mini.base`, and `ayaneo.pocket_s2.base` when required planner-only input bindings are supplied. No-`app_data_write` profiles prune RetroArch app-data copy steps and `launch_retroarch` during selection instead of emitting `unknown_step_dependency`. P7J additionally classifies checked-in `defaults.show_advanced_steps` and `overrides.config_variants` as inactive metadata, and supports strict private `<recipe_ref>/<input_id>` override binding merge in temporary authored-root tests. Config variant selection, plan defaults as bindings, broader Python override key forms, profile matching, real detected facts, CLI operation replay, and device probing remain out of scope. | Prove or deliberately retire full Python planner plan/profile behavior, including CLI context resolution, profile matching, broader defaults/overrides, and diagnostics. |
+| Device plan/profile ingestion | `src/emuchef/io/loader.py`; `src/emuchef/planner/service.py`; `src/emuchef/cli.py`; `profile_matching.py` | `planner_device_plan.rs`; `repo_device_profile_inventory_is_explicit_by_path_and_id`; `repo_device_plan_inventory_is_explicit_by_path_id_profile_and_selected_order`; `repo_device_plan_profile_context_can_plan_successfully_without_python_or_devices`; P7J defaults/override classification tests; P7L/P7O `repo_plan_e2e_*` tests; P7N comparison harness; P7P scenario matrix | Rust has private checked-in repo device-plan/profile ingestion coverage. It parses current YAML profiles/plans, requires `selected_by_default` where current Python parsing requires it, maps selected recipe refs in authored order, maps profile `capability_defaults` and `device_tags`, and builds synthetic planner-only context from profile fields. Private repo-plan success covers `ayaneo.konkr_pocket_fit.base`, `ayaneo.pocket_s_mini.base`, `ayaneo.generic.base`, `ayaneo.pocket_air_mini.base`, and `ayaneo.pocket_s2.base` when required planner-only input bindings are supplied. P7P records all five checked-in device-plan comparisons as current `match` scenarios under supplied planner-only bindings and the shared synthetic/profile-derived planner context. No-`app_data_write` profiles prune RetroArch app-data copy steps and `launch_retroarch` during selection instead of emitting `unknown_step_dependency`. P7J additionally classifies checked-in `defaults.show_advanced_steps` and `overrides.config_variants` as inactive metadata, and supports strict private `<recipe_ref>/<input_id>` override binding merge in temporary authored-root tests. Config variant selection, plan defaults as bindings, broader Python override key forms, profile matching, real detected facts, CLI operation replay, and device probing remain out of scope. | Prove or deliberately retire full Python planner plan/profile behavior, including CLI context resolution, profile matching, broader defaults/overrides, and diagnostics. |
 | Input binding/default handling | `src/emuchef/planner/bindings.py`; `draft_builder.py`; `emitter.py` | `required_input_bindings_match_python_success_and_missing_error`; `phase6n_optional_inputs_prune_and_rebind_like_python`; `phase6n_input_defaults_and_multiple_values_match_python`; `temp_device_plan_override_bindings_merge_before_explicit_bindings` | Covered for selected required, optional, default, and multiple input fixtures. P7J covers private device-plan override binding merge for strict `<recipe_ref>/<input_id>` keys with explicit test bindings taking precedence. | Cover operation replay, validation errors, broader Python override key forms such as `inputs.<id>`, and broader input declarations before planner cutover. |
 | Selected recipe expansion | `src/emuchef/planner/service.py`; `dependencies.py`; `draft_builder.py` | `recipe_and_step_dependencies_match_python_ordering`; `phase6n_dependency_expansion_and_namespacing_match_python`; P7K `recipe_expansion_*` tests | Private Rust planner expansion follows direct `recipe_dependencies` evidence: dependencies before dependents, sibling dependencies in authored order, selected recipe closure expansion in selected order, and duplicate suppression without moving the first occurrence. Current checked-in recipes have no non-empty dependency metadata, so current corpus selected and expanded refs match as current-state evidence only. | Prove selected recipe expansion across the required authored catalog and CLI workflows, including any future non-empty checked-in dependencies. |
 | Dependency validation | `src/emuchef/planner/dependencies.py`; `src/emuchef/io/validation.py` | `phase6l_catalog_validation.rs`; planner dependency tests; `dependency_validation_*` planner tests | Rust validates selected/emitted step dependencies for unknown or non-emitted targets, self-dependencies, and static cycles. Duplicate authored dependencies remain allowed and are preserved in emitted execution steps. Runtime dependency outcomes remain executor behavior. | Match Python planner diagnostics, ordering, and failure behavior for broader planner-facing dependency cases. |
@@ -145,6 +152,20 @@ executor, apply, artifact-materialization, or real-device readiness evidence.
 They use synthetic profile-derived planner context and do not invoke Python,
 ADB, network access, executor code, or artifact downloads.
 
+P7P adds `tools/plan_parity_scenarios.json` and matrix mode for
+`tools/compare_rust_python_plan.py`. In this matrix, `match` means only that
+the dev-only comparison harness found no unclassified differences for the
+compared fields under the supplied planner-only bindings and shared planner
+context. It does not mean Python CLI parity, real-device parity,
+executor/apply parity, artifact/network/materialization parity, full schema
+parity, future scenario parity, or Rust planner cutover readiness by itself.
+Matrix mode exits `0` only when every scenario actual classification matches
+its expected classification. This is an expectation check for the current
+dev-only scenario matrix, not a full planner-correctness claim. The matrix may
+require Python dependencies and Rust build artifacts. It does not execute
+plans, probe devices, invoke ADB, access the network, materialize artifacts,
+regenerate goldens, or participate in normal Rust/Tauri runtime checks.
+
 | Device plan | Device profile | Selected recipes | Private Rust planner status | Required planner-only bindings | Current limitation |
 | --- | --- | --- | --- | --- | --- |
 | `authored/device_plans/ayaneo.konkr_pocket_fit.base.yaml` | `ayaneo.konkr_pocket_fit` | `app.retroarch.provision` | Success. `repo_plan_e2e_*` tests build input from checked-in plan/profile YAML, emit deterministic selected/expanded refs and step order, and assert normalized RetroArch params. | None. Optional `app.retroarch.provision/retroarch_cfg` may be omitted, which prunes `seed_retroarch_cfg`; a temp `.cfg` binding includes that step. | Not a user-facing planner path. |
@@ -152,6 +173,14 @@ ADB, network access, executor code, or artifact downloads.
 | `authored/device_plans/ayaneo.generic.base.yaml` | `ayaneo.generic` | `app.retroarch.provision`, `feature.copy_bios` | Success. Required BIOS binding supplied in tests; no-`app_data_write` capability prunes RetroArch app-data copy steps and `launch_retroarch`. | `feature.copy_bios/bios_source_dir` is required by the selected BIOS recipe and is supplied with a planner-only temp directory in tests. | Not a user-facing planner path. Planner-only BIOS binding does not inspect BIOS contents, and executor/apply behavior is unchanged. |
 | `authored/device_plans/ayaneo.pocket_air_mini.base.yaml` | `ayaneo.pocket_air_mini` | `app.retroarch.provision`, `feature.copy_bios` | Success. Required BIOS binding supplied in tests; no-`app_data_write` capability prunes RetroArch app-data copy steps and `launch_retroarch`. | `feature.copy_bios/bios_source_dir` is required by the selected BIOS recipe and is supplied with a planner-only temp directory in tests. | Not a user-facing planner path. Planner-only BIOS binding does not inspect BIOS contents, and executor/apply behavior is unchanged. |
 | `authored/device_plans/ayaneo.pocket_s2.base.yaml` | `ayaneo.pocket_s2` | `app.retroarch.provision`, `feature.copy_bios`, `app.xaniteog.install` | Success. Required BIOS and XaniteOG bindings supplied in tests; no-`app_data_write` capability prunes RetroArch app-data copy steps and `launch_retroarch`. | `feature.copy_bios/bios_source_dir` and `app.xaniteog.install/xaniteog_apk` are required by selected recipes and are supplied with planner-only temp paths in tests. | Not a user-facing planner path. Planner-only BIOS/APK bindings do not inspect payload contents, and executor/apply behavior is unchanged. |
+
+| P7P scenario id | Device plan | Required matrix bindings | Expected current comparison classification |
+| --- | --- | --- | --- |
+| `ayaneo_konkr_pocket_fit_base` | `ayaneo.konkr_pocket_fit.base` | None. | `match` |
+| `ayaneo_pocket_s_mini_base` | `ayaneo.pocket_s_mini.base` | None. | `match` |
+| `ayaneo_generic_base` | `ayaneo.generic.base` | `feature.copy_bios/bios_source_dir` directory. | `match` |
+| `ayaneo_pocket_air_mini_base` | `ayaneo.pocket_air_mini.base` | `feature.copy_bios/bios_source_dir` directory. | `match` |
+| `ayaneo_pocket_s2_base` | `ayaneo.pocket_s2.base` | `feature.copy_bios/bios_source_dir` directory; `app.xaniteog.install/xaniteog_apk` `.apk` file. | `match` |
 
 | Path | Recipe id | Parse status | Planner/emission status | Context source | Unsupported gap | Test/evidence path |
 | --- | --- | --- | --- | --- | --- | --- |

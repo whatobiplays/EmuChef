@@ -336,6 +336,14 @@ The repository includes a developer-only comparison/reporting harness:
   --device-plan ayaneo.pocket_s_mini.base
 ```
 
+It also includes a dev-only current scenario matrix for checked-in device plans:
+
+```bash
+.venv/bin/python tools/compare_rust_python_plan.py \
+  --scenario-matrix tools/plan_parity_scenarios.json \
+  --authored-root authored
+```
+
 This compares Python planner API output with Rust `emuchef-plan-shadow` output.
 It does not compare Python CLI behavior, because the user-facing
 `emuchef plan` CLI probes device facts through ADB before planning. The Python
@@ -351,6 +359,13 @@ The report is deterministic JSON. It classifies differences as `match`,
 selected recipe refs, expanded recipe refs, execution step count, step ids and
 order, step types, dependencies, normalized params, warning/error shape, and
 serialized `permission_plan` presence.
+
+For P7P, `match` means only that the dev-only comparison harness found no
+unclassified differences for the compared fields under the supplied
+planner-only bindings and shared planner context. It does not mean Python CLI
+parity, real-device parity, executor/apply parity, artifact/network/
+materialization parity, full schema parity, future scenario parity, or Rust
+planner cutover readiness by itself.
 
 By default the harness launches Rust with offline Cargo:
 
@@ -376,6 +391,23 @@ mkdir -p /tmp/emuchef-p7n-bios
   --bind app.xaniteog.install/xaniteog_apk=/tmp/emuchef-p7n-xaniteog.apk
 ```
 
+Matrix mode creates required planner-only temp directories and files from
+`tools/plan_parity_scenarios.json` and includes binding refs/kinds, not
+generated temp path values, in the matrix report. It exits `0` only when every
+scenario's actual classification matches its expected classification. This is
+an expectation check for the current dev-only scenario matrix, not a claim of
+full planner correctness. Future scenarios may intentionally expect
+`known_gap`; currently all five checked-in device-plan scenarios are expected
+`match`:
+
+| Scenario id | Device plan | Matrix bindings | Expected classification |
+| --- | --- | --- | --- |
+| `ayaneo_konkr_pocket_fit_base` | `ayaneo.konkr_pocket_fit.base` | None. | `match` |
+| `ayaneo_pocket_s_mini_base` | `ayaneo.pocket_s_mini.base` | None. | `match` |
+| `ayaneo_generic_base` | `ayaneo.generic.base` | `feature.copy_bios/bios_source_dir` directory. | `match` |
+| `ayaneo_pocket_air_mini_base` | `ayaneo.pocket_air_mini.base` | `feature.copy_bios/bios_source_dir` directory. | `match` |
+| `ayaneo_pocket_s2_base` | `ayaneo.pocket_s2.base` | `feature.copy_bios/bios_source_dir` directory; `app.xaniteog.install/xaniteog_apk` `.apk` file. | `match` |
+
 The Pocket S2 comparison currently reports `match` when required planner-only
 BIOS and XaniteOG bindings are supplied. The comparison harness still has a
 synthetic unit test for stale or future Rust outputs that return the old
@@ -386,6 +418,8 @@ The comparison harness is not part of normal Rust/Tauri runtime checks. It does
 not execute plans, probe devices, invoke ADB, access the network, download or
 materialize artifacts, regenerate checked-in goldens, expose Tauri commands, or
 alter user-facing CLI routing. Planner cutover remains a future explicit phase.
+Single-scenario and matrix runs may require Python dependencies and Rust build
+artifacts; they are developer tools, not user-facing planner paths.
 
 ## Phase 6O Executor Scope
 

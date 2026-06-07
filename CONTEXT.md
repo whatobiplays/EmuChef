@@ -258,6 +258,28 @@ developers can pass `--cargo-online`, set
 `EMUCHEF_PLAN_COMPARE_CARGO_OFFLINE=0`, or pass `--rust-bin <path>` for local
 development.
 
+`tools/plan_parity_scenarios.json` is a dev-only current comparison scenario
+manifest for checked-in device plans. Matrix mode runs the Python planner API
+and Rust shadow planner for each listed scenario, creates only planner-visible
+temporary placeholder resources for required bindings, and emits one
+deterministic JSON report to stdout. The report includes scenario ids, device
+plan ids, binding refs/kinds, expected and actual classifications, expectation
+pass/fail status, summary counts, known gaps, diagnostics, and mismatch
+classification buckets. It does not include generated temporary path values.
+In this matrix, `match` means only that the dev-only comparison harness found
+no unclassified differences for the compared fields under the supplied
+planner-only bindings and shared planner context. It does not mean Python CLI
+parity, real-device parity, executor/apply parity, artifact/network/
+materialization parity, full schema parity, future scenario parity, or Rust
+planner cutover readiness by itself. Matrix mode exits `0` only when every
+scenario actual classification matches its expected classification. This exit
+status is an expectation check for the current dev-only scenario matrix, not a
+claim of full planner correctness. Current checked-in matrix scenarios for
+`ayaneo.konkr_pocket_fit.base`, `ayaneo.pocket_s_mini.base`,
+`ayaneo.generic.base`, `ayaneo.pocket_air_mini.base`, and
+`ayaneo.pocket_s2.base` are all expected `match`; future scenarios may
+intentionally expect `known_gap`.
+
 The Rust backend supports one-shot stateless requests through:
 
 - `hello`
