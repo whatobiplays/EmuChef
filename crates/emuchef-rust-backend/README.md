@@ -367,6 +367,11 @@ parity, real-device parity, executor/apply parity, artifact/network/
 materialization parity, full schema parity, future scenario parity, or Rust
 planner cutover readiness by itself.
 
+Planner cutover readiness and Python planner deletion blockers are classified
+in `../../docs/rust-planner-cutover-readiness.md`. The readiness document is
+the source for future user-facing routing, matrix-gating, and Python deletion
+criteria.
+
 By default the harness launches Rust with offline Cargo:
 
 ```bash

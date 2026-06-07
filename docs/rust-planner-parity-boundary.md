@@ -6,6 +6,11 @@ deprecated, or ready for cutover. Rust planner coverage remains crate-internal
 and fixture-scoped, with a dev-only shadow Cargo command for manual emission of
 the current private Rust `PlanningResult`.
 
+Planner cutover readiness and Python planner deletion blockers are classified
+in `docs/rust-planner-cutover-readiness.md`. This boundary document records
+current parity evidence; the readiness document is the source for the
+user-facing routing and deletion checklist.
+
 Rust planner tests include an intentional fixture inventory/parsing guard for
 the existing Phase 6M/6N planner parity evidence. The guard consumes checked-in
 files only; it does not invoke Python or regenerate fixtures. The Rust tests
@@ -391,22 +396,16 @@ BIOS and XaniteOG bindings are supplied. The old
 comparison-harness unit test for stale or future Rust outputs, but it is not a
 current checked-in repo-plan comparison gap.
 
-## Deletion-Readiness Ladder
+## Cutover Readiness
 
-Python planner deletion requires, at minimum:
+The current Rust planner evidence is incremental parity evidence only. Python
+remains the user-facing CLI/reference planner owner, and Rust remains
+shadow/dev-only. The current checked-in scenario matrix expects all five
+scenarios to classify as `match`, but matching matrix status is necessary
+evidence for the compared planner-only fields, not sufficient proof of CLI
+routing, real-device context resolution, executor/apply compatibility, artifact
+materialization, or Python planner deletability.
 
-1. Rust parses all required authored corpus and frozen planner goldens.
-2. Rust validates planner-owned rules with parity coverage.
-3. Rust emits execution-plan DTOs matching frozen goldens for supported flows.
-4. A Rust CLI or replacement command path can produce equivalent plans.
-5. Python planner no longer owns any user-facing CLI/reference path.
-6. Python planner tests are ported, retired, or explicitly reclassified as
-   historical reference.
-
-The current Rust planner coverage does not complete this ladder. The current
-boundary docs, frozen planner evidence guard, selected emitted step-output ref
-and dependency validation coverage, and focused emitted-step param contract
-coverage, including P7F internal permission-intent construction coverage and
-P7G DTO shape/normalization coverage plus P7I private repo device-plan/profile
-ingestion coverage and P7J device-plan default/override/config-variant
-classification coverage, are incremental parity evidence only.
+Use `docs/rust-planner-cutover-readiness.md` for the current blocker
+classification, comparison-matrix gating policy, and proposed staged ladder for
+future user-facing Rust planner routing and Python planner deletion.

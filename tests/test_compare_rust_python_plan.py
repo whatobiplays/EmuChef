@@ -600,6 +600,26 @@ class CompareRustPythonPlanTests(unittest.TestCase):
         self.assertEqual(first, second)
         self.assertEqual(json.loads(first)["summary"]["expectation_counts"], {"pass": 1, "fail": 0})
 
+    def test_readiness_doc_mentions_matrix_scenarios_and_comparison_tools(self) -> None:
+        repo_root = Path(__file__).resolve().parents[1]
+        matrix = harness.load_scenario_matrix(repo_root / "tools/plan_parity_scenarios.json")
+        doc_path = repo_root / "docs/rust-planner-cutover-readiness.md"
+
+        self.assertTrue(doc_path.is_file(), f"{doc_path} should exist")
+        doc_text = doc_path.read_text(encoding="utf-8")
+
+        for scenario in matrix.scenarios:
+            with self.subTest(scenario_id=scenario.id):
+                self.assertIn(scenario.id, doc_text)
+
+        for required_text in [
+            "tools/plan_parity_scenarios.json",
+            "tools/compare_rust_python_plan.py",
+            "emuchef-plan-shadow",
+        ]:
+            with self.subTest(required_text=required_text):
+                self.assertIn(required_text, doc_text)
+
     def test_compare_main_single_scenario_behavior_remains_single_report(self) -> None:
         process = harness.ProcessResult(
             exit_code=0,

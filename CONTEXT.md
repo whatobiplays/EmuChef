@@ -156,8 +156,10 @@ dev-only/reference-only and are not setup, runtime, packaging, or Rust/Tauri
 verification prerequisites.
 
 The Rust planner parity boundary is documented in
-`docs/rust-planner-parity-boundary.md`. Python remains the CLI/reference owner
-for planner behavior. Rust planner coverage remains crate-internal and
+`docs/rust-planner-parity-boundary.md`. Rust planner cutover readiness and
+Python planner deletion blockers are classified in
+`docs/rust-planner-cutover-readiness.md`. Python remains the CLI/reference
+owner for planner behavior. Rust planner coverage remains crate-internal and
 fixture-scoped. The Rust planner tests include an intentional Phase 6M/6N
 fixture inventory/parsing guard that consumes checked-in authored fixtures and
 planner goldens only, plus focused coverage for selected emitted step-output
@@ -278,7 +280,11 @@ claim of full planner correctness. Current checked-in matrix scenarios for
 `ayaneo.konkr_pocket_fit.base`, `ayaneo.pocket_s_mini.base`,
 `ayaneo.generic.base`, `ayaneo.pocket_air_mini.base`, and
 `ayaneo.pocket_s2.base` are all expected `match`; future scenarios may
-intentionally expect `known_gap`.
+intentionally expect `known_gap`. Matching matrix status is necessary evidence
+for the compared planner-only fields, not sufficient user-facing planner
+cutover or Python planner deletion readiness. The matrix remains a dev-only
+manual artifact in the current state; it is not wired into normal Rust/Tauri
+checks.
 
 The Rust backend supports one-shot stateless requests through:
 
