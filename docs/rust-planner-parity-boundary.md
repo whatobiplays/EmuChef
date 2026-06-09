@@ -53,7 +53,8 @@ Rust planner-adjacent coverage is internal and fixture-scoped:
   `crates/emuchef-rust-backend/src/bin/emuchef-plan-shadow.rs`: dev-only shadow
   planner command support for manual migration inspection. The command emits
   pretty JSON `PlanningResult` values from explicit authored-root/device-plan
-  inputs, but it is not the user-facing planner CLI.
+  inputs. P8A exposes it through an explicit developer-only Python CLI bridge,
+  but it is not the default planner CLI or a cutover path.
 - `tools/compare_rust_python_plan.py`: dev-only comparison harness for Python
   planner API output versus Rust shadow planner output. The harness emits a
   deterministic JSON classification report or matrix report and is not part of
@@ -290,11 +291,14 @@ for Phase 6M/6N planner goldens remain documented in
 `crates/emuchef-rust-backend/README.md` and classified in
 `docs/python-fixture-golden-ownership.md`.
 
-The Rust planner skeleton is not a replacement command path. It is not exposed
-as a Tauri command, sidecar protocol request, production CLI command, backend
-selector, or runtime fallback. Its internal permission-intent helper is not a
-serialized execution-plan field and is not consumed by executor/apply behavior.
-P7G DTO coverage does not change those boundaries.
+The Rust planner skeleton is not a replacement command path. P8A exposes only an
+explicit developer-only Python CLI bridge to the shadow binary:
+`emuchef plan --planner-backend rust-shadow --rust-planner-bin <path>`. It is
+not exposed as a Tauri command, sidecar protocol request, production/default CLI
+command, backend selector, or runtime fallback. Its internal permission-intent
+helper is not a serialized execution-plan field and is not consumed by
+executor/apply behavior. P7G DTO coverage and the P8A bridge do not change those
+boundaries.
 
 ## Dev-Only Shadow Emission
 
@@ -306,6 +310,22 @@ cargo run --manifest-path crates/emuchef-rust-backend/Cargo.toml --bin emuchef-p
   --authored-root authored \
   --device-plan ayaneo.pocket_s_mini.base
 ```
+
+P8A also exposes a thin Python CLI bridge to an already-built shadow binary:
+
+```bash
+emuchef plan \
+  --planner-backend rust-shadow \
+  --rust-planner-bin <path-to-emuchef-plan-shadow> \
+  --authored-root authored \
+  --device-plan ayaneo.pocket_s_mini.base
+```
+
+The Python bridge requires `--rust-planner-bin` in P8A and never invokes Cargo.
+It forwards `--authored-root`, `--device-plan`, and repeated raw `--bind` values
+to the supplied binary in original order. Rust stdout/stderr are passed through
+directly as JSON/text from the shadow command; the bridge does not translate
+Rust JSON into Python YAML, concise summary text, or Python planner structures.
 
 The shadow command builds `PlannerInput` through the private
 `PlannerInput::from_authored_device_plan(...)` path and then calls
@@ -321,10 +341,10 @@ Success exits `0`; planner error results exit non-zero. Argument/usage failures
 and authored-root/device-plan load failures write stable text to stderr and do
 not emit stdout JSON.
 
-The shadow command does not execute plans, probe devices, invoke ADB, access the
-network, download or materialize artifacts, regenerate goldens, invoke Python,
-expose Tauri commands, expose sidecar protocol requests, or replace the Python
-`emuchef plan` CLI. Planner CLI cutover remains a future explicit phase.
+The shadow command and Python bridge do not execute plans, probe devices, invoke
+ADB, access the network, download or materialize artifacts, regenerate goldens,
+expose Tauri commands, expose sidecar protocol requests, or replace the default
+Python `emuchef plan` CLI. Planner CLI cutover remains a future explicit phase.
 
 ## Dev-Only Python Planner API Vs Rust Shadow Comparison
 

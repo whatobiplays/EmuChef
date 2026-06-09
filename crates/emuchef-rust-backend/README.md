@@ -307,6 +307,23 @@ still writing the structured result to stdout. Argument/usage errors and
 authored-root/device-plan load failures are process errors: they write stable
 stderr text and no stdout JSON.
 
+P8A adds an explicit developer-only bridge through the Python CLI for an
+already-built shadow binary:
+
+```bash
+emuchef plan \
+  --planner-backend rust-shadow \
+  --rust-planner-bin <path-to-emuchef-plan-shadow> \
+  --authored-root authored \
+  --device-plan ayaneo.pocket_s_mini.base
+```
+
+The Python CLI route requires `--rust-planner-bin` in P8A and never invokes
+Cargo. It forwards `--authored-root`, `--device-plan`, and repeated raw `--bind`
+values to the supplied binary in original order. Rust stdout/stderr are passed
+through directly, so output is Rust JSON/text passthrough rather than Python CLI
+YAML or summary output.
+
 Bindings use the explicit form:
 
 ```bash
@@ -318,13 +335,14 @@ same ref are grouped into a string array because the current Python CLI parser
 groups repeated `--bind REF=VALUE` entries that way. This is dev-only shadow
 behavior, not full future Rust planner CLI binding type parity.
 
-The shadow command does not replace the Python `emuchef plan` CLI. It does not
-run executor/apply, inspect or probe devices, invoke ADB, access the network,
-download or materialize artifacts, regenerate checked-in goldens, invoke Python,
-expose Tauri commands, expose sidecar protocol requests, or alter the default
-`emuchef-rust-backend` sidecar binary. `default-run = "emuchef-rust-backend"` is
-set so existing `cargo run --manifest-path crates/emuchef-rust-backend/Cargo.toml -- --sidecar`
-and one-shot development workflows remain unambiguous.
+The shadow command and Python bridge do not replace the default Python
+`emuchef plan` CLI. They do not run executor/apply, inspect or probe devices,
+invoke ADB, access the network, download or materialize artifacts, regenerate
+checked-in goldens, expose Tauri commands, expose sidecar protocol requests, or
+alter the default `emuchef-rust-backend` sidecar binary. `default-run =
+"emuchef-rust-backend"` is set so existing `cargo run --manifest-path
+crates/emuchef-rust-backend/Cargo.toml -- --sidecar` and one-shot development
+workflows remain unambiguous.
 
 ## Python Planner API Vs Rust Shadow Comparison
 

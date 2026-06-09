@@ -4,6 +4,8 @@ from __future__ import annotations
 
 import argparse
 import logging
+import os
+import subprocess
 import sys
 from collections.abc import Mapping, Sequence
 from dataclasses import replace
@@ -89,6 +91,16 @@ def main(argv: list[str] | None = None) -> int:
         help="Emit a planning_result for the current draft state.",
     )
     plan_parser.add_argument("--output", help="Optional file path for the structured planning_result YAML.")
+    plan_parser.add_argument(
+        "--planner-backend",
+        choices=("python", "rust-shadow"),
+        default="python",
+        help="Planner implementation to use. rust-shadow is dev-only and requires --rust-planner-bin.",
+    )
+    plan_parser.add_argument(
+        "--rust-planner-bin",
+        help="Dev-only path to emuchef-plan-shadow for --planner-backend rust-shadow.",
+    )
 
     detect_parser = subparsers.add_parser(
         "detect",
@@ -126,6 +138,8 @@ def main(argv: list[str] | None = None) -> int:
     _configure_logging(args)
 
     try:
+        if args.command == "plan" and args.planner_backend == "rust-shadow":
+            return _run_plan(args)
         setattr(
             args,
             "_resolved_adb",
@@ -180,6 +194,12 @@ def _run_draft(args: argparse.Namespace) -> int:
 
 
 def _run_plan(args: argparse.Namespace) -> int:
+    if args.planner_backend == "rust-shadow":
+        return _run_rust_shadow_plan(args)
+    return _run_python_plan(args)
+
+
+def _run_python_plan(args: argparse.Namespace) -> int:
     catalog, session, detected_device = _build_session(args)
     maybe_failure = _replay_ops_and_bindings(session, args.ops, args.bind)
     if maybe_failure is not None:
@@ -196,6 +216,73 @@ def _run_plan(args: argparse.Namespace) -> int:
     else:
         sys.stdout.write(_format_planning_summary(result, output_path=args.output))
     return 0 if result.execution_plan is not None else 1
+
+
+def _run_rust_shadow_plan(args: argparse.Namespace) -> int:
+    try:
+        command = _build_rust_shadow_plan_command(args)
+    except ValueError as exc:
+        sys.stderr.write(f"Error: {exc}\n")
+        return 1
+
+    try:
+        completed = subprocess.run(
+            command,
+            check=False,
+            text=True,
+            capture_output=True,
+        )
+    except OSError as exc:
+        sys.stderr.write(f"Error: failed to start Rust shadow planner '{command[0]}': {exc}\n")
+        return 1
+
+    if completed.stdout:
+        sys.stdout.write(completed.stdout)
+    if completed.stderr:
+        sys.stderr.write(completed.stderr)
+    if completed.returncode != 0 and not completed.stdout:
+        sys.stderr.write(f"Error: Rust shadow planner failed with exit code {completed.returncode}.\n")
+    return completed.returncode
+
+
+def _build_rust_shadow_plan_command(args: argparse.Namespace) -> list[str]:
+    _validate_rust_shadow_plan_args(args)
+    rust_planner_bin = Path(args.rust_planner_bin).expanduser()
+    if not rust_planner_bin.exists():
+        raise ValueError(f"Rust shadow planner binary does not exist: {args.rust_planner_bin}")
+    if not rust_planner_bin.is_file() or not os.access(rust_planner_bin, os.X_OK):
+        raise ValueError(f"Rust shadow planner binary is not executable: {args.rust_planner_bin}")
+
+    command = [
+        str(rust_planner_bin),
+        "--authored-root",
+        args.authored_root,
+        "--device-plan",
+        args.device_plan,
+    ]
+    for raw_binding in args.bind:
+        command.extend(["--bind", raw_binding])
+    return command
+
+
+def _validate_rust_shadow_plan_args(args: argparse.Namespace) -> None:
+    if not args.rust_planner_bin:
+        raise ValueError("--rust-planner-bin is required when --planner-backend rust-shadow is selected.")
+    unsupported_options = [
+        ("--verbose", args.verbose),
+        ("--debug", args.debug),
+        ("--adb", args.adb is not None),
+        ("--ops", args.ops is not None),
+        ("--output", args.output is not None),
+        ("--serial", args.serial is not None),
+        ("--manufacturer", args.manufacturer is not None),
+        ("--model", args.model is not None),
+        ("--android-version", args.android_version is not None),
+        ("--device-tag", bool(args.device_tag)),
+    ]
+    for option, is_set in unsupported_options:
+        if is_set:
+            raise ValueError(f"{option} is not supported with --planner-backend rust-shadow.")
 
 
 def _run_detect(args: argparse.Namespace) -> int:

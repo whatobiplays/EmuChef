@@ -3,9 +3,11 @@
 This document classifies current evidence and remaining blockers before Rust
 planner ownership can move into a user-facing planner route or before the Python
 planner can be removed. Python remains the current CLI/reference planner owner.
-Rust planner output remains shadow/dev-only. Executor, apply, real-device, ADB,
-artifact materialization, network, Tauri protocol, and user-facing CLI behavior
-are unchanged.
+Rust planner output remains shadow/dev-only. The default `emuchef plan` route
+remains Python-owned; the only Python CLI route to Rust planning is the explicit
+developer-only `--planner-backend rust-shadow --rust-planner-bin <path>` path.
+Executor, apply, real-device, ADB, artifact materialization, network, Tauri
+protocol, and default user-facing CLI behavior are unchanged.
 
 ## Current Evidence
 
@@ -31,6 +33,12 @@ The Rust planner evidence is planner-only and migration-focused:
   `tests/test_compare_rust_python_plan.py` provide the P7N dev-only comparison
   harness for Python planner API output versus Rust `emuchef-plan-shadow`
   output under a shared synthetic/profile-derived planner context.
+- `src/emuchef/cli.py` exposes a P8A explicit developer-only bridge:
+  `emuchef plan --planner-backend rust-shadow --rust-planner-bin <path>`.
+  The route forwards authored-root, device-plan, and repeated raw `--bind`
+  values to the supplied `emuchef-plan-shadow` binary and passes through Rust
+  JSON stdout/stderr without translating it into Python planner YAML or summary
+  output. This is not a cutover and does not make Rust the default planner.
 - `tools/plan_parity_scenarios.json` is the P7P scenario matrix for the current
   checked-in device-plan scenarios. The current checked-in scenario matrix
   expects all five scenarios to classify as `match`.
@@ -38,9 +46,9 @@ The Rust planner evidence is planner-only and migration-focused:
   `ayaneo_pocket_s_mini_base`, `ayaneo_generic_base`,
   `ayaneo_pocket_air_mini_base`, and `ayaneo_pocket_s2_base`.
 - A matching matrix means the dev-only compared fields align for current
-  scenarios; it does not prove CLI routing, real-device context resolution,
-  executor/apply compatibility, artifact materialization, or Python planner
-  deletability.
+  scenarios; it does not prove default CLI cutover, real-device CLI context
+  resolution, executor/apply compatibility, artifact materialization, or Python
+  planner deletability.
 - `docs/python-fixture-golden-ownership.md`, `CONTEXT.md`, and
   `crates/emuchef-rust-backend/README.md` define the no-Python-runtime,
   no-PySide-runtime, and no-Python-fixture/golden-regeneration guard
@@ -51,7 +59,7 @@ The Rust planner evidence is planner-only and migration-focused:
 
 Current evidence does not prove:
 
-- Python `emuchef plan` CLI cutover.
+- Default Python `emuchef plan` CLI cutover.
 - Python `emuchef draft` CLI cutover.
 - Executor/apply parity.
 - Real-device probing parity.
@@ -69,10 +77,10 @@ resolved or explicitly accepted for a narrower experimental route:
 
 | Blocker | Current classification |
 | --- | --- |
-| CLI routing strategy | Python `src/emuchef/cli.py` remains the current `draft` and `plan` route. Rust has no user-facing planner flag, fallback policy, output mode policy, or replacement command path. |
+| CLI routing strategy | Python `src/emuchef/cli.py` remains the current default `draft` and `plan` route. P8A adds only an explicit dev-only `emuchef plan --planner-backend rust-shadow --rust-planner-bin <path>` bridge. It requires a supplied shadow binary, never invokes Cargo, passes through Rust JSON stdout/stderr, and is not a replacement command path or fallback policy. |
 | Device probing and context resolution | Python CLI resolves ADB/device facts before planning in `_resolve_device_context(...)`. Rust shadow planning uses synthetic/profile-derived planner context and does not probe devices. |
 | Argument and binding parity | `emuchef-plan-shadow` accepts explicit `--authored-root`, `--device-plan`, and string `--bind` values. It mirrors repeated-bind grouping but is not full future Rust CLI binding type parity, ops replay parity, or common-flag parity. |
-| Output format compatibility | Rust emits private JSON `PlanningResult` through the shadow command. Python CLI supports concise summaries, verbose YAML, and `--output`; those surfaces are not routed through Rust. |
+| Output format compatibility | Rust emits private JSON `PlanningResult` through the shadow command. P8A passes that JSON through directly from the explicit dev-only Python CLI bridge. Python CLI default planning still supports concise summaries, verbose YAML, and `--output`; those output modes are not routed through Rust. |
 | Error and warning compatibility | Rust covers selected planner result, warning/error shape, and focused diagnostics. Full CLI stderr/stdout, profile mismatch warnings, operation replay failures, exit codes, and broader planner diagnostics are not proven. |
 | Required normal-check gating | The matrix is not part of normal Rust/Tauri checks. A cutover route needs an approved gate policy before the route becomes user-facing. |
 | Unsupported scenarios outside the matrix | The checked-in matrix covers five current device-plan scenarios only. Future authored plans, non-empty recipe dependencies, broader override forms, profile matching, and scenario drift require intentional coverage updates. |
@@ -114,13 +122,15 @@ Before Python planner source can be removed, these blockers must be resolved:
    current scenarios.
 3. Planner routing work may add an optional/manual matrix gate before exposing a
    user-facing route.
-4. A user-facing experimental Rust planner flag or route is added only for
+4. A developer-only explicit Rust shadow planner route is available for manual
+   inspection with a supplied `emuchef-plan-shadow` binary.
+5. A future user-facing experimental Rust planner flag or route is added only for
    explicitly supported scenarios.
-5. The default planner route switches to Rust only for supported scenarios with
+6. The default planner route switches to Rust only for supported scenarios with
    approved fallback/error behavior.
-6. Python planner remains available as fallback/reference while unsupported
+7. Python planner remains available as fallback/reference while unsupported
    scenarios, diagnostics, CLI output, and deletion blockers are retired.
-7. Python planner tests, docs, and fixture/golden references are ported,
+8. Python planner tests, docs, and fixture/golden references are ported,
    retired, or converted to historical evidence.
-8. Python planner code is deleted only after no user-facing, test, fixture,
+9. Python planner code is deleted only after no user-facing, test, fixture,
    docs, or developer-tool dependency still requires it.

@@ -4,6 +4,7 @@ from io import StringIO
 from pathlib import Path
 from tempfile import TemporaryDirectory
 import contextlib
+import subprocess
 import unittest
 from unittest.mock import patch
 
@@ -22,6 +23,12 @@ from emuchef.planner import Planner
 
 
 class CliTests(unittest.TestCase):
+    def _shadow_bin(self, tmp: str) -> str:
+        shadow_bin = Path(tmp) / "emuchef-plan-shadow"
+        shadow_bin.write_text("#!/bin/sh\n", encoding="utf-8")
+        shadow_bin.chmod(0o755)
+        return str(shadow_bin)
+
     def test_validate_command_succeeds_for_bundled_catalog(self) -> None:
         stdout = StringIO()
         stderr = StringIO()
@@ -105,6 +112,313 @@ class CliTests(unittest.TestCase):
         self.assertNotIn("binding_missing", output)
         self.assertIn("id: app.retroarch.provision/launch_retroarch", output)
         self.assertNotIn("id: app.retroarch.provision/seed_retroarch_cfg", output)
+
+    def test_plan_default_uses_python_planner_without_rust_process(self) -> None:
+        detected = DetectedDevice(
+            serial="SERIAL",
+            manufacturer="AYANEO",
+            brand="AYANEO",
+            model="Pocket FIT",
+            android_version=14,
+            android_api_level=34,
+            root_available=True,
+        )
+        stdout = StringIO()
+        stderr = StringIO()
+        with (
+            patch("emuchef.cli.resolve_adb_executable", return_value="adb"),
+            patch("emuchef.cli.SubprocessAdb.detect_device", return_value=detected),
+            patch("subprocess.run") as run,
+            contextlib.redirect_stdout(stdout),
+            contextlib.redirect_stderr(stderr),
+        ):
+            rc = main(
+                [
+                    "plan",
+                    "--authored-root",
+                    "authored",
+                    "--device-plan",
+                    "ayaneo.konkr_pocket_fit.base",
+                ]
+            )
+
+        self.assertEqual(rc, 0, stderr.getvalue())
+        self.assertIn("Planning status: success", stdout.getvalue())
+        run.assert_not_called()
+
+    def test_plan_rust_shadow_requires_explicit_binary_path(self) -> None:
+        stdout = StringIO()
+        stderr = StringIO()
+        with (
+            patch("emuchef.cli.resolve_adb_executable") as resolve_adb,
+            patch("subprocess.run") as run,
+            contextlib.redirect_stdout(stdout),
+            contextlib.redirect_stderr(stderr),
+        ):
+            rc = main(
+                [
+                    "plan",
+                    "--planner-backend",
+                    "rust-shadow",
+                    "--authored-root",
+                    "authored",
+                    "--device-plan",
+                    "ayaneo.pocket_s_mini.base",
+                ]
+            )
+
+        self.assertEqual(rc, 1)
+        self.assertEqual(stdout.getvalue(), "")
+        self.assertIn("--rust-planner-bin is required", stderr.getvalue())
+        resolve_adb.assert_not_called()
+        run.assert_not_called()
+
+    def test_plan_rust_shadow_invokes_explicit_binary_and_forwards_raw_binds(self) -> None:
+        with TemporaryDirectory() as tmp:
+            shadow_bin = self._shadow_bin(tmp)
+            completed = subprocess.CompletedProcess(
+                args=[],
+                returncode=0,
+                stdout='{\n  "kind": "planning_result",\n  "status": "success"\n}\n',
+                stderr="",
+            )
+            stdout = StringIO()
+            stderr = StringIO()
+            with (
+                patch("emuchef.cli.resolve_adb_executable") as resolve_adb,
+                patch("emuchef.cli.SubprocessAdb.detect_device") as detect_device,
+                patch("subprocess.run", return_value=completed) as run,
+                contextlib.redirect_stdout(stdout),
+                contextlib.redirect_stderr(stderr),
+            ):
+                rc = main(
+                    [
+                        "plan",
+                        "--planner-backend",
+                        "rust-shadow",
+                        "--rust-planner-bin",
+                        shadow_bin,
+                        "--authored-root",
+                        "authored",
+                        "--device-plan",
+                        "ayaneo.pocket_s2.base",
+                        "--bind",
+                        "feature.copy_bios/bios_source_dir=/tmp/bios=with=equals",
+                        "--bind",
+                        "app.xaniteog.install/xaniteog_apk=/tmp/app.apk",
+                        "--bind",
+                        "feature.copy_bios/bios_source_dir=/tmp/second",
+                    ]
+                )
+
+        self.assertEqual(rc, 0, stderr.getvalue())
+        self.assertEqual(stdout.getvalue(), completed.stdout)
+        self.assertEqual(stderr.getvalue(), "")
+        resolve_adb.assert_not_called()
+        detect_device.assert_not_called()
+        run.assert_called_once()
+        self.assertEqual(
+            run.call_args.args[0],
+            [
+                shadow_bin,
+                "--authored-root",
+                "authored",
+                "--device-plan",
+                "ayaneo.pocket_s2.base",
+                "--bind",
+                "feature.copy_bios/bios_source_dir=/tmp/bios=with=equals",
+                "--bind",
+                "app.xaniteog.install/xaniteog_apk=/tmp/app.apk",
+                "--bind",
+                "feature.copy_bios/bios_source_dir=/tmp/second",
+            ],
+        )
+        self.assertEqual(run.call_args.kwargs["check"], False)
+        self.assertEqual(run.call_args.kwargs["text"], True)
+        self.assertEqual(run.call_args.kwargs["capture_output"], True)
+        self.assertNotIn("cargo", run.call_args.args[0])
+        self.assertNotIn("--sidecar", run.call_args.args[0])
+
+    def test_plan_rust_shadow_passes_through_json_for_planner_error(self) -> None:
+        with TemporaryDirectory() as tmp:
+            shadow_bin = self._shadow_bin(tmp)
+            completed = subprocess.CompletedProcess(
+                args=[],
+                returncode=1,
+                stdout='{\n  "kind": "planning_result",\n  "status": "error"\n}\n',
+                stderr="",
+            )
+            stdout = StringIO()
+            stderr = StringIO()
+            with (
+                patch("emuchef.cli.resolve_adb_executable") as resolve_adb,
+                patch("subprocess.run", return_value=completed),
+                contextlib.redirect_stdout(stdout),
+                contextlib.redirect_stderr(stderr),
+            ):
+                rc = main(
+                    [
+                        "plan",
+                        "--planner-backend",
+                        "rust-shadow",
+                        "--rust-planner-bin",
+                        shadow_bin,
+                        "--authored-root",
+                        "authored",
+                        "--device-plan",
+                        "ayaneo.pocket_s2.base",
+                    ]
+                )
+
+        self.assertEqual(rc, 1)
+        self.assertEqual(stdout.getvalue(), completed.stdout)
+        self.assertEqual(stderr.getvalue(), "")
+        resolve_adb.assert_not_called()
+
+    def test_plan_rust_shadow_rejects_python_only_options(self) -> None:
+        unsupported_args = [
+            ["--verbose"],
+            ["--debug"],
+            ["--ops", "ops.yaml"],
+            ["--output", "plan.yaml"],
+            ["--adb", "/does/not/exist"],
+            ["--serial", "SERIAL"],
+            ["--manufacturer", "AYANEO"],
+            ["--model", "Pocket"],
+            ["--android-version", "14"],
+            ["--device-tag", "handheld"],
+        ]
+        with TemporaryDirectory() as tmp:
+            shadow_bin = self._shadow_bin(tmp)
+            for extra_args in unsupported_args:
+                with self.subTest(extra_args=extra_args):
+                    stdout = StringIO()
+                    stderr = StringIO()
+                    with (
+                        patch("emuchef.cli.resolve_adb_executable") as resolve_adb,
+                        patch("subprocess.run") as run,
+                        contextlib.redirect_stdout(stdout),
+                        contextlib.redirect_stderr(stderr),
+                    ):
+                        rc = main(
+                            [
+                                "plan",
+                                "--planner-backend",
+                                "rust-shadow",
+                                "--rust-planner-bin",
+                                shadow_bin,
+                                "--authored-root",
+                                "authored",
+                                "--device-plan",
+                                "ayaneo.pocket_s_mini.base",
+                                *extra_args,
+                            ]
+                        )
+
+                    self.assertEqual(rc, 1)
+                    self.assertEqual(stdout.getvalue(), "")
+                    self.assertIn("is not supported with --planner-backend rust-shadow", stderr.getvalue())
+                    resolve_adb.assert_not_called()
+                    run.assert_not_called()
+
+    def test_plan_rust_shadow_missing_binary_path_is_clear_error(self) -> None:
+        missing_bin = "/definitely/missing/emuchef-plan-shadow"
+        stdout = StringIO()
+        stderr = StringIO()
+        with (
+            patch("emuchef.cli.resolve_adb_executable") as resolve_adb,
+            patch("subprocess.run") as run,
+            contextlib.redirect_stdout(stdout),
+            contextlib.redirect_stderr(stderr),
+        ):
+            rc = main(
+                [
+                    "plan",
+                    "--planner-backend",
+                    "rust-shadow",
+                    "--rust-planner-bin",
+                    missing_bin,
+                    "--authored-root",
+                    "authored",
+                    "--device-plan",
+                    "ayaneo.pocket_s_mini.base",
+                ]
+            )
+
+        self.assertEqual(rc, 1)
+        self.assertEqual(stdout.getvalue(), "")
+        self.assertIn("Rust shadow planner binary does not exist", stderr.getvalue())
+        self.assertIn(missing_bin, stderr.getvalue())
+        resolve_adb.assert_not_called()
+        run.assert_not_called()
+
+    def test_plan_rust_shadow_failed_start_uses_stable_error_prefix(self) -> None:
+        with TemporaryDirectory() as tmp:
+            shadow_bin = self._shadow_bin(tmp)
+            stdout = StringIO()
+            stderr = StringIO()
+            with (
+                patch("emuchef.cli.resolve_adb_executable") as resolve_adb,
+                patch("subprocess.run", side_effect=OSError("platform-specific detail")),
+                contextlib.redirect_stdout(stdout),
+                contextlib.redirect_stderr(stderr),
+            ):
+                rc = main(
+                    [
+                        "plan",
+                        "--planner-backend",
+                        "rust-shadow",
+                        "--rust-planner-bin",
+                        shadow_bin,
+                        "--authored-root",
+                        "authored",
+                        "--device-plan",
+                        "ayaneo.pocket_s_mini.base",
+                    ]
+                )
+
+        self.assertEqual(rc, 1)
+        self.assertEqual(stdout.getvalue(), "")
+        self.assertIn("Error: failed to start Rust shadow planner", stderr.getvalue())
+        self.assertIn(shadow_bin, stderr.getvalue())
+        resolve_adb.assert_not_called()
+
+    def test_plan_rust_shadow_process_failure_without_json_uses_stable_error_prefix(self) -> None:
+        with TemporaryDirectory() as tmp:
+            shadow_bin = self._shadow_bin(tmp)
+            completed = subprocess.CompletedProcess(
+                args=[],
+                returncode=2,
+                stdout="",
+                stderr="rust usage details\n",
+            )
+            stdout = StringIO()
+            stderr = StringIO()
+            with (
+                patch("emuchef.cli.resolve_adb_executable") as resolve_adb,
+                patch("subprocess.run", return_value=completed),
+                contextlib.redirect_stdout(stdout),
+                contextlib.redirect_stderr(stderr),
+            ):
+                rc = main(
+                    [
+                        "plan",
+                        "--planner-backend",
+                        "rust-shadow",
+                        "--rust-planner-bin",
+                        shadow_bin,
+                        "--authored-root",
+                        "authored",
+                        "--device-plan",
+                        "ayaneo.pocket_s_mini.base",
+                    ]
+                )
+
+        self.assertEqual(rc, 2)
+        self.assertEqual(stdout.getvalue(), "")
+        self.assertIn("Error: Rust shadow planner failed with exit code 2.", stderr.getvalue())
+        self.assertIn("rust usage details", stderr.getvalue())
+        resolve_adb.assert_not_called()
 
     def test_apply_dry_run_shows_progress_and_summary(self) -> None:
         with TemporaryDirectory() as tmp:
