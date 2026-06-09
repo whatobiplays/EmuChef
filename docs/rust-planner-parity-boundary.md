@@ -82,9 +82,10 @@ Rust planner-adjacent coverage is internal and fixture-scoped:
   durable readiness-document references, stable CLI backend tokens, required
   artifact presence, and checked-in device-plan coverage from
   `authored/device_plans/*.yaml` / `*.yml` filenames. It emits deterministic JSON
-  and lists manual evidence commands without executing comparison, smoke, Cargo,
-  npm, ADB, Tauri/protocol, executor/apply, network, artifact, or golden
-  regeneration work.
+  validates optional `device_context` shape separately from meaningful
+  explicit-context coverage, and lists manual evidence commands without executing
+  comparison, smoke, Cargo, npm, ADB, Tauri/protocol, executor/apply, network,
+  artifact, or golden regeneration work.
 - `tests/test_cli.py`: P8C and P8E CLI output compatibility contract coverage for
   the explicit `rust-shadow` bridge. The default guarded contract is Rust
   stdout/stderr/exit-code passthrough. The explicit
@@ -332,6 +333,15 @@ because the existing P8J flag surface cannot distinguish an explicit empty tag
 override from omitted tag flags. The comparison and smoke reports include stable
 context presence/key metadata only. This remains dev-only evidence and does not
 make Rust default or authoritative.
+
+P8L reclassifies readiness around explicit device context without changing
+planner or CLI behavior. The static readiness gate treats `device_context` schema
+validity and explicit-context readiness coverage as separate checks:
+`device_context: {}` remains schema-valid, but at least one valid scenario with a
+meaningful explicit field is required for explicit-context coverage. The former
+broad real-device context blocker is narrowed into two still-blocked default
+cutover blockers: real-device probing and detected-device profile mismatch
+warning parity.
 
 | Device plan | Device profile | Selected recipes | Private Rust planner status | Required planner-only bindings | Current limitation |
 | --- | --- | --- | --- | --- | --- |
@@ -679,7 +689,10 @@ The current Rust planner evidence is incremental parity evidence only. Python
 remains the user-facing CLI/reference planner owner, and Rust remains
 shadow/dev-only. The current checked-in scenario matrix covers all five
 checked-in device plans with six scenarios, including one P8K explicit-context
-scenario, and expects every scenario to classify as `match`. Matching matrix
+scenario, and expects every scenario to classify as `match`. P8L records that
+explicit device context has static coverage evidence through that matrix schema
+and scenario, but real-device probing and detected-device profile mismatch
+warnings remain blocked. Matching matrix
 status is necessary evidence for the compared planner-only fields, not
 sufficient proof of CLI routing, real-device context resolution, executor/apply
 compatibility, artifact materialization, or Python planner deletability.

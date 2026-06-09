@@ -304,6 +304,19 @@ exit-code behavior unless a separate accepted breaking-change decision changes
 that target. Rust-native JSON output requires a future explicit structured-output
 mode such as `--format json`.
 
+The Rust planner readiness gate treats optional `device_context` schema validity
+and explicit-context readiness coverage as separate static facts. Valid matrix
+schema fields are `manufacturer`, `model`, `android_version`, and non-empty
+ordered `device_tags`. A scenario with `device_context: {}` is schema-valid but
+does not count as explicit-context coverage; explicit-context coverage requires
+at least one valid scenario with a meaningful supplied context field. Explicit
+device context support is covered by matrix schema/tooling evidence, but default
+Rust planner cutover remains blocked. The former broad real-device context
+blocker is narrowed into two still-blocked areas: real-device probing and
+detected-device profile mismatch warning parity. Default `emuchef plan` remains
+Python-owned, and `rust-shadow` and `rust-experimental` remain explicit
+non-default Rust routes.
+
 P8K extends the dev-only planner matrix tooling with optional explicit
 `device_context` data per scenario. Valid matrix context fields are
 `manufacturer`, `model`, `android_version`, and non-empty ordered `device_tags`.

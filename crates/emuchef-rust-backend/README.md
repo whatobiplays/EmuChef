@@ -467,8 +467,8 @@ PR. It does not run the comparison harness, smoke runner, Cargo, npm, ADB,
 executor/apply, Tauri/protocol, network, artifact materialization, or
 fixture/golden regeneration checks. Its top-level status remains `blocked` even
 when static checks pass because Python remains the default planner owner and
-default-route, real-device probing, executor/apply, and Python planner deletion
-blockers remain unresolved.
+default-route, real-device probing, detected-device profile mismatch warning
+parity, executor/apply, and Python planner deletion blockers remain unresolved.
 
 P8K extends the dev-only matrix evidence with optional explicit
 `device_context` data per scenario. The schema accepts non-empty `manufacturer`
@@ -481,6 +481,17 @@ supplied scalar fields override it, and supplied tags replace profile tags in
 order. This does not add ADB/device probing, detected-device facts,
 executor/apply behavior, Tauri/protocol behavior, Cargo fallback behavior,
 fixture/golden regeneration, or Python planner deletion readiness.
+
+P8L refines the static readiness classification for that evidence. The readiness
+gate keeps optional `device_context` schema validation separate from
+explicit-context coverage: `device_context: {}` is schema-valid, but coverage
+requires at least one valid scenario with a meaningful supplied context field.
+The former broad real-device context blocker is narrowed into two unresolved
+default-cutover blockers, `real_device_probing_not_cut_over` and
+`detected_device_profile_mismatch_warning_not_cut_over`. The top-level report
+status remains `blocked`, and the gate still does not run live comparison,
+smoke, Cargo, npm, ADB, executor/apply, Tauri/protocol, network, artifact, or
+fixture/golden work.
 
 P8C guards the explicit bridge's default CLI output compatibility contract. P7P
 is planner DTO/result comparison evidence, P8B is Python CLI `rust-shadow` route

@@ -146,6 +146,14 @@ The Rust planner evidence is planner-only and migration-focused:
   encode an explicit empty tag override separately from omitted tags, matrix
   validation rejects `device_tags: []`; omitted `device_tags` means no tag
   override and non-empty `device_tags` replace profile-derived tags in order.
+- P8L classifies explicit device context support as statically covered only when
+  the scenario matrix includes at least one valid `device_context` scenario with
+  at least one meaningful explicit context field. The readiness gate keeps
+  optional `device_context` schema validation separate from coverage evidence:
+  an empty `device_context: {}` remains schema-valid but does not satisfy
+  explicit-context readiness coverage. This reclassification narrows the former
+  broad real-device context blocker into separate unresolved blockers for real
+  device probing and detected-device profile mismatch warning parity.
 - `tools/plan_parity_scenarios.json` is the P7P scenario matrix for the current
   checked-in device-plan scenarios plus P8K explicit-context evidence. The
   current checked-in scenario matrix expects all six scenarios to classify as
@@ -188,10 +196,10 @@ resolved or explicitly accepted for a narrower experimental route:
 | Blocker | Current classification |
 | --- | --- |
 | CLI routing strategy | Python `src/emuchef/cli.py` remains the current default `draft` and `plan` route. P8A adds an explicit dev-only `emuchef plan --planner-backend rust-shadow --rust-planner-bin <path>` bridge. It requires a supplied shadow binary, never invokes Cargo, passes through Rust JSON stdout/stderr by default, and is not a replacement command path or fallback policy. P8B adds a dev-only matrix smoke for that bridge's raw passthrough invocation path, and P8F adds dev-only matrix smoke for the same bridge with explicit `--rust-shadow-output python-compatible`; neither makes Rust authoritative. P8G adds `emuchef plan --planner-backend rust-experimental --rust-planner-bin <path>` as an explicit non-default migration route that reuses the Rust shadow planner invocation and Python-compatible formatter by default. P8H adds dev-only matrix smoke evidence for that explicit route across the current scenario matrix. `rust-experimental` is a cutover rehearsal route, not the default planner, not a stable final public contract, and not Python planner deletion. Its name and behavior may change before Rust becomes the default planner backend. |
-| Device probing and context resolution | Python CLI resolves ADB/device facts before planning in `_resolve_device_context(...)`. P8J lets the explicit Rust routes accept supplied `--manufacturer`, `--model`, `--android-version`, and repeated `--device-tag` values, but Rust shadow planning still does not probe devices, create detected-device facts, or emit detected-device profile mismatch warnings. Real-device context/probing remains a default-cutover blocker. |
+| Device probing and context resolution | Python CLI resolves ADB/device facts before planning in `_resolve_device_context(...)`. P8J lets the explicit Rust routes accept supplied `--manufacturer`, `--model`, `--android-version`, and repeated `--device-tag` values, and P8K/P8L provide matrix schema/tooling plus static coverage evidence for meaningful supplied `device_context` scenarios. Rust shadow planning still does not probe real devices or create detected-device facts. The former broad `real_device_context_probing_not_cut_over` blocker is narrowed, not resolved: `real_device_probing_not_cut_over` remains blocked. |
 | Argument and binding parity | `emuchef-plan-shadow` accepts explicit `--authored-root`, `--device-plan`, explicit device context flags, and string `--bind` values. It mirrors repeated-bind grouping and ordered repeated device tags, but is not full future Rust CLI binding type parity, ops replay parity, detected-device parity, or common-flag parity. |
 | Output format compatibility | Rust emits private JSON `PlanningResult` through the shadow command. P8A passes that JSON through directly from the explicit dev-only Python CLI bridge, and P8C guards that omitted `--rust-shadow-output` and explicit `--rust-shadow-output passthrough` remain Rust stdout/stderr/exit-code passthrough. P8E adds explicit `--rust-shadow-output python-compatible` formatting for usable Rust `PlanningResult` JSON: concise summary labels mirror the visible Python CLI labels, structured YAML is produced from the Rust JSON mapping through `dump_yaml(...)`, and `--output` writes that YAML while stdout stays concise unless `--verbose` is selected. Python CLI default planning still owns the default concise summary, verbose YAML, `--output`, and exit-code behavior. P8D accepts the future default-route target: Rust must preserve the Python-owned output and exit-code contract before default planner cutover unless a separate accepted breaking-change decision says otherwise. Rust-native JSON requires a future explicit structured-output mode such as `--format json`. P8E is output-compatibility path evidence only; it is not default Rust planner routing. |
-| Error and warning compatibility | Rust covers selected planner result, warning/error shape, and focused diagnostics. Full CLI stderr/stdout, detected-device profile mismatch warnings, operation replay failures, exit codes, and broader planner diagnostics are not proven. P8J intentionally does not add profile mismatch warnings. |
+| Error and warning compatibility | Rust covers selected planner result, warning/error shape, and focused diagnostics. Full CLI stderr/stdout, detected-device profile mismatch warnings, operation replay failures, exit codes, and broader planner diagnostics are not proven. P8J intentionally does not add profile mismatch warnings, and P8L keeps `detected_device_profile_mismatch_warning_not_cut_over` blocked as a separate default-cutover blocker. |
 | Required normal-check gating | The P7P comparison matrix and P8B CLI-route smoke are not part of normal Rust/Tauri checks. A cutover route needs an approved gate policy before the route becomes user-facing. |
 | Unsupported scenarios outside the matrix | The checked-in matrix covers all five current device plans with six current scenarios, including one P8K explicit-context scenario for `ayaneo.pocket_s_mini.base`. Future authored plans, non-empty recipe dependencies, broader override forms, profile matching, and scenario drift require intentional coverage updates. |
 | Authored/device-plan drift | `tools/plan_parity_scenarios.json` and this readiness doc must be updated when checked-in scenarios change. The static doc guard only checks scenario id/tool references. |
@@ -250,8 +258,8 @@ resolved or explicitly accepted for a narrower experimental route:
   P8H `rust-experimental` smoke command, focused Python tests, and Rust/Tauri
   checks as required manual evidence, but it does not execute them. The report
   remains `blocked` even when static checks pass because the default CLI backend,
-  executor/apply, real-device context probing, and Python planner deletion
-  blockers remain unresolved.
+  executor/apply, real-device probing, detected-device profile mismatch warning
+  parity, and Python planner deletion blockers remain unresolved.
 - P8J explicit-context state: `emuchef plan --planner-backend rust-shadow
   --rust-planner-bin <path>` and `emuchef plan --planner-backend
   rust-experimental --rust-planner-bin <path>` accept explicitly supplied
@@ -260,8 +268,9 @@ resolved or explicitly accepted for a narrower experimental route:
   those values to the private Rust planner `DeviceContext`; explicit tags replace
   profile-derived tags only when at least one `--device-tag` is supplied. This is
   explicit input support only. ADB/device probing and detected-device profile
-  mismatch warnings remain unsupported, and the
-  `real_device_context_probing_not_cut_over` blocker remains blocked.
+  mismatch warnings remain unsupported; P8L narrows the old broad context
+  blocker into `real_device_probing_not_cut_over` and
+  `detected_device_profile_mismatch_warning_not_cut_over`, both still blocked.
 - P8K explicit-context matrix state: `tools/plan_parity_scenarios.json` supports
   optional `device_context` objects for dev-only comparison and smoke evidence.
   The checked-in matrix includes
@@ -275,6 +284,18 @@ resolved or explicitly accepted for a narrower experimental route:
   executor/apply behavior, Tauri/protocol behavior, Cargo fallback behavior,
   fixture/golden regeneration, normal runtime-check wiring, or Python planner
   deletion readiness.
+- P8L explicit-context readiness state: the P8I static gate now emits separate
+  checks for optional `device_context` schema support and meaningful
+  explicit-context coverage. `explicit_context_supported_by_matrix_schema`
+  describes the supported matrix fields, while
+  `explicit_context_scenario_present` and `explicit_context_scenario_valid`
+  distinguish meaningful supplied-field coverage from schema-valid supplied-field
+  coverage.
+  The gate still lists manual comparison/smoke commands as advisory only and does
+  not run them. Its top-level report remains `blocked` even when all static
+  explicit-context checks pass because default backend ownership, real-device
+  probing, detected-device profile mismatch warning parity, executor/apply, and
+  Python planner deletion readiness remain unresolved.
 - Pre-cutover candidate: planner routing work may use the matrix as an
   optional/manual gate to gather evidence before exposing any user-facing Rust
   planner path.

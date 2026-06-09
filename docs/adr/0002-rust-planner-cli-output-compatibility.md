@@ -13,11 +13,14 @@ codes.
 
 The current Rust planner route is the explicit developer-only shadow path:
 `emuchef plan --planner-backend rust-shadow --rust-planner-bin <path>`. It
-requires an already-built `emuchef-plan-shadow` binary. The route forwards only
-the supported shadow inputs to Rust and preserves Rust stdout, stderr, and exit
-code as JSON passthrough. It rejects Python-only output and device-context
-options such as `--output`, `--verbose`, `--ops`, ADB flags, and explicit device
-fact flags.
+requires an already-built `emuchef-plan-shadow` binary. In default passthrough
+mode, the route forwards supported shadow inputs to Rust and preserves Rust
+stdout, stderr, and exit code as JSON passthrough. The route now accepts
+explicit supplied device context flags (`--manufacturer`, `--model`,
+`--android-version`, and repeated `--device-tag`) and forwards them to the shadow
+binary. It still rejects Python-only output and runtime/device-probing options
+such as `--output`, `--verbose`, `--ops`, ADB flags, and `--serial` unless a
+later explicit compatibility route or mode supports a subset of those flags.
 
 The Rust shadow route is migration evidence only. It is not a default planner
 route, a formatter layer, a Cargo fallback, an executor/apply route, a Tauri

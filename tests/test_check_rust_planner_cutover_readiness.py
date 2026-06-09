@@ -33,6 +33,13 @@ plan_parser.add_argument("--rust-planner-bin")
 plan_parser.add_argument("--rust-shadow-output")
 """
 
+EXPLICIT_DEVICE_CONTEXT = {
+    "manufacturer": "Example",
+    "model": "Example Device",
+    "android_version": 13,
+    "device_tags": ["handheld", "landscape"],
+}
+
 
 def import_readiness_module():
     spec = importlib.util.spec_from_file_location("check_rust_planner_cutover_readiness", TOOL_PATH)
@@ -49,19 +56,29 @@ def write_text(root: Path, relative_path: str, text: str = "") -> None:
     path.write_text(text, encoding="utf-8")
 
 
-def scenario_payload(*device_plan_ids: str, classification: str = "match") -> dict:
+def scenario_payload(
+    *device_plan_ids: str,
+    classification: str = "match",
+    include_explicit_context: bool = True,
+) -> dict:
+    scenarios = [
+        {
+            "id": device_plan_id.replace(".", "_"),
+            "device_plan": device_plan_id,
+            "expected_classification": classification,
+            "bindings": [],
+            "known_gap_ids": [],
+        }
+        for device_plan_id in device_plan_ids
+    ]
+    if include_explicit_context and scenarios:
+        scenarios[-1]["device_context"] = {
+            **EXPLICIT_DEVICE_CONTEXT,
+            "device_tags": list(EXPLICIT_DEVICE_CONTEXT["device_tags"]),
+        }
     return {
         "schema_version": 1,
-        "scenarios": [
-            {
-                "id": device_plan_id.replace(".", "_"),
-                "device_plan": device_plan_id,
-                "expected_classification": classification,
-                "bindings": [],
-                "known_gap_ids": [],
-            }
-            for device_plan_id in device_plan_ids
-        ],
+        "scenarios": scenarios,
     }
 
 
@@ -140,6 +157,9 @@ class CheckRustPlannerCutoverReadinessTests(unittest.TestCase):
         )
         self.assertTrue(all(check["status"] == "pass" for check in report["static_checks"]))
         self.assertEqual(check_by_id(report, "scenario_matrix_covers_checked_in_device_plans")["status"], "pass")
+        self.assertEqual(check_by_id(report, "explicit_context_supported_by_matrix_schema")["status"], "pass")
+        self.assertEqual(check_by_id(report, "explicit_context_scenario_present")["status"], "pass")
+        self.assertEqual(check_by_id(report, "explicit_context_scenario_valid")["status"], "pass")
 
     def test_missing_scenario_matrix_reports_failed_check(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
@@ -243,6 +263,47 @@ class CheckRustPlannerCutoverReadinessTests(unittest.TestCase):
                     any(message in error for error in check["details"]["errors"]),
                     check["details"]["errors"],
                 )
+                self.assertEqual(check_by_id(report, "explicit_context_scenario_valid")["status"], "fail")
+                self.assertEqual(check_by_id(report, "explicit_context_scenario_present")["status"], "fail")
+
+    def test_explicit_context_static_check_fails_when_no_scenario_has_device_context(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            make_synthetic_repo(
+                root,
+                matrix_payload=scenario_payload(
+                    "example.one",
+                    "example.two",
+                    include_explicit_context=False,
+                ),
+            )
+
+            report = self.build_report(root)
+
+        self.assertEqual(check_by_id(report, "scenario_matrix_scenario_fields")["status"], "pass")
+        self.assertEqual(check_by_id(report, "explicit_context_supported_by_matrix_schema")["status"], "pass")
+        self.assertEqual(check_by_id(report, "explicit_context_scenario_present")["status"], "fail")
+        self.assertEqual(check_by_id(report, "explicit_context_scenario_valid")["status"], "fail")
+
+    def test_explicit_context_static_check_fails_when_context_has_no_explicit_fields(self) -> None:
+        payload = scenario_payload("example.one")
+        payload["scenarios"][0]["device_context"] = {}
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            make_synthetic_repo(
+                root,
+                device_plan_ids=("example.one",),
+                matrix_payload=payload,
+            )
+
+            report = self.build_report(root)
+
+        self.assertEqual(check_by_id(report, "scenario_matrix_scenario_fields")["status"], "pass")
+        self.assertEqual(check_by_id(report, "explicit_context_supported_by_matrix_schema")["status"], "pass")
+        self.assertEqual(check_by_id(report, "explicit_context_scenario_present")["status"], "fail")
+        explicit_check = check_by_id(report, "explicit_context_scenario_valid")
+        self.assertEqual(explicit_check["status"], "fail")
+        self.assertIn("at least one explicit context field", explicit_check["details"]["errors"][0])
 
     def test_scenario_matrix_non_match_expected_classification_reports_failed_check(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
@@ -320,6 +381,21 @@ class CheckRustPlannerCutoverReadinessTests(unittest.TestCase):
         self.assertTrue(all(check["status"] == "pass" for check in report["static_checks"]))
         self.assertEqual(report["status"], "blocked")
         self.assertTrue(all(blocker["status"] == "blocked" for blocker in report["remaining_blockers"]))
+
+    def test_report_includes_narrowed_context_blockers_and_existing_cutover_blockers(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            make_synthetic_repo(root)
+
+            report = self.build_report(root)
+
+        blockers = {blocker["id"]: blocker["status"] for blocker in report["remaining_blockers"]}
+        self.assertEqual(blockers["default_cli_backend_still_python"], "blocked")
+        self.assertEqual(blockers["real_device_probing_not_cut_over"], "blocked")
+        self.assertEqual(blockers["detected_device_profile_mismatch_warning_not_cut_over"], "blocked")
+        self.assertEqual(blockers["executor_apply_not_cut_over"], "blocked")
+        self.assertEqual(blockers["python_planner_deletion_not_ready"], "blocked")
+        self.assertNotIn("real_device_context_probing_not_cut_over", blockers)
 
     def test_source_has_no_forbidden_imports(self) -> None:
         source = TOOL_PATH.read_text(encoding="utf-8")
