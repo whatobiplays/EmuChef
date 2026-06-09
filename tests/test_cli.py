@@ -143,7 +143,46 @@ class CliTests(unittest.TestCase):
             )
 
         self.assertEqual(rc, 0, stderr.getvalue())
-        self.assertIn("Planning status: success", stdout.getvalue())
+        output = stdout.getvalue()
+        self.assertIn("Planning status: success", output)
+        self.assertNotIn("kind: planning_result", output)
+        run.assert_not_called()
+
+    def test_plan_explicit_python_backend_uses_python_summary_without_rust_process(self) -> None:
+        detected = DetectedDevice(
+            serial="SERIAL",
+            manufacturer="AYANEO",
+            brand="AYANEO",
+            model="Pocket FIT",
+            android_version=14,
+            android_api_level=34,
+            root_available=True,
+        )
+        stdout = StringIO()
+        stderr = StringIO()
+        with (
+            patch("emuchef.cli.resolve_adb_executable", return_value="adb"),
+            patch("emuchef.cli.SubprocessAdb.detect_device", return_value=detected),
+            patch("subprocess.run") as run,
+            contextlib.redirect_stdout(stdout),
+            contextlib.redirect_stderr(stderr),
+        ):
+            rc = main(
+                [
+                    "plan",
+                    "--planner-backend",
+                    "python",
+                    "--authored-root",
+                    "authored",
+                    "--device-plan",
+                    "ayaneo.konkr_pocket_fit.base",
+                ]
+            )
+
+        self.assertEqual(rc, 0, stderr.getvalue())
+        output = stdout.getvalue()
+        self.assertIn("Planning status: success", output)
+        self.assertNotIn("kind: planning_result", output)
         run.assert_not_called()
 
     def test_plan_rust_shadow_requires_explicit_binary_path(self) -> None:
@@ -180,7 +219,7 @@ class CliTests(unittest.TestCase):
                 args=[],
                 returncode=0,
                 stdout='{\n  "kind": "planning_result",\n  "status": "success"\n}\n',
-                stderr="",
+                stderr="rust shadow diagnostic\n",
             )
             stdout = StringIO()
             stderr = StringIO()
@@ -213,7 +252,8 @@ class CliTests(unittest.TestCase):
 
         self.assertEqual(rc, 0, stderr.getvalue())
         self.assertEqual(stdout.getvalue(), completed.stdout)
-        self.assertEqual(stderr.getvalue(), "")
+        self.assertEqual(stderr.getvalue(), completed.stderr)
+        self.assertNotIn("Planning status:", stdout.getvalue())
         resolve_adb.assert_not_called()
         detect_device.assert_not_called()
         run.assert_called_once()
@@ -239,14 +279,14 @@ class CliTests(unittest.TestCase):
         self.assertNotIn("cargo", run.call_args.args[0])
         self.assertNotIn("--sidecar", run.call_args.args[0])
 
-    def test_plan_rust_shadow_passes_through_json_for_planner_error(self) -> None:
+    def test_plan_rust_shadow_passes_through_json_and_exit_code_for_planner_error(self) -> None:
         with TemporaryDirectory() as tmp:
             shadow_bin = self._shadow_bin(tmp)
             completed = subprocess.CompletedProcess(
                 args=[],
-                returncode=1,
+                returncode=7,
                 stdout='{\n  "kind": "planning_result",\n  "status": "error"\n}\n',
-                stderr="",
+                stderr="rust planner error detail\n",
             )
             stdout = StringIO()
             stderr = StringIO()
@@ -270,9 +310,10 @@ class CliTests(unittest.TestCase):
                     ]
                 )
 
-        self.assertEqual(rc, 1)
+        self.assertEqual(rc, 7)
         self.assertEqual(stdout.getvalue(), completed.stdout)
-        self.assertEqual(stderr.getvalue(), "")
+        self.assertEqual(stderr.getvalue(), completed.stderr)
+        self.assertNotIn("Planning status:", stdout.getvalue())
         resolve_adb.assert_not_called()
 
     def test_plan_rust_shadow_rejects_python_only_options(self) -> None:
@@ -318,8 +359,48 @@ class CliTests(unittest.TestCase):
                     self.assertEqual(rc, 1)
                     self.assertEqual(stdout.getvalue(), "")
                     self.assertIn("is not supported with --planner-backend rust-shadow", stderr.getvalue())
+                    self.assertIn(extra_args[0], stderr.getvalue())
                     resolve_adb.assert_not_called()
                     run.assert_not_called()
+
+    def test_plan_rust_shadow_does_not_build_python_planner_session_or_detect_device(self) -> None:
+        with TemporaryDirectory() as tmp:
+            shadow_bin = self._shadow_bin(tmp)
+            completed = subprocess.CompletedProcess(
+                args=[],
+                returncode=0,
+                stdout='{"kind":"planning_result","status":"success"}\n',
+                stderr="",
+            )
+            stdout = StringIO()
+            stderr = StringIO()
+            with (
+                patch("emuchef.cli._build_session") as build_session,
+                patch("emuchef.cli.SubprocessAdb.detect_device") as detect_device,
+                patch("subprocess.run", return_value=completed) as run,
+                contextlib.redirect_stdout(stdout),
+                contextlib.redirect_stderr(stderr),
+            ):
+                rc = main(
+                    [
+                        "plan",
+                        "--planner-backend",
+                        "rust-shadow",
+                        "--rust-planner-bin",
+                        shadow_bin,
+                        "--authored-root",
+                        "authored",
+                        "--device-plan",
+                        "ayaneo.pocket_s_mini.base",
+                    ]
+                )
+
+        self.assertEqual(rc, 0, stderr.getvalue())
+        self.assertEqual(stdout.getvalue(), completed.stdout)
+        self.assertEqual(stderr.getvalue(), "")
+        build_session.assert_not_called()
+        detect_device.assert_not_called()
+        run.assert_called_once()
 
     def test_plan_rust_shadow_missing_binary_path_is_clear_error(self) -> None:
         missing_bin = "/definitely/missing/emuchef-plan-shadow"

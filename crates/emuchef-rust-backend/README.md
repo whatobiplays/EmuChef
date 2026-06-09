@@ -318,11 +318,13 @@ emuchef plan \
   --device-plan ayaneo.pocket_s_mini.base
 ```
 
-The Python CLI route requires `--rust-planner-bin` in P8A and never invokes
-Cargo. It forwards `--authored-root`, `--device-plan`, and repeated raw `--bind`
-values to the supplied binary in original order. Rust stdout/stderr are passed
-through directly, so output is Rust JSON/text passthrough rather than Python CLI
-YAML or summary output.
+The Python CLI route requires `--rust-planner-bin` and never invokes Cargo. It
+forwards `--authored-root`, `--device-plan`, and repeated raw `--bind` values to
+the supplied binary in original order. Rust stdout, stderr, and exit code are
+passed through directly, so output is Rust JSON/text passthrough rather than
+Python CLI YAML, `--output`, verbose, or concise summary output. The bridge
+rejects `--output`, `--verbose`, and Python/device context options that are not
+supported by Rust shadow.
 
 P8B adds a developer-only matrix smoke for that explicit Python CLI route:
 
@@ -339,6 +341,12 @@ temporary placeholders for matrix bindings, invokes `python -m emuchef plan
 deterministic JSON route-invocation report. It is not output parity evidence;
 P7P remains the Python planner API versus Rust planner-output comparison
 evidence.
+
+P8C guards the explicit bridge's CLI output compatibility contract. P7P is
+planner DTO/result comparison evidence, P8B is Python CLI `rust-shadow` route
+invocation evidence, and P8C is the assertion that the route remains dev-only
+Rust stdout/stderr/exit-code passthrough. None of these is default Rust planner
+cutover readiness or Python planner deletion readiness.
 
 Bindings use the explicit form:
 
@@ -463,8 +471,9 @@ artifacts; they are developer tools, not user-facing planner paths.
 The P8B CLI-route smoke uses the same current scenario matrix but does not call
 this comparison harness. It proves that the explicit Python CLI `rust-shadow`
 bridge can invoke the supplied Rust shadow planner across the current matrix
-only. It is not wired into normal Rust/Tauri runtime checks and does not change
-default `emuchef plan` ownership.
+only. P8C separately guards the bridge's output contract as Rust passthrough, not
+Python CLI output compatibility. Neither tool is wired into normal Rust/Tauri
+runtime checks, and neither changes default `emuchef plan` ownership.
 
 ## Phase 6O Executor Scope
 

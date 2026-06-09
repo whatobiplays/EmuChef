@@ -241,21 +241,23 @@ current Python CLI parser. The shadow binary does not execute plans, probe
 devices, invoke ADB, access the network, materialize artifacts, expose Tauri or
 sidecar protocol commands, or replace the Python planner CLI.
 
-The Python CLI exposes a P8A developer-only bridge to an already-built Rust
-shadow planner binary:
+The Python CLI exposes a developer-only bridge to an already-built Rust shadow
+planner binary:
 `emuchef plan --planner-backend rust-shadow --rust-planner-bin <path>`. The
-default `emuchef plan` behavior remains Python-owned. In P8A, `rust-shadow`
-requires `--rust-planner-bin` and the Python CLI route never invokes Cargo. The
-route forwards `--authored-root`, `--device-plan`, and repeated raw `--bind`
-arguments to the supplied `emuchef-plan-shadow` binary in original order. Rust
-stdout/stderr are passed through directly; the route does not translate Rust
-JSON `PlanningResult` output into Python YAML, Python summary text, or Python
-planner structures. Python-only planner/device options such as `--ops`,
-`--output`, `--verbose`, `--debug`, `--adb`, and device context flags are not
-supported with `rust-shadow`. The bridge does not execute/apply plans, probe
-devices, invoke ADB, access the network, materialize artifacts, use Tauri
-commands, expose sidecar protocol requests, or make Rust planner output
-authoritative.
+default `emuchef plan` behavior remains Python-owned for planning output and
+exit-code behavior. `rust-shadow` requires `--rust-planner-bin` and the Python
+CLI route never invokes Cargo. The route forwards `--authored-root`,
+`--device-plan`, and repeated raw `--bind` arguments to the supplied
+`emuchef-plan-shadow` binary in original order. Rust stdout is passed through to
+Python stdout, Rust stderr is passed through to Python stderr, and the Rust
+process exit code is returned. The route does not translate Rust JSON
+`PlanningResult` output into Python YAML, Python summary text, or Python planner
+structures. Python-only planner/device options such as `--ops`, `--output`,
+`--verbose`, `--debug`, `--adb`, and device context flags are not supported with
+`rust-shadow`. The bridge does not execute/apply plans, probe devices, invoke
+ADB, access the network, materialize artifacts, use Tauri commands, expose
+sidecar protocol requests, or make Rust planner output authoritative. CLI output
+compatibility remains a blocker before any default Rust planner routing.
 
 `tools/smoke_rust_shadow_cli_matrix.py` is the P8B dev-only matrix smoke for the
 explicit Python CLI `rust-shadow` bridge. It is standalone stdlib-only tooling
@@ -275,6 +277,11 @@ remains the Python-vs-Rust planner-output comparison evidence. The smoke does
 not execute/apply plans, probe devices, invoke ADB, access the network,
 materialize artifacts, regenerate goldens, participate in normal Rust/Tauri
 runtime checks, or make Rust planner output authoritative.
+
+P7P is planner DTO/result comparison evidence, P8B is Python CLI `rust-shadow`
+route invocation evidence, and P8C is the CLI output compatibility contract for
+the explicit shadow route. None of these is default Rust planner cutover
+readiness or Python planner deletion readiness.
 
 `tools/compare_rust_python_plan.py` is a dev-only deterministic comparison
 harness for Python planner API output versus Rust shadow planner output. It uses
@@ -867,10 +874,11 @@ Current commands:
 Common notes:
 
 - `emuchef plan` defaults to the Python planner. The only Rust planner route in
-  P8A is the explicit dev-only
+  the current CLI is the explicit dev-only
   `emuchef plan --planner-backend rust-shadow --rust-planner-bin <path>` bridge.
-  It passes through Rust JSON stdout/stderr and is not a drop-in replacement for
-  Python's YAML or concise summary output modes.
+  It passes through Rust JSON/text stdout, stderr, and exit code and is not a
+  drop-in replacement for Python's YAML, `--output`, verbose, or concise summary
+  output modes.
 - `--device-plan` expects a device plan id, not a device profile id
 - `--adb` is supported on `draft`, `plan`, `apply`, and `detect`
 - ADB resolution order is:

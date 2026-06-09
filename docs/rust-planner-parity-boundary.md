@@ -64,6 +64,9 @@ Rust planner-adjacent coverage is internal and fixture-scoped:
   The smoke requires a supplied shadow binary, invokes the Python CLI route, and
   reports route exit-code/classification evidence only. It does not run the
   Python-vs-Rust planner-output comparison harness.
+- `tests/test_cli.py`: P8C CLI output compatibility contract coverage for the
+  explicit `rust-shadow` bridge. The guarded contract is Rust stdout/stderr/exit
+  code passthrough, not Python CLI YAML or concise summary compatibility.
 - `tools/plan_parity_scenarios.json`: dev-only P7P comparison scenario
   manifest for current checked-in device-plan comparisons. It is not a Python
   golden, regenerated evidence, normal Rust/Tauri check input, or user-facing
@@ -189,6 +192,16 @@ Python-vs-Rust planner-output comparison evidence. The smoke is not a normal
 Rust/Tauri runtime check and does not execute/apply plans, probe devices, invoke
 ADB, access the network, materialize artifacts, regenerate goldens, or make the
 Rust planner authoritative.
+
+P8C defines the CLI output compatibility contract for that explicit bridge. The
+default Python planner route remains the CLI/reference owner for planning output
+and exit-code behavior. `rust-shadow` remains a developer-only passthrough route:
+Rust stdout is written to Python stdout, Rust stderr is written to Python stderr,
+and the Rust process exit code is returned. The bridge does not translate Rust
+JSON `PlanningResult` output into Python YAML, Python concise planning summary
+text, or Python planner structures. `--output`, `--verbose`, and Python/device
+context options unsupported by Rust shadow are rejected before invoking the Rust
+process. This contract is not default Rust planner cutover readiness.
 
 | Device plan | Device profile | Selected recipes | Private Rust planner status | Required planner-only bindings | Current limitation |
 | --- | --- | --- | --- | --- | --- |
@@ -344,6 +357,8 @@ It forwards `--authored-root`, `--device-plan`, and repeated raw `--bind` values
 to the supplied binary in original order. Rust stdout/stderr are passed through
 directly as JSON/text from the shadow command; the bridge does not translate
 Rust JSON into Python YAML, concise summary text, or Python planner structures.
+`--output` and `--verbose` are not supported by the bridge because the route is
+not Python CLI output-compatible.
 
 P8B provides a dev-only matrix smoke for the Python bridge:
 

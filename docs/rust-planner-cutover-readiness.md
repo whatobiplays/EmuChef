@@ -45,6 +45,12 @@ The Rust planner evidence is planner-only and migration-focused:
   matrix. The smoke requires a supplied `--rust-planner-bin`, never invokes
   Cargo, and proves route invocation only; P7P remains the Python-vs-Rust
   planner-output comparison evidence.
+- `tests/test_cli.py` guards the P8C output compatibility contract for the
+  explicit Python CLI `rust-shadow` bridge. The bridge is Rust stdout/stderr/exit
+  code passthrough; it does not translate Rust JSON `PlanningResult` output into
+  Python YAML, Python concise planning summary text, or Python planner
+  structures. Default and explicit `--planner-backend python` planning remain
+  Python-owned for output and exit-code behavior.
 - `tools/plan_parity_scenarios.json` is the P7P scenario matrix for the current
   checked-in device-plan scenarios. The current checked-in scenario matrix
   expects all five scenarios to classify as `match`.
@@ -86,7 +92,7 @@ resolved or explicitly accepted for a narrower experimental route:
 | CLI routing strategy | Python `src/emuchef/cli.py` remains the current default `draft` and `plan` route. P8A adds only an explicit dev-only `emuchef plan --planner-backend rust-shadow --rust-planner-bin <path>` bridge. It requires a supplied shadow binary, never invokes Cargo, passes through Rust JSON stdout/stderr, and is not a replacement command path or fallback policy. P8B adds a dev-only matrix smoke for that bridge's invocation path only; it does not make Rust authoritative. |
 | Device probing and context resolution | Python CLI resolves ADB/device facts before planning in `_resolve_device_context(...)`. Rust shadow planning uses synthetic/profile-derived planner context and does not probe devices. |
 | Argument and binding parity | `emuchef-plan-shadow` accepts explicit `--authored-root`, `--device-plan`, and string `--bind` values. It mirrors repeated-bind grouping but is not full future Rust CLI binding type parity, ops replay parity, or common-flag parity. |
-| Output format compatibility | Rust emits private JSON `PlanningResult` through the shadow command. P8A passes that JSON through directly from the explicit dev-only Python CLI bridge. Python CLI default planning still supports concise summaries, verbose YAML, and `--output`; those output modes are not routed through Rust. |
+| Output format compatibility | Rust emits private JSON `PlanningResult` through the shadow command. P8A passes that JSON through directly from the explicit dev-only Python CLI bridge, and P8C guards that the bridge remains passthrough rather than Python CLI output-compatible. Python CLI default planning still owns concise summaries, verbose YAML, `--output`, and exit-code behavior; those output modes are not routed through Rust. `--output` and `--verbose` are rejected for `rust-shadow`. Output compatibility remains a blocker before any default Rust planner route. |
 | Error and warning compatibility | Rust covers selected planner result, warning/error shape, and focused diagnostics. Full CLI stderr/stdout, profile mismatch warnings, operation replay failures, exit codes, and broader planner diagnostics are not proven. |
 | Required normal-check gating | The P7P comparison matrix and P8B CLI-route smoke are not part of normal Rust/Tauri checks. A cutover route needs an approved gate policy before the route becomes user-facing. |
 | Unsupported scenarios outside the matrix | The checked-in matrix covers five current device-plan scenarios only. Future authored plans, non-empty recipe dependencies, broader override forms, profile matching, and scenario drift require intentional coverage updates. |
@@ -104,6 +110,10 @@ resolved or explicitly accepted for a narrower experimental route:
   `rust-shadow` route for each current scenario, classifies stdout/stderr
   stably, and emits deterministic JSON route-invocation evidence. It does not
   compare Python and Rust planner outputs.
+- P8C contract state: `tests/test_cli.py` guards the explicit route's CLI output
+  boundary. Rust stdout, stderr, and exit code pass through; Python YAML,
+  summary text, `--output`, and `--verbose` remain outside the `rust-shadow`
+  contract.
 - Pre-cutover candidate: planner routing work may use the matrix as an
   optional/manual gate to gather evidence before exposing any user-facing Rust
   planner path.
