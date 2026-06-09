@@ -65,7 +65,9 @@ Rust planner-adjacent coverage is internal and fixture-scoped:
   explicit Python CLI `rust-shadow` bridge across the current scenario matrix.
   The smoke requires a supplied shadow binary, invokes the Python CLI route, and
   reports route exit-code/classification evidence only. It does not run the
-  Python-vs-Rust planner-output comparison harness.
+  Python-vs-Rust planner-output comparison harness. P8F extends the same smoke
+  runner with explicit `--rust-shadow-output python-compatible` coverage that
+  requires successful scenarios to emit concise Python-compatible summary stdout.
 - `tests/test_cli.py`: P8C and P8E CLI output compatibility contract coverage for
   the explicit `rust-shadow` bridge. The default guarded contract is Rust
   stdout/stderr/exit-code passthrough. The explicit
@@ -236,6 +238,17 @@ surface is the Rust JSON mapping emitted through `dump_yaml(...)`, not a rebuilt
 Python planner domain object. This mode is not default planner routing and does
 not change executor/apply, real-device, ADB, artifact, network, Tauri, protocol,
 Cargo fallback, fixture/golden, or Python planner deletion behavior.
+
+P8F adds matrix-level smoke evidence for that explicit compatibility mode through
+`tools/smoke_rust_shadow_cli_matrix.py --rust-shadow-output python-compatible`.
+It uses the same current scenario matrix and Python CLI `rust-shadow` route as
+P8B, but successful scenarios must classify stdout as `python_summary`. Raw Rust
+JSON remains `stdout_json` and fails the compatibility-mode smoke for successful
+scenarios. YAML-like output may classify as `python_yaml`, but it is not the
+default P8F success expectation unless a future scenario explicitly defines that
+expectation. P8F is route plus output-format smoke only; P7P remains the
+Python-vs-Rust planner DTO/result comparison evidence, and P8B remains raw
+passthrough route-invocation evidence.
 
 | Device plan | Device profile | Selected recipes | Private Rust planner status | Required planner-only bindings | Current limitation |
 | --- | --- | --- | --- | --- | --- |
@@ -426,6 +439,22 @@ python3 tools/smoke_rust_shadow_cli_matrix.py \
 
 The smoke requires an already-built shadow binary and never builds it. It is
 route-invocation evidence only, not planner-output parity evidence.
+
+P8F uses the same smoke runner for explicit Python-compatible output-mode smoke:
+
+```bash
+python3 tools/smoke_rust_shadow_cli_matrix.py \
+  --scenario-matrix tools/plan_parity_scenarios.json \
+  --authored-root authored \
+  --rust-planner-bin <path-to-emuchef-plan-shadow> \
+  --rust-shadow-output python-compatible
+```
+
+This compatibility smoke requires concise Python-compatible summary stdout for
+successful scenarios. It does not call the Python-vs-Rust comparison harness,
+execute/apply plans, probe devices, invoke ADB, access the network, materialize
+artifacts, regenerate goldens, or participate in normal Rust/Tauri runtime
+checks.
 
 The shadow command builds `PlannerInput` through the private
 `PlannerInput::from_authored_device_plan(...)` path and then calls
