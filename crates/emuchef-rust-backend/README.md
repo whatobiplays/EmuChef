@@ -324,6 +324,22 @@ values to the supplied binary in original order. Rust stdout/stderr are passed
 through directly, so output is Rust JSON/text passthrough rather than Python CLI
 YAML or summary output.
 
+P8B adds a developer-only matrix smoke for that explicit Python CLI route:
+
+```bash
+python3 tools/smoke_rust_shadow_cli_matrix.py \
+  --scenario-matrix tools/plan_parity_scenarios.json \
+  --authored-root authored \
+  --rust-planner-bin <path-to-emuchef-plan-shadow>
+```
+
+The smoke requires an already-built shadow binary, creates only planner-visible
+temporary placeholders for matrix bindings, invokes `python -m emuchef plan
+--planner-backend rust-shadow` for each current matrix scenario, and emits a
+deterministic JSON route-invocation report. It is not output parity evidence;
+P7P remains the Python planner API versus Rust planner-output comparison
+evidence.
+
 Bindings use the explicit form:
 
 ```bash
@@ -443,6 +459,12 @@ materialize artifacts, regenerate checked-in goldens, expose Tauri commands, or
 alter user-facing CLI routing. Planner cutover remains a future explicit phase.
 Single-scenario and matrix runs may require Python dependencies and Rust build
 artifacts; they are developer tools, not user-facing planner paths.
+
+The P8B CLI-route smoke uses the same current scenario matrix but does not call
+this comparison harness. It proves that the explicit Python CLI `rust-shadow`
+bridge can invoke the supplied Rust shadow planner across the current matrix
+only. It is not wired into normal Rust/Tauri runtime checks and does not change
+default `emuchef plan` ownership.
 
 ## Phase 6O Executor Scope
 

@@ -59,6 +59,11 @@ Rust planner-adjacent coverage is internal and fixture-scoped:
   planner API output versus Rust shadow planner output. The harness emits a
   deterministic JSON classification report or matrix report and is not part of
   normal Rust/Tauri runtime checks.
+- `tools/smoke_rust_shadow_cli_matrix.py`: dev-only P8B smoke runner for the
+  explicit Python CLI `rust-shadow` bridge across the current scenario matrix.
+  The smoke requires a supplied shadow binary, invokes the Python CLI route, and
+  reports route exit-code/classification evidence only. It does not run the
+  Python-vs-Rust planner-output comparison harness.
 - `tools/plan_parity_scenarios.json`: dev-only P7P comparison scenario
   manifest for current checked-in device-plan comparisons. It is not a Python
   golden, regenerated evidence, normal Rust/Tauri check input, or user-facing
@@ -171,6 +176,19 @@ dev-only scenario matrix, not a full planner-correctness claim. The matrix may
 require Python dependencies and Rust build artifacts. It does not execute
 plans, probe devices, invoke ADB, access the network, materialize artifacts,
 regenerate goldens, or participate in normal Rust/Tauri runtime checks.
+
+P8B adds `tools/smoke_rust_shadow_cli_matrix.py` for a separate dev-only smoke
+of the explicit Python CLI bridge:
+`emuchef plan --planner-backend rust-shadow --rust-planner-bin <path>`. The
+smoke loads the same current scenario matrix, creates planner-only placeholder
+binding resources, invokes the Python CLI route for each scenario, and emits a
+deterministic JSON report with stable stdout/stderr classifications and route
+exit-code pass/fail status. This proves that the explicit bridge can invoke the
+Rust shadow planner across the current matrix only. P7P remains the
+Python-vs-Rust planner-output comparison evidence. The smoke is not a normal
+Rust/Tauri runtime check and does not execute/apply plans, probe devices, invoke
+ADB, access the network, materialize artifacts, regenerate goldens, or make the
+Rust planner authoritative.
 
 | Device plan | Device profile | Selected recipes | Private Rust planner status | Required planner-only bindings | Current limitation |
 | --- | --- | --- | --- | --- | --- |
@@ -326,6 +344,18 @@ It forwards `--authored-root`, `--device-plan`, and repeated raw `--bind` values
 to the supplied binary in original order. Rust stdout/stderr are passed through
 directly as JSON/text from the shadow command; the bridge does not translate
 Rust JSON into Python YAML, concise summary text, or Python planner structures.
+
+P8B provides a dev-only matrix smoke for the Python bridge:
+
+```bash
+python3 tools/smoke_rust_shadow_cli_matrix.py \
+  --scenario-matrix tools/plan_parity_scenarios.json \
+  --authored-root authored \
+  --rust-planner-bin <path-to-emuchef-plan-shadow>
+```
+
+The smoke requires an already-built shadow binary and never builds it. It is
+route-invocation evidence only, not planner-output parity evidence.
 
 The shadow command builds `PlannerInput` through the private
 `PlannerInput::from_authored_device_plan(...)` path and then calls

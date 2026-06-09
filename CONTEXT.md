@@ -257,6 +257,25 @@ devices, invoke ADB, access the network, materialize artifacts, use Tauri
 commands, expose sidecar protocol requests, or make Rust planner output
 authoritative.
 
+`tools/smoke_rust_shadow_cli_matrix.py` is the P8B dev-only matrix smoke for the
+explicit Python CLI `rust-shadow` bridge. It is standalone stdlib-only tooling
+and does not import the planner comparison harness or Python planner modules at
+module load. The smoke loads `tools/plan_parity_scenarios.json`, requires
+`--authored-root` and an explicit `--rust-planner-bin`, optionally accepts
+`--python-executable`, creates only planner-visible temporary placeholder
+resources for matrix bindings, and invokes `python -m emuchef plan
+--planner-backend rust-shadow` for each scenario. Its deterministic JSON report
+uses stable basenames for local executables, includes scenario ids, device-plan
+ids, binding refs/kinds, expected and actual route exit codes, pass/fail status,
+stdout/stderr classifications, and bounded normalized failure summaries. The
+report does not include timestamps, durations, generated temp paths, or full
+volatile process output. P8B proves that the explicit Python CLI route can
+invoke the Rust shadow planner across the current scenario matrix only. P7P
+remains the Python-vs-Rust planner-output comparison evidence. The smoke does
+not execute/apply plans, probe devices, invoke ADB, access the network,
+materialize artifacts, regenerate goldens, participate in normal Rust/Tauri
+runtime checks, or make Rust planner output authoritative.
+
 `tools/compare_rust_python_plan.py` is a dev-only deterministic comparison
 harness for Python planner API output versus Rust shadow planner output. It uses
 the current Python planner API path (`load_authored_catalog`,

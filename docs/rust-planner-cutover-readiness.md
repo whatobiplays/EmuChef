@@ -39,6 +39,12 @@ The Rust planner evidence is planner-only and migration-focused:
   values to the supplied `emuchef-plan-shadow` binary and passes through Rust
   JSON stdout/stderr without translating it into Python planner YAML or summary
   output. This is not a cutover and does not make Rust the default planner.
+- `tools/smoke_rust_shadow_cli_matrix.py` and
+  `tests/test_smoke_rust_shadow_cli_matrix.py` provide P8B dev-only smoke
+  evidence for the explicit Python CLI bridge across the current scenario
+  matrix. The smoke requires a supplied `--rust-planner-bin`, never invokes
+  Cargo, and proves route invocation only; P7P remains the Python-vs-Rust
+  planner-output comparison evidence.
 - `tools/plan_parity_scenarios.json` is the P7P scenario matrix for the current
   checked-in device-plan scenarios. The current checked-in scenario matrix
   expects all five scenarios to classify as `match`.
@@ -77,21 +83,27 @@ resolved or explicitly accepted for a narrower experimental route:
 
 | Blocker | Current classification |
 | --- | --- |
-| CLI routing strategy | Python `src/emuchef/cli.py` remains the current default `draft` and `plan` route. P8A adds only an explicit dev-only `emuchef plan --planner-backend rust-shadow --rust-planner-bin <path>` bridge. It requires a supplied shadow binary, never invokes Cargo, passes through Rust JSON stdout/stderr, and is not a replacement command path or fallback policy. |
+| CLI routing strategy | Python `src/emuchef/cli.py` remains the current default `draft` and `plan` route. P8A adds only an explicit dev-only `emuchef plan --planner-backend rust-shadow --rust-planner-bin <path>` bridge. It requires a supplied shadow binary, never invokes Cargo, passes through Rust JSON stdout/stderr, and is not a replacement command path or fallback policy. P8B adds a dev-only matrix smoke for that bridge's invocation path only; it does not make Rust authoritative. |
 | Device probing and context resolution | Python CLI resolves ADB/device facts before planning in `_resolve_device_context(...)`. Rust shadow planning uses synthetic/profile-derived planner context and does not probe devices. |
 | Argument and binding parity | `emuchef-plan-shadow` accepts explicit `--authored-root`, `--device-plan`, and string `--bind` values. It mirrors repeated-bind grouping but is not full future Rust CLI binding type parity, ops replay parity, or common-flag parity. |
 | Output format compatibility | Rust emits private JSON `PlanningResult` through the shadow command. P8A passes that JSON through directly from the explicit dev-only Python CLI bridge. Python CLI default planning still supports concise summaries, verbose YAML, and `--output`; those output modes are not routed through Rust. |
 | Error and warning compatibility | Rust covers selected planner result, warning/error shape, and focused diagnostics. Full CLI stderr/stdout, profile mismatch warnings, operation replay failures, exit codes, and broader planner diagnostics are not proven. |
-| Required normal-check gating | The matrix is not part of normal Rust/Tauri checks. A cutover route needs an approved gate policy before the route becomes user-facing. |
+| Required normal-check gating | The P7P comparison matrix and P8B CLI-route smoke are not part of normal Rust/Tauri checks. A cutover route needs an approved gate policy before the route becomes user-facing. |
 | Unsupported scenarios outside the matrix | The checked-in matrix covers five current device-plan scenarios only. Future authored plans, non-empty recipe dependencies, broader override forms, profile matching, and scenario drift require intentional coverage updates. |
 | Authored/device-plan drift | `tools/plan_parity_scenarios.json` and this readiness doc must be updated when checked-in scenarios change. The static doc guard only checks scenario id/tool references. |
 | Matrix as cutover gate | Matching matrix status is necessary evidence for the current compared fields, not sufficient cutover readiness. A routing PR should decide whether matrix execution becomes required for that PR. |
 
 ### Comparison Matrix Gating Policy
 
-- Current state: `tools/plan_parity_scenarios.json` and
-  `tools/compare_rust_python_plan.py` are dev-only/manual comparison artifacts
-  and are not part of normal Rust/Tauri checks.
+- Current state: `tools/plan_parity_scenarios.json`,
+  `tools/compare_rust_python_plan.py`, and
+  `tools/smoke_rust_shadow_cli_matrix.py` are dev-only/manual artifacts and are
+  not part of normal Rust/Tauri checks.
+- P8B smoke state: `tools/smoke_rust_shadow_cli_matrix.py` creates only
+  planner-visible placeholder binding resources, runs the explicit Python CLI
+  `rust-shadow` route for each current scenario, classifies stdout/stderr
+  stably, and emits deterministic JSON route-invocation evidence. It does not
+  compare Python and Rust planner outputs.
 - Pre-cutover candidate: planner routing work may use the matrix as an
   optional/manual gate to gather evidence before exposing any user-facing Rust
   planner path.
@@ -123,7 +135,8 @@ Before Python planner source can be removed, these blockers must be resolved:
 3. Planner routing work may add an optional/manual matrix gate before exposing a
    user-facing route.
 4. A developer-only explicit Rust shadow planner route is available for manual
-   inspection with a supplied `emuchef-plan-shadow` binary.
+   inspection with a supplied `emuchef-plan-shadow` binary, and a dev-only smoke
+   runner can exercise that route across the current scenario matrix.
 5. A future user-facing experimental Rust planner flag or route is added only for
    explicitly supported scenarios.
 6. The default planner route switches to Rust only for supported scenarios with
