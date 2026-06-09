@@ -55,8 +55,10 @@ Rust planner-adjacent coverage is internal and fixture-scoped:
   `crates/emuchef-rust-backend/src/bin/emuchef-plan-shadow.rs`: dev-only shadow
   planner command support for manual migration inspection. The command emits
   pretty JSON `PlanningResult` values from explicit authored-root/device-plan
-  inputs. P8A exposes it through an explicit developer-only Python CLI bridge,
-  but it is not the default planner CLI or a cutover path.
+  inputs. P8J adds explicit device context flags to this command for supplied
+  manufacturer, model, Android version, and ordered device tags. P8A exposes it
+  through an explicit developer-only Python CLI bridge, but it is not the default
+  planner CLI or a cutover path.
 - `tools/compare_rust_python_plan.py`: dev-only comparison harness for Python
   planner API output versus Rust shadow planner output. The harness emits a
   deterministic JSON classification report or matrix report and is not part of
@@ -114,7 +116,9 @@ Rust planner-adjacent coverage is internal and fixture-scoped:
   `PlannerInput` values from repo device plans/profiles, accept supplied test
   bindings, and emit at least one deterministic plan from a checked-in
   profile/plan context without invoking Python, ADB, executor/apply, network,
-  or artifact materialization. P7J tests classify checked-in device-plan
+  or artifact materialization. P8J tests cover explicit device context overrides
+  for the shadow command while preserving profile-derived tags when no explicit
+  tags are supplied. P7J tests classify checked-in device-plan
   `defaults.show_advanced_steps` and `overrides.config_variants` as inactive
   metadata, and use temporary authored roots to prove strict private
   `<recipe_ref>/<input_id>` override binding merge behavior. P7F
@@ -226,10 +230,12 @@ Rust stderr is written to Python stderr, and the Rust process exit code is
 returned. That passthrough mode does not translate Rust JSON `PlanningResult`
 output into Python YAML, Python concise planning summary text, or Python planner
 structures. `--output` and `--verbose` are rejected unless the explicit
-`--rust-shadow-output python-compatible` formatter mode is selected.
-Python/device context options unsupported by Rust shadow are rejected before
-invoking the Rust process in every shadow output mode. This contract is not
-default Rust planner cutover readiness.
+`--rust-shadow-output python-compatible` formatter mode is selected. P8J makes
+explicit `--manufacturer`, `--model`, `--android-version`, and repeated
+`--device-tag` values supported for Rust routes and forwards only supplied
+values to the shadow command. `--adb`, `--serial`, `--ops`, and `--debug` remain
+unsupported before invoking the Rust process. This contract is not default Rust
+planner cutover readiness.
 
 P8D records the future default-route compatibility target in
 `docs/adr/0002-rust-planner-cli-output-compatibility.md`. When Rust eventually
@@ -299,6 +305,16 @@ because Python remains the default planner owner, `rust-experimental` remains an
 explicit non-default rehearsal route, and executor/apply, real-device probing,
 Tauri/protocol behavior, Python planner deletion, and normal runtime checks are
 unchanged.
+
+P8J adds explicit device context support to the explicit Rust routes only.
+`rust-shadow`, `rust-experimental`, and `emuchef-plan-shadow` accept supplied
+`--manufacturer`, `--model`, `--android-version`, and repeated `--device-tag`
+values. Supplied scalar values override the synthetic/profile-derived Rust
+planner context, and supplied tags replace profile-derived tags in order. When no
+explicit tags are supplied, profile-derived tags remain unchanged. P8J does not
+probe devices, invoke ADB, create detected-device facts, emit detected-device
+profile mismatch warnings, change the default Python planner route, or change
+executor/apply/Tauri/protocol behavior.
 
 | Device plan | Device profile | Selected recipes | Private Rust planner status | Required planner-only bindings | Current limitation |
 | --- | --- | --- | --- | --- | --- |
@@ -546,9 +562,13 @@ exit `0` and emit concise Python-compatible summary stdout.
 
 The shadow command builds `PlannerInput` through the private
 `PlannerInput::from_authored_device_plan(...)` path and then calls
-`plan_execution(...)`. Explicit `--bind <recipe_ref>/<input_id>=<value>` values
-are string-only in this slice. Repeated binds for the same ref are grouped into
-a string array because the current Python CLI parser groups repeated
+`plan_execution(...)`. Explicit `--manufacturer`, `--model`, and
+`--android-version` values override the synthetic/profile-derived planner
+context for the invocation. Repeated `--device-tag` values replace
+profile-derived tags in supplied order; when no tags are supplied, profile tags
+remain unchanged. Explicit `--bind <recipe_ref>/<input_id>=<value>` values are
+string-only in this slice. Repeated binds for the same ref are grouped into a
+string array because the current Python CLI parser groups repeated
 `--bind REF=VALUE` entries that way. This is a shadow-command limitation and is
 not full future Rust planner CLI binding type parity.
 
@@ -559,9 +579,11 @@ and authored-root/device-plan load failures write stable text to stderr and do
 not emit stdout JSON.
 
 The shadow command and Python bridge do not execute plans, probe devices, invoke
-ADB, access the network, download or materialize artifacts, regenerate goldens,
-expose Tauri commands, expose sidecar protocol requests, or replace the default
-Python `emuchef plan` CLI. Planner CLI cutover remains a future explicit phase.
+ADB, create detected-device facts, emit detected-device profile mismatch
+warnings, access the network, download or materialize artifacts, regenerate
+goldens, expose Tauri commands, expose sidecar protocol requests, or replace the
+default Python `emuchef plan` CLI. Planner CLI cutover remains a future explicit
+phase.
 
 ## Dev-Only Python Planner API Vs Rust Shadow Comparison
 

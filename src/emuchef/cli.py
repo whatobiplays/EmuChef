@@ -277,9 +277,21 @@ def _build_rust_shadow_plan_command(args: argparse.Namespace) -> list[str]:
         "--device-plan",
         args.device_plan,
     ]
+    _append_rust_shadow_device_context_args(command, args)
     for raw_binding in args.bind:
         command.extend(["--bind", raw_binding])
     return command
+
+
+def _append_rust_shadow_device_context_args(command: list[str], args: argparse.Namespace) -> None:
+    if args.manufacturer is not None:
+        command.extend(["--manufacturer", args.manufacturer])
+    if args.model is not None:
+        command.extend(["--model", args.model])
+    if args.android_version is not None:
+        command.extend(["--android-version", str(args.android_version)])
+    for device_tag in args.device_tag:
+        command.extend(["--device-tag", device_tag])
 
 
 def _validate_plan_backend_args(args: argparse.Namespace) -> None:
@@ -304,10 +316,6 @@ def _validate_rust_shadow_plan_args(args: argparse.Namespace) -> None:
         ("--ops", args.ops is not None),
         ("--output", args.output is not None and not python_compatible_output),
         ("--serial", args.serial is not None),
-        ("--manufacturer", args.manufacturer is not None),
-        ("--model", args.model is not None),
-        ("--android-version", args.android_version is not None),
-        ("--device-tag", bool(args.device_tag)),
     ]
     for option, is_set in unsupported_options:
         if is_set:

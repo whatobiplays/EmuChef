@@ -307,6 +307,25 @@ still writing the structured result to stdout. Argument/usage errors and
 authored-root/device-plan load failures are process errors: they write stable
 stderr text and no stdout JSON.
 
+P8J adds explicit device context inputs to this dev-only command:
+
+```bash
+cargo run --manifest-path crates/emuchef-rust-backend/Cargo.toml --bin emuchef-plan-shadow -- \
+  --authored-root authored \
+  --device-plan ayaneo.pocket_s_mini.base \
+  --manufacturer AYANEO \
+  --model "Pocket S Mini" \
+  --android-version 13 \
+  --device-tag handheld
+```
+
+Explicit `--manufacturer`, `--model`, and `--android-version` values override
+the synthetic/profile-derived planner context for that invocation. Repeated
+`--device-tag` values replace profile-derived tags exactly in the supplied
+order. When no explicit tags are supplied, profile-derived tags remain
+unchanged. The shadow command still does not probe devices, invoke ADB, create
+detected-device facts, or emit detected-device profile mismatch warnings.
+
 P8A adds an explicit developer-only bridge through the Python CLI for an
 already-built shadow binary:
 
@@ -319,11 +338,11 @@ emuchef plan \
 ```
 
 The Python CLI route requires `--rust-planner-bin` and never invokes Cargo. It
-forwards `--authored-root`, `--device-plan`, and repeated raw `--bind` values to
-the supplied binary in original order. Omitted `--rust-shadow-output` and
-explicit `--rust-shadow-output passthrough` pass Rust stdout, stderr, and exit
-code through directly, so the default shadow output remains Rust JSON/text
-passthrough.
+forwards `--authored-root`, `--device-plan`, explicitly supplied device context
+flags, and repeated raw `--bind` values to the supplied binary in original
+order. Omitted `--rust-shadow-output` and explicit `--rust-shadow-output
+passthrough` pass Rust stdout, stderr, and exit code through directly, so the
+default shadow output remains Rust JSON/text passthrough.
 
 P8E adds an explicit Python-compatible formatter mode for the same dev-only
 bridge:
@@ -347,9 +366,13 @@ objects. If Rust emits usable planning JSON with a non-zero exit code, the CLI
 formats the result and preserves the Rust exit code. Empty, invalid, or
 non-planning-result stdout is reported as a compatibility-mode error.
 
-Python/device context options that are not supported by Rust shadow remain
-rejected. `--output` and `--verbose` are accepted only for explicit
-`--rust-shadow-output python-compatible`.
+`--manufacturer`, `--model`, `--android-version`, and repeated `--device-tag`
+values are accepted by the explicit Rust routes. The Python CLI forwards only
+values explicitly supplied on the command line; it does not resolve or forward
+synthetic/profile-derived context. `--adb`, `--serial`, `--ops`, and `--debug`
+remain rejected for Rust routes. `--output` and `--verbose` are accepted only for
+explicit `--rust-shadow-output python-compatible` or for the always-compatible
+`rust-experimental` route.
 
 P8G adds an explicit non-default migration route that reuses the same supplied
 shadow binary invocation while defaulting to Python-compatible formatting:
@@ -363,10 +386,11 @@ emuchef plan \
 ```
 
 `rust-experimental` requires `--rust-planner-bin`, never invokes Cargo, forwards
-the same authored-root/device-plan/repeated-bind arguments as `rust-shadow`, and
-formats usable Rust `PlanningResult` JSON through the Python-compatible summary
-or YAML path by default. It allows `--verbose` and `--output` because those flags
-use the compatibility formatting path. `--rust-shadow-output` is only valid with
+the same authored-root/device-plan/explicit-context/repeated-bind arguments as
+`rust-shadow`, and formats usable Rust `PlanningResult` JSON through the
+Python-compatible summary or YAML path by default. It allows `--verbose` and
+`--output` because those flags use the compatibility formatting path.
+`--rust-shadow-output` is only valid with
 `--planner-backend rust-shadow`; Python and `rust-experimental` reject it before
 ADB resolution or Python planner/session construction. `rust-experimental` is an
 explicit non-default migration route. Its name and behavior may change before
@@ -482,9 +506,10 @@ behavior, not full future Rust planner CLI binding type parity.
 
 The shadow command and Python bridge do not replace the default Python
 `emuchef plan` CLI. They do not run executor/apply, inspect or probe devices,
-invoke ADB, access the network, download or materialize artifacts, regenerate
-checked-in goldens, expose Tauri commands, expose sidecar protocol requests,
-invoke Cargo from the Python CLI route, or alter the default
+invoke ADB, emit detected-device profile mismatch warnings, access the network,
+download or materialize artifacts, regenerate checked-in goldens, expose Tauri
+commands, expose sidecar protocol requests, invoke Cargo from the Python CLI
+route, or alter the default
 `emuchef-rust-backend` sidecar binary. Default Rust planner routing remains
 blocked on broader output/behavior compatibility with the current Python CLI
 contract or a separate accepted breaking-change decision. `default-run =

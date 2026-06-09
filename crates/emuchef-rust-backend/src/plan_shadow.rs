@@ -10,16 +10,25 @@ use std::path::PathBuf;
 use serde_json::Value;
 
 use crate::model::OrderedMap;
-use crate::planner::{plan_execution, PlannerInput, PlanningStatus};
+use crate::planner::{plan_execution, DeviceContext, PlannerInput, PlanningStatus};
 use crate::ProcessOutput;
 
-const USAGE: &str = "usage: emuchef-plan-shadow --authored-root <path> --device-plan <id> [--bind <recipe_ref>/<input_id>=<value>]...\n";
+const USAGE: &str = "usage: emuchef-plan-shadow --authored-root <path> --device-plan <id> [--manufacturer <value>] [--model <value>] [--android-version <integer>] [--device-tag <value>]... [--bind <recipe_ref>/<input_id>=<value>]...\n";
 
 #[derive(Debug, PartialEq)]
 struct ShadowConfig {
     authored_root: PathBuf,
     device_plan: String,
     input_bindings: OrderedMap<Value>,
+    explicit_context: ExplicitDeviceContext,
+}
+
+#[derive(Clone, Debug, Default, PartialEq)]
+struct ExplicitDeviceContext {
+    manufacturer: Option<String>,
+    model: Option<String>,
+    android_version: Option<i64>,
+    device_tags: Vec<String>,
 }
 
 /// Run the dev-only planner shadow command with already-split process args.
@@ -46,7 +55,7 @@ pub fn run(args: &[String]) -> ProcessOutput {
         }
     };
 
-    let input = match PlannerInput::from_authored_device_plan(
+    let mut input = match PlannerInput::from_authored_device_plan(
         &config.authored_root,
         &config.device_plan,
         format!("plan.shadow.{}.001", config.device_plan),
@@ -61,6 +70,7 @@ pub fn run(args: &[String]) -> ProcessOutput {
             };
         }
     };
+    apply_explicit_device_context(&mut input.device_context, &config.explicit_context);
 
     let result = plan_execution(input);
     let exit_code = if matches!(result.status, PlanningStatus::Success) {
@@ -89,6 +99,7 @@ fn parse_args(args: &[String]) -> Result<ShadowConfig, ShadowArgError> {
     let mut authored_root: Option<PathBuf> = None;
     let mut device_plan: Option<String> = None;
     let mut raw_bindings: Vec<String> = Vec::new();
+    let mut explicit_context = ExplicitDeviceContext::default();
     let mut index = 0;
 
     while index < args.len() {
@@ -106,6 +117,34 @@ fn parse_args(args: &[String]) -> Result<ShadowConfig, ShadowArgError> {
                     return usage_error("--device-plan requires one argument");
                 };
                 device_plan = Some(value.clone());
+            }
+            "--manufacturer" => {
+                index += 1;
+                let Some(value) = args.get(index) else {
+                    return usage_error("--manufacturer requires one argument");
+                };
+                explicit_context.manufacturer = Some(value.clone());
+            }
+            "--model" => {
+                index += 1;
+                let Some(value) = args.get(index) else {
+                    return usage_error("--model requires one argument");
+                };
+                explicit_context.model = Some(value.clone());
+            }
+            "--android-version" => {
+                index += 1;
+                let Some(value) = args.get(index) else {
+                    return usage_error("--android-version requires one argument");
+                };
+                explicit_context.android_version = Some(parse_android_version(value)?);
+            }
+            "--device-tag" => {
+                index += 1;
+                let Some(value) = args.get(index) else {
+                    return usage_error("--device-tag requires one argument");
+                };
+                explicit_context.device_tags.push(value.clone());
             }
             "--bind" => {
                 index += 1;
@@ -143,7 +182,33 @@ fn parse_args(args: &[String]) -> Result<ShadowConfig, ShadowArgError> {
         authored_root: authored_root.expect("missing authored_root was checked"),
         device_plan: device_plan.expect("missing device_plan was checked"),
         input_bindings: parse_bindings(&raw_bindings)?,
+        explicit_context,
     })
+}
+
+fn parse_android_version(value: &str) -> Result<i64, ShadowArgError> {
+    match value.parse::<i64>() {
+        Ok(version) if version >= 0 => Ok(version),
+        _ => usage_error("--android-version must be a non-negative integer"),
+    }
+}
+
+fn apply_explicit_device_context(
+    device_context: &mut DeviceContext,
+    explicit_context: &ExplicitDeviceContext,
+) {
+    if let Some(manufacturer) = &explicit_context.manufacturer {
+        device_context.manufacturer = manufacturer.clone();
+    }
+    if let Some(model) = &explicit_context.model {
+        device_context.model = model.clone();
+    }
+    if let Some(android_version) = explicit_context.android_version {
+        device_context.android_version = android_version;
+    }
+    if !explicit_context.device_tags.is_empty() {
+        device_context.device_tags = explicit_context.device_tags.clone();
+    }
 }
 
 fn parse_bindings(raw_bindings: &[String]) -> Result<OrderedMap<Value>, ShadowArgError> {
@@ -207,6 +272,90 @@ mod tests {
 
     fn strings(values: &[&str]) -> Vec<String> {
         values.iter().map(|value| (*value).to_string()).collect()
+    }
+
+    #[test]
+    fn parse_args_accepts_explicit_device_context_args_in_order() {
+        let config = parse_args(&strings(&[
+            "--authored-root",
+            "authored",
+            "--device-plan",
+            "ayaneo.pocket_s_mini.base",
+            "--manufacturer",
+            "AYANEO",
+            "--model",
+            "Pocket S Mini",
+            "--android-version",
+            "13",
+            "--device-tag",
+            "handheld",
+            "--device-tag",
+            "landscape",
+        ]))
+        .expect("explicit device context args should parse");
+
+        assert_eq!(config.explicit_context.manufacturer.as_deref(), Some("AYANEO"));
+        assert_eq!(config.explicit_context.model.as_deref(), Some("Pocket S Mini"));
+        assert_eq!(config.explicit_context.android_version, Some(13));
+        assert_eq!(
+            config.explicit_context.device_tags,
+            vec!["handheld".to_string(), "landscape".to_string()]
+        );
+    }
+
+    #[test]
+    fn parse_args_default_has_no_explicit_device_context() {
+        let config = parse_args(&strings(&[
+            "--authored-root",
+            "authored",
+            "--device-plan",
+            "ayaneo.pocket_s_mini.base",
+        ]))
+        .expect("minimal args should parse");
+
+        assert_eq!(config.explicit_context, ExplicitDeviceContext::default());
+    }
+
+    #[test]
+    fn parse_args_rejects_invalid_android_versions() {
+        for raw_version in ["not-an-int", "-1"] {
+            let error = parse_args(&strings(&[
+                "--authored-root",
+                "authored",
+                "--device-plan",
+                "ayaneo.pocket_s_mini.base",
+                "--android-version",
+                raw_version,
+            ]))
+            .expect_err("invalid android version should fail");
+
+            assert!(
+                matches!(error, ShadowArgError::Usage(message) if message.contains("--android-version must be a non-negative integer"))
+            );
+        }
+    }
+
+    #[test]
+    fn parse_args_rejects_missing_explicit_context_values() {
+        for flag in [
+            "--manufacturer",
+            "--model",
+            "--android-version",
+            "--device-tag",
+        ] {
+            let error = parse_args(&strings(&[
+                "--authored-root",
+                "authored",
+                "--device-plan",
+                "ayaneo.pocket_s_mini.base",
+                flag,
+            ]))
+            .expect_err("missing value should fail");
+
+            assert!(
+                matches!(error, ShadowArgError::Usage(message) if message.contains(&format!("{flag} requires one argument")))
+            );
+        }
     }
 
     #[test]

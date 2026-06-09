@@ -145,6 +145,10 @@ fn execution_step_ids(result: &Value) -> Vec<&str> {
         .collect()
 }
 
+fn execution_device_context(result: &Value) -> &Value {
+    &result["execution_plan"]["device_context"]
+}
+
 #[test]
 fn shadow_plan_success_for_checked_in_device_plan_emits_pretty_json() {
     let output = run_shadow_with_authored_root("ayaneo.pocket_s_mini.base", &[]);
@@ -180,6 +184,57 @@ fn shadow_plan_success_for_checked_in_device_plan_emits_pretty_json() {
         .as_object()
         .expect("execution_plan should be an object")
         .contains_key("permission_plan"));
+}
+
+#[test]
+fn shadow_plan_without_explicit_device_tags_preserves_profile_tags() {
+    let result = stdout_json(&run_shadow_with_authored_root(
+        "ayaneo.pocket_s_mini.base",
+        &[
+            "--manufacturer",
+            "AYANEO Override",
+            "--model",
+            "Pocket S Mini Override",
+            "--android-version",
+            "13",
+        ],
+    ));
+
+    let context = execution_device_context(&result);
+    assert_eq!(context["manufacturer"], "AYANEO Override");
+    assert_eq!(context["model"], "Pocket S Mini Override");
+    assert_eq!(context["android_version"], 13);
+    assert_eq!(context["android_api_level"], Value::Null);
+    assert_eq!(
+        context["device_tags"],
+        json!(["handheld_android", "brand_ayaneo"])
+    );
+}
+
+#[test]
+fn shadow_plan_explicit_device_tags_replace_profile_tags_in_order() {
+    let result = stdout_json(&run_shadow_with_authored_root(
+        "ayaneo.pocket_s_mini.base",
+        &[
+            "--manufacturer",
+            "AYANEO Override",
+            "--model",
+            "Pocket S Mini Override",
+            "--android-version",
+            "13",
+            "--device-tag",
+            "handheld",
+            "--device-tag",
+            "landscape",
+        ],
+    ));
+
+    let context = execution_device_context(&result);
+    assert_eq!(context["manufacturer"], "AYANEO Override");
+    assert_eq!(context["model"], "Pocket S Mini Override");
+    assert_eq!(context["android_version"], 13);
+    assert_eq!(context["android_api_level"], Value::Null);
+    assert_eq!(context["device_tags"], json!(["handheld", "landscape"]));
 }
 
 #[test]

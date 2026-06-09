@@ -241,10 +241,15 @@ manual Rust planner inspection. The shadow binary builds a private
 emits deterministic pretty JSON to stdout for planner success and planner error
 results, and exits non-zero for planner error results. Argument errors and
 authored-root/device-plan load errors write stable process text to stderr with
-no stdout JSON. Shadow `--bind` values are parsed as strings; repeated binds for
-the same `<recipe_ref>/<input_id>` are grouped into a string array to match the
-current Python CLI parser. The shadow binary does not execute plans, probe
-devices, invoke ADB, access the network, materialize artifacts, expose Tauri or
+no stdout JSON. Shadow `--manufacturer`, `--model`, and `--android-version`
+values override the synthetic/profile-derived planner `DeviceContext` for that
+invocation. Repeated `--device-tag` values replace profile-derived tags exactly
+in the supplied order; when no explicit tags are supplied, profile-derived tags
+remain unchanged. Shadow `--bind` values are parsed as strings; repeated binds
+for the same `<recipe_ref>/<input_id>` are grouped into a string array to match
+the current Python CLI parser. The shadow binary does not execute plans, probe
+devices, invoke ADB, create detected-device facts, emit detected-device profile
+mismatch warnings, access the network, materialize artifacts, expose Tauri or
 sidecar protocol commands, or replace the Python planner CLI.
 
 The Python CLI exposes a developer-only bridge to an already-built Rust shadow
@@ -253,14 +258,15 @@ planner binary:
 default `emuchef plan` behavior remains Python-owned for planning output and
 exit-code behavior. `rust-shadow` requires `--rust-planner-bin` and the Python
 CLI route never invokes Cargo. The route forwards `--authored-root`,
-`--device-plan`, and repeated raw `--bind` arguments to the supplied
-`emuchef-plan-shadow` binary in original order. Omitted `--rust-shadow-output`
-and explicit `--rust-shadow-output passthrough` preserve JSON/text passthrough:
-Rust stdout is passed through to Python stdout, Rust stderr is passed through to
-Python stderr, and the Rust process exit code is returned. In passthrough mode,
-Python-only planner/device options such as `--ops`, `--output`, `--verbose`,
-`--debug`, `--adb`, and device context flags are not supported with
-`rust-shadow`.
+`--device-plan`, explicitly supplied device context flags, and repeated raw
+`--bind` arguments to the supplied `emuchef-plan-shadow` binary in original
+order. Omitted `--rust-shadow-output` and explicit `--rust-shadow-output
+passthrough` preserve JSON/text passthrough: Rust stdout is passed through to
+Python stdout, Rust stderr is passed through to Python stderr, and the Rust
+process exit code is returned. In passthrough mode, `--ops`, `--output`,
+`--verbose`, `--debug`, `--adb`, and `--serial` are not supported with
+`rust-shadow`; explicit `--manufacturer`, `--model`, `--android-version`, and
+repeated `--device-tag` values are supported.
 
 The explicit `--rust-shadow-output python-compatible` mode is a formatter bridge
 for usable Rust `PlanningResult` JSON. It formats concise stdout with the visible
@@ -277,8 +283,9 @@ stdout is a compatibility-mode error.
 `emuchef plan --planner-backend rust-experimental --rust-planner-bin <path>` is
 an explicit non-default migration route. It reuses the same supplied Rust shadow
 planner binary invocation as `rust-shadow`, always uses Python-compatible output
-formatting, and allows `--verbose` and `--output` through that compatibility
-formatting path. `--rust-shadow-output` is only valid with
+formatting, forwards the same explicit device context flags as `rust-shadow`, and
+allows `--verbose` and `--output` through that compatibility formatting path.
+`--rust-shadow-output` is only valid with
 `--planner-backend rust-shadow`; Python and `rust-experimental` reject it before
 ADB resolution or planner/session construction. `rust-experimental` is a
 cutover rehearsal route, not the default planner, not a stable final public
@@ -286,14 +293,16 @@ contract, and not Python planner deletion. Its name and behavior may change
 before Rust becomes the default planner backend.
 
 The Rust shadow bridge does not execute/apply plans, probe devices, invoke ADB,
-access the network, materialize artifacts, use Tauri commands, expose sidecar
-protocol requests, invoke Cargo, regenerate fixtures/goldens, or make Rust
-planner output authoritative. CLI output compatibility remains a blocker before
-any default Rust planner routing. Future default Rust planner routing must
-preserve Python concise summary output, Python `--verbose` structured YAML,
-Python `--output` YAML file behavior, and Python exit-code behavior unless a
-separate accepted breaking-change decision changes that target. Rust-native JSON
-output requires a future explicit structured-output mode such as `--format json`.
+emit detected-device profile mismatch warnings, access the network, materialize
+artifacts, use Tauri commands, expose sidecar protocol requests, invoke Cargo,
+regenerate fixtures/goldens, or make Rust planner output authoritative. Real
+device context/probing remains a default-cutover blocker. CLI output
+compatibility remains a blocker before any default Rust planner routing. Future
+default Rust planner routing must preserve Python concise summary output, Python
+`--verbose` structured YAML, Python `--output` YAML file behavior, and Python
+exit-code behavior unless a separate accepted breaking-change decision changes
+that target. Rust-native JSON output requires a future explicit structured-output
+mode such as `--format json`.
 
 `tools/smoke_rust_shadow_cli_matrix.py` is the dev-only matrix smoke for the
 explicit Python CLI Rust planner migration routes. It is standalone stdlib-only
