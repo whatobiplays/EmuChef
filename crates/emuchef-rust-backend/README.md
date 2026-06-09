@@ -322,9 +322,9 @@ The Python CLI route requires `--rust-planner-bin` and never invokes Cargo. It
 forwards `--authored-root`, `--device-plan`, and repeated raw `--bind` values to
 the supplied binary in original order. Rust stdout, stderr, and exit code are
 passed through directly, so output is Rust JSON/text passthrough rather than
-Python CLI YAML, `--output`, verbose, or concise summary output. The bridge
-rejects `--output`, `--verbose`, and Python/device context options that are not
-supported by Rust shadow.
+Python CLI YAML, `--output`, verbose, or concise summary output. The current
+bridge is JSON passthrough and rejects `--output`, `--verbose`, and
+Python/device context options that are not supported by Rust shadow.
 
 P8B adds a developer-only matrix smoke for that explicit Python CLI route:
 
@@ -348,6 +348,17 @@ invocation evidence, and P8C is the assertion that the route remains dev-only
 Rust stdout/stderr/exit-code passthrough. None of these is default Rust planner
 cutover readiness or Python planner deletion readiness.
 
+P8D records the future default-route output compatibility decision in
+`../../docs/adr/0002-rust-planner-cli-output-compatibility.md`. When Rust
+eventually becomes the default planner backend for `emuchef plan`, default CLI
+output and exit-code behavior must remain compatible with the current
+Python-owned `emuchef plan` contract unless a separate accepted breaking-change
+decision says otherwise. Python concise summaries, Python `--verbose`
+structured YAML, and Python `--output` YAML file behavior remain the
+compatibility targets. Rust-native JSON requires a future explicit
+structured-output mode such as `--format json`; this README does not implement
+that formatter or make Rust default.
+
 Bindings use the explicit form:
 
 ```bash
@@ -363,7 +374,9 @@ The shadow command and Python bridge do not replace the default Python
 `emuchef plan` CLI. They do not run executor/apply, inspect or probe devices,
 invoke ADB, access the network, download or materialize artifacts, regenerate
 checked-in goldens, expose Tauri commands, expose sidecar protocol requests, or
-alter the default `emuchef-rust-backend` sidecar binary. `default-run =
+alter the default `emuchef-rust-backend` sidecar binary. Default Rust planner
+routing remains blocked on output compatibility with the current Python CLI
+contract or a separate accepted breaking-change decision. `default-run =
 "emuchef-rust-backend"` is set so existing `cargo run --manifest-path
 crates/emuchef-rust-backend/Cargo.toml -- --sidecar` and one-shot development
 workflows remain unambiguous.
@@ -412,7 +425,9 @@ planner cutover readiness by itself.
 Planner cutover readiness and Python planner deletion blockers are classified
 in `../../docs/rust-planner-cutover-readiness.md`. The readiness document is
 the source for future user-facing routing, matrix-gating, and Python deletion
-criteria.
+criteria. The future default planner CLI output and exit-code compatibility
+decision is classified in
+`../../docs/adr/0002-rust-planner-cli-output-compatibility.md`.
 
 By default the harness launches Rust with offline Cargo:
 

@@ -363,6 +363,34 @@ class CliTests(unittest.TestCase):
                     resolve_adb.assert_not_called()
                     run.assert_not_called()
 
+    def test_rust_planner_output_compatibility_adr_is_referenced_by_readiness_doc(self) -> None:
+        repo_root = Path(__file__).resolve().parents[1]
+        adr_matches = sorted(
+            (repo_root / "docs" / "adr").glob("*-rust-planner-cli-output-compatibility.md")
+        )
+        readiness_path = repo_root / "docs" / "rust-planner-cutover-readiness.md"
+
+        self.assertEqual(
+            len(adr_matches),
+            1,
+            "Exactly one Rust planner CLI output compatibility ADR should exist.",
+        )
+        adr_path = adr_matches[0]
+        readiness_text = readiness_path.read_text(encoding="utf-8")
+        adr_ref = adr_path.relative_to(repo_root).as_posix()
+
+        self.assertIn(adr_ref, readiness_text)
+        for token in [
+            "rust-shadow",
+            "JSON passthrough",
+            "--output",
+            "--verbose",
+            "--format json",
+            "output compatibility",
+        ]:
+            with self.subTest(token=token):
+                self.assertIn(token, readiness_text)
+
     def test_plan_rust_shadow_does_not_build_python_planner_session_or_detect_device(self) -> None:
         with TemporaryDirectory() as tmp:
             shadow_bin = self._shadow_bin(tmp)

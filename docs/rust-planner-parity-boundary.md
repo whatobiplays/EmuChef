@@ -9,7 +9,9 @@ the current private Rust `PlanningResult`.
 Planner cutover readiness and Python planner deletion blockers are classified
 in `docs/rust-planner-cutover-readiness.md`. This boundary document records
 current parity evidence; the readiness document is the source for the
-user-facing routing and deletion checklist.
+user-facing routing and deletion checklist. The future Rust planner CLI output
+compatibility decision is recorded in
+`docs/adr/0002-rust-planner-cli-output-compatibility.md`.
 
 Rust planner tests include an intentional fixture inventory/parsing guard for
 the existing Phase 6M/6N planner parity evidence. The guard consumes checked-in
@@ -67,6 +69,10 @@ Rust planner-adjacent coverage is internal and fixture-scoped:
 - `tests/test_cli.py`: P8C CLI output compatibility contract coverage for the
   explicit `rust-shadow` bridge. The guarded contract is Rust stdout/stderr/exit
   code passthrough, not Python CLI YAML or concise summary compatibility.
+- `docs/adr/0002-rust-planner-cli-output-compatibility.md`: P8D decision record
+  for future default Rust planner routing. The accepted target is compatibility
+  with the current Python `emuchef plan` output and exit-code behavior unless a
+  separate accepted breaking-change decision says otherwise.
 - `tools/plan_parity_scenarios.json`: dev-only P7P comparison scenario
   manifest for current checked-in device-plan comparisons. It is not a Python
   golden, regenerated evidence, normal Rust/Tauri check input, or user-facing
@@ -195,13 +201,24 @@ Rust planner authoritative.
 
 P8C defines the CLI output compatibility contract for that explicit bridge. The
 default Python planner route remains the CLI/reference owner for planning output
-and exit-code behavior. `rust-shadow` remains a developer-only passthrough route:
-Rust stdout is written to Python stdout, Rust stderr is written to Python stderr,
-and the Rust process exit code is returned. The bridge does not translate Rust
-JSON `PlanningResult` output into Python YAML, Python concise planning summary
-text, or Python planner structures. `--output`, `--verbose`, and Python/device
-context options unsupported by Rust shadow are rejected before invoking the Rust
-process. This contract is not default Rust planner cutover readiness.
+and exit-code behavior. `rust-shadow` remains a developer-only JSON passthrough
+route: Rust stdout is written to Python stdout, Rust stderr is written to Python
+stderr, and the Rust process exit code is returned. The bridge does not
+translate Rust JSON `PlanningResult` output into Python YAML, Python concise
+planning summary text, or Python planner structures. `--output`, `--verbose`,
+and Python/device context options unsupported by Rust shadow are rejected before
+invoking the Rust process. This contract is not default Rust planner cutover
+readiness.
+
+P8D records the future default-route compatibility target in
+`docs/adr/0002-rust-planner-cli-output-compatibility.md`. When Rust eventually
+becomes the default planner backend for `emuchef plan`, default CLI output and
+exit-code behavior must remain compatible with the current Python-owned
+`emuchef plan` contract unless a separate accepted breaking-change decision says
+otherwise. Python concise summaries, Python `--verbose` structured YAML, and
+Python `--output` YAML file behavior remain the compatibility targets. A
+Rust-native JSON mode requires a future explicit structured-output option such
+as `--format json`; it is not introduced by the current shadow route.
 
 | Device plan | Device profile | Selected recipes | Private Rust planner status | Required planner-only bindings | Current limitation |
 | --- | --- | --- | --- | --- | --- |
@@ -473,4 +490,6 @@ materialization, or Python planner deletability.
 
 Use `docs/rust-planner-cutover-readiness.md` for the current blocker
 classification, comparison-matrix gating policy, and proposed staged ladder for
-future user-facing Rust planner routing and Python planner deletion.
+future user-facing Rust planner routing and Python planner deletion. Use
+`docs/adr/0002-rust-planner-cli-output-compatibility.md` for the accepted
+default-route output and exit-code compatibility target.

@@ -48,6 +48,12 @@ The current Rust/Python ownership decision is recorded in
 CLI/planner/executor/apply parity strategy is documented in
 [docs/rust-cli-executor-parity.md](docs/rust-cli-executor-parity.md); this is a
 documentation clarification and does not change current runtime ownership.
+The future Rust planner CLI output compatibility target is recorded in
+[ADR 0002](docs/adr/0002-rust-planner-cli-output-compatibility.md). When Rust
+eventually becomes the default planner backend for `emuchef plan`, the default
+CLI output and exit-code behavior must remain compatible with the current
+Python-owned `emuchef plan` contract unless a separate accepted breaking-change
+decision says otherwise.
 
 ## Current Authored Model
 
@@ -250,14 +256,19 @@ CLI route never invokes Cargo. The route forwards `--authored-root`,
 `--device-plan`, and repeated raw `--bind` arguments to the supplied
 `emuchef-plan-shadow` binary in original order. Rust stdout is passed through to
 Python stdout, Rust stderr is passed through to Python stderr, and the Rust
-process exit code is returned. The route does not translate Rust JSON
-`PlanningResult` output into Python YAML, Python summary text, or Python planner
-structures. Python-only planner/device options such as `--ops`, `--output`,
-`--verbose`, `--debug`, `--adb`, and device context flags are not supported with
-`rust-shadow`. The bridge does not execute/apply plans, probe devices, invoke
-ADB, access the network, materialize artifacts, use Tauri commands, expose
-sidecar protocol requests, or make Rust planner output authoritative. CLI output
-compatibility remains a blocker before any default Rust planner routing.
+process exit code is returned. The route is JSON passthrough and does not
+translate Rust JSON `PlanningResult` output into Python YAML, Python summary
+text, or Python planner structures. Python-only planner/device options such as
+`--ops`, `--output`, `--verbose`, `--debug`, `--adb`, and device context flags
+are not supported with `rust-shadow`. The bridge does not execute/apply plans,
+probe devices, invoke ADB, access the network, materialize artifacts, use Tauri
+commands, expose sidecar protocol requests, or make Rust planner output
+authoritative. CLI output compatibility remains a blocker before any default
+Rust planner routing. Future default Rust planner routing must preserve Python
+concise summary output, Python `--verbose` structured YAML, Python `--output`
+YAML file behavior, and Python exit-code behavior unless a separate accepted
+breaking-change decision changes that target. Rust-native JSON output requires a
+future explicit structured-output mode such as `--format json`.
 
 `tools/smoke_rust_shadow_cli_matrix.py` is the P8B dev-only matrix smoke for the
 explicit Python CLI `rust-shadow` bridge. It is standalone stdlib-only tooling
@@ -878,7 +889,10 @@ Common notes:
   `emuchef plan --planner-backend rust-shadow --rust-planner-bin <path>` bridge.
   It passes through Rust JSON/text stdout, stderr, and exit code and is not a
   drop-in replacement for Python's YAML, `--output`, verbose, or concise summary
-  output modes.
+  output modes. Future default Rust planner routing must preserve those
+  Python-owned output and exit-code semantics unless a separate accepted
+  breaking-change decision says otherwise; Rust-native JSON belongs behind a
+  future explicit structured-output mode such as `--format json`.
 - `--device-plan` expects a device plan id, not a device profile id
 - `--adb` is supported on `draft`, `plan`, `apply`, and `detect`
 - ADB resolution order is:
