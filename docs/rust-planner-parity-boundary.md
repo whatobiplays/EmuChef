@@ -66,9 +66,12 @@ Rust planner-adjacent coverage is internal and fixture-scoped:
   The smoke requires a supplied shadow binary, invokes the Python CLI route, and
   reports route exit-code/classification evidence only. It does not run the
   Python-vs-Rust planner-output comparison harness.
-- `tests/test_cli.py`: P8C CLI output compatibility contract coverage for the
-  explicit `rust-shadow` bridge. The guarded contract is Rust stdout/stderr/exit
-  code passthrough, not Python CLI YAML or concise summary compatibility.
+- `tests/test_cli.py`: P8C and P8E CLI output compatibility contract coverage for
+  the explicit `rust-shadow` bridge. The default guarded contract is Rust
+  stdout/stderr/exit-code passthrough. The explicit
+  `--rust-shadow-output python-compatible` mode formats usable Rust
+  `PlanningResult` JSON with Python-compatible visible summary labels and
+  structured YAML over the Rust JSON mapping.
 - `docs/adr/0002-rust-planner-cli-output-compatibility.md`: P8D decision record
   for future default Rust planner routing. The accepted target is compatibility
   with the current Python `emuchef plan` output and exit-code behavior unless a
@@ -199,16 +202,19 @@ Rust/Tauri runtime check and does not execute/apply plans, probe devices, invoke
 ADB, access the network, materialize artifacts, regenerate goldens, or make the
 Rust planner authoritative.
 
-P8C defines the CLI output compatibility contract for that explicit bridge. The
-default Python planner route remains the CLI/reference owner for planning output
-and exit-code behavior. `rust-shadow` remains a developer-only JSON passthrough
-route: Rust stdout is written to Python stdout, Rust stderr is written to Python
-stderr, and the Rust process exit code is returned. The bridge does not
-translate Rust JSON `PlanningResult` output into Python YAML, Python concise
-planning summary text, or Python planner structures. `--output`, `--verbose`,
-and Python/device context options unsupported by Rust shadow are rejected before
-invoking the Rust process. This contract is not default Rust planner cutover
-readiness.
+P8C defines the default CLI output compatibility contract for that explicit
+bridge. The default Python planner route remains the CLI/reference owner for
+planning output and exit-code behavior. Omitted `--rust-shadow-output` and
+explicit `--rust-shadow-output passthrough` keep `rust-shadow` as a
+developer-only JSON passthrough route: Rust stdout is written to Python stdout,
+Rust stderr is written to Python stderr, and the Rust process exit code is
+returned. That passthrough mode does not translate Rust JSON `PlanningResult`
+output into Python YAML, Python concise planning summary text, or Python planner
+structures. `--output` and `--verbose` are rejected unless the explicit
+`--rust-shadow-output python-compatible` formatter mode is selected.
+Python/device context options unsupported by Rust shadow are rejected before
+invoking the Rust process in every shadow output mode. This contract is not
+default Rust planner cutover readiness.
 
 P8D records the future default-route compatibility target in
 `docs/adr/0002-rust-planner-cli-output-compatibility.md`. When Rust eventually
@@ -219,6 +225,17 @@ otherwise. Python concise summaries, Python `--verbose` structured YAML, and
 Python `--output` YAML file behavior remain the compatibility targets. A
 Rust-native JSON mode requires a future explicit structured-output option such
 as `--format json`; it is not introduced by the current shadow route.
+
+P8E adds an explicit formatter mode to the existing dev-only bridge:
+`--rust-shadow-output python-compatible`. Omitted `--rust-shadow-output` and
+`--rust-shadow-output passthrough` keep P8C passthrough unchanged. The
+compatibility mode parses usable Rust `PlanningResult` JSON even when the Rust
+process exits non-zero, preserves that non-zero exit code, and formats the
+result through Python-compatible CLI summary labels or structured YAML. The YAML
+surface is the Rust JSON mapping emitted through `dump_yaml(...)`, not a rebuilt
+Python planner domain object. This mode is not default planner routing and does
+not change executor/apply, real-device, ADB, artifact, network, Tauri, protocol,
+Cargo fallback, fixture/golden, or Python planner deletion behavior.
 
 | Device plan | Device profile | Selected recipes | Private Rust planner status | Required planner-only bindings | Current limitation |
 | --- | --- | --- | --- | --- | --- |
@@ -371,11 +388,32 @@ emuchef plan \
 
 The Python bridge requires `--rust-planner-bin` in P8A and never invokes Cargo.
 It forwards `--authored-root`, `--device-plan`, and repeated raw `--bind` values
-to the supplied binary in original order. Rust stdout/stderr are passed through
-directly as JSON/text from the shadow command; the bridge does not translate
-Rust JSON into Python YAML, concise summary text, or Python planner structures.
-`--output` and `--verbose` are not supported by the bridge because the route is
-not Python CLI output-compatible.
+to the supplied binary in original order. In the default passthrough mode, Rust
+stdout/stderr are passed through directly as JSON/text from the shadow command;
+that default mode does not translate Rust JSON into Python YAML, concise summary
+text, or Python planner structures. `--output` and `--verbose` are supported
+only when the explicit P8E `python-compatible` output mode is selected.
+
+The bridge also supports an explicit P8E formatter mode:
+
+```bash
+emuchef plan \
+  --planner-backend rust-shadow \
+  --rust-planner-bin <path-to-emuchef-plan-shadow> \
+  --rust-shadow-output python-compatible \
+  --authored-root authored \
+  --device-plan ayaneo.pocket_s_mini.base
+```
+
+In `python-compatible` mode, Rust stdout must contain a `PlanningResult` JSON
+object. The Python CLI formats that mapping into the visible Python planning
+summary labels by default, emits structured YAML to stdout for `--verbose`, and
+writes structured YAML to the requested path for `--output` while stdout remains
+the concise summary. If Rust emits usable planning JSON with a non-zero exit
+code, the CLI formats the result and preserves the Rust exit code. If stdout is
+empty, invalid JSON, or not a planning result, the CLI reports a compatibility
+mode error. Omitted `--rust-shadow-output` and explicit
+`--rust-shadow-output passthrough` retain P8C passthrough semantics.
 
 P8B provides a dev-only matrix smoke for the Python bridge:
 

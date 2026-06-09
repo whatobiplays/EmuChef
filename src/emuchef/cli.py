@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import argparse
+import json
 import logging
 import os
 import subprocess
@@ -100,6 +101,15 @@ def main(argv: list[str] | None = None) -> int:
     plan_parser.add_argument(
         "--rust-planner-bin",
         help="Dev-only path to emuchef-plan-shadow for --planner-backend rust-shadow.",
+    )
+    plan_parser.add_argument(
+        "--rust-shadow-output",
+        choices=("passthrough", "python-compatible"),
+        default="passthrough",
+        help=(
+            "Output mode for --planner-backend rust-shadow. passthrough preserves Rust stdout/stderr; "
+            "python-compatible formats Rust PlanningResult JSON with Python-compatible CLI labels/YAML."
+        ),
     )
 
     detect_parser = subparsers.add_parser(
@@ -236,6 +246,9 @@ def _run_rust_shadow_plan(args: argparse.Namespace) -> int:
         sys.stderr.write(f"Error: failed to start Rust shadow planner '{command[0]}': {exc}\n")
         return 1
 
+    if args.rust_shadow_output == "python-compatible":
+        return _run_rust_shadow_python_compatible_plan(args, completed)
+
     if completed.stdout:
         sys.stdout.write(completed.stdout)
     if completed.stderr:
@@ -268,12 +281,13 @@ def _build_rust_shadow_plan_command(args: argparse.Namespace) -> list[str]:
 def _validate_rust_shadow_plan_args(args: argparse.Namespace) -> None:
     if not args.rust_planner_bin:
         raise ValueError("--rust-planner-bin is required when --planner-backend rust-shadow is selected.")
+    python_compatible_output = args.rust_shadow_output == "python-compatible"
     unsupported_options = [
-        ("--verbose", args.verbose),
+        ("--verbose", args.verbose and not python_compatible_output),
         ("--debug", args.debug),
         ("--adb", args.adb is not None),
         ("--ops", args.ops is not None),
-        ("--output", args.output is not None),
+        ("--output", args.output is not None and not python_compatible_output),
         ("--serial", args.serial is not None),
         ("--manufacturer", args.manufacturer is not None),
         ("--model", args.model is not None),
@@ -283,6 +297,99 @@ def _validate_rust_shadow_plan_args(args: argparse.Namespace) -> None:
     for option, is_set in unsupported_options:
         if is_set:
             raise ValueError(f"{option} is not supported with --planner-backend rust-shadow.")
+
+
+def _run_rust_shadow_python_compatible_plan(
+    args: argparse.Namespace,
+    completed: subprocess.CompletedProcess[str],
+) -> int:
+    if completed.stderr:
+        sys.stderr.write(completed.stderr)
+
+    result, parse_error = _parse_rust_shadow_planning_result_json(completed.stdout)
+    if parse_error is not None:
+        sys.stderr.write(f"Error: Rust shadow planner python-compatible output {parse_error}.\n")
+        return completed.returncode if completed.returncode != 0 else 1
+
+    _write_rust_shadow_python_compatible_result(result, verbose=args.verbose, output_path=args.output)
+    if completed.returncode != 0:
+        return completed.returncode
+    return 0 if isinstance(result.get("execution_plan"), Mapping) else 1
+
+
+def _parse_rust_shadow_planning_result_json(stdout: str) -> tuple[Mapping[str, object], str | None]:
+    if not stdout.strip():
+        return {}, "did not emit PlanningResult JSON on stdout"
+    try:
+        payload = json.loads(stdout)
+    except json.JSONDecodeError as exc:
+        return {}, f"was not valid JSON: {exc}"
+    if not isinstance(payload, Mapping) or payload.get("kind") != "planning_result":
+        return {}, "did not emit PlanningResult JSON with kind: planning_result"
+    return payload, None
+
+
+def _write_rust_shadow_python_compatible_result(
+    result: Mapping[str, object],
+    *,
+    verbose: bool,
+    output_path: str | None,
+) -> None:
+    payload = dump_yaml(result, path=output_path) if output_path else dump_yaml(result)
+    if verbose:
+        sys.stdout.write(payload)
+        return
+    sys.stdout.write(_format_rust_shadow_planning_summary(result, output_path=output_path))
+
+
+def _format_rust_shadow_planning_summary(
+    result: Mapping[str, object],
+    output_path: str | None = None,
+) -> str:
+    lines = [f"Planning status: {result.get('status', 'unknown')}"]
+    if output_path:
+        lines.append(f"Wrote planning result: {Path(output_path).resolve()}")
+
+    execution_plan = result.get("execution_plan")
+    if isinstance(execution_plan, Mapping):
+        lines.append(f"Execution plan: {execution_plan.get('id', 'unknown')}")
+        lines.append("Runnable steps:")
+        lines.extend(_bullet_lines(_rust_shadow_step_ids(execution_plan.get("steps"))))
+
+    warnings = _rust_shadow_messages(result.get("warnings"))
+    if warnings:
+        lines.append("Warnings:")
+        lines.extend(_bullet_lines(warnings))
+
+    errors = _rust_shadow_messages(result.get("errors"))
+    if errors:
+        lines.append("Errors:")
+        lines.extend(_bullet_lines(errors))
+
+    return "\n".join(lines) + "\n"
+
+
+def _rust_shadow_step_ids(raw_steps: object) -> list[str]:
+    if not isinstance(raw_steps, Sequence) or isinstance(raw_steps, (str, bytes, bytearray)):
+        return []
+    step_ids = []
+    for raw_step in raw_steps:
+        if isinstance(raw_step, Mapping) and raw_step.get("id") is not None:
+            step_ids.append(str(raw_step["id"]))
+    return step_ids
+
+
+def _rust_shadow_messages(raw_messages: object) -> list[str]:
+    if not isinstance(raw_messages, Sequence) or isinstance(raw_messages, (str, bytes, bytearray)):
+        return []
+    messages = []
+    for raw_message in raw_messages:
+        if not isinstance(raw_message, Mapping):
+            continue
+        code = raw_message.get("code", "unknown")
+        message = raw_message.get("message", "")
+        messages.append(f"{code}: {message}".rstrip())
+    return messages
 
 
 def _run_detect(args: argparse.Namespace) -> int:

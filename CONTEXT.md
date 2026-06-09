@@ -254,21 +254,35 @@ default `emuchef plan` behavior remains Python-owned for planning output and
 exit-code behavior. `rust-shadow` requires `--rust-planner-bin` and the Python
 CLI route never invokes Cargo. The route forwards `--authored-root`,
 `--device-plan`, and repeated raw `--bind` arguments to the supplied
-`emuchef-plan-shadow` binary in original order. Rust stdout is passed through to
-Python stdout, Rust stderr is passed through to Python stderr, and the Rust
-process exit code is returned. The route is JSON passthrough and does not
-translate Rust JSON `PlanningResult` output into Python YAML, Python summary
-text, or Python planner structures. Python-only planner/device options such as
-`--ops`, `--output`, `--verbose`, `--debug`, `--adb`, and device context flags
-are not supported with `rust-shadow`. The bridge does not execute/apply plans,
-probe devices, invoke ADB, access the network, materialize artifacts, use Tauri
-commands, expose sidecar protocol requests, or make Rust planner output
-authoritative. CLI output compatibility remains a blocker before any default
-Rust planner routing. Future default Rust planner routing must preserve Python
-concise summary output, Python `--verbose` structured YAML, Python `--output`
-YAML file behavior, and Python exit-code behavior unless a separate accepted
-breaking-change decision changes that target. Rust-native JSON output requires a
-future explicit structured-output mode such as `--format json`.
+`emuchef-plan-shadow` binary in original order. Omitted `--rust-shadow-output`
+and explicit `--rust-shadow-output passthrough` preserve JSON/text passthrough:
+Rust stdout is passed through to Python stdout, Rust stderr is passed through to
+Python stderr, and the Rust process exit code is returned. In passthrough mode,
+Python-only planner/device options such as `--ops`, `--output`, `--verbose`,
+`--debug`, `--adb`, and device context flags are not supported with
+`rust-shadow`.
+
+The explicit `--rust-shadow-output python-compatible` mode is a formatter bridge
+for usable Rust `PlanningResult` JSON. It formats concise stdout with the visible
+Python planning summary labels, emits structured YAML to stdout for `--verbose`,
+and writes structured YAML to `--output` paths while stdout remains concise. The
+structured YAML is produced from the Rust JSON mapping through the existing
+`dump_yaml(...)` path; the mode does not reconstruct full Python planner domain
+objects or make Rust the default planner. If Rust emits usable planning JSON with
+a non-zero exit code, the CLI formats the result and preserves that non-zero exit
+code. If Rust exits zero but the parsed result has no execution plan, the CLI
+formats the result and returns non-zero. Empty, invalid, or non-planning-result
+stdout is a compatibility-mode error.
+
+The Rust shadow bridge does not execute/apply plans, probe devices, invoke ADB,
+access the network, materialize artifacts, use Tauri commands, expose sidecar
+protocol requests, invoke Cargo, regenerate fixtures/goldens, or make Rust
+planner output authoritative. CLI output compatibility remains a blocker before
+any default Rust planner routing. Future default Rust planner routing must
+preserve Python concise summary output, Python `--verbose` structured YAML,
+Python `--output` YAML file behavior, and Python exit-code behavior unless a
+separate accepted breaking-change decision changes that target. Rust-native JSON
+output requires a future explicit structured-output mode such as `--format json`.
 
 `tools/smoke_rust_shadow_cli_matrix.py` is the P8B dev-only matrix smoke for the
 explicit Python CLI `rust-shadow` bridge. It is standalone stdlib-only tooling
@@ -887,12 +901,16 @@ Common notes:
 - `emuchef plan` defaults to the Python planner. The only Rust planner route in
   the current CLI is the explicit dev-only
   `emuchef plan --planner-backend rust-shadow --rust-planner-bin <path>` bridge.
-  It passes through Rust JSON/text stdout, stderr, and exit code and is not a
-  drop-in replacement for Python's YAML, `--output`, verbose, or concise summary
-  output modes. Future default Rust planner routing must preserve those
-  Python-owned output and exit-code semantics unless a separate accepted
-  breaking-change decision says otherwise; Rust-native JSON belongs behind a
-  future explicit structured-output mode such as `--format json`.
+  Omitted `--rust-shadow-output` and `--rust-shadow-output passthrough` pass
+  through Rust JSON/text stdout, stderr, and exit code. Explicit
+  `--rust-shadow-output python-compatible` parses usable Rust `PlanningResult`
+  JSON and formats it with Python-compatible visible summary labels, `--verbose`
+  YAML, and `--output` YAML over the Rust JSON mapping. The formatter mode is not
+  default planner routing and is not a Python planner replacement. Future default
+  Rust planner routing must preserve those Python-owned output and exit-code
+  semantics unless a separate accepted breaking-change decision says otherwise;
+  Rust-native JSON belongs behind a future explicit structured-output mode such
+  as `--format json`.
 - `--device-plan` expects a device plan id, not a device profile id
 - `--adb` is supported on `draft`, `plan`, `apply`, and `detect`
 - ADB resolution order is:

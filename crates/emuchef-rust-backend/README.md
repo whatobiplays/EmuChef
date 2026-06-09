@@ -320,11 +320,36 @@ emuchef plan \
 
 The Python CLI route requires `--rust-planner-bin` and never invokes Cargo. It
 forwards `--authored-root`, `--device-plan`, and repeated raw `--bind` values to
-the supplied binary in original order. Rust stdout, stderr, and exit code are
-passed through directly, so output is Rust JSON/text passthrough rather than
-Python CLI YAML, `--output`, verbose, or concise summary output. The current
-bridge is JSON passthrough and rejects `--output`, `--verbose`, and
-Python/device context options that are not supported by Rust shadow.
+the supplied binary in original order. Omitted `--rust-shadow-output` and
+explicit `--rust-shadow-output passthrough` pass Rust stdout, stderr, and exit
+code through directly, so the default shadow output remains Rust JSON/text
+passthrough.
+
+P8E adds an explicit Python-compatible formatter mode for the same dev-only
+bridge:
+
+```bash
+emuchef plan \
+  --planner-backend rust-shadow \
+  --rust-planner-bin <path-to-emuchef-plan-shadow> \
+  --rust-shadow-output python-compatible \
+  --authored-root authored \
+  --device-plan ayaneo.pocket_s_mini.base
+```
+
+In `python-compatible` mode, the Python CLI parses usable Rust
+`PlanningResult` JSON and formats it with the visible Python planning summary
+labels by default. `--verbose` emits structured YAML to stdout, and `--output`
+writes structured YAML to the requested path while stdout remains the concise
+summary. The YAML is produced from the Rust JSON mapping through Python's
+`dump_yaml(...)` helper; this mode does not rebuild full Python planner domain
+objects. If Rust emits usable planning JSON with a non-zero exit code, the CLI
+formats the result and preserves the Rust exit code. Empty, invalid, or
+non-planning-result stdout is reported as a compatibility-mode error.
+
+Python/device context options that are not supported by Rust shadow remain
+rejected. `--output` and `--verbose` are accepted only for explicit
+`--rust-shadow-output python-compatible`.
 
 P8B adds a developer-only matrix smoke for that explicit Python CLI route:
 
@@ -342,11 +367,13 @@ deterministic JSON route-invocation report. It is not output parity evidence;
 P7P remains the Python planner API versus Rust planner-output comparison
 evidence.
 
-P8C guards the explicit bridge's CLI output compatibility contract. P7P is
-planner DTO/result comparison evidence, P8B is Python CLI `rust-shadow` route
-invocation evidence, and P8C is the assertion that the route remains dev-only
-Rust stdout/stderr/exit-code passthrough. None of these is default Rust planner
-cutover readiness or Python planner deletion readiness.
+P8C guards the explicit bridge's default CLI output compatibility contract. P7P
+is planner DTO/result comparison evidence, P8B is Python CLI `rust-shadow` route
+invocation evidence, P8C is the assertion that omitted
+`--rust-shadow-output`/explicit `passthrough` remains dev-only Rust
+stdout/stderr/exit-code passthrough, and P8E is the explicit formatter bridge for
+usable Rust `PlanningResult` JSON. None of these is default Rust planner cutover
+readiness or Python planner deletion readiness.
 
 P8D records the future default-route output compatibility decision in
 `../../docs/adr/0002-rust-planner-cli-output-compatibility.md`. When Rust
@@ -356,8 +383,8 @@ Python-owned `emuchef plan` contract unless a separate accepted breaking-change
 decision says otherwise. Python concise summaries, Python `--verbose`
 structured YAML, and Python `--output` YAML file behavior remain the
 compatibility targets. Rust-native JSON requires a future explicit
-structured-output mode such as `--format json`; this README does not implement
-that formatter or make Rust default.
+structured-output mode such as `--format json`; P8E's `python-compatible` mode
+is a dev-only formatter bridge and does not make Rust default.
 
 Bindings use the explicit form:
 
@@ -373,9 +400,10 @@ behavior, not full future Rust planner CLI binding type parity.
 The shadow command and Python bridge do not replace the default Python
 `emuchef plan` CLI. They do not run executor/apply, inspect or probe devices,
 invoke ADB, access the network, download or materialize artifacts, regenerate
-checked-in goldens, expose Tauri commands, expose sidecar protocol requests, or
-alter the default `emuchef-rust-backend` sidecar binary. Default Rust planner
-routing remains blocked on output compatibility with the current Python CLI
+checked-in goldens, expose Tauri commands, expose sidecar protocol requests,
+invoke Cargo from the Python CLI route, or alter the default
+`emuchef-rust-backend` sidecar binary. Default Rust planner routing remains
+blocked on broader output/behavior compatibility with the current Python CLI
 contract or a separate accepted breaking-change decision. `default-run =
 "emuchef-rust-backend"` is set so existing `cargo run --manifest-path
 crates/emuchef-rust-backend/Cargo.toml -- --sidecar` and one-shot development
