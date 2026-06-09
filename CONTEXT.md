@@ -385,6 +385,20 @@ cutover or Python planner deletion readiness. The matrix remains a dev-only
 manual artifact in the current state; it is not wired into normal Rust/Tauri
 checks.
 
+`tools/check_rust_planner_cutover_readiness.py` is the P8I static readiness gate
+for future PRs that propose making Rust the default `emuchef plan` backend. It is
+stdlib-only, imports no planner/runtime modules, parses only JSON and source/docs
+text, derives checked-in device-plan ids from
+`authored/device_plans/*.yaml` and `authored/device_plans/*.yml` filenames, and
+emits deterministic JSON. The report verifies static prerequisites and stable
+references, lists required manual evidence commands, and keeps its top-level
+status `blocked` even when all static checks pass. The gate does not run live
+comparison or smoke tooling, Cargo, npm, ADB, executor/apply, Tauri/protocol,
+device probing, network access, artifact materialization, fixture/golden
+regeneration, or Python planner deletion work. Python remains the default
+CLI/reference planner owner, and `rust-experimental` remains explicit,
+non-default cutover rehearsal routing.
+
 The Rust backend supports one-shot stateless requests through:
 
 - `hello`

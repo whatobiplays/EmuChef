@@ -427,6 +427,25 @@ successful scenarios must exit `0` and emit concise Python-compatible planning
 summary stdout. Raw Rust JSON stdout remains classified as `stdout_json` and
 fails the P8H smoke for successful scenarios.
 
+P8I adds a static readiness gate for future default Rust planner proposals:
+
+```bash
+python3 tools/check_rust_planner_cutover_readiness.py \
+  --authored-root authored \
+  --scenario-matrix tools/plan_parity_scenarios.json
+```
+
+The gate is stdlib-only and emits deterministic JSON. It verifies static
+prerequisites, derives checked-in device-plan coverage from
+`authored/device_plans/*.yaml` and `authored/device_plans/*.yml` filenames, and
+lists manual evidence commands that must be run before a future default-cutover
+PR. It does not run the comparison harness, smoke runner, Cargo, npm, ADB,
+executor/apply, Tauri/protocol, network, artifact materialization, or
+fixture/golden regeneration checks. Its top-level status remains `blocked` even
+when static checks pass because Python remains the default planner owner and
+default-route, real-device probing, executor/apply, and Python planner deletion
+blockers remain unresolved.
+
 P8C guards the explicit bridge's default CLI output compatibility contract. P7P
 is planner DTO/result comparison evidence, P8B is Python CLI `rust-shadow` route
 invocation evidence, P8C is the assertion that omitted
@@ -435,8 +454,9 @@ stdout/stderr/exit-code passthrough, and P8E is the explicit formatter bridge fo
 usable Rust `PlanningResult` JSON. P8F is Python-compatible output-mode smoke
 across the same explicit `rust-shadow` route and scenario matrix, P8G is the
 explicit non-default `rust-experimental` migration route, and P8H is dev-only
-matrix smoke evidence for that explicit route. None of these is default Rust
-planner cutover readiness or Python planner deletion readiness.
+matrix smoke evidence for that explicit route. P8I is static default-cutover
+readiness reporting only. None of these makes Rust the default planner or makes
+Python planner deletion ready.
 
 P8D records the future default-route output compatibility decision in
 `../../docs/adr/0002-rust-planner-cli-output-compatibility.md`. When Rust
@@ -586,7 +606,10 @@ runner to exercise `--planner-backend rust-experimental`; generated commands omi
 successful scenarios require exit `0` plus concise Python-compatible summary
 stdout. P8C separately guards the `rust-shadow` default output contract as Rust
 passthrough. None of these tools is wired into normal Rust/Tauri runtime checks,
-and none changes default `emuchef plan` ownership.
+and none changes default `emuchef plan` ownership. The P8I static readiness gate
+adds deterministic reporting around these prerequisites and remaining blockers;
+it lists manual evidence commands without executing them and remains `blocked`
+until future phases intentionally clear default-cutover blockers.
 
 ## Phase 6O Executor Scope
 

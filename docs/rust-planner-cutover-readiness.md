@@ -19,6 +19,16 @@ otherwise.
 Executor, apply, real-device, ADB, artifact materialization, network, Tauri
 protocol, and default user-facing CLI behavior are unchanged.
 
+P8I adds `tools/check_rust_planner_cutover_readiness.py` as a static,
+developer-only readiness gate for any future PR that proposes making Rust the
+default `emuchef plan` backend. The gate verifies current static prerequisites,
+lists required manual/live evidence commands, and reports remaining default
+cutover blockers. It does not run live comparison or smoke tooling, Cargo, npm,
+ADB, executor/apply, Tauri/protocol checks, device probing, network access,
+artifact materialization, fixture/golden regeneration, or Python planner
+deletion work. Its top-level report status is expected to remain `blocked` until
+future phases intentionally clear default-cutover blockers.
+
 ## Current Evidence
 
 The Rust planner evidence is planner-only and migration-focused:
@@ -107,6 +117,15 @@ The Rust planner evidence is planner-only and migration-focused:
   `route_output_mode: python-compatible`, and requires successful scenarios to
   exit `0` with stdout classified as `python_summary`. Raw Rust JSON remains
   `stdout_json` and fails the P8H smoke for successful scenarios.
+- `tools/check_rust_planner_cutover_readiness.py` provides the P8I static
+  readiness gate for future default Rust planner proposals. It is stdlib-only,
+  imports no planner/runtime modules, derives checked-in device-plan coverage
+  from `authored/device_plans/*.yaml` and `authored/device_plans/*.yml`
+  filenames, verifies durable references in this document, verifies stable CLI
+  backend tokens in `src/emuchef/cli.py`, and emits deterministic JSON. Its
+  `required_manual_evidence` entries are advisory commands that must be run
+  before a future default-cutover PR can be evaluated; the gate does not execute
+  or claim those commands passed.
 - `tools/plan_parity_scenarios.json` is the P7P scenario matrix for the current
   checked-in device-plan scenarios. The current checked-in scenario matrix
   expects all five scenarios to classify as `match`.
@@ -201,6 +220,15 @@ resolved or explicitly accepted for a narrower experimental route:
   require successful scenarios to exit `0` and emit concise Python-compatible
   summary stdout. This extends the existing smoke runner without renaming it or
   wiring it into normal runtime checks.
+- P8I static-readiness state: `tools/check_rust_planner_cutover_readiness.py
+  --authored-root authored --scenario-matrix tools/plan_parity_scenarios.json`
+  checks static prerequisites for any future default Rust planner PR and emits a
+  deterministic JSON report. The report lists the P7P comparison matrix command,
+  P8H `rust-experimental` smoke command, focused Python tests, and Rust/Tauri
+  checks as required manual evidence, but it does not execute them. The report
+  remains `blocked` even when static checks pass because the default CLI backend,
+  executor/apply, real-device context probing, and Python planner deletion
+  blockers remain unresolved.
 - Pre-cutover candidate: planner routing work may use the matrix as an
   optional/manual gate to gather evidence before exposing any user-facing Rust
   planner path.

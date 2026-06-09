@@ -70,6 +70,14 @@ Rust planner-adjacent coverage is internal and fixture-scoped:
   for `rust-shadow`. P8H extends it to `--planner-backend rust-experimental`,
   where generated commands omit `--rust-shadow-output` and successful scenarios
   must exit `0` and emit concise Python-compatible summary stdout.
+- `tools/check_rust_planner_cutover_readiness.py`: dev-only P8I static readiness
+  gate for future default Rust planner proposals. It checks static prerequisites,
+  durable readiness-document references, stable CLI backend tokens, required
+  artifact presence, and checked-in device-plan coverage from
+  `authored/device_plans/*.yaml` / `*.yml` filenames. It emits deterministic JSON
+  and lists manual evidence commands without executing comparison, smoke, Cargo,
+  npm, ADB, Tauri/protocol, executor/apply, network, artifact, or golden
+  regeneration work.
 - `tests/test_cli.py`: P8C and P8E CLI output compatibility contract coverage for
   the explicit `rust-shadow` bridge. The default guarded contract is Rust
   stdout/stderr/exit-code passthrough. The explicit
@@ -278,6 +286,19 @@ fails the P8H smoke for successful scenarios. P8H is route plus output-shape
 smoke only; P7P remains the Python-vs-Rust planner DTO/result comparison
 evidence, P8B remains raw passthrough route-invocation evidence, and P8F remains
 explicit `rust-shadow` Python-compatible output-mode smoke.
+
+P8I adds `tools/check_rust_planner_cutover_readiness.py` as a static,
+developer-only gate for future default Rust planner proposals. The gate checks
+that the current scenario matrix is structurally valid, every checked-in device
+plan filename has a matrix scenario, required docs/tools/tests exist, the
+readiness document contains durable references to the current evidence and
+blockers, and the Python CLI still exposes the expected backend tokens. The
+report's manual evidence commands are advisory and are not executed by the gate.
+The top-level report status remains `blocked` even when static checks pass
+because Python remains the default planner owner, `rust-experimental` remains an
+explicit non-default rehearsal route, and executor/apply, real-device probing,
+Tauri/protocol behavior, Python planner deletion, and normal runtime checks are
+unchanged.
 
 | Device plan | Device profile | Selected recipes | Private Rust planner status | Required planner-only bindings | Current limitation |
 | --- | --- | --- | --- | --- | --- |
