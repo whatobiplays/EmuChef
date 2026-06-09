@@ -62,7 +62,10 @@ Rust planner-adjacent coverage is internal and fixture-scoped:
 - `tools/compare_rust_python_plan.py`: dev-only comparison harness for Python
   planner API output versus Rust shadow planner output. The harness emits a
   deterministic JSON classification report or matrix report and is not part of
-  normal Rust/Tauri runtime checks.
+  normal Rust/Tauri runtime checks. P8K matrix scenarios may include optional
+  explicit `device_context` values; the harness forwards supplied values to both
+  the Python planner worker and Rust shadow command while reporting only stable
+  context presence/key metadata.
 - `tools/smoke_rust_shadow_cli_matrix.py`: dev-only P8B smoke runner for the
   explicit Python CLI Rust planner migration routes across the current scenario
   matrix. The smoke requires a supplied shadow binary, invokes the Python CLI
@@ -71,7 +74,9 @@ Rust planner-adjacent coverage is internal and fixture-scoped:
   smoke runner with explicit `--rust-shadow-output python-compatible` coverage
   for `rust-shadow`. P8H extends it to `--planner-backend rust-experimental`,
   where generated commands omit `--rust-shadow-output` and successful scenarios
-  must exit `0` and emit concise Python-compatible summary stdout.
+  must exit `0` and emit concise Python-compatible summary stdout. P8K forwards
+  optional scenario `device_context` fields through generated route commands
+  using the existing P8J flags.
 - `tools/check_rust_planner_cutover_readiness.py`: dev-only P8I static readiness
   gate for future default Rust planner proposals. It checks static prerequisites,
   durable readiness-document references, stable CLI backend tokens, required
@@ -316,6 +321,18 @@ probe devices, invoke ADB, create detected-device facts, emit detected-device
 profile mismatch warnings, change the default Python planner route, or change
 executor/apply/Tauri/protocol behavior.
 
+P8K adds explicit-context evidence to the dev-only matrix tooling. Optional
+`device_context` objects in `tools/plan_parity_scenarios.json` are validated with
+only `manufacturer`, `model`, `android_version`, and non-empty ordered
+`device_tags`; detected-device, `adb`, `serial`, and probing fields are rejected.
+Omitted context preserves the existing synthetic/profile-derived behavior.
+Supplied scalar fields override synthetic/profile-derived fields, and supplied
+tags replace profile tags in order. Empty `device_tags` lists are rejected
+because the existing P8J flag surface cannot distinguish an explicit empty tag
+override from omitted tag flags. The comparison and smoke reports include stable
+context presence/key metadata only. This remains dev-only evidence and does not
+make Rust default or authoritative.
+
 | Device plan | Device profile | Selected recipes | Private Rust planner status | Required planner-only bindings | Current limitation |
 | --- | --- | --- | --- | --- | --- |
 | `authored/device_plans/ayaneo.konkr_pocket_fit.base.yaml` | `ayaneo.konkr_pocket_fit` | `app.retroarch.provision` | Success. `repo_plan_e2e_*` tests build input from checked-in plan/profile YAML, emit deterministic selected/expanded refs and step order, and assert normalized RetroArch params. | None. Optional `app.retroarch.provision/retroarch_cfg` may be omitted, which prunes `seed_retroarch_cfg`; a temp `.cfg` binding includes that step. | Not a user-facing planner path. |
@@ -331,6 +348,7 @@ executor/apply/Tauri/protocol behavior.
 | `ayaneo_generic_base` | `ayaneo.generic.base` | `feature.copy_bios/bios_source_dir` directory. | `match` |
 | `ayaneo_pocket_air_mini_base` | `ayaneo.pocket_air_mini.base` | `feature.copy_bios/bios_source_dir` directory. | `match` |
 | `ayaneo_pocket_s2_base` | `ayaneo.pocket_s2.base` | `feature.copy_bios/bios_source_dir` directory; `app.xaniteog.install/xaniteog_apk` `.apk` file. | `match` |
+| `ayaneo_pocket_s_mini_base_explicit_context` | `ayaneo.pocket_s_mini.base` | None; supplies explicit manufacturer, model, Android version, and ordered device tags. | `match` |
 
 | Path | Recipe id | Parse status | Planner/emission status | Context source | Unsupported gap | Test/evidence path |
 | --- | --- | --- | --- | --- | --- | --- |
@@ -659,11 +677,12 @@ current checked-in repo-plan comparison gap.
 
 The current Rust planner evidence is incremental parity evidence only. Python
 remains the user-facing CLI/reference planner owner, and Rust remains
-shadow/dev-only. The current checked-in scenario matrix expects all five
-scenarios to classify as `match`, but matching matrix status is necessary
-evidence for the compared planner-only fields, not sufficient proof of CLI
-routing, real-device context resolution, executor/apply compatibility, artifact
-materialization, or Python planner deletability.
+shadow/dev-only. The current checked-in scenario matrix covers all five
+checked-in device plans with six scenarios, including one P8K explicit-context
+scenario, and expects every scenario to classify as `match`. Matching matrix
+status is necessary evidence for the compared planner-only fields, not
+sufficient proof of CLI routing, real-device context resolution, executor/apply
+compatibility, artifact materialization, or Python planner deletability.
 
 Use `docs/rust-planner-cutover-readiness.md` for the current blocker
 classification, comparison-matrix gating policy, and proposed staged ladder for

@@ -63,6 +63,20 @@
       ],
       "known_gap_ids": [],
       "notes": "Current checked-in RetroArch plus BIOS plus XaniteOG scenario is expected to match when required planner-only BIOS directory and APK path bindings are supplied."
+    },
+    {
+      "id": "ayaneo_pocket_s_mini_base_explicit_context",
+      "device_plan": "ayaneo.pocket_s_mini.base",
+      "expected_classification": "match",
+      "bindings": [],
+      "device_context": {
+        "manufacturer": "AYANEO",
+        "model": "Pocket S Mini",
+        "android_version": 13,
+        "device_tags": ["handheld", "landscape"]
+      },
+      "known_gap_ids": [],
+      "notes": "Explicit device context scenario for Rust route and comparison evidence. This does not probe devices."
     }
   ]
 }

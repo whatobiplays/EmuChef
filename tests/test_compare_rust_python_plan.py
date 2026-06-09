@@ -177,6 +177,47 @@ class CompareRustPythonPlanTests(unittest.TestCase):
         self.assertEqual(prebuilt.mode, "prebuilt_binary")
         self.assertEqual(prebuilt.argv[:5], ["/tmp/emuchef-plan-shadow", "--authored-root", "authored", "--device-plan", "example.plan"])
 
+    def test_build_rust_command_forwards_explicit_device_context_args(self) -> None:
+        context = harness.PlanParityDeviceContext(
+            manufacturer="AYANEO",
+            model="Pocket S Mini",
+            android_version=13,
+            device_tags=("handheld", "landscape"),
+        )
+
+        spec = harness.build_rust_command(
+            authored_root="authored",
+            device_plan="example.plan",
+            binds=["recipe/input=value"],
+            rust_bin="/tmp/emuchef-plan-shadow",
+            cargo_offline=True,
+            repo_root=Path("/repo"),
+            device_context=context,
+        )
+
+        self.assertEqual(
+            spec.argv,
+            [
+                "/tmp/emuchef-plan-shadow",
+                "--authored-root",
+                "authored",
+                "--device-plan",
+                "example.plan",
+                "--manufacturer",
+                "AYANEO",
+                "--model",
+                "Pocket S Mini",
+                "--android-version",
+                "13",
+                "--device-tag",
+                "handheld",
+                "--device-tag",
+                "landscape",
+                "--bind",
+                "recipe/input=value",
+            ],
+        )
+
     def test_build_python_worker_command_uses_hidden_worker_mode(self) -> None:
         spec = harness.build_python_worker_command(
             python_executable="/venv/bin/python",
@@ -197,6 +238,48 @@ class CompareRustPythonPlanTests(unittest.TestCase):
                 "authored",
                 "--device-plan",
                 "example.plan",
+                "--bind",
+                "recipe/input=value",
+            ],
+        )
+
+    def test_build_python_worker_command_forwards_explicit_device_context_args(self) -> None:
+        context = harness.PlanParityDeviceContext(
+            manufacturer="AYANEO",
+            model="Pocket S Mini",
+            android_version=13,
+            device_tags=("handheld", "landscape"),
+        )
+
+        spec = harness.build_python_worker_command(
+            python_executable="/venv/bin/python",
+            script_path=Path("/repo/tools/compare_rust_python_plan.py"),
+            authored_root="authored",
+            device_plan="example.plan",
+            binds=["recipe/input=value"],
+            device_context=context,
+        )
+
+        self.assertEqual(
+            spec.argv,
+            [
+                "/venv/bin/python",
+                "/repo/tools/compare_rust_python_plan.py",
+                "__python-planner-worker",
+                "--authored-root",
+                "authored",
+                "--device-plan",
+                "example.plan",
+                "--manufacturer",
+                "AYANEO",
+                "--model",
+                "Pocket S Mini",
+                "--android-version",
+                "13",
+                "--device-tag",
+                "handheld",
+                "--device-tag",
+                "landscape",
                 "--bind",
                 "recipe/input=value",
             ],
@@ -226,6 +309,42 @@ class CompareRustPythonPlanTests(unittest.TestCase):
         self.assertEqual(report["summary"]["classification"], "match")
         self.assertTrue(all(item["classification"] in {"match", "intentional_shape_difference"} for item in report["comparisons"]))
         self.assertEqual(json.loads(first), report)
+
+    def test_report_metadata_records_context_keys_without_values(self) -> None:
+        context = harness.PlanParityDeviceContext(
+            manufacturer="AYANEO",
+            model="Pocket S Mini",
+            android_version=13,
+            device_tags=("handheld", "landscape"),
+        )
+        step = {
+            "id": "example.recipe/step",
+            "type": "wait",
+            "dependencies": [],
+            "params": {"duration_ms": {"value": 1}},
+        }
+
+        report = harness.build_report(
+            authored_root="authored",
+            device_plan="example.plan",
+            bindings=OrderedDict(),
+            python_result=planning_result(steps=[step]),
+            rust_result=planning_result(steps=[step]),
+            python_mode="python_planner_worker",
+            rust_mode="prebuilt_binary",
+            known_gap_rules=[],
+            device_context=context,
+        )
+        serialized = harness.dumps_report(report)
+
+        self.assertEqual(report["metadata"]["device_context"], True)
+        self.assertEqual(
+            report["metadata"]["device_context_keys"],
+            ["manufacturer", "model", "android_version", "device_tags"],
+        )
+        self.assertNotIn("AYANEO", serialized)
+        self.assertNotIn("Pocket S Mini", serialized)
+        self.assertNotIn("handheld", serialized)
 
     def test_value_and_presence_mismatches_are_classified(self) -> None:
         python = planning_result(
@@ -377,6 +496,82 @@ class CompareRustPythonPlanTests(unittest.TestCase):
             ],
         )
 
+    def test_scenario_matrix_payload_accepts_optional_device_context(self) -> None:
+        matrix = harness.parse_scenario_matrix_payload(
+            {
+                "schema_version": 1,
+                "scenarios": [
+                    {
+                        "id": "no_context",
+                        "device_plan": "example.no_context",
+                        "expected_classification": "match",
+                        "known_gap_ids": [],
+                        "bindings": [],
+                    },
+                    {
+                        "id": "with_context",
+                        "device_plan": "example.with_context",
+                        "expected_classification": "match",
+                        "known_gap_ids": [],
+                        "bindings": [],
+                        "device_context": {
+                            "manufacturer": "AYANEO",
+                            "model": "Pocket S Mini",
+                            "android_version": 13,
+                            "device_tags": ["handheld", "landscape"],
+                        },
+                    },
+                ],
+            },
+            source="synthetic.json",
+        )
+
+        self.assertIsNone(matrix.scenarios[0].device_context)
+        context = matrix.scenarios[1].device_context
+        self.assertEqual(
+            context,
+            harness.PlanParityDeviceContext(
+                manufacturer="AYANEO",
+                model="Pocket S Mini",
+                android_version=13,
+                device_tags=("handheld", "landscape"),
+            ),
+        )
+
+    def test_scenario_matrix_rejects_invalid_device_context_shape(self) -> None:
+        invalid_contexts = [
+            (None, "device_context must be an object"),
+            ({"manufacturer": ""}, "device_context.manufacturer must be a non-empty string"),
+            ({"model": ""}, "device_context.model must be a non-empty string"),
+            ({"android_version": -1}, "device_context.android_version must be a non-negative integer"),
+            ({"android_version": True}, "device_context.android_version must be a non-negative integer"),
+            ({"device_tags": []}, "device_context.device_tags must be a non-empty list"),
+            ({"device_tags": ["handheld", ""]}, "device_context.device_tags[1] must be a non-empty string"),
+            ({"serial": "SERIAL"}, "device_context contains unsupported field: serial"),
+            ({"adb": True}, "device_context contains unsupported field: adb"),
+        ]
+
+        for device_context, message in invalid_contexts:
+            with self.subTest(device_context=device_context):
+                with self.assertRaises(ValueError) as context:
+                    harness.parse_scenario_matrix_payload(
+                        {
+                            "schema_version": 1,
+                            "scenarios": [
+                                {
+                                    "id": "bad_context",
+                                    "device_plan": "example.plan",
+                                    "expected_classification": "match",
+                                    "known_gap_ids": [],
+                                    "bindings": [],
+                                    "device_context": device_context,
+                                }
+                            ],
+                        },
+                        source="synthetic.json",
+                    )
+                self.assertIn(message, str(context.exception))
+
     def test_scenario_matrix_rejects_malformed_definitions_with_stable_errors(self) -> None:
         malformed_payloads = [
             (
@@ -487,6 +682,7 @@ class CompareRustPythonPlanTests(unittest.TestCase):
                     bindings=(),
                     notes="Expected to match.",
                     known_gap_ids=(),
+                    device_context=None,
                 ),
                 harness.PlanParityScenario(
                     id="expected_gap",
@@ -495,6 +691,12 @@ class CompareRustPythonPlanTests(unittest.TestCase):
                     bindings=(),
                     notes="Future scenarios may intentionally expect a known gap.",
                     known_gap_ids=("future_gap",),
+                    device_context=harness.PlanParityDeviceContext(
+                        manufacturer="AYANEO",
+                        model=None,
+                        android_version=None,
+                        device_tags=None,
+                    ),
                 ),
                 harness.PlanParityScenario(
                     id="unexpected_gap",
@@ -503,6 +705,7 @@ class CompareRustPythonPlanTests(unittest.TestCase):
                     bindings=(),
                     notes="Synthetic expectation failure.",
                     known_gap_ids=(),
+                    device_context=None,
                 ),
             ),
         )
@@ -556,6 +759,8 @@ class CompareRustPythonPlanTests(unittest.TestCase):
         self.assertEqual(report["summary"]["mismatch_buckets"], {"known_gap": 2})
         self.assertEqual(report["scenarios"][0]["expectation_status"], "pass")
         self.assertEqual(report["scenarios"][1]["expectation_status"], "pass")
+        self.assertEqual(report["scenarios"][1]["device_context"], True)
+        self.assertEqual(report["scenarios"][1]["device_context_keys"], ["manufacturer"])
         self.assertEqual(report["scenarios"][2]["expectation_status"], "fail")
         self.assertEqual(report["known_gaps"][0]["scenario_id"], "expected_gap")
         self.assertEqual(harness.matrix_exit_code(report), 1)
@@ -571,6 +776,7 @@ class CompareRustPythonPlanTests(unittest.TestCase):
                     bindings=(),
                     notes="Expected to match.",
                     known_gap_ids=(),
+                    device_context=None,
                 ),
             ),
         )

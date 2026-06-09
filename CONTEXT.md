@@ -304,6 +304,16 @@ exit-code behavior unless a separate accepted breaking-change decision changes
 that target. Rust-native JSON output requires a future explicit structured-output
 mode such as `--format json`.
 
+P8K extends the dev-only planner matrix tooling with optional explicit
+`device_context` data per scenario. Valid matrix context fields are
+`manufacturer`, `model`, `android_version`, and non-empty ordered `device_tags`.
+Detected-device, `adb`, `serial`, and probing-related fields are rejected.
+Omitted `device_context` preserves the existing synthetic/profile-derived
+planner context. Supplied scalar context fields override synthetic/profile-derived
+fields, and supplied tags replace profile tags in order. Empty `device_tags`
+lists are rejected because the existing P8J CLI flags cannot distinguish an
+explicit empty tag override from omitted tag flags.
+
 `tools/smoke_rust_shadow_cli_matrix.py` is the dev-only matrix smoke for the
 explicit Python CLI Rust planner migration routes. It is standalone stdlib-only
 tooling and does not import the planner comparison harness or Python planner
@@ -324,9 +334,10 @@ deterministic JSON report uses stable basenames for local executables, records
 the selected route backend and effective route output mode, includes scenario
 ids, device-plan ids, binding refs/kinds, expected and actual route exit codes,
 pass/fail status, stable command classifications, stdout/stderr classifications,
-expected stdout class where enforced, and bounded normalized failure summaries.
+expected stdout class where enforced, stable context presence/key metadata when a
+scenario supplies `device_context`, and bounded normalized failure summaries.
 The report does not include timestamps, durations, generated temp paths, random
-ids, or full volatile process output.
+ids, full context values, detected-device data, or full volatile process output.
 
 P8F uses the same smoke runner for explicit
 `--rust-shadow-output python-compatible` matrix smoke. In that mode, a successful
@@ -354,11 +365,14 @@ harness for Python planner API output versus Rust shadow planner output. It uses
 the current Python planner API path (`load_authored_catalog`,
 `Planner.start_session`, `session.bind_input`, and `session.emit_execution_plan`)
 under the same synthetic/profile-derived planner context used by Rust shadow
-planning. This comparison does not call `emuchef plan`, does not prove Python
-CLI/device-probing parity, and does not execute plans, probe devices, invoke
-ADB, access the network, download or materialize artifacts, expose Tauri or
-sidecar protocol commands, update checked-in fixtures/goldens, or participate in
-normal Rust/Tauri runtime checks. Reports classify differences as `match`,
+planning unless a matrix scenario supplies explicit P8K `device_context` fields.
+For those scenarios, the harness forwards supplied values to both the hidden
+Python planner worker and the Rust shadow command and reports only stable context
+presence/key metadata. This comparison does not call `emuchef plan`, does not
+prove Python CLI/device-probing parity, and does not execute plans, probe
+devices, invoke ADB, access the network, download or materialize artifacts,
+expose Tauri or sidecar protocol commands, update checked-in fixtures/goldens,
+or participate in normal Rust/Tauri runtime checks. Reports classify differences as `match`,
 `rust_missing`, `python_missing`, `value_mismatch`, `known_gap`,
 `intentional_shape_difference`, or `unsupported`, and compare top-level status,
 selected and expanded refs, execution-plan presence, step count, step ids/order,
@@ -371,11 +385,13 @@ development.
 `tools/plan_parity_scenarios.json` is a dev-only current comparison scenario
 manifest for checked-in device plans. Matrix mode runs the Python planner API
 and Rust shadow planner for each listed scenario, creates only planner-visible
-temporary placeholder resources for required bindings, and emits one
-deterministic JSON report to stdout. The report includes scenario ids, device
-plan ids, binding refs/kinds, expected and actual classifications, expectation
-pass/fail status, summary counts, known gaps, diagnostics, and mismatch
-classification buckets. It does not include generated temporary path values.
+temporary placeholder resources for required bindings, forwards optional
+explicit `device_context` values where present, and emits one deterministic JSON
+report to stdout. The report includes scenario ids, device plan ids, binding
+refs/kinds, stable context presence/key metadata when applicable, expected and
+actual classifications, expectation pass/fail status, summary counts, known
+gaps, diagnostics, and mismatch classification buckets. It does not include
+generated temporary path values or full context values.
 In this matrix, `match` means only that the dev-only comparison harness found
 no unclassified differences for the compared fields under the supplied
 planner-only bindings and shared planner context. It does not mean Python CLI
@@ -384,15 +400,17 @@ materialization parity, full schema parity, future scenario parity, or Rust
 planner cutover readiness by itself. Matrix mode exits `0` only when every
 scenario actual classification matches its expected classification. This exit
 status is an expectation check for the current dev-only scenario matrix, not a
-claim of full planner correctness. Current checked-in matrix scenarios for
+claim of full planner correctness. Current checked-in base matrix scenarios for
 `ayaneo.konkr_pocket_fit.base`, `ayaneo.pocket_s_mini.base`,
 `ayaneo.generic.base`, `ayaneo.pocket_air_mini.base`, and
-`ayaneo.pocket_s2.base` are all expected `match`; future scenarios may
-intentionally expect `known_gap`. Matching matrix status is necessary evidence
-for the compared planner-only fields, not sufficient user-facing planner
-cutover or Python planner deletion readiness. The matrix remains a dev-only
-manual artifact in the current state; it is not wired into normal Rust/Tauri
-checks.
+`ayaneo.pocket_s2.base` are all expected `match`. P8K adds
+`ayaneo_pocket_s_mini_base_explicit_context`, another expected-`match` scenario
+for `ayaneo.pocket_s_mini.base` with supplied manufacturer, model, Android
+version, and ordered tags. Future scenarios may intentionally expect
+`known_gap`. Matching matrix status is necessary evidence for the compared
+planner-only fields, not sufficient user-facing planner cutover or Python
+planner deletion readiness. The matrix remains a dev-only manual artifact in
+the current state; it is not wired into normal Rust/Tauri checks.
 
 `tools/check_rust_planner_cutover_readiness.py` is the P8I static readiness gate
 for future PRs that propose making Rust the default `emuchef plan` backend. It is
@@ -400,8 +418,9 @@ stdlib-only, imports no planner/runtime modules, parses only JSON and source/doc
 text, derives checked-in device-plan ids from
 `authored/device_plans/*.yaml` and `authored/device_plans/*.yml` filenames, and
 emits deterministic JSON. The report verifies static prerequisites and stable
-references, lists required manual evidence commands, and keeps its top-level
-status `blocked` even when all static checks pass. The gate does not run live
+references, validates optional P8K `device_context` shape, lists required manual
+evidence commands, and keeps its top-level status `blocked` even when all static
+checks pass. The gate does not run live
 comparison or smoke tooling, Cargo, npm, ADB, executor/apply, Tauri/protocol,
 device probing, network access, artifact materialization, fixture/golden
 regeneration, or Python planner deletion work. Python remains the default

@@ -229,15 +229,6 @@ def _scenario_matrix_checks(matrix_path: Path, authored_path: Path) -> tuple[dic
     )
 
     scenario_device_plans = _scenario_string_values(scenarios, "device_plan")
-    duplicate_device_plans = _duplicates(scenario_device_plans)
-    checks.append(
-        _check(
-            "scenario_matrix_unique_device_plans",
-            bool(scenario_device_plans) and not duplicate_device_plans,
-            None if scenario_device_plans and not duplicate_device_plans else {"duplicate_device_plans": duplicate_device_plans},
-        )
-    )
-
     checked_in_device_plan_ids = _checked_in_device_plan_ids(authored_path)
     matrix_device_plan_ids = set(scenario_device_plans)
     missing_device_plans = sorted(device_plan_id for device_plan_id in checked_in_device_plan_ids if device_plan_id not in matrix_device_plan_ids)
@@ -303,6 +294,40 @@ def _scenario_field_errors(scenarios: object) -> list[str]:
             errors.append(f"{prefix}.bindings must be a list")
         if not isinstance(scenario.get("known_gap_ids"), list):
             errors.append(f"{prefix}.known_gap_ids must be a list")
+        if "device_context" in scenario:
+            errors.extend(_device_context_field_errors(scenario["device_context"], prefix=prefix))
+    return errors
+
+
+def _device_context_field_errors(device_context: object, *, prefix: str) -> list[str]:
+    field = f"{prefix}.device_context"
+    if not isinstance(device_context, dict):
+        return [f"{field} must be an object"]
+
+    errors: list[str] = []
+    allowed_keys = {"manufacturer", "model", "android_version", "device_tags"}
+    for key in device_context:
+        if key not in allowed_keys:
+            errors.append(f"{field} contains unsupported field: {key}")
+
+    for key in ("manufacturer", "model"):
+        if key in device_context and not _non_empty_string(device_context.get(key)):
+            errors.append(f"{field}.{key} must be a non-empty string")
+
+    if "android_version" in device_context:
+        android_version = device_context["android_version"]
+        if isinstance(android_version, bool) or not isinstance(android_version, int) or android_version < 0:
+            errors.append(f"{field}.android_version must be a non-negative integer")
+
+    if "device_tags" in device_context:
+        raw_tags = device_context["device_tags"]
+        if not isinstance(raw_tags, list) or not raw_tags:
+            errors.append(f"{field}.device_tags must be a non-empty list")
+        else:
+            for index, value in enumerate(raw_tags):
+                if not _non_empty_string(value):
+                    errors.append(f"{field}.device_tags[{index}] must be a non-empty string")
+
     return errors
 
 

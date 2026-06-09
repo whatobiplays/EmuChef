@@ -470,6 +470,18 @@ when static checks pass because Python remains the default planner owner and
 default-route, real-device probing, executor/apply, and Python planner deletion
 blockers remain unresolved.
 
+P8K extends the dev-only matrix evidence with optional explicit
+`device_context` data per scenario. The schema accepts non-empty `manufacturer`
+and `model` strings, a non-negative integer `android_version`, and non-empty
+ordered `device_tags`; detected-device, `adb`, `serial`, and probing fields are
+rejected. Empty `device_tags` lists are rejected because the existing P8J flag
+surface cannot distinguish an explicit empty tag override from omitted tag
+flags. Omitted context keeps the synthetic/profile-derived planner context,
+supplied scalar fields override it, and supplied tags replace profile tags in
+order. This does not add ADB/device probing, detected-device facts,
+executor/apply behavior, Tauri/protocol behavior, Cargo fallback behavior,
+fixture/golden regeneration, or Python planner deletion readiness.
+
 P8C guards the explicit bridge's default CLI output compatibility contract. P7P
 is planner DTO/result comparison evidence, P8B is Python CLI `rust-shadow` route
 invocation evidence, P8C is the assertion that omitted
@@ -540,9 +552,11 @@ It does not compare Python CLI behavior, because the user-facing
 `emuchef plan` CLI probes device facts through ADB before planning. The Python
 worker uses `load_authored_catalog(...)`, `Planner.start_session(...)`,
 optional `session.bind_input(...)`, and `session.emit_execution_plan()` under a
-shared synthetic/profile-derived planner context. That context uses profile
-match/name/version/tags and `capability_defaults`; it does not prove full
-Python CLI or real-device parity.
+shared synthetic/profile-derived planner context unless a matrix scenario
+supplies explicit P8K `device_context` fields. For those scenarios, the harness
+passes supplied values to both the hidden Python worker and the Rust shadow
+command. Reports include stable context presence/key metadata only, not full
+context values. This does not prove full Python CLI or real-device parity.
 
 The report is deterministic JSON. It classifies differences as `match`,
 `rust_missing`, `python_missing`, `value_mismatch`, `known_gap`,
@@ -590,13 +604,13 @@ mkdir -p /tmp/emuchef-p7n-bios
 ```
 
 Matrix mode creates required planner-only temp directories and files from
-`tools/plan_parity_scenarios.json` and includes binding refs/kinds, not
-generated temp path values, in the matrix report. It exits `0` only when every
-scenario's actual classification matches its expected classification. This is
-an expectation check for the current dev-only scenario matrix, not a claim of
-full planner correctness. Future scenarios may intentionally expect
-`known_gap`; currently all five checked-in device-plan scenarios are expected
-`match`:
+`tools/plan_parity_scenarios.json` and includes binding refs/kinds plus stable
+context presence/key metadata, not generated temp path values or full context
+values, in the matrix report. It exits `0` only when every scenario's actual
+classification matches its expected classification. This is an expectation check
+for the current dev-only scenario matrix, not a claim of full planner
+correctness. Future scenarios may intentionally expect `known_gap`; currently
+all six checked-in scenarios are expected `match`:
 
 | Scenario id | Device plan | Matrix bindings | Expected classification |
 | --- | --- | --- | --- |
@@ -605,6 +619,7 @@ full planner correctness. Future scenarios may intentionally expect
 | `ayaneo_generic_base` | `ayaneo.generic.base` | `feature.copy_bios/bios_source_dir` directory. | `match` |
 | `ayaneo_pocket_air_mini_base` | `ayaneo.pocket_air_mini.base` | `feature.copy_bios/bios_source_dir` directory. | `match` |
 | `ayaneo_pocket_s2_base` | `ayaneo.pocket_s2.base` | `feature.copy_bios/bios_source_dir` directory; `app.xaniteog.install/xaniteog_apk` `.apk` file. | `match` |
+| `ayaneo_pocket_s_mini_base_explicit_context` | `ayaneo.pocket_s_mini.base` | None; supplies explicit manufacturer, model, Android version, and ordered device tags. | `match` |
 
 The Pocket S2 comparison currently reports `match` when required planner-only
 BIOS and XaniteOG bindings are supplied. The comparison harness still has a
@@ -629,11 +644,13 @@ adds the explicit non-default `rust-experimental` route. P8H uses the same smoke
 runner to exercise `--planner-backend rust-experimental`; generated commands omit
 `--rust-shadow-output`, the effective output mode is Python-compatible, and
 successful scenarios require exit `0` plus concise Python-compatible summary
-stdout. P8C separately guards the `rust-shadow` default output contract as Rust
-passthrough. None of these tools is wired into normal Rust/Tauri runtime checks,
-and none changes default `emuchef plan` ownership. The P8I static readiness gate
-adds deterministic reporting around these prerequisites and remaining blockers;
-it lists manual evidence commands without executing them and remains `blocked`
+stdout. P8K forwards optional scenario `device_context` values through these
+smoke commands and records only stable context presence/key metadata. P8C
+separately guards the `rust-shadow` default output contract as Rust passthrough.
+None of these tools is wired into normal Rust/Tauri runtime checks, and none
+changes default `emuchef plan` ownership. The P8I static readiness gate adds
+deterministic reporting around these prerequisites and remaining blockers; it
+lists manual evidence commands without executing them and remains `blocked`
 until future phases intentionally clear default-cutover blockers.
 
 ## Phase 6O Executor Scope

@@ -50,6 +50,7 @@ class SmokeRustShadowCliMatrixTests(unittest.TestCase):
                 "ayaneo_generic_base",
                 "ayaneo_pocket_air_mini_base",
                 "ayaneo_pocket_s2_base",
+                "ayaneo_pocket_s_mini_base_explicit_context",
             ],
         )
         run_process.assert_not_called()
@@ -95,6 +96,56 @@ class SmokeRustShadowCliMatrixTests(unittest.TestCase):
             ],
         )
         self.assertNotIn("--rust-shadow-output", command)
+
+    def test_builds_cli_command_for_scenario_with_explicit_context(self) -> None:
+        scenario = self.smoke.PlanParityScenario(
+            id="with_context",
+            device_plan="example.plan",
+            expected_route_exit_code=0,
+            bindings=(),
+            device_context=self.smoke.PlanParityDeviceContext(
+                manufacturer="AYANEO",
+                model="Pocket S Mini",
+                android_version=13,
+                device_tags=("handheld", "landscape"),
+            ),
+        )
+
+        command = self.smoke.build_cli_command(
+            python_executable="/venv/bin/python",
+            authored_root="authored",
+            rust_planner_bin="/tmp/emuchef-plan-shadow",
+            scenario=scenario,
+            raw_binds=[],
+        )
+
+        self.assertEqual(
+            command,
+            [
+                "/venv/bin/python",
+                "-m",
+                "emuchef",
+                "plan",
+                "--planner-backend",
+                "rust-shadow",
+                "--rust-planner-bin",
+                "/tmp/emuchef-plan-shadow",
+                "--authored-root",
+                "authored",
+                "--device-plan",
+                "example.plan",
+                "--manufacturer",
+                "AYANEO",
+                "--model",
+                "Pocket S Mini",
+                "--android-version",
+                "13",
+                "--device-tag",
+                "handheld",
+                "--device-tag",
+                "landscape",
+            ],
+        )
 
     def test_builds_cli_command_for_python_compatible_output_mode(self) -> None:
         scenario = self.smoke.PlanParityScenario(
@@ -307,6 +358,58 @@ class SmokeRustShadowCliMatrixTests(unittest.TestCase):
         self.assertNotIn("/abs/path", first)
         self.assertNotIn(tempfile.gettempdir(), first)
 
+    def test_report_includes_stable_context_metadata_without_context_values(self) -> None:
+        matrix = self.smoke.PlanParityScenarioMatrix(
+            schema_version=1,
+            scenarios=(
+                self.smoke.PlanParityScenario(
+                    "context",
+                    "context.plan",
+                    0,
+                    (),
+                    self.smoke.PlanParityDeviceContext(
+                        manufacturer="AYANEO",
+                        model="Pocket S Mini",
+                        android_version=13,
+                        device_tags=("handheld", "landscape"),
+                    ),
+                ),
+            ),
+        )
+        result = self.smoke.ScenarioSmokeResult(
+            scenario=matrix.scenarios[0],
+            report_bindings=[],
+            expected_route_exit_code=0,
+            actual_exit_code=0,
+            stdout_classification="stdout_json",
+            expected_stdout_class="not_enforced",
+            stderr_classification="stderr_empty",
+            command_classification="rust_shadow_passthrough_implicit",
+        )
+
+        serialized = self.smoke.dumps_report(
+            self.smoke.build_report(
+                scenario_matrix="tools/plan_parity_scenarios.json",
+                authored_root="authored",
+                rust_planner_bin="/abs/path/to/emuchef-plan-shadow",
+                python_executable="/abs/path/to/python3",
+                route_backend="rust-shadow",
+                route_output_mode="passthrough",
+                matrix=matrix,
+                scenario_results=[result],
+            )
+        )
+        report = json.loads(serialized)
+
+        self.assertEqual(report["scenarios"][0]["device_context"], True)
+        self.assertEqual(
+            report["scenarios"][0]["device_context_keys"],
+            ["manufacturer", "model", "android_version", "device_tags"],
+        )
+        self.assertNotIn("AYANEO", serialized)
+        self.assertNotIn("Pocket S Mini", serialized)
+        self.assertNotIn("handheld", serialized)
+
     def test_run_matrix_exits_zero_when_all_synthetic_runs_pass(self) -> None:
         payload = scenario_payload(
             {"id": "one", "device_plan": "one.plan", "bindings": []},
@@ -395,7 +498,17 @@ class SmokeRustShadowCliMatrixTests(unittest.TestCase):
     def test_rust_experimental_matrix_uses_implicit_python_compatible_output(self) -> None:
         payload = scenario_payload(
             {"id": "one", "device_plan": "one.plan", "bindings": []},
-            {"id": "two", "device_plan": "two.plan", "bindings": []},
+            {
+                "id": "two",
+                "device_plan": "two.plan",
+                "bindings": [],
+                "device_context": {
+                    "manufacturer": "AYANEO",
+                    "model": "Pocket S Mini",
+                    "android_version": 13,
+                    "device_tags": ["handheld", "landscape"],
+                },
+            },
         )
         completed = [
             subprocess.CompletedProcess(
@@ -442,6 +555,41 @@ class SmokeRustShadowCliMatrixTests(unittest.TestCase):
                 "rust-experimental",
             )
             self.assertNotIn("--rust-shadow-output", argv)
+        context_argv = run_process.call_args_list[1].args[0]
+        self.assertEqual(context_argv[context_argv.index("--manufacturer") + 1], "AYANEO")
+        self.assertEqual(context_argv[context_argv.index("--model") + 1], "Pocket S Mini")
+        self.assertEqual(context_argv[context_argv.index("--android-version") + 1], "13")
+        tag_values = [context_argv[index + 1] for index, value in enumerate(context_argv) if value == "--device-tag"]
+        self.assertEqual(tag_values, ["handheld", "landscape"])
+
+    def test_scenario_matrix_rejects_invalid_device_context_shape(self) -> None:
+        invalid_contexts = [
+            (None, "device_context must be an object"),
+            ({"manufacturer": ""}, "device_context.manufacturer must be a non-empty string"),
+            ({"model": ""}, "device_context.model must be a non-empty string"),
+            ({"android_version": -1}, "device_context.android_version must be a non-negative integer"),
+            ({"android_version": True}, "device_context.android_version must be a non-negative integer"),
+            ({"device_tags": []}, "device_context.device_tags must be a non-empty list"),
+            ({"device_tags": ["handheld", ""]}, "device_context.device_tags[1] must be a non-empty string"),
+            ({"serial": "SERIAL"}, "device_context contains unsupported field: serial"),
+            ({"adb": True}, "device_context contains unsupported field: adb"),
+        ]
+
+        for device_context, message in invalid_contexts:
+            with self.subTest(device_context=device_context):
+                with self.assertRaises(ValueError) as context:
+                    self.smoke.parse_scenario_matrix_payload(
+                        scenario_payload(
+                            {
+                                "id": "bad_context",
+                                "device_plan": "example.plan",
+                                "bindings": [],
+                                "device_context": device_context,
+                            },
+                        ),
+                        source="synthetic.json",
+                    )
+                self.assertIn(message, str(context.exception))
 
     def test_rust_experimental_matrix_exits_zero_when_all_synthetic_runs_emit_summary(self) -> None:
         payload = scenario_payload(

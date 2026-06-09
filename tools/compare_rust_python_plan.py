@@ -16,7 +16,7 @@ import sys
 import tempfile
 from collections import Counter, OrderedDict
 from collections.abc import Mapping, Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Any
 
@@ -108,6 +108,14 @@ class PlanParityBindingSpec:
 
 
 @dataclass(frozen=True, slots=True)
+class PlanParityDeviceContext:
+    manufacturer: str | None = None
+    model: str | None = None
+    android_version: int | None = None
+    device_tags: tuple[str, ...] | None = None
+
+
+@dataclass(frozen=True, slots=True)
 class PlanParityScenario:
     id: str
     device_plan: str
@@ -115,6 +123,7 @@ class PlanParityScenario:
     bindings: tuple[PlanParityBindingSpec, ...]
     notes: str
     known_gap_ids: tuple[str, ...]
+    device_context: PlanParityDeviceContext | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -254,6 +263,10 @@ def _parse_scenario(
         bindings=bindings,
         notes=notes,
         known_gap_ids=known_gap_ids,
+        device_context=_parse_device_context(
+            raw_scenario.get("device_context", MISSING),
+            field=f"{prefix}.device_context",
+        ),
     )
 
 
@@ -284,8 +297,51 @@ def _parse_binding_spec(
     return PlanParityBindingSpec(ref=binding_ref, kind=kind, suffix=suffix)
 
 
+def _parse_device_context(raw_context: object, *, field: str) -> PlanParityDeviceContext | None:
+    if raw_context is MISSING:
+        return None
+    if not isinstance(raw_context, Mapping):
+        raise ValueError(f"{field} must be an object")
+
+    allowed_keys = {"manufacturer", "model", "android_version", "device_tags"}
+    for key in raw_context:
+        if key not in allowed_keys:
+            raise ValueError(f"{field} contains unsupported field: {key}")
+
+    manufacturer = _optional_non_empty_string(raw_context, "manufacturer", f"{field}.manufacturer")
+    model = _optional_non_empty_string(raw_context, "model", f"{field}.model")
+
+    android_version = raw_context.get("android_version")
+    if android_version is not None:
+        if isinstance(android_version, bool) or not isinstance(android_version, int) or android_version < 0:
+            raise ValueError(f"{field}.android_version must be a non-negative integer")
+
+    device_tags: tuple[str, ...] | None = None
+    if "device_tags" in raw_context:
+        raw_tags = raw_context["device_tags"]
+        if not isinstance(raw_tags, list) or not raw_tags:
+            raise ValueError(f"{field}.device_tags must be a non-empty list")
+        device_tags = _string_tuple(raw_tags, f"{field}.device_tags")
+
+    return PlanParityDeviceContext(
+        manufacturer=manufacturer,
+        model=model,
+        android_version=android_version,
+        device_tags=device_tags,
+    )
+
+
 def _required_string(raw: Mapping[str, object], key: str, field: str) -> str:
     value = raw.get(key)
+    if not isinstance(value, str) or not value:
+        raise ValueError(f"{field} must be a non-empty string")
+    return value
+
+
+def _optional_non_empty_string(raw: Mapping[str, object], key: str, field: str) -> str | None:
+    value = raw.get(key)
+    if value is None:
+        return None
     if not isinstance(value, str) or not value:
         raise ValueError(f"{field} must be a non-empty string")
     return value
@@ -364,6 +420,7 @@ def build_python_worker_command(
     authored_root: str,
     device_plan: str,
     binds: Sequence[str],
+    device_context: PlanParityDeviceContext | None = None,
 ) -> CommandSpec:
     argv = [
         python_executable,
@@ -374,6 +431,7 @@ def build_python_worker_command(
         "--device-plan",
         device_plan,
     ]
+    argv.extend(_device_context_cli_args(device_context))
     for raw_binding in binds:
         argv.extend(["--bind", raw_binding])
     return CommandSpec(argv=argv, mode="python_planner_worker")
@@ -387,6 +445,7 @@ def build_rust_command(
     rust_bin: str | None,
     cargo_offline: bool,
     repo_root: Path,
+    device_context: PlanParityDeviceContext | None = None,
 ) -> CommandSpec:
     if rust_bin:
         argv = [rust_bin]
@@ -407,9 +466,26 @@ def build_rust_command(
         )
         mode = "cargo_offline" if cargo_offline else "cargo"
     argv.extend(["--authored-root", authored_root, "--device-plan", device_plan])
+    argv.extend(_device_context_cli_args(device_context))
     for raw_binding in binds:
         argv.extend(["--bind", raw_binding])
     return CommandSpec(argv=argv, mode=mode)
+
+
+def _device_context_cli_args(device_context: PlanParityDeviceContext | None) -> list[str]:
+    if device_context is None:
+        return []
+    args: list[str] = []
+    if device_context.manufacturer is not None:
+        args.extend(["--manufacturer", device_context.manufacturer])
+    if device_context.model is not None:
+        args.extend(["--model", device_context.model])
+    if device_context.android_version is not None:
+        args.extend(["--android-version", str(device_context.android_version)])
+    if device_context.device_tags is not None:
+        for device_tag in device_context.device_tags:
+            args.extend(["--device-tag", device_tag])
+    return args
 
 
 def parse_process_planning_result(*, side: str, process: ProcessResult) -> ParsedPlanningResult:
@@ -643,6 +719,7 @@ def build_report(
     python_mode: str,
     rust_mode: str,
     known_gap_rules: Sequence[KnownGapRule],
+    device_context: PlanParityDeviceContext | None = None,
 ) -> dict[str, Any]:
     comparisons = compare_results(python_result, rust_result, known_gap_rules=known_gap_rules)
     diagnostics = diagnose_results(python_result, rust_result)
@@ -668,7 +745,8 @@ def build_report(
             "python_worker_mode": python_mode,
             "rust_command_mode": rust_mode,
             "normalizations": list(NORMALIZATIONS),
-        },
+        }
+        | _device_context_report_metadata(device_context),
         "summary": _summary(comparisons),
         "comparisons": comparisons,
         "known_gaps": known_gaps,
@@ -684,6 +762,7 @@ def build_unsupported_report(
     python_mode: str,
     rust_mode: str,
     issues: Sequence[dict[str, Any]],
+    device_context: PlanParityDeviceContext | None = None,
 ) -> dict[str, Any]:
     comparisons = list(issues)
     return {
@@ -699,7 +778,8 @@ def build_unsupported_report(
             "python_worker_mode": python_mode,
             "rust_command_mode": rust_mode,
             "normalizations": list(NORMALIZATIONS),
-        },
+        }
+        | _device_context_report_metadata(device_context),
         "summary": _summary(comparisons),
         "comparisons": comparisons,
         "known_gaps": [],
@@ -763,6 +843,7 @@ def build_matrix_report(
                 "known_gaps": result.comparison_report.get("known_gaps", []),
                 "diagnostics": result.comparison_report.get("diagnostics", []),
             }
+            | _device_context_report_metadata(scenario.device_context)
         )
 
     expectation_counts = Counter(expectation_statuses)
@@ -832,6 +913,28 @@ def _nonzero_ordered_counts(counts: Counter[str]) -> OrderedDict[str, int]:
         for name in CLASSIFICATIONS
         if counts.get(name, 0)
     )
+
+
+def _device_context_report_metadata(device_context: PlanParityDeviceContext | None) -> dict[str, Any]:
+    if device_context is None:
+        return {}
+    return {
+        "device_context": True,
+        "device_context_keys": _device_context_keys(device_context),
+    }
+
+
+def _device_context_keys(device_context: PlanParityDeviceContext) -> list[str]:
+    keys: list[str] = []
+    if device_context.manufacturer is not None:
+        keys.append("manufacturer")
+    if device_context.model is not None:
+        keys.append("model")
+    if device_context.android_version is not None:
+        keys.append("android_version")
+    if device_context.device_tags is not None:
+        keys.append("device_tags")
+    return keys
 
 
 def diagnose_results(python_result: Mapping[str, Any], rust_result: Mapping[str, Any]) -> list[dict[str, Any]]:
@@ -959,6 +1062,7 @@ def run_single_comparison_report(
     cargo_online: bool,
     repo_root: Path,
     script_path: Path,
+    device_context: PlanParityDeviceContext | None = None,
 ) -> dict[str, Any]:
     bindings = parse_bindings(raw_binds)
     python_spec = build_python_worker_command(
@@ -967,6 +1071,7 @@ def run_single_comparison_report(
         authored_root=authored_root,
         device_plan=device_plan,
         binds=raw_binds,
+        device_context=device_context,
     )
     rust_spec = build_rust_command(
         authored_root=authored_root,
@@ -975,6 +1080,7 @@ def run_single_comparison_report(
         rust_bin=rust_bin,
         cargo_offline=_cargo_offline_default() and not cargo_online,
         repo_root=repo_root,
+        device_context=device_context,
     )
 
     python_process = run_process(python_spec, cwd=repo_root)
@@ -994,6 +1100,7 @@ def run_single_comparison_report(
             python_mode=python_spec.mode,
             rust_mode=rust_spec.mode,
             issues=issues,
+            device_context=device_context,
         )
 
     assert python_parsed.result is not None
@@ -1007,6 +1114,7 @@ def run_single_comparison_report(
         python_mode=python_spec.mode,
         rust_mode=rust_spec.mode,
         known_gap_rules=[],
+        device_context=device_context,
     )
 
 
@@ -1035,6 +1143,7 @@ def run_scenario_matrix_report(
                 cargo_online=cargo_online,
                 repo_root=repo_root,
                 script_path=script_path,
+                device_context=scenario.device_context,
             )
             scenario_results.append(
                 MatrixScenarioResult(
@@ -1119,6 +1228,10 @@ def python_worker_main(argv: Sequence[str]) -> int:
     )
     parser.add_argument("--authored-root", required=True)
     parser.add_argument("--device-plan", required=True)
+    parser.add_argument("--manufacturer")
+    parser.add_argument("--model")
+    parser.add_argument("--android-version", type=int)
+    parser.add_argument("--device-tag", action="append")
     parser.add_argument("--bind", action="append", default=[])
     args = parser.parse_args(argv)
 
@@ -1132,6 +1245,17 @@ def python_worker_main(argv: Sequence[str]) -> int:
             authored_root=args.authored_root,
             device_plan_ref=args.device_plan,
             bindings=parse_bindings(args.bind),
+            device_context=PlanParityDeviceContext(
+                manufacturer=args.manufacturer,
+                model=args.model,
+                android_version=args.android_version,
+                device_tags=None if args.device_tag is None else tuple(args.device_tag),
+            )
+            if any(
+                value is not None
+                for value in (args.manufacturer, args.model, args.android_version, args.device_tag)
+            )
+            else None,
         )
     except Exception as exc:  # pragma: no cover - exercised through process-level reports.
         sys.stdout.write(
@@ -1157,6 +1281,7 @@ def _run_python_planner_api(
     authored_root: str,
     device_plan_ref: str,
     bindings: OrderedDict[str, object],
+    device_context: PlanParityDeviceContext | None = None,
 ) -> dict[str, Any]:
     # Imports stay inside worker mode so the comparison module remains usable
     # without planner dependencies installed.
@@ -1170,7 +1295,10 @@ def _run_python_planner_api(
     device_profile = catalog.device_profiles[device_plan.device_profile_ref]
     session = Planner(catalog).start_session(
         device_plan_ref=device_plan_ref,
-        device_context=_synthetic_device_context(device_profile),
+        device_context=_merge_device_context(
+            _synthetic_device_context(device_profile),
+            device_context,
+        ),
         runtime_capabilities=device_profile.capability_defaults,
         plan_id=f"plan.shadow.{device_plan_ref}.001",
     )
@@ -1205,6 +1333,21 @@ def _synthetic_device_context(device_profile: object) -> object:
         android_api_level=None,
         device_tags=device_profile.device_tags,
     )
+
+
+def _merge_device_context(base_context: object, device_context: PlanParityDeviceContext | None) -> object:
+    if device_context is None:
+        return base_context
+    updates: dict[str, object] = {}
+    if device_context.manufacturer is not None:
+        updates["manufacturer"] = device_context.manufacturer
+    if device_context.model is not None:
+        updates["model"] = device_context.model
+    if device_context.android_version is not None:
+        updates["android_version"] = device_context.android_version
+    if device_context.device_tags is not None:
+        updates["device_tags"] = device_context.device_tags
+    return replace(base_context, **updates)
 
 
 def main(argv: Sequence[str] | None = None) -> int:

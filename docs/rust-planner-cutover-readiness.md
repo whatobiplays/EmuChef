@@ -136,12 +136,25 @@ The Rust planner evidence is planner-only and migration-focused:
   warnings, default Rust planner routing, executor/apply behavior, Tauri/protocol
   behavior, Cargo fallback behavior, fixture/golden regeneration, or Python
   planner deletion readiness.
+- P8K extends the dev-only scenario matrix, comparison harness, smoke runner, and
+  static readiness gate with optional explicit `device_context` evidence. Matrix
+  context values are forwarded to the hidden Python planner worker and to Rust
+  shadow commands using the existing P8J flags. Reports include stable context
+  presence/key metadata only, not full context values. This is matrix evidence
+  for supplied context values, not ADB/device probing, detected-device facts, or
+  profile mismatch warning support. Because the P8J CLI flag surface cannot
+  encode an explicit empty tag override separately from omitted tags, matrix
+  validation rejects `device_tags: []`; omitted `device_tags` means no tag
+  override and non-empty `device_tags` replace profile-derived tags in order.
 - `tools/plan_parity_scenarios.json` is the P7P scenario matrix for the current
-  checked-in device-plan scenarios. The current checked-in scenario matrix
-  expects all five scenarios to classify as `match`.
+  checked-in device-plan scenarios plus P8K explicit-context evidence. The
+  current checked-in scenario matrix expects all six scenarios to classify as
+  `match`.
 - The five current scenario ids are `ayaneo_konkr_pocket_fit_base`,
   `ayaneo_pocket_s_mini_base`, `ayaneo_generic_base`,
-  `ayaneo_pocket_air_mini_base`, and `ayaneo_pocket_s2_base`.
+  `ayaneo_pocket_air_mini_base`, and `ayaneo_pocket_s2_base`. The additional
+  explicit-context scenario id is
+  `ayaneo_pocket_s_mini_base_explicit_context`.
 - A matching matrix means the dev-only compared fields align for current
   scenarios; it does not prove default CLI cutover, real-device CLI context
   resolution, executor/apply compatibility, artifact materialization, or Python
@@ -180,7 +193,7 @@ resolved or explicitly accepted for a narrower experimental route:
 | Output format compatibility | Rust emits private JSON `PlanningResult` through the shadow command. P8A passes that JSON through directly from the explicit dev-only Python CLI bridge, and P8C guards that omitted `--rust-shadow-output` and explicit `--rust-shadow-output passthrough` remain Rust stdout/stderr/exit-code passthrough. P8E adds explicit `--rust-shadow-output python-compatible` formatting for usable Rust `PlanningResult` JSON: concise summary labels mirror the visible Python CLI labels, structured YAML is produced from the Rust JSON mapping through `dump_yaml(...)`, and `--output` writes that YAML while stdout stays concise unless `--verbose` is selected. Python CLI default planning still owns the default concise summary, verbose YAML, `--output`, and exit-code behavior. P8D accepts the future default-route target: Rust must preserve the Python-owned output and exit-code contract before default planner cutover unless a separate accepted breaking-change decision says otherwise. Rust-native JSON requires a future explicit structured-output mode such as `--format json`. P8E is output-compatibility path evidence only; it is not default Rust planner routing. |
 | Error and warning compatibility | Rust covers selected planner result, warning/error shape, and focused diagnostics. Full CLI stderr/stdout, detected-device profile mismatch warnings, operation replay failures, exit codes, and broader planner diagnostics are not proven. P8J intentionally does not add profile mismatch warnings. |
 | Required normal-check gating | The P7P comparison matrix and P8B CLI-route smoke are not part of normal Rust/Tauri checks. A cutover route needs an approved gate policy before the route becomes user-facing. |
-| Unsupported scenarios outside the matrix | The checked-in matrix covers five current device-plan scenarios only. Future authored plans, non-empty recipe dependencies, broader override forms, profile matching, and scenario drift require intentional coverage updates. |
+| Unsupported scenarios outside the matrix | The checked-in matrix covers all five current device plans with six current scenarios, including one P8K explicit-context scenario for `ayaneo.pocket_s_mini.base`. Future authored plans, non-empty recipe dependencies, broader override forms, profile matching, and scenario drift require intentional coverage updates. |
 | Authored/device-plan drift | `tools/plan_parity_scenarios.json` and this readiness doc must be updated when checked-in scenarios change. The static doc guard only checks scenario id/tool references. |
 | Matrix as cutover gate | Matching matrix status is necessary evidence for the current compared fields, not sufficient cutover readiness. A routing PR should decide whether matrix execution becomes required for that PR. |
 
@@ -249,6 +262,19 @@ resolved or explicitly accepted for a narrower experimental route:
   explicit input support only. ADB/device probing and detected-device profile
   mismatch warnings remain unsupported, and the
   `real_device_context_probing_not_cut_over` blocker remains blocked.
+- P8K explicit-context matrix state: `tools/plan_parity_scenarios.json` supports
+  optional `device_context` objects for dev-only comparison and smoke evidence.
+  The checked-in matrix includes
+  `ayaneo_pocket_s_mini_base_explicit_context` for
+  `ayaneo.pocket_s_mini.base` with supplied manufacturer, model, Android version,
+  and ordered tags. The comparison harness forwards those values to both the
+  hidden Python planner worker and the Rust shadow command; the smoke runner
+  forwards them to generated `emuchef plan --planner-backend rust-shadow` or
+  `rust-experimental` commands. Reports record only stable context presence and
+  key names. This does not add ADB/device probing, detected-device facts,
+  executor/apply behavior, Tauri/protocol behavior, Cargo fallback behavior,
+  fixture/golden regeneration, normal runtime-check wiring, or Python planner
+  deletion readiness.
 - Pre-cutover candidate: planner routing work may use the matrix as an
   optional/manual gate to gather evidence before exposing any user-facing Rust
   planner path.

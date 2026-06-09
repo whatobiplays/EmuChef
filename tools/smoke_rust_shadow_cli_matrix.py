@@ -25,6 +25,7 @@ SCENARIO_MATRIX_SCHEMA_VERSION = 1
 FAILURE_TEXT_LIMIT = 240
 ROUTE_BACKENDS = ("rust-shadow", "rust-experimental")
 ROUTE_OUTPUT_MODES = ("passthrough", "python-compatible")
+MISSING = object()
 
 
 @dataclass(frozen=True, slots=True)
@@ -35,11 +36,20 @@ class PlanParityBindingSpec:
 
 
 @dataclass(frozen=True, slots=True)
+class PlanParityDeviceContext:
+    manufacturer: str | None = None
+    model: str | None = None
+    android_version: int | None = None
+    device_tags: tuple[str, ...] | None = None
+
+
+@dataclass(frozen=True, slots=True)
 class PlanParityScenario:
     id: str
     device_plan: str
     expected_route_exit_code: int
     bindings: tuple[PlanParityBindingSpec, ...]
+    device_context: PlanParityDeviceContext | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -137,6 +147,10 @@ def _parse_scenario(
         device_plan=device_plan,
         expected_route_exit_code=expected_route_exit_code,
         bindings=bindings,
+        device_context=_parse_device_context(
+            raw_scenario.get("device_context", MISSING),
+            field=f"{prefix}.device_context",
+        ),
     )
 
 
@@ -165,11 +179,65 @@ def _parse_binding_spec(
     return PlanParityBindingSpec(ref=binding_ref, kind=kind, suffix=suffix or "")
 
 
+def _parse_device_context(raw_context: object, *, field: str) -> PlanParityDeviceContext | None:
+    if raw_context is MISSING:
+        return None
+    if not isinstance(raw_context, Mapping):
+        raise ValueError(f"{field} must be an object")
+
+    allowed_keys = {"manufacturer", "model", "android_version", "device_tags"}
+    for key in raw_context:
+        if key not in allowed_keys:
+            raise ValueError(f"{field} contains unsupported field: {key}")
+
+    manufacturer = _optional_non_empty_string(raw_context, "manufacturer", f"{field}.manufacturer")
+    model = _optional_non_empty_string(raw_context, "model", f"{field}.model")
+
+    android_version = raw_context.get("android_version")
+    if android_version is not None:
+        if isinstance(android_version, bool) or not isinstance(android_version, int) or android_version < 0:
+            raise ValueError(f"{field}.android_version must be a non-negative integer")
+
+    device_tags: tuple[str, ...] | None = None
+    if "device_tags" in raw_context:
+        raw_tags = raw_context["device_tags"]
+        if not isinstance(raw_tags, list) or not raw_tags:
+            raise ValueError(f"{field}.device_tags must be a non-empty list")
+        device_tags = _string_tuple(raw_tags, f"{field}.device_tags")
+
+    return PlanParityDeviceContext(
+        manufacturer=manufacturer,
+        model=model,
+        android_version=android_version,
+        device_tags=device_tags,
+    )
+
+
 def _required_string(raw: Mapping[str, object], key: str, field: str) -> str:
     value = raw.get(key)
     if not isinstance(value, str) or not value:
         raise ValueError(f"{field} must be a non-empty string")
     return value
+
+
+def _optional_non_empty_string(raw: Mapping[str, object], key: str, field: str) -> str | None:
+    value = raw.get(key)
+    if value is None:
+        return None
+    if not isinstance(value, str) or not value:
+        raise ValueError(f"{field} must be a non-empty string")
+    return value
+
+
+def _string_tuple(raw: object, field: str) -> tuple[str, ...]:
+    if not isinstance(raw, list):
+        raise ValueError(f"{field} must be a list")
+    result: list[str] = []
+    for index, value in enumerate(raw):
+        if not isinstance(value, str) or not value:
+            raise ValueError(f"{field}[{index}] must be a non-empty string")
+        result.append(value)
+    return tuple(result)
 
 
 def _validate_binding_ref(binding_ref: str, *, field: str) -> None:
@@ -262,9 +330,26 @@ def build_cli_command(
             scenario.device_plan,
         ]
     )
+    command.extend(_device_context_cli_args(scenario.device_context))
     for raw_bind in raw_binds:
         command.extend(["--bind", raw_bind])
     return command
+
+
+def _device_context_cli_args(device_context: PlanParityDeviceContext | None) -> list[str]:
+    if device_context is None:
+        return []
+    args: list[str] = []
+    if device_context.manufacturer is not None:
+        args.extend(["--manufacturer", device_context.manufacturer])
+    if device_context.model is not None:
+        args.extend(["--model", device_context.model])
+    if device_context.android_version is not None:
+        args.extend(["--android-version", str(device_context.android_version)])
+    if device_context.device_tags is not None:
+        for device_tag in device_context.device_tags:
+            args.extend(["--device-tag", device_tag])
+    return args
 
 
 def run_process(argv: Sequence[str], *, cwd: Path) -> subprocess.CompletedProcess[str]:
@@ -431,6 +516,7 @@ def build_report(
             "stderr_classification": result.stderr_classification,
             "command_classification": result.command_classification,
         }
+        scenario_item.update(_device_context_report_metadata(result.scenario.device_context))
         if result.failure_summary is not None:
             scenario_item["failure_summary"] = result.failure_summary
             failure_items.append(
@@ -477,6 +563,28 @@ def dumps_report(report: Mapping[str, object]) -> str:
 
 def _stable_basename(value: str) -> str:
     return Path(value).name or value
+
+
+def _device_context_report_metadata(device_context: PlanParityDeviceContext | None) -> dict[str, object]:
+    if device_context is None:
+        return {}
+    return {
+        "device_context": True,
+        "device_context_keys": _device_context_keys(device_context),
+    }
+
+
+def _device_context_keys(device_context: PlanParityDeviceContext) -> list[str]:
+    keys: list[str] = []
+    if device_context.manufacturer is not None:
+        keys.append("manufacturer")
+    if device_context.model is not None:
+        keys.append("model")
+    if device_context.android_version is not None:
+        keys.append("android_version")
+    if device_context.device_tags is not None:
+        keys.append("device_tags")
+    return keys
 
 
 def _failure_summary(

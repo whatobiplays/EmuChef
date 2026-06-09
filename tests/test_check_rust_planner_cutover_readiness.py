@@ -170,6 +170,80 @@ class CheckRustPlannerCutoverReadinessTests(unittest.TestCase):
         self.assertEqual(check["status"], "fail")
         self.assertIn("example.two", check["details"]["missing_device_plans"])
 
+    def test_scenario_matrix_allows_additional_context_scenario_for_same_device_plan(self) -> None:
+        payload = {
+            "schema_version": 1,
+            "scenarios": [
+                {
+                    "id": "example_one_base",
+                    "device_plan": "example.one",
+                    "expected_classification": "match",
+                    "bindings": [],
+                    "known_gap_ids": [],
+                },
+                {
+                    "id": "example_one_explicit_context",
+                    "device_plan": "example.one",
+                    "expected_classification": "match",
+                    "bindings": [],
+                    "known_gap_ids": [],
+                    "device_context": {
+                        "manufacturer": "Example",
+                        "model": "Example Device",
+                        "android_version": 13,
+                        "device_tags": ["handheld", "landscape"],
+                    },
+                },
+            ],
+        }
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            make_synthetic_repo(
+                root,
+                device_plan_ids=("example.one",),
+                matrix_payload=payload,
+            )
+
+            report = self.build_report(root)
+
+        self.assertEqual(check_by_id(report, "scenario_matrix_scenario_fields")["status"], "pass")
+        self.assertEqual(check_by_id(report, "scenario_matrix_covers_checked_in_device_plans")["status"], "pass")
+        self.assertTrue(all(check["id"] != "scenario_matrix_unique_device_plans" for check in report["static_checks"]))
+
+    def test_scenario_matrix_invalid_device_context_reports_failed_check(self) -> None:
+        invalid_contexts = [
+            (None, "device_context must be an object"),
+            ({"manufacturer": ""}, "device_context.manufacturer must be a non-empty string"),
+            ({"model": ""}, "device_context.model must be a non-empty string"),
+            ({"android_version": -1}, "device_context.android_version must be a non-negative integer"),
+            ({"android_version": True}, "device_context.android_version must be a non-negative integer"),
+            ({"device_tags": []}, "device_context.device_tags must be a non-empty list"),
+            ({"device_tags": ["handheld", ""]}, "device_context.device_tags[1] must be a non-empty string"),
+            ({"serial": "SERIAL"}, "device_context contains unsupported field: serial"),
+            ({"adb": True}, "device_context contains unsupported field: adb"),
+        ]
+
+        for device_context, message in invalid_contexts:
+            with self.subTest(device_context=device_context):
+                payload = scenario_payload("example.one")
+                payload["scenarios"][0]["device_context"] = device_context
+                with tempfile.TemporaryDirectory() as temp_dir:
+                    root = Path(temp_dir)
+                    make_synthetic_repo(
+                        root,
+                        device_plan_ids=("example.one",),
+                        matrix_payload=payload,
+                    )
+
+                    report = self.build_report(root)
+
+                check = check_by_id(report, "scenario_matrix_scenario_fields")
+                self.assertEqual(check["status"], "fail")
+                self.assertTrue(
+                    any(message in error for error in check["details"]["errors"]),
+                    check["details"]["errors"],
+                )
+
     def test_scenario_matrix_non_match_expected_classification_reports_failed_check(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
             root = Path(temp_dir)
