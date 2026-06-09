@@ -248,6 +248,35 @@ class CliTests(unittest.TestCase):
         self.assertNotIn("kind: planning_result", output)
         run.assert_not_called()
 
+    def test_plan_python_backend_rejects_rust_shadow_output(self) -> None:
+        stdout = StringIO()
+        stderr = StringIO()
+        with (
+            patch("emuchef.cli.resolve_adb_executable") as resolve_adb,
+            patch("subprocess.run") as run,
+            contextlib.redirect_stdout(stdout),
+            contextlib.redirect_stderr(stderr),
+        ):
+            rc = main(
+                [
+                    "plan",
+                    "--planner-backend",
+                    "python",
+                    "--rust-shadow-output",
+                    "python-compatible",
+                    "--authored-root",
+                    "authored",
+                    "--device-plan",
+                    "ayaneo.konkr_pocket_fit.base",
+                ]
+            )
+
+        self.assertEqual(rc, 1)
+        self.assertEqual(stdout.getvalue(), "")
+        self.assertIn("--rust-shadow-output is only valid with --planner-backend rust-shadow", stderr.getvalue())
+        resolve_adb.assert_not_called()
+        run.assert_not_called()
+
     def test_plan_rust_shadow_requires_explicit_binary_path(self) -> None:
         stdout = StringIO()
         stderr = StringIO()
@@ -740,6 +769,302 @@ class CliTests(unittest.TestCase):
                         "rust-shadow",
                         "--rust-shadow-output",
                         "python-compatible",
+                        "--rust-planner-bin",
+                        shadow_bin,
+                        "--authored-root",
+                        "authored",
+                        "--device-plan",
+                        "ayaneo.pocket_s2.base",
+                    ]
+                )
+
+        self.assertEqual(rc, 2)
+        self.assertEqual(stdout.getvalue(), "")
+        self.assertIn("rust usage details", stderr.getvalue())
+        self.assertIn("python-compatible", stderr.getvalue())
+        self.assertIn("did not emit PlanningResult JSON", stderr.getvalue())
+
+    def test_plan_rust_experimental_requires_explicit_binary_path(self) -> None:
+        stdout = StringIO()
+        stderr = StringIO()
+        with (
+            patch("emuchef.cli.resolve_adb_executable") as resolve_adb,
+            patch("subprocess.run") as run,
+            contextlib.redirect_stdout(stdout),
+            contextlib.redirect_stderr(stderr),
+        ):
+            rc = main(
+                [
+                    "plan",
+                    "--planner-backend",
+                    "rust-experimental",
+                    "--authored-root",
+                    "authored",
+                    "--device-plan",
+                    "ayaneo.pocket_s_mini.base",
+                ]
+            )
+
+        self.assertEqual(rc, 1)
+        self.assertEqual(stdout.getvalue(), "")
+        self.assertIn("--rust-planner-bin is required", stderr.getvalue())
+        self.assertIn("rust-experimental", stderr.getvalue())
+        resolve_adb.assert_not_called()
+        run.assert_not_called()
+
+    def test_plan_rust_experimental_invokes_shadow_command_and_prints_concise_summary(self) -> None:
+        with TemporaryDirectory() as tmp:
+            shadow_bin = self._shadow_bin(tmp)
+            completed = subprocess.CompletedProcess(
+                args=[],
+                returncode=0,
+                stdout=self._rust_shadow_planning_result_json(
+                    warnings=[
+                        {
+                            "code": "device_profile_mismatch",
+                            "message": "Selected profile does not match.",
+                            "details": {"device_profile_ref": "example.device_profile"},
+                        }
+                    ],
+                ),
+                stderr="",
+            )
+            stdout = StringIO()
+            stderr = StringIO()
+            with (
+                patch("emuchef.cli._build_session") as build_session,
+                patch("emuchef.cli.resolve_adb_executable") as resolve_adb,
+                patch("emuchef.cli.SubprocessAdb.detect_device") as detect_device,
+                patch("emuchef.cli._run_apply") as run_apply,
+                patch("subprocess.run", return_value=completed) as run,
+                contextlib.redirect_stdout(stdout),
+                contextlib.redirect_stderr(stderr),
+            ):
+                rc = main(
+                    [
+                        "plan",
+                        "--planner-backend",
+                        "rust-experimental",
+                        "--rust-planner-bin",
+                        shadow_bin,
+                        "--authored-root",
+                        "authored",
+                        "--device-plan",
+                        "ayaneo.pocket_s2.base",
+                        "--bind",
+                        "feature.copy_bios/bios_source_dir=/tmp/bios=with=equals",
+                    ]
+                )
+
+        self.assertEqual(rc, 0, stderr.getvalue())
+        output = stdout.getvalue()
+        self.assertIn("Planning status: success", output)
+        self.assertIn("Execution plan: plan.shadow.example.001", output)
+        self.assertIn("Runnable steps:", output)
+        self.assertIn("- example.recipe/wait", output)
+        self.assertIn("Warnings:", output)
+        self.assertNotIn("kind: planning_result", output)
+        self.assertEqual(stderr.getvalue(), "")
+        build_session.assert_not_called()
+        resolve_adb.assert_not_called()
+        detect_device.assert_not_called()
+        run_apply.assert_not_called()
+        run.assert_called_once()
+        self.assertEqual(
+            run.call_args.args[0],
+            [
+                shadow_bin,
+                "--authored-root",
+                "authored",
+                "--device-plan",
+                "ayaneo.pocket_s2.base",
+                "--bind",
+                "feature.copy_bios/bios_source_dir=/tmp/bios=with=equals",
+            ],
+        )
+        self.assertNotIn("cargo", run.call_args.args[0])
+        self.assertNotIn("adb", run.call_args.args[0])
+        self.assertNotIn("--sidecar", run.call_args.args[0])
+
+    def test_plan_rust_experimental_verbose_emits_structured_yaml(self) -> None:
+        with TemporaryDirectory() as tmp:
+            shadow_bin = self._shadow_bin(tmp)
+            completed = subprocess.CompletedProcess(
+                args=[],
+                returncode=0,
+                stdout=self._rust_shadow_planning_result_json(),
+                stderr="",
+            )
+            stdout = StringIO()
+            stderr = StringIO()
+            with (
+                patch("emuchef.cli.resolve_adb_executable") as resolve_adb,
+                patch("subprocess.run", return_value=completed),
+                contextlib.redirect_stdout(stdout),
+                contextlib.redirect_stderr(stderr),
+            ):
+                rc = main(
+                    [
+                        "plan",
+                        "--planner-backend",
+                        "rust-experimental",
+                        "--rust-planner-bin",
+                        shadow_bin,
+                        "--authored-root",
+                        "authored",
+                        "--device-plan",
+                        "ayaneo.pocket_s2.base",
+                        "--verbose",
+                    ]
+                )
+
+        self.assertEqual(rc, 0, stderr.getvalue())
+        output = stdout.getvalue()
+        self.assertIn("status: success", output)
+        self.assertIn("execution_plan:", output)
+        self.assertIn("id: plan.shadow.example.001", output)
+        self.assertIn("kind: planning_result", output)
+        self.assertNotIn("Planning status:", output)
+        resolve_adb.assert_not_called()
+
+    def test_plan_rust_experimental_output_writes_yaml_and_prints_summary(self) -> None:
+        with TemporaryDirectory() as tmp:
+            shadow_bin = self._shadow_bin(tmp)
+            output_path = Path(tmp) / "planning-result.yaml"
+            completed = subprocess.CompletedProcess(
+                args=[],
+                returncode=0,
+                stdout=self._rust_shadow_planning_result_json(),
+                stderr="",
+            )
+            stdout = StringIO()
+            stderr = StringIO()
+            with (
+                patch("emuchef.cli.resolve_adb_executable") as resolve_adb,
+                patch("subprocess.run", return_value=completed),
+                contextlib.redirect_stdout(stdout),
+                contextlib.redirect_stderr(stderr),
+            ):
+                rc = main(
+                    [
+                        "plan",
+                        "--planner-backend",
+                        "rust-experimental",
+                        "--rust-planner-bin",
+                        shadow_bin,
+                        "--authored-root",
+                        "authored",
+                        "--device-plan",
+                        "ayaneo.pocket_s2.base",
+                        "--output",
+                        str(output_path),
+                    ]
+                )
+
+            self.assertEqual(rc, 0, stderr.getvalue())
+            summary = stdout.getvalue()
+            self.assertIn("Planning status: success", summary)
+            self.assertIn(f"Wrote planning result: {output_path.resolve()}", summary)
+            self.assertIn("Execution plan: plan.shadow.example.001", summary)
+            self.assertNotIn("execution_plan:", summary)
+            yaml_output = output_path.read_text(encoding="utf-8")
+            self.assertIn("status: success", yaml_output)
+            self.assertIn("execution_plan:", yaml_output)
+            self.assertIn("kind: planning_result", yaml_output)
+            resolve_adb.assert_not_called()
+
+    def test_plan_rust_experimental_rejects_rust_shadow_output(self) -> None:
+        with TemporaryDirectory() as tmp:
+            shadow_bin = self._shadow_bin(tmp)
+            for output_mode in ("passthrough", "python-compatible"):
+                with self.subTest(output_mode=output_mode):
+                    stdout = StringIO()
+                    stderr = StringIO()
+                    with (
+                        patch("emuchef.cli.resolve_adb_executable") as resolve_adb,
+                        patch("subprocess.run") as run,
+                        contextlib.redirect_stdout(stdout),
+                        contextlib.redirect_stderr(stderr),
+                    ):
+                        rc = main(
+                            [
+                                "plan",
+                                "--planner-backend",
+                                "rust-experimental",
+                                "--rust-shadow-output",
+                                output_mode,
+                                "--rust-planner-bin",
+                                shadow_bin,
+                                "--authored-root",
+                                "authored",
+                                "--device-plan",
+                                "ayaneo.pocket_s2.base",
+                            ]
+                        )
+
+                    self.assertEqual(rc, 1)
+                    self.assertEqual(stdout.getvalue(), "")
+                    self.assertIn("--rust-shadow-output is only valid with --planner-backend rust-shadow", stderr.getvalue())
+                    resolve_adb.assert_not_called()
+                    run.assert_not_called()
+
+    def test_plan_rust_experimental_invalid_json_matches_python_compatible_mode(self) -> None:
+        with TemporaryDirectory() as tmp:
+            shadow_bin = self._shadow_bin(tmp)
+            completed = subprocess.CompletedProcess(
+                args=[],
+                returncode=0,
+                stdout="not json\n",
+                stderr="rust diagnostic\n",
+            )
+            stdout = StringIO()
+            stderr = StringIO()
+            with (
+                patch("subprocess.run", return_value=completed),
+                contextlib.redirect_stdout(stdout),
+                contextlib.redirect_stderr(stderr),
+            ):
+                rc = main(
+                    [
+                        "plan",
+                        "--planner-backend",
+                        "rust-experimental",
+                        "--rust-planner-bin",
+                        shadow_bin,
+                        "--authored-root",
+                        "authored",
+                        "--device-plan",
+                        "ayaneo.pocket_s2.base",
+                    ]
+                )
+
+        self.assertEqual(rc, 1)
+        self.assertEqual(stdout.getvalue(), "")
+        self.assertIn("rust diagnostic", stderr.getvalue())
+        self.assertIn("python-compatible", stderr.getvalue())
+        self.assertIn("not valid JSON", stderr.getvalue())
+
+    def test_plan_rust_experimental_process_failure_without_json_matches_python_compatible_mode(self) -> None:
+        with TemporaryDirectory() as tmp:
+            shadow_bin = self._shadow_bin(tmp)
+            completed = subprocess.CompletedProcess(
+                args=[],
+                returncode=2,
+                stdout="",
+                stderr="rust usage details\n",
+            )
+            stdout = StringIO()
+            stderr = StringIO()
+            with (
+                patch("subprocess.run", return_value=completed),
+                contextlib.redirect_stdout(stdout),
+                contextlib.redirect_stderr(stderr),
+            ):
+                rc = main(
+                    [
+                        "plan",
+                        "--planner-backend",
+                        "rust-experimental",
                         "--rust-planner-bin",
                         shadow_bin,
                         "--authored-root",

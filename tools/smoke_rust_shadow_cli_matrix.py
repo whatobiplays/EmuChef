@@ -20,6 +20,7 @@ from typing import Mapping, Sequence
 REPORT_SCHEMA_VERSION = 1
 SCENARIO_MATRIX_SCHEMA_VERSION = 1
 FAILURE_TEXT_LIMIT = 240
+ROUTE_BACKENDS = ("rust-shadow", "rust-experimental")
 ROUTE_OUTPUT_MODES = ("passthrough", "python-compatible")
 
 
@@ -231,18 +232,22 @@ def build_cli_command(
     rust_planner_bin: str,
     scenario: PlanParityScenario,
     raw_binds: Sequence[str],
-    route_output_mode: str = "passthrough",
+    route_backend: str = "rust-shadow",
+    route_output_mode: str | None = None,
 ) -> list[str]:
-    _validate_route_output_mode(route_output_mode)
+    effective_output_mode = _effective_route_output_mode(
+        route_backend=route_backend,
+        route_output_mode=route_output_mode,
+    )
     command = [
         python_executable,
         "-m",
         "emuchef",
         "plan",
         "--planner-backend",
-        "rust-shadow",
+        route_backend,
     ]
-    if route_output_mode == "python-compatible":
+    if route_backend == "rust-shadow" and effective_output_mode == "python-compatible":
         command.extend(["--rust-shadow-output", "python-compatible"])
     command.extend(
         [
@@ -278,9 +283,13 @@ def run_scenario_matrix_report(
     rust_planner_bin: str,
     python_executable: str,
     repo_root: Path,
-    route_output_mode: str = "passthrough",
+    route_backend: str = "rust-shadow",
+    route_output_mode: str | None = None,
 ) -> dict[str, object]:
-    _validate_route_output_mode(route_output_mode)
+    effective_output_mode = _effective_route_output_mode(
+        route_backend=route_backend,
+        route_output_mode=route_output_mode,
+    )
     matrix = load_scenario_matrix(scenario_matrix)
     scenario_results: list[ScenarioSmokeResult] = []
 
@@ -294,6 +303,7 @@ def run_scenario_matrix_report(
                 rust_planner_bin=rust_planner_bin,
                 scenario=scenario,
                 raw_binds=prepared.raw_cli_binds,
+                route_backend=route_backend,
                 route_output_mode=route_output_mode,
             )
             completed = run_process(command, cwd=repo_root)
@@ -303,7 +313,8 @@ def run_scenario_matrix_report(
                     report_bindings=prepared.report_bindings,
                     completed=completed,
                     temp_root=temp_root,
-                    route_output_mode=route_output_mode,
+                    route_backend=route_backend,
+                    route_output_mode=effective_output_mode,
                 )
             )
 
@@ -312,7 +323,8 @@ def run_scenario_matrix_report(
         authored_root=authored_root,
         rust_planner_bin=rust_planner_bin,
         python_executable=python_executable,
-        route_output_mode=route_output_mode,
+        route_backend=route_backend,
+        route_output_mode=effective_output_mode,
         matrix=matrix,
         scenario_results=scenario_results,
     )
@@ -324,6 +336,7 @@ def _scenario_result(
     report_bindings: list[dict[str, str]],
     completed: subprocess.CompletedProcess[str],
     temp_root: Path,
+    route_backend: str,
     route_output_mode: str,
 ) -> ScenarioSmokeResult:
     expected = scenario.expected_route_exit_code
@@ -357,7 +370,7 @@ def _scenario_result(
         stdout_classification=stdout_classification,
         expected_stdout_class=expected_stdout_class,
         stderr_classification=classify_stderr(completed.stderr),
-        command_classification=_command_classification(route_output_mode),
+        command_classification=_command_classification(route_backend, route_output_mode),
         failure_summary=failure_summary,
     )
 
@@ -388,10 +401,12 @@ def build_report(
     authored_root: str,
     rust_planner_bin: str,
     python_executable: str,
+    route_backend: str,
     route_output_mode: str,
     matrix: PlanParityScenarioMatrix,
     scenario_results: Sequence[ScenarioSmokeResult],
 ) -> dict[str, object]:
+    _validate_route_backend(route_backend)
     _validate_route_output_mode(route_output_mode)
     scenario_items: list[dict[str, object]] = []
     failure_items: list[dict[str, object]] = []
@@ -433,6 +448,7 @@ def build_report(
             "authored_root": authored_root,
             "rust_planner_bin": _stable_basename(rust_planner_bin),
             "python_executable": _stable_basename(python_executable),
+            "route_backend": route_backend,
             "route_output_mode": route_output_mode,
         },
         "summary": {
@@ -493,15 +509,19 @@ def _bounded_output(text: str, *, temp_root: Path) -> str:
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="smoke_rust_shadow_cli_matrix.py",
-        description="Smoke the explicit Python CLI rust-shadow planner route across a scenario matrix."
+        description="Smoke explicit Python CLI Rust planner migration routes across a scenario matrix."
     )
     parser.add_argument("--scenario-matrix", required=True)
     parser.add_argument("--authored-root", required=True)
     parser.add_argument("--rust-planner-bin")
     parser.add_argument(
+        "--planner-backend",
+        choices=ROUTE_BACKENDS,
+        default="rust-shadow",
+    )
+    parser.add_argument(
         "--rust-shadow-output",
         choices=ROUTE_OUTPUT_MODES,
-        default="passthrough",
     )
     parser.add_argument("--python-executable", default=sys.executable)
     return parser
@@ -524,10 +544,11 @@ def main(argv: Sequence[str] | None = None) -> int:
             rust_planner_bin=args.rust_planner_bin,
             python_executable=args.python_executable,
             repo_root=Path.cwd(),
+            route_backend=args.planner_backend,
             route_output_mode=args.rust_shadow_output,
         )
     except ValueError as exc:
-        parser.error(str(exc))
+        sys.stderr.write(f"smoke_rust_shadow_cli_matrix.py: error: {exc}\n")
         return 2
     sys.stdout.write(dumps_report(report))
     return matrix_exit_code(report)
@@ -536,6 +557,27 @@ def main(argv: Sequence[str] | None = None) -> int:
 def _validate_route_output_mode(route_output_mode: str) -> None:
     if route_output_mode not in ROUTE_OUTPUT_MODES:
         raise ValueError(f"route_output_mode must be one of: {', '.join(ROUTE_OUTPUT_MODES)}")
+
+
+def _validate_route_backend(route_backend: str) -> None:
+    if route_backend not in ROUTE_BACKENDS:
+        raise ValueError(f"route_backend must be one of: {', '.join(ROUTE_BACKENDS)}")
+
+
+def _effective_route_output_mode(
+    *,
+    route_backend: str,
+    route_output_mode: str | None,
+) -> str:
+    _validate_route_backend(route_backend)
+    if route_backend == "rust-experimental":
+        if route_output_mode is not None:
+            raise ValueError("--rust-shadow-output is only valid with --planner-backend rust-shadow")
+        return "python-compatible"
+    if route_output_mode is None:
+        return "passthrough"
+    _validate_route_output_mode(route_output_mode)
+    return route_output_mode
 
 
 def _expected_stdout_class(
@@ -562,7 +604,9 @@ def _stdout_expectation_met(
     return stdout_classification == expected_stdout_class
 
 
-def _command_classification(route_output_mode: str) -> str:
+def _command_classification(route_backend: str, route_output_mode: str) -> str:
+    if route_backend == "rust-experimental":
+        return "rust_experimental_python_compatible_implicit"
     if route_output_mode == "python-compatible":
         return "rust_shadow_python_compatible_explicit"
     return "rust_shadow_passthrough_implicit"

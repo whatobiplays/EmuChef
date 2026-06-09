@@ -62,18 +62,23 @@ Rust planner-adjacent coverage is internal and fixture-scoped:
   deterministic JSON classification report or matrix report and is not part of
   normal Rust/Tauri runtime checks.
 - `tools/smoke_rust_shadow_cli_matrix.py`: dev-only P8B smoke runner for the
-  explicit Python CLI `rust-shadow` bridge across the current scenario matrix.
-  The smoke requires a supplied shadow binary, invokes the Python CLI route, and
-  reports route exit-code/classification evidence only. It does not run the
-  Python-vs-Rust planner-output comparison harness. P8F extends the same smoke
-  runner with explicit `--rust-shadow-output python-compatible` coverage that
-  requires successful scenarios to emit concise Python-compatible summary stdout.
+  explicit Python CLI Rust planner migration routes across the current scenario
+  matrix. The smoke requires a supplied shadow binary, invokes the Python CLI
+  route, and reports route exit-code/classification evidence only. It does not
+  run the Python-vs-Rust planner-output comparison harness. P8F extends the same
+  smoke runner with explicit `--rust-shadow-output python-compatible` coverage
+  for `rust-shadow`. P8G extends it to `--planner-backend rust-experimental`,
+  where generated commands omit `--rust-shadow-output` and successful scenarios
+  must emit concise Python-compatible summary stdout.
 - `tests/test_cli.py`: P8C and P8E CLI output compatibility contract coverage for
   the explicit `rust-shadow` bridge. The default guarded contract is Rust
   stdout/stderr/exit-code passthrough. The explicit
   `--rust-shadow-output python-compatible` mode formats usable Rust
   `PlanningResult` JSON with Python-compatible visible summary labels and
-  structured YAML over the Rust JSON mapping.
+  structured YAML over the Rust JSON mapping. P8G coverage keeps Python as the
+  default planner, rejects `--rust-shadow-output` for non-`rust-shadow` backends,
+  and verifies that `rust-experimental` reuses Rust shadow command construction
+  with Python-compatible output by default.
 - `docs/adr/0002-rust-planner-cli-output-compatibility.md`: P8D decision record
   for future default Rust planner routing. The accepted target is compatibility
   with the current Python `emuchef plan` output and exit-code behavior unless a
@@ -250,6 +255,19 @@ expectation. P8F is route plus output-format smoke only; P7P remains the
 Python-vs-Rust planner DTO/result comparison evidence, and P8B remains raw
 passthrough route-invocation evidence.
 
+P8G adds `emuchef plan --planner-backend rust-experimental --rust-planner-bin
+<path>` as an explicit non-default migration route. It reuses the same supplied
+Rust shadow planner binary invocation as `rust-shadow`, defaults to
+Python-compatible CLI formatting, and supports `--verbose` and `--output` through
+that formatter path. `--rust-shadow-output` is only valid with
+`--planner-backend rust-shadow`; Python and `rust-experimental` reject it before
+ADB resolution or Python planner/session construction. `rust-experimental` is a
+cutover rehearsal route, not the default planner, not a stable final public
+contract, and not Python planner deletion. Its name and behavior may change
+before Rust becomes the default planner backend. P8G does not change
+executor/apply, real-device, ADB, artifact, network, Tauri, protocol, Cargo
+fallback, fixture/golden, or normal runtime-check behavior.
+
 | Device plan | Device profile | Selected recipes | Private Rust planner status | Required planner-only bindings | Current limitation |
 | --- | --- | --- | --- | --- | --- |
 | `authored/device_plans/ayaneo.konkr_pocket_fit.base.yaml` | `ayaneo.konkr_pocket_fit` | `app.retroarch.provision` | Success. `repo_plan_e2e_*` tests build input from checked-in plan/profile YAML, emit deterministic selected/expanded refs and step order, and assert normalized RetroArch params. | None. Optional `app.retroarch.provision/retroarch_cfg` may be omitted, which prunes `seed_retroarch_cfg`; a temp `.cfg` binding includes that step. | Not a user-facing planner path. |
@@ -369,14 +387,17 @@ for Phase 6M/6N planner goldens remain documented in
 `crates/emuchef-rust-backend/README.md` and classified in
 `docs/python-fixture-golden-ownership.md`.
 
-The Rust planner skeleton is not a replacement command path. P8A exposes only an
+The Rust planner skeleton is not a replacement command path. P8A exposes an
 explicit developer-only Python CLI bridge to the shadow binary:
-`emuchef plan --planner-backend rust-shadow --rust-planner-bin <path>`. It is
-not exposed as a Tauri command, sidecar protocol request, production/default CLI
-command, backend selector, or runtime fallback. Its internal permission-intent
+`emuchef plan --planner-backend rust-shadow --rust-planner-bin <path>`. P8G adds
+the explicit non-default migration route
+`emuchef plan --planner-backend rust-experimental --rust-planner-bin <path>`.
+Both require a supplied shadow binary, and neither is exposed as a Tauri command,
+sidecar protocol request, production/default CLI command, stable final public
+contract, or runtime fallback. The Rust planner's internal permission-intent
 helper is not a serialized execution-plan field and is not consumed by
-executor/apply behavior. P7G DTO coverage and the P8A bridge do not change those
-boundaries.
+executor/apply behavior. P7G DTO coverage and the explicit Python CLI migration
+routes do not change those boundaries.
 
 ## Dev-Only Shadow Emission
 
@@ -428,6 +449,24 @@ empty, invalid JSON, or not a planning result, the CLI reports a compatibility
 mode error. Omitted `--rust-shadow-output` and explicit
 `--rust-shadow-output passthrough` retain P8C passthrough semantics.
 
+P8G adds an explicit non-default migration route for cutover rehearsal:
+
+```bash
+emuchef plan \
+  --planner-backend rust-experimental \
+  --rust-planner-bin <path-to-emuchef-plan-shadow> \
+  --authored-root authored \
+  --device-plan ayaneo.pocket_s_mini.base
+```
+
+`rust-experimental` reuses the same Rust shadow planner binary invocation as
+`rust-shadow` and defaults to Python-compatible output formatting. It supports
+`--verbose` and `--output` through that compatibility formatter. It rejects
+`--rust-shadow-output` because that option is only valid with
+`--planner-backend rust-shadow`. `rust-experimental` is not the default planner,
+not a stable final public contract, and not Python planner deletion. Its name and
+behavior may change before Rust becomes the default planner backend.
+
 P8B provides a dev-only matrix smoke for the Python bridge:
 
 ```bash
@@ -455,6 +494,11 @@ successful scenarios. It does not call the Python-vs-Rust comparison harness,
 execute/apply plans, probe devices, invoke ADB, access the network, materialize
 artifacts, regenerate goldens, or participate in normal Rust/Tauri runtime
 checks.
+
+The same smoke runner supports `--planner-backend rust-experimental` without
+renaming the tool. In that mode, generated commands omit `--rust-shadow-output`,
+report an effective Python-compatible output mode, and require concise
+Python-compatible summary stdout for successful scenarios.
 
 The shadow command builds `PlannerInput` through the private
 `PlannerInput::from_authored_device_plan(...)` path and then calls

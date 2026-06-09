@@ -23,6 +23,13 @@ The Rust shadow route is migration evidence only. It is not a default planner
 route, a formatter layer, a Cargo fallback, an executor/apply route, a Tauri
 protocol route, or a real-device behavior change.
 
+P8G later adds `emuchef plan --planner-backend rust-experimental` as an explicit
+non-default migration route that reuses the Rust shadow planner invocation and
+defaults to Python-compatible output formatting. It is a cutover rehearsal route,
+not the default planner, not a stable final public contract, and not Python
+planner deletion. Its name and behavior may change before Rust becomes the
+default planner backend.
+
 ## Decision
 
 When Rust eventually becomes the default planner backend for `emuchef plan`, the

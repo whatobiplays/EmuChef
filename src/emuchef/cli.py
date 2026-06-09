@@ -94,18 +94,20 @@ def main(argv: list[str] | None = None) -> int:
     plan_parser.add_argument("--output", help="Optional file path for the structured planning_result YAML.")
     plan_parser.add_argument(
         "--planner-backend",
-        choices=("python", "rust-shadow"),
+        choices=("python", "rust-shadow", "rust-experimental"),
         default="python",
-        help="Planner implementation to use. rust-shadow is dev-only and requires --rust-planner-bin.",
+        help=(
+            "Planner implementation to use. rust-shadow is dev-only passthrough by default; "
+            "rust-experimental is explicit non-default migration routing and requires --rust-planner-bin."
+        ),
     )
     plan_parser.add_argument(
         "--rust-planner-bin",
-        help="Dev-only path to emuchef-plan-shadow for --planner-backend rust-shadow.",
+        help="Dev-only path to emuchef-plan-shadow for Rust planner migration routes.",
     )
     plan_parser.add_argument(
         "--rust-shadow-output",
         choices=("passthrough", "python-compatible"),
-        default="passthrough",
         help=(
             "Output mode for --planner-backend rust-shadow. passthrough preserves Rust stdout/stderr; "
             "python-compatible formats Rust PlanningResult JSON with Python-compatible CLI labels/YAML."
@@ -148,7 +150,9 @@ def main(argv: list[str] | None = None) -> int:
     _configure_logging(args)
 
     try:
-        if args.command == "plan" and args.planner_backend == "rust-shadow":
+        if args.command == "plan":
+            _validate_plan_backend_args(args)
+        if args.command == "plan" and args.planner_backend in {"rust-shadow", "rust-experimental"}:
             return _run_plan(args)
         setattr(
             args,
@@ -204,7 +208,7 @@ def _run_draft(args: argparse.Namespace) -> int:
 
 
 def _run_plan(args: argparse.Namespace) -> int:
-    if args.planner_backend == "rust-shadow":
+    if args.planner_backend in {"rust-shadow", "rust-experimental"}:
         return _run_rust_shadow_plan(args)
     return _run_python_plan(args)
 
@@ -246,7 +250,7 @@ def _run_rust_shadow_plan(args: argparse.Namespace) -> int:
         sys.stderr.write(f"Error: failed to start Rust shadow planner '{command[0]}': {exc}\n")
         return 1
 
-    if args.rust_shadow_output == "python-compatible":
+    if _effective_rust_shadow_output(args) == "python-compatible":
         return _run_rust_shadow_python_compatible_plan(args, completed)
 
     if completed.stdout:
@@ -278,10 +282,21 @@ def _build_rust_shadow_plan_command(args: argparse.Namespace) -> list[str]:
     return command
 
 
+def _validate_plan_backend_args(args: argparse.Namespace) -> None:
+    if args.planner_backend != "rust-shadow" and args.rust_shadow_output is not None:
+        raise ValueError("--rust-shadow-output is only valid with --planner-backend rust-shadow.")
+
+
+def _effective_rust_shadow_output(args: argparse.Namespace) -> str:
+    if args.planner_backend == "rust-experimental":
+        return "python-compatible"
+    return args.rust_shadow_output or "passthrough"
+
+
 def _validate_rust_shadow_plan_args(args: argparse.Namespace) -> None:
     if not args.rust_planner_bin:
-        raise ValueError("--rust-planner-bin is required when --planner-backend rust-shadow is selected.")
-    python_compatible_output = args.rust_shadow_output == "python-compatible"
+        raise ValueError(f"--rust-planner-bin is required when --planner-backend {args.planner_backend} is selected.")
+    python_compatible_output = _effective_rust_shadow_output(args) == "python-compatible"
     unsupported_options = [
         ("--verbose", args.verbose and not python_compatible_output),
         ("--debug", args.debug),
@@ -296,7 +311,7 @@ def _validate_rust_shadow_plan_args(args: argparse.Namespace) -> None:
     ]
     for option, is_set in unsupported_options:
         if is_set:
-            raise ValueError(f"{option} is not supported with --planner-backend rust-shadow.")
+            raise ValueError(f"{option} is not supported with --planner-backend {args.planner_backend}.")
 
 
 def _run_rust_shadow_python_compatible_plan(
