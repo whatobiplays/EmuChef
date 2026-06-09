@@ -32,6 +32,12 @@ explicit ownership change is documented.
 For future Rust planner default routing, the accepted CLI output and exit-code
 compatibility target is recorded in
 `docs/adr/0002-rust-planner-cli-output-compatibility.md`.
+For future Rust planner default routing, the accepted real-device context
+ownership model is recorded in
+`docs/adr/0003-rust-real-device-context-ownership.md`: Rust should own
+real-device probing and detected-device profile mismatch warning parity before
+default Rust planner cutover. P8M records that decision only; it does not change
+Python default planning behavior.
 
 Rust planner, executor, and CLI behavior is fixture-scoped, test-scoped,
 internal, or editor-backend-scoped unless explicitly promoted by later work.
@@ -126,6 +132,14 @@ field is required for the coverage checks to pass. This does not add
 real-device probing, detected-device profile mismatch warning behavior,
 executor/apply behavior, Tauri/protocol behavior, or default Rust planner
 ownership.
+
+P8M records an accepted ADR for future real-device context ownership:
+`docs/adr/0003-rust-real-device-context-ownership.md` says Rust should own
+real-device probing and detected-device profile mismatch warning parity for
+future default Rust planner cutover. Python remains the current default
+CLI/reference planner owner, Rust routes remain explicit and non-default, and
+real-device probing plus mismatch-warning parity remain blocked until
+implemented and evidenced.
 Existing Rust planner, executor, and CLI slices should remain scoped as parity
 scaffolding until a later phase explicitly promotes or retires the corresponding
 Python surface.
@@ -174,7 +188,9 @@ Ownership may change only after:
 4. Failure behavior and diagnostics are documented.
 5. CLI/API compatibility is intentionally accepted or intentionally changed. For
    default Rust planner routing, the accepted default is compatibility with the
-   current Python `emuchef plan` output and exit-code contract.
+   current Python `emuchef plan` output and exit-code contract. For real-device
+   context, the accepted future default-cutover model is Rust-owned probing and
+   detected-device profile mismatch warning parity.
 
 ## Rust Real-Device Apply Promotion Checklist
 

@@ -11,7 +11,11 @@ in `docs/rust-planner-cutover-readiness.md`. This boundary document records
 current parity evidence; the readiness document is the source for the
 user-facing routing and deletion checklist. The future Rust planner CLI output
 compatibility decision is recorded in
-`docs/adr/0002-rust-planner-cli-output-compatibility.md`.
+`docs/adr/0002-rust-planner-cli-output-compatibility.md`. The future default
+Rust planner real-device context ownership decision is recorded in
+`docs/adr/0003-rust-real-device-context-ownership.md`: Rust should own
+real-device probing and detected-device profile mismatch warning parity before a
+default Rust planner cutover.
 
 Rust planner tests include an intentional fixture inventory/parsing guard for
 the existing Phase 6M/6N planner parity evidence. The guard consumes checked-in
@@ -99,6 +103,12 @@ Rust planner-adjacent coverage is internal and fixture-scoped:
   for future default Rust planner routing. The accepted target is compatibility
   with the current Python `emuchef plan` output and exit-code behavior unless a
   separate accepted breaking-change decision says otherwise.
+- `docs/adr/0003-rust-real-device-context-ownership.md`: P8M decision record for
+  future default Rust planner routing. The accepted future-cutover ownership
+  model is Rust-owned real-device probing and detected-device profile mismatch
+  warning parity. The ADR does not implement probing, deprecate Python probing,
+  change default CLI behavior, or promote Rust routes beyond explicit
+  non-default migration paths.
 - `tools/plan_parity_scenarios.json`: dev-only P7P comparison scenario
   manifest for current checked-in device-plan comparisons. It is not a Python
   golden, regenerated evidence, normal Rust/Tauri check input, or user-facing
@@ -342,6 +352,12 @@ meaningful explicit field is required for explicit-context coverage. The former
 broad real-device context blocker is narrowed into two still-blocked default
 cutover blockers: real-device probing and detected-device profile mismatch
 warning parity.
+
+P8M records the future ownership decision for those two blocked areas without
+implementing them. For future default Rust planner cutover, Rust should own
+real-device probing and detected-device profile mismatch warning parity. Python
+remains the current CLI/reference owner, explicit Rust routes remain non-default,
+and explicit context evidence remains separate from real-device probing.
 
 | Device plan | Device profile | Selected recipes | Private Rust planner status | Required planner-only bindings | Current limitation |
 | --- | --- | --- | --- | --- | --- |
@@ -610,8 +626,10 @@ The shadow command and Python bridge do not execute plans, probe devices, invoke
 ADB, create detected-device facts, emit detected-device profile mismatch
 warnings, access the network, download or materialize artifacts, regenerate
 goldens, expose Tauri commands, expose sidecar protocol requests, or replace the
-default Python `emuchef plan` CLI. Planner CLI cutover remains a future explicit
-phase.
+default Python `emuchef plan` CLI. ADR 0003 decides that Rust should own
+real-device probing and detected-device profile mismatch warning parity before
+future default Rust planner cutover, but P8M does not implement that behavior.
+Planner CLI cutover remains a future explicit phase.
 
 ## Dev-Only Python Planner API Vs Rust Shadow Comparison
 
@@ -692,7 +710,10 @@ checked-in device plans with six scenarios, including one P8K explicit-context
 scenario, and expects every scenario to classify as `match`. P8L records that
 explicit device context has static coverage evidence through that matrix schema
 and scenario, but real-device probing and detected-device profile mismatch
-warnings remain blocked. Matching matrix
+warnings remain blocked. P8M records the accepted future-cutover ownership model:
+Rust should own those behaviors before default Rust planner cutover, after an
+incremental implementation path that starts with a Rust probing abstraction and
+fake/non-live tests. Matching matrix
 status is necessary evidence for the compared planner-only fields, not
 sufficient proof of CLI routing, real-device context resolution, executor/apply
 compatibility, artifact materialization, or Python planner deletability.
@@ -701,4 +722,6 @@ Use `docs/rust-planner-cutover-readiness.md` for the current blocker
 classification, comparison-matrix gating policy, and proposed staged ladder for
 future user-facing Rust planner routing and Python planner deletion. Use
 `docs/adr/0002-rust-planner-cli-output-compatibility.md` for the accepted
-default-route output and exit-code compatibility target.
+default-route output and exit-code compatibility target. Use
+`docs/adr/0003-rust-real-device-context-ownership.md` for the accepted
+future-cutover real-device context ownership model.

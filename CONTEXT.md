@@ -54,6 +54,13 @@ eventually becomes the default planner backend for `emuchef plan`, the default
 CLI output and exit-code behavior must remain compatible with the current
 Python-owned `emuchef plan` contract unless a separate accepted breaking-change
 decision says otherwise.
+The future Rust planner real-device context ownership model is recorded in
+[ADR 0003](docs/adr/0003-rust-real-device-context-ownership.md). For future
+default Rust planner cutover, Rust should own real-device probing and
+detected-device profile mismatch warning parity. Python remains the current
+default/reference planner owner until a later implementation and cutover phase.
+P8M is the accepted ADR slice for this decision only; it does not implement
+ADB/device probing.
 
 ## Current Authored Model
 
@@ -316,6 +323,18 @@ blocker is narrowed into two still-blocked areas: real-device probing and
 detected-device profile mismatch warning parity. Default `emuchef plan` remains
 Python-owned, and `rust-shadow` and `rust-experimental` remain explicit
 non-default Rust routes.
+
+P8M's accepted ADR 0003 decides the future ownership model for those remaining
+context blockers:
+Rust should own real-device probing and detected-device profile mismatch warning
+parity before default Rust planner cutover. This is not implemented in the
+current code and does not add ADB/device probing. The expected implementation
+path is incremental: Rust device probing abstraction, fake/non-live probe tests,
+detected-context planner input construction, mismatch-warning parity, explicit
+non-default route support, optional live ADB smoke, readiness reclassification,
+and later default planner backend cutover. Executor/apply, Tauri/protocol, Cargo
+fallback behavior, fixture/golden data, normal runtime checks, and Python planner
+deletion remain unchanged.
 
 P8K extends the dev-only planner matrix tooling with optional explicit
 `device_context` data per scenario. Valid matrix context fields are

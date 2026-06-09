@@ -493,6 +493,18 @@ status remains `blocked`, and the gate still does not run live comparison,
 smoke, Cargo, npm, ADB, executor/apply, Tauri/protocol, network, artifact, or
 fixture/golden work.
 
+P8M records the accepted future ownership decision in
+`../../docs/adr/0003-rust-real-device-context-ownership.md`: Rust should own
+real-device probing and detected-device profile mismatch warning parity for
+future default Rust planner cutover. This decision does not implement probing,
+deprecate Python probing, change default `emuchef plan`, promote Rust routes, or
+change executor/apply, Tauri/protocol, Cargo fallback, fixture/golden, network,
+artifact, or runtime-check behavior. The expected implementation path remains
+incremental: a Rust probing abstraction, fake/non-live tests, detected-context
+planner input construction, mismatch-warning parity, explicit non-default route
+support, optional live ADB smoke, readiness reclassification, and a later default
+planner backend cutover.
+
 P8C guards the explicit bridge's default CLI output compatibility contract. P7P
 is planner DTO/result comparison evidence, P8B is Python CLI `rust-shadow` route
 invocation evidence, P8C is the assertion that omitted
@@ -535,7 +547,9 @@ commands, expose sidecar protocol requests, invoke Cargo from the Python CLI
 route, or alter the default
 `emuchef-rust-backend` sidecar binary. Default Rust planner routing remains
 blocked on broader output/behavior compatibility with the current Python CLI
-contract or a separate accepted breaking-change decision. `default-run =
+contract or a separate accepted breaking-change decision, plus Rust-owned
+real-device probing and detected-device profile mismatch warning parity as
+accepted in ADR 0003. `default-run =
 "emuchef-rust-backend"` is set so existing `cargo run --manifest-path
 crates/emuchef-rust-backend/Cargo.toml -- --sidecar` and one-shot development
 workflows remain unambiguous.
@@ -588,7 +602,9 @@ in `../../docs/rust-planner-cutover-readiness.md`. The readiness document is
 the source for future user-facing routing, matrix-gating, and Python deletion
 criteria. The future default planner CLI output and exit-code compatibility
 decision is classified in
-`../../docs/adr/0002-rust-planner-cli-output-compatibility.md`.
+`../../docs/adr/0002-rust-planner-cli-output-compatibility.md`. The future
+default planner real-device context ownership decision is classified in
+`../../docs/adr/0003-rust-real-device-context-ownership.md`.
 
 By default the harness launches Rust with offline Cargo:
 
