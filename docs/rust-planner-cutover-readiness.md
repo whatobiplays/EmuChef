@@ -95,11 +95,18 @@ The Rust planner evidence is planner-only and migration-focused:
   `--verbose` and `--output` through that formatter. `--rust-shadow-output` is
   valid only with `--planner-backend rust-shadow`; Python and
   `rust-experimental` reject it before ADB resolution or Python planner/session
-  construction. P8G is cutover rehearsal evidence only. It does not change
+  construction. P8G is cutover rehearsal routing evidence only. It does not change
   default Python planner ownership, executor/apply behavior, real-device
   behavior, Tauri/protocol behavior, Cargo fallback behavior, fixture/golden
   ownership, or normal runtime checks. Its name and behavior may change before
   Rust becomes the default planner backend.
+- `tools/smoke_rust_shadow_cli_matrix.py` provides P8H dev-only matrix smoke
+  evidence for `--planner-backend rust-experimental`. It reuses the existing
+  route backend and effective output-mode machinery, generates commands without
+  `--rust-shadow-output`, reports `route_backend: rust-experimental` and
+  `route_output_mode: python-compatible`, and requires successful scenarios to
+  exit `0` with stdout classified as `python_summary`. Raw Rust JSON remains
+  `stdout_json` and fails the P8H smoke for successful scenarios.
 - `tools/plan_parity_scenarios.json` is the P7P scenario matrix for the current
   checked-in device-plan scenarios. The current checked-in scenario matrix
   expects all five scenarios to classify as `match`.
@@ -138,7 +145,7 @@ resolved or explicitly accepted for a narrower experimental route:
 
 | Blocker | Current classification |
 | --- | --- |
-| CLI routing strategy | Python `src/emuchef/cli.py` remains the current default `draft` and `plan` route. P8A adds an explicit dev-only `emuchef plan --planner-backend rust-shadow --rust-planner-bin <path>` bridge. It requires a supplied shadow binary, never invokes Cargo, passes through Rust JSON stdout/stderr by default, and is not a replacement command path or fallback policy. P8B adds a dev-only matrix smoke for that bridge's raw passthrough invocation path, and P8F adds dev-only matrix smoke for the same bridge with explicit `--rust-shadow-output python-compatible`; neither makes Rust authoritative. P8G adds `emuchef plan --planner-backend rust-experimental --rust-planner-bin <path>` as an explicit non-default migration route that reuses the Rust shadow planner invocation and Python-compatible formatter by default. `rust-experimental` is a cutover rehearsal route, not the default planner, not a stable final public contract, and not Python planner deletion. Its name and behavior may change before Rust becomes the default planner backend. |
+| CLI routing strategy | Python `src/emuchef/cli.py` remains the current default `draft` and `plan` route. P8A adds an explicit dev-only `emuchef plan --planner-backend rust-shadow --rust-planner-bin <path>` bridge. It requires a supplied shadow binary, never invokes Cargo, passes through Rust JSON stdout/stderr by default, and is not a replacement command path or fallback policy. P8B adds a dev-only matrix smoke for that bridge's raw passthrough invocation path, and P8F adds dev-only matrix smoke for the same bridge with explicit `--rust-shadow-output python-compatible`; neither makes Rust authoritative. P8G adds `emuchef plan --planner-backend rust-experimental --rust-planner-bin <path>` as an explicit non-default migration route that reuses the Rust shadow planner invocation and Python-compatible formatter by default. P8H adds dev-only matrix smoke evidence for that explicit route across the current scenario matrix. `rust-experimental` is a cutover rehearsal route, not the default planner, not a stable final public contract, and not Python planner deletion. Its name and behavior may change before Rust becomes the default planner backend. |
 | Device probing and context resolution | Python CLI resolves ADB/device facts before planning in `_resolve_device_context(...)`. Rust shadow planning uses synthetic/profile-derived planner context and does not probe devices. |
 | Argument and binding parity | `emuchef-plan-shadow` accepts explicit `--authored-root`, `--device-plan`, and string `--bind` values. It mirrors repeated-bind grouping but is not full future Rust CLI binding type parity, ops replay parity, or common-flag parity. |
 | Output format compatibility | Rust emits private JSON `PlanningResult` through the shadow command. P8A passes that JSON through directly from the explicit dev-only Python CLI bridge, and P8C guards that omitted `--rust-shadow-output` and explicit `--rust-shadow-output passthrough` remain Rust stdout/stderr/exit-code passthrough. P8E adds explicit `--rust-shadow-output python-compatible` formatting for usable Rust `PlanningResult` JSON: concise summary labels mirror the visible Python CLI labels, structured YAML is produced from the Rust JSON mapping through `dump_yaml(...)`, and `--output` writes that YAML while stdout stays concise unless `--verbose` is selected. Python CLI default planning still owns the default concise summary, verbose YAML, `--output`, and exit-code behavior. P8D accepts the future default-route target: Rust must preserve the Python-owned output and exit-code contract before default planner cutover unless a separate accepted breaking-change decision says otherwise. Rust-native JSON requires a future explicit structured-output mode such as `--format json`. P8E is output-compatibility path evidence only; it is not default Rust planner routing. |
@@ -183,13 +190,17 @@ resolved or explicitly accepted for a narrower experimental route:
   Cargo, the P7P comparison harness, executor/apply, ADB, Tauri/protocol,
   network, artifact materialization, fixture/golden regeneration, or normal
   Rust/Tauri runtime checks.
-- P8G experimental-route state: `tools/smoke_rust_shadow_cli_matrix.py
+- P8G experimental-route state: `emuchef plan --planner-backend
+  rust-experimental --rust-planner-bin <path>` reuses the Rust shadow planner
+  invocation and defaults to Python-compatible output formatting. It remains
+  explicit opt-in, non-default, and non-stable.
+- P8H experimental-route smoke state: `tools/smoke_rust_shadow_cli_matrix.py
   --planner-backend rust-experimental` runs the same current scenario matrix
   through the explicit non-default migration route. Generated commands omit
   `--rust-shadow-output`, report an effective Python-compatible output mode, and
-  require successful scenarios to emit concise Python-compatible summary stdout.
-  This extends the existing smoke runner without renaming it or wiring it into
-  normal runtime checks.
+  require successful scenarios to exit `0` and emit concise Python-compatible
+  summary stdout. This extends the existing smoke runner without renaming it or
+  wiring it into normal runtime checks.
 - Pre-cutover candidate: planner routing work may use the matrix as an
   optional/manual gate to gather evidence before exposing any user-facing Rust
   planner path.

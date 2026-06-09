@@ -1,10 +1,13 @@
 #!/usr/bin/env python3
-"""Smoke the explicit Python CLI route to the Rust shadow planner.
+"""Smoke explicit Python CLI routes to the Rust shadow planner.
 
-This developer-only tool proves that the opt-in ``emuchef plan
---planner-backend rust-shadow`` route can invoke a supplied shadow planner
-binary across the current scenario matrix. It does not compare planner output,
-execute plans, probe devices, materialize artifacts, or regenerate fixtures.
+This developer-only tool proves that the opt-in ``rust-shadow`` route and the
+explicit non-default ``rust-experimental`` migration route can invoke a supplied
+shadow planner binary across the current scenario matrix. ``rust-shadow``
+remains passthrough by default; ``rust-experimental`` uses Python-compatible
+summary output through the shared compatibility classification machinery. The
+smoke does not compare planner output, execute plans, probe devices, materialize
+artifacts, or regenerate fixtures.
 """
 
 import argparse

@@ -410,7 +410,7 @@ explicitly defines that expectation. The smoke runner default remains
 `passthrough`, and default generated commands omit `--rust-shadow-output
 passthrough` to preserve P8B behavior.
 
-The same smoke runner also supports `--planner-backend rust-experimental` without
+P8H uses the same smoke runner for `--planner-backend rust-experimental` without
 renaming the tool:
 
 ```bash
@@ -423,7 +423,9 @@ python3 tools/smoke_rust_shadow_cli_matrix.py \
 
 In `rust-experimental` smoke mode, generated commands omit
 `--rust-shadow-output`, the effective output mode is Python-compatible, and
-successful scenarios must emit concise Python-compatible planning summary stdout.
+successful scenarios must exit `0` and emit concise Python-compatible planning
+summary stdout. Raw Rust JSON stdout remains classified as `stdout_json` and
+fails the P8H smoke for successful scenarios.
 
 P8C guards the explicit bridge's default CLI output compatibility contract. P7P
 is planner DTO/result comparison evidence, P8B is Python CLI `rust-shadow` route
@@ -431,8 +433,9 @@ invocation evidence, P8C is the assertion that omitted
 `--rust-shadow-output`/explicit `passthrough` remains dev-only Rust
 stdout/stderr/exit-code passthrough, and P8E is the explicit formatter bridge for
 usable Rust `PlanningResult` JSON. P8F is Python-compatible output-mode smoke
-across the same explicit route and scenario matrix, and P8G is the explicit
-non-default `rust-experimental` migration route. None of these is default Rust
+across the same explicit `rust-shadow` route and scenario matrix, P8G is the
+explicit non-default `rust-experimental` migration route, and P8H is dev-only
+matrix smoke evidence for that explicit route. None of these is default Rust
 planner cutover readiness or Python planner deletion readiness.
 
 P8D records the future default-route output compatibility decision in
@@ -577,12 +580,13 @@ routes can invoke the supplied Rust shadow planner across the current matrix.
 The default smoke remains the `rust-shadow` raw passthrough route. P8F uses
 `rust-shadow` with explicit `--rust-shadow-output python-compatible` and
 requires concise Python-compatible summary stdout for successful scenarios. P8G
-also allows the same smoke runner to exercise `--planner-backend
-rust-experimental`, whose generated commands omit `--rust-shadow-output` and
-whose effective output mode is Python-compatible. P8C separately guards the
-`rust-shadow` default output contract as Rust passthrough. None of these tools is
-wired into normal Rust/Tauri runtime checks, and none changes default
-`emuchef plan` ownership.
+adds the explicit non-default `rust-experimental` route. P8H uses the same smoke
+runner to exercise `--planner-backend rust-experimental`; generated commands omit
+`--rust-shadow-output`, the effective output mode is Python-compatible, and
+successful scenarios require exit `0` plus concise Python-compatible summary
+stdout. P8C separately guards the `rust-shadow` default output contract as Rust
+passthrough. None of these tools is wired into normal Rust/Tauri runtime checks,
+and none changes default `emuchef plan` ownership.
 
 ## Phase 6O Executor Scope
 

@@ -67,9 +67,9 @@ Rust planner-adjacent coverage is internal and fixture-scoped:
   route, and reports route exit-code/classification evidence only. It does not
   run the Python-vs-Rust planner-output comparison harness. P8F extends the same
   smoke runner with explicit `--rust-shadow-output python-compatible` coverage
-  for `rust-shadow`. P8G extends it to `--planner-backend rust-experimental`,
+  for `rust-shadow`. P8H extends it to `--planner-backend rust-experimental`,
   where generated commands omit `--rust-shadow-output` and successful scenarios
-  must emit concise Python-compatible summary stdout.
+  must exit `0` and emit concise Python-compatible summary stdout.
 - `tests/test_cli.py`: P8C and P8E CLI output compatibility contract coverage for
   the explicit `rust-shadow` bridge. The default guarded contract is Rust
   stdout/stderr/exit-code passthrough. The explicit
@@ -268,6 +268,17 @@ before Rust becomes the default planner backend. P8G does not change
 executor/apply, real-device, ADB, artifact, network, Tauri, protocol, Cargo
 fallback, fixture/golden, or normal runtime-check behavior.
 
+P8H adds matrix-level smoke evidence for that explicit non-default route through
+`tools/smoke_rust_shadow_cli_matrix.py --planner-backend rust-experimental`.
+The smoke reuses the existing backend and effective-output-mode logic, omits
+`--rust-shadow-output` from generated commands, reports the effective
+Python-compatible output mode, and requires successful scenarios to exit `0` and
+classify stdout as `python_summary`. Raw Rust JSON remains `stdout_json` and
+fails the P8H smoke for successful scenarios. P8H is route plus output-shape
+smoke only; P7P remains the Python-vs-Rust planner DTO/result comparison
+evidence, P8B remains raw passthrough route-invocation evidence, and P8F remains
+explicit `rust-shadow` Python-compatible output-mode smoke.
+
 | Device plan | Device profile | Selected recipes | Private Rust planner status | Required planner-only bindings | Current limitation |
 | --- | --- | --- | --- | --- | --- |
 | `authored/device_plans/ayaneo.konkr_pocket_fit.base.yaml` | `ayaneo.konkr_pocket_fit` | `app.retroarch.provision` | Success. `repo_plan_e2e_*` tests build input from checked-in plan/profile YAML, emit deterministic selected/expanded refs and step order, and assert normalized RetroArch params. | None. Optional `app.retroarch.provision/retroarch_cfg` may be omitted, which prunes `seed_retroarch_cfg`; a temp `.cfg` binding includes that step. | Not a user-facing planner path. |
@@ -391,8 +402,10 @@ The Rust planner skeleton is not a replacement command path. P8A exposes an
 explicit developer-only Python CLI bridge to the shadow binary:
 `emuchef plan --planner-backend rust-shadow --rust-planner-bin <path>`. P8G adds
 the explicit non-default migration route
-`emuchef plan --planner-backend rust-experimental --rust-planner-bin <path>`.
-Both require a supplied shadow binary, and neither is exposed as a Tauri command,
+`emuchef plan --planner-backend rust-experimental --rust-planner-bin <path>`,
+and P8H adds dev-only matrix smoke evidence for that route across the current
+scenario matrix. Both routes require a supplied shadow binary, and neither is
+exposed as a Tauri command,
 sidecar protocol request, production/default CLI command, stable final public
 contract, or runtime fallback. The Rust planner's internal permission-intent
 helper is not a serialized execution-plan field and is not consumed by
@@ -495,10 +508,20 @@ execute/apply plans, probe devices, invoke ADB, access the network, materialize
 artifacts, regenerate goldens, or participate in normal Rust/Tauri runtime
 checks.
 
-The same smoke runner supports `--planner-backend rust-experimental` without
-renaming the tool. In that mode, generated commands omit `--rust-shadow-output`,
-report an effective Python-compatible output mode, and require concise
-Python-compatible summary stdout for successful scenarios.
+P8H uses the same smoke runner for the explicit `rust-experimental` route without
+renaming the tool:
+
+```bash
+python3 tools/smoke_rust_shadow_cli_matrix.py \
+  --scenario-matrix tools/plan_parity_scenarios.json \
+  --authored-root authored \
+  --rust-planner-bin <path-to-emuchef-plan-shadow> \
+  --planner-backend rust-experimental
+```
+
+In that mode, generated commands omit `--rust-shadow-output`, report an
+effective Python-compatible output mode, and require successful scenarios to
+exit `0` and emit concise Python-compatible summary stdout.
 
 The shadow command builds `PlannerInput` through the private
 `PlannerInput::from_authored_device_plan(...)` path and then calls

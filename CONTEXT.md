@@ -305,9 +305,12 @@ accepts `--python-executable`, and supports `--planner-backend rust-shadow` or
 `rust-shadow`; its default output mode remains `passthrough`, and generated
 commands omit `--rust-shadow-output passthrough` so the raw P8B route remains
 stable. For `rust-experimental`, generated commands omit `--rust-shadow-output`
-and the effective output mode is Python-compatible. The smoke creates only
-planner-visible temporary placeholder resources for matrix bindings and invokes
-`python -m emuchef plan` for each scenario. Its
+and the effective output mode is Python-compatible. Successful
+`rust-experimental` smoke scenarios require actual route exit code `0` and
+stdout classification `python_summary`. Raw Rust JSON stdout remains classified
+as `stdout_json` and fails the `rust-experimental` smoke for successful
+scenarios. The smoke creates only planner-visible temporary placeholder resources
+for matrix bindings and invokes `python -m emuchef plan` for each scenario. Its
 deterministic JSON report uses stable basenames for local executables, records
 the selected route backend and effective route output mode, includes scenario
 ids, device-plan ids, binding refs/kinds, expected and actual route exit codes,
@@ -328,12 +331,14 @@ future scenario explicitly defines that expectation.
 P7P is Python-vs-Rust planner DTO/result comparison evidence, P8B is raw
 passthrough Python CLI `rust-shadow` route invocation evidence, P8C is the
 passthrough CLI output contract for the explicit shadow route, P8E is the
-explicit formatter bridge, P8F is Python-compatible route/output matrix smoke,
-and P8G is the explicit non-default `rust-experimental` migration route. None of
-these is default Rust planner cutover readiness or Python planner deletion
-readiness. The smoke does not execute/apply plans, probe devices, invoke ADB,
-access the network, materialize artifacts, regenerate goldens, participate in
-normal Rust/Tauri runtime checks, or make Rust planner output authoritative.
+explicit formatter bridge, P8F is Python-compatible `rust-shadow` route/output
+matrix smoke, P8G is the explicit non-default `rust-experimental` migration
+route, and P8H is dev-only matrix smoke evidence for that explicit route across
+the current scenario matrix. None of these is default Rust planner cutover
+readiness or Python planner deletion readiness. The smoke does not execute/apply
+plans, probe devices, invoke ADB, access the network, materialize artifacts,
+regenerate goldens, participate in normal Rust/Tauri runtime checks, or make
+Rust planner output authoritative.
 
 `tools/compare_rust_python_plan.py` is a dev-only deterministic comparison
 harness for Python planner API output versus Rust shadow planner output. It uses
@@ -938,7 +943,10 @@ Common notes:
   non-default migration route. Its name and behavior may change before Rust
   becomes the default planner backend. It uses Python-compatible output by
   default and is not the default planner, not a stable final public contract, and
-  not Python planner deletion. Future default Rust planner routing must preserve
+  not Python planner deletion. The dev-only matrix smoke for `rust-experimental`
+  requires successful scenarios to exit `0` and emit stdout classified as
+  `python_summary`; raw Rust JSON stdout fails that smoke for successful
+  scenarios. Future default Rust planner routing must preserve
   Python-owned output and exit-code semantics unless a separate accepted
   breaking-change decision says otherwise; Rust-native JSON belongs behind a
   future explicit structured-output mode such as `--format json`.

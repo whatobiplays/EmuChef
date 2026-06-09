@@ -54,6 +54,13 @@ class SmokeRustShadowCliMatrixTests(unittest.TestCase):
         )
         run_process.assert_not_called()
 
+    def test_module_docs_describe_both_explicit_rust_routes(self) -> None:
+        module_docs = self.smoke.__doc__ or ""
+
+        self.assertIn("rust-shadow", module_docs)
+        self.assertIn("rust-experimental", module_docs)
+        self.assertIn("Python-compatible", module_docs)
+
     def test_builds_cli_command_for_scenario_without_bindings(self) -> None:
         scenario = self.smoke.PlanParityScenario(
             id="no_bindings",
@@ -434,6 +441,48 @@ class SmokeRustShadowCliMatrixTests(unittest.TestCase):
                 argv[argv.index("--planner-backend") + 1],
                 "rust-experimental",
             )
+            self.assertNotIn("--rust-shadow-output", argv)
+
+    def test_rust_experimental_matrix_exits_zero_when_all_synthetic_runs_emit_summary(self) -> None:
+        payload = scenario_payload(
+            {"id": "one", "device_plan": "one.plan", "bindings": []},
+            {"id": "two", "device_plan": "two.plan", "bindings": []},
+        )
+        completed = subprocess.CompletedProcess(
+            args=[],
+            returncode=0,
+            stdout="Planning status: success\nExecution plan: plan.shadow.synthetic\n",
+            stderr="",
+        )
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            matrix_path = Path(temp_dir) / "matrix.json"
+            matrix_path.write_text(json.dumps(payload), encoding="utf-8")
+            with patch.object(self.smoke, "run_process", return_value=completed) as run_process:
+                report = self.smoke.run_scenario_matrix_report(
+                    scenario_matrix=matrix_path,
+                    authored_root="authored",
+                    rust_planner_bin="/tmp/emuchef-plan-shadow",
+                    python_executable="python3",
+                    repo_root=Path("/repo"),
+                    route_backend="rust-experimental",
+                )
+
+        self.assertEqual(self.smoke.matrix_exit_code(report), 0)
+        self.assertEqual(report["inputs"]["route_backend"], "rust-experimental")
+        self.assertEqual(report["inputs"]["route_output_mode"], "python-compatible")
+        self.assertEqual(report["summary"], {"total_scenarios": 2, "pass_count": 2, "fail_count": 0})
+        for scenario in report["scenarios"]:
+            self.assertEqual(scenario["expected_route_exit_code"], 0)
+            self.assertEqual(scenario["actual_exit_code"], 0)
+            self.assertEqual(scenario["stdout_classification"], "python_summary")
+            self.assertEqual(scenario["expected_stdout_class"], "python_summary")
+            self.assertEqual(scenario["command_classification"], "rust_experimental_python_compatible_implicit")
+            self.assertEqual(scenario["status"], "pass")
+        for call in run_process.call_args_list:
+            argv = call.args[0]
+            self.assertEqual(argv[argv.index("--planner-backend") + 1], "rust-experimental")
+            self.assertIn("--rust-planner-bin", argv)
             self.assertNotIn("--rust-shadow-output", argv)
 
     def test_run_matrix_exits_nonzero_when_any_synthetic_run_fails(self) -> None:
