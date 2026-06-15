@@ -23,13 +23,17 @@ future default Rust planner cutover. P8M records that ownership decision. P8N
 adds a crate-local Rust probe abstraction, fake probe, and tests for layering
 detected facts over synthetic/profile-derived context. P8O adds fake/test-backed
 planner-input construction that applies detected facts over
-synthetic/profile-derived context. P8O does not implement live ADB probing, detected-device
-profile mismatch warning parity, route wiring, readiness gate behavior, or
+synthetic/profile-derived context. P8P adds pure/test-backed Rust
+detected-device profile mismatch warning foundation for supplied detected facts
+and authored profile criteria; it evaluates the current Python criteria surface
+of manufacturer, brand, model regex, and Android minimum version. Authored
+Android maximum values are parsed but not evaluated because the current Python
+warning path does not evaluate them. P8P does not implement live ADB probing,
+route wiring, readiness gate behavior, normal runtime warning emission, or
 current Python default planning behavior. Intended future context precedence is
 synthetic/profile context -> detected facts -> explicit CLI overrides. Executor,
-apply, real-device, ADB, artifact
-materialization, network, Tauri protocol, normal runtime checks, and default
-user-facing CLI behavior are unchanged.
+apply, real-device, ADB, artifact materialization, network, Tauri protocol,
+normal runtime checks, and default user-facing CLI behavior are unchanged.
 
 P8I adds `tools/check_rust_planner_cutover_readiness.py` as a static,
 developer-only readiness gate for any future PR that proposes making Rust the
@@ -336,6 +340,15 @@ resolved or explicitly accepted for a narrower experimental route:
   mismatch warning parity, `rust-shadow` or `rust-experimental` route wiring,
   Python CLI behavior, Tauri/protocol behavior, executor/apply behavior,
   readiness gate reclassification, or Python planner deletion readiness.
+- P8P detected-device profile mismatch warning foundation:
+  `crates/emuchef-rust-backend/src/device_profile_match.rs` adds pure
+  crate-private warning construction for supplied detected facts and authored
+  profile criteria. `crates/emuchef-rust-backend/src/planner_device_plan.rs`
+  exposes private criteria loading for tests and future wiring. This is not live
+  probing, not normal planner warning emission, not `rust-shadow` or
+  `rust-experimental` route wiring, not readiness gate reclassification, and not
+  Python planner deletion readiness. Real-device probing and mismatch-warning
+  parity remain blocked until live implementation and route evidence exist.
 - Pre-cutover candidate: planner routing work may use the matrix as an
   optional/manual gate to gather evidence before exposing any user-facing Rust
   planner path.

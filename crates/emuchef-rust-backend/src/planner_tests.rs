@@ -6,6 +6,7 @@ use serde_json::{json, Value};
 use tempfile::TempDir;
 
 use crate::device_probe::{DetectedDeviceFacts, DeviceProbe, FakeDeviceProbe};
+use crate::device_profile_match::build_detected_device_profile_mismatch_warning;
 use crate::model::{
     OrderedMap, ParamValue, Recipe, RecipeProvides, RemoteFileArtifact, Step, StepCondition,
     StepConstraints,
@@ -15,6 +16,7 @@ use crate::planner::{
 };
 use crate::planner_device_plan::{
     discover_device_plan_inventory, discover_device_profile_inventory,
+    load_device_plan_profile_match_criteria,
     planner_input_from_authored_device_plan_with_detected_facts,
 };
 
@@ -2739,7 +2741,9 @@ fn detected_context_planner_input_overrides_profile_scalars() {
         "ayaneo.konkr_pocket_fit.base",
         &[],
         &DetectedDeviceFacts {
+            serial: None,
             manufacturer: Some("Detected Manufacturer".to_string()),
+            brand: None,
             model: Some("Detected Model".to_string()),
             android_version: Some(15),
             android_api_level: Some(35),
@@ -2759,7 +2763,7 @@ fn detected_context_planner_input_overrides_profile_scalars() {
 
 #[test]
 fn detected_context_planner_input_preserves_absent_detected_fields() {
-    let mut bindings = OrderedMap::new();
+    let bindings = OrderedMap::new();
     let plan_id = "plan.p8o.detected.absent_fields.001".to_string();
     let baseline = PlannerInput::from_authored_device_plan(
         repo_authored_root(),
@@ -2892,7 +2896,9 @@ metadata: {}
 #[test]
 fn detected_context_planner_input_accepts_fake_probe_facts_without_live_probe() {
     let facts = DetectedDeviceFacts {
+        serial: None,
         manufacturer: Some("Probe Manufacturer".to_string()),
+        brand: None,
         model: Some("Probe Model".to_string()),
         android_version: Some(16),
         android_api_level: Some(36),
@@ -2932,7 +2938,9 @@ fn detected_context_planner_input_does_not_emit_profile_mismatch_warning() {
         "plan.p8o.detected.no_mismatch_warning.001".to_string(),
         bindings,
         &DetectedDeviceFacts {
+            serial: None,
             manufacturer: Some("Not AYANEO".to_string()),
+            brand: None,
             model: Some("Unmatched Device".to_string()),
             android_version: Some(9),
             android_api_level: Some(28),
@@ -2944,6 +2952,332 @@ fn detected_context_planner_input_does_not_emit_profile_mismatch_warning() {
 
     assert_eq!(actual["status"], "success", "{actual:#}");
     assert_eq!(actual["warnings"], json!([]));
+}
+
+#[test]
+fn detected_profile_mismatch_matching_authored_criteria_returns_no_warning() {
+    let selection =
+        load_device_plan_profile_match_criteria(repo_authored_root(), "ayaneo.pocket_s_mini.base")
+            .expect("repo device plan profile criteria should load");
+    let facts = DetectedDeviceFacts {
+        serial: Some("test-serial".to_string()),
+        manufacturer: Some("AYANEO".to_string()),
+        brand: Some("AYANEO".to_string()),
+        model: Some("AYANEO Pocket S mini".to_string()),
+        android_version: Some(13),
+        ..DetectedDeviceFacts::default()
+    };
+
+    let warning = build_detected_device_profile_mismatch_warning(
+        &selection.device_plan_ref,
+        &selection.device_profile_ref,
+        &facts,
+        &selection.profile_match,
+    );
+
+    assert_eq!(warning, None);
+}
+
+#[test]
+fn detected_profile_mismatch_warns_for_manufacturer_mismatch() {
+    let selection =
+        load_device_plan_profile_match_criteria(repo_authored_root(), "ayaneo.pocket_s_mini.base")
+            .expect("repo device plan profile criteria should load");
+    let facts = DetectedDeviceFacts {
+        serial: Some("test-serial".to_string()),
+        manufacturer: Some("Valve".to_string()),
+        brand: Some("AYANEO".to_string()),
+        model: Some("AYANEO Pocket S mini".to_string()),
+        android_version: Some(13),
+        ..DetectedDeviceFacts::default()
+    };
+
+    let warning = build_detected_device_profile_mismatch_warning(
+        &selection.device_plan_ref,
+        &selection.device_profile_ref,
+        &facts,
+        &selection.profile_match,
+    )
+    .expect("manufacturer mismatch should produce a warning");
+
+    assert_eq!(warning.code, "device_profile_mismatch");
+    assert_eq!(
+        warning.message,
+        "Selected device plan profile 'ayaneo.pocket_s_mini' does not match the detected device Valve AYANEO Pocket S mini."
+    );
+    assert_eq!(
+        warning.details["device_plan_ref"],
+        "ayaneo.pocket_s_mini.base"
+    );
+    assert_eq!(
+        warning.details["device_profile_ref"],
+        "ayaneo.pocket_s_mini"
+    );
+    assert_eq!(warning.details["serial"], "test-serial");
+    assert_eq!(warning.details["manufacturer"], "Valve");
+    assert_eq!(warning.details["brand"], "AYANEO");
+    assert_eq!(warning.details["model"], "AYANEO Pocket S mini");
+    assert_eq!(warning.details["android_version"], 13);
+    assert_eq!(
+        warning.details["reasons"],
+        json!([
+            "manufacturer 'Valve' did not contain any of: AYANEO",
+            "brand matched one of: AYANEO",
+            "model matched one of: Pocket S mini",
+            "android version 13 met minimum 13"
+        ])
+    );
+}
+
+#[test]
+fn detected_profile_mismatch_warns_for_brand_and_model_pattern_mismatches() {
+    let selection =
+        load_device_plan_profile_match_criteria(repo_authored_root(), "ayaneo.pocket_s_mini.base")
+            .expect("repo device plan profile criteria should load");
+    let facts = DetectedDeviceFacts {
+        manufacturer: Some("AYANEO".to_string()),
+        brand: Some("Valve".to_string()),
+        model: Some("Steam Deck".to_string()),
+        android_version: Some(13),
+        ..DetectedDeviceFacts::default()
+    };
+
+    let warning = build_detected_device_profile_mismatch_warning(
+        &selection.device_plan_ref,
+        &selection.device_profile_ref,
+        &facts,
+        &selection.profile_match,
+    )
+    .expect("brand and model mismatches should produce a warning");
+
+    assert_eq!(
+        warning.details["reasons"],
+        json!([
+            "manufacturer matched one of: AYANEO",
+            "brand 'Valve' did not contain any of: AYANEO",
+            "model 'Steam Deck' did not match any of: Pocket S mini",
+            "android version 13 met minimum 13"
+        ])
+    );
+}
+
+#[test]
+fn detected_profile_mismatch_missing_detected_fields_do_not_warn() {
+    let selection =
+        load_device_plan_profile_match_criteria(repo_authored_root(), "ayaneo.pocket_s_mini.base")
+            .expect("repo device plan profile criteria should load");
+
+    let warning = build_detected_device_profile_mismatch_warning(
+        &selection.device_plan_ref,
+        &selection.device_profile_ref,
+        &DetectedDeviceFacts::default(),
+        &selection.profile_match,
+    );
+
+    assert_eq!(warning, None);
+}
+
+#[test]
+fn detected_profile_mismatch_warns_for_android_version_below_minimum() {
+    let selection =
+        load_device_plan_profile_match_criteria(repo_authored_root(), "ayaneo.pocket_s_mini.base")
+            .expect("repo device plan profile criteria should load");
+    let facts = DetectedDeviceFacts {
+        manufacturer: Some("AYANEO".to_string()),
+        brand: Some("AYANEO".to_string()),
+        model: Some("AYANEO Pocket S mini".to_string()),
+        android_version: Some(12),
+        ..DetectedDeviceFacts::default()
+    };
+
+    let warning = build_detected_device_profile_mismatch_warning(
+        &selection.device_plan_ref,
+        &selection.device_profile_ref,
+        &facts,
+        &selection.profile_match,
+    )
+    .expect("android version below minimum should produce a warning");
+
+    assert_eq!(
+        warning.details["reasons"],
+        json!([
+            "manufacturer matched one of: AYANEO",
+            "brand matched one of: AYANEO",
+            "model matched one of: Pocket S mini",
+            "android version 12 was below minimum 13"
+        ])
+    );
+}
+
+#[test]
+fn planner_device_plan_detected_profile_mismatch_loads_authored_brand_model_and_android_range_criteria(
+) {
+    let selection =
+        load_device_plan_profile_match_criteria(repo_authored_root(), "ayaneo.pocket_s_mini.base")
+            .expect("repo device plan profile criteria should load");
+    let android_version = selection
+        .profile_match
+        .android_version
+        .as_ref()
+        .expect("repo profile should define android range criteria");
+
+    assert_eq!(
+        selection.profile_match.manufacturer_contains,
+        vec!["AYANEO".to_string()]
+    );
+    assert_eq!(
+        selection.profile_match.brand_contains,
+        vec!["AYANEO".to_string()]
+    );
+    assert_eq!(
+        selection.profile_match.model_patterns,
+        vec!["Pocket S mini".to_string()]
+    );
+    assert_eq!(android_version.min, Some(13));
+    assert_eq!(android_version.max, None);
+}
+
+#[test]
+fn detected_profile_mismatch_android_max_is_parsed_but_not_evaluated_for_python_parity() {
+    let root = temp_authored_root_with_device_plan(
+        "detected.max.profile",
+        "ayaneo.konkr_pocket_fit",
+        &[("app.retroarch.provision", true)],
+    );
+    let authored_root = root.path().join("authored");
+    fs::write(
+        authored_root.join("device_profiles/ayaneo.konkr_pocket_fit.yaml"),
+        r#"
+schema_version: 1
+kind: device_profile
+id: ayaneo.konkr_pocket_fit
+name: AYANEO KONKR Pocket FIT
+match:
+  manufacturer_contains:
+    - AYANEO
+  brand_contains:
+    - AYANEO
+  model_patterns:
+    - 'Pocket FIT'
+  android_version:
+    min: 13
+    max: 13
+capability_defaults:
+  adb_available: true
+  apk_install: true
+  shared_storage_write: true
+  app_launch: true
+  shell_command: true
+  package_remove_for_user: false
+  root_shell: true
+  app_data_write: true
+device_tags:
+  - handheld_android
+"#
+        .trim_start(),
+    )
+    .expect("temp profile with max should be written");
+    let selection = load_device_plan_profile_match_criteria(&authored_root, "detected.max.profile")
+        .expect("temp device plan profile criteria should load");
+    let android_version = selection
+        .profile_match
+        .android_version
+        .as_ref()
+        .expect("temp profile should define android range criteria");
+    let facts = DetectedDeviceFacts {
+        manufacturer: Some("AYANEO".to_string()),
+        brand: Some("AYANEO".to_string()),
+        model: Some("KONKR Pocket FIT".to_string()),
+        android_version: Some(14),
+        ..DetectedDeviceFacts::default()
+    };
+
+    let warning = build_detected_device_profile_mismatch_warning(
+        &selection.device_plan_ref,
+        &selection.device_profile_ref,
+        &facts,
+        &selection.profile_match,
+    );
+
+    assert_eq!(android_version.max, Some(13));
+    assert_eq!(warning, None);
+}
+
+#[test]
+fn detected_profile_mismatch_accepts_fake_probe_facts_without_live_behavior() {
+    let selection =
+        load_device_plan_profile_match_criteria(repo_authored_root(), "ayaneo.pocket_s_mini.base")
+            .expect("repo device plan profile criteria should load");
+    let probe = FakeDeviceProbe::new(Ok(DetectedDeviceFacts {
+        serial: Some("fake-probe-serial".to_string()),
+        manufacturer: Some("Valve".to_string()),
+        brand: Some("Valve".to_string()),
+        model: Some("Steam Deck".to_string()),
+        android_version: Some(12),
+        ..DetectedDeviceFacts::default()
+    }));
+    let facts = probe
+        .detect()
+        .expect("fake probe should return configured facts");
+
+    let warning = build_detected_device_profile_mismatch_warning(
+        &selection.device_plan_ref,
+        &selection.device_profile_ref,
+        &facts,
+        &selection.profile_match,
+    )
+    .expect("fake probe mismatch facts should produce a warning");
+
+    assert_eq!(warning.code, "device_profile_mismatch");
+    assert_eq!(warning.details["serial"], "fake-probe-serial");
+}
+
+#[test]
+fn detected_profile_mismatch_helper_does_not_mutate_facts_or_criteria() {
+    let selection =
+        load_device_plan_profile_match_criteria(repo_authored_root(), "ayaneo.pocket_s_mini.base")
+            .expect("repo device plan profile criteria should load");
+    let original_criteria = selection.profile_match.clone();
+    let facts = DetectedDeviceFacts {
+        manufacturer: Some("Valve".to_string()),
+        brand: Some("Valve".to_string()),
+        model: Some("Steam Deck".to_string()),
+        android_version: Some(12),
+        ..DetectedDeviceFacts::default()
+    };
+    let original_facts = facts.clone();
+
+    let _ = build_detected_device_profile_mismatch_warning(
+        &selection.device_plan_ref,
+        &selection.device_profile_ref,
+        &facts,
+        &selection.profile_match,
+    );
+
+    assert_eq!(facts, original_facts);
+    assert_eq!(selection.profile_match, original_criteria);
+}
+
+#[test]
+fn detected_profile_mismatch_source_has_no_live_behavior() {
+    let source = include_str!("device_profile_match.rs");
+
+    for forbidden in [
+        "std::process",
+        "Command::new",
+        "std::env",
+        "std::fs",
+        "TcpStream",
+        "UdpSocket",
+        "reqwest",
+        "ureq",
+        "hyper",
+    ] {
+        assert!(
+            !source.contains(forbidden),
+            "profile mismatch helper must not contain live behavior marker {forbidden:?}"
+        );
+    }
 }
 
 #[test]

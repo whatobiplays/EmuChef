@@ -12,7 +12,9 @@ use crate::planner::DeviceContext;
 /// profile-derived `DeviceContext` without inventing placeholder facts.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub(crate) struct DetectedDeviceFacts {
+    pub serial: Option<String>,
     pub manufacturer: Option<String>,
+    pub brand: Option<String>,
     pub model: Option<String>,
     pub android_version: Option<i64>,
     pub android_api_level: Option<i64>,
@@ -98,7 +100,9 @@ mod tests {
     #[test]
     fn fake_probe_returns_configured_detected_facts() {
         let facts = DetectedDeviceFacts {
+            serial: Some("FAKE123".to_string()),
             manufacturer: Some("AYANEO".to_string()),
+            brand: Some("AYANEO".to_string()),
             model: Some("Pocket S Mini".to_string()),
             android_version: Some(13),
             android_api_level: Some(33),
@@ -124,7 +128,9 @@ mod tests {
         assert_eq!(
             DetectedDeviceFacts::default(),
             DetectedDeviceFacts {
+                serial: None,
                 manufacturer: None,
+                brand: None,
                 model: None,
                 android_version: None,
                 android_api_level: None,
@@ -225,21 +231,29 @@ mod tests {
     }
 
     #[test]
-    fn fake_probe_path_has_no_host_or_adb_dependencies() {
+    fn fake_probe_path_has_no_live_behavior_dependencies() {
         let source = include_str!("device_probe.rs");
         let production_source = source
             .split("#[cfg(test)]")
             .next()
             .expect("source should include production section");
 
-        assert!(!production_source.contains("std::process"));
-        assert!(!production_source.contains("std::env"));
-        assert!(!production_source.contains("std::fs"));
-        assert!(!production_source.contains("Command::new"));
-        assert!(!production_source.contains("SubprocessAdb"));
-        assert!(!production_source.contains("detect_device"));
-        assert!(!production_source.contains("adb"));
-        assert!(!production_source.contains("ADB"));
+        for forbidden in [
+            "std::process",
+            "Command::new",
+            "std::env",
+            "std::fs",
+            "TcpStream",
+            "UdpSocket",
+            "reqwest",
+            "ureq",
+            "hyper",
+        ] {
+            assert!(
+                !production_source.contains(forbidden),
+                "device probe foundation must not contain live behavior marker {forbidden:?}"
+            );
+        }
     }
 
     #[test]

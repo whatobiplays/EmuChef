@@ -114,6 +114,12 @@ Rust planner-adjacent coverage is internal and fixture-scoped:
   facts, stable probe errors, a probe trait, a fake probe, and context layering
   helper. It is not wired into CLI routes, Python, Tauri/protocol,
   executor/apply, readiness behavior, or live ADB probing.
+- `crates/emuchef-rust-backend/src/device_profile_match.rs`: P8P crate-local
+  pure/test-backed foundation for future detected-device profile mismatch
+  warnings. It compares supplied detected facts with authored profile match
+  criteria and returns the existing Rust `PlannerMessage` shape. It is not wired
+  into planner routes, CLI behavior, Python, Tauri/protocol, executor/apply,
+  readiness behavior, or live ADB probing.
 - `tools/plan_parity_scenarios.json`: dev-only P7P comparison scenario
   manifest for current checked-in device-plan comparisons. It is not a Python
   golden, regenerated evidence, normal Rust/Tauri check input, or user-facing
@@ -362,7 +368,10 @@ P8M records the future ownership decision for those two blocked areas without
 implementing them. For future default Rust planner cutover, Rust should own
 real-device probing and detected-device profile mismatch warning parity. Python
 remains the current CLI/reference owner, explicit Rust routes remain non-default,
-and explicit context evidence remains separate from real-device probing.
+and explicit context evidence remains separate from detected facts and
+real-device probing. P8P adds pure/test-backed mismatch-warning helper logic
+only; the default-cutover blockers remain until live probing and route evidence
+exist.
 
 | Device plan | Device profile | Selected recipes | Private Rust planner status | Required planner-only bindings | Current limitation |
 | --- | --- | --- | --- | --- | --- |
@@ -720,8 +729,9 @@ Rust should own those behaviors before default Rust planner cutover. P8N adds
 the crate-local probe abstraction and fake/non-live tests only. P8O adds
 fake/test-backed detected-facts planner-input construction only. The intended
 future precedence is synthetic/profile context -> detected facts -> explicit CLI
-overrides. P8O does not add live ADB probing, mismatch-warning parity, or route
-wiring. Matching matrix
+overrides. P8P adds pure/test-backed mismatch-warning helper logic for supplied
+detected facts, but does not add live ADB probing, normal planner warning
+emission, or route wiring. Matching matrix
 status is necessary evidence for the compared planner-only fields, not
 sufficient proof of CLI routing, real-device context resolution, executor/apply
 compatibility, artifact materialization, or Python planner deletability.
