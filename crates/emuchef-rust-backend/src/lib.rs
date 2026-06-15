@@ -15,7 +15,10 @@
 pub mod catalog;
 mod cli;
 pub mod commands;
+#[allow(dead_code)]
 pub(crate) mod device_probe;
+#[allow(dead_code)]
+pub(crate) mod device_profile_match;
 pub mod document;
 pub mod dto;
 pub mod envelope;

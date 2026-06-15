@@ -501,14 +501,18 @@ first implementation step: `src/device_probe.rs` defines detected facts, stable
 probe errors, a probe trait, a fake probe, and a helper that applies detected
 facts over planner `DeviceContext`. P8O adds crate-private fake/test-backed
 planner-input construction that applies detected facts over
-synthetic/profile-derived context. The intended future precedence is synthetic/profile context ->
-detected facts -> explicit CLI overrides. P8O does not implement live ADB
-probing, detected-device profile mismatch warning parity,
-`rust-shadow` or `rust-experimental` route wiring, Python CLI behavior,
-executor/apply, Tauri/protocol, Cargo fallback, fixture/golden, network,
-artifact, runtime-check behavior, readiness gate reclassification, or Python
-planner deletion readiness. The expected implementation path remains
-incremental: live real-device probing, mismatch-warning parity, explicit
+synthetic/profile-derived context. P8P adds crate-private pure/test-backed
+detected-device profile mismatch warning construction for supplied detected
+facts and authored profile criteria. P8P evaluates the current Python warning
+criteria for manufacturer, brand, model regex, and Android minimum version;
+authored Android maximum values are parsed but not evaluated because the current
+Python warning path does not evaluate them. The intended future precedence is
+synthetic/profile context -> detected facts -> explicit CLI overrides. P8P does
+not implement live ADB probing, `rust-shadow` or `rust-experimental` route
+wiring, Python CLI behavior, executor/apply, Tauri/protocol, Cargo fallback,
+fixture/golden, network, artifact, runtime-check behavior, readiness gate
+reclassification, or Python planner deletion readiness. The expected
+implementation path remains incremental: live real-device probing, explicit
 non-default route support, optional live ADB smoke, readiness reclassification,
 and a later default planner backend cutover.
 
@@ -556,8 +560,9 @@ route, or alter the default
 blocked on broader output/behavior compatibility with the current Python CLI
 contract or a separate accepted breaking-change decision, plus Rust-owned
 real-device probing and detected-device profile mismatch warning parity as
-accepted in ADR 0003. P8N's fake probe module is not part of this route and does
-not change shadow command behavior. `default-run =
+accepted in ADR 0003. P8N's fake probe module and P8P's pure mismatch-warning
+helper are not part of this route and do not change shadow command behavior.
+`default-run =
 "emuchef-rust-backend"` is set so existing `cargo run --manifest-path
 crates/emuchef-rust-backend/Cargo.toml -- --sidecar` and one-shot development
 workflows remain unambiguous.

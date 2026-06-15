@@ -39,10 +39,11 @@ real-device probing and detected-device profile mismatch warning parity before
 default Rust planner cutover. P8M records that ownership decision. P8N adds
 only the crate-local Rust fake/test probe foundation. P8O adds fake/test-backed
 detected-facts planner-input construction. Intended future context precedence:
-synthetic/profile context -> detected facts -> explicit CLI overrides. P8O does
-not change Python default planning behavior,
+synthetic/profile context -> detected facts -> explicit CLI overrides. P8P adds
+pure/test-backed mismatch-warning helper logic for supplied detected facts and
+authored profile criteria. P8P does not change Python default planning behavior,
 live probing, CLI route wiring, executor/apply, Tauri/protocol, readiness gate
-behavior, or detected-device profile mismatch warning parity.
+behavior, or normal planner warning emission.
 
 Rust planner, executor, and CLI behavior is fixture-scoped, test-scoped,
 internal, or editor-backend-scoped unless explicitly promoted by later work.
@@ -145,8 +146,9 @@ future default Rust planner cutover. Python remains the current default
 CLI/reference planner owner, Rust routes remain explicit and non-default, and
 real-device probing plus mismatch-warning parity remain blocked until
 implemented and evidenced. P8N adds only the Rust crate-local probe abstraction,
-fake probe, and context layering helper; it does not wire probing into any CLI,
-Tauri/protocol, executor/apply, or readiness-gate path.
+fake probe, and context layering helper. P8P adds only pure/test-backed
+mismatch-warning helper logic. Neither slice wires probing or mismatch warnings
+into any CLI, Tauri/protocol, executor/apply, or readiness-gate path.
 Existing Rust planner, executor, and CLI slices should remain scoped as parity
 scaffolding until a later phase explicitly promotes or retires the corresponding
 Python surface.

@@ -14,6 +14,7 @@ use serde_json::Value as JsonValue;
 use serde_yaml::{Mapping, Value as YamlValue};
 
 use crate::device_probe::{apply_detected_device_facts_to_context, DetectedDeviceFacts};
+use crate::device_profile_match::{AndroidVersionRangeCriteria, DeviceProfileMatchCriteria};
 use crate::model::{OrderedMap, Recipe};
 use crate::planner::{DeviceContext, PlannerInput, PlannerLoadError, RuntimeCapabilities};
 
@@ -44,6 +45,13 @@ pub(crate) struct PlannerInputParts {
     pub runtime_capabilities: RuntimeCapabilities,
 }
 
+#[derive(Clone, Debug, PartialEq)]
+pub(crate) struct DevicePlanProfileMatchCriteria {
+    pub device_plan_ref: String,
+    pub device_profile_ref: String,
+    pub profile_match: DeviceProfileMatchCriteria,
+}
+
 #[derive(Clone, Debug)]
 struct DeviceProfileRecord {
     path: PathBuf,
@@ -72,12 +80,17 @@ struct DeviceMatchYaml {
     #[serde(default)]
     manufacturer_contains: Vec<String>,
     #[serde(default)]
+    brand_contains: Vec<String>,
+    #[serde(default)]
+    model_patterns: Vec<String>,
+    #[serde(default)]
     android_version: Option<AndroidVersionRangeYaml>,
 }
 
 #[derive(Clone, Debug, Deserialize)]
 struct AndroidVersionRangeYaml {
     min: Option<i64>,
+    max: Option<i64>,
 }
 
 #[derive(Clone, Debug, Deserialize)]
@@ -154,6 +167,49 @@ pub(crate) fn planner_input_from_authored_device_plan_with_detected_facts(
     input.device_context =
         apply_detected_device_facts_to_context(input.device_context, detected_facts);
     Ok(input)
+}
+
+pub(crate) fn load_device_plan_profile_match_criteria(
+    authored_root: impl AsRef<Path>,
+    device_plan_ref: &str,
+) -> Result<DevicePlanProfileMatchCriteria, PlannerLoadError> {
+    let authored_root = authored_root.as_ref();
+    let profile_records = load_device_profiles(authored_root)?;
+    let plan_records = load_device_plans(authored_root)?;
+    let plan = plan_records
+        .iter()
+        .find(|record| record.plan.id == device_plan_ref)
+        .ok_or_else(|| {
+            let available = plan_records
+                .iter()
+                .map(|record| record.plan.id.as_str())
+                .collect::<Vec<_>>()
+                .join(", ");
+            PlannerLoadError::new(
+                "device_plan_not_found",
+                format!(
+                    "Unknown device plan '{device_plan_ref}'. Available device plans: {available}"
+                ),
+            )
+        })?;
+    let profile = profile_records
+        .iter()
+        .find(|record| record.profile.id == plan.plan.device_profile_ref)
+        .ok_or_else(|| {
+            PlannerLoadError::new(
+                "device_profile_not_found",
+                format!(
+                    "Device profile '{}' referenced by device plan '{}' was not found.",
+                    plan.plan.device_profile_ref, plan.plan.id
+                ),
+            )
+        })?;
+
+    Ok(DevicePlanProfileMatchCriteria {
+        device_plan_ref: plan.plan.id.clone(),
+        device_profile_ref: profile.profile.id.clone(),
+        profile_match: profile_match_criteria(&profile.profile),
+    })
 }
 
 pub(crate) fn load_planner_input_parts(
@@ -494,6 +550,22 @@ fn synthetic_device_context(profile: &DeviceProfileYaml) -> DeviceContext {
             .unwrap_or(0),
         android_api_level: None,
         device_tags: profile.device_tags.clone(),
+    }
+}
+
+fn profile_match_criteria(profile: &DeviceProfileYaml) -> DeviceProfileMatchCriteria {
+    DeviceProfileMatchCriteria {
+        manufacturer_contains: profile.match_criteria.manufacturer_contains.clone(),
+        brand_contains: profile.match_criteria.brand_contains.clone(),
+        model_patterns: profile.match_criteria.model_patterns.clone(),
+        android_version: profile
+            .match_criteria
+            .android_version
+            .as_ref()
+            .map(|version| AndroidVersionRangeCriteria {
+                min: version.min,
+                max: version.max,
+            }),
     }
 }
 

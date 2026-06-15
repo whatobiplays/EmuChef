@@ -294,8 +294,14 @@ mod tests {
         ]))
         .expect("explicit device context args should parse");
 
-        assert_eq!(config.explicit_context.manufacturer.as_deref(), Some("AYANEO"));
-        assert_eq!(config.explicit_context.model.as_deref(), Some("Pocket S Mini"));
+        assert_eq!(
+            config.explicit_context.manufacturer.as_deref(),
+            Some("AYANEO")
+        );
+        assert_eq!(
+            config.explicit_context.model.as_deref(),
+            Some("Pocket S Mini")
+        );
         assert_eq!(config.explicit_context.android_version, Some(13));
         assert_eq!(
             config.explicit_context.device_tags,
