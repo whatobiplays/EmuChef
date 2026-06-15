@@ -19,10 +19,15 @@ otherwise.
 The future default Rust planner real-device context ownership decision is
 accepted in `docs/adr/0003-rust-real-device-context-ownership.md`: Rust should
 own real-device probing and detected-device profile mismatch warning parity for
-future default Rust planner cutover. P8M records that decision only; it does not
-implement probing or change current Python default planning behavior.
-Executor, apply, real-device, ADB, artifact materialization, network, Tauri
-protocol, and default user-facing CLI behavior are unchanged.
+future default Rust planner cutover. P8M records that ownership decision. P8N
+adds a crate-local Rust probe abstraction, fake probe, and tests for layering
+detected facts over synthetic/profile-derived context. P8N does not implement
+live ADB probing, detected-device profile mismatch warning parity, route wiring,
+readiness gate behavior, or current Python default planning behavior. Intended
+future context precedence is synthetic/profile context -> detected facts ->
+explicit CLI overrides. Executor, apply, real-device, ADB, artifact
+materialization, network, Tauri protocol, normal runtime checks, and default
+user-facing CLI behavior are unchanged.
 
 P8I adds `tools/check_rust_planner_cutover_readiness.py` as a static,
 developer-only readiness gate for any future PR that proposes making Rust the
@@ -209,7 +214,7 @@ resolved or explicitly accepted for a narrower experimental route:
 | Blocker | Current classification |
 | --- | --- |
 | CLI routing strategy | Python `src/emuchef/cli.py` remains the current default `draft` and `plan` route. P8A adds an explicit dev-only `emuchef plan --planner-backend rust-shadow --rust-planner-bin <path>` bridge. It requires a supplied shadow binary, never invokes Cargo, passes through Rust JSON stdout/stderr by default, and is not a replacement command path or fallback policy. P8B adds a dev-only matrix smoke for that bridge's raw passthrough invocation path, and P8F adds dev-only matrix smoke for the same bridge with explicit `--rust-shadow-output python-compatible`; neither makes Rust authoritative. P8G adds `emuchef plan --planner-backend rust-experimental --rust-planner-bin <path>` as an explicit non-default migration route that reuses the Rust shadow planner invocation and Python-compatible formatter by default. P8H adds dev-only matrix smoke evidence for that explicit route across the current scenario matrix. `rust-experimental` is a cutover rehearsal route, not the default planner, not a stable final public contract, and not Python planner deletion. Its name and behavior may change before Rust becomes the default planner backend. |
-| Device probing and context resolution | Python CLI resolves ADB/device facts before planning in `_resolve_device_context(...)`. P8J lets the explicit Rust routes accept supplied `--manufacturer`, `--model`, `--android-version`, and repeated `--device-tag` values, and P8K/P8L provide matrix schema/tooling plus static coverage evidence for meaningful supplied `device_context` scenarios. P8M accepts the future-cutover ownership decision that Rust should own real-device probing and detected-device mismatch-warning parity, but it does not implement probing. Rust shadow planning still does not probe real devices or create detected-device facts. The former broad `real_device_context_probing_not_cut_over` blocker is narrowed, not resolved: `real_device_probing_not_cut_over` remains blocked. |
+| Device probing and context resolution | Python CLI resolves ADB/device facts before planning in `_resolve_device_context(...)`. P8J lets the explicit Rust routes accept supplied `--manufacturer`, `--model`, `--android-version`, and repeated `--device-tag` values, and P8K/P8L provide matrix schema/tooling plus static coverage evidence for meaningful supplied `device_context` scenarios. P8M accepts the future-cutover ownership decision that Rust should own real-device probing and detected-device mismatch-warning parity. P8N adds only a crate-local probe abstraction, fake probe, and context layering helper with intended future precedence synthetic/profile context -> detected facts -> explicit CLI overrides. Rust shadow planning still does not probe real devices or create detected-device facts. The former broad `real_device_context_probing_not_cut_over` blocker is narrowed, not resolved: `real_device_probing_not_cut_over` remains blocked. |
 | Argument and binding parity | `emuchef-plan-shadow` accepts explicit `--authored-root`, `--device-plan`, explicit device context flags, and string `--bind` values. It mirrors repeated-bind grouping and ordered repeated device tags, but is not full future Rust CLI binding type parity, ops replay parity, detected-device parity, or common-flag parity. |
 | Output format compatibility | Rust emits private JSON `PlanningResult` through the shadow command. P8A passes that JSON through directly from the explicit dev-only Python CLI bridge, and P8C guards that omitted `--rust-shadow-output` and explicit `--rust-shadow-output passthrough` remain Rust stdout/stderr/exit-code passthrough. P8E adds explicit `--rust-shadow-output python-compatible` formatting for usable Rust `PlanningResult` JSON: concise summary labels mirror the visible Python CLI labels, structured YAML is produced from the Rust JSON mapping through `dump_yaml(...)`, and `--output` writes that YAML while stdout stays concise unless `--verbose` is selected. Python CLI default planning still owns the default concise summary, verbose YAML, `--output`, and exit-code behavior. P8D accepts the future default-route target: Rust must preserve the Python-owned output and exit-code contract before default planner cutover unless a separate accepted breaking-change decision says otherwise. Rust-native JSON requires a future explicit structured-output mode such as `--format json`. P8E is output-compatibility path evidence only; it is not default Rust planner routing. |
 | Error and warning compatibility | Rust covers selected planner result, warning/error shape, and focused diagnostics. Full CLI stderr/stdout, detected-device profile mismatch warnings, operation replay failures, exit codes, and broader planner diagnostics are not proven. P8J intentionally does not add profile mismatch warnings, and P8L keeps `detected_device_profile_mismatch_warning_not_cut_over` blocked as a separate default-cutover blocker. |
@@ -311,11 +316,21 @@ resolved or explicitly accepted for a narrower experimental route:
   Python planner deletion readiness remain unresolved.
 - P8M real-device context ownership decision: `docs/adr/0003-rust-real-device-context-ownership.md`
   records that Rust should own real-device probing and detected-device profile
-  mismatch warning parity for future default Rust planner cutover. This is a
-  decision-only slice. Python remains the current default/reference planner
-  implementation, Rust routes remain explicit and non-default, explicit context
-  support remains separate from real-device probing, and the readiness gate
-  remains blocked until Rust probing and mismatch-warning evidence exists.
+  mismatch warning parity for future default Rust planner cutover. Python
+  remains the current default/reference planner implementation, Rust routes
+  remain explicit and non-default, explicit context support remains separate from
+  real-device probing, and the readiness gate remains blocked until Rust probing
+  and mismatch-warning evidence exists.
+- P8N fake probe foundation:
+  `crates/emuchef-rust-backend/src/device_probe.rs` defines a crate-local probe
+  trait, stable detected-facts/error types, fake probe, and helper for applying
+  detected facts over planner `DeviceContext`. It is fake/test-only foundation.
+  Intended future context precedence is synthetic/profile context -> detected
+  facts -> explicit CLI overrides. It does not implement live ADB probing,
+  detected-device profile mismatch warning parity, `rust-shadow` or
+  `rust-experimental` route wiring, Python CLI behavior, Tauri/protocol
+  behavior, executor/apply behavior, readiness gate reclassification, or Python
+  planner deletion readiness.
 - Pre-cutover candidate: planner routing work may use the matrix as an
   optional/manual gate to gather evidence before exposing any user-facing Rust
   planner path.

@@ -36,8 +36,12 @@ For future Rust planner default routing, the accepted real-device context
 ownership model is recorded in
 `docs/adr/0003-rust-real-device-context-ownership.md`: Rust should own
 real-device probing and detected-device profile mismatch warning parity before
-default Rust planner cutover. P8M records that decision only; it does not change
-Python default planning behavior.
+default Rust planner cutover. P8M records that ownership decision. P8N adds
+only the crate-local Rust fake/test probe foundation and documents intended
+future context precedence: synthetic/profile context -> detected facts ->
+explicit CLI overrides. P8N does not change Python default planning behavior,
+live probing, CLI route wiring, executor/apply, Tauri/protocol, readiness gate
+behavior, or detected-device profile mismatch warning parity.
 
 Rust planner, executor, and CLI behavior is fixture-scoped, test-scoped,
 internal, or editor-backend-scoped unless explicitly promoted by later work.
@@ -139,7 +143,9 @@ real-device probing and detected-device profile mismatch warning parity for
 future default Rust planner cutover. Python remains the current default
 CLI/reference planner owner, Rust routes remain explicit and non-default, and
 real-device probing plus mismatch-warning parity remain blocked until
-implemented and evidenced.
+implemented and evidenced. P8N adds only the Rust crate-local probe abstraction,
+fake probe, and context layering helper; it does not wire probing into any CLI,
+Tauri/protocol, executor/apply, or readiness-gate path.
 Existing Rust planner, executor, and CLI slices should remain scoped as parity
 scaffolding until a later phase explicitly promotes or retires the corresponding
 Python surface.

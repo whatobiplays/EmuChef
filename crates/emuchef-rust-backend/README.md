@@ -496,14 +496,19 @@ fixture/golden work.
 P8M records the accepted future ownership decision in
 `../../docs/adr/0003-rust-real-device-context-ownership.md`: Rust should own
 real-device probing and detected-device profile mismatch warning parity for
-future default Rust planner cutover. This decision does not implement probing,
-deprecate Python probing, change default `emuchef plan`, promote Rust routes, or
-change executor/apply, Tauri/protocol, Cargo fallback, fixture/golden, network,
-artifact, or runtime-check behavior. The expected implementation path remains
-incremental: a Rust probing abstraction, fake/non-live tests, detected-context
-planner input construction, mismatch-warning parity, explicit non-default route
-support, optional live ADB smoke, readiness reclassification, and a later default
-planner backend cutover.
+future default Rust planner cutover. P8N adds the crate-local foundation for the
+first implementation step: `src/device_probe.rs` defines detected facts, stable
+probe errors, a probe trait, a fake probe, and a helper that applies detected
+facts over planner `DeviceContext`. The intended future precedence is
+synthetic/profile context -> detected facts -> explicit CLI overrides. P8N does
+not implement live ADB probing, detected-device profile mismatch warning parity,
+`rust-shadow` or `rust-experimental` route wiring, Python CLI behavior,
+executor/apply, Tauri/protocol, Cargo fallback, fixture/golden, network,
+artifact, runtime-check behavior, readiness gate reclassification, or Python
+planner deletion readiness. The expected implementation path remains
+incremental: live detected-context planner input construction, mismatch-warning
+parity, explicit non-default route support, optional live ADB smoke, readiness
+reclassification, and a later default planner backend cutover.
 
 P8C guards the explicit bridge's default CLI output compatibility contract. P7P
 is planner DTO/result comparison evidence, P8B is Python CLI `rust-shadow` route
@@ -549,7 +554,8 @@ route, or alter the default
 blocked on broader output/behavior compatibility with the current Python CLI
 contract or a separate accepted breaking-change decision, plus Rust-owned
 real-device probing and detected-device profile mismatch warning parity as
-accepted in ADR 0003. `default-run =
+accepted in ADR 0003. P8N's fake probe module is not part of this route and does
+not change shadow command behavior. `default-run =
 "emuchef-rust-backend"` is set so existing `cargo run --manifest-path
 crates/emuchef-rust-backend/Cargo.toml -- --sidecar` and one-shot development
 workflows remain unambiguous.

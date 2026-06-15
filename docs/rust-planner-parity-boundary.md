@@ -109,6 +109,11 @@ Rust planner-adjacent coverage is internal and fixture-scoped:
   warning parity. The ADR does not implement probing, deprecate Python probing,
   change default CLI behavior, or promote Rust routes beyond explicit
   non-default migration paths.
+- `crates/emuchef-rust-backend/src/device_probe.rs`: P8N crate-local
+  fake/test-only foundation for future Rust-owned probing. It defines detected
+  facts, stable probe errors, a probe trait, a fake probe, and context layering
+  helper. It is not wired into CLI routes, Python, Tauri/protocol,
+  executor/apply, readiness behavior, or live ADB probing.
 - `tools/plan_parity_scenarios.json`: dev-only P7P comparison scenario
   manifest for current checked-in device-plan comparisons. It is not a Python
   golden, regenerated evidence, normal Rust/Tauri check input, or user-facing
@@ -711,9 +716,11 @@ scenario, and expects every scenario to classify as `match`. P8L records that
 explicit device context has static coverage evidence through that matrix schema
 and scenario, but real-device probing and detected-device profile mismatch
 warnings remain blocked. P8M records the accepted future-cutover ownership model:
-Rust should own those behaviors before default Rust planner cutover, after an
-incremental implementation path that starts with a Rust probing abstraction and
-fake/non-live tests. Matching matrix
+Rust should own those behaviors before default Rust planner cutover. P8N adds
+the crate-local probe abstraction and fake/non-live tests only. The intended
+future precedence is synthetic/profile context -> detected facts -> explicit CLI
+overrides. P8N does not add live ADB probing, mismatch-warning parity, or route
+wiring. Matching matrix
 status is necessary evidence for the compared planner-only fields, not
 sufficient proof of CLI routing, real-device context resolution, executor/apply
 compatibility, artifact materialization, or Python planner deletability.

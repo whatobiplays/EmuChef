@@ -15,6 +15,7 @@
 pub mod catalog;
 mod cli;
 pub mod commands;
+pub(crate) mod device_probe;
 pub mod document;
 pub mod dto;
 pub mod envelope;

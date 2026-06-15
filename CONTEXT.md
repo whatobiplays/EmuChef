@@ -59,8 +59,10 @@ The future Rust planner real-device context ownership model is recorded in
 default Rust planner cutover, Rust should own real-device probing and
 detected-device profile mismatch warning parity. Python remains the current
 default/reference planner owner until a later implementation and cutover phase.
-P8M is the accepted ADR slice for this decision only; it does not implement
-ADB/device probing.
+P8M is the accepted ADR slice for this ownership decision. P8N adds a
+crate-local Rust probe abstraction, fake probe, and tests for layering detected
+facts over profile-derived planner context. P8N does not implement live
+ADB/device probing or detected-device profile mismatch warning parity.
 
 ## Current Authored Model
 
@@ -325,16 +327,17 @@ Python-owned, and `rust-shadow` and `rust-experimental` remain explicit
 non-default Rust routes.
 
 P8M's accepted ADR 0003 decides the future ownership model for those remaining
-context blockers:
-Rust should own real-device probing and detected-device profile mismatch warning
-parity before default Rust planner cutover. This is not implemented in the
-current code and does not add ADB/device probing. The expected implementation
-path is incremental: Rust device probing abstraction, fake/non-live probe tests,
-detected-context planner input construction, mismatch-warning parity, explicit
-non-default route support, optional live ADB smoke, readiness reclassification,
-and later default planner backend cutover. Executor/apply, Tauri/protocol, Cargo
+context blockers: Rust should own real-device probing and detected-device
+profile mismatch warning parity before default Rust planner cutover. P8N adds
+the crate-local Rust abstraction and fake/non-live tests for the first step of
+that path. The intended future precedence is synthetic/profile context ->
+detected facts -> explicit CLI overrides. P8N does not wire probing into
+`rust-shadow`, `rust-experimental`, the Python CLI, Tauri/protocol,
+executor/apply, the readiness gate, or normal runtime checks. Real-device
+probing and detected-device profile mismatch warning parity remain blocked until
+live implementation and evidence exist. Executor/apply, Tauri/protocol, Cargo
 fallback behavior, fixture/golden data, normal runtime checks, and Python planner
-deletion remain unchanged.
+deletion remain separate future work.
 
 P8K extends the dev-only planner matrix tooling with optional explicit
 `device_context` data per scenario. Valid matrix context fields are
