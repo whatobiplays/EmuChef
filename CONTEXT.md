@@ -68,9 +68,11 @@ for detected-device profile mismatch warnings by comparing supplied detected
 facts with authored profile match criteria. P8P mirrors the current Python
 mismatch criteria for manufacturer, brand, model regex, and Android minimum
 version; authored Android maximum values are parsed but not evaluated because
-the current Python warning path does not evaluate them. P8P does not implement
-live ADB/device probing, route wiring, normal runtime warning emission, or
-default planner cutover behavior.
+the current Python warning path does not evaluate them. P8Q composes the
+fake/test-backed detected-facts path into crate-private `PlanningResult`
+construction and appends detected-device profile mismatch warnings for that
+test path only. P8Q does not implement live ADB/device probing, route wiring,
+normal runtime warning emission, or default planner cutover behavior.
 
 ## Current Authored Model
 
@@ -343,12 +345,15 @@ detected facts over synthetic/profile-derived context. The intended future
 precedence is synthetic/profile context -> detected facts -> explicit CLI
 overrides. P8P adds pure/test-backed mismatch-warning helper logic and tests
 only; explicit device context remains separate from detected facts and
-real-device probing. P8P does not wire probing or mismatch warnings into
-`rust-shadow`, `rust-experimental`, the Python CLI, Tauri/protocol,
-executor/apply, the readiness gate, or normal runtime checks. Real-device
-probing and detected-device profile mismatch warning parity remain blocked until
-live implementation and route evidence exist. Executor/apply, Tauri/protocol,
-Cargo fallback behavior, fixture/golden data, normal runtime checks, and Python
+real-device probing. P8Q adds crate-private fake/test-backed planner-result
+composition that applies detected facts to planner context and appends
+detected-device profile mismatch warnings only in that helper/test path. P8Q
+does not wire probing or mismatch warnings into `rust-shadow`,
+`rust-experimental`, the Python CLI, Tauri/protocol, executor/apply, the
+readiness gate, or normal runtime checks. Real-device probing and route-level
+detected-device profile mismatch warning parity remain blocked until live
+implementation and route evidence exist. Executor/apply, Tauri/protocol, Cargo
+fallback behavior, fixture/golden data, normal runtime checks, and Python
 planner deletion remain separate future work.
 
 P8K extends the dev-only planner matrix tooling with optional explicit

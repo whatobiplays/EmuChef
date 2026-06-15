@@ -128,7 +128,11 @@ Rust planner-adjacent coverage is internal and fixture-scoped:
   checked-in device-plan/profile ingestion for crate-internal planner inputs.
   It parses only the current authored profile/plan YAML surface, maps selected
   recipe refs in authored order, derives profile capability defaults and tags,
-  and builds explicitly synthetic planner-only device context.
+  builds explicitly synthetic planner-only device context, and provides the P8Q
+  fake/test-backed `PlanningResult` composition path for supplied detected
+  facts and detected-device profile mismatch warnings. That P8Q helper is not
+  route wiring, live probing, normal planner warning emission, or readiness gate
+  reclassification.
 - `crates/emuchef-rust-backend/src/planner_tests.rs`: Rust unit tests comparing
   Phase 6M/6N planning output to checked-in Python planner goldens, including
   the P7A fixture inventory/parsing guard, focused planner-only param contract
@@ -145,7 +149,9 @@ Rust planner-adjacent coverage is internal and fixture-scoped:
   profile/plan context without invoking Python, ADB, executor/apply, network,
   or artifact materialization. P8J tests cover explicit device context overrides
   for the shadow command while preserving profile-derived tags when no explicit
-  tags are supplied. P7J tests classify checked-in device-plan
+  tags are supplied. P8Q tests cover fake/test-backed planner-result
+  composition with detected facts and mismatch warnings while preserving stable
+  non-context planner output fields. P7J tests classify checked-in device-plan
   `defaults.show_advanced_steps` and `overrides.config_variants` as inactive
   metadata, and use temporary authored roots to prove strict private
   `<recipe_ref>/<input_id>` override binding merge behavior. P7F
@@ -730,9 +736,10 @@ the crate-local probe abstraction and fake/non-live tests only. P8O adds
 fake/test-backed detected-facts planner-input construction only. The intended
 future precedence is synthetic/profile context -> detected facts -> explicit CLI
 overrides. P8P adds pure/test-backed mismatch-warning helper logic for supplied
-detected facts, but does not add live ADB probing, normal planner warning
-emission, or route wiring. Matching matrix
-status is necessary evidence for the compared planner-only fields, not
+detected facts. P8Q composes those fake/test-backed pieces into crate-private
+`PlanningResult` construction, but does not add live ADB probing, normal planner
+warning emission, or route wiring. Matching matrix status is necessary evidence
+for the compared planner-only fields, not
 sufficient proof of CLI routing, real-device context resolution, executor/apply
 compatibility, artifact materialization, or Python planner deletability.
 
