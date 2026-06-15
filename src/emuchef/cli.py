@@ -113,6 +113,13 @@ def main(argv: list[str] | None = None) -> int:
             "python-compatible formats Rust PlanningResult JSON with Python-compatible CLI labels/YAML."
         ),
     )
+    plan_parser.add_argument(
+        "--rust-detected-facts-json",
+        help=(
+            "Dev-only local detected-facts fixture path forwarded only by "
+            "--planner-backend rust-experimental."
+        ),
+    )
 
     detect_parser = subparsers.add_parser(
         "detect",
@@ -277,6 +284,8 @@ def _build_rust_shadow_plan_command(args: argparse.Namespace) -> list[str]:
         "--device-plan",
         args.device_plan,
     ]
+    if args.rust_detected_facts_json is not None:
+        command.extend(["--detected-facts-json", args.rust_detected_facts_json])
     _append_rust_shadow_device_context_args(command, args)
     for raw_binding in args.bind:
         command.extend(["--bind", raw_binding])
@@ -297,6 +306,8 @@ def _append_rust_shadow_device_context_args(command: list[str], args: argparse.N
 def _validate_plan_backend_args(args: argparse.Namespace) -> None:
     if args.planner_backend != "rust-shadow" and args.rust_shadow_output is not None:
         raise ValueError("--rust-shadow-output is only valid with --planner-backend rust-shadow.")
+    if args.planner_backend != "rust-experimental" and args.rust_detected_facts_json is not None:
+        raise ValueError("--rust-detected-facts-json is only valid with --planner-backend rust-experimental.")
 
 
 def _effective_rust_shadow_output(args: argparse.Namespace) -> str:

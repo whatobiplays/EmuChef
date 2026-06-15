@@ -77,10 +77,17 @@ an explicit local detected-facts fixture harness to the dev-only Rust shadow
 binary with `--detected-facts-json <path>`. The fixture path reads strict local
 JSON matching `DetectedDeviceFacts`, runs the P8Q planning-result composition
 path, and emits the usual shadow `PlanningResult` JSON. P8R does not implement
-live ADB/device probing, expose detected-facts fixture input through Python CLI
-routes, wire route-level detection into `rust-shadow` or `rust-experimental`,
-or change executor/apply, Tauri/protocol, normal runtime checks, readiness gate
-blockers, or default planner behavior. P8S adds optional/manual smoke evidence
+live ADB/device probing, wire route-level detection into `rust-shadow` or
+`rust-experimental`, or change executor/apply, Tauri/protocol, normal runtime
+checks, readiness gate blockers, or default planner behavior. P8T exposes only
+an explicit Python wrapper flag, `--rust-detected-facts-json <path>`, for
+`emuchef plan --planner-backend rust-experimental`. Python forwards the exact
+argparse string as `--detected-facts-json <path>` to the supplied Rust shadow
+binary and does not open, stat, expand, normalize, parse, or schema-validate the
+fixture. The default Python backend and `rust-shadow` reject the Python wrapper
+flag before ADB resolution, planner/session construction, device probing, or
+subprocess execution; the raw Rust `--detected-facts-json` flag remains
+unrecognized by Python CLI routes. P8S adds optional/manual smoke evidence
 for that Rust shadow-binary fixture harness through
 `tools/smoke_rust_detected_facts_fixture.py`. The smoke invokes a supplied
 `emuchef-plan-shadow` binary directly with temporary fixture files, emits
@@ -288,11 +295,10 @@ mode reads a local strict JSON `DetectedDeviceFacts` fixture, applies detected
 facts over the profile-derived planner context, evaluates mismatch warnings
 from those fixture facts, then applies any explicit `--manufacturer`, `--model`,
 `--android-version`, or repeated `--device-tag` overrides to the emitted
-`execution_plan.device_context`. Python CLI routes do not forward this fixture
-option. `tools/smoke_rust_detected_facts_fixture.py` is the optional/manual
-smoke for this direct Rust shadow-binary fixture path. It creates temporary
-matching, mismatching, and explicit-context override fixture cases and reports
-only stable classifications, not temp paths or full process output.
+`execution_plan.device_context`. The direct Rust fixture smoke remains
+`tools/smoke_rust_detected_facts_fixture.py`; it creates temporary matching,
+mismatching, and explicit-context override fixture cases and reports only stable
+classifications, not temp paths or full process output.
 
 The Python CLI exposes a developer-only bridge to an already-built Rust shadow
 planner binary:
@@ -325,8 +331,10 @@ stdout is a compatibility-mode error.
 `emuchef plan --planner-backend rust-experimental --rust-planner-bin <path>` is
 an explicit non-default migration route. It reuses the same supplied Rust shadow
 planner binary invocation as `rust-shadow`, always uses Python-compatible output
-formatting, forwards the same explicit device context flags as `rust-shadow`, and
-allows `--verbose` and `--output` through that compatibility formatting path.
+formatting, forwards the same explicit device context flags as `rust-shadow`,
+forwards explicit `--rust-detected-facts-json <path>` as
+`--detected-facts-json <path>` without Python-side fixture inspection, and allows
+`--verbose` and `--output` through that compatibility formatting path.
 `--rust-shadow-output` is only valid with
 `--planner-backend rust-shadow`; Python and `rust-experimental` reject it before
 ADB resolution or planner/session construction. `rust-experimental` is a
