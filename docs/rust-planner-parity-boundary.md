@@ -717,9 +717,10 @@ explicit device context has static coverage evidence through that matrix schema
 and scenario, but real-device probing and detected-device profile mismatch
 warnings remain blocked. P8M records the accepted future-cutover ownership model:
 Rust should own those behaviors before default Rust planner cutover. P8N adds
-the crate-local probe abstraction and fake/non-live tests only. The intended
+the crate-local probe abstraction and fake/non-live tests only. P8O adds
+fake/test-backed detected-facts planner-input construction only. The intended
 future precedence is synthetic/profile context -> detected facts -> explicit CLI
-overrides. P8N does not add live ADB probing, mismatch-warning parity, or route
+overrides. P8O does not add live ADB probing, mismatch-warning parity, or route
 wiring. Matching matrix
 status is necessary evidence for the compared planner-only fields, not
 sufficient proof of CLI routing, real-device context resolution, executor/apply

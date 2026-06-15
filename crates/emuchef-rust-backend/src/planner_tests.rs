@@ -5,6 +5,7 @@ use std::path::{Path, PathBuf};
 use serde_json::{json, Value};
 use tempfile::TempDir;
 
+use crate::device_probe::{DetectedDeviceFacts, DeviceProbe, FakeDeviceProbe};
 use crate::model::{
     OrderedMap, ParamValue, Recipe, RecipeProvides, RemoteFileArtifact, Step, StepCondition,
     StepConstraints,
@@ -14,6 +15,7 @@ use crate::planner::{
 };
 use crate::planner_device_plan::{
     discover_device_plan_inventory, discover_device_profile_inventory,
+    planner_input_from_authored_device_plan_with_detected_facts,
 };
 
 const P7L_RETROARCH_ONLY_REFS: &[&str] = &["app.retroarch.provision"];
@@ -177,6 +179,37 @@ fn repo_device_plan_planner_input_with_bindings(
         bindings,
     )
     .unwrap_or_else(|error| panic!("{device_plan_ref} should build PlannerInput: {error}"))
+}
+
+fn repo_detected_context_planner_input_with_bindings(
+    device_plan_ref: &str,
+    input_bindings: &[(&str, Value)],
+    detected_facts: &DetectedDeviceFacts,
+) -> PlannerInput {
+    let mut bindings = OrderedMap::new();
+    for (input_id, value) in input_bindings {
+        bindings.insert((*input_id).to_string(), value.clone());
+    }
+    planner_input_from_authored_device_plan_with_detected_facts(
+        repo_authored_root(),
+        device_plan_ref,
+        format!("plan.p8o.{device_plan_ref}.001"),
+        bindings,
+        detected_facts,
+    )
+    .unwrap_or_else(|error| {
+        panic!("{device_plan_ref} should build detected-context PlannerInput: {error}")
+    })
+}
+
+fn assert_non_context_planner_input_fields_eq(baseline: &PlannerInput, actual: &PlannerInput) {
+    assert_eq!(actual.recipes, baseline.recipes);
+    assert_eq!(actual.selected_recipe_refs, baseline.selected_recipe_refs);
+    assert_eq!(actual.input_bindings, baseline.input_bindings);
+    assert_eq!(actual.plan_id, baseline.plan_id);
+    assert_eq!(actual.device_plan_ref, baseline.device_plan_ref);
+    assert_eq!(actual.device_profile_ref, baseline.device_profile_ref);
+    assert_eq!(actual.runtime_capabilities, baseline.runtime_capabilities);
 }
 
 fn repo_plan_e2e_input(case: &RepoPlanE2eCase, temp: &TempDir) -> PlannerInput {
@@ -2698,6 +2731,219 @@ fn repo_device_plan_context_builds_planner_input_from_profile_data() {
     );
     assert!(input.runtime_capabilities.app_data_write);
     assert!(input.runtime_capabilities.root_shell);
+}
+
+#[test]
+fn detected_context_planner_input_overrides_profile_scalars() {
+    let input = repo_detected_context_planner_input_with_bindings(
+        "ayaneo.konkr_pocket_fit.base",
+        &[],
+        &DetectedDeviceFacts {
+            manufacturer: Some("Detected Manufacturer".to_string()),
+            model: Some("Detected Model".to_string()),
+            android_version: Some(15),
+            android_api_level: Some(35),
+            device_tags: Vec::new(),
+        },
+    );
+
+    assert_eq!(input.device_context.manufacturer, "Detected Manufacturer");
+    assert_eq!(input.device_context.model, "Detected Model");
+    assert_eq!(input.device_context.android_version, 15);
+    assert_eq!(input.device_context.android_api_level, Some(35));
+    assert_eq!(
+        input.device_context.device_tags,
+        vec!["handheld_android".to_string(), "brand_ayaneo".to_string()]
+    );
+}
+
+#[test]
+fn detected_context_planner_input_preserves_absent_detected_fields() {
+    let mut bindings = OrderedMap::new();
+    let plan_id = "plan.p8o.detected.absent_fields.001".to_string();
+    let baseline = PlannerInput::from_authored_device_plan(
+        repo_authored_root(),
+        "ayaneo.konkr_pocket_fit.base",
+        plan_id.clone(),
+        bindings.clone(),
+    )
+    .expect("baseline profile-derived PlannerInput should build");
+    let actual = planner_input_from_authored_device_plan_with_detected_facts(
+        repo_authored_root(),
+        "ayaneo.konkr_pocket_fit.base",
+        plan_id,
+        bindings,
+        &DetectedDeviceFacts::default(),
+    )
+    .expect("detected-context PlannerInput should build");
+
+    assert_non_context_planner_input_fields_eq(&baseline, &actual);
+    assert_eq!(actual.device_context, baseline.device_context);
+}
+
+#[test]
+fn detected_context_planner_input_replaces_non_empty_detected_tags_in_order() {
+    let input = repo_detected_context_planner_input_with_bindings(
+        "ayaneo.konkr_pocket_fit.base",
+        &[],
+        &DetectedDeviceFacts {
+            device_tags: vec![
+                "detected_handheld".to_string(),
+                "detected_vendor".to_string(),
+            ],
+            ..DetectedDeviceFacts::default()
+        },
+    );
+
+    assert_eq!(
+        input.device_context.device_tags,
+        vec![
+            "detected_handheld".to_string(),
+            "detected_vendor".to_string()
+        ]
+    );
+}
+
+#[test]
+fn detected_context_planner_input_preserves_profile_tags_when_detected_tags_empty() {
+    let baseline =
+        repo_device_plan_planner_input_with_bindings("ayaneo.konkr_pocket_fit.base", &[]);
+    let actual = repo_detected_context_planner_input_with_bindings(
+        "ayaneo.konkr_pocket_fit.base",
+        &[],
+        &DetectedDeviceFacts {
+            manufacturer: Some("Detected Manufacturer".to_string()),
+            device_tags: Vec::new(),
+            ..DetectedDeviceFacts::default()
+        },
+    );
+
+    assert_eq!(
+        actual.device_context.device_tags,
+        baseline.device_context.device_tags
+    );
+}
+
+#[test]
+fn detected_context_planner_input_preserves_selected_recipes_bindings_and_other_fields() {
+    let root = temp_authored_root_with_device_plan_selection_yaml(
+        r#"
+schema_version: 1
+kind: device_plan
+id: detected.context.non_context
+name: Detected Context Non Context
+device_profile_ref: ayaneo.konkr_pocket_fit
+recipes:
+  - recipe_ref: app.retroarch.provision
+    selected_by_default: true
+  - recipe_ref: feature.copy_bios
+    selected_by_default: true
+  - recipe_ref: app.xaniteog.install
+    selected_by_default: false
+defaults: {}
+overrides:
+  feature.copy_bios/bios_source_dir: /tmp/override-bios
+  app.xaniteog.install/xaniteog_apk: /tmp/override-xaniteog.apk
+  config_variants:
+    vendor_family: test
+    screen_class: detected_context
+metadata: {}
+"#,
+    );
+    let authored_root = root.path().join("authored");
+    let plan_id = "plan.p8o.detected.non_context.001".to_string();
+    let mut bindings = OrderedMap::new();
+    bindings.insert(
+        "feature.copy_bios/bios_source_dir".to_string(),
+        json!("/tmp/explicit-bios"),
+    );
+    bindings.insert(
+        "app.retroarch.provision/retroarch_cfg".to_string(),
+        json!("/tmp/explicit-retroarch.cfg"),
+    );
+    let detected_facts = DetectedDeviceFacts {
+        manufacturer: Some("Detected Manufacturer".to_string()),
+        device_tags: vec!["detected_context".to_string()],
+        ..DetectedDeviceFacts::default()
+    };
+    let baseline = PlannerInput::from_authored_device_plan(
+        &authored_root,
+        "detected.context.non_context",
+        plan_id.clone(),
+        bindings.clone(),
+    )
+    .expect("baseline PlannerInput should build");
+    let actual = planner_input_from_authored_device_plan_with_detected_facts(
+        &authored_root,
+        "detected.context.non_context",
+        plan_id,
+        bindings,
+        &detected_facts,
+    )
+    .expect("detected-context PlannerInput should build");
+    let mut expected_context = baseline.device_context.clone();
+    expected_context.manufacturer = "Detected Manufacturer".to_string();
+    expected_context.device_tags = vec!["detected_context".to_string()];
+
+    assert_non_context_planner_input_fields_eq(&baseline, &actual);
+    assert_eq!(actual.device_context, expected_context);
+}
+
+#[test]
+fn detected_context_planner_input_accepts_fake_probe_facts_without_live_probe() {
+    let facts = DetectedDeviceFacts {
+        manufacturer: Some("Probe Manufacturer".to_string()),
+        model: Some("Probe Model".to_string()),
+        android_version: Some(16),
+        android_api_level: Some(36),
+        device_tags: vec!["probe_detected".to_string()],
+    };
+    let probe = FakeDeviceProbe::new(Ok(facts.clone()));
+    let detected_facts = probe
+        .detect()
+        .expect("fake probe should return configured facts");
+    let input = repo_detected_context_planner_input_with_bindings(
+        "ayaneo.konkr_pocket_fit.base",
+        &[],
+        &detected_facts,
+    );
+
+    assert_eq!(detected_facts, facts);
+    assert_eq!(input.device_context.manufacturer, "Probe Manufacturer");
+    assert_eq!(input.device_context.model, "Probe Model");
+    assert_eq!(input.device_context.android_version, 16);
+    assert_eq!(input.device_context.android_api_level, Some(36));
+    assert_eq!(
+        input.device_context.device_tags,
+        vec!["probe_detected".to_string()]
+    );
+}
+
+#[test]
+fn detected_context_planner_input_does_not_emit_profile_mismatch_warning() {
+    let mut bindings = OrderedMap::new();
+    bindings.insert(
+        "app.retroarch.provision/retroarch_cfg".to_string(),
+        json!("/tmp/emuchef-p8o-retroarch.cfg"),
+    );
+    let input = planner_input_from_authored_device_plan_with_detected_facts(
+        repo_authored_root(),
+        "ayaneo.pocket_s_mini.base",
+        "plan.p8o.detected.no_mismatch_warning.001".to_string(),
+        bindings,
+        &DetectedDeviceFacts {
+            manufacturer: Some("Not AYANEO".to_string()),
+            model: Some("Unmatched Device".to_string()),
+            android_version: Some(9),
+            android_api_level: Some(28),
+            device_tags: vec!["unmatched".to_string()],
+        },
+    )
+    .expect("detected-context PlannerInput should build");
+    let actual = planning_result_value(input);
+
+    assert_eq!(actual["status"], "success", "{actual:#}");
+    assert_eq!(actual["warnings"], json!([]));
 }
 
 #[test]

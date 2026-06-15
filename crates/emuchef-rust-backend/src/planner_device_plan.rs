@@ -13,8 +13,9 @@ use serde::Deserialize;
 use serde_json::Value as JsonValue;
 use serde_yaml::{Mapping, Value as YamlValue};
 
+use crate::device_probe::{apply_detected_device_facts_to_context, DetectedDeviceFacts};
 use crate::model::{OrderedMap, Recipe};
-use crate::planner::{DeviceContext, PlannerLoadError, RuntimeCapabilities};
+use crate::planner::{DeviceContext, PlannerInput, PlannerLoadError, RuntimeCapabilities};
 
 #[derive(Clone, Debug, PartialEq)]
 pub(crate) struct DeviceProfileInventoryEntry {
@@ -129,6 +130,30 @@ pub(crate) fn discover_device_plan_inventory(
             .map(DevicePlanInventoryEntry::from)
             .collect()
     })
+}
+
+/// Build planner input from authored device-plan data with detected facts applied.
+///
+/// This keeps the existing authored device-plan constructor as the source of
+/// selected recipes, bindings, profile context, and runtime capabilities. It
+/// only layers detected facts over the resulting planner context; route-specific
+/// explicit context overrides remain separate and are not applied here.
+pub(crate) fn planner_input_from_authored_device_plan_with_detected_facts(
+    authored_root: impl AsRef<Path>,
+    device_plan_ref: &str,
+    plan_id: String,
+    input_bindings: OrderedMap<JsonValue>,
+    detected_facts: &DetectedDeviceFacts,
+) -> Result<PlannerInput, PlannerLoadError> {
+    let mut input = PlannerInput::from_authored_device_plan(
+        authored_root,
+        device_plan_ref,
+        plan_id,
+        input_bindings,
+    )?;
+    input.device_context =
+        apply_detected_device_facts_to_context(input.device_context, detected_facts);
+    Ok(input)
 }
 
 pub(crate) fn load_planner_input_parts(

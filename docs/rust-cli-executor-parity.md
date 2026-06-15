@@ -37,9 +37,10 @@ ownership model is recorded in
 `docs/adr/0003-rust-real-device-context-ownership.md`: Rust should own
 real-device probing and detected-device profile mismatch warning parity before
 default Rust planner cutover. P8M records that ownership decision. P8N adds
-only the crate-local Rust fake/test probe foundation and documents intended
-future context precedence: synthetic/profile context -> detected facts ->
-explicit CLI overrides. P8N does not change Python default planning behavior,
+only the crate-local Rust fake/test probe foundation. P8O adds fake/test-backed
+detected-facts planner-input construction. Intended future context precedence:
+synthetic/profile context -> detected facts -> explicit CLI overrides. P8O does
+not change Python default planning behavior,
 live probing, CLI route wiring, executor/apply, Tauri/protocol, readiness gate
 behavior, or detected-device profile mismatch warning parity.
 

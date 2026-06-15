@@ -499,16 +499,18 @@ real-device probing and detected-device profile mismatch warning parity for
 future default Rust planner cutover. P8N adds the crate-local foundation for the
 first implementation step: `src/device_probe.rs` defines detected facts, stable
 probe errors, a probe trait, a fake probe, and a helper that applies detected
-facts over planner `DeviceContext`. The intended future precedence is
-synthetic/profile context -> detected facts -> explicit CLI overrides. P8N does
-not implement live ADB probing, detected-device profile mismatch warning parity,
+facts over planner `DeviceContext`. P8O adds crate-private fake/test-backed
+planner-input construction that applies detected facts over
+synthetic/profile-derived context. The intended future precedence is synthetic/profile context ->
+detected facts -> explicit CLI overrides. P8O does not implement live ADB
+probing, detected-device profile mismatch warning parity,
 `rust-shadow` or `rust-experimental` route wiring, Python CLI behavior,
 executor/apply, Tauri/protocol, Cargo fallback, fixture/golden, network,
 artifact, runtime-check behavior, readiness gate reclassification, or Python
 planner deletion readiness. The expected implementation path remains
-incremental: live detected-context planner input construction, mismatch-warning
-parity, explicit non-default route support, optional live ADB smoke, readiness
-reclassification, and a later default planner backend cutover.
+incremental: live real-device probing, mismatch-warning parity, explicit
+non-default route support, optional live ADB smoke, readiness reclassification,
+and a later default planner backend cutover.
 
 P8C guards the explicit bridge's default CLI output compatibility contract. P7P
 is planner DTO/result comparison evidence, P8B is Python CLI `rust-shadow` route

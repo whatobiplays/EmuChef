@@ -61,8 +61,11 @@ detected-device profile mismatch warning parity. Python remains the current
 default/reference planner owner until a later implementation and cutover phase.
 P8M is the accepted ADR slice for this ownership decision. P8N adds a
 crate-local Rust probe abstraction, fake probe, and tests for layering detected
-facts over profile-derived planner context. P8N does not implement live
-ADB/device probing or detected-device profile mismatch warning parity.
+facts over profile-derived planner context. P8O adds fake/test-backed
+planner-input construction that applies detected facts over
+synthetic/profile-derived context. P8O does not implement live ADB/device probing,
+detected-device profile mismatch warning parity, route wiring, or default
+planner cutover behavior.
 
 ## Current Authored Model
 
@@ -330,10 +333,12 @@ P8M's accepted ADR 0003 decides the future ownership model for those remaining
 context blockers: Rust should own real-device probing and detected-device
 profile mismatch warning parity before default Rust planner cutover. P8N adds
 the crate-local Rust abstraction and fake/non-live tests for the first step of
-that path. The intended future precedence is synthetic/profile context ->
-detected facts -> explicit CLI overrides. P8N does not wire probing into
-`rust-shadow`, `rust-experimental`, the Python CLI, Tauri/protocol,
-executor/apply, the readiness gate, or normal runtime checks. Real-device
+that path. P8O adds fake/test-backed planner-input construction that applies
+detected facts over synthetic/profile-derived context. The intended future
+precedence is synthetic/profile context -> detected facts -> explicit CLI
+overrides. P8O does not wire probing into `rust-shadow`, `rust-experimental`,
+the Python CLI, Tauri/protocol, executor/apply, the readiness gate, or normal
+runtime checks. Real-device
 probing and detected-device profile mismatch warning parity remain blocked until
 live implementation and evidence exist. Executor/apply, Tauri/protocol, Cargo
 fallback behavior, fixture/golden data, normal runtime checks, and Python planner

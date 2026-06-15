@@ -21,11 +21,13 @@ accepted in `docs/adr/0003-rust-real-device-context-ownership.md`: Rust should
 own real-device probing and detected-device profile mismatch warning parity for
 future default Rust planner cutover. P8M records that ownership decision. P8N
 adds a crate-local Rust probe abstraction, fake probe, and tests for layering
-detected facts over synthetic/profile-derived context. P8N does not implement
-live ADB probing, detected-device profile mismatch warning parity, route wiring,
-readiness gate behavior, or current Python default planning behavior. Intended
-future context precedence is synthetic/profile context -> detected facts ->
-explicit CLI overrides. Executor, apply, real-device, ADB, artifact
+detected facts over synthetic/profile-derived context. P8O adds fake/test-backed
+planner-input construction that applies detected facts over
+synthetic/profile-derived context. P8O does not implement live ADB probing, detected-device
+profile mismatch warning parity, route wiring, readiness gate behavior, or
+current Python default planning behavior. Intended future context precedence is
+synthetic/profile context -> detected facts -> explicit CLI overrides. Executor,
+apply, real-device, ADB, artifact
 materialization, network, Tauri protocol, normal runtime checks, and default
 user-facing CLI behavior are unchanged.
 
@@ -325,12 +327,15 @@ resolved or explicitly accepted for a narrower experimental route:
   `crates/emuchef-rust-backend/src/device_probe.rs` defines a crate-local probe
   trait, stable detected-facts/error types, fake probe, and helper for applying
   detected facts over planner `DeviceContext`. It is fake/test-only foundation.
-  Intended future context precedence is synthetic/profile context -> detected
-  facts -> explicit CLI overrides. It does not implement live ADB probing,
-  detected-device profile mismatch warning parity, `rust-shadow` or
-  `rust-experimental` route wiring, Python CLI behavior, Tauri/protocol
-  behavior, executor/apply behavior, readiness gate reclassification, or Python
-  planner deletion readiness.
+- P8O detected-facts planner-input construction:
+  `crates/emuchef-rust-backend/src/planner_device_plan.rs` adds crate-private
+  fake/test-backed construction of `PlannerInput` with detected facts layered
+  over synthetic/profile-derived `DeviceContext`. Intended future context
+  precedence is synthetic/profile context -> detected facts -> explicit CLI
+  overrides. It does not implement live ADB probing, detected-device profile
+  mismatch warning parity, `rust-shadow` or `rust-experimental` route wiring,
+  Python CLI behavior, Tauri/protocol behavior, executor/apply behavior,
+  readiness gate reclassification, or Python planner deletion readiness.
 - Pre-cutover candidate: planner routing work may use the matrix as an
   optional/manual gate to gather evidence before exposing any user-facing Rust
   planner path.
