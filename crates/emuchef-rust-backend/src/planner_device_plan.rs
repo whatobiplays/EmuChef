@@ -14,9 +14,15 @@ use serde_json::Value as JsonValue;
 use serde_yaml::{Mapping, Value as YamlValue};
 
 use crate::device_probe::{apply_detected_device_facts_to_context, DetectedDeviceFacts};
-use crate::device_profile_match::{AndroidVersionRangeCriteria, DeviceProfileMatchCriteria};
+use crate::device_profile_match::{
+    build_detected_device_profile_mismatch_warning, AndroidVersionRangeCriteria,
+    DeviceProfileMatchCriteria,
+};
 use crate::model::{OrderedMap, Recipe};
-use crate::planner::{DeviceContext, PlannerInput, PlannerLoadError, RuntimeCapabilities};
+use crate::planner::{
+    plan_execution, DeviceContext, PlannerInput, PlannerLoadError, PlanningResult, PlanningStatus,
+    RuntimeCapabilities,
+};
 
 #[derive(Clone, Debug, PartialEq)]
 pub(crate) struct DeviceProfileInventoryEntry {
@@ -167,6 +173,53 @@ pub(crate) fn planner_input_from_authored_device_plan_with_detected_facts(
     input.device_context =
         apply_detected_device_facts_to_context(input.device_context, detected_facts);
     Ok(input)
+}
+
+/// Build a planner result from authored device-plan data with detected facts.
+///
+/// This composes the fake/test-backed detected-context path with the pure
+/// profile mismatch warning helper. It is crate-private migration evidence only:
+/// it does not probe devices, call route code, or change normal planner input
+/// construction.
+pub(crate) fn plan_from_authored_device_plan_with_detected_facts(
+    authored_root: impl AsRef<Path>,
+    device_plan_ref: &str,
+    plan_id: String,
+    input_bindings: OrderedMap<JsonValue>,
+    detected_facts: &DetectedDeviceFacts,
+) -> Result<PlanningResult, PlannerLoadError> {
+    let authored_root = authored_root.as_ref();
+    let input = planner_input_from_authored_device_plan_with_detected_facts(
+        authored_root,
+        device_plan_ref,
+        plan_id,
+        input_bindings,
+        detected_facts,
+    )?;
+    let profile_match = load_device_plan_profile_match_criteria(authored_root, device_plan_ref)?;
+    let mut result = plan_execution(input);
+
+    if result.execution_plan.is_some() {
+        if let Some(warning) = build_detected_device_profile_mismatch_warning(
+            &profile_match.device_plan_ref,
+            &profile_match.device_profile_ref,
+            detected_facts,
+            &profile_match.profile_match,
+        ) {
+            let already_present = result
+                .warnings
+                .iter()
+                .any(|existing| existing.code == "device_profile_mismatch");
+            if !already_present {
+                if matches!(result.status, PlanningStatus::Success) {
+                    result.status = PlanningStatus::Warning;
+                }
+                result.warnings.push(warning);
+            }
+        }
+    }
+
+    Ok(result)
 }
 
 pub(crate) fn load_device_plan_profile_match_criteria(

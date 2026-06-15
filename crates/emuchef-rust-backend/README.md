@@ -506,9 +506,11 @@ detected-device profile mismatch warning construction for supplied detected
 facts and authored profile criteria. P8P evaluates the current Python warning
 criteria for manufacturer, brand, model regex, and Android minimum version;
 authored Android maximum values are parsed but not evaluated because the current
-Python warning path does not evaluate them. The intended future precedence is
-synthetic/profile context -> detected facts -> explicit CLI overrides. P8P does
-not implement live ADB probing, `rust-shadow` or `rust-experimental` route
+Python warning path does not evaluate them. P8Q composes those fake/test-backed
+pieces into crate-private `PlanningResult` construction with detected context
+and optional `device_profile_mismatch` warnings. The intended future precedence
+is synthetic/profile context -> detected facts -> explicit CLI overrides. P8Q
+does not implement live ADB probing, `rust-shadow` or `rust-experimental` route
 wiring, Python CLI behavior, executor/apply, Tauri/protocol, Cargo fallback,
 fixture/golden, network, artifact, runtime-check behavior, readiness gate
 reclassification, or Python planner deletion readiness. The expected
@@ -561,7 +563,8 @@ blocked on broader output/behavior compatibility with the current Python CLI
 contract or a separate accepted breaking-change decision, plus Rust-owned
 real-device probing and detected-device profile mismatch warning parity as
 accepted in ADR 0003. P8N's fake probe module and P8P's pure mismatch-warning
-helper are not part of this route and do not change shadow command behavior.
+helper, plus P8Q's fake/test-backed result-composition helper, are not part of
+this route and do not change shadow command behavior.
 `default-run =
 "emuchef-rust-backend"` is set so existing `cargo run --manifest-path
 crates/emuchef-rust-backend/Cargo.toml -- --sidecar` and one-shot development

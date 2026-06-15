@@ -16,7 +16,7 @@ use crate::planner::{
 };
 use crate::planner_device_plan::{
     discover_device_plan_inventory, discover_device_profile_inventory,
-    load_device_plan_profile_match_criteria,
+    load_device_plan_profile_match_criteria, plan_from_authored_device_plan_with_detected_facts,
     planner_input_from_authored_device_plan_with_detected_facts,
 };
 
@@ -202,6 +202,91 @@ fn repo_detected_context_planner_input_with_bindings(
     .unwrap_or_else(|error| {
         panic!("{device_plan_ref} should build detected-context PlannerInput: {error}")
     })
+}
+
+fn repo_detected_context_planning_result_with_bindings(
+    device_plan_ref: &str,
+    plan_id: &str,
+    input_bindings: &[(&str, Value)],
+    detected_facts: &DetectedDeviceFacts,
+) -> Value {
+    let mut bindings = OrderedMap::new();
+    for (input_id, value) in input_bindings {
+        bindings.insert((*input_id).to_string(), value.clone());
+    }
+    serde_json::to_value(
+        plan_from_authored_device_plan_with_detected_facts(
+            repo_authored_root(),
+            device_plan_ref,
+            plan_id.to_string(),
+            bindings,
+            detected_facts,
+        )
+        .unwrap_or_else(|error| {
+            panic!("{device_plan_ref} should build detected-context PlanningResult: {error}")
+        }),
+    )
+    .expect("detected-context planning result should serialize")
+}
+
+fn repo_baseline_planning_result_with_bindings(
+    device_plan_ref: &str,
+    plan_id: &str,
+    input_bindings: &[(&str, Value)],
+) -> Value {
+    planning_result_value(repo_device_plan_planner_input_with_bindings_and_plan_id(
+        device_plan_ref,
+        plan_id,
+        input_bindings,
+    ))
+}
+
+fn repo_device_plan_planner_input_with_bindings_and_plan_id(
+    device_plan_ref: &str,
+    plan_id: &str,
+    input_bindings: &[(&str, Value)],
+) -> PlannerInput {
+    let mut bindings = OrderedMap::new();
+    for (input_id, value) in input_bindings {
+        bindings.insert((*input_id).to_string(), value.clone());
+    }
+    PlannerInput::from_authored_device_plan(
+        repo_authored_root(),
+        device_plan_ref,
+        plan_id.to_string(),
+        bindings,
+    )
+    .unwrap_or_else(|error| panic!("{device_plan_ref} should build PlannerInput: {error}"))
+}
+
+fn assert_planning_result_stable_non_context_fields_eq(baseline: &Value, actual: &Value) {
+    assert_eq!(actual["errors"], baseline["errors"]);
+    assert_eq!(actual["schema_version"], baseline["schema_version"]);
+    assert_eq!(actual["kind"], baseline["kind"]);
+    assert_eq!(
+        actual["execution_plan"]["id"],
+        baseline["execution_plan"]["id"]
+    );
+    assert_eq!(
+        actual["execution_plan"]["source"],
+        baseline["execution_plan"]["source"]
+    );
+    assert_eq!(
+        actual["execution_plan"]["runtime_capabilities"],
+        baseline["execution_plan"]["runtime_capabilities"]
+    );
+    assert_eq!(
+        actual["execution_plan"]["inputs"],
+        baseline["execution_plan"]["inputs"]
+    );
+    assert_eq!(
+        actual["execution_plan"]["artifacts"],
+        baseline["execution_plan"]["artifacts"]
+    );
+    assert_eq!(
+        actual["execution_plan"]["steps"],
+        baseline["execution_plan"]["steps"]
+    );
 }
 
 fn assert_non_context_planner_input_fields_eq(baseline: &PlannerInput, actual: &PlannerInput) {
@@ -2952,6 +3037,235 @@ fn detected_context_planner_input_does_not_emit_profile_mismatch_warning() {
 
     assert_eq!(actual["status"], "success", "{actual:#}");
     assert_eq!(actual["warnings"], json!([]));
+}
+
+#[test]
+fn detected_context_planning_result_matching_facts_keeps_success_without_mismatch_warning() {
+    let plan_id = "plan.p8q.detected.matching.001";
+    let bindings = [(
+        "app.retroarch.provision/retroarch_cfg",
+        json!("/tmp/emuchef-p8q-retroarch.cfg"),
+    )];
+    let baseline = repo_baseline_planning_result_with_bindings(
+        "ayaneo.pocket_s_mini.base",
+        plan_id,
+        &bindings,
+    );
+    let actual = repo_detected_context_planning_result_with_bindings(
+        "ayaneo.pocket_s_mini.base",
+        plan_id,
+        &bindings,
+        &DetectedDeviceFacts {
+            serial: Some("p8q-matching".to_string()),
+            manufacturer: Some("AYANEO".to_string()),
+            brand: Some("AYANEO".to_string()),
+            model: Some("AYANEO Pocket S mini".to_string()),
+            android_version: Some(13),
+            android_api_level: Some(33),
+            device_tags: vec!["detected_handheld".to_string()],
+        },
+    );
+
+    assert_planning_result_stable_non_context_fields_eq(&baseline, &actual);
+    assert_eq!(actual["status"], "success", "{actual:#}");
+    assert_eq!(actual["warnings"], json!([]));
+    assert_eq!(
+        actual["execution_plan"]["device_context"],
+        json!({
+            "manufacturer": "AYANEO",
+            "model": "AYANEO Pocket S mini",
+            "android_version": 13,
+            "android_api_level": 33,
+            "device_tags": ["detected_handheld"],
+        })
+    );
+}
+
+#[test]
+fn detected_context_planning_result_appends_manufacturer_mismatch_warning() {
+    let plan_id = "plan.p8q.detected.manufacturer_mismatch.001";
+    let baseline =
+        repo_baseline_planning_result_with_bindings("ayaneo.pocket_s_mini.base", plan_id, &[]);
+    let actual = repo_detected_context_planning_result_with_bindings(
+        "ayaneo.pocket_s_mini.base",
+        plan_id,
+        &[],
+        &DetectedDeviceFacts {
+            serial: Some("p8q-manufacturer".to_string()),
+            manufacturer: Some("Valve".to_string()),
+            brand: Some("AYANEO".to_string()),
+            model: Some("AYANEO Pocket S mini".to_string()),
+            android_version: Some(13),
+            ..DetectedDeviceFacts::default()
+        },
+    );
+    let warnings = actual["warnings"]
+        .as_array()
+        .expect("warnings should be an array");
+
+    assert_planning_result_stable_non_context_fields_eq(&baseline, &actual);
+    assert_eq!(actual["status"], "warning", "{actual:#}");
+    assert_eq!(warnings.len(), 1);
+    assert_eq!(warnings[0]["code"], "device_profile_mismatch");
+    assert_eq!(
+        warnings[0]["details"]["reasons"],
+        json!([
+            "manufacturer 'Valve' did not contain any of: AYANEO",
+            "brand matched one of: AYANEO",
+            "model matched one of: Pocket S mini",
+            "android version 13 met minimum 13"
+        ])
+    );
+}
+
+#[test]
+fn detected_context_planning_result_appends_brand_and_model_mismatch_warning() {
+    let actual = repo_detected_context_planning_result_with_bindings(
+        "ayaneo.pocket_s_mini.base",
+        "plan.p8q.detected.brand_model_mismatch.001",
+        &[],
+        &DetectedDeviceFacts {
+            manufacturer: Some("AYANEO".to_string()),
+            brand: Some("Valve".to_string()),
+            model: Some("Steam Deck".to_string()),
+            android_version: Some(13),
+            ..DetectedDeviceFacts::default()
+        },
+    );
+    let warning = actual["warnings"][0].clone();
+
+    assert_eq!(actual["status"], "warning", "{actual:#}");
+    assert_eq!(warning["code"], "device_profile_mismatch");
+    assert_eq!(
+        warning["details"]["reasons"],
+        json!([
+            "manufacturer matched one of: AYANEO",
+            "brand 'Valve' did not contain any of: AYANEO",
+            "model 'Steam Deck' did not match any of: Pocket S mini",
+            "android version 13 met minimum 13"
+        ])
+    );
+}
+
+#[test]
+fn detected_context_planning_result_appends_android_minimum_mismatch_warning() {
+    let actual = repo_detected_context_planning_result_with_bindings(
+        "ayaneo.pocket_s_mini.base",
+        "plan.p8q.detected.android_mismatch.001",
+        &[],
+        &DetectedDeviceFacts {
+            manufacturer: Some("AYANEO".to_string()),
+            brand: Some("AYANEO".to_string()),
+            model: Some("AYANEO Pocket S mini".to_string()),
+            android_version: Some(12),
+            ..DetectedDeviceFacts::default()
+        },
+    );
+    let warning = actual["warnings"][0].clone();
+
+    assert_eq!(actual["status"], "warning", "{actual:#}");
+    assert_eq!(warning["code"], "device_profile_mismatch");
+    assert_eq!(
+        warning["details"]["reasons"],
+        json!([
+            "manufacturer matched one of: AYANEO",
+            "brand matched one of: AYANEO",
+            "model matched one of: Pocket S mini",
+            "android version 12 was below minimum 13"
+        ])
+    );
+}
+
+#[test]
+fn detected_context_planning_result_missing_detected_fields_do_not_warn() {
+    let plan_id = "plan.p8q.detected.missing_fields.001";
+    let baseline =
+        repo_baseline_planning_result_with_bindings("ayaneo.pocket_s_mini.base", plan_id, &[]);
+    let actual = repo_detected_context_planning_result_with_bindings(
+        "ayaneo.pocket_s_mini.base",
+        plan_id,
+        &[],
+        &DetectedDeviceFacts::default(),
+    );
+
+    assert_planning_result_stable_non_context_fields_eq(&baseline, &actual);
+    assert_eq!(actual["status"], "success", "{actual:#}");
+    assert_eq!(actual["warnings"], json!([]));
+    assert_eq!(
+        actual["execution_plan"]["device_context"],
+        baseline["execution_plan"]["device_context"]
+    );
+}
+
+#[test]
+fn normal_authored_device_plan_planning_result_does_not_emit_detected_mismatch_warning() {
+    let actual = repo_baseline_planning_result_with_bindings(
+        "ayaneo.pocket_s_mini.base",
+        "plan.p8q.normal.no_detected_warning.001",
+        &[],
+    );
+
+    assert_eq!(actual["status"], "success", "{actual:#}");
+    assert_eq!(actual["warnings"], json!([]));
+}
+
+#[test]
+fn detected_context_planning_result_accepts_fake_probe_facts() {
+    let probe = FakeDeviceProbe::new(Ok(DetectedDeviceFacts {
+        serial: Some("p8q-fake-probe".to_string()),
+        manufacturer: Some("Valve".to_string()),
+        brand: Some("Valve".to_string()),
+        model: Some("Steam Deck".to_string()),
+        android_version: Some(12),
+        android_api_level: Some(32),
+        device_tags: vec!["fake_probe".to_string()],
+    }));
+    let facts = probe
+        .detect()
+        .expect("fake probe should return configured facts");
+    let actual = repo_detected_context_planning_result_with_bindings(
+        "ayaneo.pocket_s_mini.base",
+        "plan.p8q.detected.fake_probe.001",
+        &[],
+        &facts,
+    );
+
+    assert_eq!(actual["status"], "warning", "{actual:#}");
+    assert_eq!(actual["warnings"][0]["code"], "device_profile_mismatch");
+    assert_eq!(
+        actual["execution_plan"]["device_context"]["device_tags"],
+        json!(["fake_probe"])
+    );
+}
+
+#[test]
+fn detected_context_planning_result_source_has_no_live_behavior() {
+    let source = include_str!("planner_device_plan.rs");
+    let code_without_line_comments = source
+        .lines()
+        .filter(|line| {
+            let trimmed = line.trim_start();
+            !(trimmed.starts_with("//") || trimmed.starts_with("///") || trimmed.starts_with("//!"))
+        })
+        .collect::<Vec<_>>()
+        .join("\n");
+
+    for forbidden in [
+        "std::process",
+        "Command::new",
+        "TcpStream",
+        "UdpSocket",
+        "reqwest",
+        "ureq",
+        "hyper",
+        "adb shell",
+        "adb ",
+    ] {
+        assert!(
+            !code_without_line_comments.contains(forbidden),
+            "P8Q planner-device-plan composition must not contain live behavior marker {forbidden:?}"
+        );
+    }
 }
 
 #[test]
