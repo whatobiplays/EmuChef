@@ -45,11 +45,15 @@ authored profile criteria. P8Q composes that helper into fake/test-backed
 planning-result construction. P8R exposes the P8Q composition path only through
 a local `emuchef-plan-shadow --detected-facts-json <path>` fixture harness.
 P8S adds optional/manual smoke evidence for that direct Rust shadow-binary
-fixture harness through `tools/smoke_rust_detected_facts_fixture.py`. These
-slices do not change Python default planning behavior, live probing, Python CLI
-fixture forwarding, route-level detection, executor/apply, Tauri/protocol,
-readiness gate behavior, normal runtime checks, or normal planner warning
-emission.
+fixture harness through `tools/smoke_rust_detected_facts_fixture.py`. P8T lets
+only the explicit `rust-experimental` Python route forward a local fixture path
+with `--rust-detected-facts-json <path>`; Python forwards the exact string to
+the Rust shadow binary as `--detected-facts-json <path>` and does not load,
+normalize, or validate the fixture. These slices do not change Python default
+planning behavior, live probing, default Python backend fixture forwarding,
+`rust-shadow` fixture forwarding, route-level detection, executor/apply,
+Tauri/protocol, readiness gate behavior, normal runtime checks, or normal
+planner warning emission.
 
 Rust planner, executor, and CLI behavior is fixture-scoped, test-scoped,
 internal, or editor-backend-scoped unless explicitly promoted by later work.
@@ -121,7 +125,12 @@ backend. It is not the default planner, not a stable final public contract, and
 not Python planner deletion. P8H adds dev-only matrix smoke evidence for that
 route across the current scenario matrix; it requires successful scenarios to
 exit `0` and emit concise Python-compatible summary stdout, and raw Rust JSON is
-a smoke failure for successful scenarios. P8I adds a static readiness report for
+a smoke failure for successful scenarios. P8T adds
+`--rust-detected-facts-json <path>` only to this explicit route and forwards it
+unchanged as `--detected-facts-json <path>` to the Rust shadow binary. The raw
+Rust flag remains unrecognized by the Python CLI, and the Python backend and
+`rust-shadow` reject the Python wrapper flag before planner or subprocess work.
+P8I adds a static readiness report for
 future default-cutover PRs; it lists required manual evidence but does not run
 comparison/smoke tooling, Cargo, npm, ADB, executor/apply, Tauri/protocol,
 network, artifact, or golden-regeneration checks, and it remains `blocked` while

@@ -62,9 +62,10 @@ Rust planner-adjacent coverage is internal and fixture-scoped:
   inputs. P8J adds explicit device context flags to this command for supplied
   manufacturer, model, Android version, and ordered device tags. P8R adds a
   local `--detected-facts-json <path>` fixture mode to the shadow binary only;
-  the Python CLI bridge does not forward that option. P8A exposes the shadow
-  binary through an explicit developer-only Python CLI bridge, but it is not the
-  default planner CLI or a cutover path.
+  P8T lets only the explicit `rust-experimental` Python route forward a local
+  fixture path through the Python-facing `--rust-detected-facts-json <path>`
+  flag. P8A exposes the shadow binary through an explicit developer-only Python
+  CLI bridge, but it is not the default planner CLI or a cutover path.
 - `tools/smoke_rust_detected_facts_fixture.py`: dev-only P8S smoke for the P8R
   Rust shadow-binary detected-facts fixture harness. The smoke creates temporary
   fixture JSON files, invokes the supplied `emuchef-plan-shadow` binary directly
@@ -554,9 +555,9 @@ supplied, the emitted `execution_plan.device_context` reflects the explicit
 overrides, while `device_profile_mismatch` warning evaluation remains based on
 the detected fixture facts. Missing or invalid fixtures are process errors:
 stderr contains a stable `detected_facts_fixture_*` classification and stdout is
-empty. This fixture mode does not probe devices, invoke ADB, add Python CLI
-forwarding, enter the Python CLI matrix smoke runner, or promote route-level
-mismatch-warning parity.
+empty. The direct Rust fixture mode does not probe devices, invoke ADB, enter
+the Python CLI matrix smoke runner, or promote route-level mismatch-warning
+parity.
 
 P8S adds optional/manual smoke evidence for the P8R fixture path:
 
@@ -623,10 +624,13 @@ emuchef plan \
 
 `rust-experimental` reuses the same Rust shadow planner binary invocation as
 `rust-shadow` and defaults to Python-compatible output formatting. It supports
-`--verbose` and `--output` through that compatibility formatter. It rejects
-`--rust-shadow-output` because that option is only valid with
-`--planner-backend rust-shadow`. `rust-experimental` is not the default planner,
-not a stable final public contract, and not Python planner deletion. Its name and
+`--verbose` and `--output` through that compatibility formatter. P8T also lets
+`rust-experimental` forward `--rust-detected-facts-json <path>` as the exact
+`--detected-facts-json <path>` argv pair to the Rust shadow binary. Python does
+not open, stat, expand, normalize, parse, or schema-validate the fixture path.
+`rust-experimental` rejects `--rust-shadow-output` because that option is only
+valid with `--planner-backend rust-shadow`. It is not the default planner, not a
+stable final public contract, and not Python planner deletion. Its name and
 behavior may change before Rust becomes the default planner backend.
 
 P8B provides a dev-only matrix smoke for the Python bridge:
@@ -694,12 +698,14 @@ The shadow command and Python bridge do not execute plans, probe devices, invoke
 ADB, access the network, download or materialize artifacts, regenerate goldens,
 expose Tauri commands, expose sidecar protocol requests, or replace the default
 Python `emuchef plan` CLI. The P8R fixture mode can create detected facts only
-from a local JSON file supplied directly to the Rust shadow binary; Python CLI
-routes do not expose or forward that mode. ADR 0003 decides that Rust should own
-real-device probing and detected-device profile mismatch warning parity before
-future default Rust planner cutover, but P8M/P8R do not implement live probing
-or production route-level warning parity. Planner CLI cutover remains a future
-explicit phase.
+from a local JSON file supplied to the Rust shadow binary directly or through
+P8T's explicit `rust-experimental` wrapper flag. The raw Rust
+`--detected-facts-json` flag remains unrecognized by Python CLI routes, and
+`rust-shadow` does not accept the Python wrapper flag. ADR 0003 decides that
+Rust should own real-device probing and detected-device profile mismatch warning
+parity before future default Rust planner cutover, but P8M/P8R/P8T do not
+implement live probing or production route-level warning parity. Planner CLI
+cutover remains a future explicit phase.
 
 ## Dev-Only Python Planner API Vs Rust Shadow Comparison
 

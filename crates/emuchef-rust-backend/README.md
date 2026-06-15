@@ -343,8 +343,14 @@ output, and does not probe devices or invoke ADB. Effective context precedence i
 synthetic/profile context -> detected fixture facts -> explicit CLI context
 overrides. When explicit context flags and a fixture are both supplied, the
 emitted `execution_plan.device_context` reflects the explicit overrides, while
-`device_profile_mismatch` warnings still evaluate the fixture facts. Python CLI
-routes do not expose or forward `--detected-facts-json`.
+`device_profile_mismatch` warnings still evaluate the fixture facts.
+`emuchef plan --planner-backend rust-experimental` can explicitly forward a
+local fixture with the Python-facing `--rust-detected-facts-json <path>` flag.
+Python forwards the exact string as `--detected-facts-json <path>` to this
+shadow binary and does not open, stat, expand, normalize, parse, or
+schema-validate the fixture. The raw Rust `--detected-facts-json` flag remains
+unrecognized by Python CLI routes, and `rust-shadow` does not accept the Python
+wrapper flag.
 
 P8S adds optional/manual smoke evidence for the direct shadow-binary fixture
 harness:
@@ -424,7 +430,10 @@ emuchef plan \
 the same authored-root/device-plan/explicit-context/repeated-bind arguments as
 `rust-shadow`, and formats usable Rust `PlanningResult` JSON through the
 Python-compatible summary or YAML path by default. It allows `--verbose` and
-`--output` because those flags use the compatibility formatting path.
+`--output` because those flags use the compatibility formatting path. It also
+accepts `--rust-detected-facts-json <path>` as an explicit local-fixture
+cutover rehearsal input and forwards it unchanged to `emuchef-plan-shadow` as
+`--detected-facts-json <path>`.
 `--rust-shadow-output` is only valid with
 `--planner-backend rust-shadow`; Python and `rust-experimental` reject it before
 ADB resolution or Python planner/session construction. `rust-experimental` is an
@@ -549,10 +558,13 @@ fixture harness. The intended future precedence is synthetic/profile context ->
 detected facts -> explicit CLI overrides. P8R applies explicit context overrides
 to the emitted fixture-derived device context, while mismatch warnings remain
 based on the detected fixture facts. P8R does not implement live ADB probing,
-`rust-shadow` or `rust-experimental` route-level detection, Python CLI fixture
-forwarding, executor/apply, Tauri/protocol, Cargo fallback, fixture/golden,
-network, artifact, runtime-check behavior, readiness gate reclassification, or
-Python planner deletion readiness. The expected
+`rust-shadow` or `rust-experimental` route-level detection, executor/apply,
+Tauri/protocol, Cargo fallback, fixture/golden, network, artifact,
+runtime-check behavior, readiness gate reclassification, or Python planner
+deletion readiness. P8T adds only explicit `rust-experimental` forwarding for a
+local fixture path through the Python wrapper flag; it does not add live
+probing, normal runtime checks, readiness gate reclassification, or default
+backend behavior. The expected
 implementation path remains incremental: live real-device probing, explicit
 non-default route support, optional live ADB smoke, readiness reclassification,
 and a later default planner backend cutover.
