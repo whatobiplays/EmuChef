@@ -60,9 +60,11 @@ Rust planner-adjacent coverage is internal and fixture-scoped:
   planner command support for manual migration inspection. The command emits
   pretty JSON `PlanningResult` values from explicit authored-root/device-plan
   inputs. P8J adds explicit device context flags to this command for supplied
-  manufacturer, model, Android version, and ordered device tags. P8A exposes it
-  through an explicit developer-only Python CLI bridge, but it is not the default
-  planner CLI or a cutover path.
+  manufacturer, model, Android version, and ordered device tags. P8R adds a
+  local `--detected-facts-json <path>` fixture mode to the shadow binary only;
+  the Python CLI bridge does not forward that option. P8A exposes the shadow
+  binary through an explicit developer-only Python CLI bridge, but it is not the
+  default planner CLI or a cutover path.
 - `tools/compare_rust_python_plan.py`: dev-only comparison harness for Python
   planner API output versus Rust shadow planner output. The harness emits a
   deterministic JSON classification report or matrix report and is not part of
@@ -130,9 +132,10 @@ Rust planner-adjacent coverage is internal and fixture-scoped:
   recipe refs in authored order, derives profile capability defaults and tags,
   builds explicitly synthetic planner-only device context, and provides the P8Q
   fake/test-backed `PlanningResult` composition path for supplied detected
-  facts and detected-device profile mismatch warnings. That P8Q helper is not
-  route wiring, live probing, normal planner warning emission, or readiness gate
-  reclassification.
+  facts and detected-device profile mismatch warnings. P8R invokes that helper
+  only from a local shadow-binary fixture path. That helper and fixture harness
+  are not Python route wiring, live probing, normal planner warning emission, or
+  readiness gate reclassification.
 - `crates/emuchef-rust-backend/src/planner_tests.rs`: Rust unit tests comparing
   Phase 6M/6N planning output to checked-in Python planner goldens, including
   the P7A fixture inventory/parsing guard, focused planner-only param contract
@@ -524,6 +527,29 @@ cargo run --manifest-path crates/emuchef-rust-backend/Cargo.toml --bin emuchef-p
   --device-plan ayaneo.pocket_s_mini.base
 ```
 
+P8R adds a local fixture-only detected-facts path to the shadow binary:
+
+```bash
+cargo run --manifest-path crates/emuchef-rust-backend/Cargo.toml --bin emuchef-plan-shadow -- \
+  --authored-root authored \
+  --device-plan ayaneo.pocket_s_mini.base \
+  --detected-facts-json /path/to/detected-facts.json
+```
+
+The fixture file is strict JSON matching `DetectedDeviceFacts`; all scalar
+fields are optional and omitted `device_tags` defaults to an empty list. Fixture
+mode runs the P8Q detected-facts planning-result composition path and emits the
+same pretty JSON `PlanningResult` shape as normal shadow planning. The effective
+context precedence is synthetic/profile context -> detected fixture facts ->
+explicit CLI context overrides. If explicit context flags and a fixture are both
+supplied, the emitted `execution_plan.device_context` reflects the explicit
+overrides, while `device_profile_mismatch` warning evaluation remains based on
+the detected fixture facts. Missing or invalid fixtures are process errors:
+stderr contains a stable `detected_facts_fixture_*` classification and stdout is
+empty. This fixture mode does not probe devices, invoke ADB, add Python CLI
+forwarding, update the smoke runner, or promote route-level mismatch-warning
+parity.
+
 P8A also exposes a thin Python CLI bridge to an already-built shadow binary:
 
 ```bash
@@ -643,13 +669,15 @@ and authored-root/device-plan load failures write stable text to stderr and do
 not emit stdout JSON.
 
 The shadow command and Python bridge do not execute plans, probe devices, invoke
-ADB, create detected-device facts, emit detected-device profile mismatch
-warnings, access the network, download or materialize artifacts, regenerate
-goldens, expose Tauri commands, expose sidecar protocol requests, or replace the
-default Python `emuchef plan` CLI. ADR 0003 decides that Rust should own
+ADB, access the network, download or materialize artifacts, regenerate goldens,
+expose Tauri commands, expose sidecar protocol requests, or replace the default
+Python `emuchef plan` CLI. The P8R fixture mode can create detected facts only
+from a local JSON file supplied directly to the Rust shadow binary; Python CLI
+routes do not expose or forward that mode. ADR 0003 decides that Rust should own
 real-device probing and detected-device profile mismatch warning parity before
-future default Rust planner cutover, but P8M does not implement that behavior.
-Planner CLI cutover remains a future explicit phase.
+future default Rust planner cutover, but P8M/P8R do not implement live probing
+or production route-level warning parity. Planner CLI cutover remains a future
+explicit phase.
 
 ## Dev-Only Python Planner API Vs Rust Shadow Comparison
 
@@ -738,10 +766,13 @@ future precedence is synthetic/profile context -> detected facts -> explicit CLI
 overrides. P8P adds pure/test-backed mismatch-warning helper logic for supplied
 detected facts. P8Q composes those fake/test-backed pieces into crate-private
 `PlanningResult` construction, but does not add live ADB probing, normal planner
-warning emission, or route wiring. Matching matrix status is necessary evidence
-for the compared planner-only fields, not
-sufficient proof of CLI routing, real-device context resolution, executor/apply
-compatibility, artifact materialization, or Python planner deletability.
+warning emission, or route wiring. P8R makes that composition path executable
+only through a local `emuchef-plan-shadow --detected-facts-json <path>` fixture
+harness; Python CLI routes, smoke tooling, live probing, normal runtime checks,
+and readiness blocker IDs remain unchanged. Matching matrix status is necessary
+evidence for the compared planner-only fields, not sufficient proof of CLI
+routing, real-device context resolution, executor/apply compatibility, artifact
+materialization, or Python planner deletability.
 
 Use `docs/rust-planner-cutover-readiness.md` for the current blocker
 classification, comparison-matrix gating policy, and proposed staged ladder for

@@ -5,20 +5,24 @@
 //! manual migration inspection and does not add protocol, Tauri, executor, or
 //! Python CLI routing.
 
-use std::path::PathBuf;
+use std::fs;
+use std::path::{Path, PathBuf};
 
 use serde_json::Value;
 
+use crate::device_probe::DetectedDeviceFacts;
 use crate::model::OrderedMap;
-use crate::planner::{plan_execution, DeviceContext, PlannerInput, PlanningStatus};
+use crate::planner::{plan_execution, DeviceContext, PlannerInput, PlanningResult, PlanningStatus};
+use crate::planner_device_plan::plan_from_authored_device_plan_with_detected_facts;
 use crate::ProcessOutput;
 
-const USAGE: &str = "usage: emuchef-plan-shadow --authored-root <path> --device-plan <id> [--manufacturer <value>] [--model <value>] [--android-version <integer>] [--device-tag <value>]... [--bind <recipe_ref>/<input_id>=<value>]...\n";
+const USAGE: &str = "usage: emuchef-plan-shadow --authored-root <path> --device-plan <id> [--detected-facts-json <path>] [--manufacturer <value>] [--model <value>] [--android-version <integer>] [--device-tag <value>]... [--bind <recipe_ref>/<input_id>=<value>]...\n";
 
 #[derive(Debug, PartialEq)]
 struct ShadowConfig {
     authored_root: PathBuf,
     device_plan: String,
+    detected_facts_json: Option<PathBuf>,
     input_bindings: OrderedMap<Value>,
     explicit_context: ExplicitDeviceContext,
 }
@@ -55,24 +59,56 @@ pub fn run(args: &[String]) -> ProcessOutput {
         }
     };
 
-    let mut input = match PlannerInput::from_authored_device_plan(
-        &config.authored_root,
-        &config.device_plan,
-        format!("plan.shadow.{}.001", config.device_plan),
-        config.input_bindings,
-    ) {
-        Ok(input) => input,
-        Err(error) => {
-            return ProcessOutput {
-                exit_code: 1,
-                stdout: String::new(),
-                stderr: format!("Error: {}: {error}\n", error.code()),
-            };
+    let plan_id = format!("plan.shadow.{}.001", config.device_plan);
+    let uses_detected_facts = config.detected_facts_json.is_some();
+    let mut result = if let Some(path) = &config.detected_facts_json {
+        let detected_facts = match load_detected_facts_fixture(path) {
+            Ok(facts) => facts,
+            Err(error) => return error.into_process_output(),
+        };
+        match plan_from_authored_device_plan_with_detected_facts(
+            &config.authored_root,
+            &config.device_plan,
+            plan_id,
+            config.input_bindings,
+            &detected_facts,
+        ) {
+            Ok(result) => result,
+            Err(error) => {
+                return ProcessOutput {
+                    exit_code: 1,
+                    stdout: String::new(),
+                    stderr: format!("Error: {}: {error}\n", error.code()),
+                };
+            }
         }
+    } else {
+        let mut input = match PlannerInput::from_authored_device_plan(
+            &config.authored_root,
+            &config.device_plan,
+            plan_id,
+            config.input_bindings,
+        ) {
+            Ok(input) => input,
+            Err(error) => {
+                return ProcessOutput {
+                    exit_code: 1,
+                    stdout: String::new(),
+                    stderr: format!("Error: {}: {error}\n", error.code()),
+                };
+            }
+        };
+        apply_explicit_device_context(&mut input.device_context, &config.explicit_context);
+        plan_execution(input)
     };
-    apply_explicit_device_context(&mut input.device_context, &config.explicit_context);
+    if uses_detected_facts {
+        apply_explicit_device_context_to_result(&mut result, &config.explicit_context);
+    }
 
-    let result = plan_execution(input);
+    emit_planning_result(result)
+}
+
+fn emit_planning_result(result: PlanningResult) -> ProcessOutput {
     let exit_code = if matches!(result.status, PlanningStatus::Success) {
         0
     } else {
@@ -98,6 +134,7 @@ enum ShadowArgError {
 fn parse_args(args: &[String]) -> Result<ShadowConfig, ShadowArgError> {
     let mut authored_root: Option<PathBuf> = None;
     let mut device_plan: Option<String> = None;
+    let mut detected_facts_json: Option<PathBuf> = None;
     let mut raw_bindings: Vec<String> = Vec::new();
     let mut explicit_context = ExplicitDeviceContext::default();
     let mut index = 0;
@@ -117,6 +154,13 @@ fn parse_args(args: &[String]) -> Result<ShadowConfig, ShadowArgError> {
                     return usage_error("--device-plan requires one argument");
                 };
                 device_plan = Some(value.clone());
+            }
+            "--detected-facts-json" => {
+                index += 1;
+                let Some(value) = args.get(index) else {
+                    return usage_error("--detected-facts-json requires one argument");
+                };
+                detected_facts_json = Some(PathBuf::from(value));
             }
             "--manufacturer" => {
                 index += 1;
@@ -181,6 +225,7 @@ fn parse_args(args: &[String]) -> Result<ShadowConfig, ShadowArgError> {
     Ok(ShadowConfig {
         authored_root: authored_root.expect("missing authored_root was checked"),
         device_plan: device_plan.expect("missing device_plan was checked"),
+        detected_facts_json,
         input_bindings: parse_bindings(&raw_bindings)?,
         explicit_context,
     })
@@ -209,6 +254,69 @@ fn apply_explicit_device_context(
     if !explicit_context.device_tags.is_empty() {
         device_context.device_tags = explicit_context.device_tags.clone();
     }
+}
+
+fn apply_explicit_device_context_to_result(
+    result: &mut PlanningResult,
+    explicit_context: &ExplicitDeviceContext,
+) {
+    if let Some(execution_plan) = &mut result.execution_plan {
+        apply_explicit_device_context(&mut execution_plan.device_context, explicit_context);
+    }
+}
+
+#[derive(Debug, PartialEq)]
+enum DetectedFactsFixtureError {
+    ReadFailed { file_name: String },
+    Invalid { file_name: String, message: String },
+}
+
+impl DetectedFactsFixtureError {
+    fn into_process_output(self) -> ProcessOutput {
+        match self {
+            DetectedFactsFixtureError::ReadFailed { file_name } => ProcessOutput {
+                exit_code: 1,
+                stdout: String::new(),
+                stderr: format!(
+                    "Error: detected_facts_fixture_read_failed: could not read detected facts fixture '{file_name}'.\n"
+                ),
+            },
+            DetectedFactsFixtureError::Invalid { file_name, message } => ProcessOutput {
+                exit_code: 1,
+                stdout: String::new(),
+                stderr: format!(
+                    "Error: detected_facts_fixture_invalid: fixture '{file_name}' is not valid DetectedDeviceFacts JSON: {message}.\n"
+                ),
+            },
+        }
+    }
+}
+
+/// Load already-detected facts from a local fixture file.
+///
+/// This is a dev/test harness input, not a probe adapter. Error text reports
+/// stable fixture names and classifications without depending on host-specific
+/// absolute paths or OS error strings.
+fn load_detected_facts_fixture(
+    path: &Path,
+) -> Result<DetectedDeviceFacts, DetectedFactsFixtureError> {
+    let file_name = stable_file_name(path);
+    let text = fs::read_to_string(path).map_err(|_| DetectedFactsFixtureError::ReadFailed {
+        file_name: file_name.clone(),
+    })?;
+    serde_json::from_str::<DetectedDeviceFacts>(&text).map_err(|error| {
+        DetectedFactsFixtureError::Invalid {
+            file_name,
+            message: error.to_string(),
+        }
+    })
+}
+
+fn stable_file_name(path: &Path) -> String {
+    path.file_name()
+        .and_then(|name| name.to_str())
+        .unwrap_or("<fixture>")
+        .to_string()
 }
 
 fn parse_bindings(raw_bindings: &[String]) -> Result<OrderedMap<Value>, ShadowArgError> {

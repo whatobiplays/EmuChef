@@ -4,13 +4,19 @@
 //! facts into planner context later. It intentionally has no live adapter and no
 //! route wiring; current callers can use only explicit/profile-derived context.
 
+use serde::Deserialize;
+
 use crate::planner::DeviceContext;
 
 /// Device facts a future probe adapter may detect from a selected device.
 ///
 /// Fields are optional so callers can layer detected values over a
-/// profile-derived `DeviceContext` without inventing placeholder facts.
-#[derive(Clone, Debug, Default, PartialEq, Eq)]
+/// profile-derived `DeviceContext` without inventing placeholder facts. The
+/// struct also deserializes strict local JSON fixtures for the dev-only shadow
+/// harness; unknown fixture fields are rejected so misspelled facts do not
+/// silently weaken migration evidence.
+#[derive(Clone, Debug, Default, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
 pub(crate) struct DetectedDeviceFacts {
     pub serial: Option<String>,
     pub manufacturer: Option<String>,
@@ -18,6 +24,7 @@ pub(crate) struct DetectedDeviceFacts {
     pub model: Option<String>,
     pub android_version: Option<i64>,
     pub android_api_level: Option<i64>,
+    #[serde(default)]
     pub device_tags: Vec<String>,
 }
 

@@ -72,7 +72,15 @@ the current Python warning path does not evaluate them. P8Q composes the
 fake/test-backed detected-facts path into crate-private `PlanningResult`
 construction and appends detected-device profile mismatch warnings for that
 test path only. P8Q does not implement live ADB/device probing, route wiring,
-normal runtime warning emission, or default planner cutover behavior.
+normal runtime warning emission, or default planner cutover behavior. P8R adds
+an explicit local detected-facts fixture harness to the dev-only Rust shadow
+binary with `--detected-facts-json <path>`. The fixture path reads strict local
+JSON matching `DetectedDeviceFacts`, runs the P8Q planning-result composition
+path, and emits the usual shadow `PlanningResult` JSON. P8R does not implement
+live ADB/device probing, expose detected-facts fixture input through Python CLI
+routes, wire route-level detection into `rust-shadow` or `rust-experimental`,
+or change executor/apply, Tauri/protocol, normal runtime checks, readiness gate
+blockers, or default planner behavior.
 
 ## Current Authored Model
 
@@ -267,9 +275,15 @@ in the supplied order; when no explicit tags are supplied, profile-derived tags
 remain unchanged. Shadow `--bind` values are parsed as strings; repeated binds
 for the same `<recipe_ref>/<input_id>` are grouped into a string array to match
 the current Python CLI parser. The shadow binary does not execute plans, probe
-devices, invoke ADB, create detected-device facts, emit detected-device profile
-mismatch warnings, access the network, materialize artifacts, expose Tauri or
-sidecar protocol commands, or replace the Python planner CLI.
+devices, invoke ADB, access the network, materialize artifacts, expose Tauri or
+sidecar protocol commands, or replace the Python planner CLI. The shadow binary
+also accepts a dev/test-only `--detected-facts-json <path>` fixture path. That
+mode reads a local strict JSON `DetectedDeviceFacts` fixture, applies detected
+facts over the profile-derived planner context, evaluates mismatch warnings
+from those fixture facts, then applies any explicit `--manufacturer`, `--model`,
+`--android-version`, or repeated `--device-tag` overrides to the emitted
+`execution_plan.device_context`. Python CLI routes do not forward this fixture
+option.
 
 The Python CLI exposes a developer-only bridge to an already-built Rust shadow
 planner binary:
@@ -352,9 +366,12 @@ does not wire probing or mismatch warnings into `rust-shadow`,
 `rust-experimental`, the Python CLI, Tauri/protocol, executor/apply, the
 readiness gate, or normal runtime checks. Real-device probing and route-level
 detected-device profile mismatch warning parity remain blocked until live
-implementation and route evidence exist. Executor/apply, Tauri/protocol, Cargo
-fallback behavior, fixture/golden data, normal runtime checks, and Python
-planner deletion remain separate future work.
+implementation and route evidence exist. P8R adds only a local detected-facts
+fixture harness to `emuchef-plan-shadow`; explicit context remains separate and
+overrides the emitted fixture-derived device context when both inputs are
+supplied. Executor/apply, Tauri/protocol, Cargo fallback behavior,
+fixture/golden data, normal runtime checks, and Python planner deletion remain
+separate future work.
 
 P8K extends the dev-only planner matrix tooling with optional explicit
 `device_context` data per scenario. Valid matrix context fields are

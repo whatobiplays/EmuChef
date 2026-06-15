@@ -41,9 +41,12 @@ only the crate-local Rust fake/test probe foundation. P8O adds fake/test-backed
 detected-facts planner-input construction. Intended future context precedence:
 synthetic/profile context -> detected facts -> explicit CLI overrides. P8P adds
 pure/test-backed mismatch-warning helper logic for supplied detected facts and
-authored profile criteria. P8P does not change Python default planning behavior,
-live probing, CLI route wiring, executor/apply, Tauri/protocol, readiness gate
-behavior, or normal planner warning emission.
+authored profile criteria. P8Q composes that helper into fake/test-backed
+planning-result construction. P8R exposes the P8Q composition path only through
+a local `emuchef-plan-shadow --detected-facts-json <path>` fixture harness.
+These slices do not change Python default planning behavior, live probing,
+Python CLI fixture forwarding, route-level detection, executor/apply,
+Tauri/protocol, readiness gate behavior, or normal planner warning emission.
 
 Rust planner, executor, and CLI behavior is fixture-scoped, test-scoped,
 internal, or editor-backend-scoped unless explicitly promoted by later work.
@@ -147,8 +150,11 @@ CLI/reference planner owner, Rust routes remain explicit and non-default, and
 real-device probing plus mismatch-warning parity remain blocked until
 implemented and evidenced. P8N adds only the Rust crate-local probe abstraction,
 fake probe, and context layering helper. P8P adds only pure/test-backed
-mismatch-warning helper logic. Neither slice wires probing or mismatch warnings
-into any CLI, Tauri/protocol, executor/apply, or readiness-gate path.
+mismatch-warning helper logic. P8Q adds fake/test-backed result composition, and
+P8R makes it executable only through a local Rust shadow-binary fixture file.
+These slices do not wire live probing or production mismatch warnings into
+Python CLI routes, Tauri/protocol, executor/apply, normal runtime checks, or the
+readiness gate.
 Existing Rust planner, executor, and CLI slices should remain scoped as parity
 scaffolding until a later phase explicitly promotes or retires the corresponding
 Python surface.

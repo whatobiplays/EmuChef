@@ -443,6 +443,42 @@ class CliTests(unittest.TestCase):
         self.assertNotIn("adb", run.call_args.args[0])
         self.assertNotIn("--sidecar", run.call_args.args[0])
 
+    def test_plan_rejects_detected_facts_fixture_option_before_rust_forwarding(self) -> None:
+        with TemporaryDirectory() as tmp:
+            shadow_bin = self._shadow_bin(tmp)
+            fixture = Path(tmp) / "facts.json"
+            fixture.write_text("{}", encoding="utf-8")
+            stdout = StringIO()
+            stderr = StringIO()
+            with (
+                patch("emuchef.cli.resolve_adb_executable") as resolve_adb,
+                patch("subprocess.run") as run,
+                contextlib.redirect_stdout(stdout),
+                contextlib.redirect_stderr(stderr),
+                self.assertRaises(SystemExit) as raised,
+            ):
+                main(
+                    [
+                        "plan",
+                        "--planner-backend",
+                        "rust-shadow",
+                        "--rust-planner-bin",
+                        shadow_bin,
+                        "--authored-root",
+                        "authored",
+                        "--device-plan",
+                        "ayaneo.pocket_s_mini.base",
+                        "--detected-facts-json",
+                        str(fixture),
+                    ]
+                )
+
+        self.assertEqual(raised.exception.code, 2)
+        self.assertEqual(stdout.getvalue(), "")
+        self.assertIn("unrecognized arguments: --detected-facts-json", stderr.getvalue())
+        resolve_adb.assert_not_called()
+        run.assert_not_called()
+
     def test_plan_rust_shadow_passes_through_json_and_exit_code_for_planner_error(self) -> None:
         with TemporaryDirectory() as tmp:
             shadow_bin = self._shadow_bin(tmp)

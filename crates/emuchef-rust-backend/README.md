@@ -326,6 +326,26 @@ order. When no explicit tags are supplied, profile-derived tags remain
 unchanged. The shadow command still does not probe devices, invoke ADB, create
 detected-device facts, or emit detected-device profile mismatch warnings.
 
+P8R adds a local detected-facts fixture harness to this dev-only command:
+
+```bash
+cargo run --manifest-path crates/emuchef-rust-backend/Cargo.toml --bin emuchef-plan-shadow -- \
+  --authored-root authored \
+  --device-plan ayaneo.pocket_s_mini.base \
+  --detected-facts-json /path/to/detected-facts.json
+```
+
+The fixture file is strict JSON matching `DetectedDeviceFacts`. Scalar fields
+are optional, omitted `device_tags` defaults to an empty list, and unknown fields
+are rejected. Fixture mode runs the fake/test-backed detected-facts
+planning-result composition path, preserves normal shadow `PlanningResult` JSON
+output, and does not probe devices or invoke ADB. Effective context precedence is
+synthetic/profile context -> detected fixture facts -> explicit CLI context
+overrides. When explicit context flags and a fixture are both supplied, the
+emitted `execution_plan.device_context` reflects the explicit overrides, while
+`device_profile_mismatch` warnings still evaluate the fixture facts. Python CLI
+routes do not expose or forward `--detected-facts-json`.
+
 P8A adds an explicit developer-only bridge through the Python CLI for an
 already-built shadow binary:
 
@@ -508,12 +528,16 @@ criteria for manufacturer, brand, model regex, and Android minimum version;
 authored Android maximum values are parsed but not evaluated because the current
 Python warning path does not evaluate them. P8Q composes those fake/test-backed
 pieces into crate-private `PlanningResult` construction with detected context
-and optional `device_profile_mismatch` warnings. The intended future precedence
-is synthetic/profile context -> detected facts -> explicit CLI overrides. P8Q
-does not implement live ADB probing, `rust-shadow` or `rust-experimental` route
-wiring, Python CLI behavior, executor/apply, Tauri/protocol, Cargo fallback,
-fixture/golden, network, artifact, runtime-check behavior, readiness gate
-reclassification, or Python planner deletion readiness. The expected
+and optional `device_profile_mismatch` warnings. P8R exposes that composition
+path only through a local `emuchef-plan-shadow --detected-facts-json <path>`
+fixture harness. The intended future precedence is synthetic/profile context ->
+detected facts -> explicit CLI overrides. P8R applies explicit context overrides
+to the emitted fixture-derived device context, while mismatch warnings remain
+based on the detected fixture facts. P8R does not implement live ADB probing,
+`rust-shadow` or `rust-experimental` route-level detection, Python CLI fixture
+forwarding, executor/apply, Tauri/protocol, Cargo fallback, fixture/golden,
+network, artifact, runtime-check behavior, readiness gate reclassification, or
+Python planner deletion readiness. The expected
 implementation path remains incremental: live real-device probing, explicit
 non-default route support, optional live ADB smoke, readiness reclassification,
 and a later default planner backend cutover.
@@ -564,7 +588,8 @@ contract or a separate accepted breaking-change decision, plus Rust-owned
 real-device probing and detected-device profile mismatch warning parity as
 accepted in ADR 0003. P8N's fake probe module and P8P's pure mismatch-warning
 helper, plus P8Q's fake/test-backed result-composition helper, are not part of
-this route and do not change shadow command behavior.
+Python CLI routes. P8R invokes that helper only from a local shadow-binary
+fixture path and does not change production route behavior.
 `default-run =
 "emuchef-rust-backend"` is set so existing `cargo run --manifest-path
 crates/emuchef-rust-backend/Cargo.toml -- --sidecar` and one-shot development
