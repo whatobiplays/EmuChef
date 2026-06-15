@@ -54,6 +54,14 @@ planning behavior, live probing, default Python backend fixture forwarding,
 `rust-shadow` fixture forwarding, route-level detection, executor/apply,
 Tauri/protocol, readiness gate behavior, normal runtime checks, or normal
 planner warning emission.
+P8U adds optional/manual smoke evidence for that Python
+`rust-experimental` fixture-forwarding route through
+`tools/smoke_rust_experimental_detected_facts_fixture.py`. The smoke expects
+Python-compatible summary output, treats raw Rust JSON as a route-smoke failure,
+and validates the mismatching output-file case with stdlib text checks only. It
+does not change default `emuchef plan`, `rust-shadow`, direct Rust fixture smoke,
+executor/apply, Tauri/protocol, live probing, normal runtime checks, readiness
+gate blocker IDs, or Python planner deletion behavior.
 
 Rust planner, executor, and CLI behavior is fixture-scoped, test-scoped,
 internal, or editor-backend-scoped unless explicitly promoted by later work.
@@ -130,6 +138,12 @@ a smoke failure for successful scenarios. P8T adds
 unchanged as `--detected-facts-json <path>` to the Rust shadow binary. The raw
 Rust flag remains unrecognized by the Python CLI, and the Python backend and
 `rust-shadow` reject the Python wrapper flag before planner or subprocess work.
+P8U adds optional/manual smoke evidence for that Python fixture-forwarding
+route. It invokes `python3 -m emuchef plan --planner-backend rust-experimental`
+with temporary `--rust-detected-facts-json` fixtures, requires concise
+Python-compatible summary stdout, and does not add live probing, normal checks,
+readiness-gate execution, default-route behavior, or `rust-shadow` fixture
+forwarding.
 P8I adds a static readiness report for
 future default-cutover PRs; it lists required manual evidence but does not run
 comparison/smoke tooling, Cargo, npm, ADB, executor/apply, Tauri/protocol,

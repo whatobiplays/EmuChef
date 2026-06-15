@@ -94,6 +94,20 @@ for that Rust shadow-binary fixture harness through
 deterministic JSON, and is not wired into Python CLI routes, normal runtime
 checks, the static readiness gate, live probing, executor/apply, Tauri/protocol,
 or Python planner deletion behavior.
+P8U adds optional/manual smoke evidence for the Python `rust-experimental`
+fixture-forwarding route through
+`tools/smoke_rust_experimental_detected_facts_fixture.py`. The smoke writes
+temporary detected-facts fixtures, invokes `python3 -m emuchef plan
+--planner-backend rust-experimental` with `--rust-detected-facts-json <path>`,
+requires Python-compatible summary stdout, and treats raw Rust JSON stdout as a
+route-smoke failure. The mismatching output-file case is checked with stdlib
+text validation for `device_profile_mismatch`; deterministic reports omit temp
+paths, output paths, fixture paths, full stdout/stderr, and environment data.
+P8U does not implement live ADB/device probing, expose fixture forwarding
+through default Python planning or `rust-shadow`, alter direct Rust fixture
+smoke, change readiness gate blocker IDs, wire the smoke into normal runtime
+checks, modify executor/apply or Tauri/protocol behavior, or make Python planner
+deletion ready.
 
 ## Current Authored Model
 

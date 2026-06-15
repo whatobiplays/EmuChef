@@ -367,6 +367,28 @@ emits deterministic JSON. It does not expose fixture mode through Python CLI
 routes, invoke ADB, run executor/apply behavior, touch Tauri/protocol behavior,
 or participate in normal runtime checks or the static readiness gate.
 
+P8U adds optional/manual smoke evidence for the Python `rust-experimental`
+fixture-forwarding route:
+
+```bash
+python3 tools/smoke_rust_experimental_detected_facts_fixture.py \
+  --authored-root authored \
+  --rust-planner-bin <path-to-emuchef-plan-shadow>
+```
+
+The smoke creates temporary matching and mismatching fixture files, invokes
+`python3 -m emuchef plan --planner-backend rust-experimental` with
+`--rust-detected-facts-json <path>`, and emits deterministic JSON. Successful
+route cases must emit concise Python-compatible summary stdout; raw Rust JSON
+stdout is classified as `stdout_json` and fails the route smoke. The
+mismatching output-file case checks only that the temporary output file exists
+and contains `device_profile_mismatch`; it does not parse YAML or include temp
+paths, output paths, file contents, or full process output in the report. P8U is
+separate from the direct P8S Rust fixture smoke and does not expose fixture mode
+through default Python planning or `rust-shadow`, invoke ADB, run
+executor/apply, touch Tauri/protocol behavior, participate in normal runtime
+checks, change readiness gate blockers, or make Rust the default planner.
+
 P8A adds an explicit developer-only bridge through the Python CLI for an
 already-built shadow binary:
 

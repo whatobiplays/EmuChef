@@ -52,6 +52,13 @@ supplied `emuchef-plan-shadow` binary directly, creates temporary local fixture
 files, and emits a deterministic report separate from the P8T Python
 `rust-experimental` forwarding path. The smoke is not wired into normal checks
 or the static readiness gate.
+P8U adds `tools/smoke_rust_experimental_detected_facts_fixture.py` as
+optional/manual smoke evidence for the P8T Python `rust-experimental`
+fixture-forwarding route. The smoke creates temporary local fixture files,
+invokes `python3 -m emuchef plan --planner-backend rust-experimental` with
+`--rust-detected-facts-json <path>`, and requires Python-compatible summary
+stdout rather than raw Rust JSON. It is separate from the direct P8S Rust
+fixture smoke and is not wired into normal checks or the static readiness gate.
 
 P8I adds `tools/check_rust_planner_cutover_readiness.py` as a static,
 developer-only readiness gate for any future PR that proposes making Rust the
@@ -405,6 +412,17 @@ resolved or explicitly accepted for a narrower experimental route:
   comparison harness, the matrix smoke runner, ADB, Cargo, executor/apply,
   Tauri/protocol, network, fixture/golden regeneration, normal runtime checks,
   or the static readiness gate.
+- P8U rust-experimental fixture-route smoke evidence:
+  `tools/smoke_rust_experimental_detected_facts_fixture.py` invokes the Python
+  CLI as `python3 -m emuchef plan --planner-backend rust-experimental` with
+  temporary local fixtures passed through `--rust-detected-facts-json <path>`.
+  It is stdlib-only, deterministic, optional/manual evidence for the Python
+  forwarding route added in P8T. It expects Python-compatible summary stdout,
+  treats raw Rust JSON as a route-smoke failure, validates the mismatching
+  output-file case with text checks only, and records no temp paths or volatile
+  stdout/stderr. It does not add live ADB probing, expose fixture forwarding
+  through default Python planning or `rust-shadow`, call the direct P8S smoke,
+  change readiness-gate blocker IDs, or run as a normal check.
 - Pre-cutover candidate: planner routing work may use the matrix as an
   optional/manual gate to gather evidence before exposing any user-facing Rust
   planner path.

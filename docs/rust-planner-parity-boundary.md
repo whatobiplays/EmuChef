@@ -74,6 +74,14 @@ Rust planner-adjacent coverage is internal and fixture-scoped:
   evidence only and does not route through Python `emuchef plan`, the matrix
   smoke runner, the Python-vs-Rust comparison harness, normal runtime checks, or
   the readiness gate.
+- `tools/smoke_rust_experimental_detected_facts_fixture.py`: dev-only P8U smoke
+  for the P8T Python `rust-experimental` fixture-forwarding route. The smoke
+  creates temporary fixture JSON files, invokes `python3 -m emuchef plan
+  --planner-backend rust-experimental` with `--rust-detected-facts-json`, and
+  reports deterministic matching and mismatching route evidence. It expects
+  Python-compatible summary stdout and treats raw Rust JSON as a route-smoke
+  failure. It is optional/manual evidence only and does not call the direct P8S
+  smoke, normal runtime checks, or the readiness gate.
 - `tools/compare_rust_python_plan.py`: dev-only comparison harness for Python
   planner API output versus Rust shadow planner output. The harness emits a
   deterministic JSON classification report or matrix report and is not part of
@@ -572,6 +580,25 @@ temporary detected-facts fixtures, and reports deterministic JSON without temp
 paths, host-specific binary paths, or full process output. It is not a normal
 check, not readiness-gate execution, not Python CLI route behavior, and not live
 device probing.
+
+P8U adds optional/manual smoke evidence for the P8T Python
+`rust-experimental` fixture-forwarding path:
+
+```bash
+python3 tools/smoke_rust_experimental_detected_facts_fixture.py \
+  --authored-root authored \
+  --rust-planner-bin <path-to-emuchef-plan-shadow>
+```
+
+The P8U smoke writes temporary detected-facts fixtures, invokes the Python CLI
+route with `--rust-detected-facts-json <path>`, and requires concise
+Python-compatible summary stdout. Raw Rust JSON stdout is classified as
+`stdout_json` and fails this route smoke. The mismatching case may request a
+temporary `--output` YAML file and validates it with text-only stdlib checks for
+`device_profile_mismatch`; the report omits temp paths, output paths, file
+contents, and volatile process output. This is not default Python planning,
+`rust-shadow` fixture forwarding, live device probing, readiness-gate execution,
+or a replacement for the direct P8S Rust fixture smoke.
 
 P8A also exposes a thin Python CLI bridge to an already-built shadow binary:
 
