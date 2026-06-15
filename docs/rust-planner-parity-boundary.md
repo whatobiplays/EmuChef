@@ -65,6 +65,14 @@ Rust planner-adjacent coverage is internal and fixture-scoped:
   the Python CLI bridge does not forward that option. P8A exposes the shadow
   binary through an explicit developer-only Python CLI bridge, but it is not the
   default planner CLI or a cutover path.
+- `tools/smoke_rust_detected_facts_fixture.py`: dev-only P8S smoke for the P8R
+  Rust shadow-binary detected-facts fixture harness. The smoke creates temporary
+  fixture JSON files, invokes the supplied `emuchef-plan-shadow` binary directly
+  with `--detected-facts-json`, and reports deterministic matching,
+  mismatching, and explicit-context override case evidence. It is optional/manual
+  evidence only and does not route through Python `emuchef plan`, the matrix
+  smoke runner, the Python-vs-Rust comparison harness, normal runtime checks, or
+  the readiness gate.
 - `tools/compare_rust_python_plan.py`: dev-only comparison harness for Python
   planner API output versus Rust shadow planner output. The harness emits a
   deterministic JSON classification report or matrix report and is not part of
@@ -547,8 +555,22 @@ overrides, while `device_profile_mismatch` warning evaluation remains based on
 the detected fixture facts. Missing or invalid fixtures are process errors:
 stderr contains a stable `detected_facts_fixture_*` classification and stdout is
 empty. This fixture mode does not probe devices, invoke ADB, add Python CLI
-forwarding, update the smoke runner, or promote route-level mismatch-warning
-parity.
+forwarding, enter the Python CLI matrix smoke runner, or promote route-level
+mismatch-warning parity.
+
+P8S adds optional/manual smoke evidence for the P8R fixture path:
+
+```bash
+python3 tools/smoke_rust_detected_facts_fixture.py \
+  --authored-root authored \
+  --rust-planner-bin <path-to-emuchef-plan-shadow>
+```
+
+The P8S smoke invokes the supplied shadow binary directly, writes only
+temporary detected-facts fixtures, and reports deterministic JSON without temp
+paths, host-specific binary paths, or full process output. It is not a normal
+check, not readiness-gate execution, not Python CLI route behavior, and not live
+device probing.
 
 P8A also exposes a thin Python CLI bridge to an already-built shadow binary:
 

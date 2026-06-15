@@ -42,6 +42,11 @@ JSON format as normal shadow planning. P8R does not add live ADB probing,
 Python CLI fixture forwarding, `rust-shadow` or `rust-experimental` route-level
 detection, executor/apply behavior, Tauri/protocol behavior, normal runtime
 checks, readiness gate reclassification, or default planner cutover.
+P8S adds `tools/smoke_rust_detected_facts_fixture.py` as optional/manual smoke
+evidence for that Rust shadow-binary fixture harness. The smoke invokes a
+supplied `emuchef-plan-shadow` binary directly, creates temporary local fixture
+files, and emits a deterministic report without exposing fixture mode through
+Python CLI routes or wiring it into normal checks or the static readiness gate.
 
 P8I adds `tools/check_rust_planner_cutover_readiness.py` as a static,
 developer-only readiness gate for any future PR that proposes making Rust the
@@ -377,10 +382,19 @@ resolved or explicitly accepted for a narrower experimental route:
   explicit context separate from detected facts, and applies explicit context
   values to the emitted `execution_plan.device_context` after fixture facts.
   The mismatch warning still evaluates the detected fixture facts. This mode is
-  not exposed through Python CLI routes, not included in the smoke runner, not
-  wired into `rust-shadow` or `rust-experimental` route-level detection, and not
-  live ADB probing. Real-device probing and production route-level
+  not exposed through Python CLI routes, not included in the Python CLI matrix
+  smoke runner, not wired into `rust-shadow` or `rust-experimental` route-level
+  detection, and not live ADB probing. Real-device probing and production route-level
   mismatch-warning parity remain blocked.
+- P8S detected-facts fixture smoke evidence:
+  `tools/smoke_rust_detected_facts_fixture.py` directly invokes a supplied
+  `emuchef-plan-shadow` binary with temporary `--detected-facts-json` fixture
+  files for matching, mismatching, and explicit-context override cases. It is
+  stdlib-only, deterministic, optional/manual evidence for the P8R fixture
+  harness. It does not call the Python planner, the Python CLI Rust routes, the
+  comparison harness, the matrix smoke runner, ADB, Cargo, executor/apply,
+  Tauri/protocol, network, fixture/golden regeneration, normal runtime checks,
+  or the static readiness gate.
 - Pre-cutover candidate: planner routing work may use the matrix as an
   optional/manual gate to gather evidence before exposing any user-facing Rust
   planner path.

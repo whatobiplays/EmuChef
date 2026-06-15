@@ -80,7 +80,13 @@ path, and emits the usual shadow `PlanningResult` JSON. P8R does not implement
 live ADB/device probing, expose detected-facts fixture input through Python CLI
 routes, wire route-level detection into `rust-shadow` or `rust-experimental`,
 or change executor/apply, Tauri/protocol, normal runtime checks, readiness gate
-blockers, or default planner behavior.
+blockers, or default planner behavior. P8S adds optional/manual smoke evidence
+for that Rust shadow-binary fixture harness through
+`tools/smoke_rust_detected_facts_fixture.py`. The smoke invokes a supplied
+`emuchef-plan-shadow` binary directly with temporary fixture files, emits
+deterministic JSON, and is not wired into Python CLI routes, normal runtime
+checks, the static readiness gate, live probing, executor/apply, Tauri/protocol,
+or Python planner deletion behavior.
 
 ## Current Authored Model
 
@@ -283,7 +289,10 @@ facts over the profile-derived planner context, evaluates mismatch warnings
 from those fixture facts, then applies any explicit `--manufacturer`, `--model`,
 `--android-version`, or repeated `--device-tag` overrides to the emitted
 `execution_plan.device_context`. Python CLI routes do not forward this fixture
-option.
+option. `tools/smoke_rust_detected_facts_fixture.py` is the optional/manual
+smoke for this direct Rust shadow-binary fixture path. It creates temporary
+matching, mismatching, and explicit-context override fixture cases and reports
+only stable classifications, not temp paths or full process output.
 
 The Python CLI exposes a developer-only bridge to an already-built Rust shadow
 planner binary:

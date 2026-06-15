@@ -346,6 +346,21 @@ emitted `execution_plan.device_context` reflects the explicit overrides, while
 `device_profile_mismatch` warnings still evaluate the fixture facts. Python CLI
 routes do not expose or forward `--detected-facts-json`.
 
+P8S adds optional/manual smoke evidence for the direct shadow-binary fixture
+harness:
+
+```bash
+python3 tools/smoke_rust_detected_facts_fixture.py \
+  --authored-root authored \
+  --rust-planner-bin <path-to-emuchef-plan-shadow>
+```
+
+The smoke creates temporary matching, mismatching, and explicit-context override
+fixture files, invokes the supplied `emuchef-plan-shadow` binary directly, and
+emits deterministic JSON. It does not expose fixture mode through Python CLI
+routes, invoke ADB, run executor/apply behavior, touch Tauri/protocol behavior,
+or participate in normal runtime checks or the static readiness gate.
+
 P8A adds an explicit developer-only bridge through the Python CLI for an
 already-built shadow binary:
 

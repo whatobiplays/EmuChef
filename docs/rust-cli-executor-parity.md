@@ -44,9 +44,12 @@ pure/test-backed mismatch-warning helper logic for supplied detected facts and
 authored profile criteria. P8Q composes that helper into fake/test-backed
 planning-result construction. P8R exposes the P8Q composition path only through
 a local `emuchef-plan-shadow --detected-facts-json <path>` fixture harness.
-These slices do not change Python default planning behavior, live probing,
-Python CLI fixture forwarding, route-level detection, executor/apply,
-Tauri/protocol, readiness gate behavior, or normal planner warning emission.
+P8S adds optional/manual smoke evidence for that direct Rust shadow-binary
+fixture harness through `tools/smoke_rust_detected_facts_fixture.py`. These
+slices do not change Python default planning behavior, live probing, Python CLI
+fixture forwarding, route-level detection, executor/apply, Tauri/protocol,
+readiness gate behavior, normal runtime checks, or normal planner warning
+emission.
 
 Rust planner, executor, and CLI behavior is fixture-scoped, test-scoped,
 internal, or editor-backend-scoped unless explicitly promoted by later work.
