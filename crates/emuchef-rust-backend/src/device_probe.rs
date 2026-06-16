@@ -1,8 +1,11 @@
 //! Rust-side device probing foundation for future planner ownership.
 //!
 //! This module defines the small abstraction needed to compose detected device
-//! facts into planner context later. It intentionally has no live adapter and no
-//! route wiring; current callers can use only explicit/profile-derived context.
+//! facts into planner context later. It includes a crate-local ADB getprop
+//! adapter foundation, but no route wiring; current planner routes still use
+//! only explicit, profile-derived, or fixture-supplied context.
+
+use std::process::Command;
 
 use serde::Deserialize;
 
@@ -37,6 +40,50 @@ pub(crate) enum DeviceProbeError {
     Unavailable { message: String },
     Failed { message: String },
     InvalidOutput { message: String },
+}
+
+/// Output captured from a structured host command invocation.
+///
+/// This type intentionally stores only the stable process result shape needed by
+/// the ADB probe adapter. Probe errors must not expose raw stderr or
+/// host-specific launch errors.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct CommandOutput {
+    pub status_code: Option<i32>,
+    pub stdout: String,
+    pub stderr: String,
+}
+
+/// Narrow runner seam for command execution used by the live ADB probe adapter.
+///
+/// Tests inject fake runners so normal verification never requires a connected
+/// device or an installed `adb` binary.
+pub(crate) trait CommandRunner {
+    fn run(&self, argv: &[String]) -> Result<CommandOutput, DeviceProbeError>;
+}
+
+/// Production command runner for the live ADB probe adapter.
+///
+/// This is the only device-probe production path that starts a host process. It
+/// executes the modeled argv directly and never routes through a platform shell.
+#[derive(Clone, Debug, Default)]
+pub(crate) struct ProcessCommandRunner;
+
+impl CommandRunner for ProcessCommandRunner {
+    fn run(&self, argv: &[String]) -> Result<CommandOutput, DeviceProbeError> {
+        let Some((executable, args)) = argv.split_first() else {
+            return Err(adb_probe_start_error());
+        };
+        let output = Command::new(executable)
+            .args(args)
+            .output()
+            .map_err(|_| adb_probe_start_error())?;
+        Ok(CommandOutput {
+            status_code: output.status.code(),
+            stdout: String::from_utf8_lossy(&output.stdout).into_owned(),
+            stderr: String::from_utf8_lossy(&output.stderr).into_owned(),
+        })
+    }
 }
 
 /// Configuration for modeling a future ADB-backed getprop probe command.
@@ -135,9 +182,46 @@ fn parse_android_api_level(value: &str) -> Option<i64> {
     value.trim().parse::<i64>().ok()
 }
 
+fn adb_probe_start_error() -> DeviceProbeError {
+    DeviceProbeError::Unavailable {
+        message: "adb probe command could not be started".to_string(),
+    }
+}
+
+fn adb_getprop_failed_error() -> DeviceProbeError {
+    DeviceProbeError::Failed {
+        message: "adb getprop probe command failed".to_string(),
+    }
+}
+
 /// Abstraction over a source of detected device facts.
 pub(crate) trait DeviceProbe {
     fn detect(&self) -> Result<DetectedDeviceFacts, DeviceProbeError>;
+}
+
+/// Live ADB-backed probe adapter for collecting Android getprop facts.
+///
+/// The adapter is intentionally crate-private foundation. It is not wired into
+/// planner routes, Python CLI paths, Tauri/protocol commands, executor/apply
+/// behavior, smoke runners, or readiness-gate execution.
+#[derive(Clone, Debug)]
+pub(crate) struct AdbDeviceProbe<R> {
+    pub config: AdbProbeConfig,
+    pub runner: R,
+}
+
+impl<R: CommandRunner> DeviceProbe for AdbDeviceProbe<R> {
+    fn detect(&self) -> Result<DetectedDeviceFacts, DeviceProbeError> {
+        let command = build_adb_getprop_command(&self.config);
+        let output = self.runner.run(&command)?;
+        if output.status_code != Some(0) {
+            return Err(adb_getprop_failed_error());
+        }
+        Ok(detected_facts_from_getprop_output(
+            &output.stdout,
+            self.config.serial.clone(),
+        ))
+    }
 }
 
 /// Test probe that returns a preconfigured detection result.
@@ -189,6 +273,7 @@ pub(crate) fn apply_detected_device_facts_to_context(
 mod tests {
     use super::*;
     use crate::planner::DeviceContext;
+    use std::cell::RefCell;
 
     fn base_context() -> DeviceContext {
         DeviceContext {
@@ -197,6 +282,45 @@ mod tests {
             android_version: 12,
             android_api_level: Some(32),
             device_tags: vec!["profile_tag".to_string(), "handheld".to_string()],
+        }
+    }
+
+    #[derive(Debug)]
+    struct FakeCommandRunner {
+        calls: RefCell<Vec<Vec<String>>>,
+        result: Result<CommandOutput, DeviceProbeError>,
+    }
+
+    impl FakeCommandRunner {
+        fn completed(status_code: Option<i32>, stdout: &str, stderr: &str) -> Self {
+            Self {
+                calls: RefCell::new(Vec::new()),
+                result: Ok(CommandOutput {
+                    status_code,
+                    stdout: stdout.to_string(),
+                    stderr: stderr.to_string(),
+                }),
+            }
+        }
+
+        fn failed_to_launch() -> Self {
+            Self {
+                calls: RefCell::new(Vec::new()),
+                result: Err(DeviceProbeError::Unavailable {
+                    message: "adb probe command could not be started".to_string(),
+                }),
+            }
+        }
+
+        fn calls(&self) -> Vec<Vec<String>> {
+            self.calls.borrow().clone()
+        }
+    }
+
+    impl CommandRunner for FakeCommandRunner {
+        fn run(&self, argv: &[String]) -> Result<CommandOutput, DeviceProbeError> {
+            self.calls.borrow_mut().push(argv.to_vec());
+            self.result.clone()
         }
     }
 
@@ -224,6 +348,200 @@ mod tests {
         let probe = FakeDeviceProbe::new(Err(error.clone()));
 
         assert_eq!(probe.detect(), Err(error));
+    }
+
+    #[test]
+    fn adb_device_probe_builds_getprop_command_without_serial() {
+        let runner = FakeCommandRunner::completed(Some(0), "", "");
+        let probe = AdbDeviceProbe {
+            config: AdbProbeConfig {
+                adb_path: "adb".to_string(),
+                serial: None,
+            },
+            runner,
+        };
+
+        let _ = probe.detect().expect("probe should parse empty facts");
+
+        assert_eq!(
+            probe.runner.calls(),
+            vec![vec![
+                "adb".to_string(),
+                "shell".to_string(),
+                "getprop".to_string()
+            ]]
+        );
+    }
+
+    #[test]
+    fn adb_device_probe_builds_getprop_command_with_serial() {
+        let runner = FakeCommandRunner::completed(Some(0), "", "");
+        let probe = AdbDeviceProbe {
+            config: AdbProbeConfig {
+                adb_path: "adb".to_string(),
+                serial: Some("SERIAL123".to_string()),
+            },
+            runner,
+        };
+
+        let _ = probe.detect().expect("probe should parse empty facts");
+
+        assert_eq!(
+            probe.runner.calls(),
+            vec![vec![
+                "adb".to_string(),
+                "-s".to_string(),
+                "SERIAL123".to_string(),
+                "shell".to_string(),
+                "getprop".to_string(),
+            ]]
+        );
+    }
+
+    #[test]
+    fn adb_device_probe_successful_stdout_returns_detected_facts() {
+        let runner = FakeCommandRunner::completed(
+            Some(0),
+            "\
+[ro.product.manufacturer]: [AYANEO]
+[ro.product.brand]: [AYANEO]
+[ro.product.model]: [Pocket S Mini]
+[ro.build.version.release]: [13]
+[ro.build.version.sdk]: [33]
+",
+            "",
+        );
+        let probe = AdbDeviceProbe {
+            config: AdbProbeConfig {
+                adb_path: "adb".to_string(),
+                serial: None,
+            },
+            runner,
+        };
+
+        let facts = probe.detect().expect("probe should parse getprop facts");
+
+        assert_eq!(
+            facts,
+            DetectedDeviceFacts {
+                serial: None,
+                manufacturer: Some("AYANEO".to_string()),
+                brand: Some("AYANEO".to_string()),
+                model: Some("Pocket S Mini".to_string()),
+                android_version: Some(13),
+                android_api_level: Some(33),
+                device_tags: Vec::new(),
+            }
+        );
+    }
+
+    #[test]
+    fn adb_device_probe_includes_configured_serial_in_detected_facts() {
+        let runner =
+            FakeCommandRunner::completed(Some(0), "[ro.product.model]: [Pocket S Mini]\n", "");
+        let probe = AdbDeviceProbe {
+            config: AdbProbeConfig {
+                adb_path: "adb".to_string(),
+                serial: Some("SERIAL123".to_string()),
+            },
+            runner,
+        };
+
+        let facts = probe
+            .detect()
+            .expect("probe should include configured serial");
+
+        assert_eq!(facts.serial, Some("SERIAL123".to_string()));
+        assert_eq!(facts.model, Some("Pocket S Mini".to_string()));
+    }
+
+    #[test]
+    fn adb_device_probe_non_zero_status_returns_stable_failed_error_without_stderr() {
+        let runner = FakeCommandRunner::completed(
+            Some(1),
+            "[ro.product.model]: [Pocket S Mini]\n",
+            "device-specific failure details",
+        );
+        let probe = AdbDeviceProbe {
+            config: AdbProbeConfig {
+                adb_path: "/host/specific/adb".to_string(),
+                serial: Some("SERIAL123".to_string()),
+            },
+            runner,
+        };
+
+        let error = probe.detect().expect_err("non-zero status should fail");
+
+        assert_eq!(
+            error,
+            DeviceProbeError::Failed {
+                message: "adb getprop probe command failed".to_string(),
+            }
+        );
+        assert_error_message_excludes(
+            &error,
+            &[
+                "device-specific failure details",
+                "/host/specific/adb",
+                "SERIAL123",
+            ],
+        );
+    }
+
+    #[test]
+    fn adb_device_probe_launch_failure_returns_stable_unavailable_error() {
+        let probe = AdbDeviceProbe {
+            config: AdbProbeConfig {
+                adb_path: "/host/specific/adb".to_string(),
+                serial: Some("SERIAL123".to_string()),
+            },
+            runner: FakeCommandRunner::failed_to_launch(),
+        };
+
+        let error = probe.detect().expect_err("launch failure should fail");
+
+        assert_eq!(
+            error,
+            DeviceProbeError::Unavailable {
+                message: "adb probe command could not be started".to_string(),
+            }
+        );
+        assert_error_message_excludes(&error, &["/host/specific/adb", "SERIAL123"]);
+    }
+
+    #[test]
+    fn adb_device_probe_empty_or_malformed_stdout_returns_absent_facts() {
+        for stdout in ["", "   \n", "not a getprop line\n[missing.end: [ignored]\n"] {
+            let probe = AdbDeviceProbe {
+                config: AdbProbeConfig {
+                    adb_path: "adb".to_string(),
+                    serial: None,
+                },
+                runner: FakeCommandRunner::completed(Some(0), stdout, ""),
+            };
+
+            let facts = probe
+                .detect()
+                .expect("successful empty output is absent facts");
+
+            assert_eq!(facts, DetectedDeviceFacts::default(), "stdout={stdout:?}");
+        }
+    }
+
+    #[test]
+    fn process_command_runner_empty_argv_returns_stable_unavailable_error() {
+        let runner = ProcessCommandRunner;
+
+        let error = runner
+            .run(&[])
+            .expect_err("empty argv should not start a process");
+
+        assert_eq!(
+            error,
+            DeviceProbeError::Unavailable {
+                message: "adb probe command could not be started".to_string(),
+            }
+        );
     }
 
     #[test]
@@ -513,27 +831,58 @@ not a getprop line
     }
 
     #[test]
-    fn fake_probe_path_has_no_live_behavior_dependencies() {
+    fn device_probe_process_command_usage_is_scoped_to_process_command_runner() {
         let production_source = production_source_without_line_comments();
 
-        for forbidden in [
-            "std::process",
-            "Command::new",
-            "std::env",
-            "std::net",
-            "TcpStream",
-            "UdpSocket",
-            "tokio::net",
-            "reqwest",
-            "ureq",
-            "hyper",
-            "adb ",
-            "adb.exe",
-        ] {
+        assert_eq!(
+            production_source.matches("std::process::Command").count(),
+            1,
+            "ProcessCommandRunner should be the only device_probe.rs import of std::process::Command"
+        );
+        assert_eq!(
+            production_source.matches("Command::new(").count(),
+            1,
+            "ProcessCommandRunner should be the only device_probe.rs caller of Command::new"
+        );
+        let runner_impl = production_source
+            .find("impl CommandRunner for ProcessCommandRunner")
+            .expect("ProcessCommandRunner implementation should exist");
+        let command_new = production_source
+            .find("Command::new(")
+            .expect("ProcessCommandRunner should launch direct argv");
+        assert!(
+            command_new > runner_impl,
+            "Command::new should be scoped inside ProcessCommandRunner"
+        );
+
+        for forbidden_shell in ["sh -c", "cmd /C", "cmd.exe", "powershell"] {
             assert!(
-                !production_source.contains(forbidden),
-                "device probe foundation must not contain live behavior marker {forbidden:?}"
+                !production_source.contains(forbidden_shell),
+                "device probe process runner must execute modeled argv directly, not through {forbidden_shell:?}"
             );
+        }
+    }
+
+    #[test]
+    fn planner_route_sources_do_not_invoke_live_adb_probe() {
+        for (name, source) in [
+            ("plan_shadow.rs", include_str!("plan_shadow.rs")),
+            (
+                "planner_device_plan.rs",
+                include_str!("planner_device_plan.rs"),
+            ),
+        ] {
+            let code = source_without_line_comments(source);
+            for forbidden in [
+                "AdbDeviceProbe",
+                "ProcessCommandRunner",
+                "build_adb_getprop_command",
+            ] {
+                assert!(
+                    !code.contains(forbidden),
+                    "{name} must not invoke live ADB probing marker {forbidden:?}"
+                );
+            }
         }
     }
 
@@ -566,10 +915,16 @@ not a getprop line
     }
 
     fn production_source_without_line_comments() -> String {
-        include_str!("device_probe.rs")
-            .split("#[cfg(test)]")
-            .next()
-            .expect("source should include production section")
+        source_without_line_comments(
+            include_str!("device_probe.rs")
+                .split("#[cfg(test)]")
+                .next()
+                .expect("source should include production section"),
+        )
+    }
+
+    fn source_without_line_comments(source: &str) -> String {
+        source
             .lines()
             .filter(|line| {
                 let trimmed = line.trim_start();
@@ -579,5 +934,19 @@ not a getprop line
             })
             .collect::<Vec<_>>()
             .join("\n")
+    }
+
+    fn assert_error_message_excludes(error: &DeviceProbeError, needles: &[&str]) {
+        let message = match error {
+            DeviceProbeError::Unavailable { message }
+            | DeviceProbeError::Failed { message }
+            | DeviceProbeError::InvalidOutput { message } => message,
+        };
+        for needle in needles {
+            assert!(
+                !message.contains(needle),
+                "probe error message {message:?} should not contain host-specific detail {needle:?}"
+            );
+        }
     }
 }

@@ -119,7 +119,17 @@ variables, access the filesystem, access the network, probe real devices, or wir
 detected facts into `rust-shadow`, `rust-experimental`, the Python CLI,
 Tauri/protocol, executor/apply, smoke runners, normal runtime checks, or the
 static readiness gate. Python remains the current default/reference planner
-owner. Fixture-based P8R/P8S/P8T/P8U evidence remains separate, and
+owner.
+P8W adds a crate-local live ADB probe adapter foundation on top of that command
+model and parser. `AdbDeviceProbe` executes the modeled argv only through an
+injectable command runner, `ProcessCommandRunner` uses direct argv process
+execution without a platform shell, and normal tests use fake runners rather
+than ADB. Stable probe errors do not include raw stderr, OS errors, paths,
+durations, process ids, serial values, or other host-specific details. P8W does
+not wire live probing into `rust-shadow`, `rust-experimental`, the Python CLI,
+Tauri/protocol, executor/apply, smoke runners, normal runtime checks, or the
+static readiness gate. Python remains the current default/reference planner
+owner after P8W. Fixture-based P8R/P8S/P8T/P8U evidence remains separate, and
 `real_device_probing_not_cut_over` plus
 `detected_device_profile_mismatch_warning_not_cut_over` remain default-cutover
 blockers until live probing and production route-level mismatch-warning evidence

@@ -136,7 +136,12 @@ Rust planner-adjacent coverage is internal and fixture-scoped:
   module with pure command modeling for a future `adb [-s SERIAL] shell getprop`
   probe and supplied-text `getprop` parsing into `DetectedDeviceFacts`; it does
   not execute ADB, start subprocesses, read environment variables, access the
-  filesystem, access the network, or wire probing into any route.
+  filesystem, access the network, or wire probing into any route. P8W adds a
+  crate-local live ADB probe adapter foundation in the same module. It executes
+  the modeled argv through an injectable runner and keeps production process
+  execution isolated to `ProcessCommandRunner`; it is not wired into planner
+  routes, Python CLI routes, Tauri/protocol, executor/apply, smoke runners,
+  normal runtime checks, or readiness-gate execution.
 - `crates/emuchef-rust-backend/src/device_profile_match.rs`: P8P crate-local
   pure/test-backed foundation for future detected-device profile mismatch
   warnings. It compares supplied detected facts with authored profile match
@@ -403,7 +408,9 @@ real-device probing. P8P adds pure/test-backed mismatch-warning helper logic
 only; the default-cutover blockers remain until live probing and route evidence
 exist. P8V adds only the pure Rust foundation for modeling a future ADB getprop
 probe command and parsing supplied getprop output into detected facts; it does
-not change that blocker classification.
+not change that blocker classification. P8W adds the live adapter foundation on
+top of that model and parser, but route-level real-device probing and
+production mismatch-warning evidence still do not exist.
 
 | Device plan | Device profile | Selected recipes | Private Rust planner status | Required planner-only bindings | Current limitation |
 | --- | --- | --- | --- | --- | --- |
@@ -833,7 +840,9 @@ harness; Python CLI routes, smoke tooling, live probing, normal runtime checks,
 and readiness blocker IDs remain unchanged. P8V adds a pure Rust getprop command
 model and parser foundation only; it consumes supplied text and does not add live
 probing, route-level detection, smoke-runner evidence, or readiness
-reclassification. Matching matrix status is necessary
+reclassification. P8W adds the crate-local adapter that can execute that getprop
+command through an injected runner, but it remains unwired foundation and does
+not count as route-level detection or readiness evidence. Matching matrix status is necessary
 evidence for the compared planner-only fields, not sufficient proof of CLI
 routing, real-device context resolution, executor/apply compatibility, artifact
 materialization, or Python planner deletability.

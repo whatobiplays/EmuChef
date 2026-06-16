@@ -70,6 +70,13 @@ filesystem, access the network, change Python CLI behavior, expose Rust
 `detect`/`detect-profiles`, wire probing into planner routes, alter
 executor/apply or Tauri/protocol behavior, add normal runtime checks, or
 reclassify readiness blockers.
+P8W adds the crate-local live ADB probe adapter foundation on top of that model
+and parser. It uses an injectable command runner, keeps production process
+execution isolated to `ProcessCommandRunner`, and uses fake runners in normal
+tests. It does not expose Rust `detect`/`detect-profiles`, change Python CLI
+behavior, wire probing into planner routes, alter executor/apply or
+Tauri/protocol behavior, add smoke-runner probing, add readiness-gate executed
+evidence, or reclassify readiness blockers.
 
 Rust planner, executor, and CLI behavior is fixture-scoped, test-scoped,
 internal, or editor-backend-scoped unless explicitly promoted by later work.
@@ -163,6 +170,10 @@ explicit Rust routes only. Supplied manufacturer, model, Android version, and
 device tags are forwarded to the shadow command; no synthetic/profile-derived
 values are forwarded by Python, no ADB/device probing is added, and
 detected-device profile mismatch warnings remain unsupported.
+P8W adds only the crate-local adapter foundation that can execute the modeled
+getprop argv through an injected runner. It remains unwired and does not make
+Rust the production owner of `detect`, `detect-profiles`, or route-level
+planning context resolution.
 P8K extends only the dev-only matrix evidence: optional scenario
 `device_context` values are validated, forwarded to both comparison sides and to
 smoke-runner CLI commands, and reported only as stable presence/key metadata.
