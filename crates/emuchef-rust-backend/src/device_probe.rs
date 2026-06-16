@@ -39,6 +39,102 @@ pub(crate) enum DeviceProbeError {
     InvalidOutput { message: String },
 }
 
+/// Configuration for modeling a future ADB-backed getprop probe command.
+///
+/// This is only a command specification. It preserves caller-supplied argv
+/// strings and never validates paths, looks up environment state, or starts a
+/// process.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct AdbProbeConfig {
+    pub adb_path: String,
+    pub serial: Option<String>,
+}
+
+/// Build the argv for collecting all device properties through getprop.
+///
+/// The returned command is suitable as a future adapter input, but this helper
+/// intentionally does not execute it. Empty or whitespace-only serial values are
+/// treated as absent so callers do not model a selected empty device id.
+pub(crate) fn build_adb_getprop_command(config: &AdbProbeConfig) -> Vec<String> {
+    let mut command = vec![config.adb_path.clone()];
+    if let Some(serial) = present_text(config.serial.as_deref()) {
+        command.push("-s".to_string());
+        command.push(serial.to_string());
+    }
+    command.push("shell".to_string());
+    command.push("getprop".to_string());
+    command
+}
+
+/// Parse supplied Android getprop stdout into detected device facts.
+///
+/// The parser accepts standard lines shaped like `[key]: [value]`, ignores
+/// unknown or malformed lines, and never infers data from host state or live
+/// device commands. Serial comes only from the explicit argument.
+pub(crate) fn detected_facts_from_getprop_output(
+    getprop_stdout: &str,
+    serial: Option<String>,
+) -> DetectedDeviceFacts {
+    let mut facts = DetectedDeviceFacts {
+        serial: present_text(serial.as_deref()).map(ToString::to_string),
+        ..DetectedDeviceFacts::default()
+    };
+
+    for line in getprop_stdout.lines() {
+        let Some((key, value)) = parse_getprop_line(line) else {
+            continue;
+        };
+        match key {
+            "ro.product.manufacturer" => {
+                facts.manufacturer = present_text(Some(value)).map(ToString::to_string);
+            }
+            "ro.product.brand" => {
+                facts.brand = present_text(Some(value)).map(ToString::to_string);
+            }
+            "ro.product.model" => {
+                facts.model = present_text(Some(value)).map(ToString::to_string);
+            }
+            "ro.build.version.release" => {
+                facts.android_version = parse_android_release(value);
+            }
+            "ro.build.version.sdk" => {
+                facts.android_api_level = parse_android_api_level(value);
+            }
+            _ => {}
+        }
+    }
+
+    facts
+}
+
+fn parse_getprop_line(line: &str) -> Option<(&str, &str)> {
+    let line = line.trim();
+    let (raw_key, raw_value) = line.split_once("]: [")?;
+    let key = raw_key.strip_prefix('[')?;
+    let value = raw_value.strip_suffix(']')?;
+    Some((key, value))
+}
+
+fn present_text(value: Option<&str>) -> Option<&str> {
+    value.map(str::trim).filter(|value| !value.is_empty())
+}
+
+fn parse_android_release(value: &str) -> Option<i64> {
+    let value = value.trim();
+    let digit_count = value
+        .chars()
+        .take_while(|character| character.is_ascii_digit())
+        .count();
+    if digit_count == 0 {
+        return None;
+    }
+    value[..digit_count].parse::<i64>().ok()
+}
+
+fn parse_android_api_level(value: &str) -> Option<i64> {
+    value.trim().parse::<i64>().ok()
+}
+
 /// Abstraction over a source of detected device facts.
 pub(crate) trait DeviceProbe {
     fn detect(&self) -> Result<DetectedDeviceFacts, DeviceProbeError>;
@@ -238,23 +334,201 @@ mod tests {
     }
 
     #[test]
+    fn adb_probe_command_without_serial_returns_adb_shell_getprop() {
+        let command = build_adb_getprop_command(&AdbProbeConfig {
+            adb_path: "adb".to_string(),
+            serial: None,
+        });
+
+        assert_eq!(
+            command,
+            vec![
+                "adb".to_string(),
+                "shell".to_string(),
+                "getprop".to_string()
+            ]
+        );
+    }
+
+    #[test]
+    fn adb_probe_command_with_serial_returns_adb_s_serial_shell_getprop() {
+        let command = build_adb_getprop_command(&AdbProbeConfig {
+            adb_path: "adb".to_string(),
+            serial: Some("SERIAL123".to_string()),
+        });
+
+        assert_eq!(
+            command,
+            vec![
+                "adb".to_string(),
+                "-s".to_string(),
+                "SERIAL123".to_string(),
+                "shell".to_string(),
+                "getprop".to_string(),
+            ]
+        );
+    }
+
+    #[test]
+    fn adb_probe_command_preserves_configured_adb_path() {
+        let command = build_adb_getprop_command(&AdbProbeConfig {
+            adb_path: "/opt/android platform tools/adb".to_string(),
+            serial: None,
+        });
+
+        assert_eq!(command[0], "/opt/android platform tools/adb");
+    }
+
+    #[test]
+    fn adb_probe_command_treats_empty_or_whitespace_serial_as_absent() {
+        for serial in ["", "   ", "\t\n"] {
+            let command = build_adb_getprop_command(&AdbProbeConfig {
+                adb_path: "adb".to_string(),
+                serial: Some(serial.to_string()),
+            });
+
+            assert_eq!(
+                command,
+                vec![
+                    "adb".to_string(),
+                    "shell".to_string(),
+                    "getprop".to_string()
+                ]
+            );
+        }
+    }
+
+    #[test]
+    fn adb_probe_getprop_parser_extracts_supported_detected_facts() {
+        let output = "\
+[ro.product.manufacturer]: [AYANEO]
+[ro.product.brand]: [AYANEO]
+[ro.product.model]: [Pocket S Mini]
+[ro.build.version.release]: [13]
+[ro.build.version.sdk]: [33]
+";
+
+        let facts = detected_facts_from_getprop_output(output, None);
+
+        assert_eq!(
+            facts,
+            DetectedDeviceFacts {
+                serial: None,
+                manufacturer: Some("AYANEO".to_string()),
+                brand: Some("AYANEO".to_string()),
+                model: Some("Pocket S Mini".to_string()),
+                android_version: Some(13),
+                android_api_level: Some(33),
+                device_tags: Vec::new(),
+            }
+        );
+    }
+
+    #[test]
+    fn adb_probe_getprop_parser_parses_android_release_leading_integer_forms() {
+        for release in ["13", "13.0", "13 QPR", " 13 QPR "] {
+            let output = format!("[ro.build.version.release]: [{release}]\n");
+
+            let facts = detected_facts_from_getprop_output(&output, None);
+
+            assert_eq!(facts.android_version, Some(13), "release={release:?}");
+        }
+    }
+
+    #[test]
+    fn adb_probe_getprop_parser_ignores_invalid_release_and_sdk_values() {
+        let output = "\
+[ro.build.version.release]: [Android 13]
+[ro.build.version.sdk]: [33 preview]
+";
+
+        let facts = detected_facts_from_getprop_output(output, None);
+
+        assert_eq!(facts.android_version, None);
+        assert_eq!(facts.android_api_level, None);
+    }
+
+    #[test]
+    fn adb_probe_getprop_parser_treats_empty_values_as_absent() {
+        let output = "\
+[ro.product.manufacturer]: []
+[ro.product.brand]: [   ]
+[ro.product.model]: []
+[ro.build.version.release]: [ ]
+[ro.build.version.sdk]: []
+";
+
+        let facts = detected_facts_from_getprop_output(output, None);
+
+        assert_eq!(facts, DetectedDeviceFacts::default());
+    }
+
+    #[test]
+    fn adb_probe_getprop_parser_ignores_unknown_and_malformed_lines() {
+        let output = "\
+[ro.product.manufacturer]: [AYANEO]
+[ro.unknown.key]: [ignored]
+not a getprop line
+[missing.end: [ignored]
+[ro.product.model]: [Pocket S Mini]
+";
+
+        let facts = detected_facts_from_getprop_output(output, None);
+
+        assert_eq!(facts.manufacturer, Some("AYANEO".to_string()));
+        assert_eq!(facts.model, Some("Pocket S Mini".to_string()));
+        assert_eq!(facts.brand, None);
+    }
+
+    #[test]
+    fn adb_probe_getprop_parser_leaves_device_tags_empty() {
+        let facts = detected_facts_from_getprop_output(
+            "[ro.product.model]: [Pocket S Mini]\n",
+            Some("SERIAL123".to_string()),
+        );
+
+        assert!(facts.device_tags.is_empty());
+    }
+
+    #[test]
+    fn adb_probe_getprop_parser_includes_supplied_serial() {
+        let facts = detected_facts_from_getprop_output(
+            "[ro.product.model]: [Pocket S Mini]\n",
+            Some("SERIAL123".to_string()),
+        );
+
+        assert_eq!(facts.serial, Some("SERIAL123".to_string()));
+    }
+
+    #[test]
+    fn adb_probe_getprop_parser_treats_empty_or_whitespace_serial_as_absent() {
+        for serial in ["", "   ", "\t\n"] {
+            let facts = detected_facts_from_getprop_output(
+                "[ro.product.model]: [Pocket S Mini]\n",
+                Some(serial.to_string()),
+            );
+
+            assert_eq!(facts.serial, None, "serial={serial:?}");
+        }
+    }
+
+    #[test]
     fn fake_probe_path_has_no_live_behavior_dependencies() {
-        let source = include_str!("device_probe.rs");
-        let production_source = source
-            .split("#[cfg(test)]")
-            .next()
-            .expect("source should include production section");
+        let production_source = production_source_without_line_comments();
 
         for forbidden in [
             "std::process",
             "Command::new",
             "std::env",
-            "std::fs",
+            "std::net",
             "TcpStream",
             "UdpSocket",
+            "tokio::net",
             "reqwest",
             "ureq",
             "hyper",
+            "adb ",
+            "adb.exe",
         ] {
             assert!(
                 !production_source.contains(forbidden),
@@ -289,5 +563,21 @@ mod tests {
             errors[2],
             DeviceProbeError::InvalidOutput { ref message } if message == "invalid probe output"
         ));
+    }
+
+    fn production_source_without_line_comments() -> String {
+        include_str!("device_probe.rs")
+            .split("#[cfg(test)]")
+            .next()
+            .expect("source should include production section")
+            .lines()
+            .filter(|line| {
+                let trimmed = line.trim_start();
+                !(trimmed.starts_with("//")
+                    || trimmed.starts_with("///")
+                    || trimmed.starts_with("//!"))
+            })
+            .collect::<Vec<_>>()
+            .join("\n")
     }
 }

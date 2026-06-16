@@ -132,7 +132,11 @@ Rust planner-adjacent coverage is internal and fixture-scoped:
   fake/test-only foundation for future Rust-owned probing. It defines detected
   facts, stable probe errors, a probe trait, a fake probe, and context layering
   helper. It is not wired into CLI routes, Python, Tauri/protocol,
-  executor/apply, readiness behavior, or live ADB probing.
+  executor/apply, readiness behavior, or live ADB probing. P8V extends the same
+  module with pure command modeling for a future `adb [-s SERIAL] shell getprop`
+  probe and supplied-text `getprop` parsing into `DetectedDeviceFacts`; it does
+  not execute ADB, start subprocesses, read environment variables, access the
+  filesystem, access the network, or wire probing into any route.
 - `crates/emuchef-rust-backend/src/device_profile_match.rs`: P8P crate-local
   pure/test-backed foundation for future detected-device profile mismatch
   warnings. It compares supplied detected facts with authored profile match
@@ -397,7 +401,9 @@ remains the current CLI/reference owner, explicit Rust routes remain non-default
 and explicit context evidence remains separate from detected facts and
 real-device probing. P8P adds pure/test-backed mismatch-warning helper logic
 only; the default-cutover blockers remain until live probing and route evidence
-exist.
+exist. P8V adds only the pure Rust foundation for modeling a future ADB getprop
+probe command and parsing supplied getprop output into detected facts; it does
+not change that blocker classification.
 
 | Device plan | Device profile | Selected recipes | Private Rust planner status | Required planner-only bindings | Current limitation |
 | --- | --- | --- | --- | --- | --- |
@@ -824,7 +830,10 @@ detected facts. P8Q composes those fake/test-backed pieces into crate-private
 warning emission, or route wiring. P8R makes that composition path executable
 only through a local `emuchef-plan-shadow --detected-facts-json <path>` fixture
 harness; Python CLI routes, smoke tooling, live probing, normal runtime checks,
-and readiness blocker IDs remain unchanged. Matching matrix status is necessary
+and readiness blocker IDs remain unchanged. P8V adds a pure Rust getprop command
+model and parser foundation only; it consumes supplied text and does not add live
+probing, route-level detection, smoke-runner evidence, or readiness
+reclassification. Matching matrix status is necessary
 evidence for the compared planner-only fields, not sufficient proof of CLI
 routing, real-device context resolution, executor/apply compatibility, artifact
 materialization, or Python planner deletability.

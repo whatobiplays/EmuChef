@@ -108,6 +108,22 @@ through default Python planning or `rust-shadow`, alter direct Rust fixture
 smoke, change readiness gate blocker IDs, wire the smoke into normal runtime
 checks, modify executor/apply or Tauri/protocol behavior, or make Python planner
 deletion ready.
+P8V adds a crate-local Rust ADB probe foundation for future planner probing
+ownership. `crates/emuchef-rust-backend/src/device_probe.rs` can model the
+future `adb [-s SERIAL] shell getprop` command as an argv vector and can parse
+supplied bracketed `getprop` text for `ro.product.manufacturer`,
+`ro.product.brand`, `ro.product.model`, `ro.build.version.release`, and
+`ro.build.version.sdk` into `DetectedDeviceFacts`. This foundation is pure and
+test-backed only: it does not execute ADB, start subprocesses, read environment
+variables, access the filesystem, access the network, probe real devices, or wire
+detected facts into `rust-shadow`, `rust-experimental`, the Python CLI,
+Tauri/protocol, executor/apply, smoke runners, normal runtime checks, or the
+static readiness gate. Python remains the current default/reference planner
+owner. Fixture-based P8R/P8S/P8T/P8U evidence remains separate, and
+`real_device_probing_not_cut_over` plus
+`detected_device_profile_mismatch_warning_not_cut_over` remain default-cutover
+blockers until live probing and production route-level mismatch-warning evidence
+exist.
 
 ## Current Authored Model
 

@@ -62,6 +62,14 @@ and validates the mismatching output-file case with stdlib text checks only. It
 does not change default `emuchef plan`, `rust-shadow`, direct Rust fixture smoke,
 executor/apply, Tauri/protocol, live probing, normal runtime checks, readiness
 gate blocker IDs, or Python planner deletion behavior.
+P8V adds only a Rust-side, crate-local ADB probe foundation for future planner
+probing work: `device_probe.rs` models `adb [-s SERIAL] shell getprop` as argv
+and parses supplied bracketed `getprop` text into `DetectedDeviceFacts`. It does
+not execute ADB, start subprocesses, read environment variables, access the
+filesystem, access the network, change Python CLI behavior, expose Rust
+`detect`/`detect-profiles`, wire probing into planner routes, alter
+executor/apply or Tauri/protocol behavior, add normal runtime checks, or
+reclassify readiness blockers.
 
 Rust planner, executor, and CLI behavior is fixture-scoped, test-scoped,
 internal, or editor-backend-scoped unless explicitly promoted by later work.

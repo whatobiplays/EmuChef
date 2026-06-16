@@ -51,6 +51,8 @@ Through Phase 6U it implements only:
   tests
 - a dev-only Rust planner shadow binary that emits the private Rust
   `PlanningResult` as pretty JSON for explicit authored-root/device-plan inputs
+- a crate-local P8V non-live ADB `getprop` command model and supplied-output
+  parser foundation for future Rust planner probing ownership
 - an internal-only, fixture-scoped executor skeleton that emits Python-shaped
   `ExecutionRunResult` values for selected safe dry-run Phase 6O tests
 - temp-dir-confined filesystem/artifact executor behavior for selected Phase 6P
@@ -389,6 +391,17 @@ through default Python planning or `rust-shadow`, invoke ADB, run
 executor/apply, touch Tauri/protocol behavior, participate in normal runtime
 checks, change readiness gate blockers, or make Rust the default planner.
 
+P8V adds a crate-local, non-live ADB probe foundation in `src/device_probe.rs`.
+It models the future `adb [-s SERIAL] shell getprop` command as argv only and
+parses supplied bracketed `getprop` output into `DetectedDeviceFacts` fields for
+manufacturer, brand, model, Android release, and SDK. Empty or whitespace-only
+serial values are treated as absent, empty property values remain absent, and
+device tags remain empty. This parser foundation does not execute ADB, start
+subprocesses, read environment variables, access the filesystem, access the
+network, change shadow command behavior, change Python CLI behavior, alter
+executor/apply or Tauri/protocol behavior, wire smoke runners, run in the static
+readiness gate, or make Rust planner probing authoritative.
+
 P8A adds an explicit developer-only bridge through the Python CLI for an
 already-built shadow binary:
 
@@ -586,10 +599,12 @@ runtime-check behavior, readiness gate reclassification, or Python planner
 deletion readiness. P8T adds only explicit `rust-experimental` forwarding for a
 local fixture path through the Python wrapper flag; it does not add live
 probing, normal runtime checks, readiness gate reclassification, or default
-backend behavior. The expected
-implementation path remains incremental: live real-device probing, explicit
-non-default route support, optional live ADB smoke, readiness reclassification,
-and a later default planner backend cutover.
+backend behavior. P8V adds a pure `getprop` command model and supplied-output
+parser in `src/device_probe.rs`; it is foundation-only and does not execute ADB
+or wire probing into any route. The expected implementation path remains
+incremental: parser foundation, live real-device probing, explicit non-default
+route support, optional live ADB smoke, readiness reclassification, and a later
+default planner backend cutover.
 
 P8C guards the explicit bridge's default CLI output compatibility contract. P7P
 is planner DTO/result comparison evidence, P8B is Python CLI `rust-shadow` route
