@@ -164,6 +164,21 @@ not default planner cutover, not production route-level probing parity, not
 readiness-gate executed evidence, and not Python planner deletion. The same
 `real_device_probing_not_cut_over` and
 `detected_device_profile_mismatch_warning_not_cut_over` blockers remain blocked.
+P8AA adds optional/manual smoke evidence for the P8Z Python
+`rust-experimental` live-probe forwarding route through
+`tools/smoke_rust_experimental_live_adb_probe.py`. The smoke invokes
+`python3 -m emuchef plan --planner-backend rust-experimental` with
+`--rust-probe-adb-getprop`, `--rust-adb-path <path>`, and
+`--rust-serial <serial>`, expects Python-compatible route output instead of raw
+Rust JSON, and emits deterministic JSON with scrubbed command metadata. It does
+not call the Rust shadow binary directly, discover devices, run `adb devices`,
+invoke Cargo, inspect, normalize, expand, or stat the supplied ADB path or
+serial, participate in normal checks, or count as readiness-gate executed
+evidence. `device_profile_mismatch` is acceptable route evidence for this smoke
+when the selected live device intentionally does not match the authored plan.
+P8AA is not default planner cutover, not production route-level probing parity,
+and not Python planner deletion. The `real_device_probing_not_cut_over` and
+`detected_device_profile_mismatch_warning_not_cut_over` blockers remain blocked.
 
 ## Current Authored Model
 

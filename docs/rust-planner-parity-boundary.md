@@ -99,13 +99,25 @@ Rust planner-adjacent coverage is internal and fixture-scoped:
   and does not discover devices, run `adb devices`, invoke Cargo, call Python
   CLI routes, reuse fixture or matrix smoke tooling, mutate devices beyond
   `adb shell getprop`, run normal checks, or participate in the readiness gate.
-- P8Z Python `rust-experimental` live-probe forwarding is covered by
-  `tests/test_cli.py`. It is wrapper-only migration routing: fixture forwarding
-  and live-probe forwarding are mutually exclusive detected-facts sources, raw
-  Rust flags remain unrecognized by Python CLI routes, and existing Python
-  `--serial` remains separate from `--rust-serial`. It is not `rust-shadow`
-  behavior, not default Python planning behavior, not smoke-runner behavior, not
-  executor/apply or Tauri/protocol behavior, and not readiness-gate execution.
+- `tools/smoke_rust_experimental_live_adb_probe.py`: dev-only P8AA smoke for
+  the P8Z Python `rust-experimental` live-probe forwarding route. The smoke
+  invokes `python3 -m emuchef plan --planner-backend rust-experimental` with
+  `--rust-probe-adb-getprop`, `--rust-adb-path`, and `--rust-serial`, then
+  expects Python-compatible output rather than raw Rust JSON. It does not call
+  the Rust shadow binary directly, discover devices, run `adb devices`, invoke
+  Cargo, inspect or normalize the supplied ADB path or serial, run normal
+  checks, or participate in the readiness gate. `device_profile_mismatch` is
+  acceptable route evidence for an intentionally mismatched selected device.
+  P8Z command construction remains covered by `tests/test_cli.py`; fixture
+  forwarding and live-probe forwarding remain mutually exclusive
+  detected-facts sources, raw Rust flags remain unrecognized by Python CLI
+  routes, and existing Python `--serial` remains separate from `--rust-serial`.
+  P8AA is not `rust-shadow` behavior, default Python planning behavior,
+  executor/apply or Tauri/protocol behavior, readiness-gate execution,
+  production route-level probing parity, default planner cutover, or Python
+  planner deletion. The `real_device_probing_not_cut_over` and
+  `detected_device_profile_mismatch_warning_not_cut_over` blockers remain
+  blocked.
 - `tools/compare_rust_python_plan.py`: dev-only comparison harness for Python
   planner API output versus Rust shadow planner output. The harness emits a
   deterministic JSON classification report or matrix report and is not part of

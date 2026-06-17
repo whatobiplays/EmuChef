@@ -428,6 +428,31 @@ default planner cutover, not production route-level probing parity, not
 readiness-gate executed evidence, not a smoke-runner change, and not Python
 planner deletion.
 
+P8AA adds optional/manual smoke evidence for that Python live-probe forwarding
+route:
+
+```bash
+python3 tools/smoke_rust_experimental_live_adb_probe.py \
+  --authored-root authored \
+  --device-plan ayaneo.pocket_s_mini.base \
+  --rust-planner-bin <path-to-emuchef-plan-shadow> \
+  --adb-path adb \
+  --serial <selected-device-serial>
+```
+
+The smoke invokes `python3 -m emuchef plan --planner-backend
+rust-experimental` with the Python wrapper live-probe flags. It does not call
+the Rust shadow binary directly, discover devices, run `adb devices`, invoke
+Cargo, or inspect, normalize, expand, or stat the supplied ADB path or serial.
+Successful route cases must emit Python-compatible output; raw Rust JSON stdout
+is a smoke failure. `device_profile_mismatch` is acceptable route evidence when
+the selected live device intentionally does not match the authored plan. P8AA
+does not participate in normal runtime checks or static readiness-gate
+execution, and it does not make default planner cutover, production route-level
+probing parity, or Python planner deletion ready. The
+`real_device_probing_not_cut_over` and
+`detected_device_profile_mismatch_warning_not_cut_over` blockers remain blocked.
+
 P8S adds optional/manual smoke evidence for the direct shadow-binary fixture
 harness:
 

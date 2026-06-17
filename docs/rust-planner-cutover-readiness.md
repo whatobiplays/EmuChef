@@ -103,6 +103,19 @@ subprocess execution. `--rust-detected-facts-json <path>` fixture forwarding and
 live-probe forwarding are mutually exclusive detected-facts sources. P8Z is not
 default planner cutover, not production route-level probing parity, not
 readiness-gate executed evidence, and not Python planner deletion.
+P8AA adds `tools/smoke_rust_experimental_live_adb_probe.py` as optional/manual
+smoke evidence for the P8Z Python `rust-experimental` live-probe forwarding
+route. The smoke invokes `python3 -m emuchef plan --planner-backend
+rust-experimental` with the Python wrapper probe flags and requires
+Python-compatible route output instead of raw Rust JSON. It does not call the
+Rust shadow binary directly, discover devices, run `adb devices`, invoke Cargo,
+or inspect, normalize, expand, or stat the supplied ADB path or serial.
+`device_profile_mismatch` is acceptable route evidence when the selected live
+device intentionally does not match the authored plan. P8AA is not default
+planner cutover, not production route-level probing parity, not readiness-gate
+executed evidence, and not Python planner deletion. The
+`real_device_probing_not_cut_over` and
+`detected_device_profile_mismatch_warning_not_cut_over` blockers remain blocked.
 
 P8I adds `tools/check_rust_planner_cutover_readiness.py` as a static,
 developer-only readiness gate for any future PR that proposes making Rust the

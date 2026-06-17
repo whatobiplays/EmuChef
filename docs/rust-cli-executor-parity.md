@@ -105,6 +105,19 @@ exclusive detected-facts sources. P8Z does not change default `emuchef plan`,
 Python planner behavior, executor/apply, Tauri/protocol, smoke runners, normal
 checks, readiness-gate blockers, Cargo fallback behavior, or Python golden
 ownership.
+P8AA adds optional/manual smoke evidence for that Python `rust-experimental`
+live-probe forwarding route through
+`tools/smoke_rust_experimental_live_adb_probe.py`. The smoke invokes
+`python3 -m emuchef plan --planner-backend rust-experimental` with the Python
+wrapper live-probe flags, expects Python-compatible output instead of raw Rust
+JSON, and treats `device_profile_mismatch` as acceptable route evidence for an
+intentionally mismatched selected device. It does not call the Rust shadow
+binary directly, discover devices, run `adb devices`, invoke Cargo, inspect,
+normalize, expand, or stat the supplied ADB path or serial, alter
+executor/apply or Tauri/protocol behavior, participate in normal checks, add
+readiness-gate executed evidence, reclassify blockers, or make Python planner
+deletion ready. The `real_device_probing_not_cut_over` and
+`detected_device_profile_mismatch_warning_not_cut_over` blockers remain blocked.
 
 Rust planner, executor, and CLI behavior is fixture-scoped, test-scoped,
 internal, or editor-backend-scoped unless explicitly promoted by later work.
