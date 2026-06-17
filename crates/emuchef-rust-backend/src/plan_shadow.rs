@@ -2,29 +2,49 @@
 //!
 //! This module intentionally exposes only a process-style helper for the
 //! `emuchef-plan-shadow` binary. It reuses the private Rust planner path for
-//! manual migration inspection and does not add protocol, Tauri, executor, or
-//! Python CLI routing.
+//! manual migration inspection. Its live ADB probing mode is explicit and
+//! shadow-binary-only; it does not add protocol, Tauri, executor, or Python CLI
+//! routing.
 
 use std::fs;
 use std::path::{Path, PathBuf};
 
 use serde_json::Value;
 
-use crate::device_probe::DetectedDeviceFacts;
+use crate::device_probe::{
+    AdbDeviceProbe, AdbProbeConfig, CommandRunner, DetectedDeviceFacts, DeviceProbe,
+    DeviceProbeError, ProcessCommandRunner,
+};
 use crate::model::OrderedMap;
 use crate::planner::{plan_execution, DeviceContext, PlannerInput, PlanningResult, PlanningStatus};
 use crate::planner_device_plan::plan_from_authored_device_plan_with_detected_facts;
 use crate::ProcessOutput;
 
-const USAGE: &str = "usage: emuchef-plan-shadow --authored-root <path> --device-plan <id> [--detected-facts-json <path>] [--manufacturer <value>] [--model <value>] [--android-version <integer>] [--device-tag <value>]... [--bind <recipe_ref>/<input_id>=<value>]...\n";
+const USAGE: &str = "usage: emuchef-plan-shadow --authored-root <path> --device-plan <id> [--detected-facts-json <path> | --probe-adb-getprop [--adb-path <path>] [--serial <serial>]] [--manufacturer <value>] [--model <value>] [--android-version <integer>] [--device-tag <value>]... [--bind <recipe_ref>/<input_id>=<value>]...\n";
 
 #[derive(Debug, PartialEq)]
 struct ShadowConfig {
     authored_root: PathBuf,
     device_plan: String,
-    detected_facts_json: Option<PathBuf>,
+    detected_facts_source: DetectedFactsSource,
     input_bindings: OrderedMap<Value>,
     explicit_context: ExplicitDeviceContext,
+}
+
+#[derive(Debug, PartialEq)]
+enum DetectedFactsSource {
+    None,
+    FixtureJson(PathBuf),
+    LiveAdbGetprop {
+        adb_path: String,
+        serial: Option<String>,
+    },
+}
+
+impl DetectedFactsSource {
+    fn uses_detected_facts(&self) -> bool {
+        !matches!(self, DetectedFactsSource::None)
+    }
 }
 
 #[derive(Clone, Debug, Default, PartialEq)]
@@ -41,6 +61,13 @@ struct ExplicitDeviceContext {
 /// validation failures such as missing required bindings. Argument and authored
 /// load failures are process-level errors and write stable text to stderr.
 pub fn run(args: &[String]) -> ProcessOutput {
+    run_with_adb_runner(args, &ProcessCommandRunner)
+}
+
+pub(crate) fn run_with_adb_runner<R: CommandRunner>(
+    args: &[String],
+    adb_runner: &R,
+) -> ProcessOutput {
     let config = match parse_args(args) {
         Ok(config) => config,
         Err(ShadowArgError::Help) => {
@@ -59,53 +86,103 @@ pub fn run(args: &[String]) -> ProcessOutput {
         }
     };
 
-    let plan_id = format!("plan.shadow.{}.001", config.device_plan);
-    let uses_detected_facts = config.detected_facts_json.is_some();
-    let mut result = if let Some(path) = &config.detected_facts_json {
-        let detected_facts = match load_detected_facts_fixture(path) {
-            Ok(facts) => facts,
-            Err(error) => return error.into_process_output(),
-        };
-        match plan_from_authored_device_plan_with_detected_facts(
-            &config.authored_root,
-            &config.device_plan,
-            plan_id,
-            config.input_bindings,
-            &detected_facts,
-        ) {
-            Ok(result) => result,
-            Err(error) => {
-                return ProcessOutput {
-                    exit_code: 1,
-                    stdout: String::new(),
-                    stderr: format!("Error: {}: {error}\n", error.code()),
-                };
+    let ShadowConfig {
+        authored_root,
+        device_plan,
+        detected_facts_source,
+        input_bindings,
+        explicit_context,
+    } = config;
+    let plan_id = format!("plan.shadow.{device_plan}.001");
+    let uses_detected_facts = detected_facts_source.uses_detected_facts();
+    let mut result = match detected_facts_source {
+        DetectedFactsSource::FixtureJson(path) => {
+            let detected_facts = match load_detected_facts_fixture(&path) {
+                Ok(facts) => facts,
+                Err(error) => return error.into_process_output(),
+            };
+            match plan_from_authored_device_plan_with_detected_facts(
+                &authored_root,
+                &device_plan,
+                plan_id,
+                input_bindings,
+                &detected_facts,
+            ) {
+                Ok(result) => result,
+                Err(error) => {
+                    return ProcessOutput {
+                        exit_code: 1,
+                        stdout: String::new(),
+                        stderr: format!("Error: {}: {error}\n", error.code()),
+                    };
+                }
             }
         }
-    } else {
-        let mut input = match PlannerInput::from_authored_device_plan(
-            &config.authored_root,
-            &config.device_plan,
-            plan_id,
-            config.input_bindings,
-        ) {
-            Ok(input) => input,
-            Err(error) => {
-                return ProcessOutput {
-                    exit_code: 1,
-                    stdout: String::new(),
-                    stderr: format!("Error: {}: {error}\n", error.code()),
-                };
+        DetectedFactsSource::LiveAdbGetprop { adb_path, serial } => {
+            let probe = AdbDeviceProbe {
+                config: AdbProbeConfig { adb_path, serial },
+                runner: adb_runner,
+            };
+            let detected_facts = match probe.detect() {
+                Ok(facts) => facts,
+                Err(error) => return adb_probe_error_output(error),
+            };
+            match plan_from_authored_device_plan_with_detected_facts(
+                &authored_root,
+                &device_plan,
+                plan_id,
+                input_bindings,
+                &detected_facts,
+            ) {
+                Ok(result) => result,
+                Err(error) => {
+                    return ProcessOutput {
+                        exit_code: 1,
+                        stdout: String::new(),
+                        stderr: format!("Error: {}: {error}\n", error.code()),
+                    };
+                }
             }
-        };
-        apply_explicit_device_context(&mut input.device_context, &config.explicit_context);
-        plan_execution(input)
+        }
+        DetectedFactsSource::None => {
+            let mut input = match PlannerInput::from_authored_device_plan(
+                &authored_root,
+                &device_plan,
+                plan_id,
+                input_bindings,
+            ) {
+                Ok(input) => input,
+                Err(error) => {
+                    return ProcessOutput {
+                        exit_code: 1,
+                        stdout: String::new(),
+                        stderr: format!("Error: {}: {error}\n", error.code()),
+                    };
+                }
+            };
+            apply_explicit_device_context(&mut input.device_context, &explicit_context);
+            plan_execution(input)
+        }
     };
     if uses_detected_facts {
-        apply_explicit_device_context_to_result(&mut result, &config.explicit_context);
+        apply_explicit_device_context_to_result(&mut result, &explicit_context);
     }
 
     emit_planning_result(result)
+}
+
+fn adb_probe_error_output(error: DeviceProbeError) -> ProcessOutput {
+    let code = match error {
+        DeviceProbeError::Unavailable { .. } => "adb_probe_unavailable",
+        DeviceProbeError::Failed { .. } | DeviceProbeError::InvalidOutput { .. } => {
+            "adb_probe_failed"
+        }
+    };
+    ProcessOutput {
+        exit_code: 1,
+        stdout: String::new(),
+        stderr: format!("Error: {code}\n"),
+    }
 }
 
 fn emit_planning_result(result: PlanningResult) -> ProcessOutput {
@@ -135,6 +212,9 @@ fn parse_args(args: &[String]) -> Result<ShadowConfig, ShadowArgError> {
     let mut authored_root: Option<PathBuf> = None;
     let mut device_plan: Option<String> = None;
     let mut detected_facts_json: Option<PathBuf> = None;
+    let mut probe_adb_getprop = false;
+    let mut adb_path: Option<String> = None;
+    let mut serial: Option<String> = None;
     let mut raw_bindings: Vec<String> = Vec::new();
     let mut explicit_context = ExplicitDeviceContext::default();
     let mut index = 0;
@@ -161,6 +241,23 @@ fn parse_args(args: &[String]) -> Result<ShadowConfig, ShadowArgError> {
                     return usage_error("--detected-facts-json requires one argument");
                 };
                 detected_facts_json = Some(PathBuf::from(value));
+            }
+            "--probe-adb-getprop" => {
+                probe_adb_getprop = true;
+            }
+            "--adb-path" => {
+                index += 1;
+                let Some(value) = args.get(index) else {
+                    return usage_error("--adb-path requires one argument");
+                };
+                adb_path = Some(value.clone());
+            }
+            "--serial" => {
+                index += 1;
+                let Some(value) = args.get(index) else {
+                    return usage_error("--serial requires one argument");
+                };
+                serial = Some(value.clone());
             }
             "--manufacturer" => {
                 index += 1;
@@ -221,11 +318,30 @@ fn parse_args(args: &[String]) -> Result<ShadowConfig, ShadowArgError> {
             missing.join(", ")
         ));
     }
+    if detected_facts_json.is_some() && probe_adb_getprop {
+        return usage_error("--probe-adb-getprop cannot be combined with --detected-facts-json");
+    }
+    if !probe_adb_getprop && adb_path.is_some() {
+        return usage_error("--adb-path is only valid with --probe-adb-getprop");
+    }
+    if !probe_adb_getprop && serial.is_some() {
+        return usage_error("--serial is only valid with --probe-adb-getprop");
+    }
+    let detected_facts_source = if let Some(path) = detected_facts_json {
+        DetectedFactsSource::FixtureJson(path)
+    } else if probe_adb_getprop {
+        DetectedFactsSource::LiveAdbGetprop {
+            adb_path: adb_path.unwrap_or_else(|| "adb".to_string()),
+            serial,
+        }
+    } else {
+        DetectedFactsSource::None
+    };
 
     Ok(ShadowConfig {
         authored_root: authored_root.expect("missing authored_root was checked"),
         device_plan: device_plan.expect("missing device_plan was checked"),
-        detected_facts_json,
+        detected_facts_source,
         input_bindings: parse_bindings(&raw_bindings)?,
         explicit_context,
     })
@@ -374,12 +490,376 @@ fn invalid_bind<T>(raw_binding: &str) -> Result<T, ShadowArgError> {
 
 #[cfg(test)]
 mod tests {
+    use std::cell::RefCell;
+    use std::path::{Path, PathBuf};
+
     use serde_json::json;
+
+    use crate::device_probe::{CommandOutput, CommandRunner, DeviceProbeError};
 
     use super::*;
 
     fn strings(values: &[&str]) -> Vec<String> {
         values.iter().map(|value| (*value).to_string()).collect()
+    }
+
+    fn repo_authored_root() -> PathBuf {
+        Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../..")
+            .canonicalize()
+            .expect("repo root should resolve from crate manifest dir")
+            .join("authored")
+    }
+
+    fn shadow_args(extra_args: &[&str]) -> Vec<String> {
+        let mut args = vec![
+            "--authored-root".to_string(),
+            repo_authored_root().to_string_lossy().into_owned(),
+            "--device-plan".to_string(),
+            "ayaneo.pocket_s_mini.base".to_string(),
+        ];
+        args.extend(extra_args.iter().map(|value| (*value).to_string()));
+        args
+    }
+
+    fn stdout_json(output: &ProcessOutput) -> serde_json::Value {
+        serde_json::from_str(&output.stdout)
+            .unwrap_or_else(|error| panic!("stdout should be JSON: {error}\n{}", output.stdout))
+    }
+
+    fn matching_getprop_output() -> &'static str {
+        "\
+[ro.product.manufacturer]: [AYANEO]
+[ro.product.brand]: [AYANEO]
+[ro.product.model]: [AYANEO Pocket S mini]
+[ro.build.version.release]: [13]
+[ro.build.version.sdk]: [33]
+"
+    }
+
+    fn mismatching_getprop_output() -> &'static str {
+        "\
+[ro.product.manufacturer]: [Valve]
+[ro.product.brand]: [Valve]
+[ro.product.model]: [Steam Deck]
+[ro.build.version.release]: [12]
+[ro.build.version.sdk]: [32]
+"
+    }
+
+    #[derive(Debug)]
+    struct FakeAdbRunner {
+        calls: RefCell<Vec<Vec<String>>>,
+        result: Result<CommandOutput, DeviceProbeError>,
+    }
+
+    impl FakeAdbRunner {
+        fn completed(status_code: Option<i32>, stdout: &str, stderr: &str) -> Self {
+            Self {
+                calls: RefCell::new(Vec::new()),
+                result: Ok(CommandOutput {
+                    status_code,
+                    stdout: stdout.to_string(),
+                    stderr: stderr.to_string(),
+                }),
+            }
+        }
+
+        fn unavailable(message: &str) -> Self {
+            Self {
+                calls: RefCell::new(Vec::new()),
+                result: Err(DeviceProbeError::Unavailable {
+                    message: message.to_string(),
+                }),
+            }
+        }
+
+        fn calls(&self) -> Vec<Vec<String>> {
+            self.calls.borrow().clone()
+        }
+    }
+
+    impl CommandRunner for FakeAdbRunner {
+        fn run(&self, argv: &[String]) -> Result<CommandOutput, DeviceProbeError> {
+            self.calls.borrow_mut().push(argv.to_vec());
+            self.result.clone()
+        }
+    }
+
+    #[test]
+    fn adb_probe_shadow_default_builds_adb_shell_getprop() {
+        let runner = FakeAdbRunner::completed(Some(0), matching_getprop_output(), "");
+
+        let output = run_with_adb_runner(&shadow_args(&["--probe-adb-getprop"]), &runner);
+
+        assert_eq!(output.exit_code, 0, "stderr: {}", output.stderr);
+        assert_eq!(
+            runner.calls(),
+            vec![vec![
+                "adb".to_string(),
+                "shell".to_string(),
+                "getprop".to_string(),
+            ]]
+        );
+    }
+
+    #[test]
+    fn adb_probe_shadow_preserves_supplied_adb_path() {
+        let runner = FakeAdbRunner::completed(Some(0), matching_getprop_output(), "");
+
+        let output = run_with_adb_runner(
+            &shadow_args(&[
+                "--probe-adb-getprop",
+                "--adb-path",
+                "/opt/android platform tools/adb",
+            ]),
+            &runner,
+        );
+
+        assert_eq!(output.exit_code, 0, "stderr: {}", output.stderr);
+        assert_eq!(runner.calls()[0][0], "/opt/android platform tools/adb");
+    }
+
+    #[test]
+    fn adb_probe_shadow_forwards_serial_to_command_and_detected_facts() {
+        let runner = FakeAdbRunner::completed(Some(0), mismatching_getprop_output(), "");
+
+        let output = run_with_adb_runner(
+            &shadow_args(&["--probe-adb-getprop", "--serial", "SERIAL123"]),
+            &runner,
+        );
+
+        assert_eq!(output.exit_code, 1);
+        assert_eq!(
+            runner.calls()[0],
+            vec![
+                "adb".to_string(),
+                "-s".to_string(),
+                "SERIAL123".to_string(),
+                "shell".to_string(),
+                "getprop".to_string(),
+            ]
+        );
+        let result = stdout_json(&output);
+        assert_eq!(
+            result["warnings"][0]["details"]["serial"],
+            json!("SERIAL123")
+        );
+    }
+
+    #[test]
+    fn adb_probe_shadow_success_routes_detected_facts_through_planning_result() {
+        let runner = FakeAdbRunner::completed(Some(0), matching_getprop_output(), "");
+
+        let output = run_with_adb_runner(&shadow_args(&["--probe-adb-getprop"]), &runner);
+
+        assert_eq!(output.exit_code, 0, "stderr: {}", output.stderr);
+        let result = stdout_json(&output);
+        assert_eq!(result["status"], "success");
+        assert_eq!(
+            result["execution_plan"]["device_context"],
+            json!({
+                "manufacturer": "AYANEO",
+                "model": "AYANEO Pocket S mini",
+                "android_version": 13,
+                "android_api_level": 33,
+                "device_tags": ["handheld_android", "brand_ayaneo"],
+            })
+        );
+    }
+
+    #[test]
+    fn adb_probe_shadow_matching_facts_do_not_emit_device_profile_mismatch() {
+        let runner = FakeAdbRunner::completed(Some(0), matching_getprop_output(), "");
+
+        let output = run_with_adb_runner(&shadow_args(&["--probe-adb-getprop"]), &runner);
+
+        assert_eq!(output.exit_code, 0, "stderr: {}", output.stderr);
+        let result = stdout_json(&output);
+        assert_eq!(result["warnings"], json!([]));
+    }
+
+    #[test]
+    fn adb_probe_shadow_mismatching_facts_emit_one_device_profile_mismatch() {
+        let runner = FakeAdbRunner::completed(Some(0), mismatching_getprop_output(), "");
+
+        let output = run_with_adb_runner(&shadow_args(&["--probe-adb-getprop"]), &runner);
+
+        assert_eq!(output.exit_code, 1);
+        let result = stdout_json(&output);
+        let warnings = result["warnings"]
+            .as_array()
+            .expect("warnings should be an array");
+        assert_eq!(result["status"], "warning");
+        assert_eq!(warnings.len(), 1);
+        assert_eq!(warnings[0]["code"], "device_profile_mismatch");
+    }
+
+    #[test]
+    fn adb_probe_shadow_explicit_context_overrides_emitted_context_after_live_facts() {
+        let runner = FakeAdbRunner::completed(Some(0), mismatching_getprop_output(), "");
+
+        let output = run_with_adb_runner(
+            &shadow_args(&[
+                "--probe-adb-getprop",
+                "--manufacturer",
+                "AYANEO",
+                "--model",
+                "AYANEO Pocket S mini",
+                "--android-version",
+                "13",
+                "--device-tag",
+                "explicit_handheld",
+            ]),
+            &runner,
+        );
+
+        assert_eq!(output.exit_code, 1);
+        let result = stdout_json(&output);
+        assert_eq!(
+            result["execution_plan"]["device_context"],
+            json!({
+                "manufacturer": "AYANEO",
+                "model": "AYANEO Pocket S mini",
+                "android_version": 13,
+                "android_api_level": 32,
+                "device_tags": ["explicit_handheld"],
+            })
+        );
+    }
+
+    #[test]
+    fn adb_probe_shadow_mismatch_warning_uses_live_facts_not_explicit_overrides() {
+        let runner = FakeAdbRunner::completed(Some(0), mismatching_getprop_output(), "");
+
+        let output = run_with_adb_runner(
+            &shadow_args(&[
+                "--probe-adb-getprop",
+                "--manufacturer",
+                "AYANEO",
+                "--model",
+                "AYANEO Pocket S mini",
+                "--android-version",
+                "13",
+            ]),
+            &runner,
+        );
+
+        assert_eq!(output.exit_code, 1);
+        let result = stdout_json(&output);
+        assert_eq!(result["warnings"][0]["code"], "device_profile_mismatch");
+        assert_eq!(result["warnings"][0]["details"]["manufacturer"], "Valve");
+        assert_eq!(result["warnings"][0]["details"]["model"], "Steam Deck");
+    }
+
+    #[test]
+    fn adb_probe_shadow_rejects_fixture_json_source_combination() {
+        let runner = FakeAdbRunner::completed(Some(0), matching_getprop_output(), "");
+
+        let output = run_with_adb_runner(
+            &shadow_args(&["--detected-facts-json", "facts.json", "--probe-adb-getprop"]),
+            &runner,
+        );
+
+        assert_eq!(output.exit_code, 2);
+        assert_eq!(output.stdout, "");
+        assert!(output
+            .stderr
+            .contains("--probe-adb-getprop cannot be combined with --detected-facts-json"));
+        assert!(output.stderr.contains("usage: emuchef-plan-shadow"));
+        assert!(runner.calls().is_empty());
+    }
+
+    #[test]
+    fn adb_probe_shadow_rejects_adb_path_without_probe_mode() {
+        let runner = FakeAdbRunner::completed(Some(0), matching_getprop_output(), "");
+
+        let output = run_with_adb_runner(&shadow_args(&["--adb-path", "adb"]), &runner);
+
+        assert_eq!(output.exit_code, 2);
+        assert_eq!(output.stdout, "");
+        assert!(output
+            .stderr
+            .contains("--adb-path is only valid with --probe-adb-getprop"));
+        assert!(runner.calls().is_empty());
+    }
+
+    #[test]
+    fn adb_probe_shadow_rejects_serial_without_probe_mode() {
+        let runner = FakeAdbRunner::completed(Some(0), matching_getprop_output(), "");
+
+        let output = run_with_adb_runner(&shadow_args(&["--serial", "SERIAL123"]), &runner);
+
+        assert_eq!(output.exit_code, 2);
+        assert_eq!(output.stdout, "");
+        assert!(output
+            .stderr
+            .contains("--serial is only valid with --probe-adb-getprop"));
+        assert!(runner.calls().is_empty());
+    }
+
+    #[test]
+    fn adb_probe_shadow_launch_failure_returns_stable_process_error() {
+        let runner = FakeAdbRunner::unavailable("raw OS error /tmp/adb SERIAL123");
+
+        let output = run_with_adb_runner(
+            &shadow_args(&[
+                "--probe-adb-getprop",
+                "--adb-path",
+                "/tmp/adb",
+                "--serial",
+                "SERIAL123",
+            ]),
+            &runner,
+        );
+
+        assert_eq!(output.exit_code, 1);
+        assert_eq!(output.stdout, "");
+        assert_eq!(output.stderr, "Error: adb_probe_unavailable\n");
+        assert!(!output.stderr.contains("raw OS error"));
+        assert!(!output.stderr.contains("/tmp/adb"));
+        assert!(!output.stderr.contains("SERIAL123"));
+        assert!(!output.stderr.contains("usage:"));
+    }
+
+    #[test]
+    fn adb_probe_shadow_non_zero_status_returns_stable_process_error() {
+        let runner =
+            FakeAdbRunner::completed(Some(1), "", "raw adb stderr for SERIAL123 from /tmp/adb");
+
+        let output = run_with_adb_runner(
+            &shadow_args(&[
+                "--probe-adb-getprop",
+                "--adb-path",
+                "/tmp/adb",
+                "--serial",
+                "SERIAL123",
+            ]),
+            &runner,
+        );
+
+        assert_eq!(output.exit_code, 1);
+        assert_eq!(output.stdout, "");
+        assert_eq!(output.stderr, "Error: adb_probe_failed\n");
+        assert!(!output.stderr.contains("raw adb stderr"));
+        assert!(!output.stderr.contains("/tmp/adb"));
+        assert!(!output.stderr.contains("SERIAL123"));
+        assert!(!output.stderr.contains("usage:"));
+    }
+
+    #[test]
+    fn adb_probe_shadow_omitted_probe_mode_preserves_existing_behavior_without_runner_call() {
+        let runner = FakeAdbRunner::unavailable("runner must not be called");
+
+        let output = run_with_adb_runner(&shadow_args(&[]), &runner);
+
+        assert_eq!(output.exit_code, 0, "stderr: {}", output.stderr);
+        assert_eq!(output.stderr, "");
+        assert_eq!(stdout_json(&output)["status"], "success");
+        assert!(
+            runner.calls().is_empty(),
+            "no-probe path must not execute the ADB runner"
+        );
     }
 
     #[test]

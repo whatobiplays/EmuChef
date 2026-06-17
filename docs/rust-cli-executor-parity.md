@@ -73,10 +73,24 @@ reclassify readiness blockers.
 P8W adds the crate-local live ADB probe adapter foundation on top of that model
 and parser. It uses an injectable command runner, keeps production process
 execution isolated to `ProcessCommandRunner`, and uses fake runners in normal
-tests. It does not expose Rust `detect`/`detect-profiles`, change Python CLI
-behavior, wire probing into planner routes, alter executor/apply or
-Tauri/protocol behavior, add smoke-runner probing, add readiness-gate executed
-evidence, or reclassify readiness blockers.
+tests. P8X wires that adapter only into the direct dev-only Rust shadow binary
+through explicit `--probe-adb-getprop` mode. It does not expose Rust
+`detect`/`detect-profiles`, change Python CLI behavior, wire live probing into
+`rust-shadow` or `rust-experimental`, alter executor/apply or Tauri/protocol
+behavior, add smoke-runner probing, add readiness-gate executed evidence, or
+reclassify readiness blockers.
+P8Y adds optional/manual smoke evidence for that direct Rust shadow live mode
+through `tools/smoke_rust_shadow_live_adb_probe.py`. The smoke requires explicit
+`--rust-planner-bin`, `--adb-path`, and `--serial`, invokes only the supplied
+Rust shadow binary with `--probe-adb-getprop`, and emits deterministic JSON with
+scrubbed command metadata. It does not discover devices, run `adb devices`,
+invoke Cargo, call Python CLI routes, wire live probing into `rust-shadow` or
+`rust-experimental`, alter executor/apply or Tauri/protocol behavior, add normal
+runtime checks, add readiness-gate executed evidence, or reclassify blockers.
+`device_profile_mismatch` is acceptable smoke evidence when the selected device
+intentionally does not match the authored plan. Production route-level probing,
+production mismatch-warning parity, and Python planner deletion remain future
+work.
 
 Rust planner, executor, and CLI behavior is fixture-scoped, test-scoped,
 internal, or editor-backend-scoped unless explicitly promoted by later work.
@@ -171,9 +185,14 @@ device tags are forwarded to the shadow command; no synthetic/profile-derived
 values are forwarded by Python, no ADB/device probing is added, and
 detected-device profile mismatch warnings remain unsupported.
 P8W adds only the crate-local adapter foundation that can execute the modeled
-getprop argv through an injected runner. It remains unwired and does not make
-Rust the production owner of `detect`, `detect-profiles`, or route-level
-planning context resolution.
+getprop argv through an injected runner. P8X wires it only into the direct
+dev-only Rust shadow binary with `--probe-adb-getprop`; this does not make Rust
+the production owner of `detect`, `detect-profiles`, Python CLI route context
+resolution, or default planner routing.
+P8Y adds only optional/manual smoke evidence for that direct shadow live path.
+The smoke requires an explicit selected serial and does not discover devices,
+run `adb devices`, invoke Cargo, call Python CLI routes, participate in normal
+checks, or count as readiness-gate executed evidence.
 P8K extends only the dev-only matrix evidence: optional scenario
 `device_context` values are validated, forwarded to both comparison sides and to
 smoke-runner CLI commands, and reported only as stable presence/key metadata.
@@ -197,9 +216,9 @@ implemented and evidenced. P8N adds only the Rust crate-local probe abstraction,
 fake probe, and context layering helper. P8P adds only pure/test-backed
 mismatch-warning helper logic. P8Q adds fake/test-backed result composition, and
 P8R makes it executable only through a local Rust shadow-binary fixture file.
-These slices do not wire live probing or production mismatch warnings into
-Python CLI routes, Tauri/protocol, executor/apply, normal runtime checks, or the
-readiness gate.
+P8X wires live probing only into the direct Rust shadow binary. These slices do
+not wire live probing or production mismatch warnings into Python CLI routes,
+Tauri/protocol, executor/apply, normal runtime checks, or the readiness gate.
 Existing Rust planner, executor, and CLI slices should remain scoped as parity
 scaffolding until a later phase explicitly promotes or retires the corresponding
 Python surface.

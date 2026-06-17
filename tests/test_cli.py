@@ -513,6 +513,86 @@ class CliTests(unittest.TestCase):
         resolve_adb.assert_not_called()
         run.assert_not_called()
 
+    def test_plan_rust_routes_reject_rust_only_live_adb_probe_flags_before_subprocess_work(self) -> None:
+        cases = [
+            (
+                "rust-experimental",
+                ["--probe-adb-getprop"],
+                2,
+                "unrecognized arguments: --probe-adb-getprop",
+            ),
+            (
+                "rust-shadow",
+                ["--probe-adb-getprop"],
+                2,
+                "unrecognized arguments: --probe-adb-getprop",
+            ),
+            (
+                "rust-experimental",
+                ["--adb-path", "adb"],
+                2,
+                "unrecognized arguments: --adb-path",
+            ),
+            (
+                "rust-shadow",
+                ["--adb-path", "adb"],
+                2,
+                "unrecognized arguments: --adb-path",
+            ),
+            (
+                "rust-experimental",
+                ["--serial", "SERIAL"],
+                1,
+                "--serial is not supported with --planner-backend rust-experimental",
+            ),
+            (
+                "rust-shadow",
+                ["--serial", "SERIAL"],
+                1,
+                "--serial is not supported with --planner-backend rust-shadow",
+            ),
+        ]
+        with TemporaryDirectory() as tmp:
+            shadow_bin = self._shadow_bin(tmp)
+            for backend, extra_args, expected_code, expected_stderr in cases:
+                with self.subTest(backend=backend, extra_args=extra_args):
+                    stdout = StringIO()
+                    stderr = StringIO()
+                    with (
+                        patch("emuchef.cli._build_session") as build_session,
+                        patch("emuchef.cli.resolve_adb_executable") as resolve_adb,
+                        patch("emuchef.cli.SubprocessAdb.detect_device") as detect_device,
+                        patch("subprocess.run") as run,
+                        contextlib.redirect_stdout(stdout),
+                        contextlib.redirect_stderr(stderr),
+                    ):
+                        argv = [
+                            "plan",
+                            "--planner-backend",
+                            backend,
+                            "--rust-planner-bin",
+                            shadow_bin,
+                            "--authored-root",
+                            "authored",
+                            "--device-plan",
+                            "ayaneo.pocket_s_mini.base",
+                            *extra_args,
+                        ]
+                        if expected_code == 2:
+                            with self.assertRaises(SystemExit) as raised:
+                                main(argv)
+                            actual_code = raised.exception.code
+                        else:
+                            actual_code = main(argv)
+
+                    self.assertEqual(actual_code, expected_code)
+                    self.assertEqual(stdout.getvalue(), "")
+                    self.assertIn(expected_stderr, stderr.getvalue())
+                    build_session.assert_not_called()
+                    resolve_adb.assert_not_called()
+                    detect_device.assert_not_called()
+                    run.assert_not_called()
+
     def test_plan_rust_shadow_passes_through_json_and_exit_code_for_planner_error(self) -> None:
         with TemporaryDirectory() as tmp:
             shadow_bin = self._shadow_bin(tmp)

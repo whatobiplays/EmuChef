@@ -125,15 +125,32 @@ model and parser. `AdbDeviceProbe` executes the modeled argv only through an
 injectable command runner, `ProcessCommandRunner` uses direct argv process
 execution without a platform shell, and normal tests use fake runners rather
 than ADB. Stable probe errors do not include raw stderr, OS errors, paths,
-durations, process ids, serial values, or other host-specific details. P8W does
-not wire live probing into `rust-shadow`, `rust-experimental`, the Python CLI,
-Tauri/protocol, executor/apply, smoke runners, normal runtime checks, or the
-static readiness gate. Python remains the current default/reference planner
-owner after P8W. Fixture-based P8R/P8S/P8T/P8U evidence remains separate, and
+durations, process ids, serial values, or other host-specific details. P8X wires
+that adapter only into the direct dev-only Rust shadow binary through explicit
+`--probe-adb-getprop`, optional `--adb-path <path>`, and optional
+`--serial <serial>` flags. That live mode is separate from
+`--detected-facts-json <path>` fixture mode; both are detected-facts sources and
+are mutually exclusive. P8X does not expose or forward live probing through
+`rust-shadow`, `rust-experimental`, the Python CLI, Tauri/protocol,
+executor/apply, smoke runners, normal runtime checks, or the static readiness
+gate. Python remains the current default/reference planner owner after P8X.
+Fixture-based P8R/P8S/P8T/P8U evidence remains separate, and
 `real_device_probing_not_cut_over` plus
 `detected_device_profile_mismatch_warning_not_cut_over` remain default-cutover
-blockers until live probing and production route-level mismatch-warning evidence
+blockers until production route-level probing and mismatch-warning evidence
 exist.
+P8Y adds optional/manual smoke evidence for the direct P8X Rust shadow live mode
+through `tools/smoke_rust_shadow_live_adb_probe.py`. The smoke requires explicit
+`--rust-planner-bin`, `--adb-path`, and `--serial`, invokes only the supplied
+Rust shadow binary with `--probe-adb-getprop`, and emits deterministic JSON with
+scrubbed command metadata. It does not discover devices, run `adb devices`,
+invoke Cargo, call Python CLI routes, reuse fixture or matrix smoke tooling,
+write artifacts, mutate devices beyond `adb shell getprop`, participate in
+normal checks, or count as readiness-gate executed evidence. A
+`device_profile_mismatch` warning is acceptable route evidence for this smoke
+when the selected device intentionally does not match the authored plan. The
+same `real_device_probing_not_cut_over` and
+`detected_device_profile_mismatch_warning_not_cut_over` blockers remain blocked.
 
 ## Current Authored Model
 
@@ -327,11 +344,13 @@ invocation. Repeated `--device-tag` values replace profile-derived tags exactly
 in the supplied order; when no explicit tags are supplied, profile-derived tags
 remain unchanged. Shadow `--bind` values are parsed as strings; repeated binds
 for the same `<recipe_ref>/<input_id>` are grouped into a string array to match
-the current Python CLI parser. The shadow binary does not execute plans, probe
-devices, invoke ADB, access the network, materialize artifacts, expose Tauri or
-sidecar protocol commands, or replace the Python planner CLI. The shadow binary
-also accepts a dev/test-only `--detected-facts-json <path>` fixture path. That
-mode reads a local strict JSON `DetectedDeviceFacts` fixture, applies detected
+the current Python CLI parser. The shadow binary does not execute/apply plans,
+access the network, materialize artifacts, expose Tauri or sidecar protocol
+commands, or replace the Python planner CLI. Live device probing is available
+only when the direct shadow binary is invoked with explicit
+`--probe-adb-getprop`; no probing occurs when that flag is omitted. The shadow
+binary also accepts a dev/test-only `--detected-facts-json <path>` fixture path.
+That mode reads a local strict JSON `DetectedDeviceFacts` fixture, applies detected
 facts over the profile-derived planner context, evaluates mismatch warnings
 from those fixture facts, then applies any explicit `--manufacturer`, `--model`,
 `--android-version`, or repeated `--device-tag` overrides to the emitted
@@ -339,6 +358,27 @@ from those fixture facts, then applies any explicit `--manufacturer`, `--model`,
 `tools/smoke_rust_detected_facts_fixture.py`; it creates temporary matching,
 mismatching, and explicit-context override fixture cases and reports only stable
 classifications, not temp paths or full process output.
+
+The direct Rust shadow live-probe mode builds `adb [-s SERIAL] shell getprop`
+from `AdbProbeConfig`, executes it through `AdbDeviceProbe<ProcessCommandRunner>`,
+parses stdout into `DetectedDeviceFacts`, and routes those facts through the same
+detected-facts planning-result composition path used by fixture mode. Probe
+launch failures and non-zero ADB exits are process errors with stable
+`adb_probe_unavailable` or `adb_probe_failed` stderr classifications and no
+stdout JSON. `--adb-path` and `--serial` are usage errors unless
+`--probe-adb-getprop` is present.
+
+`tools/smoke_rust_shadow_live_adb_probe.py` is the optional/manual smoke for
+that direct Rust shadow live-probe mode. It requires an already-built
+`emuchef-plan-shadow` binary, an explicit ADB path, and an explicit selected
+serial; it never discovers devices or runs `adb devices`. The generated command
+uses only the supplied Rust binary plus `--authored-root`, `--device-plan`,
+`--probe-adb-getprop`, `--adb-path`, and `--serial`. Its deterministic report
+records stable status, stdout/stderr classes, planning status, device-context
+field presence, mismatch-warning presence, and scrubbed command metadata. It
+does not record the raw serial, full command, full stdout/stderr, absolute local
+paths, raw ADB output, timestamps, durations, environment variables, or process
+ids.
 
 The Python CLI exposes a developer-only bridge to an already-built Rust shadow
 planner binary:
@@ -382,11 +422,13 @@ cutover rehearsal route, not the default planner, not a stable final public
 contract, and not Python planner deletion. Its name and behavior may change
 before Rust becomes the default planner backend.
 
-The Rust shadow bridge does not execute/apply plans, probe devices, invoke ADB,
-emit detected-device profile mismatch warnings, access the network, materialize
-artifacts, use Tauri commands, expose sidecar protocol requests, invoke Cargo,
-regenerate fixtures/goldens, or make Rust planner output authoritative. Real
-device context/probing remains a default-cutover blocker. CLI output
+The Python Rust shadow bridge does not execute/apply plans, expose live-probe
+flags, invoke ADB, access the network, materialize artifacts, use Tauri commands,
+expose sidecar protocol requests, invoke Cargo, regenerate fixtures/goldens, or
+make Rust planner output authoritative. Direct Rust shadow fixture and live-probe
+modes can emit detected-device profile mismatch warnings, but Python routes and
+production user-facing planning routes do not own that warning path. Real device
+context/probing remains a default-cutover blocker. CLI output
 compatibility remains a blocker before any default Rust planner routing. Future
 default Rust planner routing must preserve Python concise summary output, Python
 `--verbose` structured YAML, Python `--output` YAML file behavior, and Python
@@ -473,6 +515,13 @@ Raw Rust JSON stdout remains classified as `stdout_json` and fails the
 compatibility-mode smoke for successful scenarios. YAML-like stdout can classify
 as `python_yaml`, but it is not the default P8F success expectation unless a
 future scenario explicitly defines that expectation.
+
+`tools/smoke_rust_shadow_live_adb_probe.py` is separate from the matrix smoke,
+fixture smokes, and readiness gate. It is direct-shadow-only optional/manual
+evidence for P8X live ADB getprop mode and does not call Python route commands,
+Cargo, comparison tooling, matrix smoke tooling, fixture smoke tooling,
+executor/apply, Tauri/protocol, normal runtime checks, or readiness-gate
+execution.
 
 P7P is Python-vs-Rust planner DTO/result comparison evidence, P8B is raw
 passthrough Python CLI `rust-shadow` route invocation evidence, P8C is the

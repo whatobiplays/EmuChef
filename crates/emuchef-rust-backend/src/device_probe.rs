@@ -2,8 +2,10 @@
 //!
 //! This module defines the small abstraction needed to compose detected device
 //! facts into planner context later. It includes a crate-local ADB getprop
-//! adapter foundation, but no route wiring; current planner routes still use
-//! only explicit, profile-derived, or fixture-supplied context.
+//! adapter foundation. The only live route wiring is the explicit dev-only
+//! `emuchef-plan-shadow --probe-adb-getprop` mode; Python CLI routes, Tauri,
+//! executor/apply, smoke runners, normal checks, and readiness-gate execution do
+//! not invoke it.
 
 use std::process::Command;
 
@@ -60,6 +62,12 @@ pub(crate) struct CommandOutput {
 /// device or an installed `adb` binary.
 pub(crate) trait CommandRunner {
     fn run(&self, argv: &[String]) -> Result<CommandOutput, DeviceProbeError>;
+}
+
+impl<T: CommandRunner + ?Sized> CommandRunner for &T {
+    fn run(&self, argv: &[String]) -> Result<CommandOutput, DeviceProbeError> {
+        (*self).run(argv)
+    }
 }
 
 /// Production command runner for the live ADB probe adapter.
@@ -246,7 +254,9 @@ impl DeviceProbe for FakeDeviceProbe {
 ///
 /// Intended future precedence is:
 /// synthetic/profile context -> detected facts -> explicit CLI overrides.
-/// P8N only supplies this helper and does not wire probing into any route.
+/// P8X wires detected facts only through the explicit dev-only Rust shadow
+/// binary live-probe mode. Other routes keep using their existing context
+/// sources.
 pub(crate) fn apply_detected_device_facts_to_context(
     mut context: DeviceContext,
     facts: &DetectedDeviceFacts,
@@ -864,14 +874,11 @@ not a getprop line
     }
 
     #[test]
-    fn planner_route_sources_do_not_invoke_live_adb_probe() {
-        for (name, source) in [
-            ("plan_shadow.rs", include_str!("plan_shadow.rs")),
-            (
-                "planner_device_plan.rs",
-                include_str!("planner_device_plan.rs"),
-            ),
-        ] {
+    fn non_shadow_planner_route_sources_do_not_invoke_live_adb_probe() {
+        for (name, source) in [(
+            "planner_device_plan.rs",
+            include_str!("planner_device_plan.rs"),
+        )] {
             let code = source_without_line_comments(source);
             for forbidden in [
                 "AdbDeviceProbe",

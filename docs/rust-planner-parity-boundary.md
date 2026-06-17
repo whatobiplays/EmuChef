@@ -62,8 +62,10 @@ Rust planner-adjacent coverage is internal and fixture-scoped:
   inputs. P8J adds explicit device context flags to this command for supplied
   manufacturer, model, Android version, and ordered device tags. P8R adds a
   local `--detected-facts-json <path>` fixture mode to the shadow binary only;
-  P8T lets only the explicit `rust-experimental` Python route forward a local
-  fixture path through the Python-facing `--rust-detected-facts-json <path>`
+  P8X adds an explicit `--probe-adb-getprop` live mode to the shadow binary only
+  and keeps fixture mode plus live mode mutually exclusive detected-facts
+  sources. P8T lets only the explicit `rust-experimental` Python route forward a
+  local fixture path through the Python-facing `--rust-detected-facts-json <path>`
   flag. P8A exposes the shadow binary through an explicit developer-only Python
   CLI bridge, but it is not the default planner CLI or a cutover path.
 - `tools/smoke_rust_detected_facts_fixture.py`: dev-only P8S smoke for the P8R
@@ -82,6 +84,14 @@ Rust planner-adjacent coverage is internal and fixture-scoped:
   Python-compatible summary stdout and treats raw Rust JSON as a route-smoke
   failure. It is optional/manual evidence only and does not call the direct P8S
   smoke, normal runtime checks, or the readiness gate.
+- `tools/smoke_rust_shadow_live_adb_probe.py`: dev-only P8Y smoke for the P8X
+  direct Rust shadow live ADB getprop mode. The smoke invokes only a supplied
+  `emuchef-plan-shadow` binary with `--probe-adb-getprop`, explicit
+  `--adb-path`, and explicit `--serial`, then reports deterministic route
+  evidence with scrubbed command metadata. It is optional/manual evidence only
+  and does not discover devices, run `adb devices`, invoke Cargo, call Python
+  CLI routes, reuse fixture or matrix smoke tooling, mutate devices beyond
+  `adb shell getprop`, run normal checks, or participate in the readiness gate.
 - `tools/compare_rust_python_plan.py`: dev-only comparison harness for Python
   planner API output versus Rust shadow planner output. The harness emits a
   deterministic JSON classification report or matrix report and is not part of
@@ -139,9 +149,10 @@ Rust planner-adjacent coverage is internal and fixture-scoped:
   filesystem, access the network, or wire probing into any route. P8W adds a
   crate-local live ADB probe adapter foundation in the same module. It executes
   the modeled argv through an injectable runner and keeps production process
-  execution isolated to `ProcessCommandRunner`; it is not wired into planner
-  routes, Python CLI routes, Tauri/protocol, executor/apply, smoke runners,
-  normal runtime checks, or readiness-gate execution.
+  execution isolated to `ProcessCommandRunner`; P8X wires it only into the
+  direct dev-only Rust shadow binary. It is not wired into Python CLI routes,
+  `rust-shadow`, `rust-experimental`, Tauri/protocol, executor/apply, smoke
+  runners, normal runtime checks, or readiness-gate execution.
 - `crates/emuchef-rust-backend/src/device_profile_match.rs`: P8P crate-local
   pure/test-backed foundation for future detected-device profile mismatch
   warnings. It compares supplied detected facts with authored profile match
@@ -409,8 +420,9 @@ only; the default-cutover blockers remain until live probing and route evidence
 exist. P8V adds only the pure Rust foundation for modeling a future ADB getprop
 probe command and parsing supplied getprop output into detected facts; it does
 not change that blocker classification. P8W adds the live adapter foundation on
-top of that model and parser, but route-level real-device probing and
-production mismatch-warning evidence still do not exist.
+top of that model and parser. P8X wires it only into the direct dev-only shadow
+binary, but production route-level real-device probing and mismatch-warning
+evidence still do not exist.
 
 | Device plan | Device profile | Selected recipes | Private Rust planner status | Required planner-only bindings | Current limitation |
 | --- | --- | --- | --- | --- | --- |
@@ -580,6 +592,52 @@ empty. The direct Rust fixture mode does not probe devices, invoke ADB, enter
 the Python CLI matrix smoke runner, or promote route-level mismatch-warning
 parity.
 
+P8X adds an explicit live ADB getprop path to the shadow binary only:
+
+```bash
+cargo run --manifest-path crates/emuchef-rust-backend/Cargo.toml --bin emuchef-plan-shadow -- \
+  --authored-root authored \
+  --device-plan ayaneo.pocket_s_mini.base \
+  --probe-adb-getprop \
+  --adb-path adb \
+  --serial SERIAL123
+```
+
+Live mode uses `AdbDeviceProbe<ProcessCommandRunner>`, parses getprop stdout
+into `DetectedDeviceFacts`, and routes those facts through the same P8Q
+planning-result composition path as fixture mode. `--adb-path` defaults to `adb`
+when live probing is enabled, and `--serial` is optional. `--adb-path` and
+`--serial` are usage errors without `--probe-adb-getprop`, and
+`--probe-adb-getprop` is mutually exclusive with `--detected-facts-json <path>`.
+Probe launch failures and non-zero ADB exits are process errors with stable
+`adb_probe_unavailable` or `adb_probe_failed` stderr classifications and no
+stdout JSON. The live mode is not exposed through Python CLI routes,
+`rust-shadow`, `rust-experimental`, Tauri/protocol, executor/apply, smoke
+runners, normal runtime checks, or readiness-gate execution.
+
+P8Y adds optional/manual smoke evidence for the P8X direct live path:
+
+```bash
+python3 tools/smoke_rust_shadow_live_adb_probe.py \
+  --authored-root authored \
+  --device-plan ayaneo.pocket_s_mini.base \
+  --rust-planner-bin <path-to-emuchef-plan-shadow> \
+  --adb-path adb \
+  --serial <selected-device-serial>
+```
+
+The P8Y smoke invokes the supplied shadow binary directly and requires an
+explicit ADB path plus selected serial. It never discovers devices, runs
+`adb devices`, invokes Cargo, calls Python CLI routes, writes artifacts, or
+mutates devices beyond `adb shell getprop`. The report includes stable
+classifications and scrubbed metadata only; it omits the raw serial, full
+command, full stdout/stderr, absolute local paths, raw ADB output, timestamps,
+durations, environment variables, and process ids. A `device_profile_mismatch`
+warning is acceptable evidence when the selected device intentionally does not
+match the authored plan. This smoke is not readiness-gate executed evidence and
+does not resolve production route-level probing or mismatch-warning parity
+blockers.
+
 P8S adds optional/manual smoke evidence for the P8R fixture path:
 
 ```bash
@@ -734,18 +792,19 @@ Success exits `0`; planner error results exit non-zero. Argument/usage failures
 and authored-root/device-plan load failures write stable text to stderr and do
 not emit stdout JSON.
 
-The shadow command and Python bridge do not execute plans, probe devices, invoke
-ADB, access the network, download or materialize artifacts, regenerate goldens,
-expose Tauri commands, expose sidecar protocol requests, or replace the default
-Python `emuchef plan` CLI. The P8R fixture mode can create detected facts only
-from a local JSON file supplied to the Rust shadow binary directly or through
-P8T's explicit `rust-experimental` wrapper flag. The raw Rust
-`--detected-facts-json` flag remains unrecognized by Python CLI routes, and
-`rust-shadow` does not accept the Python wrapper flag. ADR 0003 decides that
-Rust should own real-device probing and detected-device profile mismatch warning
-parity before future default Rust planner cutover, but P8M/P8R/P8T do not
-implement live probing or production route-level warning parity. Planner CLI
-cutover remains a future explicit phase.
+The shadow command and Python bridge do not execute/apply plans, access the
+network, download or materialize artifacts, regenerate goldens, expose Tauri
+commands, expose sidecar protocol requests, or replace the default Python
+`emuchef plan` CLI. The P8R fixture mode can create detected facts only from a
+local JSON file supplied to the Rust shadow binary directly or through P8T's
+explicit `rust-experimental` wrapper flag. P8X live probing is direct
+shadow-binary-only and is not forwarded by Python CLI routes. The raw Rust
+`--detected-facts-json`, `--probe-adb-getprop`, and `--adb-path` flags remain
+unrecognized by Python CLI routes, and `rust-shadow` does not accept the Python
+fixture wrapper flag. ADR 0003 decides that Rust should own real-device probing
+and detected-device profile mismatch warning parity before future default Rust
+planner cutover, but P8X is not production route-level warning parity. Planner
+CLI cutover remains a future explicit phase.
 
 ## Dev-Only Python Planner API Vs Rust Shadow Comparison
 
@@ -836,13 +895,14 @@ detected facts. P8Q composes those fake/test-backed pieces into crate-private
 `PlanningResult` construction, but does not add live ADB probing, normal planner
 warning emission, or route wiring. P8R makes that composition path executable
 only through a local `emuchef-plan-shadow --detected-facts-json <path>` fixture
-harness; Python CLI routes, smoke tooling, live probing, normal runtime checks,
-and readiness blocker IDs remain unchanged. P8V adds a pure Rust getprop command
-model and parser foundation only; it consumes supplied text and does not add live
-probing, route-level detection, smoke-runner evidence, or readiness
-reclassification. P8W adds the crate-local adapter that can execute that getprop
-command through an injected runner, but it remains unwired foundation and does
-not count as route-level detection or readiness evidence. Matching matrix status is necessary
+harness. P8V adds a pure Rust getprop command model and parser foundation only;
+it consumes supplied text and does not add live probing, route-level detection,
+smoke-runner evidence, or readiness reclassification. P8W adds the crate-local
+adapter that can execute that getprop command through an injected runner. P8X
+wires that adapter only into direct `emuchef-plan-shadow --probe-adb-getprop`
+manual use. P8Y adds optional/manual direct-shadow smoke evidence for that mode;
+Python CLI routes, production route wiring, normal runtime checks, and readiness
+blocker IDs remain unchanged. Matching matrix status is necessary
 evidence for the compared planner-only fields, not sufficient proof of CLI
 routing, real-device context resolution, executor/apply compatibility, artifact
 materialization, or Python planner deletability.

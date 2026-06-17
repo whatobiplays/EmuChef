@@ -263,7 +263,7 @@ fn detected_facts_shadow_unknown_field_writes_stable_process_error_without_stdou
 }
 
 #[test]
-fn detected_facts_shadow_source_has_no_live_behavior_dependencies() {
+fn detected_facts_shadow_source_avoids_direct_process_network_dependencies() {
     let source = include_str!("../src/plan_shadow.rs");
     let code_without_line_comments = source
         .lines()
@@ -282,12 +282,10 @@ fn detected_facts_shadow_source_has_no_live_behavior_dependencies() {
         "reqwest",
         "ureq",
         "hyper",
-        "adb ",
-        "adb.exe",
     ] {
         assert!(
             !code_without_line_comments.contains(forbidden),
-            "shadow fixture harness must not contain live behavior marker {forbidden:?}"
+            "shadow detected-facts paths must not contain direct process or network marker {forbidden:?}"
         );
     }
 }
