@@ -401,6 +401,33 @@ device intentionally does not match the authored plan. Production route-level
 probing, production mismatch-warning parity, and Python planner deletion remain
 future work.
 
+P8Z adds explicit Python CLI forwarding for live probe intent only through
+`emuchef plan --planner-backend rust-experimental`:
+
+```bash
+python3 -m emuchef plan \
+  --planner-backend rust-experimental \
+  --rust-planner-bin <path-to-emuchef-plan-shadow> \
+  --authored-root authored \
+  --device-plan ayaneo.pocket_s_mini.base \
+  --rust-probe-adb-getprop \
+  --rust-adb-path adb \
+  --rust-serial <selected-device-serial>
+```
+
+Python forwards those wrapper flags to the supplied shadow binary as
+`--probe-adb-getprop`, `--adb-path <path>`, and `--serial <serial>`, then keeps
+using Python-compatible output formatting for usable Rust `PlanningResult` JSON.
+Python does not invoke ADB, discover devices, run `adb devices`, parse
+`getprop`, or validate, normalize, expand, or stat the forwarded ADB path or
+serial. The default Python backend and `rust-shadow` reject the wrapper flags
+before ADB resolution, planner/session construction, device probing, or
+subprocess execution. `--rust-detected-facts-json <path>` fixture forwarding and
+live-probe forwarding are mutually exclusive detected-facts sources. P8Z is not
+default planner cutover, not production route-level probing parity, not
+readiness-gate executed evidence, not a smoke-runner change, and not Python
+planner deletion.
+
 P8S adds optional/manual smoke evidence for the direct shadow-binary fixture
 harness:
 
@@ -525,7 +552,13 @@ Python-compatible summary or YAML path by default. It allows `--verbose` and
 `--output` because those flags use the compatibility formatting path. It also
 accepts `--rust-detected-facts-json <path>` as an explicit local-fixture
 cutover rehearsal input and forwards it unchanged to `emuchef-plan-shadow` as
-`--detected-facts-json <path>`.
+`--detected-facts-json <path>`. It accepts `--rust-probe-adb-getprop`,
+`--rust-adb-path <path>`, and `--rust-serial <serial>` as an explicit live-probe
+cutover rehearsal input and forwards those exact argparse strings to
+`emuchef-plan-shadow` as `--probe-adb-getprop`, `--adb-path <path>`, and
+`--serial <serial>`. The fixture and live-probe inputs are mutually exclusive
+detected-facts sources, and Python does not invoke ADB or validate/normalize the
+forwarded ADB path or serial.
 `--rust-shadow-output` is only valid with
 `--planner-backend rust-shadow`; Python and `rust-experimental` reject it before
 ADB resolution or Python planner/session construction. `rust-experimental` is an

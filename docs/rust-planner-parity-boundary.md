@@ -66,7 +66,14 @@ Rust planner-adjacent coverage is internal and fixture-scoped:
   and keeps fixture mode plus live mode mutually exclusive detected-facts
   sources. P8T lets only the explicit `rust-experimental` Python route forward a
   local fixture path through the Python-facing `--rust-detected-facts-json <path>`
-  flag. P8A exposes the shadow binary through an explicit developer-only Python
+  flag. P8Z lets only the same explicit `rust-experimental` Python route forward
+  live-probe intent through `--rust-probe-adb-getprop`, `--rust-adb-path <path>`,
+  and `--rust-serial <serial>`, which become `--probe-adb-getprop`,
+  `--adb-path <path>`, and `--serial <serial>` for the supplied Rust shadow
+  binary. Python does not invoke ADB, discover devices, run `adb devices`, parse
+  `getprop`, or validate, normalize, expand, or stat the forwarded ADB path or
+  serial. The default Python backend and `rust-shadow` reject the P8Z wrapper
+  flags. P8A exposes the shadow binary through an explicit developer-only Python
   CLI bridge, but it is not the default planner CLI or a cutover path.
 - `tools/smoke_rust_detected_facts_fixture.py`: dev-only P8S smoke for the P8R
   Rust shadow-binary detected-facts fixture harness. The smoke creates temporary
@@ -92,6 +99,13 @@ Rust planner-adjacent coverage is internal and fixture-scoped:
   and does not discover devices, run `adb devices`, invoke Cargo, call Python
   CLI routes, reuse fixture or matrix smoke tooling, mutate devices beyond
   `adb shell getprop`, run normal checks, or participate in the readiness gate.
+- P8Z Python `rust-experimental` live-probe forwarding is covered by
+  `tests/test_cli.py`. It is wrapper-only migration routing: fixture forwarding
+  and live-probe forwarding are mutually exclusive detected-facts sources, raw
+  Rust flags remain unrecognized by Python CLI routes, and existing Python
+  `--serial` remains separate from `--rust-serial`. It is not `rust-shadow`
+  behavior, not default Python planning behavior, not smoke-runner behavior, not
+  executor/apply or Tauri/protocol behavior, and not readiness-gate execution.
 - `tools/compare_rust_python_plan.py`: dev-only comparison harness for Python
   planner API output versus Rust shadow planner output. The harness emits a
   deterministic JSON classification report or matrix report and is not part of
@@ -127,7 +141,12 @@ Rust planner-adjacent coverage is internal and fixture-scoped:
   structured YAML over the Rust JSON mapping. P8G coverage keeps Python as the
   default planner, rejects `--rust-shadow-output` for non-`rust-shadow` backends,
   and verifies that `rust-experimental` reuses Rust shadow command construction
-  with Python-compatible output by default.
+  with Python-compatible output by default. P8Z coverage verifies that only
+  `rust-experimental` accepts live-probe wrapper flags, that Python forwards
+  exact wrapper strings to raw Rust shadow flags, that Python does not enter
+  session construction, ADB resolution, device detection, or executor/apply for
+  that route, and that unsupported backends reject those flags before
+  subprocess work.
 - `docs/adr/0002-rust-planner-cli-output-compatibility.md`: P8D decision record
   for future default Rust planner routing. The accepted target is compatibility
   with the current Python `emuchef plan` output and exit-code behavior unless a

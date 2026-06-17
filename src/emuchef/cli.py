@@ -120,6 +120,19 @@ def main(argv: list[str] | None = None) -> int:
             "--planner-backend rust-experimental."
         ),
     )
+    plan_parser.add_argument(
+        "--rust-probe-adb-getprop",
+        action="store_true",
+        help="Dev-only live ADB getprop probe forwarded only by --planner-backend rust-experimental.",
+    )
+    plan_parser.add_argument(
+        "--rust-adb-path",
+        help="Dev-only ADB path forwarded only with --rust-probe-adb-getprop.",
+    )
+    plan_parser.add_argument(
+        "--rust-serial",
+        help="Dev-only device serial forwarded only with --rust-probe-adb-getprop.",
+    )
 
     detect_parser = subparsers.add_parser(
         "detect",
@@ -286,6 +299,16 @@ def _build_rust_shadow_plan_command(args: argparse.Namespace) -> list[str]:
     ]
     if args.rust_detected_facts_json is not None:
         command.extend(["--detected-facts-json", args.rust_detected_facts_json])
+    if args.rust_probe_adb_getprop:
+        command.extend(
+            [
+                "--probe-adb-getprop",
+                "--adb-path",
+                args.rust_adb_path,
+                "--serial",
+                args.rust_serial,
+            ]
+        )
     _append_rust_shadow_device_context_args(command, args)
     for raw_binding in args.bind:
         command.extend(["--bind", raw_binding])
@@ -308,6 +331,28 @@ def _validate_plan_backend_args(args: argparse.Namespace) -> None:
         raise ValueError("--rust-shadow-output is only valid with --planner-backend rust-shadow.")
     if args.planner_backend != "rust-experimental" and args.rust_detected_facts_json is not None:
         raise ValueError("--rust-detected-facts-json is only valid with --planner-backend rust-experimental.")
+    rust_live_probe_options = [
+        ("--rust-probe-adb-getprop", args.rust_probe_adb_getprop),
+        ("--rust-adb-path", args.rust_adb_path is not None),
+        ("--rust-serial", args.rust_serial is not None),
+    ]
+    if args.planner_backend != "rust-experimental":
+        for option, is_set in rust_live_probe_options:
+            if is_set:
+                raise ValueError(f"{option} is only valid with --planner-backend rust-experimental.")
+        return
+    if args.rust_detected_facts_json is not None and args.rust_probe_adb_getprop:
+        raise ValueError("--rust-detected-facts-json cannot be combined with --rust-probe-adb-getprop.")
+    if args.rust_probe_adb_getprop:
+        if args.rust_adb_path is None:
+            raise ValueError("--rust-probe-adb-getprop requires --rust-adb-path.")
+        if args.rust_serial is None:
+            raise ValueError("--rust-probe-adb-getprop requires --rust-serial.")
+        return
+    if args.rust_adb_path is not None:
+        raise ValueError("--rust-adb-path requires --rust-probe-adb-getprop.")
+    if args.rust_serial is not None:
+        raise ValueError("--rust-serial requires --rust-probe-adb-getprop.")
 
 
 def _effective_rust_shadow_output(args: argparse.Namespace) -> str:

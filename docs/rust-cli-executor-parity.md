@@ -91,6 +91,20 @@ runtime checks, add readiness-gate executed evidence, or reclassify blockers.
 intentionally does not match the authored plan. Production route-level probing,
 production mismatch-warning parity, and Python planner deletion remain future
 work.
+P8Z adds explicit Python CLI forwarding only for
+`emuchef plan --planner-backend rust-experimental`: `--rust-probe-adb-getprop`,
+`--rust-adb-path <path>`, and `--rust-serial <serial>` are forwarded to the
+supplied Rust shadow binary as `--probe-adb-getprop`, `--adb-path <path>`, and
+`--serial <serial>`. Python does not invoke ADB, discover devices, run
+`adb devices`, parse `getprop`, or validate, normalize, expand, or stat the ADB
+path or serial. The default Python backend and `rust-shadow` reject these wrapper
+flags before session construction, ADB resolution, Python planner work, or Rust
+subprocess execution. Fixture forwarding with
+`--rust-detected-facts-json <path>` and live-probe forwarding are mutually
+exclusive detected-facts sources. P8Z does not change default `emuchef plan`,
+Python planner behavior, executor/apply, Tauri/protocol, smoke runners, normal
+checks, readiness-gate blockers, Cargo fallback behavior, or Python golden
+ownership.
 
 Rust planner, executor, and CLI behavior is fixture-scoped, test-scoped,
 internal, or editor-backend-scoped unless explicitly promoted by later work.
@@ -173,6 +187,11 @@ with temporary `--rust-detected-facts-json` fixtures, requires concise
 Python-compatible summary stdout, and does not add live probing, normal checks,
 readiness-gate execution, default-route behavior, or `rust-shadow` fixture
 forwarding.
+P8Z adds `--rust-probe-adb-getprop`, `--rust-adb-path <path>`, and
+`--rust-serial <serial>` only to the same explicit `rust-experimental` route; it
+forwards them as raw Rust shadow live-probe flags and keeps fixture and live
+detected-facts sources mutually exclusive. Python still does not invoke or parse
+ADB, and the default Python backend plus `rust-shadow` reject the wrapper flags.
 P8I adds a static readiness report for
 future default-cutover PRs; it lists required manual evidence but does not run
 comparison/smoke tooling, Cargo, npm, ADB, executor/apply, Tauri/protocol,
@@ -193,6 +212,11 @@ P8Y adds only optional/manual smoke evidence for that direct shadow live path.
 The smoke requires an explicit selected serial and does not discover devices,
 run `adb devices`, invoke Cargo, call Python CLI routes, participate in normal
 checks, or count as readiness-gate executed evidence.
+P8Z lets only the explicit `rust-experimental` Python route forward live-probe
+wrapper flags to the supplied Rust shadow binary and keeps Python out of ADB
+execution, device discovery, `getprop` parsing, and path/serial normalization.
+The default Python backend and `rust-shadow` reject those wrapper flags, and
+readiness blockers remain blocked.
 P8K extends only the dev-only matrix evidence: optional scenario
 `device_context` values are validated, forwarded to both comparison sides and to
 smoke-runner CLI commands, and reported only as stable presence/key metadata.
@@ -217,8 +241,11 @@ fake probe, and context layering helper. P8P adds only pure/test-backed
 mismatch-warning helper logic. P8Q adds fake/test-backed result composition, and
 P8R makes it executable only through a local Rust shadow-binary fixture file.
 P8X wires live probing only into the direct Rust shadow binary. These slices do
-not wire live probing or production mismatch warnings into Python CLI routes,
-Tauri/protocol, executor/apply, normal runtime checks, or the readiness gate.
+not wire live probing or production mismatch warnings into default Python
+planning, `rust-shadow`, Tauri/protocol, executor/apply, normal runtime checks,
+or the readiness gate. P8Z adds only `rust-experimental` wrapper forwarding for
+that direct Rust shadow live mode and does not make Python the owner of ADB
+probing or mismatch-warning parity.
 Existing Rust planner, executor, and CLI slices should remain scoped as parity
 scaffolding until a later phase explicitly promotes or retires the corresponding
 Python surface.

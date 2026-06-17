@@ -146,10 +146,23 @@ Rust shadow binary with `--probe-adb-getprop`, and emits deterministic JSON with
 scrubbed command metadata. It does not discover devices, run `adb devices`,
 invoke Cargo, call Python CLI routes, reuse fixture or matrix smoke tooling,
 write artifacts, mutate devices beyond `adb shell getprop`, participate in
-normal checks, or count as readiness-gate executed evidence. A
-`device_profile_mismatch` warning is acceptable route evidence for this smoke
-when the selected device intentionally does not match the authored plan. The
-same `real_device_probing_not_cut_over` and
+normal checks, or count as readiness-gate executed evidence. P8Z adds explicit
+Python CLI forwarding for that live-probe intent only through `emuchef plan
+--planner-backend rust-experimental`. The Python wrapper flags are
+`--rust-probe-adb-getprop`, `--rust-adb-path <path>`, and
+`--rust-serial <serial>`; Python forwards the exact argparse strings to the
+supplied Rust shadow binary as `--probe-adb-getprop`, `--adb-path <path>`, and
+`--serial <serial>`. Python does not invoke ADB, discover devices, run
+`adb devices`, parse `getprop`, or validate, normalize, expand, or stat the ADB
+path or serial. The default Python backend and `rust-shadow` reject those wrapper
+flags before ADB resolution, planner/session construction, device probing, or
+subprocess execution. `--rust-detected-facts-json <path>` fixture forwarding and
+live-probe forwarding are mutually exclusive detected-facts sources. A
+`device_profile_mismatch` warning is acceptable route evidence for the P8Y smoke
+when the selected device intentionally does not match the authored plan. P8Z is
+not default planner cutover, not production route-level probing parity, not
+readiness-gate executed evidence, and not Python planner deletion. The same
+`real_device_probing_not_cut_over` and
 `detected_device_profile_mismatch_warning_not_cut_over` blockers remain blocked.
 
 ## Current Authored Model
@@ -413,8 +426,15 @@ an explicit non-default migration route. It reuses the same supplied Rust shadow
 planner binary invocation as `rust-shadow`, always uses Python-compatible output
 formatting, forwards the same explicit device context flags as `rust-shadow`,
 forwards explicit `--rust-detected-facts-json <path>` as
-`--detected-facts-json <path>` without Python-side fixture inspection, and allows
-`--verbose` and `--output` through that compatibility formatting path.
+`--detected-facts-json <path>` without Python-side fixture inspection, forwards
+explicit live-probe wrapper flags `--rust-probe-adb-getprop`,
+`--rust-adb-path <path>`, and `--rust-serial <serial>` as
+`--probe-adb-getprop`, `--adb-path <path>`, and `--serial <serial>`, and allows
+`--verbose` and `--output` through that compatibility formatting path. Fixture
+forwarding and live-probe forwarding are mutually exclusive detected-facts
+sources. Python does not invoke ADB, discover devices, run `adb devices`, parse
+`getprop`, or validate, normalize, expand, or stat the forwarded ADB path or
+serial.
 `--rust-shadow-output` is only valid with
 `--planner-backend rust-shadow`; Python and `rust-experimental` reject it before
 ADB resolution or planner/session construction. `rust-experimental` is a
@@ -422,13 +442,16 @@ cutover rehearsal route, not the default planner, not a stable final public
 contract, and not Python planner deletion. Its name and behavior may change
 before Rust becomes the default planner backend.
 
-The Python Rust shadow bridge does not execute/apply plans, expose live-probe
-flags, invoke ADB, access the network, materialize artifacts, use Tauri commands,
-expose sidecar protocol requests, invoke Cargo, regenerate fixtures/goldens, or
-make Rust planner output authoritative. Direct Rust shadow fixture and live-probe
-modes can emit detected-device profile mismatch warnings, but Python routes and
-production user-facing planning routes do not own that warning path. Real device
-context/probing remains a default-cutover blocker. CLI output
+The Python Rust shadow bridge does not execute/apply plans, invoke ADB, access
+the network, materialize artifacts, use Tauri commands, expose sidecar protocol
+requests, invoke Cargo, regenerate fixtures/goldens, or make Rust planner output
+authoritative. Only `rust-experimental` accepts Python-facing detected-facts
+fixture and live-probe wrapper flags; the default Python backend and
+`rust-shadow` reject them. Direct Rust shadow fixture and live-probe modes can
+emit detected-device profile mismatch warnings, and `rust-experimental` can
+format forwarded Rust `PlanningResult` JSON through the Python-compatible path,
+but production user-facing planning routes do not own that warning path. Real
+device context/probing remains a default-cutover blocker. CLI output
 compatibility remains a blocker before any default Rust planner routing. Future
 default Rust planner routing must preserve Python concise summary output, Python
 `--verbose` structured YAML, Python `--output` YAML file behavior, and Python
