@@ -118,6 +118,9 @@ Rust planner-adjacent coverage is internal and fixture-scoped:
   planner deletion. The `real_device_probing_not_cut_over` and
   `detected_device_profile_mismatch_warning_not_cut_over` blockers remain
   blocked.
+- `docs/rust-live-probe-evidence-and-cutover-gap.md`: consolidated P8X-P8AA
+  live-probe evidence, default-route, production-route, and readiness-gate gap
+  summary.
 - `tools/compare_rust_python_plan.py`: dev-only comparison harness for Python
   planner API output versus Rust shadow planner output. The harness emits a
   deterministic JSON classification report or matrix report and is not part of

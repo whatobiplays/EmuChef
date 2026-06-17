@@ -116,6 +116,9 @@ planner cutover, not production route-level probing parity, not readiness-gate
 executed evidence, and not Python planner deletion. The
 `real_device_probing_not_cut_over` and
 `detected_device_profile_mismatch_warning_not_cut_over` blockers remain blocked.
+For the consolidated P8X-P8AA live-probe evidence, default-route,
+production-route, and readiness-gate gap summary, see
+`docs/rust-live-probe-evidence-and-cutover-gap.md`.
 
 P8I adds `tools/check_rust_planner_cutover_readiness.py` as a static,
 developer-only readiness gate for any future PR that proposes making Rust the

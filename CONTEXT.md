@@ -179,6 +179,9 @@ when the selected live device intentionally does not match the authored plan.
 P8AA is not default planner cutover, not production route-level probing parity,
 and not Python planner deletion. The `real_device_probing_not_cut_over` and
 `detected_device_profile_mismatch_warning_not_cut_over` blockers remain blocked.
+`docs/rust-live-probe-evidence-and-cutover-gap.md` is the consolidated P8X-P8AA
+live-probe evidence, default-route, production-route, and readiness-gate gap
+summary.
 
 ## Current Authored Model
 

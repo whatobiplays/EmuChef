@@ -452,6 +452,9 @@ execution, and it does not make default planner cutover, production route-level
 probing parity, or Python planner deletion ready. The
 `real_device_probing_not_cut_over` and
 `detected_device_profile_mismatch_warning_not_cut_over` blockers remain blocked.
+See `../../docs/rust-live-probe-evidence-and-cutover-gap.md` for the
+consolidated P8X-P8AA live-probe evidence, default-route, production-route, and
+readiness-gate gap summary.
 
 P8S adds optional/manual smoke evidence for the direct shadow-binary fixture
 harness:

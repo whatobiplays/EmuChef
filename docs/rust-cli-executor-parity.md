@@ -118,6 +118,9 @@ executor/apply or Tauri/protocol behavior, participate in normal checks, add
 readiness-gate executed evidence, reclassify blockers, or make Python planner
 deletion ready. The `real_device_probing_not_cut_over` and
 `detected_device_profile_mismatch_warning_not_cut_over` blockers remain blocked.
+See `docs/rust-live-probe-evidence-and-cutover-gap.md` for the consolidated
+P8X-P8AA live-probe evidence, default-route, production-route, and
+readiness-gate gap summary.
 
 Rust planner, executor, and CLI behavior is fixture-scoped, test-scoped,
 internal, or editor-backend-scoped unless explicitly promoted by later work.
