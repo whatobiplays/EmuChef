@@ -36,14 +36,18 @@ For future Rust planner default routing, the accepted real-device context
 ownership model is recorded in
 `docs/adr/0003-rust-real-device-context-ownership.md`: Rust should own
 real-device probing and detected-device profile mismatch warning parity before
-default Rust planner cutover. P8M records that ownership decision. P8N adds
-only the crate-local Rust fake/test probe foundation. P8O adds fake/test-backed
-detected-facts planner-input construction. Intended future context precedence:
-synthetic/profile context -> detected facts -> explicit CLI overrides. P8P adds
-pure/test-backed mismatch-warning helper logic for supplied detected facts and
-authored profile criteria. P8Q composes that helper into fake/test-backed
-planning-result construction. P8R exposes the P8Q composition path only through
-a local `emuchef-plan-shadow --detected-facts-json <path>` fixture harness.
+default Rust planner cutover. P8M records that ownership decision.
+`docs/adr/0004-default-route-live-probe-cutover-design.md` records that future
+default-route live probing should be Rust-owned and that P8X-P8AA migration
+evidence does not clear the default-route probing or mismatch-warning blockers.
+P8N adds only the crate-local Rust fake/test probe foundation. P8O adds
+fake/test-backed detected-facts planner-input construction. Intended future
+context precedence: synthetic/profile context -> detected facts -> explicit CLI
+overrides. P8P adds pure/test-backed mismatch-warning helper logic for supplied
+detected facts and authored profile criteria. P8Q composes that helper into
+fake/test-backed planning-result construction. P8R exposes the P8Q composition
+path only through a local `emuchef-plan-shadow --detected-facts-json <path>`
+fixture harness.
 P8S adds optional/manual smoke evidence for that direct Rust shadow-binary
 fixture harness through `tools/smoke_rust_detected_facts_fixture.py`. P8T lets
 only the explicit `rust-experimental` Python route forward a local fixture path
@@ -120,7 +124,9 @@ deletion ready. The `real_device_probing_not_cut_over` and
 `detected_device_profile_mismatch_warning_not_cut_over` blockers remain blocked.
 See `docs/rust-live-probe-evidence-and-cutover-gap.md` for the consolidated
 P8X-P8AA live-probe evidence, default-route, production-route, and
-readiness-gate gap summary.
+readiness-gate gap summary. See
+`docs/adr/0004-default-route-live-probe-cutover-design.md` for the accepted
+future default-route live-probe cutover design.
 
 Rust planner, executor, and CLI behavior is fixture-scoped, test-scoped,
 internal, or editor-backend-scoped unless explicitly promoted by later work.

@@ -16,6 +16,9 @@ Rust planner real-device context ownership decision is recorded in
 `docs/adr/0003-rust-real-device-context-ownership.md`: Rust should own
 real-device probing and detected-device profile mismatch warning parity before a
 default Rust planner cutover.
+`docs/adr/0004-default-route-live-probe-cutover-design.md` records that future
+default-route live probing should be Rust-owned and that P8X-P8AA migration
+evidence does not clear the default-route probing or mismatch-warning blockers.
 
 Rust planner tests include an intentional fixture inventory/parsing guard for
 the existing Phase 6M/6N planner parity evidence. The guard consumes checked-in
@@ -121,6 +124,10 @@ Rust planner-adjacent coverage is internal and fixture-scoped:
 - `docs/rust-live-probe-evidence-and-cutover-gap.md`: consolidated P8X-P8AA
   live-probe evidence, default-route, production-route, and readiness-gate gap
   summary.
+- `docs/adr/0004-default-route-live-probe-cutover-design.md`: P8AC decision
+  record for Rust-owned future default-route live probing. P8X-P8AA remain
+  migration evidence, and production/default-route evidence is still required
+  before the live-probing and mismatch-warning blockers can be cleared.
 - `tools/compare_rust_python_plan.py`: dev-only comparison harness for Python
   planner API output versus Rust shadow planner output. The harness emits a
   deterministic JSON classification report or matrix report and is not part of

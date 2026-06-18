@@ -454,7 +454,9 @@ probing parity, or Python planner deletion ready. The
 `detected_device_profile_mismatch_warning_not_cut_over` blockers remain blocked.
 See `../../docs/rust-live-probe-evidence-and-cutover-gap.md` for the
 consolidated P8X-P8AA live-probe evidence, default-route, production-route, and
-readiness-gate gap summary.
+readiness-gate gap summary. See
+`../../docs/adr/0004-default-route-live-probe-cutover-design.md` for the
+accepted future default-route live-probe cutover design.
 
 P8S adds optional/manual smoke evidence for the direct shadow-binary fixture
 harness:
@@ -693,7 +695,12 @@ fixture/golden work.
 P8M records the accepted future ownership decision in
 `../../docs/adr/0003-rust-real-device-context-ownership.md`: Rust should own
 real-device probing and detected-device profile mismatch warning parity for
-future default Rust planner cutover. P8N adds the crate-local foundation for the
+future default Rust planner cutover.
+P8AC records the accepted future default-route live-probe cutover design in
+`../../docs/adr/0004-default-route-live-probe-cutover-design.md`: default-route
+live probing should be Rust-owned, and P8X-P8AA migration evidence does not
+clear the default-route probing or mismatch-warning blockers. P8N adds the
+crate-local foundation for the
 first implementation step: `src/device_probe.rs` defines detected facts, stable
 probe errors, a probe trait, a fake probe, and a helper that applies detected
 facts over planner `DeviceContext`. P8O adds crate-private fake/test-backed

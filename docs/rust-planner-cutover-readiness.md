@@ -19,8 +19,13 @@ otherwise.
 The future default Rust planner real-device context ownership decision is
 accepted in `docs/adr/0003-rust-real-device-context-ownership.md`: Rust should
 own real-device probing and detected-device profile mismatch warning parity for
-future default Rust planner cutover. P8M records that ownership decision. P8N
-adds a crate-local Rust probe abstraction, fake probe, and tests for layering
+future default Rust planner cutover. P8M records that ownership decision.
+`docs/adr/0004-default-route-live-probe-cutover-design.md` records the
+default-route live-probe cutover design: future default-route probing should be
+Rust-owned, and P8X-P8AA migration evidence does not clear
+`real_device_probing_not_cut_over` or
+`detected_device_profile_mismatch_warning_not_cut_over`.
+P8N adds a crate-local Rust probe abstraction, fake probe, and tests for layering
 detected facts over synthetic/profile-derived context. P8O adds fake/test-backed
 planner-input construction that applies detected facts over
 synthetic/profile-derived context. P8P adds pure/test-backed Rust
@@ -263,6 +268,11 @@ The Rust planner evidence is planner-only and migration-focused:
   behavior, Tauri/protocol behavior, Cargo fallback behavior, fixture/golden
   regeneration, normal runtime-check wiring, or Python planner deletion
   readiness.
+- `docs/adr/0004-default-route-live-probe-cutover-design.md` records the P8AC
+  default-route live-probe cutover design. Future default-route live probing
+  should be Rust-owned, explicit migration-route evidence remains migration
+  evidence, and the live-probing plus mismatch-warning readiness blockers stay
+  blocked until production/default-route evidence exists.
 - `tools/plan_parity_scenarios.json` is the P7P scenario matrix for the current
   checked-in device-plan scenarios plus P8K explicit-context evidence. The
   current checked-in scenario matrix expects all six scenarios to classify as

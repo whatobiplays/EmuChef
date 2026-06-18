@@ -182,6 +182,9 @@ and not Python planner deletion. The `real_device_probing_not_cut_over` and
 `docs/rust-live-probe-evidence-and-cutover-gap.md` is the consolidated P8X-P8AA
 live-probe evidence, default-route, production-route, and readiness-gate gap
 summary.
+ADR 0004 records that future default-route live probing should be Rust-owned
+and that P8X-P8AA migration evidence does not clear the default-route probing or
+mismatch-warning blockers.
 
 ## Current Authored Model
 
