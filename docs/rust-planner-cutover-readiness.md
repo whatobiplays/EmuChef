@@ -35,17 +35,24 @@ Rust-owned, and P8X-P8AA migration evidence does not clear
 default-route probe request/response shape without implementing probing or
 clearing readiness blockers.
 `docs/rust-production-equivalent-live-probe-smoke.md` records the evidence bar
-for production-equivalent live probe smoke evidence and records the optional
-P8AJ manual smoke tool. The tool is not required manual evidence in this
-readiness gate and does not clear readiness blockers by its existence alone.
+for production-equivalent live probe smoke evidence and records the P8AJ manual
+smoke tool. P8AL allows the readiness gate to consume a manually saved P8AJ
+report only when it is explicitly supplied through
+`--p8aj-live-probe-report <path>`. Tool existence alone is insufficient.
+Accepted P8AJ evidence moves the `real_device_probing_not_cut_over` blocker
+entry to `evidence_accepted`; it does not clear default cutover, and the
+top-level readiness status remains `blocked`.
 `docs/rust-default-route-mismatch-warning-parity.md` records the evidence bar
-for future default-route mismatch-warning parity without adding required manual
-evidence or clearing readiness blockers.
+for future default-route mismatch-warning parity.
 P8AK adds optional/manual fixture-backed mismatch-warning parity smoke tooling
 for the explicit production-equivalent route. The tool can produce evidence for
 `detected_device_profile_mismatch_warning_not_cut_over` when run manually, but
-it is not required manual evidence in this readiness gate and does not clear
-readiness blockers by its existence alone.
+tool existence alone is insufficient. P8AL allows the readiness gate to consume
+a manually saved P8AK report only when it is explicitly supplied through
+`--p8ak-mismatch-warning-report <path>`. Accepted P8AK evidence moves the
+`detected_device_profile_mismatch_warning_not_cut_over` blocker entry to
+`evidence_accepted`; it does not clear default cutover, and the top-level
+readiness status remains `blocked`.
 `docs/rust-production-equivalent-route-implementation-plan.md` records the P8AG
 implementation plan for an explicit production-equivalent route. P8AH
 recognizes and reserves the backend name in the CLI parser, and P8AI wires it
@@ -180,12 +187,13 @@ production-route, and readiness-gate gap summary, see
 P8I adds `tools/check_rust_planner_cutover_readiness.py` as a static,
 developer-only readiness gate for any future PR that proposes making Rust the
 default `emuchef plan` backend. The gate verifies current static prerequisites,
-lists required manual/live evidence commands, and reports remaining default
-cutover blockers. It does not run live comparison or smoke tooling, Cargo, npm,
-ADB, executor/apply, Tauri/protocol checks, device probing, network access,
-artifact materialization, fixture/golden regeneration, or Python planner
-deletion work. Its top-level report status is expected to remain `blocked` until
-future phases intentionally clear default-cutover blockers.
+lists required manual/live evidence commands, can classify explicitly supplied
+P8AJ/P8AK JSON reports, and reports remaining default cutover blockers. It does
+not run live comparison or smoke tooling, Cargo, npm, ADB, executor/apply,
+Tauri/protocol checks, device probing, network access, artifact materialization,
+fixture/golden regeneration, or Python planner deletion work. Its top-level
+report status is expected to remain `blocked` until future phases intentionally
+clear default-cutover blockers.
 
 ## Current Evidence
 

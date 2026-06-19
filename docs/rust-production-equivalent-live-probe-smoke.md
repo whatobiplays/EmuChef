@@ -7,6 +7,9 @@ smoke evidence and records the optional/manual P8AJ smoke tool. P8AJ adds
 `tools/smoke_rust_production_equivalent_live_adb_probe.py` as tooling only. The
 tool can produce evidence when it is run manually with real device inputs, but
 the tool's existence alone does not clear readiness blockers.
+P8AL is supplied-report evidence intake only. The readiness gate accepts P8AJ
+evidence only when a manually saved report is supplied with
+`--p8aj-live-probe-report <path>` and the report satisfies the evidence bar.
 `docs/rust-default-route-mismatch-warning-parity.md` separately records the
 P8AF evidence bar for future default-route mismatch-warning parity.
 `docs/rust-production-equivalent-route-implementation-plan.md` separately
@@ -128,12 +131,17 @@ P8AJ does not:
 The P8AJ tool alone does not clear `real_device_probing_not_cut_over`.
 
 Manual evidence produced by running the tool against real device inputs may
-support a future reclassification of `real_device_probing_not_cut_over`. It does
-not clear `detected_device_profile_mismatch_warning_not_cut_over`; that blocker
-remains separate and still requires P8AK evidence satisfying
+support P8AL readiness-gate evidence intake for
+`real_device_probing_not_cut_over`. An accepted P8AJ report moves that blocker
+entry to `evidence_accepted`; it does not fully clear default cutover, and the
+top-level readiness status remains `blocked`.
+
+P8AJ evidence does not clear
+`detected_device_profile_mismatch_warning_not_cut_over`; that blocker remains
+separate and still requires accepted P8AK evidence satisfying
 `docs/rust-default-route-mismatch-warning-parity.md`.
 
-After P8AJ, both blockers remain blocked:
+Without an accepted P8AL-supplied report, both blockers remain blocked:
 
 ```text
 real_device_probing_not_cut_over

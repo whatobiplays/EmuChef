@@ -13,6 +13,10 @@ production-equivalent route.
 P8AK adds optional/manual fixture-backed smoke tooling for this evidence bar
 through the explicit production-equivalent route. The tool can produce evidence
 when run manually, but the tool's existence alone does not clear blocker status.
+P8AL is supplied-report evidence intake only. The readiness gate accepts P8AK
+evidence only when a manually saved report is supplied with
+`--p8ak-mismatch-warning-report <path>` and the report satisfies the evidence
+bar.
 
 ## Evidence Bar
 
@@ -135,13 +139,15 @@ This design alone does not clear
 
 P8AK tooling alone does not clear
 `detected_device_profile_mismatch_warning_not_cut_over`. Manual evidence from
-that tooling may support a future P8AL readiness-gate update only after the
-evidence exists.
+that tooling may support P8AL readiness-gate evidence intake only after the
+report exists and is explicitly supplied. An accepted P8AK report moves the
+blocker entry to `evidence_accepted`; it does not fully clear default cutover,
+and the top-level readiness status remains `blocked`.
 
 `real_device_probing_not_cut_over` remains separate unless the same future phase
-also satisfies the P8AE production-equivalent live probe evidence bar.
+also supplies an accepted P8AJ production-equivalent live probe report.
 
-After P8AF, both blockers remain blocked:
+Without an accepted P8AL-supplied report, both blockers remain blocked:
 
 ```text
 real_device_probing_not_cut_over

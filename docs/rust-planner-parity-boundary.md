@@ -39,6 +39,11 @@ for that explicit live-probe route without adding normal-check or readiness-gate
 execution. P8AK adds optional/manual fixture-backed mismatch-warning smoke
 tooling for the same explicit route without adding normal-check or
 readiness-gate execution.
+P8AL updates the static readiness gate to consume only explicitly supplied
+P8AJ/P8AK JSON reports. Accepted reports move the relevant blocker entry to
+`evidence_accepted`, but they do not clear default cutover. The top-level
+readiness status remains `blocked`, and default `emuchef plan` remains
+Python-owned until a separate default-cutover phase.
 
 Rust planner tests include an intentional fixture inventory/parsing guard for
 the existing Phase 6M/6N planner parity evidence. The guard consumes checked-in
@@ -202,11 +207,12 @@ Rust planner-adjacent coverage is internal and fixture-scoped:
   gate for future default Rust planner proposals. It checks static prerequisites,
   durable readiness-document references, stable CLI backend tokens, required
   artifact presence, and checked-in device-plan coverage from
-  `authored/device_plans/*.yaml` / `*.yml` filenames. It emits deterministic JSON
+  `authored/device_plans/*.yaml` / `*.yml` filenames. It emits deterministic JSON,
   validates optional `device_context` shape separately from meaningful
-  explicit-context coverage, and lists manual evidence commands without executing
-  comparison, smoke, Cargo, npm, ADB, Tauri/protocol, executor/apply, network,
-  artifact, or golden regeneration work.
+  explicit-context coverage, lists manual evidence commands, and classifies only
+  explicitly supplied P8AJ/P8AK report files without executing comparison, smoke,
+  Cargo, npm, ADB, Tauri/protocol, executor/apply, network, artifact, or golden
+  regeneration work.
 - `tests/test_cli.py`: P8C and P8E CLI output compatibility contract coverage for
   the explicit `rust-shadow` bridge. The default guarded contract is Rust
   stdout/stderr/exit-code passthrough. The explicit
