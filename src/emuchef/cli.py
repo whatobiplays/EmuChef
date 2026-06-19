@@ -57,6 +57,7 @@ from emuchef.planner import (
 
 logger = logging.getLogger(__name__)
 
+_DEFAULT_RUST_PLANNER_BACKEND = "rust-production-equivalent"
 _RUST_SUBPROCESS_BACKENDS = frozenset(
     {"rust-shadow", "rust-experimental", "rust-production-equivalent"}
 )
@@ -105,12 +106,13 @@ def main(argv: list[str] | None = None) -> int:
     plan_parser.add_argument(
         "--planner-backend",
         choices=("python", "rust-shadow", "rust-experimental", "rust-production-equivalent"),
-        default="python",
         help=(
-            "Planner implementation to use. rust-shadow is dev-only passthrough by default; "
+            "Planner implementation to use. Omit this option to use default Rust-owned "
+            "planning through rust-production-equivalent. python remains an explicit fallback; "
+            "rust-shadow is dev-only passthrough by default; "
             "rust-experimental is explicit non-default migration routing and requires --rust-planner-bin; "
-            "rust-production-equivalent is explicit non-default Rust-owned probe routing and requires "
-            "--rust-planner-bin."
+            "selecting rust-production-equivalent explicitly uses the same Rust-owned probe routing and "
+            "requires --rust-planner-bin."
         ),
     )
     plan_parser.add_argument(
@@ -187,7 +189,7 @@ def main(argv: list[str] | None = None) -> int:
     try:
         if args.command == "plan":
             _validate_plan_backend_args(args)
-        if args.command == "plan" and args.planner_backend in _RUST_SUBPROCESS_BACKENDS:
+        if args.command == "plan" and _effective_plan_backend(args) in _RUST_SUBPROCESS_BACKENDS:
             return _run_plan(args)
         setattr(
             args,
@@ -243,7 +245,7 @@ def _run_draft(args: argparse.Namespace) -> int:
 
 
 def _run_plan(args: argparse.Namespace) -> int:
-    if args.planner_backend in _RUST_SUBPROCESS_BACKENDS:
+    if _effective_plan_backend(args) in _RUST_SUBPROCESS_BACKENDS:
         return _run_rust_shadow_plan(args)
     return _run_python_plan(args)
 
@@ -371,14 +373,22 @@ def _validate_plan_backend_args(args: argparse.Namespace) -> None:
 
 
 def _effective_rust_shadow_output(args: argparse.Namespace) -> str:
-    if args.planner_backend in _PYTHON_COMPATIBLE_RUST_BACKENDS:
+    if _effective_plan_backend(args) in _PYTHON_COMPATIBLE_RUST_BACKENDS:
         return "python-compatible"
     return args.rust_shadow_output or "passthrough"
 
 
+def _effective_plan_backend(args: argparse.Namespace) -> str:
+    return args.planner_backend or _DEFAULT_RUST_PLANNER_BACKEND
+
+
 def _validate_rust_shadow_plan_args(args: argparse.Namespace) -> None:
     if not args.rust_planner_bin:
-        raise ValueError(f"--rust-planner-bin is required when --planner-backend {args.planner_backend} is selected.")
+        if args.planner_backend is None:
+            raise ValueError("--rust-planner-bin is required when default Rust planner routing is active.")
+        raise ValueError(
+            f"--rust-planner-bin is required when --planner-backend {_effective_plan_backend(args)} is selected."
+        )
     python_compatible_output = _effective_rust_shadow_output(args) == "python-compatible"
     unsupported_options = [
         ("--verbose", args.verbose and not python_compatible_output),
@@ -390,7 +400,7 @@ def _validate_rust_shadow_plan_args(args: argparse.Namespace) -> None:
     ]
     for option, is_set in unsupported_options:
         if is_set:
-            raise ValueError(f"{option} is not supported with --planner-backend {args.planner_backend}.")
+            raise ValueError(f"{option} is not supported with --planner-backend {_effective_plan_backend(args)}.")
 
 
 def _run_rust_shadow_python_compatible_plan(

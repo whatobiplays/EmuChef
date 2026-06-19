@@ -8,8 +8,9 @@ the existing Python-to-Rust subprocess plumbing. P8AJ adds optional/manual smoke
 tooling for the live-probe evidence bar. P8AK adds optional/manual fixture-backed
 smoke tooling for mismatch-warning parity evidence. P8AL adds supplied-report
 evidence intake to the readiness gate for manually saved P8AJ/P8AK reports.
-These phases do not change default planner behavior or clear Rust planner
-cutover.
+P8AN verifies those reports as accepted evidence before default-route
+implementation. P8AO then reuses the production-equivalent subprocess path as
+the default no-backend `emuchef plan` route.
 
 The plan identifies the smallest safe path toward route evidence that can
 eventually satisfy:
@@ -39,21 +40,22 @@ tool existence alone does not clear the blocker.
 P8AL updates the readiness gate to read only explicitly supplied P8AJ and P8AK
 JSON reports. Accepted reports move the relevant blocker entry to
 `evidence_accepted`, but the top-level readiness status remains `blocked` and
-default `emuchef plan` remains Python-owned until a separate default-cutover
-phase.
+executor/apply plus Python planner deletion remain blocked.
 
-`docs/rust-default-planner-cutover-contract.md` records the P8AM future
-default-backend cutover contract. P8AM performs no cutover, and P8AN is the
-first possible default-route implementation phase after required evidence is
+`docs/rust-default-planner-cutover-contract.md` records the default-backend
+cutover contract. P8AM performs no cutover, P8AN is evidence preflight only, and
+P8AO is the default-route implementation phase after required evidence is
 accepted.
 
 ## Current Route Inventory
 
 The current route surface is split by migration purpose:
 
-- Default Python backend: `emuchef plan` remains Python-owned and is the current
-  production/reference planner route. Python resolves ADB/device facts before
-  planning and owns the visible CLI output contract today.
+- Default planner backend: no-backend `emuchef plan` is Rust-owned through the
+  production-equivalent subprocess path. It requires a supplied
+  `--rust-planner-bin` during this transition and emits Python-compatible output.
+- Explicit Python backend: `--planner-backend python` remains the transition
+  fallback for the previous Python planning path.
 - Python `rust-shadow`: an explicit developer-only bridge to a supplied
   `emuchef-plan-shadow` binary. It passes through Rust JSON by default, can use
   the explicit Python-compatible formatter, and rejects detected-facts and live
@@ -106,8 +108,8 @@ to satisfy production-equivalent route evidence before default cutover.
   Rust-owned detected-fact interpretation, and ADR 0002-compatible output.
 - P8AF fit: strong. The route can be required to emit matched and mismatched
   detected-device profile results through the planner result contract.
-- Default `emuchef plan` risk: low. Python remains the default route until a
-  separate cutover phase.
+- Default `emuchef plan` risk: P8AO now reuses this route for no-backend
+  planning; before P8AO, the route was explicit-only.
 - Test complexity: moderate and cleaner than extending `rust-experimental`.
   Future tests can target a backend name whose purpose matches the evidence bar.
 - User-facing semantics: clearer. The name signals production-equivalent
@@ -160,7 +162,6 @@ boundary, and keep ADR 0004 context precedence:
 
 This plan does not:
 
-- change default `emuchef plan`;
 - remove the Python planner;
 - reclassify readiness blockers;
 - modify readiness gate behavior;
@@ -212,4 +213,8 @@ supplied reports:
 - P8AK adds optional/manual production-equivalent mismatch-warning parity smoke
   tooling.
 - P8AL updates the readiness gate to classify explicitly supplied P8AJ/P8AK
-  evidence reports without clearing default cutover.
+  evidence reports without clearing executor/apply or Python planner deletion
+  blockers.
+- P8AN verifies accepted P8AJ/P8AK report evidence without editing repo files.
+- P8AO makes no-backend `emuchef plan` route through the existing
+  production-equivalent subprocess path.
