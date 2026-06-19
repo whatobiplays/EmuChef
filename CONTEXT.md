@@ -217,6 +217,21 @@ live probe evidence when run manually with real device inputs, but tool
 existence alone does not clear `real_device_probing_not_cut_over`.
 `detected_device_profile_mismatch_warning_not_cut_over` remains separate for
 P8AK evidence, and both blockers remain blocked after P8AJ.
+P8AK adds optional/manual smoke tooling for the explicit
+`rust-production-equivalent` fixture-backed mismatch-warning route through
+`tools/smoke_rust_production_equivalent_mismatch_warning.py`. The smoke creates
+temporary detected-facts JSON fixtures for `ayaneo.pocket_s_mini.base`, invokes
+`python -m emuchef plan --planner-backend rust-production-equivalent` with
+`--rust-detected-facts-json <path>`, requires Python-compatible output instead
+of raw Rust JSON, and checks matched, manufacturer-mismatched, model-mismatched,
+Android-minimum-mismatched, and Android-minimum-matching cases. It does not run
+live probing, invoke the supplied Rust binary directly, discover devices, run
+`adb devices`, participate in normal checks, or count as readiness-gate executed
+evidence. The tool can produce evidence for
+`detected_device_profile_mismatch_warning_not_cut_over` when run manually, but
+tool existence alone does not clear the blocker. P8AJ and P8AK cover separate
+evidence bars, P8AL remains the future readiness-gate update phase after
+evidence exists, and both blockers remain blocked after P8AK.
 
 ## Current Authored Model
 
@@ -508,6 +523,9 @@ discover devices, run `adb devices`, parse `getprop`, validate or normalize the
 forwarded ADB path or serial, construct a planner session, or run apply logic
 for this route. P8AI adds no production-equivalent-specific flags, smoke
 evidence, readiness-gate execution, or blocker reclassification.
+P8AK adds optional/manual fixture-backed mismatch-warning smoke tooling for this
+explicit route only. It does not add normal checks, readiness-gate execution, or
+blocker reclassification.
 
 The Python Rust shadow bridge does not execute/apply plans, invoke ADB, access
 the network, materialize artifacts, use Tauri commands, expose sidecar protocol

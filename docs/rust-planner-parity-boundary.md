@@ -36,7 +36,9 @@ The route always uses Python-compatible output and can forward Rust-owned
 detected-facts fixture or live-probe wrapper inputs. P8AI does not add smoke
 evidence or readiness reclassification. P8AJ adds optional/manual smoke tooling
 for that explicit live-probe route without adding normal-check or readiness-gate
-execution.
+execution. P8AK adds optional/manual fixture-backed mismatch-warning smoke
+tooling for the same explicit route without adding normal-check or
+readiness-gate execution.
 
 Rust planner tests include an intentional fixture inventory/parsing guard for
 the existing Phase 6M/6N planner parity evidence. The guard consumes checked-in
@@ -156,6 +158,18 @@ Rust planner-adjacent coverage is internal and fixture-scoped:
   clear `real_device_probing_not_cut_over`.
   `detected_device_profile_mismatch_warning_not_cut_over` remains separate and
   still requires P8AK evidence.
+- `tools/smoke_rust_production_equivalent_mismatch_warning.py`: optional/manual
+  P8AK smoke tooling for the explicit `rust-production-equivalent`
+  fixture-backed mismatch-warning route. The smoke invokes
+  `python -m emuchef plan --planner-backend rust-production-equivalent` with
+  temporary `--rust-detected-facts-json` fixtures, checks matched and mismatched
+  warning behavior for the `ayaneo.pocket_s_mini.base` profile criteria, and
+  requires Python-compatible output instead of raw Rust JSON. It does not run
+  live probing, call the supplied Rust binary directly, run normal checks, or
+  participate in the readiness gate. The tool can produce evidence for
+  `detected_device_profile_mismatch_warning_not_cut_over` when run manually,
+  but tool existence alone does not clear the blocker. P8AJ and P8AK cover
+  separate evidence bars.
 - `docs/rust-live-probe-evidence-and-cutover-gap.md`: consolidated P8X-P8AA
   live-probe evidence, default-route, production-route, and readiness-gate gap
   summary.
@@ -459,6 +473,9 @@ flags as `rust-experimental`. Python does not resolve ADB, probe devices,
 construct a planner session, or run apply logic for this route. P8AI does not
 add production-equivalent-specific flags, smoke evidence, or readiness blocker
 reclassification.
+P8AK uses that route for optional/manual fixture-backed mismatch-warning smoke
+tooling only; it does not change route behavior, normal checks, or readiness
+blocker classification.
 
 P8I adds `tools/check_rust_planner_cutover_readiness.py` as a static,
 developer-only gate for future default Rust planner proposals. The gate checks

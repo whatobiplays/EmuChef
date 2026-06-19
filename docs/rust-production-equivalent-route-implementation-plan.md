@@ -5,8 +5,10 @@
 This document records the implementation plan and current state for the
 explicit production-equivalent Rust planner route. P8AI wires the route through
 the existing Python-to-Rust subprocess plumbing. P8AJ adds optional/manual smoke
-tooling for that explicit route. Neither phase changes default planner behavior,
-readiness-gate execution, or Rust planner cutover blocker status.
+tooling for the live-probe evidence bar. P8AK adds optional/manual fixture-backed
+smoke tooling for mismatch-warning parity evidence. These phases do not change
+default planner behavior, readiness-gate execution, or Rust planner cutover
+blocker status.
 
 The plan identifies the smallest safe path toward route evidence that can
 eventually satisfy:
@@ -27,6 +29,12 @@ P8AI is route plumbing only. P8AJ adds
 smoke tooling for the live-probe wrapper route. The tool can produce evidence
 when run manually with real device inputs, but its existence alone does not
 clear `real_device_probing_not_cut_over`.
+P8AK adds `tools/smoke_rust_production_equivalent_mismatch_warning.py` as
+optional/manual fixture-backed smoke tooling for detected-device profile
+mismatch-warning parity through the same explicit production-equivalent route.
+That tool can produce evidence for
+`detected_device_profile_mismatch_warning_not_cut_over` when run manually, but
+tool existence alone does not clear the blocker.
 
 ## Current Route Inventory
 
@@ -147,7 +155,7 @@ This plan does not:
 - modify readiness gate behavior;
 - add Tauri/protocol integration;
 - add executor/apply integration;
-- add readiness-gate evidence in P8AI or P8AJ.
+- add readiness-gate evidence in P8AI, P8AJ, or P8AK.
 
 ## Required Test Evidence
 
@@ -165,7 +173,7 @@ P8AI adds focused tests proving executable-route plumbing:
 ## Required Manual Evidence
 
 Future blocker reclassification requires manual evidence that is not added to
-the readiness gate in P8AI or P8AJ:
+the readiness gate in P8AI, P8AJ, or P8AK:
 
 - production-equivalent live probe smoke satisfying P8AE;
 - mismatch-warning parity evidence satisfying P8AF;
@@ -188,6 +196,7 @@ the readiness gate in P8AI or P8AJ:
   with validation only.
 - P8AI wires the production-equivalent backend to Rust-owned probe route
   plumbing.
-- P8AJ adds optional/manual production-equivalent route smoke tooling.
-- P8AK add mismatch-warning parity evidence for production-equivalent route.
-- P8AL update readiness gate only after evidence exists.
+- P8AJ adds optional/manual production-equivalent live-probe smoke tooling.
+- P8AK adds optional/manual production-equivalent mismatch-warning parity smoke
+  tooling.
+- P8AL updates the readiness gate only after evidence exists.

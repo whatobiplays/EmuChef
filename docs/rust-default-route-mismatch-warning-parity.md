@@ -10,6 +10,9 @@ behavior, or change blocker status.
 `docs/rust-production-equivalent-route-implementation-plan.md` separately
 records the P8AG implementation plan for a future explicit
 production-equivalent route.
+P8AK adds optional/manual fixture-backed smoke tooling for this evidence bar
+through the explicit production-equivalent route. The tool can produce evidence
+when run manually, but the tool's existence alone does not clear blocker status.
 
 ## Evidence Bar
 
@@ -22,6 +25,13 @@ Helper and manual migration-route warnings from P8Q, P8R, P8X, P8Y, P8Z, and
 P8AA do not satisfy this bar by themselves. They remain useful migration
 evidence, but they are not default-route or production-equivalent warning
 parity evidence.
+
+Manual P8AK smoke output from
+`tools/smoke_rust_production_equivalent_mismatch_warning.py` may contribute to
+future `detected_device_profile_mismatch_warning_not_cut_over` evidence when it
+is produced by running the tool through the explicit production-equivalent route.
+P8AJ remains separate: it targets production-equivalent live probe evidence, not
+fixture-backed mismatch-warning parity evidence.
 
 ## Required Route Characteristics
 
@@ -123,8 +133,10 @@ P8AF does not:
 This design alone does not clear
 `detected_device_profile_mismatch_warning_not_cut_over`.
 
-A future implementation that satisfies this evidence bar may support
-reclassifying `detected_device_profile_mismatch_warning_not_cut_over`.
+P8AK tooling alone does not clear
+`detected_device_profile_mismatch_warning_not_cut_over`. Manual evidence from
+that tooling may support a future P8AL readiness-gate update only after the
+evidence exists.
 
 `real_device_probing_not_cut_over` remains separate unless the same future phase
 also satisfies the P8AE production-equivalent live probe evidence bar.
