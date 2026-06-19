@@ -34,7 +34,9 @@ explicit production-equivalent route plan. P8AH recognizes
 explicit non-default Rust subprocess route backed by the supplied shadow binary.
 The route always uses Python-compatible output and can forward Rust-owned
 detected-facts fixture or live-probe wrapper inputs. P8AI does not add smoke
-evidence or readiness reclassification.
+evidence or readiness reclassification. P8AJ adds optional/manual smoke tooling
+for that explicit live-probe route without adding normal-check or readiness-gate
+execution.
 
 Rust planner tests include an intentional fixture inventory/parsing guard for
 the existing Phase 6M/6N planner parity evidence. The guard consumes checked-in
@@ -140,6 +142,20 @@ Rust planner-adjacent coverage is internal and fixture-scoped:
   planner deletion. The `real_device_probing_not_cut_over` and
   `detected_device_profile_mismatch_warning_not_cut_over` blockers remain
   blocked.
+- `tools/smoke_rust_production_equivalent_live_adb_probe.py`: optional/manual
+  P8AJ smoke tooling for the explicit `rust-production-equivalent` live-probe
+  route. The smoke invokes `python -m emuchef plan --planner-backend
+  rust-production-equivalent` with `--rust-probe-adb-getprop`,
+  `--rust-adb-path`, and `--rust-serial`, expects Python-compatible output
+  instead of raw Rust JSON, and emits deterministic JSON with scrubbed inputs
+  including `live_probe_requested: true`. It does not call the supplied Rust
+  binary directly, discover devices, run `adb devices`, inspect or normalize the
+  supplied ADB path or serial, run normal checks, or participate in the
+  readiness gate. The tool can produce production-equivalent live probe evidence
+  when run manually with real device inputs, but its existence alone does not
+  clear `real_device_probing_not_cut_over`.
+  `detected_device_profile_mismatch_warning_not_cut_over` remains separate and
+  still requires P8AK evidence.
 - `docs/rust-live-probe-evidence-and-cutover-gap.md`: consolidated P8X-P8AA
   live-probe evidence, default-route, production-route, and readiness-gate gap
   summary.

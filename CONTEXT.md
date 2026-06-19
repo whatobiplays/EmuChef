@@ -202,6 +202,21 @@ subprocess route backed by a supplied Rust shadow binary. It always uses
 Python-compatible output and can forward Rust-owned detected-facts fixture or
 live-probe wrapper inputs. It does not add readiness-gate manual evidence and
 does not clear readiness blockers.
+P8AJ adds optional/manual smoke tooling for the explicit
+`rust-production-equivalent` live-probe route through
+`tools/smoke_rust_production_equivalent_live_adb_probe.py`. The smoke invokes
+`python -m emuchef plan --planner-backend rust-production-equivalent` with
+`--rust-probe-adb-getprop`, `--rust-adb-path <path>`, and
+`--rust-serial <serial>`, requires Python-compatible output instead of raw Rust
+JSON, and emits deterministic JSON with scrubbed inputs including
+`live_probe_requested: true`. It does not call the supplied Rust binary
+directly, discover devices, run `adb devices`, inspect, normalize, expand, or
+stat the supplied ADB path or serial, participate in normal checks, or count as
+readiness-gate executed evidence. The tool can produce production-equivalent
+live probe evidence when run manually with real device inputs, but tool
+existence alone does not clear `real_device_probing_not_cut_over`.
+`detected_device_profile_mismatch_warning_not_cut_over` remains separate for
+P8AK evidence, and both blockers remain blocked after P8AJ.
 
 ## Current Authored Model
 
