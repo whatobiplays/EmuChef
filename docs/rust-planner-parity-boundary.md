@@ -28,6 +28,11 @@ behavior or readiness classification.
 `docs/rust-default-route-mismatch-warning-parity.md` records the evidence bar
 for future default-route mismatch-warning parity and does not change planner
 behavior or readiness classification.
+`docs/rust-production-equivalent-route-implementation-plan.md` records the
+future explicit production-equivalent route plan. P8AH recognizes
+`rust-production-equivalent` as a parser backend value but reserves it with
+validation before any planner, probe, session, subprocess, Rust command, or
+apply work.
 
 Rust planner tests include an intentional fixture inventory/parsing guard for
 the existing Phase 6M/6N planner parity evidence. The guard consumes checked-in
@@ -180,7 +185,10 @@ Rust planner-adjacent coverage is internal and fixture-scoped:
   exact wrapper strings to raw Rust shadow flags, that Python does not enter
   session construction, ADB resolution, device detection, or executor/apply for
   that route, and that unsupported backends reject those flags before
-  subprocess work.
+  subprocess work. P8AH coverage verifies that `rust-production-equivalent` is
+  accepted by argparse, rejected with a reserved-backend validation error before
+  planner, probe, session, subprocess, Rust command, or apply work, and not
+  treated as an argparse invalid choice.
 - `docs/adr/0002-rust-planner-cli-output-compatibility.md`: P8D decision record
   for future default Rust planner routing. The accepted target is compatibility
   with the current Python `emuchef plan` output and exit-code behavior unless a
@@ -418,6 +426,13 @@ fails the P8H smoke for successful scenarios. P8H is route plus output-shape
 smoke only; P7P remains the Python-vs-Rust planner DTO/result comparison
 evidence, P8B remains raw passthrough route-invocation evidence, and P8F remains
 explicit `rust-shadow` Python-compatible output-mode smoke.
+
+P8AH adds parser recognition for
+`emuchef plan --planner-backend rust-production-equivalent` and reserves that
+backend with a validation error before route execution. P8AH does not build a
+Rust command, invoke a Rust binary, resolve ADB, probe devices, construct a
+planner session, run apply logic, add production-equivalent-specific flags, add
+smoke evidence, or clear readiness blockers.
 
 P8I adds `tools/check_rust_planner_cutover_readiness.py` as a static,
 developer-only gate for future default Rust planner proposals. The gate checks

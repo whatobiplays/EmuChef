@@ -57,6 +57,11 @@ from emuchef.planner import (
 
 logger = logging.getLogger(__name__)
 
+_RESERVED_PRODUCTION_EQUIVALENT_BACKEND_MESSAGE = (
+    "--planner-backend rust-production-equivalent is reserved for a future "
+    "production-equivalent Rust route and is not executable yet."
+)
+
 
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(prog="emuchef")
@@ -94,11 +99,12 @@ def main(argv: list[str] | None = None) -> int:
     plan_parser.add_argument("--output", help="Optional file path for the structured planning_result YAML.")
     plan_parser.add_argument(
         "--planner-backend",
-        choices=("python", "rust-shadow", "rust-experimental"),
+        choices=("python", "rust-shadow", "rust-experimental", "rust-production-equivalent"),
         default="python",
         help=(
             "Planner implementation to use. rust-shadow is dev-only passthrough by default; "
-            "rust-experimental is explicit non-default migration routing and requires --rust-planner-bin."
+            "rust-experimental is explicit non-default migration routing and requires --rust-planner-bin; "
+            "rust-production-equivalent is reserved and not executable yet."
         ),
     )
     plan_parser.add_argument(
@@ -327,6 +333,8 @@ def _append_rust_shadow_device_context_args(command: list[str], args: argparse.N
 
 
 def _validate_plan_backend_args(args: argparse.Namespace) -> None:
+    if args.planner_backend == "rust-production-equivalent":
+        raise ValueError(_RESERVED_PRODUCTION_EQUIVALENT_BACKEND_MESSAGE)
     if args.planner_backend != "rust-shadow" and args.rust_shadow_output is not None:
         raise ValueError("--rust-shadow-output is only valid with --planner-backend rust-shadow.")
     if args.planner_backend != "rust-experimental" and args.rust_detected_facts_json is not None:

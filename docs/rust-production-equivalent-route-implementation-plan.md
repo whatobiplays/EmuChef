@@ -14,9 +14,11 @@ eventually satisfy:
 - the default-route mismatch-warning parity evidence bar in
   `docs/rust-default-route-mismatch-warning-parity.md`.
 
-P8AG is documentation-only. The future backend name
-`rust-production-equivalent` is documentation-only here and is not accepted by
-the CLI in P8AG.
+P8AG is documentation-only. P8AH recognizes the backend name
+`rust-production-equivalent` in the Python CLI parser, but reserves it with a
+validation error before planning, probing, session construction, Rust command
+construction, subprocess execution, or apply work. The route is not executable
+in P8AH.
 
 ## Current Route Inventory
 
@@ -37,6 +39,10 @@ The current route surface is split by migration purpose:
   forwards local fixture paths or selected live-probe intent to the supplied
   Rust shadow binary without parsing `adb shell getprop`, and formats successful
   Rust `PlanningResult` JSON through the Python-compatible output path.
+- Python `rust-production-equivalent`: an explicit non-default reserved backend
+  name. The parser accepts the value, and backend validation rejects it before
+  any planner, probe, session, subprocess, or apply work. P8AH adds no
+  production-equivalent route behavior.
 - Tauri/protocol: unchanged. Planner route cutover is not exposed through the
   active editor protocol by current evidence.
 - Executor/apply: unchanged. Planner route cutover does not imply Rust
@@ -132,11 +138,13 @@ This plan does not:
 - modify readiness gate behavior;
 - add Tauri/protocol integration;
 - add executor/apply integration;
-- implement route changes in P8AG.
+- implement executable production-equivalent route behavior in P8AH.
 
 ## Required Test Evidence
 
-Future implementation must add focused tests proving:
+P8AH adds focused tests proving parser recognition plus reserved-backend
+validation. Future executable-route implementation must add focused tests
+proving:
 
 - CLI rejects production-equivalent flags outside the new backend;
 - the route forwards or invokes Rust-owned probing without Python parsing
@@ -150,7 +158,7 @@ Future implementation must add focused tests proving:
 ## Required Manual Evidence
 
 Future blocker reclassification requires manual evidence that is not added to
-the readiness gate in P8AG:
+the readiness gate in P8AH:
 
 - production-equivalent live probe smoke satisfying P8AE;
 - mismatch-warning parity evidence satisfying P8AF;
@@ -158,8 +166,8 @@ the readiness gate in P8AG:
 
 ## Risks
 
-- Backend naming churn if `rust-production-equivalent` is accepted too early or
-  renamed after evidence has accumulated.
+- Backend naming churn if `rust-production-equivalent` is mistaken for an
+  executable route before evidence has accumulated.
 - Confusing a production-equivalent explicit route with default cutover.
 - Accidental blocker reclassification before production-equivalent evidence
   exists.
@@ -169,7 +177,8 @@ the readiness gate in P8AG:
 
 ## Follow-Up Phases
 
-- P8AH add explicit production-equivalent backend flag validation only.
+- P8AH recognizes and reserves the explicit production-equivalent backend name
+  with validation only.
 - P8AI wire production-equivalent backend to Rust-owned probe route.
 - P8AJ add production-equivalent route smoke.
 - P8AK add mismatch-warning parity evidence for production-equivalent route.

@@ -225,6 +225,11 @@ P8Z adds `--rust-probe-adb-getprop`, `--rust-adb-path <path>`, and
 forwards them as raw Rust shadow live-probe flags and keeps fixture and live
 detected-facts sources mutually exclusive. Python still does not invoke or parse
 ADB, and the default Python backend plus `rust-shadow` reject the wrapper flags.
+P8AH recognizes `rust-production-equivalent` as an explicit non-default
+`--planner-backend` value but reserves it with validation before planner,
+probe, session, subprocess, Rust command, or apply work. It does not add
+production-equivalent-specific flags, execute production-equivalent planning, or
+change `python`, `rust-shadow`, or `rust-experimental` behavior.
 P8I adds a static readiness report for
 future default-cutover PRs; it lists required manual evidence but does not run
 comparison/smoke tooling, Cargo, npm, ADB, executor/apply, Tauri/protocol,
@@ -250,6 +255,9 @@ wrapper flags to the supplied Rust shadow binary and keeps Python out of ADB
 execution, device discovery, `getprop` parsing, and path/serial normalization.
 The default Python backend and `rust-shadow` reject those wrapper flags, and
 readiness blockers remain blocked.
+P8AH reserves the explicit `rust-production-equivalent` backend name before any
+route execution, so it does not affect executor/apply behavior or readiness
+blockers.
 P8K extends only the dev-only matrix evidence: optional scenario
 `device_context` values are validated, forwarded to both comparison sides and to
 smoke-runner CLI commands, and reported only as stable presence/key metadata.
