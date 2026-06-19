@@ -61,6 +61,10 @@ manually saved P8AJ/P8AK JSON reports. Accepted reports move the relevant
 blocker entry to `evidence_accepted`; they do not clear default cutover, and the
 top-level readiness status remains `blocked`. Default `emuchef plan` remains
 Python-owned until a separate default-cutover phase.
+`docs/rust-default-planner-cutover-contract.md` records the P8AM future
+default-backend cutover contract. P8AM performs no cutover, and P8AN is the
+first possible default-route implementation phase after required evidence is
+accepted.
 P8N adds only the crate-local Rust fake/test probe foundation. P8O adds
 fake/test-backed detected-facts planner-input construction. Intended future
 context precedence: synthetic/profile context -> detected facts -> explicit CLI

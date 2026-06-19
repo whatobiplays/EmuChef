@@ -59,6 +59,10 @@ recognizes and reserves the backend name in the CLI parser, and P8AI wires it
 as an explicit non-default Rust subprocess route backed by the supplied shadow
 binary. It does not add required manual evidence, readiness-gate execution, or
 blocker reclassification.
+`docs/rust-default-planner-cutover-contract.md` records the P8AM future
+default-backend cutover contract. P8AM performs no cutover, and P8AN is the
+first possible default-route implementation phase after required evidence is
+accepted.
 P8N adds a crate-local Rust probe abstraction, fake probe, and tests for layering
 detected facts over synthetic/profile-derived context. P8O adds fake/test-backed
 planner-input construction that applies detected facts over

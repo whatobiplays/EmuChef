@@ -241,6 +241,13 @@ paths. Accepted reports move only the relevant blocker entry to
 `evidence_accepted`; they do not clear default cutover, and the top-level
 readiness status remains `blocked`. Default `emuchef plan` remains Python-owned
 until a separate default-cutover phase.
+P8AM records the future default-backend cutover contract in
+`docs/rust-default-planner-cutover-contract.md`. P8AM performs no cutover.
+`rust-production-equivalent` remains explicit and non-default, P8AL
+`evidence_accepted` status does not clear default cutover, and top-level
+readiness remains `blocked`. P8AN is the first possible default-route
+implementation phase. Python planner deletion, executor/apply cutover, and
+Tauri/protocol changes are not part of the default-backend flip.
 
 ## Current Authored Model
 

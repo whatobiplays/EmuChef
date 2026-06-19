@@ -44,6 +44,10 @@ P8AJ/P8AK JSON reports. Accepted reports move the relevant blocker entry to
 `evidence_accepted`, but they do not clear default cutover. The top-level
 readiness status remains `blocked`, and default `emuchef plan` remains
 Python-owned until a separate default-cutover phase.
+`docs/rust-default-planner-cutover-contract.md` records the P8AM future
+default-backend cutover contract. P8AM performs no cutover, and P8AN is the
+first possible default-route implementation phase after required evidence is
+accepted.
 
 Rust planner tests include an intentional fixture inventory/parsing guard for
 the existing Phase 6M/6N planner parity evidence. The guard consumes checked-in

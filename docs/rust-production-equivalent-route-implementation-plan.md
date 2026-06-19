@@ -42,6 +42,11 @@ JSON reports. Accepted reports move the relevant blocker entry to
 default `emuchef plan` remains Python-owned until a separate default-cutover
 phase.
 
+`docs/rust-default-planner-cutover-contract.md` records the P8AM future
+default-backend cutover contract. P8AM performs no cutover, and P8AN is the
+first possible default-route implementation phase after required evidence is
+accepted.
+
 ## Current Route Inventory
 
 The current route surface is split by migration purpose:
