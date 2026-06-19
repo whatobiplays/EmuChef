@@ -6,9 +6,10 @@ This document records the implementation plan and current state for the
 explicit production-equivalent Rust planner route. P8AI wires the route through
 the existing Python-to-Rust subprocess plumbing. P8AJ adds optional/manual smoke
 tooling for the live-probe evidence bar. P8AK adds optional/manual fixture-backed
-smoke tooling for mismatch-warning parity evidence. These phases do not change
-default planner behavior, readiness-gate execution, or Rust planner cutover
-blocker status.
+smoke tooling for mismatch-warning parity evidence. P8AL adds supplied-report
+evidence intake to the readiness gate for manually saved P8AJ/P8AK reports.
+These phases do not change default planner behavior or clear Rust planner
+cutover.
 
 The plan identifies the smallest safe path toward route evidence that can
 eventually satisfy:
@@ -35,6 +36,11 @@ mismatch-warning parity through the same explicit production-equivalent route.
 That tool can produce evidence for
 `detected_device_profile_mismatch_warning_not_cut_over` when run manually, but
 tool existence alone does not clear the blocker.
+P8AL updates the readiness gate to read only explicitly supplied P8AJ and P8AK
+JSON reports. Accepted reports move the relevant blocker entry to
+`evidence_accepted`, but the top-level readiness status remains `blocked` and
+default `emuchef plan` remains Python-owned until a separate default-cutover
+phase.
 
 ## Current Route Inventory
 
@@ -173,11 +179,12 @@ P8AI adds focused tests proving executable-route plumbing:
 ## Required Manual Evidence
 
 Future blocker reclassification requires manual evidence that is not added to
-the readiness gate in P8AI, P8AJ, or P8AK:
+the readiness gate in P8AI, P8AJ, or P8AK. P8AL consumes only explicitly
+supplied reports:
 
 - production-equivalent live probe smoke satisfying P8AE;
 - mismatch-warning parity evidence satisfying P8AF;
-- readiness gate update only after the production-equivalent evidence exists.
+- readiness gate intake only after the production-equivalent evidence exists.
 
 ## Risks
 
@@ -199,4 +206,5 @@ the readiness gate in P8AI, P8AJ, or P8AK:
 - P8AJ adds optional/manual production-equivalent live-probe smoke tooling.
 - P8AK adds optional/manual production-equivalent mismatch-warning parity smoke
   tooling.
-- P8AL updates the readiness gate only after evidence exists.
+- P8AL updates the readiness gate to classify explicitly supplied P8AJ/P8AK
+  evidence reports without clearing default cutover.

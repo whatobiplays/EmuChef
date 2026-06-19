@@ -56,6 +56,60 @@ def write_text(root: Path, relative_path: str, text: str = "") -> None:
     path.write_text(text, encoding="utf-8")
 
 
+def write_json(root: Path, relative_path: str, payload: dict) -> Path:
+    path = root / relative_path
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps(payload, indent=2), encoding="utf-8")
+    return Path(relative_path)
+
+
+def accepted_p8aj_report() -> dict:
+    return {
+        "kind": "rust_production_equivalent_live_adb_probe_smoke",
+        "schema_version": 1,
+        "inputs": {
+            "live_probe_requested": True,
+            "serial_supplied": True,
+        },
+        "cases": [
+            {
+                "id": "rust_production_equivalent_live_adb_probe_forwarding",
+                "status": "passed",
+                "stdout_class": "python_compatible",
+                "stderr_class": "empty",
+            }
+        ],
+        "summary": {
+            "passed": 1,
+            "failed": 0,
+            "skipped": 0,
+        },
+    }
+
+
+def accepted_p8ak_report() -> dict:
+    return {
+        "kind": "rust_production_equivalent_mismatch_warning_smoke",
+        "schema_version": 1,
+        "inputs": {
+            "route_backend": "rust-production-equivalent",
+            "route_output_mode": "python-compatible",
+        },
+        "cases": [
+            {"id": "matched_profile", "status": "passed", "stdout_class": "python_compatible"},
+            {"id": "manufacturer_mismatch", "status": "passed", "stdout_class": "python_compatible"},
+            {"id": "model_mismatch", "status": "passed", "stdout_class": "python_compatible"},
+            {"id": "android_minimum_mismatch", "status": "passed", "stdout_class": "python_compatible"},
+            {"id": "android_minimum_match", "status": "passed", "stdout_class": "python_compatible"},
+        ],
+        "summary": {
+            "passed": 5,
+            "failed": 0,
+            "skipped": 0,
+        },
+    }
+
+
 def scenario_payload(
     *device_plan_ids: str,
     classification: str = "match",
@@ -126,16 +180,31 @@ def check_by_id(report: dict, check_id: str) -> dict:
     return matches[0]
 
 
+def blocker_status(report: dict, blocker_id: str) -> str:
+    matches = [blocker for blocker in report["remaining_blockers"] if blocker["id"] == blocker_id]
+    if len(matches) != 1:
+        raise AssertionError(f"Expected one blocker with id {blocker_id!r}, found {len(matches)}")
+    return matches[0]["status"]
+
+
 class CheckRustPlannerCutoverReadinessTests(unittest.TestCase):
     @classmethod
     def setUpClass(cls) -> None:
         cls.readiness = import_readiness_module()
 
-    def build_report(self, root: Path) -> dict:
+    def build_report(
+        self,
+        root: Path,
+        *,
+        p8aj_live_probe_report: Path | None = None,
+        p8ak_mismatch_warning_report: Path | None = None,
+    ) -> dict:
         return self.readiness.build_readiness_report(
             repo_root=root,
             authored_root=Path("authored"),
             scenario_matrix=Path("tools/plan_parity_scenarios.json"),
+            p8aj_live_probe_report=p8aj_live_probe_report,
+            p8ak_mismatch_warning_report=p8ak_mismatch_warning_report,
         )
 
     def test_happy_path_static_report_with_required_files_and_docs(self) -> None:
@@ -370,6 +439,183 @@ class CheckRustPlannerCutoverReadinessTests(unittest.TestCase):
         self.assertIn("--planner-backend rust-experimental", commands["p8h_rust_experimental_matrix_smoke"])
         self.assertIn("focused_python_tests", commands)
         self.assertIn("rust_tauri_checks", commands)
+        self.assertIn("p8aj_rust_production_equivalent_live_probe_smoke", commands)
+        self.assertIn(
+            "tools/smoke_rust_production_equivalent_live_adb_probe.py",
+            commands["p8aj_rust_production_equivalent_live_probe_smoke"],
+        )
+        self.assertIn("p8ak_rust_production_equivalent_mismatch_warning_smoke", commands)
+        self.assertIn(
+            "tools/smoke_rust_production_equivalent_mismatch_warning.py",
+            commands["p8ak_rust_production_equivalent_mismatch_warning_smoke"],
+        )
+
+    def test_missing_p8aj_and_p8ak_evidence_keeps_production_equivalent_blockers_blocked(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            make_synthetic_repo(root)
+
+            report = self.build_report(root)
+
+        evidence = report["production_equivalent_evidence"]
+        self.assertEqual(evidence["p8aj_live_probe"]["status"], "missing")
+        self.assertEqual(evidence["p8aj_live_probe"]["evidence_id"], "p8aj_live_probe")
+        self.assertEqual(evidence["p8aj_live_probe"]["blocker_id"], "real_device_probing_not_cut_over")
+        self.assertTrue(evidence["p8aj_live_probe"]["reasons"])
+        self.assertEqual(evidence["p8ak_mismatch_warning"]["status"], "missing")
+        self.assertEqual(
+            evidence["p8ak_mismatch_warning"]["blocker_id"],
+            "detected_device_profile_mismatch_warning_not_cut_over",
+        )
+        self.assertEqual(blocker_status(report, "real_device_probing_not_cut_over"), "blocked")
+        self.assertEqual(blocker_status(report, "detected_device_profile_mismatch_warning_not_cut_over"), "blocked")
+        self.assertEqual(report["status"], "blocked")
+
+    def test_p8aj_accepted_and_p8ak_missing_updates_only_live_probe_blocker(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            make_synthetic_repo(root)
+            live_report = write_json(root, "reports/p8aj.json", accepted_p8aj_report())
+
+            report = self.build_report(root, p8aj_live_probe_report=live_report)
+
+        evidence = report["production_equivalent_evidence"]
+        self.assertEqual(evidence["p8aj_live_probe"]["status"], "accepted")
+        self.assertEqual(evidence["p8aj_live_probe"]["reasons"], [])
+        self.assertEqual(evidence["p8ak_mismatch_warning"]["status"], "missing")
+        self.assertEqual(blocker_status(report, "real_device_probing_not_cut_over"), "evidence_accepted")
+        self.assertEqual(blocker_status(report, "detected_device_profile_mismatch_warning_not_cut_over"), "blocked")
+        self.assertEqual(report["status"], "blocked")
+
+    def test_p8aj_missing_and_p8ak_accepted_updates_only_mismatch_warning_blocker(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            make_synthetic_repo(root)
+            mismatch_report = write_json(root, "reports/p8ak.json", accepted_p8ak_report())
+
+            report = self.build_report(root, p8ak_mismatch_warning_report=mismatch_report)
+
+        evidence = report["production_equivalent_evidence"]
+        self.assertEqual(evidence["p8aj_live_probe"]["status"], "missing")
+        self.assertEqual(evidence["p8ak_mismatch_warning"]["status"], "accepted")
+        self.assertEqual(evidence["p8ak_mismatch_warning"]["reasons"], [])
+        self.assertEqual(blocker_status(report, "real_device_probing_not_cut_over"), "blocked")
+        self.assertEqual(
+            blocker_status(report, "detected_device_profile_mismatch_warning_not_cut_over"),
+            "evidence_accepted",
+        )
+        self.assertEqual(report["status"], "blocked")
+
+    def test_accepted_p8aj_and_p8ak_reports_mark_both_evidence_blockers_accepted(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            make_synthetic_repo(root)
+            live_report = write_json(root, "reports/p8aj.json", accepted_p8aj_report())
+            mismatch_report = write_json(root, "reports/p8ak.json", accepted_p8ak_report())
+
+            report = self.build_report(
+                root,
+                p8aj_live_probe_report=live_report,
+                p8ak_mismatch_warning_report=mismatch_report,
+            )
+
+        self.assertEqual(report["production_equivalent_evidence"]["p8aj_live_probe"]["status"], "accepted")
+        self.assertEqual(report["production_equivalent_evidence"]["p8ak_mismatch_warning"]["status"], "accepted")
+        self.assertEqual(blocker_status(report, "real_device_probing_not_cut_over"), "evidence_accepted")
+        self.assertEqual(
+            blocker_status(report, "detected_device_profile_mismatch_warning_not_cut_over"),
+            "evidence_accepted",
+        )
+        self.assertEqual(blocker_status(report, "default_cli_backend_still_python"), "blocked")
+        self.assertEqual(blocker_status(report, "executor_apply_not_cut_over"), "blocked")
+        self.assertEqual(blocker_status(report, "python_planner_deletion_not_ready"), "blocked")
+        self.assertEqual(report["status"], "blocked")
+
+    def test_failed_or_incomplete_evidence_reports_do_not_mark_blockers_accepted(self) -> None:
+        p8aj_failed = accepted_p8aj_report()
+        p8aj_failed["summary"]["failed"] = 1
+        p8aj_not_live = accepted_p8aj_report()
+        p8aj_not_live["inputs"]["live_probe_requested"] = False
+        p8ak_failed = accepted_p8ak_report()
+        p8ak_failed["summary"]["failed"] = 1
+        p8ak_missing_case = accepted_p8ak_report()
+        p8ak_missing_case["cases"] = [
+            case for case in p8ak_missing_case["cases"] if case["id"] != "android_minimum_match"
+        ]
+
+        cases = [
+            ("p8aj_failed", "reports/p8aj.json", p8aj_failed, "real_device_probing_not_cut_over"),
+            ("p8aj_not_live", "reports/p8aj.json", p8aj_not_live, "real_device_probing_not_cut_over"),
+            (
+                "p8ak_failed",
+                "reports/p8ak.json",
+                p8ak_failed,
+                "detected_device_profile_mismatch_warning_not_cut_over",
+            ),
+            (
+                "p8ak_missing_case",
+                "reports/p8ak.json",
+                p8ak_missing_case,
+                "detected_device_profile_mismatch_warning_not_cut_over",
+            ),
+        ]
+        for name, relative_path, payload, blocker_id in cases:
+            with self.subTest(name=name):
+                with tempfile.TemporaryDirectory() as temp_dir:
+                    root = Path(temp_dir)
+                    make_synthetic_repo(root)
+                    report_path = write_json(root, relative_path, payload)
+                    kwargs = (
+                        {"p8aj_live_probe_report": report_path}
+                        if "p8aj" in name
+                        else {"p8ak_mismatch_warning_report": report_path}
+                    )
+
+                    report = self.build_report(root, **kwargs)
+
+                evidence_key = "p8aj_live_probe" if "p8aj" in name else "p8ak_mismatch_warning"
+                self.assertEqual(report["production_equivalent_evidence"][evidence_key]["status"], "rejected")
+                self.assertTrue(report["production_equivalent_evidence"][evidence_key]["reasons"])
+                self.assertEqual(blocker_status(report, blocker_id), "blocked")
+                self.assertEqual(report["status"], "blocked")
+
+    def test_sensitive_evidence_fields_are_rejected_without_rejecting_classification_fields(self) -> None:
+        accepted_with_classification_fields = accepted_p8aj_report()
+        rejected_with_raw_stdout = accepted_p8aj_report()
+        rejected_with_raw_stdout["cases"][0]["stdout"] = "Planning status: success\n"
+        rejected_with_serial = accepted_p8ak_report()
+        rejected_with_serial["cases"][0]["serial"] = "RAW-SERIAL"
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            make_synthetic_repo(root)
+            accepted_path = write_json(root, "reports/accepted.json", accepted_with_classification_fields)
+            raw_stdout_path = write_json(root, "reports/raw_stdout.json", rejected_with_raw_stdout)
+            raw_serial_path = write_json(root, "reports/raw_serial.json", rejected_with_serial)
+
+            accepted_report = self.build_report(root, p8aj_live_probe_report=accepted_path)
+            raw_stdout_report = self.build_report(root, p8aj_live_probe_report=raw_stdout_path)
+            raw_serial_report = self.build_report(root, p8ak_mismatch_warning_report=raw_serial_path)
+
+        self.assertEqual(accepted_report["production_equivalent_evidence"]["p8aj_live_probe"]["status"], "accepted")
+        self.assertEqual(raw_stdout_report["production_equivalent_evidence"]["p8aj_live_probe"]["status"], "rejected")
+        self.assertEqual(
+            raw_serial_report["production_equivalent_evidence"]["p8ak_mismatch_warning"]["status"],
+            "rejected",
+        )
+
+    def test_parser_accepts_optional_production_equivalent_evidence_report_paths(self) -> None:
+        args = self.readiness.parse_args(
+            [
+                "--p8aj-live-probe-report",
+                "reports/p8aj.json",
+                "--p8ak-mismatch-warning-report",
+                "reports/p8ak.json",
+            ]
+        )
+
+        self.assertEqual(args.p8aj_live_probe_report, "reports/p8aj.json")
+        self.assertEqual(args.p8ak_mismatch_warning_report, "reports/p8ak.json")
 
     def test_report_status_remains_blocked_when_static_checks_pass(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
@@ -409,6 +655,10 @@ class CheckRustPlannerCutoverReadinessTests(unittest.TestCase):
             r"^\s*from\s+tools\.compare_rust_python_plan\b",
             r"^\s*import\s+tools\.smoke_rust_shadow_cli_matrix\b",
             r"^\s*from\s+tools\.smoke_rust_shadow_cli_matrix\b",
+            r"^\s*import\s+tools\.smoke_rust_production_equivalent_live_adb_probe\b",
+            r"^\s*from\s+tools\.smoke_rust_production_equivalent_live_adb_probe\b",
+            r"^\s*import\s+tools\.smoke_rust_production_equivalent_mismatch_warning\b",
+            r"^\s*from\s+tools\.smoke_rust_production_equivalent_mismatch_warning\b",
         ]
         for pattern in forbidden_import_patterns:
             with self.subTest(pattern=pattern):

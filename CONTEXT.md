@@ -230,8 +230,17 @@ live probing, invoke the supplied Rust binary directly, discover devices, run
 evidence. The tool can produce evidence for
 `detected_device_profile_mismatch_warning_not_cut_over` when run manually, but
 tool existence alone does not clear the blocker. P8AJ and P8AK cover separate
-evidence bars, P8AL remains the future readiness-gate update phase after
-evidence exists, and both blockers remain blocked after P8AK.
+evidence bars, and both blockers remain blocked by tool existence alone.
+P8AL adds supplied-report evidence intake to
+`tools/check_rust_planner_cutover_readiness.py` for manually saved P8AJ and P8AK
+JSON reports. The gate reads only report paths explicitly supplied through
+`--p8aj-live-probe-report <path>` and
+`--p8ak-mismatch-warning-report <path>`. It does not run smoke tools, ADB, Cargo,
+npm, Tauri/protocol checks, executor/apply, network checks, or planner runtime
+paths. Accepted reports move only the relevant blocker entry to
+`evidence_accepted`; they do not clear default cutover, and the top-level
+readiness status remains `blocked`. Default `emuchef plan` remains Python-owned
+until a separate default-cutover phase.
 
 ## Current Authored Model
 

@@ -1,9 +1,10 @@
 #!/usr/bin/env python3
 """Static readiness report for future Rust planner default-cutover PRs.
 
-This developer-only gate consolidates static prerequisites, advisory manual
-evidence commands, and intentionally remaining blockers. It does not execute the
-comparison matrix, smoke runner, Cargo, npm, ADB, planner code, or runtime paths.
+This developer-only gate consolidates static prerequisites, supplied manual
+evidence reports, advisory manual evidence commands, and intentionally remaining
+blockers. It does not execute the comparison matrix, smoke runner, Cargo, npm,
+ADB, planner code, or runtime paths.
 """
 
 from __future__ import annotations
@@ -12,7 +13,7 @@ import argparse
 import json
 import sys
 from pathlib import Path
-from typing import Any
+from typing import Any, Callable
 
 
 REPORT_KIND = "rust_planner_cutover_readiness_check"
@@ -20,6 +21,32 @@ REPORT_SCHEMA_VERSION = 1
 SCENARIO_MATRIX_SCHEMA_VERSION = 1
 DEVICE_CONTEXT_FIELDS = ("manufacturer", "model", "android_version", "device_tags")
 DEVICE_CONTEXT_FIELD_SET = set(DEVICE_CONTEXT_FIELDS)
+P8AJ_EVIDENCE_ID = "p8aj_live_probe"
+P8AK_EVIDENCE_ID = "p8ak_mismatch_warning"
+P8AJ_REPORT_KIND = "rust_production_equivalent_live_adb_probe_smoke"
+P8AK_REPORT_KIND = "rust_production_equivalent_mismatch_warning_smoke"
+REAL_DEVICE_PROBING_BLOCKER_ID = "real_device_probing_not_cut_over"
+MISMATCH_WARNING_BLOCKER_ID = "detected_device_profile_mismatch_warning_not_cut_over"
+EVIDENCE_ACCEPTED_STATUS = "evidence_accepted"
+P8AK_REQUIRED_PASSING_CASES = (
+    "matched_profile",
+    "manufacturer_mismatch",
+    "model_mismatch",
+    "android_minimum_mismatch",
+    "android_minimum_match",
+)
+SENSITIVE_EVIDENCE_KEYS = {
+    "command",
+    "argv",
+    "environment",
+    "env",
+    "stdout",
+    "stderr",
+    "raw_command",
+    "raw_stdout",
+    "raw_stderr",
+    "serial",
+}
 
 REQUIRED_ARTIFACTS = (
     "tools/compare_rust_python_plan.py",
@@ -95,6 +122,26 @@ REQUIRED_MANUAL_EVIDENCE = (
             "cd ../ && npm run check:rust-runtime"
         ),
     },
+    {
+        "id": "p8aj_rust_production_equivalent_live_probe_smoke",
+        "command": (
+            "PYTHONPATH=src rtk python3 tools/smoke_rust_production_equivalent_live_adb_probe.py "
+            "--rust-planner-bin <path-to-emuchef-plan-shadow> "
+            "--adb-path <path-to-adb> "
+            "--serial <device-serial> "
+            "--authored-root authored "
+            "--device-plan <device-plan>"
+        ),
+    },
+    {
+        "id": "p8ak_rust_production_equivalent_mismatch_warning_smoke",
+        "command": (
+            "PYTHONPATH=src rtk python3 tools/smoke_rust_production_equivalent_mismatch_warning.py "
+            "--rust-planner-bin <path-to-emuchef-plan-shadow> "
+            "--authored-root authored "
+            "--device-plan ayaneo.pocket_s_mini.base"
+        ),
+    },
 )
 
 REMAINING_BLOCKERS = (
@@ -107,11 +154,11 @@ REMAINING_BLOCKERS = (
         "status": "blocked",
     },
     {
-        "id": "real_device_probing_not_cut_over",
+        "id": REAL_DEVICE_PROBING_BLOCKER_ID,
         "status": "blocked",
     },
     {
-        "id": "detected_device_profile_mismatch_warning_not_cut_over",
+        "id": MISMATCH_WARNING_BLOCKER_ID,
         "status": "blocked",
     },
     {
@@ -126,11 +173,14 @@ def build_readiness_report(
     repo_root: Path,
     authored_root: Path,
     scenario_matrix: Path,
+    p8aj_live_probe_report: Path | None = None,
+    p8ak_mismatch_warning_report: Path | None = None,
 ) -> dict[str, Any]:
     """Build the deterministic static readiness report.
 
-    `status` intentionally remains `blocked` because static prerequisites alone
-    are not enough to make Rust the default planner backend.
+    `status` intentionally remains `blocked` because static prerequisites and
+    supplied production-equivalent evidence are not enough to make Rust the
+    default planner backend.
     """
 
     repo_root = repo_root.resolve()
@@ -144,6 +194,22 @@ def build_readiness_report(
         *_readiness_doc_reference_checks(repo_root),
         *_cli_backend_token_checks(repo_root),
     ]
+    production_equivalent_evidence = {
+        P8AJ_EVIDENCE_ID: _evaluate_evidence_report(
+            repo_root=repo_root,
+            report_path=p8aj_live_probe_report,
+            evidence_id=P8AJ_EVIDENCE_ID,
+            blocker_id=REAL_DEVICE_PROBING_BLOCKER_ID,
+            validator=_p8aj_evidence_rejection_reasons,
+        ),
+        P8AK_EVIDENCE_ID: _evaluate_evidence_report(
+            repo_root=repo_root,
+            report_path=p8ak_mismatch_warning_report,
+            evidence_id=P8AK_EVIDENCE_ID,
+            blocker_id=MISMATCH_WARNING_BLOCKER_ID,
+            validator=_p8ak_evidence_rejection_reasons,
+        ),
+    }
 
     return {
         "kind": REPORT_KIND,
@@ -154,8 +220,9 @@ def build_readiness_report(
             "scenario_matrix": _display_path(scenario_matrix),
         },
         "static_checks": static_checks,
+        "production_equivalent_evidence": production_equivalent_evidence,
         "required_manual_evidence": [dict(item) for item in REQUIRED_MANUAL_EVIDENCE],
-        "remaining_blockers": [dict(item) for item in REMAINING_BLOCKERS],
+        "remaining_blockers": _remaining_blockers_with_evidence(production_equivalent_evidence),
     }
 
 
@@ -169,6 +236,168 @@ def static_checks_pass(report: dict[str, Any]) -> bool:
     """Return whether all static prerequisites passed."""
 
     return all(check.get("status") == "pass" for check in report.get("static_checks", []))
+
+
+def _evaluate_evidence_report(
+    *,
+    repo_root: Path,
+    report_path: Path | None,
+    evidence_id: str,
+    blocker_id: str,
+    validator: Callable[[dict[str, Any]], list[str]],
+) -> dict[str, Any]:
+    if report_path is None:
+        return _evidence_item(
+            status="missing",
+            evidence_id=evidence_id,
+            blocker_id=blocker_id,
+            reasons=["evidence report path was not supplied"],
+        )
+
+    payload, read_reasons = _read_evidence_json(_resolve_input_path(repo_root, report_path))
+    if read_reasons:
+        return _evidence_item(
+            status="rejected",
+            evidence_id=evidence_id,
+            blocker_id=blocker_id,
+            reasons=read_reasons,
+        )
+
+    if payload is None:
+        return _evidence_item(
+            status="rejected",
+            evidence_id=evidence_id,
+            blocker_id=blocker_id,
+            reasons=["evidence report root must be a JSON object"],
+        )
+
+    reasons = [*_sensitive_evidence_rejection_reasons(payload), *validator(payload)]
+    return _evidence_item(
+        status="accepted" if not reasons else "rejected",
+        evidence_id=evidence_id,
+        blocker_id=blocker_id,
+        reasons=reasons,
+    )
+
+
+def _evidence_item(*, status: str, evidence_id: str, blocker_id: str, reasons: list[str]) -> dict[str, Any]:
+    return {
+        "status": status,
+        "evidence_id": evidence_id,
+        "blocker_id": blocker_id,
+        "reasons": reasons,
+    }
+
+
+def _read_evidence_json(path: Path) -> tuple[dict[str, Any] | None, list[str]]:
+    if not path.exists():
+        return None, ["evidence report file is missing"]
+    try:
+        # SECURITY-REVIEW: Evidence paths are explicitly supplied by a developer.
+        # The gate only parses JSON and validates metadata; it never executes
+        # commands or imports smoke/planner modules.
+        payload = json.loads(path.read_text(encoding="utf-8"))
+    except OSError:
+        return None, ["evidence report could not be read"]
+    except json.JSONDecodeError:
+        return None, ["evidence report must be valid JSON"]
+    if not isinstance(payload, dict):
+        return None, ["evidence report root must be a JSON object"]
+    return payload, []
+
+
+def _sensitive_evidence_rejection_reasons(payload: dict[str, Any]) -> list[str]:
+    sensitive_paths = _sensitive_evidence_key_paths(payload)
+    if not sensitive_paths:
+        return []
+    return [f"evidence report contains sensitive field: {path}" for path in sensitive_paths]
+
+
+def _sensitive_evidence_key_paths(value: object, *, prefix: str = "report") -> list[str]:
+    paths: list[str] = []
+    if isinstance(value, dict):
+        for key, child in value.items():
+            key_text = str(key)
+            child_path = f"{prefix}.{key_text}"
+            if key_text in SENSITIVE_EVIDENCE_KEYS:
+                paths.append(child_path)
+            paths.extend(_sensitive_evidence_key_paths(child, prefix=child_path))
+    elif isinstance(value, list):
+        for index, child in enumerate(value):
+            paths.extend(_sensitive_evidence_key_paths(child, prefix=f"{prefix}[{index}]"))
+    return paths
+
+
+def _p8aj_evidence_rejection_reasons(payload: dict[str, Any]) -> list[str]:
+    reasons = []
+    if payload.get("kind") != P8AJ_REPORT_KIND:
+        reasons.append(f"kind must be {P8AJ_REPORT_KIND}")
+    if payload.get("schema_version") != REPORT_SCHEMA_VERSION:
+        reasons.append(f"schema_version must be {REPORT_SCHEMA_VERSION}")
+
+    summary = payload.get("summary")
+    if not isinstance(summary, dict) or not _json_int_equals(summary.get("failed"), 0):
+        reasons.append("summary.failed must be 0")
+
+    inputs = payload.get("inputs")
+    if not isinstance(inputs, dict) or inputs.get("live_probe_requested") is not True:
+        reasons.append("inputs.live_probe_requested must be true")
+    return reasons
+
+
+def _p8ak_evidence_rejection_reasons(payload: dict[str, Any]) -> list[str]:
+    reasons = []
+    if payload.get("kind") != P8AK_REPORT_KIND:
+        reasons.append(f"kind must be {P8AK_REPORT_KIND}")
+    if payload.get("schema_version") != REPORT_SCHEMA_VERSION:
+        reasons.append(f"schema_version must be {REPORT_SCHEMA_VERSION}")
+
+    summary = payload.get("summary")
+    if not isinstance(summary, dict) or not _json_int_equals(summary.get("failed"), 0):
+        reasons.append("summary.failed must be 0")
+
+    cases = payload.get("cases")
+    if not isinstance(cases, list):
+        reasons.append("cases must be a list")
+    else:
+        passing_case_ids = {
+            case.get("id")
+            for case in cases
+            if isinstance(case, dict) and case.get("status") == "passed" and isinstance(case.get("id"), str)
+        }
+        missing_cases = [case_id for case_id in P8AK_REQUIRED_PASSING_CASES if case_id not in passing_case_ids]
+        if missing_cases:
+            reasons.append(f"missing passing cases: {', '.join(missing_cases)}")
+    return reasons
+
+
+def _json_int_equals(value: object, expected: int) -> bool:
+    return isinstance(value, int) and not isinstance(value, bool) and value == expected
+
+
+def _remaining_blockers_with_evidence(production_equivalent_evidence: dict[str, dict[str, Any]]) -> list[dict[str, str]]:
+    blocker_statuses = {
+        REAL_DEVICE_PROBING_BLOCKER_ID: (
+            EVIDENCE_ACCEPTED_STATUS
+            if production_equivalent_evidence[P8AJ_EVIDENCE_ID]["status"] == "accepted"
+            else "blocked"
+        ),
+        MISMATCH_WARNING_BLOCKER_ID: (
+            EVIDENCE_ACCEPTED_STATUS
+            if production_equivalent_evidence[P8AK_EVIDENCE_ID]["status"] == "accepted"
+            else "blocked"
+        ),
+    }
+    blockers: list[dict[str, str]] = []
+    for blocker in REMAINING_BLOCKERS:
+        blocker_id = blocker["id"]
+        blockers.append(
+            {
+                "id": blocker_id,
+                "status": blocker_statuses.get(blocker_id, blocker["status"]),
+            }
+        )
+    return blockers
 
 
 def _scenario_matrix_checks(matrix_path: Path, authored_path: Path) -> tuple[dict[str, Any] | None, list[dict[str, Any]]]:
@@ -495,6 +724,8 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     )
     parser.add_argument("--authored-root", default="authored")
     parser.add_argument("--scenario-matrix", default="tools/plan_parity_scenarios.json")
+    parser.add_argument("--p8aj-live-probe-report")
+    parser.add_argument("--p8ak-mismatch-warning-report")
     return parser.parse_args(argv)
 
 
@@ -504,6 +735,8 @@ def main(argv: list[str] | None = None) -> int:
         repo_root=Path.cwd(),
         authored_root=Path(args.authored_root),
         scenario_matrix=Path(args.scenario_matrix),
+        p8aj_live_probe_report=Path(args.p8aj_live_probe_report) if args.p8aj_live_probe_report else None,
+        p8ak_mismatch_warning_report=Path(args.p8ak_mismatch_warning_report) if args.p8ak_mismatch_warning_report else None,
     )
     sys.stdout.write(dumps_report(report))
     return 0 if static_checks_pass(report) else 1

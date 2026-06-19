@@ -56,6 +56,11 @@ for the explicit production-equivalent route. The tool can produce evidence for
 `detected_device_profile_mismatch_warning_not_cut_over` when run manually, but
 tool existence alone does not clear the blocker or change readiness-gate
 behavior.
+P8AL adds supplied-report evidence intake to the static readiness gate for
+manually saved P8AJ/P8AK JSON reports. Accepted reports move the relevant
+blocker entry to `evidence_accepted`; they do not clear default cutover, and the
+top-level readiness status remains `blocked`. Default `emuchef plan` remains
+Python-owned until a separate default-cutover phase.
 P8N adds only the crate-local Rust fake/test probe foundation. P8O adds
 fake/test-backed detected-facts planner-input construction. Intended future
 context precedence: synthetic/profile context -> detected facts -> explicit CLI
@@ -173,7 +178,7 @@ scenarios for `ayaneo.pocket_s_mini.base`. It does not run live probing, call
 the supplied Rust binary directly, alter executor/apply or Tauri/protocol
 behavior, participate in normal checks, add readiness-gate executed evidence, or
 reclassify blockers. P8AJ and P8AK cover separate evidence bars, and P8AL
-remains the future readiness-gate update phase after evidence exists.
+is supplied-report evidence intake only.
 
 Rust planner, executor, and CLI behavior is fixture-scoped, test-scoped,
 internal, or editor-backend-scoped unless explicitly promoted by later work.
