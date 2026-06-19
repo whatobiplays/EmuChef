@@ -44,8 +44,10 @@ evidence does not clear the default-route probing or mismatch-warning blockers.
 default-route probe request/response shape and does not change current CLI,
 executor/apply, readiness-gate, or route behavior.
 `docs/rust-production-equivalent-live-probe-smoke.md` records the evidence bar
-for a future production-equivalent live probe smoke and does not change current
-CLI, executor/apply, readiness-gate, or route behavior.
+for production-equivalent live probe smoke evidence and records the optional
+P8AJ manual smoke tool. The tool can produce evidence when run manually with
+real device inputs, but it does not change current CLI, executor/apply,
+readiness-gate, or default-route behavior.
 `docs/rust-default-route-mismatch-warning-parity.md` records the evidence bar
 for future default-route mismatch-warning parity and does not change current
 CLI, executor/apply, readiness-gate, or route behavior.
@@ -140,6 +142,21 @@ readiness-gate gap summary. See
 future default-route live-probe cutover design, and
 `docs/rust-default-route-mismatch-warning-parity.md` for the P8AF evidence bar
 for future default-route mismatch-warning parity.
+P8AJ adds optional/manual smoke tooling for the explicit
+`rust-production-equivalent` live-probe route through
+`tools/smoke_rust_production_equivalent_live_adb_probe.py`. The smoke invokes
+`python -m emuchef plan --planner-backend rust-production-equivalent` with the
+Rust live-probe wrapper flags, expects Python-compatible output instead of raw
+Rust JSON, and emits deterministic JSON with scrubbed inputs including
+`live_probe_requested: true`. It does not call the supplied Rust binary
+directly, discover devices, run `adb devices`, inspect or normalize the
+supplied ADB path or serial, alter executor/apply or Tauri/protocol behavior,
+participate in normal checks, add readiness-gate executed evidence, or
+reclassify blockers. The tool can produce production-equivalent live probe
+evidence when run manually with real device inputs. Its existence alone does not
+clear `real_device_probing_not_cut_over`, and
+`detected_device_profile_mismatch_warning_not_cut_over` remains separate for
+P8AK evidence.
 
 Rust planner, executor, and CLI behavior is fixture-scoped, test-scoped,
 internal, or editor-backend-scoped unless explicitly promoted by later work.
@@ -236,6 +253,9 @@ forward Rust-owned detected-facts fixture and live-probe wrapper inputs without
 Python ADB execution, probing, session construction, or apply work. It does not
 add production-equivalent-specific flags or change `python`, `rust-shadow`, or
 `rust-experimental` behavior.
+P8AJ adds optional/manual smoke tooling for that explicit route only. The smoke
+is not part of normal checks or readiness-gate execution, and the live-probing
+plus mismatch-warning blockers remain blocked after the tool is added.
 P8I adds a static readiness report for
 future default-cutover PRs; it lists required manual evidence but does not run
 comparison/smoke tooling, Cargo, npm, ADB, executor/apply, Tauri/protocol,

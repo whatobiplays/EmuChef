@@ -35,8 +35,9 @@ Rust-owned, and P8X-P8AA migration evidence does not clear
 default-route probe request/response shape without implementing probing or
 clearing readiness blockers.
 `docs/rust-production-equivalent-live-probe-smoke.md` records the evidence bar
-for a future production-equivalent live probe smoke without adding required
-manual evidence or clearing readiness blockers.
+for production-equivalent live probe smoke evidence and records the optional
+P8AJ manual smoke tool. The tool is not required manual evidence in this
+readiness gate and does not clear readiness blockers by its existence alone.
 `docs/rust-default-route-mismatch-warning-parity.md` records the evidence bar
 for future default-route mismatch-warning parity without adding required manual
 evidence or clearing readiness blockers.
@@ -136,6 +137,15 @@ shadow binary, always uses Python-compatible output, and keeps Python out of
 ADB execution, device discovery, `getprop` parsing, planner session
 construction, and apply work. P8AI is not smoke evidence, not readiness-gate
 executed evidence, not default planner cutover, and not Python planner deletion.
+P8AJ adds `tools/smoke_rust_production_equivalent_live_adb_probe.py` as
+optional/manual smoke tooling for the explicit `rust-production-equivalent`
+live-probe route. The smoke invokes the Python CLI route with the Rust
+live-probe wrapper flags, requires Python-compatible output instead of raw Rust
+JSON, emits deterministic JSON with scrubbed inputs including
+`live_probe_requested: true`, and is not part of normal checks or
+readiness-gate execution. The tool can produce production-equivalent live probe
+evidence when run manually with real device inputs, but tool existence alone
+does not clear `real_device_probing_not_cut_over`.
 P8AA adds `tools/smoke_rust_experimental_live_adb_probe.py` as optional/manual
 smoke evidence for the P8Z Python `rust-experimental` live-probe forwarding
 route. The smoke invokes `python3 -m emuchef plan --planner-backend
@@ -302,16 +312,18 @@ The Rust planner evidence is planner-only and migration-focused:
   evidence, and the live-probing plus mismatch-warning readiness blockers stay
   blocked until production/default-route evidence exists.
 - `docs/rust-production-equivalent-live-probe-smoke.md` records the P8AE
-  evidence bar for future production-equivalent live probe smoke evidence. It
-  does not add readiness-gate execution or reclassify blockers.
+  evidence bar and P8AJ optional/manual smoke tooling for production-equivalent
+  live probe evidence. It does not add readiness-gate execution or reclassify
+  blockers.
 - `docs/rust-default-route-mismatch-warning-parity.md` records the P8AF
   evidence bar for future default-route mismatch-warning parity. It does not add
   readiness-gate execution or reclassify blockers.
 - `docs/rust-production-equivalent-route-implementation-plan.md` records the
   P8AG implementation plan for an explicit production-equivalent route. P8AI
   wires that route as executable, explicit, non-default,
-  Rust-shadow-binary-backed, Python-compatible route plumbing only. It does not
-  add readiness-gate execution or reclassify blockers.
+  Rust-shadow-binary-backed, Python-compatible route plumbing only. P8AJ adds
+  optional/manual smoke tooling only. These phases do not add readiness-gate
+  execution or reclassify blockers.
 - `tools/plan_parity_scenarios.json` is the P7P scenario matrix for the current
   checked-in device-plan scenarios plus P8K explicit-context evidence. The
   current checked-in scenario matrix expects all six scenarios to classify as
