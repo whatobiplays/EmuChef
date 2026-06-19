@@ -456,7 +456,9 @@ See `../../docs/rust-live-probe-evidence-and-cutover-gap.md` for the
 consolidated P8X-P8AA live-probe evidence, default-route, production-route, and
 readiness-gate gap summary. See
 `../../docs/adr/0004-default-route-live-probe-cutover-design.md` for the
-accepted future default-route live-probe cutover design.
+accepted future default-route live-probe cutover design, and
+`../../docs/rust-default-route-probe-request-response.md` for the intended
+future default-route probe request/response shape.
 
 P8S adds optional/manual smoke evidence for the direct shadow-binary fixture
 harness:

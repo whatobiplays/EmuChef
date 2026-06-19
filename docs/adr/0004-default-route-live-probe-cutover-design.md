@@ -34,6 +34,10 @@ The default-route cutover must preserve the output and exit-code contract
 accepted in ADR 0002 unless another accepted ADR explicitly changes that
 contract.
 
+`docs/rust-default-route-probe-request-response.md` records the intended future
+default-route probe request/response shape. It does not implement probing or
+clear readiness blockers.
+
 Default-route context precedence is:
 
 1. authored/profile-derived context is the fallback base;

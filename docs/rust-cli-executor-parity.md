@@ -40,6 +40,9 @@ default Rust planner cutover. P8M records that ownership decision.
 `docs/adr/0004-default-route-live-probe-cutover-design.md` records that future
 default-route live probing should be Rust-owned and that P8X-P8AA migration
 evidence does not clear the default-route probing or mismatch-warning blockers.
+`docs/rust-default-route-probe-request-response.md` records the future
+default-route probe request/response shape and does not change current CLI,
+executor/apply, readiness-gate, or route behavior.
 P8N adds only the crate-local Rust fake/test probe foundation. P8O adds
 fake/test-backed detected-facts planner-input construction. Intended future
 context precedence: synthetic/profile context -> detected facts -> explicit CLI

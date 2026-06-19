@@ -9,6 +9,9 @@ cutover documentation.
 `docs/adr/0004-default-route-live-probe-cutover-design.md` records that future
 default-route live probing should be Rust-owned and that P8X-P8AA migration
 evidence does not clear the default-route probing or mismatch-warning blockers.
+`docs/rust-default-route-probe-request-response.md` records the intended future
+default-route probe request/response shape without implementing probing or
+clearing readiness blockers.
 
 This document is not a release checklist and is not a readiness-gate result.
 Manual smoke evidence from P8Y and P8AA does not make Rust the default planner
@@ -74,7 +77,8 @@ default production-route parity.
 
 ## Next Cutover Candidates
 
-- default-route probe request/response shape following ADR 0004
+- implementation of the default-route probe request/response shape recorded in
+  `docs/rust-default-route-probe-request-response.md`
 - production-route mismatch-warning parity evidence
 - readiness-gate blocker reclassification only after production/default-route
   evidence

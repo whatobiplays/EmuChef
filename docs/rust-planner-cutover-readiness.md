@@ -25,6 +25,9 @@ default-route live-probe cutover design: future default-route probing should be
 Rust-owned, and P8X-P8AA migration evidence does not clear
 `real_device_probing_not_cut_over` or
 `detected_device_profile_mismatch_warning_not_cut_over`.
+`docs/rust-default-route-probe-request-response.md` records the intended future
+default-route probe request/response shape without implementing probing or
+clearing readiness blockers.
 P8N adds a crate-local Rust probe abstraction, fake probe, and tests for layering
 detected facts over synthetic/profile-derived context. P8O adds fake/test-backed
 planner-input construction that applies detected facts over

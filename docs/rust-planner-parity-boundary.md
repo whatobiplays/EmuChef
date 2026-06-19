@@ -19,6 +19,9 @@ default Rust planner cutover.
 `docs/adr/0004-default-route-live-probe-cutover-design.md` records that future
 default-route live probing should be Rust-owned and that P8X-P8AA migration
 evidence does not clear the default-route probing or mismatch-warning blockers.
+`docs/rust-default-route-probe-request-response.md` records the future
+default-route probe request/response shape and does not change planner behavior
+or readiness classification.
 
 Rust planner tests include an intentional fixture inventory/parsing guard for
 the existing Phase 6M/6N planner parity evidence. The guard consumes checked-in

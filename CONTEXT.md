@@ -185,6 +185,9 @@ summary.
 ADR 0004 records that future default-route live probing should be Rust-owned
 and that P8X-P8AA migration evidence does not clear the default-route probing or
 mismatch-warning blockers.
+P8AD records the future default-route probe request/response shape in
+`docs/rust-default-route-probe-request-response.md`; it does not implement
+probing or clear readiness blockers.
 
 ## Current Authored Model
 
