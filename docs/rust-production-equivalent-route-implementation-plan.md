@@ -2,9 +2,11 @@
 
 ## Purpose
 
-This document is an implementation plan for a future production-equivalent Rust
-planner route. It does not implement route behavior, change runtime behavior, or
-clear Rust planner cutover blockers.
+This document records the implementation plan and current state for the
+explicit production-equivalent Rust planner route. P8AI wires the route through
+the existing Python-to-Rust subprocess plumbing, but it does not add smoke
+evidence, change default planner behavior, or clear Rust planner cutover
+blockers.
 
 The plan identifies the smallest safe path toward route evidence that can
 eventually satisfy:
@@ -15,10 +17,12 @@ eventually satisfy:
   `docs/rust-default-route-mismatch-warning-parity.md`.
 
 P8AG is documentation-only. P8AH recognizes the backend name
-`rust-production-equivalent` in the Python CLI parser, but reserves it with a
-validation error before planning, probing, session construction, Rust command
-construction, subprocess execution, or apply work. The route is not executable
-in P8AH.
+`rust-production-equivalent` in the Python CLI parser and reserves it with a
+validation error. P8AI makes that backend executable only when explicitly
+selected with `--rust-planner-bin`, reuses the supplied Rust shadow binary,
+always uses Python-compatible output, and allows the same Rust-owned
+detected-facts fixture and live-probe wrapper inputs as `rust-experimental`.
+P8AI is route plumbing only.
 
 ## Current Route Inventory
 
@@ -39,10 +43,11 @@ The current route surface is split by migration purpose:
   forwards local fixture paths or selected live-probe intent to the supplied
   Rust shadow binary without parsing `adb shell getprop`, and formats successful
   Rust `PlanningResult` JSON through the Python-compatible output path.
-- Python `rust-production-equivalent`: an explicit non-default reserved backend
-  name. The parser accepts the value, and backend validation rejects it before
-  any planner, probe, session, subprocess, or apply work. P8AH adds no
-  production-equivalent route behavior.
+- Python `rust-production-equivalent`: an explicit non-default route to the
+  supplied Rust shadow binary. It requires `--rust-planner-bin`, always uses
+  Python-compatible output, accepts `--rust-detected-facts-json <path>` and the
+  complete live-probe wrapper flag set, and does not use Python ADB/device
+  probing, planner session construction, or apply work.
 - Tauri/protocol: unchanged. Planner route cutover is not exposed through the
   active editor protocol by current evidence.
 - Executor/apply: unchanged. Planner route cutover does not imply Rust
@@ -138,27 +143,25 @@ This plan does not:
 - modify readiness gate behavior;
 - add Tauri/protocol integration;
 - add executor/apply integration;
-- implement executable production-equivalent route behavior in P8AH.
+- add smoke evidence or readiness-gate evidence in P8AI.
 
 ## Required Test Evidence
 
-P8AH adds focused tests proving parser recognition plus reserved-backend
-validation. Future executable-route implementation must add focused tests
-proving:
+P8AI adds focused tests proving executable-route plumbing:
 
-- CLI rejects production-equivalent flags outside the new backend;
 - the route forwards or invokes Rust-owned probing without Python parsing
   `adb shell getprop`;
-- detected facts affect `execution_plan.device_context`;
-- explicit overrides win over detected facts;
-- matched scenarios avoid `device_profile_mismatch`;
-- mismatch scenarios emit a warning through `PlanningResult`;
+- `--rust-planner-bin` is required;
+- `--rust-shadow-output` stays scoped to `rust-shadow`;
+- fixture and live-probe wrapper inputs are forwarded to the supplied Rust
+  shadow binary;
+- fixture and live-probe inputs stay mutually exclusive;
 - output and exit behavior preserve ADR 0002.
 
 ## Required Manual Evidence
 
 Future blocker reclassification requires manual evidence that is not added to
-the readiness gate in P8AH:
+the readiness gate in P8AI:
 
 - production-equivalent live probe smoke satisfying P8AE;
 - mismatch-warning parity evidence satisfying P8AF;
@@ -166,8 +169,8 @@ the readiness gate in P8AH:
 
 ## Risks
 
-- Backend naming churn if `rust-production-equivalent` is mistaken for an
-  executable route before evidence has accumulated.
+- Confusing executable `rust-production-equivalent` route plumbing with
+  production-equivalent smoke or readiness evidence.
 - Confusing a production-equivalent explicit route with default cutover.
 - Accidental blocker reclassification before production-equivalent evidence
   exists.
@@ -179,7 +182,8 @@ the readiness gate in P8AH:
 
 - P8AH recognizes and reserves the explicit production-equivalent backend name
   with validation only.
-- P8AI wire production-equivalent backend to Rust-owned probe route.
+- P8AI wires the production-equivalent backend to Rust-owned probe route
+  plumbing.
 - P8AJ add production-equivalent route smoke.
 - P8AK add mismatch-warning parity evidence for production-equivalent route.
 - P8AL update readiness gate only after evidence exists.

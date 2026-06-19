@@ -7,11 +7,13 @@ Rust planner output remains shadow/dev-only. The default `emuchef plan` route
 remains Python-owned; the only Python CLI route to Rust planning is the explicit
 developer-only `--planner-backend rust-shadow --rust-planner-bin <path>` path
 and the explicit non-default migration route
-`--planner-backend rust-experimental --rust-planner-bin <path>`.
-The explicit non-default `--planner-backend rust-production-equivalent` name is
-recognized by the parser but reserved by validation before any planning,
-probing, session construction, Rust command construction, subprocess execution,
-or apply work. It is not an executable Rust planning route yet.
+`--planner-backend rust-experimental --rust-planner-bin <path>`, plus the
+explicit non-default production-equivalent route
+`--planner-backend rust-production-equivalent --rust-planner-bin <path>`.
+`rust-production-equivalent` reuses the supplied Rust shadow binary, always uses
+Python-compatible output, and routes detected-facts fixture or live-probe
+wrapper inputs through Rust-owned shadow-binary plumbing. It is route plumbing
+only, not default planner cutover or readiness evidence.
 `rust-experimental` is a cutover rehearsal route. Its name and behavior may
 change before Rust becomes the default planner backend. It is not the default
 planner, not a stable final public contract, and not Python planner deletion.
@@ -39,10 +41,11 @@ manual evidence or clearing readiness blockers.
 for future default-route mismatch-warning parity without adding required manual
 evidence or clearing readiness blockers.
 `docs/rust-production-equivalent-route-implementation-plan.md` records the P8AG
-implementation plan for a future explicit production-equivalent route. P8AH
-recognizes the backend name in the CLI parser but reserves it with validation
-before any route work. It does not add required manual evidence,
-readiness-gate execution, or blocker reclassification.
+implementation plan for an explicit production-equivalent route. P8AH
+recognizes and reserves the backend name in the CLI parser, and P8AI wires it
+as an explicit non-default Rust subprocess route backed by the supplied shadow
+binary. It does not add required manual evidence, readiness-gate execution, or
+blocker reclassification.
 P8N adds a crate-local Rust probe abstraction, fake probe, and tests for layering
 detected facts over synthetic/profile-derived context. P8O adds fake/test-backed
 planner-input construction that applies detected facts over
@@ -126,6 +129,13 @@ subprocess execution. `--rust-detected-facts-json <path>` fixture forwarding and
 live-probe forwarding are mutually exclusive detected-facts sources. P8Z is not
 default planner cutover, not production route-level probing parity, not
 readiness-gate executed evidence, and not Python planner deletion.
+P8AI lets the explicit `rust-production-equivalent` Python route use the same
+Rust-owned detected-facts fixture and live-probe wrapper inputs as
+`rust-experimental`. It requires `--rust-planner-bin`, invokes the supplied Rust
+shadow binary, always uses Python-compatible output, and keeps Python out of
+ADB execution, device discovery, `getprop` parsing, planner session
+construction, and apply work. P8AI is not smoke evidence, not readiness-gate
+executed evidence, not default planner cutover, and not Python planner deletion.
 P8AA adds `tools/smoke_rust_experimental_live_adb_probe.py` as optional/manual
 smoke evidence for the P8Z Python `rust-experimental` live-probe forwarding
 route. The smoke invokes `python3 -m emuchef plan --planner-backend
@@ -298,9 +308,10 @@ The Rust planner evidence is planner-only and migration-focused:
   evidence bar for future default-route mismatch-warning parity. It does not add
   readiness-gate execution or reclassify blockers.
 - `docs/rust-production-equivalent-route-implementation-plan.md` records the
-  P8AG implementation plan for a future explicit production-equivalent route.
-  P8AH recognizes the backend name but reserves it before route execution. It
-  does not add readiness-gate execution or reclassify blockers.
+  P8AG implementation plan for an explicit production-equivalent route. P8AI
+  wires that route as executable, explicit, non-default,
+  Rust-shadow-binary-backed, Python-compatible route plumbing only. It does not
+  add readiness-gate execution or reclassify blockers.
 - `tools/plan_parity_scenarios.json` is the P7P scenario matrix for the current
   checked-in device-plan scenarios plus P8K explicit-context evidence. The
   current checked-in scenario matrix expects all six scenarios to classify as
@@ -342,8 +353,8 @@ resolved or explicitly accepted for a narrower experimental route:
 
 | Blocker | Current classification |
 | --- | --- |
-| CLI routing strategy | Python `src/emuchef/cli.py` remains the current default `draft` and `plan` route. P8A adds an explicit dev-only `emuchef plan --planner-backend rust-shadow --rust-planner-bin <path>` bridge. It requires a supplied shadow binary, never invokes Cargo, passes through Rust JSON stdout/stderr by default, and is not a replacement command path or fallback policy. P8B adds a dev-only matrix smoke for that bridge's raw passthrough invocation path, and P8F adds dev-only matrix smoke for the same bridge with explicit `--rust-shadow-output python-compatible`; neither makes Rust authoritative. P8G adds `emuchef plan --planner-backend rust-experimental --rust-planner-bin <path>` as an explicit non-default migration route that reuses the Rust shadow planner invocation and Python-compatible formatter by default. P8H adds dev-only matrix smoke evidence for that explicit route across the current scenario matrix. P8AH recognizes `emuchef plan --planner-backend rust-production-equivalent` as a reserved backend name and rejects it before planning, probing, session construction, Rust command construction, subprocess execution, or apply work. `rust-experimental` is a cutover rehearsal route, not the default planner, not a stable final public contract, and not Python planner deletion. Its name and behavior may change before Rust becomes the default planner backend. |
-| Device probing and context resolution | Python CLI resolves ADB/device facts before planning in `_resolve_device_context(...)`. P8J lets the explicit Rust routes accept supplied `--manufacturer`, `--model`, `--android-version`, and repeated `--device-tag` values, and P8K/P8L provide matrix schema/tooling plus static coverage evidence for meaningful supplied `device_context` scenarios. P8M accepts the future-cutover ownership decision that Rust should own real-device probing and detected-device mismatch-warning parity. P8N adds a crate-local probe abstraction, fake probe, and context layering helper with intended future precedence synthetic/profile context -> detected facts -> explicit CLI overrides. P8O adds fake/test-backed detected-facts planner input construction, P8Q composes that input path into fake/test-backed planner-result construction, and P8R exposes that composition through a local `emuchef-plan-shadow --detected-facts-json <path>` fixture harness. P8T lets only `rust-experimental` forward an explicitly supplied local fixture path; default Python planning and `rust-shadow` do not forward fixture facts. P8V adds pure command modeling and supplied-text `getprop` parsing in Rust. P8W adds a crate-local live ADB probe adapter foundation that can execute the P8V command model through an injectable runner and parse stdout into `DetectedDeviceFacts`. P8X wires live probing only into the direct dev-only `emuchef-plan-shadow --probe-adb-getprop` mode and keeps fixture mode plus live mode mutually exclusive detected-facts sources. P8Y adds optional/manual smoke evidence for that direct shadow-binary live mode only; it requires explicit binary, ADB path, and serial inputs and does not discover devices or run through Python CLI routes. P8Z lets only `rust-experimental` forward explicit live-probe wrapper flags to the supplied Rust shadow binary as raw shadow flags; Python does not invoke ADB, discover devices, run `adb devices`, parse `getprop`, or validate/normalize the forwarded ADB path or serial. Default Python planning and `rust-shadow` reject the P8Z wrapper flags, and fixture forwarding plus live-probe forwarding remain mutually exclusive. P8X/P8Y/P8Z do not add normal runtime checks or readiness-gate execution. The former broad `real_device_context_probing_not_cut_over` blocker is narrowed, not resolved: `real_device_probing_not_cut_over` remains blocked. |
+| CLI routing strategy | Python `src/emuchef/cli.py` remains the current default `draft` and `plan` route. P8A adds an explicit dev-only `emuchef plan --planner-backend rust-shadow --rust-planner-bin <path>` bridge. It requires a supplied shadow binary, never invokes Cargo, passes through Rust JSON stdout/stderr by default, and is not a replacement command path or fallback policy. P8B adds a dev-only matrix smoke for that bridge's raw passthrough invocation path, and P8F adds dev-only matrix smoke for the same bridge with explicit `--rust-shadow-output python-compatible`; neither makes Rust authoritative. P8G adds `emuchef plan --planner-backend rust-experimental --rust-planner-bin <path>` as an explicit non-default migration route that reuses the Rust shadow planner invocation and Python-compatible formatter by default. P8H adds dev-only matrix smoke evidence for that explicit route across the current scenario matrix. P8AI wires `emuchef plan --planner-backend rust-production-equivalent --rust-planner-bin <path>` as an explicit non-default Rust subprocess route that reuses the supplied shadow binary, always uses Python-compatible output, and can forward Rust-owned detected-facts/probe wrapper inputs. This is route plumbing only and does not add smoke evidence or default cutover. `rust-experimental` is a cutover rehearsal route, not the default planner, not a stable final public contract, and not Python planner deletion. Its name and behavior may change before Rust becomes the default planner backend. |
+| Device probing and context resolution | Python CLI resolves ADB/device facts before planning in `_resolve_device_context(...)`. P8J lets the explicit Rust routes accept supplied `--manufacturer`, `--model`, `--android-version`, and repeated `--device-tag` values, and P8K/P8L provide matrix schema/tooling plus static coverage evidence for meaningful supplied `device_context` scenarios. P8M accepts the future-cutover ownership decision that Rust should own real-device probing and detected-device mismatch-warning parity. P8N adds a crate-local probe abstraction, fake probe, and context layering helper with intended future precedence synthetic/profile context -> detected facts -> explicit CLI overrides. P8O adds fake/test-backed detected-facts planner input construction, P8Q composes that input path into fake/test-backed planner-result construction, and P8R exposes that composition through a local `emuchef-plan-shadow --detected-facts-json <path>` fixture harness. P8T lets `rust-experimental` forward an explicitly supplied local fixture path; P8AI lets `rust-production-equivalent` forward the same fixture input. Default Python planning and `rust-shadow` do not forward fixture facts. P8V adds pure command modeling and supplied-text `getprop` parsing in Rust. P8W adds a crate-local live ADB probe adapter foundation that can execute the P8V command model through an injectable runner and parse stdout into `DetectedDeviceFacts`. P8X wires live probing only into the direct dev-only `emuchef-plan-shadow --probe-adb-getprop` mode and keeps fixture mode plus live mode mutually exclusive detected-facts sources. P8Y adds optional/manual smoke evidence for that direct shadow-binary live mode only; it requires explicit binary, ADB path, and serial inputs and does not discover devices or run through Python CLI routes. P8Z lets `rust-experimental` forward explicit live-probe wrapper flags to the supplied Rust shadow binary as raw shadow flags; P8AI lets `rust-production-equivalent` forward the same live-probe wrapper flags. Python does not invoke ADB, discover devices, run `adb devices`, parse `getprop`, or validate/normalize the forwarded ADB path or serial. Default Python planning and `rust-shadow` reject the wrapper flags, and fixture forwarding plus live-probe forwarding remain mutually exclusive. P8X/P8Y/P8Z/P8AI do not add normal runtime checks or readiness-gate execution. The former broad `real_device_context_probing_not_cut_over` blocker is narrowed, not resolved: `real_device_probing_not_cut_over` remains blocked. |
 | Argument and binding parity | `emuchef-plan-shadow` accepts explicit `--authored-root`, `--device-plan`, explicit device context flags, and string `--bind` values. It mirrors repeated-bind grouping and ordered repeated device tags, but is not full future Rust CLI binding type parity, ops replay parity, detected-device parity, or common-flag parity. |
 | Output format compatibility | Rust emits private JSON `PlanningResult` through the shadow command. P8A passes that JSON through directly from the explicit dev-only Python CLI bridge, and P8C guards that omitted `--rust-shadow-output` and explicit `--rust-shadow-output passthrough` remain Rust stdout/stderr/exit-code passthrough. P8E adds explicit `--rust-shadow-output python-compatible` formatting for usable Rust `PlanningResult` JSON: concise summary labels mirror the visible Python CLI labels, structured YAML is produced from the Rust JSON mapping through `dump_yaml(...)`, and `--output` writes that YAML while stdout stays concise unless `--verbose` is selected. Python CLI default planning still owns the default concise summary, verbose YAML, `--output`, and exit-code behavior. P8D accepts the future default-route target: Rust must preserve the Python-owned output and exit-code contract before default planner cutover unless a separate accepted breaking-change decision says otherwise. Rust-native JSON requires a future explicit structured-output mode such as `--format json`. P8E is output-compatibility path evidence only; it is not default Rust planner routing. |
 | Error and warning compatibility | Rust covers selected planner result, warning/error shape, and focused diagnostics. P8P adds pure/test-backed detected-device profile mismatch warning construction, P8Q appends that warning in a crate-private fake/test-backed planning-result helper, and P8R makes that helper executable through a local shadow-binary fixture only. P8Y treats `device_profile_mismatch` as acceptable optional/manual live-route smoke evidence when the selected device intentionally does not match the authored plan. Full CLI stderr/stdout, production route-level detected-device profile mismatch warnings, operation replay failures, exit codes, and broader planner diagnostics are not proven. `detected_device_profile_mismatch_warning_not_cut_over` remains blocked until production route-level evidence exists. |
@@ -494,10 +505,12 @@ resolved or explicitly accepted for a narrower experimental route:
   The mismatch warning still evaluates the detected fixture facts. P8T exposes
   a Python wrapper flag only for `--planner-backend rust-experimental`:
   `--rust-detected-facts-json <path>` forwards the exact argparse string as
-  `--detected-facts-json <path>`. The default Python backend and `rust-shadow`
-  reject the Python wrapper flag before ADB resolution, planner/session
-  construction, or subprocess execution; the raw Rust `--detected-facts-json`
-  flag remains unrecognized by Python CLI routes. This forwarding is not
+  `--detected-facts-json <path>`. P8AI exposes the same wrapper input for the
+  explicit `rust-production-equivalent` route. The default Python backend and
+  `rust-shadow` reject the Python wrapper flag before ADB resolution,
+  planner/session construction, or subprocess execution; the raw Rust
+  `--detected-facts-json` flag remains unrecognized by Python CLI routes. This
+  forwarding is not
   included in the Python CLI matrix smoke runner, not wired into route-level
   detection, and not live ADB probing. Real-device probing and production
   route-level mismatch-warning parity remain blocked.

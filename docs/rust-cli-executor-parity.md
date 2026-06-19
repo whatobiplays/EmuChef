@@ -62,7 +62,9 @@ fixture harness through `tools/smoke_rust_detected_facts_fixture.py`. P8T lets
 only the explicit `rust-experimental` Python route forward a local fixture path
 with `--rust-detected-facts-json <path>`; Python forwards the exact string to
 the Rust shadow binary as `--detected-facts-json <path>` and does not load,
-normalize, or validate the fixture. These slices do not change Python default
+normalize, or validate the fixture. P8AI lets the explicit
+`rust-production-equivalent` route forward the same fixture wrapper input
+through the same Rust shadow-binary flag. These slices do not change Python default
 planning behavior, live probing, default Python backend fixture forwarding,
 `rust-shadow` fixture forwarding, route-level detection, executor/apply,
 Tauri/protocol, readiness gate behavior, normal runtime checks, or normal
@@ -223,13 +225,17 @@ forwarding.
 P8Z adds `--rust-probe-adb-getprop`, `--rust-adb-path <path>`, and
 `--rust-serial <serial>` only to the same explicit `rust-experimental` route; it
 forwards them as raw Rust shadow live-probe flags and keeps fixture and live
-detected-facts sources mutually exclusive. Python still does not invoke or parse
-ADB, and the default Python backend plus `rust-shadow` reject the wrapper flags.
-P8AH recognizes `rust-production-equivalent` as an explicit non-default
-`--planner-backend` value but reserves it with validation before planner,
-probe, session, subprocess, Rust command, or apply work. It does not add
-production-equivalent-specific flags, execute production-equivalent planning, or
-change `python`, `rust-shadow`, or `rust-experimental` behavior.
+detected-facts sources mutually exclusive. P8AI lets
+`rust-production-equivalent` forward the same live-probe wrapper inputs. Python
+still does not invoke or parse ADB, and the default Python backend plus
+`rust-shadow` reject the wrapper flags.
+P8AI wires `rust-production-equivalent` as an explicit non-default
+`--planner-backend` route backed by the supplied Rust shadow binary. It
+requires `--rust-planner-bin`, always uses Python-compatible output, and can
+forward Rust-owned detected-facts fixture and live-probe wrapper inputs without
+Python ADB execution, probing, session construction, or apply work. It does not
+add production-equivalent-specific flags or change `python`, `rust-shadow`, or
+`rust-experimental` behavior.
 P8I adds a static readiness report for
 future default-cutover PRs; it lists required manual evidence but does not run
 comparison/smoke tooling, Cargo, npm, ADB, executor/apply, Tauri/protocol,
@@ -250,13 +256,14 @@ P8Y adds only optional/manual smoke evidence for that direct shadow live path.
 The smoke requires an explicit selected serial and does not discover devices,
 run `adb devices`, invoke Cargo, call Python CLI routes, participate in normal
 checks, or count as readiness-gate executed evidence.
-P8Z lets only the explicit `rust-experimental` Python route forward live-probe
-wrapper flags to the supplied Rust shadow binary and keeps Python out of ADB
-execution, device discovery, `getprop` parsing, and path/serial normalization.
-The default Python backend and `rust-shadow` reject those wrapper flags, and
-readiness blockers remain blocked.
-P8AH reserves the explicit `rust-production-equivalent` backend name before any
-route execution, so it does not affect executor/apply behavior or readiness
+P8Z lets the explicit `rust-experimental` Python route forward live-probe
+wrapper flags to the supplied Rust shadow binary, and P8AI lets the explicit
+`rust-production-equivalent` route forward the same wrapper inputs. Both routes
+keep Python out of ADB execution, device discovery, `getprop` parsing, and
+path/serial normalization. The default Python backend and `rust-shadow` reject
+those wrapper flags, and readiness blockers remain blocked.
+P8AI makes the explicit `rust-production-equivalent` backend executable as
+route plumbing only, so it does not affect executor/apply behavior or readiness
 blockers.
 P8K extends only the dev-only matrix evidence: optional scenario
 `device_context` values are validated, forwarded to both comparison sides and to
@@ -284,9 +291,10 @@ P8R makes it executable only through a local Rust shadow-binary fixture file.
 P8X wires live probing only into the direct Rust shadow binary. These slices do
 not wire live probing or production mismatch warnings into default Python
 planning, `rust-shadow`, Tauri/protocol, executor/apply, normal runtime checks,
-or the readiness gate. P8Z adds only `rust-experimental` wrapper forwarding for
-that direct Rust shadow live mode and does not make Python the owner of ADB
-probing or mismatch-warning parity.
+or the readiness gate. P8Z adds `rust-experimental` wrapper forwarding for that
+direct Rust shadow live mode, and P8AI adds the same forwarding to
+`rust-production-equivalent` as route plumbing only. Neither route makes Python
+the owner of ADB probing or mismatch-warning parity.
 Existing Rust planner, executor, and CLI slices should remain scoped as parity
 scaffolding until a later phase explicitly promotes or retires the corresponding
 Python surface.

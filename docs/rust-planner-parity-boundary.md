@@ -29,10 +29,12 @@ behavior or readiness classification.
 for future default-route mismatch-warning parity and does not change planner
 behavior or readiness classification.
 `docs/rust-production-equivalent-route-implementation-plan.md` records the
-future explicit production-equivalent route plan. P8AH recognizes
-`rust-production-equivalent` as a parser backend value but reserves it with
-validation before any planner, probe, session, subprocess, Rust command, or
-apply work.
+explicit production-equivalent route plan. P8AH recognizes
+`rust-production-equivalent` as a parser backend value, and P8AI wires it as an
+explicit non-default Rust subprocess route backed by the supplied shadow binary.
+The route always uses Python-compatible output and can forward Rust-owned
+detected-facts fixture or live-probe wrapper inputs. P8AI does not add smoke
+evidence or readiness reclassification.
 
 Rust planner tests include an intentional fixture inventory/parsing guard for
 the existing Phase 6M/6N planner parity evidence. The guard consumes checked-in
@@ -87,7 +89,10 @@ Rust planner-adjacent coverage is internal and fixture-scoped:
   live-probe intent through `--rust-probe-adb-getprop`, `--rust-adb-path <path>`,
   and `--rust-serial <serial>`, which become `--probe-adb-getprop`,
   `--adb-path <path>`, and `--serial <serial>` for the supplied Rust shadow
-  binary. Python does not invoke ADB, discover devices, run `adb devices`, parse
+  binary. P8AI lets the explicit `rust-production-equivalent` route forward the
+  same detected-facts fixture and complete live-probe wrapper inputs through the
+  same Rust shadow-binary flags. Python does not invoke ADB, discover devices,
+  run `adb devices`, parse
   `getprop`, or validate, normalize, expand, or stat the forwarded ADB path or
   serial. The default Python backend and `rust-shadow` reject the P8Z wrapper
   flags. P8A exposes the shadow binary through an explicit developer-only Python
@@ -185,10 +190,12 @@ Rust planner-adjacent coverage is internal and fixture-scoped:
   exact wrapper strings to raw Rust shadow flags, that Python does not enter
   session construction, ADB resolution, device detection, or executor/apply for
   that route, and that unsupported backends reject those flags before
-  subprocess work. P8AH coverage verifies that `rust-production-equivalent` is
-  accepted by argparse, rejected with a reserved-backend validation error before
-  planner, probe, session, subprocess, Rust command, or apply work, and not
-  treated as an argparse invalid choice.
+  subprocess work. P8AI coverage verifies that `rust-production-equivalent`
+  requires `--rust-planner-bin`, always uses Python-compatible output, rejects
+  `--rust-shadow-output`, forwards detected-facts fixture and complete
+  live-probe wrapper inputs to the supplied Rust shadow binary, rejects
+  incomplete/conflicting probe inputs before subprocess work, and does not use
+  Python planner, ADB, device detection, or apply work.
 - `docs/adr/0002-rust-planner-cli-output-compatibility.md`: P8D decision record
   for future default Rust planner routing. The accepted target is compatibility
   with the current Python `emuchef plan` output and exit-code behavior unless a
@@ -427,12 +434,15 @@ smoke only; P7P remains the Python-vs-Rust planner DTO/result comparison
 evidence, P8B remains raw passthrough route-invocation evidence, and P8F remains
 explicit `rust-shadow` Python-compatible output-mode smoke.
 
-P8AH adds parser recognition for
-`emuchef plan --planner-backend rust-production-equivalent` and reserves that
-backend with a validation error before route execution. P8AH does not build a
-Rust command, invoke a Rust binary, resolve ADB, probe devices, construct a
-planner session, run apply logic, add production-equivalent-specific flags, add
-smoke evidence, or clear readiness blockers.
+P8AI wires `emuchef plan --planner-backend rust-production-equivalent` as an
+explicit non-default Rust subprocess route. It requires `--rust-planner-bin`,
+invokes the supplied Rust shadow binary through the existing command builder,
+always uses Python-compatible output, and allows the same
+`--rust-detected-facts-json <path>` fixture and complete live-probe wrapper
+flags as `rust-experimental`. Python does not resolve ADB, probe devices,
+construct a planner session, or run apply logic for this route. P8AI does not
+add production-equivalent-specific flags, smoke evidence, or readiness blocker
+reclassification.
 
 P8I adds `tools/check_rust_planner_cutover_readiness.py` as a static,
 developer-only gate for future default Rust planner proposals. The gate checks

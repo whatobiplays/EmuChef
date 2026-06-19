@@ -196,12 +196,12 @@ in `docs/rust-default-route-mismatch-warning-parity.md`; it does not implement
 warning parity or clear readiness blockers.
 P8AG records the implementation plan for a future explicit
 production-equivalent planner route in
-`docs/rust-production-equivalent-route-implementation-plan.md`. The backend
-name `rust-production-equivalent` is accepted by the Python CLI parser and is
-reserved by backend validation before any planning, probing, session
-construction, Rust command construction, subprocess execution, or apply work. It
-does not change runtime behavior, does not add readiness-gate manual evidence,
-and does not clear readiness blockers.
+`docs/rust-production-equivalent-route-implementation-plan.md`. P8AI wires the
+backend name `rust-production-equivalent` as an explicit non-default Rust
+subprocess route backed by a supplied Rust shadow binary. It always uses
+Python-compatible output and can forward Rust-owned detected-facts fixture or
+live-probe wrapper inputs. It does not add readiness-gate manual evidence and
+does not clear readiness blockers.
 
 ## Current Authored Model
 
@@ -474,30 +474,36 @@ sources. Python does not invoke ADB, discover devices, run `adb devices`, parse
 `getprop`, or validate, normalize, expand, or stat the forwarded ADB path or
 serial.
 `--rust-shadow-output` is only valid with
-`--planner-backend rust-shadow`; Python and `rust-experimental` reject it before
-ADB resolution or planner/session construction. `rust-experimental` is a
+`--planner-backend rust-shadow`; Python, `rust-experimental`, and
+`rust-production-equivalent` reject it before ADB resolution,
+planner/session construction, or subprocess execution. `rust-experimental` is a
 cutover rehearsal route, not the default planner, not a stable final public
 contract, and not Python planner deletion. Its name and behavior may change
 before Rust becomes the default planner backend.
 
-`emuchef plan --planner-backend rust-production-equivalent` is an explicit
-non-default reserved backend name. The Python CLI parser accepts the value, and
-backend validation rejects it with a reserved-route error before ADB resolution,
-planner/session construction, device probing, Rust shadow command construction,
-subprocess execution, or apply work. It has no production-equivalent-specific
-flags and is not executable until a later phase wires route behavior.
+`emuchef plan --planner-backend rust-production-equivalent --rust-planner-bin
+<path>` is an explicit non-default production-equivalent route-plumbing path.
+It reuses the supplied Rust shadow binary, always uses Python-compatible output,
+forwards explicit device context flags and bindings like the other Rust
+subprocess routes, accepts `--rust-detected-facts-json <path>`, and accepts the
+complete live-probe wrapper flag set `--rust-probe-adb-getprop`,
+`--rust-adb-path <path>`, and `--rust-serial <serial>`. Fixture forwarding and
+live-probe forwarding are mutually exclusive. Python does not invoke ADB,
+discover devices, run `adb devices`, parse `getprop`, validate or normalize the
+forwarded ADB path or serial, construct a planner session, or run apply logic
+for this route. P8AI adds no production-equivalent-specific flags, smoke
+evidence, readiness-gate execution, or blocker reclassification.
 
 The Python Rust shadow bridge does not execute/apply plans, invoke ADB, access
 the network, materialize artifacts, use Tauri commands, expose sidecar protocol
 requests, invoke Cargo, regenerate fixtures/goldens, or make Rust planner output
-authoritative. Only `rust-experimental` accepts Python-facing detected-facts
-fixture and live-probe wrapper flags; the default Python backend and
-`rust-shadow` reject them, while `rust-production-equivalent` rejects before
-route-specific wrapper flag validation. Direct Rust shadow fixture and
-live-probe modes can emit detected-device profile mismatch warnings, and
-`rust-experimental` can format forwarded Rust `PlanningResult` JSON through the
-Python-compatible path, but production user-facing planning routes do not own
-that warning path. Real device context/probing remains a default-cutover
+authoritative. `rust-experimental` and `rust-production-equivalent` accept
+Python-facing detected-facts fixture and live-probe wrapper flags; the default
+Python backend and `rust-shadow` reject them. Direct Rust shadow fixture and
+live-probe modes can emit detected-device profile mismatch warnings, and the
+explicit Rust subprocess routes can format forwarded Rust `PlanningResult` JSON
+through the Python-compatible path, but production user-facing planning routes
+do not own that warning path. Real device context/probing remains a default-cutover
 blocker. CLI output
 compatibility remains a blocker before any default Rust planner routing. Future
 default Rust planner routing must preserve Python concise summary output, Python
@@ -1233,9 +1239,12 @@ Common notes:
   not Python planner deletion. The dev-only matrix smoke for `rust-experimental`
   requires successful scenarios to exit `0` and emit stdout classified as
   `python_summary`; raw Rust JSON stdout fails that smoke for successful
-  scenarios. `--planner-backend rust-production-equivalent` is recognized but
-  reserved and rejected before planner, probe, session, subprocess, Rust
-  command, or apply work. Future default Rust planner routing must preserve
+  scenarios. `--planner-backend rust-production-equivalent` is an explicit
+  non-default Rust subprocess route that requires `--rust-planner-bin`, reuses
+  the supplied Rust shadow binary, always uses Python-compatible output, and can
+  forward Rust-owned detected-facts fixture or live-probe wrapper inputs. It is
+  route plumbing only and does not add smoke evidence or default cutover. Future
+  default Rust planner routing must preserve
   Python-owned output and exit-code semantics unless a separate accepted
   breaking-change decision says otherwise; Rust-native JSON belongs behind a
   future explicit structured-output mode such as `--format json`.

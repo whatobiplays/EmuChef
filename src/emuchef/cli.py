@@ -57,9 +57,14 @@ from emuchef.planner import (
 
 logger = logging.getLogger(__name__)
 
-_RESERVED_PRODUCTION_EQUIVALENT_BACKEND_MESSAGE = (
-    "--planner-backend rust-production-equivalent is reserved for a future "
-    "production-equivalent Rust route and is not executable yet."
+_RUST_SUBPROCESS_BACKENDS = frozenset(
+    {"rust-shadow", "rust-experimental", "rust-production-equivalent"}
+)
+_PYTHON_COMPATIBLE_RUST_BACKENDS = frozenset(
+    {"rust-experimental", "rust-production-equivalent"}
+)
+_RUST_DETECTED_FACTS_BACKENDS = frozenset(
+    {"rust-experimental", "rust-production-equivalent"}
 )
 
 
@@ -104,7 +109,8 @@ def main(argv: list[str] | None = None) -> int:
         help=(
             "Planner implementation to use. rust-shadow is dev-only passthrough by default; "
             "rust-experimental is explicit non-default migration routing and requires --rust-planner-bin; "
-            "rust-production-equivalent is reserved and not executable yet."
+            "rust-production-equivalent is explicit non-default Rust-owned probe routing and requires "
+            "--rust-planner-bin."
         ),
     )
     plan_parser.add_argument(
@@ -123,13 +129,16 @@ def main(argv: list[str] | None = None) -> int:
         "--rust-detected-facts-json",
         help=(
             "Dev-only local detected-facts fixture path forwarded only by "
-            "--planner-backend rust-experimental."
+            "--planner-backend rust-experimental or rust-production-equivalent."
         ),
     )
     plan_parser.add_argument(
         "--rust-probe-adb-getprop",
         action="store_true",
-        help="Dev-only live ADB getprop probe forwarded only by --planner-backend rust-experimental.",
+        help=(
+            "Dev-only live ADB getprop probe forwarded only by "
+            "--planner-backend rust-experimental or rust-production-equivalent."
+        ),
     )
     plan_parser.add_argument(
         "--rust-adb-path",
@@ -178,7 +187,7 @@ def main(argv: list[str] | None = None) -> int:
     try:
         if args.command == "plan":
             _validate_plan_backend_args(args)
-        if args.command == "plan" and args.planner_backend in {"rust-shadow", "rust-experimental"}:
+        if args.command == "plan" and args.planner_backend in _RUST_SUBPROCESS_BACKENDS:
             return _run_plan(args)
         setattr(
             args,
@@ -234,7 +243,7 @@ def _run_draft(args: argparse.Namespace) -> int:
 
 
 def _run_plan(args: argparse.Namespace) -> int:
-    if args.planner_backend in {"rust-shadow", "rust-experimental"}:
+    if args.planner_backend in _RUST_SUBPROCESS_BACKENDS:
         return _run_rust_shadow_plan(args)
     return _run_python_plan(args)
 
@@ -333,18 +342,16 @@ def _append_rust_shadow_device_context_args(command: list[str], args: argparse.N
 
 
 def _validate_plan_backend_args(args: argparse.Namespace) -> None:
-    if args.planner_backend == "rust-production-equivalent":
-        raise ValueError(_RESERVED_PRODUCTION_EQUIVALENT_BACKEND_MESSAGE)
     if args.planner_backend != "rust-shadow" and args.rust_shadow_output is not None:
         raise ValueError("--rust-shadow-output is only valid with --planner-backend rust-shadow.")
-    if args.planner_backend != "rust-experimental" and args.rust_detected_facts_json is not None:
+    if args.planner_backend not in _RUST_DETECTED_FACTS_BACKENDS and args.rust_detected_facts_json is not None:
         raise ValueError("--rust-detected-facts-json is only valid with --planner-backend rust-experimental.")
     rust_live_probe_options = [
         ("--rust-probe-adb-getprop", args.rust_probe_adb_getprop),
         ("--rust-adb-path", args.rust_adb_path is not None),
         ("--rust-serial", args.rust_serial is not None),
     ]
-    if args.planner_backend != "rust-experimental":
+    if args.planner_backend not in _RUST_DETECTED_FACTS_BACKENDS:
         for option, is_set in rust_live_probe_options:
             if is_set:
                 raise ValueError(f"{option} is only valid with --planner-backend rust-experimental.")
@@ -364,7 +371,7 @@ def _validate_plan_backend_args(args: argparse.Namespace) -> None:
 
 
 def _effective_rust_shadow_output(args: argparse.Namespace) -> str:
-    if args.planner_backend == "rust-experimental":
+    if args.planner_backend in _PYTHON_COMPATIBLE_RUST_BACKENDS:
         return "python-compatible"
     return args.rust_shadow_output or "passthrough"
 
