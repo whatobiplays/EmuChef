@@ -43,6 +43,9 @@ evidence does not clear the default-route probing or mismatch-warning blockers.
 `docs/rust-default-route-probe-request-response.md` records the future
 default-route probe request/response shape and does not change current CLI,
 executor/apply, readiness-gate, or route behavior.
+`docs/rust-production-equivalent-live-probe-smoke.md` records the evidence bar
+for a future production-equivalent live probe smoke and does not change current
+CLI, executor/apply, readiness-gate, or route behavior.
 P8N adds only the crate-local Rust fake/test probe foundation. P8O adds
 fake/test-backed detected-facts planner-input construction. Intended future
 context precedence: synthetic/profile context -> detected facts -> explicit CLI

@@ -188,6 +188,9 @@ mismatch-warning blockers.
 P8AD records the future default-route probe request/response shape in
 `docs/rust-default-route-probe-request-response.md`; it does not implement
 probing or clear readiness blockers.
+P8AE records the evidence bar for a future production-equivalent live probe
+smoke in `docs/rust-production-equivalent-live-probe-smoke.md`; it does not
+implement smoke tooling or clear readiness blockers.
 
 ## Current Authored Model
 

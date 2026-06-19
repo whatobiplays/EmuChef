@@ -12,6 +12,8 @@ evidence does not clear the default-route probing or mismatch-warning blockers.
 `docs/rust-default-route-probe-request-response.md` records the intended future
 default-route probe request/response shape without implementing probing or
 clearing readiness blockers.
+`docs/rust-production-equivalent-live-probe-smoke.md` records the evidence bar
+for a future production-equivalent live probe smoke without implementing one.
 
 This document is not a release checklist and is not a readiness-gate result.
 Manual smoke evidence from P8Y and P8AA does not make Rust the default planner
@@ -79,6 +81,8 @@ default production-route parity.
 
 - implementation of the default-route probe request/response shape recorded in
   `docs/rust-default-route-probe-request-response.md`
+- future production-equivalent live probe smoke evidence satisfying
+  `docs/rust-production-equivalent-live-probe-smoke.md`
 - production-route mismatch-warning parity evidence
 - readiness-gate blocker reclassification only after production/default-route
   evidence

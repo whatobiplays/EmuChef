@@ -37,6 +37,9 @@ contract.
 `docs/rust-default-route-probe-request-response.md` records the intended future
 default-route probe request/response shape. It does not implement probing or
 clear readiness blockers.
+`docs/rust-production-equivalent-live-probe-smoke.md` records the evidence bar
+for a future production-equivalent live probe smoke. It does not implement a
+smoke or clear readiness blockers.
 
 Default-route context precedence is:
 
@@ -82,7 +85,8 @@ P8AC does not:
 ## Future Work
 
 1. P8AD default-route probe request/response shape.
-2. P8AE production-equivalent live probe smoke.
+2. Future implementation of a production-equivalent live probe smoke that
+   satisfies the P8AE evidence bar.
 3. P8AF default-route mismatch-warning parity evidence.
 4. P8AG readiness blocker reclassification after production/default evidence.
 5. Python planner deletion plan after default Rust route ownership is proven.

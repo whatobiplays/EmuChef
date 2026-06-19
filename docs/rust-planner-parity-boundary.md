@@ -22,6 +22,9 @@ evidence does not clear the default-route probing or mismatch-warning blockers.
 `docs/rust-default-route-probe-request-response.md` records the future
 default-route probe request/response shape and does not change planner behavior
 or readiness classification.
+`docs/rust-production-equivalent-live-probe-smoke.md` records the evidence bar
+for a future production-equivalent live probe smoke and does not change planner
+behavior or readiness classification.
 
 Rust planner tests include an intentional fixture inventory/parsing guard for
 the existing Phase 6M/6N planner parity evidence. The guard consumes checked-in

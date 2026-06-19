@@ -28,6 +28,8 @@ evidence:
   still exists.
 - `docs/rust-live-probe-evidence-and-cutover-gap.md` records the P8X-P8AA
   live-probe evidence and the remaining default-route and production-route gaps.
+- `docs/rust-production-equivalent-live-probe-smoke.md` records the evidence
+  bar for a future production-equivalent live probe smoke.
 - The P8V, P8W, and P8X Rust probe foundations model ADB getprop command shape,
   parse detected facts, and wire live probing only into the direct dev-only Rust
   shadow binary.
@@ -141,6 +143,8 @@ P8AD does not:
 This design note helps future implementation phases by naming the intended
 request/response boundary for Rust-owned default-route live probing. It does not
 provide production/default-route evidence and does not clear readiness blockers.
+P8AE separately records the evidence bar a future production-equivalent live
+probe smoke must satisfy.
 
 These blockers remain blocked:
 
