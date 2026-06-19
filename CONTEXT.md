@@ -194,6 +194,12 @@ implement smoke tooling or clear readiness blockers.
 P8AF records the evidence bar for future default-route mismatch-warning parity
 in `docs/rust-default-route-mismatch-warning-parity.md`; it does not implement
 warning parity or clear readiness blockers.
+P8AG records the implementation plan for a future explicit
+production-equivalent planner route in
+`docs/rust-production-equivalent-route-implementation-plan.md`. The future
+backend name `rust-production-equivalent` is documentation-only in P8AG. It is
+not accepted by the CLI, does not change runtime behavior, does not add
+readiness-gate manual evidence, and does not clear readiness blockers.
 
 ## Current Authored Model
 

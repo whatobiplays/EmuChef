@@ -34,6 +34,10 @@ manual evidence or clearing readiness blockers.
 `docs/rust-default-route-mismatch-warning-parity.md` records the evidence bar
 for future default-route mismatch-warning parity without adding required manual
 evidence or clearing readiness blockers.
+`docs/rust-production-equivalent-route-implementation-plan.md` records the P8AG
+implementation plan for a future explicit production-equivalent route without
+adding a CLI backend, required manual evidence, readiness-gate execution, or
+blocker reclassification.
 P8N adds a crate-local Rust probe abstraction, fake probe, and tests for layering
 detected facts over synthetic/profile-derived context. P8O adds fake/test-backed
 planner-input construction that applies detected facts over
@@ -288,6 +292,10 @@ The Rust planner evidence is planner-only and migration-focused:
 - `docs/rust-default-route-mismatch-warning-parity.md` records the P8AF
   evidence bar for future default-route mismatch-warning parity. It does not add
   readiness-gate execution or reclassify blockers.
+- `docs/rust-production-equivalent-route-implementation-plan.md` records the
+  P8AG implementation plan for a future explicit production-equivalent route.
+  It does not add CLI recognition, readiness-gate execution, or reclassify
+  blockers.
 - `tools/plan_parity_scenarios.json` is the P7P scenario matrix for the current
   checked-in device-plan scenarios plus P8K explicit-context evidence. The
   current checked-in scenario matrix expects all six scenarios to classify as

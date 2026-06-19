@@ -7,6 +7,9 @@ mismatch warning parity.
 
 This is a design note only. It does not implement warning parity, change runtime
 behavior, or change blocker status.
+`docs/rust-production-equivalent-route-implementation-plan.md` separately
+records the P8AG implementation plan for a future explicit
+production-equivalent route.
 
 ## Evidence Bar
 
@@ -106,6 +109,7 @@ P8AF does not:
 
 - implement mismatch warning parity;
 - run live ADB;
+- implement or expose a production-equivalent backend;
 - add or change smoke tools;
 - change the default planner route;
 - change CLI, Rust, Python, test, or smoke source;

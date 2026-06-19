@@ -32,6 +32,8 @@ evidence:
   bar for a future production-equivalent live probe smoke.
 - `docs/rust-default-route-mismatch-warning-parity.md` records the evidence bar
   for future default-route mismatch-warning parity.
+- `docs/rust-production-equivalent-route-implementation-plan.md` records the
+  P8AG implementation plan for a future explicit production-equivalent route.
 - The P8V, P8W, and P8X Rust probe foundations model ADB getprop command shape,
   parse detected facts, and wire live probing only into the direct dev-only Rust
   shadow binary.
@@ -151,6 +153,8 @@ P8AE separately records the evidence bar a future production-equivalent live
 probe smoke must satisfy.
 P8AF separately records the evidence bar future default-route mismatch-warning
 parity must satisfy.
+P8AG separately records the recommended future implementation path for an
+explicit production-equivalent route; it does not make that route available.
 
 These blockers remain blocked:
 

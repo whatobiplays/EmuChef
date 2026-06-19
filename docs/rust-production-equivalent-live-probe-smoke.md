@@ -7,6 +7,9 @@ probe smoke. It is a design note only; it does not implement a smoke tool, run
 live ADB, or provide smoke evidence.
 `docs/rust-default-route-mismatch-warning-parity.md` separately records the
 P8AF evidence bar for future default-route mismatch-warning parity.
+`docs/rust-production-equivalent-route-implementation-plan.md` separately
+records the P8AG implementation plan for a future explicit
+production-equivalent route.
 
 ## Evidence Bar
 
@@ -95,6 +98,7 @@ P8AE does not:
 
 - implement a smoke tool;
 - run live ADB;
+- implement or expose a production-equivalent backend;
 - change the default planner route;
 - change CLI, Rust, Python, test, or smoke source;
 - modify readiness gate behavior;

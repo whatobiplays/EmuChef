@@ -43,6 +43,9 @@ smoke or clear readiness blockers.
 `docs/rust-default-route-mismatch-warning-parity.md` records the evidence bar
 for future default-route mismatch-warning parity. It does not implement warning
 parity or clear readiness blockers.
+`docs/rust-production-equivalent-route-implementation-plan.md` records the P8AG
+implementation plan for a future explicit production-equivalent route. It does
+not implement route behavior or clear readiness blockers.
 
 Default-route context precedence is:
 
@@ -94,5 +97,5 @@ P8AC does not:
    satisfies the P8AE evidence bar.
 3. Future implementation of default-route mismatch-warning parity that
    satisfies the P8AF evidence bar.
-4. P8AG readiness blocker reclassification after production/default evidence.
+4. P8AL update readiness gate only after production/default evidence exists.
 5. Python planner deletion plan after default Rust route ownership is proven.
