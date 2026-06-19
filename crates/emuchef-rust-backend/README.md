@@ -461,6 +461,8 @@ accepted future default-route live-probe cutover design, and
 future default-route probe request/response shape. See
 `../../docs/rust-production-equivalent-live-probe-smoke.md` for the P8AE
 evidence bar for a future production-equivalent live probe smoke.
+See `../../docs/rust-default-route-mismatch-warning-parity.md` for the P8AF
+evidence bar for future default-route mismatch-warning parity.
 
 P8S adds optional/manual smoke evidence for the direct shadow-binary fixture
 harness:
@@ -703,7 +705,9 @@ future default Rust planner cutover.
 P8AC records the accepted future default-route live-probe cutover design in
 `../../docs/adr/0004-default-route-live-probe-cutover-design.md`: default-route
 live probing should be Rust-owned, and P8X-P8AA migration evidence does not
-clear the default-route probing or mismatch-warning blockers. P8N adds the
+clear the default-route probing or mismatch-warning blockers. P8AF records the
+evidence bar for future default-route mismatch-warning parity in
+`../../docs/rust-default-route-mismatch-warning-parity.md`. P8N adds the
 crate-local foundation for the
 first implementation step: `src/device_probe.rs` defines detected facts, stable
 probe errors, a probe trait, a fake probe, and a helper that applies detected

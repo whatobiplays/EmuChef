@@ -30,6 +30,8 @@ evidence:
   live-probe evidence and the remaining default-route and production-route gaps.
 - `docs/rust-production-equivalent-live-probe-smoke.md` records the evidence
   bar for a future production-equivalent live probe smoke.
+- `docs/rust-default-route-mismatch-warning-parity.md` records the evidence bar
+  for future default-route mismatch-warning parity.
 - The P8V, P8W, and P8X Rust probe foundations model ADB getprop command shape,
   parse detected facts, and wire live probing only into the direct dev-only Rust
   shadow binary.
@@ -109,6 +111,8 @@ detected_device_profile_mismatch_warning_not_cut_over
 `device_profile_mismatch` is the current warning code used in migration
 evidence. This document does not freeze a new warning schema beyond the current
 evidence and existing planner result contract.
+`docs/rust-default-route-mismatch-warning-parity.md` records the evidence bar
+for future default-route mismatch-warning parity.
 
 ## Error Semantics
 
@@ -145,6 +149,8 @@ request/response boundary for Rust-owned default-route live probing. It does not
 provide production/default-route evidence and does not clear readiness blockers.
 P8AE separately records the evidence bar a future production-equivalent live
 probe smoke must satisfy.
+P8AF separately records the evidence bar future default-route mismatch-warning
+parity must satisfy.
 
 These blockers remain blocked:
 

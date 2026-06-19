@@ -40,6 +40,9 @@ clear readiness blockers.
 `docs/rust-production-equivalent-live-probe-smoke.md` records the evidence bar
 for a future production-equivalent live probe smoke. It does not implement a
 smoke or clear readiness blockers.
+`docs/rust-default-route-mismatch-warning-parity.md` records the evidence bar
+for future default-route mismatch-warning parity. It does not implement warning
+parity or clear readiness blockers.
 
 Default-route context precedence is:
 
@@ -53,6 +56,8 @@ behavior in P8AC.
 Detected profile mismatch warnings must be emitted from the default production
 route, not only helper/manual migration routes, before
 `detected_device_profile_mismatch_warning_not_cut_over` can be cleared.
+Future evidence for that blocker must satisfy
+`docs/rust-default-route-mismatch-warning-parity.md`.
 
 Live probing must be exercised through default-route or production-equivalent
 evidence before `real_device_probing_not_cut_over` can be cleared.
@@ -87,6 +92,7 @@ P8AC does not:
 1. P8AD default-route probe request/response shape.
 2. Future implementation of a production-equivalent live probe smoke that
    satisfies the P8AE evidence bar.
-3. P8AF default-route mismatch-warning parity evidence.
+3. Future implementation of default-route mismatch-warning parity that
+   satisfies the P8AF evidence bar.
 4. P8AG readiness blocker reclassification after production/default evidence.
 5. Python planner deletion plan after default Rust route ownership is proven.

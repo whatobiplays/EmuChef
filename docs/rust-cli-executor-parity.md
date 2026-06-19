@@ -46,6 +46,9 @@ executor/apply, readiness-gate, or route behavior.
 `docs/rust-production-equivalent-live-probe-smoke.md` records the evidence bar
 for a future production-equivalent live probe smoke and does not change current
 CLI, executor/apply, readiness-gate, or route behavior.
+`docs/rust-default-route-mismatch-warning-parity.md` records the evidence bar
+for future default-route mismatch-warning parity and does not change current
+CLI, executor/apply, readiness-gate, or route behavior.
 P8N adds only the crate-local Rust fake/test probe foundation. P8O adds
 fake/test-backed detected-facts planner-input construction. Intended future
 context precedence: synthetic/profile context -> detected facts -> explicit CLI
@@ -132,7 +135,9 @@ See `docs/rust-live-probe-evidence-and-cutover-gap.md` for the consolidated
 P8X-P8AA live-probe evidence, default-route, production-route, and
 readiness-gate gap summary. See
 `docs/adr/0004-default-route-live-probe-cutover-design.md` for the accepted
-future default-route live-probe cutover design.
+future default-route live-probe cutover design, and
+`docs/rust-default-route-mismatch-warning-parity.md` for the P8AF evidence bar
+for future default-route mismatch-warning parity.
 
 Rust planner, executor, and CLI behavior is fixture-scoped, test-scoped,
 internal, or editor-backend-scoped unless explicitly promoted by later work.

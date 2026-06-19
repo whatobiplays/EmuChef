@@ -31,6 +31,9 @@ clearing readiness blockers.
 `docs/rust-production-equivalent-live-probe-smoke.md` records the evidence bar
 for a future production-equivalent live probe smoke without adding required
 manual evidence or clearing readiness blockers.
+`docs/rust-default-route-mismatch-warning-parity.md` records the evidence bar
+for future default-route mismatch-warning parity without adding required manual
+evidence or clearing readiness blockers.
 P8N adds a crate-local Rust probe abstraction, fake probe, and tests for layering
 detected facts over synthetic/profile-derived context. P8O adds fake/test-backed
 planner-input construction that applies detected facts over
@@ -282,6 +285,9 @@ The Rust planner evidence is planner-only and migration-focused:
 - `docs/rust-production-equivalent-live-probe-smoke.md` records the P8AE
   evidence bar for future production-equivalent live probe smoke evidence. It
   does not add readiness-gate execution or reclassify blockers.
+- `docs/rust-default-route-mismatch-warning-parity.md` records the P8AF
+  evidence bar for future default-route mismatch-warning parity. It does not add
+  readiness-gate execution or reclassify blockers.
 - `tools/plan_parity_scenarios.json` is the P7P scenario matrix for the current
   checked-in device-plan scenarios plus P8K explicit-context evidence. The
   current checked-in scenario matrix expects all six scenarios to classify as

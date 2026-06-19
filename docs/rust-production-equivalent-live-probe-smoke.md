@@ -5,6 +5,8 @@
 This document defines the evidence bar for a future production-equivalent live
 probe smoke. It is a design note only; it does not implement a smoke tool, run
 live ADB, or provide smoke evidence.
+`docs/rust-default-route-mismatch-warning-parity.md` separately records the
+P8AF evidence bar for future default-route mismatch-warning parity.
 
 ## Evidence Bar
 
@@ -107,7 +109,8 @@ This design alone does not clear `real_device_probing_not_cut_over`.
 A future smoke that satisfies this evidence bar may support reclassifying
 `real_device_probing_not_cut_over`. It does not by itself clear
 `detected_device_profile_mismatch_warning_not_cut_over` unless the same future
-phase also proves default-route detected profile mismatch warning parity.
+phase also proves default-route detected profile mismatch warning parity
+satisfying `docs/rust-default-route-mismatch-warning-parity.md`.
 
 After P8AE, both blockers remain blocked:
 

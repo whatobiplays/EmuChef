@@ -25,6 +25,9 @@ or readiness classification.
 `docs/rust-production-equivalent-live-probe-smoke.md` records the evidence bar
 for a future production-equivalent live probe smoke and does not change planner
 behavior or readiness classification.
+`docs/rust-default-route-mismatch-warning-parity.md` records the evidence bar
+for future default-route mismatch-warning parity and does not change planner
+behavior or readiness classification.
 
 Rust planner tests include an intentional fixture inventory/parsing guard for
 the existing Phase 6M/6N planner parity evidence. The guard consumes checked-in
@@ -134,6 +137,9 @@ Rust planner-adjacent coverage is internal and fixture-scoped:
   record for Rust-owned future default-route live probing. P8X-P8AA remain
   migration evidence, and production/default-route evidence is still required
   before the live-probing and mismatch-warning blockers can be cleared.
+- `docs/rust-default-route-mismatch-warning-parity.md`: P8AF evidence bar for
+  future default-route mismatch-warning parity. It does not implement parity or
+  clear readiness blockers.
 - `tools/compare_rust_python_plan.py`: dev-only comparison harness for Python
   planner API output versus Rust shadow planner output. The harness emits a
   deterministic JSON classification report or matrix report and is not part of

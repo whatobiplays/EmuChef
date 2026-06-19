@@ -191,6 +191,9 @@ probing or clear readiness blockers.
 P8AE records the evidence bar for a future production-equivalent live probe
 smoke in `docs/rust-production-equivalent-live-probe-smoke.md`; it does not
 implement smoke tooling or clear readiness blockers.
+P8AF records the evidence bar for future default-route mismatch-warning parity
+in `docs/rust-default-route-mismatch-warning-parity.md`; it does not implement
+warning parity or clear readiness blockers.
 
 ## Current Authored Model
 

@@ -14,6 +14,9 @@ default-route probe request/response shape without implementing probing or
 clearing readiness blockers.
 `docs/rust-production-equivalent-live-probe-smoke.md` records the evidence bar
 for a future production-equivalent live probe smoke without implementing one.
+`docs/rust-default-route-mismatch-warning-parity.md` records the evidence bar
+for future default-route mismatch-warning parity without implementing warning
+parity.
 
 This document is not a release checklist and is not a readiness-gate result.
 Manual smoke evidence from P8Y and P8AA does not make Rust the default planner
@@ -60,7 +63,8 @@ P8X-P8AA do not prove any of the following:
 
 - default `emuchef plan` Rust cutover;
 - production-route live probing parity;
-- default-route detected profile mismatch warning parity;
+- default-route detected profile mismatch warning parity satisfying
+  `docs/rust-default-route-mismatch-warning-parity.md`;
 - Python planner deletion readiness;
 - Tauri/protocol integration;
 - executor/apply integration;
@@ -83,7 +87,8 @@ default production-route parity.
   `docs/rust-default-route-probe-request-response.md`
 - future production-equivalent live probe smoke evidence satisfying
   `docs/rust-production-equivalent-live-probe-smoke.md`
-- production-route mismatch-warning parity evidence
+- future default-route mismatch-warning parity evidence satisfying
+  `docs/rust-default-route-mismatch-warning-parity.md`
 - readiness-gate blocker reclassification only after production/default-route
   evidence
 - eventual Python planner deletion plan
