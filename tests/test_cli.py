@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import argparse
 import json
 import os
 from io import StringIO
@@ -10,6 +11,7 @@ import subprocess
 import unittest
 from unittest.mock import patch
 
+import emuchef.cli as cli
 from emuchef.cli import main
 from emuchef.domain import (
     DeviceContext,
@@ -30,6 +32,24 @@ class CliTests(unittest.TestCase):
         shadow_bin.write_text("#!/bin/sh\n", encoding="utf-8")
         shadow_bin.chmod(0o755)
         return str(shadow_bin)
+
+    def _rust_resolver_args(
+        self,
+        *,
+        rust_planner_bin: str | None = None,
+        planner_backend: str | None = None,
+    ) -> argparse.Namespace:
+        return argparse.Namespace(
+            rust_planner_bin=rust_planner_bin,
+            planner_backend=planner_backend,
+            rust_shadow_output=None,
+            verbose=False,
+            debug=False,
+            adb=None,
+            ops=None,
+            output=None,
+            serial=None,
+        )
 
     def _rust_shadow_planning_result_json(
         self,
@@ -190,6 +210,7 @@ class CliTests(unittest.TestCase):
             patch("emuchef.cli.SubprocessAdb.detect_device") as detect_device,
             patch("subprocess.run") as run,
             patch("emuchef.cli._run_apply") as run_apply,
+            patch("emuchef.cli._packaged_rust_planner_bin_candidate", return_value=None) as packaged_candidate,
             contextlib.redirect_stdout(stdout),
             contextlib.redirect_stderr(stderr),
         ):
@@ -205,12 +226,31 @@ class CliTests(unittest.TestCase):
 
         self.assertEqual(rc, 1)
         self.assertEqual(stdout.getvalue(), "")
-        self.assertIn("--rust-planner-bin is required when default Rust planner routing is active.", stderr.getvalue())
+        self.assertEqual(
+            stderr.getvalue(),
+            "Error: --rust-planner-bin is required when default Rust planner routing is active.\n",
+        )
         build_session.assert_not_called()
         resolve_adb.assert_not_called()
         detect_device.assert_not_called()
         run.assert_not_called()
         run_apply.assert_not_called()
+        packaged_candidate.assert_called_once()
+
+    def test_packaged_rust_planner_bin_candidate_returns_none_today(self) -> None:
+        self.assertIsNone(cli._packaged_rust_planner_bin_candidate(self._rust_resolver_args()))
+
+    def test_resolve_rust_planner_bin_calls_packaged_candidate_once_before_missing_bin_error(self) -> None:
+        args = self._rust_resolver_args()
+
+        with patch("emuchef.cli._packaged_rust_planner_bin_candidate", return_value=None) as packaged_candidate:
+            with self.assertRaisesRegex(
+                ValueError,
+                "--rust-planner-bin is required when default Rust planner routing is active.",
+            ):
+                cli._resolve_rust_planner_bin(args)
+
+        packaged_candidate.assert_called_once_with(args)
 
     def test_plan_default_ignores_implicit_binary_fallback_sources_without_explicit_path(self) -> None:
         with TemporaryDirectory() as tmp:
@@ -291,6 +331,10 @@ class CliTests(unittest.TestCase):
                 patch("emuchef.cli.SubprocessAdb.detect_device") as detect_device,
                 patch("emuchef.cli._run_apply") as run_apply,
                 patch("subprocess.run", return_value=completed) as run,
+                patch(
+                    "emuchef.cli._packaged_rust_planner_bin_candidate",
+                    return_value=Path("/not-used"),
+                ) as packaged_candidate,
                 contextlib.redirect_stdout(stdout),
                 contextlib.redirect_stderr(stderr),
             ):
@@ -337,6 +381,7 @@ class CliTests(unittest.TestCase):
         self.assertNotIn("cargo", run.call_args.args[0])
         self.assertNotIn("adb", run.call_args.args[0])
         self.assertNotIn("--sidecar", run.call_args.args[0])
+        packaged_candidate.assert_not_called()
 
     def test_plan_explicit_python_backend_uses_python_summary_without_rust_process_or_binary(self) -> None:
         detected = DetectedDevice(
@@ -525,6 +570,7 @@ class CliTests(unittest.TestCase):
             patch("emuchef.cli.SubprocessAdb.detect_device") as detect_device,
             patch("subprocess.run") as run,
             patch("emuchef.cli._run_apply") as run_apply,
+            patch("emuchef.cli._packaged_rust_planner_bin_candidate", return_value=None) as packaged_candidate,
             contextlib.redirect_stdout(stdout),
             contextlib.redirect_stderr(stderr),
         ):
@@ -542,13 +588,17 @@ class CliTests(unittest.TestCase):
 
         self.assertEqual(rc, 1)
         self.assertEqual(stdout.getvalue(), "")
-        self.assertIn("--rust-planner-bin is required", stderr.getvalue())
-        self.assertIn("rust-production-equivalent", stderr.getvalue())
+        self.assertEqual(
+            stderr.getvalue(),
+            "Error: --rust-planner-bin is required when --planner-backend "
+            "rust-production-equivalent is selected.\n",
+        )
         build_session.assert_not_called()
         resolve_adb.assert_not_called()
         detect_device.assert_not_called()
         run.assert_not_called()
         run_apply.assert_not_called()
+        packaged_candidate.assert_called_once()
 
     def test_plan_rust_production_equivalent_invokes_shadow_command_and_prints_concise_summary(self) -> None:
         with TemporaryDirectory() as tmp:

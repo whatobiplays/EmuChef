@@ -83,6 +83,12 @@ is implemented, `--rust-planner-bin <path>` remains required, explicit
 `PATH` search, env-var lookup, repo-local guessing, or silent Python fallback is
 implemented, existing Tauri sidecar packaging is not automatically planner
 binary packaging, and packaged release readiness remains future work.
+P8AT adds an inert packaged resolver placeholder in the Python CLI. The
+placeholder currently returns `None`; no packaged lookup is implemented,
+`--rust-planner-bin <path>` remains required, explicit `--planner-backend
+python` remains available, no Cargo fallback, `PATH` search, env-var lookup,
+repo-local guessing, or silent Python fallback is implemented, and packaged
+release readiness remains future work.
 P8N adds only the crate-local Rust fake/test probe foundation. P8O adds
 fake/test-backed detected-facts planner-input construction. Intended future
 context precedence: synthetic/profile context -> detected facts -> explicit CLI

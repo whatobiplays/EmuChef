@@ -3,7 +3,8 @@
 ## Purpose
 
 This document records the P8AS contract for the future packaged/runtime
-location of the Rust planner binary.
+location of the Rust planner binary and the P8AT inert packaged resolver
+placeholder.
 
 P8AS is documentation-only. It does not change runtime CLI behavior, resolver
 behavior, tests, readiness-gate logic, smoke tooling, Rust backend code,
@@ -32,6 +33,13 @@ fallback is implemented when Rust binary resolution fails.
 
 Packaged release readiness remains future work.
 
+P8AT adds an inert packaged resolver placeholder in the Python CLI. The
+placeholder currently returns `None`. No packaged lookup is implemented,
+`--rust-planner-bin <path>` remains required, explicit `--planner-backend
+python` remains available, no Cargo fallback, `PATH` search, env-var lookup,
+repo-local guessing, or silent Python fallback is implemented, and packaged
+release readiness remains future work.
+
 ## Goals
 
 - Define the future packaged Rust planner binary location contract.
@@ -55,6 +63,11 @@ P8AS does not:
 - change readiness-gate behavior;
 - delete the Python planner;
 - change executor/apply behavior.
+
+P8AT modifies only the Python CLI resolver seam, CLI tests, and current-state
+documentation. It does not implement packaged lookup, choose a packaged path,
+bundle binaries, rename binaries, change Tauri config, change readiness-gate
+behavior, delete the Python planner, or change executor/apply behavior.
 
 ## Proposed Packaged Location Contract
 
@@ -112,7 +125,10 @@ fallback.
 
 ## Relationship To Existing Resolver
 
-P8AR resolver behavior remains explicit-path-only after P8AS.
+P8AR resolver behavior remains explicit-path-only after P8AS. P8AT adds an
+inert packaged candidate helper that currently returns `None`; it gives future
+packaged lookup a named internal seam without changing current resolution
+behavior.
 
 A later implementation may add a packaged source branch to
 `_resolve_rust_planner_bin`. Explicit `--rust-planner-bin <path>` must remain

@@ -328,20 +328,38 @@ def _build_rust_shadow_plan_command(args: argparse.Namespace) -> list[str]:
 
 
 def _resolve_rust_planner_bin(args: argparse.Namespace) -> Path:
-    """Resolve the explicitly supplied Rust planner binary path.
+    """Resolve the Rust planner binary path for Rust-backed planning routes.
 
-    This resolver intentionally supports only ``--rust-planner-bin``. Future
-    packaged lookup must be added here deliberately rather than through PATH,
-    environment-variable, repo-local, Cargo, shell, or Python-fallback behavior.
+    The resolver intentionally supports only ``--rust-planner-bin`` today. The
+    packaged candidate seam is inert until an accepted packaged-location
+    contract adds real lookup behavior.
     """
 
     _validate_rust_shadow_plan_args(args)
-    rust_planner_bin = Path(args.rust_planner_bin).expanduser()
-    if not rust_planner_bin.exists():
-        raise ValueError(f"Rust shadow planner binary does not exist: {args.rust_planner_bin}")
-    if not rust_planner_bin.is_file() or not os.access(rust_planner_bin, os.X_OK):
-        raise ValueError(f"Rust shadow planner binary is not executable: {args.rust_planner_bin}")
-    return rust_planner_bin
+    if args.rust_planner_bin:
+        rust_planner_bin = Path(args.rust_planner_bin).expanduser()
+        if not rust_planner_bin.exists():
+            raise ValueError(f"Rust shadow planner binary does not exist: {args.rust_planner_bin}")
+        if not rust_planner_bin.is_file() or not os.access(rust_planner_bin, os.X_OK):
+            raise ValueError(f"Rust shadow planner binary is not executable: {args.rust_planner_bin}")
+        return rust_planner_bin
+
+    packaged_candidate = _packaged_rust_planner_bin_candidate(args)
+    if packaged_candidate is not None:
+        return packaged_candidate
+
+    if args.planner_backend is None:
+        raise ValueError("--rust-planner-bin is required when default Rust planner routing is active.")
+    raise ValueError(f"--rust-planner-bin is required when --planner-backend {_effective_plan_backend(args)} is selected.")
+
+
+def _packaged_rust_planner_bin_candidate(args: argparse.Namespace) -> Path | None:
+    """Return a packaged Rust planner binary candidate, if configured.
+
+    P8AT intentionally returns None. Future packaged lookup must be added here
+    under an accepted packaged-location contract.
+    """
+    return None
 
 
 def _append_rust_shadow_device_context_args(command: list[str], args: argparse.Namespace) -> None:
@@ -395,12 +413,6 @@ def _effective_plan_backend(args: argparse.Namespace) -> str:
 
 
 def _validate_rust_shadow_plan_args(args: argparse.Namespace) -> None:
-    if not args.rust_planner_bin:
-        if args.planner_backend is None:
-            raise ValueError("--rust-planner-bin is required when default Rust planner routing is active.")
-        raise ValueError(
-            f"--rust-planner-bin is required when --planner-backend {_effective_plan_backend(args)} is selected."
-        )
     python_compatible_output = _effective_rust_shadow_output(args) == "python-compatible"
     unsupported_options = [
         ("--verbose", args.verbose and not python_compatible_output),

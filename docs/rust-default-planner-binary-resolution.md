@@ -5,7 +5,8 @@
 This document records the P8AQ design contract for future Rust planner binary
 resolution on the default Rust-owned `emuchef plan` route after P8AO, the P8AR
 internal resolver foundation that centralizes current explicit-path validation,
-and the P8AS packaged binary location contract.
+the P8AS packaged binary location contract, and the P8AT inert packaged
+resolver placeholder.
 
 P8AQ is documentation-only. It does not change runtime CLI behavior, tests,
 readiness-gate code, Rust backend code, smoke tools, executor/apply behavior,
@@ -24,6 +25,13 @@ binary location contract. It does not implement packaged lookup: the explicit
 `--planner-backend python` remains available, no Cargo fallback, `PATH` search,
 env-var lookup, repo-local guessing, or silent Python fallback is implemented,
 and packaged release readiness remains future work.
+
+P8AT adds an inert packaged resolver placeholder in the Python CLI. The
+placeholder currently returns `None`. No packaged lookup is implemented,
+`--rust-planner-bin <path>` remains required, explicit `--planner-backend
+python` remains available, no Cargo fallback, `PATH` search, env-var lookup,
+repo-local guessing, or silent Python fallback is implemented, and packaged
+release readiness remains future work.
 
 ## Current State
 
@@ -44,10 +52,12 @@ or resource packaging paths are not automatically planner-binary locations
 unless a later planner-specific packaging decision explicitly designates them.
 
 The Python CLI validates explicit Rust planner binary paths through an internal
-resolver helper. That helper first applies the existing Rust-route argument
-validation, then expands the explicit path, verifies that it exists, verifies
-that it is a file, verifies that it is executable, and returns that path for the
-subprocess argv.
+resolver helper. That helper first applies Rust-route option compatibility
+validation. If an explicit path is supplied, it expands the path, verifies that
+it exists, verifies that it is a file, verifies that it is executable, and
+returns that path for the subprocess argv. If no explicit path is supplied, the
+resolver calls the inert P8AT packaged candidate helper once. The helper returns
+`None`, so the resolver emits the same missing-bin error as before P8AT.
 
 Executor/apply remains unresolved. Python planner deletion remains unresolved.
 Packaged release readiness remains future work until a later implementation
@@ -66,7 +76,7 @@ proves binary lookup and bundling.
 
 ## Non-Goals
 
-P8AQ and P8AR do not:
+P8AQ, P8AR, and P8AT do not:
 
 - implement packaged Rust planner binary lookup;
 - bundle or package a Rust planner binary;
@@ -147,10 +157,14 @@ lookup implementation should test:
 - explicit `--planner-backend python` bypasses Rust binary resolution;
 - default Rust routing fails deterministically when no binary can be resolved.
 
+P8AT additionally tests that the inert packaged candidate helper returns `None`,
+is consulted only when no explicit path is supplied, and is not consulted when
+`--rust-planner-bin <path>` is present.
+
 ## Relationship To Readiness
 
-P8AQ and P8AR do not change readiness-gate status. They do not reclassify
-blockers or add accepted evidence.
+P8AQ, P8AR, and P8AT do not change readiness-gate status. They do not
+reclassify blockers or add accepted evidence.
 
 `python_planner_deletion_not_ready` remains blocked.
 `executor_apply_not_cut_over` remains blocked. Packaged release readiness
