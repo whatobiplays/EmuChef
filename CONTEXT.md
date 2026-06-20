@@ -256,6 +256,13 @@ with status `resolved`. Top-level readiness remains `blocked` because
 executor/apply and Python planner deletion remain unresolved. Python planner
 deletion, executor/apply cutover, packaged release readiness while
 `--rust-planner-bin` is required, and Tauri/protocol changes remain future work.
+P8AQ records the future default-route Rust planner binary resolution design in
+`docs/rust-default-planner-binary-resolution.md`. P8AQ is documentation-only:
+`--rust-planner-bin` remains required, explicit `--planner-backend python`
+remains available, no packaged binary lookup, Cargo fallback, arbitrary `PATH`
+search, host-path guessing, or silent Python fallback is implemented, and
+executor/apply, Python planner deletion, and packaged release readiness remain
+unresolved.
 
 ## Current Authored Model
 

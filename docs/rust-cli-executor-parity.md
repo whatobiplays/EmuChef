@@ -67,6 +67,11 @@ planner deletion readiness, and the top-level readiness status remains
 cutover contract. P8AM performs no cutover, P8AN is evidence preflight only, and
 P8AO is the default-route implementation phase after required evidence is
 accepted.
+`docs/rust-default-planner-binary-resolution.md` records the P8AQ design for
+future default-route Rust planner binary lookup. P8AQ does not change runtime
+behavior: `--rust-planner-bin <path>` remains required, no packaged binary
+lookup, Cargo fallback, arbitrary `PATH` search, or host-path guessing exists,
+and explicit `--planner-backend python` remains available.
 P8N adds only the crate-local Rust fake/test probe foundation. P8O adds
 fake/test-backed detected-facts planner-input construction. Intended future
 context precedence: synthetic/profile context -> detected facts -> explicit CLI

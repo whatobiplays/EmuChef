@@ -69,6 +69,11 @@ blocker reclassification.
 cutover contract. P8AM performs no cutover, P8AN is the evidence-preflight
 phase, and P8AO is the default-route implementation phase after required
 evidence is accepted.
+`docs/rust-default-planner-binary-resolution.md` records the P8AQ future
+binary-resolution design. P8AQ is design-only: `--rust-planner-bin <path>`
+remains required, no packaged binary lookup, Cargo fallback, arbitrary `PATH`
+search, host-path guessing, or silent Python fallback is implemented, and
+packaged release readiness remains future work.
 P8N adds a crate-local Rust probe abstraction, fake probe, and tests for layering
 detected facts over synthetic/profile-derived context. P8O adds fake/test-backed
 planner-input construction that applies detected facts over

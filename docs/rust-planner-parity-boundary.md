@@ -50,6 +50,10 @@ production-equivalent Rust subprocess path. P8AP updates only the static
 readiness-gate classification for that current state: the historical
 `default_cli_backend_still_python` entry is preserved with status `resolved`,
 while executor/apply and Python planner deletion remain blocked.
+`docs/rust-default-planner-binary-resolution.md` records the P8AQ design-only
+future resolver contract. P8AQ does not implement packaged binary lookup, Cargo
+fallback, arbitrary `PATH` search, host-path guessing, or silent Python fallback;
+`--rust-planner-bin <path>` remains required after P8AQ.
 
 Rust planner tests include an intentional fixture inventory/parsing guard for
 the existing Phase 6M/6N planner parity evidence. The guard consumes checked-in

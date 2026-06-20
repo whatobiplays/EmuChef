@@ -38,6 +38,12 @@ non-planner-routing blockers include:
 - `executor_apply_not_cut_over`
 - `python_planner_deletion_not_ready`
 
+P8AQ records the future binary-resolution design in
+`docs/rust-default-planner-binary-resolution.md`. It is design-only:
+`--rust-planner-bin <path>` remains required, no packaged binary lookup or Cargo
+fallback is implemented, explicit `--planner-backend python` remains available,
+and packaged release readiness remains future work.
+
 ## Cutover Preconditions And Evidence
 
 P8AO depends on these preconditions before changing the default `emuchef plan`
