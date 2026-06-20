@@ -3,9 +3,9 @@
 ## Purpose
 
 This document records the P8AQ design contract for future Rust planner binary
-resolution on the default Rust-owned `emuchef plan` route after P8AO, and the
-P8AR internal resolver foundation that centralizes current explicit-path
-validation.
+resolution on the default Rust-owned `emuchef plan` route after P8AO, the P8AR
+internal resolver foundation that centralizes current explicit-path validation,
+and the P8AS packaged binary location contract.
 
 P8AQ is documentation-only. It does not change runtime CLI behavior, tests,
 readiness-gate code, Rust backend code, smoke tools, executor/apply behavior,
@@ -16,6 +16,14 @@ P8AR adds a behavior-preserving internal resolver helper in the Python CLI. It
 supports only the explicitly supplied `--rust-planner-bin <path>` value and does
 not add packaged lookup, Cargo fallback, `PATH` search, environment-variable
 lookup, repo-local guessing, shell execution, or silent Python fallback.
+
+P8AS is documentation-only. It records
+`docs/rust-packaged-planner-binary-location.md` for the future packaged planner
+binary location contract. It does not implement packaged lookup: the explicit
+`--rust-planner-bin <path>` path remains required, explicit
+`--planner-backend python` remains available, no Cargo fallback, `PATH` search,
+env-var lookup, repo-local guessing, or silent Python fallback is implemented,
+and packaged release readiness remains future work.
 
 ## Current State
 
@@ -30,6 +38,10 @@ No packaged binary lookup is implemented. No Cargo fallback is implemented. No
 arbitrary `PATH` search is implemented. No environment-variable lookup is
 implemented. No repo-local or host-path guessing is implemented. No silent
 Python fallback is introduced when default Rust routing is active.
+
+P8AS defines only the future packaged location contract. Existing Tauri sidecar
+or resource packaging paths are not automatically planner-binary locations
+unless a later planner-specific packaging decision explicitly designates them.
 
 The Python CLI validates explicit Rust planner binary paths through an internal
 resolver helper. That helper first applies the existing Rust-route argument

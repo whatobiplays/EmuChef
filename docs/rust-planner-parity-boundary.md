@@ -58,6 +58,13 @@ P8AR adds only an internal explicit-path resolver foundation for that existing
 `--rust-planner-bin <path>` validation. It does not add packaged lookup, Cargo
 fallback, arbitrary `PATH` search, environment-variable lookup, repo-local
 guessing, or silent Python fallback.
+`docs/rust-packaged-planner-binary-location.md` records the P8AS packaged
+planner binary location contract. P8AS is documentation-only: no packaged lookup
+is implemented, `--rust-planner-bin <path>` remains required, explicit
+`--planner-backend python` remains available, no Cargo fallback, arbitrary
+`PATH` search, env-var lookup, repo-local guessing, or silent Python fallback is
+implemented, existing Tauri sidecar packaging is not automatically planner
+binary packaging, and packaged release readiness remains future work.
 
 Rust planner tests include an intentional fixture inventory/parsing guard for
 the existing Phase 6M/6N planner parity evidence. The guard consumes checked-in

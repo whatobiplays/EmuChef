@@ -61,6 +61,15 @@ an internal Python CLI resolver helper. That helper remains explicit-path-only:
 no packaged lookup, Cargo fallback, arbitrary `PATH` search,
 environment-variable lookup, repo-local guessing, shell execution, or silent
 Python fallback is implemented.
+P8AS records the packaged planner binary location contract in
+[docs/rust-packaged-planner-binary-location.md](docs/rust-packaged-planner-binary-location.md).
+P8AS is documentation-only: no packaged lookup is implemented,
+`--rust-planner-bin <path>` remains required, explicit
+`--planner-backend python` remains available, no Cargo fallback, `PATH` search,
+env-var lookup,
+repo-local guessing, or silent Python fallback is implemented, existing Tauri
+sidecar packaging is not automatically planner binary packaging, and packaged
+release readiness remains future work.
 The future Rust planner real-device context ownership model is recorded in
 [ADR 0003](docs/adr/0003-rust-real-device-context-ownership.md). For future
 default Rust planner cutover, Rust should own real-device probing and
@@ -268,6 +277,16 @@ remains available, no packaged binary lookup, Cargo fallback, arbitrary `PATH`
 search, host-path guessing, or silent Python fallback is implemented, and
 executor/apply, Python planner deletion, and packaged release readiness remain
 unresolved.
+P8AR adds only a behavior-preserving internal explicit-path resolver foundation
+for `--rust-planner-bin <path>` validation. It does not add packaged lookup,
+Cargo fallback, arbitrary `PATH` search, env-var lookup, repo-local guessing,
+shell execution, or silent Python fallback. P8AS records the future packaged
+planner binary location contract in
+`docs/rust-packaged-planner-binary-location.md`. P8AS is documentation-only:
+no packaged lookup is implemented, `--rust-planner-bin <path>` remains required,
+explicit `--planner-backend python` remains available, existing Tauri sidecar
+packaging is not automatically planner binary packaging, and packaged release
+readiness remains future work.
 
 ## Current Authored Model
 
