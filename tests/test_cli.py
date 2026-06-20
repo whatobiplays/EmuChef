@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import os
 from io import StringIO
 from pathlib import Path
 from tempfile import TemporaryDirectory
@@ -211,6 +212,60 @@ class CliTests(unittest.TestCase):
         run.assert_not_called()
         run_apply.assert_not_called()
 
+    def test_plan_default_ignores_implicit_binary_fallback_sources_without_explicit_path(self) -> None:
+        with TemporaryDirectory() as tmp:
+            temp_root = Path(tmp)
+            path_bin_dir = temp_root / "path-bin"
+            env_bin_dir = temp_root / "env-bin"
+            work_dir = temp_root / "work"
+            target_debug_dir = work_dir / "target" / "debug"
+            path_bin_dir.mkdir()
+            env_bin_dir.mkdir()
+            target_debug_dir.mkdir(parents=True)
+            self._shadow_bin(str(path_bin_dir))
+            env_bin = self._shadow_bin(str(env_bin_dir))
+            self._shadow_bin(str(target_debug_dir))
+
+            stdout = StringIO()
+            stderr = StringIO()
+            old_cwd = Path.cwd()
+            try:
+                os.chdir(work_dir)
+                with (
+                    patch.dict(
+                        os.environ,
+                        {
+                            "PATH": f"{path_bin_dir}{os.pathsep}{os.environ.get('PATH', '')}",
+                            "EMUCHEF_RUST_PLANNER_BIN": env_bin,
+                        },
+                    ),
+                    patch("emuchef.cli._build_session") as build_session,
+                    patch("emuchef.cli.resolve_adb_executable") as resolve_adb,
+                    patch("emuchef.cli.SubprocessAdb.detect_device") as detect_device,
+                    patch("subprocess.run") as run,
+                    contextlib.redirect_stdout(stdout),
+                    contextlib.redirect_stderr(stderr),
+                ):
+                    rc = main(
+                        [
+                            "plan",
+                            "--authored-root",
+                            "authored",
+                            "--device-plan",
+                            "ayaneo.konkr_pocket_fit.base",
+                        ]
+                    )
+            finally:
+                os.chdir(old_cwd)
+
+        self.assertEqual(rc, 1)
+        self.assertEqual(stdout.getvalue(), "")
+        self.assertIn("--rust-planner-bin is required when default Rust planner routing is active.", stderr.getvalue())
+        build_session.assert_not_called()
+        resolve_adb.assert_not_called()
+        detect_device.assert_not_called()
+        run.assert_not_called()
+
     def test_plan_default_uses_rust_route_and_prints_concise_summary(self) -> None:
         with TemporaryDirectory() as tmp:
             shadow_bin = self._shadow_bin(tmp)
@@ -298,6 +353,7 @@ class CliTests(unittest.TestCase):
         with (
             patch("emuchef.cli.resolve_adb_executable", return_value="adb"),
             patch("emuchef.cli.SubprocessAdb.detect_device", return_value=detected),
+            patch("emuchef.cli._resolve_rust_planner_bin") as resolve_rust_planner_bin,
             patch("subprocess.run") as run,
             contextlib.redirect_stdout(stdout),
             contextlib.redirect_stderr(stderr),
@@ -319,6 +375,7 @@ class CliTests(unittest.TestCase):
         self.assertIn("Planning status: success", output)
         self.assertNotIn("kind: planning_result", output)
         self.assertNotIn("--rust-planner-bin is required when default Rust planner routing is active.", stderr.getvalue())
+        resolve_rust_planner_bin.assert_not_called()
         run.assert_not_called()
 
     def test_plan_default_verbose_emits_structured_yaml_from_rust_route(self) -> None:
@@ -2724,6 +2781,46 @@ class CliTests(unittest.TestCase):
         self.assertIn(missing_bin, stderr.getvalue())
         resolve_adb.assert_not_called()
         run.assert_not_called()
+
+    def test_plan_rust_shadow_rejects_non_file_or_non_executable_binary_path(self) -> None:
+        with TemporaryDirectory() as tmp:
+            temp_root = Path(tmp)
+            binary_dir = temp_root / "emuchef-plan-shadow-dir"
+            non_executable_bin = temp_root / "emuchef-plan-shadow"
+            binary_dir.mkdir()
+            non_executable_bin.write_text("#!/bin/sh\n", encoding="utf-8")
+            non_executable_bin.chmod(0o644)
+
+            for rust_planner_bin in (str(binary_dir), str(non_executable_bin)):
+                with self.subTest(rust_planner_bin=rust_planner_bin):
+                    stdout = StringIO()
+                    stderr = StringIO()
+                    with (
+                        patch("emuchef.cli.resolve_adb_executable") as resolve_adb,
+                        patch("subprocess.run") as run,
+                        contextlib.redirect_stdout(stdout),
+                        contextlib.redirect_stderr(stderr),
+                    ):
+                        rc = main(
+                            [
+                                "plan",
+                                "--planner-backend",
+                                "rust-shadow",
+                                "--rust-planner-bin",
+                                rust_planner_bin,
+                                "--authored-root",
+                                "authored",
+                                "--device-plan",
+                                "ayaneo.pocket_s_mini.base",
+                            ]
+                        )
+
+                    self.assertEqual(rc, 1)
+                    self.assertEqual(stdout.getvalue(), "")
+                    self.assertIn("Rust shadow planner binary is not executable", stderr.getvalue())
+                    self.assertIn(rust_planner_bin, stderr.getvalue())
+                    resolve_adb.assert_not_called()
+                    run.assert_not_called()
 
     def test_plan_rust_shadow_failed_start_uses_stable_error_prefix(self) -> None:
         with TemporaryDirectory() as tmp:

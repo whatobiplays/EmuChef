@@ -72,6 +72,10 @@ future default-route Rust planner binary lookup. P8AQ does not change runtime
 behavior: `--rust-planner-bin <path>` remains required, no packaged binary
 lookup, Cargo fallback, arbitrary `PATH` search, or host-path guessing exists,
 and explicit `--planner-backend python` remains available.
+P8AR adds only an internal explicit-path resolver foundation for the same
+`--rust-planner-bin <path>` validation. It does not add packaged lookup, Cargo
+fallback, arbitrary `PATH` search, environment-variable lookup, repo-local
+guessing, or silent Python fallback.
 P8N adds only the crate-local Rust fake/test probe foundation. P8O adds
 fake/test-backed detected-facts planner-input construction. Intended future
 context precedence: synthetic/profile context -> detected facts -> explicit CLI

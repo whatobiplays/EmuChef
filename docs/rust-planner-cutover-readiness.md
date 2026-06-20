@@ -74,6 +74,10 @@ binary-resolution design. P8AQ is design-only: `--rust-planner-bin <path>`
 remains required, no packaged binary lookup, Cargo fallback, arbitrary `PATH`
 search, host-path guessing, or silent Python fallback is implemented, and
 packaged release readiness remains future work.
+P8AR adds only an internal explicit-path resolver foundation for the existing
+`--rust-planner-bin <path>` validation. It does not add packaged lookup, Cargo
+fallback, arbitrary `PATH` search, environment-variable lookup, repo-local
+guessing, or silent Python fallback, and it does not change readiness status.
 P8N adds a crate-local Rust probe abstraction, fake probe, and tests for layering
 detected facts over synthetic/profile-derived context. P8O adds fake/test-backed
 planner-input construction that applies detected facts over

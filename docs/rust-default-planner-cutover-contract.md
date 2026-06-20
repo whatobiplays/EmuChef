@@ -43,6 +43,10 @@ P8AQ records the future binary-resolution design in
 `--rust-planner-bin <path>` remains required, no packaged binary lookup or Cargo
 fallback is implemented, explicit `--planner-backend python` remains available,
 and packaged release readiness remains future work.
+P8AR adds only an internal explicit-path resolver foundation for the current
+`--rust-planner-bin <path>` validation. It does not add packaged lookup, Cargo
+fallback, `PATH` search, environment-variable lookup, repo-local guessing, or
+silent Python fallback.
 
 ## Cutover Preconditions And Evidence
 

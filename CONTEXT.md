@@ -56,6 +56,11 @@ Rust route requires `--rust-planner-bin <path>` and emits Python-compatible
 summary/YAML output. Explicit `--planner-backend python` remains the fallback
 for the previous Python planning path. Rust-native JSON requires a separate
 accepted structured-output option.
+P8AR centralizes the current explicit `--rust-planner-bin <path>` validation in
+an internal Python CLI resolver helper. That helper remains explicit-path-only:
+no packaged lookup, Cargo fallback, arbitrary `PATH` search,
+environment-variable lookup, repo-local guessing, shell execution, or silent
+Python fallback is implemented.
 The future Rust planner real-device context ownership model is recorded in
 [ADR 0003](docs/adr/0003-rust-real-device-context-ownership.md). For future
 default Rust planner cutover, Rust should own real-device probing and

@@ -3,25 +3,39 @@
 ## Purpose
 
 This document records the P8AQ design contract for future Rust planner binary
-resolution on the default Rust-owned `emuchef plan` route after P8AO.
+resolution on the default Rust-owned `emuchef plan` route after P8AO, and the
+P8AR internal resolver foundation that centralizes current explicit-path
+validation.
 
 P8AQ is documentation-only. It does not change runtime CLI behavior, tests,
 readiness-gate code, Rust backend code, smoke tools, executor/apply behavior,
 Tauri/protocol behavior, packaging configuration, or Python planner deletion
 behavior.
 
+P8AR adds a behavior-preserving internal resolver helper in the Python CLI. It
+supports only the explicitly supplied `--rust-planner-bin <path>` value and does
+not add packaged lookup, Cargo fallback, `PATH` search, environment-variable
+lookup, repo-local guessing, shell execution, or silent Python fallback.
+
 ## Current State
 
 P8AO made a no-backend `emuchef plan` invocation route through Rust-owned
 planning by reusing the existing production-equivalent Rust subprocess path.
 
-After P8AQ, the default Rust route still requires an explicit
+After P8AR, the default Rust route still requires an explicit
 `--rust-planner-bin <path>` argument. Explicit `--planner-backend python`
 remains available for the previous Python planning path.
 
 No packaged binary lookup is implemented. No Cargo fallback is implemented. No
-arbitrary `PATH` search is implemented. No host-path guessing is implemented.
-No silent Python fallback is introduced when default Rust routing is active.
+arbitrary `PATH` search is implemented. No environment-variable lookup is
+implemented. No repo-local or host-path guessing is implemented. No silent
+Python fallback is introduced when default Rust routing is active.
+
+The Python CLI validates explicit Rust planner binary paths through an internal
+resolver helper. That helper first applies the existing Rust-route argument
+validation, then expands the explicit path, verifies that it exists, verifies
+that it is a file, verifies that it is executable, and returns that path for the
+subprocess argv.
 
 Executor/apply remains unresolved. Python planner deletion remains unresolved.
 Packaged release readiness remains future work until a later implementation
@@ -40,10 +54,16 @@ proves binary lookup and bundling.
 
 ## Non-Goals
 
-P8AQ does not:
+P8AQ and P8AR do not:
 
-- implement Rust planner binary lookup;
+- implement packaged Rust planner binary lookup;
 - bundle or package a Rust planner binary;
+- search `PATH`;
+- read environment variables for planner binary discovery;
+- guess repo-local `target/debug` locations;
+- run Cargo;
+- execute through a shell;
+- silently fall back to Python planning;
 - delete the Python planner;
 - change executor/apply behavior;
 - change Tauri/protocol behavior;
@@ -102,22 +122,23 @@ as the intentional Python fallback path.
 
 ## Future Testing Strategy
 
-A future implementation should test:
+P8AR tests the current explicit-path-only resolver foundation. A future packaged
+lookup implementation should test:
 
 - explicit `--rust-planner-bin <path>` still wins over packaged lookup;
 - invalid explicit paths return explicit-path errors;
 - non-executable explicit paths return explicit-path executable errors;
 - packaged paths are used only when configured by the packaged resolver;
 - missing or non-executable packaged binaries return packaged-path errors;
-- no shell, Cargo, arbitrary `PATH`, or host-path guessing fallback runs during
-  normal runtime resolution;
+- no shell, Cargo, arbitrary `PATH`, environment-variable, repo-local, or
+  host-path guessing fallback runs during normal runtime resolution;
 - explicit `--planner-backend python` bypasses Rust binary resolution;
 - default Rust routing fails deterministically when no binary can be resolved.
 
 ## Relationship To Readiness
 
-P8AQ does not change readiness-gate status. It does not reclassify blockers or
-add accepted evidence.
+P8AQ and P8AR do not change readiness-gate status. They do not reclassify
+blockers or add accepted evidence.
 
 `python_planner_deletion_not_ready` remains blocked.
 `executor_apply_not_cut_over` remains blocked. Packaged release readiness

@@ -54,6 +54,10 @@ while executor/apply and Python planner deletion remain blocked.
 future resolver contract. P8AQ does not implement packaged binary lookup, Cargo
 fallback, arbitrary `PATH` search, host-path guessing, or silent Python fallback;
 `--rust-planner-bin <path>` remains required after P8AQ.
+P8AR adds only an internal explicit-path resolver foundation for that existing
+`--rust-planner-bin <path>` validation. It does not add packaged lookup, Cargo
+fallback, arbitrary `PATH` search, environment-variable lookup, repo-local
+guessing, or silent Python fallback.
 
 Rust planner tests include an intentional fixture inventory/parsing guard for
 the existing Phase 6M/6N planner parity evidence. The guard consumes checked-in

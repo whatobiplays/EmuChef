@@ -300,12 +300,7 @@ def _run_rust_shadow_plan(args: argparse.Namespace) -> int:
 
 
 def _build_rust_shadow_plan_command(args: argparse.Namespace) -> list[str]:
-    _validate_rust_shadow_plan_args(args)
-    rust_planner_bin = Path(args.rust_planner_bin).expanduser()
-    if not rust_planner_bin.exists():
-        raise ValueError(f"Rust shadow planner binary does not exist: {args.rust_planner_bin}")
-    if not rust_planner_bin.is_file() or not os.access(rust_planner_bin, os.X_OK):
-        raise ValueError(f"Rust shadow planner binary is not executable: {args.rust_planner_bin}")
+    rust_planner_bin = _resolve_rust_planner_bin(args)
 
     command = [
         str(rust_planner_bin),
@@ -330,6 +325,23 @@ def _build_rust_shadow_plan_command(args: argparse.Namespace) -> list[str]:
     for raw_binding in args.bind:
         command.extend(["--bind", raw_binding])
     return command
+
+
+def _resolve_rust_planner_bin(args: argparse.Namespace) -> Path:
+    """Resolve the explicitly supplied Rust planner binary path.
+
+    This resolver intentionally supports only ``--rust-planner-bin``. Future
+    packaged lookup must be added here deliberately rather than through PATH,
+    environment-variable, repo-local, Cargo, shell, or Python-fallback behavior.
+    """
+
+    _validate_rust_shadow_plan_args(args)
+    rust_planner_bin = Path(args.rust_planner_bin).expanduser()
+    if not rust_planner_bin.exists():
+        raise ValueError(f"Rust shadow planner binary does not exist: {args.rust_planner_bin}")
+    if not rust_planner_bin.is_file() or not os.access(rust_planner_bin, os.X_OK):
+        raise ValueError(f"Rust shadow planner binary is not executable: {args.rust_planner_bin}")
+    return rust_planner_bin
 
 
 def _append_rust_shadow_device_context_args(command: list[str], args: argparse.Namespace) -> None:
