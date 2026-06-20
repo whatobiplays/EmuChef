@@ -30,10 +30,10 @@ Accepted reports can move only the relevant evidence-backed blocker entries to
 `evidence_accepted`. P8AL `evidence_accepted` status does not clear default
 cutover by itself, and the top-level readiness status remains `blocked`.
 
-After P8AO, runtime behavior resolves the default-route ownership gap, but the
-static readiness gate still reports `default_cli_backend_still_python` until a
-later gate-cleanup phase updates `tools/check_rust_planner_cutover_readiness.py`.
-The remaining non-planner-routing blockers include:
+After P8AO, runtime behavior resolves the default-route ownership gap. P8AP
+updates the static readiness gate to preserve the historical
+`default_cli_backend_still_python` entry with status `resolved`. The remaining
+non-planner-routing blockers include:
 
 - `executor_apply_not_cut_over`
 - `python_planner_deletion_not_ready`
@@ -136,3 +136,7 @@ reports without changing repo files.
 P8AO is the default-route implementation phase. It may edit CLI routing, tests,
 and current-state docs only after required P8AJ/P8AK evidence is accepted and
 the implementation scope preserves the contracts in this document.
+
+P8AP is readiness-gate classification cleanup only. It does not change runtime
+CLI routing, smoke tooling, Rust backend behavior, executor/apply,
+Tauri/protocol behavior, or Python planner deletion behavior.

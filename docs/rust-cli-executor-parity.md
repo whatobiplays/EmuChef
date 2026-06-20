@@ -291,9 +291,10 @@ implementation.
 P8I adds a static readiness report for default-cutover PRs; it lists required
 manual evidence but does not run comparison/smoke tooling, Cargo, npm, ADB,
 executor/apply, Tauri/protocol, network, artifact, or golden-regeneration
-checks. P8AO does not update the gate logic, so any remaining
-`default_cli_backend_still_python` report entry is a deferred gate-cleanup item
-after runtime behavior changes.
+checks. P8AP updates that report after P8AO by preserving the historical
+`default_cli_backend_still_python` entry with status `resolved`. The report
+top-level status remains `blocked` because executor/apply and Python planner
+deletion remain unresolved.
 P8J adds explicit device context flags to the
 explicit Rust routes only. Supplied manufacturer, model, Android version, and
 device tags are forwarded to the shadow command; no synthetic/profile-derived

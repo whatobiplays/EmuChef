@@ -201,9 +201,11 @@ lists required manual/live evidence commands, can classify explicitly supplied
 P8AJ/P8AK JSON reports, and reports remaining default cutover blockers. It does
 not run live comparison or smoke tooling, Cargo, npm, ADB, executor/apply,
 Tauri/protocol checks, device probing, network access, artifact materialization,
-fixture/golden regeneration, or Python planner deletion work. Its top-level
-report status is expected to remain `blocked` until future phases intentionally
-clear default-cutover blockers.
+fixture/golden regeneration, or Python planner deletion work. P8AP updates the
+gate after P8AO so the historical `default_cli_backend_still_python` entry is
+preserved with status `resolved`. The top-level report status remains `blocked`
+until future phases intentionally clear executor/apply and Python planner
+deletion blockers.
 
 ## Current Evidence
 
@@ -402,7 +404,7 @@ narrower route:
 
 | Blocker | Current classification |
 | --- | --- |
-| CLI routing strategy | P8AO makes no-backend `emuchef plan` use Rust-owned planning through the existing production-equivalent subprocess path with Python-compatible output. The transition route still requires a supplied `--rust-planner-bin` and does not invoke Cargo or search host paths. Explicit `--planner-backend python` remains the fallback for the previous Python planner route. P8A/P8E keep the explicit `rust-shadow` developer bridge and formatter behavior, P8G keeps `rust-experimental` as an explicit migration route, and P8AI keeps `rust-production-equivalent` as an explicit evidence route. The static readiness gate still reports `default_cli_backend_still_python` until a later gate-cleanup phase updates the advisory blocker list. |
+| CLI routing strategy | P8AO makes no-backend `emuchef plan` use Rust-owned planning through the existing production-equivalent subprocess path with Python-compatible output. The transition route still requires a supplied `--rust-planner-bin` and does not invoke Cargo or search host paths. Explicit `--planner-backend python` remains the fallback for the previous Python planner route. P8A/P8E keep the explicit `rust-shadow` developer bridge and formatter behavior, P8G keeps `rust-experimental` as an explicit migration route, and P8AI keeps `rust-production-equivalent` as an explicit evidence route. P8AP preserves the historical `default_cli_backend_still_python` readiness entry with status `resolved`; it does not clear executor/apply, packaged-release, or Python planner deletion readiness. |
 | Device probing and context resolution | The P8AN preflight supplies accepted P8AJ live-probe evidence, so `real_device_probing_not_cut_over` can be reported as `evidence_accepted` when those report paths are supplied to the readiness gate. P8AO no-backend default routing still keeps detected-facts fixture and live-probe wrapper flags explicit-only; they remain accepted on the explicit production-equivalent route. Explicit `--manufacturer`, `--model`, `--android-version`, and repeated `--device-tag` values are forwarded to Rust planning. Python does not invoke ADB, discover devices, run `adb devices`, parse `getprop`, or validate/normalize forwarded ADB paths or serials for Rust routes. |
 | Argument and binding parity | `emuchef-plan-shadow` accepts explicit `--authored-root`, `--device-plan`, explicit device context flags, and string `--bind` values. It mirrors repeated-bind grouping and ordered repeated device tags, but is not full future Rust CLI binding type parity, ops replay parity, detected-device parity, or common-flag parity. |
 | Output format compatibility | P8AO default Rust routing uses the Python-compatible formatter over Rust `PlanningResult` JSON: concise summary labels mirror the visible Python CLI labels, structured YAML is produced from the Rust JSON mapping through `dump_yaml(...)`, and `--output` writes that YAML while stdout stays concise unless `--verbose` is selected. `rust-shadow` omitted `--rust-shadow-output` and explicit `passthrough` continue to preserve Rust stdout/stderr/exit-code passthrough. Rust-native JSON still requires a future explicit structured-output mode such as `--format json`. |

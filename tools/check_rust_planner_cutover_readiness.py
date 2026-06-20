@@ -25,6 +25,7 @@ P8AJ_EVIDENCE_ID = "p8aj_live_probe"
 P8AK_EVIDENCE_ID = "p8ak_mismatch_warning"
 P8AJ_REPORT_KIND = "rust_production_equivalent_live_adb_probe_smoke"
 P8AK_REPORT_KIND = "rust_production_equivalent_mismatch_warning_smoke"
+DEFAULT_CLI_BACKEND_BLOCKER_ID = "default_cli_backend_still_python"
 REAL_DEVICE_PROBING_BLOCKER_ID = "real_device_probing_not_cut_over"
 MISMATCH_WARNING_BLOCKER_ID = "detected_device_profile_mismatch_warning_not_cut_over"
 EVIDENCE_ACCEPTED_STATUS = "evidence_accepted"
@@ -146,8 +147,8 @@ REQUIRED_MANUAL_EVIDENCE = (
 
 REMAINING_BLOCKERS = (
     {
-        "id": "default_cli_backend_still_python",
-        "status": "blocked",
+        "id": DEFAULT_CLI_BACKEND_BLOCKER_ID,
+        "status": "resolved",
     },
     {
         "id": "executor_apply_not_cut_over",
@@ -193,6 +194,7 @@ def build_readiness_report(
         *_required_artifact_checks(repo_root),
         *_readiness_doc_reference_checks(repo_root),
         *_cli_backend_token_checks(repo_root),
+        *_cli_default_route_checks(repo_root),
     ]
     production_equivalent_evidence = {
         P8AJ_EVIDENCE_ID: _evaluate_evidence_report(
@@ -508,6 +510,88 @@ def _cli_backend_token_checks(repo_root: Path) -> list[dict[str, Any]]:
         details = None if has_token else {"missing_token": token}
         checks.append(_check(f"cli_backend_token_{token_id}", has_token, details))
     return checks
+
+
+def _cli_default_route_checks(repo_root: Path) -> list[dict[str, Any]]:
+    path = repo_root / "src" / "emuchef" / "cli.py"
+    text = _read_text_if_available(path)
+    backend_block = _source_call_block(text, '"--planner-backend"')
+    default_omitted = bool(backend_block) and "default=" not in backend_block
+
+    default_resolution_tokens = (
+        '_DEFAULT_RUST_PLANNER_BACKEND = "rust-production-equivalent"',
+        "return args.planner_backend or _DEFAULT_RUST_PLANNER_BACKEND",
+    )
+    rust_bin_required_tokens = (
+        "if not args.rust_planner_bin:",
+        "if args.planner_backend is None:",
+        "--rust-planner-bin is required when default Rust planner routing is active.",
+    )
+
+    return [
+        _check(
+            "cli_default_backend_is_omitted",
+            default_omitted,
+            _default_backend_omitted_details(backend_block, default_omitted),
+        ),
+        _check(
+            "cli_default_backend_resolves_to_rust_production_equivalent",
+            _source_has_tokens(text, default_resolution_tokens),
+            _missing_source_tokens_details(text, default_resolution_tokens),
+        ),
+        _check(
+            "cli_explicit_python_backend_available",
+            '"python"' in backend_block,
+            None if '"python"' in backend_block else {"missing_token": '"python"', "source_block": "--planner-backend"},
+        ),
+        _check(
+            "cli_default_rust_requires_planner_bin",
+            _source_has_tokens(text, rust_bin_required_tokens),
+            _missing_source_tokens_details(text, rust_bin_required_tokens),
+        ),
+    ]
+
+
+def _default_backend_omitted_details(backend_block: str, passed: bool) -> dict[str, str] | None:
+    if passed:
+        return None
+    if not backend_block:
+        return {"missing_token": '"--planner-backend"'}
+    return {"unexpected_token": "default="}
+
+
+def _source_call_block(text: str, marker: str) -> str:
+    lines = text.splitlines()
+    for marker_index, line in enumerate(lines):
+        if marker not in line:
+            continue
+        start_index = marker_index
+        while start_index > 0 and "add_argument(" not in lines[start_index]:
+            start_index -= 1
+        block_lines: list[str] = []
+        paren_balance = 0
+        for block_line in lines[start_index:]:
+            block_lines.append(block_line)
+            paren_balance += block_line.count("(") - block_line.count(")")
+            if block_lines and paren_balance <= 0:
+                break
+        return "\n".join(block_lines)
+    return ""
+
+
+def _source_has_tokens(text: str, tokens: tuple[str, ...]) -> bool:
+    return not _missing_source_tokens(text, tokens)
+
+
+def _missing_source_tokens_details(text: str, tokens: tuple[str, ...]) -> dict[str, list[str]] | None:
+    missing_tokens = _missing_source_tokens(text, tokens)
+    if not missing_tokens:
+        return None
+    return {"missing_tokens": missing_tokens}
+
+
+def _missing_source_tokens(text: str, tokens: tuple[str, ...]) -> list[str]:
+    return [token for token in tokens if token not in text]
 
 
 def _scenario_field_errors(scenarios: object) -> list[str]:

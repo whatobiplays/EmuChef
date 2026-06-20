@@ -250,9 +250,12 @@ P8AM records the default-backend cutover contract in
 is evidence preflight only and verifies accepted P8AJ/P8AK reports without
 editing repo files. P8AO makes no-backend `emuchef plan` route through the
 existing production-equivalent Rust subprocess path. `rust-production-equivalent`
-also remains available as an explicit backend. Python planner deletion,
-executor/apply cutover, readiness-gate logic cleanup, and Tauri/protocol
-changes are not part of the default-backend flip.
+also remains available as an explicit backend. P8AP updates the static readiness
+gate for this current state by preserving `default_cli_backend_still_python`
+with status `resolved`. Top-level readiness remains `blocked` because
+executor/apply and Python planner deletion remain unresolved. Python planner
+deletion, executor/apply cutover, packaged release readiness while
+`--rust-planner-bin` is required, and Tauri/protocol changes remain future work.
 
 ## Current Authored Model
 

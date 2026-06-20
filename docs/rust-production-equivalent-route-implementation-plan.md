@@ -45,7 +45,10 @@ executor/apply plus Python planner deletion remain blocked.
 `docs/rust-default-planner-cutover-contract.md` records the default-backend
 cutover contract. P8AM performs no cutover, P8AN is evidence preflight only, and
 P8AO is the default-route implementation phase after required evidence is
-accepted.
+accepted. P8AP updates readiness-gate current-state classification only by
+preserving the historical `default_cli_backend_still_python` entry with status
+`resolved`; it does not change runtime route behavior, smoke tools,
+executor/apply, Tauri/protocol, or Python planner deletion behavior.
 
 ## Current Route Inventory
 

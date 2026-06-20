@@ -46,7 +46,10 @@ deletion readiness. The top-level readiness status remains `blocked`.
 `docs/rust-default-planner-cutover-contract.md` records the default-backend
 cutover contract. P8AM performs no cutover, P8AN is evidence preflight only, and
 P8AO makes no-backend `emuchef plan` route through the existing
-production-equivalent Rust subprocess path.
+production-equivalent Rust subprocess path. P8AP updates only the static
+readiness-gate classification for that current state: the historical
+`default_cli_backend_still_python` entry is preserved with status `resolved`,
+while executor/apply and Python planner deletion remain blocked.
 
 Rust planner tests include an intentional fixture inventory/parsing guard for
 the existing Phase 6M/6N planner parity evidence. The guard consumes checked-in

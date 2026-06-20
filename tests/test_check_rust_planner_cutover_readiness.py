@@ -28,9 +28,29 @@ Python planner deletion
 """
 
 CLI_TEXT = """
-plan_parser.add_argument("--planner-backend", choices=("python", "rust-shadow", "rust-experimental"), default="python")
+_DEFAULT_RUST_PLANNER_BACKEND = "rust-production-equivalent"
+plan_parser.add_argument(
+    "--planner-backend",
+    choices=("python", "rust-shadow", "rust-experimental", "rust-production-equivalent"),
+    help=(
+        "Omit this option to use default Rust-owned planning through "
+        "rust-production-equivalent; python remains an explicit fallback; "
+        "python-compatible output is the route formatter."
+    ),
+)
 plan_parser.add_argument("--rust-planner-bin")
 plan_parser.add_argument("--rust-shadow-output")
+
+def _effective_plan_backend(args):
+    return args.planner_backend or _DEFAULT_RUST_PLANNER_BACKEND
+
+def _validate_rust_shadow_plan_args(args):
+    if not args.rust_planner_bin:
+        if args.planner_backend is None:
+            raise ValueError("--rust-planner-bin is required when default Rust planner routing is active.")
+        raise ValueError(
+            f"--rust-planner-bin is required when --planner-backend {_effective_plan_backend(args)} is selected."
+        )
 """
 
 EXPLICIT_DEVICE_CONTEXT = {
@@ -229,6 +249,13 @@ class CheckRustPlannerCutoverReadinessTests(unittest.TestCase):
         self.assertEqual(check_by_id(report, "explicit_context_supported_by_matrix_schema")["status"], "pass")
         self.assertEqual(check_by_id(report, "explicit_context_scenario_present")["status"], "pass")
         self.assertEqual(check_by_id(report, "explicit_context_scenario_valid")["status"], "pass")
+        self.assertEqual(check_by_id(report, "cli_default_backend_is_omitted")["status"], "pass")
+        self.assertEqual(
+            check_by_id(report, "cli_default_backend_resolves_to_rust_production_equivalent")["status"],
+            "pass",
+        )
+        self.assertEqual(check_by_id(report, "cli_explicit_python_backend_available")["status"], "pass")
+        self.assertEqual(check_by_id(report, "cli_default_rust_requires_planner_bin")["status"], "pass")
 
     def test_missing_scenario_matrix_reports_failed_check(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
@@ -414,6 +441,46 @@ class CheckRustPlannerCutoverReadinessTests(unittest.TestCase):
 
         self.assertEqual(check_by_id(report, "cli_backend_token_rust_experimental")["status"], "fail")
 
+    def test_p8ao_default_route_static_checks_fail_when_route_markers_are_missing(self) -> None:
+        missing_python_choice = CLI_TEXT.replace('"python", ', "", 1)
+        self.assertIn("python-compatible", missing_python_choice)
+        self.assertIn("python remains an explicit fallback", missing_python_choice)
+        self.assertNotIn('"python"', missing_python_choice)
+
+        cases = [
+            (
+                "cli_default_backend_is_omitted",
+                CLI_TEXT.replace('    help=(', '    default="python",\n    help=(', 1),
+            ),
+            (
+                "cli_default_backend_resolves_to_rust_production_equivalent",
+                CLI_TEXT.replace(
+                    "return args.planner_backend or _DEFAULT_RUST_PLANNER_BACKEND",
+                    'return args.planner_backend or "python"',
+                ),
+            ),
+            (
+                "cli_explicit_python_backend_available",
+                missing_python_choice,
+            ),
+            (
+                "cli_default_rust_requires_planner_bin",
+                CLI_TEXT.replace(
+                    "--rust-planner-bin is required when default Rust planner routing is active.",
+                    "--rust-planner-bin is required for explicit Rust routes.",
+                ),
+            ),
+        ]
+        for check_id, cli_text in cases:
+            with self.subTest(check_id=check_id):
+                with tempfile.TemporaryDirectory() as temp_dir:
+                    root = Path(temp_dir)
+                    make_synthetic_repo(root, cli_text=cli_text)
+
+                    report = self.build_report(root)
+
+                self.assertEqual(check_by_id(report, check_id)["status"], "fail")
+
     def test_report_is_deterministic_for_identical_synthetic_inputs(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
             root = Path(temp_dir)
@@ -526,7 +593,7 @@ class CheckRustPlannerCutoverReadinessTests(unittest.TestCase):
             blocker_status(report, "detected_device_profile_mismatch_warning_not_cut_over"),
             "evidence_accepted",
         )
-        self.assertEqual(blocker_status(report, "default_cli_backend_still_python"), "blocked")
+        self.assertEqual(blocker_status(report, "default_cli_backend_still_python"), "resolved")
         self.assertEqual(blocker_status(report, "executor_apply_not_cut_over"), "blocked")
         self.assertEqual(blocker_status(report, "python_planner_deletion_not_ready"), "blocked")
         self.assertEqual(report["status"], "blocked")
@@ -626,9 +693,13 @@ class CheckRustPlannerCutoverReadinessTests(unittest.TestCase):
 
         self.assertTrue(all(check["status"] == "pass" for check in report["static_checks"]))
         self.assertEqual(report["status"], "blocked")
-        self.assertTrue(all(blocker["status"] == "blocked" for blocker in report["remaining_blockers"]))
+        self.assertEqual(blocker_status(report, "default_cli_backend_still_python"), "resolved")
+        self.assertEqual(blocker_status(report, "executor_apply_not_cut_over"), "blocked")
+        self.assertEqual(blocker_status(report, "python_planner_deletion_not_ready"), "blocked")
+        self.assertEqual(blocker_status(report, "real_device_probing_not_cut_over"), "blocked")
+        self.assertEqual(blocker_status(report, "detected_device_profile_mismatch_warning_not_cut_over"), "blocked")
 
-    def test_report_includes_narrowed_context_blockers_and_existing_cutover_blockers(self) -> None:
+    def test_report_includes_narrowed_context_blockers_and_resolved_default_backend_history(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
             root = Path(temp_dir)
             make_synthetic_repo(root)
@@ -636,7 +707,7 @@ class CheckRustPlannerCutoverReadinessTests(unittest.TestCase):
             report = self.build_report(root)
 
         blockers = {blocker["id"]: blocker["status"] for blocker in report["remaining_blockers"]}
-        self.assertEqual(blockers["default_cli_backend_still_python"], "blocked")
+        self.assertEqual(blockers["default_cli_backend_still_python"], "resolved")
         self.assertEqual(blockers["real_device_probing_not_cut_over"], "blocked")
         self.assertEqual(blockers["detected_device_profile_mismatch_warning_not_cut_over"], "blocked")
         self.assertEqual(blockers["executor_apply_not_cut_over"], "blocked")
