@@ -240,6 +240,30 @@ class CliTests(unittest.TestCase):
     def test_packaged_rust_planner_bin_candidate_returns_none_today(self) -> None:
         self.assertIsNone(cli._packaged_rust_planner_bin_candidate(self._rust_resolver_args()))
 
+    def test_resolve_rust_planner_bin_prefers_explicit_valid_path_without_packaged_candidate(self) -> None:
+        with TemporaryDirectory() as tmp:
+            shadow_bin = Path(self._shadow_bin(tmp))
+            args = self._rust_resolver_args(rust_planner_bin=str(shadow_bin))
+
+            with patch("emuchef.cli._packaged_rust_planner_bin_candidate") as packaged_candidate:
+                resolved = cli._resolve_rust_planner_bin(args)
+
+        self.assertEqual(resolved, shadow_bin)
+        packaged_candidate.assert_not_called()
+
+    def test_resolve_rust_planner_bin_returns_mocked_packaged_candidate_future_seam_contract(self) -> None:
+        args = self._rust_resolver_args()
+        packaged_path = Path("/packaged/emuchef-plan-shadow")
+
+        with patch(
+            "emuchef.cli._packaged_rust_planner_bin_candidate",
+            return_value=packaged_path,
+        ) as packaged_candidate:
+            resolved = cli._resolve_rust_planner_bin(args)
+
+        self.assertEqual(resolved, packaged_path)
+        packaged_candidate.assert_called_once_with(args)
+
     def test_resolve_rust_planner_bin_calls_packaged_candidate_once_before_missing_bin_error(self) -> None:
         args = self._rust_resolver_args()
 

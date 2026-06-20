@@ -76,6 +76,12 @@ placeholder currently returns `None`; no packaged lookup is implemented,
 python` remains available, no Cargo fallback, `PATH` search, env-var lookup,
 repo-local guessing, or silent Python fallback is implemented, and packaged
 release readiness remains future work.
+P8AU adds tests for this packaged candidate seam only. The actual helper still
+returns `None`, no packaged lookup is implemented, `--rust-planner-bin <path>`
+remains required for real Rust routes, explicit `--planner-backend python`
+remains available, no Cargo fallback, `PATH` search, env-var lookup, repo-local
+guessing, or silent Python fallback is implemented, and packaged release
+readiness remains future work.
 The future Rust planner real-device context ownership model is recorded in
 [ADR 0003](docs/adr/0003-rust-real-device-context-ownership.md). For future
 default Rust planner cutover, Rust should own real-device probing and
@@ -1317,10 +1323,11 @@ Current commands:
 
 Common notes:
 
-- `emuchef plan` defaults to the Python planner. Explicit Rust planner migration
-  routes are `--planner-backend rust-shadow` and
-  `--planner-backend rust-experimental`, and both require
-  `--rust-planner-bin <path>`. `rust-shadow` remains diagnostic/dev-only and
+- No-backend `emuchef plan` is Rust-owned through the production-equivalent
+  subprocess path. Explicit `--planner-backend python` remains the
+  fallback/reference path. Explicit Rust planner migration routes are
+  `--planner-backend rust-shadow` and `--planner-backend rust-experimental`,
+  and both require `--rust-planner-bin <path>`. `rust-shadow` remains diagnostic/dev-only and
   passthrough by default: omitted `--rust-shadow-output` and
   `--rust-shadow-output passthrough` pass through Rust JSON/text stdout, stderr,
   and exit code. Explicit `--rust-shadow-output python-compatible` is valid only

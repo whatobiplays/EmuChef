@@ -40,6 +40,13 @@ python` remains available, no Cargo fallback, `PATH` search, env-var lookup,
 repo-local guessing, or silent Python fallback is implemented, and packaged
 release readiness remains future work.
 
+P8AU adds tests for this packaged candidate seam only. The actual helper still
+returns `None`, no packaged lookup is implemented, `--rust-planner-bin <path>`
+remains required for real Rust routes, explicit `--planner-backend python`
+remains available, no Cargo fallback, `PATH` search, env-var lookup, repo-local
+guessing, or silent Python fallback is implemented, and packaged release
+readiness remains future work.
+
 ## Goals
 
 - Define the future packaged Rust planner binary location contract.
