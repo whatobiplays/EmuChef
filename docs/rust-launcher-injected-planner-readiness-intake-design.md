@@ -2,13 +2,16 @@
 
 ## Purpose
 
-P8BB is documentation-only. It defines the future readiness-gate intake rules
-for `rust_launcher_injected_planner_smoke` reports produced by the P8BA smoke
-tool.
+P8BB was documentation-only and defined the readiness-gate intake rules for
+`rust_launcher_injected_planner_smoke` reports produced by the P8BA smoke tool.
 
-Readiness intake is not implemented. No report kind is accepted yet, no
-readiness blocker is cleared, and packaged release readiness remains future
-work.
+P8BC implements supplied-report readiness intake for
+`rust_launcher_injected_planner_smoke` reports with `schema_version: 1`. The
+readiness gate accepts this report kind only when a developer explicitly
+supplies a report path. P8BC does not execute the P8BA smoke tool, import smoke
+tool code, execute planner code, probe devices, read `.local` evidence
+implicitly, change CLI resolver behavior, implement packaged lookup, change
+runtime behavior, or change packaging behavior.
 
 P8BA report identity remains:
 
@@ -17,10 +20,9 @@ kind: rust_launcher_injected_planner_smoke
 schema_version: 1
 ```
 
-## Future Acceptance Rules
+## Acceptance Rules
 
-A future readiness gate should accept a report only when all of these
-conditions are true:
+The readiness gate accepts a report only when all of these conditions are true:
 
 1. `kind == rust_launcher_injected_planner_smoke`
 2. `schema_version == 1`
@@ -37,12 +39,12 @@ conditions are true:
 13. all redaction booleans are true
 14. `artifacts.argv0_basename` is present and contains no `/` or `\`
 
-The future gate should continue to require the existing top-level report shape:
+The gate requires the existing top-level report shape:
 `kind`, `schema_version`, `generated_at`, `summary`, `inputs`, `checks`,
 `redaction`, and `artifacts`.
 
-Additional non-sensitive fields may be ignored by the future readiness gate
-unless a later implementation explicitly makes them acceptance criteria.
+Additional non-sensitive fields may be ignored by the readiness gate unless a
+later implementation explicitly makes them acceptance criteria.
 
 ## Required Checks
 
@@ -58,11 +60,11 @@ have `passed: true`:
 7. `explicit_python_backend_bypass_available`
 8. `no_implicit_fallback_sources_used`
 
-## Future Rejection Rules
+## Rejection Rules
 
-The future gate should reject reports with any of these conditions:
+The gate rejects reports with any of these conditions:
 
-1. denylisted sensitive keys or equivalent fields
+1. denylisted sensitive keys
 2. full local path-looking string values
 3. `artifacts.argv0_basename` containing `/` or `\`
 4. missing required top-level keys
@@ -70,6 +72,11 @@ The future gate should reject reports with any of these conditions:
 6. `summary.failed > 0`
 7. missing required checks
 8. failed required checks
+
+Denylisted sensitive keys are matched by exact normalized key only, equivalent
+to `key.lower() in DENYLISTED_KEYS`. Allowed fields such as `argv0_basename`
+and `argv0_corresponds_to_launcher_path` are not rejected merely because they
+contain `argv0`.
 
 Denylisted sensitive keys are:
 
@@ -90,21 +97,21 @@ Denylisted sensitive keys are:
 15. `cwd`
 16. `home`
 
-Equivalent fields are alternate names that carry the same sensitive values.
-Reports must not store raw commands, process output, environment data, device
-identifiers, home directories, working directories, or planner paths under
-different field names.
+Full local path-looking string values are rejected even when the field name is
+not denylisted. The heuristic is intentionally bounded to obvious local paths:
+absolute POSIX paths beginning with `/`, home-relative paths beginning with
+`~/`, Windows drive paths such as `C:\...` or `C:/...`, and UNC paths beginning
+with `\\`. Safe schema values such as `rust-production-equivalent`,
+`cli_help_static`, `temporary_fixture_json`, `external_wrapper`,
+`emuchef-plan-shadow`, and ISO-8601 timestamps remain allowed when they do not
+reveal local host paths.
 
-Full local path-looking string values must be rejected even when the field name
-is not denylisted. Safe basenames such as `emuchef-plan-shadow` remain allowed
-when they do not reveal a local path.
+For `artifacts.argv0_basename`, the gate applies the stricter basename rule:
+the value must be a non-empty string and must not contain `/` or `\`.
 
-## Future Blocker Semantics
+## Readiness Semantics
 
-An accepted report may satisfy the packaged launcher-injection evidence bar
-later, but it does not clear executor/apply readiness, Python planner deletion
-readiness, broader packaged release readiness, or any blocker in P8BB.
-
-P8BB itself clears no blocker. A future implementation must explicitly wire
-readiness intake before `rust_launcher_injected_planner_smoke` reports can
-change readiness output.
+An accepted P8BC report may satisfy only the packaged launcher-injection
+evidence item. It does not clear executor/apply readiness, Python planner
+deletion readiness, broader packaged release readiness, or top-level readiness.
+Top-level readiness remains `blocked` while those blockers remain.

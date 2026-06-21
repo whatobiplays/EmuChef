@@ -144,10 +144,19 @@ behavior, or implement packaged lookup. Packaged release readiness remains
 future work.
 P8BB is documentation-only and records
 `docs/rust-launcher-injected-planner-readiness-intake-design.md` as the future
-readiness intake design for P8BA reports. Readiness intake is not implemented,
-no report kind is accepted yet, no readiness blocker is cleared, the P8BA report
-identity remains `rust_launcher_injected_planner_smoke` with `schema_version: 1`,
-and packaged release readiness remains future work.
+readiness intake design for P8BA reports. At P8BB, readiness intake was not
+implemented, no report kind was accepted, no readiness blocker was cleared, the
+P8BA report identity remained `rust_launcher_injected_planner_smoke` with
+`schema_version: 1`, and packaged release readiness remained future work.
+P8BC implements supplied-report readiness intake for
+`rust_launcher_injected_planner_smoke` reports with `schema_version: 1`.
+Accepted P8BC reports may satisfy only the packaged launcher-injection evidence
+item. P8BC does not change the P8BA smoke tool, CLI resolver behavior, packaged
+lookup, runtime planning behavior, Tauri/config-editor code, packaging scripts,
+Rust backend code, executor/apply behavior, Python planner deletion readiness,
+or broader packaged release readiness. Top-level readiness remains `blocked`
+while executor/apply, Python planner deletion, and packaged release readiness
+remain blocked.
 P8N adds a crate-local Rust probe abstraction, fake probe, and tests for layering
 detected facts over synthetic/profile-derived context. P8O adds fake/test-backed
 planner-input construction that applies detected facts over

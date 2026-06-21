@@ -130,6 +130,52 @@ def accepted_p8ak_report() -> dict:
     }
 
 
+def accepted_p8bc_report() -> dict:
+    return {
+        "kind": "rust_launcher_injected_planner_smoke",
+        "schema_version": 1,
+        "generated_at": "2026-06-21T00:00:00Z",
+        "summary": {
+            "passed": 8,
+            "failed": 0,
+        },
+        "inputs": {
+            "planner_backend": "rust-production-equivalent",
+            "launcher_supplied_planner_path": True,
+            "path_was_absolute": True,
+            "path_exists": True,
+            "path_is_file": True,
+            "path_executable": True,
+            "argv0_corresponds_to_launcher_path": True,
+            "explicit_python_bypass_checked": True,
+            "explicit_python_bypass_check_mode": "cli_help_static",
+            "detected_facts_source": "temporary_fixture_json",
+            "launcher_entrypoint_observation": "external_wrapper",
+        },
+        "checks": [
+            {"name": "launcher_supplied_path_absolute", "passed": True},
+            {"name": "launcher_supplied_path_exists", "passed": True},
+            {"name": "launcher_supplied_path_file", "passed": True},
+            {"name": "launcher_supplied_path_executable", "passed": True},
+            {"name": "argv0_corresponds_to_launcher_path", "passed": True},
+            {"name": "known_fixture_plan_succeeded", "passed": True},
+            {"name": "explicit_python_backend_bypass_available", "passed": True},
+            {"name": "no_implicit_fallback_sources_used", "passed": True},
+        ],
+        "redaction": {
+            "full_paths_omitted": True,
+            "process_invocation_omitted": True,
+            "process_output_omitted": True,
+            "runtime_context_omitted": True,
+            "device_identifiers_omitted": True,
+            "sensitive_values_omitted": True,
+        },
+        "artifacts": {
+            "argv0_basename": "emuchef-plan-shadow",
+        },
+    }
+
+
 def scenario_payload(
     *device_plan_ids: str,
     classification: str = "match",
@@ -218,6 +264,7 @@ class CheckRustPlannerCutoverReadinessTests(unittest.TestCase):
         *,
         p8aj_live_probe_report: Path | None = None,
         p8ak_mismatch_warning_report: Path | None = None,
+        p8bc_launcher_injected_planner_report: Path | None = None,
     ) -> dict:
         return self.readiness.build_readiness_report(
             repo_root=root,
@@ -225,6 +272,7 @@ class CheckRustPlannerCutoverReadinessTests(unittest.TestCase):
             scenario_matrix=Path("tools/plan_parity_scenarios.json"),
             p8aj_live_probe_report=p8aj_live_probe_report,
             p8ak_mismatch_warning_report=p8ak_mismatch_warning_report,
+            p8bc_launcher_injected_planner_report=p8bc_launcher_injected_planner_report,
         )
 
     def test_happy_path_static_report_with_required_files_and_docs(self) -> None:
@@ -646,6 +694,187 @@ class CheckRustPlannerCutoverReadinessTests(unittest.TestCase):
                 self.assertEqual(blocker_status(report, blocker_id), "blocked")
                 self.assertEqual(report["status"], "blocked")
 
+    def test_valid_p8bc_report_is_accepted_for_launcher_injection_evidence_only(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            make_synthetic_repo(root)
+            report_path = write_json(root, "reports/p8bc.json", accepted_p8bc_report())
+
+            report = self.build_report(root, p8bc_launcher_injected_planner_report=report_path)
+
+        evidence = report["production_equivalent_evidence"]["p8bc_launcher_injected_planner"]
+        self.assertEqual(evidence["status"], "accepted")
+        self.assertEqual(evidence["evidence_id"], "p8bc_launcher_injected_planner")
+        self.assertEqual(evidence["blocker_id"], "packaged_launcher_injection_evidence_not_accepted")
+        self.assertEqual(evidence["reasons"], [])
+        self.assertEqual(
+            blocker_status(report, "packaged_launcher_injection_evidence_not_accepted"),
+            "evidence_accepted",
+        )
+        self.assertEqual(blocker_status(report, "executor_apply_not_cut_over"), "blocked")
+        self.assertEqual(blocker_status(report, "python_planner_deletion_not_ready"), "blocked")
+        self.assertEqual(blocker_status(report, "packaged_release_not_ready"), "blocked")
+        self.assertEqual(report["status"], "blocked")
+
+    def test_invalid_p8bc_identity_summary_and_shape_are_rejected(self) -> None:
+        cases = [
+            ("wrong_kind", {"kind": "rust_production_equivalent_mismatch_warning_smoke"}),
+            ("wrong_schema_version", {"schema_version": 2}),
+            ("summary_failed", {"summary": {"passed": 7, "failed": 1}}),
+        ]
+        for name, replacement in cases:
+            with self.subTest(name=name):
+                payload = accepted_p8bc_report()
+                payload.update(replacement)
+                with tempfile.TemporaryDirectory() as temp_dir:
+                    root = Path(temp_dir)
+                    make_synthetic_repo(root)
+                    report_path = write_json(root, "reports/p8bc.json", payload)
+
+                    report = self.build_report(root, p8bc_launcher_injected_planner_report=report_path)
+
+                evidence = report["production_equivalent_evidence"]["p8bc_launcher_injected_planner"]
+                self.assertEqual(evidence["status"], "rejected")
+                self.assertTrue(evidence["reasons"])
+                self.assertEqual(blocker_status(report, "packaged_launcher_injection_evidence_not_accepted"), "blocked")
+                self.assertEqual(report["status"], "blocked")
+
+    def test_missing_p8bc_top_level_key_is_rejected(self) -> None:
+        payload = accepted_p8bc_report()
+        del payload["redaction"]
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            make_synthetic_repo(root)
+            report_path = write_json(root, "reports/p8bc.json", payload)
+
+            report = self.build_report(root, p8bc_launcher_injected_planner_report=report_path)
+
+        evidence = report["production_equivalent_evidence"]["p8bc_launcher_injected_planner"]
+        self.assertEqual(evidence["status"], "rejected")
+        self.assertTrue(any("missing required top-level key: redaction" in reason for reason in evidence["reasons"]))
+
+    def test_missing_or_failed_p8bc_required_check_is_rejected(self) -> None:
+        missing_check = accepted_p8bc_report()
+        missing_check["checks"] = [
+            check
+            for check in missing_check["checks"]
+            if check["name"] != "no_implicit_fallback_sources_used"
+        ]
+        failed_check = accepted_p8bc_report()
+        failed_check["checks"][0]["passed"] = False
+
+        cases = [
+            ("missing_check", missing_check),
+            ("failed_check", failed_check),
+        ]
+        for name, payload in cases:
+            with self.subTest(name=name):
+                with tempfile.TemporaryDirectory() as temp_dir:
+                    root = Path(temp_dir)
+                    make_synthetic_repo(root)
+                    report_path = write_json(root, "reports/p8bc.json", payload)
+
+                    report = self.build_report(root, p8bc_launcher_injected_planner_report=report_path)
+
+                evidence = report["production_equivalent_evidence"]["p8bc_launcher_injected_planner"]
+                self.assertEqual(evidence["status"], "rejected")
+                self.assertTrue(evidence["reasons"])
+
+    def test_p8bc_denylisted_key_rejection_is_recursive_and_exact_match_only(self) -> None:
+        rejected = accepted_p8bc_report()
+        rejected["checks"][0]["details"] = {"raw_command": "do-not-store"}
+        accepted = accepted_p8bc_report()
+        accepted["artifacts"]["argv0_basename"] = "emuchef-plan-shadow"
+        accepted["inputs"]["argv0_corresponds_to_launcher_path"] = True
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            make_synthetic_repo(root)
+            rejected_path = write_json(root, "reports/rejected.json", rejected)
+            accepted_path = write_json(root, "reports/accepted.json", accepted)
+
+            rejected_report = self.build_report(root, p8bc_launcher_injected_planner_report=rejected_path)
+            accepted_report = self.build_report(root, p8bc_launcher_injected_planner_report=accepted_path)
+
+        rejected_evidence = rejected_report["production_equivalent_evidence"]["p8bc_launcher_injected_planner"]
+        accepted_evidence = accepted_report["production_equivalent_evidence"]["p8bc_launcher_injected_planner"]
+        self.assertEqual(rejected_evidence["status"], "rejected")
+        self.assertTrue(any("report.checks[0].details.raw_command" in reason for reason in rejected_evidence["reasons"]))
+        self.assertEqual(accepted_evidence["status"], "accepted")
+        self.assertEqual(accepted_evidence["reasons"], [])
+
+    def test_p8bc_local_path_values_are_rejected_but_safe_schema_values_and_basenames_are_allowed(self) -> None:
+        path_values = [
+            "/Users/example/Projects/EmuChef",
+            "~/Projects/EmuChef",
+            "C:\\Users\\example\\EmuChef",
+            "C:/Users/example/EmuChef",
+            "\\\\server\\share\\EmuChef",
+        ]
+        for value in path_values:
+            with self.subTest(value=value):
+                payload = accepted_p8bc_report()
+                payload["inputs"]["non_sensitive_extra"] = value
+                with tempfile.TemporaryDirectory() as temp_dir:
+                    root = Path(temp_dir)
+                    make_synthetic_repo(root)
+                    report_path = write_json(root, "reports/p8bc.json", payload)
+
+                    report = self.build_report(root, p8bc_launcher_injected_planner_report=report_path)
+
+                evidence = report["production_equivalent_evidence"]["p8bc_launcher_injected_planner"]
+                self.assertEqual(evidence["status"], "rejected")
+                self.assertTrue(any("local path-looking value" in reason for reason in evidence["reasons"]))
+
+        accepted = accepted_p8bc_report()
+        accepted["inputs"]["non_sensitive_extra"] = "temporary_fixture_json"
+        accepted["artifacts"]["safe_basename"] = "emuchef-plan-shadow"
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            make_synthetic_repo(root)
+            report_path = write_json(root, "reports/p8bc.json", accepted)
+
+            report = self.build_report(root, p8bc_launcher_injected_planner_report=report_path)
+
+        evidence = report["production_equivalent_evidence"]["p8bc_launcher_injected_planner"]
+        self.assertEqual(evidence["status"], "accepted")
+
+    def test_p8bc_argv0_basename_must_be_safe_basename(self) -> None:
+        cases = [
+            ("slash", "nested/emuchef-plan-shadow"),
+            ("backslash", "nested\\emuchef-plan-shadow"),
+            ("empty", ""),
+        ]
+        for name, argv0_basename in cases:
+            with self.subTest(name=name):
+                payload = accepted_p8bc_report()
+                payload["artifacts"]["argv0_basename"] = argv0_basename
+                with tempfile.TemporaryDirectory() as temp_dir:
+                    root = Path(temp_dir)
+                    make_synthetic_repo(root)
+                    report_path = write_json(root, "reports/p8bc.json", payload)
+
+                    report = self.build_report(root, p8bc_launcher_injected_planner_report=report_path)
+
+                evidence = report["production_equivalent_evidence"]["p8bc_launcher_injected_planner"]
+                self.assertEqual(evidence["status"], "rejected")
+                self.assertTrue(any("artifacts.argv0_basename" in reason for reason in evidence["reasons"]))
+
+    def test_p8bc_non_sensitive_extra_field_is_ignored(self) -> None:
+        payload = accepted_p8bc_report()
+        payload["inputs"]["additional_classification"] = "external_wrapper"
+        payload["checks"][0]["classification"] = "temporary_fixture_json"
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            make_synthetic_repo(root)
+            report_path = write_json(root, "reports/p8bc.json", payload)
+
+            report = self.build_report(root, p8bc_launcher_injected_planner_report=report_path)
+
+        evidence = report["production_equivalent_evidence"]["p8bc_launcher_injected_planner"]
+        self.assertEqual(evidence["status"], "accepted")
+        self.assertEqual(evidence["reasons"], [])
+
     def test_sensitive_evidence_fields_are_rejected_without_rejecting_classification_fields(self) -> None:
         accepted_with_classification_fields = accepted_p8aj_report()
         rejected_with_raw_stdout = accepted_p8aj_report()
@@ -678,11 +907,14 @@ class CheckRustPlannerCutoverReadinessTests(unittest.TestCase):
                 "reports/p8aj.json",
                 "--p8ak-mismatch-warning-report",
                 "reports/p8ak.json",
+                "--p8bc-launcher-injected-planner-report",
+                "reports/p8bc.json",
             ]
         )
 
         self.assertEqual(args.p8aj_live_probe_report, "reports/p8aj.json")
         self.assertEqual(args.p8ak_mismatch_warning_report, "reports/p8ak.json")
+        self.assertEqual(args.p8bc_launcher_injected_planner_report, "reports/p8bc.json")
 
     def test_report_status_remains_blocked_when_static_checks_pass(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
@@ -698,6 +930,8 @@ class CheckRustPlannerCutoverReadinessTests(unittest.TestCase):
         self.assertEqual(blocker_status(report, "python_planner_deletion_not_ready"), "blocked")
         self.assertEqual(blocker_status(report, "real_device_probing_not_cut_over"), "blocked")
         self.assertEqual(blocker_status(report, "detected_device_profile_mismatch_warning_not_cut_over"), "blocked")
+        self.assertEqual(blocker_status(report, "packaged_launcher_injection_evidence_not_accepted"), "blocked")
+        self.assertEqual(blocker_status(report, "packaged_release_not_ready"), "blocked")
 
     def test_report_includes_narrowed_context_blockers_and_resolved_default_backend_history(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
@@ -710,6 +944,8 @@ class CheckRustPlannerCutoverReadinessTests(unittest.TestCase):
         self.assertEqual(blockers["default_cli_backend_still_python"], "resolved")
         self.assertEqual(blockers["real_device_probing_not_cut_over"], "blocked")
         self.assertEqual(blockers["detected_device_profile_mismatch_warning_not_cut_over"], "blocked")
+        self.assertEqual(blockers["packaged_launcher_injection_evidence_not_accepted"], "blocked")
+        self.assertEqual(blockers["packaged_release_not_ready"], "blocked")
         self.assertEqual(blockers["executor_apply_not_cut_over"], "blocked")
         self.assertEqual(blockers["python_planner_deletion_not_ready"], "blocked")
         self.assertNotIn("real_device_context_probing_not_cut_over", blockers)
@@ -730,6 +966,8 @@ class CheckRustPlannerCutoverReadinessTests(unittest.TestCase):
             r"^\s*from\s+tools\.smoke_rust_production_equivalent_live_adb_probe\b",
             r"^\s*import\s+tools\.smoke_rust_production_equivalent_mismatch_warning\b",
             r"^\s*from\s+tools\.smoke_rust_production_equivalent_mismatch_warning\b",
+            r"^\s*import\s+tools\.smoke_launcher_injected_planner\b",
+            r"^\s*from\s+tools\.smoke_launcher_injected_planner\b",
         ]
         for pattern in forbidden_import_patterns:
             with self.subTest(pattern=pattern):

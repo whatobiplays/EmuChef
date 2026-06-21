@@ -23,11 +23,15 @@ DEVICE_CONTEXT_FIELDS = ("manufacturer", "model", "android_version", "device_tag
 DEVICE_CONTEXT_FIELD_SET = set(DEVICE_CONTEXT_FIELDS)
 P8AJ_EVIDENCE_ID = "p8aj_live_probe"
 P8AK_EVIDENCE_ID = "p8ak_mismatch_warning"
+P8BC_EVIDENCE_ID = "p8bc_launcher_injected_planner"
 P8AJ_REPORT_KIND = "rust_production_equivalent_live_adb_probe_smoke"
 P8AK_REPORT_KIND = "rust_production_equivalent_mismatch_warning_smoke"
+P8BC_REPORT_KIND = "rust_launcher_injected_planner_smoke"
 DEFAULT_CLI_BACKEND_BLOCKER_ID = "default_cli_backend_still_python"
 REAL_DEVICE_PROBING_BLOCKER_ID = "real_device_probing_not_cut_over"
 MISMATCH_WARNING_BLOCKER_ID = "detected_device_profile_mismatch_warning_not_cut_over"
+PACKAGED_LAUNCHER_INJECTION_BLOCKER_ID = "packaged_launcher_injection_evidence_not_accepted"
+PACKAGED_RELEASE_BLOCKER_ID = "packaged_release_not_ready"
 EVIDENCE_ACCEPTED_STATUS = "evidence_accepted"
 P8AK_REQUIRED_PASSING_CASES = (
     "matched_profile",
@@ -39,14 +43,58 @@ P8AK_REQUIRED_PASSING_CASES = (
 SENSITIVE_EVIDENCE_KEYS = {
     "command",
     "argv",
+    "raw_command",
     "environment",
     "env",
     "stdout",
     "stderr",
-    "raw_command",
     "raw_stdout",
     "raw_stderr",
     "serial",
+    "device_serial",
+    "planner_path",
+    "absolute_path",
+    "launcher_supplied_absolute_path",
+    "cwd",
+    "home",
+}
+P8BC_REQUIRED_TOP_LEVEL_KEYS = (
+    "kind",
+    "schema_version",
+    "generated_at",
+    "summary",
+    "inputs",
+    "checks",
+    "redaction",
+    "artifacts",
+)
+P8BC_REQUIRED_CHECKS = (
+    "launcher_supplied_path_absolute",
+    "launcher_supplied_path_exists",
+    "launcher_supplied_path_file",
+    "launcher_supplied_path_executable",
+    "argv0_corresponds_to_launcher_path",
+    "known_fixture_plan_succeeded",
+    "explicit_python_backend_bypass_available",
+    "no_implicit_fallback_sources_used",
+)
+P8BC_REQUIRED_REDACTION_FLAGS = (
+    "full_paths_omitted",
+    "process_invocation_omitted",
+    "process_output_omitted",
+    "runtime_context_omitted",
+    "device_identifiers_omitted",
+    "sensitive_values_omitted",
+)
+P8BC_REQUIRED_INPUT_VALUES = {
+    "planner_backend": "rust-production-equivalent",
+    "launcher_supplied_planner_path": True,
+    "path_was_absolute": True,
+    "path_exists": True,
+    "path_executable": True,
+    "argv0_corresponds_to_launcher_path": True,
+    "explicit_python_bypass_checked": True,
+    "explicit_python_bypass_check_mode": "cli_help_static",
 }
 
 REQUIRED_ARTIFACTS = (
@@ -163,6 +211,14 @@ REMAINING_BLOCKERS = (
         "status": "blocked",
     },
     {
+        "id": PACKAGED_LAUNCHER_INJECTION_BLOCKER_ID,
+        "status": "blocked",
+    },
+    {
+        "id": PACKAGED_RELEASE_BLOCKER_ID,
+        "status": "blocked",
+    },
+    {
         "id": "python_planner_deletion_not_ready",
         "status": "blocked",
     },
@@ -176,6 +232,7 @@ def build_readiness_report(
     scenario_matrix: Path,
     p8aj_live_probe_report: Path | None = None,
     p8ak_mismatch_warning_report: Path | None = None,
+    p8bc_launcher_injected_planner_report: Path | None = None,
 ) -> dict[str, Any]:
     """Build the deterministic static readiness report.
 
@@ -210,6 +267,13 @@ def build_readiness_report(
             evidence_id=P8AK_EVIDENCE_ID,
             blocker_id=MISMATCH_WARNING_BLOCKER_ID,
             validator=_p8ak_evidence_rejection_reasons,
+        ),
+        P8BC_EVIDENCE_ID: _evaluate_evidence_report(
+            repo_root=repo_root,
+            report_path=p8bc_launcher_injected_planner_report,
+            evidence_id=P8BC_EVIDENCE_ID,
+            blocker_id=PACKAGED_LAUNCHER_INJECTION_BLOCKER_ID,
+            validator=_p8bc_evidence_rejection_reasons,
         ),
     }
 
@@ -273,7 +337,11 @@ def _evaluate_evidence_report(
             reasons=["evidence report root must be a JSON object"],
         )
 
-    reasons = [*_sensitive_evidence_rejection_reasons(payload), *validator(payload)]
+    reasons = [
+        *_sensitive_evidence_rejection_reasons(payload),
+        *_local_path_value_rejection_reasons(payload),
+        *validator(payload),
+    ]
     return _evidence_item(
         status="accepted" if not reasons else "rejected",
         evidence_id=evidence_id,
@@ -321,13 +389,46 @@ def _sensitive_evidence_key_paths(value: object, *, prefix: str = "report") -> l
         for key, child in value.items():
             key_text = str(key)
             child_path = f"{prefix}.{key_text}"
-            if key_text in SENSITIVE_EVIDENCE_KEYS:
+            if key_text.lower() in SENSITIVE_EVIDENCE_KEYS:
                 paths.append(child_path)
             paths.extend(_sensitive_evidence_key_paths(child, prefix=child_path))
     elif isinstance(value, list):
         for index, child in enumerate(value):
             paths.extend(_sensitive_evidence_key_paths(child, prefix=f"{prefix}[{index}]"))
     return paths
+
+
+def _local_path_value_rejection_reasons(payload: dict[str, Any]) -> list[str]:
+    path_values = _local_path_value_paths(payload)
+    if not path_values:
+        return []
+    return [f"evidence report contains local path-looking value: {path}" for path in path_values]
+
+
+def _local_path_value_paths(value: object, *, prefix: str = "report") -> list[str]:
+    paths: list[str] = []
+    if isinstance(value, dict):
+        for key, child in value.items():
+            paths.extend(_local_path_value_paths(child, prefix=f"{prefix}.{key}"))
+    elif isinstance(value, list):
+        for index, child in enumerate(value):
+            paths.extend(_local_path_value_paths(child, prefix=f"{prefix}[{index}]"))
+    elif isinstance(value, str) and _looks_like_full_local_path(value):
+        paths.append(prefix)
+    return paths
+
+
+def _looks_like_full_local_path(value: str) -> bool:
+    return (
+        value.startswith("/")
+        or value.startswith("~/")
+        or _looks_like_windows_drive_path(value)
+        or value.startswith("\\\\")
+    )
+
+
+def _looks_like_windows_drive_path(value: str) -> bool:
+    return len(value) >= 3 and value[0].isalpha() and value[1] == ":" and value[2] in ("/", "\\")
 
 
 def _p8aj_evidence_rejection_reasons(payload: dict[str, Any]) -> list[str]:
@@ -373,6 +474,75 @@ def _p8ak_evidence_rejection_reasons(payload: dict[str, Any]) -> list[str]:
     return reasons
 
 
+def _p8bc_evidence_rejection_reasons(payload: dict[str, Any]) -> list[str]:
+    reasons = []
+    for key in P8BC_REQUIRED_TOP_LEVEL_KEYS:
+        if key not in payload:
+            reasons.append(f"missing required top-level key: {key}")
+
+    if payload.get("kind") != P8BC_REPORT_KIND:
+        reasons.append(f"kind must be {P8BC_REPORT_KIND}")
+    if payload.get("schema_version") != REPORT_SCHEMA_VERSION:
+        reasons.append(f"schema_version must be {REPORT_SCHEMA_VERSION}")
+
+    summary = payload.get("summary")
+    if not isinstance(summary, dict) or not _json_int_equals(summary.get("failed"), 0):
+        reasons.append("summary.failed must be 0")
+
+    inputs = payload.get("inputs")
+    if not isinstance(inputs, dict):
+        reasons.append("inputs must be an object")
+    else:
+        for key, expected in P8BC_REQUIRED_INPUT_VALUES.items():
+            if inputs.get(key) != expected:
+                reasons.append(f"inputs.{key} must be {_json_literal(expected)}")
+
+    checks = payload.get("checks")
+    if not isinstance(checks, list):
+        reasons.append("checks must be a list")
+    else:
+        required_check_states = _p8bc_required_check_states(checks)
+        for check_name in P8BC_REQUIRED_CHECKS:
+            check_state = required_check_states.get(check_name)
+            if check_state is None:
+                reasons.append(f"missing required check: {check_name}")
+            elif check_state is not True:
+                reasons.append(f"required check must pass: {check_name}")
+
+    redaction = payload.get("redaction")
+    if not isinstance(redaction, dict):
+        reasons.append("redaction must be an object")
+    else:
+        for key in P8BC_REQUIRED_REDACTION_FLAGS:
+            if redaction.get(key) is not True:
+                reasons.append(f"redaction.{key} must be true")
+
+    artifacts = payload.get("artifacts")
+    if not isinstance(artifacts, dict):
+        reasons.append("artifacts must be an object")
+    else:
+        argv0_basename = artifacts.get("argv0_basename")
+        if not isinstance(argv0_basename, str) or not argv0_basename or "/" in argv0_basename or "\\" in argv0_basename:
+            reasons.append("artifacts.argv0_basename must be a non-empty basename")
+
+    return reasons
+
+
+def _p8bc_required_check_states(checks: list[object]) -> dict[str, bool | None]:
+    states: dict[str, bool | None] = {}
+    for check in checks:
+        if not isinstance(check, dict):
+            continue
+        name = check.get("name")
+        if isinstance(name, str) and name in P8BC_REQUIRED_CHECKS:
+            states[name] = check.get("passed") if isinstance(check.get("passed"), bool) else None
+    return states
+
+
+def _json_literal(value: object) -> str:
+    return json.dumps(value)
+
+
 def _json_int_equals(value: object, expected: int) -> bool:
     return isinstance(value, int) and not isinstance(value, bool) and value == expected
 
@@ -387,6 +557,11 @@ def _remaining_blockers_with_evidence(production_equivalent_evidence: dict[str, 
         MISMATCH_WARNING_BLOCKER_ID: (
             EVIDENCE_ACCEPTED_STATUS
             if production_equivalent_evidence[P8AK_EVIDENCE_ID]["status"] == "accepted"
+            else "blocked"
+        ),
+        PACKAGED_LAUNCHER_INJECTION_BLOCKER_ID: (
+            EVIDENCE_ACCEPTED_STATUS
+            if production_equivalent_evidence[P8BC_EVIDENCE_ID]["status"] == "accepted"
             else "blocked"
         ),
     }
@@ -810,6 +985,7 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--scenario-matrix", default="tools/plan_parity_scenarios.json")
     parser.add_argument("--p8aj-live-probe-report")
     parser.add_argument("--p8ak-mismatch-warning-report")
+    parser.add_argument("--p8bc-launcher-injected-planner-report")
     return parser.parse_args(argv)
 
 
@@ -821,6 +997,11 @@ def main(argv: list[str] | None = None) -> int:
         scenario_matrix=Path(args.scenario_matrix),
         p8aj_live_probe_report=Path(args.p8aj_live_probe_report) if args.p8aj_live_probe_report else None,
         p8ak_mismatch_warning_report=Path(args.p8ak_mismatch_warning_report) if args.p8ak_mismatch_warning_report else None,
+        p8bc_launcher_injected_planner_report=(
+            Path(args.p8bc_launcher_injected_planner_report)
+            if args.p8bc_launcher_injected_planner_report
+            else None
+        ),
     )
     sys.stdout.write(dumps_report(report))
     return 0 if static_checks_pass(report) else 1

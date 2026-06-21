@@ -129,11 +129,15 @@ readiness blocker, change CLI resolver behavior, implement packaged lookup, or
 change packaged release readiness. Packaged release readiness remains future
 work.
 P8BB is documentation-only. [docs/rust-launcher-injected-planner-readiness-intake-design.md](docs/rust-launcher-injected-planner-readiness-intake-design.md)
-defines future readiness intake rules for P8BA reports, but readiness intake is
-not implemented, no report kind is accepted yet, no readiness blocker is
-cleared, the P8BA report identity remains
-`rust_launcher_injected_planner_smoke` with `schema_version: 1`, and packaged
-release readiness remains future work.
+defines readiness intake rules for P8BA reports. P8BC implements supplied-report
+readiness intake for `rust_launcher_injected_planner_smoke` reports with
+`schema_version: 1`. Accepted P8BC reports may satisfy only the packaged
+launcher-injection evidence item. P8BC does not change the smoke tool, CLI
+resolver behavior, packaged lookup, runtime behavior, Tauri/config-editor code,
+packaging scripts, Rust backend code, executor/apply behavior, Python planner
+deletion readiness, or broader packaged release readiness. Top-level readiness
+remains blocked while executor/apply, Python planner deletion, and packaged
+release readiness remain blocked.
 The future Rust planner real-device context ownership model is recorded in
 [ADR 0003](docs/adr/0003-rust-real-device-context-ownership.md). For future
 default Rust planner cutover, Rust should own real-device probing and
@@ -387,6 +391,14 @@ bypass/reference check. P8BA does not add readiness intake, clear a readiness
 blocker, change CLI resolver behavior, implement packaged lookup, change
 runtime or packaging behavior, or write `.local` evidence. Packaged release
 readiness remains future work.
+P8BC implements readiness intake for explicitly supplied
+`rust_launcher_injected_planner_smoke` reports with `schema_version: 1`. The
+readiness gate validates the report JSON only and does not execute the P8BA
+smoke tool, import smoke tool code, execute planner code, probe devices, or
+read `.local` evidence implicitly. Accepted P8BC evidence may mark only the
+packaged launcher-injection evidence item as accepted. Executor/apply readiness,
+Python planner deletion readiness, broader packaged release readiness, and
+top-level readiness remain blocked until later work intentionally clears them.
 
 ## Current Authored Model
 
