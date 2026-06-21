@@ -95,6 +95,7 @@ remains required for real Rust routes, explicit `--planner-backend python`
 remains available, no Cargo fallback, `PATH` search, env-var lookup, repo-local
 guessing, or silent Python fallback is implemented, and packaged release
 readiness remains future work.
+P8AV tightens resolver error-contract tests only. It does not change runtime behavior or implement packaged lookup; `--rust-planner-bin <path>` remains required for real Rust routes, explicit `--planner-backend python` remains available, and packaged release readiness remains future work.
 P8N adds only the crate-local Rust fake/test probe foundation. P8O adds
 fake/test-backed detected-facts planner-input construction. Intended future
 context precedence: synthetic/profile context -> detected facts -> explicit CLI

@@ -67,6 +67,8 @@ remains available, no Cargo fallback, `PATH` search, env-var lookup, repo-local
 guessing, or silent Python fallback is implemented, and packaged release
 readiness remains future work.
 
+P8AV tightens resolver error-contract tests only. It does not change runtime behavior or implement packaged lookup; `--rust-planner-bin <path>` remains required for real Rust routes, explicit `--planner-backend python` remains available, and packaged release readiness remains future work.
+
 ## Cutover Preconditions And Evidence
 
 P8AO depends on these preconditions before changing the default `emuchef plan`

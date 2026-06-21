@@ -1182,7 +1182,9 @@ class CliTests(unittest.TestCase):
         stdout = StringIO()
         stderr = StringIO()
         with (
+            patch("emuchef.cli._build_session") as build_session,
             patch("emuchef.cli.resolve_adb_executable") as resolve_adb,
+            patch("emuchef.cli.SubprocessAdb.detect_device") as detect_device,
             patch("subprocess.run") as run,
             contextlib.redirect_stdout(stdout),
             contextlib.redirect_stderr(stderr),
@@ -1201,8 +1203,13 @@ class CliTests(unittest.TestCase):
 
         self.assertEqual(rc, 1)
         self.assertEqual(stdout.getvalue(), "")
-        self.assertIn("--rust-planner-bin is required", stderr.getvalue())
+        self.assertEqual(
+            stderr.getvalue(),
+            "Error: --rust-planner-bin is required when --planner-backend rust-shadow is selected.\n",
+        )
+        build_session.assert_not_called()
         resolve_adb.assert_not_called()
+        detect_device.assert_not_called()
         run.assert_not_called()
 
     def test_plan_rust_shadow_invokes_explicit_binary_and_forwards_raw_binds(self) -> None:
@@ -1911,7 +1918,9 @@ class CliTests(unittest.TestCase):
         stdout = StringIO()
         stderr = StringIO()
         with (
+            patch("emuchef.cli._build_session") as build_session,
             patch("emuchef.cli.resolve_adb_executable") as resolve_adb,
+            patch("emuchef.cli.SubprocessAdb.detect_device") as detect_device,
             patch("subprocess.run") as run,
             contextlib.redirect_stdout(stdout),
             contextlib.redirect_stderr(stderr),
@@ -1930,9 +1939,13 @@ class CliTests(unittest.TestCase):
 
         self.assertEqual(rc, 1)
         self.assertEqual(stdout.getvalue(), "")
-        self.assertIn("--rust-planner-bin is required", stderr.getvalue())
-        self.assertIn("rust-experimental", stderr.getvalue())
+        self.assertEqual(
+            stderr.getvalue(),
+            "Error: --rust-planner-bin is required when --planner-backend rust-experimental is selected.\n",
+        )
+        build_session.assert_not_called()
         resolve_adb.assert_not_called()
+        detect_device.assert_not_called()
         run.assert_not_called()
 
     def test_plan_rust_experimental_invokes_shadow_command_and_prints_concise_summary(self) -> None:
@@ -2830,7 +2843,9 @@ class CliTests(unittest.TestCase):
         stdout = StringIO()
         stderr = StringIO()
         with (
+            patch("emuchef.cli._build_session") as build_session,
             patch("emuchef.cli.resolve_adb_executable") as resolve_adb,
+            patch("emuchef.cli.SubprocessAdb.detect_device") as detect_device,
             patch("subprocess.run") as run,
             contextlib.redirect_stdout(stdout),
             contextlib.redirect_stderr(stderr),
@@ -2851,9 +2866,13 @@ class CliTests(unittest.TestCase):
 
         self.assertEqual(rc, 1)
         self.assertEqual(stdout.getvalue(), "")
-        self.assertIn("Rust shadow planner binary does not exist", stderr.getvalue())
-        self.assertIn(missing_bin, stderr.getvalue())
+        self.assertEqual(
+            stderr.getvalue(),
+            f"Error: Rust shadow planner binary does not exist: {missing_bin}\n",
+        )
+        build_session.assert_not_called()
         resolve_adb.assert_not_called()
+        detect_device.assert_not_called()
         run.assert_not_called()
 
     def test_plan_rust_shadow_rejects_non_file_or_non_executable_binary_path(self) -> None:
@@ -2870,7 +2889,9 @@ class CliTests(unittest.TestCase):
                     stdout = StringIO()
                     stderr = StringIO()
                     with (
+                        patch("emuchef.cli._build_session") as build_session,
                         patch("emuchef.cli.resolve_adb_executable") as resolve_adb,
+                        patch("emuchef.cli.SubprocessAdb.detect_device") as detect_device,
                         patch("subprocess.run") as run,
                         contextlib.redirect_stdout(stdout),
                         contextlib.redirect_stderr(stderr),
@@ -2891,9 +2912,13 @@ class CliTests(unittest.TestCase):
 
                     self.assertEqual(rc, 1)
                     self.assertEqual(stdout.getvalue(), "")
-                    self.assertIn("Rust shadow planner binary is not executable", stderr.getvalue())
-                    self.assertIn(rust_planner_bin, stderr.getvalue())
+                    self.assertEqual(
+                        stderr.getvalue(),
+                        f"Error: Rust shadow planner binary is not executable: {rust_planner_bin}\n",
+                    )
+                    build_session.assert_not_called()
                     resolve_adb.assert_not_called()
+                    detect_device.assert_not_called()
                     run.assert_not_called()
 
     def test_plan_rust_shadow_failed_start_uses_stable_error_prefix(self) -> None:
