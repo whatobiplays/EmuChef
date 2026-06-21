@@ -47,7 +47,23 @@ remains available, no Cargo fallback, `PATH` search, env-var lookup, repo-local
 guessing, or silent Python fallback is implemented, and packaged release
 readiness remains future work.
 
-P8AV tightens resolver error-contract tests only. It does not change runtime behavior or implement packaged lookup; `--rust-planner-bin <path>` remains required for real Rust routes, explicit `--planner-backend python` remains available, and packaged release readiness remains future work.
+P8AV tightens resolver error-contract tests only. It does not change runtime
+behavior or implement packaged lookup; `--rust-planner-bin <path>` remains
+required for real Rust routes, explicit `--planner-backend python` remains
+available, and packaged release readiness remains future work.
+
+P8AW records the packaged resolver implementation design in
+`docs/rust-packaged-planner-resolver-implementation-design.md`. P8AW is
+documentation-only. The proposed future mechanism is a
+package/runtime-provided absolute path, once a later implementation defines the
+integration point that supplies it. No packaged lookup is implemented,
+`_packaged_rust_planner_bin_candidate(args)` still returns `None`,
+`--rust-planner-bin <path>` remains required for real Rust routes, explicit
+`--planner-backend python` remains available, no Cargo fallback, `PATH` search,
+env-var lookup, repo-local guessing, or silent Python fallback exists, existing
+Tauri sidecar/resource paths are not planner binary paths unless later
+designated by a planner-specific decision, and packaged release readiness
+remains future work.
 
 ## Goals
 
@@ -90,15 +106,15 @@ sidecar or resource packaging paths are not automatically planner-binary
 locations unless a later planner-specific packaging decision explicitly
 designates them.
 
-The actual concrete path mechanism must be selected in a later implementation
-phase from one of these options:
+P8AS does not choose a concrete mechanism because the repository did not yet
+define enough planner-specific packaging evidence. P8AW later narrows the
+proposed future mechanism to a package/runtime-provided absolute path, once a
+later implementation defines the integration point that supplies it.
 
-1. package-provided absolute path
-2. package-provided app resource directory plus known binary name
-3. installer/config-generated resolver metadata
+These mechanisms remain deferred:
 
-P8AS does not choose between those mechanisms because the current repository
-does not yet define enough planner-specific packaging evidence.
+1. package-provided app resource directory plus known binary name
+2. installer/config-generated resolver metadata
 
 ## Binary Naming
 

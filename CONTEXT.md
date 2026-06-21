@@ -82,7 +82,22 @@ remains required for real Rust routes, explicit `--planner-backend python`
 remains available, no Cargo fallback, `PATH` search, env-var lookup, repo-local
 guessing, or silent Python fallback is implemented, and packaged release
 readiness remains future work.
-P8AV tightens resolver error-contract tests only. It does not change runtime behavior or implement packaged lookup; `--rust-planner-bin <path>` remains required for real Rust routes, explicit `--planner-backend python` remains available, and packaged release readiness remains future work.
+P8AV tightens resolver error-contract tests only. It does not change runtime
+behavior or implement packaged lookup; `--rust-planner-bin <path>` remains
+required for real Rust routes, explicit `--planner-backend python` remains
+available, and packaged release readiness remains future work.
+P8AW records the packaged resolver implementation design in
+[docs/rust-packaged-planner-resolver-implementation-design.md](docs/rust-packaged-planner-resolver-implementation-design.md).
+P8AW is documentation-only. The proposed future mechanism is a
+package/runtime-provided absolute path, once a later implementation defines the
+integration point that supplies it. No packaged lookup is implemented,
+`_packaged_rust_planner_bin_candidate(args)` still returns `None`,
+`--rust-planner-bin <path>` remains required for real Rust routes, explicit
+`--planner-backend python` remains available, no Cargo fallback, `PATH` search,
+env-var lookup, repo-local guessing, or silent Python fallback exists, existing
+Tauri sidecar/resource paths are not planner binary paths unless later
+designated by a planner-specific decision, and packaged release readiness
+remains future work.
 The future Rust planner real-device context ownership model is recorded in
 [ADR 0003](docs/adr/0003-rust-real-device-context-ownership.md). For future
 default Rust planner cutover, Rust should own real-device probing and
@@ -300,6 +315,17 @@ no packaged lookup is implemented, `--rust-planner-bin <path>` remains required,
 explicit `--planner-backend python` remains available, existing Tauri sidecar
 packaging is not automatically planner binary packaging, and packaged release
 readiness remains future work.
+P8AW records the packaged resolver implementation design in
+`docs/rust-packaged-planner-resolver-implementation-design.md`. The proposed
+future mechanism is a package/runtime-provided absolute path, once a later
+implementation defines the integration point that supplies it. P8AW is
+documentation-only: no packaged lookup is implemented, the inert helper still
+returns `None`, `--rust-planner-bin <path>` remains required for real Rust
+routes, explicit `--planner-backend python` remains available, no Cargo
+fallback, `PATH` search, env-var lookup, repo-local guessing, or silent Python
+fallback exists, existing Tauri sidecar/resource paths are not planner binary
+paths unless later designated by a planner-specific decision, and packaged
+release readiness remains future work.
 
 ## Current Authored Model
 

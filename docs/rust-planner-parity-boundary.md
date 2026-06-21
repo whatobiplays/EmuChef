@@ -78,7 +78,23 @@ remains available, no Cargo fallback, `PATH` search, env-var lookup, repo-local
 guessing, or silent Python fallback is implemented, and packaged release
 readiness remains future work.
 
-P8AV tightens resolver error-contract tests only. It does not change runtime behavior or implement packaged lookup; `--rust-planner-bin <path>` remains required for real Rust routes, explicit `--planner-backend python` remains available, and packaged release readiness remains future work.
+P8AV tightens resolver error-contract tests only. It does not change runtime
+behavior or implement packaged lookup; `--rust-planner-bin <path>` remains
+required for real Rust routes, explicit `--planner-backend python` remains
+available, and packaged release readiness remains future work.
+
+P8AW records the packaged resolver implementation design in
+`docs/rust-packaged-planner-resolver-implementation-design.md`. P8AW is
+documentation-only. The proposed future mechanism is a
+package/runtime-provided absolute path, once a later implementation defines the
+integration point that supplies it. No packaged lookup is implemented,
+`_packaged_rust_planner_bin_candidate(args)` still returns `None`,
+`--rust-planner-bin <path>` remains required for real Rust routes, explicit
+`--planner-backend python` remains available, no Cargo fallback, `PATH` search,
+env-var lookup, repo-local guessing, or silent Python fallback exists, existing
+Tauri sidecar/resource paths are not planner binary paths unless later
+designated by a planner-specific decision, and packaged release readiness
+remains future work.
 
 Rust planner tests include an intentional fixture inventory/parsing guard for
 the existing Phase 6M/6N planner parity evidence. The guard consumes checked-in

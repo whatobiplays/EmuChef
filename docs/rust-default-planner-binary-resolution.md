@@ -40,7 +40,23 @@ remains available, no Cargo fallback, `PATH` search, env-var lookup, repo-local
 guessing, or silent Python fallback is implemented, and packaged release
 readiness remains future work.
 
-P8AV tightens resolver error-contract tests only. It does not change runtime behavior or implement packaged lookup; `--rust-planner-bin <path>` remains required for real Rust routes, explicit `--planner-backend python` remains available, and packaged release readiness remains future work.
+P8AV tightens resolver error-contract tests only. It does not change runtime
+behavior or implement packaged lookup; `--rust-planner-bin <path>` remains
+required for real Rust routes, explicit `--planner-backend python` remains
+available, and packaged release readiness remains future work.
+
+P8AW records the packaged resolver implementation design in
+`docs/rust-packaged-planner-resolver-implementation-design.md`. P8AW is
+documentation-only. The proposed future mechanism is a
+package/runtime-provided absolute path, once a later implementation defines the
+integration point that supplies it. No packaged lookup is implemented,
+`_packaged_rust_planner_bin_candidate(args)` still returns `None`,
+`--rust-planner-bin <path>` remains required for real Rust routes, explicit
+`--planner-backend python` remains available, no Cargo fallback, `PATH` search,
+env-var lookup, repo-local guessing, or silent Python fallback exists, existing
+Tauri sidecar/resource paths are not planner binary paths unless later
+designated by a planner-specific decision, and packaged release readiness
+remains future work.
 
 ## Current State
 
@@ -106,21 +122,14 @@ P8AQ, P8AR, and P8AT do not:
 Future default Rust planner binary resolution should use this order:
 
 1. Use an explicit `--rust-planner-bin <path>` when supplied.
-2. Use the packaged or bundled planner binary location after packaging defines
-   that location.
-3. Use a repo-local developer build path only under a separately accepted
-   explicit dev-mode mechanism.
-4. Fail with a deterministic error when no binary can be resolved.
+2. Use the package/runtime-provided absolute path after a later implementation
+   defines the integration point that supplies it.
+3. Fail with a deterministic error when no binary can be resolved.
 
 Cargo build fallback must not be used by default runtime behavior.
 
-Repo-local developer build lookup, if added later, must be gated behind an
-explicit dev-mode mechanism. It must not run in packaged/runtime mode and must
-not mask missing packaged-binary defects.
-
-Packaged/runtime mode means an installed, bundled, or release-style invocation.
-Developer source checkout behavior must stay opt-in so local build artifacts do
-not hide release packaging defects.
+Repo-local developer build lookup is not part of the packaged resolver contract
+and must not mask missing packaged-binary defects.
 
 ## Error Contract
 
@@ -128,9 +137,11 @@ Future missing-binary errors should clearly distinguish these cases:
 
 - explicit path missing;
 - explicit path not executable;
+- packaged path not configured;
 - packaged binary missing;
 - packaged binary not executable;
-- no resolver configured.
+- packaged binary failed to start;
+- packaged binary emitted invalid output.
 
 Errors should identify the selected resolution source and the failing condition
 without leaking unrelated host details. They should not silently retry through a
@@ -159,10 +170,10 @@ lookup implementation should test:
 - explicit `--rust-planner-bin <path>` still wins over packaged lookup;
 - invalid explicit paths return explicit-path errors;
 - non-executable explicit paths return explicit-path executable errors;
-- packaged paths are used only when configured by the packaged resolver;
+- package/runtime-provided paths are used only when explicit paths are absent;
 - missing or non-executable packaged binaries return packaged-path errors;
-- no shell, Cargo, arbitrary `PATH`, environment-variable, repo-local, or
-  host-path guessing fallback runs during normal runtime resolution;
+- no shell, Cargo, arbitrary `PATH`, env-var lookup, repo-local, or host-path
+  guessing fallback runs during normal runtime resolution;
 - explicit `--planner-backend python` bypasses Rust binary resolution;
 - default Rust routing fails deterministically when no binary can be resolved.
 
