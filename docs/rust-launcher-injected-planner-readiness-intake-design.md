@@ -115,3 +115,8 @@ An accepted P8BC report may satisfy only the packaged launcher-injection
 evidence item. It does not clear executor/apply readiness, Python planner
 deletion readiness, broader packaged release readiness, or top-level readiness.
 Top-level readiness remains `blocked` while those blockers remain.
+
+`docs/rust-packaged-readiness-blocker-taxonomy.md` defines the P8BD taxonomy for
+separating accepted launcher-injection evidence from broader packaged release
+readiness, executor/apply readiness, Python planner deletion readiness, and
+top-level readiness.

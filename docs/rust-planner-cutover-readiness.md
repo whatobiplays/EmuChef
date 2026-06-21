@@ -157,6 +157,12 @@ Rust backend code, executor/apply behavior, Python planner deletion readiness,
 or broader packaged release readiness. Top-level readiness remains `blocked`
 while executor/apply, Python planner deletion, and packaged release readiness
 remain blocked.
+P8BD is documentation-only and records
+`docs/rust-packaged-readiness-blocker-taxonomy.md` as the packaged-readiness
+blocker taxonomy. Accepted P8BC evidence can satisfy only
+`packaged_launcher_injection_evidence_not_accepted`; it does not clear
+`packaged_release_not_ready`, `executor_apply_not_cut_over`,
+`python_planner_deletion_not_ready`, or top-level readiness.
 P8N adds a crate-local Rust probe abstraction, fake probe, and tests for layering
 detected facts over synthetic/profile-derived context. P8O adds fake/test-backed
 planner-input construction that applies detected facts over

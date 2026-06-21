@@ -138,6 +138,12 @@ packaging scripts, Rust backend code, executor/apply behavior, Python planner
 deletion readiness, or broader packaged release readiness. Top-level readiness
 remains blocked while executor/apply, Python planner deletion, and packaged
 release readiness remain blocked.
+P8BD is documentation-only. [docs/rust-packaged-readiness-blocker-taxonomy.md](docs/rust-packaged-readiness-blocker-taxonomy.md)
+separates packaged launcher-injection evidence from packaged release readiness,
+executor/apply readiness, Python planner deletion readiness, and top-level
+readiness. Accepted P8BC evidence can satisfy only the packaged
+launcher-injection evidence item; packaged release readiness remains future
+work.
 The future Rust planner real-device context ownership model is recorded in
 [ADR 0003](docs/adr/0003-rust-real-device-context-ownership.md). For future
 default Rust planner cutover, Rust should own real-device probing and
@@ -399,6 +405,9 @@ read `.local` evidence implicitly. Accepted P8BC evidence may mark only the
 packaged launcher-injection evidence item as accepted. Executor/apply readiness,
 Python planner deletion readiness, broader packaged release readiness, and
 top-level readiness remain blocked until later work intentionally clears them.
+P8BD documents that `evidence_accepted` means a supplied evidence item passed
+validation and does not mean the broader release blocker is resolved unless the
+blocker is specifically scoped to that evidence item.
 
 ## Current Authored Model
 

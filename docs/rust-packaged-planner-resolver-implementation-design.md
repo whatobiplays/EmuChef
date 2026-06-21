@@ -41,6 +41,13 @@ future reports must not record full local paths, serials, commands,
 stdout/stderr, or environment variables. Packaged release readiness remains
 future work.
 
+P8BD is documentation-only and records
+`docs/rust-packaged-readiness-blocker-taxonomy.md` as the taxonomy separating
+accepted launcher-injection evidence from broader packaged release readiness.
+Accepted P8BC evidence may satisfy only the packaged launcher-injection
+evidence item; it does not implement packaged lookup or clear packaged release
+readiness.
+
 ## Current State
 
 P8AO made a no-backend `emuchef plan` invocation route through Rust-owned
