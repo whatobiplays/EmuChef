@@ -73,6 +73,15 @@ still returns `None`, `--rust-planner-bin` remains required unless a launcher
 supplies it, explicit `--planner-backend python` remains available, and
 packaged release readiness remains future work.
 
+P8AY is documentation-only and records
+`docs/rust-launcher-injected-planner-smoke-contract.md` as the future smoke
+evidence contract for launcher-injected `--rust-planner-bin <path>`. No smoke
+tool is implemented, no packaged lookup is implemented, no readiness blocker is
+cleared, `_packaged_rust_planner_bin_candidate(args)` still returns `None`,
+`--rust-planner-bin` remains required unless a launcher supplies it, explicit
+`--planner-backend python` remains available, and packaged release readiness
+remains future work.
+
 ## Goals
 
 - Define the future packaged Rust planner binary location contract.
@@ -122,6 +131,10 @@ later implementation defines the integration point that supplies it.
 ADR 0005 defines the first integration point as launcher injection through the
 existing `--rust-planner-bin <path>` option. A later ADR may add a true packaged
 resolver candidate branch if launcher injection proves insufficient.
+
+P8AY defines the future smoke evidence bar for that launcher-injected path. It
+does not implement a smoke tool, implement packaged lookup, or clear packaged
+release readiness.
 
 These mechanisms remain deferred:
 

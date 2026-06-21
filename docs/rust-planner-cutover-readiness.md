@@ -121,6 +121,14 @@ added, no env-var lookup is added, `_packaged_rust_planner_bin_candidate(args)`
 still returns `None`, `--rust-planner-bin` remains required unless a launcher
 supplies it, explicit `--planner-backend python` remains available, and
 packaged release readiness remains future work.
+P8AY is documentation-only and records
+`docs/rust-launcher-injected-planner-smoke-contract.md` as the future smoke
+evidence contract for launcher-injected `--rust-planner-bin <path>`. No smoke
+tool is implemented, no packaged lookup is implemented, no readiness blocker is
+cleared, `_packaged_rust_planner_bin_candidate(args)` still returns `None`,
+`--rust-planner-bin` remains required unless a launcher supplies it, explicit
+`--planner-backend python` remains available, and packaged release readiness
+remains future work.
 P8N adds a crate-local Rust probe abstraction, fake probe, and tests for layering
 detected facts over synthetic/profile-derived context. P8O adds fake/test-backed
 planner-input construction that applies detected facts over

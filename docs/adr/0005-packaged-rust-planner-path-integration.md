@@ -69,6 +69,15 @@ integration.
 A later ADR may add a true packaged resolver candidate branch only if launcher
 injection is insufficient.
 
+P8AY is documentation-only and defines the future smoke evidence contract in
+`docs/rust-launcher-injected-planner-smoke-contract.md` for this
+launcher-injected `--rust-planner-bin <path>` path. No smoke tool is
+implemented, no packaged lookup is implemented, no readiness blocker is
+cleared, and `_packaged_rust_planner_bin_candidate(args)` still returns `None`.
+`--rust-planner-bin` remains required unless a launcher supplies it, explicit
+`--planner-backend python` remains available, and packaged release readiness
+remains future work.
+
 ## Non-Goals
 
 P8AX does not:
@@ -85,3 +94,7 @@ P8AX does not:
 10. infer Tauri sidecar or resource paths as planner binary paths;
 11. change executor/apply behavior;
 12. change Python planner deletion readiness.
+
+P8AY does not implement launcher integration, smoke tooling, packaged lookup,
+readiness-gate intake, Tauri packaging configuration, installer behavior,
+runtime resolver behavior, or packaged release readiness.

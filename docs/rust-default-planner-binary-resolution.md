@@ -66,6 +66,15 @@ still returns `None`, `--rust-planner-bin` remains required unless a launcher
 supplies it, explicit `--planner-backend python` remains available, and
 packaged release readiness remains future work.
 
+P8AY is documentation-only and records
+`docs/rust-launcher-injected-planner-smoke-contract.md` as the future smoke
+evidence contract for launcher-injected `--rust-planner-bin <path>`. No smoke
+tool is implemented, no packaged lookup is implemented, no readiness blocker is
+cleared, `_packaged_rust_planner_bin_candidate(args)` still returns `None`,
+`--rust-planner-bin` remains required unless a launcher supplies it, explicit
+`--planner-backend python` remains available, and packaged release readiness
+remains future work.
+
 ## Current State
 
 P8AO made a no-backend `emuchef plan` invocation route through Rust-owned
@@ -100,6 +109,9 @@ ADR 0005 defines the first packaged integration point as launcher injection
 through the existing `--rust-planner-bin <path>` option. A later ADR may add a
 true packaged resolver candidate branch if launcher injection proves
 insufficient.
+
+P8AY defines the future smoke evidence bar for that launcher-injected path. It
+does not change the current explicit-path-only resolver behavior.
 
 ## Goals
 
@@ -193,6 +205,10 @@ lookup implementation should test:
 P8AT additionally tests that the inert packaged candidate helper returns `None`,
 is consulted only when no explicit path is supplied, and is not consulted when
 `--rust-planner-bin <path>` is present.
+
+P8AY adds no tests. A later smoke implementation should use the P8AY contract to
+prove launcher-supplied `--rust-planner-bin <path>` injection without requiring
+reports to store full local absolute paths.
 
 ## Relationship To Readiness
 

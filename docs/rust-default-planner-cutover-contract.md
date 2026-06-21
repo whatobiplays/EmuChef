@@ -93,6 +93,15 @@ still returns `None`, `--rust-planner-bin` remains required unless a launcher
 supplies it, explicit `--planner-backend python` remains available, and
 packaged release readiness remains future work.
 
+P8AY is documentation-only and records
+`docs/rust-launcher-injected-planner-smoke-contract.md` as the future smoke
+evidence contract for launcher-injected `--rust-planner-bin <path>`. No smoke
+tool is implemented, no packaged lookup is implemented, no readiness blocker is
+cleared, `_packaged_rust_planner_bin_candidate(args)` still returns `None`,
+`--rust-planner-bin` remains required unless a launcher supplies it, explicit
+`--planner-backend python` remains available, and packaged release readiness
+remains future work.
+
 ## Cutover Preconditions And Evidence
 
 P8AO depends on these preconditions before changing the default `emuchef plan`

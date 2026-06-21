@@ -106,6 +106,14 @@ lookup is added, `_packaged_rust_planner_bin_candidate(args)` still returns
 `None`, `--rust-planner-bin` remains required unless a launcher supplies it,
 explicit `--planner-backend python` remains available, and packaged release
 readiness remains future work.
+P8AY is documentation-only. [docs/rust-launcher-injected-planner-smoke-contract.md](docs/rust-launcher-injected-planner-smoke-contract.md)
+defines future smoke evidence for launcher-injected
+`--rust-planner-bin <path>`. No smoke tool is implemented, no packaged lookup
+is implemented, no readiness blocker is cleared,
+`_packaged_rust_planner_bin_candidate(args)` still returns `None`,
+`--rust-planner-bin` remains required unless a launcher supplies it, explicit
+`--planner-backend python` remains available, and packaged release readiness
+remains future work.
 The future Rust planner real-device context ownership model is recorded in
 [ADR 0003](docs/adr/0003-rust-real-device-context-ownership.md). For future
 default Rust planner cutover, Rust should own real-device probing and
@@ -334,6 +342,14 @@ fallback, `PATH` search, env-var lookup, repo-local guessing, or silent Python
 fallback exists, existing Tauri sidecar/resource paths are not planner binary
 paths unless later designated by a planner-specific decision, and packaged
 release readiness remains future work.
+P8AY records the future smoke evidence contract for launcher-injected
+`--rust-planner-bin <path>` in
+`docs/rust-launcher-injected-planner-smoke-contract.md`. P8AY is
+documentation-only: no smoke tool is implemented, no packaged lookup is
+implemented, no readiness blocker is cleared, the inert helper still returns
+`None`, `--rust-planner-bin <path>` remains required for real Rust routes
+unless a launcher supplies it, explicit `--planner-backend python` remains
+available, and packaged release readiness remains future work.
 
 ## Current Authored Model
 
