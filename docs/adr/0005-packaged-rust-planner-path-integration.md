@@ -78,6 +78,14 @@ cleared, and `_packaged_rust_planner_bin_candidate(args)` still returns `None`.
 `--planner-backend python` remains available, and packaged release readiness
 remains future work.
 
+P8AZ is documentation-only and defines the future report schema in
+`docs/rust-launcher-injected-planner-smoke-report-schema.md` for
+`kind: rust_launcher_injected_planner_smoke` with `schema_version: 1`. No smoke
+tool is implemented, no readiness intake is implemented, no readiness blocker is
+cleared, and future reports must not record full local paths, serials, commands,
+stdout/stderr, or environment variables. Packaged release readiness remains
+future work.
+
 ## Non-Goals
 
 P8AX does not:
@@ -98,3 +106,7 @@ P8AX does not:
 P8AY does not implement launcher integration, smoke tooling, packaged lookup,
 readiness-gate intake, Tauri packaging configuration, installer behavior,
 runtime resolver behavior, or packaged release readiness.
+
+P8AZ does not implement smoke tooling, readiness-gate intake, runtime resolver
+behavior, packaging behavior, Tauri configuration, Rust backend behavior, tests,
+or packaged release readiness.

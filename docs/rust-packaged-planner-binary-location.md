@@ -82,6 +82,15 @@ cleared, `_packaged_rust_planner_bin_candidate(args)` still returns `None`,
 `--planner-backend python` remains available, and packaged release readiness
 remains future work.
 
+P8AZ is documentation-only and records
+`docs/rust-launcher-injected-planner-smoke-report-schema.md` as the future
+schema for `rust_launcher_injected_planner_smoke` reports with
+`schema_version: 1`. No smoke tool is implemented, no readiness intake is
+implemented, no readiness blocker is cleared, no packaging or Tauri behavior
+changes, and future reports must not record full local paths, serials, commands,
+stdout/stderr, or environment variables. Packaged release readiness remains
+future work.
+
 ## Goals
 
 - Define the future packaged Rust planner binary location contract.
@@ -135,6 +144,9 @@ resolver candidate branch if launcher injection proves insufficient.
 P8AY defines the future smoke evidence bar for that launcher-injected path. It
 does not implement a smoke tool, implement packaged lookup, or clear packaged
 release readiness.
+
+P8AZ defines the future report shape and redaction denylist for that smoke
+evidence without adding report production or readiness intake.
 
 These mechanisms remain deferred:
 

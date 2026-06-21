@@ -114,6 +114,13 @@ is implemented, no readiness blocker is cleared,
 `--rust-planner-bin` remains required unless a launcher supplies it, explicit
 `--planner-backend python` remains available, and packaged release readiness
 remains future work.
+P8AZ is documentation-only. [docs/rust-launcher-injected-planner-smoke-report-schema.md](docs/rust-launcher-injected-planner-smoke-report-schema.md)
+defines the future `rust_launcher_injected_planner_smoke` report schema with
+`schema_version: 1`. No smoke tool is implemented, no readiness intake is
+implemented, no readiness blocker is cleared, no resolver or packaging behavior
+changes, and future reports must not record full local paths, serials, commands,
+stdout/stderr, or environment variables. Packaged release readiness remains
+future work.
 The future Rust planner real-device context ownership model is recorded in
 [ADR 0003](docs/adr/0003-rust-real-device-context-ownership.md). For future
 default Rust planner cutover, Rust should own real-device probing and
@@ -350,6 +357,13 @@ implemented, no readiness blocker is cleared, the inert helper still returns
 `None`, `--rust-planner-bin <path>` remains required for real Rust routes
 unless a launcher supplies it, explicit `--planner-backend python` remains
 available, and packaged release readiness remains future work.
+P8AZ records the future `rust_launcher_injected_planner_smoke` report schema in
+`docs/rust-launcher-injected-planner-smoke-report-schema.md` with
+`schema_version: 1`. P8AZ is documentation-only: no smoke tool is implemented,
+no readiness intake is implemented, no readiness blocker is cleared, no runtime
+or packaging behavior changes, and future reports must not record full local
+paths, serials, commands, stdout/stderr, or environment variables. Packaged
+release readiness remains future work.
 
 ## Current Authored Model
 

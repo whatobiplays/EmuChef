@@ -32,6 +32,15 @@ cleared, `_packaged_rust_planner_bin_candidate(args)` still returns `None`,
 `--planner-backend python` remains available, and packaged release readiness
 remains future work.
 
+P8AZ is documentation-only and records
+`docs/rust-launcher-injected-planner-smoke-report-schema.md` as the future
+schema for `rust_launcher_injected_planner_smoke` reports with
+`schema_version: 1`. No smoke tool is implemented, no readiness intake is
+implemented, no readiness blocker is cleared, no resolver behavior changes, and
+future reports must not record full local paths, serials, commands,
+stdout/stderr, or environment variables. Packaged release readiness remains
+future work.
+
 ## Current State
 
 P8AO made a no-backend `emuchef plan` invocation route through Rust-owned
@@ -81,6 +90,9 @@ resolver candidate branch if launcher injection proves insufficient.
 
 P8AY defines the future smoke evidence bar for that launcher-injected path. It
 does not change resolver order or introduce a packaged candidate branch.
+
+P8AZ defines the future report shape and redaction denylist for that smoke
+evidence. It does not add a report producer or readiness-gate consumer.
 
 The package/runtime-provided absolute path is a planner-specific resolver input.
 It is not implied by existing Tauri sidecar/resource paths, and it is not

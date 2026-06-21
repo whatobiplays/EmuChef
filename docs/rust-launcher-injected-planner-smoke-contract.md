@@ -10,6 +10,14 @@ P8AY does not implement a smoke tool, packaged lookup, runtime code, tests,
 Tauri configuration, packaging scripts, readiness logic, Rust backend code, or
 `.local` evidence.
 
+P8AZ is documentation-only. It defines
+`docs/rust-launcher-injected-planner-smoke-report-schema.md` as the future
+schema for `rust_launcher_injected_planner_smoke` reports with
+`schema_version: 1`. No smoke tool is implemented, no readiness intake is
+implemented, no readiness blocker is cleared, and no full local paths, serials,
+commands, stdout/stderr, or environment variables may be recorded. Packaged
+release readiness remains future work.
+
 ## Current State
 
 P8AW selected a package/runtime-provided absolute planner binary path as the
@@ -26,6 +34,9 @@ supplies it. Explicit `--planner-backend python` remains available.
 
 No smoke tool is implemented. No readiness blocker is cleared. Packaged release
 readiness remains future work.
+
+P8AZ defines only the future report shape and redaction boundary for that
+launcher-injected smoke evidence.
 
 ## Future Smoke Goal
 

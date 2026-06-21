@@ -113,6 +113,15 @@ cleared, `_packaged_rust_planner_bin_candidate(args)` still returns `None`,
 `--planner-backend python` remains available, and packaged release readiness
 remains future work.
 
+P8AZ is documentation-only and records
+`docs/rust-launcher-injected-planner-smoke-report-schema.md` as the future
+schema for `rust_launcher_injected_planner_smoke` reports with
+`schema_version: 1`. No smoke tool is implemented, no readiness intake is
+implemented, no readiness blocker is cleared, no planner behavior changes, and
+future reports must not record full local paths, serials, commands,
+stdout/stderr, or environment variables. Packaged release readiness remains
+future work.
+
 Rust planner tests include an intentional fixture inventory/parsing guard for
 the existing Phase 6M/6N planner parity evidence. The guard consumes checked-in
 files only; it does not invoke Python or regenerate fixtures. The Rust tests

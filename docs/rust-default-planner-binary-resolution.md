@@ -75,6 +75,15 @@ cleared, `_packaged_rust_planner_bin_candidate(args)` still returns `None`,
 `--planner-backend python` remains available, and packaged release readiness
 remains future work.
 
+P8AZ is documentation-only and records
+`docs/rust-launcher-injected-planner-smoke-report-schema.md` as the future
+schema for `rust_launcher_injected_planner_smoke` reports with
+`schema_version: 1`. No smoke tool is implemented, no readiness intake is
+implemented, no readiness blocker is cleared, no resolver behavior changes, and
+future reports must not record full local paths, serials, commands,
+stdout/stderr, or environment variables. Packaged release readiness remains
+future work.
+
 ## Current State
 
 P8AO made a no-backend `emuchef plan` invocation route through Rust-owned
@@ -112,6 +121,9 @@ insufficient.
 
 P8AY defines the future smoke evidence bar for that launcher-injected path. It
 does not change the current explicit-path-only resolver behavior.
+
+P8AZ defines the future report shape and redaction denylist for that smoke
+evidence without adding report production or readiness intake.
 
 ## Goals
 
@@ -209,6 +221,12 @@ is consulted only when no explicit path is supplied, and is not consulted when
 P8AY adds no tests. A later smoke implementation should use the P8AY contract to
 prove launcher-supplied `--rust-planner-bin <path>` injection without requiring
 reports to store full local absolute paths.
+
+P8AZ adds no tests. A later smoke implementation should use
+`docs/rust-launcher-injected-planner-smoke-report-schema.md` for
+`rust_launcher_injected_planner_smoke` reports with `schema_version: 1`, and a
+later readiness-gate implementation must accept that report kind before it
+counts as evidence.
 
 ## Relationship To Readiness
 
