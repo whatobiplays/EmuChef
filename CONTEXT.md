@@ -107,20 +107,27 @@ lookup is added, `_packaged_rust_planner_bin_candidate(args)` still returns
 explicit `--planner-backend python` remains available, and packaged release
 readiness remains future work.
 P8AY is documentation-only. [docs/rust-launcher-injected-planner-smoke-contract.md](docs/rust-launcher-injected-planner-smoke-contract.md)
-defines future smoke evidence for launcher-injected
-`--rust-planner-bin <path>`. No smoke tool is implemented, no packaged lookup
-is implemented, no readiness blocker is cleared,
+defines smoke evidence for launcher-injected
+`--rust-planner-bin <path>`. P8AY did not implement a smoke tool, packaged
+lookup, or readiness-blocker clearing.
 `_packaged_rust_planner_bin_candidate(args)` still returns `None`,
 `--rust-planner-bin` remains required unless a launcher supplies it, explicit
 `--planner-backend python` remains available, and packaged release readiness
 remains future work.
 P8AZ is documentation-only. [docs/rust-launcher-injected-planner-smoke-report-schema.md](docs/rust-launcher-injected-planner-smoke-report-schema.md)
-defines the future `rust_launcher_injected_planner_smoke` report schema with
-`schema_version: 1`. No smoke tool is implemented, no readiness intake is
-implemented, no readiness blocker is cleared, no resolver or packaging behavior
-changes, and future reports must not record full local paths, serials, commands,
+defines the `rust_launcher_injected_planner_smoke` report schema with
+`schema_version: 1`. P8AZ did not implement a smoke tool, readiness intake,
+readiness-blocker clearing, resolver changes, or packaging behavior changes.
+Reports of this kind must not record full local paths, serials, commands,
 stdout/stderr, or environment variables. Packaged release readiness remains
 future work.
+P8BA implements [tools/smoke_launcher_injected_planner.py](tools/smoke_launcher_injected_planner.py)
+and focused tests for the launcher-injected planner smoke report only. The
+report kind remains `rust_launcher_injected_planner_smoke` and
+`schema_version` remains `1`. P8BA does not add readiness intake, clear a
+readiness blocker, change CLI resolver behavior, implement packaged lookup, or
+change packaged release readiness. Packaged release readiness remains future
+work.
 The future Rust planner real-device context ownership model is recorded in
 [ADR 0003](docs/adr/0003-rust-real-device-context-ownership.md). For future
 default Rust planner cutover, Rust should own real-device probing and
@@ -349,21 +356,31 @@ fallback, `PATH` search, env-var lookup, repo-local guessing, or silent Python
 fallback exists, existing Tauri sidecar/resource paths are not planner binary
 paths unless later designated by a planner-specific decision, and packaged
 release readiness remains future work.
-P8AY records the future smoke evidence contract for launcher-injected
+P8AY records the smoke evidence contract for launcher-injected
 `--rust-planner-bin <path>` in
 `docs/rust-launcher-injected-planner-smoke-contract.md`. P8AY is
-documentation-only: no smoke tool is implemented, no packaged lookup is
-implemented, no readiness blocker is cleared, the inert helper still returns
+documentation-only: it did not implement a smoke tool, packaged lookup, or
+readiness-blocker clearing. The inert helper still returns
 `None`, `--rust-planner-bin <path>` remains required for real Rust routes
 unless a launcher supplies it, explicit `--planner-backend python` remains
 available, and packaged release readiness remains future work.
-P8AZ records the future `rust_launcher_injected_planner_smoke` report schema in
+P8AZ records the `rust_launcher_injected_planner_smoke` report schema in
 `docs/rust-launcher-injected-planner-smoke-report-schema.md` with
-`schema_version: 1`. P8AZ is documentation-only: no smoke tool is implemented,
-no readiness intake is implemented, no readiness blocker is cleared, no runtime
-or packaging behavior changes, and future reports must not record full local
+`schema_version: 1`. P8AZ is documentation-only: it did not implement a smoke
+tool, readiness intake, readiness-blocker clearing, runtime behavior changes,
+or packaging behavior changes. Reports of this kind must not record full local
 paths, serials, commands, stdout/stderr, or environment variables. Packaged
 release readiness remains future work.
+P8BA implements the launcher-injected planner smoke tool at
+`tools/smoke_launcher_injected_planner.py` and its focused tests only. The tool
+emits `kind: rust_launcher_injected_planner_smoke` reports with
+`schema_version: 1`, uses an explicit launcher-supplied `--rust-planner-bin`
+path, treats an argv0-observing wrapper as the launcher-supplied subprocess
+entrypoint, and keeps explicit `--planner-backend python` as a static CLI-help
+bypass/reference check. P8BA does not add readiness intake, clear a readiness
+blocker, change CLI resolver behavior, implement packaged lookup, change
+runtime or packaging behavior, or write `.local` evidence. Packaged release
+readiness remains future work.
 
 ## Current Authored Model
 

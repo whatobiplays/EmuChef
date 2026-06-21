@@ -122,20 +122,26 @@ still returns `None`, `--rust-planner-bin` remains required unless a launcher
 supplies it, explicit `--planner-backend python` remains available, and
 packaged release readiness remains future work.
 P8AY is documentation-only and records
-`docs/rust-launcher-injected-planner-smoke-contract.md` as the future smoke
-evidence contract for launcher-injected `--rust-planner-bin <path>`. No smoke
-tool is implemented, no packaged lookup is implemented, no readiness blocker is
-cleared, `_packaged_rust_planner_bin_candidate(args)` still returns `None`,
+`docs/rust-launcher-injected-planner-smoke-contract.md` as the smoke
+evidence contract for launcher-injected `--rust-planner-bin <path>`. P8AY did
+not implement a smoke tool, packaged lookup, or readiness-blocker clearing.
+`_packaged_rust_planner_bin_candidate(args)` still returns `None`,
 `--rust-planner-bin` remains required unless a launcher supplies it, explicit
 `--planner-backend python` remains available, and packaged release readiness
 remains future work.
 P8AZ is documentation-only and records
-`docs/rust-launcher-injected-planner-smoke-report-schema.md` as the future
+`docs/rust-launcher-injected-planner-smoke-report-schema.md` as the
 schema for `rust_launcher_injected_planner_smoke` reports with
-`schema_version: 1`. No smoke tool is implemented, no readiness intake is
-implemented, no readiness blocker is cleared, and future reports must not record
-full local paths, serials, commands, stdout/stderr, or environment variables.
-Packaged release readiness remains future work.
+`schema_version: 1`. P8AZ did not implement a smoke tool, readiness intake, or
+readiness-blocker clearing. Reports of this kind must not record full local
+paths, serials, commands, stdout/stderr, or environment variables. Packaged
+release readiness remains future work.
+P8BA implements `tools/smoke_launcher_injected_planner.py` and focused tests for
+the launcher-injected planner smoke report only. The report kind remains
+`rust_launcher_injected_planner_smoke` and `schema_version` remains `1`. P8BA
+does not add readiness intake, clear a readiness blocker, change CLI resolver
+behavior, or implement packaged lookup. Packaged release readiness remains
+future work.
 P8N adds a crate-local Rust probe abstraction, fake probe, and tests for layering
 detected facts over synthetic/profile-derived context. P8O adds fake/test-backed
 planner-input construction that applies detected facts over
