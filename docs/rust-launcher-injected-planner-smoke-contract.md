@@ -21,6 +21,12 @@ configuration, change packaging scripts, change Rust backend code, change
 executor/apply behavior, or write `.local` evidence. Packaged release readiness
 remains future work.
 
+P8BB is documentation-only. It records
+`docs/rust-launcher-injected-planner-readiness-intake-design.md` as the future
+readiness intake design for `rust_launcher_injected_planner_smoke` reports with
+`schema_version: 1`; readiness intake is not implemented, no report kind is
+accepted yet, and no readiness blocker is cleared.
+
 ## Current State
 
 P8AW selected a package/runtime-provided absolute planner binary path as the
@@ -43,6 +49,10 @@ validation; no packaged lookup is implemented.
 
 P8BA does not add readiness intake and does not clear a readiness blocker.
 Packaged release readiness remains future work.
+
+P8BB does not implement readiness intake. The P8BA report identity remains
+`rust_launcher_injected_planner_smoke` with `schema_version: 1`, no report kind
+is accepted yet, and packaged release readiness remains future work.
 
 ## Smoke Goal
 
@@ -132,4 +142,6 @@ P8BA does not:
 The P8BA smoke may become readiness evidence only after a later phase makes the
 readiness gate accept its report kind.
 
-P8BA itself clears no blocker. Packaged release readiness remains future work.
+P8BB documents the future intake criteria for that later phase but does not
+implement them. P8BA and P8BB clear no blocker. Packaged release readiness
+remains future work.

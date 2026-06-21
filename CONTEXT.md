@@ -128,6 +128,12 @@ report kind remains `rust_launcher_injected_planner_smoke` and
 readiness blocker, change CLI resolver behavior, implement packaged lookup, or
 change packaged release readiness. Packaged release readiness remains future
 work.
+P8BB is documentation-only. [docs/rust-launcher-injected-planner-readiness-intake-design.md](docs/rust-launcher-injected-planner-readiness-intake-design.md)
+defines future readiness intake rules for P8BA reports, but readiness intake is
+not implemented, no report kind is accepted yet, no readiness blocker is
+cleared, the P8BA report identity remains
+`rust_launcher_injected_planner_smoke` with `schema_version: 1`, and packaged
+release readiness remains future work.
 The future Rust planner real-device context ownership model is recorded in
 [ADR 0003](docs/adr/0003-rust-real-device-context-ownership.md). For future
 default Rust planner cutover, Rust should own real-device probing and

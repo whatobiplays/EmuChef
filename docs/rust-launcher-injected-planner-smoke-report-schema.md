@@ -21,6 +21,12 @@ schema_version: 1
 No report of this kind is accepted readiness evidence until a later readiness
 gate explicitly accepts it.
 
+P8BB is documentation-only and records
+`docs/rust-launcher-injected-planner-readiness-intake-design.md` as the future
+readiness intake design for this report kind. Readiness intake is not
+implemented, no report kind is accepted yet, no readiness blocker is cleared,
+and packaged release readiness remains future work.
+
 ## Required Top-Level Keys
 
 `rust_launcher_injected_planner_smoke` reports must include these top-level
@@ -145,6 +151,10 @@ stdout/stderr, environment data, or device serials.
 
 The schema defines the smoke report shape. P8BA implements the smoke tool only;
 it does not add readiness-gate intake or clear a readiness blocker.
+
+P8BB documents future readiness intake rules only. The report identity remains
+`rust_launcher_injected_planner_smoke` with `schema_version: 1`, and no report
+kind is accepted yet.
 
 Packaged release readiness remains future work until a later readiness gate
 accepts this report kind as evidence.
