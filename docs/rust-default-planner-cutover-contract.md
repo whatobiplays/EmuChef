@@ -85,6 +85,14 @@ Tauri sidecar/resource paths are not planner binary paths unless later
 designated by a planner-specific decision, and packaged release readiness
 remains future work.
 
+P8AX is documentation-only. ADR 0005 accepts a launcher-supplied absolute path
+through the existing `--rust-planner-bin <path>` option as the first packaged
+planner integration path. No packaged lookup is implemented, no new CLI flag is
+added, no env-var lookup is added, `_packaged_rust_planner_bin_candidate(args)`
+still returns `None`, `--rust-planner-bin` remains required unless a launcher
+supplies it, explicit `--planner-backend python` remains available, and
+packaged release readiness remains future work.
+
 ## Cutover Preconditions And Evidence
 
 P8AO depends on these preconditions before changing the default `emuchef plan`

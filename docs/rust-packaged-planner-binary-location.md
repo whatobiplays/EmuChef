@@ -65,6 +65,14 @@ Tauri sidecar/resource paths are not planner binary paths unless later
 designated by a planner-specific decision, and packaged release readiness
 remains future work.
 
+P8AX is documentation-only. ADR 0005 accepts a launcher-supplied absolute path
+through the existing `--rust-planner-bin <path>` option as the first packaged
+planner integration path. No packaged lookup is implemented, no new CLI flag is
+added, no env-var lookup is added, `_packaged_rust_planner_bin_candidate(args)`
+still returns `None`, `--rust-planner-bin` remains required unless a launcher
+supplies it, explicit `--planner-backend python` remains available, and
+packaged release readiness remains future work.
+
 ## Goals
 
 - Define the future packaged Rust planner binary location contract.
@@ -110,6 +118,10 @@ P8AS does not choose a concrete mechanism because the repository did not yet
 define enough planner-specific packaging evidence. P8AW later narrows the
 proposed future mechanism to a package/runtime-provided absolute path, once a
 later implementation defines the integration point that supplies it.
+
+ADR 0005 defines the first integration point as launcher injection through the
+existing `--rust-planner-bin <path>` option. A later ADR may add a true packaged
+resolver candidate branch if launcher injection proves insufficient.
 
 These mechanisms remain deferred:
 

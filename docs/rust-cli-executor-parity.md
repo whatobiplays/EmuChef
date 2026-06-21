@@ -111,6 +111,13 @@ env-var lookup, repo-local guessing, or silent Python fallback exists, existing
 Tauri sidecar/resource paths are not planner binary paths unless later
 designated by a planner-specific decision, and packaged release readiness
 remains future work.
+P8AX is documentation-only. ADR 0005 accepts a launcher-supplied absolute path
+through the existing `--rust-planner-bin <path>` option as the first packaged
+planner integration path. No packaged lookup is implemented, no new CLI flag is
+added, no env-var lookup is added, `_packaged_rust_planner_bin_candidate(args)`
+still returns `None`, `--rust-planner-bin` remains required unless a launcher
+supplies it, explicit `--planner-backend python` remains available, and
+packaged release readiness remains future work.
 P8N adds only the crate-local Rust fake/test probe foundation. P8O adds
 fake/test-backed detected-facts planner-input construction. Intended future
 context precedence: synthetic/profile context -> detected facts -> explicit CLI

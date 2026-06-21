@@ -58,6 +58,14 @@ Tauri sidecar/resource paths are not planner binary paths unless later
 designated by a planner-specific decision, and packaged release readiness
 remains future work.
 
+P8AX is documentation-only. ADR 0005 accepts a launcher-supplied absolute path
+through the existing `--rust-planner-bin <path>` option as the first packaged
+planner integration path. No packaged lookup is implemented, no new CLI flag is
+added, no env-var lookup is added, `_packaged_rust_planner_bin_candidate(args)`
+still returns `None`, `--rust-planner-bin` remains required unless a launcher
+supplies it, explicit `--planner-backend python` remains available, and
+packaged release readiness remains future work.
+
 ## Current State
 
 P8AO made a no-backend `emuchef plan` invocation route through Rust-owned
@@ -87,6 +95,11 @@ resolver calls the inert P8AT packaged candidate helper once. The helper returns
 Executor/apply remains unresolved. Python planner deletion remains unresolved.
 Packaged release readiness remains future work until a later implementation
 proves binary lookup and bundling.
+
+ADR 0005 defines the first packaged integration point as launcher injection
+through the existing `--rust-planner-bin <path>` option. A later ADR may add a
+true packaged resolver candidate branch if launcher injection proves
+insufficient.
 
 ## Goals
 

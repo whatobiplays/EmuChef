@@ -15,6 +15,14 @@ P8AW does not implement packaged lookup. The current inert packaged resolver
 helper still returns `None`, `--rust-planner-bin <path>` remains required for
 real Rust routes, and explicit `--planner-backend python` remains available.
 
+P8AX is documentation-only. ADR 0005 accepts a launcher-supplied absolute path
+through the existing `--rust-planner-bin <path>` option as the first packaged
+planner integration path. No packaged lookup is implemented, no new CLI flag is
+added, no env-var lookup is added, `_packaged_rust_planner_bin_candidate(args)`
+still returns `None`, `--rust-planner-bin` remains required unless a launcher
+supplies it, explicit `--planner-backend python` remains available, and
+packaged release readiness remains future work.
+
 ## Current State
 
 P8AO made a no-backend `emuchef plan` invocation route through Rust-owned
@@ -57,6 +65,10 @@ a later implementation defines the integration point that supplies it.
 A later runtime implementation may use only an absolute path supplied by an
 explicit package/runtime integration point. That integration point is not
 defined by P8AW.
+
+P8AX defines the first integration point as launcher injection through the
+existing `--rust-planner-bin <path>` option. A later ADR may add a true packaged
+resolver candidate branch if launcher injection proves insufficient.
 
 The package/runtime-provided absolute path is a planner-specific resolver input.
 It is not implied by existing Tauri sidecar/resource paths, and it is not
