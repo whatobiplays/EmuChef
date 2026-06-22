@@ -50,3 +50,13 @@ readiness validators, packaging, Tauri/config-editor, Rust backend code, or
 `.local` evidence. After P8BL, the real repository preflight no longer reports
 `cli_run_python_plan_function`, but it still reports `blocked` while other
 Python planner deletion surfaces remain.
+
+P8BM removes direct `src/emuchef/cli.py` imports from `emuchef.planner` by
+adding `src/emuchef/planner_cli.py` as a transitional CLI-facing compatibility
+module for still-needed Python planner symbols. It does not delete
+`src/emuchef/planner.py`, remove Python draft/session/profile helper behavior,
+or change plan routing, draft behavior, executor/apply, Rust planner behavior,
+smoke tooling, readiness validators, packaging, Tauri/config-editor, Rust
+backend code, or `.local` evidence. After P8BM, the real repository preflight
+no longer reports `cli_imports_emuchef_planner`, but it still reports
+`blocked` while non-runtime readiness/test/docs/context surfaces remain.

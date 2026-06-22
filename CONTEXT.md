@@ -57,8 +57,13 @@ summary/YAML output. P8BJ removes the explicit public
 `--planner-backend python` route, P8BK removes fallback routing from
 `_run_plan(...)` to `_run_python_plan(...)`, and P8BL deletes the private
 `_run_python_plan(...)` function without deleting `src/emuchef/planner.py` or
-broader CLI imports from `emuchef.planner`. Rust-native JSON requires a
-separate accepted structured-output option.
+broader CLI imports from `emuchef.planner`. P8BM removes direct
+`src/emuchef/cli.py` imports from `emuchef.planner` by adding
+`src/emuchef/planner_cli.py` as a transitional CLI-facing compatibility module
+for still-needed Python planner symbols. P8BM does not delete
+`src/emuchef/planner.py` or remove Python draft/session/profile helper
+behavior. Rust-native JSON requires a separate accepted structured-output
+option.
 P8AR centralizes the current explicit `--rust-planner-bin <path>` validation in
 an internal Python CLI resolver helper. That helper remains explicit-path-only:
 no packaged lookup, Cargo fallback, arbitrary `PATH` search,
@@ -392,6 +397,15 @@ readiness validators, packaging, Tauri/config-editor, Rust backend code, or
 `.local` evidence. The P8BI preflight no longer reports
 `cli_run_python_plan_function` for the real repo, but it still reports
 `blocked` while other Python planner deletion surfaces remain.
+P8BM removes direct `src/emuchef/cli.py` imports from `emuchef.planner` by
+adding `src/emuchef/planner_cli.py` as a transitional CLI-facing compatibility
+module for still-needed Python planner symbols. P8BM does not delete
+`src/emuchef/planner.py`, remove Python draft/session/profile helper behavior,
+or change plan routing, draft behavior, executor/apply, Rust planner behavior,
+smoke tooling, readiness validators, packaging, Tauri/config-editor, Rust
+backend code, or `.local` evidence. The P8BI preflight no longer reports
+`cli_imports_emuchef_planner` for the real repo, but it still reports `blocked`
+while non-runtime readiness/test/docs/context surfaces remain.
 P8AQ records the future default-route Rust planner binary resolution design in
 `docs/rust-default-planner-binary-resolution.md`. P8AQ is documentation-only:
 `--rust-planner-bin` remains required, no packaged binary lookup, Cargo

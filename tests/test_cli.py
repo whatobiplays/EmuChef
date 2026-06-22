@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import argparse
+import ast
 import emuchef.cli as cli
 import json
 import os
@@ -28,6 +29,25 @@ from emuchef.planner import Planner
 
 
 class CliTests(unittest.TestCase):
+    def test_cli_does_not_directly_import_python_planner_module(self) -> None:
+        source_path = Path(__file__).resolve().parents[1] / "src" / "emuchef" / "cli.py"
+        tree = ast.parse(source_path.read_text(encoding="utf-8"))
+
+        def is_direct_planner_module(module_name: str) -> bool:
+            return module_name == "emuchef.planner" or module_name.startswith("emuchef.planner.")
+
+        direct_imports: list[str] = []
+        for node in ast.walk(tree):
+            if isinstance(node, ast.Import):
+                direct_imports.extend(
+                    alias.name for alias in node.names if is_direct_planner_module(alias.name)
+                )
+            elif isinstance(node, ast.ImportFrom) and node.module is not None:
+                if is_direct_planner_module(node.module):
+                    direct_imports.append(node.module)
+
+        self.assertEqual(direct_imports, [])
+
     def _shadow_bin(self, tmp: str) -> str:
         shadow_bin = Path(tmp) / "emuchef-plan-shadow"
         shadow_bin.write_text("#!/bin/sh\n", encoding="utf-8")

@@ -41,7 +41,7 @@ from emuchef.io import (
     validate_authored_path,
 )
 from emuchef.io.serde import load_yaml
-from emuchef.planner import (
+from emuchef.planner_cli import (
     BindInput,
     CatalogLoadError,
     DeselectRecipe,

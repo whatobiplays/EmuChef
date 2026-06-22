@@ -7,9 +7,12 @@ does not remove the Python planner implementation or CLI imports from
 `emuchef.planner`. P8BK removes fallback routing from `_run_plan(...)` to
 `_run_python_plan(...)`, and P8BL deletes the private `_run_python_plan(...)`
 function while leaving `src/emuchef/planner.py` and broader CLI planner imports
-in place. P8AO makes the default no-backend `emuchef plan` route Rust-owned
-through the existing production-equivalent Rust subprocess path. During this
-transition, the default Rust route requires
+in place. P8BM removes direct `src/emuchef/cli.py` imports from
+`emuchef.planner` by adding `src/emuchef/planner_cli.py` as a transitional
+CLI-facing compatibility module for still-needed Python planner symbols. P8AO
+makes the default no-backend `emuchef plan` route Rust-owned through the
+existing production-equivalent Rust subprocess path. During this transition,
+the default Rust route requires
 `--rust-planner-bin <path>` and emits Python-compatible output. The public CLI
 routes to Rust planning are the explicit developer-only
 `--planner-backend rust-shadow --rust-planner-bin <path>` path, the explicit
@@ -211,6 +214,15 @@ readiness validators, packaging, Tauri/config-editor, Rust backend code, or
 `.local` evidence. The P8BI preflight no longer reports
 `cli_run_python_plan_function` for the real repo, but it still reports
 `blocked` while other Python planner deletion surfaces remain.
+P8BM removes direct `src/emuchef/cli.py` imports from `emuchef.planner` by
+adding `src/emuchef/planner_cli.py` as a transitional CLI-facing compatibility
+module for still-needed Python planner symbols. It does not delete
+`src/emuchef/planner.py`, remove Python draft/session/profile helper behavior,
+or change plan routing, draft behavior, executor/apply, Rust planner behavior,
+smoke tooling, readiness validators, packaging, Tauri/config-editor, Rust
+backend code, or `.local` evidence. The P8BI preflight no longer reports
+`cli_imports_emuchef_planner` for the real repo, but it still reports `blocked`
+while non-runtime readiness/test/docs/context surfaces remain.
 P8N adds a crate-local Rust probe abstraction, fake probe, and tests for layering
 detected facts over synthetic/profile-derived context. P8O adds fake/test-backed
 planner-input construction that applies detected facts over
