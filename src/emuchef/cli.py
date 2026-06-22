@@ -105,10 +105,10 @@ def main(argv: list[str] | None = None) -> int:
     plan_parser.add_argument("--output", help="Optional file path for the structured planning_result YAML.")
     plan_parser.add_argument(
         "--planner-backend",
-        choices=("python", "rust-shadow", "rust-experimental", "rust-production-equivalent"),
+        choices=("rust-shadow", "rust-experimental", "rust-production-equivalent"),
         help=(
             "Planner implementation to use. Omit this option to use default Rust-owned "
-            "planning through rust-production-equivalent. python remains an explicit fallback; "
+            "planning through rust-production-equivalent. "
             "rust-shadow is dev-only passthrough by default; "
             "rust-experimental is explicit non-default migration routing and requires --rust-planner-bin; "
             "selecting rust-production-equivalent explicitly uses the same Rust-owned probe routing and "

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import argparse
+import emuchef.cli as cli
 import json
 import os
 from io import StringIO
@@ -121,7 +122,7 @@ class CliTests(unittest.TestCase):
         self.assertEqual(rc, 0, stderr.getvalue())
         self.assertIn("Validation status: success", stdout.getvalue())
 
-    def test_plan_verbose_emits_normalized_execution_plan(self) -> None:
+    def test_private_run_python_plan_transitionally_emits_normalized_execution_plan(self) -> None:
         with TemporaryDirectory() as tmp:
             cfg = Path(tmp) / "retroarch.cfg"
             cfg.write_text("video_driver = gl\n", encoding="utf-8")
@@ -138,24 +139,25 @@ class CliTests(unittest.TestCase):
             stdout = StringIO()
             stderr = StringIO()
             with (
-                patch("emuchef.cli.resolve_adb_executable", return_value="adb"),
                 patch("emuchef.cli.SubprocessAdb.detect_device", return_value=detected),
                 contextlib.redirect_stdout(stdout),
                 contextlib.redirect_stderr(stderr),
             ):
-                rc = main(
-                    [
-                        "plan",
-                        "--planner-backend",
-                        "python",
-                        "--authored-root",
-                        "authored",
-                        "--device-plan",
-                        "ayaneo.pocket_s_mini.base",
-                        "--bind",
-                        f"app.retroarch.provision/retroarch_cfg={cfg}",
-                        "--verbose",
-                    ]
+                rc = cli._run_python_plan(
+                    argparse.Namespace(
+                        authored_root="authored",
+                        device_plan="ayaneo.pocket_s_mini.base",
+                        bind=[f"app.retroarch.provision/retroarch_cfg={cfg}"],
+                        ops=None,
+                        output=None,
+                        verbose=True,
+                        serial=None,
+                        manufacturer=None,
+                        model=None,
+                        android_version=None,
+                        device_tag=[],
+                        _resolved_adb="adb",
+                    )
                 )
             self.assertEqual(rc, 0, stderr.getvalue())
             output = stdout.getvalue()
@@ -164,7 +166,7 @@ class CliTests(unittest.TestCase):
             self.assertIn("ref: inputs.app.retroarch.provision/retroarch_cfg", output)
             self.assertIn("type: resolve_artifacts", output)
 
-    def test_plan_allows_missing_optional_retroarch_cfg(self) -> None:
+    def test_private_run_python_plan_transitionally_allows_missing_optional_retroarch_cfg(self) -> None:
         detected = DetectedDevice(
             serial="SERIAL",
             manufacturer="AYANEO",
@@ -177,22 +179,25 @@ class CliTests(unittest.TestCase):
         stdout = StringIO()
         stderr = StringIO()
         with (
-            patch("emuchef.cli.resolve_adb_executable", return_value="adb"),
             patch("emuchef.cli.SubprocessAdb.detect_device", return_value=detected),
             contextlib.redirect_stdout(stdout),
             contextlib.redirect_stderr(stderr),
         ):
-            rc = main(
-                [
-                    "plan",
-                    "--planner-backend",
-                    "python",
-                    "--authored-root",
-                    "authored",
-                    "--device-plan",
-                    "ayaneo.konkr_pocket_fit.base",
-                    "--verbose",
-                ]
+            rc = cli._run_python_plan(
+                argparse.Namespace(
+                    authored_root="authored",
+                    device_plan="ayaneo.konkr_pocket_fit.base",
+                    bind=[],
+                    ops=None,
+                    output=None,
+                    verbose=True,
+                    serial=None,
+                    manufacturer=None,
+                    model=None,
+                    android_version=None,
+                    device_tag=[],
+                    _resolved_adb="adb",
+                )
             )
         self.assertEqual(rc, 0, stderr.getvalue())
         output = stdout.getvalue()
@@ -407,7 +412,7 @@ class CliTests(unittest.TestCase):
         self.assertNotIn("--sidecar", run.call_args.args[0])
         packaged_candidate.assert_not_called()
 
-    def test_plan_explicit_python_backend_uses_python_summary_without_rust_process_or_binary(self) -> None:
+    def test_private_run_python_plan_transitionally_uses_python_summary_without_rust_process_or_binary(self) -> None:
         detected = DetectedDevice(
             serial="SERIAL",
             manufacturer="AYANEO",
@@ -420,23 +425,27 @@ class CliTests(unittest.TestCase):
         stdout = StringIO()
         stderr = StringIO()
         with (
-            patch("emuchef.cli.resolve_adb_executable", return_value="adb"),
             patch("emuchef.cli.SubprocessAdb.detect_device", return_value=detected),
             patch("emuchef.cli._resolve_rust_planner_bin") as resolve_rust_planner_bin,
             patch("subprocess.run") as run,
             contextlib.redirect_stdout(stdout),
             contextlib.redirect_stderr(stderr),
         ):
-            rc = main(
-                [
-                    "plan",
-                    "--planner-backend",
-                    "python",
-                    "--authored-root",
-                    "authored",
-                    "--device-plan",
-                    "ayaneo.konkr_pocket_fit.base",
-                ]
+            rc = cli._run_python_plan(
+                argparse.Namespace(
+                    authored_root="authored",
+                    device_plan="ayaneo.konkr_pocket_fit.base",
+                    bind=[],
+                    ops=None,
+                    output=None,
+                    verbose=False,
+                    serial=None,
+                    manufacturer=None,
+                    model=None,
+                    android_version=None,
+                    device_tag=[],
+                    _resolved_adb="adb",
+                )
             )
 
         self.assertEqual(rc, 0, stderr.getvalue())
@@ -1149,22 +1158,27 @@ class CliTests(unittest.TestCase):
         run.assert_not_called()
         run_apply.assert_not_called()
 
-    def test_plan_python_backend_rejects_rust_shadow_output(self) -> None:
+    def test_plan_python_backend_is_rejected_by_argparse_before_work(self) -> None:
+        rejected_backend = "python"
         stdout = StringIO()
         stderr = StringIO()
         with (
+            patch("emuchef.cli._build_session") as build_session,
             patch("emuchef.cli.resolve_adb_executable") as resolve_adb,
+            patch("emuchef.cli.SubprocessAdb.detect_device") as detect_device,
+            patch("emuchef.cli._resolve_rust_planner_bin") as resolve_rust_planner_bin,
+            patch("emuchef.cli._build_rust_shadow_plan_command") as build_rust_shadow_command,
             patch("subprocess.run") as run,
+            patch("emuchef.cli._run_apply") as run_apply,
             contextlib.redirect_stdout(stdout),
             contextlib.redirect_stderr(stderr),
+            self.assertRaises(SystemExit) as raised,
         ):
-            rc = main(
+            main(
                 [
                     "plan",
                     "--planner-backend",
-                    "python",
-                    "--rust-shadow-output",
-                    "python-compatible",
+                    rejected_backend,
                     "--authored-root",
                     "authored",
                     "--device-plan",
@@ -1172,11 +1186,17 @@ class CliTests(unittest.TestCase):
                 ]
             )
 
-        self.assertEqual(rc, 1)
+        self.assertEqual(raised.exception.code, 2)
         self.assertEqual(stdout.getvalue(), "")
-        self.assertIn("--rust-shadow-output is only valid with --planner-backend rust-shadow", stderr.getvalue())
+        self.assertIn("invalid choice", stderr.getvalue())
+        self.assertIn(rejected_backend, stderr.getvalue())
+        build_session.assert_not_called()
         resolve_adb.assert_not_called()
+        detect_device.assert_not_called()
+        resolve_rust_planner_bin.assert_not_called()
+        build_rust_shadow_command.assert_not_called()
         run.assert_not_called()
+        run_apply.assert_not_called()
 
     def test_plan_rust_shadow_requires_explicit_binary_path(self) -> None:
         stdout = StringIO()
@@ -2478,21 +2498,6 @@ class CliTests(unittest.TestCase):
 
     def test_plan_rejects_live_probe_wrapper_flags_for_non_experimental_backends_before_planning_work(self) -> None:
         cases = [
-            (
-                "python",
-                ["--rust-probe-adb-getprop"],
-                "--rust-probe-adb-getprop is only valid with --planner-backend rust-experimental.",
-            ),
-            (
-                "python",
-                ["--rust-adb-path", "adb"],
-                "--rust-adb-path is only valid with --planner-backend rust-experimental.",
-            ),
-            (
-                "python",
-                ["--rust-serial", "SERIAL123"],
-                "--rust-serial is only valid with --planner-backend rust-experimental.",
-            ),
             (
                 "rust-shadow",
                 ["--rust-probe-adb-getprop"],

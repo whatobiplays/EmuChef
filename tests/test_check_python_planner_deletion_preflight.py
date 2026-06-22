@@ -256,11 +256,9 @@ class CheckPythonPlannerDeletionPreflightTests(unittest.TestCase):
             surface_ids(report),
             [
                 "cli_imports_emuchef_planner",
-                "cli_explicit_python_backend",
                 "cli_run_python_plan_function",
                 "cli_run_plan_routes_to_python_plan",
                 "readiness_gate_python_deletion_blocker",
-                "test_cli_explicit_python_backend_behavior",
                 "test_readiness_python_backend_or_deletion_assertions",
                 "test_launcher_smoke_python_help_exposure",
                 "docs_cutover_python_fallback_or_deletion_readiness",

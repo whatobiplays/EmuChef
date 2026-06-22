@@ -22,3 +22,13 @@ fallback assertions, and docs/context references explicit before any deletion
 slice removes or quarantines them. Once Python planner deletion is complete, the
 preflight should either report ready with no remaining surfaces or be removed as
 part of cleanup.
+
+P8BJ removes the explicit public `--planner-backend python` route from
+`emuchef plan`. It does not delete Python planner code, remove
+`_run_python_plan`, remove CLI imports from `emuchef.planner`, or change draft
+behavior, executor/apply behavior, Rust planner behavior, smoke tooling,
+readiness validators, packaging, Tauri/config-editor behavior, or `.local`
+evidence. After P8BJ, the real repository preflight no longer reports
+`cli_explicit_python_backend` or `test_cli_explicit_python_backend_behavior`,
+but it still reports `blocked` while other Python planner deletion surfaces
+remain.

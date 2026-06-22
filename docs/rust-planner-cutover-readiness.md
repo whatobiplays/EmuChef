@@ -2,13 +2,13 @@
 
 This document classifies current evidence and remaining blockers before Python
 planner fallback/reference behavior can be retired or the Python planner can be
-removed. Python remains the explicit fallback and deletion-readiness reference.
-P8AO makes the default no-backend `emuchef plan` route Rust-owned through the
-existing production-equivalent Rust subprocess path. During this transition,
-the default Rust route requires `--rust-planner-bin <path>` and emits
-Python-compatible output. Explicit `--planner-backend python` keeps the previous
-Python planning behavior. The other Python CLI routes to Rust planning are the
-explicit developer-only
+removed. P8BJ removes the explicit public `--planner-backend python` route but
+does not remove the Python planner implementation, `_run_python_plan`, or CLI
+imports from `emuchef.planner`. P8AO makes the default no-backend `emuchef plan`
+route Rust-owned through the existing production-equivalent Rust subprocess
+path. During this transition, the default Rust route requires
+`--rust-planner-bin <path>` and emits Python-compatible output. The public CLI
+routes to Rust planning are the explicit developer-only
 `--planner-backend rust-shadow --rust-planner-bin <path>` path, the explicit
 non-default migration route
 `--planner-backend rust-experimental --rust-planner-bin <path>`, and the
@@ -80,27 +80,26 @@ fallback, arbitrary `PATH` search, environment-variable lookup, repo-local
 guessing, or silent Python fallback, and it does not change readiness status.
 `docs/rust-packaged-planner-binary-location.md` records the P8AS packaged
 planner binary location contract. P8AS is documentation-only: no packaged lookup
-is implemented, `--rust-planner-bin <path>` remains required, explicit
-`--planner-backend python` remains available, no Cargo fallback, arbitrary
-`PATH` search, env-var lookup, repo-local guessing, or silent Python fallback is
-implemented, existing Tauri sidecar packaging is not automatically planner
-binary packaging, and packaged release readiness remains future work.
+is implemented, `--rust-planner-bin <path>` remains required, no Cargo fallback,
+arbitrary `PATH` search, env-var lookup, repo-local guessing, or silent Python
+fallback is implemented, existing Tauri sidecar packaging is not automatically
+planner binary packaging, and packaged release readiness remains future work.
+P8BJ later removes the explicit public `--planner-backend python` route.
 P8AT adds an inert packaged resolver placeholder in the Python CLI. The
 placeholder currently returns `None`; no packaged lookup is implemented,
-`--rust-planner-bin <path>` remains required, explicit `--planner-backend
-python` remains available, no Cargo fallback, `PATH` search, env-var lookup,
+`--rust-planner-bin <path>` remains required, no Cargo fallback, `PATH` search,
+env-var lookup,
 repo-local guessing, or silent Python fallback is implemented, and packaged
 release readiness remains future work.
 P8AU adds tests for this packaged candidate seam only. The actual helper still
 returns `None`, no packaged lookup is implemented, `--rust-planner-bin <path>`
-remains required for real Rust routes, explicit `--planner-backend python`
-remains available, no Cargo fallback, `PATH` search, env-var lookup, repo-local
-guessing, or silent Python fallback is implemented, and packaged release
-readiness remains future work.
+remains required for real Rust routes, no Cargo fallback, `PATH` search,
+env-var lookup, repo-local guessing, or silent Python fallback is implemented,
+and packaged release readiness remains future work.
 P8AV tightens resolver error-contract tests only. It does not change runtime
 behavior or implement packaged lookup; `--rust-planner-bin <path>` remains
-required for real Rust routes, explicit `--planner-backend python` remains
-available, and packaged release readiness remains future work.
+required for real Rust routes, and packaged release readiness remains future
+work.
 
 P8AW records the packaged resolver implementation design in
 `docs/rust-packaged-planner-resolver-implementation-design.md`. P8AW is
@@ -108,9 +107,9 @@ documentation-only. The proposed future mechanism is a
 package/runtime-provided absolute path, once a later implementation defines the
 integration point that supplies it. No packaged lookup is implemented,
 `_packaged_rust_planner_bin_candidate(args)` still returns `None`,
-`--rust-planner-bin <path>` remains required for real Rust routes, explicit
-`--planner-backend python` remains available, no Cargo fallback, `PATH` search,
-env-var lookup, repo-local guessing, or silent Python fallback exists, existing
+`--rust-planner-bin <path>` remains required for real Rust routes, no Cargo
+fallback, `PATH` search, env-var lookup, repo-local guessing, or silent Python
+fallback exists, existing
 Tauri sidecar/resource paths are not planner binary paths unless later
 designated by a planner-specific decision, and packaged release readiness
 remains future work.
@@ -119,16 +118,14 @@ through the existing `--rust-planner-bin <path>` option as the first packaged
 planner integration path. No packaged lookup is implemented, no new CLI flag is
 added, no env-var lookup is added, `_packaged_rust_planner_bin_candidate(args)`
 still returns `None`, `--rust-planner-bin` remains required unless a launcher
-supplies it, explicit `--planner-backend python` remains available, and
-packaged release readiness remains future work.
+supplies it, and packaged release readiness remains future work.
 P8AY is documentation-only and records
 `docs/rust-launcher-injected-planner-smoke-contract.md` as the smoke
 evidence contract for launcher-injected `--rust-planner-bin <path>`. P8AY did
 not implement a smoke tool, packaged lookup, or readiness-blocker clearing.
 `_packaged_rust_planner_bin_candidate(args)` still returns `None`,
-`--rust-planner-bin` remains required unless a launcher supplies it, explicit
-`--planner-backend python` remains available, and packaged release readiness
-remains future work.
+`--rust-planner-bin` remains required unless a launcher supplies it, and
+packaged release readiness remains future work.
 P8AZ is documentation-only and records
 `docs/rust-launcher-injected-planner-smoke-report-schema.md` as the
 schema for `rust_launcher_injected_planner_smoke` reports with
@@ -187,6 +184,14 @@ preflight for Python planner removal. P8BI does not remove Python planner code,
 change CLI/runtime behavior, change readiness-gate semantics, run smoke tools,
 read `.local`, require Rust binaries, or clear Python planner deletion
 readiness.
+P8BJ removes the explicit public `--planner-backend python` route. It does not
+delete Python planner code, remove `_run_python_plan`, remove CLI imports from
+`emuchef.planner`, or change draft behavior, executor/apply, Rust planner
+behavior, smoke tooling, readiness validators, packaging,
+Tauri/config-editor, or `.local` evidence. The P8BI preflight no longer reports
+`cli_explicit_python_backend` or `test_cli_explicit_python_backend_behavior` for
+the real repo, but it still reports `blocked` while other Python planner
+deletion surfaces remain.
 P8N adds a crate-local Rust probe abstraction, fake probe, and tests for layering
 detected facts over synthetic/profile-derived context. P8O adds fake/test-backed
 planner-input construction that applies detected facts over
@@ -367,8 +372,9 @@ The Rust planner evidence is planner-only and migration-focused:
   explicit Python CLI `rust-shadow` bridge. The bridge is Rust stdout/stderr/exit
   code passthrough; it does not translate Rust JSON `PlanningResult` output into
   Python YAML, Python concise planning summary text, or Python planner
-  structures. Default and explicit `--planner-backend python` planning remain
-  Python-owned for output and exit-code behavior.
+  structures. P8BJ removes the explicit public Python planner backend route;
+  the retained `_run_python_plan` path remains transitional private coverage for
+  later deletion slices.
 - `docs/adr/0002-rust-planner-cli-output-compatibility.md` records the P8D
   forward-looking default-route decision. Current `rust-shadow` remains JSON
   passthrough and dev-only, while any future default Rust planner route must
@@ -524,7 +530,7 @@ narrower route:
 
 | Blocker | Current classification |
 | --- | --- |
-| CLI routing strategy | P8AO makes no-backend `emuchef plan` use Rust-owned planning through the existing production-equivalent subprocess path with Python-compatible output. The transition route still requires a supplied `--rust-planner-bin` and does not invoke Cargo or search host paths. Explicit `--planner-backend python` remains the fallback for the previous Python planner route. P8A/P8E keep the explicit `rust-shadow` developer bridge and formatter behavior, P8G keeps `rust-experimental` as an explicit migration route, and P8AI keeps `rust-production-equivalent` as an explicit evidence route. P8AP preserves the historical `default_cli_backend_still_python` readiness entry with status `resolved`; it does not clear executor/apply, packaged-release, or Python planner deletion readiness. |
+| CLI routing strategy | P8AO makes no-backend `emuchef plan` use Rust-owned planning through the existing production-equivalent subprocess path with Python-compatible output. The transition route still requires a supplied `--rust-planner-bin` and does not invoke Cargo or search host paths. P8BJ removes the explicit public `--planner-backend python` route without deleting the Python planner implementation or private `_run_python_plan` path. P8A/P8E keep the explicit `rust-shadow` developer bridge and formatter behavior, P8G keeps `rust-experimental` as an explicit migration route, and P8AI keeps `rust-production-equivalent` as an explicit evidence route. P8AP preserves the historical `default_cli_backend_still_python` readiness entry with status `resolved`; it does not clear executor/apply, packaged-release, or Python planner deletion readiness. |
 | Device probing and context resolution | The P8AN preflight supplies accepted P8AJ live-probe evidence, so `real_device_probing_not_cut_over` can be reported as `evidence_accepted` when those report paths are supplied to the readiness gate. P8AO no-backend default routing still keeps detected-facts fixture and live-probe wrapper flags explicit-only; they remain accepted on the explicit production-equivalent route. Explicit `--manufacturer`, `--model`, `--android-version`, and repeated `--device-tag` values are forwarded to Rust planning. Python does not invoke ADB, discover devices, run `adb devices`, parse `getprop`, or validate/normalize forwarded ADB paths or serials for Rust routes. |
 | Argument and binding parity | `emuchef-plan-shadow` accepts explicit `--authored-root`, `--device-plan`, explicit device context flags, and string `--bind` values. It mirrors repeated-bind grouping and ordered repeated device tags, but is not full future Rust CLI binding type parity, ops replay parity, detected-device parity, or common-flag parity. |
 | Output format compatibility | P8AO default Rust routing uses the Python-compatible formatter over Rust `PlanningResult` JSON: concise summary labels mirror the visible Python CLI labels, structured YAML is produced from the Rust JSON mapping through `dump_yaml(...)`, and `--output` writes that YAML while stdout stays concise unless `--verbose` is selected. `rust-shadow` omitted `--rust-shadow-output` and explicit `passthrough` continue to preserve Rust stdout/stderr/exit-code passthrough. Rust-native JSON still requires a future explicit structured-output mode such as `--format json`. |
@@ -790,8 +796,8 @@ or retired by later deletion slices.
 6. P8AO makes no-backend `emuchef plan` use Rust-owned planning through the
    existing production-equivalent subprocess path while requiring
    `--rust-planner-bin` during the transition.
-7. Python planner remains available as explicit fallback/reference while unsupported
-   scenarios, diagnostics, CLI output, and deletion blockers are retired.
+7. The explicit public Python planner backend route is removed while the Python
+   planner implementation remains for later deletion slices.
 8. Python planner tests, docs, and fixture/golden references are ported,
    retired, or converted to historical evidence.
 9. Python planner code is deleted only after no user-facing, test, fixture,

@@ -53,9 +53,10 @@ The Rust planner CLI output compatibility target is recorded in
 no-backend `emuchef plan` route through Rust-owned planning using the existing
 production-equivalent Rust subprocess path. During this transition, the default
 Rust route requires `--rust-planner-bin <path>` and emits Python-compatible
-summary/YAML output. Explicit `--planner-backend python` remains the fallback
-for the previous Python planning path. Rust-native JSON requires a separate
-accepted structured-output option.
+summary/YAML output. P8BJ removes the explicit public
+`--planner-backend python` route without deleting Python planner code,
+`_run_python_plan`, or CLI imports from `emuchef.planner`. Rust-native JSON
+requires a separate accepted structured-output option.
 P8AR centralizes the current explicit `--rust-planner-bin <path>` validation in
 an internal Python CLI resolver helper. That helper remains explicit-path-only:
 no packaged lookup, Cargo fallback, arbitrary `PATH` search,
@@ -64,37 +65,36 @@ Python fallback is implemented.
 P8AS records the packaged planner binary location contract in
 [docs/rust-packaged-planner-binary-location.md](docs/rust-packaged-planner-binary-location.md).
 P8AS is documentation-only: no packaged lookup is implemented,
-`--rust-planner-bin <path>` remains required, explicit
-`--planner-backend python` remains available, no Cargo fallback, `PATH` search,
+`--rust-planner-bin <path>` remains required, no Cargo fallback, `PATH` search,
 env-var lookup,
 repo-local guessing, or silent Python fallback is implemented, existing Tauri
 sidecar packaging is not automatically planner binary packaging, and packaged
-release readiness remains future work.
+release readiness remains future work. P8BJ later removes the explicit public
+`--planner-backend python` route.
 P8AT adds an inert packaged resolver placeholder in the Python CLI. The
 placeholder currently returns `None`; no packaged lookup is implemented,
-`--rust-planner-bin <path>` remains required, explicit `--planner-backend
-python` remains available, no Cargo fallback, `PATH` search, env-var lookup,
+`--rust-planner-bin <path>` remains required, no Cargo fallback, `PATH` search,
+env-var lookup,
 repo-local guessing, or silent Python fallback is implemented, and packaged
 release readiness remains future work.
 P8AU adds tests for this packaged candidate seam only. The actual helper still
 returns `None`, no packaged lookup is implemented, `--rust-planner-bin <path>`
-remains required for real Rust routes, explicit `--planner-backend python`
-remains available, no Cargo fallback, `PATH` search, env-var lookup, repo-local
-guessing, or silent Python fallback is implemented, and packaged release
-readiness remains future work.
+remains required for real Rust routes, no Cargo fallback, `PATH` search,
+env-var lookup, repo-local guessing, or silent Python fallback is implemented,
+and packaged release readiness remains future work.
 P8AV tightens resolver error-contract tests only. It does not change runtime
 behavior or implement packaged lookup; `--rust-planner-bin <path>` remains
-required for real Rust routes, explicit `--planner-backend python` remains
-available, and packaged release readiness remains future work.
+required for real Rust routes, and packaged release readiness remains future
+work.
 P8AW records the packaged resolver implementation design in
 [docs/rust-packaged-planner-resolver-implementation-design.md](docs/rust-packaged-planner-resolver-implementation-design.md).
 P8AW is documentation-only. The proposed future mechanism is a
 package/runtime-provided absolute path, once a later implementation defines the
 integration point that supplies it. No packaged lookup is implemented,
 `_packaged_rust_planner_bin_candidate(args)` still returns `None`,
-`--rust-planner-bin <path>` remains required for real Rust routes, explicit
-`--planner-backend python` remains available, no Cargo fallback, `PATH` search,
-env-var lookup, repo-local guessing, or silent Python fallback exists, existing
+`--rust-planner-bin <path>` remains required for real Rust routes, no Cargo
+fallback, `PATH` search, env-var lookup, repo-local guessing, or silent Python
+fallback exists, existing
 Tauri sidecar/resource paths are not planner binary paths unless later
 designated by a planner-specific decision, and packaged release readiness
 remains future work.
@@ -104,16 +104,14 @@ accepts a launcher-supplied absolute path through the existing
 path. No packaged lookup is implemented, no new CLI flag is added, no env-var
 lookup is added, `_packaged_rust_planner_bin_candidate(args)` still returns
 `None`, `--rust-planner-bin` remains required unless a launcher supplies it,
-explicit `--planner-backend python` remains available, and packaged release
-readiness remains future work.
+and packaged release readiness remains future work.
 P8AY is documentation-only. [docs/rust-launcher-injected-planner-smoke-contract.md](docs/rust-launcher-injected-planner-smoke-contract.md)
 defines smoke evidence for launcher-injected
 `--rust-planner-bin <path>`. P8AY did not implement a smoke tool, packaged
 lookup, or readiness-blocker clearing.
 `_packaged_rust_planner_bin_candidate(args)` still returns `None`,
-`--rust-planner-bin` remains required unless a launcher supplies it, explicit
-`--planner-backend python` remains available, and packaged release readiness
-remains future work.
+`--rust-planner-bin` remains required unless a launcher supplies it, and
+packaged release readiness remains future work.
 P8AZ is documentation-only. [docs/rust-launcher-injected-planner-smoke-report-schema.md](docs/rust-launcher-injected-planner-smoke-report-schema.md)
 defines the `rust_launcher_injected_planner_smoke` report schema with
 `schema_version: 1`. P8AZ did not implement a smoke tool, readiness intake,
@@ -368,13 +366,21 @@ CLI imports, readiness blockers, fallback assertions, or docs/context
 references still keep Python planner deletion incomplete. P8BI does not delete
 Python planner code, change runtime behavior, run smoke tools, read `.local`,
 require Rust binaries, or clear readiness blockers.
+P8BJ removes the explicit public `--planner-backend python` route from
+`emuchef plan`. It does not delete Python planner code, remove
+`_run_python_plan`, remove CLI imports from `emuchef.planner`, or change draft
+behavior, executor/apply, Rust planner behavior, smoke tooling, readiness
+validators, packaging, Tauri/config-editor behavior, or `.local` evidence. The
+P8BI preflight no longer reports `cli_explicit_python_backend` or
+`test_cli_explicit_python_backend_behavior` for the real repo, but it still
+reports `blocked` while other Python planner deletion surfaces remain.
 P8AQ records the future default-route Rust planner binary resolution design in
 `docs/rust-default-planner-binary-resolution.md`. P8AQ is documentation-only:
-`--rust-planner-bin` remains required, explicit `--planner-backend python`
-remains available, no packaged binary lookup, Cargo fallback, arbitrary `PATH`
-search, host-path guessing, or silent Python fallback is implemented, and
-executor/apply, Python planner deletion, and packaged release readiness remain
-unresolved.
+`--rust-planner-bin` remains required, no packaged binary lookup, Cargo
+fallback, arbitrary `PATH` search, host-path guessing, or silent Python fallback
+is implemented, and executor/apply, Python planner deletion, and packaged
+release readiness remain unresolved. P8BJ later removes the explicit public
+`--planner-backend python` route.
 P8AR adds only a behavior-preserving internal explicit-path resolver foundation
 for `--rust-planner-bin <path>` validation. It does not add packaged lookup,
 Cargo fallback, arbitrary `PATH` search, env-var lookup, repo-local guessing,
@@ -382,28 +388,26 @@ shell execution, or silent Python fallback. P8AS records the future packaged
 planner binary location contract in
 `docs/rust-packaged-planner-binary-location.md`. P8AS is documentation-only:
 no packaged lookup is implemented, `--rust-planner-bin <path>` remains required,
-explicit `--planner-backend python` remains available, existing Tauri sidecar
-packaging is not automatically planner binary packaging, and packaged release
-readiness remains future work.
+existing Tauri sidecar packaging is not automatically planner binary packaging,
+and packaged release readiness remains future work.
 P8AW records the packaged resolver implementation design in
 `docs/rust-packaged-planner-resolver-implementation-design.md`. The proposed
 future mechanism is a package/runtime-provided absolute path, once a later
 implementation defines the integration point that supplies it. P8AW is
 documentation-only: no packaged lookup is implemented, the inert helper still
 returns `None`, `--rust-planner-bin <path>` remains required for real Rust
-routes, explicit `--planner-backend python` remains available, no Cargo
-fallback, `PATH` search, env-var lookup, repo-local guessing, or silent Python
-fallback exists, existing Tauri sidecar/resource paths are not planner binary
-paths unless later designated by a planner-specific decision, and packaged
-release readiness remains future work.
+routes, no Cargo fallback, `PATH` search, env-var lookup, repo-local guessing,
+or silent Python fallback exists, existing Tauri sidecar/resource paths are not
+planner binary paths unless later designated by a planner-specific decision, and
+packaged release readiness remains future work.
 P8AY records the smoke evidence contract for launcher-injected
 `--rust-planner-bin <path>` in
 `docs/rust-launcher-injected-planner-smoke-contract.md`. P8AY is
 documentation-only: it did not implement a smoke tool, packaged lookup, or
 readiness-blocker clearing. The inert helper still returns
 `None`, `--rust-planner-bin <path>` remains required for real Rust routes
-unless a launcher supplies it, explicit `--planner-backend python` remains
-available, and packaged release readiness remains future work.
+unless a launcher supplies it, and packaged release readiness remains future
+work.
 P8AZ records the `rust_launcher_injected_planner_smoke` report schema in
 `docs/rust-launcher-injected-planner-smoke-report-schema.md` with
 `schema_version: 1`. P8AZ is documentation-only: it did not implement a smoke
@@ -416,11 +420,11 @@ P8BA implements the launcher-injected planner smoke tool at
 emits `kind: rust_launcher_injected_planner_smoke` reports with
 `schema_version: 1`, uses an explicit launcher-supplied `--rust-planner-bin`
 path, treats an argv0-observing wrapper as the launcher-supplied subprocess
-entrypoint, and keeps explicit `--planner-backend python` as a static CLI-help
-bypass/reference check. P8BA does not add readiness intake, clear a readiness
-blocker, change CLI resolver behavior, implement packaged lookup, change
-runtime or packaging behavior, or write `.local` evidence. Packaged release
-readiness remains future work.
+entrypoint, and retains its original static CLI-help check. P8BJ does not
+change this smoke tooling. P8BA does not add readiness intake, clear a
+readiness blocker, change CLI resolver behavior, implement packaged lookup,
+change runtime or packaging behavior, or write `.local` evidence. Packaged
+release readiness remains future work.
 P8BC implements readiness intake for explicitly supplied
 `rust_launcher_injected_planner_smoke` reports with `schema_version: 1`. The
 readiness gate validates the report JSON only and does not execute the P8BA
@@ -1457,10 +1461,12 @@ Current commands:
 Common notes:
 
 - No-backend `emuchef plan` is Rust-owned through the production-equivalent
-  subprocess path. Explicit `--planner-backend python` remains the
-  fallback/reference path. Explicit Rust planner migration routes are
-  `--planner-backend rust-shadow` and `--planner-backend rust-experimental`,
-  and both require `--rust-planner-bin <path>`. `rust-shadow` remains diagnostic/dev-only and
+  subprocess path. P8BJ removes the explicit public `--planner-backend python`
+  route; the Python planner implementation remains present only for later
+  deletion slices and private transitional coverage. Explicit Rust planner
+  migration routes are `--planner-backend rust-shadow` and
+  `--planner-backend rust-experimental`, and both require
+  `--rust-planner-bin <path>`. `rust-shadow` remains diagnostic/dev-only and
   passthrough by default: omitted `--rust-shadow-output` and
   `--rust-shadow-output passthrough` pass through Rust JSON/text stdout, stderr,
   and exit code. Explicit `--rust-shadow-output python-compatible` is valid only
