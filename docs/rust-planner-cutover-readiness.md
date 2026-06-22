@@ -163,6 +163,12 @@ blocker taxonomy. Accepted P8BC evidence can satisfy only
 `packaged_launcher_injection_evidence_not_accepted`; it does not clear
 `packaged_release_not_ready`, `executor_apply_not_cut_over`,
 `python_planner_deletion_not_ready`, or top-level readiness.
+P8BE improves only the readiness report's explanatory output. The report now
+includes descriptive status context so accepted evidence is easier to distinguish
+from release readiness. P8BE does not change evidence acceptance rules, blocker
+computation, smoke tooling, CLI/runtime behavior, packaging, Rust backend code,
+executor/apply behavior, or `.local` evidence. Top-level readiness remains
+`blocked` until separate blockers are resolved.
 P8N adds a crate-local Rust probe abstraction, fake probe, and tests for layering
 detected facts over synthetic/profile-derived context. P8O adds fake/test-backed
 planner-input construction that applies detected facts over
@@ -298,8 +304,10 @@ Tauri/protocol checks, device probing, network access, artifact materialization,
 fixture/golden regeneration, or Python planner deletion work. P8AP updates the
 gate after P8AO so the historical `default_cli_backend_still_python` entry is
 preserved with status `resolved`. The top-level report status remains `blocked`
-until future phases intentionally clear executor/apply and Python planner
-deletion blockers.
+until future phases intentionally clear executor/apply, Python planner deletion,
+and packaged release blockers. P8BE adds descriptive `status_explanation` output
+only; that explanation does not drive evidence acceptance, blocker computation,
+or top-level status.
 
 ## Current Evidence
 

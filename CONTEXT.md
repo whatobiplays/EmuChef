@@ -144,6 +144,11 @@ executor/apply readiness, Python planner deletion readiness, and top-level
 readiness. Accepted P8BC evidence can satisfy only the packaged
 launcher-injection evidence item; packaged release readiness remains future
 work.
+P8BE only improves readiness report explanatory output. It does not change
+evidence acceptance rules, blocker computation, smoke tooling, CLI/runtime
+behavior, packaging, Rust backend code, executor/apply behavior, or `.local`
+evidence. Top-level readiness remains blocked until separate blockers are
+resolved.
 The future Rust planner real-device context ownership model is recorded in
 [ADR 0003](docs/adr/0003-rust-real-device-context-ownership.md). For future
 default Rust planner cutover, Rust should own real-device probing and

@@ -253,6 +253,25 @@ def blocker_status(report: dict, blocker_id: str) -> str:
     return matches[0]["status"]
 
 
+def expected_status_explanation() -> dict:
+    return {
+        "top_level_status": "blocked",
+        "evidence_accepted_is_not_release_ready": True,
+        "evidence_accepted_meaning": (
+            "Accepted evidence can satisfy scoped evidence blockers; it does not imply top-level readiness."
+        ),
+        "top_level_blocked_reason": (
+            "Top-level readiness remains blocked while executor/apply, Python planner deletion, "
+            "and packaged release blockers remain blocked."
+        ),
+        "blocking_categories": [
+            "executor_apply",
+            "python_planner_deletion",
+            "packaged_release",
+        ],
+    }
+
+
 class CheckRustPlannerCutoverReadinessTests(unittest.TestCase):
     @classmethod
     def setUpClass(cls) -> None:
@@ -565,6 +584,16 @@ class CheckRustPlannerCutoverReadinessTests(unittest.TestCase):
             commands["p8ak_rust_production_equivalent_mismatch_warning_smoke"],
         )
 
+    def test_status_explanation_is_present_without_p8bc_evidence(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            make_synthetic_repo(root)
+
+            report = self.build_report(root)
+
+        self.assertEqual(list(report).index("status_explanation"), list(report).index("status") + 1)
+        self.assertEqual(report["status_explanation"], expected_status_explanation())
+
     def test_missing_p8aj_and_p8ak_evidence_keeps_production_equivalent_blockers_blocked(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
             root = Path(temp_dir)
@@ -715,6 +744,7 @@ class CheckRustPlannerCutoverReadinessTests(unittest.TestCase):
         self.assertEqual(blocker_status(report, "python_planner_deletion_not_ready"), "blocked")
         self.assertEqual(blocker_status(report, "packaged_release_not_ready"), "blocked")
         self.assertEqual(report["status"], "blocked")
+        self.assertEqual(report["status_explanation"], expected_status_explanation())
 
     def test_invalid_p8bc_identity_summary_and_shape_are_rejected(self) -> None:
         cases = [

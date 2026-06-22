@@ -225,6 +225,27 @@ REMAINING_BLOCKERS = (
 )
 
 
+def _status_explanation() -> dict[str, Any]:
+    """Return descriptive context for the intentionally blocked top-level status."""
+
+    return {
+        "top_level_status": "blocked",
+        "evidence_accepted_is_not_release_ready": True,
+        "evidence_accepted_meaning": (
+            "Accepted evidence can satisfy scoped evidence blockers; it does not imply top-level readiness."
+        ),
+        "top_level_blocked_reason": (
+            "Top-level readiness remains blocked while executor/apply, Python planner deletion, "
+            "and packaged release blockers remain blocked."
+        ),
+        "blocking_categories": [
+            "executor_apply",
+            "python_planner_deletion",
+            "packaged_release",
+        ],
+    }
+
+
 def build_readiness_report(
     *,
     repo_root: Path,
@@ -281,6 +302,7 @@ def build_readiness_report(
         "kind": REPORT_KIND,
         "schema_version": REPORT_SCHEMA_VERSION,
         "status": "blocked",
+        "status_explanation": _status_explanation(),
         "inputs": {
             "authored_root": _display_path(authored_root),
             "scenario_matrix": _display_path(scenario_matrix),
