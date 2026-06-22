@@ -32,3 +32,12 @@ evidence. After P8BJ, the real repository preflight no longer reports
 `cli_explicit_python_backend` or `test_cli_explicit_python_backend_behavior`,
 but it still reports `blocked` while other Python planner deletion surfaces
 remain.
+
+P8BK removes `_run_plan(...)` fallback routing to `_run_python_plan(...)`.
+It does not delete `_run_python_plan(...)`, delete Python planner code, remove
+CLI imports from `emuchef.planner`, or change draft behavior, executor/apply,
+Rust planner behavior, smoke tooling, readiness validators, packaging,
+Tauri/config-editor, Rust backend code, or `.local` evidence. After P8BK, the
+real repository preflight no longer reports
+`cli_run_plan_routes_to_python_plan`, but it still reports `blocked` while
+other Python planner deletion surfaces remain.

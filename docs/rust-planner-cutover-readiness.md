@@ -192,6 +192,14 @@ Tauri/config-editor, or `.local` evidence. The P8BI preflight no longer reports
 `cli_explicit_python_backend` or `test_cli_explicit_python_backend_behavior` for
 the real repo, but it still reports `blocked` while other Python planner
 deletion surfaces remain.
+P8BK removes `_run_plan(...)` fallback routing to `_run_python_plan(...)`.
+It does not delete `_run_python_plan(...)`, delete Python planner code, remove
+CLI imports from `emuchef.planner`, or change draft behavior, executor/apply,
+Rust planner behavior, smoke tooling, readiness validators, packaging,
+Tauri/config-editor, Rust backend code, or `.local` evidence. The P8BI
+preflight no longer reports `cli_run_plan_routes_to_python_plan` for the real
+repo, but it still reports `blocked` while other Python planner deletion
+surfaces remain.
 P8N adds a crate-local Rust probe abstraction, fake probe, and tests for layering
 detected facts over synthetic/profile-derived context. P8O adds fake/test-backed
 planner-input construction that applies detected facts over

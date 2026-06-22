@@ -245,9 +245,7 @@ def _run_draft(args: argparse.Namespace) -> int:
 
 
 def _run_plan(args: argparse.Namespace) -> int:
-    if _effective_plan_backend(args) in _RUST_SUBPROCESS_BACKENDS:
-        return _run_rust_shadow_plan(args)
-    return _run_python_plan(args)
+    return _run_rust_shadow_plan(args)
 
 
 def _run_python_plan(args: argparse.Namespace) -> int:

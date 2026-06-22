@@ -242,6 +242,50 @@ class CliTests(unittest.TestCase):
         run_apply.assert_not_called()
         packaged_candidate.assert_called_once()
 
+    def test_plan_public_routes_do_not_call_private_python_plan(self) -> None:
+        cases = [
+            ("default", []),
+            ("rust-shadow", ["--planner-backend", "rust-shadow", "--rust-shadow-output", "python-compatible"]),
+            ("rust-experimental", ["--planner-backend", "rust-experimental"]),
+            ("rust-production-equivalent", ["--planner-backend", "rust-production-equivalent"]),
+        ]
+        with TemporaryDirectory() as tmp:
+            shadow_bin = self._shadow_bin(tmp)
+            completed = subprocess.CompletedProcess(
+                args=[],
+                returncode=0,
+                stdout=self._rust_shadow_planning_result_json(),
+                stderr="",
+            )
+            for route_name, backend_args in cases:
+                with self.subTest(route=route_name):
+                    stdout = StringIO()
+                    stderr = StringIO()
+                    with (
+                        patch("emuchef.cli._run_python_plan") as run_python_plan,
+                        patch("subprocess.run", return_value=completed) as run,
+                        contextlib.redirect_stdout(stdout),
+                        contextlib.redirect_stderr(stderr),
+                    ):
+                        rc = main(
+                            [
+                                "plan",
+                                *backend_args,
+                                "--rust-planner-bin",
+                                shadow_bin,
+                                "--authored-root",
+                                "authored",
+                                "--device-plan",
+                                "ayaneo.pocket_s2.base",
+                            ]
+                        )
+
+                    self.assertEqual(rc, 0, stderr.getvalue())
+                    self.assertIn("Planning status: success", stdout.getvalue())
+                    self.assertEqual(stderr.getvalue(), "")
+                    run_python_plan.assert_not_called()
+                    run.assert_called_once()
+
     def test_packaged_rust_planner_bin_candidate_returns_none_today(self) -> None:
         self.assertIsNone(cli._packaged_rust_planner_bin_candidate(self._rust_resolver_args()))
 
