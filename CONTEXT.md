@@ -155,6 +155,11 @@ acceptance rules, smoke tooling, CLI/runtime behavior, packaging, Rust backend
 code, executor/apply behavior, or `.local` evidence. Fixture maintenance is
 documented in
 [docs/rust-readiness-fixture-maintenance.md](docs/rust-readiness-fixture-maintenance.md).
+P8BH is documentation-only. [docs/rust-planner-readiness-docs-index.md](docs/rust-planner-readiness-docs-index.md)
+is the navigation index for Rust planner readiness and cutover evidence docs. It
+does not change readiness semantics, evidence acceptance rules, smoke tooling,
+CLI/runtime behavior, packaging, Rust backend behavior, executor/apply
+behavior, or `.local` evidence.
 The future Rust planner real-device context ownership model is recorded in
 [ADR 0003](docs/adr/0003-rust-real-device-context-ownership.md). For future
 default Rust planner cutover, Rust should own real-device probing and

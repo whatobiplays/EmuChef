@@ -174,6 +174,12 @@ no-evidence report shape. P8BF does not change readiness semantics, evidence
 acceptance rules, smoke tooling, CLI/runtime behavior, packaging, Rust backend
 code, executor/apply behavior, or `.local` evidence. Fixture maintenance is
 documented in `docs/rust-readiness-fixture-maintenance.md`.
+P8BH is documentation-only and adds
+[docs/rust-planner-readiness-docs-index.md](rust-planner-readiness-docs-index.md)
+as a navigation index for Rust planner readiness and cutover evidence docs. It
+does not change readiness semantics, evidence acceptance rules, smoke tooling,
+CLI/runtime behavior, packaging, Rust backend behavior, executor/apply
+behavior, or `.local` evidence.
 P8N adds a crate-local Rust probe abstraction, fake probe, and tests for layering
 detected facts over synthetic/profile-derived context. P8O adds fake/test-backed
 planner-input construction that applies detected facts over
