@@ -169,6 +169,10 @@ from release readiness. P8BE does not change evidence acceptance rules, blocker
 computation, smoke tooling, CLI/runtime behavior, packaging, Rust backend code,
 executor/apply behavior, or `.local` evidence. Top-level readiness remains
 `blocked` until separate blockers are resolved.
+P8BF adds a checked-in static readiness report fixture for the current
+no-evidence report shape. P8BF does not change readiness semantics, evidence
+acceptance rules, smoke tooling, CLI/runtime behavior, packaging, Rust backend
+code, executor/apply behavior, or `.local` evidence.
 P8N adds a crate-local Rust probe abstraction, fake probe, and tests for layering
 detected facts over synthetic/profile-derived context. P8O adds fake/test-backed
 planner-input construction that applies detected facts over

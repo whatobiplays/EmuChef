@@ -10,6 +10,7 @@ from pathlib import Path
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 TOOL_PATH = REPO_ROOT / "tools" / "check_rust_planner_cutover_readiness.py"
+CURRENT_STATIC_READINESS_FIXTURE = REPO_ROOT / "tests" / "fixtures" / "readiness" / "current_static_readiness_report.json"
 
 
 READINESS_DOC_TEXT = """
@@ -558,6 +559,22 @@ class CheckRustPlannerCutoverReadinessTests(unittest.TestCase):
 
         self.assertEqual(first, second)
         self.assertEqual(json.loads(first), json.loads(second))
+
+    def test_current_static_readiness_report_matches_fixture(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            make_synthetic_repo(root)
+
+            report = self.build_report(root)
+            serialized = self.readiness.dumps_report(report)
+
+        fixture_text = CURRENT_STATIC_READINESS_FIXTURE.read_text(encoding="utf-8")
+
+        self.assertEqual(serialized, fixture_text)
+        self.assertEqual(json.loads(fixture_text), report)
+        for leaked_token in (".local", "stdout", "stderr", "environment", "/tmp/", "/private/", "/Users/", "C:\\"):
+            with self.subTest(leaked_token=leaked_token):
+                self.assertNotIn(leaked_token, fixture_text)
 
     def test_report_includes_required_manual_evidence_commands_without_executing_them(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:

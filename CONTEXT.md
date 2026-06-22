@@ -149,6 +149,10 @@ evidence acceptance rules, blocker computation, smoke tooling, CLI/runtime
 behavior, packaging, Rust backend code, executor/apply behavior, or `.local`
 evidence. Top-level readiness remains blocked until separate blockers are
 resolved.
+P8BF adds a checked-in static readiness report fixture for the current
+no-evidence report shape. It does not change readiness semantics, evidence
+acceptance rules, smoke tooling, CLI/runtime behavior, packaging, Rust backend
+code, executor/apply behavior, or `.local` evidence.
 The future Rust planner real-device context ownership model is recorded in
 [ADR 0003](docs/adr/0003-rust-real-device-context-ownership.md). For future
 default Rust planner cutover, Rust should own real-device probing and
