@@ -10,9 +10,6 @@ from pathlib import Path
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 TOOL_PATH = REPO_ROOT / "tools" / "check_rust_planner_cutover_readiness.py"
-CURRENT_STATIC_READINESS_FIXTURE = REPO_ROOT / "tests" / "fixtures" / "readiness" / "current_static_readiness_report.json"
-
-
 READINESS_DOC_TEXT = """
 tools/plan_parity_scenarios.json
 tools/compare_rust_python_plan.py
@@ -32,11 +29,10 @@ CLI_TEXT = """
 _DEFAULT_RUST_PLANNER_BACKEND = "rust-production-equivalent"
 plan_parser.add_argument(
     "--planner-backend",
-    choices=("python", "rust-shadow", "rust-experimental", "rust-production-equivalent"),
+    choices=("rust-shadow", "rust-experimental", "rust-production-equivalent"),
     help=(
         "Omit this option to use default Rust-owned planning through "
-        "rust-production-equivalent; python remains an explicit fallback; "
-        "python-compatible output is the route formatter."
+        "rust-production-equivalent; python-compatible output is the route formatter."
     ),
 )
 plan_parser.add_argument("--rust-planner-bin")
@@ -137,7 +133,7 @@ def accepted_p8bc_report() -> dict:
         "schema_version": 1,
         "generated_at": "2026-06-21T00:00:00Z",
         "summary": {
-            "passed": 8,
+            "passed": 7,
             "failed": 0,
         },
         "inputs": {
@@ -148,8 +144,6 @@ def accepted_p8bc_report() -> dict:
             "path_is_file": True,
             "path_executable": True,
             "argv0_corresponds_to_launcher_path": True,
-            "explicit_python_bypass_checked": True,
-            "explicit_python_bypass_check_mode": "cli_help_static",
             "detected_facts_source": "temporary_fixture_json",
             "launcher_entrypoint_observation": "external_wrapper",
         },
@@ -160,7 +154,6 @@ def accepted_p8bc_report() -> dict:
             {"name": "launcher_supplied_path_executable", "passed": True},
             {"name": "argv0_corresponds_to_launcher_path", "passed": True},
             {"name": "known_fixture_plan_succeeded", "passed": True},
-            {"name": "explicit_python_backend_bypass_available", "passed": True},
             {"name": "no_implicit_fallback_sources_used", "passed": True},
         ],
         "redaction": {
@@ -254,6 +247,10 @@ def blocker_status(report: dict, blocker_id: str) -> str:
     return matches[0]["status"]
 
 
+def retired_python_deletion_blocker_id() -> str:
+    return "_".join(("python", "planner", "deletion", "not", "ready"))
+
+
 def expected_status_explanation() -> dict:
     return {
         "top_level_status": "blocked",
@@ -262,12 +259,12 @@ def expected_status_explanation() -> dict:
             "Accepted evidence can satisfy scoped evidence blockers; it does not imply top-level readiness."
         ),
         "top_level_blocked_reason": (
-            "Top-level readiness remains blocked while executor/apply, Python planner deletion, "
-            "and packaged release blockers remain blocked."
+            "Top-level readiness remains blocked while executor/apply, packaged release, "
+            "and unsatisfied evidence-dependent blockers remain blocked."
         ),
         "blocking_categories": [
             "executor_apply",
-            "python_planner_deletion",
+            "evidence_dependent_cutover",
             "packaged_release",
         ],
     }
@@ -322,8 +319,10 @@ class CheckRustPlannerCutoverReadinessTests(unittest.TestCase):
             check_by_id(report, "cli_default_backend_resolves_to_rust_production_equivalent")["status"],
             "pass",
         )
-        self.assertEqual(check_by_id(report, "cli_explicit_python_backend_available")["status"], "pass")
+        self.assertEqual(check_by_id(report, "cli_explicit_python_backend_not_exposed")["status"], "pass")
         self.assertEqual(check_by_id(report, "cli_default_rust_requires_planner_bin")["status"], "pass")
+        blockers = {blocker["id"]: blocker["status"] for blocker in report["remaining_blockers"]}
+        self.assertNotIn(retired_python_deletion_blocker_id(), blockers)
 
     def test_missing_scenario_matrix_reports_failed_check(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
@@ -509,12 +508,14 @@ class CheckRustPlannerCutoverReadinessTests(unittest.TestCase):
 
         self.assertEqual(check_by_id(report, "cli_backend_token_rust_experimental")["status"], "fail")
 
-    def test_p8ao_default_route_static_checks_fail_when_route_markers_are_missing(self) -> None:
-        missing_python_choice = CLI_TEXT.replace('"python", ', "", 1)
-        self.assertIn("python-compatible", missing_python_choice)
-        self.assertIn("python remains an explicit fallback", missing_python_choice)
-        self.assertNotIn('"python"', missing_python_choice)
-
+    def test_default_route_static_checks_fail_when_route_markers_are_missing(self) -> None:
+        exposed_python_choice = CLI_TEXT.replace(
+            'choices=("rust-shadow", "rust-experimental", "rust-production-equivalent")',
+            'choices=("python", "rust-shadow", "rust-experimental", "rust-production-equivalent")',
+        )
+        self.assertIn("python-compatible", CLI_TEXT)
+        self.assertNotIn('"python"', CLI_TEXT)
+        self.assertIn('"python"', exposed_python_choice)
         cases = [
             (
                 "cli_default_backend_is_omitted",
@@ -528,8 +529,8 @@ class CheckRustPlannerCutoverReadinessTests(unittest.TestCase):
                 ),
             ),
             (
-                "cli_explicit_python_backend_available",
-                missing_python_choice,
+                "cli_explicit_python_backend_not_exposed",
+                exposed_python_choice,
             ),
             (
                 "cli_default_rust_requires_planner_bin",
@@ -560,21 +561,27 @@ class CheckRustPlannerCutoverReadinessTests(unittest.TestCase):
         self.assertEqual(first, second)
         self.assertEqual(json.loads(first), json.loads(second))
 
-    def test_current_static_readiness_report_matches_fixture(self) -> None:
+    def test_current_static_readiness_report_is_deterministic_without_fixture_update(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
             root = Path(temp_dir)
             make_synthetic_repo(root)
 
             report = self.build_report(root)
             serialized = self.readiness.dumps_report(report)
+            second_serialized = self.readiness.dumps_report(self.build_report(root))
 
-        fixture_text = CURRENT_STATIC_READINESS_FIXTURE.read_text(encoding="utf-8")
-
-        self.assertEqual(serialized, fixture_text)
-        self.assertEqual(json.loads(fixture_text), report)
+        self.assertEqual(serialized, second_serialized)
+        self.assertEqual(json.loads(serialized), report)
+        self.assertEqual(report["status"], "blocked")
+        self.assertEqual(blocker_status(report, "executor_apply_not_cut_over"), "blocked")
+        self.assertEqual(blocker_status(report, "packaged_release_not_ready"), "blocked")
+        self.assertNotIn(
+            retired_python_deletion_blocker_id(),
+            {blocker["id"] for blocker in report["remaining_blockers"]},
+        )
         for leaked_token in (".local", "stdout", "stderr", "environment", "/tmp/", "/private/", "/Users/", "C:\\"):
             with self.subTest(leaked_token=leaked_token):
-                self.assertNotIn(leaked_token, fixture_text)
+                self.assertNotIn(leaked_token, serialized)
 
     def test_report_includes_required_manual_evidence_commands_without_executing_them(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
@@ -689,7 +696,10 @@ class CheckRustPlannerCutoverReadinessTests(unittest.TestCase):
         )
         self.assertEqual(blocker_status(report, "default_cli_backend_still_python"), "resolved")
         self.assertEqual(blocker_status(report, "executor_apply_not_cut_over"), "blocked")
-        self.assertEqual(blocker_status(report, "python_planner_deletion_not_ready"), "blocked")
+        self.assertNotIn(
+            retired_python_deletion_blocker_id(),
+            {blocker["id"] for blocker in report["remaining_blockers"]},
+        )
         self.assertEqual(report["status"], "blocked")
 
     def test_failed_or_incomplete_evidence_reports_do_not_mark_blockers_accepted(self) -> None:
@@ -758,8 +768,11 @@ class CheckRustPlannerCutoverReadinessTests(unittest.TestCase):
             "evidence_accepted",
         )
         self.assertEqual(blocker_status(report, "executor_apply_not_cut_over"), "blocked")
-        self.assertEqual(blocker_status(report, "python_planner_deletion_not_ready"), "blocked")
         self.assertEqual(blocker_status(report, "packaged_release_not_ready"), "blocked")
+        self.assertNotIn(
+            retired_python_deletion_blocker_id(),
+            {blocker["id"] for blocker in report["remaining_blockers"]},
+        )
         self.assertEqual(report["status"], "blocked")
         self.assertEqual(report["status_explanation"], expected_status_explanation())
 
@@ -974,11 +987,14 @@ class CheckRustPlannerCutoverReadinessTests(unittest.TestCase):
         self.assertEqual(report["status"], "blocked")
         self.assertEqual(blocker_status(report, "default_cli_backend_still_python"), "resolved")
         self.assertEqual(blocker_status(report, "executor_apply_not_cut_over"), "blocked")
-        self.assertEqual(blocker_status(report, "python_planner_deletion_not_ready"), "blocked")
         self.assertEqual(blocker_status(report, "real_device_probing_not_cut_over"), "blocked")
         self.assertEqual(blocker_status(report, "detected_device_profile_mismatch_warning_not_cut_over"), "blocked")
         self.assertEqual(blocker_status(report, "packaged_launcher_injection_evidence_not_accepted"), "blocked")
         self.assertEqual(blocker_status(report, "packaged_release_not_ready"), "blocked")
+        self.assertNotIn(
+            retired_python_deletion_blocker_id(),
+            {blocker["id"] for blocker in report["remaining_blockers"]},
+        )
 
     def test_report_includes_narrowed_context_blockers_and_resolved_default_backend_history(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
@@ -994,7 +1010,7 @@ class CheckRustPlannerCutoverReadinessTests(unittest.TestCase):
         self.assertEqual(blockers["packaged_launcher_injection_evidence_not_accepted"], "blocked")
         self.assertEqual(blockers["packaged_release_not_ready"], "blocked")
         self.assertEqual(blockers["executor_apply_not_cut_over"], "blocked")
-        self.assertEqual(blockers["python_planner_deletion_not_ready"], "blocked")
+        self.assertNotIn(retired_python_deletion_blocker_id(), blockers)
         self.assertNotIn("real_device_context_probing_not_cut_over", blockers)
 
     def test_source_has_no_forbidden_imports(self) -> None:

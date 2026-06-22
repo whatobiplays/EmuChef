@@ -64,6 +64,16 @@ for still-needed Python planner symbols. P8BM does not delete
 `src/emuchef/planner.py` or remove Python draft/session/profile helper
 behavior. Rust-native JSON requires a separate accepted structured-output
 option.
+P8BN removes stale Rust readiness and launcher-smoke assumptions that explicit
+`--planner-backend python` remains available. It removes
+`python_planner_deletion_not_ready` as a Rust planner cutover readiness blocker
+and stops requiring standalone `python` as a planner-backend token in the
+readiness gate; the gate may still require `python-compatible` output wording.
+P8BN does not delete `src/emuchef/planner.py`, remove Python
+draft/session/profile helper behavior, or change plan routing, draft behavior,
+executor/apply, Rust planner behavior, packaging, Tauri/config-editor, Rust
+backend code, or `.local` evidence. The Python planner deletion preflight
+remains blocked until remaining docs/context detector surfaces are retired.
 P8AR centralizes the current explicit `--rust-planner-bin <path>` validation in
 an internal Python CLI resolver helper. That helper remains explicit-path-only:
 no packaged lookup, Cargo fallback, arbitrary `PATH` search,
@@ -140,12 +150,12 @@ readiness intake for `rust_launcher_injected_planner_smoke` reports with
 launcher-injection evidence item. P8BC does not change the smoke tool, CLI
 resolver behavior, packaged lookup, runtime behavior, Tauri/config-editor code,
 packaging scripts, Rust backend code, executor/apply behavior, Python planner
-deletion readiness, or broader packaged release readiness. Top-level readiness
-remains blocked while executor/apply, Python planner deletion, and packaged
-release readiness remain blocked.
+deletion preflight, or broader packaged release readiness. Top-level readiness
+remains blocked while executor/apply, packaged release, and unsatisfied
+evidence-dependent blockers remain blocked.
 P8BD is documentation-only. [docs/rust-packaged-readiness-blocker-taxonomy.md](docs/rust-packaged-readiness-blocker-taxonomy.md)
 separates packaged launcher-injection evidence from packaged release readiness,
-executor/apply readiness, Python planner deletion readiness, and top-level
+executor/apply readiness, the Python planner deletion preflight, and top-level
 readiness. Accepted P8BC evidence can satisfy only the packaged
 launcher-injection evidence item; packaged release readiness remains future
 work.
@@ -231,7 +241,8 @@ variables, access the filesystem, access the network, probe real devices, or wir
 detected facts into `rust-shadow`, `rust-experimental`, the Python CLI,
 Tauri/protocol, executor/apply, smoke runners, normal runtime checks, or the
 static readiness gate. P8AO later makes no-backend `emuchef plan` Rust-owned
-while preserving explicit Python fallback.
+through the production-equivalent Rust route; P8BJ later removes the explicit
+Python fallback route.
 P8W adds a crate-local live ADB probe adapter foundation on top of that command
 model and parser. `AdbDeviceProbe` executes the modeled argv only through an
 injectable command runner, `ProcessCommandRunner` uses direct argv process
@@ -245,8 +256,9 @@ that adapter only into the direct dev-only Rust shadow binary through explicit
 are mutually exclusive. P8X does not expose or forward live probing through
 `rust-shadow`, `rust-experimental`, the Python CLI, Tauri/protocol,
 executor/apply, smoke runners, normal runtime checks, or the static readiness
-gate. P8AO later makes no-backend `emuchef plan` Rust-owned while preserving
-explicit Python fallback.
+gate. P8AO later makes no-backend `emuchef plan` Rust-owned through the
+production-equivalent Rust route; P8BJ later removes the explicit Python
+fallback route.
 Fixture-based P8R/P8S/P8T/P8U evidence remains separate, and
 `real_device_probing_not_cut_over` plus
 `detected_device_profile_mismatch_warning_not_cut_over` remain default-cutover
@@ -352,8 +364,9 @@ JSON reports. The gate reads only report paths explicitly supplied through
 `--p8ak-mismatch-warning-report <path>`. It does not run smoke tools, ADB, Cargo,
 npm, Tauri/protocol checks, executor/apply, network checks, or planner runtime
 paths. Accepted reports move only the relevant blocker entry to
-`evidence_accepted`; they do not clear executor/apply or Python planner deletion
-readiness, and the top-level readiness status remains `blocked`.
+`evidence_accepted`; they do not clear executor/apply, packaged release, or
+unsatisfied evidence-dependent readiness, and the top-level readiness status
+remains `blocked`.
 P8AM records the default-backend cutover contract in
 `docs/rust-default-planner-cutover-contract.md`. P8AM performs no cutover. P8AN
 is evidence preflight only and verifies accepted P8AJ/P8AK reports without
@@ -362,9 +375,9 @@ existing production-equivalent Rust subprocess path. `rust-production-equivalent
 also remains available as an explicit backend. P8AP updates the static readiness
 gate for this current state by preserving `default_cli_backend_still_python`
 with status `resolved`. Top-level readiness remains `blocked` because
-executor/apply and Python planner deletion remain unresolved. Python planner
-deletion, executor/apply cutover, packaged release readiness while
-`--rust-planner-bin` is required, and Tauri/protocol changes remain future work.
+executor/apply, packaged release, and unsatisfied evidence-dependent blockers
+remain unresolved. The Python planner deletion preflight remains separate future
+work while docs/context surfaces are present.
 P8BI adds `tools/check_python_planner_deletion_preflight.py` and
 `docs/python-planner-deletion-preflight.md` as a static preflight for the Python
 planner deletion sequence. The preflight reads checked-in source and docs text
@@ -452,18 +465,18 @@ P8BA implements the launcher-injected planner smoke tool at
 emits `kind: rust_launcher_injected_planner_smoke` reports with
 `schema_version: 1`, uses an explicit launcher-supplied `--rust-planner-bin`
 path, treats an argv0-observing wrapper as the launcher-supplied subprocess
-entrypoint, and retains its original static CLI-help check. P8BJ does not
-change this smoke tooling. P8BA does not add readiness intake, clear a
-readiness blocker, change CLI resolver behavior, implement packaged lookup,
-change runtime or packaging behavior, or write `.local` evidence. Packaged
-release readiness remains future work.
+entrypoint, and originally retained a static CLI-help check for explicit Python
+fallback availability. P8BN removes that stale CLI-help check. P8BA does not add
+readiness intake, clear a readiness blocker, change CLI resolver behavior,
+implement packaged lookup, change runtime or packaging behavior, or write
+`.local` evidence. Packaged release readiness remains future work.
 P8BC implements readiness intake for explicitly supplied
 `rust_launcher_injected_planner_smoke` reports with `schema_version: 1`. The
 readiness gate validates the report JSON only and does not execute the P8BA
 smoke tool, import smoke tool code, execute planner code, probe devices, or
 read `.local` evidence implicitly. Accepted P8BC evidence may mark only the
 packaged launcher-injection evidence item as accepted. Executor/apply readiness,
-Python planner deletion readiness, broader packaged release readiness, and
+broader packaged release readiness, unsatisfied evidence-dependent blockers, and
 top-level readiness remain blocked until later work intentionally clears them.
 P8BD documents that `evidence_accepted` means a supplied evidence item passed
 validation and does not mean the broader release blocker is resolved unless the
@@ -875,7 +888,7 @@ explicit formatter bridge, P8F is Python-compatible `rust-shadow` route/output
 matrix smoke, P8G is the explicit non-default `rust-experimental` migration
 route, and P8H is dev-only matrix smoke evidence for that explicit route across
 the current scenario matrix. None of these is default Rust planner cutover
-readiness or Python planner deletion readiness. The smoke does not execute/apply
+readiness or Python planner deletion work. The smoke does not execute/apply
 plans, probe devices, invoke ADB, access the network, materialize artifacts,
 regenerate goldens, participate in normal Rust/Tauri runtime checks, or make
 Rust planner output authoritative.

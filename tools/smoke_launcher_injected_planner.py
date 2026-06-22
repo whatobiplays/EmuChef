@@ -138,27 +138,6 @@ def run_process(
     )
 
 
-def run_help_process(command: Sequence[str], *, cwd: Path) -> subprocess.CompletedProcess[str]:
-    return subprocess.run(
-        list(command),
-        cwd=str(cwd),
-        check=False,
-        text=True,
-        capture_output=True,
-    )
-
-
-def check_explicit_python_backend_available(*, python_executable: str, repo_root: Path) -> bool:
-    """Return whether CLI help still exposes explicit Python planner fallback."""
-
-    try:
-        completed = run_help_process([python_executable, "-m", "emuchef", "plan", "--help"], cwd=repo_root)
-    except OSError:
-        return False
-    help_text = f"{completed.stdout}\n{completed.stderr}"
-    return completed.returncode == 0 and "--planner-backend" in help_text and "python" in help_text
-
-
 def run_smoke_report(
     *,
     authored_root: str,
@@ -168,10 +147,6 @@ def run_smoke_report(
     generated_at: str | None = None,
 ) -> dict[str, object]:
     validation = validate_launcher_path(rust_planner_bin)
-    python_bypass_available = check_explicit_python_backend_available(
-        python_executable=sys.executable,
-        repo_root=repo_root,
-    )
     observation = PlannerRunObservation(process_started=False, plan_succeeded=False, observed_argv0=None)
 
     if validation.passed:
@@ -206,7 +181,6 @@ def run_smoke_report(
         generated_at=generated_at or utc_timestamp(),
         device_plan=device_plan,
         validation=validation,
-        python_bypass_available=python_bypass_available,
         observation=observation,
         rust_planner_bin=rust_planner_bin,
     )
@@ -217,7 +191,6 @@ def build_report(
     generated_at: str,
     device_plan: str,
     validation: LauncherPathValidation,
-    python_bypass_available: bool,
     observation: PlannerRunObservation,
     rust_planner_bin: str,
 ) -> dict[str, object]:
@@ -247,11 +220,6 @@ def build_report(
             "known_fixture_plan_failed",
         ),
         _check(
-            "explicit_python_backend_bypass_available",
-            python_bypass_available,
-            "explicit_python_backend_not_exposed",
-        ),
-        _check(
             "no_implicit_fallback_sources_used",
             no_implicit_fallback_sources_used,
             "explicit_launcher_entrypoint_not_observed",
@@ -276,8 +244,6 @@ def build_report(
             "path_is_file": validation.path_is_file,
             "path_executable": validation.path_executable,
             "argv0_corresponds_to_launcher_path": argv0_corresponds,
-            "explicit_python_bypass_checked": True,
-            "explicit_python_bypass_check_mode": "cli_help_static",
             "detected_facts_source": "temporary_fixture_json",
             "launcher_entrypoint_observation": "external_wrapper",
         },

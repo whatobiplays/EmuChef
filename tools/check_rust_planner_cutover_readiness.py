@@ -75,7 +75,6 @@ P8BC_REQUIRED_CHECKS = (
     "launcher_supplied_path_executable",
     "argv0_corresponds_to_launcher_path",
     "known_fixture_plan_succeeded",
-    "explicit_python_backend_bypass_available",
     "no_implicit_fallback_sources_used",
 )
 P8BC_REQUIRED_REDACTION_FLAGS = (
@@ -93,8 +92,6 @@ P8BC_REQUIRED_INPUT_VALUES = {
     "path_exists": True,
     "path_executable": True,
     "argv0_corresponds_to_launcher_path": True,
-    "explicit_python_bypass_checked": True,
-    "explicit_python_bypass_check_mode": "cli_help_static",
 }
 
 REQUIRED_ARTIFACTS = (
@@ -127,7 +124,7 @@ READINESS_DOC_REFERENCES = (
 
 CLI_BACKEND_TOKENS = (
     ("planner_backend", "--planner-backend"),
-    ("python", "python"),
+    ("python_compatible_output", "python-compatible"),
     ("rust_shadow", "rust-shadow"),
     ("rust_experimental", "rust-experimental"),
     ("rust_planner_bin", "--rust-planner-bin"),
@@ -218,10 +215,6 @@ REMAINING_BLOCKERS = (
         "id": PACKAGED_RELEASE_BLOCKER_ID,
         "status": "blocked",
     },
-    {
-        "id": "python_planner_deletion_not_ready",
-        "status": "blocked",
-    },
 )
 
 
@@ -235,12 +228,12 @@ def _status_explanation() -> dict[str, Any]:
             "Accepted evidence can satisfy scoped evidence blockers; it does not imply top-level readiness."
         ),
         "top_level_blocked_reason": (
-            "Top-level readiness remains blocked while executor/apply, Python planner deletion, "
-            "and packaged release blockers remain blocked."
+            "Top-level readiness remains blocked while executor/apply, packaged release, "
+            "and unsatisfied evidence-dependent blockers remain blocked."
         ),
         "blocking_categories": [
             "executor_apply",
-            "python_planner_deletion",
+            "evidence_dependent_cutover",
             "packaged_release",
         ],
     }
@@ -737,9 +730,11 @@ def _cli_default_route_checks(repo_root: Path) -> list[dict[str, Any]]:
             _missing_source_tokens_details(text, default_resolution_tokens),
         ),
         _check(
-            "cli_explicit_python_backend_available",
-            '"python"' in backend_block,
-            None if '"python"' in backend_block else {"missing_token": '"python"', "source_block": "--planner-backend"},
+            "cli_explicit_python_backend_not_exposed",
+            '"python"' not in backend_block,
+            None
+            if '"python"' not in backend_block
+            else {"unexpected_token": '"python"', "source_block": "--planner-backend"},
         ),
         _check(
             "cli_default_rust_requires_planner_bin",

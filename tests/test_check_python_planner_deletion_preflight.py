@@ -255,9 +255,6 @@ class CheckPythonPlannerDeletionPreflightTests(unittest.TestCase):
         self.assertEqual(
             surface_ids(report),
             [
-                "readiness_gate_python_deletion_blocker",
-                "test_readiness_python_backend_or_deletion_assertions",
-                "test_launcher_smoke_python_help_exposure",
                 "docs_cutover_python_fallback_or_deletion_readiness",
                 "context_python_fallback_or_deletion_readiness",
             ],

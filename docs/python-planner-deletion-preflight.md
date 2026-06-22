@@ -60,3 +60,14 @@ smoke tooling, readiness validators, packaging, Tauri/config-editor, Rust
 backend code, or `.local` evidence. After P8BM, the real repository preflight
 no longer reports `cli_imports_emuchef_planner`, but it still reports
 `blocked` while non-runtime readiness/test/docs/context surfaces remain.
+
+P8BN removes stale Rust readiness and launcher-smoke assumptions that explicit
+`--planner-backend python` remains available. It removes
+`python_planner_deletion_not_ready` as a Rust planner cutover readiness blocker
+and removes the real-repo readiness-test and launcher-smoke preflight surfaces.
+It does not delete `src/emuchef/planner.py`, remove Python
+draft/session/profile helper behavior, or change plan routing, draft behavior,
+executor/apply, Rust planner behavior, packaging, Tauri/config-editor, Rust
+backend code, or `.local` evidence. After P8BN, the real repository preflight
+still reports `blocked` for the remaining docs/context surfaces until those
+surfaces are intentionally retired.

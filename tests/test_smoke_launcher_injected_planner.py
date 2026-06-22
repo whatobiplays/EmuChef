@@ -53,22 +53,6 @@ def executable_file(path: Path) -> Path:
     return path
 
 
-def successful_help() -> subprocess.CompletedProcess[str]:
-    return subprocess.CompletedProcess(
-        args=[],
-        returncode=0,
-        stdout=(
-            "usage: emuchef plan [-h]\n"
-            "  --planner-backend {python,rust-shadow,rust-experimental,rust-production-equivalent}\n"
-        ),
-        stderr="",
-    )
-
-
-def failed_help() -> subprocess.CompletedProcess[str]:
-    return subprocess.CompletedProcess(args=[], returncode=1, stdout="", stderr="help failed")
-
-
 def observed_success(launcher_path: Path):
     def fake_run_process(command, *, cwd, observation_path):
         observation_path.write_text(json.dumps({"argv0": str(launcher_path)}), encoding="utf-8")
@@ -136,24 +120,6 @@ class SmokeLauncherInjectedPlannerTests(unittest.TestCase):
         self.assertNotIn("cargo", command)
         self.assertNotIn("adb", command)
 
-    def test_static_python_bypass_check_uses_help_not_python_backend_execution(self) -> None:
-        captured_commands = []
-
-        def fake_run_help_process(command, *, cwd):
-            captured_commands.append(command)
-            return successful_help()
-
-        with patch.object(self.smoke, "run_help_process", side_effect=fake_run_help_process):
-            available = self.smoke.check_explicit_python_backend_available(
-                python_executable="python3",
-                repo_root=REPO_ROOT,
-            )
-
-        self.assertTrue(available)
-        self.assertEqual(captured_commands, [["python3", "-m", "emuchef", "plan", "--help"]])
-        self.assertNotIn("--planner-backend", captured_commands[0])
-        self.assertNotIn("python", captured_commands[0])
-
     def test_path_validation_rejects_relative_missing_directories_and_non_executable_files(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
             temp_root = Path(temp_dir)
@@ -200,10 +166,7 @@ class SmokeLauncherInjectedPlannerTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as temp_dir:
             temp_root = Path(temp_dir)
             launcher_wrapper = executable_file(temp_root / "emuchef-plan-shadow")
-            with (
-                patch.object(self.smoke, "run_help_process", return_value=successful_help()),
-                patch.object(self.smoke, "run_process", side_effect=observed_success(launcher_wrapper)),
-            ):
+            with patch.object(self.smoke, "run_process", side_effect=observed_success(launcher_wrapper)):
                 report = self.smoke.run_smoke_report(
                     authored_root=f"{temp_dir}/authored",
                     device_plan="ayaneo.pocket_s_mini.base",
@@ -221,7 +184,7 @@ class SmokeLauncherInjectedPlannerTests(unittest.TestCase):
             set(report),
             {"kind", "schema_version", "generated_at", "summary", "inputs", "checks", "redaction", "artifacts"},
         )
-        self.assertEqual(report["summary"], {"passed": 8, "failed": 0})
+        self.assertEqual(report["summary"], {"passed": 7, "failed": 0})
         self.assertEqual(
             set(check_map),
             {
@@ -231,7 +194,6 @@ class SmokeLauncherInjectedPlannerTests(unittest.TestCase):
                 "launcher_supplied_path_executable",
                 "argv0_corresponds_to_launcher_path",
                 "known_fixture_plan_succeeded",
-                "explicit_python_backend_bypass_available",
                 "no_implicit_fallback_sources_used",
             },
         )
@@ -254,10 +216,7 @@ class SmokeLauncherInjectedPlannerTests(unittest.TestCase):
         self.assertNotIn("serial", serialized.lower())
 
     def test_validation_failure_emits_report_without_running_planner_or_leaking_path(self) -> None:
-        with (
-            patch.object(self.smoke, "run_help_process", return_value=successful_help()),
-            patch.object(self.smoke, "run_process") as run_process,
-        ):
+        with patch.object(self.smoke, "run_process") as run_process:
             report = self.smoke.run_smoke_report(
                 authored_root="/Users/example/Projects/EmuChef/authored",
                 device_plan="ayaneo.pocket_s_mini.base",
@@ -296,10 +255,7 @@ class SmokeLauncherInjectedPlannerTests(unittest.TestCase):
                     stderr=f"raw stderr with {REPO_ROOT}\n",
                 )
 
-            with (
-                patch.object(self.smoke, "run_help_process", return_value=successful_help()),
-                patch.object(self.smoke, "run_process", side_effect=fake_failure),
-            ):
+            with patch.object(self.smoke, "run_process", side_effect=fake_failure):
                 report = self.smoke.run_smoke_report(
                     authored_root=f"{temp_dir}/authored",
                     device_plan="ayaneo.pocket_s_mini.base",
@@ -335,10 +291,7 @@ class SmokeLauncherInjectedPlannerTests(unittest.TestCase):
                 observation_path.write_text(json.dumps({"argv0": str(other_wrapper)}), encoding="utf-8")
                 return subprocess.CompletedProcess(args=[], returncode=0, stdout="Planning status: success\n", stderr="")
 
-            with (
-                patch.object(self.smoke, "run_help_process", return_value=successful_help()),
-                patch.object(self.smoke, "run_process", side_effect=fake_mismatch),
-            ):
+            with patch.object(self.smoke, "run_process", side_effect=fake_mismatch):
                 report = self.smoke.run_smoke_report(
                     authored_root=f"{temp_dir}/authored",
                     device_plan="ayaneo.pocket_s_mini.base",
@@ -361,36 +314,10 @@ class SmokeLauncherInjectedPlannerTests(unittest.TestCase):
         self.assertNotIn(str(other_wrapper), serialized)
         self.assertNotIn(temp_dir, serialized)
 
-    def test_failed_static_python_help_check_is_reported_without_running_python_backend(self) -> None:
-        with tempfile.TemporaryDirectory() as temp_dir:
-            launcher_wrapper = executable_file(Path(temp_dir) / "emuchef-plan-shadow")
-            with (
-                patch.object(self.smoke, "run_help_process", return_value=failed_help()) as run_help_process,
-                patch.object(self.smoke, "run_process", side_effect=observed_success(launcher_wrapper)),
-            ):
-                report = self.smoke.run_smoke_report(
-                    authored_root="authored",
-                    device_plan="ayaneo.pocket_s_mini.base",
-                    rust_planner_bin=str(launcher_wrapper),
-                    repo_root=REPO_ROOT,
-                    generated_at="2026-06-21T00:00:00Z",
-                )
-
-        check_map = checks_by_name(report)
-        help_command = run_help_process.call_args.args[0]
-
-        self.assertFalse(check_map["explicit_python_backend_bypass_available"]["passed"])
-        self.assertEqual(self.smoke.smoke_exit_code(report), 1)
-        self.assertNotIn("--planner-backend", help_command)
-        self.assertNotIn("python", help_command)
-
     def test_main_writes_report_file_and_returns_nonzero_for_failed_checks(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
             output_report = Path(temp_dir) / "report.json"
-            with (
-                patch.object(self.smoke, "run_help_process", return_value=successful_help()),
-                patch.object(self.smoke, "run_process") as run_process,
-            ):
+            with patch.object(self.smoke, "run_process") as run_process:
                 exit_code = self.smoke.main(
                     [
                         "--authored-root",
