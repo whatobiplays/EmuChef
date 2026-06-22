@@ -248,25 +248,6 @@ def _run_plan(args: argparse.Namespace) -> int:
     return _run_rust_shadow_plan(args)
 
 
-def _run_python_plan(args: argparse.Namespace) -> int:
-    catalog, session, detected_device = _build_session(args)
-    maybe_failure = _replay_ops_and_bindings(session, args.ops, args.bind)
-    if maybe_failure is not None:
-        return _write_failure_result(maybe_failure, verbose=args.verbose)
-
-    result = _append_profile_mismatch_warning_to_result(
-        catalog=catalog,
-        result=session.emit_execution_plan(),
-        detected_device=detected_device,
-    )
-    payload = dump_yaml(result, path=args.output) if args.output else dump_yaml(result)
-    if args.verbose:
-        sys.stdout.write(payload)
-    else:
-        sys.stdout.write(_format_planning_summary(result, output_path=args.output))
-    return 0 if result.execution_plan is not None else 1
-
-
 def _run_rust_shadow_plan(args: argparse.Namespace) -> int:
     try:
         command = _build_rust_shadow_plan_command(args)

@@ -41,3 +41,12 @@ Tauri/config-editor, Rust backend code, or `.local` evidence. After P8BK, the
 real repository preflight no longer reports
 `cli_run_plan_routes_to_python_plan`, but it still reports `blocked` while
 other Python planner deletion surfaces remain.
+
+P8BL deletes the private `_run_python_plan(...)` function and removes the
+transitional direct tests of that private function. It does not delete
+`src/emuchef/planner.py`, remove broader CLI imports from `emuchef.planner`, or
+change draft behavior, executor/apply, Rust planner behavior, smoke tooling,
+readiness validators, packaging, Tauri/config-editor, Rust backend code, or
+`.local` evidence. After P8BL, the real repository preflight no longer reports
+`cli_run_python_plan_function`, but it still reports `blocked` while other
+Python planner deletion surfaces remain.

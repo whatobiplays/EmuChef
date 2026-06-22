@@ -54,9 +54,11 @@ no-backend `emuchef plan` route through Rust-owned planning using the existing
 production-equivalent Rust subprocess path. During this transition, the default
 Rust route requires `--rust-planner-bin <path>` and emits Python-compatible
 summary/YAML output. P8BJ removes the explicit public
-`--planner-backend python` route without deleting Python planner code,
-`_run_python_plan`, or CLI imports from `emuchef.planner`. Rust-native JSON
-requires a separate accepted structured-output option.
+`--planner-backend python` route, P8BK removes fallback routing from
+`_run_plan(...)` to `_run_python_plan(...)`, and P8BL deletes the private
+`_run_python_plan(...)` function without deleting `src/emuchef/planner.py` or
+broader CLI imports from `emuchef.planner`. Rust-native JSON requires a
+separate accepted structured-output option.
 P8AR centralizes the current explicit `--rust-planner-bin <path>` validation in
 an internal Python CLI resolver helper. That helper remains explicit-path-only:
 no packaged lookup, Cargo fallback, arbitrary `PATH` search,
@@ -382,6 +384,14 @@ Tauri/config-editor, Rust backend code, or `.local` evidence. The P8BI
 preflight no longer reports `cli_run_plan_routes_to_python_plan` for the real
 repo, but it still reports `blocked` while other Python planner deletion
 surfaces remain.
+P8BL deletes the private `_run_python_plan(...)` function and removes the
+transitional direct tests of that private function. It does not delete
+`src/emuchef/planner.py`, remove broader CLI imports from `emuchef.planner`, or
+change draft behavior, executor/apply, Rust planner behavior, smoke tooling,
+readiness validators, packaging, Tauri/config-editor, Rust backend code, or
+`.local` evidence. The P8BI preflight no longer reports
+`cli_run_python_plan_function` for the real repo, but it still reports
+`blocked` while other Python planner deletion surfaces remain.
 P8AQ records the future default-route Rust planner binary resolution design in
 `docs/rust-default-planner-binary-resolution.md`. P8AQ is documentation-only:
 `--rust-planner-bin` remains required, no packaged binary lookup, Cargo
