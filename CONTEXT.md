@@ -360,6 +360,14 @@ with status `resolved`. Top-level readiness remains `blocked` because
 executor/apply and Python planner deletion remain unresolved. Python planner
 deletion, executor/apply cutover, packaged release readiness while
 `--rust-planner-bin` is required, and Tauri/protocol changes remain future work.
+P8BI adds `tools/check_python_planner_deletion_preflight.py` and
+`docs/python-planner-deletion-preflight.md` as a static preflight for the Python
+planner deletion sequence. The preflight reads checked-in source and docs text
+only, emits deterministic JSON, and reports `blocked` while CLI runtime paths,
+CLI imports, readiness blockers, fallback assertions, or docs/context
+references still keep Python planner deletion incomplete. P8BI does not delete
+Python planner code, change runtime behavior, run smoke tools, read `.local`,
+require Rust binaries, or clear readiness blockers.
 P8AQ records the future default-route Rust planner binary resolution design in
 `docs/rust-default-planner-binary-resolution.md`. P8AQ is documentation-only:
 `--rust-planner-bin` remains required, explicit `--planner-backend python`

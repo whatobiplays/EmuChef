@@ -180,6 +180,13 @@ as a navigation index for Rust planner readiness and cutover evidence docs. It
 does not change readiness semantics, evidence acceptance rules, smoke tooling,
 CLI/runtime behavior, packaging, Rust backend behavior, executor/apply
 behavior, or `.local` evidence.
+P8BI adds
+[docs/python-planner-deletion-preflight.md](python-planner-deletion-preflight.md)
+and `tools/check_python_planner_deletion_preflight.py` as a static deletion
+preflight for Python planner removal. P8BI does not remove Python planner code,
+change CLI/runtime behavior, change readiness-gate semantics, run smoke tools,
+read `.local`, require Rust binaries, or clear Python planner deletion
+readiness.
 P8N adds a crate-local Rust probe abstraction, fake probe, and tests for layering
 detected facts over synthetic/profile-derived context. P8O adds fake/test-backed
 planner-input construction that applies detected facts over
@@ -751,6 +758,12 @@ narrower route:
 ## Python Planner Deletion Blockers
 
 Before Python planner source can be removed, these blockers must be resolved:
+
+P8BI adds a static Python planner deletion preflight at
+`tools/check_python_planner_deletion_preflight.py`. The preflight inventories
+the current CLI runtime path, CLI import dependency, readiness blocker,
+fallback assertions, and docs/context references that must be removed, ported,
+or retired by later deletion slices.
 
 | Blocker | Current classification |
 | --- | --- |
