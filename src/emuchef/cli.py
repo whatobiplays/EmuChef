@@ -182,6 +182,10 @@ def main(argv: list[str] | None = None) -> int:
     apply_parser.add_argument("--plan-file", required=True)
     apply_parser.add_argument("--serial")
     apply_parser.add_argument("--dry-run", action="store_true")
+    apply_parser.add_argument(
+        "--rust-apply-bin",
+        help="Explicit path to the Rust backend binary for apply --dry-run migration checks.",
+    )
 
     args = parser.parse_args(argv)
     _configure_logging(args)
@@ -191,6 +195,8 @@ def main(argv: list[str] | None = None) -> int:
             _validate_plan_backend_args(args)
         if args.command == "plan" and _effective_plan_backend(args) in _RUST_SUBPROCESS_BACKENDS:
             return _run_plan(args)
+        if args.command == "apply" and args.rust_apply_bin is not None:
+            return _run_apply(args)
         setattr(
             args,
             "_resolved_adb",
@@ -527,6 +533,9 @@ def _run_detect_profiles(args: argparse.Namespace) -> int:
 
 
 def _run_apply(args: argparse.Namespace) -> int:
+    if args.rust_apply_bin is not None:
+        return _run_rust_apply_dry_run(args)
+
     plan_path = Path(args.plan_file)
     execution_plan = load_execution_plan_file(plan_path)
     adb = DryRunAdb() if args.dry_run else _build_adb(args)
@@ -537,6 +546,64 @@ def _run_apply(args: argparse.Namespace) -> int:
     )
     sys.stdout.write(_format_execution_summary(result, dry_run=args.dry_run))
     return 0 if result.success else 1
+
+
+def _run_rust_apply_dry_run(args: argparse.Namespace) -> int:
+    command = _build_rust_apply_command(args)
+    try:
+        completed = subprocess.run(
+            command,
+            check=False,
+            text=True,
+            capture_output=True,
+        )
+    except OSError as exc:
+        sys.stderr.write(f"Error: failed to start Rust apply binary '{command[0]}': {exc}\n")
+        return 1
+
+    if completed.stdout:
+        sys.stdout.write(completed.stdout)
+    if completed.stderr:
+        sys.stderr.write(completed.stderr)
+    return completed.returncode
+
+
+def _build_rust_apply_command(args: argparse.Namespace) -> list[str]:
+    rust_apply_bin = _resolve_rust_apply_bin(args)
+    command = [
+        str(rust_apply_bin),
+        "apply",
+        "--plan-file",
+        args.plan_file,
+        "--dry-run",
+    ]
+    if args.serial is not None:
+        command.extend(["--serial", args.serial])
+    return command
+
+
+def _resolve_rust_apply_bin(args: argparse.Namespace) -> Path:
+    """Resolve the explicitly supplied Rust apply binary for dry-run delegation."""
+
+    if not args.dry_run:
+        raise ValueError("--rust-apply-bin requires --dry-run.")
+    unsupported_options = [
+        ("--adb", args.adb is not None),
+        ("--verbose", args.verbose),
+        ("--debug", args.debug),
+    ]
+    for option, is_set in unsupported_options:
+        if is_set:
+            raise ValueError(f"--rust-apply-bin does not support {option}.")
+
+    rust_apply_bin = Path(args.rust_apply_bin).expanduser()
+    if not rust_apply_bin.exists():
+        raise ValueError(f"Rust apply binary does not exist: {args.rust_apply_bin}")
+    if not rust_apply_bin.is_file():
+        raise ValueError(f"Rust apply binary is not a file: {args.rust_apply_bin}")
+    if not os.access(rust_apply_bin, os.X_OK):
+        raise ValueError(f"Rust apply binary is not executable: {args.rust_apply_bin}")
+    return rust_apply_bin
 
 
 def _run_validate(args: argparse.Namespace) -> int:

@@ -54,6 +54,12 @@ class CliTests(unittest.TestCase):
         shadow_bin.chmod(0o755)
         return str(shadow_bin)
 
+    def _rust_apply_bin(self, tmp: str) -> str:
+        apply_bin = Path(tmp) / "emuchef-rust-backend"
+        apply_bin.write_text("#!/bin/sh\n", encoding="utf-8")
+        apply_bin.chmod(0o755)
+        return str(apply_bin)
+
     def _rust_resolver_args(
         self,
         *,
@@ -2982,6 +2988,309 @@ class CliTests(unittest.TestCase):
             self.assertIn("- total: 1", output)
             self.assertIn("- succeeded: 1", output)
             self.assertIn("- blocked: 0", output)
+
+    def test_apply_rust_dry_run_delegates_without_adb_resolution(self) -> None:
+        with TemporaryDirectory() as tmp:
+            rust_apply_bin = self._rust_apply_bin(tmp)
+            plan_path = Path(tmp) / "plan.yaml"
+            plan_path.write_text("kind: execution_plan\n", encoding="utf-8")
+            completed = subprocess.CompletedProcess(
+                args=[],
+                returncode=7,
+                stdout="rust stdout\n",
+                stderr="rust stderr\n",
+            )
+
+            stdout = StringIO()
+            stderr = StringIO()
+            with (
+                patch("emuchef.cli.resolve_adb_executable") as resolve_adb,
+                patch("emuchef.cli.load_execution_plan_file") as load_plan,
+                patch("emuchef.cli.ExecutorRunner") as executor_runner,
+                patch("subprocess.run", return_value=completed) as run,
+                contextlib.redirect_stdout(stdout),
+                contextlib.redirect_stderr(stderr),
+            ):
+                rc = main(
+                    [
+                        "apply",
+                        "--plan-file",
+                        str(plan_path),
+                        "--dry-run",
+                        "--rust-apply-bin",
+                        rust_apply_bin,
+                    ]
+                )
+
+        self.assertEqual(rc, 7)
+        self.assertEqual(stdout.getvalue(), "rust stdout\n")
+        self.assertEqual(stderr.getvalue(), "rust stderr\n")
+        resolve_adb.assert_not_called()
+        load_plan.assert_not_called()
+        executor_runner.assert_not_called()
+        run.assert_called_once_with(
+            [
+                rust_apply_bin,
+                "apply",
+                "--plan-file",
+                str(plan_path),
+                "--dry-run",
+            ],
+            check=False,
+            text=True,
+            capture_output=True,
+        )
+
+    def test_apply_rust_dry_run_forwards_serial_when_supplied(self) -> None:
+        with TemporaryDirectory() as tmp:
+            rust_apply_bin = self._rust_apply_bin(tmp)
+            plan_path = Path(tmp) / "plan.yaml"
+            plan_path.write_text("kind: execution_plan\n", encoding="utf-8")
+            completed = subprocess.CompletedProcess(args=[], returncode=0, stdout="", stderr="")
+
+            stdout = StringIO()
+            stderr = StringIO()
+            with (
+                patch("emuchef.cli.resolve_adb_executable") as resolve_adb,
+                patch("subprocess.run", return_value=completed) as run,
+                contextlib.redirect_stdout(stdout),
+                contextlib.redirect_stderr(stderr),
+            ):
+                rc = main(
+                    [
+                        "apply",
+                        "--plan-file",
+                        str(plan_path),
+                        "--dry-run",
+                        "--rust-apply-bin",
+                        rust_apply_bin,
+                        "--serial",
+                        "DEVICE123",
+                    ]
+                )
+
+        self.assertEqual(rc, 0, stderr.getvalue())
+        resolve_adb.assert_not_called()
+        run.assert_called_once()
+        self.assertEqual(
+            run.call_args.args[0],
+            [
+                rust_apply_bin,
+                "apply",
+                "--plan-file",
+                str(plan_path),
+                "--dry-run",
+                "--serial",
+                "DEVICE123",
+            ],
+        )
+
+    def test_apply_rust_dry_run_reports_subprocess_startup_failure(self) -> None:
+        with TemporaryDirectory() as tmp:
+            rust_apply_bin = self._rust_apply_bin(tmp)
+            plan_path = Path(tmp) / "plan.yaml"
+            plan_path.write_text("kind: execution_plan\n", encoding="utf-8")
+
+            stdout = StringIO()
+            stderr = StringIO()
+            with (
+                patch("emuchef.cli.resolve_adb_executable") as resolve_adb,
+                patch("emuchef.cli.load_execution_plan_file") as load_plan,
+                patch("emuchef.cli.ExecutorRunner") as executor_runner,
+                patch("subprocess.run", side_effect=OSError("boom")) as run,
+                contextlib.redirect_stdout(stdout),
+                contextlib.redirect_stderr(stderr),
+            ):
+                rc = main(
+                    [
+                        "apply",
+                        "--plan-file",
+                        str(plan_path),
+                        "--dry-run",
+                        "--rust-apply-bin",
+                        rust_apply_bin,
+                    ]
+                )
+
+        self.assertEqual(rc, 1)
+        self.assertEqual(stdout.getvalue(), "")
+        self.assertIn(f"Error: failed to start Rust apply binary '{rust_apply_bin}': boom\n", stderr.getvalue())
+        resolve_adb.assert_not_called()
+        load_plan.assert_not_called()
+        executor_runner.assert_not_called()
+        run.assert_called_once()
+
+    def test_apply_rust_bin_requires_dry_run_before_subprocess_work(self) -> None:
+        with TemporaryDirectory() as tmp:
+            rust_apply_bin = self._rust_apply_bin(tmp)
+            plan_path = Path(tmp) / "plan.yaml"
+            plan_path.write_text("kind: execution_plan\n", encoding="utf-8")
+
+            stdout = StringIO()
+            stderr = StringIO()
+            with (
+                patch("emuchef.cli.resolve_adb_executable") as resolve_adb,
+                patch("emuchef.cli.load_execution_plan_file") as load_plan,
+                patch("emuchef.cli.ExecutorRunner") as executor_runner,
+                patch("subprocess.run") as run,
+                contextlib.redirect_stdout(stdout),
+                contextlib.redirect_stderr(stderr),
+            ):
+                rc = main(["apply", "--plan-file", str(plan_path), "--rust-apply-bin", rust_apply_bin])
+
+        self.assertEqual(rc, 1)
+        self.assertEqual(stdout.getvalue(), "")
+        self.assertEqual(stderr.getvalue(), "Error: --rust-apply-bin requires --dry-run.\n")
+        resolve_adb.assert_not_called()
+        load_plan.assert_not_called()
+        executor_runner.assert_not_called()
+        run.assert_not_called()
+
+    def test_apply_rust_bin_validates_supplied_binary_path_before_subprocess_work(self) -> None:
+        with TemporaryDirectory() as tmp:
+            temp_root = Path(tmp)
+            missing_bin = temp_root / "missing"
+            directory_bin = temp_root / "directory"
+            directory_bin.mkdir()
+            non_executable_bin = temp_root / "not-executable"
+            non_executable_bin.write_text("#!/bin/sh\n", encoding="utf-8")
+            non_executable_bin.chmod(0o600)
+            plan_path = temp_root / "plan.yaml"
+            plan_path.write_text("kind: execution_plan\n", encoding="utf-8")
+            cases = [
+                (missing_bin, f"Rust apply binary does not exist: {missing_bin}"),
+                (directory_bin, f"Rust apply binary is not a file: {directory_bin}"),
+                (non_executable_bin, f"Rust apply binary is not executable: {non_executable_bin}"),
+            ]
+
+            for rust_apply_bin, expected_message in cases:
+                with self.subTest(rust_apply_bin=rust_apply_bin):
+                    stdout = StringIO()
+                    stderr = StringIO()
+                    with (
+                        patch("emuchef.cli.resolve_adb_executable") as resolve_adb,
+                        patch("emuchef.cli.load_execution_plan_file") as load_plan,
+                        patch("emuchef.cli.ExecutorRunner") as executor_runner,
+                        patch("subprocess.run") as run,
+                        contextlib.redirect_stdout(stdout),
+                        contextlib.redirect_stderr(stderr),
+                    ):
+                        rc = main(
+                            [
+                                "apply",
+                                "--plan-file",
+                                str(plan_path),
+                                "--dry-run",
+                                "--rust-apply-bin",
+                                str(rust_apply_bin),
+                            ]
+                        )
+
+                    self.assertEqual(rc, 1)
+                    self.assertEqual(stdout.getvalue(), "")
+                    self.assertIn(f"Error: {expected_message}\n", stderr.getvalue())
+                    resolve_adb.assert_not_called()
+                    load_plan.assert_not_called()
+                    executor_runner.assert_not_called()
+                    run.assert_not_called()
+
+    def test_apply_rust_bin_rejects_python_only_flags_before_subprocess_work(self) -> None:
+        cases = [
+            (["--adb", "/does/not/matter"], "--rust-apply-bin does not support --adb."),
+            (["--verbose"], "--rust-apply-bin does not support --verbose."),
+            (["--debug"], "--rust-apply-bin does not support --debug."),
+        ]
+        with TemporaryDirectory() as tmp:
+            rust_apply_bin = self._rust_apply_bin(tmp)
+            plan_path = Path(tmp) / "plan.yaml"
+            plan_path.write_text("kind: execution_plan\n", encoding="utf-8")
+
+            for extra_args, expected_message in cases:
+                with self.subTest(extra_args=extra_args):
+                    stdout = StringIO()
+                    stderr = StringIO()
+                    with (
+                        patch("emuchef.cli.resolve_adb_executable") as resolve_adb,
+                        patch("emuchef.cli.load_execution_plan_file") as load_plan,
+                        patch("emuchef.cli.ExecutorRunner") as executor_runner,
+                        patch("subprocess.run") as run,
+                        contextlib.redirect_stdout(stdout),
+                        contextlib.redirect_stderr(stderr),
+                    ):
+                        rc = main(
+                            [
+                                "apply",
+                                *extra_args,
+                                "--plan-file",
+                                str(plan_path),
+                                "--dry-run",
+                                "--rust-apply-bin",
+                                rust_apply_bin,
+                            ]
+                        )
+
+                    self.assertEqual(rc, 1)
+                    self.assertEqual(stdout.getvalue(), "")
+                    self.assertIn(f"Error: {expected_message}\n", stderr.getvalue())
+                    resolve_adb.assert_not_called()
+                    load_plan.assert_not_called()
+                    executor_runner.assert_not_called()
+                    run.assert_not_called()
+
+    def test_apply_without_rust_apply_bin_keeps_python_executor_path(self) -> None:
+        with TemporaryDirectory() as tmp:
+            plan = ExecutionPlan(
+                id="plan.test",
+                source=ExecutionPlanSource(
+                    device_profile_ref="example.device_profile",
+                    device_plan_ref="example.device_plan",
+                    selected_recipe_refs=("example.recipe",),
+                    expanded_recipe_refs=("example.recipe",),
+                ),
+                device_context=DeviceContext(
+                    manufacturer="Example",
+                    model="Example",
+                    android_version=13,
+                    android_api_level=33,
+                    device_tags=(),
+                ),
+                runtime_capabilities=RuntimeCapabilities(
+                    adb_available=True,
+                    apk_install=True,
+                    shared_storage_write=True,
+                    app_launch=True,
+                    shell_command=True,
+                    package_remove_for_user=False,
+                    root_shell=True,
+                    app_data_write=True,
+                ),
+                inputs=(),
+                artifacts=(),
+                steps=(
+                    ExecutionStep(
+                        id="example.recipe/wait",
+                        recipe_ref="example.recipe",
+                        type="wait",
+                        name="Wait",
+                        params={"duration_ms": LiteralParamValue(value=10)},
+                    ),
+                ),
+            )
+            plan_path = Path(tmp) / "plan.yaml"
+            dump_yaml(plan, path=plan_path)
+
+            stdout = StringIO()
+            stderr = StringIO()
+            with (
+                patch("subprocess.run") as run,
+                contextlib.redirect_stdout(stdout),
+                contextlib.redirect_stderr(stderr),
+            ):
+                rc = main(["apply", "--plan-file", str(plan_path), "--dry-run"])
+
+        self.assertEqual(rc, 0, stderr.getvalue())
+        self.assertIn("Dry run: success", stdout.getvalue())
+        run.assert_not_called()
 
     def test_apply_reports_blocked_steps_separately(self) -> None:
         with TemporaryDirectory() as tmp:
