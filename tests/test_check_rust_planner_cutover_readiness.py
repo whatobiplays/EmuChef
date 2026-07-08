@@ -3,13 +3,17 @@ from __future__ import annotations
 import importlib.util
 import json
 import re
+import subprocess
+import sys
 import tempfile
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 TOOL_PATH = REPO_ROOT / "tools" / "check_rust_planner_cutover_readiness.py"
+SMOKE_PATH = REPO_ROOT / "tools" / "smoke_launcher_injected_planner.py"
 READINESS_DOC_TEXT = """
 tools/plan_parity_scenarios.json
 tools/compare_rust_python_plan.py
@@ -42,12 +46,28 @@ def _effective_plan_backend(args):
     return args.planner_backend or _DEFAULT_RUST_PLANNER_BACKEND
 
 def _validate_rust_shadow_plan_args(args):
-    if not args.rust_planner_bin:
-        if args.planner_backend is None:
-            raise ValueError("--rust-planner-bin is required when default Rust planner routing is active.")
-        raise ValueError(
-            f"--rust-planner-bin is required when --planner-backend {_effective_plan_backend(args)} is selected."
-        )
+
+def _resolve_rust_planner_bin(args):
+    _validate_rust_shadow_plan_args(args)
+    if args.rust_planner_bin:
+        rust_planner_bin = Path(args.rust_planner_bin).expanduser()
+        if not rust_planner_bin.exists():
+            raise ValueError(f"Rust shadow planner binary does not exist: {args.rust_planner_bin}")
+        if not rust_planner_bin.is_file() or not os.access(rust_planner_bin, os.X_OK):
+            raise ValueError(f"Rust shadow planner binary is not executable: {args.rust_planner_bin}")
+        return rust_planner_bin
+
+    packaged_candidate = _packaged_rust_planner_bin_candidate(args)
+    if packaged_candidate is not None:
+        return packaged_candidate
+
+    if args.planner_backend is None:
+        raise ValueError("--rust-planner-bin is required when default Rust planner routing is active.")
+    raise ValueError(f"--rust-planner-bin is required when --planner-backend {_effective_plan_backend(args)} is selected.")
+
+
+def _packaged_rust_planner_bin_candidate(args):
+    return None
 """
 
 EXPLICIT_DEVICE_CONTEXT = {
@@ -63,6 +83,17 @@ def import_readiness_module():
     if spec is None or spec.loader is None:
         raise AssertionError(f"Could not load module spec for {TOOL_PATH}")
     module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+def import_smoke_module():
+    module_name = "smoke_launcher_injected_planner_for_readiness_tests"
+    spec = importlib.util.spec_from_file_location(module_name, SMOKE_PATH)
+    if spec is None or spec.loader is None:
+        raise AssertionError(f"Could not load module spec for {SMOKE_PATH}")
+    module = importlib.util.module_from_spec(spec)
+    sys.modules[module_name] = module
     spec.loader.exec_module(module)
     return module
 
@@ -268,6 +299,12 @@ def expected_status_explanation() -> dict:
             "packaged_release",
         ],
     }
+
+
+def executable_file(path: Path) -> Path:
+    path.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
+    path.chmod(0o700)
+    return path
 
 
 class CheckRustPlannerCutoverReadinessTests(unittest.TestCase):
@@ -607,6 +644,17 @@ class CheckRustPlannerCutoverReadinessTests(unittest.TestCase):
             "tools/smoke_rust_production_equivalent_mismatch_warning.py",
             commands["p8ak_rust_production_equivalent_mismatch_warning_smoke"],
         )
+        self.assertIn("p8bc_launcher_injected_planner_smoke", commands)
+        p8bc_command = commands["p8bc_launcher_injected_planner_smoke"]
+        self.assertIn("tools/smoke_launcher_injected_planner.py", p8bc_command)
+        self.assertIn("--rust-planner-bin <absolute-path-to-launcher-supplied-planner>", p8bc_command)
+        self.assertIn("--output-report <path-to-output-report>", p8bc_command)
+        self.assertNotIn(".local", p8bc_command)
+        self.assertNotIn("/Users/", p8bc_command)
+        self.assertNotIn("/tmp/", p8bc_command)
+        self.assertNotIn("stdout", p8bc_command.lower())
+        self.assertNotIn("stderr", p8bc_command.lower())
+        self.assertNotIn("environment", p8bc_command.lower())
 
     def test_status_explanation_is_present_without_p8bc_evidence(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
@@ -617,6 +665,42 @@ class CheckRustPlannerCutoverReadinessTests(unittest.TestCase):
 
         self.assertEqual(list(report).index("status_explanation"), list(report).index("status") + 1)
         self.assertEqual(report["status_explanation"], expected_status_explanation())
+
+    def test_valid_p8aj_p8ak_and_p8bc_reports_under_local_evidence_paths_accept_scoped_blockers_only(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            make_synthetic_repo(root)
+            live_report = write_json(root, ".local/evidence/p8aj-live-probe.json", accepted_p8aj_report())
+            mismatch_report = write_json(root, ".local/evidence/p8ak-mismatch-warning.json", accepted_p8ak_report())
+            launcher_report = write_json(
+                root,
+                ".local/evidence/p8bc-launcher-injected-planner.json",
+                accepted_p8bc_report(),
+            )
+
+            report = self.build_report(
+                root,
+                p8aj_live_probe_report=live_report,
+                p8ak_mismatch_warning_report=mismatch_report,
+                p8bc_launcher_injected_planner_report=launcher_report,
+            )
+
+        evidence = report["production_equivalent_evidence"]
+        self.assertEqual(evidence["p8aj_live_probe"]["status"], "accepted")
+        self.assertEqual(evidence["p8ak_mismatch_warning"]["status"], "accepted")
+        self.assertEqual(evidence["p8bc_launcher_injected_planner"]["status"], "accepted")
+        self.assertEqual(blocker_status(report, "real_device_probing_not_cut_over"), "evidence_accepted")
+        self.assertEqual(
+            blocker_status(report, "detected_device_profile_mismatch_warning_not_cut_over"),
+            "evidence_accepted",
+        )
+        self.assertEqual(
+            blocker_status(report, "packaged_launcher_injection_evidence_not_accepted"),
+            "evidence_accepted",
+        )
+        self.assertEqual(blocker_status(report, "executor_apply_not_cut_over"), "blocked")
+        self.assertEqual(blocker_status(report, "packaged_release_not_ready"), "blocked")
+        self.assertEqual(report["status"], "blocked")
 
     def test_missing_p8aj_and_p8ak_evidence_keeps_production_equivalent_blockers_blocked(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
@@ -637,7 +721,34 @@ class CheckRustPlannerCutoverReadinessTests(unittest.TestCase):
         )
         self.assertEqual(blocker_status(report, "real_device_probing_not_cut_over"), "blocked")
         self.assertEqual(blocker_status(report, "detected_device_profile_mismatch_warning_not_cut_over"), "blocked")
+        self.assertEqual(blocker_status(report, "packaged_launcher_injection_evidence_not_accepted"), "blocked")
         self.assertEqual(report["status"], "blocked")
+
+    def test_supplied_missing_evidence_paths_are_rejected_without_accepting_blockers(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            make_synthetic_repo(root)
+
+            report = self.build_report(
+                root,
+                p8aj_live_probe_report=Path(".local/evidence/p8aj-live-probe.json"),
+                p8ak_mismatch_warning_report=Path(".local/evidence/p8ak-mismatch-warning.json"),
+                p8bc_launcher_injected_planner_report=Path(".local/evidence/p8bc-launcher-injected-planner.json"),
+            )
+
+        evidence = report["production_equivalent_evidence"]
+        self.assertEqual(evidence["p8aj_live_probe"]["status"], "rejected")
+        self.assertEqual(evidence["p8ak_mismatch_warning"]["status"], "rejected")
+        self.assertEqual(evidence["p8bc_launcher_injected_planner"]["status"], "rejected")
+        self.assertTrue(
+            all(
+                item["reasons"] == ["evidence report file is missing"]
+                for item in evidence.values()
+            )
+        )
+        self.assertEqual(blocker_status(report, "real_device_probing_not_cut_over"), "blocked")
+        self.assertEqual(blocker_status(report, "detected_device_profile_mismatch_warning_not_cut_over"), "blocked")
+        self.assertEqual(blocker_status(report, "packaged_launcher_injection_evidence_not_accepted"), "blocked")
 
     def test_p8aj_accepted_and_p8ak_missing_updates_only_live_probe_blocker(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
@@ -705,10 +816,14 @@ class CheckRustPlannerCutoverReadinessTests(unittest.TestCase):
     def test_failed_or_incomplete_evidence_reports_do_not_mark_blockers_accepted(self) -> None:
         p8aj_failed = accepted_p8aj_report()
         p8aj_failed["summary"]["failed"] = 1
+        p8aj_failed_status = accepted_p8aj_report()
+        p8aj_failed_status["status"] = "failed"
         p8aj_not_live = accepted_p8aj_report()
         p8aj_not_live["inputs"]["live_probe_requested"] = False
         p8ak_failed = accepted_p8ak_report()
         p8ak_failed["summary"]["failed"] = 1
+        p8ak_failed_status = accepted_p8ak_report()
+        p8ak_failed_status["status"] = "failed"
         p8ak_missing_case = accepted_p8ak_report()
         p8ak_missing_case["cases"] = [
             case for case in p8ak_missing_case["cases"] if case["id"] != "android_minimum_match"
@@ -716,11 +831,18 @@ class CheckRustPlannerCutoverReadinessTests(unittest.TestCase):
 
         cases = [
             ("p8aj_failed", "reports/p8aj.json", p8aj_failed, "real_device_probing_not_cut_over"),
+            ("p8aj_failed_status", "reports/p8aj.json", p8aj_failed_status, "real_device_probing_not_cut_over"),
             ("p8aj_not_live", "reports/p8aj.json", p8aj_not_live, "real_device_probing_not_cut_over"),
             (
                 "p8ak_failed",
                 "reports/p8ak.json",
                 p8ak_failed,
+                "detected_device_profile_mismatch_warning_not_cut_over",
+            ),
+            (
+                "p8ak_failed_status",
+                "reports/p8ak.json",
+                p8ak_failed_status,
                 "detected_device_profile_mismatch_warning_not_cut_over",
             ),
             (
@@ -840,6 +962,35 @@ class CheckRustPlannerCutoverReadinessTests(unittest.TestCase):
                 self.assertEqual(evidence["status"], "rejected")
                 self.assertTrue(evidence["reasons"])
 
+    def test_missing_or_false_p8bc_required_input_and_redaction_values_are_rejected(self) -> None:
+        missing_input = accepted_p8bc_report()
+        del missing_input["inputs"]["launcher_supplied_planner_path"]
+        false_input = accepted_p8bc_report()
+        false_input["inputs"]["path_executable"] = False
+        missing_redaction_flag = accepted_p8bc_report()
+        del missing_redaction_flag["redaction"]["sensitive_values_omitted"]
+        false_redaction_flag = accepted_p8bc_report()
+        false_redaction_flag["redaction"]["process_output_omitted"] = False
+
+        cases = [
+            ("missing_input", missing_input, "inputs.launcher_supplied_planner_path"),
+            ("false_input", false_input, "inputs.path_executable"),
+            ("missing_redaction_flag", missing_redaction_flag, "redaction.sensitive_values_omitted"),
+            ("false_redaction_flag", false_redaction_flag, "redaction.process_output_omitted"),
+        ]
+        for name, payload, reason_token in cases:
+            with self.subTest(name=name):
+                with tempfile.TemporaryDirectory() as temp_dir:
+                    root = Path(temp_dir)
+                    make_synthetic_repo(root)
+                    report_path = write_json(root, "reports/p8bc.json", payload)
+
+                    report = self.build_report(root, p8bc_launcher_injected_planner_report=report_path)
+
+                evidence = report["production_equivalent_evidence"]["p8bc_launcher_injected_planner"]
+                self.assertEqual(evidence["status"], "rejected")
+                self.assertTrue(any(reason_token in reason for reason in evidence["reasons"]))
+
     def test_p8bc_denylisted_key_rejection_is_recursive_and_exact_match_only(self) -> None:
         rejected = accepted_p8bc_report()
         rejected["checks"][0]["details"] = {"raw_command": "do-not-store"}
@@ -862,6 +1013,33 @@ class CheckRustPlannerCutoverReadinessTests(unittest.TestCase):
         self.assertTrue(any("report.checks[0].details.raw_command" in reason for reason in rejected_evidence["reasons"]))
         self.assertEqual(accepted_evidence["status"], "accepted")
         self.assertEqual(accepted_evidence["reasons"], [])
+
+    def test_sensitive_evidence_keys_are_rejected_across_supplied_payloads(self) -> None:
+        for key in (
+            "command",
+            "argv",
+            "stdout",
+            "stderr",
+            "env",
+            "serial",
+            "planner_path",
+            "absolute_path",
+            "cwd",
+            "home",
+        ):
+            with self.subTest(key=key):
+                payload = accepted_p8aj_report()
+                payload["cases"][0][key] = "do-not-store"
+                with tempfile.TemporaryDirectory() as temp_dir:
+                    root = Path(temp_dir)
+                    make_synthetic_repo(root)
+                    report_path = write_json(root, "reports/p8aj.json", payload)
+
+                    report = self.build_report(root, p8aj_live_probe_report=report_path)
+
+                evidence = report["production_equivalent_evidence"]["p8aj_live_probe"]
+                self.assertEqual(evidence["status"], "rejected")
+                self.assertTrue(any(f"report.cases[0].{key}" in reason for reason in evidence["reasons"]))
 
     def test_p8bc_local_path_values_are_rejected_but_safe_schema_values_and_basenames_are_allowed(self) -> None:
         path_values = [
@@ -934,6 +1112,42 @@ class CheckRustPlannerCutoverReadinessTests(unittest.TestCase):
         evidence = report["production_equivalent_evidence"]["p8bc_launcher_injected_planner"]
         self.assertEqual(evidence["status"], "accepted")
         self.assertEqual(evidence["reasons"], [])
+
+    def test_generated_p8bc_smoke_report_shape_is_accepted_by_readiness_gate(self) -> None:
+        smoke = import_smoke_module()
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            make_synthetic_repo(root)
+            launcher_wrapper = executable_file(root / "emuchef-plan-shadow")
+
+            def fake_run_process(command, *, cwd, observation_path):
+                observation_path.write_text(json.dumps({"argv0": str(launcher_wrapper)}), encoding="utf-8")
+                return subprocess.CompletedProcess(
+                    args=[],
+                    returncode=0,
+                    stdout="Planning status: success\nExecution plan: plan.shadow.test\n",
+                    stderr="",
+                )
+
+            with patch.object(smoke, "run_process", side_effect=fake_run_process):
+                payload = smoke.run_smoke_report(
+                    authored_root=str(root / "authored"),
+                    device_plan="ayaneo.pocket_s_mini.base",
+                    rust_planner_bin=str(launcher_wrapper),
+                    repo_root=REPO_ROOT,
+                    generated_at="2026-06-21T00:00:00Z",
+                )
+            report_path = write_json(root, ".local/evidence/p8bc-launcher-injected-planner.json", payload)
+
+            report = self.build_report(root, p8bc_launcher_injected_planner_report=report_path)
+
+        evidence = report["production_equivalent_evidence"]["p8bc_launcher_injected_planner"]
+        self.assertEqual(evidence["status"], "accepted")
+        self.assertEqual(evidence["reasons"], [])
+        self.assertEqual(
+            blocker_status(report, "packaged_launcher_injection_evidence_not_accepted"),
+            "evidence_accepted",
+        )
 
     def test_sensitive_evidence_fields_are_rejected_without_rejecting_classification_fields(self) -> None:
         accepted_with_classification_fields = accepted_p8aj_report()

@@ -188,6 +188,16 @@ REQUIRED_MANUAL_EVIDENCE = (
             "--device-plan ayaneo.pocket_s_mini.base"
         ),
     },
+    {
+        "id": "p8bc_launcher_injected_planner_smoke",
+        "command": (
+            "PYTHONPATH=src rtk python3 tools/smoke_launcher_injected_planner.py "
+            "--authored-root authored "
+            "--device-plan ayaneo.pocket_s_mini.base "
+            "--rust-planner-bin <absolute-path-to-launcher-supplied-planner> "
+            "--output-report <path-to-output-report>"
+        ),
+    },
 )
 
 REMAINING_BLOCKERS = (
@@ -452,6 +462,7 @@ def _p8aj_evidence_rejection_reasons(payload: dict[str, Any]) -> list[str]:
         reasons.append(f"kind must be {P8AJ_REPORT_KIND}")
     if payload.get("schema_version") != REPORT_SCHEMA_VERSION:
         reasons.append(f"schema_version must be {REPORT_SCHEMA_VERSION}")
+    reasons.extend(_optional_status_rejection_reasons(payload))
 
     summary = payload.get("summary")
     if not isinstance(summary, dict) or not _json_int_equals(summary.get("failed"), 0):
@@ -469,6 +480,7 @@ def _p8ak_evidence_rejection_reasons(payload: dict[str, Any]) -> list[str]:
         reasons.append(f"kind must be {P8AK_REPORT_KIND}")
     if payload.get("schema_version") != REPORT_SCHEMA_VERSION:
         reasons.append(f"schema_version must be {REPORT_SCHEMA_VERSION}")
+    reasons.extend(_optional_status_rejection_reasons(payload))
 
     summary = payload.get("summary")
     if not isinstance(summary, dict) or not _json_int_equals(summary.get("failed"), 0):
@@ -541,6 +553,13 @@ def _p8bc_evidence_rejection_reasons(payload: dict[str, Any]) -> list[str]:
             reasons.append("artifacts.argv0_basename must be a non-empty basename")
 
     return reasons
+
+
+def _optional_status_rejection_reasons(payload: dict[str, Any]) -> list[str]:
+    status = payload.get("status")
+    if status is None or status == "passed":
+        return []
+    return ["status must be passed when present"]
 
 
 def _p8bc_required_check_states(checks: list[object]) -> dict[str, bool | None]:
@@ -713,7 +732,12 @@ def _cli_default_route_checks(repo_root: Path) -> list[dict[str, Any]]:
         "return args.planner_backend or _DEFAULT_RUST_PLANNER_BACKEND",
     )
     rust_bin_required_tokens = (
-        "if not args.rust_planner_bin:",
+        "if args.rust_planner_bin:",
+        "packaged_candidate = _packaged_rust_planner_bin_candidate(args)",
+        "if packaged_candidate is not None:",
+        "return packaged_candidate",
+        "def _packaged_rust_planner_bin_candidate(args",
+        "return None",
         "if args.planner_backend is None:",
         "--rust-planner-bin is required when default Rust planner routing is active.",
     )
