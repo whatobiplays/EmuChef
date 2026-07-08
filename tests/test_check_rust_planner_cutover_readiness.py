@@ -47,7 +47,7 @@ apply_parser.add_argument("--serial")
 apply_parser.add_argument("--dry-run", action="store_true")
 apply_parser.add_argument("--rust-apply-bin")
 
-if args.command == "apply" and args.rust_apply_bin is not None:
+if _should_route_apply_dry_run_to_rust(args):
     return _run_apply(args)
 setattr(
     args,
@@ -85,12 +85,17 @@ def _resolve_rust_planner_bin(args):
 def _packaged_rust_planner_bin_candidate(args):
     return None
 
+def _should_route_apply_dry_run_to_rust(args):
+    return args.command == "apply" and (args.rust_apply_bin is not None or args.dry_run is True)
+
 def _run_apply(args):
-    if args.rust_apply_bin is not None:
+    if args.rust_apply_bin is not None or args.dry_run:
         return _run_rust_apply_dry_run(args)
 
     plan_path = Path(args.plan_file)
-    adb = DryRunAdb() if args.dry_run else _build_adb(args)
+    execution_plan = load_execution_plan_file(plan_path)
+    adb = _build_adb(args)
+    runner = ExecutorRunner(adb=adb, workdir=plan_path.parent)
 
 def _run_rust_apply_dry_run(args):
     command = _build_rust_apply_command(args)
@@ -131,7 +136,11 @@ def _resolve_rust_apply_bin(args):
         if is_set:
             raise ValueError(f"--rust-apply-bin does not support {option}.")
 
-    rust_apply_bin = Path(args.rust_apply_bin).expanduser()
+    rust_apply_bin = _explicit_rust_apply_bin_candidate(args)
+    if rust_apply_bin is None:
+        rust_apply_bin = _packaged_rust_apply_bin_candidate(args)
+    if rust_apply_bin is None:
+        raise ValueError("--rust-apply-bin is required when default Rust apply dry-run routing is active.")
     if not rust_apply_bin.exists():
         raise ValueError(f"Rust apply binary does not exist: {args.rust_apply_bin}")
     if not rust_apply_bin.is_file():
@@ -139,6 +148,14 @@ def _resolve_rust_apply_bin(args):
     if not os.access(rust_apply_bin, os.X_OK):
         raise ValueError(f"Rust apply binary is not executable: {args.rust_apply_bin}")
     return rust_apply_bin
+
+def _explicit_rust_apply_bin_candidate(args):
+    if args.rust_apply_bin is None:
+        return None
+    return Path(args.rust_apply_bin).expanduser()
+
+def _packaged_rust_apply_bin_candidate(args):
+    return None
 """
 
 P8BR_STATIC_CHECK_IDS = (
@@ -152,6 +169,14 @@ P8BR_STATIC_CHECK_IDS = (
     "cli_explicit_rust_apply_forwards_serial_conditionally",
     "cli_explicit_rust_apply_uses_static_subprocess_contract",
     "cli_explicit_rust_apply_preserves_subprocess_output",
+)
+
+P8BS_STATIC_CHECK_IDS = (
+    "cli_default_rust_apply_dry_run_route_present",
+    "cli_default_rust_apply_dry_run_route_before_adb_resolution",
+    "cli_default_rust_apply_dry_run_requires_binary",
+    "cli_default_rust_apply_dry_run_has_no_python_fallback",
+    "cli_default_rust_apply_dry_run_preserves_non_dry_run_apply_boundary",
 )
 
 EXPLICIT_DEVICE_CONTEXT = {
@@ -445,8 +470,12 @@ class CheckRustPlannerCutoverReadinessTests(unittest.TestCase):
         for check_id in P8BR_STATIC_CHECK_IDS:
             with self.subTest(check_id=check_id):
                 self.assertEqual(check_by_id(report, check_id)["status"], "pass")
+        for check_id in P8BS_STATIC_CHECK_IDS:
+            with self.subTest(check_id=check_id):
+                self.assertEqual(check_by_id(report, check_id)["status"], "pass")
         blockers = {blocker["id"]: blocker["status"] for blocker in report["remaining_blockers"]}
         self.assertEqual(blockers["explicit_rust_apply_dry_run_bridge"], "resolved")
+        self.assertEqual(blockers["default_rust_apply_dry_run_route"], "resolved")
         self.assertEqual(blockers["executor_apply_not_cut_over"], "blocked")
         self.assertNotIn(retired_python_deletion_blocker_id(), blockers)
 
@@ -456,7 +485,19 @@ class CheckRustPlannerCutoverReadinessTests(unittest.TestCase):
         for check_id in P8BR_STATIC_CHECK_IDS:
             with self.subTest(check_id=check_id):
                 self.assertEqual(check_by_id(report, check_id)["status"], "pass")
+        for check_id in P8BS_STATIC_CHECK_IDS:
+            with self.subTest(check_id=check_id):
+                self.assertEqual(check_by_id(report, check_id)["status"], "pass")
         self.assertEqual(blocker_status(report, "explicit_rust_apply_dry_run_bridge"), "resolved")
+        self.assertEqual(blocker_status(report, "default_rust_apply_dry_run_route"), "resolved")
+        self.assertEqual(blocker_status(report, "executor_apply_not_cut_over"), "blocked")
+        self.assertEqual(report["status"], "blocked")
+
+    def test_default_rust_apply_dry_run_route_does_not_clear_executor_apply_blocker(self) -> None:
+        report = self.build_report(REPO_ROOT)
+
+        self.assertEqual(blocker_status(report, "explicit_rust_apply_dry_run_bridge"), "resolved")
+        self.assertEqual(blocker_status(report, "default_rust_apply_dry_run_route"), "resolved")
         self.assertEqual(blocker_status(report, "executor_apply_not_cut_over"), "blocked")
         self.assertEqual(report["status"], "blocked")
 
@@ -481,14 +522,14 @@ class CheckRustPlannerCutoverReadinessTests(unittest.TestCase):
 
     def test_explicit_rust_apply_static_checks_fail_for_targeted_source_regressions(self) -> None:
         dispatch_after_adb = CLI_TEXT.replace(
-            'if args.command == "apply" and args.rust_apply_bin is not None:\n'
+            'if _should_route_apply_dry_run_to_rust(args):\n'
             '    return _run_apply(args)\n'
             'setattr(\n',
             'setattr(\n',
         ).replace(
             ')\n\ndef _effective_plan_backend(args):',
             ')\n'
-            'if args.command == "apply" and args.rust_apply_bin is not None:\n'
+            'if _should_route_apply_dry_run_to_rust(args):\n'
             '    return _run_apply(args)\n'
             '\ndef _effective_plan_backend(args):',
         )
@@ -513,7 +554,7 @@ class CheckRustPlannerCutoverReadinessTests(unittest.TestCase):
             (
                 "cli_explicit_rust_apply_branch_present",
                 CLI_TEXT.replace(
-                    "    if args.rust_apply_bin is not None:\n"
+                    "    if args.rust_apply_bin is not None or args.dry_run:\n"
                     "        return _run_rust_apply_dry_run(args)\n",
                     "",
                 ),
@@ -562,6 +603,62 @@ class CheckRustPlannerCutoverReadinessTests(unittest.TestCase):
                 "cli_explicit_rust_apply_preserves_subprocess_output",
                 CLI_TEXT.replace("    return completed.returncode\n", "    return 0\n"),
             ),
+        ]
+        for check_id, cli_text in cases:
+            with self.subTest(check_id=check_id):
+                with tempfile.TemporaryDirectory() as temp_dir:
+                    root = Path(temp_dir)
+                    make_synthetic_repo(root, cli_text=cli_text)
+
+                    report = self.build_report(root)
+
+                self.assertEqual(check_by_id(report, check_id)["status"], "fail")
+
+    def test_default_rust_apply_dry_run_static_checks_fail_for_targeted_source_regressions(self) -> None:
+        no_default_route = CLI_TEXT.replace(
+            'def _should_route_apply_dry_run_to_rust(args):\n'
+            '    return args.command == "apply" and (args.rust_apply_bin is not None or args.dry_run is True)\n',
+            'def _should_route_apply_dry_run_to_rust(args):\n'
+            '    return args.command == "apply" and args.rust_apply_bin is not None\n',
+        )
+        route_after_adb = CLI_TEXT.replace(
+            'if _should_route_apply_dry_run_to_rust(args):\n'
+            '    return _run_apply(args)\n'
+            'setattr(\n',
+            'setattr(\n',
+        ).replace(
+            ')\n\ndef _effective_plan_backend(args):',
+            ')\n'
+            'if _should_route_apply_dry_run_to_rust(args):\n'
+            '    return _run_apply(args)\n'
+            '\ndef _effective_plan_backend(args):',
+        )
+        missing_binary_requirement = CLI_TEXT.replace(
+            '    if rust_apply_bin is None:\n'
+            '        raise ValueError("--rust-apply-bin is required when default Rust apply dry-run routing is active.")\n',
+            "",
+        )
+        dry_run_python_fallback = CLI_TEXT.replace(
+            "    if args.rust_apply_bin is not None or args.dry_run:\n"
+            "        return _run_rust_apply_dry_run(args)\n",
+            "    if args.rust_apply_bin is not None:\n"
+            "        return _run_rust_apply_dry_run(args)\n",
+        ).replace(
+            "    adb = _build_adb(args)\n",
+            "    adb = DryRunAdb() if args.dry_run else _build_adb(args)\n",
+        )
+        non_dry_run_rust_route = CLI_TEXT.replace(
+            "    if args.rust_apply_bin is not None or args.dry_run:\n"
+            "        return _run_rust_apply_dry_run(args)\n",
+            '    if args.command == "apply":\n'
+            "        return _run_rust_apply_dry_run(args)\n",
+        )
+        cases = [
+            ("cli_default_rust_apply_dry_run_route_present", no_default_route),
+            ("cli_default_rust_apply_dry_run_route_before_adb_resolution", route_after_adb),
+            ("cli_default_rust_apply_dry_run_requires_binary", missing_binary_requirement),
+            ("cli_default_rust_apply_dry_run_has_no_python_fallback", dry_run_python_fallback),
+            ("cli_default_rust_apply_dry_run_preserves_non_dry_run_apply_boundary", non_dry_run_rust_route),
         ]
         for check_id, cli_text in cases:
             with self.subTest(check_id=check_id):
@@ -1412,6 +1509,7 @@ class CheckRustPlannerCutoverReadinessTests(unittest.TestCase):
         self.assertTrue(all(check["status"] == "pass" for check in report["static_checks"]))
         self.assertEqual(report["status"], "blocked")
         self.assertEqual(blocker_status(report, "default_cli_backend_still_python"), "resolved")
+        self.assertEqual(blocker_status(report, "default_rust_apply_dry_run_route"), "resolved")
         self.assertEqual(blocker_status(report, "executor_apply_not_cut_over"), "blocked")
         self.assertEqual(blocker_status(report, "real_device_probing_not_cut_over"), "blocked")
         self.assertEqual(blocker_status(report, "detected_device_profile_mismatch_warning_not_cut_over"), "blocked")
@@ -1431,6 +1529,7 @@ class CheckRustPlannerCutoverReadinessTests(unittest.TestCase):
 
         blockers = {blocker["id"]: blocker["status"] for blocker in report["remaining_blockers"]}
         self.assertEqual(blockers["default_cli_backend_still_python"], "resolved")
+        self.assertEqual(blockers["default_rust_apply_dry_run_route"], "resolved")
         self.assertEqual(blockers["real_device_probing_not_cut_over"], "blocked")
         self.assertEqual(blockers["detected_device_profile_mismatch_warning_not_cut_over"], "blocked")
         self.assertEqual(blockers["packaged_launcher_injection_evidence_not_accepted"], "blocked")

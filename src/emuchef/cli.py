@@ -26,7 +26,6 @@ from emuchef.domain import (
 from emuchef.executor import (
     AdbResolutionError,
     DetectedDevice,
-    DryRunAdb,
     ExecutionProgressEvent,
     ExecutorRunner,
     ProgressPhase,
@@ -195,7 +194,7 @@ def main(argv: list[str] | None = None) -> int:
             _validate_plan_backend_args(args)
         if args.command == "plan" and _effective_plan_backend(args) in _RUST_SUBPROCESS_BACKENDS:
             return _run_plan(args)
-        if args.command == "apply" and args.rust_apply_bin is not None:
+        if _should_route_apply_dry_run_to_rust(args):
             return _run_apply(args)
         setattr(
             args,
@@ -533,13 +532,13 @@ def _run_detect_profiles(args: argparse.Namespace) -> int:
 
 
 def _run_apply(args: argparse.Namespace) -> int:
-    if args.rust_apply_bin is not None:
+    if args.rust_apply_bin is not None or args.dry_run:
         return _run_rust_apply_dry_run(args)
 
     plan_path = Path(args.plan_file)
     execution_plan = load_execution_plan_file(plan_path)
-    adb = DryRunAdb() if args.dry_run else _build_adb(args)
-    runner = ExecutorRunner(adb=adb, workdir=plan_path.parent, sleep_fn=(lambda _: None) if args.dry_run else None)
+    adb = _build_adb(args)
+    runner = ExecutorRunner(adb=adb, workdir=plan_path.parent)
     result = runner.run(
         execution_plan,
         progress_callback=_make_execution_progress_callback(verbose=args.verbose, dry_run=args.dry_run),
@@ -583,7 +582,11 @@ def _build_rust_apply_command(args: argparse.Namespace) -> list[str]:
 
 
 def _resolve_rust_apply_bin(args: argparse.Namespace) -> Path:
-    """Resolve the explicitly supplied Rust apply binary for dry-run delegation."""
+    """Resolve the Rust apply binary used by dry-run apply delegation.
+
+    Explicit CLI input wins. The packaged candidate hook is intentionally inert
+    until the packaging contract defines a real runtime-provided location.
+    """
 
     if not args.dry_run:
         raise ValueError("--rust-apply-bin requires --dry-run.")
@@ -596,14 +599,43 @@ def _resolve_rust_apply_bin(args: argparse.Namespace) -> Path:
         if is_set:
             raise ValueError(f"--rust-apply-bin does not support {option}.")
 
-    rust_apply_bin = Path(args.rust_apply_bin).expanduser()
+    rust_apply_bin = _explicit_rust_apply_bin_candidate(args)
+    if rust_apply_bin is None:
+        rust_apply_bin = _packaged_rust_apply_bin_candidate(args)
+    if rust_apply_bin is None:
+        raise ValueError("--rust-apply-bin is required when default Rust apply dry-run routing is active.")
+
+    display_path = args.rust_apply_bin if args.rust_apply_bin is not None else str(rust_apply_bin)
     if not rust_apply_bin.exists():
-        raise ValueError(f"Rust apply binary does not exist: {args.rust_apply_bin}")
+        raise ValueError(f"Rust apply binary does not exist: {display_path}")
     if not rust_apply_bin.is_file():
-        raise ValueError(f"Rust apply binary is not a file: {args.rust_apply_bin}")
+        raise ValueError(f"Rust apply binary is not a file: {display_path}")
     if not os.access(rust_apply_bin, os.X_OK):
-        raise ValueError(f"Rust apply binary is not executable: {args.rust_apply_bin}")
+        raise ValueError(f"Rust apply binary is not executable: {display_path}")
     return rust_apply_bin
+
+
+def _should_route_apply_dry_run_to_rust(args: argparse.Namespace) -> bool:
+    """Return whether apply should enter the Rust dry-run validation route."""
+
+    return args.command == "apply" and (args.rust_apply_bin is not None or args.dry_run is True)
+
+
+def _explicit_rust_apply_bin_candidate(args: argparse.Namespace) -> Path | None:
+    """Return the explicit Rust apply binary candidate, if one was supplied."""
+
+    if args.rust_apply_bin is None:
+        return None
+    return Path(args.rust_apply_bin).expanduser()
+
+
+def _packaged_rust_apply_bin_candidate(args: argparse.Namespace) -> Path | None:
+    """Return a packaged Rust apply binary candidate, if configured.
+
+    P8BS intentionally returns None. Future packaged lookup must be added here
+    under an accepted packaged-location contract.
+    """
+    return None
 
 
 def _run_validate(args: argparse.Namespace) -> int:
