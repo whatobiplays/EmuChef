@@ -77,16 +77,12 @@ def make_repo(
     test_cli_text: str = 'def test_plan_explicit_python_backend_uses_python_summary_without_rust_process_or_binary(): pass',
     test_readiness_text: str = 'self.assertEqual(blockers["python_planner_deletion_not_ready"], "blocked")',
     test_launcher_text: str = "check_explicit_python_backend_available(repo_root=REPO_ROOT)",
-    cutover_doc_text: str = "Explicit `--planner-backend python` remains available until Python planner deletion.",
-    context_text: str = "Python planner deletion remains blocked while `--planner-backend python` remains available.",
 ) -> None:
     write_text(root, "src/emuchef/cli.py", cli_text)
     write_text(root, "tools/check_rust_planner_cutover_readiness.py", readiness_text)
     write_text(root, "tests/test_cli.py", test_cli_text)
     write_text(root, "tests/test_check_rust_planner_cutover_readiness.py", test_readiness_text)
     write_text(root, "tests/test_smoke_launcher_injected_planner.py", test_launcher_text)
-    write_text(root, "docs/rust-planner-cutover-readiness.md", cutover_doc_text)
-    write_text(root, "CONTEXT.md", context_text)
 
 
 def surface_ids(report: dict) -> list[str]:
@@ -156,8 +152,6 @@ class CheckPythonPlannerDeletionPreflightTests(unittest.TestCase):
                 test_cli_text="def test_rust_route(): pass",
                 test_readiness_text="self.assertEqual(blockers, {})",
                 test_launcher_text="def test_launcher_path(): pass",
-                cutover_doc_text="Rust planner deletion cleanup is complete.",
-                context_text="Rust planning is the only runtime planner implementation.",
             )
 
             report = preflight.build_preflight_report(root)
@@ -180,8 +174,6 @@ class CheckPythonPlannerDeletionPreflightTests(unittest.TestCase):
                 test_cli_text="def test_rust_route(): pass",
                 test_readiness_text="self.assertEqual(blockers, {})",
                 test_launcher_text="def test_launcher_path(): pass",
-                cutover_doc_text="Rust planner deletion cleanup is complete.",
-                context_text="Rust planning is the only runtime planner implementation.",
             )
             blocked_stdout = StringIO()
             ready_stdout = StringIO()
@@ -246,19 +238,14 @@ class CheckPythonPlannerDeletionPreflightTests(unittest.TestCase):
         self.assertTrue(all(".local" not in path.parts for path in read_paths), read_paths)
         self.assertNotIn(".local", TOOL_PATH.read_text(encoding="utf-8"))
 
-    def test_real_repo_integration_reports_current_surfaces(self) -> None:
+    def test_real_repo_integration_reports_ready_after_p8bo(self) -> None:
         preflight = import_preflight_module()
 
         report = preflight.build_preflight_report(REPO_ROOT)
 
-        self.assertEqual(report["status"], "blocked")
-        self.assertEqual(
-            surface_ids(report),
-            [
-                "docs_cutover_python_fallback_or_deletion_readiness",
-                "context_python_fallback_or_deletion_readiness",
-            ],
-        )
+        self.assertEqual(report["status"], "ready")
+        self.assertEqual(surface_ids(report), [])
+        self.assertEqual(report["required_deletion_steps"], [])
 
 
 if __name__ == "__main__":

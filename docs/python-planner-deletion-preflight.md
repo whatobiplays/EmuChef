@@ -5,23 +5,24 @@ developer-only preflight for the Python planner deletion sequence.
 
 P8BI is static only. It does not delete Python planner code, change runtime
 behavior, import `emuchef`, execute planner code, invoke subprocesses, probe
-devices, read `.local`, or require Rust binaries. It identifies remaining
-Python planner deletion surfaces in checked-in source, tests, readiness docs,
-and current-state project context.
+devices, read `.local`, or require Rust binaries. The current P8BO surface set
+tracks public `emuchef plan` Python planner fallback, import, runtime,
+readiness, and test surfaces in checked-in source.
 
 The preflight emits deterministic JSON with
 `kind: python_planner_deletion_preflight`, `schema_version: 1`, and a top-level
-`status`. The status is `blocked` while any remaining surface is present and
-`ready` only when no remaining surfaces remain. A blocked report lists the
+`status`. The status is `blocked` while any tracked public `emuchef plan`
+Python planner fallback/import/runtime/readiness/test surface is present and
+`ready` only when no tracked surfaces remain. A blocked report lists the
 remaining Python planner surfaces and the deletion steps that future slices must
 complete.
 
 The preflight exists to guide and verify the Python planner deletion sequence.
 It makes the remaining CLI runtime path, CLI imports, readiness blocker,
-fallback assertions, and docs/context references explicit before any deletion
-slice removes or quarantines them. Once Python planner deletion is complete, the
-preflight should either report ready with no remaining surfaces or be removed as
-part of cleanup.
+and fallback assertions explicit before any deletion slice removes or
+quarantines them. `ready` does not mean `src/emuchef/planner.py` has been
+deleted and does not mean Python draft/session/profile helper behavior has been
+removed.
 
 P8BJ removes the explicit public `--planner-backend python` route from
 `emuchef plan`. It does not delete Python planner code, remove
@@ -71,3 +72,13 @@ executor/apply, Rust planner behavior, packaging, Tauri/config-editor, Rust
 backend code, or `.local` evidence. After P8BN, the real repository preflight
 still reports `blocked` for the remaining docs/context surfaces until those
 surfaces are intentionally retired.
+
+P8BO retires the final docs/context preflight detector surfaces. After P8BO,
+the real repository preflight reports `ready` with no remaining surfaces and no
+required deletion steps. This means the Python planner deletion preflight is
+complete for tracked public `emuchef plan`
+fallback/import/runtime/readiness/test surfaces after P8BO. P8BO does not
+delete `src/emuchef/planner.py`, remove Python draft/session/profile helper
+behavior, or change plan routing, draft behavior, executor/apply, Rust planner
+behavior, smoke tooling, readiness validators, packaging, Tauri/config-editor,
+Rust backend code, or `.local` evidence.

@@ -1,11 +1,11 @@
 #!/usr/bin/env python3
 """Static preflight for the Python planner deletion sequence.
 
-The preflight inventories the runtime CLI, readiness, test, and documentation
-surfaces that still intentionally keep the Python planner reachable. It reads
-checked-in source files as text only; it does not import EmuChef modules,
-execute planner code, invoke subprocesses, probe devices, or require Rust
-binaries.
+The preflight inventories tracked public ``emuchef plan`` fallback, import,
+runtime, readiness, and test surfaces that still intentionally keep the Python
+planner reachable. It reads checked-in source files as text only; it does not
+import EmuChef modules, execute planner code, invoke subprocesses, probe
+devices, or require Rust binaries.
 """
 
 from __future__ import annotations
@@ -26,8 +26,6 @@ READINESS_GATE_PATH = Path("tools/check_rust_planner_cutover_readiness.py")
 TEST_CLI_PATH = Path("tests/test_cli.py")
 TEST_READINESS_PATH = Path("tests/test_check_rust_planner_cutover_readiness.py")
 TEST_LAUNCHER_SMOKE_PATH = Path("tests/test_smoke_launcher_injected_planner.py")
-CUTOVER_DOC_PATH = Path("docs/rust-planner-cutover-readiness.md")
-CONTEXT_PATH = Path("CONTEXT.md")
 
 DELETION_STEP_ORDER = (
     "remove explicit Python planner backend from CLI",
@@ -37,7 +35,6 @@ DELETION_STEP_ORDER = (
     "move still-needed shared types/helpers out of planner-owned modules",
     "update tests that assert Python fallback availability",
     "update readiness gate assertions for Python planner deletion blocker",
-    "update docs and CONTEXT once deletion is complete",
 )
 
 SURFACE_DELETION_STEPS = {
@@ -60,12 +57,6 @@ SURFACE_DELETION_STEPS = {
     ),
     "test_launcher_smoke_python_help_exposure": (
         "update tests that assert Python fallback availability",
-    ),
-    "docs_cutover_python_fallback_or_deletion_readiness": (
-        "update docs and CONTEXT once deletion is complete",
-    ),
-    "context_python_fallback_or_deletion_readiness": (
-        "update docs and CONTEXT once deletion is complete",
     ),
 }
 
@@ -133,12 +124,6 @@ def _remaining_python_planner_surfaces(repo_root: Path) -> list[dict[str, str]]:
             TEST_LAUNCHER_SMOKE_PATH,
             _test_launcher_smoke_python_help_exposure,
         ),
-        (
-            "docs_cutover_python_fallback_or_deletion_readiness",
-            CUTOVER_DOC_PATH,
-            _docs_cutover_python_fallback_or_deletion_readiness,
-        ),
-        ("context_python_fallback_or_deletion_readiness", CONTEXT_PATH, _context_python_fallback_or_deletion_readiness),
     )
 
     surfaces: list[dict[str, str]] = []
@@ -240,28 +225,6 @@ def _test_launcher_smoke_python_help_exposure(path: Path) -> bool:
         (
             "check_explicit_python_backend_available",
             "explicit_python_backend_bypass_available",
-        ),
-    )
-
-
-def _docs_cutover_python_fallback_or_deletion_readiness(path: Path) -> bool:
-    return _text_has_any_token(
-        path,
-        (
-            "`--planner-backend python`",
-            "Python planner deletion",
-            "python_planner_deletion_not_ready",
-        ),
-    )
-
-
-def _context_python_fallback_or_deletion_readiness(path: Path) -> bool:
-    return _text_has_any_token(
-        path,
-        (
-            "`--planner-backend python`",
-            "Python planner deletion",
-            "python_planner_deletion_not_ready",
         ),
     )
 

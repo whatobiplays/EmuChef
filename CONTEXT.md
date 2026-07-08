@@ -72,8 +72,13 @@ readiness gate; the gate may still require `python-compatible` output wording.
 P8BN does not delete `src/emuchef/planner.py`, remove Python
 draft/session/profile helper behavior, or change plan routing, draft behavior,
 executor/apply, Rust planner behavior, packaging, Tauri/config-editor, Rust
-backend code, or `.local` evidence. The Python planner deletion preflight
-remains blocked until remaining docs/context detector surfaces are retired.
+backend code, or `.local` evidence. P8BO completes the Python planner deletion
+preflight for tracked public `emuchef plan`
+fallback/import/runtime/readiness/test surfaces. It does not delete
+`src/emuchef/planner.py`, remove Python draft/session/profile helper behavior,
+or change plan routing, draft behavior, executor/apply, Rust planner behavior,
+smoke tooling, readiness validators, packaging, Tauri/config-editor, Rust
+backend code, or `.local` evidence.
 P8AR centralizes the current explicit `--rust-planner-bin <path>` validation in
 an internal Python CLI resolver helper. That helper remains explicit-path-only:
 no packaged lookup, Cargo fallback, arbitrary `PATH` search,
@@ -376,16 +381,17 @@ also remains available as an explicit backend. P8AP updates the static readiness
 gate for this current state by preserving `default_cli_backend_still_python`
 with status `resolved`. Top-level readiness remains `blocked` because
 executor/apply, packaged release, and unsatisfied evidence-dependent blockers
-remain unresolved. The Python planner deletion preflight remains separate future
-work while docs/context surfaces are present.
+remain unresolved. The Python planner deletion preflight is complete for tracked
+public `emuchef plan` fallback/import/runtime/readiness/test surfaces after
+P8BO; retained Python planner implementation/helper deletion remains separate
+future work.
 P8BI adds `tools/check_python_planner_deletion_preflight.py` and
 `docs/python-planner-deletion-preflight.md` as a static preflight for the Python
-planner deletion sequence. The preflight reads checked-in source and docs text
-only, emits deterministic JSON, and reports `blocked` while CLI runtime paths,
-CLI imports, readiness blockers, fallback assertions, or docs/context
-references still keep Python planner deletion incomplete. P8BI does not delete
-Python planner code, change runtime behavior, run smoke tools, read `.local`,
-require Rust binaries, or clear readiness blockers.
+planner deletion sequence. The preflight reads checked-in source text only,
+emits deterministic JSON, and reports `blocked` while tracked public
+`emuchef plan` fallback, import, runtime, readiness, or test surfaces remain.
+P8BI does not delete Python planner code, change runtime behavior, run smoke
+tools, read `.local`, require Rust binaries, or clear readiness blockers.
 P8BJ removes the explicit public `--planner-backend python` route from
 `emuchef plan`. It does not delete Python planner code, remove
 `_run_python_plan`, remove CLI imports from `emuchef.planner`, or change draft
@@ -419,6 +425,21 @@ smoke tooling, readiness validators, packaging, Tauri/config-editor, Rust
 backend code, or `.local` evidence. The P8BI preflight no longer reports
 `cli_imports_emuchef_planner` for the real repo, but it still reports `blocked`
 while non-runtime readiness/test/docs/context surfaces remain.
+P8BN removes stale readiness and launcher-smoke assumptions that explicit
+`--planner-backend python` remains available. It removes
+`python_planner_deletion_not_ready` from the Rust planner cutover readiness
+blocker list and stops requiring standalone `python` as a planner-backend token;
+the readiness gate may still require `python-compatible` output wording. P8BN
+does not delete `src/emuchef/planner.py`, remove Python draft/session/profile
+helper behavior, or change plan routing, draft behavior, executor/apply, Rust
+planner behavior, packaging, Tauri/config-editor, Rust backend code, or `.local`
+evidence. P8BO retires the final docs/context detector surfaces, so the Python
+planner deletion preflight is complete for tracked public `emuchef plan`
+fallback/import/runtime/readiness/test surfaces after P8BO. P8BO does not
+delete `src/emuchef/planner.py`, remove Python draft/session/profile helper
+behavior, or change plan routing, draft behavior, executor/apply, Rust planner
+behavior, smoke tooling, readiness validators, packaging, Tauri/config-editor,
+Rust backend code, or `.local` evidence.
 P8AQ records the future default-route Rust planner binary resolution design in
 `docs/rust-default-planner-binary-resolution.md`. P8AQ is documentation-only:
 `--rust-planner-bin` remains required, no packaged binary lookup, Cargo

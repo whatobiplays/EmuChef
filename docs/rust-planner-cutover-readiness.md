@@ -16,7 +16,11 @@ removes stale Rust readiness and launcher-smoke assumptions that an explicit
 P8BN does not delete `src/emuchef/planner.py`, remove Python
 draft/session/profile helper behavior, or change plan routing, draft behavior,
 executor/apply, Rust planner behavior, packaging, Tauri/config-editor, Rust
-backend code, or `.local` evidence. P8AO
+backend code, or `.local` evidence. P8BO completes the Python planner deletion
+preflight for tracked public `emuchef plan`
+fallback/import/runtime/readiness/test surfaces. It does not delete
+`src/emuchef/planner.py` or remove Python draft/session/profile helper
+behavior. P8AO
 makes the default no-backend `emuchef plan` route Rust-owned through the
 existing production-equivalent Rust subprocess path. During this transition,
 the default Rust route requires
@@ -241,8 +245,9 @@ the readiness gate may still require `python-compatible` output wording. P8BN
 does not delete `src/emuchef/planner.py`, remove Python draft/session/profile
 helper behavior, or change plan routing, draft behavior, executor/apply, Rust
 planner behavior, packaging, Tauri/config-editor, Rust backend code, or `.local`
-evidence. The P8BI Python planner deletion preflight remains `blocked` until
-the remaining docs/context detector surfaces are retired.
+evidence. P8BO retires the final docs/context detector surfaces, so the Python
+planner deletion preflight is complete for tracked public `emuchef plan`
+fallback/import/runtime/readiness/test surfaces after P8BO.
 P8N adds a crate-local Rust probe abstraction, fake probe, and tests for layering
 detected facts over synthetic/profile-derived context. P8O adds fake/test-backed
 planner-input construction that applies detected facts over
@@ -572,21 +577,22 @@ Current evidence does not prove:
 - Network behavior.
 - Tauri protocol, command, or UI integration for planning.
 - Full schema parity or future authored scenario parity.
-- Python planner deletion.
+- Deletion of the retained `src/emuchef/planner.py` implementation and Python
+  draft/session/profile helper behavior.
 
 ## Rust Planner User-Facing Cutover Blockers
 
-Before broader Rust planner ownership, packaging, or Python planner deletion can
-be claimed, these blockers must be resolved or explicitly accepted for a
-narrower route:
+Before broader Rust planner ownership, packaging, or retained Python planner
+implementation deletion can be claimed, these blockers must be resolved or
+explicitly accepted for a narrower route:
 
 | Blocker | Current classification |
 | --- | --- |
-| CLI routing strategy | P8AO makes no-backend `emuchef plan` use Rust-owned planning through the existing production-equivalent subprocess path with Python-compatible output. The transition route still requires a supplied `--rust-planner-bin` and does not invoke Cargo or search host paths. P8BJ removes the explicit public `--planner-backend python` route, P8BK removes `_run_plan(...)` fallback routing to `_run_python_plan(...)`, and P8BL deletes the private `_run_python_plan(...)` function without deleting `src/emuchef/planner.py` or broader CLI planner imports. P8A/P8E keep the explicit `rust-shadow` developer bridge and formatter behavior, P8G keeps `rust-experimental` as an explicit migration route, and P8AI keeps `rust-production-equivalent` as an explicit evidence route. P8AP preserves the historical `default_cli_backend_still_python` readiness entry with status `resolved`; it does not clear executor/apply or packaged-release readiness. Python planner deletion is tracked by the separate preflight. |
+| CLI routing strategy | P8AO makes no-backend `emuchef plan` use Rust-owned planning through the existing production-equivalent subprocess path with Python-compatible output. The transition route still requires a supplied `--rust-planner-bin` and does not invoke Cargo or search host paths. P8BJ removes the explicit public `--planner-backend python` route, P8BK removes `_run_plan(...)` fallback routing to `_run_python_plan(...)`, and P8BL deletes the private `_run_python_plan(...)` function without deleting `src/emuchef/planner.py` or broader CLI planner imports. P8A/P8E keep the explicit `rust-shadow` developer bridge and formatter behavior, P8G keeps `rust-experimental` as an explicit migration route, and P8AI keeps `rust-production-equivalent` as an explicit evidence route. P8AP preserves the historical `default_cli_backend_still_python` readiness entry with status `resolved`; it does not clear executor/apply or packaged-release readiness. The Python planner deletion preflight is complete for tracked public `emuchef plan` fallback/import/runtime/readiness/test surfaces after P8BO. |
 | Device probing and context resolution | The P8AN preflight supplies accepted P8AJ live-probe evidence, so `real_device_probing_not_cut_over` can be reported as `evidence_accepted` when those report paths are supplied to the readiness gate. P8AO no-backend default routing still keeps detected-facts fixture and live-probe wrapper flags explicit-only; they remain accepted on the explicit production-equivalent route. Explicit `--manufacturer`, `--model`, `--android-version`, and repeated `--device-tag` values are forwarded to Rust planning. Python does not invoke ADB, discover devices, run `adb devices`, parse `getprop`, or validate/normalize forwarded ADB paths or serials for Rust routes. |
 | Argument and binding parity | `emuchef-plan-shadow` accepts explicit `--authored-root`, `--device-plan`, explicit device context flags, and string `--bind` values. It mirrors repeated-bind grouping and ordered repeated device tags, but is not full future Rust CLI binding type parity, ops replay parity, detected-device parity, or common-flag parity. |
 | Output format compatibility | P8AO default Rust routing uses the Python-compatible formatter over Rust `PlanningResult` JSON: concise summary labels mirror the visible Python CLI labels, structured YAML is produced from the Rust JSON mapping through `dump_yaml(...)`, and `--output` writes that YAML while stdout stays concise unless `--verbose` is selected. `rust-shadow` omitted `--rust-shadow-output` and explicit `passthrough` continue to preserve Rust stdout/stderr/exit-code passthrough. Rust-native JSON still requires a future explicit structured-output mode such as `--format json`. |
-| Error and warning compatibility | Rust covers selected planner result, warning/error shape, and focused diagnostics. P8AN supplies accepted P8AK fixture-backed production-equivalent route smoke evidence for matched and mismatched warning behavior, so `detected_device_profile_mismatch_warning_not_cut_over` can be reported as `evidence_accepted` when those report paths are supplied to the readiness gate. Broader planner diagnostics, operation replay parity, and Python planner deletion cleanup remain separate work. |
+| Error and warning compatibility | Rust covers selected planner result, warning/error shape, and focused diagnostics. P8AN supplies accepted P8AK fixture-backed production-equivalent route smoke evidence for matched and mismatched warning behavior, so `detected_device_profile_mismatch_warning_not_cut_over` can be reported as `evidence_accepted` when those report paths are supplied to the readiness gate. Broader planner diagnostics, operation replay parity, and retained Python planner implementation/helper deletion remain separate work. |
 | Required normal-check gating | The P7P comparison matrix and P8B CLI-route smoke are not part of normal Rust/Tauri checks. A cutover route needs an approved gate policy before the route becomes user-facing. |
 | Unsupported scenarios outside the matrix | The checked-in matrix covers all five current device plans with six current scenarios, including one P8K explicit-context scenario for `ayaneo.pocket_s_mini.base`. Future authored plans, non-empty recipe dependencies, broader override forms, profile matching, and scenario drift require intentional coverage updates. |
 | Authored/device-plan drift | `tools/plan_parity_scenarios.json` and this readiness doc must be updated when checked-in scenarios change. The static doc guard only checks scenario id/tool references. |
@@ -646,7 +652,8 @@ narrower route:
   checks as required manual evidence, but it does not execute them. The report
   remains `blocked` even when static checks pass because the default CLI backend,
   executor/apply, real-device probing, detected-device profile mismatch warning
-  parity, and Python planner deletion blockers remain unresolved.
+  parity, and retained Python planner implementation deletion blockers remain
+  unresolved.
 - P8J explicit-context state: `emuchef plan --planner-backend rust-shadow
   --rust-planner-bin <path>` and `emuchef plan --planner-backend
   rust-experimental --rust-planner-bin <path>` accept explicitly supplied
@@ -818,9 +825,11 @@ Before Python planner source can be removed, these blockers must be resolved:
 
 P8BI adds a static Python planner deletion preflight at
 `tools/check_python_planner_deletion_preflight.py`. The preflight inventories
-the current CLI runtime path, CLI import dependency, readiness blocker,
-fallback assertions, and docs/context references that must be removed, ported,
-or retired by later deletion slices.
+tracked public `emuchef plan` fallback, import, runtime, readiness, and test
+surfaces that must be removed, ported, or retired by later deletion slices.
+After P8BO, that preflight is complete for the tracked public `emuchef plan`
+surface set. Retained Python planner source and Python draft/session/profile
+helper behavior remain separate deletion work.
 
 | Blocker | Current classification |
 | --- | --- |
