@@ -28,6 +28,7 @@ P8AJ_REPORT_KIND = "rust_production_equivalent_live_adb_probe_smoke"
 P8AK_REPORT_KIND = "rust_production_equivalent_mismatch_warning_smoke"
 P8BC_REPORT_KIND = "rust_launcher_injected_planner_smoke"
 DEFAULT_CLI_BACKEND_BLOCKER_ID = "default_cli_backend_still_python"
+EXPLICIT_RUST_APPLY_DRY_RUN_CAPABILITY_ID = "explicit_rust_apply_dry_run_bridge"
 REAL_DEVICE_PROBING_BLOCKER_ID = "real_device_probing_not_cut_over"
 MISMATCH_WARNING_BLOCKER_ID = "detected_device_profile_mismatch_warning_not_cut_over"
 PACKAGED_LAUNCHER_INJECTION_BLOCKER_ID = "packaged_launcher_injection_evidence_not_accepted"
@@ -206,6 +207,10 @@ REMAINING_BLOCKERS = (
         "status": "resolved",
     },
     {
+        "id": EXPLICIT_RUST_APPLY_DRY_RUN_CAPABILITY_ID,
+        "status": "resolved",
+    },
+    {
         "id": "executor_apply_not_cut_over",
         "status": "blocked",
     },
@@ -276,6 +281,7 @@ def build_readiness_report(
         *_readiness_doc_reference_checks(repo_root),
         *_cli_backend_token_checks(repo_root),
         *_cli_default_route_checks(repo_root),
+        *_cli_explicit_rust_apply_dry_run_checks(repo_root),
     ]
     production_equivalent_evidence = {
         P8AJ_EVIDENCE_ID: _evaluate_evidence_report(
@@ -768,6 +774,153 @@ def _cli_default_route_checks(repo_root: Path) -> list[dict[str, Any]]:
     ]
 
 
+def _cli_explicit_rust_apply_dry_run_checks(repo_root: Path) -> list[dict[str, Any]]:
+    path = repo_root / "src" / "emuchef" / "cli.py"
+    text = _read_text_if_available(path)
+    main_block = _source_function_block(text, "main")
+    dispatch_scope = main_block or text
+    run_apply_block = _source_function_block(text, "_run_apply")
+    run_rust_apply_block = _source_function_block(text, "_run_rust_apply_dry_run")
+    build_command_block = _source_function_block(text, "_build_rust_apply_command")
+    resolve_bin_block = _source_function_block(text, "_resolve_rust_apply_bin")
+
+    option_block = _source_call_block(text, '"--rust-apply-bin"')
+    option_present = bool(option_block) and "apply_parser.add_argument" in option_block
+
+    dispatch_tokens = (
+        'if args.command == "apply"',
+        "args.rust_apply_bin is not None",
+        "return _run_apply(args)",
+    )
+    adb_resolution_tokens = (
+        "setattr(",
+        '"_resolved_adb"',
+        "resolve_adb_executable(",
+    )
+    dispatch_before_adb = _source_tokens_before(dispatch_scope, dispatch_tokens, adb_resolution_tokens)
+
+    branch_tokens = (
+        "if args.rust_apply_bin is not None",
+        "return _run_rust_apply_dry_run(args)",
+        "_build_adb(args)",
+    )
+    dry_run_tokens = (
+        "if not args.dry_run",
+        "--rust-apply-bin requires --dry-run.",
+    )
+    unsupported_rejection_tokens = (
+        '"--adb"',
+        "args.adb is not None",
+        '"--verbose"',
+        "args.verbose",
+        '"--debug"',
+        "args.debug",
+        "--rust-apply-bin does not support",
+    )
+    unsupported_forwarding_tokens = (
+        '"--adb"',
+        "args.adb",
+        '"--verbose"',
+        "args.verbose",
+        '"--debug"',
+        "args.debug",
+    )
+    binary_validation_tokens = (
+        "Path(args.rust_apply_bin).expanduser()",
+        ".exists()",
+        ".is_file()",
+        "os.access(",
+        "os.X_OK",
+    )
+    command_tokens = (
+        "str(rust_apply_bin)",
+        '"apply"',
+        '"--plan-file"',
+        "args.plan_file",
+        '"--dry-run"',
+    )
+    serial_tokens = (
+        "if args.serial is not None",
+        "command.extend",
+        '"--serial"',
+        "args.serial",
+    )
+    subprocess_tokens = (
+        "subprocess" + ".run(",
+        "check=False",
+        "text=True",
+        "capture_output=True",
+    )
+    output_tokens = (
+        "sys.stdout.write(completed.stdout)",
+        "sys.stderr.write(completed.stderr)",
+        "return completed.returncode",
+    )
+
+    rejects_unsupported_flags = _source_has_tokens(
+        resolve_bin_block,
+        unsupported_rejection_tokens,
+    ) and not _source_has_any_compact_tokens(build_command_block, unsupported_forwarding_tokens)
+
+    return [
+        _check(
+            "cli_explicit_rust_apply_dry_run_option_present",
+            option_present,
+            None if option_present else {"missing_token": '"--rust-apply-bin"', "source_block": "apply_parser"},
+        ),
+        _check(
+            "cli_explicit_rust_apply_dispatch_before_adb_resolution",
+            dispatch_before_adb,
+            _ordered_source_tokens_details(dispatch_scope, dispatch_tokens, adb_resolution_tokens),
+        ),
+        _check(
+            "cli_explicit_rust_apply_branch_present",
+            _source_has_tokens(run_apply_block, branch_tokens),
+            _missing_source_tokens_details(run_apply_block, branch_tokens),
+        ),
+        _check(
+            "cli_explicit_rust_apply_requires_dry_run",
+            _source_has_tokens(resolve_bin_block, dry_run_tokens),
+            _missing_source_tokens_details(resolve_bin_block, dry_run_tokens),
+        ),
+        _check(
+            "cli_explicit_rust_apply_rejects_python_only_flags",
+            rejects_unsupported_flags,
+            _unsupported_apply_flags_details(
+                resolve_bin_block,
+                build_command_block,
+                unsupported_rejection_tokens,
+                unsupported_forwarding_tokens,
+            ),
+        ),
+        _check(
+            "cli_explicit_rust_apply_validates_binary_path",
+            _source_has_compact_tokens(resolve_bin_block, binary_validation_tokens),
+            _missing_compact_source_tokens_details(resolve_bin_block, binary_validation_tokens),
+        ),
+        _check(
+            "cli_explicit_rust_apply_builds_expected_command",
+            _source_has_ordered_tokens(build_command_block, command_tokens),
+            _missing_or_unordered_source_tokens_details(build_command_block, command_tokens),
+        ),
+        _check(
+            "cli_explicit_rust_apply_forwards_serial_conditionally",
+            _source_has_tokens(build_command_block, serial_tokens),
+            _missing_source_tokens_details(build_command_block, serial_tokens),
+        ),
+        _check(
+            "cli_explicit_rust_apply_uses_static_subprocess_contract",
+            _source_has_tokens(run_rust_apply_block, subprocess_tokens),
+            _missing_source_tokens_details(run_rust_apply_block, subprocess_tokens),
+        ),
+        _check(
+            "cli_explicit_rust_apply_preserves_subprocess_output",
+            _source_has_compact_tokens(run_rust_apply_block, output_tokens),
+            _missing_compact_source_tokens_details(run_rust_apply_block, output_tokens),
+        ),
+    ]
+
+
 def _default_backend_omitted_details(backend_block: str, passed: bool) -> dict[str, str] | None:
     if passed:
         return None
@@ -795,8 +948,61 @@ def _source_call_block(text: str, marker: str) -> str:
     return ""
 
 
+def _source_function_block(text: str, function_name: str) -> str:
+    lines = text.splitlines()
+    marker = f"def {function_name}("
+    for start_index, line in enumerate(lines):
+        if not line.startswith(marker):
+            continue
+        block_lines = [line]
+        for block_line in lines[start_index + 1 :]:
+            if block_line.startswith("def ") or block_line.startswith("class "):
+                break
+            block_lines.append(block_line)
+        return "\n".join(block_lines)
+    return ""
+
+
+def _source_tokens_before(text: str, first_tokens: tuple[str, ...], second_tokens: tuple[str, ...]) -> bool:
+    first_start = _ordered_token_end_index(text, first_tokens)
+    second_start = _ordered_token_start_index(text, second_tokens)
+    return first_start is not None and second_start is not None and first_start <= second_start
+
+
+def _ordered_source_tokens_details(
+    text: str,
+    first_tokens: tuple[str, ...],
+    second_tokens: tuple[str, ...],
+) -> dict[str, list[str] | str] | None:
+    if _source_tokens_before(text, first_tokens, second_tokens):
+        return None
+    details: dict[str, list[str] | str] = {}
+    missing_first = _missing_source_tokens(text, first_tokens)
+    missing_second = _missing_source_tokens(text, second_tokens)
+    if missing_first:
+        details["missing_first_tokens"] = missing_first
+    if missing_second:
+        details["missing_second_tokens"] = missing_second
+    if not details:
+        details["ordering"] = "first token group must appear before second token group"
+    return details
+
+
 def _source_has_tokens(text: str, tokens: tuple[str, ...]) -> bool:
     return not _missing_source_tokens(text, tokens)
+
+
+def _source_has_compact_tokens(text: str, tokens: tuple[str, ...]) -> bool:
+    return not _missing_compact_source_tokens(text, tokens)
+
+
+def _source_has_any_compact_tokens(text: str, tokens: tuple[str, ...]) -> bool:
+    compact_text = _compact_source(text)
+    return any(_compact_source(token) in compact_text for token in tokens)
+
+
+def _source_has_ordered_tokens(text: str, tokens: tuple[str, ...]) -> bool:
+    return _ordered_token_end_index(text, tokens) is not None
 
 
 def _missing_source_tokens_details(text: str, tokens: tuple[str, ...]) -> dict[str, list[str]] | None:
@@ -806,8 +1012,76 @@ def _missing_source_tokens_details(text: str, tokens: tuple[str, ...]) -> dict[s
     return {"missing_tokens": missing_tokens}
 
 
+def _missing_compact_source_tokens_details(text: str, tokens: tuple[str, ...]) -> dict[str, list[str]] | None:
+    missing_tokens = _missing_compact_source_tokens(text, tokens)
+    if not missing_tokens:
+        return None
+    return {"missing_tokens": missing_tokens}
+
+
+def _missing_or_unordered_source_tokens_details(text: str, tokens: tuple[str, ...]) -> dict[str, list[str] | str] | None:
+    if _source_has_ordered_tokens(text, tokens):
+        return None
+    missing_tokens = _missing_source_tokens(text, tokens)
+    if missing_tokens:
+        return {"missing_tokens": missing_tokens}
+    return {"ordering": "tokens must appear in the expected order"}
+
+
+def _unsupported_apply_flags_details(
+    resolve_bin_block: str,
+    build_command_block: str,
+    rejection_tokens: tuple[str, ...],
+    forwarding_tokens: tuple[str, ...],
+) -> dict[str, list[str]] | None:
+    missing_rejection_tokens = _missing_source_tokens(resolve_bin_block, rejection_tokens)
+    forwarded_tokens = [
+        token
+        for token in forwarding_tokens
+        if _compact_source(token) in _compact_source(build_command_block)
+    ]
+    details: dict[str, list[str]] = {}
+    if missing_rejection_tokens:
+        details["missing_rejection_tokens"] = missing_rejection_tokens
+    if forwarded_tokens:
+        details["unexpected_command_tokens"] = forwarded_tokens
+    return details or None
+
+
 def _missing_source_tokens(text: str, tokens: tuple[str, ...]) -> list[str]:
     return [token for token in tokens if token not in text]
+
+
+def _missing_compact_source_tokens(text: str, tokens: tuple[str, ...]) -> list[str]:
+    compact_text = _compact_source(text)
+    return [token for token in tokens if _compact_source(token) not in compact_text]
+
+
+def _ordered_token_start_index(text: str, tokens: tuple[str, ...]) -> int | None:
+    position = 0
+    first_index: int | None = None
+    for token in tokens:
+        index = text.find(token, position)
+        if index < 0:
+            return None
+        if first_index is None:
+            first_index = index
+        position = index + len(token)
+    return first_index
+
+
+def _ordered_token_end_index(text: str, tokens: tuple[str, ...]) -> int | None:
+    position = 0
+    for token in tokens:
+        index = text.find(token, position)
+        if index < 0:
+            return None
+        position = index + len(token)
+    return position
+
+
+def _compact_source(text: str) -> str:
+    return "".join(text.split())
 
 
 def _scenario_field_errors(scenarios: object) -> list[str]:

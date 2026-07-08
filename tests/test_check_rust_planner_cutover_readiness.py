@@ -42,6 +42,22 @@ plan_parser.add_argument(
 plan_parser.add_argument("--rust-planner-bin")
 plan_parser.add_argument("--rust-shadow-output")
 
+apply_parser.add_argument("--plan-file", required=True)
+apply_parser.add_argument("--serial")
+apply_parser.add_argument("--dry-run", action="store_true")
+apply_parser.add_argument("--rust-apply-bin")
+
+if args.command == "apply" and args.rust_apply_bin is not None:
+    return _run_apply(args)
+setattr(
+    args,
+    "_resolved_adb",
+    resolve_adb_executable(
+        cli_value=getattr(args, "adb", None),
+        config_value=_configured_adb_executable(),
+    ),
+)
+
 def _effective_plan_backend(args):
     return args.planner_backend or _DEFAULT_RUST_PLANNER_BACKEND
 
@@ -68,7 +84,75 @@ def _resolve_rust_planner_bin(args):
 
 def _packaged_rust_planner_bin_candidate(args):
     return None
+
+def _run_apply(args):
+    if args.rust_apply_bin is not None:
+        return _run_rust_apply_dry_run(args)
+
+    plan_path = Path(args.plan_file)
+    adb = DryRunAdb() if args.dry_run else _build_adb(args)
+
+def _run_rust_apply_dry_run(args):
+    command = _build_rust_apply_command(args)
+    completed = subprocess.run(
+        command,
+        check=False,
+        text=True,
+        capture_output=True,
+    )
+    if completed.stdout:
+        sys.stdout.write(completed.stdout)
+    if completed.stderr:
+        sys.stderr.write(completed.stderr)
+    return completed.returncode
+
+def _build_rust_apply_command(args):
+    rust_apply_bin = _resolve_rust_apply_bin(args)
+    command = [
+        str(rust_apply_bin),
+        "apply",
+        "--plan-file",
+        args.plan_file,
+        "--dry-run",
+    ]
+    if args.serial is not None:
+        command.extend(["--serial", args.serial])
+    return command
+
+def _resolve_rust_apply_bin(args):
+    if not args.dry_run:
+        raise ValueError("--rust-apply-bin requires --dry-run.")
+    unsupported_options = [
+        ("--adb", args.adb is not None),
+        ("--verbose", args.verbose),
+        ("--debug", args.debug),
+    ]
+    for option, is_set in unsupported_options:
+        if is_set:
+            raise ValueError(f"--rust-apply-bin does not support {option}.")
+
+    rust_apply_bin = Path(args.rust_apply_bin).expanduser()
+    if not rust_apply_bin.exists():
+        raise ValueError(f"Rust apply binary does not exist: {args.rust_apply_bin}")
+    if not rust_apply_bin.is_file():
+        raise ValueError(f"Rust apply binary is not a file: {args.rust_apply_bin}")
+    if not os.access(rust_apply_bin, os.X_OK):
+        raise ValueError(f"Rust apply binary is not executable: {args.rust_apply_bin}")
+    return rust_apply_bin
 """
+
+P8BR_STATIC_CHECK_IDS = (
+    "cli_explicit_rust_apply_dry_run_option_present",
+    "cli_explicit_rust_apply_dispatch_before_adb_resolution",
+    "cli_explicit_rust_apply_branch_present",
+    "cli_explicit_rust_apply_requires_dry_run",
+    "cli_explicit_rust_apply_rejects_python_only_flags",
+    "cli_explicit_rust_apply_validates_binary_path",
+    "cli_explicit_rust_apply_builds_expected_command",
+    "cli_explicit_rust_apply_forwards_serial_conditionally",
+    "cli_explicit_rust_apply_uses_static_subprocess_contract",
+    "cli_explicit_rust_apply_preserves_subprocess_output",
+)
 
 EXPLICIT_DEVICE_CONTEXT = {
     "manufacturer": "Example",
@@ -358,8 +442,136 @@ class CheckRustPlannerCutoverReadinessTests(unittest.TestCase):
         )
         self.assertEqual(check_by_id(report, "cli_explicit_python_backend_not_exposed")["status"], "pass")
         self.assertEqual(check_by_id(report, "cli_default_rust_requires_planner_bin")["status"], "pass")
+        for check_id in P8BR_STATIC_CHECK_IDS:
+            with self.subTest(check_id=check_id):
+                self.assertEqual(check_by_id(report, check_id)["status"], "pass")
         blockers = {blocker["id"]: blocker["status"] for blocker in report["remaining_blockers"]}
+        self.assertEqual(blockers["explicit_rust_apply_dry_run_bridge"], "resolved")
+        self.assertEqual(blockers["executor_apply_not_cut_over"], "blocked")
         self.assertNotIn(retired_python_deletion_blocker_id(), blockers)
+
+    def test_current_repo_reports_explicit_rust_apply_dry_run_bridge_static_checks_as_passing(self) -> None:
+        report = self.build_report(REPO_ROOT)
+
+        for check_id in P8BR_STATIC_CHECK_IDS:
+            with self.subTest(check_id=check_id):
+                self.assertEqual(check_by_id(report, check_id)["status"], "pass")
+        self.assertEqual(blocker_status(report, "explicit_rust_apply_dry_run_bridge"), "resolved")
+        self.assertEqual(blocker_status(report, "executor_apply_not_cut_over"), "blocked")
+        self.assertEqual(report["status"], "blocked")
+
+    def test_explicit_rust_apply_bridge_does_not_clear_top_level_readiness_with_all_evidence_accepted(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            make_synthetic_repo(root)
+            live_report = write_json(root, "reports/p8aj.json", accepted_p8aj_report())
+            mismatch_report = write_json(root, "reports/p8ak.json", accepted_p8ak_report())
+            launcher_report = write_json(root, "reports/p8bc.json", accepted_p8bc_report())
+
+            report = self.build_report(
+                root,
+                p8aj_live_probe_report=live_report,
+                p8ak_mismatch_warning_report=mismatch_report,
+                p8bc_launcher_injected_planner_report=launcher_report,
+            )
+
+        self.assertEqual(blocker_status(report, "explicit_rust_apply_dry_run_bridge"), "resolved")
+        self.assertEqual(blocker_status(report, "executor_apply_not_cut_over"), "blocked")
+        self.assertEqual(report["status"], "blocked")
+
+    def test_explicit_rust_apply_static_checks_fail_for_targeted_source_regressions(self) -> None:
+        dispatch_after_adb = CLI_TEXT.replace(
+            'if args.command == "apply" and args.rust_apply_bin is not None:\n'
+            '    return _run_apply(args)\n'
+            'setattr(\n',
+            'setattr(\n',
+        ).replace(
+            ')\n\ndef _effective_plan_backend(args):',
+            ')\n'
+            'if args.command == "apply" and args.rust_apply_bin is not None:\n'
+            '    return _run_apply(args)\n'
+            '\ndef _effective_plan_backend(args):',
+        )
+        unsupported_flags_forwarded = CLI_TEXT.replace(
+            '    if args.serial is not None:\n'
+            '        command.extend(["--serial", args.serial])\n',
+            '    if args.serial is not None:\n'
+            '        command.extend(["--serial", args.serial])\n'
+            '    if args.adb is not None:\n'
+            '        command.extend(["--adb", args.adb])\n',
+        )
+        unsupported_flags_not_rejected = CLI_TEXT.replace('        ("--verbose", args.verbose),\n', "")
+        cases = [
+            (
+                "cli_explicit_rust_apply_dry_run_option_present",
+                CLI_TEXT.replace('apply_parser.add_argument("--rust-apply-bin")', ""),
+            ),
+            (
+                "cli_explicit_rust_apply_dispatch_before_adb_resolution",
+                dispatch_after_adb,
+            ),
+            (
+                "cli_explicit_rust_apply_branch_present",
+                CLI_TEXT.replace(
+                    "    if args.rust_apply_bin is not None:\n"
+                    "        return _run_rust_apply_dry_run(args)\n",
+                    "",
+                ),
+            ),
+            (
+                "cli_explicit_rust_apply_requires_dry_run",
+                CLI_TEXT.replace(
+                    '    if not args.dry_run:\n'
+                    '        raise ValueError("--rust-apply-bin requires --dry-run.")\n',
+                    "",
+                ),
+            ),
+            (
+                "cli_explicit_rust_apply_rejects_python_only_flags",
+                unsupported_flags_forwarded,
+            ),
+            (
+                "cli_explicit_rust_apply_rejects_python_only_flags",
+                unsupported_flags_not_rejected,
+            ),
+            (
+                "cli_explicit_rust_apply_validates_binary_path",
+                CLI_TEXT.replace(
+                    '    if not rust_apply_bin.is_file():\n'
+                    '        raise ValueError(f"Rust apply binary is not a file: {args.rust_apply_bin}")\n',
+                    "",
+                ),
+            ),
+            (
+                "cli_explicit_rust_apply_builds_expected_command",
+                CLI_TEXT.replace('        "--plan-file",\n        args.plan_file,\n', ""),
+            ),
+            (
+                "cli_explicit_rust_apply_forwards_serial_conditionally",
+                CLI_TEXT.replace(
+                    '    if args.serial is not None:\n'
+                    '        command.extend(["--serial", args.serial])\n',
+                    '    command.extend(["--serial", args.serial])\n',
+                ),
+            ),
+            (
+                "cli_explicit_rust_apply_uses_static_subprocess_contract",
+                CLI_TEXT.replace("        capture_output=True,\n", ""),
+            ),
+            (
+                "cli_explicit_rust_apply_preserves_subprocess_output",
+                CLI_TEXT.replace("    return completed.returncode\n", "    return 0\n"),
+            ),
+        ]
+        for check_id, cli_text in cases:
+            with self.subTest(check_id=check_id):
+                with tempfile.TemporaryDirectory() as temp_dir:
+                    root = Path(temp_dir)
+                    make_synthetic_repo(root, cli_text=cli_text)
+
+                    report = self.build_report(root)
+
+                self.assertEqual(check_by_id(report, check_id)["status"], "fail")
 
     def test_missing_scenario_matrix_reports_failed_check(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
