@@ -12,6 +12,7 @@ from unittest.mock import patch
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 SMOKE_PATH = REPO_ROOT / "tools" / "smoke_rust_apply_dry_run_bridge.py"
+APPLY_DRY_RUN_FIXTURE = REPO_ROOT / "tests" / "fixtures" / "apply_dry_run" / "minimal_execution_plan.yaml"
 ARGV_CAPTURE_ENV = "EMUCHEF_P8BU_ARGV_PATH"
 
 
@@ -180,6 +181,34 @@ class SmokeRustApplyDryRunBridgeTests(unittest.TestCase):
         self.assertTrue(report["result"]["stdout_present"])
         self.assertFalse(report["result"]["stderr_present"])
         self.assertTrue(all(check["status"] == "pass" for check in report["checks"]))
+
+    def test_checked_in_fixture_works_as_smoke_plan_file_input(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            temp_root = Path(temp_dir)
+            rust_apply_bin = write_executable(
+                temp_root / "emuchef-rust-backend",
+                "#!/bin/sh\nprintf 'fixture dry run ok\\n'\nexit 0\n",
+            )
+            output_report = temp_root / "report.json"
+
+            rc, report = self.run_smoke(
+                rust_apply_bin=rust_apply_bin,
+                plan_file=APPLY_DRY_RUN_FIXTURE,
+                output_report=output_report,
+            )
+
+        self.assertTrue(APPLY_DRY_RUN_FIXTURE.exists())
+        self.assertEqual(rc, 0)
+        self.assertEqual(report["status"], "passed")
+        self.assertEqual(report["result"]["returncode"], 0)
+        self.assertIn("apply", report["command"])
+        self.assertIn("--plan-file", report["command"])
+        self.assertIn("--dry-run", report["command"])
+        self.assertIn("--rust-apply-bin", report["command"])
+        self.assertIn(
+            "tests/fixtures/apply_dry_run/minimal_execution_plan.yaml",
+            report["inputs"]["plan_file"],
+        )
 
     def test_failed_bridge_invocation_preserves_return_code_and_writes_failed_report(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:

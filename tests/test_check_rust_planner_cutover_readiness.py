@@ -1009,7 +1009,7 @@ class CheckRustPlannerCutoverReadinessTests(unittest.TestCase):
         p8bu_command = commands["p8bu_rust_apply_dry_run_bridge"]
         self.assertIn("tools/smoke_rust_apply_dry_run_bridge.py", p8bu_command)
         self.assertIn("--rust-apply-bin <path-to-emuchef-rust-backend>", p8bu_command)
-        self.assertIn("--plan-file <path-to-execution-plan>", p8bu_command)
+        self.assertIn("--plan-file tests/fixtures/apply_dry_run/minimal_execution_plan.yaml", p8bu_command)
         self.assertIn("--output-report <path-to-output-report>", p8bu_command)
         self.assertNotIn(".local", p8bc_command)
         self.assertNotIn("/Users/", p8bc_command)

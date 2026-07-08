@@ -28,6 +28,9 @@ from emuchef.io import dump_yaml, load_authored_catalog
 from emuchef.planner import Planner
 
 
+APPLY_DRY_RUN_FIXTURE = Path("tests/fixtures/apply_dry_run/minimal_execution_plan.yaml")
+
+
 class CliTests(unittest.TestCase):
     def test_cli_does_not_directly_import_python_planner_module(self) -> None:
         source_path = Path(__file__).resolve().parents[1] / "src" / "emuchef" / "cli.py"
@@ -3161,6 +3164,55 @@ class CliTests(unittest.TestCase):
             text=True,
             capture_output=True,
         )
+
+    def test_apply_rust_dry_run_delegates_checked_in_fixture_without_serial_by_default(self) -> None:
+        with TemporaryDirectory() as tmp:
+            rust_apply_bin = Path(tmp) / "emuchef-rust-backend"
+            expected_plan = str(APPLY_DRY_RUN_FIXTURE)
+            rust_apply_bin.write_text(
+                "#!/bin/sh\n"
+                'if [ "$#" -ne 4 ]; then\n'
+                '  printf "unexpected argc: %s\\n" "$#" >&2\n'
+                "  exit 97\n"
+                "fi\n"
+                'if [ "$1" != "apply" ] || [ "$2" != "--plan-file" ] || [ "$3" != "$EXPECTED_PLAN" ] || [ "$4" != "--dry-run" ]; then\n'
+                '  printf "unexpected argv: %s\\n" "$*" >&2\n'
+                "  exit 98\n"
+                "fi\n"
+                'printf "fixture dry run ok\\n"\n'
+                "exit 0\n",
+                encoding="utf-8",
+            )
+            rust_apply_bin.chmod(0o755)
+
+            stdout = StringIO()
+            stderr = StringIO()
+            with (
+                patch.dict(os.environ, {"EXPECTED_PLAN": expected_plan}),
+                patch("emuchef.cli.resolve_adb_executable") as resolve_adb,
+                patch("emuchef.cli.load_execution_plan_file") as load_plan,
+                patch("emuchef.cli.ExecutorRunner") as executor_runner,
+                contextlib.redirect_stdout(stdout),
+                contextlib.redirect_stderr(stderr),
+            ):
+                rc = main(
+                    [
+                        "apply",
+                        "--plan-file",
+                        expected_plan,
+                        "--dry-run",
+                        "--rust-apply-bin",
+                        str(rust_apply_bin),
+                    ]
+                )
+
+        self.assertTrue(APPLY_DRY_RUN_FIXTURE.exists())
+        self.assertEqual(rc, 0, stderr.getvalue())
+        self.assertEqual(stdout.getvalue(), "fixture dry run ok\n")
+        self.assertEqual(stderr.getvalue(), "")
+        resolve_adb.assert_not_called()
+        load_plan.assert_not_called()
+        executor_runner.assert_not_called()
 
     def test_apply_rust_dry_run_forwards_serial_when_supplied(self) -> None:
         with TemporaryDirectory() as tmp:

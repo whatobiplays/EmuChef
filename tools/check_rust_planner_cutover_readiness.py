@@ -225,7 +225,7 @@ REQUIRED_MANUAL_EVIDENCE = (
         "command": (
             "PYTHONPATH=src rtk python3 tools/smoke_rust_apply_dry_run_bridge.py "
             "--rust-apply-bin <path-to-emuchef-rust-backend> "
-            "--plan-file <path-to-execution-plan> "
+            "--plan-file tests/fixtures/apply_dry_run/minimal_execution_plan.yaml "
             "--output-report <path-to-output-report>"
         ),
     },
