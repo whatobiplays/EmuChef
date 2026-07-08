@@ -29,6 +29,8 @@ P8AJ_REPORT_KIND = "rust_production_equivalent_live_adb_probe_smoke"
 P8AK_REPORT_KIND = "rust_production_equivalent_mismatch_warning_smoke"
 P8BC_REPORT_KIND = "rust_launcher_injected_planner_smoke"
 P8BU_REPORT_KIND = "rust_apply_dry_run_bridge_smoke"
+P8BU_EXPLICIT_ROUTE = "explicit_rust_apply_bin"
+P8BU_DEFAULT_PACKAGED_ROUTE = "default_packaged"
 DEFAULT_CLI_BACKEND_BLOCKER_ID = "default_cli_backend_still_python"
 EXPLICIT_RUST_APPLY_DRY_RUN_CAPABILITY_ID = "explicit_rust_apply_dry_run_bridge"
 DEFAULT_RUST_APPLY_DRY_RUN_CAPABILITY_ID = "default_rust_apply_dry_run_route"
@@ -109,12 +111,16 @@ P8BU_REQUIRED_CHECKS = (
     "plan_file_exists",
     "python_bridge_invocation_succeeded",
 )
-P8BU_REQUIRED_COMMAND_TOKENS = (
+P8BU_DEFAULT_REQUIRED_CHECKS = (
+    "plan_file_exists",
+    "python_bridge_invocation_succeeded",
+)
+P8BU_BASE_REQUIRED_COMMAND_TOKENS = (
     "apply",
     "--plan-file",
     "--dry-run",
-    "--rust-apply-bin",
 )
+P8BU_EXPLICIT_REQUIRED_COMMAND_TOKENS = (*P8BU_BASE_REQUIRED_COMMAND_TOKENS, "--rust-apply-bin")
 
 REQUIRED_ARTIFACTS = (
     "tools/compare_rust_python_plan.py",
@@ -224,7 +230,7 @@ REQUIRED_MANUAL_EVIDENCE = (
         "id": P8BU_EVIDENCE_ID,
         "command": (
             "PYTHONPATH=src rtk python3 tools/smoke_rust_apply_dry_run_bridge.py "
-            "--rust-apply-bin <path-to-emuchef-rust-backend> "
+            "--use-default-packaged-route "
             "--plan-file tests/fixtures/apply_dry_run/minimal_execution_plan.yaml "
             "--output-report <path-to-output-report>"
         ),
@@ -318,6 +324,7 @@ def build_readiness_report(
         *_cli_default_route_checks(repo_root),
         *_cli_explicit_rust_apply_dry_run_checks(repo_root),
         *_cli_default_rust_apply_dry_run_checks(repo_root),
+        *_cli_packaged_rust_backend_candidate_checks(repo_root),
     ]
     production_equivalent_evidence = {
         P8AJ_EVIDENCE_ID: _evaluate_evidence_report(
@@ -414,9 +421,9 @@ def _evaluate_evidence_report(
         )
 
     # P8BU intentionally records command tokens and absolute input paths because
-    # the smoke proves a developer-supplied explicit binary bridge. Keep that
-    # exception tied to the exact report kind so older evidence schemas retain
-    # their stricter metadata-only policy.
+    # the smoke proves the apply dry-run bridge route. Keep that exception tied
+    # to the exact report kind so older evidence schemas retain their stricter
+    # metadata-only policy.
     exempt_from_sensitive_payload_filters = (
         sensitive_payload_exemption_kind is not None and payload.get("kind") == sensitive_payload_exemption_kind
     )
@@ -626,15 +633,23 @@ def _p8bu_evidence_rejection_reasons(payload: dict[str, Any]) -> list[str]:
     if payload.get("status") != "passed":
         reasons.append("status must be passed")
 
+    route = payload.get("route")
+    if route is None:
+        reasons.append("route is required")
+    elif route not in (P8BU_EXPLICIT_ROUTE, P8BU_DEFAULT_PACKAGED_ROUTE):
+        reasons.append(f"route must be {P8BU_EXPLICIT_ROUTE} or {P8BU_DEFAULT_PACKAGED_ROUTE}")
+
     inputs = payload.get("inputs")
     if not isinstance(inputs, dict):
         reasons.append("inputs must be an object")
+    elif route == P8BU_DEFAULT_PACKAGED_ROUTE and inputs.get("rust_apply_bin") is not None:
+        reasons.append("inputs.rust_apply_bin must be null for default_packaged")
 
     command = payload.get("command")
     if not isinstance(command, list) or not all(isinstance(token, str) for token in command):
         reasons.append("command must be a list of strings")
     else:
-        reasons.extend(_p8bu_command_rejection_reasons(command))
+        reasons.extend(_p8bu_command_rejection_reasons(command, route=route if isinstance(route, str) else None))
 
     result = payload.get("result")
     if not isinstance(result, dict):
@@ -646,8 +661,9 @@ def _p8bu_evidence_rejection_reasons(payload: dict[str, Any]) -> list[str]:
     if not isinstance(checks, list):
         reasons.append("checks must be a list")
     else:
-        required_check_states = _p8bu_required_check_states(checks)
-        for check_id in P8BU_REQUIRED_CHECKS:
+        required_check_ids = _p8bu_required_checks_for_route(route if isinstance(route, str) else None)
+        required_check_states = _p8bu_required_check_states(checks, required_check_ids=required_check_ids)
+        for check_id in required_check_ids:
             check_state = required_check_states.get(check_id)
             if check_state is None:
                 reasons.append(f"missing required check: {check_id}")
@@ -657,12 +673,20 @@ def _p8bu_evidence_rejection_reasons(payload: dict[str, Any]) -> list[str]:
     return reasons
 
 
-def _p8bu_command_rejection_reasons(command: list[str]) -> list[str]:
+def _p8bu_command_rejection_reasons(command: list[str], *, route: str | None) -> list[str]:
     reasons = []
-    for token in P8BU_REQUIRED_COMMAND_TOKENS:
+    required_tokens = (
+        P8BU_EXPLICIT_REQUIRED_COMMAND_TOKENS
+        if route == P8BU_EXPLICIT_ROUTE
+        else P8BU_BASE_REQUIRED_COMMAND_TOKENS
+    )
+    for token in required_tokens:
         if token not in command:
             reasons.append(f"command must contain {token}")
-    for option in ("--plan-file", "--rust-apply-bin"):
+    if route == P8BU_DEFAULT_PACKAGED_ROUTE and "--rust-apply-bin" in command:
+        reasons.append("default_packaged command must not contain --rust-apply-bin")
+    options_with_values = ("--plan-file", "--rust-apply-bin") if route == P8BU_EXPLICIT_ROUTE else ("--plan-file",)
+    for option in options_with_values:
         if option in command and not _command_option_has_value(command, option):
             reasons.append(f"command must include a value after {option}")
     return reasons
@@ -679,13 +703,25 @@ def _command_option_has_value(command: list[str], option: str) -> bool:
     )
 
 
-def _p8bu_required_check_states(checks: list[object]) -> dict[str, bool | None]:
+def _p8bu_required_checks_for_route(route: str | None) -> tuple[str, ...]:
+    if route == P8BU_DEFAULT_PACKAGED_ROUTE:
+        return P8BU_DEFAULT_REQUIRED_CHECKS
+    if route == P8BU_EXPLICIT_ROUTE:
+        return P8BU_REQUIRED_CHECKS
+    return ()
+
+
+def _p8bu_required_check_states(
+    checks: list[object],
+    *,
+    required_check_ids: tuple[str, ...],
+) -> dict[str, bool | None]:
     states: dict[str, bool | None] = {}
     for check in checks:
         if not isinstance(check, dict):
             continue
         check_id = check.get("id")
-        if isinstance(check_id, str) and check_id in P8BU_REQUIRED_CHECKS:
+        if isinstance(check_id, str) and check_id in required_check_ids:
             status = check.get("status")
             states[check_id] = True if status == "pass" else False if isinstance(status, str) else None
     return states
@@ -879,9 +915,8 @@ def _cli_default_route_checks(repo_root: Path) -> list[dict[str, Any]]:
         "if args.rust_planner_bin:",
         "packaged_candidate = _packaged_rust_planner_bin_candidate(args)",
         "if packaged_candidate is not None:",
-        "return packaged_candidate",
         "def _packaged_rust_planner_bin_candidate(args",
-        "return None",
+        "return _packaged_rust_backend_bin_candidate()",
         "if args.planner_backend is None:",
         "--rust-planner-bin is required when default Rust planner routing is active.",
     )
@@ -1106,7 +1141,10 @@ def _cli_default_rust_apply_dry_run_checks(repo_root: Path) -> list[dict[str, An
     route_present = _source_has_tokens(should_route_block, route_tokens)
     dispatch_before_adb = _source_tokens_before(dispatch_scope, dispatch_tokens, adb_resolution_tokens)
     requires_binary = _source_has_tokens(resolve_bin_block, requires_binary_tokens)
-    packaged_seam_inert = "def _packaged_rust_apply_bin_candidate(args" in packaged_candidate_block and "return None" in packaged_candidate_block
+    packaged_seam_present = (
+        "def _packaged_rust_apply_bin_candidate(args" in packaged_candidate_block
+        and "return _packaged_rust_backend_bin_candidate()" in packaged_candidate_block
+    )
     no_python_fallback = _source_has_tokens(run_apply_block, no_fallback_branch_tokens) and "DryRunAdb() if args.dry_run" not in run_apply_block
     preserves_non_dry_run = _source_has_tokens(run_apply_block, no_fallback_branch_tokens) and _source_has_tokens(
         run_apply_block,
@@ -1126,12 +1164,12 @@ def _cli_default_rust_apply_dry_run_checks(repo_root: Path) -> list[dict[str, An
         ),
         _check(
             "cli_default_rust_apply_dry_run_requires_binary",
-            requires_binary and packaged_seam_inert,
+            requires_binary and packaged_seam_present,
             _default_rust_apply_requires_binary_details(
                 resolve_bin_block,
                 packaged_candidate_block,
                 requires_binary_tokens,
-                packaged_seam_inert,
+                packaged_seam_present,
             ),
         ),
         _check(
@@ -1143,6 +1181,87 @@ def _cli_default_rust_apply_dry_run_checks(repo_root: Path) -> list[dict[str, An
             "cli_default_rust_apply_dry_run_preserves_non_dry_run_apply_boundary",
             preserves_non_dry_run,
             _missing_source_tokens_details(run_apply_block, (*no_fallback_branch_tokens, *non_dry_run_python_tokens)),
+        ),
+    ]
+
+
+def _cli_packaged_rust_backend_candidate_checks(repo_root: Path) -> list[dict[str, Any]]:
+    cli_path = repo_root / "src" / "emuchef" / "cli.py"
+    cli_text = _read_text_if_available(cli_path)
+    helper_block = _source_function_block(cli_text, "_packaged_rust_backend_bin_candidate")
+    planner_candidate_block = _source_function_block(cli_text, "_packaged_rust_planner_bin_candidate")
+    apply_candidate_block = _source_function_block(cli_text, "_packaged_rust_apply_bin_candidate")
+    smoke_text = _read_text_if_available(repo_root / "tools" / "smoke_rust_apply_dry_run_bridge.py")
+
+    helper_tokens = (
+        "def _packaged_rust_backend_bin_candidate(",
+        "platform.system()",
+        "platform.machine()",
+        "apps",
+        "config-editor",
+        "src-tauri",
+        "binaries",
+        "emuchef-rust-backend-",
+    )
+    forbidden_helper_tokens = (
+        "os.environ",
+        "getenv(",
+        "shutil.which",
+        "subprocess" + ".",
+        "Popen(",
+        "os.system",
+        "cargo ",
+        "npm ",
+        "node ",
+        "target/debug",
+        "target/release",
+        ".iterdir(",
+        ".rglob(",
+        "glob(",
+        "os.listdir",
+        "os.walk",
+    )
+    forbidden_present = [token for token in forbidden_helper_tokens if token in helper_block]
+    planner_tokens = (
+        "def _packaged_rust_planner_bin_candidate(args",
+        "return _packaged_rust_backend_bin_candidate()",
+    )
+    apply_tokens = (
+        "def _packaged_rust_apply_bin_candidate(args",
+        "return _packaged_rust_backend_bin_candidate()",
+    )
+    smoke_tokens = (
+        "--use-default-packaged-route",
+        "default_packaged",
+        "route",
+        "--rust-apply-bin",
+    )
+
+    return [
+        _check(
+            "cli_packaged_rust_backend_candidate_contract_present",
+            _source_has_tokens(helper_block, helper_tokens),
+            _missing_source_tokens_details(helper_block, helper_tokens),
+        ),
+        _check(
+            "cli_packaged_rust_backend_candidate_no_shell_or_path_lookup",
+            not forbidden_present,
+            None if not forbidden_present else {"forbidden_tokens": forbidden_present},
+        ),
+        _check(
+            "cli_packaged_rust_planner_uses_packaged_backend_candidate",
+            _source_has_tokens(planner_candidate_block, planner_tokens),
+            _missing_source_tokens_details(planner_candidate_block, planner_tokens),
+        ),
+        _check(
+            "cli_packaged_rust_apply_uses_packaged_backend_candidate",
+            _source_has_tokens(apply_candidate_block, apply_tokens),
+            _missing_source_tokens_details(apply_candidate_block, apply_tokens),
+        ),
+        _check(
+            "cli_default_packaged_apply_dry_run_smoke_supported",
+            _source_has_tokens(smoke_text, smoke_tokens),
+            _missing_source_tokens_details(smoke_text, smoke_tokens),
         ),
     ]
 
@@ -1159,14 +1278,14 @@ def _default_rust_apply_requires_binary_details(
     resolve_bin_block: str,
     packaged_candidate_block: str,
     required_tokens: tuple[str, ...],
-    packaged_seam_inert: bool,
+    packaged_seam_present: bool,
 ) -> dict[str, list[str] | str] | None:
     missing_tokens = _missing_source_tokens(resolve_bin_block, required_tokens)
     details: dict[str, list[str] | str] = {}
     if missing_tokens:
         details["missing_tokens"] = missing_tokens
-    if not packaged_seam_inert:
-        details["packaged_candidate"] = "packaged apply resolver seam must be present and return None"
+    if not packaged_seam_present:
+        details["packaged_candidate"] = "packaged apply resolver seam must call shared packaged backend candidate"
     return details or None
 
 

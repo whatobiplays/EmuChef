@@ -72,6 +72,43 @@ class CliTests(unittest.TestCase):
 
         self.assertEqual(str(context.exception), "Rust apply binary does not exist: displayed packaged path")
 
+    def test_packaged_rust_backend_bin_candidate_maps_supported_platforms(self) -> None:
+        cases = [
+            ("Darwin", "arm64", "emuchef-rust-backend-aarch64-apple-darwin"),
+            ("Darwin", "x86_64", "emuchef-rust-backend-x86_64-apple-darwin"),
+            ("Linux", "x86_64", "emuchef-rust-backend-x86_64-unknown-linux-gnu"),
+            ("Linux", "aarch64", "emuchef-rust-backend-aarch64-unknown-linux-gnu"),
+            ("Windows", "AMD64", "emuchef-rust-backend-x86_64-pc-windows-msvc.exe"),
+            ("Windows", "ARM64", "emuchef-rust-backend-aarch64-pc-windows-msvc.exe"),
+        ]
+
+        for system, machine, expected_name in cases:
+            with self.subTest(system=system, machine=machine):
+                with (
+                    patch("emuchef.cli.platform.system", return_value=system),
+                    patch("emuchef.cli.platform.machine", return_value=machine),
+                ):
+                    candidate = cli._packaged_rust_backend_bin_candidate()
+
+                self.assertIsNotNone(candidate)
+                assert candidate is not None
+                self.assertEqual(candidate.name, expected_name)
+                self.assertIn("apps/config-editor/src-tauri/binaries", candidate.as_posix())
+
+    def test_packaged_rust_backend_bin_candidate_returns_none_for_unsupported_platforms(self) -> None:
+        cases = [
+            ("FreeBSD", "x86_64"),
+            ("Linux", "riscv64"),
+        ]
+
+        for system, machine in cases:
+            with self.subTest(system=system, machine=machine):
+                with (
+                    patch("emuchef.cli.platform.system", return_value=system),
+                    patch("emuchef.cli.platform.machine", return_value=machine),
+                ):
+                    self.assertIsNone(cli._packaged_rust_backend_bin_candidate())
+
     def _rust_resolver_args(
         self,
         *,
@@ -88,6 +125,20 @@ class CliTests(unittest.TestCase):
             ops=None,
             output=None,
             serial=None,
+        )
+
+    def _rust_apply_resolver_args(
+        self,
+        *,
+        rust_apply_bin: str | None = None,
+        dry_run: bool = True,
+    ) -> argparse.Namespace:
+        return argparse.Namespace(
+            rust_apply_bin=rust_apply_bin,
+            dry_run=dry_run,
+            adb=None,
+            verbose=False,
+            debug=False,
         )
 
     def _rust_shadow_planning_result_json(
@@ -164,12 +215,12 @@ class CliTests(unittest.TestCase):
         stdout = StringIO()
         stderr = StringIO()
         with (
+            patch("emuchef.cli._packaged_rust_planner_bin_candidate", return_value=None) as packaged_candidate,
             patch("emuchef.cli._build_session") as build_session,
             patch("emuchef.cli.resolve_adb_executable") as resolve_adb,
             patch("emuchef.cli.SubprocessAdb.detect_device") as detect_device,
             patch("subprocess.run") as run,
             patch("emuchef.cli._run_apply") as run_apply,
-            patch("emuchef.cli._packaged_rust_planner_bin_candidate", return_value=None) as packaged_candidate,
             contextlib.redirect_stdout(stdout),
             contextlib.redirect_stderr(stderr),
         ):
@@ -193,8 +244,8 @@ class CliTests(unittest.TestCase):
         resolve_adb.assert_not_called()
         detect_device.assert_not_called()
         run.assert_not_called()
-        run_apply.assert_not_called()
         packaged_candidate.assert_called_once()
+        run_apply.assert_not_called()
 
     def test_plan_public_routes_do_not_call_private_python_plan(self) -> None:
         self.assertFalse(hasattr(cli, "_run_python_plan"))
@@ -239,8 +290,14 @@ class CliTests(unittest.TestCase):
                     self.assertEqual(stderr.getvalue(), "")
                     run.assert_called_once()
 
-    def test_packaged_rust_planner_bin_candidate_returns_none_today(self) -> None:
-        self.assertIsNone(cli._packaged_rust_planner_bin_candidate(self._rust_resolver_args()))
+    def test_packaged_rust_planner_bin_candidate_uses_shared_backend_candidate(self) -> None:
+        args = self._rust_resolver_args()
+        packaged_path = Path("/packaged/emuchef-rust-backend")
+
+        with patch("emuchef.cli._packaged_rust_backend_bin_candidate", return_value=packaged_path) as backend_candidate:
+            self.assertEqual(cli._packaged_rust_planner_bin_candidate(args), packaged_path)
+
+        backend_candidate.assert_called_once_with()
 
     def test_resolve_rust_planner_bin_prefers_explicit_valid_path_without_packaged_candidate(self) -> None:
         with TemporaryDirectory() as tmp:
@@ -253,18 +310,31 @@ class CliTests(unittest.TestCase):
         self.assertEqual(resolved, shadow_bin)
         packaged_candidate.assert_not_called()
 
-    def test_resolve_rust_planner_bin_returns_mocked_packaged_candidate_future_seam_contract(self) -> None:
-        args = self._rust_resolver_args()
-        packaged_path = Path("/packaged/emuchef-plan-shadow")
+    def test_resolve_rust_planner_bin_uses_valid_packaged_candidate_when_explicit_path_absent(self) -> None:
+        with TemporaryDirectory() as tmp:
+            packaged_path = Path(self._shadow_bin(tmp))
+            args = self._rust_resolver_args()
 
-        with patch(
-            "emuchef.cli._packaged_rust_planner_bin_candidate",
-            return_value=packaged_path,
-        ) as packaged_candidate:
-            resolved = cli._resolve_rust_planner_bin(args)
+            with patch(
+                "emuchef.cli._packaged_rust_planner_bin_candidate",
+                return_value=packaged_path,
+            ) as packaged_candidate:
+                resolved = cli._resolve_rust_planner_bin(args)
 
         self.assertEqual(resolved, packaged_path)
         packaged_candidate.assert_called_once_with(args)
+
+    def test_resolve_rust_planner_bin_validates_packaged_candidate_with_existing_message_style(self) -> None:
+        with TemporaryDirectory() as tmp:
+            missing_bin = Path(tmp) / "missing-packaged"
+            args = self._rust_resolver_args()
+
+            with patch("emuchef.cli._packaged_rust_planner_bin_candidate", return_value=missing_bin):
+                with self.assertRaisesRegex(
+                    ValueError,
+                    f"Rust shadow planner binary does not exist: {missing_bin}",
+                ):
+                    cli._resolve_rust_planner_bin(args)
 
     def test_resolve_rust_planner_bin_calls_packaged_candidate_once_before_missing_bin_error(self) -> None:
         args = self._rust_resolver_args()
@@ -305,6 +375,7 @@ class CliTests(unittest.TestCase):
                             "EMUCHEF_RUST_PLANNER_BIN": env_bin,
                         },
                     ),
+                    patch("emuchef.cli._packaged_rust_planner_bin_candidate", return_value=None),
                     patch("emuchef.cli._build_session") as build_session,
                     patch("emuchef.cli.resolve_adb_executable") as resolve_adb,
                     patch("emuchef.cli.SubprocessAdb.detect_device") as detect_device,
@@ -551,12 +622,12 @@ class CliTests(unittest.TestCase):
         stdout = StringIO()
         stderr = StringIO()
         with (
+            patch("emuchef.cli._packaged_rust_planner_bin_candidate", return_value=None) as packaged_candidate,
             patch("emuchef.cli._build_session") as build_session,
             patch("emuchef.cli.resolve_adb_executable") as resolve_adb,
             patch("emuchef.cli.SubprocessAdb.detect_device") as detect_device,
             patch("subprocess.run") as run,
             patch("emuchef.cli._run_apply") as run_apply,
-            patch("emuchef.cli._packaged_rust_planner_bin_candidate", return_value=None) as packaged_candidate,
             contextlib.redirect_stdout(stdout),
             contextlib.redirect_stderr(stderr),
         ):
@@ -583,8 +654,8 @@ class CliTests(unittest.TestCase):
         resolve_adb.assert_not_called()
         detect_device.assert_not_called()
         run.assert_not_called()
-        run_apply.assert_not_called()
         packaged_candidate.assert_called_once()
+        run_apply.assert_not_called()
 
     def test_plan_rust_production_equivalent_invokes_shadow_command_and_prints_concise_summary(self) -> None:
         with TemporaryDirectory() as tmp:
@@ -1155,6 +1226,7 @@ class CliTests(unittest.TestCase):
         stdout = StringIO()
         stderr = StringIO()
         with (
+            patch("emuchef.cli._packaged_rust_planner_bin_candidate", return_value=None) as packaged_candidate,
             patch("emuchef.cli._build_session") as build_session,
             patch("emuchef.cli.resolve_adb_executable") as resolve_adb,
             patch("emuchef.cli.SubprocessAdb.detect_device") as detect_device,
@@ -1184,6 +1256,7 @@ class CliTests(unittest.TestCase):
         resolve_adb.assert_not_called()
         detect_device.assert_not_called()
         run.assert_not_called()
+        packaged_candidate.assert_called_once()
 
     def test_plan_rust_shadow_invokes_explicit_binary_and_forwards_raw_binds(self) -> None:
         with TemporaryDirectory() as tmp:
@@ -1891,6 +1964,7 @@ class CliTests(unittest.TestCase):
         stdout = StringIO()
         stderr = StringIO()
         with (
+            patch("emuchef.cli._packaged_rust_planner_bin_candidate", return_value=None) as packaged_candidate,
             patch("emuchef.cli._build_session") as build_session,
             patch("emuchef.cli.resolve_adb_executable") as resolve_adb,
             patch("emuchef.cli.SubprocessAdb.detect_device") as detect_device,
@@ -1920,6 +1994,7 @@ class CliTests(unittest.TestCase):
         resolve_adb.assert_not_called()
         detect_device.assert_not_called()
         run.assert_not_called()
+        packaged_candidate.assert_called_once()
 
     def test_plan_rust_experimental_invokes_shadow_command_and_prints_concise_summary(self) -> None:
         with TemporaryDirectory() as tmp:
@@ -2977,6 +3052,26 @@ class CliTests(unittest.TestCase):
         executor_runner.assert_not_called()
         run.assert_not_called()
 
+    def test_packaged_rust_apply_bin_candidate_uses_shared_backend_candidate(self) -> None:
+        args = self._rust_apply_resolver_args()
+        packaged_path = Path("/packaged/emuchef-rust-backend")
+
+        with patch("emuchef.cli._packaged_rust_backend_bin_candidate", return_value=packaged_path) as backend_candidate:
+            self.assertEqual(cli._packaged_rust_apply_bin_candidate(args), packaged_path)
+
+        backend_candidate.assert_called_once_with()
+
+    def test_resolve_rust_apply_bin_prefers_explicit_valid_path_without_packaged_candidate(self) -> None:
+        with TemporaryDirectory() as tmp:
+            rust_apply_bin = Path(self._rust_apply_bin(tmp))
+            args = self._rust_apply_resolver_args(rust_apply_bin=str(rust_apply_bin))
+
+            with patch("emuchef.cli._packaged_rust_apply_bin_candidate") as packaged_candidate:
+                resolved = cli._resolve_rust_apply_bin(args)
+
+        self.assertEqual(resolved, rust_apply_bin)
+        packaged_candidate.assert_not_called()
+
     def test_apply_default_dry_run_uses_packaged_rust_apply_candidate_without_adb_resolution(self) -> None:
         with TemporaryDirectory() as tmp:
             rust_apply_bin = Path(self._rust_apply_bin(tmp))
@@ -3210,6 +3305,55 @@ class CliTests(unittest.TestCase):
         self.assertEqual(rc, 0, stderr.getvalue())
         self.assertEqual(stdout.getvalue(), "fixture dry run ok\n")
         self.assertEqual(stderr.getvalue(), "")
+        resolve_adb.assert_not_called()
+        load_plan.assert_not_called()
+        executor_runner.assert_not_called()
+
+    def test_apply_default_dry_run_fixture_uses_mocked_packaged_candidate_without_explicit_arg(self) -> None:
+        with TemporaryDirectory() as tmp:
+            rust_apply_bin = Path(tmp) / "emuchef-rust-backend"
+            expected_plan = str(APPLY_DRY_RUN_FIXTURE)
+            rust_apply_bin.write_text(
+                "#!/bin/sh\n"
+                'if [ "$#" -ne 4 ]; then\n'
+                '  printf "unexpected argc: %s\\n" "$#" >&2\n'
+                "  exit 97\n"
+                "fi\n"
+                'if [ "$1" != "apply" ] || [ "$2" != "--plan-file" ] || [ "$3" != "$EXPECTED_PLAN" ] || [ "$4" != "--dry-run" ]; then\n'
+                '  printf "unexpected argv: %s\\n" "$*" >&2\n'
+                "  exit 98\n"
+                "fi\n"
+                'printf "default packaged fixture dry run ok\\n"\n'
+                "exit 0\n",
+                encoding="utf-8",
+            )
+            rust_apply_bin.chmod(0o755)
+
+            stdout = StringIO()
+            stderr = StringIO()
+            with (
+                patch.dict(os.environ, {"EXPECTED_PLAN": expected_plan}),
+                patch("emuchef.cli._packaged_rust_apply_bin_candidate", return_value=rust_apply_bin) as packaged_candidate,
+                patch("emuchef.cli.resolve_adb_executable") as resolve_adb,
+                patch("emuchef.cli.load_execution_plan_file") as load_plan,
+                patch("emuchef.cli.ExecutorRunner") as executor_runner,
+                contextlib.redirect_stdout(stdout),
+                contextlib.redirect_stderr(stderr),
+            ):
+                rc = main(
+                    [
+                        "apply",
+                        "--plan-file",
+                        expected_plan,
+                        "--dry-run",
+                    ]
+                )
+
+        self.assertTrue(APPLY_DRY_RUN_FIXTURE.exists())
+        self.assertEqual(rc, 0, stderr.getvalue())
+        self.assertEqual(stdout.getvalue(), "default packaged fixture dry run ok\n")
+        self.assertEqual(stderr.getvalue(), "")
+        packaged_candidate.assert_called_once()
         resolve_adb.assert_not_called()
         load_plan.assert_not_called()
         executor_runner.assert_not_called()

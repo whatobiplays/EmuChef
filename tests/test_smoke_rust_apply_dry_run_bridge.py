@@ -61,6 +61,45 @@ class SmokeRustApplyDryRunBridgeTests(unittest.TestCase):
         )
         return rc, json.loads(output_report.read_text(encoding="utf-8"))
 
+    def run_default_smoke(self, *, plan_file: Path, output_report: Path) -> tuple[int, dict]:
+        rc = self.smoke.main(
+            [
+                "--use-default-packaged-route",
+                "--plan-file",
+                str(plan_file),
+                "--output-report",
+                str(output_report),
+            ]
+        )
+        return rc, json.loads(output_report.read_text(encoding="utf-8"))
+
+    def test_missing_route_choice_writes_failed_report_and_nonzero_exit(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            temp_root = Path(temp_dir)
+            plan_file = temp_root / "plan.yaml"
+            plan_file.write_text("kind: execution_plan\n", encoding="utf-8")
+            output_report = temp_root / "report.json"
+
+            rc = self.smoke.main(
+                [
+                    "--plan-file",
+                    str(plan_file),
+                    "--output-report",
+                    str(output_report),
+                ]
+            )
+            report = json.loads(output_report.read_text(encoding="utf-8"))
+
+        self.assertEqual(rc, 1)
+        self.assertEqual(report["status"], "failed")
+        self.assertIsNone(report["route"])
+        self.assertIsNone(report["inputs"]["rust_apply_bin"])
+        self.assertEqual(report["inputs"]["plan_file"], str(plan_file.resolve()))
+        self.assertIsNone(report["result"]["returncode"])
+        route_check = check_by_id(report, "route_choice_valid")
+        self.assertEqual(route_check["status"], "fail")
+        self.assertEqual(route_check["reason"], "missing_route_choice")
+
     def test_missing_rust_apply_binary_path_produces_failed_report_and_nonzero_exit(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
             temp_root = Path(temp_dir)
@@ -167,6 +206,7 @@ class SmokeRustApplyDryRunBridgeTests(unittest.TestCase):
         self.assertEqual(rc, 0)
         self.assertEqual(report["kind"], "rust_apply_dry_run_bridge_smoke")
         self.assertEqual(report["schema_version"], 1)
+        self.assertEqual(report["route"], "explicit_rust_apply_bin")
         self.assertEqual(report["status"], "passed")
         self.assertEqual(report["inputs"]["rust_apply_bin"], str(rust_apply_bin.resolve()))
         self.assertEqual(report["inputs"]["plan_file"], str(plan_file.resolve()))
@@ -200,6 +240,7 @@ class SmokeRustApplyDryRunBridgeTests(unittest.TestCase):
         self.assertTrue(APPLY_DRY_RUN_FIXTURE.exists())
         self.assertEqual(rc, 0)
         self.assertEqual(report["status"], "passed")
+        self.assertEqual(report["route"], "explicit_rust_apply_bin")
         self.assertEqual(report["result"]["returncode"], 0)
         self.assertIn("apply", report["command"])
         self.assertIn("--plan-file", report["command"])
@@ -235,6 +276,58 @@ class SmokeRustApplyDryRunBridgeTests(unittest.TestCase):
         invocation_check = check_by_id(report, "python_bridge_invocation_succeeded")
         self.assertEqual(invocation_check["status"], "fail")
         self.assertIn("reason", invocation_check)
+
+    def test_default_packaged_route_invokes_python_cli_without_rust_apply_bin(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            temp_root = Path(temp_dir)
+            plan_file = temp_root / "plan.yaml"
+            plan_file.write_text("kind: execution_plan\n", encoding="utf-8")
+            output_report = temp_root / "report.json"
+
+            def fake_cli_main(argv):
+                print("default packaged dry run ok")
+                return 0
+
+            with patch("emuchef.cli.main", side_effect=fake_cli_main) as cli_main:
+                rc, report = self.run_default_smoke(
+                    plan_file=plan_file,
+                    output_report=output_report,
+                )
+
+        self.assertEqual(rc, 0)
+        cli_main.assert_called_once_with(["apply", "--plan-file", str(plan_file.resolve()), "--dry-run"])
+        self.assertEqual(report["route"], "default_packaged")
+        self.assertEqual(report["status"], "passed")
+        self.assertIsNone(report["inputs"]["rust_apply_bin"])
+        self.assertEqual(report["inputs"]["plan_file"], str(plan_file.resolve()))
+        self.assertEqual(report["command"], ["emuchef", "apply", "--plan-file", str(plan_file.resolve()), "--dry-run"])
+        self.assertNotIn("--rust-apply-bin", report["command"])
+        self.assertEqual(report["result"]["returncode"], 0)
+        self.assertTrue(report["result"]["stdout_present"])
+        self.assertFalse(report["result"]["stderr_present"])
+        self.assertTrue(all(check["status"] == "pass" for check in report["checks"]))
+
+    def test_default_packaged_route_failure_preserves_return_code(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            temp_root = Path(temp_dir)
+            plan_file = temp_root / "plan.yaml"
+            plan_file.write_text("kind: execution_plan\n", encoding="utf-8")
+            output_report = temp_root / "report.json"
+
+            with patch("emuchef.cli.main", return_value=3) as cli_main:
+                rc, report = self.run_default_smoke(
+                    plan_file=plan_file,
+                    output_report=output_report,
+                )
+
+        self.assertEqual(rc, 3)
+        cli_main.assert_called_once_with(["apply", "--plan-file", str(plan_file.resolve()), "--dry-run"])
+        self.assertEqual(report["route"], "default_packaged")
+        self.assertEqual(report["status"], "failed")
+        self.assertEqual(report["result"]["returncode"], 3)
+        invocation_check = check_by_id(report, "python_bridge_invocation_succeeded")
+        self.assertEqual(invocation_check["status"], "fail")
+        self.assertEqual(invocation_check["reason"], "bridge_returncode_nonzero")
 
 
 if __name__ == "__main__":

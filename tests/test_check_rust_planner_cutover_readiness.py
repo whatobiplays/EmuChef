@@ -83,7 +83,14 @@ def _resolve_rust_planner_bin(args):
 
 
 def _packaged_rust_planner_bin_candidate(args):
-    return None
+    return _packaged_rust_backend_bin_candidate()
+
+def _packaged_rust_backend_bin_candidate():
+    system = platform.system()
+    machine = platform.machine().lower()
+    binary_dir = Path(__file__).resolve().parents[2] / "apps" / "config-editor" / "src-tauri" / "binaries"
+    target_triple = "x86_64-unknown-linux-gnu"
+    return binary_dir / f"emuchef-rust-backend-{target_triple}"
 
 def _should_route_apply_dry_run_to_rust(args):
     return args.command == "apply" and (args.rust_apply_bin is not None or args.dry_run is True)
@@ -170,7 +177,7 @@ def _explicit_rust_apply_bin_candidate(args):
     return Path(args.rust_apply_bin).expanduser()
 
 def _packaged_rust_apply_bin_candidate(args):
-    return None
+    return _packaged_rust_backend_bin_candidate()
 """
 
 P8BR_STATIC_CHECK_IDS = (
@@ -192,6 +199,14 @@ P8BS_STATIC_CHECK_IDS = (
     "cli_default_rust_apply_dry_run_requires_binary",
     "cli_default_rust_apply_dry_run_has_no_python_fallback",
     "cli_default_rust_apply_dry_run_preserves_non_dry_run_apply_boundary",
+)
+
+P8BW_STATIC_CHECK_IDS = (
+    "cli_packaged_rust_backend_candidate_contract_present",
+    "cli_packaged_rust_backend_candidate_no_shell_or_path_lookup",
+    "cli_packaged_rust_planner_uses_packaged_backend_candidate",
+    "cli_packaged_rust_apply_uses_packaged_backend_candidate",
+    "cli_default_packaged_apply_dry_run_smoke_supported",
 )
 
 EXPLICIT_DEVICE_CONTEXT = {
@@ -329,6 +344,7 @@ def accepted_p8bu_report() -> dict:
     return {
         "kind": "rust_apply_dry_run_bridge_smoke",
         "schema_version": 1,
+        "route": "explicit_rust_apply_bin",
         "status": "passed",
         "inputs": {
             "rust_apply_bin": "/tmp/emuchef-rust-backend",
@@ -350,6 +366,35 @@ def accepted_p8bu_report() -> dict:
         },
         "checks": [
             {"id": "rust_apply_bin_exists", "status": "pass"},
+            {"id": "plan_file_exists", "status": "pass"},
+            {"id": "python_bridge_invocation_succeeded", "status": "pass"},
+        ],
+    }
+
+
+def accepted_default_p8bu_report() -> dict:
+    return {
+        "kind": "rust_apply_dry_run_bridge_smoke",
+        "schema_version": 1,
+        "route": "default_packaged",
+        "status": "passed",
+        "inputs": {
+            "rust_apply_bin": None,
+            "plan_file": "/tmp/execution-plan.yaml",
+        },
+        "command": [
+            "emuchef",
+            "apply",
+            "--plan-file",
+            "/tmp/execution-plan.yaml",
+            "--dry-run",
+        ],
+        "result": {
+            "returncode": 0,
+            "stdout_present": True,
+            "stderr_present": False,
+        },
+        "checks": [
             {"id": "plan_file_exists", "status": "pass"},
             {"id": "python_bridge_invocation_succeeded", "status": "pass"},
         ],
@@ -402,12 +447,24 @@ def make_synthetic_repo(
         "docs/rust-planner-parity-boundary.md",
         "docs/rust-cli-executor-parity.md",
         "docs/adr/0002-rust-planner-cli-output-compatibility.md",
+        "tools/smoke_rust_apply_dry_run_bridge.py",
         "tests/test_cli.py",
         "tests/test_compare_rust_python_plan.py",
         "tests/test_smoke_rust_shadow_cli_matrix.py",
     ]
     for relative_path in required_files:
         write_text(root, relative_path, "required artifact\n")
+
+    write_text(
+        root,
+        "tools/smoke_rust_apply_dry_run_bridge.py",
+        """
+DEFAULT_PACKAGED_ROUTE = "default_packaged"
+parser.add_argument("--use-default-packaged-route", action="store_true")
+parser.add_argument("--rust-apply-bin")
+report = {"route": DEFAULT_PACKAGED_ROUTE}
+""",
+    )
 
     write_text(root, "docs/rust-planner-cutover-readiness.md", readiness_doc_text)
     write_text(root, "src/emuchef/cli.py", cli_text)
@@ -521,6 +578,9 @@ class CheckRustPlannerCutoverReadinessTests(unittest.TestCase):
         for check_id in P8BS_STATIC_CHECK_IDS:
             with self.subTest(check_id=check_id):
                 self.assertEqual(check_by_id(report, check_id)["status"], "pass")
+        for check_id in P8BW_STATIC_CHECK_IDS:
+            with self.subTest(check_id=check_id):
+                self.assertEqual(check_by_id(report, check_id)["status"], "pass")
         blockers = {blocker["id"]: blocker["status"] for blocker in report["remaining_blockers"]}
         self.assertEqual(blockers["explicit_rust_apply_dry_run_bridge"], "resolved")
         self.assertEqual(blockers["default_rust_apply_dry_run_route"], "resolved")
@@ -534,6 +594,9 @@ class CheckRustPlannerCutoverReadinessTests(unittest.TestCase):
             with self.subTest(check_id=check_id):
                 self.assertEqual(check_by_id(report, check_id)["status"], "pass")
         for check_id in P8BS_STATIC_CHECK_IDS:
+            with self.subTest(check_id=check_id):
+                self.assertEqual(check_by_id(report, check_id)["status"], "pass")
+        for check_id in P8BW_STATIC_CHECK_IDS:
             with self.subTest(check_id=check_id):
                 self.assertEqual(check_by_id(report, check_id)["status"], "pass")
         self.assertEqual(blocker_status(report, "explicit_rust_apply_dry_run_bridge"), "resolved")
@@ -1008,7 +1071,8 @@ class CheckRustPlannerCutoverReadinessTests(unittest.TestCase):
         self.assertIn("p8bu_rust_apply_dry_run_bridge", commands)
         p8bu_command = commands["p8bu_rust_apply_dry_run_bridge"]
         self.assertIn("tools/smoke_rust_apply_dry_run_bridge.py", p8bu_command)
-        self.assertIn("--rust-apply-bin <path-to-emuchef-rust-backend>", p8bu_command)
+        self.assertIn("--use-default-packaged-route", p8bu_command)
+        self.assertNotIn("--rust-apply-bin <path-to-emuchef-rust-backend>", p8bu_command)
         self.assertIn("--plan-file tests/fixtures/apply_dry_run/minimal_execution_plan.yaml", p8bu_command)
         self.assertIn("--output-report <path-to-output-report>", p8bu_command)
         self.assertNotIn(".local", p8bc_command)
@@ -1265,6 +1329,36 @@ class CheckRustPlannerCutoverReadinessTests(unittest.TestCase):
         self.assertEqual(blocker_status(report, "executor_apply_not_cut_over"), "blocked")
         self.assertEqual(report["status"], "blocked")
 
+    def test_accepted_default_packaged_p8bu_report_is_recognized_and_does_not_unblock_executor_apply(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            make_synthetic_repo(root)
+            report_path = write_json(root, "reports/p8bu.json", accepted_default_p8bu_report())
+
+            report = self.build_report(root, p8bu_rust_apply_dry_run_bridge_report=report_path)
+
+        evidence = report["production_equivalent_evidence"]["p8bu_rust_apply_dry_run_bridge"]
+        self.assertEqual(evidence["status"], "accepted")
+        self.assertEqual(evidence["reasons"], [])
+        self.assertEqual(blocker_status(report, "rust_apply_dry_run_bridge_evidence"), "evidence_accepted")
+        self.assertEqual(blocker_status(report, "executor_apply_not_cut_over"), "blocked")
+        self.assertEqual(blocker_status(report, "packaged_release_not_ready"), "blocked")
+        self.assertEqual(report["status"], "blocked")
+
+    def test_p8bu_report_without_route_is_rejected_for_compatibility_boundary(self) -> None:
+        payload = accepted_p8bu_report()
+        del payload["route"]
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            make_synthetic_repo(root)
+            report_path = write_json(root, "reports/p8bu.json", payload)
+
+            report = self.build_report(root, p8bu_rust_apply_dry_run_bridge_report=report_path)
+
+        evidence = report["production_equivalent_evidence"]["p8bu_rust_apply_dry_run_bridge"]
+        self.assertEqual(evidence["status"], "rejected")
+        self.assertTrue(any("route is required" in reason for reason in evidence["reasons"]))
+
     def test_invalid_p8bu_kind_is_rejected(self) -> None:
         payload = accepted_p8bu_report()
         payload["kind"] = "rust_launcher_injected_planner_smoke"
@@ -1359,6 +1453,34 @@ class CheckRustPlannerCutoverReadinessTests(unittest.TestCase):
         evidence = report["production_equivalent_evidence"]["p8bu_rust_apply_dry_run_bridge"]
         self.assertEqual(evidence["status"], "rejected")
         self.assertTrue(any("command must contain --rust-apply-bin" in reason for reason in evidence["reasons"]))
+
+    def test_default_packaged_p8bu_report_rejects_rust_apply_bin_command_token(self) -> None:
+        payload = accepted_default_p8bu_report()
+        payload["command"].extend(["--rust-apply-bin", "/tmp/emuchef-rust-backend"])
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            make_synthetic_repo(root)
+            report_path = write_json(root, "reports/p8bu.json", payload)
+
+            report = self.build_report(root, p8bu_rust_apply_dry_run_bridge_report=report_path)
+
+        evidence = report["production_equivalent_evidence"]["p8bu_rust_apply_dry_run_bridge"]
+        self.assertEqual(evidence["status"], "rejected")
+        self.assertTrue(any("default_packaged command must not contain --rust-apply-bin" in reason for reason in evidence["reasons"]))
+
+    def test_default_packaged_p8bu_report_rejects_missing_dry_run_command_token(self) -> None:
+        payload = accepted_default_p8bu_report()
+        payload["command"] = [token for token in payload["command"] if token != "--dry-run"]
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            make_synthetic_repo(root)
+            report_path = write_json(root, "reports/p8bu.json", payload)
+
+            report = self.build_report(root, p8bu_rust_apply_dry_run_bridge_report=report_path)
+
+        evidence = report["production_equivalent_evidence"]["p8bu_rust_apply_dry_run_bridge"]
+        self.assertEqual(evidence["status"], "rejected")
+        self.assertTrue(any("command must contain --dry-run" in reason for reason in evidence["reasons"]))
 
     def test_valid_p8bc_report_is_accepted_for_launcher_injection_evidence_only(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:

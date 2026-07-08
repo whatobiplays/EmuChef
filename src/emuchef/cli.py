@@ -6,6 +6,7 @@ import argparse
 import json
 import logging
 import os
+import platform
 import subprocess
 import sys
 from collections.abc import Mapping, Sequence
@@ -314,36 +315,84 @@ def _build_rust_shadow_plan_command(args: argparse.Namespace) -> list[str]:
 def _resolve_rust_planner_bin(args: argparse.Namespace) -> Path:
     """Resolve the Rust planner binary path for Rust-backed planning routes.
 
-    The resolver intentionally supports only ``--rust-planner-bin`` today. The
-    packaged candidate seam is inert until an accepted packaged-location
-    contract adds real lookup behavior.
+    Explicit CLI input wins. When no explicit binary is supplied, the resolver
+    tries the deterministic packaged Rust backend sidecar candidate for the
+    current host platform.
     """
 
     _validate_rust_shadow_plan_args(args)
     if args.rust_planner_bin:
         rust_planner_bin = Path(args.rust_planner_bin).expanduser()
-        if not rust_planner_bin.exists():
-            raise ValueError(f"Rust shadow planner binary does not exist: {args.rust_planner_bin}")
-        if not rust_planner_bin.is_file() or not os.access(rust_planner_bin, os.X_OK):
-            raise ValueError(f"Rust shadow planner binary is not executable: {args.rust_planner_bin}")
-        return rust_planner_bin
+        return _validate_rust_planner_bin_candidate(
+            rust_planner_bin,
+            display_path=args.rust_planner_bin,
+        )
 
     packaged_candidate = _packaged_rust_planner_bin_candidate(args)
     if packaged_candidate is not None:
-        return packaged_candidate
+        return _validate_rust_planner_bin_candidate(
+            packaged_candidate,
+            display_path=str(packaged_candidate),
+        )
 
     if args.planner_backend is None:
         raise ValueError("--rust-planner-bin is required when default Rust planner routing is active.")
     raise ValueError(f"--rust-planner-bin is required when --planner-backend {_effective_plan_backend(args)} is selected.")
 
 
-def _packaged_rust_planner_bin_candidate(args: argparse.Namespace) -> Path | None:
-    """Return a packaged Rust planner binary candidate, if configured.
+def _validate_rust_planner_bin_candidate(path: Path, *, display_path: str) -> Path:
+    """Validate a Rust planner candidate while preserving planner error text."""
 
-    P8AT intentionally returns None. Future packaged lookup must be added here
-    under an accepted packaged-location contract.
+    if not path.exists():
+        raise ValueError(f"Rust shadow planner binary does not exist: {display_path}")
+    if not path.is_file() or not os.access(path, os.X_OK):
+        raise ValueError(f"Rust shadow planner binary is not executable: {display_path}")
+    return path
+
+
+def _packaged_rust_planner_bin_candidate(args: argparse.Namespace) -> Path | None:
+    """Return the packaged Rust backend candidate for planner routing."""
+
+    return _packaged_rust_backend_bin_candidate()
+
+
+def _packaged_rust_backend_bin_candidate() -> Path | None:
+    """Return the repo-relative packaged Rust backend candidate for this host.
+
+    The helper computes the Tauri sidecar filename from Python host platform
+    metadata only. It deliberately does not inspect the environment, search
+    PATH, invoke toolchains, scan directories, or validate that the candidate
+    exists; route-specific validators own existence and executable checks.
     """
-    return None
+
+    arch = platform.machine().lower()
+    normalized_arch = {
+        "amd64": "x86_64",
+        "x64": "x86_64",
+        "x86_64": "x86_64",
+        "aarch64": "aarch64",
+        "arm64": "aarch64",
+    }.get(arch)
+    if normalized_arch is None:
+        return None
+
+    system = platform.system()
+    target_triples = {
+        ("Darwin", "aarch64"): ("aarch64-apple-darwin", ""),
+        ("Darwin", "x86_64"): ("x86_64-apple-darwin", ""),
+        ("Linux", "x86_64"): ("x86_64-unknown-linux-gnu", ""),
+        ("Linux", "aarch64"): ("aarch64-unknown-linux-gnu", ""),
+        ("Windows", "x86_64"): ("x86_64-pc-windows-msvc", ".exe"),
+        ("Windows", "aarch64"): ("aarch64-pc-windows-msvc", ".exe"),
+    }
+    target = target_triples.get((system, normalized_arch))
+    if target is None:
+        return None
+
+    target_triple, suffix = target
+    repo_root = Path(__file__).resolve().parents[2]
+    binary_dir = repo_root / "apps" / "config-editor" / "src-tauri" / "binaries"
+    return binary_dir / f"emuchef-rust-backend-{target_triple}{suffix}"
 
 
 def _append_rust_shadow_device_context_args(command: list[str], args: argparse.Namespace) -> None:
@@ -584,8 +633,9 @@ def _build_rust_apply_command(args: argparse.Namespace) -> list[str]:
 def _resolve_rust_apply_bin(args: argparse.Namespace) -> Path:
     """Resolve the Rust apply binary used by dry-run apply delegation.
 
-    Explicit CLI input wins. The packaged candidate hook is intentionally inert
-    until the packaging contract defines a real runtime-provided location.
+    Explicit CLI input wins. When no explicit binary is supplied, dry-run apply
+    uses the deterministic packaged Rust backend sidecar candidate for the
+    current host platform.
     """
 
     _validate_rust_apply_dry_run_args(args)
@@ -649,12 +699,9 @@ def _explicit_rust_apply_bin_candidate(args: argparse.Namespace) -> Path | None:
 
 
 def _packaged_rust_apply_bin_candidate(args: argparse.Namespace) -> Path | None:
-    """Return a packaged Rust apply binary candidate, if configured.
+    """Return the packaged Rust backend candidate for apply dry-run routing."""
 
-    P8BS intentionally returns None. Future packaged lookup must be added here
-    under an accepted packaged-location contract.
-    """
-    return None
+    return _packaged_rust_backend_bin_candidate()
 
 
 def _run_validate(args: argparse.Namespace) -> int:
