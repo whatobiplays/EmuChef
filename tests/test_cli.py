@@ -23,7 +23,7 @@ from emuchef.domain import (
     LiteralParamValue,
     RuntimeCapabilities,
 )
-from emuchef.executor import DetectedDevice
+from emuchef.executor import DetectedDevice, DryRunAdb
 from emuchef.io import dump_yaml, load_authored_catalog
 from emuchef.planner import Planner
 
@@ -2935,59 +2935,125 @@ class CliTests(unittest.TestCase):
         self.assertIn("rust usage details", stderr.getvalue())
         resolve_adb.assert_not_called()
 
-    def test_apply_dry_run_shows_progress_and_summary(self) -> None:
+    def test_apply_dry_run_without_rust_apply_bin_fails_before_python_apply_work(self) -> None:
         with TemporaryDirectory() as tmp:
-            plan = ExecutionPlan(
-                id="plan.test",
-                source=ExecutionPlanSource(
-                    device_profile_ref="example.device_profile",
-                    device_plan_ref="example.device_plan",
-                    selected_recipe_refs=("example.recipe",),
-                    expanded_recipe_refs=("example.recipe",),
-                ),
-                device_context=DeviceContext(
-                    manufacturer="Example",
-                    model="Example",
-                    android_version=13,
-                    android_api_level=33,
-                    device_tags=(),
-                ),
-                runtime_capabilities=RuntimeCapabilities(
-                    adb_available=True,
-                    apk_install=True,
-                    shared_storage_write=True,
-                    app_launch=True,
-                    shell_command=True,
-                    package_remove_for_user=False,
-                    root_shell=True,
-                    app_data_write=True,
-                ),
-                inputs=(),
-                artifacts=(),
-                steps=(
-                    ExecutionStep(
-                        id="example.recipe/wait",
-                        recipe_ref="example.recipe",
-                        type="wait",
-                        name="Wait",
-                        params={"duration_ms": LiteralParamValue(value=10)},
-                    ),
-                ),
-            )
             plan_path = Path(tmp) / "plan.yaml"
-            dump_yaml(plan, path=plan_path)
+            plan_path.write_text("kind: execution_plan\n", encoding="utf-8")
 
             stdout = StringIO()
             stderr = StringIO()
-            with contextlib.redirect_stdout(stdout), contextlib.redirect_stderr(stderr):
+            with (
+                patch("emuchef.cli.resolve_adb_executable") as resolve_adb,
+                patch("emuchef.cli.load_execution_plan_file") as load_plan,
+                patch("emuchef.cli.ExecutorRunner") as executor_runner,
+                patch("subprocess.run") as run,
+                contextlib.redirect_stdout(stdout),
+                contextlib.redirect_stderr(stderr),
+            ):
                 rc = main(["apply", "--plan-file", str(plan_path), "--dry-run"])
-            self.assertEqual(rc, 0, stderr.getvalue())
-            output = stdout.getvalue()
-            self.assertIn("[1/1] Wait: executing (dry-run)", output)
-            self.assertIn("Dry run: success", output)
-            self.assertIn("- total: 1", output)
-            self.assertIn("- succeeded: 1", output)
-            self.assertIn("- blocked: 0", output)
+
+        self.assertEqual(rc, 1)
+        self.assertEqual(stdout.getvalue(), "")
+        self.assertEqual(
+            stderr.getvalue(),
+            "Error: --rust-apply-bin is required when default Rust apply dry-run routing is active.\n",
+        )
+        resolve_adb.assert_not_called()
+        load_plan.assert_not_called()
+        executor_runner.assert_not_called()
+        run.assert_not_called()
+
+    def test_apply_default_dry_run_uses_packaged_rust_apply_candidate_without_adb_resolution(self) -> None:
+        with TemporaryDirectory() as tmp:
+            rust_apply_bin = Path(self._rust_apply_bin(tmp))
+            plan_path = Path(tmp) / "plan.yaml"
+            plan_path.write_text("kind: execution_plan\n", encoding="utf-8")
+            completed = subprocess.CompletedProcess(
+                args=[],
+                returncode=0,
+                stdout="default rust stdout\n",
+                stderr="",
+            )
+
+            stdout = StringIO()
+            stderr = StringIO()
+            with (
+                patch("emuchef.cli._packaged_rust_apply_bin_candidate", return_value=rust_apply_bin) as packaged_candidate,
+                patch("emuchef.cli.resolve_adb_executable") as resolve_adb,
+                patch("emuchef.cli.load_execution_plan_file") as load_plan,
+                patch("emuchef.cli.ExecutorRunner") as executor_runner,
+                patch("subprocess.run", return_value=completed) as run,
+                contextlib.redirect_stdout(stdout),
+                contextlib.redirect_stderr(stderr),
+            ):
+                rc = main(["apply", "--plan-file", str(plan_path), "--dry-run"])
+
+        self.assertEqual(rc, 0, stderr.getvalue())
+        self.assertEqual(stdout.getvalue(), "default rust stdout\n")
+        self.assertEqual(stderr.getvalue(), "")
+        packaged_candidate.assert_called_once()
+        resolve_adb.assert_not_called()
+        load_plan.assert_not_called()
+        executor_runner.assert_not_called()
+        run.assert_called_once_with(
+            [
+                str(rust_apply_bin),
+                "apply",
+                "--plan-file",
+                str(plan_path),
+                "--dry-run",
+            ],
+            check=False,
+            text=True,
+            capture_output=True,
+        )
+
+    def test_apply_default_dry_run_forwards_serial_to_rust_apply_candidate(self) -> None:
+        with TemporaryDirectory() as tmp:
+            rust_apply_bin = Path(self._rust_apply_bin(tmp))
+            plan_path = Path(tmp) / "plan.yaml"
+            plan_path.write_text("kind: execution_plan\n", encoding="utf-8")
+            completed = subprocess.CompletedProcess(args=[], returncode=0, stdout="", stderr="")
+
+            stdout = StringIO()
+            stderr = StringIO()
+            with (
+                patch("emuchef.cli._packaged_rust_apply_bin_candidate", return_value=rust_apply_bin),
+                patch("emuchef.cli.resolve_adb_executable") as resolve_adb,
+                patch("emuchef.cli.load_execution_plan_file") as load_plan,
+                patch("emuchef.cli.ExecutorRunner") as executor_runner,
+                patch("subprocess.run", return_value=completed) as run,
+                contextlib.redirect_stdout(stdout),
+                contextlib.redirect_stderr(stderr),
+            ):
+                rc = main(
+                    [
+                        "apply",
+                        "--plan-file",
+                        str(plan_path),
+                        "--dry-run",
+                        "--serial",
+                        "DEVICE123",
+                    ]
+                )
+
+        self.assertEqual(rc, 0, stderr.getvalue())
+        resolve_adb.assert_not_called()
+        load_plan.assert_not_called()
+        executor_runner.assert_not_called()
+        run.assert_called_once()
+        self.assertEqual(
+            run.call_args.args[0],
+            [
+                str(rust_apply_bin),
+                "apply",
+                "--plan-file",
+                str(plan_path),
+                "--dry-run",
+                "--serial",
+                "DEVICE123",
+            ],
+        )
 
     def test_apply_rust_dry_run_delegates_without_adb_resolution(self) -> None:
         with TemporaryDirectory() as tmp:
@@ -3237,7 +3303,47 @@ class CliTests(unittest.TestCase):
                     executor_runner.assert_not_called()
                     run.assert_not_called()
 
-    def test_apply_without_rust_apply_bin_keeps_python_executor_path(self) -> None:
+    def test_apply_default_dry_run_rejects_python_only_flags_before_subprocess_work(self) -> None:
+        cases = [
+            (["--adb", "/does/not/matter"], "--rust-apply-bin does not support --adb."),
+            (["--verbose"], "--rust-apply-bin does not support --verbose."),
+            (["--debug"], "--rust-apply-bin does not support --debug."),
+        ]
+        with TemporaryDirectory() as tmp:
+            plan_path = Path(tmp) / "plan.yaml"
+            plan_path.write_text("kind: execution_plan\n", encoding="utf-8")
+
+            for extra_args, expected_message in cases:
+                with self.subTest(extra_args=extra_args):
+                    stdout = StringIO()
+                    stderr = StringIO()
+                    with (
+                        patch("emuchef.cli.resolve_adb_executable") as resolve_adb,
+                        patch("emuchef.cli.load_execution_plan_file") as load_plan,
+                        patch("emuchef.cli.ExecutorRunner") as executor_runner,
+                        patch("subprocess.run") as run,
+                        contextlib.redirect_stdout(stdout),
+                        contextlib.redirect_stderr(stderr),
+                    ):
+                        rc = main(
+                            [
+                                "apply",
+                                *extra_args,
+                                "--plan-file",
+                                str(plan_path),
+                                "--dry-run",
+                            ]
+                        )
+
+                    self.assertEqual(rc, 1)
+                    self.assertEqual(stdout.getvalue(), "")
+                    self.assertIn(f"Error: {expected_message}\n", stderr.getvalue())
+                    resolve_adb.assert_not_called()
+                    load_plan.assert_not_called()
+                    executor_runner.assert_not_called()
+                    run.assert_not_called()
+
+    def test_apply_non_dry_run_without_rust_apply_bin_keeps_python_executor_path(self) -> None:
         with TemporaryDirectory() as tmp:
             plan = ExecutionPlan(
                 id="plan.test",
@@ -3282,14 +3388,16 @@ class CliTests(unittest.TestCase):
             stdout = StringIO()
             stderr = StringIO()
             with (
+                patch("emuchef.cli._build_adb") as build_adb,
                 patch("subprocess.run") as run,
                 contextlib.redirect_stdout(stdout),
                 contextlib.redirect_stderr(stderr),
             ):
-                rc = main(["apply", "--plan-file", str(plan_path), "--dry-run"])
+                rc = main(["apply", "--plan-file", str(plan_path)])
 
         self.assertEqual(rc, 0, stderr.getvalue())
-        self.assertIn("Dry run: success", stdout.getvalue())
+        self.assertIn("Execution: success", stdout.getvalue())
+        build_adb.assert_called_once()
         run.assert_not_called()
 
     def test_apply_reports_blocked_steps_separately(self) -> None:
@@ -3344,12 +3452,16 @@ class CliTests(unittest.TestCase):
 
             stdout = StringIO()
             stderr = StringIO()
-            with contextlib.redirect_stdout(stdout), contextlib.redirect_stderr(stderr):
-                rc = main(["apply", "--plan-file", str(plan_path), "--dry-run"])
+            with (
+                patch("emuchef.cli._build_adb", return_value=DryRunAdb()),
+                contextlib.redirect_stdout(stdout),
+                contextlib.redirect_stderr(stderr),
+            ):
+                rc = main(["apply", "--plan-file", str(plan_path)])
             self.assertEqual(rc, 1, stderr.getvalue())
             output = stdout.getvalue()
             self.assertIn("[2/2] Downstream: blocked", output)
-            self.assertIn("Dry run: failed", output)
+            self.assertIn("Execution: failed", output)
             self.assertIn("- blocked: 1", output)
 
     def test_apply_permission_summary_contains_only_runtime_and_appop_reporting(self) -> None:
@@ -3417,8 +3529,12 @@ class CliTests(unittest.TestCase):
 
             stdout = StringIO()
             stderr = StringIO()
-            with contextlib.redirect_stdout(stdout), contextlib.redirect_stderr(stderr):
-                rc = main(["apply", "--plan-file", str(plan_path), "--dry-run"])
+            with (
+                patch("emuchef.cli._build_adb", return_value=DryRunAdb()),
+                contextlib.redirect_stdout(stdout),
+                contextlib.redirect_stderr(stderr),
+            ):
+                rc = main(["apply", "--plan-file", str(plan_path)])
             self.assertEqual(rc, 0, stderr.getvalue())
             output = stdout.getvalue()
             self.assertIn("Permission actions:", output)

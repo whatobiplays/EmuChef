@@ -29,6 +29,7 @@ P8AK_REPORT_KIND = "rust_production_equivalent_mismatch_warning_smoke"
 P8BC_REPORT_KIND = "rust_launcher_injected_planner_smoke"
 DEFAULT_CLI_BACKEND_BLOCKER_ID = "default_cli_backend_still_python"
 EXPLICIT_RUST_APPLY_DRY_RUN_CAPABILITY_ID = "explicit_rust_apply_dry_run_bridge"
+DEFAULT_RUST_APPLY_DRY_RUN_CAPABILITY_ID = "default_rust_apply_dry_run_route"
 REAL_DEVICE_PROBING_BLOCKER_ID = "real_device_probing_not_cut_over"
 MISMATCH_WARNING_BLOCKER_ID = "detected_device_profile_mismatch_warning_not_cut_over"
 PACKAGED_LAUNCHER_INJECTION_BLOCKER_ID = "packaged_launcher_injection_evidence_not_accepted"
@@ -211,6 +212,10 @@ REMAINING_BLOCKERS = (
         "status": "resolved",
     },
     {
+        "id": DEFAULT_RUST_APPLY_DRY_RUN_CAPABILITY_ID,
+        "status": "resolved",
+    },
+    {
         "id": "executor_apply_not_cut_over",
         "status": "blocked",
     },
@@ -282,6 +287,7 @@ def build_readiness_report(
         *_cli_backend_token_checks(repo_root),
         *_cli_default_route_checks(repo_root),
         *_cli_explicit_rust_apply_dry_run_checks(repo_root),
+        *_cli_default_rust_apply_dry_run_checks(repo_root),
     ]
     production_equivalent_evidence = {
         P8AJ_EVIDENCE_ID: _evaluate_evidence_report(
@@ -783,13 +789,14 @@ def _cli_explicit_rust_apply_dry_run_checks(repo_root: Path) -> list[dict[str, A
     run_rust_apply_block = _source_function_block(text, "_run_rust_apply_dry_run")
     build_command_block = _source_function_block(text, "_build_rust_apply_command")
     resolve_bin_block = _source_function_block(text, "_resolve_rust_apply_bin")
+    explicit_candidate_block = _source_function_block(text, "_explicit_rust_apply_bin_candidate")
+    binary_validation_scope = "\n".join((resolve_bin_block, explicit_candidate_block))
 
     option_block = _source_call_block(text, '"--rust-apply-bin"')
     option_present = bool(option_block) and "apply_parser.add_argument" in option_block
 
     dispatch_tokens = (
-        'if args.command == "apply"',
-        "args.rust_apply_bin is not None",
+        "if _should_route_apply_dry_run_to_rust(args)",
         "return _run_apply(args)",
     )
     adb_resolution_tokens = (
@@ -800,7 +807,7 @@ def _cli_explicit_rust_apply_dry_run_checks(repo_root: Path) -> list[dict[str, A
     dispatch_before_adb = _source_tokens_before(dispatch_scope, dispatch_tokens, adb_resolution_tokens)
 
     branch_tokens = (
-        "if args.rust_apply_bin is not None",
+        "if args.rust_apply_bin is not None or args.dry_run",
         "return _run_rust_apply_dry_run(args)",
         "_build_adb(args)",
     )
@@ -895,8 +902,8 @@ def _cli_explicit_rust_apply_dry_run_checks(repo_root: Path) -> list[dict[str, A
         ),
         _check(
             "cli_explicit_rust_apply_validates_binary_path",
-            _source_has_compact_tokens(resolve_bin_block, binary_validation_tokens),
-            _missing_compact_source_tokens_details(resolve_bin_block, binary_validation_tokens),
+            _source_has_compact_tokens(binary_validation_scope, binary_validation_tokens),
+            _missing_compact_source_tokens_details(binary_validation_scope, binary_validation_tokens),
         ),
         _check(
             "cli_explicit_rust_apply_builds_expected_command",
@@ -921,12 +928,124 @@ def _cli_explicit_rust_apply_dry_run_checks(repo_root: Path) -> list[dict[str, A
     ]
 
 
+def _cli_default_rust_apply_dry_run_checks(repo_root: Path) -> list[dict[str, Any]]:
+    path = repo_root / "src" / "emuchef" / "cli.py"
+    text = _read_text_if_available(path)
+    main_block = _source_function_block(text, "main")
+    dispatch_scope = main_block or text
+    should_route_block = _source_function_block(text, "_should_route_apply_dry_run_to_rust")
+    run_apply_block = _source_function_block(text, "_run_apply")
+    resolve_bin_block = _source_function_block(text, "_resolve_rust_apply_bin")
+    packaged_candidate_block = _source_function_block(text, "_packaged_rust_apply_bin_candidate")
+
+    route_tokens = (
+        'args.command == "apply"',
+        "args.rust_apply_bin is not None",
+        "args.dry_run is True",
+    )
+    dispatch_tokens = (
+        "if _should_route_apply_dry_run_to_rust(args)",
+        "return _run_apply(args)",
+    )
+    adb_resolution_tokens = (
+        "setattr(",
+        '"_resolved_adb"',
+        "resolve_adb_executable(",
+    )
+    requires_binary_tokens = (
+        "rust_apply_bin = _packaged_rust_apply_bin_candidate(args)",
+        "if rust_apply_bin is None",
+        "--rust-apply-bin is required when default Rust apply dry-run routing is active.",
+    )
+    no_fallback_branch_tokens = (
+        "if args.rust_apply_bin is not None or args.dry_run",
+        "return _run_rust_apply_dry_run(args)",
+    )
+    non_dry_run_python_tokens = (
+        "plan_path = Path(args.plan_file)",
+        "load_execution_plan_file(plan_path)",
+        "_build_adb(args)",
+        "ExecutorRunner(",
+    )
+
+    route_present = _source_has_tokens(should_route_block, route_tokens)
+    dispatch_before_adb = _source_tokens_before(dispatch_scope, dispatch_tokens, adb_resolution_tokens)
+    requires_binary = _source_has_tokens(resolve_bin_block, requires_binary_tokens)
+    packaged_seam_inert = "def _packaged_rust_apply_bin_candidate(args" in packaged_candidate_block and "return None" in packaged_candidate_block
+    no_python_fallback = _source_has_tokens(run_apply_block, no_fallback_branch_tokens) and "DryRunAdb() if args.dry_run" not in run_apply_block
+    preserves_non_dry_run = _source_has_tokens(run_apply_block, no_fallback_branch_tokens) and _source_has_tokens(
+        run_apply_block,
+        non_dry_run_python_tokens,
+    )
+
+    return [
+        _check(
+            "cli_default_rust_apply_dry_run_route_present",
+            route_present,
+            _missing_source_tokens_details(should_route_block, route_tokens),
+        ),
+        _check(
+            "cli_default_rust_apply_dry_run_route_before_adb_resolution",
+            dispatch_before_adb,
+            _ordered_source_tokens_details(dispatch_scope, dispatch_tokens, adb_resolution_tokens),
+        ),
+        _check(
+            "cli_default_rust_apply_dry_run_requires_binary",
+            requires_binary and packaged_seam_inert,
+            _default_rust_apply_requires_binary_details(
+                resolve_bin_block,
+                packaged_candidate_block,
+                requires_binary_tokens,
+                packaged_seam_inert,
+            ),
+        ),
+        _check(
+            "cli_default_rust_apply_dry_run_has_no_python_fallback",
+            no_python_fallback,
+            _default_rust_apply_no_fallback_details(run_apply_block, no_fallback_branch_tokens),
+        ),
+        _check(
+            "cli_default_rust_apply_dry_run_preserves_non_dry_run_apply_boundary",
+            preserves_non_dry_run,
+            _missing_source_tokens_details(run_apply_block, (*no_fallback_branch_tokens, *non_dry_run_python_tokens)),
+        ),
+    ]
+
+
 def _default_backend_omitted_details(backend_block: str, passed: bool) -> dict[str, str] | None:
     if passed:
         return None
     if not backend_block:
         return {"missing_token": '"--planner-backend"'}
     return {"unexpected_token": "default="}
+
+
+def _default_rust_apply_requires_binary_details(
+    resolve_bin_block: str,
+    packaged_candidate_block: str,
+    required_tokens: tuple[str, ...],
+    packaged_seam_inert: bool,
+) -> dict[str, list[str] | str] | None:
+    missing_tokens = _missing_source_tokens(resolve_bin_block, required_tokens)
+    details: dict[str, list[str] | str] = {}
+    if missing_tokens:
+        details["missing_tokens"] = missing_tokens
+    if not packaged_seam_inert:
+        details["packaged_candidate"] = "packaged apply resolver seam must be present and return None"
+    return details or None
+
+
+def _default_rust_apply_no_fallback_details(
+    run_apply_block: str,
+    branch_tokens: tuple[str, ...],
+) -> dict[str, list[str] | str] | None:
+    details: dict[str, list[str] | str] = {}
+    missing_tokens = _missing_source_tokens(run_apply_block, branch_tokens)
+    if missing_tokens:
+        details["missing_tokens"] = missing_tokens
+    if "DryRunAdb() if args.dry_run" in run_apply_block:
+        details["unexpected_token"] = "DryRunAdb() if args.dry_run"
+    return details or None
 
 
 def _source_call_block(text: str, marker: str) -> str:
