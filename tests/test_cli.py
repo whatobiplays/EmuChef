@@ -60,6 +60,15 @@ class CliTests(unittest.TestCase):
         apply_bin.chmod(0o755)
         return str(apply_bin)
 
+    def test_validate_rust_apply_bin_candidate_uses_supplied_display_path(self) -> None:
+        with TemporaryDirectory() as tmp:
+            missing_bin = Path(tmp) / "packaged-missing"
+
+            with self.assertRaises(ValueError) as context:
+                cli._validate_rust_apply_bin_candidate(missing_bin, display_path="displayed packaged path")
+
+        self.assertEqual(str(context.exception), "Rust apply binary does not exist: displayed packaged path")
+
     def _rust_resolver_args(
         self,
         *,
@@ -2943,6 +2952,7 @@ class CliTests(unittest.TestCase):
             stdout = StringIO()
             stderr = StringIO()
             with (
+                patch("emuchef.cli._packaged_rust_apply_bin_candidate", return_value=None) as packaged_candidate,
                 patch("emuchef.cli.resolve_adb_executable") as resolve_adb,
                 patch("emuchef.cli.load_execution_plan_file") as load_plan,
                 patch("emuchef.cli.ExecutorRunner") as executor_runner,
@@ -2958,6 +2968,7 @@ class CliTests(unittest.TestCase):
             stderr.getvalue(),
             "Error: --rust-apply-bin is required when default Rust apply dry-run routing is active.\n",
         )
+        packaged_candidate.assert_called_once()
         resolve_adb.assert_not_called()
         load_plan.assert_not_called()
         executor_runner.assert_not_called()
@@ -3007,6 +3018,50 @@ class CliTests(unittest.TestCase):
             text=True,
             capture_output=True,
         )
+
+    def test_apply_default_dry_run_validates_packaged_rust_apply_candidate_path(self) -> None:
+        with TemporaryDirectory() as tmp:
+            temp_root = Path(tmp)
+            missing_bin = temp_root / "missing-packaged"
+            directory_bin = temp_root / "directory-packaged"
+            directory_bin.mkdir()
+            non_executable_bin = temp_root / "not-executable-packaged"
+            non_executable_bin.write_text("#!/bin/sh\n", encoding="utf-8")
+            non_executable_bin.chmod(0o600)
+            plan_path = temp_root / "plan.yaml"
+            plan_path.write_text("kind: execution_plan\n", encoding="utf-8")
+            cases = [
+                (missing_bin, f"Rust apply binary does not exist: {missing_bin}"),
+                (directory_bin, f"Rust apply binary is not a file: {directory_bin}"),
+                (non_executable_bin, f"Rust apply binary is not executable: {non_executable_bin}"),
+            ]
+
+            for packaged_candidate_path, expected_message in cases:
+                with self.subTest(packaged_candidate_path=packaged_candidate_path):
+                    stdout = StringIO()
+                    stderr = StringIO()
+                    with (
+                        patch(
+                            "emuchef.cli._packaged_rust_apply_bin_candidate",
+                            return_value=packaged_candidate_path,
+                        ) as packaged_candidate,
+                        patch("emuchef.cli.resolve_adb_executable") as resolve_adb,
+                        patch("emuchef.cli.load_execution_plan_file") as load_plan,
+                        patch("emuchef.cli.ExecutorRunner") as executor_runner,
+                        patch("subprocess.run") as run,
+                        contextlib.redirect_stdout(stdout),
+                        contextlib.redirect_stderr(stderr),
+                    ):
+                        rc = main(["apply", "--plan-file", str(plan_path), "--dry-run"])
+
+                    self.assertEqual(rc, 1)
+                    self.assertEqual(stdout.getvalue(), "")
+                    self.assertEqual(stderr.getvalue(), f"Error: {expected_message}\n")
+                    packaged_candidate.assert_called_once()
+                    resolve_adb.assert_not_called()
+                    load_plan.assert_not_called()
+                    executor_runner.assert_not_called()
+                    run.assert_not_called()
 
     def test_apply_default_dry_run_forwards_serial_to_rust_apply_candidate(self) -> None:
         with TemporaryDirectory() as tmp:
@@ -3195,6 +3250,7 @@ class CliTests(unittest.TestCase):
             stdout = StringIO()
             stderr = StringIO()
             with (
+                patch("emuchef.cli._packaged_rust_apply_bin_candidate") as packaged_candidate,
                 patch("emuchef.cli.resolve_adb_executable") as resolve_adb,
                 patch("emuchef.cli.load_execution_plan_file") as load_plan,
                 patch("emuchef.cli.ExecutorRunner") as executor_runner,
@@ -3207,6 +3263,45 @@ class CliTests(unittest.TestCase):
         self.assertEqual(rc, 1)
         self.assertEqual(stdout.getvalue(), "")
         self.assertEqual(stderr.getvalue(), "Error: --rust-apply-bin requires --dry-run.\n")
+        packaged_candidate.assert_not_called()
+        resolve_adb.assert_not_called()
+        load_plan.assert_not_called()
+        executor_runner.assert_not_called()
+        run.assert_not_called()
+
+    def test_apply_invalid_explicit_rust_apply_bin_does_not_try_packaged_candidate(self) -> None:
+        with TemporaryDirectory() as tmp:
+            temp_root = Path(tmp)
+            missing_bin = temp_root / "missing-explicit"
+            plan_path = temp_root / "plan.yaml"
+            plan_path.write_text("kind: execution_plan\n", encoding="utf-8")
+
+            stdout = StringIO()
+            stderr = StringIO()
+            with (
+                patch("emuchef.cli._packaged_rust_apply_bin_candidate") as packaged_candidate,
+                patch("emuchef.cli.resolve_adb_executable") as resolve_adb,
+                patch("emuchef.cli.load_execution_plan_file") as load_plan,
+                patch("emuchef.cli.ExecutorRunner") as executor_runner,
+                patch("subprocess.run") as run,
+                contextlib.redirect_stdout(stdout),
+                contextlib.redirect_stderr(stderr),
+            ):
+                rc = main(
+                    [
+                        "apply",
+                        "--plan-file",
+                        str(plan_path),
+                        "--dry-run",
+                        "--rust-apply-bin",
+                        str(missing_bin),
+                    ]
+                )
+
+        self.assertEqual(rc, 1)
+        self.assertEqual(stdout.getvalue(), "")
+        self.assertEqual(stderr.getvalue(), f"Error: Rust apply binary does not exist: {missing_bin}\n")
+        packaged_candidate.assert_not_called()
         resolve_adb.assert_not_called()
         load_plan.assert_not_called()
         executor_runner.assert_not_called()

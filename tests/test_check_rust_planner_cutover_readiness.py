@@ -125,6 +125,25 @@ def _build_rust_apply_command(args):
     return command
 
 def _resolve_rust_apply_bin(args):
+    _validate_rust_apply_dry_run_args(args)
+
+    explicit_candidate = _explicit_rust_apply_bin_candidate(args)
+    if explicit_candidate is not None:
+        return _validate_rust_apply_bin_candidate(
+            explicit_candidate,
+            display_path=args.rust_apply_bin,
+        )
+
+    rust_apply_bin = _packaged_rust_apply_bin_candidate(args)
+    if rust_apply_bin is not None:
+        return _validate_rust_apply_bin_candidate(
+            rust_apply_bin,
+            display_path=str(rust_apply_bin),
+        )
+
+    raise ValueError("--rust-apply-bin is required when default Rust apply dry-run routing is active.")
+
+def _validate_rust_apply_dry_run_args(args):
     if not args.dry_run:
         raise ValueError("--rust-apply-bin requires --dry-run.")
     unsupported_options = [
@@ -136,18 +155,14 @@ def _resolve_rust_apply_bin(args):
         if is_set:
             raise ValueError(f"--rust-apply-bin does not support {option}.")
 
-    rust_apply_bin = _explicit_rust_apply_bin_candidate(args)
-    if rust_apply_bin is None:
-        rust_apply_bin = _packaged_rust_apply_bin_candidate(args)
-    if rust_apply_bin is None:
-        raise ValueError("--rust-apply-bin is required when default Rust apply dry-run routing is active.")
-    if not rust_apply_bin.exists():
-        raise ValueError(f"Rust apply binary does not exist: {args.rust_apply_bin}")
-    if not rust_apply_bin.is_file():
-        raise ValueError(f"Rust apply binary is not a file: {args.rust_apply_bin}")
-    if not os.access(rust_apply_bin, os.X_OK):
-        raise ValueError(f"Rust apply binary is not executable: {args.rust_apply_bin}")
-    return rust_apply_bin
+def _validate_rust_apply_bin_candidate(path, *, display_path):
+    if not path.exists():
+        raise ValueError(f"Rust apply binary does not exist: {display_path}")
+    if not path.is_file():
+        raise ValueError(f"Rust apply binary is not a file: {display_path}")
+    if not os.access(path, os.X_OK):
+        raise ValueError(f"Rust apply binary is not executable: {display_path}")
+    return path
 
 def _explicit_rust_apply_bin_candidate(args):
     if args.rust_apply_bin is None:
@@ -578,8 +593,8 @@ class CheckRustPlannerCutoverReadinessTests(unittest.TestCase):
             (
                 "cli_explicit_rust_apply_validates_binary_path",
                 CLI_TEXT.replace(
-                    '    if not rust_apply_bin.is_file():\n'
-                    '        raise ValueError(f"Rust apply binary is not a file: {args.rust_apply_bin}")\n',
+                    '    if not path.is_file():\n'
+                    '        raise ValueError(f"Rust apply binary is not a file: {display_path}")\n',
                     "",
                 ),
             ),
@@ -634,8 +649,7 @@ class CheckRustPlannerCutoverReadinessTests(unittest.TestCase):
             '\ndef _effective_plan_backend(args):',
         )
         missing_binary_requirement = CLI_TEXT.replace(
-            '    if rust_apply_bin is None:\n'
-            '        raise ValueError("--rust-apply-bin is required when default Rust apply dry-run routing is active.")\n',
+            '    raise ValueError("--rust-apply-bin is required when default Rust apply dry-run routing is active.")\n',
             "",
         )
         dry_run_python_fallback = CLI_TEXT.replace(

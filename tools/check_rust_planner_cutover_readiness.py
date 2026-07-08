@@ -789,8 +789,11 @@ def _cli_explicit_rust_apply_dry_run_checks(repo_root: Path) -> list[dict[str, A
     run_rust_apply_block = _source_function_block(text, "_run_rust_apply_dry_run")
     build_command_block = _source_function_block(text, "_build_rust_apply_command")
     resolve_bin_block = _source_function_block(text, "_resolve_rust_apply_bin")
+    validate_dry_run_block = _source_function_block(text, "_validate_rust_apply_dry_run_args")
+    validate_candidate_block = _source_function_block(text, "_validate_rust_apply_bin_candidate")
     explicit_candidate_block = _source_function_block(text, "_explicit_rust_apply_bin_candidate")
-    binary_validation_scope = "\n".join((resolve_bin_block, explicit_candidate_block))
+    args_validation_scope = "\n".join((resolve_bin_block, validate_dry_run_block))
+    binary_validation_scope = "\n".join((resolve_bin_block, explicit_candidate_block, validate_candidate_block))
 
     option_block = _source_call_block(text, '"--rust-apply-bin"')
     option_present = bool(option_block) and "apply_parser.add_argument" in option_block
@@ -865,7 +868,7 @@ def _cli_explicit_rust_apply_dry_run_checks(repo_root: Path) -> list[dict[str, A
     )
 
     rejects_unsupported_flags = _source_has_tokens(
-        resolve_bin_block,
+        args_validation_scope,
         unsupported_rejection_tokens,
     ) and not _source_has_any_compact_tokens(build_command_block, unsupported_forwarding_tokens)
 
@@ -887,14 +890,14 @@ def _cli_explicit_rust_apply_dry_run_checks(repo_root: Path) -> list[dict[str, A
         ),
         _check(
             "cli_explicit_rust_apply_requires_dry_run",
-            _source_has_tokens(resolve_bin_block, dry_run_tokens),
-            _missing_source_tokens_details(resolve_bin_block, dry_run_tokens),
+            _source_has_tokens(args_validation_scope, dry_run_tokens),
+            _missing_source_tokens_details(args_validation_scope, dry_run_tokens),
         ),
         _check(
             "cli_explicit_rust_apply_rejects_python_only_flags",
             rejects_unsupported_flags,
             _unsupported_apply_flags_details(
-                resolve_bin_block,
+                args_validation_scope,
                 build_command_block,
                 unsupported_rejection_tokens,
                 unsupported_forwarding_tokens,
@@ -954,7 +957,7 @@ def _cli_default_rust_apply_dry_run_checks(repo_root: Path) -> list[dict[str, An
     )
     requires_binary_tokens = (
         "rust_apply_bin = _packaged_rust_apply_bin_candidate(args)",
-        "if rust_apply_bin is None",
+        "if rust_apply_bin is not None",
         "--rust-apply-bin is required when default Rust apply dry-run routing is active.",
     )
     no_fallback_branch_tokens = (
