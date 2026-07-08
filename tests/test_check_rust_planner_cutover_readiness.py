@@ -325,6 +325,37 @@ def accepted_p8bc_report() -> dict:
     }
 
 
+def accepted_p8bu_report() -> dict:
+    return {
+        "kind": "rust_apply_dry_run_bridge_smoke",
+        "schema_version": 1,
+        "status": "passed",
+        "inputs": {
+            "rust_apply_bin": "/tmp/emuchef-rust-backend",
+            "plan_file": "/tmp/execution-plan.yaml",
+        },
+        "command": [
+            "emuchef",
+            "apply",
+            "--plan-file",
+            "/tmp/execution-plan.yaml",
+            "--dry-run",
+            "--rust-apply-bin",
+            "/tmp/emuchef-rust-backend",
+        ],
+        "result": {
+            "returncode": 0,
+            "stdout_present": True,
+            "stderr_present": False,
+        },
+        "checks": [
+            {"id": "rust_apply_bin_exists", "status": "pass"},
+            {"id": "plan_file_exists", "status": "pass"},
+            {"id": "python_bridge_invocation_succeeded", "status": "pass"},
+        ],
+    }
+
+
 def scenario_payload(
     *device_plan_ids: str,
     classification: str = "match",
@@ -443,6 +474,7 @@ class CheckRustPlannerCutoverReadinessTests(unittest.TestCase):
         p8aj_live_probe_report: Path | None = None,
         p8ak_mismatch_warning_report: Path | None = None,
         p8bc_launcher_injected_planner_report: Path | None = None,
+        p8bu_rust_apply_dry_run_bridge_report: Path | None = None,
     ) -> dict:
         return self.readiness.build_readiness_report(
             repo_root=root,
@@ -451,6 +483,7 @@ class CheckRustPlannerCutoverReadinessTests(unittest.TestCase):
             p8aj_live_probe_report=p8aj_live_probe_report,
             p8ak_mismatch_warning_report=p8ak_mismatch_warning_report,
             p8bc_launcher_injected_planner_report=p8bc_launcher_injected_planner_report,
+            p8bu_rust_apply_dry_run_bridge_report=p8bu_rust_apply_dry_run_bridge_report,
         )
 
     def test_happy_path_static_report_with_required_files_and_docs(self) -> None:
@@ -972,6 +1005,12 @@ class CheckRustPlannerCutoverReadinessTests(unittest.TestCase):
         self.assertIn("tools/smoke_launcher_injected_planner.py", p8bc_command)
         self.assertIn("--rust-planner-bin <absolute-path-to-launcher-supplied-planner>", p8bc_command)
         self.assertIn("--output-report <path-to-output-report>", p8bc_command)
+        self.assertIn("p8bu_rust_apply_dry_run_bridge", commands)
+        p8bu_command = commands["p8bu_rust_apply_dry_run_bridge"]
+        self.assertIn("tools/smoke_rust_apply_dry_run_bridge.py", p8bu_command)
+        self.assertIn("--rust-apply-bin <path-to-emuchef-rust-backend>", p8bu_command)
+        self.assertIn("--plan-file <path-to-execution-plan>", p8bu_command)
+        self.assertIn("--output-report <path-to-output-report>", p8bu_command)
         self.assertNotIn(".local", p8bc_command)
         self.assertNotIn("/Users/", p8bc_command)
         self.assertNotIn("/tmp/", p8bc_command)
@@ -1063,12 +1102,10 @@ class CheckRustPlannerCutoverReadinessTests(unittest.TestCase):
         self.assertEqual(evidence["p8aj_live_probe"]["status"], "rejected")
         self.assertEqual(evidence["p8ak_mismatch_warning"]["status"], "rejected")
         self.assertEqual(evidence["p8bc_launcher_injected_planner"]["status"], "rejected")
-        self.assertTrue(
-            all(
-                item["reasons"] == ["evidence report file is missing"]
-                for item in evidence.values()
-            )
-        )
+        self.assertEqual(evidence["p8bu_rust_apply_dry_run_bridge"]["status"], "missing")
+        for evidence_id in ("p8aj_live_probe", "p8ak_mismatch_warning", "p8bc_launcher_injected_planner"):
+            with self.subTest(evidence_id=evidence_id):
+                self.assertEqual(evidence[evidence_id]["reasons"], ["evidence report file is missing"])
         self.assertEqual(blocker_status(report, "real_device_probing_not_cut_over"), "blocked")
         self.assertEqual(blocker_status(report, "detected_device_profile_mismatch_warning_not_cut_over"), "blocked")
         self.assertEqual(blocker_status(report, "packaged_launcher_injection_evidence_not_accepted"), "blocked")
@@ -1194,6 +1231,134 @@ class CheckRustPlannerCutoverReadinessTests(unittest.TestCase):
                 self.assertTrue(report["production_equivalent_evidence"][evidence_key]["reasons"])
                 self.assertEqual(blocker_status(report, blocker_id), "blocked")
                 self.assertEqual(report["status"], "blocked")
+
+    def test_missing_p8bu_evidence_does_not_fail_static_checks_or_add_bridge_evidence_blocker(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            make_synthetic_repo(root)
+
+            report = self.build_report(root)
+
+        self.assertTrue(all(check["status"] == "pass" for check in report["static_checks"]))
+        evidence = report["production_equivalent_evidence"]["p8bu_rust_apply_dry_run_bridge"]
+        self.assertEqual(evidence["status"], "missing")
+        self.assertEqual(evidence["evidence_id"], "p8bu_rust_apply_dry_run_bridge")
+        self.assertEqual(evidence["blocker_id"], "rust_apply_dry_run_bridge_evidence")
+        self.assertNotIn(
+            "rust_apply_dry_run_bridge_evidence",
+            {blocker["id"] for blocker in report["remaining_blockers"]},
+        )
+        self.assertEqual(report["status"], "blocked")
+
+    def test_accepted_p8bu_report_is_recognized_and_does_not_unblock_executor_apply(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            make_synthetic_repo(root)
+            report_path = write_json(root, "reports/p8bu.json", accepted_p8bu_report())
+
+            report = self.build_report(root, p8bu_rust_apply_dry_run_bridge_report=report_path)
+
+        evidence = report["production_equivalent_evidence"]["p8bu_rust_apply_dry_run_bridge"]
+        self.assertEqual(evidence["status"], "accepted")
+        self.assertEqual(evidence["reasons"], [])
+        self.assertEqual(blocker_status(report, "rust_apply_dry_run_bridge_evidence"), "evidence_accepted")
+        self.assertEqual(blocker_status(report, "executor_apply_not_cut_over"), "blocked")
+        self.assertEqual(report["status"], "blocked")
+
+    def test_invalid_p8bu_kind_is_rejected(self) -> None:
+        payload = accepted_p8bu_report()
+        payload["kind"] = "rust_launcher_injected_planner_smoke"
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            make_synthetic_repo(root)
+            report_path = write_json(root, "reports/p8bu.json", payload)
+
+            report = self.build_report(root, p8bu_rust_apply_dry_run_bridge_report=report_path)
+
+        evidence = report["production_equivalent_evidence"]["p8bu_rust_apply_dry_run_bridge"]
+        self.assertEqual(evidence["status"], "rejected")
+        self.assertTrue(any("kind must be rust_apply_dry_run_bridge_smoke" in reason for reason in evidence["reasons"]))
+        self.assertTrue(any("report.command" in reason for reason in evidence["reasons"]))
+        self.assertNotIn(
+            "rust_apply_dry_run_bridge_evidence",
+            {blocker["id"] for blocker in report["remaining_blockers"]},
+        )
+
+    def test_invalid_p8bu_schema_version_is_rejected(self) -> None:
+        payload = accepted_p8bu_report()
+        payload["schema_version"] = 2
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            make_synthetic_repo(root)
+            report_path = write_json(root, "reports/p8bu.json", payload)
+
+            report = self.build_report(root, p8bu_rust_apply_dry_run_bridge_report=report_path)
+
+        evidence = report["production_equivalent_evidence"]["p8bu_rust_apply_dry_run_bridge"]
+        self.assertEqual(evidence["status"], "rejected")
+        self.assertTrue(any("schema_version must be 1" in reason for reason in evidence["reasons"]))
+
+    def test_p8bu_status_other_than_passed_is_rejected(self) -> None:
+        payload = accepted_p8bu_report()
+        payload["status"] = "failed"
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            make_synthetic_repo(root)
+            report_path = write_json(root, "reports/p8bu.json", payload)
+
+            report = self.build_report(root, p8bu_rust_apply_dry_run_bridge_report=report_path)
+
+        evidence = report["production_equivalent_evidence"]["p8bu_rust_apply_dry_run_bridge"]
+        self.assertEqual(evidence["status"], "rejected")
+        self.assertTrue(any("status must be passed" in reason for reason in evidence["reasons"]))
+
+    def test_missing_p8bu_required_check_is_rejected(self) -> None:
+        payload = accepted_p8bu_report()
+        payload["checks"] = [
+            check
+            for check in payload["checks"]
+            if check["id"] != "python_bridge_invocation_succeeded"
+        ]
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            make_synthetic_repo(root)
+            report_path = write_json(root, "reports/p8bu.json", payload)
+
+            report = self.build_report(root, p8bu_rust_apply_dry_run_bridge_report=report_path)
+
+        evidence = report["production_equivalent_evidence"]["p8bu_rust_apply_dry_run_bridge"]
+        self.assertEqual(evidence["status"], "rejected")
+        self.assertTrue(
+            any("missing required check: python_bridge_invocation_succeeded" in reason for reason in evidence["reasons"])
+        )
+
+    def test_failed_p8bu_required_check_is_rejected(self) -> None:
+        payload = accepted_p8bu_report()
+        payload["checks"][0]["status"] = "fail"
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            make_synthetic_repo(root)
+            report_path = write_json(root, "reports/p8bu.json", payload)
+
+            report = self.build_report(root, p8bu_rust_apply_dry_run_bridge_report=report_path)
+
+        evidence = report["production_equivalent_evidence"]["p8bu_rust_apply_dry_run_bridge"]
+        self.assertEqual(evidence["status"], "rejected")
+        self.assertTrue(any("required check must pass: rust_apply_bin_exists" in reason for reason in evidence["reasons"]))
+
+    def test_p8bu_command_missing_rust_apply_bin_token_is_rejected(self) -> None:
+        payload = accepted_p8bu_report()
+        payload["command"] = [token for token in payload["command"] if token != "--rust-apply-bin"]
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            make_synthetic_repo(root)
+            report_path = write_json(root, "reports/p8bu.json", payload)
+
+            report = self.build_report(root, p8bu_rust_apply_dry_run_bridge_report=report_path)
+
+        evidence = report["production_equivalent_evidence"]["p8bu_rust_apply_dry_run_bridge"]
+        self.assertEqual(evidence["status"], "rejected")
+        self.assertTrue(any("command must contain --rust-apply-bin" in reason for reason in evidence["reasons"]))
 
     def test_valid_p8bc_report_is_accepted_for_launcher_injection_evidence_only(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
@@ -1506,12 +1671,15 @@ class CheckRustPlannerCutoverReadinessTests(unittest.TestCase):
                 "reports/p8ak.json",
                 "--p8bc-launcher-injected-planner-report",
                 "reports/p8bc.json",
+                "--p8bu-rust-apply-dry-run-bridge-report",
+                "reports/p8bu.json",
             ]
         )
 
         self.assertEqual(args.p8aj_live_probe_report, "reports/p8aj.json")
         self.assertEqual(args.p8ak_mismatch_warning_report, "reports/p8ak.json")
         self.assertEqual(args.p8bc_launcher_injected_planner_report, "reports/p8bc.json")
+        self.assertEqual(args.p8bu_rust_apply_dry_run_bridge_report, "reports/p8bu.json")
 
     def test_report_status_remains_blocked_when_static_checks_pass(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
@@ -1570,6 +1738,8 @@ class CheckRustPlannerCutoverReadinessTests(unittest.TestCase):
             r"^\s*from\s+tools\.smoke_rust_production_equivalent_mismatch_warning\b",
             r"^\s*import\s+tools\.smoke_launcher_injected_planner\b",
             r"^\s*from\s+tools\.smoke_launcher_injected_planner\b",
+            r"^\s*import\s+tools\.smoke_rust_apply_dry_run_bridge\b",
+            r"^\s*from\s+tools\.smoke_rust_apply_dry_run_bridge\b",
         ]
         for pattern in forbidden_import_patterns:
             with self.subTest(pattern=pattern):

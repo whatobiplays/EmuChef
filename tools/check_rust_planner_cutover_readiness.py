@@ -24,12 +24,15 @@ DEVICE_CONTEXT_FIELD_SET = set(DEVICE_CONTEXT_FIELDS)
 P8AJ_EVIDENCE_ID = "p8aj_live_probe"
 P8AK_EVIDENCE_ID = "p8ak_mismatch_warning"
 P8BC_EVIDENCE_ID = "p8bc_launcher_injected_planner"
+P8BU_EVIDENCE_ID = "p8bu_rust_apply_dry_run_bridge"
 P8AJ_REPORT_KIND = "rust_production_equivalent_live_adb_probe_smoke"
 P8AK_REPORT_KIND = "rust_production_equivalent_mismatch_warning_smoke"
 P8BC_REPORT_KIND = "rust_launcher_injected_planner_smoke"
+P8BU_REPORT_KIND = "rust_apply_dry_run_bridge_smoke"
 DEFAULT_CLI_BACKEND_BLOCKER_ID = "default_cli_backend_still_python"
 EXPLICIT_RUST_APPLY_DRY_RUN_CAPABILITY_ID = "explicit_rust_apply_dry_run_bridge"
 DEFAULT_RUST_APPLY_DRY_RUN_CAPABILITY_ID = "default_rust_apply_dry_run_route"
+RUST_APPLY_DRY_RUN_BRIDGE_EVIDENCE_ID = "rust_apply_dry_run_bridge_evidence"
 REAL_DEVICE_PROBING_BLOCKER_ID = "real_device_probing_not_cut_over"
 MISMATCH_WARNING_BLOCKER_ID = "detected_device_profile_mismatch_warning_not_cut_over"
 PACKAGED_LAUNCHER_INJECTION_BLOCKER_ID = "packaged_launcher_injection_evidence_not_accepted"
@@ -95,6 +98,23 @@ P8BC_REQUIRED_INPUT_VALUES = {
     "path_executable": True,
     "argv0_corresponds_to_launcher_path": True,
 }
+P8BU_REQUIRED_TOP_LEVEL_KEYS = (
+    "inputs",
+    "command",
+    "result",
+    "checks",
+)
+P8BU_REQUIRED_CHECKS = (
+    "rust_apply_bin_exists",
+    "plan_file_exists",
+    "python_bridge_invocation_succeeded",
+)
+P8BU_REQUIRED_COMMAND_TOKENS = (
+    "apply",
+    "--plan-file",
+    "--dry-run",
+    "--rust-apply-bin",
+)
 
 REQUIRED_ARTIFACTS = (
     "tools/compare_rust_python_plan.py",
@@ -200,6 +220,15 @@ REQUIRED_MANUAL_EVIDENCE = (
             "--output-report <path-to-output-report>"
         ),
     },
+    {
+        "id": P8BU_EVIDENCE_ID,
+        "command": (
+            "PYTHONPATH=src rtk python3 tools/smoke_rust_apply_dry_run_bridge.py "
+            "--rust-apply-bin <path-to-emuchef-rust-backend> "
+            "--plan-file <path-to-execution-plan> "
+            "--output-report <path-to-output-report>"
+        ),
+    },
 )
 
 REMAINING_BLOCKERS = (
@@ -267,6 +296,7 @@ def build_readiness_report(
     p8aj_live_probe_report: Path | None = None,
     p8ak_mismatch_warning_report: Path | None = None,
     p8bc_launcher_injected_planner_report: Path | None = None,
+    p8bu_rust_apply_dry_run_bridge_report: Path | None = None,
 ) -> dict[str, Any]:
     """Build the deterministic static readiness report.
 
@@ -311,6 +341,14 @@ def build_readiness_report(
             blocker_id=PACKAGED_LAUNCHER_INJECTION_BLOCKER_ID,
             validator=_p8bc_evidence_rejection_reasons,
         ),
+        P8BU_EVIDENCE_ID: _evaluate_evidence_report(
+            repo_root=repo_root,
+            report_path=p8bu_rust_apply_dry_run_bridge_report,
+            evidence_id=P8BU_EVIDENCE_ID,
+            blocker_id=RUST_APPLY_DRY_RUN_BRIDGE_EVIDENCE_ID,
+            validator=_p8bu_evidence_rejection_reasons,
+            sensitive_payload_exemption_kind=P8BU_REPORT_KIND,
+        ),
     }
 
     return {
@@ -348,6 +386,7 @@ def _evaluate_evidence_report(
     evidence_id: str,
     blocker_id: str,
     validator: Callable[[dict[str, Any]], list[str]],
+    sensitive_payload_exemption_kind: str | None = None,
 ) -> dict[str, Any]:
     if report_path is None:
         return _evidence_item(
@@ -374,11 +413,18 @@ def _evaluate_evidence_report(
             reasons=["evidence report root must be a JSON object"],
         )
 
-    reasons = [
-        *_sensitive_evidence_rejection_reasons(payload),
-        *_local_path_value_rejection_reasons(payload),
-        *validator(payload),
-    ]
+    # P8BU intentionally records command tokens and absolute input paths because
+    # the smoke proves a developer-supplied explicit binary bridge. Keep that
+    # exception tied to the exact report kind so older evidence schemas retain
+    # their stricter metadata-only policy.
+    exempt_from_sensitive_payload_filters = (
+        sensitive_payload_exemption_kind is not None and payload.get("kind") == sensitive_payload_exemption_kind
+    )
+    reasons = []
+    if not exempt_from_sensitive_payload_filters:
+        reasons.extend(_sensitive_evidence_rejection_reasons(payload))
+        reasons.extend(_local_path_value_rejection_reasons(payload))
+    reasons.extend(validator(payload))
     return _evidence_item(
         status="accepted" if not reasons else "rejected",
         evidence_id=evidence_id,
@@ -567,6 +613,84 @@ def _p8bc_evidence_rejection_reasons(payload: dict[str, Any]) -> list[str]:
     return reasons
 
 
+def _p8bu_evidence_rejection_reasons(payload: dict[str, Any]) -> list[str]:
+    reasons = []
+    for key in P8BU_REQUIRED_TOP_LEVEL_KEYS:
+        if key not in payload:
+            reasons.append(f"missing required top-level key: {key}")
+
+    if payload.get("kind") != P8BU_REPORT_KIND:
+        reasons.append(f"kind must be {P8BU_REPORT_KIND}")
+    if payload.get("schema_version") != REPORT_SCHEMA_VERSION:
+        reasons.append(f"schema_version must be {REPORT_SCHEMA_VERSION}")
+    if payload.get("status") != "passed":
+        reasons.append("status must be passed")
+
+    inputs = payload.get("inputs")
+    if not isinstance(inputs, dict):
+        reasons.append("inputs must be an object")
+
+    command = payload.get("command")
+    if not isinstance(command, list) or not all(isinstance(token, str) for token in command):
+        reasons.append("command must be a list of strings")
+    else:
+        reasons.extend(_p8bu_command_rejection_reasons(command))
+
+    result = payload.get("result")
+    if not isinstance(result, dict):
+        reasons.append("result must be an object")
+    elif not _json_int_equals(result.get("returncode"), 0):
+        reasons.append("result.returncode must be 0")
+
+    checks = payload.get("checks")
+    if not isinstance(checks, list):
+        reasons.append("checks must be a list")
+    else:
+        required_check_states = _p8bu_required_check_states(checks)
+        for check_id in P8BU_REQUIRED_CHECKS:
+            check_state = required_check_states.get(check_id)
+            if check_state is None:
+                reasons.append(f"missing required check: {check_id}")
+            elif check_state is not True:
+                reasons.append(f"required check must pass: {check_id}")
+
+    return reasons
+
+
+def _p8bu_command_rejection_reasons(command: list[str]) -> list[str]:
+    reasons = []
+    for token in P8BU_REQUIRED_COMMAND_TOKENS:
+        if token not in command:
+            reasons.append(f"command must contain {token}")
+    for option in ("--plan-file", "--rust-apply-bin"):
+        if option in command and not _command_option_has_value(command, option):
+            reasons.append(f"command must include a value after {option}")
+    return reasons
+
+
+def _command_option_has_value(command: list[str], option: str) -> bool:
+    return any(
+        index + 1 < len(command)
+        and isinstance(command[index + 1], str)
+        and bool(command[index + 1])
+        and not command[index + 1].startswith("--")
+        for index, token in enumerate(command)
+        if token == option
+    )
+
+
+def _p8bu_required_check_states(checks: list[object]) -> dict[str, bool | None]:
+    states: dict[str, bool | None] = {}
+    for check in checks:
+        if not isinstance(check, dict):
+            continue
+        check_id = check.get("id")
+        if isinstance(check_id, str) and check_id in P8BU_REQUIRED_CHECKS:
+            status = check.get("status")
+            states[check_id] = True if status == "pass" else False if isinstance(status, str) else None
+    return states
+
+
 def _optional_status_rejection_reasons(payload: dict[str, Any]) -> list[str]:
     status = payload.get("status")
     if status is None or status == "passed":
@@ -611,6 +735,7 @@ def _remaining_blockers_with_evidence(production_equivalent_evidence: dict[str, 
             else "blocked"
         ),
     }
+    p8bu_evidence_accepted = production_equivalent_evidence[P8BU_EVIDENCE_ID]["status"] == "accepted"
     blockers: list[dict[str, str]] = []
     for blocker in REMAINING_BLOCKERS:
         blocker_id = blocker["id"]
@@ -620,6 +745,13 @@ def _remaining_blockers_with_evidence(production_equivalent_evidence: dict[str, 
                 "status": blocker_statuses.get(blocker_id, blocker["status"]),
             }
         )
+        if blocker_id == DEFAULT_RUST_APPLY_DRY_RUN_CAPABILITY_ID and p8bu_evidence_accepted:
+            blockers.append(
+                {
+                    "id": RUST_APPLY_DRY_RUN_BRIDGE_EVIDENCE_ID,
+                    "status": EVIDENCE_ACCEPTED_STATUS,
+                }
+            )
     return blockers
 
 
@@ -1423,6 +1555,7 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--p8aj-live-probe-report")
     parser.add_argument("--p8ak-mismatch-warning-report")
     parser.add_argument("--p8bc-launcher-injected-planner-report")
+    parser.add_argument("--p8bu-rust-apply-dry-run-bridge-report")
     return parser.parse_args(argv)
 
 
@@ -1437,6 +1570,11 @@ def main(argv: list[str] | None = None) -> int:
         p8bc_launcher_injected_planner_report=(
             Path(args.p8bc_launcher_injected_planner_report)
             if args.p8bc_launcher_injected_planner_report
+            else None
+        ),
+        p8bu_rust_apply_dry_run_bridge_report=(
+            Path(args.p8bu_rust_apply_dry_run_bridge_report)
+            if args.p8bu_rust_apply_dry_run_bridge_report
             else None
         ),
     )
