@@ -22,6 +22,28 @@ export const RUNTIME_CHECK_FILES = [
   "src-tauri/src/lib.rs",
 ];
 
+export function productRuntimeContractErrors({ pyproject, cargoManifest, tauriConfig, packaging }) {
+  const errors = [];
+  const scriptsSection = sectionContent(pyproject, "project.scripts");
+  if (/^\s*emuchef\s*=\s*"emuchef\.cli:main"\s*$/m.test(scriptsSection)) {
+    errors.push("Python-owned emuchef console entrypoint");
+  }
+  if (!/^\s*emuchef-python-legacy\s*=\s*"emuchef\.cli:main"\s*$/m.test(scriptsSection)) {
+    errors.push("missing emuchef-python-legacy console entrypoint");
+  }
+  for (const [label, passed] of [
+    ["Cargo default-run emuchef", /^default-run\s*=\s*"emuchef"\s*$/m.test(cargoManifest)],
+    ["Cargo emuchef binary target", /\[\[bin\]\][\s\S]*?name\s*=\s*"emuchef"[\s\S]*?path\s*=\s*"src\/main\.rs"/.test(cargoManifest)],
+    ["Tauri emuchef externalBin", /"externalBin"\s*:\s*\[\s*"binaries\/emuchef"\s*\]/.test(tauriConfig)],
+    ["packaging emuchef basename", /BINARY_BASENAME\s*=\s*"emuchef"/.test(packaging)],
+  ]) {
+    if (!passed) {
+      errors.push(`missing ${label}`);
+    }
+  }
+  return errors;
+}
+
 export function findForbiddenRuntimeHits(filePath, content) {
   const runtimeContent = stripNonRuntimeSections(filePath, content);
   const hits = [];
@@ -43,6 +65,22 @@ function stripNonRuntimeSections(filePath, content) {
     return content;
   }
   return stripRustCfgTestItems(content);
+}
+
+function sectionContent(content, sectionName) {
+  const lines = content.split("\n");
+  const start = lines.findIndex((line) => line.trim() === `[${sectionName}]`);
+  if (start === -1) {
+    return "";
+  }
+  const section = [];
+  for (let index = start + 1; index < lines.length; index += 1) {
+    if (/^\s*\[.+\]\s*$/.test(lines[index])) {
+      break;
+    }
+    section.push(lines[index]);
+  }
+  return section.join("\n");
 }
 
 function stripRustCfgTestItems(content) {
@@ -98,12 +136,26 @@ function lineNumberForIndex(content, index) {
 async function main() {
   const scriptDir = path.dirname(fileURLToPath(import.meta.url));
   const appDir = path.resolve(scriptDir, "..");
+  const repoRoot = path.resolve(appDir, "../..");
   const hits = [];
 
   for (const relativePath of RUNTIME_CHECK_FILES) {
     const absolutePath = path.join(appDir, relativePath);
     const content = await fs.readFile(absolutePath, "utf8");
     hits.push(...findForbiddenRuntimeHits(relativePath, content));
+  }
+
+  const contractErrors = productRuntimeContractErrors({
+    pyproject: await fs.readFile(path.join(repoRoot, "pyproject.toml"), "utf8"),
+    cargoManifest: await fs.readFile(
+      path.join(repoRoot, "crates/emuchef-rust-backend/Cargo.toml"),
+      "utf8",
+    ),
+    tauriConfig: await fs.readFile(path.join(appDir, "src-tauri/tauri.conf.json"), "utf8"),
+    packaging: await fs.readFile(path.join(appDir, "scripts/sidecar-packaging.mjs"), "utf8"),
+  });
+  for (const error of contractErrors) {
+    hits.push({ filePath: "product runtime contract", token: error, line: 0 });
   }
 
   if (hits.length > 0) {

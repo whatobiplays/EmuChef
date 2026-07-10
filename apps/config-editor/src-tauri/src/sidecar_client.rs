@@ -784,9 +784,9 @@ fn rust_sidecar_binary_candidates(repo_root: &Path) -> Vec<PathBuf> {
 
 fn rust_backend_binary_name() -> &'static str {
     if cfg!(windows) {
-        "emuchef-rust-backend.exe"
+        "emuchef.exe"
     } else {
-        "emuchef-rust-backend"
+        "emuchef"
     }
 }
 
@@ -1003,7 +1003,7 @@ mod tests {
 
     #[test]
     fn rust_sidecar_command_uses_only_backend_binary_and_sidecar_arg() {
-        let binary = PathBuf::from("/tmp/emuchef-rust-backend");
+        let binary = PathBuf::from("/tmp/emuchef");
         let spec = rust_sidecar_command_spec(Some(&binary), &SidecarRuntime::Dev)
             .expect("override should build spec");
 

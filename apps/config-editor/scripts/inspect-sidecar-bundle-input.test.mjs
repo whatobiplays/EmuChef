@@ -11,7 +11,7 @@ test("inspects prepared externalBin source artifact and metadata", () => {
   const targetTriple = "aarch64-apple-darwin";
   const profile = "debug";
   const binariesDir = path.join(appDir, "src-tauri", "binaries");
-  const artifactPath = path.join(binariesDir, "emuchef-rust-backend-aarch64-apple-darwin");
+  const artifactPath = path.join(binariesDir, "emuchef-aarch64-apple-darwin");
   fs.mkdirSync(binariesDir, { recursive: true });
   fs.writeFileSync(artifactPath, "sidecar");
   fs.chmodSync(artifactPath, 0o755);
@@ -22,8 +22,8 @@ test("inspects prepared externalBin source artifact and metadata", () => {
 
   const result = inspectPreparedSidecarBundleInput({ appDir, profile, targetTriple });
 
-  assert.equal(result.artifactName, "emuchef-rust-backend-aarch64-apple-darwin");
-  assert.equal(result.packagedName, "emuchef-rust-backend");
+  assert.equal(result.artifactName, "emuchef-aarch64-apple-darwin");
+  assert.equal(result.packagedName, "emuchef");
   assert.equal(result.metadata.profile, profile);
   assert.equal(result.metadata.targetTriple, targetTriple);
   assert.equal(result.executable, true);

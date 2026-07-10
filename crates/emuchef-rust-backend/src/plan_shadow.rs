@@ -1,10 +1,8 @@
-//! Dev-only Rust planner shadow command support.
+//! Shared Rust planning implementation plus the development-only shadow command.
 //!
-//! This module intentionally exposes only a process-style helper for the
-//! `emuchef-plan-shadow` binary. It reuses the private Rust planner path for
-//! manual migration inspection. Its live ADB probing mode is explicit and
-//! shadow-binary-only; it does not add protocol, Tauri, executor, or Python CLI
-//! routing.
+//! The product `emuchef plan` command and the `emuchef-plan-shadow` reference
+//! binary call the same planning function. The shadow binary remains a manual
+//! JSON inspection surface and is not used by product runtime or packaging.
 
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -68,21 +66,31 @@ pub(crate) fn run_with_adb_runner<R: CommandRunner>(
     args: &[String],
     adb_runner: &R,
 ) -> ProcessOutput {
+    match planning_result_with_adb_runner(args, adb_runner) {
+        Ok(result) => emit_planning_result(result),
+        Err(output) => output,
+    }
+}
+
+pub(crate) fn planning_result_with_adb_runner<R: CommandRunner>(
+    args: &[String],
+    adb_runner: &R,
+) -> Result<PlanningResult, ProcessOutput> {
     let config = match parse_args(args) {
         Ok(config) => config,
         Err(ShadowArgError::Help) => {
-            return ProcessOutput {
+            return Err(ProcessOutput {
                 exit_code: 0,
                 stdout: USAGE.to_string(),
                 stderr: String::new(),
-            };
+            });
         }
         Err(ShadowArgError::Usage(message)) => {
-            return ProcessOutput {
+            return Err(ProcessOutput {
                 exit_code: 2,
                 stdout: String::new(),
                 stderr: format!("{message}\n{USAGE}"),
-            };
+            });
         }
     };
 
@@ -99,7 +107,7 @@ pub(crate) fn run_with_adb_runner<R: CommandRunner>(
         DetectedFactsSource::FixtureJson(path) => {
             let detected_facts = match load_detected_facts_fixture(&path) {
                 Ok(facts) => facts,
-                Err(error) => return error.into_process_output(),
+                Err(error) => return Err(error.into_process_output()),
             };
             match plan_from_authored_device_plan_with_detected_facts(
                 &authored_root,
@@ -110,11 +118,11 @@ pub(crate) fn run_with_adb_runner<R: CommandRunner>(
             ) {
                 Ok(result) => result,
                 Err(error) => {
-                    return ProcessOutput {
+                    return Err(ProcessOutput {
                         exit_code: 1,
                         stdout: String::new(),
                         stderr: format!("Error: {}: {error}\n", error.code()),
-                    };
+                    });
                 }
             }
         }
@@ -125,7 +133,7 @@ pub(crate) fn run_with_adb_runner<R: CommandRunner>(
             };
             let detected_facts = match probe.detect() {
                 Ok(facts) => facts,
-                Err(error) => return adb_probe_error_output(error),
+                Err(error) => return Err(adb_probe_error_output(error)),
             };
             match plan_from_authored_device_plan_with_detected_facts(
                 &authored_root,
@@ -136,11 +144,11 @@ pub(crate) fn run_with_adb_runner<R: CommandRunner>(
             ) {
                 Ok(result) => result,
                 Err(error) => {
-                    return ProcessOutput {
+                    return Err(ProcessOutput {
                         exit_code: 1,
                         stdout: String::new(),
                         stderr: format!("Error: {}: {error}\n", error.code()),
-                    };
+                    });
                 }
             }
         }
@@ -153,11 +161,11 @@ pub(crate) fn run_with_adb_runner<R: CommandRunner>(
             ) {
                 Ok(input) => input,
                 Err(error) => {
-                    return ProcessOutput {
+                    return Err(ProcessOutput {
                         exit_code: 1,
                         stdout: String::new(),
                         stderr: format!("Error: {}: {error}\n", error.code()),
-                    };
+                    });
                 }
             };
             apply_explicit_device_context(&mut input.device_context, &explicit_context);
@@ -168,7 +176,7 @@ pub(crate) fn run_with_adb_runner<R: CommandRunner>(
         apply_explicit_device_context_to_result(&mut result, &explicit_context);
     }
 
-    emit_planning_result(result)
+    Ok(result)
 }
 
 fn adb_probe_error_output(error: DeviceProbeError) -> ProcessOutput {

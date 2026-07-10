@@ -28,6 +28,6 @@
   },
   "bundle": {
     "active": true,
-    "externalBin": ["binaries/emuchef-rust-backend"]
+    "externalBin": ["binaries/emuchef"]
   }
 }

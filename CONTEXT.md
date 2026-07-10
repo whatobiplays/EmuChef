@@ -9,6 +9,39 @@ in the same change.
 
 EmuChef is a CLI-first Android handheld provisioner.
 
+## Canonical Runtime Contract
+
+The product command is the Cargo binary target `emuchef` from the
+`emuchef-rust-backend` package. Rust directly owns default `plan`, file-based
+`validate`, `apply --plan-file` with or without `--dry-run`, and `--sidecar`.
+Non-dry-run apply uses the exact `--adb` executable when supplied, otherwise the
+literal executable name `adb`, and forwards an optional `--serial`.
+
+Tauri packages and launches `emuchef-<target-triple>[.exe]` as its external
+sidecar input and resolves the packaged launch name `emuchef[.exe]`. Active CLI,
+Tauri, packaging, planner, validator, apply, and editor flows do not execute
+Python. The Python package exposes only `emuchef-python-legacy`; retained Python
+planner, executor, CLI, fixtures, tests, and migration tooling are reference or
+legacy surfaces.
+
+Device-target archive extraction runs on the host inside the Rust staging root,
+then pushes the extracted file tree through ADB. The runtime does not depend on
+an Android `unzip` command. File paths and `file://` artifact sources are
+supported. Network artifact downloads fail explicitly with
+`network_artifact_downloads_not_cut_over` and remain a separate readiness
+blocker because current authored recipes include network sources.
+
+The current readiness report has kind
+`rust_runtime_cutover_readiness_check` and `schema_version: 2`. P8 schema-v1
+reports are historical/manual evidence only and cannot establish current
+implementation readiness. Code-level local/BYO runtime cutover checks are
+resolved; real-device apply/probe proof remains manual, and release signing,
+distribution, and network artifact support remain blocked.
+
+Phase-labelled P8 and Phase 6 sections later in this document are migration
+history. Where a historical statement conflicts with this section, the current
+runtime contract in this section is authoritative.
+
 The current flow is:
 
 1. Load authored YAML from `authored/`
@@ -25,7 +58,8 @@ A manual checklist for opt-in RetroArch real-device validation lives under
 apply is not part of normal CI, and the checklist itself is not completed
 validation evidence.
 
-The code is intentionally split into:
+The active runtime implementation is split across the Rust crate and Tauri app.
+The following Python modules remain as reference implementation surfaces:
 
 - `src/emuchef/io`: authored loading, validation, YAML I/O
 - `src/emuchef/planner`: normalization, draft/session logic, execution-plan emission
@@ -36,9 +70,9 @@ The code is intentionally split into:
 - `src/emuchef_editor/core`: UI-agnostic recipe document, canonical YAML, ref indexing, validation adapters, workspace discovery, and PySide-free editor metadata
 - `apps/config-editor`: primary Tauri development/editor UI for authored recipe files
 
-The base Python package is retained temporarily for legacy/reference/developer
-workflows, including the Python CLI/planner/executor reference implementation
-and golden generation. A clean default install and the normal active
+The base Python package is retained for legacy/reference/developer workflows,
+including the Python CLI/planner/executor reference implementation and golden
+generation. A clean product install and the normal active
 runtime/test path do not require, import, or launch PySide6. The legacy PySide6
 editor source, Python editor API source, corresponding normal tests, optional
 dependency extra, and Python GUI console script are not present.

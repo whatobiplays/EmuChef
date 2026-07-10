@@ -1440,6 +1440,88 @@ fn phase6r_executor_can_use_explicit_real_adb_device_for_selected_handlers() {
 }
 
 #[test]
+fn rust_real_adb_file_operations_forward_exact_executable_and_serial() {
+    let tmp = tempfile::tempdir().expect("temp root should be created");
+    let source = tmp.path().join("payload.bin");
+    fs::write(&source, "payload").expect("source should be writable");
+    let mut device = RealAdbDevice::with_executor(
+        "/opt/android/adb",
+        Some("device-123"),
+        FakeAdbCommandExecutor::default(),
+    );
+
+    device.push(&source, "/sdcard/payload.bin", false).unwrap();
+    device.push(&source, "/sdcard/payload.bin", true).unwrap();
+    device.mkdir_p("/sdcard/EmuChef").unwrap();
+    device.remove_file("/sdcard/payload.bin").unwrap();
+    device.remove_tree("/sdcard/EmuChef").unwrap();
+    device
+        .copy_on_device(
+            "/data/local/tmp/emuchef/payload.bin",
+            "/data/data/com.example/payload.bin",
+            false,
+            true,
+        )
+        .unwrap();
+
+    let calls = device.command_executor().calls();
+    assert_eq!(calls.len(), 6);
+    assert!(calls.iter().all(|call| {
+        call.starts_with(&[
+            "/opt/android/adb".to_string(),
+            "-s".to_string(),
+            "device-123".to_string(),
+        ])
+    }));
+    assert_eq!(calls[0][3..5], ["push", source.to_string_lossy().as_ref()]);
+    assert_eq!(
+        calls[1][3..6],
+        ["push", "--sync", source.to_string_lossy().as_ref()]
+    );
+    assert!(calls[5]
+        .last()
+        .expect("privileged copy should have a shell payload")
+        .starts_with("su -c "));
+}
+
+#[test]
+fn device_archive_extraction_happens_on_host_then_pushes_without_unzip_command() {
+    let tmp = tempfile::tempdir().expect("temp root should be created");
+    let runtime_root = tmp.path().join("runtime");
+    let cache_root = tmp.path().join("cache");
+    let fake_device_root = tmp.path().join("fake-device");
+    let archive = tmp.path().join("archive.zip");
+    write_zip(&archive, &[("nested/file.txt", "hello")]);
+    let mut step = extract_archive_step("example.recipe/extract-device", &archive);
+    step.params
+        .insert("extract_on".to_string(), literal(json!("device")));
+    step.params.insert(
+        "dest".to_string(),
+        literal(json!("/sdcard/EmuChef/extracted")),
+    );
+
+    let (actual, runner) = run_value(
+        &plan(vec![step]),
+        sandbox_adapters(
+            &runtime_root,
+            &cache_root,
+            &fake_device_root,
+            vec![tmp.path().to_path_buf()],
+        ),
+    );
+
+    assert_eq!(actual["success"], true);
+    assert_eq!(
+        actual["steps"][0]["outputs"]["extracted_path"]["location"],
+        "device"
+    );
+    let commands = runner.adapters().device().commands();
+    assert!(commands.iter().any(|command| command[0] == "mkdir_p"));
+    assert!(commands.iter().any(|command| command[0] == "push"));
+    assert!(!commands.iter().flatten().any(|token| token == "unzip"));
+}
+
+#[test]
 fn phase6p_artifact_filename_algorithm_matches_python_reference() {
     assert_eq!(
         artifact_local_filename("example.recipe/archive", "file:///tmp/archive.zip", "none"),
@@ -1675,11 +1757,11 @@ fn phase6p_remote_artifact_resolution_fails_without_network_download_attempt() {
     assert!(actual["steps"][0]["message"]
         .as_str()
         .unwrap()
-        .contains("artifact_download_failed"));
+        .contains("network_artifact_downloads_not_cut_over"));
     assert!(actual["steps"][0]["message"]
         .as_str()
         .unwrap()
-        .contains("network downloads are disabled"));
+        .contains("use a file:// source"));
     assert_eq!(actual["steps"][1]["status"], "blocked");
     assert!(!runtime_root.join("downloads").exists());
 }

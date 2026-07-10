@@ -1,5 +1,21 @@
 # Rust Backend Cutover Readiness Audit
 
+## Current Runtime Contract
+
+The Rust Cargo target `emuchef` is the product CLI and Tauri sidecar. Rust owns
+default `plan`, file-based `validate`, dry-run and real-device `apply`, and
+`--sidecar`. The Python distribution exposes only
+`emuchef-python-legacy`; Python is not a default CLI, editor, Tauri, planner,
+validator, executor, apply, or packaged runtime dependency.
+
+Tauri prepares `emuchef-<target-triple>[.exe]` and launches the packaged
+`emuchef[.exe]`. Real-device evidence remains manual, network artifact downloads
+remain explicitly unsupported, and release signing/distribution remain open.
+The readiness gate expresses this current contract as
+`rust_runtime_cutover_readiness_check` schema version 2.
+
+## Historical Phase 6 Audit
+
 Phase 6T audits the experimental Rust backend against the Python reference and
 records what still blocks a hard cutover. It does not start the cutover.
 

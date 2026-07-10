@@ -1,4 +1,4 @@
-"""CLI entrypoints for the current vertical slice."""
+"""Explicit legacy/reference Python CLI for compatibility and migration tests."""
 
 from __future__ import annotations
 
@@ -70,7 +70,10 @@ _RUST_DETECTED_FACTS_BACKENDS = frozenset(
 
 
 def main(argv: list[str] | None = None) -> int:
-    parser = argparse.ArgumentParser(prog="emuchef")
+    parser = argparse.ArgumentParser(
+        prog="emuchef-python-legacy",
+        description="Legacy/reference Python CLI; the product emuchef command is Rust-owned.",
+    )
     subparsers = parser.add_subparsers(dest="command", required=True)
 
     common = argparse.ArgumentParser(add_help=False)
@@ -392,7 +395,7 @@ def _packaged_rust_backend_bin_candidate() -> Path | None:
     target_triple, suffix = target
     repo_root = Path(__file__).resolve().parents[2]
     binary_dir = repo_root / "apps" / "config-editor" / "src-tauri" / "binaries"
-    return binary_dir / f"emuchef-rust-backend-{target_triple}{suffix}"
+    return binary_dir / f"emuchef-{target_triple}{suffix}"
 
 
 def _append_rust_shadow_device_context_args(command: list[str], args: argparse.Namespace) -> None:

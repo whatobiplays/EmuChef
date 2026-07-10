@@ -189,6 +189,64 @@ impl<E: AdbCommandExecutor> RealAdbDevice<E> {
             .map_err(error_string)
     }
 
+    pub fn push(&mut self, source: &Path, dest: &str, sync: bool) -> Result<(), String> {
+        let mut args = vec!["push".to_string()];
+        if sync {
+            args.push("--sync".to_string());
+        }
+        args.push(source.to_string_lossy().to_string());
+        args.push(dest.to_string());
+        self.runner
+            .run(args, true)
+            .map(|_| ())
+            .map_err(error_string)
+    }
+
+    pub fn mkdir_p(&mut self, path: &str) -> Result<(), String> {
+        self.run_shell(
+            vec!["mkdir".to_string(), "-p".to_string(), path.to_string()],
+            true,
+        )
+        .map(|_| ())
+    }
+
+    pub fn remove_file(&mut self, path: &str) -> Result<(), String> {
+        self.run_shell(
+            vec!["rm".to_string(), "-f".to_string(), path.to_string()],
+            true,
+        )
+        .map(|_| ())
+    }
+
+    pub fn remove_tree(&mut self, path: &str) -> Result<(), String> {
+        self.run_shell(
+            vec!["rm".to_string(), "-rf".to_string(), path.to_string()],
+            true,
+        )
+        .map(|_| ())
+    }
+
+    pub fn copy_on_device(
+        &mut self,
+        source: &str,
+        dest: &str,
+        recursive: bool,
+        privileged: bool,
+    ) -> Result<(), String> {
+        let mut args = vec!["cp".to_string()];
+        if recursive {
+            args.push("-R".to_string());
+        }
+        args.push(source.to_string());
+        args.push(dest.to_string());
+        self.run_shell_with_privilege(
+            args,
+            true,
+            privileged || is_app_private_path(source) || is_app_private_path(dest),
+        )
+        .map(|_| ())
+    }
+
     pub fn package_installed(&mut self, package_name: &str) -> Result<bool, String> {
         let result = self
             .runner
@@ -326,6 +384,15 @@ impl<E: AdbCommandExecutor> RealAdbDevice<E> {
             .last()
             .map(|path| is_app_private_path(path))
             .unwrap_or(false);
+        self.run_shell_with_privilege(args, check, privileged)
+    }
+
+    fn run_shell_with_privilege(
+        &mut self,
+        args: Vec<String>,
+        check: bool,
+        privileged: bool,
+    ) -> Result<AdbCommandResult, String> {
         self.runner
             .run(
                 vec!["shell".to_string(), build_shell_command(&args, privileged)],

@@ -1,12 +1,21 @@
-# EmuChef Rust Backend Skeleton
+# EmuChef Rust CLI and Runtime
 
-This package is an experimental Rust backend for the EmuChef config editor
-protocol. It is runnable independently and is the Rust sidecar runtime used by
-the Tauri editor. Phase 6V adds host-target Tauri v2 `externalBin` packaging for
-this process. Phase 6W retires Python from the Tauri runtime path but keeps
-Python CLI, PySide6, and golden-generation code temporarily as
-legacy/reference/developer tooling. Broad CLI/planner/executor replacement and
-full Python deletion remain separate later work.
+This Cargo package provides the canonical `emuchef` product executable. Rust
+owns the CLI `plan`, file-based `validate`, dry-run and real-device `apply`, and
+JSONL `--sidecar` runtime used by the Tauri editor. The package name remains
+`emuchef-rust-backend`, but its default and product binary target is `emuchef`.
+The separate `emuchef-plan-shadow` target is development/reference-only and is
+not used by product CLI, Tauri, packaging, or readiness runtime paths.
+
+Python remains only as explicitly named legacy/reference tooling, compatibility
+tests, and migration fixtures. The Python package does not publish `emuchef`;
+its optional reference command is `emuchef-python-legacy`.
+
+## Historical Implementation Inventory
+
+The phase-specific inventory below documents how the Rust implementation was
+assembled. Its former scope limitations do not override the current runtime
+contract above.
 
 Through Phase 6U it implements only:
 
@@ -54,7 +63,7 @@ Through Phase 6U it implements only:
 - a crate-local P8V/P8W/P8X ADB `getprop` command model, supplied-output
   parser, live adapter foundation, and explicit dev-only shadow-binary probe
   mode for future Rust planner probing ownership
-- an internal-only, fixture-scoped executor skeleton that emits Python-shaped
+- a Rust executor that emits Python-shaped
   `ExecutionRunResult` values for selected safe dry-run Phase 6O tests
 - temp-dir-confined filesystem/artifact executor behavior for selected Phase 6P
   fixtures
@@ -62,8 +71,8 @@ Through Phase 6U it implements only:
   device/app/permission fixtures
 - internal real-ADB adapter foundations and ignored/manual Phase 6R tests for
   selected device/app/permission behavior
-- a minimal crate-local Phase 6S Rust CLI skeleton for selected Python CLI
-  parity fixtures
+- the canonical Rust `emuchef` CLI with Rust-owned planner, validator, executor,
+  and sidecar dispatch
 
 It reports only capabilities that are implemented in this crate:
 
@@ -101,10 +110,8 @@ hard-cutover policy and packages the same Rust process as a Tauri v2
 `externalBin`. The app-local Tauri hooks build and copy debug or release
 sidecar artifacts before normal Tauri dev/build commands.
 
-The Python backend, Python CLI, and PySide6 editor remain in the repository only
-as legacy/reference/developer/golden tooling. They are not Tauri editor runtime
-backends or packaged-editor fallbacks. Python deletion and broad
-CLI/planner/executor replacement remain later confirmed cutover work.
+Python reference implementations and golden tooling are not Tauri editor,
+packaged runtime, or product CLI fallbacks.
 
 ## Tauri Sidecar Packaging
 
@@ -120,13 +127,13 @@ npm run tauri build
 
 `sidecar:dev` builds the debug Cargo binary and prepares the Tauri externalBin
 input for development. `sidecar:build` builds the release Cargo binary and
-prepares `src-tauri/binaries/emuchef-rust-backend-$TARGET_TRIPLE`, adding
+prepares `src-tauri/binaries/emuchef-$TARGET_TRIPLE`, adding
 `.exe` for Windows triples. The script verifies `rustc --print host-tuple` and
 only supports host-target preparation in Phase 6V; cross-compilation and release
 CI are deferred.
 
 Tauri strips the target triple when bundling. Packaged apps launch
-`emuchef-rust-backend --sidecar` from the app executable directory, while
+`emuchef --sidecar` from the app executable directory, while
 development and tests continue to resolve Cargo `target/debug` binaries.
 
 This package does not implement full planner behavior, full executor behavior,
@@ -150,15 +157,11 @@ operations, or install operations. Python remains the legacy/reference source
 for broader CLI/planner/executor behavior until parity or retirement is
 confirmed.
 
-## Phase 6S CLI Scope
+## Historical Phase 6S CLI Scope
 
-Phase 6S adds a minimal Rust CLI skeleton inside this standalone crate. It is a
-crate-local experimental parity surface, not the user-facing replacement for the
-Python `emuchef` CLI. The Python CLI entrypoint in `pyproject.toml` remains
-unchanged temporarily for legacy/reference/developer/golden workflows, and the
-Rust CLI subset is not packaged as a replacement for the Python CLI. There is no
-backend selector, backend toggle, environment variable, config option, UI switch,
-or Python fallback for the Tauri editor runtime.
+This section records the bounded CLI state during Phase 6S. It is retained as
+migration history; the current product contract is the canonical Rust CLI
+described at the top of this file.
 
 The Python CLI inventory verified from `src/emuchef/cli.py` is:
 

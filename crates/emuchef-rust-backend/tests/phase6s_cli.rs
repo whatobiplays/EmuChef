@@ -230,9 +230,7 @@ fn phase6s_preserves_one_shot_json_and_sidecar_dispatch() {
     let mixed = run_with_args_and_input(&args(&["--sidecar", r#"{"type":"hello"}"#]), "");
     assert_eq!(mixed.exit_code, 2);
     assert_eq!(mixed.stdout, "");
-    assert!(mixed
-        .stderr
-        .contains("usage: emuchef-rust-backend --sidecar"));
+    assert!(mixed.stderr.contains("usage: emuchef --sidecar"));
 }
 
 #[test]
@@ -363,7 +361,7 @@ fn phase6s_apply_accepts_python_planning_result_plan_file_wrapper() {
 }
 
 #[test]
-fn phase6s_apply_rejects_broader_plan_files_instead_of_silent_divergence() {
+fn rust_apply_accepts_execution_plan_inputs() {
     let temp_dir = TempDir::new().expect("temp dir should be available");
     let plan_path = write_plan(&temp_dir, "with_input.yaml", &plan_with_input_yaml());
     let output = run_with_args_and_input(
@@ -376,10 +374,9 @@ fn phase6s_apply_rejects_broader_plan_files_instead_of_silent_divergence() {
         "",
     );
 
-    assert_eq!(output.exit_code, 1);
-    assert_eq!(output.stdout, "");
-    assert!(output.stderr.contains("no-input plan fixtures"));
-    assert!(!output.stderr.contains("\"ok\":false"));
+    assert_eq!(output.exit_code, 0, "stderr: {}", output.stderr);
+    assert_eq!(output.stderr, "");
+    assert!(output.stdout.contains("Dry run: success"));
 }
 
 #[test]

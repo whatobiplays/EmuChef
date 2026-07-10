@@ -1,11 +1,9 @@
-//! Rust-side device probing foundation for future planner ownership.
+//! Rust-owned device probing used by canonical planner dispatch.
 //!
-//! This module defines the small abstraction needed to compose detected device
-//! facts into planner context later. It includes a crate-local ADB getprop
-//! adapter foundation. The only live route wiring is the explicit dev-only
-//! `emuchef-plan-shadow --probe-adb-getprop` mode; Python CLI routes, Tauri,
-//! executor/apply, smoke runners, normal checks, and readiness-gate execution do
-//! not invoke it.
+//! This module defines the command abstraction used to compose ADB `getprop`
+//! facts into planner context. The canonical Rust `emuchef plan` route uses the
+//! adapter when `--adb` or `--serial` requests live probing. The dev-only
+//! `emuchef-plan-shadow` command reuses the same adapter for reference evidence.
 
 use std::process::Command;
 
@@ -13,7 +11,7 @@ use serde::Deserialize;
 
 use crate::planner::DeviceContext;
 
-/// Device facts a future probe adapter may detect from a selected device.
+/// Device facts detected from a selected device.
 ///
 /// Fields are optional so callers can layer detected values over a
 /// profile-derived `DeviceContext` without inventing placeholder facts. The

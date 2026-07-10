@@ -76,7 +76,7 @@ function hostTargetTriple() {
 }
 
 function runCargoBuild({ manifestPath, profile }) {
-  const args = ["build", "--manifest-path", manifestPath];
+  const args = ["build", "--manifest-path", manifestPath, "--bin", BINARY_BASENAME];
   if (profile === "release") {
     args.push("--release");
   }

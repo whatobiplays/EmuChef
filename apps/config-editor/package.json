@@ -4,6 +4,7 @@
   "private": true,
   "type": "module",
   "scripts": {
+    "test": "npm run check:rust-runtime",
     "sidecar:dev": "node scripts/prepare-rust-sidecar.mjs --profile debug",
     "sidecar:build": "node scripts/prepare-rust-sidecar.mjs --profile release",
     "test:sidecar-packaging": "node --test scripts/sidecar-packaging.test.mjs",

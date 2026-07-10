@@ -58,7 +58,7 @@ class CliTests(unittest.TestCase):
         return str(shadow_bin)
 
     def _rust_apply_bin(self, tmp: str) -> str:
-        apply_bin = Path(tmp) / "emuchef-rust-backend"
+        apply_bin = Path(tmp) / "emuchef"
         apply_bin.write_text("#!/bin/sh\n", encoding="utf-8")
         apply_bin.chmod(0o755)
         return str(apply_bin)
@@ -74,12 +74,12 @@ class CliTests(unittest.TestCase):
 
     def test_packaged_rust_backend_bin_candidate_maps_supported_platforms(self) -> None:
         cases = [
-            ("Darwin", "arm64", "emuchef-rust-backend-aarch64-apple-darwin"),
-            ("Darwin", "x86_64", "emuchef-rust-backend-x86_64-apple-darwin"),
-            ("Linux", "x86_64", "emuchef-rust-backend-x86_64-unknown-linux-gnu"),
-            ("Linux", "aarch64", "emuchef-rust-backend-aarch64-unknown-linux-gnu"),
-            ("Windows", "AMD64", "emuchef-rust-backend-x86_64-pc-windows-msvc.exe"),
-            ("Windows", "ARM64", "emuchef-rust-backend-aarch64-pc-windows-msvc.exe"),
+            ("Darwin", "arm64", "emuchef-aarch64-apple-darwin"),
+            ("Darwin", "x86_64", "emuchef-x86_64-apple-darwin"),
+            ("Linux", "x86_64", "emuchef-x86_64-unknown-linux-gnu"),
+            ("Linux", "aarch64", "emuchef-aarch64-unknown-linux-gnu"),
+            ("Windows", "AMD64", "emuchef-x86_64-pc-windows-msvc.exe"),
+            ("Windows", "ARM64", "emuchef-aarch64-pc-windows-msvc.exe"),
         ]
 
         for system, machine, expected_name in cases:
@@ -292,7 +292,7 @@ class CliTests(unittest.TestCase):
 
     def test_packaged_rust_planner_bin_candidate_uses_shared_backend_candidate(self) -> None:
         args = self._rust_resolver_args()
-        packaged_path = Path("/packaged/emuchef-rust-backend")
+        packaged_path = Path("/packaged/emuchef")
 
         with patch("emuchef.cli._packaged_rust_backend_bin_candidate", return_value=packaged_path) as backend_candidate:
             self.assertEqual(cli._packaged_rust_planner_bin_candidate(args), packaged_path)
@@ -3054,7 +3054,7 @@ class CliTests(unittest.TestCase):
 
     def test_packaged_rust_apply_bin_candidate_uses_shared_backend_candidate(self) -> None:
         args = self._rust_apply_resolver_args()
-        packaged_path = Path("/packaged/emuchef-rust-backend")
+        packaged_path = Path("/packaged/emuchef")
 
         with patch("emuchef.cli._packaged_rust_backend_bin_candidate", return_value=packaged_path) as backend_candidate:
             self.assertEqual(cli._packaged_rust_apply_bin_candidate(args), packaged_path)
@@ -3262,7 +3262,7 @@ class CliTests(unittest.TestCase):
 
     def test_apply_rust_dry_run_delegates_checked_in_fixture_without_serial_by_default(self) -> None:
         with TemporaryDirectory() as tmp:
-            rust_apply_bin = Path(tmp) / "emuchef-rust-backend"
+            rust_apply_bin = Path(tmp) / "emuchef"
             expected_plan = str(APPLY_DRY_RUN_FIXTURE)
             rust_apply_bin.write_text(
                 "#!/bin/sh\n"
@@ -3311,7 +3311,7 @@ class CliTests(unittest.TestCase):
 
     def test_apply_default_dry_run_fixture_uses_mocked_packaged_candidate_without_explicit_arg(self) -> None:
         with TemporaryDirectory() as tmp:
-            rust_apply_bin = Path(tmp) / "emuchef-rust-backend"
+            rust_apply_bin = Path(tmp) / "emuchef"
             expected_plan = str(APPLY_DRY_RUN_FIXTURE)
             rust_apply_bin.write_text(
                 "#!/bin/sh\n"

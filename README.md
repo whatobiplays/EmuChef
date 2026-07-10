@@ -16,6 +16,19 @@ Authored YAML under `authored/` is the source for current planning behavior.
 Generated execution-plan YAML is emitted on demand and is not maintained as
 root-level `*.plan.yaml` examples.
 
+## CLI Runtime
+
+The product `emuchef` executable is the Rust binary target in
+`crates/emuchef-rust-backend`. Rust owns `plan`, file-based `validate`,
+`apply --plan-file` in dry-run and real-ADB modes, and `--sidecar`. The Python
+package publishes only the explicitly named `emuchef-python-legacy` reference
+command; no Python-owned `emuchef` console entrypoint exists.
+
+The Rust CLI accepts file paths and `file://` artifact sources. Network artifact
+downloads are not implemented and fail with the durable
+`network_artifact_downloads_not_cut_over` diagnostic. Real-device validation is
+manual and is not required by automated tests.
+
 ## Step Architecture
 
 Supported steps are first-party built-in plugins registered in the in-repo step
@@ -69,9 +82,10 @@ negotiation yet. Future Rust backends should implement the same protocol.
 
 ### Tauri config editor
 
-The Tauri editor is a Tauri v2 development app that uses the experimental Rust
+The Tauri editor is a Tauri v2 development app that uses the Rust
 JSONL sidecar for session-backed document operations. Python remains in the repo
-only for legacy/reference/developer/golden workflows such as Python CLI
+only for legacy/reference/developer/golden workflows such as the explicitly
+named `emuchef-python-legacy` command, Python CLI
 reference behavior, fixture/golden generation, and later confirmed-cutover work.
 Fixture/golden ownership and remaining dev-only/reference-only regeneration
 paths are classified in
@@ -93,8 +107,8 @@ npm run tauri build
 ```
 
 During development, the Rust bridge discovers the repo root and checks the
-crate-local and repo-root Cargo `target/debug` directories for
-`emuchef-rust-backend`. Packaged builds bundle the Rust sidecar through Tauri v2
+crate-local and repo-root Cargo `target/debug` directories for `emuchef`.
+Packaged builds bundle the Rust sidecar through Tauri v2
 `externalBin`.
 
 Current editor scope notes:

@@ -2,9 +2,18 @@
 name = "emuchef-rust-backend"
 version = "0.1.0"
 edition = "2021"
-description = "Experimental EmuChef Rust backend protocol skeleton"
+description = "EmuChef Rust CLI and runtime"
 license = "GPL-3.0-only"
-default-run = "emuchef-rust-backend"
+autobins = false
+default-run = "emuchef"
+
+[[bin]]
+name = "emuchef"
+path = "src/main.rs"
+
+[[bin]]
+name = "emuchef-plan-shadow"
+path = "src/bin/emuchef-plan-shadow.rs"
 
 [dependencies]
 indexmap = { version = "2.14.0", features = ["serde"] }

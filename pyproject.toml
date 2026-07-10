@@ -13,10 +13,9 @@ authors = [{ name = "Daniel" }]
 dependencies = ["PyYAML>=6.0"]
 
 [project.scripts]
-# Retained temporarily for legacy/reference/developer/golden CLI workflows while
-# Rust CLI parity remains fixture-scoped. This is not a supported production path
-# for the Tauri editor runtime.
-emuchef = "emuchef.cli:main"
+# Explicit legacy/reference command. The product `emuchef` executable is the
+# Rust binary built by crates/emuchef-rust-backend.
+emuchef-python-legacy = "emuchef.cli:main"
 
 [tool.setuptools]
 package-dir = { "" = "src" }

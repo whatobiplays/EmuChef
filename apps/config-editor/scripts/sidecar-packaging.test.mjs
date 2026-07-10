@@ -10,15 +10,15 @@ import {
 } from "./sidecar-packaging.mjs";
 
 test("builds Tauri externalBin input names for Unix-like target triples", () => {
-  assert.equal(BINARY_BASENAME, "emuchef-rust-backend");
+  assert.equal(BINARY_BASENAME, "emuchef");
   assert.equal(binaryExtensionForTargetTriple("aarch64-apple-darwin"), "");
   assert.equal(
     externalBinArtifactName("aarch64-apple-darwin"),
-    "emuchef-rust-backend-aarch64-apple-darwin",
+    "emuchef-aarch64-apple-darwin",
   );
   assert.equal(
     packagedBinaryNameForTargetTriple("aarch64-apple-darwin"),
-    "emuchef-rust-backend",
+    "emuchef",
   );
 });
 
@@ -26,11 +26,11 @@ test("builds Tauri externalBin input and packaged names for Windows target tripl
   assert.equal(binaryExtensionForTargetTriple("x86_64-pc-windows-msvc"), ".exe");
   assert.equal(
     externalBinArtifactName("x86_64-pc-windows-msvc"),
-    "emuchef-rust-backend-x86_64-pc-windows-msvc.exe",
+    "emuchef-x86_64-pc-windows-msvc.exe",
   );
   assert.equal(
     packagedBinaryNameForTargetTriple("x86_64-pc-windows-msvc"),
-    "emuchef-rust-backend.exe",
+    "emuchef.exe",
   );
 });
 

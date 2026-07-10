@@ -1,16 +1,9 @@
-//! Standalone protocol skeleton for the experimental Rust editor backend.
+//! EmuChef's canonical Rust CLI, executor, planner, validation, and sidecar runtime.
 //!
-//! The crate intentionally implements only the migration surface from Phases 6C
-//! through 6S: request validation, response envelopes, one-shot invocation,
-//! JSONL sidecar invocation, the `hello` handshake, Rust-owned StepSpec DTOs,
-//! authored recipe YAML load/emit/validation fixtures, sidecar document
-//! sessions, editor command parity, undo/redo, fixture-scoped RefIndex
-//! generation, authoredRoot catalog-context validation, internal planner
-//! fixtures, and an internal executor with temp-dir-confined filesystem/artifact
-//! fixture behavior plus selected fake-device/DryRunAdb parity, real-ADB adapter
-//! foundations, and a minimal crate-local CLI parity skeleton. The Rust executor
-//! is not exposed through protocol, Tauri, backend selection, or production
-//! packaging APIs.
+//! The crate exposes the product `emuchef` executable while retaining the
+//! one-shot and JSONL protocol surfaces used by the Tauri configuration editor.
+//! The separate `emuchef-plan-shadow` binary is development/reference tooling
+//! and is never part of product CLI, sidecar, or packaging resolution.
 
 pub mod catalog;
 mod cli;
@@ -66,7 +59,7 @@ pub fn run_with_args_and_input(args: &[String], input: &str) -> ProcessOutput {
             return ProcessOutput {
                 exit_code: 2,
                 stdout: String::new(),
-                stderr: "usage: emuchef-rust-backend --sidecar\n".to_string(),
+                stderr: "usage: emuchef --sidecar\n".to_string(),
             };
         }
         return ProcessOutput {

@@ -25,7 +25,7 @@ npm run tauri dev
 `tauri dev` runs `npm run sidecar:dev && npm run dev` through
 `beforeDevCommand`. The sidecar step builds the Rust backend with Cargo's debug
 profile and prepares the Tauri v2 `externalBin` input under
-`src-tauri/binaries/emuchef-rust-backend-$TARGET_TRIPLE`. Cargo incremental
+`src-tauri/binaries/emuchef-$TARGET_TRIPLE`. Cargo incremental
 builds make running this on each dev start acceptable, and the preparation
 script avoids copying when the generated binary is already current.
 
@@ -99,16 +99,16 @@ release profile, verifies `rustc --print host-tuple`, and writes the
 target-triple-suffixed `externalBin` source expected by Tauri v2. Phase 6V
 verifies host-target packaging only; cross-compilation is not configured here.
 
-For the configured `externalBin` value `binaries/emuchef-rust-backend`, Tauri v2
+For the configured `externalBin` value `binaries/emuchef`, Tauri v2
 expects these source names before bundling:
 
-- macOS/Linux: `src-tauri/binaries/emuchef-rust-backend-$TARGET_TRIPLE`
-- Windows: `src-tauri/binaries/emuchef-rust-backend-$TARGET_TRIPLE.exe`
+- macOS/Linux: `src-tauri/binaries/emuchef-$TARGET_TRIPLE`
+- Windows: `src-tauri/binaries/emuchef-$TARGET_TRIPLE.exe`
 
 Tauri strips the target triple in the packaged app. The config editor resolves
-the packaged sidecar by looking for `emuchef-rust-backend` or
-`emuchef-rust-backend.exe` beside the app executable. On macOS this is
-`EmuChef Config Editor.app/Contents/MacOS/emuchef-rust-backend`.
+the packaged sidecar by looking for `emuchef` or `emuchef.exe` beside the app
+executable. On macOS this is
+`EmuChef Config Editor.app/Contents/MacOS/emuchef`.
 
 The generated `src-tauri/binaries` artifacts are ignored source-control outputs.
 The preparation script writes metadata next to the generated binary and verifies

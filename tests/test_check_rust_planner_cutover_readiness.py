@@ -90,7 +90,7 @@ def _packaged_rust_backend_bin_candidate():
     machine = platform.machine().lower()
     binary_dir = Path(__file__).resolve().parents[2] / "apps" / "config-editor" / "src-tauri" / "binaries"
     target_triple = "x86_64-unknown-linux-gnu"
-    return binary_dir / f"emuchef-rust-backend-{target_triple}"
+    return binary_dir / f"emuchef-{target_triple}"
 
 def _should_route_apply_dry_run_to_rust(args):
     return args.command == "apply" and (args.rust_apply_bin is not None or args.dry_run is True)
@@ -468,6 +468,62 @@ report = {"route": DEFAULT_PACKAGED_ROUTE}
 
     write_text(root, "docs/rust-planner-cutover-readiness.md", readiness_doc_text)
     write_text(root, "src/emuchef/cli.py", cli_text)
+    write_text(
+        root,
+        "pyproject.toml",
+        '[project.scripts]\nemuchef-python-legacy = "emuchef.cli:main"\n',
+    )
+    write_text(
+        root,
+        "crates/emuchef-rust-backend/Cargo.toml",
+        '[package]\nname = "emuchef-rust-backend"\ndefault-run = "emuchef"\n'
+        '[[bin]]\nname = "emuchef"\npath = "src/main.rs"\n',
+    )
+    write_text(
+        root,
+        "crates/emuchef-rust-backend/src/main.rs",
+        "fn main() { emuchef_rust_backend::run_with_args_and_input(&[], \"\"); }\n",
+    )
+    write_text(
+        root,
+        "crates/emuchef-rust-backend/src/cli.rs",
+        '''match command {
+Some("plan") => run_plan(args),
+Some("validate") => run_validate(args),
+Some("apply") => run_apply(args),
+}
+planning_result_with_adb_runner(args, runner);
+validation::validate_recipe_path_result(path, root);
+fn run_apply_with_real_device_factory() {
+  let device = RealAdbDevice::new(adb, serial);
+  if config.dry_run {
+    let adapters = ExecutorAdapters::with_sandbox_roots(runtime, cache, fake, roots);
+    execute_apply_plan(&plan, adapters, true);
+  } else {
+    let device = factory(config.adb, config.serial);
+    let adapters = ExecutorAdapters::with_device_and_sandbox_roots(device, runtime, cache, fake, roots, true);
+    execute_apply_plan(&plan, adapters, false);
+  }
+}
+match option { "--plan-file" | "--adb" | "--serial" => {} }
+''',
+    )
+    write_text(root, "crates/emuchef-rust-backend/src/executor.rs", "")
+    write_text(root, "crates/emuchef-rust-backend/src/executor/adb.rs", "")
+    write_text(root, "crates/emuchef-rust-backend/src/plan_shadow.rs", "")
+    write_text(root, "apps/config-editor/package.json", '{"scripts":{"test":"npm run check:rust-runtime"}}')
+    write_text(
+        root,
+        "apps/config-editor/src-tauri/tauri.conf.json",
+        '{"bundle":{"externalBin": ["binaries/emuchef"]}}',
+    )
+    write_text(root, "apps/config-editor/src-tauri/src/sidecar_client.rs", 'const BINARY: &str = "emuchef";')
+    write_text(root, "apps/config-editor/scripts/sidecar-packaging.mjs", 'export const BINARY_BASENAME = "emuchef";')
+    write_text(
+        root,
+        "apps/config-editor/scripts/prepare-rust-sidecar.mjs",
+        'const args = ["build", "--manifest-path", manifestPath, "--bin", BINARY_BASENAME];',
+    )
 
     if include_matrix:
         if matrix_text is None:
@@ -477,7 +533,11 @@ report = {"route": DEFAULT_PACKAGED_ROUTE}
 
 
 def check_by_id(report: dict, check_id: str) -> dict:
-    matches = [check for check in report["static_checks"] if check["id"] == check_id]
+    matches = [
+        check
+        for check in [*report["static_checks"], *report.get("historical_checks", [])]
+        if check["id"] == check_id
+    ]
     if len(matches) != 1:
         raise AssertionError(f"Expected one check with id {check_id!r}, found {len(matches)}")
     return matches[0]
@@ -499,17 +559,20 @@ def expected_status_explanation() -> dict:
         "top_level_status": "blocked",
         "evidence_accepted_is_not_release_ready": True,
         "evidence_accepted_meaning": (
-            "Accepted evidence can satisfy scoped evidence blockers; it does not imply top-level readiness."
+            "Accepted schema-v1 P8 evidence validates historical report shape only; "
+            "it does not satisfy current schema-v2 blockers."
         ),
         "top_level_blocked_reason": (
-            "Top-level readiness remains blocked while executor/apply, packaged release, "
-            "and unsatisfied evidence-dependent blockers remain blocked."
+            "Code-level local/BYO Rust runtime cutover is complete. Top-level readiness remains "
+            "blocked only by manual device evidence, network artifact support required by current "
+            "authored recipes, and release/distribution work."
         ),
         "blocking_categories": [
-            "executor_apply",
-            "evidence_dependent_cutover",
-            "packaged_release",
+            "manual_device_evidence",
+            "network_artifacts",
+            "release_distribution",
         ],
+        "code_level_local_runtime_cutover": "resolved",
     }
 
 
@@ -550,8 +613,16 @@ class CheckRustPlannerCutoverReadinessTests(unittest.TestCase):
 
             report = self.build_report(root)
 
-        self.assertEqual(report["kind"], "rust_planner_cutover_readiness_check")
-        self.assertEqual(report["schema_version"], 1)
+        self.assertEqual(report["kind"], "rust_runtime_cutover_readiness_check")
+        self.assertEqual(report["schema_version"], 2)
+        self.assertEqual(
+            report["historical_p8_evidence_classification"],
+            {
+                "classification": "historical_manual_only",
+                "current_product_readiness_effect": False,
+                "accepted_reports_do_not_resolve_implementation_cutover": True,
+            },
+        )
         self.assertEqual(report["status"], "blocked")
         self.assertEqual(
             report["inputs"],
@@ -584,8 +655,32 @@ class CheckRustPlannerCutoverReadinessTests(unittest.TestCase):
         blockers = {blocker["id"]: blocker["status"] for blocker in report["remaining_blockers"]}
         self.assertEqual(blockers["explicit_rust_apply_dry_run_bridge"], "resolved")
         self.assertEqual(blockers["default_rust_apply_dry_run_route"], "resolved")
-        self.assertEqual(blockers["executor_apply_not_cut_over"], "blocked")
+        self.assertEqual(blockers["executor_apply_not_cut_over"], "resolved")
         self.assertNotIn(retired_python_deletion_blocker_id(), blockers)
+
+    def test_v1_p8_evidence_remains_historical_under_the_current_v2_schema(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            make_synthetic_repo(root)
+            report_path = write_json(root, "reports/p8bu.json", accepted_p8bu_report())
+
+            without_history = self.build_report(root)
+            with_history = self.build_report(root, p8bu_rust_apply_dry_run_bridge_report=report_path)
+
+        self.assertEqual(with_history["kind"], "rust_runtime_cutover_readiness_check")
+        self.assertEqual(with_history["schema_version"], 2)
+        self.assertEqual(
+            with_history["historical_p8_evidence"]["p8bu_rust_apply_dry_run_bridge"]["status"],
+            "accepted",
+        )
+        self.assertEqual(
+            with_history["historical_p8_evidence_classification"]["classification"],
+            "historical_manual_only",
+        )
+        self.assertFalse(
+            with_history["historical_p8_evidence_classification"]["current_product_readiness_effect"]
+        )
+        self.assertEqual(with_history["remaining_blockers"], without_history["remaining_blockers"])
 
     def test_current_repo_reports_explicit_rust_apply_dry_run_bridge_static_checks_as_passing(self) -> None:
         report = self.build_report(REPO_ROOT)
@@ -601,15 +696,15 @@ class CheckRustPlannerCutoverReadinessTests(unittest.TestCase):
                 self.assertEqual(check_by_id(report, check_id)["status"], "pass")
         self.assertEqual(blocker_status(report, "explicit_rust_apply_dry_run_bridge"), "resolved")
         self.assertEqual(blocker_status(report, "default_rust_apply_dry_run_route"), "resolved")
-        self.assertEqual(blocker_status(report, "executor_apply_not_cut_over"), "blocked")
+        self.assertEqual(blocker_status(report, "executor_apply_not_cut_over"), "resolved")
         self.assertEqual(report["status"], "blocked")
 
-    def test_default_rust_apply_dry_run_route_does_not_clear_executor_apply_blocker(self) -> None:
+    def test_default_rust_apply_dry_run_route_and_executor_cutover_are_resolved(self) -> None:
         report = self.build_report(REPO_ROOT)
 
         self.assertEqual(blocker_status(report, "explicit_rust_apply_dry_run_bridge"), "resolved")
         self.assertEqual(blocker_status(report, "default_rust_apply_dry_run_route"), "resolved")
-        self.assertEqual(blocker_status(report, "executor_apply_not_cut_over"), "blocked")
+        self.assertEqual(blocker_status(report, "executor_apply_not_cut_over"), "resolved")
         self.assertEqual(report["status"], "blocked")
 
     def test_explicit_rust_apply_bridge_does_not_clear_top_level_readiness_with_all_evidence_accepted(self) -> None:
@@ -628,7 +723,7 @@ class CheckRustPlannerCutoverReadinessTests(unittest.TestCase):
             )
 
         self.assertEqual(blocker_status(report, "explicit_rust_apply_dry_run_bridge"), "resolved")
-        self.assertEqual(blocker_status(report, "executor_apply_not_cut_over"), "blocked")
+        self.assertEqual(blocker_status(report, "executor_apply_not_cut_over"), "resolved")
         self.assertEqual(report["status"], "blocked")
 
     def test_explicit_rust_apply_static_checks_fail_for_targeted_source_regressions(self) -> None:
@@ -1029,7 +1124,7 @@ class CheckRustPlannerCutoverReadinessTests(unittest.TestCase):
         self.assertEqual(serialized, second_serialized)
         self.assertEqual(json.loads(serialized), report)
         self.assertEqual(report["status"], "blocked")
-        self.assertEqual(blocker_status(report, "executor_apply_not_cut_over"), "blocked")
+        self.assertEqual(blocker_status(report, "executor_apply_not_cut_over"), "resolved")
         self.assertEqual(blocker_status(report, "packaged_release_not_ready"), "blocked")
         self.assertNotIn(
             retired_python_deletion_blocker_id(),
@@ -1039,7 +1134,7 @@ class CheckRustPlannerCutoverReadinessTests(unittest.TestCase):
             with self.subTest(leaked_token=leaked_token):
                 self.assertNotIn(leaked_token, serialized)
 
-    def test_report_includes_required_manual_evidence_commands_without_executing_them(self) -> None:
+    def test_report_separates_current_manual_evidence_from_historical_p8_commands(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
             root = Path(temp_dir)
             make_synthetic_repo(root)
@@ -1047,29 +1142,33 @@ class CheckRustPlannerCutoverReadinessTests(unittest.TestCase):
             report = self.build_report(root)
 
         commands = {item["id"]: item["command"] for item in report["required_manual_evidence"]}
-        self.assertIn("p7p_python_rust_comparison_matrix", commands)
-        self.assertIn("tools/compare_rust_python_plan.py", commands["p7p_python_rust_comparison_matrix"])
-        self.assertIn("p8h_rust_experimental_matrix_smoke", commands)
-        self.assertIn("--planner-backend rust-experimental", commands["p8h_rust_experimental_matrix_smoke"])
-        self.assertIn("focused_python_tests", commands)
-        self.assertIn("rust_tauri_checks", commands)
-        self.assertIn("p8aj_rust_production_equivalent_live_probe_smoke", commands)
+        self.assertEqual(
+            set(commands),
+            {
+                "real_device_plan_probe_evidence",
+                "device_profile_mismatch_warning_evidence",
+                "real_device_apply_evidence",
+            },
+        )
+        self.assertIn("emuchef plan", commands["real_device_plan_probe_evidence"])
+        self.assertIn("emuchef plan", commands["device_profile_mismatch_warning_evidence"])
+        self.assertIn("emuchef apply", commands["real_device_apply_evidence"])
+        self.assertNotIn("python", "\n".join(commands.values()).lower())
+
+        historical = {item["id"]: item["command"] for item in report["historical_manual_evidence"]}
+        self.assertIn("p7p_python_rust_comparison_matrix", historical)
+        self.assertIn("p8aj_rust_production_equivalent_live_probe_smoke", historical)
         self.assertIn(
             "tools/smoke_rust_production_equivalent_live_adb_probe.py",
-            commands["p8aj_rust_production_equivalent_live_probe_smoke"],
+            historical["p8aj_rust_production_equivalent_live_probe_smoke"],
         )
-        self.assertIn("p8ak_rust_production_equivalent_mismatch_warning_smoke", commands)
-        self.assertIn(
-            "tools/smoke_rust_production_equivalent_mismatch_warning.py",
-            commands["p8ak_rust_production_equivalent_mismatch_warning_smoke"],
-        )
-        self.assertIn("p8bc_launcher_injected_planner_smoke", commands)
-        p8bc_command = commands["p8bc_launcher_injected_planner_smoke"]
+        self.assertIn("p8bc_launcher_injected_planner_smoke", historical)
+        p8bc_command = historical["p8bc_launcher_injected_planner_smoke"]
         self.assertIn("tools/smoke_launcher_injected_planner.py", p8bc_command)
         self.assertIn("--rust-planner-bin <absolute-path-to-launcher-supplied-planner>", p8bc_command)
         self.assertIn("--output-report <path-to-output-report>", p8bc_command)
-        self.assertIn("p8bu_rust_apply_dry_run_bridge", commands)
-        p8bu_command = commands["p8bu_rust_apply_dry_run_bridge"]
+        self.assertIn("p8bu_rust_apply_dry_run_bridge", historical)
+        p8bu_command = historical["p8bu_rust_apply_dry_run_bridge"]
         self.assertIn("tools/smoke_rust_apply_dry_run_bridge.py", p8bu_command)
         self.assertIn("--use-default-packaged-route", p8bu_command)
         self.assertNotIn("--rust-apply-bin <path-to-emuchef-rust-backend>", p8bu_command)
@@ -1111,20 +1210,25 @@ class CheckRustPlannerCutoverReadinessTests(unittest.TestCase):
                 p8bc_launcher_injected_planner_report=launcher_report,
             )
 
-        evidence = report["production_equivalent_evidence"]
+        evidence = report["historical_p8_evidence"]
         self.assertEqual(evidence["p8aj_live_probe"]["status"], "accepted")
         self.assertEqual(evidence["p8ak_mismatch_warning"]["status"], "accepted")
         self.assertEqual(evidence["p8bc_launcher_injected_planner"]["status"], "accepted")
-        self.assertEqual(blocker_status(report, "real_device_probing_not_cut_over"), "evidence_accepted")
+        self.assertEqual(blocker_status(report, "real_device_probing_not_cut_over"), "resolved")
+        self.assertEqual(blocker_status(report, "real_device_plan_probe_evidence"), "missing")
         self.assertEqual(
             blocker_status(report, "detected_device_profile_mismatch_warning_not_cut_over"),
-            "evidence_accepted",
+            "resolved",
+        )
+        self.assertEqual(
+            blocker_status(report, "device_profile_mismatch_warning_evidence"),
+            "missing",
         )
         self.assertEqual(
             blocker_status(report, "packaged_launcher_injection_evidence_not_accepted"),
-            "evidence_accepted",
+            "resolved",
         )
-        self.assertEqual(blocker_status(report, "executor_apply_not_cut_over"), "blocked")
+        self.assertEqual(blocker_status(report, "executor_apply_not_cut_over"), "resolved")
         self.assertEqual(blocker_status(report, "packaged_release_not_ready"), "blocked")
         self.assertEqual(report["status"], "blocked")
 
@@ -1135,19 +1239,24 @@ class CheckRustPlannerCutoverReadinessTests(unittest.TestCase):
 
             report = self.build_report(root)
 
-        evidence = report["production_equivalent_evidence"]
+        evidence = report["historical_p8_evidence"]
         self.assertEqual(evidence["p8aj_live_probe"]["status"], "missing")
         self.assertEqual(evidence["p8aj_live_probe"]["evidence_id"], "p8aj_live_probe")
-        self.assertEqual(evidence["p8aj_live_probe"]["blocker_id"], "real_device_probing_not_cut_over")
+        self.assertEqual(
+            evidence["p8aj_live_probe"]["blocker_id"],
+            "historical_real_device_plan_probe_evidence",
+        )
         self.assertTrue(evidence["p8aj_live_probe"]["reasons"])
         self.assertEqual(evidence["p8ak_mismatch_warning"]["status"], "missing")
         self.assertEqual(
             evidence["p8ak_mismatch_warning"]["blocker_id"],
-            "detected_device_profile_mismatch_warning_not_cut_over",
+            "historical_device_profile_mismatch_warning_evidence",
         )
-        self.assertEqual(blocker_status(report, "real_device_probing_not_cut_over"), "blocked")
-        self.assertEqual(blocker_status(report, "detected_device_profile_mismatch_warning_not_cut_over"), "blocked")
-        self.assertEqual(blocker_status(report, "packaged_launcher_injection_evidence_not_accepted"), "blocked")
+        self.assertEqual(blocker_status(report, "real_device_probing_not_cut_over"), "resolved")
+        self.assertEqual(blocker_status(report, "real_device_plan_probe_evidence"), "missing")
+        self.assertEqual(blocker_status(report, "detected_device_profile_mismatch_warning_not_cut_over"), "resolved")
+        self.assertEqual(blocker_status(report, "device_profile_mismatch_warning_evidence"), "missing")
+        self.assertEqual(blocker_status(report, "packaged_launcher_injection_evidence_not_accepted"), "resolved")
         self.assertEqual(report["status"], "blocked")
 
     def test_supplied_missing_evidence_paths_are_rejected_without_accepting_blockers(self) -> None:
@@ -1162,7 +1271,7 @@ class CheckRustPlannerCutoverReadinessTests(unittest.TestCase):
                 p8bc_launcher_injected_planner_report=Path(".local/evidence/p8bc-launcher-injected-planner.json"),
             )
 
-        evidence = report["production_equivalent_evidence"]
+        evidence = report["historical_p8_evidence"]
         self.assertEqual(evidence["p8aj_live_probe"]["status"], "rejected")
         self.assertEqual(evidence["p8ak_mismatch_warning"]["status"], "rejected")
         self.assertEqual(evidence["p8bc_launcher_injected_planner"]["status"], "rejected")
@@ -1170,9 +1279,9 @@ class CheckRustPlannerCutoverReadinessTests(unittest.TestCase):
         for evidence_id in ("p8aj_live_probe", "p8ak_mismatch_warning", "p8bc_launcher_injected_planner"):
             with self.subTest(evidence_id=evidence_id):
                 self.assertEqual(evidence[evidence_id]["reasons"], ["evidence report file is missing"])
-        self.assertEqual(blocker_status(report, "real_device_probing_not_cut_over"), "blocked")
-        self.assertEqual(blocker_status(report, "detected_device_profile_mismatch_warning_not_cut_over"), "blocked")
-        self.assertEqual(blocker_status(report, "packaged_launcher_injection_evidence_not_accepted"), "blocked")
+        self.assertEqual(blocker_status(report, "real_device_plan_probe_evidence"), "missing")
+        self.assertEqual(blocker_status(report, "device_profile_mismatch_warning_evidence"), "missing")
+        self.assertEqual(blocker_status(report, "packaged_launcher_injection_evidence_not_accepted"), "resolved")
 
     def test_p8aj_accepted_and_p8ak_missing_updates_only_live_probe_blocker(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
@@ -1182,12 +1291,13 @@ class CheckRustPlannerCutoverReadinessTests(unittest.TestCase):
 
             report = self.build_report(root, p8aj_live_probe_report=live_report)
 
-        evidence = report["production_equivalent_evidence"]
+        evidence = report["historical_p8_evidence"]
         self.assertEqual(evidence["p8aj_live_probe"]["status"], "accepted")
         self.assertEqual(evidence["p8aj_live_probe"]["reasons"], [])
         self.assertEqual(evidence["p8ak_mismatch_warning"]["status"], "missing")
-        self.assertEqual(blocker_status(report, "real_device_probing_not_cut_over"), "evidence_accepted")
-        self.assertEqual(blocker_status(report, "detected_device_profile_mismatch_warning_not_cut_over"), "blocked")
+        self.assertEqual(blocker_status(report, "real_device_probing_not_cut_over"), "resolved")
+        self.assertEqual(blocker_status(report, "real_device_plan_probe_evidence"), "missing")
+        self.assertEqual(blocker_status(report, "device_profile_mismatch_warning_evidence"), "missing")
         self.assertEqual(report["status"], "blocked")
 
     def test_p8aj_missing_and_p8ak_accepted_updates_only_mismatch_warning_blocker(self) -> None:
@@ -1198,14 +1308,14 @@ class CheckRustPlannerCutoverReadinessTests(unittest.TestCase):
 
             report = self.build_report(root, p8ak_mismatch_warning_report=mismatch_report)
 
-        evidence = report["production_equivalent_evidence"]
+        evidence = report["historical_p8_evidence"]
         self.assertEqual(evidence["p8aj_live_probe"]["status"], "missing")
         self.assertEqual(evidence["p8ak_mismatch_warning"]["status"], "accepted")
         self.assertEqual(evidence["p8ak_mismatch_warning"]["reasons"], [])
-        self.assertEqual(blocker_status(report, "real_device_probing_not_cut_over"), "blocked")
+        self.assertEqual(blocker_status(report, "real_device_plan_probe_evidence"), "missing")
         self.assertEqual(
-            blocker_status(report, "detected_device_profile_mismatch_warning_not_cut_over"),
-            "evidence_accepted",
+            blocker_status(report, "device_profile_mismatch_warning_evidence"),
+            "missing",
         )
         self.assertEqual(report["status"], "blocked")
 
@@ -1222,15 +1332,16 @@ class CheckRustPlannerCutoverReadinessTests(unittest.TestCase):
                 p8ak_mismatch_warning_report=mismatch_report,
             )
 
-        self.assertEqual(report["production_equivalent_evidence"]["p8aj_live_probe"]["status"], "accepted")
-        self.assertEqual(report["production_equivalent_evidence"]["p8ak_mismatch_warning"]["status"], "accepted")
-        self.assertEqual(blocker_status(report, "real_device_probing_not_cut_over"), "evidence_accepted")
+        self.assertEqual(report["historical_p8_evidence"]["p8aj_live_probe"]["status"], "accepted")
+        self.assertEqual(report["historical_p8_evidence"]["p8ak_mismatch_warning"]["status"], "accepted")
+        self.assertEqual(blocker_status(report, "real_device_probing_not_cut_over"), "resolved")
+        self.assertEqual(blocker_status(report, "real_device_plan_probe_evidence"), "missing")
         self.assertEqual(
-            blocker_status(report, "detected_device_profile_mismatch_warning_not_cut_over"),
-            "evidence_accepted",
+            blocker_status(report, "device_profile_mismatch_warning_evidence"),
+            "missing",
         )
         self.assertEqual(blocker_status(report, "default_cli_backend_still_python"), "resolved")
-        self.assertEqual(blocker_status(report, "executor_apply_not_cut_over"), "blocked")
+        self.assertEqual(blocker_status(report, "executor_apply_not_cut_over"), "resolved")
         self.assertNotIn(
             retired_python_deletion_blocker_id(),
             {blocker["id"] for blocker in report["remaining_blockers"]},
@@ -1254,26 +1365,26 @@ class CheckRustPlannerCutoverReadinessTests(unittest.TestCase):
         ]
 
         cases = [
-            ("p8aj_failed", "reports/p8aj.json", p8aj_failed, "real_device_probing_not_cut_over"),
-            ("p8aj_failed_status", "reports/p8aj.json", p8aj_failed_status, "real_device_probing_not_cut_over"),
-            ("p8aj_not_live", "reports/p8aj.json", p8aj_not_live, "real_device_probing_not_cut_over"),
+            ("p8aj_failed", "reports/p8aj.json", p8aj_failed, "real_device_plan_probe_evidence"),
+            ("p8aj_failed_status", "reports/p8aj.json", p8aj_failed_status, "real_device_plan_probe_evidence"),
+            ("p8aj_not_live", "reports/p8aj.json", p8aj_not_live, "real_device_plan_probe_evidence"),
             (
                 "p8ak_failed",
                 "reports/p8ak.json",
                 p8ak_failed,
-                "detected_device_profile_mismatch_warning_not_cut_over",
+                "device_profile_mismatch_warning_evidence",
             ),
             (
                 "p8ak_failed_status",
                 "reports/p8ak.json",
                 p8ak_failed_status,
-                "detected_device_profile_mismatch_warning_not_cut_over",
+                "device_profile_mismatch_warning_evidence",
             ),
             (
                 "p8ak_missing_case",
                 "reports/p8ak.json",
                 p8ak_missing_case,
-                "detected_device_profile_mismatch_warning_not_cut_over",
+                "device_profile_mismatch_warning_evidence",
             ),
         ]
         for name, relative_path, payload, blocker_id in cases:
@@ -1291,9 +1402,9 @@ class CheckRustPlannerCutoverReadinessTests(unittest.TestCase):
                     report = self.build_report(root, **kwargs)
 
                 evidence_key = "p8aj_live_probe" if "p8aj" in name else "p8ak_mismatch_warning"
-                self.assertEqual(report["production_equivalent_evidence"][evidence_key]["status"], "rejected")
-                self.assertTrue(report["production_equivalent_evidence"][evidence_key]["reasons"])
-                self.assertEqual(blocker_status(report, blocker_id), "blocked")
+                self.assertEqual(report["historical_p8_evidence"][evidence_key]["status"], "rejected")
+                self.assertTrue(report["historical_p8_evidence"][evidence_key]["reasons"])
+                self.assertEqual(blocker_status(report, blocker_id), "missing")
                 self.assertEqual(report["status"], "blocked")
 
     def test_missing_p8bu_evidence_does_not_fail_static_checks_or_add_bridge_evidence_blocker(self) -> None:
@@ -1304,10 +1415,10 @@ class CheckRustPlannerCutoverReadinessTests(unittest.TestCase):
             report = self.build_report(root)
 
         self.assertTrue(all(check["status"] == "pass" for check in report["static_checks"]))
-        evidence = report["production_equivalent_evidence"]["p8bu_rust_apply_dry_run_bridge"]
+        evidence = report["historical_p8_evidence"]["p8bu_rust_apply_dry_run_bridge"]
         self.assertEqual(evidence["status"], "missing")
         self.assertEqual(evidence["evidence_id"], "p8bu_rust_apply_dry_run_bridge")
-        self.assertEqual(evidence["blocker_id"], "rust_apply_dry_run_bridge_evidence")
+        self.assertEqual(evidence["blocker_id"], "historical_rust_apply_dry_run_bridge_evidence")
         self.assertNotIn(
             "rust_apply_dry_run_bridge_evidence",
             {blocker["id"] for blocker in report["remaining_blockers"]},
@@ -1322,11 +1433,14 @@ class CheckRustPlannerCutoverReadinessTests(unittest.TestCase):
 
             report = self.build_report(root, p8bu_rust_apply_dry_run_bridge_report=report_path)
 
-        evidence = report["production_equivalent_evidence"]["p8bu_rust_apply_dry_run_bridge"]
+        evidence = report["historical_p8_evidence"]["p8bu_rust_apply_dry_run_bridge"]
         self.assertEqual(evidence["status"], "accepted")
         self.assertEqual(evidence["reasons"], [])
-        self.assertEqual(blocker_status(report, "rust_apply_dry_run_bridge_evidence"), "evidence_accepted")
-        self.assertEqual(blocker_status(report, "executor_apply_not_cut_over"), "blocked")
+        self.assertNotIn(
+            "historical_rust_apply_dry_run_bridge_evidence",
+            {blocker["id"] for blocker in report["remaining_blockers"]},
+        )
+        self.assertEqual(blocker_status(report, "executor_apply_not_cut_over"), "resolved")
         self.assertEqual(report["status"], "blocked")
 
     def test_accepted_default_packaged_p8bu_report_is_recognized_and_does_not_unblock_executor_apply(self) -> None:
@@ -1337,11 +1451,14 @@ class CheckRustPlannerCutoverReadinessTests(unittest.TestCase):
 
             report = self.build_report(root, p8bu_rust_apply_dry_run_bridge_report=report_path)
 
-        evidence = report["production_equivalent_evidence"]["p8bu_rust_apply_dry_run_bridge"]
+        evidence = report["historical_p8_evidence"]["p8bu_rust_apply_dry_run_bridge"]
         self.assertEqual(evidence["status"], "accepted")
         self.assertEqual(evidence["reasons"], [])
-        self.assertEqual(blocker_status(report, "rust_apply_dry_run_bridge_evidence"), "evidence_accepted")
-        self.assertEqual(blocker_status(report, "executor_apply_not_cut_over"), "blocked")
+        self.assertNotIn(
+            "historical_rust_apply_dry_run_bridge_evidence",
+            {blocker["id"] for blocker in report["remaining_blockers"]},
+        )
+        self.assertEqual(blocker_status(report, "executor_apply_not_cut_over"), "resolved")
         self.assertEqual(blocker_status(report, "packaged_release_not_ready"), "blocked")
         self.assertEqual(report["status"], "blocked")
 
@@ -1355,7 +1472,7 @@ class CheckRustPlannerCutoverReadinessTests(unittest.TestCase):
 
             report = self.build_report(root, p8bu_rust_apply_dry_run_bridge_report=report_path)
 
-        evidence = report["production_equivalent_evidence"]["p8bu_rust_apply_dry_run_bridge"]
+        evidence = report["historical_p8_evidence"]["p8bu_rust_apply_dry_run_bridge"]
         self.assertEqual(evidence["status"], "rejected")
         self.assertTrue(any("route is required" in reason for reason in evidence["reasons"]))
 
@@ -1369,7 +1486,7 @@ class CheckRustPlannerCutoverReadinessTests(unittest.TestCase):
 
             report = self.build_report(root, p8bu_rust_apply_dry_run_bridge_report=report_path)
 
-        evidence = report["production_equivalent_evidence"]["p8bu_rust_apply_dry_run_bridge"]
+        evidence = report["historical_p8_evidence"]["p8bu_rust_apply_dry_run_bridge"]
         self.assertEqual(evidence["status"], "rejected")
         self.assertTrue(any("kind must be rust_apply_dry_run_bridge_smoke" in reason for reason in evidence["reasons"]))
         self.assertTrue(any("report.command" in reason for reason in evidence["reasons"]))
@@ -1388,7 +1505,7 @@ class CheckRustPlannerCutoverReadinessTests(unittest.TestCase):
 
             report = self.build_report(root, p8bu_rust_apply_dry_run_bridge_report=report_path)
 
-        evidence = report["production_equivalent_evidence"]["p8bu_rust_apply_dry_run_bridge"]
+        evidence = report["historical_p8_evidence"]["p8bu_rust_apply_dry_run_bridge"]
         self.assertEqual(evidence["status"], "rejected")
         self.assertTrue(any("schema_version must be 1" in reason for reason in evidence["reasons"]))
 
@@ -1402,7 +1519,7 @@ class CheckRustPlannerCutoverReadinessTests(unittest.TestCase):
 
             report = self.build_report(root, p8bu_rust_apply_dry_run_bridge_report=report_path)
 
-        evidence = report["production_equivalent_evidence"]["p8bu_rust_apply_dry_run_bridge"]
+        evidence = report["historical_p8_evidence"]["p8bu_rust_apply_dry_run_bridge"]
         self.assertEqual(evidence["status"], "rejected")
         self.assertTrue(any("status must be passed" in reason for reason in evidence["reasons"]))
 
@@ -1420,7 +1537,7 @@ class CheckRustPlannerCutoverReadinessTests(unittest.TestCase):
 
             report = self.build_report(root, p8bu_rust_apply_dry_run_bridge_report=report_path)
 
-        evidence = report["production_equivalent_evidence"]["p8bu_rust_apply_dry_run_bridge"]
+        evidence = report["historical_p8_evidence"]["p8bu_rust_apply_dry_run_bridge"]
         self.assertEqual(evidence["status"], "rejected")
         self.assertTrue(
             any("missing required check: python_bridge_invocation_succeeded" in reason for reason in evidence["reasons"])
@@ -1436,7 +1553,7 @@ class CheckRustPlannerCutoverReadinessTests(unittest.TestCase):
 
             report = self.build_report(root, p8bu_rust_apply_dry_run_bridge_report=report_path)
 
-        evidence = report["production_equivalent_evidence"]["p8bu_rust_apply_dry_run_bridge"]
+        evidence = report["historical_p8_evidence"]["p8bu_rust_apply_dry_run_bridge"]
         self.assertEqual(evidence["status"], "rejected")
         self.assertTrue(any("required check must pass: rust_apply_bin_exists" in reason for reason in evidence["reasons"]))
 
@@ -1450,7 +1567,7 @@ class CheckRustPlannerCutoverReadinessTests(unittest.TestCase):
 
             report = self.build_report(root, p8bu_rust_apply_dry_run_bridge_report=report_path)
 
-        evidence = report["production_equivalent_evidence"]["p8bu_rust_apply_dry_run_bridge"]
+        evidence = report["historical_p8_evidence"]["p8bu_rust_apply_dry_run_bridge"]
         self.assertEqual(evidence["status"], "rejected")
         self.assertTrue(any("command must contain --rust-apply-bin" in reason for reason in evidence["reasons"]))
 
@@ -1464,7 +1581,7 @@ class CheckRustPlannerCutoverReadinessTests(unittest.TestCase):
 
             report = self.build_report(root, p8bu_rust_apply_dry_run_bridge_report=report_path)
 
-        evidence = report["production_equivalent_evidence"]["p8bu_rust_apply_dry_run_bridge"]
+        evidence = report["historical_p8_evidence"]["p8bu_rust_apply_dry_run_bridge"]
         self.assertEqual(evidence["status"], "rejected")
         self.assertTrue(any("default_packaged command must not contain --rust-apply-bin" in reason for reason in evidence["reasons"]))
 
@@ -1478,7 +1595,7 @@ class CheckRustPlannerCutoverReadinessTests(unittest.TestCase):
 
             report = self.build_report(root, p8bu_rust_apply_dry_run_bridge_report=report_path)
 
-        evidence = report["production_equivalent_evidence"]["p8bu_rust_apply_dry_run_bridge"]
+        evidence = report["historical_p8_evidence"]["p8bu_rust_apply_dry_run_bridge"]
         self.assertEqual(evidence["status"], "rejected")
         self.assertTrue(any("command must contain --dry-run" in reason for reason in evidence["reasons"]))
 
@@ -1490,16 +1607,16 @@ class CheckRustPlannerCutoverReadinessTests(unittest.TestCase):
 
             report = self.build_report(root, p8bc_launcher_injected_planner_report=report_path)
 
-        evidence = report["production_equivalent_evidence"]["p8bc_launcher_injected_planner"]
+        evidence = report["historical_p8_evidence"]["p8bc_launcher_injected_planner"]
         self.assertEqual(evidence["status"], "accepted")
         self.assertEqual(evidence["evidence_id"], "p8bc_launcher_injected_planner")
-        self.assertEqual(evidence["blocker_id"], "packaged_launcher_injection_evidence_not_accepted")
+        self.assertEqual(evidence["blocker_id"], "historical_packaged_launcher_injection_evidence")
         self.assertEqual(evidence["reasons"], [])
         self.assertEqual(
             blocker_status(report, "packaged_launcher_injection_evidence_not_accepted"),
-            "evidence_accepted",
+            "resolved",
         )
-        self.assertEqual(blocker_status(report, "executor_apply_not_cut_over"), "blocked")
+        self.assertEqual(blocker_status(report, "executor_apply_not_cut_over"), "resolved")
         self.assertEqual(blocker_status(report, "packaged_release_not_ready"), "blocked")
         self.assertNotIn(
             retired_python_deletion_blocker_id(),
@@ -1525,10 +1642,10 @@ class CheckRustPlannerCutoverReadinessTests(unittest.TestCase):
 
                     report = self.build_report(root, p8bc_launcher_injected_planner_report=report_path)
 
-                evidence = report["production_equivalent_evidence"]["p8bc_launcher_injected_planner"]
+                evidence = report["historical_p8_evidence"]["p8bc_launcher_injected_planner"]
                 self.assertEqual(evidence["status"], "rejected")
                 self.assertTrue(evidence["reasons"])
-                self.assertEqual(blocker_status(report, "packaged_launcher_injection_evidence_not_accepted"), "blocked")
+                self.assertEqual(blocker_status(report, "packaged_launcher_injection_evidence_not_accepted"), "resolved")
                 self.assertEqual(report["status"], "blocked")
 
     def test_missing_p8bc_top_level_key_is_rejected(self) -> None:
@@ -1541,7 +1658,7 @@ class CheckRustPlannerCutoverReadinessTests(unittest.TestCase):
 
             report = self.build_report(root, p8bc_launcher_injected_planner_report=report_path)
 
-        evidence = report["production_equivalent_evidence"]["p8bc_launcher_injected_planner"]
+        evidence = report["historical_p8_evidence"]["p8bc_launcher_injected_planner"]
         self.assertEqual(evidence["status"], "rejected")
         self.assertTrue(any("missing required top-level key: redaction" in reason for reason in evidence["reasons"]))
 
@@ -1568,7 +1685,7 @@ class CheckRustPlannerCutoverReadinessTests(unittest.TestCase):
 
                     report = self.build_report(root, p8bc_launcher_injected_planner_report=report_path)
 
-                evidence = report["production_equivalent_evidence"]["p8bc_launcher_injected_planner"]
+                evidence = report["historical_p8_evidence"]["p8bc_launcher_injected_planner"]
                 self.assertEqual(evidence["status"], "rejected")
                 self.assertTrue(evidence["reasons"])
 
@@ -1597,7 +1714,7 @@ class CheckRustPlannerCutoverReadinessTests(unittest.TestCase):
 
                     report = self.build_report(root, p8bc_launcher_injected_planner_report=report_path)
 
-                evidence = report["production_equivalent_evidence"]["p8bc_launcher_injected_planner"]
+                evidence = report["historical_p8_evidence"]["p8bc_launcher_injected_planner"]
                 self.assertEqual(evidence["status"], "rejected")
                 self.assertTrue(any(reason_token in reason for reason in evidence["reasons"]))
 
@@ -1617,8 +1734,8 @@ class CheckRustPlannerCutoverReadinessTests(unittest.TestCase):
             rejected_report = self.build_report(root, p8bc_launcher_injected_planner_report=rejected_path)
             accepted_report = self.build_report(root, p8bc_launcher_injected_planner_report=accepted_path)
 
-        rejected_evidence = rejected_report["production_equivalent_evidence"]["p8bc_launcher_injected_planner"]
-        accepted_evidence = accepted_report["production_equivalent_evidence"]["p8bc_launcher_injected_planner"]
+        rejected_evidence = rejected_report["historical_p8_evidence"]["p8bc_launcher_injected_planner"]
+        accepted_evidence = accepted_report["historical_p8_evidence"]["p8bc_launcher_injected_planner"]
         self.assertEqual(rejected_evidence["status"], "rejected")
         self.assertTrue(any("report.checks[0].details.raw_command" in reason for reason in rejected_evidence["reasons"]))
         self.assertEqual(accepted_evidence["status"], "accepted")
@@ -1647,7 +1764,7 @@ class CheckRustPlannerCutoverReadinessTests(unittest.TestCase):
 
                     report = self.build_report(root, p8aj_live_probe_report=report_path)
 
-                evidence = report["production_equivalent_evidence"]["p8aj_live_probe"]
+                evidence = report["historical_p8_evidence"]["p8aj_live_probe"]
                 self.assertEqual(evidence["status"], "rejected")
                 self.assertTrue(any(f"report.cases[0].{key}" in reason for reason in evidence["reasons"]))
 
@@ -1670,7 +1787,7 @@ class CheckRustPlannerCutoverReadinessTests(unittest.TestCase):
 
                     report = self.build_report(root, p8bc_launcher_injected_planner_report=report_path)
 
-                evidence = report["production_equivalent_evidence"]["p8bc_launcher_injected_planner"]
+                evidence = report["historical_p8_evidence"]["p8bc_launcher_injected_planner"]
                 self.assertEqual(evidence["status"], "rejected")
                 self.assertTrue(any("local path-looking value" in reason for reason in evidence["reasons"]))
 
@@ -1684,7 +1801,7 @@ class CheckRustPlannerCutoverReadinessTests(unittest.TestCase):
 
             report = self.build_report(root, p8bc_launcher_injected_planner_report=report_path)
 
-        evidence = report["production_equivalent_evidence"]["p8bc_launcher_injected_planner"]
+        evidence = report["historical_p8_evidence"]["p8bc_launcher_injected_planner"]
         self.assertEqual(evidence["status"], "accepted")
 
     def test_p8bc_argv0_basename_must_be_safe_basename(self) -> None:
@@ -1704,7 +1821,7 @@ class CheckRustPlannerCutoverReadinessTests(unittest.TestCase):
 
                     report = self.build_report(root, p8bc_launcher_injected_planner_report=report_path)
 
-                evidence = report["production_equivalent_evidence"]["p8bc_launcher_injected_planner"]
+                evidence = report["historical_p8_evidence"]["p8bc_launcher_injected_planner"]
                 self.assertEqual(evidence["status"], "rejected")
                 self.assertTrue(any("artifacts.argv0_basename" in reason for reason in evidence["reasons"]))
 
@@ -1719,7 +1836,7 @@ class CheckRustPlannerCutoverReadinessTests(unittest.TestCase):
 
             report = self.build_report(root, p8bc_launcher_injected_planner_report=report_path)
 
-        evidence = report["production_equivalent_evidence"]["p8bc_launcher_injected_planner"]
+        evidence = report["historical_p8_evidence"]["p8bc_launcher_injected_planner"]
         self.assertEqual(evidence["status"], "accepted")
         self.assertEqual(evidence["reasons"], [])
 
@@ -1751,12 +1868,12 @@ class CheckRustPlannerCutoverReadinessTests(unittest.TestCase):
 
             report = self.build_report(root, p8bc_launcher_injected_planner_report=report_path)
 
-        evidence = report["production_equivalent_evidence"]["p8bc_launcher_injected_planner"]
+        evidence = report["historical_p8_evidence"]["p8bc_launcher_injected_planner"]
         self.assertEqual(evidence["status"], "accepted")
         self.assertEqual(evidence["reasons"], [])
         self.assertEqual(
             blocker_status(report, "packaged_launcher_injection_evidence_not_accepted"),
-            "evidence_accepted",
+            "resolved",
         )
 
     def test_sensitive_evidence_fields_are_rejected_without_rejecting_classification_fields(self) -> None:
@@ -1777,14 +1894,14 @@ class CheckRustPlannerCutoverReadinessTests(unittest.TestCase):
             raw_stdout_report = self.build_report(root, p8aj_live_probe_report=raw_stdout_path)
             raw_serial_report = self.build_report(root, p8ak_mismatch_warning_report=raw_serial_path)
 
-        self.assertEqual(accepted_report["production_equivalent_evidence"]["p8aj_live_probe"]["status"], "accepted")
-        self.assertEqual(raw_stdout_report["production_equivalent_evidence"]["p8aj_live_probe"]["status"], "rejected")
+        self.assertEqual(accepted_report["historical_p8_evidence"]["p8aj_live_probe"]["status"], "accepted")
+        self.assertEqual(raw_stdout_report["historical_p8_evidence"]["p8aj_live_probe"]["status"], "rejected")
         self.assertEqual(
-            raw_serial_report["production_equivalent_evidence"]["p8ak_mismatch_warning"]["status"],
+            raw_serial_report["historical_p8_evidence"]["p8ak_mismatch_warning"]["status"],
             "rejected",
         )
 
-    def test_parser_accepts_optional_production_equivalent_evidence_report_paths(self) -> None:
+    def test_parser_accepts_optional_historical_p8_evidence_report_paths(self) -> None:
         args = self.readiness.parse_args(
             [
                 "--p8aj-live-probe-report",
@@ -1814,10 +1931,12 @@ class CheckRustPlannerCutoverReadinessTests(unittest.TestCase):
         self.assertEqual(report["status"], "blocked")
         self.assertEqual(blocker_status(report, "default_cli_backend_still_python"), "resolved")
         self.assertEqual(blocker_status(report, "default_rust_apply_dry_run_route"), "resolved")
-        self.assertEqual(blocker_status(report, "executor_apply_not_cut_over"), "blocked")
-        self.assertEqual(blocker_status(report, "real_device_probing_not_cut_over"), "blocked")
-        self.assertEqual(blocker_status(report, "detected_device_profile_mismatch_warning_not_cut_over"), "blocked")
-        self.assertEqual(blocker_status(report, "packaged_launcher_injection_evidence_not_accepted"), "blocked")
+        self.assertEqual(blocker_status(report, "executor_apply_not_cut_over"), "resolved")
+        self.assertEqual(blocker_status(report, "real_device_probing_not_cut_over"), "resolved")
+        self.assertEqual(blocker_status(report, "detected_device_profile_mismatch_warning_not_cut_over"), "resolved")
+        self.assertEqual(blocker_status(report, "packaged_launcher_injection_evidence_not_accepted"), "resolved")
+        self.assertEqual(blocker_status(report, "real_device_plan_probe_evidence"), "missing")
+        self.assertEqual(blocker_status(report, "real_device_apply_evidence"), "missing")
         self.assertEqual(blocker_status(report, "packaged_release_not_ready"), "blocked")
         self.assertNotIn(
             retired_python_deletion_blocker_id(),
@@ -1834,11 +1953,13 @@ class CheckRustPlannerCutoverReadinessTests(unittest.TestCase):
         blockers = {blocker["id"]: blocker["status"] for blocker in report["remaining_blockers"]}
         self.assertEqual(blockers["default_cli_backend_still_python"], "resolved")
         self.assertEqual(blockers["default_rust_apply_dry_run_route"], "resolved")
-        self.assertEqual(blockers["real_device_probing_not_cut_over"], "blocked")
-        self.assertEqual(blockers["detected_device_profile_mismatch_warning_not_cut_over"], "blocked")
-        self.assertEqual(blockers["packaged_launcher_injection_evidence_not_accepted"], "blocked")
+        self.assertEqual(blockers["real_device_probing_not_cut_over"], "resolved")
+        self.assertEqual(blockers["detected_device_profile_mismatch_warning_not_cut_over"], "resolved")
+        self.assertEqual(blockers["packaged_launcher_injection_evidence_not_accepted"], "resolved")
         self.assertEqual(blockers["packaged_release_not_ready"], "blocked")
-        self.assertEqual(blockers["executor_apply_not_cut_over"], "blocked")
+        self.assertEqual(blockers["executor_apply_not_cut_over"], "resolved")
+        self.assertEqual(blockers["real_device_plan_probe_evidence"], "missing")
+        self.assertEqual(blockers["real_device_apply_evidence"], "missing")
         self.assertNotIn(retired_python_deletion_blocker_id(), blockers)
         self.assertNotIn("real_device_context_probing_not_cut_over", blockers)
 

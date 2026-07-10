@@ -410,7 +410,7 @@ fn mixed_sidecar_plus_extra_args_is_process_usage_error() {
 
 #[test]
 fn process_one_shot_stdout_contains_exactly_one_json_envelope() {
-    let output = Command::new(env!("CARGO_BIN_EXE_emuchef-rust-backend"))
+    let output = Command::new(env!("CARGO_BIN_EXE_emuchef"))
         .arg(r#"{"type":"hello"}"#)
         .output()
         .expect("process should run");
@@ -423,7 +423,7 @@ fn process_one_shot_stdout_contains_exactly_one_json_envelope() {
 
 #[test]
 fn process_jsonl_sidecar_responds_line_by_line_with_json_only_stdout() {
-    let mut child = Command::new(env!("CARGO_BIN_EXE_emuchef-rust-backend"))
+    let mut child = Command::new(env!("CARGO_BIN_EXE_emuchef"))
         .arg("--sidecar")
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
@@ -456,7 +456,7 @@ fn process_jsonl_sidecar_responds_line_by_line_with_json_only_stdout() {
 
 #[test]
 fn process_jsonl_sidecar_flushes_each_response_before_stdin_eof_and_continues_after_errors() {
-    let mut child = Command::new(env!("CARGO_BIN_EXE_emuchef-rust-backend"))
+    let mut child = Command::new(env!("CARGO_BIN_EXE_emuchef"))
         .arg("--sidecar")
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
@@ -508,7 +508,7 @@ fn process_jsonl_sidecar_flushes_each_response_before_stdin_eof_and_continues_af
 
 #[test]
 fn process_mixed_sidecar_extra_arg_writes_no_stdout_and_non_zero_stderr() {
-    let output = Command::new(env!("CARGO_BIN_EXE_emuchef-rust-backend"))
+    let output = Command::new(env!("CARGO_BIN_EXE_emuchef"))
         .arg("--sidecar")
         .arg(r#"{"type":"hello"}"#)
         .output()

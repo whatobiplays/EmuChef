@@ -1,7 +1,35 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
-import { findForbiddenRuntimeHits } from "./check-no-python-runtime.mjs";
+import {
+  findForbiddenRuntimeHits,
+  productRuntimeContractErrors,
+} from "./check-no-python-runtime.mjs";
+
+test("accepts the canonical Rust CLI and legacy-only Python entrypoint contract", () => {
+  const errors = productRuntimeContractErrors({
+    pyproject: '[project.scripts]\nemuchef-python-legacy = "emuchef.cli:main"\n',
+    cargoManifest: '[package]\ndefault-run = "emuchef"\n[[bin]]\nname = "emuchef"\npath = "src/main.rs"\n',
+    tauriConfig: '{"bundle":{"externalBin":["binaries/emuchef"]}}',
+    packaging: 'export const BINARY_BASENAME = "emuchef";',
+  });
+
+  assert.deepEqual(errors, []);
+});
+
+test("rejects a Python-owned emuchef entrypoint and v1 sidecar naming", () => {
+  const errors = productRuntimeContractErrors({
+    pyproject: '[project.scripts]\nemuchef = "emuchef.cli:main"\n',
+    cargoManifest: '[package]\ndefault-run = "emuchef-rust-backend"\n',
+    tauriConfig: '{"bundle":{"externalBin":["binaries/emuchef-rust-backend"]}}',
+    packaging: 'export const BINARY_BASENAME = "emuchef-rust-backend";',
+  });
+
+  assert.ok(errors.includes("Python-owned emuchef console entrypoint"));
+  assert.ok(errors.includes("missing emuchef-python-legacy console entrypoint"));
+  assert.ok(errors.some((error) => error.includes("Cargo default-run emuchef")));
+  assert.ok(errors.some((error) => error.includes("Tauri emuchef externalBin")));
+});
 
 test("flags forbidden runtime command tokens and explicit Python module names", () => {
   const hits = findForbiddenRuntimeHits(

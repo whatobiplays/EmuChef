@@ -78,7 +78,22 @@ pub struct ExecutionProgressEvent {
 }
 
 pub trait ExecutorDevice: std::fmt::Debug {
+    fn uses_fake_device_filesystem(&self) -> bool {
+        false
+    }
+
     fn install_apk(&mut self, apk_path: &Path, replace_existing: bool) -> Result<(), String>;
+    fn push(&mut self, source: &Path, dest: &str, sync: bool) -> Result<(), String>;
+    fn mkdir_p(&mut self, path: &str) -> Result<(), String>;
+    fn remove_file(&mut self, path: &str) -> Result<(), String>;
+    fn remove_tree(&mut self, path: &str) -> Result<(), String>;
+    fn copy_on_device(
+        &mut self,
+        source: &str,
+        dest: &str,
+        recursive: bool,
+        privileged: bool,
+    ) -> Result<(), String>;
     fn package_installed(&mut self, package_name: &str) -> Result<bool, String>;
     fn path_exists(&mut self, path: &str) -> Result<bool, String>;
     fn path_is_dir(&mut self, path: &str) -> Result<bool, String>;
@@ -391,7 +406,7 @@ impl<D: ExecutorDevice> ExecutorRunner<D> {
             "resolve_artifacts" => self.execute_resolve_artifacts(plan, state, &resolved_params),
             "extract_artifacts" => self.execute_extract_artifacts(state, step, &resolved_params),
             "extract_archive" => self.execute_extract_archive(step, &resolved_params),
-            "copy_files" => self.execute_copy_files(&resolved_params),
+            "copy_files" => self.execute_copy_files(plan, step, &resolved_params),
             "install_apk" => self.execute_install_apk(&resolved_params),
             "launch_app" => self.execute_launch_app(&resolved_params),
             "force_stop_app" => self.execute_force_stop_app(&resolved_params),
@@ -541,7 +556,7 @@ impl<D: ExecutorDevice> ExecutorRunner<D> {
         if !local_path.exists() {
             let Some(source_path) = file_url_to_path(&artifact.url) else {
                 return Err(StepFailure::new(format!(
-                    "artifact_download_failed: Failed to download artifact {:?} from {:?}: network downloads are disabled in Rust Phase 6P",
+                    "network_artifact_downloads_not_cut_over: Network artifact downloads are not supported by the Rust runtime for artifact {:?} from {:?}; use a file:// source.",
                     artifact.id, artifact.url
                 )));
             };
@@ -569,17 +584,18 @@ impl<D: ExecutorDevice> ExecutorRunner<D> {
             .get("extract_on")
             .and_then(Value::as_str)
             .unwrap_or("host");
-        if extract_on != "host" {
-            return Err(StepFailure::new(
-                "extract_artifacts device extraction is outside Rust Phase 6P".to_string(),
-            ));
+        if !matches!(extract_on, "host" | "device") {
+            return Err(StepFailure::new(format!(
+                "extract_artifacts extract_on must be 'host' or 'device', got {extract_on:?}"
+            )));
         }
-        let sandbox = self.adapters.sandbox()?;
+        let sandbox = self.adapters.sandbox()?.clone();
         let extract_root = sandbox
             .runtime_root
             .join("extract")
             .join(sanitize_step_id(&step.id));
         let mut output_paths = Vec::new();
+        let device_base = format!("/data/local/tmp/emuchef/{}", sanitize_step_id(&step.id));
         for artifact_id in string_list_param(resolved_params.get("artifacts")) {
             let Some(artifact_state) = state.artifacts.get(&artifact_id) else {
                 return Err(StepFailure::new(format!(
@@ -601,11 +617,30 @@ impl<D: ExecutorDevice> ExecutorRunner<D> {
             let artifact_dir =
                 extract_root.join(artifact_id.rsplit('/').next().unwrap_or(&artifact_id));
             let members = sandbox.extract_zip_to_directory(&archive_path, &artifact_dir)?;
-            output_paths.extend(
-                members
-                    .into_iter()
-                    .map(|member| json!(member.to_string_lossy().to_string())),
-            );
+            if extract_on == "host" {
+                output_paths.extend(
+                    members
+                        .into_iter()
+                        .map(|member| json!(member.to_string_lossy().to_string())),
+                );
+            } else {
+                let device_dest = join_device_path(
+                    &device_base,
+                    artifact_id.rsplit('/').next().unwrap_or(&artifact_id),
+                );
+                self.adapters.device.mkdir_p(&device_dest)?;
+                for member in members {
+                    let name = member.file_name().ok_or_else(|| {
+                        StepFailure::new(format!(
+                            "extracted path has no basename: {}",
+                            member.display()
+                        ))
+                    })?;
+                    let target = join_device_path(&device_dest, &name.to_string_lossy());
+                    self.adapters.device.push(&member, &target, false)?;
+                }
+                output_paths.push(json!(device_dest));
+            }
         }
         let mut outputs = OrderedMap::new();
         outputs.insert(
@@ -613,7 +648,7 @@ impl<D: ExecutorDevice> ExecutorRunner<D> {
             RuntimeValue {
                 type_name: "path_list".to_string(),
                 value: Value::Array(output_paths),
-                location: Some("host".to_string()),
+                location: Some(extract_on.to_string()),
             },
         );
         Ok(outputs)
@@ -628,15 +663,15 @@ impl<D: ExecutorDevice> ExecutorRunner<D> {
             .get("extract_on")
             .and_then(Value::as_str)
             .unwrap_or("host");
-        if extract_on != "host" {
-            return Err(StepFailure::new(
-                "extract_archive device extraction is outside Rust Phase 6P".to_string(),
-            ));
+        if !matches!(extract_on, "host" | "device") {
+            return Err(StepFailure::new(format!(
+                "extract_archive extract_on must be 'host' or 'device', got {extract_on:?}"
+            )));
         }
         let archive = runtime_value_param(resolved_params, "archive")?;
         if archive.location.as_deref() != Some("host") {
             return Err(StepFailure::new(
-                "Host extraction requires a host-side archive path.".to_string(),
+                "Rust host-side extraction requires a host-side archive path.".to_string(),
             ));
         }
         let Some(archive_path) = archive.value.as_str() else {
@@ -645,13 +680,52 @@ impl<D: ExecutorDevice> ExecutorRunner<D> {
             ));
         };
         let archive_path = PathBuf::from(archive_path);
-        let sandbox = self.adapters.sandbox()?;
+        let sandbox = self.adapters.sandbox()?.clone();
         sandbox.ensure_read_allowed(&archive_path)?;
         let extract_root = sandbox
             .runtime_root
             .join("extract")
             .join(sanitize_step_id(&step.id));
         let members = sandbox.extract_zip_to_directory(&archive_path, &extract_root)?;
+        if extract_on == "device" {
+            let dest = resolved_params
+                .get("dest")
+                .and_then(Value::as_str)
+                .ok_or_else(|| {
+                    StepFailure::new(
+                        "extract_archive targeting a device requires a string dest".to_string(),
+                    )
+                })?;
+            self.adapters.device.mkdir_p(dest)?;
+            for member in &members {
+                let name = member.file_name().ok_or_else(|| {
+                    StepFailure::new(format!(
+                        "extracted path has no basename: {}",
+                        member.display()
+                    ))
+                })?;
+                let target = join_device_path(dest, &name.to_string_lossy());
+                self.adapters.device.push(member, &target, false)?;
+            }
+            if resolved_params
+                .get("cleanup")
+                .map(python_truthy)
+                .unwrap_or(true)
+            {
+                fs::remove_dir_all(&extract_root)
+                    .map_err(|error| StepFailure::new(error.to_string()))?;
+            }
+            let mut outputs = OrderedMap::new();
+            outputs.insert(
+                "extracted_path".to_string(),
+                RuntimeValue {
+                    type_name: "directory_path".to_string(),
+                    value: json!(dest),
+                    location: Some("device".to_string()),
+                },
+            );
+            return Ok(outputs);
+        }
         let (type_name, value) = if members.len() == 1 {
             let member = &members[0];
             let type_name = if member.is_dir() {
@@ -677,14 +751,11 @@ impl<D: ExecutorDevice> ExecutorRunner<D> {
 
     fn execute_copy_files(
         &mut self,
+        plan: &ExecutionPlan,
+        step: &ExecutionStep,
         resolved_params: &OrderedMap<Value>,
     ) -> Result<OrderedMap<RuntimeValue>, StepFailure> {
         let source = runtime_value_param(resolved_params, "source")?;
-        if source.location.as_deref() != Some("host") {
-            return Err(StepFailure::new(
-                "copy_files device sources are outside Rust Phase 6P".to_string(),
-            ));
-        }
         let dest = resolved_params
             .get("dest")
             .and_then(Value::as_str)
@@ -693,8 +764,45 @@ impl<D: ExecutorDevice> ExecutorRunner<D> {
             .get("copy_policy")
             .and_then(Value::as_str)
             .unwrap_or("merge");
-        let sandbox = self.adapters.sandbox()?;
-        let copied_paths = sandbox.copy_host_source_to_fake_device(&source, dest, copy_policy)?;
+        if !matches!(copy_policy, "merge" | "replace" | "sync") {
+            return Err(StepFailure::new(format!(
+                "copy_files copy_policy must be merge, replace, or sync, got {copy_policy:?}"
+            )));
+        }
+        let sandbox = self.adapters.sandbox()?.clone();
+        let app_private_dest = is_app_private_path(dest);
+        if app_private_dest
+            && !(plan.runtime_capabilities.app_data_write && plan.runtime_capabilities.root_shell)
+        {
+            return Err(StepFailure::new(format!(
+                "app_data_write_unavailable: Destination {dest:?} requires both app_data_write and root_shell runtime capabilities."
+            )));
+        }
+        let copied_paths = if self.adapters.device.uses_fake_device_filesystem()
+            && source.location.as_deref() == Some("host")
+            && !app_private_dest
+        {
+            sandbox.copy_host_source_to_fake_device(&source, dest, copy_policy)?
+        } else if source.location.as_deref() == Some("device") {
+            copy_device_source(&mut self.adapters.device, &source, dest, copy_policy)?
+        } else if app_private_dest {
+            copy_host_source_to_app_private(
+                &mut self.adapters.device,
+                &sandbox,
+                step,
+                &source,
+                dest,
+                copy_policy,
+            )?
+        } else {
+            copy_host_source(
+                &mut self.adapters.device,
+                &sandbox,
+                &source,
+                dest,
+                copy_policy,
+            )?
+        };
         let mut outputs = OrderedMap::new();
         outputs.insert(
             "copied_paths".to_string(),
@@ -800,6 +908,273 @@ impl<D: ExecutorDevice> ExecutorRunner<D> {
     }
 }
 
+fn copy_host_source<D: ExecutorDevice>(
+    device: &mut D,
+    sandbox: &SandboxRoots,
+    source: &RuntimeValue,
+    dest: &str,
+    copy_policy: &str,
+) -> Result<Vec<String>, StepFailure> {
+    match source.type_name.as_str() {
+        "directory_path" => {
+            let source_path = source_path_from_value(source)?;
+            sandbox.ensure_read_allowed(&source_path)?;
+            if copy_policy == "replace" {
+                device.remove_tree(dest)?;
+            }
+            device.mkdir_p(dest)?;
+            let mut copied = Vec::new();
+            for child in sorted_children(&source_path)? {
+                let child_name = child
+                    .file_name()
+                    .expect("source child should have a basename")
+                    .to_string_lossy();
+                let target = join_device_path(dest, &child_name);
+                device.push(&child, &target, copy_policy == "sync")?;
+                copied.push(target);
+            }
+            Ok(copied)
+        }
+        "path_list" => {
+            if copy_policy == "replace" {
+                device.remove_tree(dest)?;
+            }
+            device.mkdir_p(dest)?;
+            let mut copied = Vec::new();
+            for source_path in source_path_list(source)? {
+                sandbox.ensure_read_allowed(&source_path)?;
+                let child_name = source_path
+                    .file_name()
+                    .ok_or_else(|| {
+                        StepFailure::new(format!(
+                            "copy_files source path has no basename: {}",
+                            source_path.display()
+                        ))
+                    })?
+                    .to_string_lossy();
+                let target = join_device_path(dest, &child_name);
+                device.push(&source_path, &target, copy_policy == "sync")?;
+                copied.push(target);
+            }
+            Ok(copied)
+        }
+        "file_path" => {
+            let source_path = source_path_from_value(source)?;
+            sandbox.ensure_read_allowed(&source_path)?;
+            let target = if device.path_is_dir(dest)? {
+                let name = source_path.file_name().ok_or_else(|| {
+                    StepFailure::new(format!(
+                        "copy_files source path has no basename: {}",
+                        source_path.display()
+                    ))
+                })?;
+                join_device_path(dest, &name.to_string_lossy())
+            } else {
+                if let Some(parent) = device_parent(dest) {
+                    device.mkdir_p(parent)?;
+                }
+                dest.to_string()
+            };
+            if copy_policy == "replace" {
+                device.remove_file(&target)?;
+            }
+            device.push(&source_path, &target, copy_policy == "sync")?;
+            Ok(vec![target])
+        }
+        other => Err(StepFailure::new(format!(
+            "copy_files does not support source runtime type {other:?}."
+        ))),
+    }
+}
+
+fn copy_device_source<D: ExecutorDevice>(
+    device: &mut D,
+    source: &RuntimeValue,
+    dest: &str,
+    copy_policy: &str,
+) -> Result<Vec<String>, StepFailure> {
+    match source.type_name.as_str() {
+        "directory_path" => {
+            let source_path = python_value_to_string(&source.value);
+            if copy_policy == "replace" {
+                device.remove_tree(dest)?;
+            }
+            device.mkdir_p(dest)?;
+            device.copy_on_device(
+                &format!("{}/.", source_path.trim_end_matches('/')),
+                dest,
+                true,
+                false,
+            )?;
+            Ok(vec![dest.to_string()])
+        }
+        "path_list" => {
+            if copy_policy == "replace" {
+                device.remove_tree(dest)?;
+            }
+            device.mkdir_p(dest)?;
+            let mut copied = Vec::new();
+            for item in source.value.as_array().cloned().unwrap_or_default() {
+                let source_path = item.as_str().ok_or_else(|| {
+                    StepFailure::new(
+                        "copy_files path_list source values must be strings".to_string(),
+                    )
+                })?;
+                device.copy_on_device(source_path, dest, true, false)?;
+                copied.push(join_device_path(dest, device_basename(source_path)));
+            }
+            Ok(copied)
+        }
+        "file_path" => {
+            let source_path = python_value_to_string(&source.value);
+            let target = if device.path_is_dir(dest)? {
+                join_device_path(dest, device_basename(&source_path))
+            } else {
+                if let Some(parent) = device_parent(dest) {
+                    device.mkdir_p(parent)?;
+                }
+                dest.to_string()
+            };
+            if copy_policy == "replace" {
+                device.remove_file(&target)?;
+            }
+            device.copy_on_device(&source_path, &target, false, false)?;
+            Ok(vec![target])
+        }
+        other => Err(StepFailure::new(format!(
+            "copy_files does not support device source runtime type {other:?}."
+        ))),
+    }
+}
+
+fn copy_host_source_to_app_private<D: ExecutorDevice>(
+    device: &mut D,
+    sandbox: &SandboxRoots,
+    step: &ExecutionStep,
+    source: &RuntimeValue,
+    dest: &str,
+    copy_policy: &str,
+) -> Result<Vec<String>, StepFailure> {
+    let stage_root = format!("/data/local/tmp/emuchef/{}", sanitize_step_id(&step.id));
+    device.remove_tree(&stage_root)?;
+    device.mkdir_p(&stage_root)?;
+    let result = (|| match source.type_name.as_str() {
+        "directory_path" => {
+            let source_path = source_path_from_value(source)?;
+            sandbox.ensure_read_allowed(&source_path)?;
+            if copy_policy == "replace" {
+                device.remove_tree(dest)?;
+            }
+            device.mkdir_p(dest)?;
+            let mut copied = Vec::new();
+            for child in sorted_children(&source_path)? {
+                let name = child
+                    .file_name()
+                    .expect("source child should have a basename")
+                    .to_string_lossy();
+                let staged = join_device_path(&stage_root, &name);
+                device.push(&child, &staged, false)?;
+                device.copy_on_device(&staged, dest, child.is_dir(), true)?;
+                copied.push(join_device_path(dest, &name));
+            }
+            Ok(copied)
+        }
+        "path_list" => {
+            if copy_policy == "replace" {
+                device.remove_tree(dest)?;
+            }
+            device.mkdir_p(dest)?;
+            let mut copied = Vec::new();
+            for source_path in source_path_list(source)? {
+                sandbox.ensure_read_allowed(&source_path)?;
+                let name = source_path
+                    .file_name()
+                    .ok_or_else(|| {
+                        StepFailure::new(format!(
+                            "copy_files source path has no basename: {}",
+                            source_path.display()
+                        ))
+                    })?
+                    .to_string_lossy();
+                let staged = join_device_path(&stage_root, &name);
+                device.push(&source_path, &staged, false)?;
+                device.copy_on_device(&staged, dest, source_path.is_dir(), true)?;
+                copied.push(join_device_path(dest, &name));
+            }
+            Ok(copied)
+        }
+        "file_path" => {
+            let source_path = source_path_from_value(source)?;
+            sandbox.ensure_read_allowed(&source_path)?;
+            let name = source_path
+                .file_name()
+                .ok_or_else(|| {
+                    StepFailure::new(format!(
+                        "copy_files source path has no basename: {}",
+                        source_path.display()
+                    ))
+                })?
+                .to_string_lossy();
+            let staged = join_device_path(&stage_root, &name);
+            device.push(&source_path, &staged, false)?;
+            let target = if device.path_is_dir(dest)? {
+                join_device_path(dest, &name)
+            } else {
+                if let Some(parent) = device_parent(dest) {
+                    device.mkdir_p(parent)?;
+                }
+                dest.to_string()
+            };
+            if copy_policy == "replace" {
+                device.remove_file(&target)?;
+            }
+            device.copy_on_device(&staged, &target, false, true)?;
+            Ok(vec![target])
+        }
+        other => Err(StepFailure::new(format!(
+            "copy_files does not support source runtime type {other:?}."
+        ))),
+    })();
+    let cleanup = device.remove_tree(&stage_root).map_err(StepFailure::from);
+    match (result, cleanup) {
+        (Err(error), _) => Err(error),
+        (Ok(_), Err(error)) => Err(error),
+        (Ok(copied), Ok(())) => Ok(copied),
+    }
+}
+
+fn source_path_list(source: &RuntimeValue) -> Result<Vec<PathBuf>, StepFailure> {
+    source
+        .value
+        .as_array()
+        .cloned()
+        .unwrap_or_default()
+        .into_iter()
+        .map(|item| {
+            item.as_str().map(PathBuf::from).ok_or_else(|| {
+                StepFailure::new("copy_files path_list source values must be strings".to_string())
+            })
+        })
+        .collect()
+}
+
+fn device_parent(path: &str) -> Option<&str> {
+    let path = path.trim_end_matches('/');
+    let (parent, _) = path.rsplit_once('/')?;
+    if parent.is_empty() {
+        Some("/")
+    } else {
+        Some(parent)
+    }
+}
+
+fn device_basename(path: &str) -> &str {
+    path.trim_end_matches('/')
+        .rsplit('/')
+        .next()
+        .unwrap_or(path)
+}
+
 pub type DryRunExecutorAdapters = ExecutorAdapters<FakeDryRunDevice>;
 
 #[derive(Debug)]
@@ -807,6 +1182,7 @@ pub struct ExecutorAdapters<D: ExecutorDevice = FakeDryRunDevice> {
     device: D,
     sleep_calls: Vec<f64>,
     sandbox: Option<SandboxRoots>,
+    perform_sleep: bool,
 }
 
 impl Default for ExecutorAdapters<FakeDryRunDevice> {
@@ -815,6 +1191,7 @@ impl Default for ExecutorAdapters<FakeDryRunDevice> {
             device: FakeDryRunDevice::default(),
             sleep_calls: Vec::new(),
             sandbox: None,
+            perform_sleep: false,
         }
     }
 }
@@ -825,6 +1202,28 @@ impl<D: ExecutorDevice> ExecutorAdapters<D> {
             device,
             sleep_calls: Vec::new(),
             sandbox: None,
+            perform_sleep: false,
+        }
+    }
+
+    pub fn with_device_and_sandbox_roots(
+        device: D,
+        runtime_root: PathBuf,
+        cache_root: PathBuf,
+        fake_device_root: PathBuf,
+        read_only_roots: Vec<PathBuf>,
+        perform_sleep: bool,
+    ) -> Self {
+        Self {
+            device,
+            sleep_calls: Vec::new(),
+            sandbox: Some(SandboxRoots {
+                runtime_root,
+                cache_root,
+                fake_device_root,
+                read_only_roots,
+            }),
+            perform_sleep,
         }
     }
 
@@ -842,6 +1241,9 @@ impl<D: ExecutorDevice> ExecutorAdapters<D> {
 
     fn sleep(&mut self, seconds: f64) {
         self.sleep_calls.push(seconds);
+        if self.perform_sleep {
+            std::thread::sleep(std::time::Duration::from_secs_f64(seconds));
+        }
     }
 
     fn sandbox(&self) -> Result<&SandboxRoots, StepFailure> {
@@ -869,6 +1271,7 @@ impl ExecutorAdapters<FakeDryRunDevice> {
                 fake_device_root,
                 read_only_roots,
             }),
+            perform_sleep: false,
         }
     }
 }
@@ -1003,8 +1406,73 @@ impl FakeDryRunDevice {
 }
 
 impl ExecutorDevice for FakeDryRunDevice {
+    fn uses_fake_device_filesystem(&self) -> bool {
+        true
+    }
+
     fn install_apk(&mut self, apk_path: &Path, replace_existing: bool) -> Result<(), String> {
         FakeDryRunDevice::install_apk(self, apk_path, replace_existing)
+    }
+
+    fn push(&mut self, source: &Path, dest: &str, sync: bool) -> Result<(), String> {
+        self.commands.push(vec![
+            if sync { "push_sync" } else { "push" }.to_string(),
+            source.to_string_lossy().to_string(),
+            dest.to_string(),
+        ]);
+        self.remote_paths.insert(dest.to_string());
+        if source.is_dir() {
+            self.remote_dirs.insert(dest.to_string());
+        }
+        Ok(())
+    }
+
+    fn mkdir_p(&mut self, path: &str) -> Result<(), String> {
+        self.commands
+            .push(vec!["mkdir_p".to_string(), path.to_string()]);
+        self.remote_paths.insert(path.to_string());
+        self.remote_dirs.insert(path.to_string());
+        Ok(())
+    }
+
+    fn remove_file(&mut self, path: &str) -> Result<(), String> {
+        self.commands
+            .push(vec!["remove_file".to_string(), path.to_string()]);
+        self.remote_paths.remove(path);
+        self.remote_dirs.remove(path);
+        Ok(())
+    }
+
+    fn remove_tree(&mut self, path: &str) -> Result<(), String> {
+        self.commands
+            .push(vec!["remove_tree".to_string(), path.to_string()]);
+        let prefix = format!("{}/", path.trim_end_matches('/'));
+        self.remote_paths
+            .retain(|candidate| candidate != path && !candidate.starts_with(&prefix));
+        self.remote_dirs
+            .retain(|candidate| candidate != path && !candidate.starts_with(&prefix));
+        Ok(())
+    }
+
+    fn copy_on_device(
+        &mut self,
+        source: &str,
+        dest: &str,
+        recursive: bool,
+        privileged: bool,
+    ) -> Result<(), String> {
+        self.commands.push(vec![
+            "copy_on_device".to_string(),
+            source.to_string(),
+            dest.to_string(),
+            py_bool(recursive).to_string(),
+            py_bool(privileged).to_string(),
+        ]);
+        self.remote_paths.insert(dest.to_string());
+        if recursive {
+            self.remote_dirs.insert(dest.to_string());
+        }
+        Ok(())
     }
 
     fn package_installed(&mut self, package_name: &str) -> Result<bool, String> {
@@ -1035,6 +1503,32 @@ impl ExecutorDevice for FakeDryRunDevice {
 impl<E: adb::AdbCommandExecutor> ExecutorDevice for adb::RealAdbDevice<E> {
     fn install_apk(&mut self, apk_path: &Path, replace_existing: bool) -> Result<(), String> {
         adb::RealAdbDevice::install_apk(self, apk_path, replace_existing)
+    }
+
+    fn push(&mut self, source: &Path, dest: &str, sync: bool) -> Result<(), String> {
+        adb::RealAdbDevice::push(self, source, dest, sync)
+    }
+
+    fn mkdir_p(&mut self, path: &str) -> Result<(), String> {
+        adb::RealAdbDevice::mkdir_p(self, path)
+    }
+
+    fn remove_file(&mut self, path: &str) -> Result<(), String> {
+        adb::RealAdbDevice::remove_file(self, path)
+    }
+
+    fn remove_tree(&mut self, path: &str) -> Result<(), String> {
+        adb::RealAdbDevice::remove_tree(self, path)
+    }
+
+    fn copy_on_device(
+        &mut self,
+        source: &str,
+        dest: &str,
+        recursive: bool,
+        privileged: bool,
+    ) -> Result<(), String> {
+        adb::RealAdbDevice::copy_on_device(self, source, dest, recursive, privileged)
     }
 
     fn package_installed(&mut self, package_name: &str) -> Result<bool, String> {
@@ -1706,7 +2200,7 @@ fn artifact_filename(artifact_id: &str, url: &str) -> String {
         })
 }
 
-fn file_url_to_path(url: &str) -> Option<PathBuf> {
+pub(crate) fn file_url_to_path(url: &str) -> Option<PathBuf> {
     let rest = url.strip_prefix("file://")?;
     let path = if rest.starts_with('/') {
         rest

@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Static readiness report for future Rust planner default-cutover PRs.
+"""Static readiness report for the canonical Rust CLI and runtime cutover.
 
 This developer-only gate consolidates static prerequisites, supplied manual
 evidence reports, advisory manual evidence commands, and intentionally remaining
@@ -16,8 +16,9 @@ from pathlib import Path
 from typing import Any, Callable
 
 
-REPORT_KIND = "rust_planner_cutover_readiness_check"
-REPORT_SCHEMA_VERSION = 1
+REPORT_KIND = "rust_runtime_cutover_readiness_check"
+REPORT_SCHEMA_VERSION = 2
+HISTORICAL_P8_REPORT_SCHEMA_VERSION = 1
 SCENARIO_MATRIX_SCHEMA_VERSION = 1
 DEVICE_CONTEXT_FIELDS = ("manufacturer", "model", "android_version", "device_tags")
 DEVICE_CONTEXT_FIELD_SET = set(DEVICE_CONTEXT_FIELDS)
@@ -39,7 +40,10 @@ REAL_DEVICE_PROBING_BLOCKER_ID = "real_device_probing_not_cut_over"
 MISMATCH_WARNING_BLOCKER_ID = "detected_device_profile_mismatch_warning_not_cut_over"
 PACKAGED_LAUNCHER_INJECTION_BLOCKER_ID = "packaged_launcher_injection_evidence_not_accepted"
 PACKAGED_RELEASE_BLOCKER_ID = "packaged_release_not_ready"
-EVIDENCE_ACCEPTED_STATUS = "evidence_accepted"
+REAL_DEVICE_PLAN_EVIDENCE_BLOCKER_ID = "real_device_plan_probe_evidence"
+MISMATCH_WARNING_EVIDENCE_BLOCKER_ID = "device_profile_mismatch_warning_evidence"
+REAL_DEVICE_APPLY_EVIDENCE_BLOCKER_ID = "real_device_apply_evidence"
+NETWORK_ARTIFACT_BLOCKER_ID = "network_artifact_downloads_not_cut_over"
 P8AK_REQUIRED_PASSING_CASES = (
     "matched_profile",
     "manufacturer_mismatch",
@@ -159,7 +163,7 @@ CLI_BACKEND_TOKENS = (
     ("rust_shadow_output", "--rust-shadow-output"),
 )
 
-REQUIRED_MANUAL_EVIDENCE = (
+HISTORICAL_P8_MANUAL_EVIDENCE = (
     {
         "id": "p7p_python_rust_comparison_matrix",
         "command": (
@@ -237,6 +241,30 @@ REQUIRED_MANUAL_EVIDENCE = (
     },
 )
 
+REQUIRED_MANUAL_EVIDENCE = (
+    {
+        "id": REAL_DEVICE_PLAN_EVIDENCE_BLOCKER_ID,
+        "command": (
+            "emuchef plan --authored-root authored --device-plan <device-plan> "
+            "--adb <path-to-adb> --serial <device-serial>"
+        ),
+    },
+    {
+        "id": MISMATCH_WARNING_EVIDENCE_BLOCKER_ID,
+        "command": (
+            "emuchef plan --authored-root authored --device-plan <mismatched-device-plan> "
+            "--adb <path-to-adb> --serial <device-serial>"
+        ),
+    },
+    {
+        "id": REAL_DEVICE_APPLY_EVIDENCE_BLOCKER_ID,
+        "command": (
+            "emuchef apply --plan-file <device-safe-plan> --adb <path-to-adb> "
+            "--serial <device-serial>"
+        ),
+    },
+)
+
 REMAINING_BLOCKERS = (
     {
         "id": DEFAULT_CLI_BACKEND_BLOCKER_ID,
@@ -252,18 +280,34 @@ REMAINING_BLOCKERS = (
     },
     {
         "id": "executor_apply_not_cut_over",
-        "status": "blocked",
+        "status": "resolved",
     },
     {
         "id": REAL_DEVICE_PROBING_BLOCKER_ID,
-        "status": "blocked",
+        "status": "resolved",
     },
     {
         "id": MISMATCH_WARNING_BLOCKER_ID,
-        "status": "blocked",
+        "status": "resolved",
     },
     {
         "id": PACKAGED_LAUNCHER_INJECTION_BLOCKER_ID,
+        "status": "resolved",
+    },
+    {
+        "id": REAL_DEVICE_PLAN_EVIDENCE_BLOCKER_ID,
+        "status": "missing",
+    },
+    {
+        "id": MISMATCH_WARNING_EVIDENCE_BLOCKER_ID,
+        "status": "missing",
+    },
+    {
+        "id": REAL_DEVICE_APPLY_EVIDENCE_BLOCKER_ID,
+        "status": "missing",
+    },
+    {
+        "id": NETWORK_ARTIFACT_BLOCKER_ID,
         "status": "blocked",
     },
     {
@@ -280,17 +324,20 @@ def _status_explanation() -> dict[str, Any]:
         "top_level_status": "blocked",
         "evidence_accepted_is_not_release_ready": True,
         "evidence_accepted_meaning": (
-            "Accepted evidence can satisfy scoped evidence blockers; it does not imply top-level readiness."
+            "Accepted schema-v1 P8 evidence validates historical report shape only; "
+            "it does not satisfy current schema-v2 blockers."
         ),
         "top_level_blocked_reason": (
-            "Top-level readiness remains blocked while executor/apply, packaged release, "
-            "and unsatisfied evidence-dependent blockers remain blocked."
+            "Code-level local/BYO Rust runtime cutover is complete. Top-level readiness remains "
+            "blocked only by manual device evidence, network artifact support required by current "
+            "authored recipes, and release/distribution work."
         ),
         "blocking_categories": [
-            "executor_apply",
-            "evidence_dependent_cutover",
-            "packaged_release",
+            "manual_device_evidence",
+            "network_artifacts",
+            "release_distribution",
         ],
+        "code_level_local_runtime_cutover": "resolved",
     }
 
 
@@ -306,9 +353,9 @@ def build_readiness_report(
 ) -> dict[str, Any]:
     """Build the deterministic static readiness report.
 
-    `status` intentionally remains `blocked` because static prerequisites and
-    supplied production-equivalent evidence are not enough to make Rust the
-    default planner backend.
+    `status` intentionally remains `blocked` for manual device evidence,
+    network-backed authored artifacts, and release/distribution work. Static
+    implementation checks independently prove the local/BYO Rust runtime cutover.
     """
 
     repo_root = repo_root.resolve()
@@ -316,7 +363,7 @@ def build_readiness_report(
     authored_path = _resolve_input_path(repo_root, authored_root)
 
     payload, matrix_checks = _scenario_matrix_checks(matrix_path, authored_path)
-    static_checks = [
+    historical_checks = [
         *matrix_checks,
         *_required_artifact_checks(repo_root),
         *_readiness_doc_reference_checks(repo_root),
@@ -326,33 +373,34 @@ def build_readiness_report(
         *_cli_default_rust_apply_dry_run_checks(repo_root),
         *_cli_packaged_rust_backend_candidate_checks(repo_root),
     ]
-    production_equivalent_evidence = {
+    static_checks = _runtime_cutover_checks(repo_root)
+    historical_p8_evidence = {
         P8AJ_EVIDENCE_ID: _evaluate_evidence_report(
             repo_root=repo_root,
             report_path=p8aj_live_probe_report,
             evidence_id=P8AJ_EVIDENCE_ID,
-            blocker_id=REAL_DEVICE_PROBING_BLOCKER_ID,
+            blocker_id="historical_real_device_plan_probe_evidence",
             validator=_p8aj_evidence_rejection_reasons,
         ),
         P8AK_EVIDENCE_ID: _evaluate_evidence_report(
             repo_root=repo_root,
             report_path=p8ak_mismatch_warning_report,
             evidence_id=P8AK_EVIDENCE_ID,
-            blocker_id=MISMATCH_WARNING_BLOCKER_ID,
+            blocker_id="historical_device_profile_mismatch_warning_evidence",
             validator=_p8ak_evidence_rejection_reasons,
         ),
         P8BC_EVIDENCE_ID: _evaluate_evidence_report(
             repo_root=repo_root,
             report_path=p8bc_launcher_injected_planner_report,
             evidence_id=P8BC_EVIDENCE_ID,
-            blocker_id=PACKAGED_LAUNCHER_INJECTION_BLOCKER_ID,
+            blocker_id="historical_packaged_launcher_injection_evidence",
             validator=_p8bc_evidence_rejection_reasons,
         ),
         P8BU_EVIDENCE_ID: _evaluate_evidence_report(
             repo_root=repo_root,
             report_path=p8bu_rust_apply_dry_run_bridge_report,
             evidence_id=P8BU_EVIDENCE_ID,
-            blocker_id=RUST_APPLY_DRY_RUN_BRIDGE_EVIDENCE_ID,
+            blocker_id="historical_rust_apply_dry_run_bridge_evidence",
             validator=_p8bu_evidence_rejection_reasons,
             sensitive_payload_exemption_kind=P8BU_REPORT_KIND,
         ),
@@ -368,9 +416,16 @@ def build_readiness_report(
             "scenario_matrix": _display_path(scenario_matrix),
         },
         "static_checks": static_checks,
-        "production_equivalent_evidence": production_equivalent_evidence,
+        "historical_checks": historical_checks,
+        "historical_p8_evidence_classification": {
+            "classification": "historical_manual_only",
+            "current_product_readiness_effect": False,
+            "accepted_reports_do_not_resolve_implementation_cutover": True,
+        },
+        "historical_p8_evidence": historical_p8_evidence,
         "required_manual_evidence": [dict(item) for item in REQUIRED_MANUAL_EVIDENCE],
-        "remaining_blockers": _remaining_blockers_with_evidence(production_equivalent_evidence),
+        "historical_manual_evidence": [dict(item) for item in HISTORICAL_P8_MANUAL_EVIDENCE],
+        "remaining_blockers": [dict(item) for item in REMAINING_BLOCKERS],
     }
 
 
@@ -525,8 +580,8 @@ def _p8aj_evidence_rejection_reasons(payload: dict[str, Any]) -> list[str]:
     reasons = []
     if payload.get("kind") != P8AJ_REPORT_KIND:
         reasons.append(f"kind must be {P8AJ_REPORT_KIND}")
-    if payload.get("schema_version") != REPORT_SCHEMA_VERSION:
-        reasons.append(f"schema_version must be {REPORT_SCHEMA_VERSION}")
+    if payload.get("schema_version") != HISTORICAL_P8_REPORT_SCHEMA_VERSION:
+        reasons.append(f"schema_version must be {HISTORICAL_P8_REPORT_SCHEMA_VERSION}")
     reasons.extend(_optional_status_rejection_reasons(payload))
 
     summary = payload.get("summary")
@@ -543,8 +598,8 @@ def _p8ak_evidence_rejection_reasons(payload: dict[str, Any]) -> list[str]:
     reasons = []
     if payload.get("kind") != P8AK_REPORT_KIND:
         reasons.append(f"kind must be {P8AK_REPORT_KIND}")
-    if payload.get("schema_version") != REPORT_SCHEMA_VERSION:
-        reasons.append(f"schema_version must be {REPORT_SCHEMA_VERSION}")
+    if payload.get("schema_version") != HISTORICAL_P8_REPORT_SCHEMA_VERSION:
+        reasons.append(f"schema_version must be {HISTORICAL_P8_REPORT_SCHEMA_VERSION}")
     reasons.extend(_optional_status_rejection_reasons(payload))
 
     summary = payload.get("summary")
@@ -574,8 +629,8 @@ def _p8bc_evidence_rejection_reasons(payload: dict[str, Any]) -> list[str]:
 
     if payload.get("kind") != P8BC_REPORT_KIND:
         reasons.append(f"kind must be {P8BC_REPORT_KIND}")
-    if payload.get("schema_version") != REPORT_SCHEMA_VERSION:
-        reasons.append(f"schema_version must be {REPORT_SCHEMA_VERSION}")
+    if payload.get("schema_version") != HISTORICAL_P8_REPORT_SCHEMA_VERSION:
+        reasons.append(f"schema_version must be {HISTORICAL_P8_REPORT_SCHEMA_VERSION}")
 
     summary = payload.get("summary")
     if not isinstance(summary, dict) or not _json_int_equals(summary.get("failed"), 0):
@@ -628,8 +683,8 @@ def _p8bu_evidence_rejection_reasons(payload: dict[str, Any]) -> list[str]:
 
     if payload.get("kind") != P8BU_REPORT_KIND:
         reasons.append(f"kind must be {P8BU_REPORT_KIND}")
-    if payload.get("schema_version") != REPORT_SCHEMA_VERSION:
-        reasons.append(f"schema_version must be {REPORT_SCHEMA_VERSION}")
+    if payload.get("schema_version") != HISTORICAL_P8_REPORT_SCHEMA_VERSION:
+        reasons.append(f"schema_version must be {HISTORICAL_P8_REPORT_SCHEMA_VERSION}")
     if payload.get("status") != "passed":
         reasons.append("status must be passed")
 
@@ -753,42 +808,122 @@ def _json_int_equals(value: object, expected: int) -> bool:
     return isinstance(value, int) and not isinstance(value, bool) and value == expected
 
 
-def _remaining_blockers_with_evidence(production_equivalent_evidence: dict[str, dict[str, Any]]) -> list[dict[str, str]]:
-    blocker_statuses = {
-        REAL_DEVICE_PROBING_BLOCKER_ID: (
-            EVIDENCE_ACCEPTED_STATUS
-            if production_equivalent_evidence[P8AJ_EVIDENCE_ID]["status"] == "accepted"
-            else "blocked"
+def _runtime_cutover_checks(repo_root: Path) -> list[dict[str, Any]]:
+    """Inspect only current product runtime source and packaging contracts."""
+
+    cargo = _read_text_if_available(repo_root / "crates/emuchef-rust-backend/Cargo.toml")
+    main_rs = _read_text_if_available(repo_root / "crates/emuchef-rust-backend/src/main.rs")
+    cli_rs = _read_text_if_available(repo_root / "crates/emuchef-rust-backend/src/cli.rs")
+    executor_rs = _read_text_if_available(repo_root / "crates/emuchef-rust-backend/src/executor.rs")
+    adb_rs = _read_text_if_available(repo_root / "crates/emuchef-rust-backend/src/executor/adb.rs")
+    plan_shadow_rs = _read_text_if_available(repo_root / "crates/emuchef-rust-backend/src/plan_shadow.rs")
+    pyproject = _read_text_if_available(repo_root / "pyproject.toml")
+    package_json = _read_text_if_available(repo_root / "apps/config-editor/package.json")
+    tauri_config = _read_text_if_available(repo_root / "apps/config-editor/src-tauri/tauri.conf.json")
+    sidecar_client = _read_text_if_available(repo_root / "apps/config-editor/src-tauri/src/sidecar_client.rs")
+    packaging = _read_text_if_available(repo_root / "apps/config-editor/scripts/sidecar-packaging.mjs")
+    prepare = _read_text_if_available(repo_root / "apps/config-editor/scripts/prepare-rust-sidecar.mjs")
+
+    python_execution_tokens = (
+        'Command::new("python',
+        'Command::new("python3',
+        '"python.exe"',
+        '"python3.exe"',
+        "src/emuchef/cli.py",
+    )
+    rust_runtime_text = "\n".join((main_rs, cli_rs, executor_rs, adb_rs, plan_shadow_rs))
+    runtime_python_tokens = [token for token in python_execution_tokens if token in rust_runtime_text]
+    package_python_tokens = [
+        token
+        for token in ("python ", "python3 ", "python.exe", "python3.exe", "src/emuchef/cli.py")
+        if token in "\n".join((package_json, tauri_config, sidecar_client, packaging, prepare))
+    ]
+
+    canonical_tokens = (
+        'default-run = "emuchef"',
+        'name = "emuchef"',
+        'path = "src/main.rs"',
+    )
+    python_legacy_only = (
+        'emuchef-python-legacy = "emuchef.cli:main"' in pyproject
+        and 'emuchef = "emuchef.cli:main"' not in pyproject
+    )
+
+    return [
+        _check(
+            "canonical_cli_is_rust_binary",
+            _source_has_tokens(cargo, canonical_tokens)
+            and "emuchef_rust_backend::run_with_args_and_input" in main_rs,
+            _missing_source_tokens_details(cargo + main_rs, (*canonical_tokens, "run_with_args_and_input")),
         ),
-        MISMATCH_WARNING_BLOCKER_ID: (
-            EVIDENCE_ACCEPTED_STATUS
-            if production_equivalent_evidence[P8AK_EVIDENCE_ID]["status"] == "accepted"
-            else "blocked"
+        _check(
+            "python_cli_not_default_entrypoint",
+            python_legacy_only,
+            None
+            if python_legacy_only
+            else {"required": "emuchef-python-legacy only", "forbidden": "Python-owned emuchef"},
         ),
-        PACKAGED_LAUNCHER_INJECTION_BLOCKER_ID: (
-            EVIDENCE_ACCEPTED_STATUS
-            if production_equivalent_evidence[P8BC_EVIDENCE_ID]["status"] == "accepted"
-            else "blocked"
+        _check(
+            "default_plan_runtime_has_no_python_execution",
+            'Some("plan") => run_plan' in cli_rs
+            and "planning_result_with_adb_runner" in cli_rs
+            and not runtime_python_tokens,
+            None if not runtime_python_tokens else {"forbidden_tokens": runtime_python_tokens},
         ),
-    }
-    p8bu_evidence_accepted = production_equivalent_evidence[P8BU_EVIDENCE_ID]["status"] == "accepted"
-    blockers: list[dict[str, str]] = []
-    for blocker in REMAINING_BLOCKERS:
-        blocker_id = blocker["id"]
-        blockers.append(
-            {
-                "id": blocker_id,
-                "status": blocker_statuses.get(blocker_id, blocker["status"]),
-            }
-        )
-        if blocker_id == DEFAULT_RUST_APPLY_DRY_RUN_CAPABILITY_ID and p8bu_evidence_accepted:
-            blockers.append(
-                {
-                    "id": RUST_APPLY_DRY_RUN_BRIDGE_EVIDENCE_ID,
-                    "status": EVIDENCE_ACCEPTED_STATUS,
-                }
-            )
-    return blockers
+        _check(
+            "default_validate_runtime_has_no_python_execution",
+            'Some("validate") => run_validate' in cli_rs
+            and "validation::validate_recipe_path_result" in cli_rs
+            and not runtime_python_tokens,
+            None if not runtime_python_tokens else {"forbidden_tokens": runtime_python_tokens},
+        ),
+        _check(
+            "default_apply_runtime_has_no_python_execution",
+            'Some("apply") => run_apply' in cli_rs
+            and "execute_apply_plan" in cli_rs
+            and not runtime_python_tokens,
+            None if not runtime_python_tokens else {"forbidden_tokens": runtime_python_tokens},
+        ),
+        _check(
+            "rust_cli_apply_accepts_non_dry_run",
+            "if config.dry_run" in cli_rs
+            and "Rust Phase 6S apply supports only --dry-run." not in cli_rs
+            and "execute_apply_plan(&plan, adapters, false)" in cli_rs,
+        ),
+        _check(
+            "rust_cli_apply_uses_real_adb_device_for_non_dry_run",
+            "RealAdbDevice::new(adb, serial)" in cli_rs
+            and "with_device_and_sandbox_roots" in cli_rs,
+        ),
+        _check(
+            "rust_cli_apply_preserves_dry_run_runner",
+            "ExecutorAdapters::with_sandbox_roots" in cli_rs
+            and "execute_apply_plan(&plan, adapters, true)" in cli_rs,
+        ),
+        _check(
+            "rust_cli_apply_forwards_adb_and_serial",
+            '"--plan-file" | "--adb" | "--serial"' in cli_rs
+            and "factory(config.adb, config.serial)" in cli_rs,
+        ),
+        _check(
+            "tauri_runtime_has_no_python_dependency",
+            '"externalBin": ["binaries/emuchef"]' in tauri_config
+            and '"emuchef"' in sidecar_client
+            and not package_python_tokens,
+            None if not package_python_tokens else {"forbidden_tokens": package_python_tokens},
+        ),
+        _check(
+            "packaged_sidecar_contract_ready",
+            'BINARY_BASENAME = "emuchef"' in packaging
+            and '"--bin", BINARY_BASENAME' in prepare
+            and '"externalBin": ["binaries/emuchef"]' in tauri_config,
+        ),
+        _check(
+            "packaged_runtime_does_not_invoke_python",
+            not package_python_tokens,
+            None if not package_python_tokens else {"forbidden_tokens": package_python_tokens},
+        ),
+    ]
 
 
 def _scenario_matrix_checks(matrix_path: Path, authored_path: Path) -> tuple[dict[str, Any] | None, list[dict[str, Any]]]:
@@ -1201,7 +1336,7 @@ def _cli_packaged_rust_backend_candidate_checks(repo_root: Path) -> list[dict[st
         "config-editor",
         "src-tauri",
         "binaries",
-        "emuchef-rust-backend-",
+        "emuchef-",
     )
     forbidden_helper_tokens = (
         "os.environ",

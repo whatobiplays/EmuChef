@@ -1,5 +1,25 @@
 # Rust Planner Cutover Readiness
 
+## Current Runtime Readiness
+
+The current readiness report is
+`kind: rust_runtime_cutover_readiness_check`, `schema_version: 2`. Its current
+static checks prove that the canonical `emuchef` binary, default planner,
+file-based validator, dry-run and real-ADB apply routes, Tauri sidecar, and
+packaging contract are Rust-owned and do not execute Python.
+
+Schema-v1 P8 reports remain accepted only as historical/manual evidence. They do
+not define the current product-readiness schema and do not resolve implementation
+cutover blockers. Real-device probe/apply evidence remains manual. Network
+artifact downloads required by existing authored HTTP/HTTPS sources and public
+release signing/distribution remain blocked independently of the completed
+local/BYO code cutover.
+
+`emuchef-plan-shadow` remains development/reference-only and is not a product,
+Tauri, packaging, or canonical planner path.
+
+## Historical P8 Migration Record
+
 This document classifies current evidence and remaining blockers before Python
 planner fallback/reference behavior can be retired or the Python planner can be
 removed. P8BJ removes the explicit public `--planner-backend python` route but

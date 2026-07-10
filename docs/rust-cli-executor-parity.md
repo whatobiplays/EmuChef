@@ -1,19 +1,25 @@
 # Rust CLI and Executor Parity Strategy
 
-This document records the current Python/Rust ownership and parity strategy for
-CLI, planner, executor, and real-device apply behavior. It is documentation
-only. It does not change command behavior, planner semantics, executor
-semantics, authored schema, Tauri UI behavior, tests, fixtures, scripts, or CI.
+The canonical `emuchef` executable is Rust-owned. Rust directly owns default
+`plan`, file-based `validate`, dry-run and real-device `apply`, and `--sidecar`.
+The Tauri runtime and packaged sidecar use that Rust binary and have no Python
+fallback. Python remains only through the explicitly named
+`emuchef-python-legacy` reference command, compatibility tests, and migration
+fixtures.
+
+Device-target archive extraction occurs on the host inside the Rust staging root
+and is transferred with ADB; Android `unzip` is not a runtime prerequisite.
+File and `file://` artifacts are supported. Network URL download support and
+real-device evidence remain separate open readiness items.
 
 ## Non-Goals
 
 This document does not:
 
-1. Promote Rust CLI or executor behavior to production.
-2. Retire Python CLI, planner, or executor surfaces.
-3. Approve Rust real-device apply.
-4. Change Tauri editor runtime ownership.
-5. Add or require CI coverage.
+1. Delete Python reference, compatibility, or fixture code.
+2. Claim manual real-device evidence that has not been collected.
+3. Add network artifact downloads.
+4. Claim release signing, notarization, or distribution readiness.
 
 ## Current Ownership
 
@@ -22,15 +28,14 @@ launches the Rust JSONL sidecar directly through `apps/config-editor/src-tauri`
 and has no Python fallback, backend selector, backend toggle, environment
 backend choice, or protocol negotiation path.
 
-Python remains the production/reference owner for `draft`, `detect`,
-`detect-profiles`, `validate`, `apply`, executor, and real-device apply
-behavior. P8AO makes no-backend `emuchef plan` route through Rust-owned planning
-using the existing production-equivalent Rust subprocess path. Explicit
-`--planner-backend python` remains the transition fallback for the previous
-Python planning path.
-Python also remains the compatibility reference for broad CLI argument behavior,
-diagnostics, exit codes, execution plan file behavior, and planner deletion
-readiness until each surface has an explicit ownership change.
+Rust owns the product CLI planner, validator, executor, apply, and sidecar
+runtime. Python is a compatibility reference only and is never selected by a
+default product path.
+
+## Historical Migration Notes
+
+The phase-specific notes below record the pre-cutover migration design and
+evidence. They do not override the current ownership contract above.
 For Rust planner default routing, the accepted CLI output and exit-code
 compatibility target is recorded in
 `docs/adr/0002-rust-planner-cli-output-compatibility.md`.

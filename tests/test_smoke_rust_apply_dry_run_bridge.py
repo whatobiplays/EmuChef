@@ -103,7 +103,7 @@ class SmokeRustApplyDryRunBridgeTests(unittest.TestCase):
     def test_missing_rust_apply_binary_path_produces_failed_report_and_nonzero_exit(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
             temp_root = Path(temp_dir)
-            missing_bin = temp_root / "missing-emuchef-rust-backend"
+            missing_bin = temp_root / "missing-emuchef"
             plan_file = temp_root / "plan.yaml"
             plan_file.write_text("kind: execution_plan\n", encoding="utf-8")
             output_report = temp_root / "report.json"
@@ -124,7 +124,7 @@ class SmokeRustApplyDryRunBridgeTests(unittest.TestCase):
     def test_directory_rust_apply_binary_path_produces_failed_report_and_nonzero_exit(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
             temp_root = Path(temp_dir)
-            directory_bin = temp_root / "emuchef-rust-backend-dir"
+            directory_bin = temp_root / "emuchef-dir"
             directory_bin.mkdir()
             plan_file = temp_root / "plan.yaml"
             plan_file.write_text("kind: execution_plan\n", encoding="utf-8")
@@ -145,7 +145,7 @@ class SmokeRustApplyDryRunBridgeTests(unittest.TestCase):
     def test_non_executable_rust_apply_binary_path_produces_failed_report_and_nonzero_exit(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
             temp_root = Path(temp_dir)
-            non_executable_bin = temp_root / "emuchef-rust-backend"
+            non_executable_bin = temp_root / "emuchef"
             non_executable_bin.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
             non_executable_bin.chmod(0o600)
             plan_file = temp_root / "plan.yaml"
@@ -167,7 +167,7 @@ class SmokeRustApplyDryRunBridgeTests(unittest.TestCase):
     def test_missing_plan_file_produces_failed_report_and_nonzero_exit(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
             temp_root = Path(temp_dir)
-            rust_apply_bin = write_executable(temp_root / "emuchef-rust-backend", "#!/bin/sh\nexit 0\n")
+            rust_apply_bin = write_executable(temp_root / "emuchef", "#!/bin/sh\nexit 0\n")
             missing_plan = temp_root / "missing-plan.yaml"
             output_report = temp_root / "report.json"
 
@@ -188,7 +188,7 @@ class SmokeRustApplyDryRunBridgeTests(unittest.TestCase):
             temp_root = Path(temp_dir)
             argv_path = temp_root / "argv.txt"
             rust_apply_bin = write_executable(
-                temp_root / "emuchef-rust-backend",
+                temp_root / "emuchef",
                 "#!/bin/sh\nprintf '%s\\n' \"$@\" > \"$EMUCHEF_P8BU_ARGV_PATH\"\nprintf 'rust dry run ok\\n'\nexit 0\n",
             )
             plan_file = temp_root / "plan.yaml"
@@ -226,7 +226,7 @@ class SmokeRustApplyDryRunBridgeTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as temp_dir:
             temp_root = Path(temp_dir)
             rust_apply_bin = write_executable(
-                temp_root / "emuchef-rust-backend",
+                temp_root / "emuchef",
                 "#!/bin/sh\nprintf 'fixture dry run ok\\n'\nexit 0\n",
             )
             output_report = temp_root / "report.json"
@@ -255,7 +255,7 @@ class SmokeRustApplyDryRunBridgeTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as temp_dir:
             temp_root = Path(temp_dir)
             rust_apply_bin = write_executable(
-                temp_root / "emuchef-rust-backend",
+                temp_root / "emuchef",
                 "#!/bin/sh\nprintf 'rust dry run failed\\n' >&2\nexit 2\n",
             )
             plan_file = temp_root / "plan.yaml"

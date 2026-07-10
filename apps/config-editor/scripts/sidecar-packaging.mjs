@@ -1,4 +1,4 @@
-export const BINARY_BASENAME = "emuchef-rust-backend";
+export const BINARY_BASENAME = "emuchef";
 
 export function validateTargetTriple(value, source) {
   if (typeof value !== "string" || value.length === 0) {

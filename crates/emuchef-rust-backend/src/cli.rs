@@ -1,22 +1,25 @@
 use std::collections::BTreeMap;
 use std::fs;
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicU64, Ordering};
 
 use serde_json::Value as JsonValue;
 use serde_yaml::Value as YamlValue;
 
+use crate::device_probe::{CommandRunner, ProcessCommandRunner};
 use crate::executor::{
-    ExecutionProgressEvent, ExecutionRunResult, ExecutorRunner, ProgressPhase, ProgressStatus,
-    StepRunStatus,
+    adb::RealAdbDevice, file_url_to_path, ExecutionProgressEvent, ExecutionRunResult,
+    ExecutorAdapters, ExecutorDevice, ExecutorRunner, ProgressPhase, ProgressStatus, StepRunStatus,
 };
 use crate::model::OrderedMap;
 use crate::planner::{
-    DeviceContext, ExecutionParamValue, ExecutionPlan, ExecutionPlanSource, ExecutionStep,
-    ExecutionStepCondition, ExecutionStepConstraints, RuntimeCapabilities,
+    DeviceContext, ExecutionArtifact, ExecutionInputValue, ExecutionParamValue, ExecutionPlan,
+    ExecutionPlanSource, ExecutionStep, ExecutionStepCondition, ExecutionStepConstraints,
+    PlanningResult, PlanningStatus, RuntimeCapabilities, RuntimeValue as PlanRuntimeValue,
 };
-use crate::{validation, yaml, ProcessOutput};
+use crate::{plan_shadow, validation, yaml, ProcessOutput};
 
-const CLI_COMMANDS: &[&str] = &["validate", "apply"];
+const CLI_COMMANDS: &[&str] = &["plan", "validate", "apply", "-h", "--help"];
 
 pub(crate) fn is_cli_command(arg: &str) -> bool {
     CLI_COMMANDS.contains(&arg)
@@ -24,14 +27,239 @@ pub(crate) fn is_cli_command(arg: &str) -> bool {
 
 pub(crate) fn run(args: &[String]) -> ProcessOutput {
     match args.first().map(String::as_str) {
+        Some("plan") => run_plan(&args[1..]),
         Some("validate") => run_validate(&args[1..]),
         Some("apply") => run_apply(&args[1..]),
+        Some("-h" | "--help") => ProcessOutput {
+            exit_code: 0,
+            stdout: format!("{}\n", cli_usage()),
+            stderr: String::new(),
+        },
         _ => ProcessOutput {
             exit_code: 2,
             stdout: String::new(),
-            stderr: "usage: emuchef {validate,apply} ...\n".to_string(),
+            stderr: format!("{}\n", cli_usage()),
         },
     }
+}
+
+#[derive(Debug, Default)]
+struct PlanCliConfig {
+    authored_root: String,
+    device_plan: Option<String>,
+    bindings: Vec<String>,
+    manufacturer: Option<String>,
+    model: Option<String>,
+    android_version: Option<String>,
+    device_tags: Vec<String>,
+    adb: Option<String>,
+    serial: Option<String>,
+    output: Option<String>,
+    verbose: bool,
+}
+
+fn run_plan(args: &[String]) -> ProcessOutput {
+    run_plan_with_adb_runner(args, &ProcessCommandRunner)
+}
+
+fn run_plan_with_adb_runner<R: CommandRunner>(args: &[String], adb_runner: &R) -> ProcessOutput {
+    let config = match parse_plan_args(args) {
+        Ok(config) => config,
+        Err(output) => return output,
+    };
+    let shadow_args = plan_shadow_args(&config);
+    let result = match plan_shadow::planning_result_with_adb_runner(&shadow_args, adb_runner) {
+        Ok(result) => result,
+        Err(output) => return output,
+    };
+    format_plan_result(result, &config)
+}
+
+fn parse_plan_args(args: &[String]) -> Result<PlanCliConfig, ProcessOutput> {
+    let mut config = PlanCliConfig {
+        authored_root: "authored".to_string(),
+        ..PlanCliConfig::default()
+    };
+    let mut index = 0;
+    while index < args.len() {
+        let option = args[index].as_str();
+        match option {
+            "--authored-root" | "--device-plan" | "--bind" | "--manufacturer" | "--model"
+            | "--android-version" | "--device-tag" | "--adb" | "--serial" | "--output" => {
+                index += 1;
+                let Some(value) = args.get(index) else {
+                    return Err(usage_error(
+                        plan_usage(),
+                        &format!("emuchef plan: error: argument {option}: expected one argument"),
+                    ));
+                };
+                match option {
+                    "--authored-root" => config.authored_root = value.clone(),
+                    "--device-plan" => config.device_plan = Some(value.clone()),
+                    "--bind" => config.bindings.push(value.clone()),
+                    "--manufacturer" => config.manufacturer = Some(value.clone()),
+                    "--model" => config.model = Some(value.clone()),
+                    "--android-version" => config.android_version = Some(value.clone()),
+                    "--device-tag" => config.device_tags.push(value.clone()),
+                    "--adb" => config.adb = Some(value.clone()),
+                    "--serial" => config.serial = Some(value.clone()),
+                    "--output" => config.output = Some(value.clone()),
+                    _ => unreachable!("matched plan option should be handled"),
+                }
+            }
+            "--verbose" => config.verbose = true,
+            "--debug" | "--ops" => {
+                return Err(usage_error(
+                    plan_usage(),
+                    &format!("emuchef plan: error: {option} is not supported by the Rust CLI"),
+                ));
+            }
+            "-h" | "--help" => {
+                return Err(ProcessOutput {
+                    exit_code: 0,
+                    stdout: format!("{}\n", plan_usage()),
+                    stderr: String::new(),
+                });
+            }
+            value => {
+                return Err(usage_error(
+                    plan_usage(),
+                    &format!("emuchef plan: error: unrecognized arguments: {value}"),
+                ));
+            }
+        }
+        index += 1;
+    }
+    if config.device_plan.is_none() {
+        return Err(usage_error(
+            plan_usage(),
+            "emuchef plan: error: the following arguments are required: --device-plan",
+        ));
+    }
+    Ok(config)
+}
+
+fn plan_shadow_args(config: &PlanCliConfig) -> Vec<String> {
+    let mut args = vec![
+        "--authored-root".to_string(),
+        config.authored_root.clone(),
+        "--device-plan".to_string(),
+        config
+            .device_plan
+            .clone()
+            .expect("device plan should be present after parsing"),
+    ];
+    if config.adb.is_some() || config.serial.is_some() {
+        args.push("--probe-adb-getprop".to_string());
+        args.push("--adb-path".to_string());
+        args.push(config.adb.clone().unwrap_or_else(|| "adb".to_string()));
+        if let Some(serial) = &config.serial {
+            args.push("--serial".to_string());
+            args.push(serial.clone());
+        }
+    }
+    for (option, value) in [
+        ("--manufacturer", config.manufacturer.as_ref()),
+        ("--model", config.model.as_ref()),
+        ("--android-version", config.android_version.as_ref()),
+    ] {
+        if let Some(value) = value {
+            args.push(option.to_string());
+            args.push(value.clone());
+        }
+    }
+    for tag in &config.device_tags {
+        args.push("--device-tag".to_string());
+        args.push(tag.clone());
+    }
+    for binding in &config.bindings {
+        args.push("--bind".to_string());
+        args.push(binding.clone());
+    }
+    args
+}
+
+fn format_plan_result(result: PlanningResult, config: &PlanCliConfig) -> ProcessOutput {
+    let yaml = match serde_yaml::to_string(&result) {
+        Ok(yaml) => yaml,
+        Err(error) => {
+            return ProcessOutput {
+                exit_code: 1,
+                stdout: String::new(),
+                stderr: format!("Error: failed to serialize planning result: {error}\n"),
+            };
+        }
+    };
+    if let Some(output) = config.output.as_deref() {
+        if let Err(error) = fs::write(output, &yaml) {
+            return ProcessOutput {
+                exit_code: 1,
+                stdout: String::new(),
+                stderr: format!("Error: failed to write planning result: {error}\n"),
+            };
+        }
+    }
+    let exit_code =
+        if matches!(result.status, PlanningStatus::Success) && result.execution_plan.is_some() {
+            0
+        } else {
+            1
+        };
+    ProcessOutput {
+        exit_code,
+        stdout: if config.verbose {
+            yaml
+        } else {
+            format_planning_summary(&result, config.output.as_deref())
+        },
+        stderr: String::new(),
+    }
+}
+
+fn format_planning_summary(result: &PlanningResult, output_path: Option<&str>) -> String {
+    let status = match result.status {
+        PlanningStatus::Success => "success",
+        PlanningStatus::Warning => "warning",
+        PlanningStatus::Error => "error",
+    };
+    let mut lines = vec![format!("Planning status: {status}")];
+    if let Some(output_path) = output_path {
+        let path = PathBuf::from(output_path);
+        let display = path.canonicalize().unwrap_or(path);
+        lines.push(format!("Wrote planning result: {}", display.display()));
+    }
+    if let Some(plan) = &result.execution_plan {
+        lines.push(format!("Execution plan: {}", plan.id));
+        lines.push("Runnable steps:".to_string());
+        lines.extend(bullet_lines(
+            &plan
+                .steps
+                .iter()
+                .map(|step| step.id.clone())
+                .collect::<Vec<_>>(),
+        ));
+    }
+    if !result.warnings.is_empty() {
+        lines.push("Warnings:".to_string());
+        lines.extend(bullet_lines(
+            &result
+                .warnings
+                .iter()
+                .map(|warning| format!("{}: {}", warning.code, warning.message))
+                .collect::<Vec<_>>(),
+        ));
+    }
+    if !result.errors.is_empty() {
+        lines.push("Errors:".to_string());
+        lines.extend(bullet_lines(
+            &result
+                .errors
+                .iter()
+                .map(|error| format!("{}: {}", error.code, error.message))
+                .collect::<Vec<_>>(),
+        ));
+    }
+    format!("{}\n", lines.join("\n"))
 }
 
 fn run_validate(args: &[String]) -> ProcessOutput {
@@ -55,7 +283,7 @@ fn run_validate(args: &[String]) -> ProcessOutput {
                     exit_code: 2,
                     stdout: String::new(),
                     stderr: format!(
-                        "Error: Rust Phase 6S validate supports only non-verbose selected fixtures; {} is deferred.\n",
+                        "Error: Rust validate does not support {}; remove the option and retry.\n",
                         args[index]
                     ),
                 };
@@ -64,9 +292,7 @@ fn run_validate(args: &[String]) -> ProcessOutput {
                 return ProcessOutput {
                     exit_code: 2,
                     stdout: String::new(),
-                    stderr:
-                        "Error: Rust Phase 6S validate does not resolve ADB; --adb is deferred.\n"
-                            .to_string(),
+                    stderr: "Error: Rust validate does not accept --adb.\n".to_string(),
                 };
             }
             "-h" | "--help" => {
@@ -99,9 +325,8 @@ fn run_validate(args: &[String]) -> ProcessOutput {
         return ProcessOutput {
             exit_code: 2,
             stdout: String::new(),
-            stderr:
-                "Error: Rust Phase 6S validate requires an explicit recipe path; catalog/default validation is deferred.\n"
-                    .to_string(),
+            stderr: "Error: Rust validate requires an explicit recipe path; default catalog validation is not supported.\n"
+                .to_string(),
         };
     };
     let target_path = PathBuf::from(&target);
@@ -110,9 +335,8 @@ fn run_validate(args: &[String]) -> ProcessOutput {
         return ProcessOutput {
             exit_code: 2,
             stdout: String::new(),
-            stderr:
-                "Error: Rust Phase 6S validate supports recipe files only; catalog validation is deferred.\n"
-                    .to_string(),
+            stderr: "Error: Rust validate supports recipe files only; directory/catalog validation is not supported.\n"
+                .to_string(),
         };
     }
     let result = validate_single_path(&target_path, authored_root_path.as_deref());
@@ -124,85 +348,28 @@ fn run_validate(args: &[String]) -> ProcessOutput {
     }
 }
 
+#[derive(Debug)]
+struct ApplyCliConfig {
+    plan_file: String,
+    dry_run: bool,
+    adb: String,
+    serial: Option<String>,
+}
+
 fn run_apply(args: &[String]) -> ProcessOutput {
-    let mut plan_file: Option<String> = None;
-    let mut dry_run = false;
-    let mut index = 0;
-    while index < args.len() {
-        match args[index].as_str() {
-            "--plan-file" => {
-                index += 1;
-                let Some(value) = args.get(index) else {
-                    return usage_error(
-                        apply_usage(),
-                        "emuchef apply: error: argument --plan-file: expected one argument",
-                    );
-                };
-                plan_file = Some(value.clone());
-            }
-            "--dry-run" => dry_run = true,
-            "--serial" => {
-                index += 1;
-                if args.get(index).is_none() {
-                    return usage_error(
-                        apply_usage(),
-                        &format!(
-                            "emuchef apply: error: argument {}: expected one argument",
-                            args[index - 1]
-                        ),
-                    );
-                }
-            }
-            "--adb" => {
-                return ProcessOutput {
-                    exit_code: 2,
-                    stdout: String::new(),
-                    stderr: "Error: Rust Phase 6S apply --dry-run does not resolve ADB; --adb is deferred.\n"
-                        .to_string(),
-                };
-            }
-            "--verbose" | "--debug" => {
-                return ProcessOutput {
-                    exit_code: 2,
-                    stdout: String::new(),
-                    stderr: format!(
-                        "Error: Rust Phase 6S apply supports only non-verbose selected fixtures; {} is deferred.\n",
-                        args[index]
-                    ),
-                };
-            }
-            "-h" | "--help" => {
-                return ProcessOutput {
-                    exit_code: 0,
-                    stdout: format!("{}\n", apply_usage()),
-                    stderr: String::new(),
-                };
-            }
-            value => {
-                return usage_error(
-                    apply_usage(),
-                    &format!("emuchef apply: error: unrecognized arguments: {value}"),
-                );
-            }
-        }
-        index += 1;
-    }
+    run_apply_with_real_device_factory(args, |adb, serial| RealAdbDevice::new(adb, serial))
+}
 
-    let Some(plan_file) = plan_file else {
-        return usage_error(
-            apply_usage(),
-            "emuchef apply: error: the following arguments are required: --plan-file",
-        );
+fn run_apply_with_real_device_factory<D, F>(args: &[String], factory: F) -> ProcessOutput
+where
+    D: ExecutorDevice,
+    F: FnOnce(String, Option<String>) -> D,
+{
+    let config = match parse_apply_args(args) {
+        Ok(config) => config,
+        Err(output) => return output,
     };
-    if !dry_run {
-        return ProcessOutput {
-            exit_code: 1,
-            stdout: String::new(),
-            stderr: "Error: Rust Phase 6S apply supports only --dry-run.\n".to_string(),
-        };
-    }
-
-    let plan_path = PathBuf::from(&plan_file);
+    let plan_path = PathBuf::from(&config.plan_file);
     let plan = match load_execution_plan_file(&plan_path) {
         Ok(plan) => plan,
         Err(CliError::IoNotFound { path }) => {
@@ -223,13 +390,164 @@ fn run_apply(args: &[String]) -> ProcessOutput {
             };
         }
     };
+    let workspace = apply_workspace(&plan_path, &plan);
+    if config.dry_run {
+        let adapters = ExecutorAdapters::with_sandbox_roots(
+            workspace.runtime_root,
+            workspace.cache_root,
+            workspace.fake_device_root.clone(),
+            workspace.read_only_roots,
+        );
+        let output = execute_apply_plan(&plan, adapters, true);
+        let _ = fs::remove_dir_all(workspace.fake_device_root);
+        output
+    } else {
+        let device = factory(config.adb, config.serial);
+        let adapters = ExecutorAdapters::with_device_and_sandbox_roots(
+            device,
+            workspace.runtime_root,
+            workspace.cache_root,
+            workspace.fake_device_root,
+            workspace.read_only_roots,
+            true,
+        );
+        execute_apply_plan(&plan, adapters, false)
+    }
+}
 
+fn parse_apply_args(args: &[String]) -> Result<ApplyCliConfig, ProcessOutput> {
+    let mut plan_file: Option<String> = None;
+    let mut dry_run = false;
+    let mut adb: Option<String> = None;
+    let mut serial: Option<String> = None;
+    let mut index = 0;
+    while index < args.len() {
+        let option = args[index].as_str();
+        match option {
+            "--plan-file" | "--adb" | "--serial" => {
+                index += 1;
+                let Some(value) = args.get(index) else {
+                    return Err(usage_error(
+                        apply_usage(),
+                        &format!("emuchef apply: error: argument {option}: expected one argument"),
+                    ));
+                };
+                match option {
+                    "--plan-file" => plan_file = Some(value.clone()),
+                    "--adb" => adb = Some(value.clone()),
+                    "--serial" => serial = Some(value.clone()),
+                    _ => unreachable!("matched apply option should be handled"),
+                }
+            }
+            "--dry-run" => dry_run = true,
+            "--verbose" | "--debug" => {
+                return Err(usage_error(
+                    apply_usage(),
+                    &format!("emuchef apply: error: {option} is not supported by the Rust CLI"),
+                ));
+            }
+            "-h" | "--help" => {
+                return Err(ProcessOutput {
+                    exit_code: 0,
+                    stdout: format!("{}\n", apply_usage()),
+                    stderr: String::new(),
+                });
+            }
+            value => {
+                return Err(usage_error(
+                    apply_usage(),
+                    &format!("emuchef apply: error: unrecognized arguments: {value}"),
+                ));
+            }
+        }
+        index += 1;
+    }
+
+    let Some(plan_file) = plan_file else {
+        return Err(usage_error(
+            apply_usage(),
+            "emuchef apply: error: the following arguments are required: --plan-file",
+        ));
+    };
+    Ok(ApplyCliConfig {
+        plan_file,
+        dry_run,
+        adb: adb.unwrap_or_else(|| "adb".to_string()),
+        serial,
+    })
+}
+
+#[derive(Debug)]
+struct ApplyWorkspace {
+    runtime_root: PathBuf,
+    cache_root: PathBuf,
+    fake_device_root: PathBuf,
+    read_only_roots: Vec<PathBuf>,
+}
+
+fn apply_workspace(plan_path: &Path, plan: &ExecutionPlan) -> ApplyWorkspace {
+    static NEXT_DRY_RUN_ID: AtomicU64 = AtomicU64::new(0);
+    let workdir = plan_path.parent().unwrap_or_else(|| Path::new("."));
+    let runtime_root = workdir.join(".emuchef_runtime");
+    let cache_root = workdir.join(".emuchef_cache").join("artifacts");
+    let fake_device_root = runtime_root.join(format!(
+        "dry-run-device-{}-{}",
+        std::process::id(),
+        NEXT_DRY_RUN_ID.fetch_add(1, Ordering::Relaxed)
+    ));
+    let mut read_only_roots = vec![workdir.to_path_buf()];
+    if let Ok(cwd) = std::env::current_dir() {
+        read_only_roots.push(cwd);
+    }
+    for input in &plan.inputs {
+        if input.value.location.as_deref() != Some("host") {
+            continue;
+        }
+        match input.value.type_name.as_str() {
+            "file_path" | "directory_path" => {
+                if let Some(path) = input.value.value.as_str() {
+                    read_only_roots.push(PathBuf::from(path));
+                }
+            }
+            "path_list" => {
+                read_only_roots.extend(
+                    input
+                        .value
+                        .value
+                        .as_array()
+                        .into_iter()
+                        .flatten()
+                        .filter_map(JsonValue::as_str)
+                        .map(PathBuf::from),
+                );
+            }
+            _ => {}
+        }
+    }
+    read_only_roots.extend(
+        plan.artifacts
+            .iter()
+            .filter_map(|artifact| file_url_to_path(&artifact.url)),
+    );
+    ApplyWorkspace {
+        runtime_root,
+        cache_root,
+        fake_device_root,
+        read_only_roots,
+    }
+}
+
+fn execute_apply_plan<D: ExecutorDevice>(
+    plan: &ExecutionPlan,
+    adapters: ExecutorAdapters<D>,
+    dry_run: bool,
+) -> ProcessOutput {
     let mut stdout = String::new();
-    let mut runner = ExecutorRunner::default();
+    let mut runner = ExecutorRunner::new(adapters);
     let result = runner.run_with_progress(&plan, |event| {
-        stdout.push_str(&format_execution_progress_event(&event, true));
+        stdout.push_str(&format_execution_progress_event(&event, dry_run));
     });
-    stdout.push_str(&format_execution_summary(&result, true));
+    stdout.push_str(&format_execution_summary(&result, dry_run));
     ProcessOutput {
         exit_code: if result.success { 0 } else { 1 },
         stdout,
@@ -538,16 +856,6 @@ fn parse_execution_plan(data: &serde_yaml::Mapping) -> Result<ExecutionPlan, Cli
     let source = mapping_value(data, "source")?;
     let device_context = mapping_value(data, "device_context")?;
     let runtime_capabilities = mapping_value(data, "runtime_capabilities")?;
-    reject_non_empty_sequence(
-        data,
-        "inputs",
-        "Rust Phase 6S apply --dry-run supports only selected no-input plan fixtures.",
-    )?;
-    reject_non_empty_sequence(
-        data,
-        "artifacts",
-        "Rust Phase 6S apply --dry-run supports only selected no-artifact plan fixtures.",
-    )?;
     Ok(ExecutionPlan {
         id: required_string(data, "id")?,
         source: ExecutionPlanSource {
@@ -576,12 +884,48 @@ fn parse_execution_plan(data: &serde_yaml::Mapping) -> Result<ExecutionPlan, Cli
             root_shell: required_bool(runtime_capabilities, "root_shell")?,
             app_data_write: required_bool(runtime_capabilities, "app_data_write")?,
         },
-        inputs: Vec::new(),
-        artifacts: Vec::new(),
+        inputs: parse_inputs(data)?,
+        artifacts: parse_artifacts(data)?,
         steps: parse_steps(data)?,
         schema_version: required_i64(data, "schema_version")?,
         kind: "execution_plan",
     })
+}
+
+fn parse_inputs(data: &serde_yaml::Mapping) -> Result<Vec<ExecutionInputValue>, CliError> {
+    sequence_value(data, "inputs")?
+        .iter()
+        .map(|item| {
+            let mapping = as_mapping(item, "execution input must be a mapping")?;
+            let value = mapping_value(mapping, "value")?;
+            let raw_value = value.get(&yaml_key("value")).ok_or_else(|| {
+                CliError::Message("Execution input value missing value.".to_string())
+            })?;
+            Ok(ExecutionInputValue {
+                id: required_string(mapping, "id")?,
+                value: PlanRuntimeValue {
+                    type_name: required_string(value, "type")?,
+                    value: yaml_to_json(raw_value)?,
+                    location: optional_string_value(value, "location"),
+                },
+            })
+        })
+        .collect()
+}
+
+fn parse_artifacts(data: &serde_yaml::Mapping) -> Result<Vec<ExecutionArtifact>, CliError> {
+    sequence_value(data, "artifacts")?
+        .iter()
+        .map(|item| {
+            let mapping = as_mapping(item, "execution artifact must be a mapping")?;
+            Ok(ExecutionArtifact {
+                id: required_string(mapping, "id")?,
+                type_name: required_string(mapping, "type")?,
+                url: required_string(mapping, "url")?,
+                cache: required_string(mapping, "cache")?,
+            })
+        })
+        .collect()
 }
 
 fn parse_steps(data: &serde_yaml::Mapping) -> Result<Vec<ExecutionStep>, CliError> {
@@ -612,17 +956,6 @@ fn parse_steps(data: &serde_yaml::Mapping) -> Result<Vec<ExecutionStep>, CliErro
             })
         })
         .collect()
-}
-
-fn reject_non_empty_sequence(
-    mapping: &serde_yaml::Mapping,
-    key: &str,
-    message: &str,
-) -> Result<(), CliError> {
-    if !sequence_value(mapping, key)?.is_empty() {
-        return Err(CliError::Message(message.to_string()));
-    }
-    Ok(())
 }
 
 fn parse_params(
@@ -834,4 +1167,171 @@ fn validate_usage() -> &'static str {
 
 fn apply_usage() -> &'static str {
     "usage: emuchef apply [-h] [--verbose] [--debug] [--adb ADB]\n                     --plan-file PLAN_FILE [--serial SERIAL] [--dry-run]"
+}
+
+fn plan_usage() -> &'static str {
+    "usage: emuchef plan [-h] [--verbose] [--adb ADB] [--serial SERIAL]\n                    [--authored-root AUTHORED_ROOT] --device-plan DEVICE_PLAN\n                    [--bind REF=VALUE] [--manufacturer VALUE] [--model VALUE]\n                    [--android-version INTEGER] [--device-tag VALUE] [--output PATH]"
+}
+
+fn cli_usage() -> &'static str {
+    "usage: emuchef {plan,validate,apply} ...\n       emuchef --sidecar"
+}
+
+#[cfg(test)]
+mod tests {
+    use std::cell::RefCell;
+
+    use tempfile::TempDir;
+
+    use super::*;
+    use crate::device_probe::{CommandOutput, DeviceProbeError};
+    use crate::executor::adb::FakeAdbCommandExecutor;
+
+    #[derive(Debug)]
+    struct FakeProbeRunner {
+        calls: RefCell<Vec<Vec<String>>>,
+    }
+
+    impl CommandRunner for FakeProbeRunner {
+        fn run(&self, argv: &[String]) -> Result<CommandOutput, DeviceProbeError> {
+            self.calls.borrow_mut().push(argv.to_vec());
+            Ok(CommandOutput {
+                status_code: Some(0),
+                stdout: "[ro.product.manufacturer]: [AYANEO]\n[ro.product.brand]: [AYANEO]\n[ro.product.model]: [AYANEO Pocket S mini]\n[ro.build.version.release]: [13]\n[ro.build.version.sdk]: [33]\n".to_string(),
+                stderr: String::new(),
+            })
+        }
+    }
+
+    fn repo_authored_root() -> String {
+        Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../..")
+            .join("authored")
+            .canonicalize()
+            .expect("repo authored root should resolve")
+            .to_string_lossy()
+            .into_owned()
+    }
+
+    #[test]
+    fn canonical_plan_dispatches_to_rust_planner() {
+        let output = run_plan_with_adb_runner(
+            &[
+                "--authored-root".to_string(),
+                repo_authored_root(),
+                "--device-plan".to_string(),
+                "ayaneo.pocket_s_mini.base".to_string(),
+            ],
+            &FakeProbeRunner {
+                calls: RefCell::new(Vec::new()),
+            },
+        );
+
+        assert_eq!(output.exit_code, 0, "stderr: {}", output.stderr);
+        assert!(output.stdout.starts_with("Planning status: success\n"));
+        assert!(output.stdout.contains("Execution plan:"));
+    }
+
+    #[test]
+    fn canonical_plan_live_probe_forwards_exact_adb_and_serial() {
+        let runner = FakeProbeRunner {
+            calls: RefCell::new(Vec::new()),
+        };
+        let output = run_plan_with_adb_runner(
+            &[
+                "--authored-root".to_string(),
+                repo_authored_root(),
+                "--device-plan".to_string(),
+                "ayaneo.pocket_s_mini.base".to_string(),
+                "--adb".to_string(),
+                "/opt/android/adb".to_string(),
+                "--serial".to_string(),
+                "emulator-5554".to_string(),
+            ],
+            &runner,
+        );
+
+        assert_eq!(output.exit_code, 0, "stderr: {}", output.stderr);
+        assert_eq!(
+            runner.calls.into_inner(),
+            vec![vec![
+                "/opt/android/adb".to_string(),
+                "-s".to_string(),
+                "emulator-5554".to_string(),
+                "shell".to_string(),
+                "getprop".to_string(),
+            ]]
+        );
+    }
+
+    #[test]
+    fn non_dry_run_apply_constructs_real_device_with_exact_adb_and_serial() {
+        let temp = TempDir::new().expect("temp dir should be created");
+        let plan_path = temp.path().join("plan.yaml");
+        fs::write(
+            &plan_path,
+            r#"schema_version: 1
+kind: execution_plan
+id: plan.real.apply
+source:
+  device_profile_ref: example.profile
+  device_plan_ref: example.plan
+  selected_recipe_refs: [example.recipe]
+  expanded_recipe_refs: [example.recipe]
+device_context:
+  manufacturer: Example
+  model: Example
+  android_version: 13
+  android_api_level: 33
+  device_tags: []
+runtime_capabilities:
+  adb_available: true
+  apk_install: true
+  shared_storage_write: true
+  app_launch: true
+  shell_command: true
+  package_remove_for_user: false
+  root_shell: true
+  app_data_write: true
+inputs: []
+artifacts: []
+steps:
+- id: example.recipe/stop
+  recipe_ref: example.recipe
+  type: force_stop_app
+  name: Stop
+  dependencies: []
+  constraints: {capabilities: [], conflicts_with: []}
+  params:
+    package_name: {value: com.example.app}
+  skip_if: []
+  verify: []
+"#,
+        )
+        .expect("plan should be written");
+
+        let output = run_apply_with_real_device_factory(
+            &[
+                "--plan-file".to_string(),
+                plan_path.to_string_lossy().into_owned(),
+                "--adb".to_string(),
+                "/opt/android/adb".to_string(),
+                "--serial".to_string(),
+                "device-123".to_string(),
+            ],
+            |adb, serial| {
+                assert_eq!(adb, "/opt/android/adb");
+                assert_eq!(serial.as_deref(), Some("device-123"));
+                RealAdbDevice::with_executor(
+                    adb,
+                    serial.as_deref(),
+                    FakeAdbCommandExecutor::default(),
+                )
+            },
+        );
+
+        assert_eq!(output.exit_code, 0, "stderr: {}", output.stderr);
+        assert!(output.stdout.contains("Execution: success"));
+        assert!(!output.stderr.contains("supports only --dry-run"));
+    }
 }
