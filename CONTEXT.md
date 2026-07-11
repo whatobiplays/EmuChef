@@ -99,6 +99,10 @@ manifests, and no leaked partial files on commit
 ## Release State
 
 Host-target Tauri builds and simulated bundled-sidecar tests are available.
+The canonical operator procedure for macOS release bundles is
+`docs/manual/macos-packaged-gui-validation.md`; it separates static bundle,
+packaged sidecar, packaged runtime, and interactive editor evidence. The editor
+does not expose planning or apply through its Tauri or JSONL command surfaces.
 Public release readiness still requires real packaged GUI evidence on supported
 targets, signing/notarization decisions, updater support, CSP hardening, and
 cross-platform release automation.

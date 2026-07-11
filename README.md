@@ -61,4 +61,6 @@ recorded in the
 See [runtime ownership](docs/architecture/runtime-ownership.md), the
 [planner/executor architecture](docs/architecture/planner-executor.md), and
 [release readiness](docs/release/release-readiness.md). Real-device evidence is
-collected with the [RetroArch validation runbook](docs/manual/real-device-retroarch-validation.md).
+collected with the [RetroArch validation runbook](docs/manual/real-device-retroarch-validation.md),
+and packaged macOS evidence uses the
+[Config Editor validation runbook](docs/manual/macos-packaged-gui-validation.md).

@@ -16,7 +16,9 @@
 
 ## Required Before Public Release
 
-- Record the real packaged GUI checklist on every supported target.
+- Record the
+  [macOS packaged Config Editor checklist](../manual/macos-packaged-gui-validation.md)
+  and the corresponding checklist for every other supported target.
 - Define and automate code signing and macOS notarization.
 - Decide and implement updater support.
 - Replace the development CSP setting with a hardened policy.
