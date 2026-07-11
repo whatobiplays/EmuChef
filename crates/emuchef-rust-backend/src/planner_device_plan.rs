@@ -24,6 +24,7 @@ use crate::planner::{
     RuntimeCapabilities,
 };
 
+#[cfg(test)]
 #[derive(Clone, Debug, PartialEq)]
 pub(crate) struct DeviceProfileInventoryEntry {
     pub path: PathBuf,
@@ -32,6 +33,7 @@ pub(crate) struct DeviceProfileInventoryEntry {
     pub device_tags: Vec<String>,
 }
 
+#[cfg(test)]
 #[derive(Clone, Debug, PartialEq)]
 pub(crate) struct DevicePlanInventoryEntry {
     pub path: PathBuf,
@@ -60,12 +62,14 @@ pub(crate) struct DevicePlanProfileMatchCriteria {
 
 #[derive(Clone, Debug)]
 struct DeviceProfileRecord {
+    #[cfg(test)]
     path: PathBuf,
     profile: DeviceProfileYaml,
 }
 
 #[derive(Clone, Debug)]
 struct DevicePlanRecord {
+    #[cfg(test)]
     path: PathBuf,
     plan: DevicePlanYaml,
 }
@@ -129,6 +133,7 @@ struct DevicePlanRecipeYaml {
     selected_by_default: bool,
 }
 
+#[cfg(test)]
 pub(crate) fn discover_device_profile_inventory(
     authored_root: impl AsRef<Path>,
 ) -> Result<Vec<DeviceProfileInventoryEntry>, PlannerLoadError> {
@@ -140,6 +145,7 @@ pub(crate) fn discover_device_profile_inventory(
     })
 }
 
+#[cfg(test)]
 pub(crate) fn discover_device_plan_inventory(
     authored_root: impl AsRef<Path>,
 ) -> Result<Vec<DevicePlanInventoryEntry>, PlannerLoadError> {
@@ -317,6 +323,7 @@ pub(crate) fn load_planner_input_parts(
     })
 }
 
+#[cfg(test)]
 impl From<DeviceProfileRecord> for DeviceProfileInventoryEntry {
     fn from(record: DeviceProfileRecord) -> Self {
         Self {
@@ -328,6 +335,7 @@ impl From<DeviceProfileRecord> for DeviceProfileInventoryEntry {
     }
 }
 
+#[cfg(test)]
 impl From<DevicePlanRecord> for DevicePlanInventoryEntry {
     fn from(record: DevicePlanRecord) -> Self {
         Self {
@@ -353,7 +361,11 @@ fn load_device_profiles(
                     format!("Duplicate device_profile id '{}'.", profile.id),
                 ));
             }
-            Ok(DeviceProfileRecord { path, profile })
+            Ok(DeviceProfileRecord {
+                #[cfg(test)]
+                path,
+                profile,
+            })
         })
         .collect()
 }
@@ -370,7 +382,11 @@ fn load_device_plans(authored_root: &Path) -> Result<Vec<DevicePlanRecord>, Plan
                     format!("Duplicate device_plan id '{}'.", plan.id),
                 ));
             }
-            Ok(DevicePlanRecord { path, plan })
+            Ok(DevicePlanRecord {
+                #[cfg(test)]
+                path,
+                plan,
+            })
         })
         .collect()
 }
@@ -508,7 +524,7 @@ fn normalize_override_binding(
         return Err(PlannerLoadError::new(
             "device_plan_override_unsupported",
             format!(
-                "Device plan '{}' override key '{}' is unsupported. P7J supports only 'config_variants' metadata or '<recipe_ref>/<input_id>' binding keys.",
+                "Device plan '{}' override key '{}' is unsupported. Only 'config_variants' metadata or '<recipe_ref>/<input_id>' binding keys are supported.",
                 plan.id, key
             ),
         ));
@@ -637,13 +653,13 @@ fn runtime_capabilities(capabilities: &RuntimeCapabilitiesYaml) -> RuntimeCapabi
 
 fn yaml_i64(mapping: &Mapping, key: &str) -> Option<i64> {
     mapping
-        .get(&YamlValue::String(key.to_string()))
+        .get(YamlValue::String(key.to_string()))
         .and_then(YamlValue::as_i64)
 }
 
 fn yaml_string(mapping: &Mapping, key: &str) -> Option<String> {
     mapping
-        .get(&YamlValue::String(key.to_string()))
+        .get(YamlValue::String(key.to_string()))
         .and_then(YamlValue::as_str)
         .map(ToString::to_string)
 }

@@ -2,8 +2,7 @@
 //!
 //! This module defines the command abstraction used to compose ADB `getprop`
 //! facts into planner context. The canonical Rust `emuchef plan` route uses the
-//! adapter when `--adb` or `--serial` requests live probing. The dev-only
-//! `emuchef-plan-shadow` command reuses the same adapter for reference evidence.
+//! adapter when `--adb` or `--serial` requests live probing.
 
 use std::process::Command;
 
@@ -15,9 +14,8 @@ use crate::planner::DeviceContext;
 ///
 /// Fields are optional so callers can layer detected values over a
 /// profile-derived `DeviceContext` without inventing placeholder facts. The
-/// struct also deserializes strict local JSON fixtures for the dev-only shadow
-/// harness; unknown fixture fields are rejected so misspelled facts do not
-/// silently weaken migration evidence.
+/// Unknown serialized fields are rejected so misspelled facts cannot silently
+/// weaken tests or other structured inputs.
 #[derive(Clone, Debug, Default, Deserialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 pub(crate) struct DetectedDeviceFacts {
@@ -39,7 +37,6 @@ pub(crate) struct DetectedDeviceFacts {
 pub(crate) enum DeviceProbeError {
     Unavailable { message: String },
     Failed { message: String },
-    InvalidOutput { message: String },
 }
 
 /// Output captured from a structured host command invocation.
@@ -231,17 +228,20 @@ impl<R: CommandRunner> DeviceProbe for AdbDeviceProbe<R> {
 }
 
 /// Test probe that returns a preconfigured detection result.
+#[cfg(test)]
 #[derive(Clone, Debug)]
 pub(crate) struct FakeDeviceProbe {
     result: Result<DetectedDeviceFacts, DeviceProbeError>,
 }
 
+#[cfg(test)]
 impl FakeDeviceProbe {
     pub(crate) fn new(result: Result<DetectedDeviceFacts, DeviceProbeError>) -> Self {
         Self { result }
     }
 }
 
+#[cfg(test)]
 impl DeviceProbe for FakeDeviceProbe {
     fn detect(&self) -> Result<DetectedDeviceFacts, DeviceProbeError> {
         self.result.clone()
@@ -872,7 +872,7 @@ not a getprop line
     }
 
     #[test]
-    fn non_shadow_planner_route_sources_do_not_invoke_live_adb_probe() {
+    fn authored_planner_data_layer_does_not_invoke_live_adb_probe() {
         for (name, source) in [(
             "planner_device_plan.rs",
             include_str!("planner_device_plan.rs"),
@@ -900,9 +900,6 @@ not a getprop line
             DeviceProbeError::Failed {
                 message: "probe failed".to_string(),
             },
-            DeviceProbeError::InvalidOutput {
-                message: "invalid probe output".to_string(),
-            },
         ];
 
         assert!(matches!(
@@ -912,10 +909,6 @@ not a getprop line
         assert!(matches!(
             errors[1],
             DeviceProbeError::Failed { ref message } if message == "probe failed"
-        ));
-        assert!(matches!(
-            errors[2],
-            DeviceProbeError::InvalidOutput { ref message } if message == "invalid probe output"
         ));
     }
 
@@ -943,9 +936,9 @@ not a getprop line
 
     fn assert_error_message_excludes(error: &DeviceProbeError, needles: &[&str]) {
         let message = match error {
-            DeviceProbeError::Unavailable { message }
-            | DeviceProbeError::Failed { message }
-            | DeviceProbeError::InvalidOutput { message } => message,
+            DeviceProbeError::Unavailable { message } | DeviceProbeError::Failed { message } => {
+                message
+            }
         };
         for needle in needles {
             assert!(

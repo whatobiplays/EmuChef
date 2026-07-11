@@ -1194,7 +1194,7 @@ fn recipe_expansion_current_corpus_selected_and_expanded_refs_match() {
 
 #[test]
 fn recipe_expansion_checked_in_device_plan_selected_sets_match_expanded_refs_for_current_corpus() {
-    for plan in discover_device_plan_inventory(&repo_authored_root())
+    for plan in discover_device_plan_inventory(repo_authored_root())
         .expect("repo device plan inventory should parse")
     {
         let selected_recipe_refs = plan
@@ -2660,7 +2660,7 @@ fn authored_corpus_planner_uses_rust_inputs_and_preserves_checked_in_evidence() 
 
 #[test]
 fn repo_device_profile_inventory_is_explicit_by_path_and_id() {
-    let actual = discover_device_profile_inventory(&repo_authored_root())
+    let actual = discover_device_profile_inventory(repo_authored_root())
         .expect("repo device profile inventory should parse")
         .into_iter()
         .map(|entry| {
@@ -2718,7 +2718,7 @@ fn repo_device_profile_inventory_is_explicit_by_path_and_id() {
 
 #[test]
 fn repo_device_plan_inventory_is_explicit_by_path_id_profile_and_selected_order() {
-    let actual = discover_device_plan_inventory(&repo_authored_root())
+    let actual = discover_device_plan_inventory(repo_authored_root())
         .expect("repo device plan inventory should parse")
         .into_iter()
         .map(|entry| {
@@ -2784,7 +2784,7 @@ fn repo_device_plan_selected_refs_map_to_existing_authored_recipes() {
         .iter()
         .map(|entry| entry.recipe_id)
         .collect::<BTreeSet<_>>();
-    for plan in discover_device_plan_inventory(&repo_authored_root())
+    for plan in discover_device_plan_inventory(repo_authored_root())
         .expect("repo device plan inventory should parse")
     {
         for recipe_ref in &plan.selected_recipe_refs {
@@ -3639,7 +3639,7 @@ fn repo_device_plan_ingestion_accepts_supplied_bindings_without_applying_metadat
 #[test]
 fn repo_device_plan_defaults_and_config_variants_are_checked_in_metadata_only() {
     let mut actual = Vec::new();
-    for plan in discover_device_plan_inventory(&repo_authored_root())
+    for plan in discover_device_plan_inventory(repo_authored_root())
         .expect("repo device plan inventory should parse")
     {
         let yaml =

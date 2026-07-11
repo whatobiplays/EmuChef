@@ -655,8 +655,8 @@ fn step_command_failures_leave_document_and_history_unchanged() {
     let opened = responses[0]["result"]["document"].clone();
 
     assert_invalid_command(&responses[1]);
-    for index in 2..=7 {
-        assert_command_failed(&responses[index]);
+    for response in &responses[2..=7] {
+        assert_command_failed(response);
     }
     assert_eq!(assert_unchanged(&responses[8]), &opened);
     assert_eq!(responses[9]["result"]["document"], opened);

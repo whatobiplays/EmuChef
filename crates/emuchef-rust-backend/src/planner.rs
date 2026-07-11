@@ -149,11 +149,13 @@ pub enum ExecutionParamValue {
     },
 }
 
+#[cfg(test)]
 #[derive(Clone, Debug, PartialEq, Serialize)]
 pub(crate) struct PermissionIntentPlan {
     pub grants: Vec<PermissionIntentGrant>,
 }
 
+#[cfg(test)]
 #[derive(Clone, Debug, PartialEq, Serialize)]
 pub(crate) struct PermissionIntentGrant {
     pub recipe_ref: String,
@@ -163,12 +165,14 @@ pub(crate) struct PermissionIntentGrant {
     pub actions: Vec<PermissionIntentAction>,
 }
 
+#[cfg(test)]
 #[derive(Clone, Debug, PartialEq, Serialize)]
 pub(crate) struct PermissionIntentPolicy {
     pub on_failure: String,
     pub require_all: bool,
 }
 
+#[cfg(test)]
 #[derive(Clone, Debug, PartialEq, Serialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub(crate) enum PermissionIntentAction {
@@ -210,6 +214,7 @@ pub struct PlannerLoadError {
 }
 
 impl PlannerInput {
+    #[cfg(test)]
     #[allow(clippy::too_many_arguments)]
     pub fn from_authored_root(
         authored_root: impl AsRef<Path>,
@@ -566,6 +571,7 @@ fn authored_steps(
     result
 }
 
+#[cfg(test)]
 pub(crate) fn build_permission_intent(steps: &[(String, String, Step)]) -> PermissionIntentPlan {
     let mut grants = Vec::new();
 
@@ -620,6 +626,7 @@ pub(crate) fn build_permission_intent(steps: &[(String, String, Step)]) -> Permi
     PermissionIntentPlan { grants }
 }
 
+#[cfg(test)]
 fn permission_intent_policy(value: Option<&ParamValue>) -> PermissionIntentPolicy {
     let Some(ParamValue::Literal(Value::Object(policy))) = value else {
         return PermissionIntentPolicy {
@@ -641,6 +648,7 @@ fn permission_intent_policy(value: Option<&ParamValue>) -> PermissionIntentPolic
     }
 }
 
+#[cfg(test)]
 fn literal_object_items(value: Option<&ParamValue>) -> Vec<&Map<String, Value>> {
     let Some(ParamValue::Literal(Value::Array(items))) = value else {
         return Vec::new();
@@ -648,6 +656,7 @@ fn literal_object_items(value: Option<&ParamValue>) -> Vec<&Map<String, Value>> 
     items.iter().filter_map(Value::as_object).collect()
 }
 
+#[cfg(test)]
 fn string_field(item: &Map<String, Value>, field: &str) -> String {
     item.get(field)
         .and_then(Value::as_str)
@@ -655,6 +664,7 @@ fn string_field(item: &Map<String, Value>, field: &str) -> String {
         .to_string()
 }
 
+#[cfg(test)]
 fn bool_field(item: &Map<String, Value>, field: &str) -> Option<bool> {
     item.get(field).and_then(Value::as_bool)
 }
@@ -2642,7 +2652,7 @@ fn normalize_step_params_for_execution(
     recipe: &Recipe,
     step: &Step,
 ) -> OrderedMap<ExecutionParamValue> {
-    let normalized = params_with_defaults(&step);
+    let normalized = params_with_defaults(step);
     if matches!(
         step.type_name.as_str(),
         "resolve_artifacts" | "extract_artifacts"

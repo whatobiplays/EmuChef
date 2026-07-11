@@ -578,11 +578,11 @@ fn invalid_and_failed_non_step_commands_leave_document_unchanged_without_history
     assert_eq!(responses.len(), 11);
     let opened = responses[0]["result"]["document"].clone();
 
-    for index in 1..=5 {
-        assert_invalid_command(&responses[index]);
+    for response in &responses[1..=5] {
+        assert_invalid_command(response);
     }
-    for index in 6..=8 {
-        assert_command_failed(&responses[index]);
+    for response in &responses[6..=8] {
+        assert_command_failed(response);
     }
     assert_eq!(assert_unchanged(&responses[9]), &opened);
     assert_eq!(responses[10]["result"]["document"], opened);

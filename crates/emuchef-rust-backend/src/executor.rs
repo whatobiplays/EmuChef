@@ -120,10 +120,12 @@ impl<D: ExecutorDevice> ExecutorRunner<D> {
         Self { adapters }
     }
 
+    #[cfg(test)]
     pub fn adapters(&self) -> &ExecutorAdapters<D> {
         &self.adapters
     }
 
+    #[cfg(test)]
     pub fn run(&mut self, plan: &ExecutionPlan) -> ExecutionRunResult {
         self.run_with_progress(plan, |_| {})
     }
@@ -411,7 +413,7 @@ impl<D: ExecutorDevice> ExecutorRunner<D> {
             "launch_app" => self.execute_launch_app(&resolved_params),
             "force_stop_app" => self.execute_force_stop_app(&resolved_params),
             other => Err(StepFailure::new(format!(
-                "Unsupported executor step type in Rust Phase 6P skeleton: {other}"
+                "Unsupported executor step type: {other}"
             ))),
         }
     }
@@ -556,7 +558,7 @@ impl<D: ExecutorDevice> ExecutorRunner<D> {
         if !local_path.exists() {
             let Some(source_path) = file_url_to_path(&artifact.url) else {
                 return Err(StepFailure::new(format!(
-                    "network_artifact_downloads_not_cut_over: Network artifact downloads are not supported by the Rust runtime for artifact {:?} from {:?}; use a file:// source.",
+                    "network_artifact_download_unsupported: Network artifact downloads are not supported for artifact {:?} from {:?}; use a file:// source.",
                     artifact.id, artifact.url
                 )));
             };
@@ -1175,6 +1177,7 @@ fn device_basename(path: &str) -> &str {
         .unwrap_or(path)
 }
 
+#[cfg(test)]
 pub type DryRunExecutorAdapters = ExecutorAdapters<FakeDryRunDevice>;
 
 #[derive(Debug)]
@@ -1197,6 +1200,7 @@ impl Default for ExecutorAdapters<FakeDryRunDevice> {
 }
 
 impl<D: ExecutorDevice> ExecutorAdapters<D> {
+    #[cfg(test)]
     pub fn with_device(device: D) -> Self {
         Self {
             device,
@@ -1227,14 +1231,17 @@ impl<D: ExecutorDevice> ExecutorAdapters<D> {
         }
     }
 
+    #[cfg(test)]
     pub fn device(&self) -> &D {
         &self.device
     }
 
+    #[cfg(test)]
     pub fn device_mut(&mut self) -> &mut D {
         &mut self.device
     }
 
+    #[cfg(test)]
     pub fn sleep_calls(&self) -> &[f64] {
         &self.sleep_calls
     }
@@ -1249,7 +1256,7 @@ impl<D: ExecutorDevice> ExecutorAdapters<D> {
     fn sandbox(&self) -> Result<&SandboxRoots, StepFailure> {
         self.sandbox.as_ref().ok_or_else(|| {
             StepFailure::new(
-                "Phase 6P filesystem/artifact handlers require explicit sandbox roots".to_string(),
+                "Filesystem and artifact handlers require explicit sandbox roots".to_string(),
             )
         })
     }
@@ -1289,43 +1296,37 @@ pub struct FakeDryRunDevice {
 }
 
 impl FakeDryRunDevice {
+    #[cfg(test)]
     pub fn installed_packages_mut(&mut self) -> &mut HashSet<String> {
         &mut self.installed_packages
     }
 
+    #[cfg(test)]
     pub fn remote_paths_mut(&mut self) -> &mut HashSet<String> {
         &mut self.remote_paths
     }
 
+    #[cfg(test)]
     pub fn remote_dirs_mut(&mut self) -> &mut HashSet<String> {
         &mut self.remote_dirs
     }
 
+    #[cfg(test)]
     pub fn commands(&self) -> &[Vec<String>] {
         &self.commands
     }
 
+    #[cfg(test)]
     pub fn fail_run_plan_command(&mut self, command: Vec<String>, message: &str) {
         self.run_plan_failures.insert(command, message.to_string());
     }
 
-    pub fn fail_install_apk(&mut self, apk_path: &Path, replace_existing: bool, message: &str) {
-        self.install_failures.insert(
-            (apk_path.to_string_lossy().to_string(), replace_existing),
-            message.to_string(),
-        );
-    }
-
+    #[cfg(test)]
     pub fn fail_launch_app(&mut self, package_name: &str, activity: Option<&str>, message: &str) {
         self.launch_failures.insert(
             (package_name.to_string(), activity.unwrap_or("").to_string()),
             message.to_string(),
         );
-    }
-
-    pub fn fail_force_stop_app(&mut self, package_name: &str, message: &str) {
-        self.force_stop_failures
-            .insert(package_name.to_string(), message.to_string());
     }
 
     fn install_apk(&mut self, apk_path: &Path, replace_existing: bool) -> Result<(), String> {
@@ -1639,7 +1640,7 @@ impl SandboxRoots {
             let entry_name = file.name().to_string();
             let relative = archive_relative_components(Path::new(&entry_name))?;
             let target = normalize_path(&dest_dir.join(relative));
-            if !target.starts_with(&normalize_path(dest_dir)) {
+            if !target.starts_with(normalize_path(dest_dir)) {
                 return Err(StepFailure::new(format!(
                     "unsafe archive entry rejected: {entry_name}"
                 )));
@@ -1806,7 +1807,7 @@ impl SandboxRoots {
 
     fn remove_fake_device_path(&self, path: &Path) -> Result<(), StepFailure> {
         let normalized = normalize_path(path);
-        if !normalized.starts_with(&normalize_path(&self.fake_device_root)) {
+        if !normalized.starts_with(normalize_path(&self.fake_device_root)) {
             return Err(StepFailure::new(format!(
                 "delete rejected outside fake device root: {}",
                 path.display()
@@ -1937,10 +1938,6 @@ impl StepFailure {
             message,
             outputs: OrderedMap::new(),
         }
-    }
-
-    fn skipped() -> Self {
-        Self::new("__emuchef_internal_skipped__".to_string())
     }
 }
 
@@ -2346,7 +2343,7 @@ fn reject_existing_symlink(path: &Path) -> Result<(), StepFailure> {
         .unwrap_or(false)
     {
         return Err(StepFailure::new(format!(
-            "symlink paths are not supported in Phase 6P sandbox operations: {}",
+            "symlink paths are not supported in sandbox operations: {}",
             path.display()
         )));
     }

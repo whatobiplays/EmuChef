@@ -37,7 +37,7 @@ pub enum LoadErrorKind {
 pub struct RecipeLoadError {
     pub kind: LoadErrorKind,
     pub message: String,
-    pub issue: Option<LoadIssue>,
+    pub issue: Option<Box<LoadIssue>>,
 }
 
 impl RecipeLoadError {
@@ -45,7 +45,7 @@ impl RecipeLoadError {
         Self {
             kind: LoadErrorKind::AuthoredData,
             message: message.into(),
-            issue: Some(issue),
+            issue: Some(Box::new(issue)),
         }
     }
 
@@ -912,11 +912,11 @@ fn python_repr(value: Option<&YamlValue>) -> String {
 }
 
 fn get_yaml<'a>(mapping: &'a Mapping, key: &str) -> Option<&'a YamlValue> {
-    mapping.get(&YamlValue::String(key.to_string()))
+    mapping.get(YamlValue::String(key.to_string()))
 }
 
 fn contains_yaml_key(mapping: &Mapping, key: &str) -> bool {
-    mapping.contains_key(&YamlValue::String(key.to_string()))
+    mapping.contains_key(YamlValue::String(key.to_string()))
 }
 
 fn insert(mapping: &mut Mapping, key: &str, value: YamlValue) {

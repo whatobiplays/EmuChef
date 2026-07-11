@@ -1,22 +1,17 @@
 //! EmuChef's canonical Rust CLI, executor, planner, validation, and sidecar runtime.
 //!
-//! The crate exposes the product `emuchef` executable while retaining the
-//! one-shot and JSONL protocol surfaces used by the Tauri configuration editor.
-//! The separate `emuchef-plan-shadow` binary is development/reference tooling
-//! and is never part of product CLI, sidecar, or packaging resolution.
+//! The crate exposes the product `emuchef` executable and the one-shot and JSONL
+//! protocol surfaces used by the Tauri configuration editor.
 
 pub mod catalog;
 mod cli;
 pub mod commands;
-#[allow(dead_code)]
 pub(crate) mod device_probe;
-#[allow(dead_code)]
 pub(crate) mod device_profile_match;
 pub mod document;
 pub mod dto;
 pub mod envelope;
 pub mod errors;
-#[allow(dead_code)]
 mod executor;
 #[cfg(test)]
 mod executor_real_adb_tests;
@@ -25,11 +20,9 @@ mod executor_tests;
 pub mod jsonl;
 pub mod model;
 pub mod one_shot;
-pub mod plan_shadow;
-#[allow(dead_code)]
 mod planner;
-#[allow(dead_code)]
 pub(crate) mod planner_device_plan;
+mod planner_runtime;
 #[cfg(test)]
 mod planner_tests;
 pub mod protocol;

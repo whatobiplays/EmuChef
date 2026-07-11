@@ -1757,7 +1757,7 @@ fn phase6p_remote_artifact_resolution_fails_without_network_download_attempt() {
     assert!(actual["steps"][0]["message"]
         .as_str()
         .unwrap()
-        .contains("network_artifact_downloads_not_cut_over"));
+        .contains("network_artifact_download_unsupported"));
     assert!(actual["steps"][0]["message"]
         .as_str()
         .unwrap()

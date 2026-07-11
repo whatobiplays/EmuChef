@@ -17,7 +17,8 @@ use crate::planner::{
     ExecutionPlanSource, ExecutionStep, ExecutionStepCondition, ExecutionStepConstraints,
     PlanningResult, PlanningStatus, RuntimeCapabilities, RuntimeValue as PlanRuntimeValue,
 };
-use crate::{plan_shadow, validation, yaml, ProcessOutput};
+use crate::planner_runtime::{plan_with_adb_runner, ExplicitDeviceContext, PlanningRequest};
+use crate::{validation, yaml, ProcessOutput};
 
 const CLI_COMMANDS: &[&str] = &["plan", "validate", "apply", "-h", "--help"];
 
@@ -67,8 +68,11 @@ fn run_plan_with_adb_runner<R: CommandRunner>(args: &[String], adb_runner: &R) -
         Ok(config) => config,
         Err(output) => return output,
     };
-    let shadow_args = plan_shadow_args(&config);
-    let result = match plan_shadow::planning_result_with_adb_runner(&shadow_args, adb_runner) {
+    let request = match planning_request(&config) {
+        Ok(request) => request,
+        Err(output) => return output,
+    };
+    let result = match plan_with_adb_runner(request, adb_runner) {
         Ok(result) => result,
         Err(output) => return output,
     };
@@ -139,44 +143,88 @@ fn parse_plan_args(args: &[String]) -> Result<PlanCliConfig, ProcessOutput> {
     Ok(config)
 }
 
-fn plan_shadow_args(config: &PlanCliConfig) -> Vec<String> {
-    let mut args = vec![
-        "--authored-root".to_string(),
-        config.authored_root.clone(),
-        "--device-plan".to_string(),
-        config
+fn planning_request(config: &PlanCliConfig) -> Result<PlanningRequest, ProcessOutput> {
+    let android_version = config
+        .android_version
+        .as_deref()
+        .map(|value| {
+            value
+                .parse::<i64>()
+                .ok()
+                .filter(|version| *version >= 0)
+                .ok_or_else(|| {
+                    usage_error(
+                        plan_usage(),
+                        "emuchef plan: error: --android-version must be a non-negative integer",
+                    )
+                })
+        })
+        .transpose()?;
+    let adb_probe = (config.adb.is_some() || config.serial.is_some()).then(|| {
+        crate::device_probe::AdbProbeConfig {
+            adb_path: config.adb.clone().unwrap_or_else(|| "adb".to_string()),
+            serial: config.serial.clone(),
+        }
+    });
+    Ok(PlanningRequest {
+        authored_root: PathBuf::from(&config.authored_root),
+        device_plan: config
             .device_plan
             .clone()
             .expect("device plan should be present after parsing"),
-    ];
-    if config.adb.is_some() || config.serial.is_some() {
-        args.push("--probe-adb-getprop".to_string());
-        args.push("--adb-path".to_string());
-        args.push(config.adb.clone().unwrap_or_else(|| "adb".to_string()));
-        if let Some(serial) = &config.serial {
-            args.push("--serial".to_string());
-            args.push(serial.clone());
+        input_bindings: parse_plan_bindings(&config.bindings)?,
+        explicit_context: ExplicitDeviceContext {
+            manufacturer: config.manufacturer.clone(),
+            model: config.model.clone(),
+            android_version,
+            device_tags: config.device_tags.clone(),
+        },
+        adb_probe,
+    })
+}
+
+fn parse_plan_bindings(raw_bindings: &[String]) -> Result<OrderedMap<JsonValue>, ProcessOutput> {
+    let mut grouped: OrderedMap<Vec<String>> = OrderedMap::new();
+    for raw_binding in raw_bindings {
+        let Some((binding_ref, raw_value)) = raw_binding.split_once('=') else {
+            return Err(invalid_plan_binding(raw_binding));
+        };
+        let Some((recipe_ref, input_id)) = binding_ref.split_once('/') else {
+            return Err(invalid_plan_binding(raw_binding));
+        };
+        if recipe_ref.is_empty() || input_id.is_empty() || input_id.contains('/') {
+            return Err(invalid_plan_binding(raw_binding));
         }
+        grouped
+            .entry(binding_ref.to_string())
+            .or_default()
+            .push(raw_value.to_string());
     }
-    for (option, value) in [
-        ("--manufacturer", config.manufacturer.as_ref()),
-        ("--model", config.model.as_ref()),
-        ("--android-version", config.android_version.as_ref()),
-    ] {
-        if let Some(value) = value {
-            args.push(option.to_string());
-            args.push(value.clone());
-        }
-    }
-    for tag in &config.device_tags {
-        args.push("--device-tag".to_string());
-        args.push(tag.clone());
-    }
-    for binding in &config.bindings {
-        args.push("--bind".to_string());
-        args.push(binding.clone());
-    }
-    args
+    Ok(grouped
+        .into_iter()
+        .map(|(binding_ref, values)| {
+            let value = if values.len() == 1 {
+                JsonValue::String(
+                    values
+                        .into_iter()
+                        .next()
+                        .expect("binding value should exist"),
+                )
+            } else {
+                JsonValue::Array(values.into_iter().map(JsonValue::String).collect())
+            };
+            (binding_ref, value)
+        })
+        .collect())
+}
+
+fn invalid_plan_binding(raw_binding: &str) -> ProcessOutput {
+    usage_error(
+        plan_usage(),
+        &format!(
+            "emuchef plan: error: Invalid --bind value: '{raw_binding}'. Expected <recipe_ref>/<input_id>=<value>."
+        ),
+    )
 }
 
 fn format_plan_result(result: PlanningResult, config: &PlanCliConfig) -> ProcessOutput {
@@ -357,7 +405,7 @@ struct ApplyCliConfig {
 }
 
 fn run_apply(args: &[String]) -> ProcessOutput {
-    run_apply_with_real_device_factory(args, |adb, serial| RealAdbDevice::new(adb, serial))
+    run_apply_with_real_device_factory(args, RealAdbDevice::new)
 }
 
 fn run_apply_with_real_device_factory<D, F>(args: &[String], factory: F) -> ProcessOutput
@@ -544,7 +592,7 @@ fn execute_apply_plan<D: ExecutorDevice>(
 ) -> ProcessOutput {
     let mut stdout = String::new();
     let mut runner = ExecutorRunner::new(adapters);
-    let result = runner.run_with_progress(&plan, |event| {
+    let result = runner.run_with_progress(plan, |event| {
         stdout.push_str(&format_execution_progress_event(&event, dry_run));
     });
     stdout.push_str(&format_execution_summary(&result, dry_run));
@@ -832,7 +880,7 @@ fn load_execution_plan_file(path: &Path) -> Result<ExecutionPlan, CliError> {
     )?;
     if string_value(raw_mapping, "kind") == "planning_result" {
         raw = raw_mapping
-            .get(&yaml_key("execution_plan"))
+            .get(yaml_key("execution_plan"))
             .cloned()
             .ok_or_else(|| {
                 CliError::Message("Planning result does not contain an execution_plan.".to_string())
@@ -898,7 +946,7 @@ fn parse_inputs(data: &serde_yaml::Mapping) -> Result<Vec<ExecutionInputValue>, 
         .map(|item| {
             let mapping = as_mapping(item, "execution input must be a mapping")?;
             let value = mapping_value(mapping, "value")?;
-            let raw_value = value.get(&yaml_key("value")).ok_or_else(|| {
+            let raw_value = value.get(yaml_key("value")).ok_or_else(|| {
                 CliError::Message("Execution input value missing value.".to_string())
             })?;
             Ok(ExecutionInputValue {
@@ -979,12 +1027,12 @@ fn parse_params(
 fn parse_param_value(value: &YamlValue) -> Result<ExecutionParamValue, CliError> {
     if let YamlValue::Mapping(mapping) = value {
         if mapping.len() == 1 {
-            if let Some(ref_value) = mapping.get(&yaml_key("ref")).and_then(YamlValue::as_str) {
+            if let Some(ref_value) = mapping.get(yaml_key("ref")).and_then(YamlValue::as_str) {
                 return Ok(ExecutionParamValue::Ref {
                     ref_value: ref_value.to_string(),
                 });
             }
-            if let Some(value) = mapping.get(&yaml_key("value")) {
+            if let Some(value) = mapping.get(yaml_key("value")) {
                 return Ok(ExecutionParamValue::Literal {
                     value: yaml_to_json(value)?,
                 });
@@ -1041,7 +1089,7 @@ fn mapping_value<'a>(
     key: &str,
 ) -> Result<&'a serde_yaml::Mapping, CliError> {
     let value = mapping
-        .get(&yaml_key(key))
+        .get(yaml_key(key))
         .ok_or_else(|| CliError::Message(format!("Execution plan missing {key}.")))?;
     as_mapping(value, &format!("Execution plan {key} must be a mapping."))
 }
@@ -1051,7 +1099,7 @@ fn optional_mapping_value<'a>(
     key: &str,
 ) -> Result<Option<&'a serde_yaml::Mapping>, CliError> {
     mapping
-        .get(&yaml_key(key))
+        .get(yaml_key(key))
         .map(|value| as_mapping(value, &format!("Execution plan {key} must be a mapping.")))
         .transpose()
 }
@@ -1060,7 +1108,7 @@ fn sequence_value<'a>(
     mapping: &'a serde_yaml::Mapping,
     key: &str,
 ) -> Result<&'a Vec<YamlValue>, CliError> {
-    match mapping.get(&yaml_key(key)) {
+    match mapping.get(yaml_key(key)) {
         Some(YamlValue::Sequence(sequence)) => Ok(sequence),
         Some(_) => Err(CliError::Message(format!(
             "Execution plan {key} must be a list."
@@ -1087,7 +1135,7 @@ fn string_list(mapping: &serde_yaml::Mapping, key: &str) -> Result<Vec<String>, 
 
 fn required_string(mapping: &serde_yaml::Mapping, key: &str) -> Result<String, CliError> {
     mapping
-        .get(&yaml_key(key))
+        .get(yaml_key(key))
         .and_then(YamlValue::as_str)
         .map(ToString::to_string)
         .ok_or_else(|| CliError::Message(format!("Execution plan missing string {key}.")))
@@ -1095,14 +1143,14 @@ fn required_string(mapping: &serde_yaml::Mapping, key: &str) -> Result<String, C
 
 fn required_i64(mapping: &serde_yaml::Mapping, key: &str) -> Result<i64, CliError> {
     mapping
-        .get(&yaml_key(key))
+        .get(yaml_key(key))
         .and_then(YamlValue::as_i64)
         .ok_or_else(|| CliError::Message(format!("Execution plan missing integer {key}.")))
 }
 
 fn optional_i64(mapping: &serde_yaml::Mapping, key: &str) -> Result<Option<i64>, CliError> {
     mapping
-        .get(&yaml_key(key))
+        .get(yaml_key(key))
         .map(|value| {
             if value.is_null() {
                 Ok(None)
@@ -1117,7 +1165,7 @@ fn optional_i64(mapping: &serde_yaml::Mapping, key: &str) -> Result<Option<i64>,
 
 fn required_bool(mapping: &serde_yaml::Mapping, key: &str) -> Result<bool, CliError> {
     mapping
-        .get(&yaml_key(key))
+        .get(yaml_key(key))
         .and_then(YamlValue::as_bool)
         .ok_or_else(|| CliError::Message(format!("Execution plan missing boolean {key}.")))
 }
@@ -1128,7 +1176,7 @@ fn string_value(mapping: &serde_yaml::Mapping, key: &str) -> String {
 
 fn optional_string_value(mapping: &serde_yaml::Mapping, key: &str) -> Option<String> {
     mapping
-        .get(&yaml_key(key))
+        .get(yaml_key(key))
         .and_then(YamlValue::as_str)
         .map(ToString::to_string)
 }

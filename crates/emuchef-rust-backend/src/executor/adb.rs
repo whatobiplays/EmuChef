@@ -58,7 +58,7 @@ impl AdbCommandExecutor for ProcessAdbCommandExecutor {
         let output = Command::new(executable)
             .args(args.iter().skip(1))
             .output()
-            .map_err(|error| map_command_spawn_error(error))?;
+            .map_err(map_command_spawn_error)?;
         Ok(AdbCommandResult {
             args: args.to_vec(),
             returncode: output.status.code().unwrap_or(-1),
@@ -94,6 +94,7 @@ impl<E: AdbCommandExecutor> AdbCommandRunner<E> {
         }
     }
 
+    #[cfg(test)]
     pub fn executor(&self) -> &E {
         &self.executor
     }
@@ -163,6 +164,7 @@ impl RealAdbDevice<ProcessAdbCommandExecutor> {
 }
 
 impl<E: AdbCommandExecutor> RealAdbDevice<E> {
+    #[cfg(test)]
     pub fn with_executor(executable: impl Into<String>, serial: Option<&str>, executor: E) -> Self {
         Self {
             runner: AdbCommandRunner::with_executor(
@@ -173,6 +175,7 @@ impl<E: AdbCommandExecutor> RealAdbDevice<E> {
         }
     }
 
+    #[cfg(test)]
     pub fn command_executor(&self) -> &E {
         self.runner.executor()
     }

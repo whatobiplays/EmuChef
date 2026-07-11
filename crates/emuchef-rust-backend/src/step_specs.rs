@@ -233,6 +233,9 @@ pub fn is_supported_step_type(type_name: &str) -> bool {
     step_spec_for(type_name).is_some()
 }
 
+// Step specifications are static declarative records. Keeping every field
+// visible at each call site is clearer than a mutable builder with defaults.
+#[allow(clippy::too_many_arguments)]
 fn spec(
     type_name: &str,
     label: &str,

@@ -781,8 +781,8 @@ fn missing_step_and_invalid_step_internals_commands_leave_document_and_history_u
     assert_changed(&responses[1]);
     let undone = assert_changed(&responses[2]).clone();
     assert_eq!(undone["canRedo"], true);
-    for index in 3..=6 {
-        assert_command_failed(&responses[index]);
+    for response in &responses[3..=6] {
+        assert_command_failed(response);
     }
     assert_invalid_command(&responses[7]);
     assert_eq!(responses[8]["result"]["document"], undone);

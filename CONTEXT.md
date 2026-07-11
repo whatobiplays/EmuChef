@@ -17,6 +17,10 @@ The product command is the Cargo binary target `emuchef` from the
 Non-dry-run apply uses the exact `--adb` executable when supplied, otherwise the
 literal executable name `adb`, and forwards an optional `--serial`.
 
+The product planner is crate-private Rust runtime code called directly by the
+CLI. The repository has no alternate planner binary or backend selector.
+Generated execution plans use the identifier `plan.<device-plan>.001`.
+
 Tauri packages and launches `emuchef-<target-triple>[.exe]` as its external
 sidecar input and resolves the packaged launch name `emuchef[.exe]`. Active CLI,
 Tauri, packaging, planner, validator, apply, and editor flows do not execute
@@ -28,7 +32,7 @@ Device-target archive extraction runs on the host inside the Rust staging root,
 then pushes the extracted file tree through ADB. The runtime does not depend on
 an Android `unzip` command. File paths and `file://` artifact sources are
 supported. Network artifact downloads fail explicitly with
-`network_artifact_downloads_not_cut_over` and remain a separate readiness
+`network_artifact_download_unsupported` and remain a separate readiness
 blocker because current authored recipes include network sources.
 
 The current readiness report has kind
