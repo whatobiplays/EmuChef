@@ -3,10 +3,12 @@
 //! The resolver is crate-private because execution plans remain the product
 //! interface. It preserves the original URL bytes when deriving cache keys.
 
-use std::fs::{self, File};
-use std::path::PathBuf;
+use std::fs;
+use std::io::{self, Write};
+use std::path::{Path, PathBuf};
 
 use sha2::{Digest, Sha256};
+use tempfile::{Builder as TempFileBuilder, NamedTempFile};
 use url::Url;
 
 use crate::artifact_transport::{
@@ -32,7 +34,6 @@ pub(crate) struct ResolvedArtifact {
 
 /// Typed artifact failures converted to stable messages only by the executor.
 #[derive(Debug)]
-#[allow(dead_code)] // Transport and publication commits activate the remaining typed variants.
 pub(crate) enum ArtifactResolveError {
     UrlInvalid,
     SchemeUnsupported { scheme: String },
@@ -144,13 +145,9 @@ impl<'a> ArtifactResolver<'a> {
         let filename = artifact_filename(request.artifact_id, request.url);
         let local_filename =
             artifact_local_filename(request.artifact_id, request.url, request.cache_mode);
-        let cache_hit;
-        let local_path = if request.cache_mode == "default" {
-            let path = self.sandbox.cache_root.join(&local_filename);
-            cache_hit = path.exists();
-            path
+        let final_path = if request.cache_mode == "default" {
+            self.sandbox.cache_root.join(&local_filename)
         } else {
-            cache_hit = false;
             self.sandbox
                 .runtime_root
                 .join("downloads")
@@ -158,50 +155,58 @@ impl<'a> ArtifactResolver<'a> {
         };
 
         self.sandbox
-            .ensure_runtime_or_cache_write(&local_path)
+            .ensure_runtime_or_cache_write(&final_path)
             .map_err(|_| ArtifactResolveError::SandboxRejected)?;
-        if !local_path.exists() {
-            let parsed_url =
-                Url::parse(request.url).map_err(|_| ArtifactResolveError::UrlInvalid)?;
-            match parsed_url.scheme() {
-                "file" => {
-                    let source_path = file_url_to_path(request.url)
-                        .filter(|path| path.is_absolute())
-                        .ok_or(ArtifactResolveError::UrlInvalid)?;
-                    self.sandbox
-                        .ensure_read_allowed(&source_path)
-                        .map_err(|_| ArtifactResolveError::SandboxRejected)?;
-                    if !source_path.is_file() {
-                        return Err(ArtifactResolveError::SourceNotFound);
-                    }
-                    fs::create_dir_all(
-                        local_path
-                            .parent()
-                            .expect("artifact destination has a parent"),
-                    )
-                    .map_err(|_| ArtifactResolveError::CacheWriteFailed)?;
-                    self.local_transport.download(&source_path, &local_path)?;
-                }
-                "http" | "https" if parsed_url.has_host() => {
-                    fs::create_dir_all(
-                        local_path
-                            .parent()
-                            .expect("artifact destination has a parent"),
-                    )
-                    .map_err(|_| ArtifactResolveError::CacheWriteFailed)?;
-                    let mut destination = File::create(&local_path)
-                        .map_err(|_| ArtifactResolveError::CacheWriteFailed)?;
-                    self.http_transport()?
-                        .download(&parsed_url, &mut destination)?;
-                }
-                "http" | "https" => return Err(ArtifactResolveError::UrlInvalid),
-                scheme => {
-                    return Err(ArtifactResolveError::SchemeUnsupported {
-                        scheme: scheme.to_string(),
-                    });
+        let existing = existing_regular_file(&final_path)?;
+        if request.cache_mode == "default" && existing {
+            return Ok(ResolvedArtifact {
+                local_path: final_path,
+                filename,
+                cache_hit: true,
+            });
+        }
+
+        let parsed_url = Url::parse(request.url).map_err(|_| ArtifactResolveError::UrlInvalid)?;
+        validate_source_url(&parsed_url)?;
+        let parent = final_path
+            .parent()
+            .expect("artifact destination has a parent");
+        fs::create_dir_all(parent).map_err(|_| ArtifactResolveError::CacheWriteFailed)?;
+        self.sandbox
+            .ensure_runtime_or_cache_write(&final_path)
+            .map_err(|_| ArtifactResolveError::SandboxRejected)?;
+        let mut partial = TempFileBuilder::new()
+            .prefix(".emuchef-artifact-")
+            .suffix(".partial")
+            .tempfile_in(parent)
+            .map_err(|_| ArtifactResolveError::CacheWriteFailed)?;
+
+        let transfer_result = match parsed_url.scheme() {
+            "file" => {
+                let source_path = file_url_to_path(request.url)
+                    .filter(|path| path.is_absolute())
+                    .ok_or(ArtifactResolveError::UrlInvalid)?;
+                self.sandbox
+                    .ensure_read_allowed(&source_path)
+                    .map_err(|_| ArtifactResolveError::SandboxRejected)?;
+                if !source_path.is_file() {
+                    Err(ArtifactResolveError::SourceNotFound)
+                } else {
+                    self.local_transport
+                        .download(&source_path, partial.as_file_mut())
                 }
             }
+            "http" | "https" => self
+                .http_transport()?
+                .download(&parsed_url, partial.as_file_mut()),
+            _ => unreachable!("source scheme was validated"),
+        };
+        if let Err(error) = transfer_result {
+            return Err(cleanup_partial(partial, error, false));
         }
+
+        let (local_path, cache_hit) =
+            finish_partial(partial, &final_path, request.cache_mode == "default", None)?;
 
         Ok(ResolvedArtifact {
             local_path,
@@ -217,6 +222,140 @@ impl<'a> ArtifactResolver<'a> {
         self.http_transport
             .as_ref()
             .ok_or(ArtifactResolveError::DownloadFailed)
+    }
+}
+
+fn validate_source_url(url: &Url) -> Result<(), ArtifactResolveError> {
+    match url.scheme() {
+        "file" if file_url_to_path(url.as_str()).is_some_and(|path| path.is_absolute()) => Ok(()),
+        "file" => Err(ArtifactResolveError::UrlInvalid),
+        "http" | "https" if url.has_host() => Ok(()),
+        "http" | "https" => Err(ArtifactResolveError::UrlInvalid),
+        scheme => Err(ArtifactResolveError::SchemeUnsupported {
+            scheme: scheme.to_string(),
+        }),
+    }
+}
+
+fn existing_regular_file(path: &Path) -> Result<bool, ArtifactResolveError> {
+    match fs::symlink_metadata(path) {
+        Ok(metadata) if metadata.file_type().is_symlink() => {
+            Err(ArtifactResolveError::SandboxRejected)
+        }
+        Ok(metadata) if metadata.is_file() => Ok(true),
+        Ok(_) => Err(ArtifactResolveError::CachePublishFailed),
+        Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(false),
+        Err(_) => Err(ArtifactResolveError::CachePublishFailed),
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum PublicationFault {
+    Sync,
+    Publish,
+    Cleanup,
+}
+
+fn finish_partial(
+    mut partial: NamedTempFile,
+    final_path: &Path,
+    default_cache: bool,
+    fault: Option<PublicationFault>,
+) -> Result<(PathBuf, bool), ArtifactResolveError> {
+    if fault == Some(PublicationFault::Cleanup) {
+        return Err(cleanup_partial(
+            partial,
+            ArtifactResolveError::CachePublishFailed,
+            true,
+        ));
+    }
+    if fault == Some(PublicationFault::Sync)
+        || partial.as_file_mut().flush().is_err()
+        || partial.as_file().sync_all().is_err()
+    {
+        return Err(cleanup_partial(
+            partial,
+            ArtifactResolveError::CacheWriteFailed,
+            false,
+        ));
+    }
+    if fault == Some(PublicationFault::Publish) {
+        return Err(cleanup_partial(
+            partial,
+            ArtifactResolveError::CachePublishFailed,
+            false,
+        ));
+    }
+    publish_partial(partial, final_path, default_cache)
+}
+
+fn publish_partial(
+    mut partial: NamedTempFile,
+    deterministic_path: &Path,
+    default_cache: bool,
+) -> Result<(PathBuf, bool), ArtifactResolveError> {
+    let unique_token = partial
+        .path()
+        .file_name()
+        .and_then(|name| name.to_str())
+        .unwrap_or("artifact")
+        .trim_start_matches(".emuchef-artifact-")
+        .trim_end_matches(".partial")
+        .to_string();
+    let mut destination = deterministic_path.to_path_buf();
+    loop {
+        match partial.persist_noclobber(&destination) {
+            Ok(_) => return Ok((destination, false)),
+            Err(error) if error.error.kind() == io::ErrorKind::AlreadyExists && default_cache => {
+                let cleanup_error = error.file.close().err();
+                if !existing_regular_file(&destination)? {
+                    return Err(ArtifactResolveError::CachePublishFailed);
+                }
+                if cleanup_error.is_some() {
+                    return Err(ArtifactResolveError::PartialCleanupFailed {
+                        primary: Box::new(ArtifactResolveError::CachePublishFailed),
+                    });
+                }
+                return Ok((destination, true));
+            }
+            Err(error) if error.error.kind() == io::ErrorKind::AlreadyExists => {
+                partial = error.file;
+                let filename = deterministic_path
+                    .file_name()
+                    .and_then(|name| name.to_str())
+                    .unwrap_or("artifact");
+                destination =
+                    deterministic_path.with_file_name(format!("{filename}.{unique_token}"));
+                if existing_regular_file(&destination)? {
+                    return Err(cleanup_partial(
+                        partial,
+                        ArtifactResolveError::CachePublishFailed,
+                        false,
+                    ));
+                }
+            }
+            Err(error) => {
+                return Err(cleanup_partial(
+                    error.file,
+                    ArtifactResolveError::CachePublishFailed,
+                    false,
+                ));
+            }
+        }
+    }
+}
+
+fn cleanup_partial(
+    partial: NamedTempFile,
+    primary: ArtifactResolveError,
+    simulate_failure: bool,
+) -> ArtifactResolveError {
+    if simulate_failure || partial.close().is_err() {
+        ArtifactResolveError::PartialCleanupFailed {
+            primary: Box::new(primary),
+        }
+    } else {
+        primary
     }
 }
 
@@ -313,6 +452,15 @@ fn redacted_url(url: &str) -> Option<String> {
 mod tests {
     use super::*;
 
+    fn sandbox(root: &Path) -> SandboxRoots {
+        SandboxRoots {
+            runtime_root: root.join("runtime"),
+            cache_root: root.join("cache"),
+            fake_device_root: root.join("device"),
+            read_only_roots: vec![root.to_path_buf()],
+        }
+    }
+
     fn request() -> ArtifactResolveRequest<'static> {
         ArtifactResolveRequest {
             artifact_id: "example.recipe/archive",
@@ -370,5 +518,106 @@ mod tests {
             redacted_url(request().url).as_deref(),
             Some("https://example.com/archive.zip")
         );
+    }
+
+    #[test]
+    fn local_files_publish_atomically_and_default_cache_hits_skip_url_parsing() {
+        let temp = tempfile::tempdir().unwrap();
+        let source = temp.path().join("source.bin");
+        fs::write(&source, b"artifact-bytes").unwrap();
+        let roots = sandbox(temp.path());
+        let url = format!("file://{}", source.display());
+        let mut resolver = ArtifactResolver::new(&roots);
+        let first = resolver
+            .resolve(ArtifactResolveRequest {
+                artifact_id: "example/artifact",
+                url: &url,
+                cache_mode: "default",
+            })
+            .unwrap();
+        assert!(!first.cache_hit);
+        assert_eq!(fs::read(&first.local_path).unwrap(), b"artifact-bytes");
+        assert!(fs::read_dir(&roots.cache_root).unwrap().all(|entry| !entry
+            .unwrap()
+            .file_name()
+            .to_string_lossy()
+            .contains("partial")));
+
+        let invalid_url = "not a valid URL";
+        let cached_path = roots.cache_root.join(artifact_local_filename(
+            "example/cached",
+            invalid_url,
+            "default",
+        ));
+        fs::write(&cached_path, b"existing").unwrap();
+        let cached = resolver
+            .resolve(ArtifactResolveRequest {
+                artifact_id: "example/cached",
+                url: invalid_url,
+                cache_mode: "default",
+            })
+            .unwrap();
+        assert!(cached.cache_hit);
+        assert_eq!(fs::read(cached.local_path).unwrap(), b"existing");
+    }
+
+    #[test]
+    fn cache_none_always_copies_and_uses_unique_collision_path() {
+        let temp = tempfile::tempdir().unwrap();
+        let source = temp.path().join("source.bin");
+        fs::write(&source, b"one").unwrap();
+        let roots = sandbox(temp.path());
+        let url = format!("file://{}", source.display());
+        let request = ArtifactResolveRequest {
+            artifact_id: "example/artifact",
+            url: &url,
+            cache_mode: "none",
+        };
+        let mut resolver = ArtifactResolver::new(&roots);
+        let first = resolver.resolve(request).unwrap();
+        fs::write(&source, b"two").unwrap();
+        let second = resolver.resolve(request).unwrap();
+        assert!(!first.cache_hit);
+        assert!(!second.cache_hit);
+        assert_ne!(first.local_path, second.local_path);
+        assert_eq!(fs::read(first.local_path).unwrap(), b"one");
+        assert_eq!(fs::read(second.local_path).unwrap(), b"two");
+    }
+
+    #[test]
+    fn publication_faults_map_to_write_publish_and_cleanup_errors() {
+        let temp = tempfile::tempdir().unwrap();
+        for (fault, expected) in [
+            (PublicationFault::Sync, "artifact_cache_write_failed"),
+            (PublicationFault::Publish, "artifact_cache_publish_failed"),
+            (PublicationFault::Cleanup, "artifact_partial_cleanup_failed"),
+        ] {
+            let mut partial = TempFileBuilder::new()
+                .prefix(".emuchef-artifact-")
+                .suffix(".partial")
+                .tempfile_in(temp.path())
+                .unwrap();
+            partial.write_all(b"bytes").unwrap();
+            let error = finish_partial(
+                partial,
+                &temp.path().join(format!("final-{expected}")),
+                true,
+                Some(fault),
+            )
+            .unwrap_err();
+            if fault == PublicationFault::Cleanup {
+                assert!(matches!(
+                    error,
+                    ArtifactResolveError::PartialCleanupFailed { .. }
+                ));
+            } else {
+                assert_eq!(error.code(), expected);
+            }
+        }
+        assert!(fs::read_dir(temp.path()).unwrap().all(|entry| !entry
+            .unwrap()
+            .file_name()
+            .to_string_lossy()
+            .contains("partial")));
     }
 }

@@ -32,7 +32,11 @@ pub(crate) struct DownloadMetadata {
 
 /// Transfer an artifact source to a resolver-selected destination.
 pub(crate) trait ArtifactTransport {
-    fn download(&self, source: &Path, destination: &Path) -> Result<(), ArtifactResolveError>;
+    fn download(
+        &self,
+        source: &Path,
+        destination: &mut dyn Write,
+    ) -> Result<DownloadMetadata, ArtifactResolveError>;
 }
 
 /// Local-file transport preserving the executor's existing copy semantics.
@@ -40,10 +44,38 @@ pub(crate) trait ArtifactTransport {
 pub(crate) struct LocalFileTransport;
 
 impl ArtifactTransport for LocalFileTransport {
-    fn download(&self, source: &Path, destination: &Path) -> Result<(), ArtifactResolveError> {
-        fs::copy(source, destination)
-            .map(|_| ())
-            .map_err(|_| ArtifactResolveError::CacheWriteFailed)
+    fn download(
+        &self,
+        source: &Path,
+        destination: &mut dyn Write,
+    ) -> Result<DownloadMetadata, ArtifactResolveError> {
+        let mut source = fs::File::open(source).map_err(|error| {
+            if error.kind() == io::ErrorKind::NotFound {
+                ArtifactResolveError::SourceNotFound
+            } else {
+                ArtifactResolveError::DownloadFailed
+            }
+        })?;
+        let mut bytes_written = 0u64;
+        let mut buffer = [0u8; COPY_BUFFER_SIZE];
+        loop {
+            let count = source
+                .read(&mut buffer)
+                .map_err(|_| ArtifactResolveError::DownloadFailed)?;
+            if count == 0 {
+                break;
+            }
+            bytes_written = bytes_written
+                .checked_add(count as u64)
+                .ok_or(ArtifactResolveError::ResponseTooLarge)?;
+            destination
+                .write_all(&buffer[..count])
+                .map_err(|_| ArtifactResolveError::CacheWriteFailed)?;
+        }
+        Ok(DownloadMetadata {
+            bytes_written,
+            content_length: Some(bytes_written),
+        })
     }
 }
 
@@ -236,6 +268,18 @@ mod tests {
 
     use super::*;
 
+    struct FailingWriter;
+
+    impl Write for FailingWriter {
+        fn write(&mut self, _buffer: &[u8]) -> io::Result<usize> {
+            Err(io::Error::other("injected write failure"))
+        }
+
+        fn flush(&mut self) -> io::Result<()> {
+            Ok(())
+        }
+    }
+
     #[test]
     fn production_http_policy_uses_locked_timeouts() {
         let config = HttpClientConfig::default();
@@ -304,5 +348,16 @@ mod tests {
             validate_redirect(&https, &https, &mut redirects, &mut visited),
             Err(ArtifactResolveError::RedirectLimitExceeded { redirects: 1 })
         ));
+    }
+
+    #[test]
+    fn local_transport_maps_destination_write_failure_without_exposing_raw_error() {
+        let temp = tempfile::tempdir().unwrap();
+        let source = temp.path().join("source");
+        fs::write(&source, b"bytes").unwrap();
+        let error = LocalFileTransport
+            .download(&source, &mut FailingWriter)
+            .unwrap_err();
+        assert_eq!(error.code(), "artifact_cache_write_failed");
     }
 }

@@ -1533,8 +1533,8 @@ impl<E: adb::AdbCommandExecutor> ExecutorDevice for adb::RealAdbDevice<E> {
 pub(crate) struct SandboxRoots {
     pub(crate) runtime_root: PathBuf,
     pub(crate) cache_root: PathBuf,
-    fake_device_root: PathBuf,
-    read_only_roots: Vec<PathBuf>,
+    pub(crate) fake_device_root: PathBuf,
+    pub(crate) read_only_roots: Vec<PathBuf>,
 }
 
 impl SandboxRoots {
