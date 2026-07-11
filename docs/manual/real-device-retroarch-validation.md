@@ -26,6 +26,10 @@ The sanitized record for the completed 2026-07-11 run is
    `ayaneo.pocket_s_mini.base`; change it when testing another profile.
 6. Treat the commands in sections C and E as destructive. Confirm the serial
    before every command that uninstalls an app or removes device files.
+7. Start from a clean tracked worktree whose committed `HEAD` contains every
+   product and runbook correction required for the run. If execution discovers
+   a defect, stop, fix and commit it, rerun the affected verification from that
+   new commit, and record the new SHA. Do not attach evidence to an older SHA.
 
 Set explicit paths from the repository root:
 
@@ -36,6 +40,8 @@ export ADB="$(command -v adb)"
 export SERIAL="REPLACE_WITH_TEST_DEVICE_SERIAL"
 export DEVICE_PLAN="ayaneo.pocket_s_mini.base"
 export RUN_ROOT="$(mktemp -d /tmp/emuchef-retroarch.XXXXXX)"
+export TESTED_COMMIT="$(git rev-parse HEAD)"
+test -z "$(git status --short)"
 cp -R "$REPO_ROOT/authored" "$RUN_ROOT/authored-local"
 ```
 
@@ -61,11 +67,14 @@ cargo test --manifest-path crates/emuchef-rust-backend/Cargo.toml
 cargo clippy --manifest-path crates/emuchef-rust-backend/Cargo.toml --all-targets -- -D warnings
 
 cd apps/config-editor
+npm ci
 npm run check:rust-runtime
 npm run typecheck
 npm run test:logic
 npm run build
 
+# This maintained command builds and copies the ignored host-target debug
+# externalBin input. Do not assume src-tauri/binaries already contains it.
 npm run sidecar:dev
 
 cargo fmt --manifest-path src-tauri/Cargo.toml --all -- --check
@@ -80,6 +89,7 @@ Record the commit and tool versions:
 
 ```bash
 git rev-parse HEAD
+git status --short
 rustc --version
 cargo --version
 node --version
@@ -137,7 +147,6 @@ baseline.
   --serial "$SERIAL" \
   --plan-file "$RUN_ROOT/retroarch-plan.yaml" \
   --dry-run \
-  --verbose \
   > "$RUN_ROOT/dry-run.stdout.log" \
   2> "$RUN_ROOT/dry-run.stderr.log"
 ```
@@ -192,6 +201,9 @@ Record each check as pass, fail, or blocked, with a short evidence reference.
 15. The cache contains complete files, the runtime staging tree contains no
     leaked partial artifact, and the recorded host/device logs contain no
     secrets or unrelated device data.
+16. ZIP artifacts that use Deflate extraction complete successfully. Deflate is
+    supported by the Rust archive reader; a Deflate failure is not an expected
+    limitation.
 
 Useful inspection commands:
 
@@ -199,12 +211,25 @@ Useful inspection commands:
 adb -s "$SERIAL" shell pm path com.retroarch.aarch64
 adb -s "$SERIAL" shell dumpsys window | grep -i retroarch
 adb -s "$SERIAL" shell su -c \
-  'for p in assets autoconfig database/rdb info overlays shaders/shaders_glsl cores; do echo "$p"; find "/data/user/0/com.retroarch.aarch64/$p" -type f | wc -l; done'
+  "'for p in assets autoconfig database/rdb info overlays shaders/shaders_glsl cores; do echo \"\$p\"; find \"/data/user/0/com.retroarch.aarch64/\$p\" -type f | wc -l; done'"
 adb -s "$SERIAL" shell \
   'for p in cheats system/dolphin-emu system/fbneo system/PPSSPP; do echo "$p"; find "/storage/emulated/0/RetroArch/$p" -type f | wc -l; done'
 find "$RUN_ROOT/.emuchef_cache" -type f -print
 find "$RUN_ROOT/.emuchef_runtime" -type f -print
+find "$RUN_ROOT" -type f -name '*.partial' -print
 ```
+
+Do not use an unqualified `grep -i 'failed\|blocked'` as the success check. It
+also matches zero-valued summary fields such as `failed: 0`. Check the process
+exit status and use a positive-count expression when reviewing summary logs:
+
+```bash
+grep -E '(^|[[:space:]])(failed|blocked):[[:space:]]*[1-9][0-9]*([[:space:]]|$)' \
+  "$RUN_ROOT/apply.stdout.log" "$RUN_ROOT/apply.stderr.log" || true
+```
+
+No matching line is only one inspection result; the required device and file
+checks still determine the manual disposition.
 
 ## F. Optional-Input Matrix
 
@@ -271,10 +296,12 @@ Record both run durations and explain any step-result differences.
 
 ## I. HTTP(S) Manual Validation
 
-HTTP(S) downloading is implemented and covered by local automated tests. It is
-not release-validated until an operator records the following evidence against
-the exact tested commit. Use a fresh temporary authored tree that retains the
-checked-in remote URLs; do not edit checked-in authored YAML.
+HTTP(S) downloading is implemented and covered by local automated tests. The
+2026-07-11 evidence record validates commit
+`5dca50603cf3a4831867c229157a94906151cbb7`; every later release
+candidate needs its own evidence against the exact tested commit. Use a fresh
+temporary authored tree that retains the checked-in remote URLs; do not edit
+checked-in authored YAML.
 
 Create a separate network-validation workspace, produce a plan from the remote
 URLs, remove only that workspace's host cache, and record the exact commit:
@@ -293,12 +320,69 @@ rm -rf "$NETWORK_RUN_ROOT/.emuchef_cache" "$NETWORK_RUN_ROOT/.emuchef_runtime"
 ```
 
 After re-confirming the disposable device and serial, run the plan from
-`NETWORK_RUN_ROOT`, complete every runtime check in section E, and save cache
-digests. Rerun without clearing the cache, then make the artifact origins
-unreachable without disrupting ADB and rerun once more. The offline warm-cache
-run must make no download request and must retain identical cache bytes. Inspect
-both EmuChef roots for `*.partial` files after every run. Do not mark a case
-passed if the network-disconnection method or request count was not observed.
+`NETWORK_RUN_ROOT` and capture a cache manifest after each run:
+
+```bash
+cd "$NETWORK_RUN_ROOT"
+"$EMUCHEF" apply \
+  --adb "$ADB" \
+  --serial "$SERIAL" \
+  --plan-file "$NETWORK_RUN_ROOT/retroarch-network-plan.yaml" \
+  > "$NETWORK_RUN_ROOT/cold.stdout.log" \
+  2> "$NETWORK_RUN_ROOT/cold.stderr.log"
+find "$NETWORK_RUN_ROOT/.emuchef_cache" -type f ! -name '*.partial' \
+  -exec shasum -a 256 {} \; | sort > "$NETWORK_RUN_ROOT/cache-cold.sha256"
+find "$NETWORK_RUN_ROOT" -type f -name '*.partial' -print
+
+"$EMUCHEF" apply \
+  --adb "$ADB" \
+  --serial "$SERIAL" \
+  --plan-file "$NETWORK_RUN_ROOT/retroarch-network-plan.yaml" \
+  > "$NETWORK_RUN_ROOT/warm.stdout.log" \
+  2> "$NETWORK_RUN_ROOT/warm.stderr.log"
+find "$NETWORK_RUN_ROOT/.emuchef_cache" -type f ! -name '*.partial' \
+  -exec shasum -a 256 {} \; | sort > "$NETWORK_RUN_ROOT/cache-warm.sha256"
+cmp "$NETWORK_RUN_ROOT/cache-cold.sha256" "$NETWORK_RUN_ROOT/cache-warm.sha256"
+find "$NETWORK_RUN_ROOT" -type f -name '*.partial' -print
+cd "$REPO_ROOT"
+```
+
+For a macOS Wi-Fi host with USB ADB, identify the Wi-Fi hardware device rather
+than assuming `en0`. Reconfirm the USB device before disconnecting the network.
+The restoration trap prevents an interrupted shell from intentionally leaving
+Wi-Fi disabled:
+
+```bash
+export WIFI_DEVICE="$(networksetup -listallhardwareports | awk '/Hardware Port: Wi-Fi/{getline; sub(/^Device: /, ""); print; exit}')"
+test -n "$WIFI_DEVICE"
+adb -s "$SERIAL" get-state
+restore_wifi() { networksetup -setairportpower "$WIFI_DEVICE" on; }
+trap restore_wifi EXIT INT TERM
+networksetup -setairportpower "$WIFI_DEVICE" off
+
+cd "$NETWORK_RUN_ROOT"
+"$EMUCHEF" apply \
+  --adb "$ADB" \
+  --serial "$SERIAL" \
+  --plan-file "$NETWORK_RUN_ROOT/retroarch-network-plan.yaml" \
+  > "$NETWORK_RUN_ROOT/offline-warm.stdout.log" \
+  2> "$NETWORK_RUN_ROOT/offline-warm.stderr.log"
+find "$NETWORK_RUN_ROOT/.emuchef_cache" -type f ! -name '*.partial' \
+  -exec shasum -a 256 {} \; | sort > "$NETWORK_RUN_ROOT/cache-offline.sha256"
+cmp "$NETWORK_RUN_ROOT/cache-cold.sha256" "$NETWORK_RUN_ROOT/cache-offline.sha256"
+find "$NETWORK_RUN_ROOT" -type f -name '*.partial' -print
+cd "$REPO_ROOT"
+
+restore_wifi
+trap - EXIT INT TERM
+```
+
+Complete every runtime check in section E after each device run. Record the
+network-disconnection method. When an instrumented local origin is used, also
+record its unchanged request count; for the checked-in remote origins, disabled
+host networking plus successful USB ADB, identical manifests, and successful
+execution provide the offline boundary. Do not mark the case passed if Wi-Fi
+was not observed disabled or any partial file remains.
 
 1. Strict TLS certificate and hostname verification.
 2. HTTPS succeeds against a trusted local test certificate setup.
@@ -374,6 +458,6 @@ A run is a pass only when all six conditions hold:
 6. No unexplained deviation, leaked partial artifact, unsafe device mutation,
    or unredacted sensitive evidence remains.
 
-Section I remains a separate release requirement. A successful local-artifact
-run or automated local-server run does not prove real-device network-download
-readiness.
+Section I remains a separate requirement for each newly tested release commit.
+A successful local-artifact run or automated local-server run does not replace
+real-device network-download evidence.
