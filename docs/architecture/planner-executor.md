@@ -9,8 +9,20 @@ The executor processes steps in dependency order on one thread. Failure blocks
 dependent work, skip conditions produce skipped results, and verification can
 fail a completed action. Progress events report execution and per-step state.
 
-Artifact resolution supports local paths and `file://` URLs with runtime/cache
-sandboxing. HTTP(S) downloads are intentionally unsupported. The next feature
-must use strict TLS, redirects, timeouts, deterministic cache keys, temporary
-files, atomic rename, partial cleanup, typed errors, local HTTP-server tests,
-and full clean-cache RetroArch validation.
+Artifact resolution supports absolute `file://`, HTTP, and HTTPS URLs inside the
+runtime/cache sandbox. The resolver owns compatible URL-based filenames,
+destination selection, partial-file cleanup, and no-clobber publication. The
+transport owns serial blocking HTTP requests and fixed-size response streaming.
+
+HTTPS uses strict Rustls certificate and hostname validation. The client has a
+15-second connect timeout, one five-minute deadline across headers, redirects,
+and body, a five-redirect limit, and no retries. HTTPS-to-HTTP redirects fail
+before the downgraded request. Transparent decompression, resume, freshness
+checking, and authored checksums are absent. Standard system proxy discovery is
+enabled without an EmuChef-specific configuration surface.
+
+Complete default-cache regular files are authoritative and bypass URL parsing
+and client construction. New files use unique partials in the destination
+directory, `sync_all`, and `persist_noclobber`; the exact underlying
+no-overwrite primitive is platform-dependent. `cache: none` always transfers
+and uses a unique runtime filename when the compatible base path already exists.

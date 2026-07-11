@@ -29,10 +29,19 @@ editor. One-shot requests remain available for stateless protocol operations.
 
 ## Artifact Boundary
 
-Local paths and `file://` URLs are supported. HTTP(S) artifact downloading is
-not implemented; the executor returns
-`network_artifact_download_unsupported`. Network downloading is the next
-runtime feature.
+Absolute `file://`, HTTP, and HTTPS URLs resolve during the existing
+`resolve_artifacts` step. HTTPS uses strict Rustls validation. Redirects are
+limited to five and cannot downgrade HTTPS to HTTP. Connections time out after
+15 seconds, the complete transfer has a five-minute deadline, and failures are
+not retried automatically.
+
+Successful bodies are streamed without transparent decompression into unique
+same-directory partial files. Files are flushed, synced, and published with
+`persist_noclobber` semantics; exact no-clobber mechanics remain
+platform-dependent. Complete default-cache files bypass network setup.
+`cache: none` always transfers and selects a unique runtime path on collision.
+There is no resume support or authored checksum field. Reqwest uses standard
+system proxy discovery without EmuChef-specific proxy settings.
 
 ## Verification
 

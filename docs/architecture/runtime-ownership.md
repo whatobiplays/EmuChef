@@ -10,7 +10,7 @@
 | Tauri editor backend | Rust JSONL sidecar | Active |
 | Python runtime | Frozen legacy/reference only | Pending deletion |
 | Compatibility fixtures | Frozen v1 evidence | No Python regeneration |
-| Network artifact download | Rust | Not implemented; next feature |
+| Network artifact download | Rust | Active; manual device evidence required |
 | Release signing/notarization/updater | Not implemented | Future work |
 
 There is no supported alternate runtime, planner backend selector, Python

@@ -12,10 +12,10 @@ be run against a device containing irreplaceable data.
 2. Use a dedicated test device with USB debugging enabled. The selected device
    profile must match the device, and the device must provide the declared
    `root_shell` and `app_data_write` capabilities.
-3. Obtain all 24 artifacts listed in
+3. For the local-artifact baseline, obtain all 24 artifacts listed in
    `authored/recipes/app.retroarch.provision.yaml` from trusted sources. Record
    their origin and SHA-256 digests before use.
-4. Create a temporary authored tree for this run. Replace every `url:` in its
+4. Create a temporary authored tree for the local-artifact baseline. Replace every `url:` in its
    RetroArch recipe with an absolute `file://` URL for the corresponding local
    artifact. Do not edit the checked-in authored tree.
 5. Choose a device plan appropriate for the test device from
@@ -236,7 +236,7 @@ corrupt cache publication or unintended device mutation.
 
 | Case | Expected boundary |
 | --- | --- |
-| Network URL with an empty cache | Fails with `network_artifact_download_unsupported`. |
+| Network URL with an empty cache | Downloads successfully or fails with a typed, redacted network error; no partial file remains. |
 | Missing local artifact | Artifact resolution fails before dependent device steps. |
 | Corrupt ZIP | Extraction fails; dependent copy is blocked. |
 | Unauthorized or offline serial | ADB setup fails without targeting another device. |
@@ -264,29 +264,57 @@ the same plan and verify:
 
 Record both run durations and explain any step-result differences.
 
-## I. Pending HTTP(S) Validation
+## I. HTTP(S) Manual Validation
 
-Do not execute this section until network artifact downloading is implemented.
-The feature is not complete until all of the following are evidenced:
+HTTP(S) downloading is implemented and covered by local automated tests. It is
+not release-validated until an operator records the following evidence against
+the exact tested commit. Use a fresh temporary authored tree that retains the
+checked-in remote URLs; do not edit checked-in authored YAML.
+
+Create a separate network-validation workspace, produce a plan from the remote
+URLs, remove only that workspace's host cache, and record the exact commit:
+
+```bash
+export NETWORK_RUN_ROOT="$(mktemp -d /tmp/emuchef-retroarch-network.XXXXXX)"
+cp -R "$REPO_ROOT/authored" "$NETWORK_RUN_ROOT/authored"
+git rev-parse HEAD > "$NETWORK_RUN_ROOT/tested-commit.txt"
+"$EMUCHEF" plan \
+  --adb "$ADB" \
+  --serial "$SERIAL" \
+  --authored-root "$NETWORK_RUN_ROOT/authored" \
+  --device-plan "$DEVICE_PLAN" \
+  --output "$NETWORK_RUN_ROOT/retroarch-network-plan.yaml"
+rm -rf "$NETWORK_RUN_ROOT/.emuchef_cache" "$NETWORK_RUN_ROOT/.emuchef_runtime"
+```
+
+After re-confirming the disposable device and serial, run the plan from
+`NETWORK_RUN_ROOT`, complete every runtime check in section E, and save cache
+digests. Rerun without clearing the cache, then make the artifact origins
+unreachable without disrupting ADB and rerun once more. The offline warm-cache
+run must make no download request and must retain identical cache bytes. Inspect
+both EmuChef roots for `*.partial` files after every run. Do not mark a case
+passed if the network-disconnection method or request count was not observed.
 
 1. Strict TLS certificate and hostname verification.
 2. HTTPS succeeds against a trusted local test certificate setup.
 3. Invalid, expired, and wrong-host certificates fail closed.
 4. Plain HTTP behavior is an explicit policy decision and is tested.
 5. Redirect following is bounded.
-6. HTTPS-to-HTTP downgrade redirects are rejected unless explicitly allowed by
-   product policy.
-7. Connect, read, and overall timeouts are bounded and typed.
+6. HTTPS-to-HTTP downgrade redirects are rejected.
+7. The 15-second connect timeout and five-minute total deadline are bounded and
+   typed.
 8. Response status failures are typed and include useful artifact context.
 9. Deterministic cache keys prevent collisions between distinct artifacts.
 10. Downloads write to temporary files inside the cache sandbox.
-11. Cache publication is atomic.
+11. Cache publication uses same-directory no-clobber persistence, with the
+    platform-specific guarantee recorded accurately.
 12. Interrupted, timed-out, and failed downloads remove temporary files.
 13. Existing complete cache entries are not replaced by partial content.
 14. Concurrent resolution cannot expose incomplete content.
-15. Response-size and storage-failure behavior is bounded and tested.
-16. Local HTTP-server tests cover success, redirects, timeout, truncation, and
-    retry behavior without public-network dependency.
+15. Response-size overflow and storage-failure behavior are typed; no arbitrary
+    product size cap is imposed.
+16. Local HTTP-server tests cover success, redirects, timeout, truncation, TLS,
+    and the no-retry policy without a public-network dependency.
 17. A clean-cache RetroArch run resolves all checked-in artifact URLs and
     completes the required runtime checks.
 18. A warm-cache rerun succeeds with the server unavailable and retains
@@ -341,5 +369,6 @@ A run is a pass only when all six conditions hold:
 6. No unexplained deviation, leaked partial artifact, unsafe device mutation,
    or unredacted sensitive evidence remains.
 
-HTTP(S) support and section I are separate release requirements. A successful
-local-artifact run does not prove network-download readiness.
+Section I remains a separate release requirement. A successful local-artifact
+run or automated local-server run does not prove real-device network-download
+readiness.

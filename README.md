@@ -50,10 +50,11 @@ Python backend or backend selector.
 
 ## Current Limitations
 
-HTTP(S) artifact downloading is not implemented and is the highest-priority
-runtime feature. Local paths and `file://` artifact sources are supported.
-Release signing, notarization, updater support, CSP hardening, cross-platform
-release automation, and recorded real-device validation remain future work.
+Artifact resolution supports absolute `file://`, HTTP, and HTTPS URLs. Network
+downloads use strict Rustls verification, bounded redirects and timeouts,
+same-directory partial files, and no-clobber cache publication. Release signing,
+notarization, updater support, CSP hardening, cross-platform release automation,
+and recorded real-device validation remain future work.
 
 See [runtime ownership](docs/architecture/runtime-ownership.md), the
 [planner/executor architecture](docs/architecture/planner-executor.md), and

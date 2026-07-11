@@ -50,12 +50,18 @@ launch, force-stop, permission/app-op grants, and waits. Device-target archive
 extraction happens in the host staging area before files are pushed through
 ADB; Android `unzip` is not required.
 
-Local paths and `file://` artifact URLs are supported. HTTP(S) sources fail with
-`network_artifact_download_unsupported`. Network downloading is the next
-runtime feature and must provide strict TLS validation, redirect and timeout
-handling, deterministic cache keys, temporary files, atomic publication,
-partial-file cleanup, typed errors, local-server tests, and clean-cache
-RetroArch validation.
+Artifact resolution supports absolute `file://`, HTTP, and HTTPS URLs. The
+single-threaded resolver uses strict Rustls certificate and hostname validation,
+a 15-second connect timeout, one five-minute transfer deadline, at most five
+redirects, and no automatic retries. HTTPS-to-HTTP redirects are rejected.
+
+Cache keys continue to hash the original URL bytes, including query and
+fragment. Complete default-cache files are authoritative and bypass URL parsing
+and network setup. New bytes are streamed to unique same-directory partial
+files, flushed, synced, and published without clobbering. `cache: none` always
+transfers and uses a unique runtime path on collision. Failures are typed and
+redacted, remove partial files when cleanup succeeds, and block dependent steps
+without preventing unrelated work.
 
 ## Editor
 
@@ -83,9 +89,9 @@ contract decision. New behavior uses Rust-native fixtures and tests.
 
 Normal automated verification does not run real-device apply. Device evidence
 is collected manually using
-`docs/manual/real-device-retroarch-validation.md`. The baseline uses a
-temporary authored tree with operator-supplied local artifact URLs because
-HTTP(S) downloading is not implemented.
+`docs/manual/real-device-retroarch-validation.md`. Automated local HTTP and TLS
+tests do not replace the required clean-cache and warm-cache real-device
+RetroArch evidence.
 
 ## Release State
 
