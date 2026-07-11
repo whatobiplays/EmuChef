@@ -1,184 +1,58 @@
 # EmuChef
 
-CLI-first Android emulation handheld provisioner.
+EmuChef is a Rust application for planning and applying reproducible Android
+handheld configurations. The repository also contains a React/Tauri editor for
+authored recipe YAML.
 
-## Context
+## Runtime
 
-Repository context and current behavior notes live in `CONTEXT.md`.
-The current Rust/Python ownership decision is recorded in
-[ADR 0001](docs/adr/0001-rust-tauri-editor-runtime-ownership.md).
-[`docs/manual/real-device-retroarch-matrix.md`](docs/manual/real-device-retroarch-matrix.md)
-contains a manual, opt-in RetroArch real-device validation checklist. It is not
-part of normal CI and does not represent completed validation unless a filled
-result record is attached.
+Rust is the sole product runtime. It owns the `emuchef` CLI, authored-data
+validation, planning, execution, real-ADB apply, the editor document protocol,
+and the JSONL sidecar used by Tauri. The Python source under `src/` is frozen
+reference code pending deletion and has no executable entrypoint.
 
-Authored YAML under `authored/` is the source for current planning behavior.
-Generated execution-plan YAML is emitted on demand and is not maintained as
-root-level `*.plan.yaml` examples.
-
-## CLI Runtime
-
-The product `emuchef` executable is the Rust binary target in
-`crates/emuchef-rust-backend`. Rust owns `plan`, file-based `validate`,
-`apply --plan-file` in dry-run and real-ADB modes, and `--sidecar`. The Python
-package publishes only the explicitly named `emuchef-python-legacy` reference
-command; no Python-owned `emuchef` console entrypoint exists.
-
-The Rust CLI accepts file paths and `file://` artifact sources. Network artifact
-downloads are not implemented and fail with the durable
-`network_artifact_downloads_not_cut_over` diagnostic. Real-device validation is
-manual and is not required by automated tests.
-
-## Step Architecture
-
-Supported steps are first-party built-in plugins registered in the in-repo step
-registry. The registry is the source of truth for step specs, planner hooks,
-direct executor handler callables, primary outputs, and editor-safe metadata.
-Any remaining `StepSpec.executor_handler` values are transitional metadata only;
-runtime dispatch uses the registry plugin handler callable.
-
-Step type ids are plain registry-owned strings. Authored recipes and execution
-plans still use the same visible YAML values, such as `copy_files` and
-`grant_permissions`, and `schema_version: 1` remains current. External plugin
-loading is deferred follow-up work.
-
-## Editor
-
-The Tauri config editor in `apps/config-editor` is the primary development UI
-for authored recipe files. It edits the shared typed authored recipe model
-through the Rust sidecar and does not provide direct YAML editing.
-
-The legacy PySide6 editor source, tests, optional dependency extra, and Python
-GUI console script have been removed. The Tauri config editor is the only GUI
-editor path, and it is not backed by Python or PySide6.
-
-The Python editor API source and tests are not present. The Rust backend owns
-the editor protocol for both one-shot protocol checks and JSONL sidecar
-sessions. From a source checkout, the Rust backend accepts one JSON request per
-process invocation:
+Build and test the CLI:
 
 ```bash
-cargo run --manifest-path crates/emuchef-rust-backend/Cargo.toml -- '{"type":"listStepSpecs"}'
-cargo run --manifest-path crates/emuchef-rust-backend/Cargo.toml -- '{"type":"hello"}'
-cargo run --manifest-path crates/emuchef-rust-backend/Cargo.toml -- '{"type":"validateRecipePath","payload":{"path":"authored/recipes/app.retroarch.provision.yaml","authoredRoot":"authored"}}'
+cargo build --manifest-path crates/emuchef-rust-backend/Cargo.toml
+cargo test --manifest-path crates/emuchef-rust-backend/Cargo.toml
+./crates/emuchef-rust-backend/target/debug/emuchef --help
 ```
 
-The same Rust backend supports a persistent JSON Lines sidecar for development
-clients that need reusable document sessions:
+Typical CLI flow:
 
 ```bash
-printf '%s\n' '{"id":"req-1","type":"listStepSpecs","payload":{}}' | cargo run --manifest-path crates/emuchef-rust-backend/Cargo.toml -- --sidecar
-printf '%s\n' '{"id":"req-1","type":"hello","payload":{}}' | cargo run --manifest-path crates/emuchef-rust-backend/Cargo.toml -- --sidecar
+./crates/emuchef-rust-backend/target/debug/emuchef validate --authored-root authored
+./crates/emuchef-rust-backend/target/debug/emuchef plan \
+  --authored-root authored \
+  --device-plan ayaneo.pocket_s_mini.base \
+  --output /tmp/emuchef-plan.yaml
+./crates/emuchef-rust-backend/target/debug/emuchef apply \
+  --plan-file /tmp/emuchef-plan.yaml \
+  --dry-run
 ```
 
-Sidecar stdin accepts one JSON request per line and stdout returns one JSON
-response per line. Stdout is machine-readable JSONL only; diagnostics belong on
-stderr. Every valid sidecar request includes an opaque string `id`, and every
-response echoes that id. Malformed JSON lines return `id: null`. The backend
-protocol includes a `hello` request that returns `protocolVersion: 1` and a
-backend-agnostic `capabilities` string list. The protocol does not expose
-`implementation` or `implementationVersion` fields, and there is no protocol
-negotiation yet. Future Rust backends should implement the same protocol.
+Mutating apply requires ADB and should be run only against a safe test device.
 
-### Tauri config editor
-
-The Tauri editor is a Tauri v2 development app that uses the Rust
-JSONL sidecar for session-backed document operations. Python remains in the repo
-only for legacy/reference/developer/golden workflows such as the explicitly
-named `emuchef-python-legacy` command, Python CLI
-reference behavior, fixture/golden generation, and later confirmed-cutover work.
-Fixture/golden ownership and remaining dev-only/reference-only regeneration
-paths are classified in
-[`docs/python-fixture-golden-ownership.md`](docs/python-fixture-golden-ownership.md).
-
-Install frontend dependencies and run the Tauri dev shell with npm:
+## Config Editor
 
 ```bash
 cd apps/config-editor
 npm install
+npm run check:rust-runtime
 npm run tauri dev
 ```
 
-The Tauri dev/build hooks prepare the Rust sidecar automatically. App-local
-details live in `apps/config-editor/README.md`.
+The editor launches the Rust `emuchef --sidecar` process. It does not use a
+Python backend or backend selector.
 
-```bash
-npm run tauri build
-```
+## Current Limitations
 
-During development, the Rust bridge discovers the repo root and checks the
-crate-local and repo-root Cargo `target/debug` directories for `emuchef`.
-Packaged builds bundle the Rust sidecar through Tauri v2
-`externalBin`.
+HTTP(S) artifact downloading is not implemented and is the highest-priority
+runtime feature. Local paths and `file://` artifact sources are supported.
+Release signing, notarization, updater support, CSP hardening, cross-platform
+release automation, and recorded real-device validation remain future work.
 
-Current editor scope notes:
-
-- it edits the shared typed authored recipe model rather than raw YAML text
-- the Tauri editor supports sidecar-backed editing for Overview, Inputs, Artifacts, Artifact Groups, basic step lifecycle operations, step dependencies, schema-backed rich step params, typed ref picking, and advanced JSON-backed step internals for constraints, `skip_if`, and `verify`
-- primary document actions are exposed through native File, Edit, and Utilities menus
-- menu items are context-aware and disabled when a document action is not valid, a command is in flight, or the sidecar session is invalid
-- the Rust sidecar client starts the backend on the first real sidecar request, sends `hello`, requires protocol version 1 and the editor's required capabilities, and then continues the original request without a frontend retry
-- `sidecar_status` is local Rust process/session state; it does not start the sidecar or send `hello`, and it reports cached compatibility metadata after a sidecar process has been started
-- incompatible backends stop normal document requests, mark the session invalid, and leave any stale document visible only as read-only reference
-- the Tauri Save command writes the current sidecar document to disk and should be tested only on safe or temporary recipe copies during development
-- native confirmation prompts guard opening another recipe with unsaved changes and closing the window/app with unsaved changes or an operation in flight where Tauri close interception is available
-- if the Rust sidecar exits or transport fails, the stale document remains visible for reference, document-specific actions are disabled, and the explicit Restart Sidecar action can recover a compatible running sidecar before the recipe is explicitly reopened
-- create-from-template sidecar capabilities are not exposed in the Tauri UI, and GUI create-from-template is retired from the normal editor path
-- capability names are backend-agnostic protocol strings; optional capabilities are display/status metadata only in the current UI
-- production signing, notarization, updater support, and cross-platform release automation are not implemented
-- there is no backend selector, backend toggle, config option, environment variable, UI switch, protocol negotiation path, or Python fallback for the Tauri editor runtime
-- executor/apply-device UI is not implemented
-- `id`, `kind`, and `schema_version` are read-only in the Overview screen
-- input, artifact, and group ids are changed through explicit Rename actions
-- artifact groups can be duplicated; the duplicate starts with the same ordered artifact members as the source group
-- step ids and step types are chosen only when adding a step and then stay read-only
-- basic step lifecycle editing uses Rust sidecar commands for add, delete, duplicate, reorder, display-name edits, and `user_toggleable` edits
-- step dependency editing uses the Rust sidecar `UpdateStepDependencies` command; adding appends a dependency id as authored storage/display order only, and the planner remains authoritative for final execution ordering
-- missing or unknown authored dependency ids remain visible in the step detail panel and can be removed from copied or temporary recipes during repair
-- deleting a step uses backend safe-delete behavior and removes supported downstream dependencies, conflicts, and refs
-- step params editing uses the Rust sidecar `UpdateStepParams` command with full params replacement for the selected step; the frontend submits authored JSON values and replaces local document state with the returned `RecipeDocumentDto`
-- step params with known Python schema shapes use rich controls where safe: ordered artifact and artifact-group id list params use add/remove/up/down list controls, runtime and app-op permission params use row editors, and policy params use select/checkbox controls
-- raw JSON remains the editor for free-form, unsupported, incompatible, or schema-less params such as metadata; schema-backed structured editors preserve unknown or extra object keys where the authored value can be copied without data loss
-- refs use the authored `{ ref: "..." }` shape in DTOs and command payloads; the backend codec converts only top-level exact ref-shaped param values into internal domain refs
-- the ref picker uses the current document `refIndex`, prefers candidate metadata, falls back to raw `allRefs`, and keeps missing or incompatible current refs visible for repair
-- `StepSpecDto` improves param ordering, enum rendering, ref filtering, and known param shape rendering, but it is UI metadata only and is not mutation authority
-- backend validation remains authoritative for required params, ref validity, and step contract diagnostics
-- editable Tauri text controls disable browser writing aids and normalize smart single and double quotes to ASCII quotes before storing local drafts or sending sidecar commands
-- selecting a ref does not automatically add or rewrite step dependencies in the Tauri editor
-- constraints, `skip_if`, and `verify` use plain JSON editors in an Advanced step section; each edit parses JSON locally, requires explicit Apply, and submits `UpdateStepConstraints`, `UpdateStepSkipIf`, or `UpdateStepVerify` through the Rust sidecar
-- the constraints JSON editor displays authored/YAML-facing `conflicts_with`; the command payload still uses the API field `conflictsWith`
-- advanced step JSON editors do not provide specialized constraints, condition, or verification builders, and they do not provide a ref picker inside advanced JSON values
-- backend command application and validation remain authoritative for advanced step internals; local frontend checks are limited to JSON parsing, representable authored keys, and the top-level shape required by the command codec
-- advanced JSON command success with `changed: false` is treated as a no-op, not an applied edit
-- Inputs, Artifacts, Artifact Groups, and Steps use independently scrolling list/detail panes with resizable list columns
-- top-level recipe `permissions:` is invalid and is not migrated or ignored by the loader
-- step refs stay in authored-ref space and save explicitly as `{ ref: ... }`
-- the YAML preview remains read-only and is refreshed through the sidecar session
-- unsupported authored step content that the current Tauri UI does not edit is preserved rather than dropped
-- ref rewrite after id changes is not implemented
-
-### Removed PySide6 editor
-
-The legacy PySide6 editor source under `src/emuchef_editor/app`, its legacy
-tests, the `pyside-editor` optional dependency extra, and the `emuchef-editor`
-console script are not present. Normal source and test paths must not import
-PySide6 or `emuchef_editor.app`.
-
-## Templates
-
-Example authored YAML templates live under `templates/authored/`.
-They are examples for authors only and are not loaded by the CLI as real authored inputs.
-
-`createRecipeFromTemplate` is implemented by the Rust sidecar backend for
-protocol parity. The normal Tauri editor path does not expose a GUI
-create-from-template flow. GUI template creation remains retired unless a future
-product requirement reintroduces it.
-
-To create real authored inputs, copy a template into the matching `authored/`
-subdirectory:
-
-- `templates/authored/app_definition.template.yaml` -> `authored/apps/`
-- `templates/authored/recipe.blank.template.yaml` -> `authored/recipes/`
-- `templates/authored/recipe.template.yaml` -> `authored/recipes/`
-- `templates/authored/device_profile.template.yaml` -> `authored/device_profiles/`
-- `templates/authored/device_plan.template.yaml` -> `authored/device_plans/`
+See [runtime ownership](docs/architecture/runtime-ownership.md), the
+[planner/executor architecture](docs/architecture/planner-executor.md), and
+[release readiness](docs/release/release-readiness.md).
