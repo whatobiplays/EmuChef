@@ -28,13 +28,13 @@ fn golden_path(name: &str) -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR"))
         .join("tests")
         .join("fixtures")
-        .join("python_goldens")
+        .join("compatibility_goldens_v1")
         .join(name)
 }
 
 fn read_golden(name: &str) -> Value {
-    let text = fs::read_to_string(golden_path(name)).expect("Python golden should be readable");
-    serde_json::from_str(&text).expect("Python golden should be valid JSON")
+    let text = fs::read_to_string(golden_path(name)).expect("Compatibility fixture should be readable");
+    serde_json::from_str(&text).expect("Compatibility fixture should be valid JSON")
 }
 
 fn sidecar_responses(input: &str) -> Vec<Value> {
@@ -632,7 +632,7 @@ fn save_after_non_step_command_preserves_history_and_updates_baseline() {
 }
 
 #[test]
-fn focused_phase6i_ref_index_results_match_python_goldens() {
+fn focused_phase6i_ref_index_results_match_compatibility_goldens_v1() {
     let input_recipe = TempRecipe::copy_fixture("phase6i_commands.yaml");
     let input_responses = sidecar_responses(&format!(
         "{}\n{}\n{}\n{}\n{}\n{}\n",

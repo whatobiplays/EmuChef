@@ -41,14 +41,14 @@ fn golden_path(name: &str) -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR"))
         .join("tests")
         .join("fixtures")
-        .join("python_goldens")
+        .join("compatibility_goldens_v1")
         .join(name)
 }
 
 fn read_diagnostic_golden(name: &str) -> Vec<Value> {
     let text =
-        fs::read_to_string(golden_path(name)).expect("Python diagnostic golden should exist");
-    serde_json::from_str(&text).expect("Python diagnostic golden should be valid JSON")
+        fs::read_to_string(golden_path(name)).expect("Compatibility diagnostic fixture should exist");
+    serde_json::from_str(&text).expect("Compatibility diagnostic fixture should be valid JSON")
 }
 
 fn parse_stdout_json(stdout: &str) -> Value {

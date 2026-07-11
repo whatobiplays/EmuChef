@@ -18,14 +18,14 @@ fn golden_path(name: &str) -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR"))
         .join("tests")
         .join("fixtures")
-        .join("python_goldens")
+        .join("compatibility_goldens_v1")
         .join(name)
 }
 
 fn read_golden(name: &str) -> Value {
     let text = fs::read_to_string(golden_path(name))
-        .expect("Python executor parity fixture should be readable");
-    serde_json::from_str(&text).expect("Python executor parity fixture should be valid JSON")
+        .expect("Compatibility fixture should be readable");
+    serde_json::from_str(&text).expect("Compatibility fixture should be valid JSON")
 }
 
 fn fixture_device_context() -> DeviceContext {

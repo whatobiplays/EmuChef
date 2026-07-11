@@ -78,7 +78,7 @@ fn golden_path(name: &str) -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR"))
         .join("tests")
         .join("fixtures")
-        .join("python_goldens")
+        .join("compatibility_goldens_v1")
         .join(name)
 }
 
@@ -86,13 +86,13 @@ fn golden_dir() -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR"))
         .join("tests")
         .join("fixtures")
-        .join("python_goldens")
+        .join("compatibility_goldens_v1")
 }
 
 fn read_golden(name: &str) -> Value {
     let text = fs::read_to_string(golden_path(name))
-        .expect("Python planner parity fixture should be readable");
-    serde_json::from_str(&text).expect("Python planner parity fixture should be valid JSON")
+        .expect("Compatibility fixture should be readable");
+    serde_json::from_str(&text).expect("Compatibility fixture should be valid JSON")
 }
 
 fn fixture_device_context() -> DeviceContext {
@@ -845,7 +845,7 @@ fn permission_intent_validation_rejects_obvious_malformed_step_local_inputs() {
 }
 
 #[test]
-fn phase6n_builtin_planner_mappings_match_python_goldens() {
+fn phase6n_builtin_planner_mappings_match_compatibility_goldens_v1() {
     let actual = normalized_planning_result_value(planner_input(
         "planner_phase6n_builtins_all",
         &["planner.phase6n.builtins_all"],
@@ -2410,27 +2410,27 @@ fn planner_does_not_mutate_authored_fixture_files() {
 }
 
 #[test]
-fn planner_parity_fixture_inventory_consumes_checked_in_evidence_only() {
-    let inventory = planner_parity_fixture_inventory();
+fn compatibility_fixture_inventory_consumes_checked_in_evidence_only() {
+    let inventory = compatibility_fixture_inventory();
     let inventory_goldens = inventory
         .iter()
         .map(|entry| entry.golden.to_string())
         .collect::<BTreeSet<_>>();
-    let discovered_goldens = discovered_planner_golden_names();
+    let discovered_goldens = discovered_planner_fixture_names();
 
     assert_eq!(
         discovered_goldens, inventory_goldens,
-        "Planner parity goldens must be intentionally classified. Add new phase6m/phase6n planner goldens to the P7A inventory, or explain why they are outside P7A planner parity scope.",
+        "Compatibility fixtures must be intentionally classified. Add new phase6m/phase6n planner goldens to the P7A inventory, or explain why they are outside P7A planner parity scope.",
     );
 
     for entry in inventory {
         assert!(
             authored_root(entry.fixture).is_dir(),
-            "planner parity authored fixture should exist: {}",
+            "compatibility authored fixture should exist: {}",
             entry.fixture
         );
         let parsed = read_golden(entry.golden);
-        assert_planner_golden_shape(entry.golden, &parsed);
+        assert_planner_fixture_shape(entry.golden, &parsed);
     }
 }
 
@@ -4917,7 +4917,7 @@ fn assert_planner_error(
     );
 }
 
-struct PlannerParityFixtureEntry {
+struct CompatibilityFixtureEntry {
     fixture: &'static str,
     golden: &'static str,
 }
@@ -5041,60 +5041,60 @@ fn temp_authored_root_with_device_plan_selection_yaml(device_plan_yaml: &str) ->
     temp
 }
 
-fn planner_parity_fixture_inventory() -> &'static [PlannerParityFixtureEntry] {
+fn compatibility_fixture_inventory() -> &'static [CompatibilityFixtureEntry] {
     &[
-        PlannerParityFixtureEntry {
+        CompatibilityFixtureEntry {
             fixture: "planner_minimal",
             golden: "phase6m_planner_minimal.json",
         },
-        PlannerParityFixtureEntry {
+        CompatibilityFixtureEntry {
             fixture: "planner_dependencies",
             golden: "phase6m_planner_dependencies.json",
         },
-        PlannerParityFixtureEntry {
+        CompatibilityFixtureEntry {
             fixture: "planner_refs_artifacts",
             golden: "phase6m_planner_refs_artifacts.json",
         },
-        PlannerParityFixtureEntry {
+        CompatibilityFixtureEntry {
             fixture: "planner_inputs",
             golden: "phase6m_planner_inputs_bound.json",
         },
-        PlannerParityFixtureEntry {
+        CompatibilityFixtureEntry {
             fixture: "planner_inputs",
             golden: "phase6m_planner_inputs_missing.json",
         },
-        PlannerParityFixtureEntry {
+        CompatibilityFixtureEntry {
             fixture: "planner_grant_permissions",
             golden: "phase6m_planner_grant_permissions.json",
         },
-        PlannerParityFixtureEntry {
+        CompatibilityFixtureEntry {
             fixture: "planner_phase6n_builtins_all",
             golden: "phase6n_planner_builtins_all.json",
         },
-        PlannerParityFixtureEntry {
+        CompatibilityFixtureEntry {
             fixture: "planner_phase6n_optional_inputs",
             golden: "phase6n_planner_optional_inputs_omitted.json",
         },
-        PlannerParityFixtureEntry {
+        CompatibilityFixtureEntry {
             fixture: "planner_phase6n_optional_inputs",
             golden: "phase6n_planner_optional_inputs_bound.json",
         },
-        PlannerParityFixtureEntry {
+        CompatibilityFixtureEntry {
             fixture: "planner_phase6n_input_defaults_multiple",
             golden: "phase6n_planner_input_defaults_multiple.json",
         },
-        PlannerParityFixtureEntry {
+        CompatibilityFixtureEntry {
             fixture: "planner_phase6n_dependency_graph",
             golden: "phase6n_planner_dependency_graph.json",
         },
-        PlannerParityFixtureEntry {
+        CompatibilityFixtureEntry {
             fixture: "planner_phase6n_step_data",
             golden: "phase6n_planner_step_data.json",
         },
     ]
 }
 
-fn discovered_planner_golden_names() -> BTreeSet<String> {
+fn discovered_planner_fixture_names() -> BTreeSet<String> {
     fs::read_dir(golden_dir())
         .expect("planner golden directory should be readable")
         .map(|entry| {
@@ -5111,7 +5111,7 @@ fn discovered_planner_golden_names() -> BTreeSet<String> {
         .collect()
 }
 
-fn assert_planner_golden_shape(name: &str, parsed: &Value) {
+fn assert_planner_fixture_shape(name: &str, parsed: &Value) {
     assert_planning_result_shape(name, parsed);
 }
 

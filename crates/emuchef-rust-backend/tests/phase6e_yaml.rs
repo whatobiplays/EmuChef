@@ -17,7 +17,7 @@ fn golden_path(name: &str) -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR"))
         .join("tests")
         .join("fixtures")
-        .join("python_goldens")
+        .join("compatibility_goldens_v1")
         .join(name)
 }
 

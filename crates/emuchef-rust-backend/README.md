@@ -259,8 +259,8 @@ is not a guarantee, but the tests compare structured `PlanningResult` fields,
 execution step order, ids, dependencies, refs, materialized StepSpec defaults,
 artifact expansion, input binding/default values, optional-input pruning,
 warnings/errors/status, and no-side-effect behavior. The Phase 6M and 6N JSON
-fixtures under `tests/fixtures/python_goldens/phase6m_*` and
-`tests/fixtures/python_goldens/phase6n_*` are generated from the actual Python
+fixtures under `tests/fixtures/compatibility_goldens_v1/phase6m_*` and
+`tests/fixtures/compatibility_goldens_v1/phase6n_*` are generated from the actual Python
 planner API. Phase 6N normalizes absolute repo-root paths in new goldens to
 `$REPO_ROOT/...`.
 
@@ -1456,7 +1456,7 @@ crates/emuchef-rust-backend/tests/fixtures/authored_root/
 Python-generated parity fixtures live under:
 
 ```text
-crates/emuchef-rust-backend/tests/fixtures/python_goldens/
+crates/emuchef-rust-backend/tests/fixtures/compatibility_goldens_v1/
 ```
 
 Fixture/golden ownership, consumers, classifications, and retirement criteria
@@ -1509,7 +1509,7 @@ from emuchef.domain import (
 )
 from emuchef.executor import DryRunAdb, ExecutorRunner
 
-GOLDENS = Path("crates/emuchef-rust-backend/tests/fixtures/python_goldens")
+GOLDENS = Path("crates/emuchef-rust-backend/tests/fixtures/compatibility_goldens_v1")
 GOLDENS.mkdir(parents=True, exist_ok=True)
 
 def to_primitive(value):
@@ -1727,7 +1727,7 @@ safe pattern:
 PYTHONPATH=src python3 - <<'PY'
 # Build ExecutionPlan values in memory, run ExecutorRunner(adb=DryRunAdb(),
 # sleep_fn=lambda _: None), normalize temp paths to "$TMP", and write
-# crates/emuchef-rust-backend/tests/fixtures/python_goldens/phase6q_executor_*.json.
+# crates/emuchef-rust-backend/tests/fixtures/compatibility_goldens_v1/phase6q_executor_*.json.
 PY
 ```
 
@@ -1762,7 +1762,7 @@ from support import build_authored_tree
 
 REPO_ROOT = str(Path.cwd())
 ROOT = Path("crates/emuchef-rust-backend/tests/fixtures/authored_root")
-GOLDENS = Path("crates/emuchef-rust-backend/tests/fixtures/python_goldens")
+GOLDENS = Path("crates/emuchef-rust-backend/tests/fixtures/compatibility_goldens_v1")
 GOLDENS.mkdir(parents=True, exist_ok=True)
 
 CASES = [
@@ -1839,7 +1839,7 @@ from emuchef.planner import Planner
 from support import build_authored_tree
 
 ROOT = Path("crates/emuchef-rust-backend/tests/fixtures/authored_root")
-GOLDENS = Path("crates/emuchef-rust-backend/tests/fixtures/python_goldens")
+GOLDENS = Path("crates/emuchef-rust-backend/tests/fixtures/compatibility_goldens_v1")
 GOLDENS.mkdir(parents=True, exist_ok=True)
 
 CASES = [
@@ -1891,7 +1891,7 @@ Phase 6G document sessions are covered by Rust integration tests and focused
 Python-generated result goldens:
 
 ```text
-crates/emuchef-rust-backend/tests/fixtures/python_goldens/phase6g_*.result.json
+crates/emuchef-rust-backend/tests/fixtures/compatibility_goldens_v1/phase6g_*.result.json
 ```
 
 Those goldens cover overview name changes, description changes,
@@ -1910,7 +1910,7 @@ owner.
 Phase 6H RefIndex parity is covered by focused Python-generated result goldens:
 
 ```text
-crates/emuchef-rust-backend/tests/fixtures/python_goldens/phase6h_*.result.json
+crates/emuchef-rust-backend/tests/fixtures/compatibility_goldens_v1/phase6h_*.result.json
 ```
 
 Those goldens cover a representative document open result, sidecar
@@ -1930,7 +1930,7 @@ Phase 6I non-step command RefIndex parity is covered by focused
 Python-generated result goldens:
 
 ```text
-crates/emuchef-rust-backend/tests/fixtures/python_goldens/phase6i_*.result.json
+crates/emuchef-rust-backend/tests/fixtures/compatibility_goldens_v1/phase6i_*.result.json
 ```
 
 Those goldens intentionally compare `getRefIndex` results after input, artifact,
