@@ -13,6 +13,9 @@
   records the local baseline, HTTP(S) cold cache, warm cache, offline warm
   cache, matching cache manifests, and successful device provisioning on
   commit `5dca50603cf3a4831867c229157a94906151cbb7`.
+- The production Tauri CSP is local-only, permits the two required IPC sources,
+  and has negative regression coverage for disabled, wildcard, eval, inline,
+  and broad-connect policies.
 
 ## Required Before Public Release
 
@@ -21,7 +24,6 @@
   and the corresponding checklist for every other supported target.
 - Define and automate code signing and macOS notarization.
 - Decide and implement updater support.
-- Replace the development CSP setting with a hardened policy.
 - Add cross-platform release automation and artifact inspection.
 
 Passing automated tests and one real-device evidence run does not establish

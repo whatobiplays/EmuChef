@@ -4,9 +4,7 @@
   "version": "0.1.0",
   "identifier": "com.emuchef.configeditor",
   "build": {
-    "beforeDevCommand": "npm run sidecar:dev && npm run dev",
     "beforeBuildCommand": "npm run sidecar:build && npm run build",
-    "devUrl": "http://localhost:5173",
     "frontendDist": "../dist"
   },
   "app": {
@@ -23,7 +21,7 @@
       }
     ],
     "security": {
-      "csp": null
+      "csp": "default-src 'self'; base-uri 'none'; connect-src ipc: http://ipc.localhost; font-src 'self'; form-action 'self'; frame-ancestors 'none'; img-src 'self' data:; object-src 'none'; script-src 'self'; style-src 'self'"
     }
   },
   "bundle": {

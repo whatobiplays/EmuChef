@@ -69,6 +69,12 @@ without preventing unrelated work.
 Rust `emuchef` binary as an external sidecar and launches it with `--sidecar`.
 The JSONL sidecar owns persistent document sessions.
 
+Release builds use a local-only production CSP with no Vite development URL.
+Frontend sources are limited to the packaged application, while Tauri IPC uses
+only `ipc:` and `http://ipc.localhost`. Development-only Vite and HMR settings
+live in `tauri.dev.conf.json` and are selected by the maintained Tauri command
+wrapper only for `tauri dev`.
+
 Product-facing Tauri commands use non-prefixed document names:
 `list_step_specs`, `open_recipe`, `get_document`, `apply_recipe_command`,
 `undo`, `redo`, `save_recipe`, `save_recipe_as`, `validate`, `emit_yaml`,
@@ -116,5 +122,5 @@ The canonical operator procedure for macOS release bundles is
 packaged sidecar, packaged runtime, and interactive editor evidence. The editor
 does not expose planning or apply through its Tauri or JSONL command surfaces.
 Public release readiness still requires real packaged GUI evidence on supported
-targets, signing/notarization decisions, updater support, CSP hardening, and
-cross-platform release automation.
+targets, signing/notarization decisions, updater support, and cross-platform
+release automation.
