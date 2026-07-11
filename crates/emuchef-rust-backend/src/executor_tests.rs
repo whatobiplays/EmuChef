@@ -1713,7 +1713,7 @@ fn extract_archive_success_matches_compatibility_golden() {
 }
 
 #[test]
-fn remote_artifact_resolution_fails_without_network_download_attempt() {
+fn unsupported_artifact_scheme_fails_without_network_download_attempt() {
     let tmp = tempfile::tempdir().expect("temp root should be created");
     let runtime_root = tmp.path().join(".emuchef_runtime");
     let cache_root = tmp.path().join(".emuchef_cache").join("artifacts");
@@ -1729,7 +1729,7 @@ fn remote_artifact_resolution_fails_without_network_download_attempt() {
         vec![ExecutionArtifact {
             id: "example.recipe/archive".to_string(),
             type_name: "remote_file".to_string(),
-            url: "https://example.invalid/archive.zip".to_string(),
+            url: "ftp://example.invalid/archive.zip".to_string(),
             cache: "none".to_string(),
         }],
         vec![

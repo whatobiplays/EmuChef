@@ -503,13 +503,13 @@ impl<D: ExecutorDevice> ExecutorRunner<D> {
             .iter()
             .map(|artifact| (artifact.id.as_str(), artifact))
             .collect::<HashMap<_, _>>();
+        let mut resolver = ArtifactResolver::new(self.adapters.sandbox()?);
         for artifact_id in string_list_param(resolved_params.get("artifacts")) {
             let Some(artifact) = artifacts_by_id.get(artifact_id.as_str()) else {
                 return Err(StepFailure::new(format!(
                     "unknown_artifact_ref: Unknown artifact ref: 'artifacts.{artifact_id}'."
                 )));
             };
-            let resolver = ArtifactResolver::new(self.adapters.sandbox()?);
             let result = resolver
                 .resolve(ArtifactResolveRequest {
                     artifact_id: &artifact.id,

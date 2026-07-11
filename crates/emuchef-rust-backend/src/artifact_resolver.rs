@@ -3,12 +3,15 @@
 //! The resolver is crate-private because execution plans remain the product
 //! interface. It preserves the original URL bytes when deriving cache keys.
 
-use std::fs;
+use std::fs::{self, File};
 use std::path::PathBuf;
 
 use sha2::{Digest, Sha256};
+use url::Url;
 
-use crate::artifact_transport::{ArtifactTransport, LocalFileTransport};
+use crate::artifact_transport::{
+    ArtifactTransport, HttpArtifactTransport, HttpClientConfig, LocalFileTransport,
+};
 use crate::executor::SandboxRoots;
 
 /// Inputs required to resolve one execution-plan artifact.
@@ -122,6 +125,7 @@ impl ArtifactResolveError {
 pub(crate) struct ArtifactResolver<'a> {
     sandbox: &'a SandboxRoots,
     local_transport: LocalFileTransport,
+    http_transport: Option<HttpArtifactTransport>,
 }
 
 impl<'a> ArtifactResolver<'a> {
@@ -129,11 +133,12 @@ impl<'a> ArtifactResolver<'a> {
         Self {
             sandbox,
             local_transport: LocalFileTransport,
+            http_transport: None,
         }
     }
 
     pub(crate) fn resolve(
-        &self,
+        &mut self,
         request: ArtifactResolveRequest<'_>,
     ) -> Result<ResolvedArtifact, ArtifactResolveError> {
         let filename = artifact_filename(request.artifact_id, request.url);
@@ -156,24 +161,46 @@ impl<'a> ArtifactResolver<'a> {
             .ensure_runtime_or_cache_write(&local_path)
             .map_err(|_| ArtifactResolveError::SandboxRejected)?;
         if !local_path.exists() {
-            let Some(source_path) = file_url_to_path(request.url) else {
-                return Err(ArtifactResolveError::SchemeUnsupported {
-                    scheme: url_scheme(request.url).unwrap_or("unknown").to_string(),
-                });
-            };
-            self.sandbox
-                .ensure_read_allowed(&source_path)
-                .map_err(|_| ArtifactResolveError::SandboxRejected)?;
-            if !source_path.is_file() {
-                return Err(ArtifactResolveError::SourceNotFound);
+            let parsed_url =
+                Url::parse(request.url).map_err(|_| ArtifactResolveError::UrlInvalid)?;
+            match parsed_url.scheme() {
+                "file" => {
+                    let source_path = file_url_to_path(request.url)
+                        .filter(|path| path.is_absolute())
+                        .ok_or(ArtifactResolveError::UrlInvalid)?;
+                    self.sandbox
+                        .ensure_read_allowed(&source_path)
+                        .map_err(|_| ArtifactResolveError::SandboxRejected)?;
+                    if !source_path.is_file() {
+                        return Err(ArtifactResolveError::SourceNotFound);
+                    }
+                    fs::create_dir_all(
+                        local_path
+                            .parent()
+                            .expect("artifact destination has a parent"),
+                    )
+                    .map_err(|_| ArtifactResolveError::CacheWriteFailed)?;
+                    self.local_transport.download(&source_path, &local_path)?;
+                }
+                "http" | "https" if parsed_url.has_host() => {
+                    fs::create_dir_all(
+                        local_path
+                            .parent()
+                            .expect("artifact destination has a parent"),
+                    )
+                    .map_err(|_| ArtifactResolveError::CacheWriteFailed)?;
+                    let mut destination = File::create(&local_path)
+                        .map_err(|_| ArtifactResolveError::CacheWriteFailed)?;
+                    self.http_transport()?
+                        .download(&parsed_url, &mut destination)?;
+                }
+                "http" | "https" => return Err(ArtifactResolveError::UrlInvalid),
+                scheme => {
+                    return Err(ArtifactResolveError::SchemeUnsupported {
+                        scheme: scheme.to_string(),
+                    });
+                }
             }
-            fs::create_dir_all(
-                local_path
-                    .parent()
-                    .expect("artifact destination has a parent"),
-            )
-            .map_err(|_| ArtifactResolveError::CacheWriteFailed)?;
-            self.local_transport.download(&source_path, &local_path)?;
         }
 
         Ok(ResolvedArtifact {
@@ -181,6 +208,15 @@ impl<'a> ArtifactResolver<'a> {
             filename,
             cache_hit,
         })
+    }
+
+    fn http_transport(&mut self) -> Result<&HttpArtifactTransport, ArtifactResolveError> {
+        if self.http_transport.is_none() {
+            self.http_transport = Some(HttpArtifactTransport::new(HttpClientConfig::default())?);
+        }
+        self.http_transport
+            .as_ref()
+            .ok_or(ArtifactResolveError::DownloadFailed)
     }
 }
 
