@@ -10,6 +10,8 @@ use std::time::Duration;
 
 use tempfile::TempDir;
 
+const TEST_BINARY_ENV: &str = "EMUCHEF_TEST_BINARY";
+
 struct LocalServer {
     base_url: String,
     requests: Arc<AtomicUsize>,
@@ -243,11 +245,37 @@ overrides: {}
 }
 
 fn run(current_dir: &Path, args: &[&str]) -> Output {
-    Command::new(env!("CARGO_BIN_EXE_emuchef"))
+    Command::new(test_binary())
         .current_dir(current_dir)
         .args(args)
         .output()
         .expect("emuchef process should run")
+}
+
+fn test_binary() -> PathBuf {
+    let binary = std::env::var_os(TEST_BINARY_ENV)
+        .map(PathBuf::from)
+        .unwrap_or_else(|| PathBuf::from(env!("CARGO_BIN_EXE_emuchef")));
+    assert!(
+        binary.is_absolute(),
+        "{TEST_BINARY_ENV} must be an absolute path"
+    );
+    assert!(
+        binary.is_file(),
+        "test binary must be a regular file: {}",
+        binary.display()
+    );
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        assert_ne!(
+            binary.metadata().unwrap().permissions().mode() & 0o111,
+            0,
+            "test binary must be executable: {}",
+            binary.display()
+        );
+    }
+    binary
 }
 
 fn assert_success(output: &Output, command: &str) {
@@ -277,6 +305,67 @@ fn assert_no_partials(root: &Path) {
     }
 }
 
+fn file_snapshot(root: &Path) -> Vec<(PathBuf, Vec<u8>)> {
+    fn visit(root: &Path, current: &Path, files: &mut Vec<(PathBuf, Vec<u8>)>) {
+        if !current.exists() {
+            return;
+        }
+        for entry in fs::read_dir(current).unwrap() {
+            let path = entry.unwrap().path();
+            if path.is_dir() {
+                visit(root, &path, files);
+            } else {
+                files.push((
+                    path.strip_prefix(root).unwrap().to_path_buf(),
+                    fs::read(&path).unwrap(),
+                ));
+            }
+        }
+    }
+
+    let mut files = Vec::new();
+    visit(root, root, &mut files);
+    files.sort_by(|left, right| left.0.cmp(&right.0));
+    files
+}
+
+fn spawn_self_signed_tls_server() -> (String, JoinHandle<()>) {
+    use rcgen::{CertificateParams, KeyPair, SanType};
+    use rustls::pki_types::{PrivateKeyDer, PrivatePkcs8KeyDer};
+    use rustls::{ServerConfig, ServerConnection, StreamOwned};
+
+    let _ = rustls::crypto::aws_lc_rs::default_provider().install_default();
+    let mut params = CertificateParams::default();
+    params.subject_alt_names = vec![SanType::DnsName("localhost".try_into().unwrap())];
+    let key = KeyPair::generate().unwrap();
+    let certificate = params.self_signed(&key).unwrap();
+    let private_key = PrivateKeyDer::Pkcs8(PrivatePkcs8KeyDer::from(key.serialize_der()));
+    let config = ServerConfig::builder()
+        .with_no_client_auth()
+        .with_single_cert(vec![certificate.der().clone()], private_key)
+        .unwrap();
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let address = listener.local_addr().unwrap();
+    let thread = thread::spawn(move || {
+        let (stream, _) = listener.accept().unwrap();
+        let connection = ServerConnection::new(Arc::new(config)).unwrap();
+        let mut stream = StreamOwned::new(connection, stream);
+        let mut request = [0u8; 4096];
+        if stream.read(&mut request).is_ok() {
+            let response =
+                b"HTTP/1.1 200 OK\r\nContent-Length: 6\r\nConnection: close\r\n\r\nsecret";
+            let _ = stream.write_all(response);
+        }
+    });
+    (
+        format!(
+            "https://localhost:{}/artifact.apk?token=tls-secret",
+            address.port()
+        ),
+        thread,
+    )
+}
+
 #[test]
 fn product_cli_downloads_then_uses_live_and_offline_warm_cache() {
     let mut server = LocalServer::spawn("200 OK", b"\0\x01network-apk");
@@ -286,19 +375,29 @@ fn product_cli_downloads_then_uses_live_and_offline_warm_cache() {
     let cold = fixture.apply();
     assert_success(&cold, "cold apply");
     assert_eq!(server.request_count(), 1);
+    let cold_cache = file_snapshot(&fixture._temp.path().join(".emuchef_cache"));
+    assert!(!cold_cache.is_empty());
     let warm = fixture.apply();
     assert_success(&warm, "warm apply");
     assert_eq!(server.request_count(), 1);
+    assert_eq!(
+        file_snapshot(&fixture._temp.path().join(".emuchef_cache")),
+        cold_cache
+    );
     server.stop();
     let offline = fixture.apply();
     assert_success(&offline, "offline warm-cache apply");
     assert_eq!(server.request_count(), 1);
+    assert_eq!(
+        file_snapshot(&fixture._temp.path().join(".emuchef_cache")),
+        cold_cache
+    );
     assert_no_partials(fixture._temp.path());
 }
 
 #[test]
 fn product_cli_redacts_network_failure_and_preserves_executor_semantics() {
-    let server = LocalServer::spawn("500 Internal Server Error", b"secret response body");
+    let server = LocalServer::spawn("404 Not Found", b"secret response body");
     let fixture = AuthoredFixture::new(&server.url("/artifact.apk?token=super-secret"));
     fixture.validate_and_plan();
 
@@ -310,8 +409,29 @@ fn product_cli_redacts_network_failure_and_preserves_executor_semantics() {
     assert!(stdout.contains("blocked"), "stdout: {stdout}");
     assert!(stdout.contains("Unrelated"), "stdout: {stdout}");
     assert!(stderr.contains("artifact_http_status"));
-    assert!(stderr.contains("HTTP 500"));
+    assert!(stderr.contains("HTTP 404"));
     assert!(!stderr.contains("super-secret"));
     assert!(!stderr.contains("secret response body"));
     assert_no_partials(fixture._temp.path());
+    assert!(file_snapshot(&fixture._temp.path().join(".emuchef_cache")).is_empty());
+}
+
+#[test]
+fn product_cli_rejects_self_signed_tls_without_publication_or_secret_leakage() {
+    let (url, server) = spawn_self_signed_tls_server();
+    let fixture = AuthoredFixture::new(&url);
+    fixture.validate_and_plan();
+
+    let failed = fixture.apply();
+    assert_eq!(failed.status.code(), Some(1));
+    let stderr = String::from_utf8_lossy(&failed.stderr);
+    assert!(
+        stderr.contains("artifact_tls_verification_failed"),
+        "stderr: {stderr}"
+    );
+    assert!(!stderr.contains("tls-secret"));
+    assert!(!stderr.contains("secret response"));
+    assert!(file_snapshot(&fixture._temp.path().join(".emuchef_cache")).is_empty());
+    assert_no_partials(fixture._temp.path());
+    server.join().unwrap();
 }

@@ -81,6 +81,18 @@ reach frontend code.
 
 Rust unit and integration tests are the product behavior authority. Frontend
 logic tests and Tauri tests cover editor behavior and sidecar packaging.
+macOS packaging automation inspects a caller-supplied `.app` rather than a
+developer-specific path. It verifies Info.plist identity, host architecture,
+the main executable and bundled `emuchef` sidecar, embedded frontend markers,
+local signing state, dynamic dependencies, and the absence of Python, shadow,
+legacy, and development-server remnants. Separate smoke commands exercise
+direct JSONL hello/ping and application launch against that exact bundle.
+
+The network CLI integration test can target the exact packaged `emuchef`
+executable through the test-only `EMUCHEF_TEST_BINARY` environment variable.
+This test seam is not read by product code. It proves local HTTP cold, warm,
+and offline cache behavior plus self-signed HTTPS rejection without changing
+the macOS trust store.
 
 `crates/emuchef-rust-backend/tests/fixtures/compatibility_goldens_v1` contains
 frozen v1 compatibility fixtures. They are immutable evidence, are not
