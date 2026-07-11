@@ -5,7 +5,7 @@ use crate::sidecar_client::SidecarState;
 
 #[tauri::command]
 pub fn list_step_specs(state: State<'_, SidecarState>) -> Result<Value, String> {
-    stateless_request(&state, "listStepSpecs", None)
+    request_without_transport_id(&state, "listStepSpecs", None)
 }
 
 #[tauri::command]
@@ -14,7 +14,7 @@ pub fn open_recipe(
     path: String,
     authored_root: Option<String>,
 ) -> Result<Value, String> {
-    stateless_request(
+    request_without_transport_id(
         &state,
         "openRecipe",
         Some(json!({
@@ -30,7 +30,7 @@ pub fn validate_recipe_path(
     path: String,
     authored_root: Option<String>,
 ) -> Result<Value, String> {
-    stateless_request(
+    request_without_transport_id(
         &state,
         "validateRecipePath",
         Some(json!({
@@ -46,7 +46,7 @@ pub fn emit_recipe_yaml_from_path(
     path: String,
     authored_root: Option<String>,
 ) -> Result<Value, String> {
-    stateless_request(
+    request_without_transport_id(
         &state,
         "emitRecipeYamlFromPath",
         Some(json!({
@@ -56,7 +56,7 @@ pub fn emit_recipe_yaml_from_path(
     )
 }
 
-fn stateless_request(
+fn request_without_transport_id(
     state: &SidecarState,
     request_type: &str,
     payload: Option<Value>,
@@ -80,7 +80,7 @@ pub fn sidecar_status(state: State<'_, SidecarState>) -> Result<Value, String> {
 
 #[tauri::command]
 pub fn sidecar_ping(state: State<'_, SidecarState>) -> Result<Value, String> {
-    state.request("ping", None)
+    request_without_transport_id(&state, "ping", None)
 }
 
 #[tauri::command]
@@ -89,31 +89,9 @@ pub fn sidecar_restart(state: State<'_, SidecarState>) -> Result<Value, String> 
 }
 
 #[tauri::command]
-pub fn sidecar_list_step_specs(state: State<'_, SidecarState>) -> Result<Value, String> {
-    state.request("listStepSpecs", None)
-}
-
-#[tauri::command]
-pub fn sidecar_open_recipe(
-    state: State<'_, SidecarState>,
-    path: String,
-    authored_root: Option<String>,
-) -> Result<Value, String> {
-    state.request(
-        "openRecipe",
-        Some(json!({
-            "path": path,
-            "authoredRoot": authored_root,
-        })),
-    )
-}
-
-#[tauri::command]
-pub fn sidecar_get_document(
-    state: State<'_, SidecarState>,
-    document_id: String,
-) -> Result<Value, String> {
-    state.request(
+pub fn get_document(state: State<'_, SidecarState>, document_id: String) -> Result<Value, String> {
+    request_without_transport_id(
+        &state,
         "getDocument",
         Some(json!({
             "documentId": document_id,
@@ -122,12 +100,13 @@ pub fn sidecar_get_document(
 }
 
 #[tauri::command]
-pub fn sidecar_apply_recipe_command(
+pub fn apply_recipe_command(
     state: State<'_, SidecarState>,
     document_id: String,
     command: Value,
 ) -> Result<Value, String> {
-    state.request(
+    request_without_transport_id(
+        &state,
         "applyRecipeCommand",
         Some(json!({
             "documentId": document_id,
@@ -137,8 +116,9 @@ pub fn sidecar_apply_recipe_command(
 }
 
 #[tauri::command]
-pub fn sidecar_undo(state: State<'_, SidecarState>, document_id: String) -> Result<Value, String> {
-    state.request(
+pub fn undo(state: State<'_, SidecarState>, document_id: String) -> Result<Value, String> {
+    request_without_transport_id(
+        &state,
         "undo",
         Some(json!({
             "documentId": document_id,
@@ -147,8 +127,9 @@ pub fn sidecar_undo(state: State<'_, SidecarState>, document_id: String) -> Resu
 }
 
 #[tauri::command]
-pub fn sidecar_redo(state: State<'_, SidecarState>, document_id: String) -> Result<Value, String> {
-    state.request(
+pub fn redo(state: State<'_, SidecarState>, document_id: String) -> Result<Value, String> {
+    request_without_transport_id(
+        &state,
         "redo",
         Some(json!({
             "documentId": document_id,
@@ -157,11 +138,9 @@ pub fn sidecar_redo(state: State<'_, SidecarState>, document_id: String) -> Resu
 }
 
 #[tauri::command]
-pub fn sidecar_save_recipe(
-    state: State<'_, SidecarState>,
-    document_id: String,
-) -> Result<Value, String> {
-    state.request(
+pub fn save_recipe(state: State<'_, SidecarState>, document_id: String) -> Result<Value, String> {
+    request_without_transport_id(
+        &state,
         "saveRecipe",
         Some(json!({
             "documentId": document_id,
@@ -170,12 +149,13 @@ pub fn sidecar_save_recipe(
 }
 
 #[tauri::command]
-pub fn sidecar_save_recipe_as(
+pub fn save_recipe_as(
     state: State<'_, SidecarState>,
     document_id: String,
     path: String,
 ) -> Result<Value, String> {
-    state.request(
+    request_without_transport_id(
+        &state,
         "saveRecipeAs",
         Some(json!({
             "documentId": document_id,
@@ -185,11 +165,9 @@ pub fn sidecar_save_recipe_as(
 }
 
 #[tauri::command]
-pub fn sidecar_validate(
-    state: State<'_, SidecarState>,
-    document_id: String,
-) -> Result<Value, String> {
-    state.request(
+pub fn validate(state: State<'_, SidecarState>, document_id: String) -> Result<Value, String> {
+    request_without_transport_id(
+        &state,
         "validate",
         Some(json!({
             "documentId": document_id,
@@ -198,11 +176,9 @@ pub fn sidecar_validate(
 }
 
 #[tauri::command]
-pub fn sidecar_emit_yaml(
-    state: State<'_, SidecarState>,
-    document_id: String,
-) -> Result<Value, String> {
-    state.request(
+pub fn emit_yaml(state: State<'_, SidecarState>, document_id: String) -> Result<Value, String> {
+    request_without_transport_id(
+        &state,
         "emitYaml",
         Some(json!({
             "documentId": document_id,
@@ -211,11 +187,9 @@ pub fn sidecar_emit_yaml(
 }
 
 #[tauri::command]
-pub fn sidecar_get_ref_index(
-    state: State<'_, SidecarState>,
-    document_id: String,
-) -> Result<Value, String> {
-    state.request(
+pub fn get_ref_index(state: State<'_, SidecarState>, document_id: String) -> Result<Value, String> {
+    request_without_transport_id(
+        &state,
         "getRefIndex",
         Some(json!({
             "documentId": document_id,
@@ -224,12 +198,13 @@ pub fn sidecar_get_ref_index(
 }
 
 #[tauri::command]
-pub fn sidecar_set_document_authored_root(
+pub fn set_document_authored_root(
     state: State<'_, SidecarState>,
     document_id: String,
     authored_root: Option<String>,
 ) -> Result<Value, String> {
-    state.request(
+    request_without_transport_id(
+        &state,
         "setDocumentAuthoredRoot",
         Some(json!({
             "documentId": document_id,
@@ -243,7 +218,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn former_one_shot_responses_do_not_expose_sidecar_transport_id() {
+    fn product_responses_do_not_expose_sidecar_transport_id() {
         let response = strip_sidecar_transport_id(json!({
             "id": "req-1",
             "ok": true,

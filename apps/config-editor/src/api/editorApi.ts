@@ -73,64 +73,53 @@ export async function sidecarRestart(): Promise<EditorApiResult<SidecarRestartRe
   return callApi<SidecarRestartResult>("sidecar_restart");
 }
 
-export async function sidecarListStepSpecs(): Promise<EditorApiResult<ListStepSpecsResult>> {
-  return callApi<ListStepSpecsResult>("sidecar_list_step_specs");
+export async function getDocument(documentId: string): Promise<EditorApiResult<DocumentResult>> {
+  return callApi<DocumentResult>("get_document", { documentId });
 }
 
-export async function sidecarOpenRecipe(
-  path: string,
-  authoredRoot: string | null = null,
-): Promise<EditorApiResult<OpenRecipeResult>> {
-  return callApi<OpenRecipeResult>("sidecar_open_recipe", { path, authoredRoot });
-}
-
-export async function sidecarGetDocument(documentId: string): Promise<EditorApiResult<DocumentResult>> {
-  return callApi<DocumentResult>("sidecar_get_document", { documentId });
-}
-
-export async function sidecarApplyRecipeCommand(
+export async function applyRecipeCommand(
   documentId: string,
   command: EditorCommand,
 ): Promise<EditorApiResult<ApplyRecipeCommandResult>> {
-  return callApi<ApplyRecipeCommandResult>("sidecar_apply_recipe_command", { documentId, command });
+  return callApi<ApplyRecipeCommandResult>("apply_recipe_command", { documentId, command });
 }
 
-export async function sidecarUndo(documentId: string): Promise<EditorApiResult<ApplyRecipeCommandResult>> {
-  return callApi<ApplyRecipeCommandResult>("sidecar_undo", { documentId });
+export async function undo(documentId: string): Promise<EditorApiResult<ApplyRecipeCommandResult>> {
+  return callApi<ApplyRecipeCommandResult>("undo", { documentId });
 }
 
-export async function sidecarRedo(documentId: string): Promise<EditorApiResult<ApplyRecipeCommandResult>> {
-  return callApi<ApplyRecipeCommandResult>("sidecar_redo", { documentId });
+export async function redo(documentId: string): Promise<EditorApiResult<ApplyRecipeCommandResult>> {
+  return callApi<ApplyRecipeCommandResult>("redo", { documentId });
 }
 
-export async function sidecarSaveRecipe(documentId: string): Promise<EditorApiResult<DocumentResult>> {
-  return callApi<DocumentResult>("sidecar_save_recipe", { documentId });
+export async function saveRecipe(documentId: string): Promise<EditorApiResult<DocumentResult>> {
+  return callApi<DocumentResult>("save_recipe", { documentId });
 }
 
-export async function sidecarSaveRecipeAs(
+export async function saveRecipeAs(
   documentId: string,
   path: string,
 ): Promise<EditorApiResult<DocumentResult>> {
-  return callApi<DocumentResult>("sidecar_save_recipe_as", { documentId, path });
+  return callApi<DocumentResult>("save_recipe_as", { documentId, path });
 }
 
-export async function sidecarValidate(documentId: string): Promise<EditorApiResult<ValidateResult>> {
-  return callApi<ValidateResult>("sidecar_validate", { documentId });
+export async function validate(documentId: string): Promise<EditorApiResult<ValidateResult>> {
+  return callApi<ValidateResult>("validate", { documentId });
 }
 
-export async function sidecarEmitYaml(documentId: string): Promise<EditorApiResult<EmitYamlResult>> {
-  return callApi<EmitYamlResult>("sidecar_emit_yaml", { documentId });
+export async function emitYaml(documentId: string): Promise<EditorApiResult<EmitYamlResult>> {
+  return callApi<EmitYamlResult>("emit_yaml", { documentId });
 }
 
-export async function sidecarGetRefIndex(documentId: string): Promise<EditorApiResult<GetRefIndexResult>> {
-  return callApi<GetRefIndexResult>("sidecar_get_ref_index", { documentId });
+export async function getRefIndex(documentId: string): Promise<EditorApiResult<GetRefIndexResult>> {
+  return callApi<GetRefIndexResult>("get_ref_index", { documentId });
 }
 
-export async function sidecarSetDocumentAuthoredRoot(
+export async function setDocumentAuthoredRoot(
   documentId: string,
   authoredRoot: string | null,
 ): Promise<EditorApiResult<DocumentResult>> {
-  return callApi<DocumentResult>("sidecar_set_document_authored_root", { documentId, authoredRoot });
+  return callApi<DocumentResult>("set_document_authored_root", { documentId, authoredRoot });
 }
 
 export interface MenuState {

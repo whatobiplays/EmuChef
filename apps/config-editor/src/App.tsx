@@ -4,18 +4,18 @@ import { useEffect, useMemo, useRef, useState } from "react";
 
 import type { EditorCommand } from "./api/commands";
 import {
-  sidecarApplyRecipeCommand,
-  sidecarEmitYaml,
-  sidecarListStepSpecs,
-  sidecarOpenRecipe,
-  sidecarRedo,
+  applyRecipeCommand,
+  emitYaml,
+  listStepSpecs,
+  openRecipe as openRecipeDocument,
+  redo as redoDocument,
   sidecarRestart,
-  sidecarSaveRecipe,
-  sidecarSaveRecipeAs,
-  sidecarSetDocumentAuthoredRoot,
+  saveRecipe as saveRecipeDocument,
+  saveRecipeAs as saveRecipeDocumentAs,
+  setDocumentAuthoredRoot,
   sidecarStatus,
-  sidecarUndo,
-  sidecarValidate,
+  undo as undoDocument,
+  validate as validateDocument,
   updateMenuState,
   type EditorApiResult,
 } from "./api/editorApi";
@@ -284,7 +284,7 @@ export default function App() {
       if (!cancelled) {
         handleStatusResponse(initialStatus);
       }
-      const response = await sidecarListStepSpecs();
+      const response = await listStepSpecs();
       if (cancelled) {
         return;
       }
@@ -379,7 +379,7 @@ export default function App() {
       return false;
     }
     try {
-      const response = await sidecarOpenRecipe(path, selectedAuthoredRootRef.current);
+      const response = await openRecipeDocument(path, selectedAuthoredRootRef.current);
       if (response.kind === "success") {
         applyDocument(response.result.document, path);
         documentSessionValidRef.current = true;
@@ -435,7 +435,7 @@ export default function App() {
       return;
     }
     try {
-      const response = await sidecarOpenRecipe(path, selectedAuthoredRootRef.current);
+      const response = await openRecipeDocument(path, selectedAuthoredRootRef.current);
       if (response.kind === "success") {
         const resolution = resolveReopenAttempt(document, { kind: "opened", document: response.result.document });
         applyDocument(response.result.document, path);
@@ -520,7 +520,7 @@ export default function App() {
 
   async function refreshStepSpecsAfterRestart(): Promise<boolean> {
     setStepSpecsLoading(true);
-    const response = await sidecarListStepSpecs();
+    const response = await listStepSpecs();
     if (response.kind === "success") {
       setStepSpecs(response.result.stepSpecs);
       setStepSpecsLoaded(true);
@@ -596,7 +596,7 @@ export default function App() {
       return;
     }
     try {
-      const response = await sidecarSetDocumentAuthoredRoot(document.documentId, nextAuthoredRoot);
+      const response = await setDocumentAuthoredRoot(document.documentId, nextAuthoredRoot);
       if (response.kind === "success") {
         const resolution = resolveAuthoredRootSelectionAttempt(selectedAuthoredRootRef.current, document, {
           kind: "updated",
@@ -630,7 +630,7 @@ export default function App() {
       return;
     }
     try {
-      const response = await sidecarValidate(document.documentId);
+      const response = await validateDocument(document.documentId);
       if (response.kind === "success") {
         setDiagnostics(response.result.diagnostics);
         setErrorMessage(null);
@@ -655,7 +655,7 @@ export default function App() {
       return;
     }
     try {
-      const response = await sidecarEmitYaml(document.documentId);
+      const response = await emitYaml(document.documentId);
       if (response.kind === "success") {
         setYaml(response.result.yaml);
         setErrorMessage(null);
@@ -680,7 +680,7 @@ export default function App() {
       return;
     }
     try {
-      const response = await sidecarUndo(document.documentId);
+      const response = await undoDocument(document.documentId);
       if (response.kind === "success") {
         applyDocument(response.result.document);
         setErrorMessage(null);
@@ -705,7 +705,7 @@ export default function App() {
       return;
     }
     try {
-      const response = await sidecarRedo(document.documentId);
+      const response = await redoDocument(document.documentId);
       if (response.kind === "success") {
         applyDocument(response.result.document);
         setErrorMessage(null);
@@ -730,7 +730,7 @@ export default function App() {
       return;
     }
     try {
-      const response = await sidecarSaveRecipe(document.documentId);
+      const response = await saveRecipeDocument(document.documentId);
       if (response.kind === "success") {
         applyDocument(response.result.document);
         setErrorMessage(null);
@@ -790,7 +790,7 @@ export default function App() {
       return;
     }
     try {
-      const response = await sidecarSaveRecipeAs(document.documentId, selectedPath);
+      const response = await saveRecipeDocumentAs(document.documentId, selectedPath);
       if (response.kind === "success") {
         applyDocument(response.result.document);
         setErrorMessage(null);
@@ -820,7 +820,7 @@ export default function App() {
       return { ok: false, changed: false };
     }
     try {
-      const response = await sidecarApplyRecipeCommand(document.documentId, command);
+      const response = await applyRecipeCommand(document.documentId, command);
       if (response.kind === "success") {
         applyDocument(response.result.document);
         setErrorMessage(null);
