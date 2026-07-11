@@ -75,9 +75,9 @@ free; a unique suffix is used without overwriting when it already exists.
 ## 5. TLS, HTTP, Redirect, and Proxy Policy
 
 Production HTTPS uses Reqwest's Rustls verifier with normal certificate-chain
-and hostname validation. There is no insecure verifier, invalid-certificate
-acceptance, trust-all mode, or product custom-CA configuration. Test-only
-clients may add the certificate generated for their isolated local server.
+and hostname validation. There is no certificate bypass, universal trust mode,
+or product custom-CA configuration. Test-only clients may add the certificate
+generated for their isolated local server.
 
 The client sends `User-Agent: EmuChef/0.1` and
 `Accept-Encoding: identity`. Reqwest automatic redirects are disabled. Manual
@@ -225,9 +225,8 @@ The initial Tauri check reported that generated resource
 `npm run sidecar:dev` prerequisite generated that ignored input; the entire
 Tauri matrix then passed. The generated sidecar was removed afterward.
 
-Repository searches found no active unsupported-network wording and no
-`danger_accept_invalid`, `accept_invalid`, `insecure`, `trust_all`, or
-`trust-all` configuration. Python/shadow terms remain only in the frozen
+Repository searches found no active unsupported-network wording or production
+TLS-verification bypass. Python/shadow terms remain only in the frozen
 current-state statement, cumulative cleanup report, and negative guard tests;
 no Python runtime or shadow planner was reintroduced.
 
