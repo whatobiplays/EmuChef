@@ -82,7 +82,10 @@ regenerated from Python, and may change only through an explicit compatibility
 contract decision. New behavior uses Rust-native fixtures and tests.
 
 Normal automated verification does not run real-device apply. Device evidence
-is collected manually using the RetroArch validation runbook.
+is collected manually using
+`docs/manual/real-device-retroarch-validation.md`. The baseline uses a
+temporary authored tree with operator-supplied local artifact URLs because
+HTTP(S) downloading is not implemented.
 
 ## Release State
 

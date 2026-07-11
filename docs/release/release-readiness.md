@@ -11,7 +11,8 @@
 ## Required Before Public Release
 
 - Record the real packaged GUI checklist on every supported target.
-- Record the real-device RetroArch validation matrix on a safe device.
+- Record the [real-device RetroArch validation runbook](../manual/real-device-retroarch-validation.md)
+  on a safe device.
 - Implement and validate HTTP(S) artifact downloading.
 - Define and automate code signing and macOS notarization.
 - Decide and implement updater support.

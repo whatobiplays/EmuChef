@@ -22,7 +22,9 @@ cargo test --manifest-path crates/emuchef-rust-backend/Cargo.toml
 Typical CLI flow:
 
 ```bash
-./crates/emuchef-rust-backend/target/debug/emuchef validate --authored-root authored
+./crates/emuchef-rust-backend/target/debug/emuchef validate \
+  authored/recipes/app.retroarch.provision.yaml \
+  --authored-root authored
 ./crates/emuchef-rust-backend/target/debug/emuchef plan \
   --authored-root authored \
   --device-plan ayaneo.pocket_s_mini.base \
@@ -55,4 +57,5 @@ release automation, and recorded real-device validation remain future work.
 
 See [runtime ownership](docs/architecture/runtime-ownership.md), the
 [planner/executor architecture](docs/architecture/planner-executor.md), and
-[release readiness](docs/release/release-readiness.md).
+[release readiness](docs/release/release-readiness.md). Real-device evidence is
+collected with the [RetroArch validation runbook](docs/manual/real-device-retroarch-validation.md).
