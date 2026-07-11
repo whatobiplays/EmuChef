@@ -22,14 +22,20 @@ export const RUNTIME_CHECK_FILES = [
   "src-tauri/src/lib.rs",
 ];
 
-export function productRuntimeContractErrors({ pyproject, cargoManifest, tauriConfig, packaging }) {
+export function productRuntimeContractErrors({
+  pyproject,
+  cargoManifest,
+  tauriConfig,
+  packaging,
+  pythonMainExists = false,
+}) {
   const errors = [];
   const scriptsSection = sectionContent(pyproject, "project.scripts");
-  if (/^\s*emuchef\s*=\s*"emuchef\.cli:main"\s*$/m.test(scriptsSection)) {
-    errors.push("Python-owned emuchef console entrypoint");
+  if (/^\s*emuchef(?:-[A-Za-z0-9_-]+)?\s*=\s*"emuchef\.cli:main"\s*$/m.test(scriptsSection)) {
+    errors.push("Python EmuChef console entrypoint");
   }
-  if (!/^\s*emuchef-python-legacy\s*=\s*"emuchef\.cli:main"\s*$/m.test(scriptsSection)) {
-    errors.push("missing emuchef-python-legacy console entrypoint");
+  if (pythonMainExists) {
+    errors.push("Python module entrypoint src/emuchef/__main__.py");
   }
   for (const [label, passed] of [
     ["Cargo default-run emuchef", /^default-run\s*=\s*"emuchef"\s*$/m.test(cargoManifest)],
@@ -153,6 +159,7 @@ async function main() {
     ),
     tauriConfig: await fs.readFile(path.join(appDir, "src-tauri/tauri.conf.json"), "utf8"),
     packaging: await fs.readFile(path.join(appDir, "scripts/sidecar-packaging.mjs"), "utf8"),
+    pythonMainExists: await fileExists(path.join(repoRoot, "src/emuchef/__main__.py")),
   });
   for (const error of contractErrors) {
     hits.push({ filePath: "product runtime contract", token: error, line: 0 });
@@ -169,6 +176,15 @@ async function main() {
   console.log(
     `check-no-python-runtime: checked ${RUNTIME_CHECK_FILES.length} Tauri runtime/build files; no Python runtime tokens found.`,
   );
+}
+
+async function fileExists(filePath) {
+  try {
+    await fs.access(filePath);
+    return true;
+  } catch {
+    return false;
+  }
 }
 
 if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) {

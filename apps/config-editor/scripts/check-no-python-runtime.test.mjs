@@ -6,9 +6,9 @@ import {
   productRuntimeContractErrors,
 } from "./check-no-python-runtime.mjs";
 
-test("accepts the canonical Rust CLI and legacy-only Python entrypoint contract", () => {
+test("accepts the canonical Rust-only product entrypoint contract", () => {
   const errors = productRuntimeContractErrors({
-    pyproject: '[project.scripts]\nemuchef-python-legacy = "emuchef.cli:main"\n',
+    pyproject: '[project]\nname = "emuchef"\n',
     cargoManifest: '[package]\ndefault-run = "emuchef"\n[[bin]]\nname = "emuchef"\npath = "src/main.rs"\n',
     tauriConfig: '{"bundle":{"externalBin":["binaries/emuchef"]}}',
     packaging: 'export const BINARY_BASENAME = "emuchef";',
@@ -17,16 +17,17 @@ test("accepts the canonical Rust CLI and legacy-only Python entrypoint contract"
   assert.deepEqual(errors, []);
 });
 
-test("rejects a Python-owned emuchef entrypoint and v1 sidecar naming", () => {
+test("rejects Python entrypoints and obsolete sidecar naming", () => {
   const errors = productRuntimeContractErrors({
     pyproject: '[project.scripts]\nemuchef = "emuchef.cli:main"\n',
     cargoManifest: '[package]\ndefault-run = "emuchef-rust-backend"\n',
     tauriConfig: '{"bundle":{"externalBin":["binaries/emuchef-rust-backend"]}}',
     packaging: 'export const BINARY_BASENAME = "emuchef-rust-backend";',
+    pythonMainExists: true,
   });
 
-  assert.ok(errors.includes("Python-owned emuchef console entrypoint"));
-  assert.ok(errors.includes("missing emuchef-python-legacy console entrypoint"));
+  assert.ok(errors.includes("Python EmuChef console entrypoint"));
+  assert.ok(errors.includes("Python module entrypoint src/emuchef/__main__.py"));
   assert.ok(errors.some((error) => error.includes("Cargo default-run emuchef")));
   assert.ok(errors.some((error) => error.includes("Tauri emuchef externalBin")));
 });

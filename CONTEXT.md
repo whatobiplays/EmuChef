@@ -24,9 +24,8 @@ Generated execution plans use the identifier `plan.<device-plan>.001`.
 Tauri packages and launches `emuchef-<target-triple>[.exe]` as its external
 sidecar input and resolves the packaged launch name `emuchef[.exe]`. Active CLI,
 Tauri, packaging, planner, validator, apply, and editor flows do not execute
-Python. The Python package exposes only `emuchef-python-legacy`; retained Python
-planner, executor, CLI, fixtures, tests, and migration tooling are reference or
-legacy surfaces.
+Python. The retained Python packages have no executable entrypoint and are
+frozen reference source pending deletion.
 
 Device-target archive extraction runs on the host inside the Rust staging root,
 then pushes the extracted file tree through ADB. The runtime does not depend on

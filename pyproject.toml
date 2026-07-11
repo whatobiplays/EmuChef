@@ -12,11 +12,6 @@ license = { text = "GPL-3.0-only" }
 authors = [{ name = "Daniel" }]
 dependencies = ["PyYAML>=6.0"]
 
-[project.scripts]
-# Explicit legacy/reference command. The product `emuchef` executable is the
-# Rust binary built by crates/emuchef-rust-backend.
-emuchef-python-legacy = "emuchef.cli:main"
-
 [tool.setuptools]
 package-dir = { "" = "src" }
 include-package-data = false

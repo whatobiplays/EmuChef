@@ -1,12 +1,9 @@
 from __future__ import annotations
 
-from io import StringIO
 from pathlib import Path
 from tempfile import TemporaryDirectory
-import contextlib
 import unittest
 
-from emuchef.cli import main
 from emuchef.io import validate_authored_catalog, validate_authored_path
 
 from support import base_recipe, build_authored_tree
@@ -318,21 +315,6 @@ steps: []
             authored_root = build_authored_tree(Path(tmp), recipes=[recipe])
             result = validate_authored_catalog(authored_root)
             self.assertEqual(result.status.value, "success", result.errors)
-
-    def test_validate_cli_groups_issues_by_file(self) -> None:
-        recipe = base_recipe(recipe_id="example.recipe", recipe_dependencies=["missing.recipe"], steps=[])
-        with TemporaryDirectory() as tmp:
-            authored_root = build_authored_tree(Path(tmp), recipes=[recipe])
-            stdout = StringIO()
-            stderr = StringIO()
-            with contextlib.redirect_stdout(stdout), contextlib.redirect_stderr(stderr):
-                rc = main(["validate", "--authored-root", str(authored_root)])
-            self.assertEqual(rc, 1)
-            output = stdout.getvalue()
-            self.assertIn("Issues:", output)
-            self.assertIn(str((authored_root / "recipes" / "example_recipe.yaml").resolve()), output)
-            self.assertIn("recipe_not_found: Recipe dependency 'missing.recipe' was not found.", output)
-
 
 if __name__ == "__main__":
     unittest.main()
