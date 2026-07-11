@@ -62,10 +62,14 @@ npm run check:rust-runtime
 npm run typecheck
 npm run test:logic
 npm run build
+
+npm run sidecar:dev
+
 cargo fmt --manifest-path src-tauri/Cargo.toml --all -- --check
 cargo check --manifest-path src-tauri/Cargo.toml
 cargo test --manifest-path src-tauri/Cargo.toml
 cargo clippy --manifest-path src-tauri/Cargo.toml --all-targets -- -D warnings
+
 cd "$REPO_ROOT"
 ```
 
@@ -123,7 +127,6 @@ baseline.
   --authored-root "$RUN_ROOT/authored-local" \
   --device-plan "$DEVICE_PLAN" \
   --output "$RUN_ROOT/retroarch-plan.yaml" \
-  --verbose \
   > "$RUN_ROOT/plan.stdout.log" \
   2> "$RUN_ROOT/plan.stderr.log"
 "$EMUCHEF" apply \
@@ -149,7 +152,6 @@ cd "$RUN_ROOT"
   --adb "$ADB" \
   --serial "$SERIAL" \
   --plan-file "$RUN_ROOT/retroarch-plan.yaml" \
-  --verbose \
   > "$RUN_ROOT/apply.stdout.log" \
   2> "$RUN_ROOT/apply.stderr.log"
 cd "$REPO_ROOT"
