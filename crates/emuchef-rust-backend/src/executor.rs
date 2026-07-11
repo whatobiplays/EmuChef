@@ -516,7 +516,13 @@ impl<D: ExecutorDevice> ExecutorRunner<D> {
                     url: &artifact.url,
                     cache_mode: &artifact.cache,
                 })
-                .map_err(|error| StepFailure::new(error.message().to_string()));
+                .map_err(|error| {
+                    StepFailure::new(error.executor_message(ArtifactResolveRequest {
+                        artifact_id: &artifact.id,
+                        url: &artifact.url,
+                        cache_mode: &artifact.cache,
+                    }))
+                });
             let artifact_state = state
                 .artifacts
                 .get_mut(&artifact.id)

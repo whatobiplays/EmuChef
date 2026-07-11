@@ -27,20 +27,93 @@ pub(crate) struct ResolvedArtifact {
     pub cache_hit: bool,
 }
 
-/// Initial resolver error boundary; commit 2 replaces this wrapper with typed
-/// artifact failure variants while retaining the same executor integration.
+/// Typed artifact failures converted to stable messages only by the executor.
 #[derive(Debug)]
-pub(crate) struct ArtifactResolveError {
-    message: String,
+#[allow(dead_code)] // Transport and publication commits activate the remaining typed variants.
+pub(crate) enum ArtifactResolveError {
+    UrlInvalid,
+    SchemeUnsupported { scheme: String },
+    SourceNotFound,
+    DownloadFailed,
+    HttpStatus { status: u16 },
+    RedirectLimitExceeded { redirects: usize },
+    RedirectDowngradeRejected,
+    ConnectTimeout,
+    RequestTimeout,
+    TlsVerificationFailed,
+    ResponseIncomplete,
+    ResponseTooLarge,
+    CacheWriteFailed,
+    CachePublishFailed,
+    PartialCleanupFailed { primary: Box<ArtifactResolveError> },
+    SandboxRejected,
 }
 
 impl ArtifactResolveError {
-    pub(crate) fn new(message: String) -> Self {
-        Self { message }
+    /// Stable code embedded in executor messages without changing protocol fields.
+    pub(crate) fn code(&self) -> &'static str {
+        match self {
+            Self::UrlInvalid => "artifact_url_invalid",
+            Self::SchemeUnsupported { .. } => "artifact_scheme_unsupported",
+            Self::SourceNotFound => "artifact_source_not_found",
+            Self::DownloadFailed => "artifact_download_failed",
+            Self::HttpStatus { .. } => "artifact_http_status",
+            Self::RedirectLimitExceeded { .. } => "artifact_redirect_limit_exceeded",
+            Self::RedirectDowngradeRejected => "artifact_redirect_downgrade_rejected",
+            Self::ConnectTimeout => "artifact_connect_timeout",
+            Self::RequestTimeout => "artifact_request_timeout",
+            Self::TlsVerificationFailed => "artifact_tls_verification_failed",
+            Self::ResponseIncomplete => "artifact_response_incomplete",
+            Self::ResponseTooLarge => "artifact_response_too_large",
+            Self::CacheWriteFailed => "artifact_cache_write_failed",
+            Self::CachePublishFailed => "artifact_cache_publish_failed",
+            Self::PartialCleanupFailed { .. } => "artifact_partial_cleanup_failed",
+            Self::SandboxRejected => "artifact_sandbox_rejected",
+        }
     }
 
-    pub(crate) fn message(&self) -> &str {
-        &self.message
+    /// Render one stable, credential-safe executor-facing failure message.
+    pub(crate) fn executor_message(&self, request: ArtifactResolveRequest<'_>) -> String {
+        if let Self::PartialCleanupFailed { primary } = self {
+            return format!(
+                "{}; artifact_partial_cleanup_failed: temporary artifact cleanup failed",
+                primary.executor_message(request)
+            );
+        }
+
+        let scheme = url_scheme(request.url).unwrap_or("unknown");
+        let source = redacted_url(request.url)
+            .map(|url| format!(" from {url}"))
+            .unwrap_or_default();
+        let detail = match self {
+            Self::UrlInvalid => "has an invalid artifact URL".to_string(),
+            Self::SchemeUnsupported { scheme } => {
+                format!("uses unsupported URL scheme {scheme:?}")
+            }
+            Self::SourceNotFound => "references a local source that does not exist".to_string(),
+            Self::DownloadFailed => "could not be downloaded".to_string(),
+            Self::HttpStatus { status } => format!("returned HTTP {status}"),
+            Self::RedirectLimitExceeded { redirects } => {
+                format!("exceeded the redirect limit after {redirects} redirects")
+            }
+            Self::RedirectDowngradeRejected => {
+                "attempted a rejected HTTPS-to-HTTP redirect".to_string()
+            }
+            Self::ConnectTimeout => "timed out while connecting".to_string(),
+            Self::RequestTimeout => "exceeded the total request deadline".to_string(),
+            Self::TlsVerificationFailed => "failed TLS verification".to_string(),
+            Self::ResponseIncomplete => "returned an incomplete response".to_string(),
+            Self::ResponseTooLarge => "exceeded the supported byte counter".to_string(),
+            Self::CacheWriteFailed => "could not be written to artifact storage".to_string(),
+            Self::CachePublishFailed => "could not be published to artifact storage".to_string(),
+            Self::SandboxRejected => "was rejected by the filesystem sandbox".to_string(),
+            Self::PartialCleanupFailed { .. } => unreachable!("handled above"),
+        };
+        format!(
+            "{}: Artifact {:?} ({scheme}) {detail}{source}",
+            self.code(),
+            request.artifact_id
+        )
     }
 }
 
@@ -81,23 +154,25 @@ impl<'a> ArtifactResolver<'a> {
 
         self.sandbox
             .ensure_runtime_or_cache_write(&local_path)
-            .map_err(|failure| ArtifactResolveError::new(failure.message))?;
+            .map_err(|_| ArtifactResolveError::SandboxRejected)?;
         if !local_path.exists() {
             let Some(source_path) = file_url_to_path(request.url) else {
-                return Err(ArtifactResolveError::new(format!(
-                    "network_artifact_download_unsupported: Network artifact downloads are not supported for artifact {:?} from {:?}; use a file:// source.",
-                    request.artifact_id, request.url
-                )));
+                return Err(ArtifactResolveError::SchemeUnsupported {
+                    scheme: url_scheme(request.url).unwrap_or("unknown").to_string(),
+                });
             };
             self.sandbox
                 .ensure_read_allowed(&source_path)
-                .map_err(|failure| ArtifactResolveError::new(failure.message))?;
+                .map_err(|_| ArtifactResolveError::SandboxRejected)?;
+            if !source_path.is_file() {
+                return Err(ArtifactResolveError::SourceNotFound);
+            }
             fs::create_dir_all(
                 local_path
                     .parent()
                     .expect("artifact destination has a parent"),
             )
-            .map_err(|error| ArtifactResolveError::new(error.to_string()))?;
+            .map_err(|_| ArtifactResolveError::CacheWriteFailed)?;
             self.local_transport.download(&source_path, &local_path)?;
         }
 
@@ -174,4 +249,90 @@ fn percent_decode(value: &str) -> String {
         index += 1;
     }
     String::from_utf8_lossy(&output).to_string()
+}
+
+fn url_scheme(url: &str) -> Option<&str> {
+    let (scheme, _) = url.split_once(':')?;
+    (!scheme.is_empty()).then_some(scheme)
+}
+
+fn redacted_url(url: &str) -> Option<String> {
+    let (scheme, rest) = url.split_once("://")?;
+    if scheme.is_empty() {
+        return None;
+    }
+    let without_sensitive_suffix = rest.split(['?', '#']).next().unwrap_or_default();
+    let (authority, path) = without_sensitive_suffix
+        .split_once('/')
+        .map(|(authority, path)| (authority, format!("/{path}")))
+        .unwrap_or((without_sensitive_suffix, String::new()));
+    let host = authority.rsplit('@').next().unwrap_or_default();
+    if host.is_empty() {
+        return None;
+    }
+    Some(format!("{scheme}://{host}{path}"))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn request() -> ArtifactResolveRequest<'static> {
+        ArtifactResolveRequest {
+            artifact_id: "example.recipe/archive",
+            url: "https://user:password@example.com/archive.zip?token=secret#private",
+            cache_mode: "default",
+        }
+    }
+
+    #[test]
+    fn every_artifact_error_has_a_stable_code_and_message() {
+        let failures = vec![
+            ArtifactResolveError::UrlInvalid,
+            ArtifactResolveError::SchemeUnsupported {
+                scheme: "ftp".to_string(),
+            },
+            ArtifactResolveError::SourceNotFound,
+            ArtifactResolveError::DownloadFailed,
+            ArtifactResolveError::HttpStatus { status: 404 },
+            ArtifactResolveError::RedirectLimitExceeded { redirects: 6 },
+            ArtifactResolveError::RedirectDowngradeRejected,
+            ArtifactResolveError::ConnectTimeout,
+            ArtifactResolveError::RequestTimeout,
+            ArtifactResolveError::TlsVerificationFailed,
+            ArtifactResolveError::ResponseIncomplete,
+            ArtifactResolveError::ResponseTooLarge,
+            ArtifactResolveError::CacheWriteFailed,
+            ArtifactResolveError::CachePublishFailed,
+            ArtifactResolveError::SandboxRejected,
+        ];
+
+        for failure in failures {
+            let message = failure.executor_message(request());
+            assert!(message.starts_with(failure.code()));
+            assert!(message.contains("example.recipe/archive"));
+            assert!(!message.contains("user"));
+            assert!(!message.contains("password"));
+            assert!(!message.contains("secret"));
+            assert!(!message.contains("private"));
+        }
+    }
+
+    #[test]
+    fn cleanup_failure_preserves_primary_code_and_adds_secondary_code() {
+        let failure = ArtifactResolveError::PartialCleanupFailed {
+            primary: Box::new(ArtifactResolveError::RequestTimeout),
+        };
+        let message = failure.executor_message(request());
+        assert!(message.starts_with("artifact_request_timeout"));
+        assert!(message.contains("artifact_partial_cleanup_failed"));
+    }
+
+    #[test]
+    fn redacted_url_keeps_location_but_removes_credentials_query_and_fragment() {
+        assert_eq!(
+            redacted_url(request().url).as_deref(),
+            Some("https://example.com/archive.zip")
+        );
+    }
 }

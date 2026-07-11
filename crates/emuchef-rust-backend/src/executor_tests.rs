@@ -1758,11 +1758,7 @@ fn remote_artifact_resolution_fails_without_network_download_attempt() {
     assert!(actual["steps"][0]["message"]
         .as_str()
         .unwrap()
-        .contains("network_artifact_download_unsupported"));
-    assert!(actual["steps"][0]["message"]
-        .as_str()
-        .unwrap()
-        .contains("use a file:// source"));
+        .contains("artifact_scheme_unsupported"));
     assert_eq!(actual["steps"][1]["status"], "blocked");
     assert!(!runtime_root.join("downloads").exists());
 }

@@ -22,6 +22,6 @@ impl ArtifactTransport for LocalFileTransport {
     fn download(&self, source: &Path, destination: &Path) -> Result<(), ArtifactResolveError> {
         fs::copy(source, destination)
             .map(|_| ())
-            .map_err(|error| ArtifactResolveError::new(error.to_string()))
+            .map_err(|_| ArtifactResolveError::CacheWriteFailed)
     }
 }
