@@ -214,7 +214,7 @@ fn validate_recipe_path_malformed_yaml_returns_compatibility_shaped_diagnostics(
 }
 
 #[test]
-fn sidecar_validate_recipe_path_echoes_id_and_returns_diagnostics() {
+fn validate_recipe_path_echoes_id_and_returns_diagnostics() {
     let path = fixture_path("minimal_recipe.yaml");
     let response = sidecar_response(json!({
         "id": "validate-1",

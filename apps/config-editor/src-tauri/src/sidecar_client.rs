@@ -86,7 +86,7 @@ pub struct SidecarClient {
 
 /// Selects the sidecar binary layout used by the Tauri backend bridge.
 ///
-/// Development builds intentionally keep the Phase 6U repo-local resolver so
+/// Development builds intentionally keep the repo-local resolver so
 /// tests and `tauri dev` use deterministic Cargo outputs. Packaged builds use
 /// the Tauri externalBin directory beside the app executable and never fall back
 /// to development paths.

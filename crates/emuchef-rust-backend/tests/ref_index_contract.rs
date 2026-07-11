@@ -278,7 +278,7 @@ fn one_shot_get_ref_index_is_not_exposed() {
 }
 
 #[test]
-fn sidecar_get_ref_index_returns_compatibility_shaped_result_for_open_document() {
+fn get_ref_index_returns_compatibility_shaped_result_for_open_document() {
     let input = format!(
         "{}\n{}\n",
         open_request(fixture_path("representative_recipe.yaml")),
