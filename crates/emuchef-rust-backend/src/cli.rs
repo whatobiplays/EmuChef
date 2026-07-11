@@ -6,10 +6,11 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use serde_json::Value as JsonValue;
 use serde_yaml::Value as YamlValue;
 
+use crate::artifact_resolver::file_url_to_path;
 use crate::device_probe::{CommandRunner, ProcessCommandRunner};
 use crate::executor::{
-    adb::RealAdbDevice, file_url_to_path, ExecutionProgressEvent, ExecutionRunResult,
-    ExecutorAdapters, ExecutorDevice, ExecutorRunner, ProgressPhase, ProgressStatus, StepRunStatus,
+    adb::RealAdbDevice, ExecutionProgressEvent, ExecutionRunResult, ExecutorAdapters,
+    ExecutorDevice, ExecutorRunner, ProgressPhase, ProgressStatus, StepRunStatus,
 };
 use crate::model::OrderedMap;
 use crate::planner::{

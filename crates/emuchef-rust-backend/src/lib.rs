@@ -3,6 +3,8 @@
 //! The crate exposes the product `emuchef` executable and the one-shot and JSONL
 //! protocol surfaces used by the Tauri configuration editor.
 
+mod artifact_resolver;
+mod artifact_transport;
 pub mod catalog;
 mod cli;
 pub mod commands;

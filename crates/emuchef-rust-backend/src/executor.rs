@@ -14,12 +14,11 @@ use std::path::{Component, Path, PathBuf};
 
 use serde::Serialize;
 use serde_json::{json, Value};
-use sha2::{Digest, Sha256};
 
+use crate::artifact_resolver::{ArtifactResolveRequest, ArtifactResolver};
 use crate::model::OrderedMap;
 use crate::planner::{
-    ExecutionArtifact, ExecutionParamValue, ExecutionPlan, ExecutionStep, ExecutionStepCondition,
-    RuntimeValue,
+    ExecutionParamValue, ExecutionPlan, ExecutionStep, ExecutionStepCondition, RuntimeValue,
 };
 
 #[derive(Clone, Debug, PartialEq, Serialize)]
@@ -510,7 +509,14 @@ impl<D: ExecutorDevice> ExecutorRunner<D> {
                     "unknown_artifact_ref: Unknown artifact ref: 'artifacts.{artifact_id}'."
                 )));
             };
-            let result = self.resolve_artifact(artifact);
+            let resolver = ArtifactResolver::new(self.adapters.sandbox()?);
+            let result = resolver
+                .resolve(ArtifactResolveRequest {
+                    artifact_id: &artifact.id,
+                    url: &artifact.url,
+                    cache_mode: &artifact.cache,
+                })
+                .map_err(|error| StepFailure::new(error.message().to_string()));
             let artifact_state = state
                 .artifacts
                 .get_mut(&artifact.id)
@@ -518,7 +524,8 @@ impl<D: ExecutorDevice> ExecutorRunner<D> {
             match result {
                 Ok(resolved) => {
                     artifact_state.status = ArtifactRuntimeStatus::Resolved;
-                    artifact_state.local_path = Some(resolved.local_path);
+                    artifact_state.local_path =
+                        Some(resolved.local_path.to_string_lossy().into_owned());
                     artifact_state.resolved_url = Some(artifact.url.clone());
                     artifact_state.filename = Some(resolved.filename);
                     artifact_state.cache_hit = resolved.cache_hit;
@@ -533,45 +540,6 @@ impl<D: ExecutorDevice> ExecutorRunner<D> {
             }
         }
         Ok(OrderedMap::new())
-    }
-
-    fn resolve_artifact(
-        &mut self,
-        artifact: &ExecutionArtifact,
-    ) -> Result<ResolvedArtifact, StepFailure> {
-        let sandbox = self.adapters.sandbox()?;
-        let filename = artifact_filename(&artifact.id, &artifact.url);
-        let local_filename = artifact_local_filename(&artifact.id, &artifact.url, &artifact.cache);
-        let cache_hit;
-        let local_path = if artifact.cache == "default" {
-            let path = sandbox.cache_root.join(&local_filename);
-            cache_hit = path.exists();
-            path
-        } else {
-            cache_hit = false;
-            sandbox.runtime_root.join("downloads").join(&local_filename)
-        };
-
-        sandbox.ensure_runtime_or_cache_write(&local_path)?;
-        if !local_path.exists() {
-            let Some(source_path) = file_url_to_path(&artifact.url) else {
-                return Err(StepFailure::new(format!(
-                    "network_artifact_download_unsupported: Network artifact downloads are not supported for artifact {:?} from {:?}; use a file:// source.",
-                    artifact.id, artifact.url
-                )));
-            };
-            sandbox.ensure_read_allowed(&source_path)?;
-            fs::create_dir_all(local_path.parent().unwrap())
-                .map_err(|error| StepFailure::new(error.to_string()))?;
-            fs::copy(&source_path, &local_path)
-                .map_err(|error| StepFailure::new(error.to_string()))?;
-        }
-
-        Ok(ResolvedArtifact {
-            local_path: local_path.to_string_lossy().to_string(),
-            filename,
-            cache_hit,
-        })
     }
 
     fn execute_extract_artifacts(
@@ -1556,15 +1524,15 @@ impl<E: adb::AdbCommandExecutor> ExecutorDevice for adb::RealAdbDevice<E> {
 }
 
 #[derive(Clone, Debug)]
-struct SandboxRoots {
-    runtime_root: PathBuf,
-    cache_root: PathBuf,
+pub(crate) struct SandboxRoots {
+    pub(crate) runtime_root: PathBuf,
+    pub(crate) cache_root: PathBuf,
     fake_device_root: PathBuf,
     read_only_roots: Vec<PathBuf>,
 }
 
 impl SandboxRoots {
-    fn ensure_read_allowed(&self, path: &Path) -> Result<(), StepFailure> {
+    pub(crate) fn ensure_read_allowed(&self, path: &Path) -> Result<(), StepFailure> {
         let normalized = path
             .canonicalize()
             .map(|path| normalize_path(&path))
@@ -1582,7 +1550,7 @@ impl SandboxRoots {
         )))
     }
 
-    fn ensure_runtime_or_cache_write(&self, path: &Path) -> Result<(), StepFailure> {
+    pub(crate) fn ensure_runtime_or_cache_write(&self, path: &Path) -> Result<(), StepFailure> {
         let normalized = normalize_path(path);
         let runtime_root = normalize_path(&self.runtime_root);
         let cache_root = normalize_path(&self.cache_root);
@@ -1917,16 +1885,9 @@ struct ArtifactRuntimeState {
     error: Option<String>,
 }
 
-#[derive(Clone, Debug)]
-struct ResolvedArtifact {
-    local_path: String,
-    filename: String,
-    cache_hit: bool,
-}
-
 #[derive(Debug)]
-struct StepFailure {
-    message: String,
+pub(crate) struct StepFailure {
+    pub(crate) message: String,
     outputs: OrderedMap<RuntimeValue>,
 }
 
@@ -2156,71 +2117,6 @@ fn resolve_runtime_ref(state: &ExecutionState, ref_value: &str) -> Result<Value,
         )));
     };
     serde_json::to_value(value).map_err(|error| StepFailure::new(error.to_string()))
-}
-
-pub(crate) fn artifact_local_filename(artifact_id: &str, url: &str, cache: &str) -> String {
-    let filename = artifact_filename(artifact_id, url);
-    let hash_input = if cache == "default" {
-        url.to_string()
-    } else {
-        format!("{artifact_id}{url}")
-    };
-    let digest = Sha256::digest(hash_input.as_bytes());
-    let digest_hex = digest
-        .iter()
-        .map(|byte| format!("{byte:02x}"))
-        .collect::<String>();
-    format!("{digest_hex}-{filename}")
-}
-
-fn artifact_filename(artifact_id: &str, url: &str) -> String {
-    let after_scheme = url.split_once("://").map(|(_, rest)| rest).unwrap_or(url);
-    let path_with_query = if after_scheme.starts_with('/') {
-        after_scheme
-    } else {
-        after_scheme
-            .find('/')
-            .map(|index| &after_scheme[index..])
-            .unwrap_or("")
-    };
-    let path = path_with_query.split(['?', '#']).next().unwrap_or_default();
-    path.rsplit('/')
-        .find(|part| !part.is_empty())
-        .map(percent_decode)
-        .unwrap_or_else(|| {
-            format!(
-                "{}.bin",
-                artifact_id.rsplit('/').next().unwrap_or(artifact_id)
-            )
-        })
-}
-
-pub(crate) fn file_url_to_path(url: &str) -> Option<PathBuf> {
-    let rest = url.strip_prefix("file://")?;
-    let path = if rest.starts_with('/') {
-        rest
-    } else {
-        rest.find('/').map(|index| &rest[index..])?
-    };
-    Some(PathBuf::from(percent_decode(path)))
-}
-
-fn percent_decode(value: &str) -> String {
-    let bytes = value.as_bytes();
-    let mut output = Vec::with_capacity(bytes.len());
-    let mut index = 0;
-    while index < bytes.len() {
-        if bytes[index] == b'%' && index + 2 < bytes.len() {
-            if let Ok(hex) = u8::from_str_radix(&value[index + 1..index + 3], 16) {
-                output.push(hex);
-                index += 3;
-                continue;
-            }
-        }
-        output.push(bytes[index]);
-        index += 1;
-    }
-    String::from_utf8_lossy(&output).to_string()
 }
 
 fn string_list_param(value: Option<&Value>) -> Vec<String> {

@@ -4,9 +4,10 @@ use std::path::{Path, PathBuf};
 
 use serde_json::{json, Value};
 
+use crate::artifact_resolver::artifact_local_filename;
 use crate::executor::{
     adb::{FakeAdbCommandExecutor, RealAdbDevice},
-    artifact_local_filename, DryRunExecutorAdapters, ExecutorAdapters, ExecutorRunner,
+    DryRunExecutorAdapters, ExecutorAdapters, ExecutorRunner,
 };
 use crate::model::OrderedMap;
 use crate::planner::{
