@@ -1,10 +1,12 @@
 # HTTP(S) Artifact Download Result
 
-Date: 2026-07-10
+Date: 2026-07-10, with real-device validation recorded 2026-07-11
 
 HTTP and HTTPS artifact downloading is implemented in the Rust product runtime.
 The executor remains single-threaded, existing execution-plan and protocol
-surfaces are unchanged, and real-device validation remains manual.
+surfaces are unchanged, and the required real-device validation completed on
+commit `5dca50603cf3a4831867c229157a94906151cbb7`. The sanitized repository record
+is [real-device-retroarch-2026-07-11.md](docs/release/evidence/real-device-retroarch-2026-07-11.md).
 
 ## 1. Commits
 
@@ -253,28 +255,24 @@ source fixtures, compatibility fixtures, and Rust lockfiles were preserved.
 
 ## 14. Tests Not Run
 
-- Real-device ADB apply was not run. It is destructive and requires explicit
-  operator authorization and a safe device.
-- The clean-cache full RetroArch remote download and apply was not run.
-- The real-device warm-cache and network-unavailable warm-cache reruns were not
-  run.
+- Optional destructive failure-matrix cases not listed in the completed
+  evidence record were not run.
 - Real packaged GUI validation on release targets was not run.
 - No public-internet endpoint was used by automated tests.
 
-No manual validation is claimed as passed.
+The completed real-device scenarios are manual operator evidence, not automated
+test results. Unattempted optional cases are not claimed as passed.
 
-## 15. Manual Runbook and Remaining Blockers
+## 15. Manual Evidence and Remaining Blockers
 
 The operator runbook is
-`docs/manual/real-device-retroarch-validation.md`. Release evidence must record
-the exact tested commit, clean cache, full remote RetroArch resolution,
-successful real-device apply and runtime checks, warm-cache rerun,
-network-unavailable warm-cache rerun, identical cache bytes, and no partial
-files.
+`docs/manual/real-device-retroarch-validation.md`. The 2026-07-11 evidence
+record confirms the exact tested commit, local baseline, successful real-device
+apply, clean-cache HTTP(S) resolution, warm-cache and network-unavailable
+warm-cache reruns, identical cache bytes, and no partial files.
 
 Public release readiness remains blocked on:
 
-- recorded real-device RetroArch evidence, including the network cases;
 - recorded packaged GUI evidence on supported targets;
 - signing and macOS notarization decisions and automation;
 - updater support;

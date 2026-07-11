@@ -53,8 +53,10 @@ Python backend or backend selector.
 Artifact resolution supports absolute `file://`, HTTP, and HTTPS URLs. Network
 downloads use strict Rustls verification, bounded redirects and timeouts,
 same-directory partial files, and no-clobber cache publication. Release signing,
-notarization, updater support, CSP hardening, cross-platform release automation,
-and recorded real-device validation remain future work.
+notarization, updater support, CSP hardening, and cross-platform release
+automation remain future work. The completed local and HTTP(S) device run is
+recorded in the
+[2026-07-11 RetroArch evidence](docs/release/evidence/real-device-retroarch-2026-07-11.md).
 
 See [runtime ownership](docs/architecture/runtime-ownership.md), the
 [planner/executor architecture](docs/architecture/planner-executor.md), and

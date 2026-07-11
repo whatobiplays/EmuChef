@@ -4,6 +4,9 @@ This runbook records manual evidence for the Rust planner and executor against a
 safe Android test device. It is not part of automated verification and must not
 be run against a device containing irreplaceable data.
 
+The sanitized record for the completed 2026-07-11 run is
+[`real-device-retroarch-2026-07-11.md`](../release/evidence/real-device-retroarch-2026-07-11.md).
+
 ## A. Preconditions
 
 1. Use a macOS or Linux host with Rust, Cargo, Android platform tools, and enough

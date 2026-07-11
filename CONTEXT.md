@@ -89,13 +89,16 @@ contract decision. New behavior uses Rust-native fixtures and tests.
 
 Normal automated verification does not run real-device apply. Device evidence
 is collected manually using
-`docs/manual/real-device-retroarch-validation.md`. Automated local HTTP and TLS
-tests do not replace the required clean-cache and warm-cache real-device
-RetroArch evidence.
+`docs/manual/real-device-retroarch-validation.md`. The evidence record at
+`docs/release/evidence/real-device-retroarch-2026-07-11.md` confirms a successful
+local-artifact baseline, real-device apply and idempotent rerun, clean-cache
+HTTP(S) resolution, warm-cache and offline warm-cache reruns, matching cache
+manifests, and no leaked partial files on commit
+`5dca50603cf3a4831867c229157a94906151cbb7`.
 
 ## Release State
 
 Host-target Tauri builds and simulated bundled-sidecar tests are available.
 Public release readiness still requires real packaged GUI evidence on supported
-targets, real-device validation, signing/notarization decisions, updater
-support, CSP hardening, and cross-platform release automation.
+targets, signing/notarization decisions, updater support, CSP hardening, and
+cross-platform release automation.

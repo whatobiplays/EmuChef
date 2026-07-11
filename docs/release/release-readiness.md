@@ -9,18 +9,18 @@
 - A simulated packaged sidecar smoke exercises protocol behavior.
 - Local HTTP/TLS tests and process-level CLI tests cover network artifact
   downloading, strict TLS, bounded redirects/timeouts, cache reuse, and cleanup.
+- [Real-device RetroArch evidence](evidence/real-device-retroarch-2026-07-11.md)
+  records the local baseline, HTTP(S) cold cache, warm cache, offline warm
+  cache, matching cache manifests, and successful device provisioning on
+  commit `5dca50603cf3a4831867c229157a94906151cbb7`.
 
 ## Required Before Public Release
 
 - Record the real packaged GUI checklist on every supported target.
-- Record the [real-device RetroArch validation runbook](../manual/real-device-retroarch-validation.md)
-  on a safe device.
-- Record clean-cache, warm-cache, and network-unavailable warm-cache HTTP(S)
-  artifact evidence on the real test device.
 - Define and automate code signing and macOS notarization.
 - Decide and implement updater support.
 - Replace the development CSP setting with a hardened policy.
 - Add cross-platform release automation and artifact inspection.
 
-Passing automated tests alone does not establish real-device or public-release
-readiness.
+Passing automated tests and one real-device evidence run does not establish
+packaged-GUI or public-release readiness.
