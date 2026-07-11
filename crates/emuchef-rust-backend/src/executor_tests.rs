@@ -1,6 +1,8 @@
 use std::fs;
 use std::io::Write;
+use std::net::TcpListener;
 use std::path::{Path, PathBuf};
+use std::thread;
 
 use serde_json::{json, Value};
 
@@ -1761,6 +1763,71 @@ fn unsupported_artifact_scheme_fails_without_network_download_attempt() {
         .contains("artifact_scheme_unsupported"));
     assert_eq!(actual["steps"][1]["status"], "blocked");
     assert!(!runtime_root.join("downloads").exists());
+}
+
+#[test]
+fn http_status_failure_blocks_dependents_allows_unrelated_steps_and_cleans_partial() {
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let address = listener.local_addr().unwrap();
+    let server = thread::spawn(move || {
+        let (mut stream, _) = listener.accept().unwrap();
+        let mut request = [0u8; 2048];
+        let _ = std::io::Read::read(&mut stream, &mut request).unwrap();
+        stream
+            .write_all(b"HTTP/1.1 500 Internal Server Error\r\nContent-Length: 11\r\nConnection: close\r\n\r\nsecret body")
+            .unwrap();
+    });
+    let tmp = tempfile::tempdir().unwrap();
+    let runtime_root = tmp.path().join(".emuchef_runtime");
+    let cache_root = tmp.path().join(".emuchef_cache").join("artifacts");
+    let fake_device_root = tmp.path().join("fake_device");
+    let url = format!("http://{address}/archive.zip?token=secret");
+    let mut resolve_params = OrderedMap::new();
+    resolve_params.insert(
+        "artifacts".to_string(),
+        literal(json!(["example.recipe/archive"])),
+    );
+    let mut dependent = wait_step("example.recipe/downstream", "Downstream", 1);
+    dependent.dependencies = vec!["example.recipe/resolve".to_string()];
+    let execution_plan = plan_with_artifacts(
+        vec![ExecutionArtifact {
+            id: "example.recipe/archive".to_string(),
+            type_name: "remote_file".to_string(),
+            url,
+            cache: "default".to_string(),
+        }],
+        vec![
+            ExecutionStep {
+                id: "example.recipe/resolve".to_string(),
+                recipe_ref: "example.recipe".to_string(),
+                type_name: "resolve_artifacts".to_string(),
+                name: "Resolve".to_string(),
+                dependencies: Vec::new(),
+                constraints: constraints(),
+                params: resolve_params,
+                skip_if: Vec::new(),
+                verify: Vec::new(),
+            },
+            dependent,
+            wait_step("example.recipe/unrelated", "Unrelated", 1),
+        ],
+    );
+    let (actual, _) = run_value(
+        &execution_plan,
+        sandbox_adapters(&runtime_root, &cache_root, &fake_device_root, Vec::new()),
+    );
+    server.join().unwrap();
+
+    assert_eq!(actual["steps"][0]["status"], "failed");
+    let message = actual["steps"][0]["message"].as_str().unwrap();
+    assert!(message.starts_with("artifact_http_status"));
+    assert!(message.contains("HTTP 500"));
+    assert!(!message.contains("secret"));
+    assert_eq!(actual["steps"][1]["status"], "blocked");
+    assert_eq!(actual["steps"][2]["status"], "executed");
+    if cache_root.exists() {
+        assert!(fs::read_dir(cache_root).unwrap().next().is_none());
+    }
 }
 
 #[test]

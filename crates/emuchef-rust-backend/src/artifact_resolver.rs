@@ -450,6 +450,12 @@ fn redacted_url(url: &str) -> Option<String> {
 
 #[cfg(test)]
 mod tests {
+    use std::io::{Read as _, Write as _};
+    use std::net::TcpListener;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::sync::Arc;
+    use std::thread;
+
     use super::*;
 
     fn sandbox(root: &Path) -> SandboxRoots {
@@ -459,6 +465,30 @@ mod tests {
             fake_device_root: root.join("device"),
             read_only_roots: vec![root.to_path_buf()],
         }
+    }
+
+    fn spawn_http_server(
+        bodies: Vec<&'static [u8]>,
+    ) -> (String, Arc<AtomicUsize>, thread::JoinHandle<()>) {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let address = listener.local_addr().unwrap();
+        let requests = Arc::new(AtomicUsize::new(0));
+        let thread_requests = Arc::clone(&requests);
+        let thread = thread::spawn(move || {
+            for body in bodies {
+                let (mut stream, _) = listener.accept().unwrap();
+                let mut request = [0u8; 4096];
+                let _ = stream.read(&mut request).unwrap();
+                thread_requests.fetch_add(1, Ordering::Relaxed);
+                let header = format!(
+                    "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+                    body.len()
+                );
+                stream.write_all(header.as_bytes()).unwrap();
+                stream.write_all(body).unwrap();
+            }
+        });
+        (format!("http://{address}"), requests, thread)
     }
 
     fn request() -> ArtifactResolveRequest<'static> {
@@ -619,5 +649,88 @@ mod tests {
             .file_name()
             .to_string_lossy()
             .contains("partial")));
+    }
+
+    #[test]
+    fn default_http_cache_uses_one_request_then_works_with_server_offline() {
+        let temp = tempfile::tempdir().unwrap();
+        let roots = sandbox(temp.path());
+        let (base_url, requests, server) = spawn_http_server(vec![b"network-bytes"]);
+        let url = format!("{base_url}/encoded%20artifact.apk?token=one#fragment");
+        let request = ArtifactResolveRequest {
+            artifact_id: "example/network",
+            url: &url,
+            cache_mode: "default",
+        };
+        let mut resolver = ArtifactResolver::new(&roots);
+        let first = resolver.resolve(request).unwrap();
+        server.join().unwrap();
+        assert_eq!(requests.load(Ordering::Relaxed), 1);
+        assert_eq!(first.filename, "encoded artifact.apk");
+        assert_eq!(fs::read(&first.local_path).unwrap(), b"network-bytes");
+
+        let second = resolver.resolve(request).unwrap();
+        assert!(second.cache_hit);
+        assert_eq!(second.local_path, first.local_path);
+        assert_eq!(requests.load(Ordering::Relaxed), 1);
+        assert_eq!(fs::read(second.local_path).unwrap(), b"network-bytes");
+    }
+
+    #[test]
+    fn raw_query_and_fragment_bytes_remain_part_of_compatible_cache_keys() {
+        let query_one =
+            artifact_local_filename("example/a", "https://host/file?value=1", "default");
+        let query_two =
+            artifact_local_filename("example/a", "https://host/file?value=2", "default");
+        let fragment_one = artifact_local_filename("example/a", "https://host/file#one", "default");
+        let fragment_two = artifact_local_filename("example/a", "https://host/file#two", "default");
+        assert_ne!(query_one, query_two);
+        assert_ne!(fragment_one, fragment_two);
+        assert!(query_one.ends_with("-file"));
+        assert!(fragment_one.ends_with("-file"));
+    }
+
+    #[test]
+    fn malformed_and_unsupported_urls_fail_before_creating_destinations() {
+        let temp = tempfile::tempdir().unwrap();
+        let roots = sandbox(temp.path());
+        let mut resolver = ArtifactResolver::new(&roots);
+        for (url, expected) in [
+            ("http://[::1", "artifact_url_invalid"),
+            ("ftp://example.com/file", "artifact_scheme_unsupported"),
+        ] {
+            let error = resolver
+                .resolve(ArtifactResolveRequest {
+                    artifact_id: "example/invalid",
+                    url,
+                    cache_mode: "none",
+                })
+                .unwrap_err();
+            assert_eq!(error.code(), expected);
+        }
+        assert!(!roots.runtime_root.join("downloads").exists());
+    }
+
+    #[test]
+    fn cache_none_http_resolution_makes_a_request_on_every_invocation() {
+        let temp = tempfile::tempdir().unwrap();
+        let roots = sandbox(temp.path());
+        let (base_url, requests, server) = spawn_http_server(vec![b"first", b"second"]);
+        let url = format!("{base_url}/artifact.bin");
+        let request = ArtifactResolveRequest {
+            artifact_id: "example/network",
+            url: &url,
+            cache_mode: "none",
+        };
+        let mut resolver = ArtifactResolver::new(&roots);
+        let first = resolver.resolve(request).unwrap();
+        let second = resolver.resolve(request).unwrap();
+        server.join().unwrap();
+        assert_eq!(requests.load(Ordering::Relaxed), 2);
+        assert!(!first.cache_hit);
+        assert!(!second.cache_hit);
+        assert_ne!(first.local_path, second.local_path);
+        assert_eq!(fs::read(first.local_path).unwrap(), b"first");
+        assert_eq!(fs::read(second.local_path).unwrap(), b"second");
     }
 }
