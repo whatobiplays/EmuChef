@@ -131,7 +131,7 @@ impl<E: AdbCommandExecutor> AdbCommandRunner<E> {
         if command[0] != "adb" {
             return Err(AdbCommandError::InvalidPlanCommand(format!(
                 "Plan command must start with 'adb': {}",
-                python_list_repr(&command)
+                list_repr(&command)
             )));
         }
 
@@ -533,7 +533,7 @@ fn parse_resolved_launcher_component(stdout: &str) -> Option<String> {
         .map(ToString::to_string)
 }
 
-fn python_list_repr(values: &[String]) -> String {
+fn list_repr(values: &[String]) -> String {
     let items = values
         .iter()
         .map(|value| format!("'{}'", value.replace('\\', "\\\\").replace('\'', "\\'")))

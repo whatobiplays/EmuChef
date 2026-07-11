@@ -1,8 +1,7 @@
-//! Authored recipe YAML loading and canonical emission for the Rust migration.
+//! Authored recipe YAML loading and canonical emission.
 //!
-//! Python remains the reference implementation. This module mirrors the narrow
-//! load/emit behavior covered by Rust backend fixtures without introducing
-//! editor sessions, planner contracts, catalog validation, or executor behavior.
+//! This module owns the recipe load and emit behavior shared by the Rust
+//! runtime and editor protocol.
 
 use std::fmt;
 use std::fs;
@@ -127,10 +126,10 @@ pub fn parse_recipe_mapping(raw: &Mapping, path: &Path) -> Result<Recipe, Recipe
             message: format!(
                 "File {} has unsupported schema_version {}.",
                 single_quote(&file_name),
-                python_repr(get_yaml(raw, "schema_version"))
+                stable_repr(get_yaml(raw, "schema_version"))
             ),
             object_kind: get_string(raw, "kind"),
-            object_id: get_python_string(raw, "id"),
+            object_id: get_scalar_string(raw, "id"),
             field: Some("schema_version".to_string()),
         };
         return Err(RecipeLoadError::authored_data(
@@ -145,10 +144,10 @@ pub fn parse_recipe_mapping(raw: &Mapping, path: &Path) -> Result<Recipe, Recipe
             message: format!(
                 "File {} has kind {}, expected 'recipe'.",
                 single_quote(&file_name),
-                python_repr(get_yaml(raw, "kind"))
+                stable_repr(get_yaml(raw, "kind"))
             ),
             object_kind: get_string(raw, "kind"),
-            object_id: get_python_string(raw, "id"),
+            object_id: get_scalar_string(raw, "id"),
             field: Some("kind".to_string()),
         };
         return Err(RecipeLoadError::authored_data(
@@ -162,7 +161,7 @@ pub fn parse_recipe_mapping(raw: &Mapping, path: &Path) -> Result<Recipe, Recipe
             code: "authored_data_invalid",
             message: "Recipe top-level 'permissions' is no longer supported; author permissions under grant_permissions.params.".to_string(),
             object_kind: Some("recipe".to_string()),
-            object_id: get_python_string(raw, "id"),
+            object_id: get_scalar_string(raw, "id"),
             field: Some("permissions".to_string()),
         };
         return Err(RecipeLoadError::authored_data(
@@ -179,7 +178,7 @@ pub fn parse_recipe_mapping(raw: &Mapping, path: &Path) -> Result<Recipe, Recipe
                 single_quote(&file_name)
             ),
             object_kind: Some("recipe".to_string()),
-            object_id: get_python_string(raw, "id"),
+            object_id: get_scalar_string(raw, "id"),
             field: None,
         };
         RecipeLoadError::authored_data("Authored data validation failed", issue)
@@ -226,8 +225,8 @@ fn absolute_path(path: &Path) -> PathBuf {
 }
 
 fn parse_recipe_shape(raw: &Mapping, path: &Path) -> Result<Recipe, String> {
-    let id = required_python_string(raw, "id")?;
-    let name = required_python_string(raw, "name")?;
+    let id = required_scalar_string(raw, "id")?;
+    let name = required_scalar_string(raw, "name")?;
     let inputs = parse_inputs(get_yaml(raw, "inputs"))?;
     let artifacts = parse_artifacts(get_yaml(raw, "artifacts"))?;
     let artifact_groups = parse_artifact_groups(get_yaml(raw, "artifact_groups"))?;
@@ -269,9 +268,9 @@ fn parse_inputs(value: Option<&YamlValue>) -> Result<OrderedMap<InputDeclaration
         inputs.insert(
             input_id.clone(),
             InputDeclaration {
-                type_name: required_python_string(input_map, "type")?,
-                role: get_python_string(input_map, "role").unwrap_or_else(|| "generic".to_string()),
-                label: get_python_string(input_map, "label").unwrap_or(input_id),
+                type_name: required_scalar_string(input_map, "type")?,
+                role: get_scalar_string(input_map, "role").unwrap_or_else(|| "generic".to_string()),
+                label: get_scalar_string(input_map, "label").unwrap_or(input_id),
                 description: optional_string(get_yaml(input_map, "description")),
                 required: get_bool(input_map, "required").unwrap_or(true),
                 multiple: get_bool(input_map, "multiple").unwrap_or(false),
@@ -285,7 +284,7 @@ fn parse_inputs(value: Option<&YamlValue>) -> Result<OrderedMap<InputDeclaration
                         })
                         .unwrap_or_default(),
                     path_kind: validation
-                        .and_then(|mapping| get_python_string(mapping, "path_kind")),
+                        .and_then(|mapping| get_scalar_string(mapping, "path_kind")),
                 },
                 default: yaml_to_json(get_yaml(input_map, "default").unwrap_or(&YamlValue::Null)),
                 metadata: parse_json_map(get_yaml(input_map, "metadata"))?,
@@ -314,7 +313,7 @@ fn parse_artifacts(value: Option<&YamlValue>) -> Result<OrderedMap<RemoteFileArt
                 single_quote(&artifact_id)
             ));
         };
-        let type_name = required_python_string(artifact_map, "type")?;
+        let type_name = required_scalar_string(artifact_map, "type")?;
         if type_name != "remote_file" {
             return Err(format!(
                 "Unsupported artifact type: {}",
@@ -325,8 +324,8 @@ fn parse_artifacts(value: Option<&YamlValue>) -> Result<OrderedMap<RemoteFileArt
             artifact_id,
             RemoteFileArtifact {
                 type_name,
-                url: required_python_string(artifact_map, "url")?,
-                cache: get_python_string(artifact_map, "cache")
+                url: required_scalar_string(artifact_map, "url")?,
+                cache: get_scalar_string(artifact_map, "cache")
                     .unwrap_or_else(|| "default".to_string()),
             },
         );
@@ -378,9 +377,9 @@ fn parse_step(value: &YamlValue) -> Result<Step, String> {
         return Err("step must be a mapping".to_string());
     };
     Ok(Step {
-        id: required_python_string(mapping, "id")?,
-        type_name: required_python_string(mapping, "type")?,
-        name: required_python_string(mapping, "name")?,
+        id: required_scalar_string(mapping, "id")?,
+        type_name: required_scalar_string(mapping, "type")?,
+        name: required_scalar_string(mapping, "name")?,
         description: optional_string(get_yaml(mapping, "description")),
         user_toggleable: get_bool(mapping, "user_toggleable")
             .ok_or_else(|| "'user_toggleable'".to_string())?,
@@ -431,7 +430,7 @@ fn parse_conditions(value: Option<&YamlValue>) -> Result<Vec<StepCondition>, Str
                 return Err("step condition must be a mapping".to_string());
             };
             Ok(StepCondition {
-                type_name: required_python_string(mapping, "type")?,
+                type_name: required_scalar_string(mapping, "type")?,
                 params: parse_json_map(get_yaml(mapping, "params"))?,
             })
         })
@@ -520,7 +519,7 @@ fn parse_string_vec(value: Option<&YamlValue>) -> Result<Vec<String>, String> {
     let YamlValue::Sequence(items) = value else {
         return Err("value must be a list".to_string());
     };
-    Ok(items.iter().map(value_to_python_string).collect())
+    Ok(items.iter().map(yaml_value_to_string).collect())
 }
 
 fn recipe_to_yaml_mapping(recipe: &Recipe) -> Mapping {
@@ -861,22 +860,22 @@ fn get_string(mapping: &Mapping, key: &str) -> Option<String> {
         .map(ToOwned::to_owned)
 }
 
-fn get_python_string(mapping: &Mapping, key: &str) -> Option<String> {
-    get_yaml(mapping, key).map(value_to_python_string)
+fn get_scalar_string(mapping: &Mapping, key: &str) -> Option<String> {
+    get_yaml(mapping, key).map(yaml_value_to_string)
 }
 
-fn required_python_string(mapping: &Mapping, key: &str) -> Result<String, String> {
-    get_python_string(mapping, key).ok_or_else(|| format!("'{key}'"))
+fn required_scalar_string(mapping: &Mapping, key: &str) -> Result<String, String> {
+    get_scalar_string(mapping, key).ok_or_else(|| format!("'{key}'"))
 }
 
 fn optional_string(value: Option<&YamlValue>) -> Option<String> {
     match value {
         None | Some(YamlValue::Null) => None,
-        Some(value) => Some(value_to_python_string(value)),
+        Some(value) => Some(yaml_value_to_string(value)),
     }
 }
 
-fn value_to_python_string(value: &YamlValue) -> String {
+fn yaml_value_to_string(value: &YamlValue) -> String {
     match value {
         YamlValue::Null => "None".to_string(),
         YamlValue::Bool(true) => "True".to_string(),
@@ -887,7 +886,7 @@ fn value_to_python_string(value: &YamlValue) -> String {
             .unwrap_or_else(|_| String::new())
             .trim()
             .to_string(),
-        YamlValue::Tagged(tagged) => value_to_python_string(&tagged.value),
+        YamlValue::Tagged(tagged) => yaml_value_to_string(&tagged.value),
     }
 }
 
@@ -900,14 +899,14 @@ fn parse_schema_version(value: Option<&YamlValue>) -> Option<i64> {
     }
 }
 
-fn python_repr(value: Option<&YamlValue>) -> String {
+fn stable_repr(value: Option<&YamlValue>) -> String {
     match value {
         None | Some(YamlValue::Null) => "None".to_string(),
         Some(YamlValue::String(value)) => format!("{value:?}").replace('"', "'"),
         Some(YamlValue::Bool(true)) => "True".to_string(),
         Some(YamlValue::Bool(false)) => "False".to_string(),
         Some(YamlValue::Number(number)) => number.to_string(),
-        Some(value) => value_to_python_string(value),
+        Some(value) => yaml_value_to_string(value),
     }
 }
 
@@ -926,7 +925,7 @@ fn insert(mapping: &mut Mapping, key: &str, value: YamlValue) {
 fn yaml_key_to_string(key: &YamlValue) -> String {
     match key {
         YamlValue::String(value) => value.clone(),
-        _ => value_to_python_string(key),
+        _ => yaml_value_to_string(key),
     }
 }
 

@@ -21,7 +21,7 @@ pub fn failure(error: ApiError) -> Value {
 /// Add the JSONL sidecar request id around a protocol envelope.
 ///
 /// Invalid ids and malformed JSONL lines pass `None`, which serializes as
-/// `id: null` to match the current Python sidecar contract.
+/// `id: null` for requests that do not supply a transport identifier.
 pub fn with_id(response: Value, id: Option<String>) -> Value {
     let mut object = serde_json::Map::new();
     object.insert("id".to_string(), id.map_or(Value::Null, Value::String));

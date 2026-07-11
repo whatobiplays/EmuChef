@@ -1,9 +1,9 @@
-//! Minimal authoredRoot catalog context for validation-only Phase 6L checks.
+//! Authored-root catalog context used by validation.
 //!
-//! Python's validation path glob-scans only these authoredRoot-relative
-//! top-level patterns: `apps/*.y*ml`, `recipes/*.y*ml`,
-//! `device_profiles/*.y*ml`, and `device_plans/*.y*ml`. Phase 6L models only
-//! recipe metadata needed for Python-verified recipe dependency diagnostics.
+//! Validation scans these authored-root-relative top-level patterns:
+//! `apps/*.y*ml`, `recipes/*.y*ml`,
+//! `device_profiles/*.y*ml`, and `device_plans/*.y*ml`. The catalog models only
+//! recipe metadata needed for recipe dependency diagnostics.
 //! It does not build planner data structures, execution plans, or executor
 //! state.
 
@@ -136,7 +136,7 @@ impl ValidationCatalog {
             errors.push(diagnostic(
                 "error",
                 "recipe_id_conflict",
-                &format!("Duplicate recipe id {}.", python_single_quote(&recipe.id)),
+                &format!("Duplicate recipe id {}.", single_quote(&recipe.id)),
                 file,
                 Some("recipe"),
                 Some(&recipe.id),
@@ -153,7 +153,7 @@ impl ValidationCatalog {
                     "recipe_not_found",
                     &format!(
                         "Recipe dependency {} was not found.",
-                        python_single_quote(dependency_ref)
+                        single_quote(dependency_ref)
                     ),
                     file,
                     Some("recipe"),
@@ -169,7 +169,7 @@ impl ValidationCatalog {
                 "dependency_cycle",
                 &format!(
                     "Recipe dependency cycle detected in recipe {}.",
-                    python_single_quote(&recipe.id)
+                    single_quote(&recipe.id)
                 ),
                 file,
                 Some("recipe"),
@@ -267,6 +267,6 @@ fn diagnostic(
     })
 }
 
-fn python_single_quote(value: &str) -> String {
+fn single_quote(value: &str) -> String {
     format!("'{}'", value.replace('\\', "\\\\").replace('\'', "\\'"))
 }

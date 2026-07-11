@@ -1,4 +1,4 @@
-//! Minimal authored recipe model used by the experimental Phase 6E backend.
+//! Authored recipe model used by the Rust runtime and editor protocol.
 //!
 //! These types intentionally cover only the authored YAML sections needed for
 //! load/emit parity tests. They are not a planner, executor, or editor document

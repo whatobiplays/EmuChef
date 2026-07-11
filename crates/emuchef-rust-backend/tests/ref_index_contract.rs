@@ -33,7 +33,8 @@ fn golden_path(name: &str) -> PathBuf {
 }
 
 fn read_golden(name: &str) -> Value {
-    let text = fs::read_to_string(golden_path(name)).expect("Compatibility fixture should be readable");
+    let text =
+        fs::read_to_string(golden_path(name)).expect("Compatibility fixture should be readable");
     serde_json::from_str(&text).expect("Compatibility fixture should be valid JSON")
 }
 
@@ -277,7 +278,7 @@ fn one_shot_get_ref_index_is_not_exposed() {
 }
 
 #[test]
-fn sidecar_get_ref_index_returns_python_shaped_result_for_open_document() {
+fn sidecar_get_ref_index_returns_compatibility_shaped_result_for_open_document() {
     let input = format!(
         "{}\n{}\n",
         open_request(fixture_path("representative_recipe.yaml")),
@@ -305,7 +306,7 @@ fn sidecar_get_ref_index_returns_python_shaped_result_for_open_document() {
 }
 
 #[test]
-fn ref_index_sources_match_python_for_artifacts_steps_and_outputs() {
+fn ref_index_sources_match_compatibility_for_artifacts_steps_and_outputs() {
     let response = sidecar_response(open_request(fixture_path("ref_params.yaml")));
 
     assert_eq!(response["ok"], true);
@@ -409,7 +410,7 @@ fn emit_yaml_result_shape_does_not_include_ref_index() {
 }
 
 #[test]
-fn focused_phase6h_results_match_compatibility_goldens_v1() {
+fn compatibility_results_match_compatibility_goldens_v1() {
     let temp_recipe = TempRecipe::copy_fixture("representative_recipe.yaml");
     let input = format!(
         "{}\n{}\n{}\n{}\n{}\n",

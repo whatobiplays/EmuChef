@@ -33,7 +33,8 @@ fn golden_path(name: &str) -> PathBuf {
 }
 
 fn read_golden(name: &str) -> Value {
-    let text = fs::read_to_string(golden_path(name)).expect("Compatibility fixture should be readable");
+    let text =
+        fs::read_to_string(golden_path(name)).expect("Compatibility fixture should be readable");
     serde_json::from_str(&text).expect("Compatibility fixture should be valid JSON")
 }
 
@@ -158,7 +159,7 @@ fn input_commands_update_dto_yaml_ref_index_and_history() {
         open_request(&temp_recipe.path),
         command_request(
             "add-input-extra-key",
-            json!({"type": "AddInput", "inputId": "save_dir", "ignoredByPython": true}),
+            json!({"type": "AddInput", "inputId": "save_dir", "ignoredUnknownField": true}),
         ),
         command_request(
             "update-label",
@@ -321,8 +322,8 @@ fn artifact_commands_update_refs_and_cleanup_supported_usages() {
             "duplicate-artifact",
             json!({"type": "DuplicateArtifact", "sourceArtifactId": "new_zip", "newArtifactId": "new_zip_copy"})
         ),
-        // Mirrors Python cleanup covered by tests/test_editor_core.py:
-        // test_delete_artifact_cleans_group_membership_step_selection_and_param_ref_in_one_command.
+        // Artifact deletion cleans group membership, step selection, and
+        // parameter references in one command.
         command_request(
             "delete-renamed",
             json!({"type": "DeleteArtifact", "artifactId": "renamed_zip"})
@@ -460,9 +461,7 @@ fn artifact_group_commands_preserve_order_cleanup_and_ref_index_scope() {
             "same-index-reorder-noop",
             json!({"type": "ReorderArtifactGroup", "groupId": "third_group_copy", "toIndex": 0})
         ),
-        // Mirrors Python cleanup covered by tests/test_editor_core.py:
-        // test_delete_input_and_artifact_group_remove_supported_structured_refs_only and
-        // test_rename_commands_rewrite_supported_structured_usages.
+        // Renaming rewrites supported structured usages only.
         command_request(
             "rename-bundle",
             json!({"type": "RenameArtifactGroup", "groupId": "bundle", "newGroupId": "renamed_bundle"})
@@ -632,7 +631,7 @@ fn save_after_non_step_command_preserves_history_and_updates_baseline() {
 }
 
 #[test]
-fn focused_phase6i_ref_index_results_match_compatibility_goldens_v1() {
+fn compatibility_ref_index_results_match_compatibility_goldens_v1() {
     let input_recipe = TempRecipe::copy_fixture("phase6i_commands.yaml");
     let input_responses = sidecar_responses(&format!(
         "{}\n{}\n{}\n{}\n{}\n{}\n",

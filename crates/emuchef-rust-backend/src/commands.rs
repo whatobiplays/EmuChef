@@ -1,8 +1,7 @@
-//! Editor command decoding for the experimental Rust backend slice.
+//! Editor command decoding for the Rust document model.
 //!
-//! Python remains the reference implementation. This module intentionally
-//! accepts only the command families that have explicit parity tests in the
-//! current Rust backend migration slice.
+//! This module accepts the product command families exposed by the editor
+//! protocol.
 
 use serde_json::{json, Map, Value};
 

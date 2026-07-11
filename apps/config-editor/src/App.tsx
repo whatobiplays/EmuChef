@@ -50,7 +50,7 @@ import {
   resolveReopenAttempt,
   resolveRestartSuccess,
   type CommandName,
-} from "./components/phase5EditorState.logic";
+} from "./components/editorState.logic";
 import { TextPromptDialog } from "./components/PromptDialog";
 import { Sidebar, type EditorView } from "./components/Sidebar";
 import { StepSpecsPanel } from "./components/StepSpecsPanel";

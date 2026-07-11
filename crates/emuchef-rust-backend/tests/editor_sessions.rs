@@ -525,7 +525,7 @@ fn sidecar_open_get_save_close_lifecycle_persists_document_state() {
 }
 
 #[test]
-fn open_recipe_matches_python_authored_root_fixture_behavior() {
+fn open_recipe_matches_compatibility_authored_root_fixture_behavior() {
     let input = format!(
         "{}\n{}\n{}\n",
         json!({
@@ -579,7 +579,7 @@ fn open_recipe_matches_python_authored_root_fixture_behavior() {
 }
 
 #[test]
-fn dto_projection_uses_python_shaped_recipe_fields_and_param_refs() {
+fn dto_projection_uses_compatibility_shaped_recipe_fields_and_param_refs() {
     let response = sidecar_response(json!({
         "id": "open-ref-params",
         "type": "openRecipe",
@@ -714,7 +714,7 @@ fn session_requests_validate_payloads_and_ignore_unknown_payload_keys() {
 }
 
 #[test]
-fn unknown_document_errors_match_python_shape() {
+fn unknown_document_errors_match_compatibility_shape() {
     for request_type in [
         "getDocument",
         "saveRecipe",

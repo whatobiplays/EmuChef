@@ -129,7 +129,7 @@ fn diagnostics_for_open_and_validate(fixture: &str) -> (Value, Value) {
     )
 }
 
-fn assert_python_diagnostic_shape(diagnostic: &Value) {
+fn assert_diagnostic_shape(diagnostic: &Value) {
     let object = diagnostic.as_object().expect("diagnostic should be object");
     let keys = object.keys().cloned().collect::<Vec<_>>();
     assert_eq!(
@@ -148,7 +148,7 @@ fn assert_python_diagnostic_shape(diagnostic: &Value) {
 
 fn assert_limited_context_warning(diagnostics: &Value, object_id: Option<&str>) {
     let warning = &diagnostics.as_array().unwrap()[0];
-    assert_python_diagnostic_shape(warning);
+    assert_diagnostic_shape(warning);
     assert_eq!(warning["severity"], "warning");
     assert_eq!(warning["code"], "validation_context_limited");
     assert_eq!(
@@ -169,7 +169,7 @@ fn assert_error_diagnostic(diagnostics: &Value, code: &str, object_id: &str, fie
         .iter()
         .find(|diagnostic| diagnostic["code"] == code)
         .unwrap_or_else(|| panic!("expected diagnostic code {code} in {diagnostics:#?}"));
-    assert_python_diagnostic_shape(error);
+    assert_diagnostic_shape(error);
     assert_eq!(error["severity"], "error");
     assert_eq!(error["objectKind"], "recipe");
     assert_eq!(error["objectId"], object_id);
@@ -188,7 +188,7 @@ fn assert_editor_local_fixture_diagnostics(
     let path_diagnostics = diagnostics_for_validate_path(fixture);
     let (open_diagnostics, session_diagnostics) = diagnostics_for_open_and_validate(fixture);
 
-    // Python ValidatorService serializes warnings before errors. These fixtures
+    // The validation contract serializes warnings before errors. These fixtures
     // intentionally omit authoredRoot to stay editor-local and avoid catalog scans.
     for diagnostics in [&path_diagnostics, &open_diagnostics, &session_diagnostics] {
         assert_limited_context_warning(diagnostics, Some(object_id));
@@ -197,7 +197,7 @@ fn assert_editor_local_fixture_diagnostics(
 }
 
 #[test]
-fn phase6k_capabilities_stay_on_editor_session_surface() {
+fn capabilities_stay_on_editor_session_surface() {
     assert_eq!(
         protocol::CAPABILITIES,
         &[
@@ -223,7 +223,7 @@ fn phase6k_capabilities_stay_on_editor_session_surface() {
 }
 
 #[test]
-fn valid_minimal_and_top_level_permissions_keep_python_request_classification() {
+fn valid_minimal_and_top_level_permissions_keep_compatibility_request_classification() {
     let valid = diagnostics_for_validate_path("minimal_recipe.yaml");
     assert_eq!(valid.as_array().unwrap().len(), 1);
     assert_limited_context_warning(&valid, Some("phase6e.minimal"));
@@ -247,7 +247,7 @@ fn valid_minimal_and_top_level_permissions_keep_python_request_classification() 
 }
 
 #[test]
-fn editor_local_step_dependency_diagnostics_match_python_fields() {
+fn editor_local_step_dependency_diagnostics_match_compatibility_fields() {
     // Mirrors src/emuchef/io/validation.py _annotate_recipe_step_cycle_errors.
     assert_editor_local_fixture_diagnostics(
         "phase6k_missing_step_dependency.yaml",
@@ -264,7 +264,7 @@ fn editor_local_step_dependency_diagnostics_match_python_fields() {
 }
 
 #[test]
-fn stepspec_required_param_diagnostics_match_python_fields() {
+fn stepspec_required_param_diagnostics_match_compatibility_fields() {
     assert_editor_local_fixture_diagnostics(
         "phase6k_missing_required_param.yaml",
         "param_contract_violation",
@@ -365,7 +365,7 @@ fn invalid_step_internals_keep_load_error_classification() {
             .iter()
             .find(|diagnostic| diagnostic["code"] == "authored_data_invalid")
             .unwrap_or_else(|| panic!("expected authored_data_invalid in {fixture}"));
-        assert_python_diagnostic_shape(error);
+        assert_diagnostic_shape(error);
         assert_eq!(error["severity"], "error");
 
         let open = sidecar_responses(&jsonl_input(vec![open_request(

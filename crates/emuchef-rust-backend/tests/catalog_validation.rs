@@ -46,8 +46,8 @@ fn golden_path(name: &str) -> PathBuf {
 }
 
 fn read_diagnostic_golden(name: &str) -> Vec<Value> {
-    let text =
-        fs::read_to_string(golden_path(name)).expect("Compatibility diagnostic fixture should exist");
+    let text = fs::read_to_string(golden_path(name))
+        .expect("Compatibility diagnostic fixture should exist");
     serde_json::from_str(&text).expect("Compatibility diagnostic fixture should be valid JSON")
 }
 
@@ -179,7 +179,7 @@ fn normalized_path(path: &Path) -> Value {
 }
 
 #[test]
-fn phase6l_capabilities_include_catalog_context_session_update() {
+fn capabilities_include_catalog_context_session_update() {
     assert_eq!(
         protocol::CAPABILITIES,
         &[
@@ -276,8 +276,8 @@ fn recipe_dependency_cycles_use_validation_local_graph_checks() {
 }
 
 #[test]
-fn catalog_scan_uses_only_python_verified_top_level_globs() {
-    // Python src/emuchef/io/validation.py scans exactly these top-level globs:
+fn catalog_scan_uses_only_compatibility_verified_top_level_globs() {
+    // Catalog validation scans only these top-level authored globs:
     // apps/*.y*ml, recipes/*.y*ml, device_profiles/*.y*ml, device_plans/*.y*ml.
     // This nested recipe is intentionally ignored, so the dependency is missing.
     let response = validate_path(
@@ -294,7 +294,7 @@ fn catalog_scan_uses_only_python_verified_top_level_globs() {
 }
 
 #[test]
-fn open_recipe_infers_and_normalizes_authored_root_like_python() {
+fn open_recipe_infers_and_normalizes_authored_root_like_compatibility() {
     let inferred_path = recipe_path("complete", "main.yaml");
     let repo_root = workspace_root("complete");
     let responses = sidecar_responses(vec![
@@ -567,7 +567,7 @@ fn open_recipe_reports_duplicate_recipe_id_conflict_against_catalog() {
 }
 
 #[test]
-fn duplicate_recipe_id_conflict_matches_python_first_file_replacement_semantics() {
+fn duplicate_recipe_id_conflict_matches_compatibility_first_file_replacement_semantics() {
     let responses = sidecar_responses(vec![json!({
         "id": "open",
         "type": "openRecipe",

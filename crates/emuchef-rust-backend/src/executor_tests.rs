@@ -23,8 +23,8 @@ fn golden_path(name: &str) -> PathBuf {
 }
 
 fn read_golden(name: &str) -> Value {
-    let text = fs::read_to_string(golden_path(name))
-        .expect("Compatibility fixture should be readable");
+    let text =
+        fs::read_to_string(golden_path(name)).expect("Compatibility fixture should be readable");
     serde_json::from_str(&text).expect("Compatibility fixture should be valid JSON")
 }
 
@@ -291,7 +291,7 @@ fn force_stop_app_step(id: &str, package_name: &str) -> ExecutionStep {
 }
 
 #[test]
-fn wait_success_matches_python_executor_dry_run_result() {
+fn wait_success_matches_compatibility_executor_dry_run_result() {
     let execution_plan = plan(vec![wait_step("example.recipe/wait", "Wait", 10)]);
     let original_plan = execution_plan.clone();
 
@@ -303,7 +303,7 @@ fn wait_success_matches_python_executor_dry_run_result() {
 }
 
 #[test]
-fn failures_block_dependents_but_not_unrelated_steps_like_python() {
+fn failures_block_dependents_but_not_unrelated_steps_like_compatibility() {
     let mut downstream = wait_step("example.recipe/downstream", "Downstream", 1);
     downstream.dependencies = vec!["example.recipe/fail".to_string()];
     let execution_plan = plan(vec![
@@ -323,7 +323,7 @@ fn failures_block_dependents_but_not_unrelated_steps_like_python() {
 }
 
 #[test]
-fn skip_if_uses_python_dry_run_device_state_and_does_not_block_dependents() {
+fn skip_if_uses_compatibility_dry_run_device_state_and_does_not_block_dependents() {
     let mut skipped = wait_step("example.recipe/skipped", "Skipped", 1);
     skipped.skip_if = vec![condition(
         "package_installed",
@@ -344,7 +344,7 @@ fn skip_if_uses_python_dry_run_device_state_and_does_not_block_dependents() {
 }
 
 #[test]
-fn verify_uses_only_python_backed_condition_types_and_fails_after_execution() {
+fn verify_uses_only_compatibility_backed_condition_types_and_fails_after_execution() {
     let mut step = wait_step("example.recipe/verify", "Verify", 1);
     step.verify = vec![condition("path_exists", json!({"path": "/sdcard/missing"}))];
     let execution_plan = plan(vec![step]);
@@ -365,7 +365,7 @@ fn verify_uses_only_python_backed_condition_types_and_fails_after_execution() {
 }
 
 #[test]
-fn grant_permissions_dry_run_result_matches_python_without_exposing_recorded_commands() {
+fn grant_permissions_dry_run_result_matches_compatibility_without_exposing_recorded_commands() {
     let mut params = OrderedMap::new();
     params.insert(
         "runtime".to_string(),
@@ -409,7 +409,7 @@ fn grant_permissions_dry_run_result_matches_python_without_exposing_recorded_com
 }
 
 #[test]
-fn grant_permissions_dry_run_failure_preserves_python_step_outputs_and_blocks_dependents() {
+fn grant_permissions_dry_run_failure_preserves_compatibility_step_outputs_and_blocks_dependents() {
     let mut params = OrderedMap::new();
     params.insert(
         "runtime".to_string(),
@@ -462,7 +462,7 @@ fn grant_permissions_dry_run_failure_preserves_python_step_outputs_and_blocks_de
 }
 
 #[test]
-fn file_exists_condition_uses_python_dry_run_path_and_directory_state() {
+fn file_exists_condition_uses_compatibility_dry_run_path_and_directory_state() {
     let mut step = wait_step("example.recipe/verify_file", "Verify File", 1);
     step.verify = vec![condition("file_exists", json!({"path": "/sdcard/config"}))];
     let execution_plan = plan(vec![step]);
@@ -593,7 +593,7 @@ fn require_all_policy_promotes_optional_permission_failure_to_step_failure() {
 }
 
 #[test]
-fn phase6q_install_apk_dry_run_matches_python_outputs_and_keeps_replace_existing_internal() {
+fn install_apk_dry_run_matches_compatibility_outputs_and_keeps_replace_existing_internal() {
     let tmp = tempfile::tempdir().expect("temp root should be created");
     let apk = tmp.path().join("example.apk");
     fs::write(&apk, "apk").expect("apk fixture should be writable");
@@ -621,7 +621,7 @@ fn phase6q_install_apk_dry_run_matches_python_outputs_and_keeps_replace_existing
 }
 
 #[test]
-fn phase6q_install_apk_validation_stays_at_python_executor_layer_with_python_messages() {
+fn install_apk_validation_stays_at_compatibility_executor_layer_with_compatibility_messages() {
     let tmp = tempfile::tempdir().expect("temp root should be created");
     let non_apk = tmp.path().join("example.txt");
     fs::write(&non_apk, "not an apk").expect("non-apk fixture should be writable");
@@ -695,7 +695,7 @@ fn phase6q_install_apk_validation_stays_at_python_executor_layer_with_python_mes
 }
 
 #[test]
-fn phase6q_install_apk_does_not_mutate_package_state_for_later_package_installed_checks() {
+fn install_apk_does_not_mutate_package_state_for_later_package_installed_checks() {
     let tmp = tempfile::tempdir().expect("temp root should be created");
     let apk = tmp.path().join("example.apk");
     fs::write(&apk, "apk").expect("apk fixture should be writable");
@@ -732,7 +732,7 @@ fn phase6q_install_apk_does_not_mutate_package_state_for_later_package_installed
 }
 
 #[test]
-fn phase6q_launch_and_force_stop_dry_run_match_python_empty_outputs_and_internal_logs() {
+fn launch_and_force_stop_dry_run_match_compatibility_empty_outputs_and_internal_logs() {
     let execution_plan = plan(vec![
         launch_app_step(
             "example.recipe/launch",
@@ -777,7 +777,7 @@ fn phase6q_launch_and_force_stop_dry_run_match_python_empty_outputs_and_internal
 }
 
 #[test]
-fn phase6q_device_app_failures_block_dependents_but_unrelated_steps_continue() {
+fn device_app_failures_block_dependents_but_unrelated_steps_continue() {
     let mut dependent = wait_step("example.recipe/dependent", "Dependent", 1);
     dependent.dependencies = vec!["example.recipe/launch".to_string()];
     let execution_plan = plan(vec![
@@ -812,7 +812,7 @@ fn phase6q_device_app_failures_block_dependents_but_unrelated_steps_continue() {
 }
 
 #[test]
-fn phase6q_force_stop_rejects_blank_package_name_with_python_executor_message() {
+fn force_stop_rejects_blank_package_name_with_compatibility_executor_message() {
     let execution_plan = plan(vec![force_stop_app_step(
         "example.recipe/force_stop",
         "   ",
@@ -830,7 +830,7 @@ fn phase6q_force_stop_rejects_blank_package_name_with_python_executor_message() 
 }
 
 #[test]
-fn phase6q_permission_required_failure_preserves_partial_permission_results_like_python() {
+fn permission_required_failure_preserves_partial_permission_results_like_compatibility() {
     let mut params = OrderedMap::new();
     params.insert(
         "runtime".to_string(),
@@ -895,7 +895,7 @@ fn phase6q_permission_required_failure_preserves_partial_permission_results_like
 }
 
 #[test]
-fn phase6q_permission_policy_matrix_covers_appops_api_root_and_failure_policies() {
+fn permission_policy_matrix_covers_appops_api_root_and_failure_policies() {
     let mut params = OrderedMap::new();
     params.insert(
         "runtime".to_string(),
@@ -980,7 +980,7 @@ fn phase6q_permission_policy_matrix_covers_appops_api_root_and_failure_policies(
 }
 
 #[test]
-fn phase6q_path_exists_and_file_exists_match_dry_run_remote_file_dir_and_missing_state() {
+fn path_exists_and_file_exists_match_dry_run_remote_file_dir_and_missing_state() {
     let mut file_step = wait_step("example.recipe/file", "File", 1);
     file_step.verify = vec![condition(
         "file_exists",
@@ -1063,7 +1063,7 @@ fn phase6q_path_exists_and_file_exists_match_dry_run_remote_file_dir_and_missing
 }
 
 #[test]
-fn phase6r_real_adb_device_construction_does_not_run_commands() {
+fn real_adb_device_construction_does_not_run_commands() {
     let executor = FakeAdbCommandExecutor::default();
     let device = RealAdbDevice::with_executor("adb", Some("emulator-5554"), executor);
 
@@ -1071,7 +1071,7 @@ fn phase6r_real_adb_device_construction_does_not_run_commands() {
 }
 
 #[test]
-fn phase6r_adb_shell_payload_quoting_matches_python_shlex_join() {
+fn adb_shell_payload_quoting_matches_compatibility_shlex_join() {
     let mut executor = FakeAdbCommandExecutor::default();
     for _ in 0..5 {
         executor.push_completed(0, "", "");
@@ -1131,7 +1131,7 @@ fn phase6r_adb_shell_payload_quoting_matches_python_shlex_join() {
 }
 
 #[test]
-fn phase6r_run_plan_command_serial_injection_matches_python() {
+fn run_plan_command_serial_injection_matches_compatibility() {
     let mut executor = FakeAdbCommandExecutor::default();
     executor.push_completed(0, "", "");
     executor.push_completed(0, "", "");
@@ -1198,7 +1198,7 @@ fn phase6r_run_plan_command_serial_injection_matches_python() {
 }
 
 #[test]
-fn phase6r_adb_result_mapping_uses_fake_executor_without_launching_processes() {
+fn adb_result_mapping_uses_fake_executor_without_launching_processes() {
     let mut executor = FakeAdbCommandExecutor::default();
     executor.push_completed(1, "", "Failure [INSTALL_FAILED_ALREADY_EXISTS]\n");
     let mut device = RealAdbDevice::with_executor("adb", None, executor);
@@ -1243,7 +1243,7 @@ fn phase6r_adb_result_mapping_uses_fake_executor_without_launching_processes() {
 }
 
 #[test]
-fn phase6r_package_installed_maps_python_stdout_and_exit_code() {
+fn package_installed_maps_compatibility_stdout_and_exit_code() {
     let mut executor = FakeAdbCommandExecutor::default();
     executor.push_completed(0, "package:/data/app/com.example/base.apk\n", "");
     executor.push_completed(1, "", "package not found");
@@ -1277,7 +1277,7 @@ fn phase6r_package_installed_maps_python_stdout_and_exit_code() {
 }
 
 #[test]
-fn phase6r_launch_app_command_shapes_match_python_explicit_resolved_and_fallback_paths() {
+fn launch_app_command_shapes_match_compatibility_explicit_resolved_and_fallback_paths() {
     let mut explicit_executor = FakeAdbCommandExecutor::default();
     explicit_executor.push_completed(0, "", "");
     let mut explicit_device = RealAdbDevice::with_executor("adb", None, explicit_executor);
@@ -1373,7 +1373,7 @@ fn phase6r_launch_app_command_shapes_match_python_explicit_resolved_and_fallback
 }
 
 #[test]
-fn phase6r_executor_can_use_explicit_real_adb_device_for_selected_handlers() {
+fn executor_can_use_explicit_real_adb_device_for_selected_handlers() {
     let tmp = tempfile::tempdir().expect("temp root should be created");
     let apk = tmp.path().join("example app.apk");
     fs::write(&apk, "apk").expect("apk fixture should be writable");
@@ -1522,7 +1522,7 @@ fn device_archive_extraction_happens_on_host_then_pushes_without_unzip_command()
 }
 
 #[test]
-fn phase6p_artifact_filename_algorithm_matches_python_reference() {
+fn artifact_filename_algorithm_matches_compatibility_reference() {
     assert_eq!(
         artifact_local_filename("example.recipe/archive", "file:///tmp/archive.zip", "none"),
         "b8fa707d78f0719a711d8ecb5c37a8cc5f2f4e56f69f9f8acd40c7eccd063c79-archive.zip"
@@ -1550,7 +1550,7 @@ fn phase6p_artifact_filename_algorithm_matches_python_reference() {
 }
 
 #[test]
-fn phase6p_resolve_extract_and_copy_flow_matches_python_and_stays_in_sandbox() {
+fn resolve_extract_and_copy_flow_matches_compatibility_and_stays_in_sandbox() {
     let tmp = tempfile::tempdir().expect("temp root should be created");
     let fixture_root = tmp.path().join("fixtures");
     let runtime_root = tmp.path().join(".emuchef_runtime");
@@ -1675,7 +1675,7 @@ fn phase6p_resolve_extract_and_copy_flow_matches_python_and_stays_in_sandbox() {
 }
 
 #[test]
-fn phase6p_extract_archive_success_matches_python_golden() {
+fn extract_archive_success_matches_compatibility_golden() {
     let tmp = tempfile::tempdir().expect("temp root should be created");
     let fixture_root = tmp.path().join("fixtures");
     let runtime_root = tmp.path().join(".emuchef_runtime");
@@ -1712,7 +1712,7 @@ fn phase6p_extract_archive_success_matches_python_golden() {
 }
 
 #[test]
-fn phase6p_remote_artifact_resolution_fails_without_network_download_attempt() {
+fn remote_artifact_resolution_fails_without_network_download_attempt() {
     let tmp = tempfile::tempdir().expect("temp root should be created");
     let runtime_root = tmp.path().join(".emuchef_runtime");
     let cache_root = tmp.path().join(".emuchef_cache").join("artifacts");
@@ -1767,7 +1767,7 @@ fn phase6p_remote_artifact_resolution_fails_without_network_download_attempt() {
 }
 
 #[test]
-fn phase6p_extract_archive_invalid_failure_blocks_dependent_like_python() {
+fn extract_archive_invalid_failure_blocks_dependent_like_compatibility() {
     let tmp = tempfile::tempdir().expect("temp root should be created");
     let fixture_root = tmp.path().join("fixtures");
     let runtime_root = tmp.path().join(".emuchef_runtime");
@@ -1802,7 +1802,7 @@ fn phase6p_extract_archive_invalid_failure_blocks_dependent_like_python() {
 }
 
 #[test]
-fn phase6p_extract_archive_rejects_traversal_entries_without_writing_outside_temp_root() {
+fn extract_archive_rejects_traversal_entries_without_writing_outside_temp_root() {
     let tmp = tempfile::tempdir().expect("temp root should be created");
     let fixture_root = tmp.path().join("fixtures");
     let runtime_root = tmp.path().join(".emuchef_runtime");
@@ -1837,7 +1837,7 @@ fn phase6p_extract_archive_rejects_traversal_entries_without_writing_outside_tem
 }
 
 #[test]
-fn phase6p_extract_archive_rejects_absolute_entries_before_writing() {
+fn extract_archive_rejects_absolute_entries_before_writing() {
     let tmp = tempfile::tempdir().expect("temp root should be created");
     let fixture_root = tmp.path().join("fixtures");
     let runtime_root = tmp.path().join(".emuchef_runtime");
@@ -1873,7 +1873,7 @@ fn phase6p_extract_archive_rejects_absolute_entries_before_writing() {
 }
 
 #[test]
-fn phase6p_extract_archive_prescans_entries_before_writing_any_member() {
+fn extract_archive_prescans_entries_before_writing_any_member() {
     let tmp = tempfile::tempdir().expect("temp root should be created");
     let fixture_root = tmp.path().join("fixtures");
     let runtime_root = tmp.path().join(".emuchef_runtime");
@@ -1910,7 +1910,7 @@ fn phase6p_extract_archive_prescans_entries_before_writing_any_member() {
 
 #[cfg(unix)]
 #[test]
-fn phase6p_extract_archive_rejects_symlinked_extract_parent_before_writing() {
+fn extract_archive_rejects_symlinked_extract_parent_before_writing() {
     let tmp = tempfile::tempdir().expect("temp root should be created");
     let fixture_root = tmp.path().join("fixtures");
     let runtime_root = tmp.path().join(".emuchef_runtime");
@@ -1951,7 +1951,7 @@ fn phase6p_extract_archive_rejects_symlinked_extract_parent_before_writing() {
 
 #[cfg(unix)]
 #[test]
-fn phase6p_extract_archive_rejects_symlinked_runtime_root_before_writing() {
+fn extract_archive_rejects_symlinked_runtime_root_before_writing() {
     let tmp = tempfile::tempdir().expect("temp root should be created");
     let fixture_root = tmp.path().join("fixtures");
     let runtime_root = tmp.path().join(".emuchef_runtime");
@@ -1990,7 +1990,7 @@ fn phase6p_extract_archive_rejects_symlinked_runtime_root_before_writing() {
 }
 
 #[test]
-fn phase6p_copy_replace_deletes_only_inside_fake_device_root() {
+fn copy_replace_deletes_only_inside_fake_device_root() {
     let tmp = tempfile::tempdir().expect("temp root should be created");
     let fixture_root = tmp.path().join("fixtures");
     let runtime_root = tmp.path().join(".emuchef_runtime");
@@ -2049,7 +2049,7 @@ fn phase6p_copy_replace_deletes_only_inside_fake_device_root() {
 }
 
 #[test]
-fn phase6p_copy_sync_preserves_stale_files_like_python_push_sync() {
+fn copy_sync_preserves_stale_files_like_compatibility_push_sync() {
     let tmp = tempfile::tempdir().expect("temp root should be created");
     let fixture_root = tmp.path().join("fixtures");
     let runtime_root = tmp.path().join(".emuchef_runtime");
@@ -2106,7 +2106,7 @@ fn phase6p_copy_sync_preserves_stale_files_like_python_push_sync() {
 }
 
 #[test]
-fn phase6p_copy_rejects_destination_traversal_before_writing() {
+fn copy_rejects_destination_traversal_before_writing() {
     let tmp = tempfile::tempdir().expect("temp root should be created");
     let fixture_root = tmp.path().join("fixtures");
     let runtime_root = tmp.path().join(".emuchef_runtime");
@@ -2158,7 +2158,7 @@ fn phase6p_copy_rejects_destination_traversal_before_writing() {
 
 #[cfg(unix)]
 #[test]
-fn phase6p_copy_rejects_fake_device_symlink_escape() {
+fn copy_rejects_fake_device_symlink_escape() {
     let tmp = tempfile::tempdir().expect("temp root should be created");
     let fixture_root = tmp.path().join("fixtures");
     let runtime_root = tmp.path().join(".emuchef_runtime");
@@ -2213,7 +2213,7 @@ fn phase6p_copy_rejects_fake_device_symlink_escape() {
 
 #[cfg(unix)]
 #[test]
-fn phase6p_copy_rejects_symlinked_fake_device_root_before_writing() {
+fn copy_rejects_symlinked_fake_device_root_before_writing() {
     let tmp = tempfile::tempdir().expect("temp root should be created");
     let fixture_root = tmp.path().join("fixtures");
     let runtime_root = tmp.path().join(".emuchef_runtime");

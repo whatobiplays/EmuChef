@@ -154,7 +154,7 @@ fn string_array(value: &Value) -> Vec<String> {
 }
 
 #[test]
-fn phase6j1_capabilities_stay_on_editor_session_surface() {
+fn capabilities_stay_on_editor_session_surface() {
     assert_eq!(
         protocol::CAPABILITIES,
         &[
@@ -180,7 +180,7 @@ fn phase6j1_capabilities_stay_on_editor_session_surface() {
 }
 
 #[test]
-fn step_command_codec_matches_python_shapes() {
+fn step_command_codec_matches_compatibility_shapes() {
     assert_eq!(
         decode_recipe_command(
             &json!({"type": "AddStep", "stepId": "pause", "stepType": "wait", "name": "Pause", "index": 1})
@@ -292,8 +292,8 @@ fn step_lifecycle_and_dependency_commands_update_document_state() {
             "set-toggleable",
             json!({"type": "SetStepUserToggleable", "stepId": "pause", "userToggleable": true}),
         ),
-        // Python commands.py _update_step_dependencies normalizes uniqueness only;
-        // it does not require dependency targets to exist.
+        // Dependency updates normalize uniqueness without requiring targets to
+        // exist; catalog validation owns target existence checks.
         command_request(
             "update-dependencies",
             json!({"type": "UpdateStepDependencies", "stepId": "pause", "dependencies": ["resolve", "missing_step"]}),
@@ -313,8 +313,7 @@ fn step_lifecycle_and_dependency_commands_update_document_state() {
     let added = assert_changed(&responses[1]);
     let pause = step(added, "pause");
 
-    // Mirrors Python commands.py _add_step and tests/test_editor_core.py
-    // test_step_commands_cover_supported_types_and_default_param_omission:
+    // Adding a step covers supported types and omits default parameters:
     // AddStep creates an empty authored params mapping, not StepSpec defaults.
     assert_eq!(pause["type"], "wait");
     assert_eq!(pause["name"], "Pause");
@@ -363,8 +362,8 @@ fn step_command_noops_do_not_push_undo_or_clear_redo() {
             json!({"type": "UpdateStepBasics", "stepId": "resolve", "name": "Resolve", "description": "Temporary description."}),
         ),
         request("undo", "undo"),
-        // Python recipe_document.py treats commands as no-ops when emitted YAML
-        // is unchanged. commands.py _optional_text clears null or blank text.
+        // Commands are no-ops when emitted YAML is unchanged. Optional text
+        // clears null or blank values.
         command_request(
             "noop-null-description",
             json!({"type": "UpdateStepBasics", "stepId": "resolve", "name": "Resolve", "description": null}),
@@ -541,12 +540,12 @@ fn each_step_command_family_supports_snapshot_undo_redo() {
 }
 
 #[test]
-fn delete_step_cleans_python_verified_modeled_refs() {
+fn delete_step_cleans_compatibility_verified_modeled_refs() {
     let temp_recipe = TempRecipe::copy_fixture("phase6j1_step_cleanup.yaml");
     let input = jsonl_input(vec![
         open_request(&temp_recipe.path),
-        // Mirrors Python commands.py _delete_step/_remove_step_refs and
-        // tests/test_editor_core.py test_step_delete_removes_supported_dependencies_conflicts_and_refs.
+        // Step deletion removes supported dependencies, conflicts, and
+        // structured references.
         command_request(
             "delete-prepare",
             json!({"type": "DeleteStep", "stepId": "prepare"}),

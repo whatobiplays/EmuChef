@@ -204,9 +204,8 @@ pub(crate) trait DeviceProbe {
 
 /// Live ADB-backed probe adapter for collecting Android getprop facts.
 ///
-/// The adapter is intentionally crate-private foundation. It is not wired into
-/// planner routes, Python CLI paths, Tauri/protocol commands, executor/apply
-/// behavior, smoke runners, or readiness-gate execution.
+/// The product planner uses this crate-private adapter when `--adb` or
+/// `--serial` requests live device detection.
 #[derive(Clone, Debug)]
 pub(crate) struct AdbDeviceProbe<R> {
     pub config: AdbProbeConfig,
@@ -252,7 +251,7 @@ impl DeviceProbe for FakeDeviceProbe {
 ///
 /// Intended future precedence is:
 /// synthetic/profile context -> detected facts -> explicit CLI overrides.
-/// P8X wires detected facts only through the explicit dev-only Rust shadow
+/// Detected facts are applied only through the product planning runtime
 /// binary live-probe mode. Other routes keep using their existing context
 /// sources.
 pub(crate) fn apply_detected_device_facts_to_context(

@@ -147,7 +147,7 @@ fn all_refs(document: &Value) -> Vec<String> {
 }
 
 #[test]
-fn phase6j2_capabilities_stay_on_editor_session_surface() {
+fn capabilities_stay_on_editor_session_surface() {
     assert_eq!(
         protocol::CAPABILITIES,
         &[
@@ -311,11 +311,11 @@ fn command_inventory_covers_current_external_apply_recipe_command_decoders() {
 }
 
 #[test]
-fn step_internals_command_codec_matches_python_shapes() {
+fn step_internals_command_codec_matches_compatibility_shapes() {
     let params = decode_recipe_command(&json!({
         "type": "UpdateStepParams",
         "stepId": "copy_input",
-        "ignoredByPython": true,
+        "ignoredUnknownField": true,
         "params": {
             "source": {"ref": "steps.extract.outputs.extracted_paths"},
             "dest": "/sdcard/New",
@@ -348,7 +348,7 @@ fn step_internals_command_codec_matches_python_shapes() {
     let constraints = decode_recipe_command(&json!({
         "type": "UpdateStepConstraints",
         "stepId": "copy_input",
-        "ignoredByPython": true,
+        "ignoredUnknownField": true,
         "constraints": {"capabilities": ["shared_storage_write"], "conflictsWith": ["resolve"]}
     }))
     .expect("UpdateStepConstraints should decode");
@@ -365,11 +365,11 @@ fn step_internals_command_codec_matches_python_shapes() {
 
     for (payload, expected_variant) in [
         (
-            json!({"type": "UpdateStepSkipIf", "stepId": "copy_input", "ignoredByPython": true, "skipIf": [{"type": "unknown_condition", "params": {"zeta": 1, "nested_ref": {"ref": "inputs.source_dir"}, "alpha": null}}]}),
+            json!({"type": "UpdateStepSkipIf", "stepId": "copy_input", "ignoredUnknownField": true, "skipIf": [{"type": "unknown_condition", "params": {"zeta": 1, "nested_ref": {"ref": "inputs.source_dir"}, "alpha": null}}]}),
             "UpdateStepSkipIf",
         ),
         (
-            json!({"type": "UpdateStepVerify", "stepId": "copy_input", "ignoredByPython": true, "verify": [{"type": "path_exists"}]}),
+            json!({"type": "UpdateStepVerify", "stepId": "copy_input", "ignoredUnknownField": true, "verify": [{"type": "path_exists"}]}),
             "UpdateStepVerify",
         ),
     ] {
@@ -428,7 +428,7 @@ fn update_step_params_replaces_values_preserves_literals_and_does_not_add_depend
             json!({
                 "type": "UpdateStepParams",
                 "stepId": "copy_input",
-                "ignoredByPython": true,
+                "ignoredUnknownField": true,
                 "params": {
                     "source": {"ref": "steps.missing.outputs.value"},
                     "dest": "/sdcard/New",
@@ -487,7 +487,7 @@ fn update_step_params_replaces_values_preserves_literals_and_does_not_add_depend
 }
 
 #[test]
-fn update_step_params_omits_only_python_equal_builtin_defaults() {
+fn update_step_params_omits_only_compatibility_equal_builtin_defaults() {
     let default_noop = TempRecipe::copy_fixture("phase6i_commands.yaml");
     let responses = sidecar_responses(&jsonl_input(vec![
         open_request(&default_noop.path),
@@ -496,7 +496,7 @@ fn update_step_params_omits_only_python_equal_builtin_defaults() {
             json!({
                 "type": "UpdateStepParams",
                 "stepId": "copy_input",
-                "ignoredByPython": true,
+                "ignoredUnknownField": true,
                 "params": {
                     "source": {"ref": "inputs.source_dir"},
                     "dest": "/sdcard/Input",
@@ -555,7 +555,7 @@ fn update_step_constraints_updates_casing_and_application_failures_preserve_hist
             json!({
                 "type": "UpdateStepConstraints",
                 "stepId": "copy_input",
-                "ignoredByPython": true,
+                "ignoredUnknownField": true,
                 "constraints": {
                     "capabilities": ["shared_storage_write"],
                     "conflictsWith": ["resolve"]
@@ -632,7 +632,7 @@ fn update_step_skip_if_and_verify_replace_conditions_preserving_literal_params()
             json!({
                 "type": "UpdateStepSkipIf",
                 "stepId": "copy_input",
-                "ignoredByPython": true,
+                "ignoredUnknownField": true,
                 "skipIf": [
                     {
                         "type": "unknown_condition",
@@ -652,7 +652,7 @@ fn update_step_skip_if_and_verify_replace_conditions_preserving_literal_params()
             json!({
                 "type": "UpdateStepVerify",
                 "stepId": "copy_input",
-                "ignoredByPython": true,
+                "ignoredUnknownField": true,
                 "verify": [
                     {
                         "type": "path_exists",

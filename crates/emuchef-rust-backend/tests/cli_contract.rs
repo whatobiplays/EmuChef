@@ -5,9 +5,8 @@ use emuchef_rust_backend::run_with_args_and_input;
 use serde_json::{json, Value};
 use tempfile::TempDir;
 
-// Phase 6S mirrors Python CLI behavior from `src/emuchef/cli.py` and
-// `src/emuchef/io/execution_plan_io.py`. Normal Rust tests keep these
-// expectations checked in instead of invoking Python at test runtime.
+// These process-level tests protect the Rust CLI's public output, exit-code,
+// and execution-plan loading contracts.
 
 fn args(values: &[&str]) -> Vec<String> {
     values.iter().map(|value| (*value).to_string()).collect()
@@ -193,7 +192,7 @@ fn write_plan(temp_dir: &TempDir, name: &str, yaml: &str) -> PathBuf {
 }
 
 #[test]
-fn phase6s_preserves_one_shot_json_and_sidecar_dispatch() {
+fn preserves_one_shot_json_and_sidecar_dispatch() {
     let one_shot = run_with_args_and_input(&args(&[r#"{"type":"hello"}"#]), "");
     assert_eq!(one_shot.exit_code, 0);
     assert_eq!(one_shot.stderr, "");
@@ -234,7 +233,7 @@ fn phase6s_preserves_one_shot_json_and_sidecar_dispatch() {
 }
 
 #[test]
-fn phase6s_single_unknown_or_malformed_args_remain_one_shot_errors() {
+fn single_unknown_or_malformed_args_remain_one_shot_errors() {
     for arg in ["foo", "{bad"] {
         let output = run_with_args_and_input(&args(&[arg]), "");
         assert_eq!(output.exit_code, 0);
@@ -246,7 +245,7 @@ fn phase6s_single_unknown_or_malformed_args_remain_one_shot_errors() {
 }
 
 #[test]
-fn phase6s_validate_without_path_is_cli_usage_error_not_one_shot_json() {
+fn validate_without_path_is_cli_usage_error_not_one_shot_json() {
     let output = run_with_args_and_input(&args(&["validate"]), "");
 
     assert_eq!(output.exit_code, 2);
@@ -256,7 +255,7 @@ fn phase6s_validate_without_path_is_cli_usage_error_not_one_shot_json() {
 }
 
 #[test]
-fn phase6s_validate_recipe_path_matches_python_summary_shape() {
+fn validate_recipe_path_matches_compatibility_summary_shape() {
     let path = fixture_path("recipes/invalid_top_level_permissions.yaml");
     let output = run_with_args_and_input(&args(&["validate", &path]), "");
 
@@ -277,7 +276,7 @@ fn phase6s_validate_recipe_path_matches_python_summary_shape() {
 }
 
 #[test]
-fn phase6s_validate_missing_file_matches_python_stdout_error_style() {
+fn validate_missing_file_matches_compatibility_stdout_error_style() {
     let path = fixture_path("recipes/does_not_exist.yaml");
     let output = run_with_args_and_input(&args(&["validate", &path]), "");
 
@@ -293,7 +292,7 @@ fn phase6s_validate_missing_file_matches_python_stdout_error_style() {
 }
 
 #[test]
-fn phase6s_apply_requires_python_plan_file_flag() {
+fn apply_requires_compatibility_plan_file_flag() {
     let output = run_with_args_and_input(&args(&["apply", "--dry-run"]), "");
 
     assert_eq!(output.exit_code, 2);
@@ -305,7 +304,7 @@ fn phase6s_apply_requires_python_plan_file_flag() {
 }
 
 #[test]
-fn phase6s_apply_dry_run_emits_python_progress_and_summary() {
+fn apply_dry_run_emits_compatibility_progress_and_summary() {
     let temp_dir = TempDir::new().expect("temp dir should be available");
     let plan_path = write_plan(&temp_dir, "plan.yaml", &minimal_plan_yaml());
     let output = run_with_args_and_input(
@@ -337,7 +336,7 @@ Dry run: success\n\
 }
 
 #[test]
-fn phase6s_apply_accepts_python_planning_result_plan_file_wrapper() {
+fn apply_accepts_compatibility_planning_result_plan_file_wrapper() {
     let temp_dir = TempDir::new().expect("temp dir should be available");
     let plan_path = write_plan(
         &temp_dir,
@@ -380,7 +379,7 @@ fn rust_apply_accepts_execution_plan_inputs() {
 }
 
 #[test]
-fn phase6s_apply_dry_run_reports_blocked_steps_like_python_cli() {
+fn apply_dry_run_reports_blocked_steps_like_compatibility_cli() {
     let temp_dir = TempDir::new().expect("temp dir should be available");
     let plan_path = write_plan(&temp_dir, "blocked.yaml", &blocked_plan_yaml());
     let output = run_with_args_and_input(
@@ -408,7 +407,7 @@ fn phase6s_apply_dry_run_reports_blocked_steps_like_python_cli() {
 }
 
 #[test]
-fn phase6s_apply_dry_run_permission_summary_matches_python_cli_labels() {
+fn apply_dry_run_permission_summary_matches_compatibility_cli_labels() {
     let temp_dir = TempDir::new().expect("temp dir should be available");
     let plan_path = write_plan(&temp_dir, "permissions.yaml", &permission_plan_yaml());
     let output = run_with_args_and_input(
@@ -436,7 +435,7 @@ fn phase6s_apply_dry_run_permission_summary_matches_python_cli_labels() {
 }
 
 #[test]
-fn phase6s_apply_missing_plan_file_is_process_error_not_api_envelope() {
+fn apply_missing_plan_file_is_process_error_not_api_envelope() {
     let output = run_with_args_and_input(
         &args(&[
             "apply",

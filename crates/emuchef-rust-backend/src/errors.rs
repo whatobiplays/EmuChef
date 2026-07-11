@@ -1,7 +1,7 @@
 use serde::Serialize;
 use serde_json::{json, Value};
 
-/// Stable editor API error codes known to the Phase 6C protocol skeleton.
+/// Stable error codes exposed by the editor API protocol.
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ApiErrorCode {
@@ -33,7 +33,7 @@ impl ApiError {
         }
     }
 
-    /// Build an `invalid_request` error with Python-compatible structured details.
+    /// Build an `invalid_request` error with stable structured details.
     pub fn invalid_request_with_details(message: impl Into<String>, details: Value) -> Self {
         Self {
             code: ApiErrorCode::InvalidRequest,
@@ -42,7 +42,7 @@ impl ApiError {
         }
     }
 
-    /// Build an `invalid_command` error with Python-compatible structured details.
+    /// Build an `invalid_command` error with stable structured details.
     pub fn invalid_command_with_details(message: impl Into<String>, details: Value) -> Self {
         Self {
             code: ApiErrorCode::InvalidCommand,
@@ -97,7 +97,7 @@ impl ApiError {
         }
     }
 
-    /// Convert the error into the Python-compatible JSON object shape.
+    /// Convert the error into the protocol JSON object shape.
     pub fn to_value(&self) -> Value {
         json!({
             "code": self.code,

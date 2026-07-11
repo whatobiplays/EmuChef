@@ -7,7 +7,7 @@ const GLOBAL_OPT_IN: &str = "EMUCHEF_RUN_REAL_ADB_TESTS";
 
 #[test]
 #[ignore = "manual real-ADB test; requires EMUCHEF_RUN_REAL_ADB_TESTS=1 and an attached test device"]
-fn phase6r_manual_real_adb_package_installed_check() {
+fn manual_real_adb_package_installed_check() {
     let Some(mut device) = manual_device() else {
         return;
     };
@@ -24,7 +24,7 @@ fn phase6r_manual_real_adb_package_installed_check() {
 
 #[test]
 #[ignore = "manual real-ADB test; requires EMUCHEF_RUN_REAL_ADB_TESTS=1 and an attached test device"]
-fn phase6r_manual_real_adb_path_exists_check() {
+fn manual_real_adb_path_exists_check() {
     let Some(mut device) = manual_device() else {
         return;
     };
@@ -38,7 +38,7 @@ fn phase6r_manual_real_adb_path_exists_check() {
 
 #[test]
 #[ignore = "manual mutating real-ADB test; requires explicit install opt-in and test APK"]
-fn phase6r_manual_real_adb_install_apk_requires_explicit_opt_in() {
+fn manual_real_adb_install_apk_requires_explicit_opt_in() {
     let Some(mut device) = manual_device() else {
         return;
     };
@@ -57,7 +57,7 @@ fn phase6r_manual_real_adb_install_apk_requires_explicit_opt_in() {
 
 #[test]
 #[ignore = "manual mutating real-ADB test; requires explicit launch opt-in and test package"]
-fn phase6r_manual_real_adb_launch_app_requires_explicit_opt_in() {
+fn manual_real_adb_launch_app_requires_explicit_opt_in() {
     let Some(mut device) = manual_device() else {
         return;
     };
@@ -76,7 +76,7 @@ fn phase6r_manual_real_adb_launch_app_requires_explicit_opt_in() {
 
 #[test]
 #[ignore = "manual mutating real-ADB test; requires explicit force-stop opt-in and test package"]
-fn phase6r_manual_real_adb_force_stop_app_requires_explicit_opt_in() {
+fn manual_real_adb_force_stop_app_requires_explicit_opt_in() {
     let Some(mut device) = manual_device() else {
         return;
     };
@@ -96,7 +96,7 @@ fn phase6r_manual_real_adb_force_stop_app_requires_explicit_opt_in() {
 
 #[test]
 #[ignore = "manual mutating real-ADB test; requires explicit permission opt-in and package allowlist"]
-fn phase6r_manual_real_adb_runtime_permission_requires_allowlist() {
+fn manual_real_adb_runtime_permission_requires_allowlist() {
     let Some(mut device) = manual_device() else {
         return;
     };
@@ -127,7 +127,7 @@ fn phase6r_manual_real_adb_runtime_permission_requires_allowlist() {
 
 #[test]
 #[ignore = "manual mutating real-ADB test; requires explicit appops opt-in and package allowlist"]
-fn phase6r_manual_real_adb_appops_requires_allowlist() {
+fn manual_real_adb_appops_requires_allowlist() {
     let Some(mut device) = manual_device() else {
         return;
     };

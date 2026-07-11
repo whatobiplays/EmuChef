@@ -1,11 +1,9 @@
-//! Internal safe executor foundations for fixture-scoped dry-run and sandboxed
-//! filesystem/artifact parity.
+//! Safe executor implementation for dry-run, sandboxed filesystem operations,
+//! and real-ADB execution.
 //!
-//! Python remains the executor reference. This module intentionally mirrors only
-//! the Python `ExecutionRunResult` shape and selected behaviors needed by Phase
-//! 6O/6P tests. Phase 6R adds crate-private real-ADB adapter foundations
-//! without protocol, CLI, Tauri, network, or unrestricted filesystem
-//! side-effect surfaces.
+//! The real-ADB adapter remains crate-private. Protocol and CLI layers call the
+//! executor through typed Rust interfaces, and filesystem effects remain
+//! constrained to explicit sandbox roots.
 
 pub mod adb;
 
@@ -427,7 +425,7 @@ impl<D: ExecutorDevice> ExecutorRunner<D> {
         if raw_duration.is_boolean() || duration.is_none() {
             return Err(StepFailure::new(format!(
                 "wait step requires a positive integer duration_ms: {}",
-                python_repr(raw_duration)
+                stable_repr(raw_duration)
             )));
         }
         self.adapters.sleep(duration.unwrap() as f64 / 1000.0);
@@ -711,7 +709,7 @@ impl<D: ExecutorDevice> ExecutorRunner<D> {
             }
             if resolved_params
                 .get("cleanup")
-                .map(python_truthy)
+                .map(value_is_truthy)
                 .unwrap_or(true)
             {
                 fs::remove_dir_all(&extract_root)
@@ -827,7 +825,7 @@ impl<D: ExecutorDevice> ExecutorRunner<D> {
                 "install_apk requires a host-side file_path runtime value.".to_string(),
             ));
         }
-        let apk_path = PathBuf::from(python_value_to_string(&app.value));
+        let apk_path = PathBuf::from(value_to_string(&app.value));
         if apk_path
             .extension()
             .and_then(|extension| extension.to_str())
@@ -847,7 +845,7 @@ impl<D: ExecutorDevice> ExecutorRunner<D> {
         }
         let replace_existing = resolved_params
             .get("replace_existing")
-            .map(python_truthy)
+            .map(value_is_truthy)
             .unwrap_or(false);
         self.adapters
             .device
@@ -861,12 +859,12 @@ impl<D: ExecutorDevice> ExecutorRunner<D> {
     ) -> Result<OrderedMap<RuntimeValue>, StepFailure> {
         let package_name = resolved_params
             .get("package_name")
-            .map(python_value_to_string)
+            .map(value_to_string)
             .unwrap_or_else(|| "None".to_string());
         let activity = resolved_params
             .get("activity")
             .filter(|value| !value.is_null())
-            .map(python_value_to_string);
+            .map(value_to_string);
         self.adapters
             .device
             .launch_app(&package_name, activity.as_deref())?;
@@ -879,7 +877,7 @@ impl<D: ExecutorDevice> ExecutorRunner<D> {
     ) -> Result<OrderedMap<RuntimeValue>, StepFailure> {
         let package_name = resolved_params
             .get("package_name")
-            .map(python_value_to_string)
+            .map(value_to_string)
             .unwrap_or_else(|| "None".to_string());
         if package_name.trim().is_empty() {
             return Err(StepFailure::new(
@@ -997,7 +995,7 @@ fn copy_device_source<D: ExecutorDevice>(
 ) -> Result<Vec<String>, StepFailure> {
     match source.type_name.as_str() {
         "directory_path" => {
-            let source_path = python_value_to_string(&source.value);
+            let source_path = value_to_string(&source.value);
             if copy_policy == "replace" {
                 device.remove_tree(dest)?;
             }
@@ -1028,7 +1026,7 @@ fn copy_device_source<D: ExecutorDevice>(
             Ok(copied)
         }
         "file_path" => {
-            let source_path = python_value_to_string(&source.value);
+            let source_path = value_to_string(&source.value);
             let target = if device.path_is_dir(dest)? {
                 join_device_path(dest, device_basename(&source_path))
             } else {
@@ -1900,7 +1898,7 @@ enum ArtifactRuntimeStatus {
 }
 
 impl ArtifactRuntimeStatus {
-    fn as_python_value(&self) -> &'static str {
+    fn as_status_value(&self) -> &'static str {
         match self {
             Self::Pending => "pending",
             Self::Resolved => "resolved",
@@ -2095,7 +2093,7 @@ fn resolve_runtime_ref(state: &ExecutionState, ref_value: &str) -> Result<Value,
         let runtime_value = match field {
             "status" => RuntimeValue {
                 type_name: "string".to_string(),
-                value: json!(artifact.status.as_python_value()),
+                value: json!(artifact.status.as_status_value()),
                 location: None,
             },
             "local_path" => RuntimeValue {
@@ -2637,7 +2635,7 @@ fn py_bool(value: bool) -> &'static str {
     }
 }
 
-fn python_truthy(value: &Value) -> bool {
+fn value_is_truthy(value: &Value) -> bool {
     match value {
         Value::Null => false,
         Value::Bool(value) => *value,
@@ -2648,7 +2646,7 @@ fn python_truthy(value: &Value) -> bool {
     }
 }
 
-fn python_value_to_string(value: &Value) -> String {
+fn value_to_string(value: &Value) -> String {
     match value {
         Value::Null => "None".to_string(),
         Value::Bool(value) => py_bool(*value).to_string(),
@@ -2658,7 +2656,7 @@ fn python_value_to_string(value: &Value) -> String {
     }
 }
 
-fn python_repr(value: &Value) -> String {
+fn stable_repr(value: &Value) -> String {
     match value {
         Value::Null => "None".to_string(),
         Value::Bool(value) => py_bool(*value).to_string(),

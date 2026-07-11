@@ -20,20 +20,20 @@ use crate::planner_device_plan::{
     planner_input_from_authored_device_plan_with_detected_facts,
 };
 
-const P7L_RETROARCH_ONLY_REFS: &[&str] = &["app.retroarch.provision"];
-const P7L_RETROARCH_BIOS_REFS: &[&str] = &["app.retroarch.provision", "feature.copy_bios"];
-const P7L_RETROARCH_BIOS_XANITEOG_REFS: &[&str] = &[
+const RETROARCH_ONLY_REFS: &[&str] = &["app.retroarch.provision"];
+const RETROARCH_BIOS_REFS: &[&str] = &["app.retroarch.provision", "feature.copy_bios"];
+const RETROARCH_BIOS_XANITEOG_REFS: &[&str] = &[
     "app.retroarch.provision",
     "feature.copy_bios",
     "app.xaniteog.install",
 ];
-const P7L_NO_REQUIRED_BINDINGS: &[RepoPlanE2eBinding] = &[];
-const P7L_BIOS_BINDINGS: &[RepoPlanE2eBinding] = &[RepoPlanE2eBinding::BiosSourceDir];
-const P7L_BIOS_XANITEOG_BINDINGS: &[RepoPlanE2eBinding] = &[
+const NO_REQUIRED_BINDINGS: &[RepoPlanE2eBinding] = &[];
+const BIOS_BINDINGS: &[RepoPlanE2eBinding] = &[RepoPlanE2eBinding::BiosSourceDir];
+const BIOS_XANITEOG_BINDINGS: &[RepoPlanE2eBinding] = &[
     RepoPlanE2eBinding::BiosSourceDir,
     RepoPlanE2eBinding::XaniteogApk,
 ];
-const P7L_RETROARCH_CFG_BINDINGS: &[RepoPlanE2eBinding] = &[RepoPlanE2eBinding::RetroarchCfg];
+const RETROARCH_CFG_BINDINGS: &[RepoPlanE2eBinding] = &[RepoPlanE2eBinding::RetroarchCfg];
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum RepoPlanE2eBinding {
@@ -90,14 +90,14 @@ fn golden_dir() -> PathBuf {
 }
 
 fn read_golden(name: &str) -> Value {
-    let text = fs::read_to_string(golden_path(name))
-        .expect("Compatibility fixture should be readable");
+    let text =
+        fs::read_to_string(golden_path(name)).expect("Compatibility fixture should be readable");
     serde_json::from_str(&text).expect("Compatibility fixture should be valid JSON")
 }
 
 fn fixture_device_context() -> DeviceContext {
-    // Mirrors the Python test fixture profile/device context shape used by the
-    // Phase 6M parity fixtures; no probing or profile resolution happens in Rust.
+    // Compatibility fixtures use synthetic context; no probing or profile
+    // resolution happens in this helper.
     DeviceContext {
         manufacturer: "Example".to_string(),
         model: "Example".to_string(),
@@ -108,7 +108,7 @@ fn fixture_device_context() -> DeviceContext {
 }
 
 fn fixture_runtime_capabilities() -> RuntimeCapabilities {
-    // Mirrors tests/support.py capability_defaults used by Python planner tests.
+    // Uses the capability defaults represented by the compatibility fixtures.
     RuntimeCapabilities {
         adb_available: true,
         apk_install: true,
@@ -314,7 +314,9 @@ fn repo_plan_e2e_input_for_device_plan(
         format!("plan.p7l.{device_plan_ref}.001"),
         repo_plan_e2e_bindings(temp, binding_kinds),
     )
-    .unwrap_or_else(|error| panic!("{device_plan_ref} should build P7L PlannerInput: {error}"))
+    .unwrap_or_else(|error| {
+        panic!("{device_plan_ref} should build current repository PlannerInput: {error}")
+    })
 }
 
 fn repo_plan_e2e_bindings(
@@ -339,17 +341,20 @@ fn repo_plan_e2e_binding_path(
     match binding_kind {
         RepoPlanE2eBinding::BiosSourceDir => {
             let path = temp.path().join("bios-source");
-            fs::create_dir_all(&path).expect("P7L BIOS source temp directory should be created");
+            fs::create_dir_all(&path)
+                .expect("current repository BIOS source temp directory should be created");
             ("feature.copy_bios/bios_source_dir", path)
         }
         RepoPlanE2eBinding::XaniteogApk => {
             let path = temp.path().join("xaniteog.apk");
-            fs::write(&path, []).expect("P7L XaniteOG placeholder APK path should be created");
+            fs::write(&path, [])
+                .expect("current repository XaniteOG placeholder APK path should be created");
             ("app.xaniteog.install/xaniteog_apk", path)
         }
         RepoPlanE2eBinding::RetroarchCfg => {
             let path = temp.path().join("retroarch.cfg");
-            fs::write(&path, []).expect("P7L RetroArch placeholder config path should be created");
+            fs::write(&path, [])
+                .expect("current repository RetroArch placeholder config path should be created");
             ("app.retroarch.provision/retroarch_cfg", path)
         }
     }
@@ -360,14 +365,14 @@ fn repo_plan_e2e_cases() -> Vec<RepoPlanE2eCase> {
         RepoPlanE2eCase {
             device_plan_ref: "ayaneo.konkr_pocket_fit.base",
             device_profile_ref: "ayaneo.konkr_pocket_fit",
-            selected_recipe_refs: P7L_RETROARCH_ONLY_REFS,
-            required_bindings: P7L_NO_REQUIRED_BINDINGS,
+            selected_recipe_refs: RETROARCH_ONLY_REFS,
+            required_bindings: NO_REQUIRED_BINDINGS,
         },
         RepoPlanE2eCase {
             device_plan_ref: "ayaneo.pocket_s_mini.base",
             device_profile_ref: "ayaneo.pocket_s_mini",
-            selected_recipe_refs: P7L_RETROARCH_ONLY_REFS,
-            required_bindings: P7L_NO_REQUIRED_BINDINGS,
+            selected_recipe_refs: RETROARCH_ONLY_REFS,
+            required_bindings: NO_REQUIRED_BINDINGS,
         },
     ]
 }
@@ -377,20 +382,20 @@ fn repo_plan_e2e_no_app_data_write_cases() -> Vec<RepoPlanE2eCase> {
         RepoPlanE2eCase {
             device_plan_ref: "ayaneo.generic.base",
             device_profile_ref: "ayaneo.generic",
-            selected_recipe_refs: P7L_RETROARCH_BIOS_REFS,
-            required_bindings: P7L_BIOS_BINDINGS,
+            selected_recipe_refs: RETROARCH_BIOS_REFS,
+            required_bindings: BIOS_BINDINGS,
         },
         RepoPlanE2eCase {
             device_plan_ref: "ayaneo.pocket_air_mini.base",
             device_profile_ref: "ayaneo.pocket_air_mini",
-            selected_recipe_refs: P7L_RETROARCH_BIOS_REFS,
-            required_bindings: P7L_BIOS_BINDINGS,
+            selected_recipe_refs: RETROARCH_BIOS_REFS,
+            required_bindings: BIOS_BINDINGS,
         },
         RepoPlanE2eCase {
             device_plan_ref: "ayaneo.pocket_s2.base",
             device_profile_ref: "ayaneo.pocket_s2",
-            selected_recipe_refs: P7L_RETROARCH_BIOS_XANITEOG_REFS,
-            required_bindings: P7L_BIOS_XANITEOG_BINDINGS,
+            selected_recipe_refs: RETROARCH_BIOS_XANITEOG_REFS,
+            required_bindings: BIOS_XANITEOG_BINDINGS,
         },
     ]
 }
@@ -427,7 +432,7 @@ fn normalize_path_string(value: String) -> String {
 }
 
 #[test]
-fn minimal_plan_matches_python_planning_result_shape() {
+fn minimal_plan_matches_compatibility_planning_result_shape() {
     let actual = planning_result_value(planner_input("planner_minimal", &["planner.minimal"]));
     let expected = read_golden("phase6m_planner_minimal.json");
 
@@ -439,7 +444,7 @@ fn minimal_plan_matches_python_planning_result_shape() {
 }
 
 #[test]
-fn recipe_and_step_dependencies_match_python_ordering() {
+fn recipe_and_step_dependencies_match_compatibility_ordering() {
     let actual = planning_result_value(planner_input(
         "planner_dependencies",
         &["planner.dependencies"],
@@ -464,7 +469,7 @@ fn recipe_and_step_dependencies_match_python_ordering() {
 }
 
 #[test]
-fn refs_artifacts_defaults_and_conditions_match_python_execution_plan() {
+fn refs_artifacts_defaults_and_conditions_match_compatibility_execution_plan() {
     let actual = planning_result_value(planner_input(
         "planner_refs_artifacts",
         &["planner.refs_artifacts"],
@@ -525,7 +530,7 @@ fn stepspec_defaults_do_not_mutate_source_recipe_model() {
 }
 
 #[test]
-fn required_input_bindings_match_python_success_and_missing_error() {
+fn required_input_bindings_match_compatibility_success_and_missing_error() {
     let mut bound = planner_input("planner_inputs", &["planner.inputs"]);
     bound.input_bindings.insert(
         "planner.inputs/required_cfg".to_string(),
@@ -845,7 +850,7 @@ fn permission_intent_validation_rejects_obvious_malformed_step_local_inputs() {
 }
 
 #[test]
-fn phase6n_builtin_planner_mappings_match_compatibility_goldens_v1() {
+fn builtin_planner_mappings_match_compatibility_goldens_v1() {
     let actual = normalized_planning_result_value(planner_input(
         "planner_phase6n_builtins_all",
         &["planner.phase6n.builtins_all"],
@@ -888,7 +893,7 @@ fn phase6n_builtin_planner_mappings_match_compatibility_goldens_v1() {
 }
 
 #[test]
-fn phase6n_optional_inputs_prune_and_rebind_like_python() {
+fn optional_inputs_prune_and_rebind_like_compatibility() {
     let omitted = normalized_planning_result_value(planner_input(
         "planner_phase6n_optional_inputs",
         &["planner.phase6n.optional_inputs"],
@@ -928,7 +933,7 @@ fn phase6n_optional_inputs_prune_and_rebind_like_python() {
 }
 
 #[test]
-fn phase6n_input_defaults_and_multiple_values_match_python() {
+fn input_defaults_and_multiple_values_match_compatibility() {
     let actual = normalized_planning_result_value(planner_input(
         "planner_phase6n_input_defaults_multiple",
         &["planner.phase6n.input_defaults_multiple"],
@@ -960,7 +965,7 @@ fn phase6n_input_defaults_and_multiple_values_match_python() {
 }
 
 #[test]
-fn phase6n_dependency_expansion_and_namespacing_match_python() {
+fn dependency_expansion_and_namespacing_match_compatibility() {
     let actual = normalized_planning_result_value(planner_input(
         "planner_phase6n_dependency_graph",
         &["planner.phase6n.dependency_graph"],
@@ -1173,11 +1178,11 @@ fn recipe_expansion_current_corpus_selected_and_expanded_refs_match() {
     ];
     let first = planning_result_value(authored_corpus_planner_input_with_bindings(
         &selected_recipe_refs,
-        &p7k_corpus_recipe_expansion_bindings(),
+        &corpus_recipe_expansion_bindings(),
     ));
     let second = planning_result_value(authored_corpus_planner_input_with_bindings(
         &selected_recipe_refs,
-        &p7k_corpus_recipe_expansion_bindings(),
+        &corpus_recipe_expansion_bindings(),
     ));
 
     assert_eq!(first, second);
@@ -1204,7 +1209,7 @@ fn recipe_expansion_checked_in_device_plan_selected_sets_match_expanded_refs_for
             .collect::<Vec<_>>();
         let actual = planning_result_value(authored_corpus_planner_input_with_bindings(
             &selected_recipe_refs,
-            &p7k_corpus_recipe_expansion_bindings(),
+            &corpus_recipe_expansion_bindings(),
         ));
 
         assert_eq!(actual["status"], "success", "{}: {actual:#}", plan.id);
@@ -1224,7 +1229,7 @@ fn recipe_expansion_checked_in_device_plan_selected_sets_match_expanded_refs_for
 }
 
 #[test]
-fn phase6n_step_data_refs_conditions_and_constraints_match_python() {
+fn step_data_refs_conditions_and_constraints_match_compatibility() {
     let actual = normalized_planning_result_value(planner_input(
         "planner_phase6n_step_data",
         &["planner.phase6n.step_data"],
@@ -2420,7 +2425,7 @@ fn compatibility_fixture_inventory_consumes_checked_in_evidence_only() {
 
     assert_eq!(
         discovered_goldens, inventory_goldens,
-        "Compatibility fixtures must be intentionally classified. Add new phase6m/phase6n planner goldens to the P7A inventory, or explain why they are outside P7A planner parity scope.",
+        "Compatibility fixtures must be intentionally classified in the compatibility inventory.",
     );
 
     for entry in inventory {
@@ -3263,7 +3268,7 @@ fn detected_context_planning_result_source_has_no_live_behavior() {
     ] {
         assert!(
             !code_without_line_comments.contains(forbidden),
-            "P8Q planner-device-plan composition must not contain live behavior marker {forbidden:?}"
+            "planner composition planner-device-plan composition must not contain live behavior marker {forbidden:?}"
         );
     }
 }
@@ -3452,7 +3457,7 @@ fn planner_device_plan_detected_profile_mismatch_loads_authored_brand_model_and_
 }
 
 #[test]
-fn detected_profile_mismatch_android_max_is_parsed_but_not_evaluated_for_python_parity() {
+fn detected_profile_mismatch_android_max_is_parsed_but_not_evaluated_for_compatibility_contract() {
     let root = temp_authored_root_with_device_plan(
         "detected.max.profile",
         "ayaneo.konkr_pocket_fit",
@@ -3818,11 +3823,11 @@ metadata: {}
         "plan.p7j.defaults_inactive.001".to_string(),
         OrderedMap::new(),
     )
-    .expect("ref-shaped defaults should stay inactive in P7J");
+    .expect("ref-shaped defaults should stay inactive in current contract");
 
     assert!(
         input.input_bindings.is_empty(),
-        "device_plan.defaults must not populate Rust planner bindings in P7J"
+        "device_plan.defaults must not populate Rust planner bindings in current contract"
     );
 }
 
@@ -3905,7 +3910,7 @@ metadata: {{}}
 }
 
 #[test]
-fn repo_device_plan_profile_context_can_plan_successfully_without_python_or_devices() {
+fn repo_device_plan_profile_context_can_plan_successfully_without_compatibility_or_devices() {
     let first = planning_result_value(repo_device_plan_planner_input_with_bindings(
         "ayaneo.pocket_s_mini.base",
         &[(
@@ -4013,12 +4018,12 @@ fn repo_plan_e2e_selected_and_expanded_refs_are_deterministic() {
 }
 
 #[test]
-fn repo_plan_e2e_normalized_steps_reflect_prior_p7_slices() {
+fn repo_plan_e2e_normalized_steps_match_runtime_contract() {
     let temp = TempDir::new().expect("repo plan e2e temp root should be created");
     let actual = planning_result_value(repo_plan_e2e_input_for_device_plan(
         "ayaneo.pocket_s_mini.base",
         &temp,
-        P7L_NO_REQUIRED_BINDINGS,
+        NO_REQUIRED_BINDINGS,
     ));
 
     assert_eq!(actual["status"], "success", "{actual:#}");
@@ -4121,7 +4126,7 @@ fn repo_plan_e2e_normalized_steps_reflect_prior_p7_slices() {
     let bound_config = planning_result_value(repo_plan_e2e_input_for_device_plan(
         "ayaneo.pocket_s_mini.base",
         &config_temp,
-        P7L_RETROARCH_CFG_BINDINGS,
+        RETROARCH_CFG_BINDINGS,
     ));
     assert_eq!(bound_config["status"], "success", "{bound_config:#}");
     assert_eq!(
@@ -4146,7 +4151,7 @@ fn repo_plan_e2e_requires_only_explicit_external_bindings_for_unbound_inputs() {
     for case in repo_plan_e2e_cases() {
         assert!(
             case.required_bindings.is_empty(),
-            "{} should not need required external bindings in the current P7L success set",
+            "{} should not need required external bindings in the current current repository success set",
             case.device_plan_ref
         );
         let temp = TempDir::new().expect("repo plan e2e temp root should be created");
@@ -4263,7 +4268,7 @@ metadata: {}
         "plan.p7i.missing_selected_flag.001".to_string(),
         OrderedMap::new(),
     )
-    .expect_err("selected_by_default is required by current Python parser semantics");
+    .expect_err("selected_by_default is required by the authored device-plan contract");
     assert_eq!(err.code(), "authored_data_invalid");
     assert!(err.to_string().contains("selected_by_default"));
 }
@@ -4603,7 +4608,7 @@ fn assert_recipe_expansion_error<'a>(actual: &'a Value, expected_code: &str) -> 
     &errors[0]
 }
 
-fn p7k_corpus_recipe_expansion_bindings() -> Vec<(&'static str, Value)> {
+fn corpus_recipe_expansion_bindings() -> Vec<(&'static str, Value)> {
     vec![
         (
             "app.retroarch.provision/retroarch_cfg",

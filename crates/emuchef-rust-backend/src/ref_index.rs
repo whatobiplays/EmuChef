@@ -1,8 +1,7 @@
-//! RefIndex generation for the Phase 6H modeled authored recipe surface.
+//! Reference-index generation for authored recipe documents.
 //!
-//! The Python backend remains the reference implementation. This module mirrors
-//! its current `build_ref_index` behavior for recipe inputs, runtime artifact
-//! fields, authored step ids, and declared StepSpec outputs. It intentionally
+//! The index covers recipe inputs, runtime artifact fields, authored step ids,
+//! and declared StepSpec outputs. It intentionally
 //! does not inspect authored param refs, artifact groups, planner state,
 //! catalog context, or executor/device data.
 

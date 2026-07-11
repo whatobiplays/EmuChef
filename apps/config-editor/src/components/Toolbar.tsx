@@ -1,5 +1,5 @@
 import type { SidecarStatusResult } from "../api/types";
-import { formatSidecarStatusLabel } from "./phase5EditorState.logic";
+import { formatSidecarStatusLabel } from "./editorState.logic";
 
 interface ToolbarProps {
   currentPath: string | null;

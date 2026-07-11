@@ -1,7 +1,7 @@
-//! JSON DTO projection for Phase 6H recipe documents.
+//! JSON DTO projection for recipe documents.
 //!
 //! These projections preserve the editor protocol shape for the authored recipe
-//! fields modeled in Phase 6E. Fields outside that model are intentionally left
+//! fields modeled by the authored recipe schema. Fields outside that model are intentionally left
 //! out of scope instead of adding new semantics.
 
 use serde_json::{json, Map, Value};

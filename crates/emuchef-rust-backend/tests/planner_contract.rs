@@ -23,7 +23,7 @@ fn sidecar_response(request: Value) -> Value {
 }
 
 #[test]
-fn phase6m_capabilities_stay_editor_scoped_and_planner_requests_are_not_routed() {
+fn capabilities_stay_editor_scoped_and_planner_requests_are_not_routed() {
     assert_eq!(
         protocol::CAPABILITIES,
         &[

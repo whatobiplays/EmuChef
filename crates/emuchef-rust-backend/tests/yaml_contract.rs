@@ -98,7 +98,7 @@ fn normalize_validation_file_paths(mut value: Value) -> Value {
 }
 
 #[test]
-fn one_shot_emit_recipe_yaml_from_path_matches_minimal_python_golden_byte_for_byte() {
+fn one_shot_emit_recipe_yaml_from_path_matches_minimal_compatibility_golden_byte_for_byte() {
     let response = one_shot_response(emit_request(&fixture_path("minimal_recipe.yaml")));
 
     assert_eq!(response["ok"], true);
@@ -109,7 +109,7 @@ fn one_shot_emit_recipe_yaml_from_path_matches_minimal_python_golden_byte_for_by
 }
 
 #[test]
-fn one_shot_emit_recipe_yaml_from_path_matches_representative_python_golden_semantically() {
+fn one_shot_emit_recipe_yaml_from_path_matches_representative_compatibility_golden_semantically() {
     let response = one_shot_response(emit_request(&fixture_path("representative_recipe.yaml")));
     let actual = response["result"]["yaml"].as_str().unwrap();
     let expected = read_golden("representative_recipe.emit.yaml");
@@ -152,7 +152,7 @@ fn sidecar_emit_recipe_yaml_from_path_echoes_id_and_returns_yaml() {
 }
 
 #[test]
-fn validate_recipe_path_valid_fixture_matches_python_diagnostics() {
+fn validate_recipe_path_valid_fixture_matches_compatibility_diagnostics() {
     let response = one_shot_response(validate_request(&fixture_path("minimal_recipe.yaml")));
     let expected: Value =
         serde_json::from_str(&read_golden("minimal_recipe.validate.json")).unwrap();
@@ -165,7 +165,7 @@ fn validate_recipe_path_valid_fixture_matches_python_diagnostics() {
 }
 
 #[test]
-fn validate_recipe_path_top_level_permissions_matches_python_diagnostics() {
+fn validate_recipe_path_top_level_permissions_matches_compatibility_diagnostics() {
     let response = one_shot_response(validate_request(&fixture_path(
         "invalid_top_level_permissions.yaml",
     )));
@@ -180,7 +180,7 @@ fn validate_recipe_path_top_level_permissions_matches_python_diagnostics() {
 }
 
 #[test]
-fn validate_recipe_path_unsupported_step_type_matches_python_diagnostics() {
+fn validate_recipe_path_unsupported_step_type_matches_compatibility_diagnostics() {
     let response = one_shot_response(validate_request(&fixture_path(
         "unsupported_step_type.yaml",
     )));
@@ -195,7 +195,7 @@ fn validate_recipe_path_unsupported_step_type_matches_python_diagnostics() {
 }
 
 #[test]
-fn validate_recipe_path_malformed_yaml_returns_python_shaped_diagnostics() {
+fn validate_recipe_path_malformed_yaml_returns_compatibility_shaped_diagnostics() {
     let response = one_shot_response(validate_request(&fixture_path("malformed.yaml")));
     let diagnostics = response["result"]["diagnostics"].as_array().unwrap();
 
@@ -205,8 +205,8 @@ fn validate_recipe_path_malformed_yaml_returns_python_shaped_diagnostics() {
     assert_eq!(diagnostics[1]["code"], "authored_data_invalid");
     assert_eq!(diagnostics[1]["objectKind"], Value::Null);
     assert_eq!(diagnostics[1]["objectId"], Value::Null);
-    // PyYAML and serde_yaml format parser messages differently; Phase 6E
-    // matches the diagnostic shape/code while documenting the message drift.
+    // Parser libraries format low-level errors differently, so the contract
+    // compares stable diagnostic structure instead of library-specific text.
     assert!(diagnostics[1]["message"]
         .as_str()
         .unwrap()
@@ -246,7 +246,7 @@ fn emit_recipe_yaml_from_path_returns_load_failed_for_expected_input_failures() 
 }
 
 #[test]
-fn new_requests_reject_non_object_payload_and_missing_path_like_python() {
+fn new_requests_reject_non_object_payload_and_missing_path_like_compatibility() {
     for request_type in ["emitRecipeYamlFromPath", "validateRecipePath"] {
         let non_object = one_shot_response(json!({"type": request_type, "payload": []}));
         assert_eq!(non_object["ok"], false);
@@ -265,7 +265,7 @@ fn new_requests_reject_non_object_payload_and_missing_path_like_python() {
 }
 
 #[test]
-fn new_requests_ignore_unknown_payload_keys_like_python() {
+fn new_requests_ignore_unknown_payload_keys_like_compatibility() {
     let path = fixture_path("minimal_recipe.yaml");
 
     let emit = one_shot_response(json!({

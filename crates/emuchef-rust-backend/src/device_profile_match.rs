@@ -1,7 +1,7 @@
-//! Pure detected-device profile matching for future Rust planner ownership.
+//! Pure detected-device profile matching for the Rust planner.
 //!
-//! This module mirrors the current Python mismatch-warning criteria without
-//! probing devices or wiring warnings into planner routes. Callers must provide
+//! This module evaluates mismatch-warning criteria without probing devices.
+//! Callers must provide
 //! already-detected facts and already-loaded authored profile criteria.
 
 use regex::Regex;
@@ -39,7 +39,7 @@ pub(crate) fn build_detected_device_profile_mismatch_warning(
         code: "device_profile_mismatch".to_string(),
         message: format!(
             "Selected device plan profile {} does not match the detected device {} {}.",
-            python_repr_string(profile_ref),
+            stable_repr_string(profile_ref),
             detected_facts.manufacturer.as_deref().unwrap_or("Unknown"),
             detected_facts.model.as_deref().unwrap_or("Unknown"),
         ),
@@ -81,7 +81,7 @@ fn match_detected_device_profile(
                 matched = false;
                 reasons.push(format!(
                     "manufacturer {} did not contain any of: {}",
-                    python_repr_string(manufacturer),
+                    stable_repr_string(manufacturer),
                     expected.join(", ")
                 ));
             }
@@ -97,7 +97,7 @@ fn match_detected_device_profile(
                 matched = false;
                 reasons.push(format!(
                     "brand {} did not contain any of: {}",
-                    python_repr_string(brand),
+                    stable_repr_string(brand),
                     expected.join(", ")
                 ));
             }
@@ -117,7 +117,7 @@ fn match_detected_device_profile(
                 matched = false;
                 reasons.push(format!(
                     "model {} did not match any of: {}",
-                    python_repr_string(model),
+                    stable_repr_string(model),
                     patterns.join(", ")
                 ));
             }
@@ -153,6 +153,6 @@ fn contains_any_case_insensitive(value: &str, expected_tokens: &[String]) -> boo
         .any(|token| folded_value.contains(&token.to_lowercase()))
 }
 
-fn python_repr_string(value: &str) -> String {
+fn stable_repr_string(value: &str) -> String {
     format!("'{}'", value.replace('\\', "\\\\").replace('\'', "\\'"))
 }

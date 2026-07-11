@@ -184,7 +184,7 @@ pub(crate) fn planner_input_from_authored_device_plan_with_detected_facts(
 /// Build a planner result from authored device-plan data with detected facts.
 ///
 /// This composes the fake/test-backed detected-context path with the pure
-/// profile mismatch warning helper. It is crate-private migration evidence only:
+/// profile mismatch warning helper. It remains crate-private product behavior:
 /// it does not probe devices, call route code, or change normal planner input
 /// construction.
 pub(crate) fn plan_from_authored_device_plan_with_detected_facts(
@@ -484,7 +484,7 @@ fn override_input_bindings(
     plan: &DevicePlanYaml,
     recipes: &[Recipe],
 ) -> Result<OrderedMap<JsonValue>, PlannerLoadError> {
-    // P7J parses defaults so the current authored shape is classified, but
+    // Defaults are parsed so the current authored shape is classified, but
     // device-plan defaults remain inactive private planner metadata.
     let _inactive_defaults = &plan.defaults;
     let mut bindings = OrderedMap::new();

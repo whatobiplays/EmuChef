@@ -33,7 +33,8 @@ fn golden_path(name: &str) -> PathBuf {
 }
 
 fn read_golden(name: &str) -> Value {
-    let text = fs::read_to_string(golden_path(name)).expect("Compatibility fixture should be readable");
+    let text =
+        fs::read_to_string(golden_path(name)).expect("Compatibility fixture should be readable");
     serde_json::from_str(&text).expect("Compatibility fixture should be valid JSON")
 }
 
@@ -165,7 +166,7 @@ fn assert_command_failed(response: &Value) {
 }
 
 #[test]
-fn one_shot_phase6g_session_requests_return_invalid_request() {
+fn one_shot_session_requests_return_invalid_request() {
     for request_type in ["applyRecipeCommand", "undo", "redo", "emitYaml", "validate"] {
         let response = one_shot_response(json!({
             "type": request_type,
@@ -421,7 +422,7 @@ fn invalid_command_leaves_document_unchanged_and_does_not_push_history() {
 }
 
 #[test]
-fn undo_redo_snapshot_history_and_save_baseline_match_python_behavior() {
+fn undo_redo_snapshot_history_and_save_baseline_match_compatibility_behavior() {
     let temp_recipe = TempRecipe::copy_fixture("minimal_recipe.yaml");
     let input = format!(
         "{}\n{}\n{}\n{}\n{}\n{}\n{}\n{}\n{}\n{}\n{}\n{}\n",
@@ -619,7 +620,7 @@ fn emit_yaml_and_validate_validate_payloads_and_unknown_documents() {
 }
 
 #[test]
-fn sidecar_continues_after_phase6g_request_errors() {
+fn sidecar_continues_after_request_errors() {
     let input = format!(
         "{}\n{}\n",
         json!({
@@ -644,7 +645,7 @@ fn sidecar_continues_after_phase6g_request_errors() {
 }
 
 #[test]
-fn focused_phase6g_results_match_compatibility_goldens_v1() {
+fn compatibility_results_match_compatibility_goldens_v1() {
     let temp_recipe = TempRecipe::copy_fixture("phase6g_golden.yaml");
     let input = format!(
         "{}\n{}\n{}\n{}\n{}\n{}\n{}\n{}\n{}\n{}\n{}\n",

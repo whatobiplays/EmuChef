@@ -2,7 +2,7 @@
 //!
 //! A document wraps the current authored recipe model with the editor-facing
 //! lifecycle state needed for sidecar document sessions. The Rust backend keeps
-//! planner behavior and executor behavior out of this crate-local migration
+//! planner behavior and executor behavior out of this document abstraction
 //! slice while preserving the stored authoredRoot needed for validation refresh.
 
 use std::fs;
@@ -392,8 +392,7 @@ impl RecipeDocument {
             return Err(format!("Input {new_input_id:?} already exists."));
         }
         recipe.inputs = rename_ordered_map_key(&recipe.inputs, &input_id, &new_input_id, input)?;
-        // Mirrors Python commands.py _rename_input / tests/test_editor_core.py
-        // test_rename_commands_rewrite_supported_structured_usages.
+        // Renaming rewrites supported structured usages only.
         recipe.steps = recipe
             .steps
             .iter()
@@ -418,7 +417,7 @@ impl RecipeDocument {
         match field {
             InputField::Type => updated.type_name = coerce_input_type(&value)?,
             InputField::Role => updated.role = coerce_input_role(&value)?,
-            InputField::Label => updated.label = json_to_python_string(&value),
+            InputField::Label => updated.label = json_value_to_string(&value),
             InputField::Description => updated.description = optional_text(&value),
             InputField::Required => updated.required = json_truthy(&value),
             InputField::Multiple => updated.multiple = json_truthy(&value),
@@ -442,8 +441,7 @@ impl RecipeDocument {
         if recipe.inputs.shift_remove(&input_id).is_none() {
             return Err(format!("Unknown input {input_id:?}."));
         }
-        // Mirrors Python commands.py _delete_input / tests/test_editor_core.py
-        // test_delete_input_and_artifact_group_remove_supported_structured_refs_only.
+        // Deletion removes supported structured references only.
         recipe.steps = recipe
             .steps
             .iter()
@@ -516,8 +514,7 @@ impl RecipeDocument {
                 }
             }
         }
-        // Mirrors Python commands.py _rename_artifact / tests/test_editor_core.py
-        // test_rename_commands_rewrite_supported_structured_usages.
+        // Renaming rewrites supported structured usages only.
         recipe.steps = recipe
             .steps
             .iter()
@@ -559,8 +556,8 @@ impl RecipeDocument {
         for members in recipe.artifact_groups.values_mut() {
             members.retain(|member| member != &artifact_id);
         }
-        // Mirrors Python commands.py _delete_artifact / tests/test_editor_core.py
-        // test_delete_artifact_cleans_group_membership_step_selection_and_param_ref_in_one_command.
+        // Deletion cleans group membership, step selection, and parameter
+        // references in one command.
         recipe.steps = recipe
             .steps
             .iter()
@@ -615,8 +612,7 @@ impl RecipeDocument {
         }
         recipe.artifact_groups =
             rename_ordered_map_key(&recipe.artifact_groups, &group_id, &new_group_id, members)?;
-        // Mirrors Python commands.py _rename_artifact_group / tests/test_editor_core.py
-        // test_rename_commands_rewrite_supported_structured_usages.
+        // Renaming rewrites supported structured usages only.
         recipe.steps = recipe
             .steps
             .iter()
@@ -630,8 +626,7 @@ impl RecipeDocument {
         if recipe.artifact_groups.shift_remove(&group_id).is_none() {
             return Err(format!("Unknown artifact group {group_id:?}."));
         }
-        // Mirrors Python commands.py _delete_artifact_group / tests/test_editor_core.py
-        // test_delete_input_and_artifact_group_remove_supported_structured_refs_only.
+        // Deletion removes supported structured references only.
         recipe.steps = recipe
             .steps
             .iter()
@@ -780,8 +775,8 @@ impl RecipeDocument {
         let mut recipe = self.recipe.clone();
         let index = step_index(&recipe.steps, &step_id)?;
         recipe.steps.remove(index);
-        // Mirrors Python commands.py _delete_step/_remove_step_refs and
-        // tests/test_editor_core.py test_step_delete_removes_supported_dependencies_conflicts_and_refs.
+        // Step deletion removes supported dependencies, conflicts, and
+        // structured references.
         recipe.steps = recipe
             .steps
             .iter()
@@ -852,8 +847,8 @@ impl RecipeDocument {
     ) -> Result<Recipe, String> {
         let mut recipe = self.recipe.clone();
         let index = step_index(&recipe.steps, &step_id)?;
-        // Python command application only normalizes and deduplicates dependency
-        // ids; planner/catalog existence checks are intentionally out of scope.
+        // Command application normalizes and deduplicates dependency ids;
+        // planner/catalog existence checks are intentionally out of scope.
         recipe.steps[index].dependencies =
             normalize_identifier_list(dependencies, "step dependency id")?;
         Ok(recipe)
@@ -1255,7 +1250,7 @@ fn normalize_step_params(
     for (param_name, default) in spec.defaults {
         let should_remove = normalized
             .get(&param_name)
-            .is_some_and(|value| param_value_equals_python_default(value, &default));
+            .is_some_and(|value| param_value_equals_default(value, &default));
         if should_remove {
             normalized.shift_remove(&param_name);
         }
@@ -1263,19 +1258,19 @@ fn normalize_step_params(
     normalized
 }
 
-fn param_value_equals_python_default(value: &ParamValue, default: &Value) -> bool {
+fn param_value_equals_default(value: &ParamValue, default: &Value) -> bool {
     match value {
         ParamValue::Ref(_) => false,
-        ParamValue::Literal(value) => python_json_equal(value, default),
+        ParamValue::Literal(value) => json_values_equal(value, default),
     }
 }
 
-fn python_json_equal(left: &Value, right: &Value) -> bool {
+fn json_values_equal(left: &Value, right: &Value) -> bool {
     match (left, right) {
         (Value::Null, Value::Null) => true,
         (Value::Bool(left), Value::Bool(right)) => left == right,
-        (Value::Bool(left), Value::Number(right)) => bool_equals_python_number(*left, right),
-        (Value::Number(left), Value::Bool(right)) => bool_equals_python_number(*right, left),
+        (Value::Bool(left), Value::Number(right)) => bool_equals_number(*left, right),
+        (Value::Number(left), Value::Bool(right)) => bool_equals_number(*right, left),
         (Value::Number(left), Value::Number(right)) => match (left.as_f64(), right.as_f64()) {
             (Some(left), Some(right)) => left == right,
             _ => left == right,
@@ -1286,21 +1281,21 @@ fn python_json_equal(left: &Value, right: &Value) -> bool {
                 && left
                     .iter()
                     .zip(right.iter())
-                    .all(|(left, right)| python_json_equal(left, right))
+                    .all(|(left, right)| json_values_equal(left, right))
         }
         (Value::Object(left), Value::Object(right)) => {
             left.len() == right.len()
                 && left.iter().all(|(key, left_value)| {
                     right
                         .get(key)
-                        .is_some_and(|right_value| python_json_equal(left_value, right_value))
+                        .is_some_and(|right_value| json_values_equal(left_value, right_value))
                 })
         }
         _ => false,
     }
 }
 
-fn bool_equals_python_number(bool_value: bool, number: &serde_json::Number) -> bool {
+fn bool_equals_number(bool_value: bool, number: &serde_json::Number) -> bool {
     let expected = if bool_value { 1.0 } else { 0.0 };
     number.as_f64() == Some(expected)
 }
@@ -1313,7 +1308,7 @@ fn step_index(steps: &[Step], step_id: &str) -> Result<usize, String> {
 }
 
 fn required_text(value: &Value, label: &str) -> Result<String, String> {
-    let text = json_to_python_string(value);
+    let text = json_value_to_string(value);
     normalize_identifier(&text, label)
 }
 
@@ -1321,7 +1316,7 @@ fn optional_text(value: &Value) -> Option<String> {
     if value.is_null() {
         return None;
     }
-    let text = json_to_python_string(value);
+    let text = json_value_to_string(value);
     if text.trim().is_empty() {
         None
     } else {
@@ -1329,18 +1324,18 @@ fn optional_text(value: &Value) -> Option<String> {
     }
 }
 
-fn json_to_python_string(value: &Value) -> String {
+fn json_value_to_string(value: &Value) -> String {
     match value {
         Value::Null => "None".to_string(),
         Value::Bool(true) => "True".to_string(),
         Value::Bool(false) => "False".to_string(),
         Value::Number(number) => number.to_string(),
         Value::String(value) => value.clone(),
-        Value::Array(_) | Value::Object(_) => json_to_python_repr(value),
+        Value::Array(_) | Value::Object(_) => json_value_repr(value),
     }
 }
 
-fn json_to_python_repr(value: &Value) -> String {
+fn json_value_repr(value: &Value) -> String {
     match value {
         Value::Null => "None".to_string(),
         Value::Bool(true) => "True".to_string(),
@@ -1351,7 +1346,7 @@ fn json_to_python_repr(value: &Value) -> String {
             "[{}]",
             items
                 .iter()
-                .map(json_to_python_repr)
+                .map(json_value_repr)
                 .collect::<Vec<_>>()
                 .join(", ")
         ),
@@ -1362,7 +1357,7 @@ fn json_to_python_repr(value: &Value) -> String {
                 .map(|(key, value)| format!(
                     "'{}': {}",
                     key.replace('\\', "\\\\").replace('\'', "\\'"),
-                    json_to_python_repr(value)
+                    json_value_repr(value)
                 ))
                 .collect::<Vec<_>>()
                 .join(", ")
@@ -1386,7 +1381,7 @@ fn json_truthy(value: &Value) -> bool {
 }
 
 fn coerce_input_type(value: &Value) -> Result<String, String> {
-    let value = json_to_python_string(value);
+    let value = json_value_to_string(value);
     match value.as_str() {
         "file" | "directory" => Ok(value),
         _ => Err(format!("Invalid input type {value:?}.")),
@@ -1397,7 +1392,7 @@ fn coerce_optional_input_type(value: &Value) -> Result<Option<String>, String> {
     if value.is_null() {
         return Ok(None);
     }
-    let value = json_to_python_string(value);
+    let value = json_value_to_string(value);
     if value.is_empty() {
         return Ok(None);
     }
@@ -1405,7 +1400,7 @@ fn coerce_optional_input_type(value: &Value) -> Result<Option<String>, String> {
 }
 
 fn coerce_input_role(value: &Value) -> Result<String, String> {
-    let value = json_to_python_string(value);
+    let value = json_value_to_string(value);
     match value.as_str() {
         "apk" | "bios" | "roms" | "config_bundle" | "generic" => Ok(value),
         _ => Err(format!("Invalid input role {value:?}.")),
@@ -1413,7 +1408,7 @@ fn coerce_input_role(value: &Value) -> Result<String, String> {
 }
 
 fn coerce_artifact_cache(value: &Value) -> Result<String, String> {
-    let value = json_to_python_string(value);
+    let value = json_value_to_string(value);
     match value.as_str() {
         "default" | "none" => Ok(value),
         _ => Err(format!("Invalid artifact cache mode {value:?}.")),
@@ -1432,7 +1427,7 @@ fn coerce_allowed_extensions(value: &Value) -> Result<Vec<String>, String> {
         Value::Array(items) => {
             let mut extensions = Vec::new();
             for item in items {
-                let value = json_to_python_string(item);
+                let value = json_value_to_string(item);
                 if value.trim().is_empty() {
                     continue;
                 }

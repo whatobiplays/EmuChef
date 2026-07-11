@@ -213,15 +213,15 @@ fn run_editor_session_flow(recipe_name: &str, authored_root: Value) {
 }
 
 #[test]
-fn phase6t_real_authored_recipe_corpus_is_explicit() {
+fn real_authored_recipe_corpus_is_explicit() {
     assert_eq!(authored_recipe_names(), EXPECTED_AUTHORED_RECIPES);
 }
 
 #[test]
-fn phase6t_real_authored_recipes_open_validate_emit_and_index_through_editor_sessions() {
+fn real_authored_recipes_open_validate_emit_and_index_through_editor_sessions() {
     // This is Rust editor/session smoke coverage for the real authored corpus.
     // It intentionally does not exercise planner, executor, apply, device,
-    // network, Tauri GUI, or Python runtime behavior.
+    // network or Tauri GUI behavior.
     for recipe_name in authored_recipe_names() {
         run_editor_session_flow(&recipe_name, Value::Null);
         run_editor_session_flow(&recipe_name, json!(repo_authored_root()));

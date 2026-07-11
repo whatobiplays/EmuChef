@@ -18,7 +18,7 @@ import {
   resolveRestartSuccess,
   type ActionAvailabilityState,
   type CommandName,
-} from "../src/components/phase5EditorState.logic.js";
+} from "../src/components/editorState.logic.js";
 
 function recoveryState(overrides: Partial<ActionAvailabilityState>): ActionAvailabilityState {
   return {
@@ -725,7 +725,7 @@ test("formatSidecarStatusLabel handles compatibility metadata safely", () => {
   assert.equal(formatSidecarStatusLabel({ running: true, pid: 7 }), "Sidecar: running pid 7");
 });
 
-test("command names stay limited to known Phase 5 document operations", () => {
+test("command names stay limited to known editor document operations", () => {
   const names: CommandName[] = [
     "openRecipe",
     "saveRecipe",

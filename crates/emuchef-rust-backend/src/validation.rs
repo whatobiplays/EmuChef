@@ -1,8 +1,8 @@
-//! Python-shaped authored recipe validation for Phases 6K and 6L.
+//! Authored recipe and catalog validation.
 //!
 //! This module returns editor diagnostic DTOs for validation that can be
 //! computed from one loaded recipe, embedded StepSpec metadata, and the local
-//! reference surface. With an authoredRoot it also runs the narrow Phase 6L
+//! recipe surface. With an authored root it also runs catalog-level
 //! catalog-context recipe diagnostics. It intentionally does not perform planner
 //! graph construction, executor, device, or network validation.
 
@@ -148,7 +148,7 @@ fn visit_step_dependency(
             "dependency_cycle",
             &format!(
                 "Step dependency cycle detected in recipe {}.",
-                python_single_quote(&recipe.id)
+                single_quote(&recipe.id)
             ),
             file,
             Some("recipe"),
@@ -172,8 +172,8 @@ fn visit_step_dependency(
             "step_not_found",
             &format!(
                 "Step {} depends on unknown step {}.",
-                python_single_quote(dependent_step_id),
-                python_single_quote(step_id)
+                single_quote(dependent_step_id),
+                single_quote(step_id)
             ),
             file,
             Some("recipe"),
@@ -221,10 +221,7 @@ fn validate_step_contracts(file: &str, recipe: &Recipe) -> Vec<Value> {
             errors.push(diagnostic(
                 "error",
                 "param_contract_violation",
-                &format!(
-                    "Unsupported step type {}.",
-                    python_single_quote(&step.type_name)
-                ),
+                &format!("Unsupported step type {}.", single_quote(&step.type_name)),
                 file,
                 Some("recipe"),
                 Some(&recipe.id),
@@ -261,8 +258,8 @@ fn validate_step_params(
             &param_name,
             &format!(
                 "Unexpected param {} for step type {}.",
-                python_single_quote(&param_name),
-                python_single_quote(&step.type_name)
+                single_quote(&param_name),
+                single_quote(&step.type_name)
             ),
         ));
     }
@@ -278,8 +275,8 @@ fn validate_step_params(
                 param_name,
                 &format!(
                     "Missing required param {} for step type {}.",
-                    python_single_quote(param_name),
-                    python_single_quote(&step.type_name)
+                    single_quote(param_name),
+                    single_quote(&step.type_name)
                 ),
             ));
             continue;
@@ -296,8 +293,8 @@ fn validate_step_params(
                 param_name,
                 &format!(
                     "Param {} must use {{ref: ...}} for step type {}.",
-                    python_single_quote(param_name),
-                    python_single_quote(&step.type_name)
+                    single_quote(param_name),
+                    single_quote(&step.type_name)
                 ),
             )),
             ("literal", ParamValue::Ref(_)) => errors.push(param_contract_error(
@@ -307,8 +304,8 @@ fn validate_step_params(
                 param_name,
                 &format!(
                     "Param {} must remain a literal for step type {}.",
-                    python_single_quote(param_name),
-                    python_single_quote(&step.type_name)
+                    single_quote(param_name),
+                    single_quote(&step.type_name)
                 ),
             )),
             _ => {}
@@ -341,8 +338,8 @@ fn validate_step_references(file: &str, recipe: &Recipe) -> Vec<Value> {
                             "unknown_input_ref",
                             &format!(
                                 "Step {} references unknown input {}.",
-                                python_single_quote(&step.id),
-                                python_single_quote(&target_id)
+                                single_quote(&step.id),
+                                single_quote(&target_id)
                             ),
                         ));
                     }
@@ -357,8 +354,8 @@ fn validate_step_references(file: &str, recipe: &Recipe) -> Vec<Value> {
                             "unknown_artifact_ref",
                             &format!(
                                 "Step {} references unknown artifact {}.",
-                                python_single_quote(&step.id),
-                                python_single_quote(&target_id)
+                                single_quote(&step.id),
+                                single_quote(&target_id)
                             ),
                         ));
                     } else if !RUNTIME_ARTIFACT_FIELDS.contains(&field.as_str()) {
@@ -370,8 +367,8 @@ fn validate_step_references(file: &str, recipe: &Recipe) -> Vec<Value> {
                             "unknown_artifact_field",
                             &format!(
                                 "Artifact ref {} uses unknown field {}.",
-                                python_single_quote(ref_value),
-                                python_single_quote(&field)
+                                single_quote(ref_value),
+                                single_quote(&field)
                             ),
                         ));
                     }
@@ -392,8 +389,8 @@ fn validate_step_references(file: &str, recipe: &Recipe) -> Vec<Value> {
                             "unknown_step_output",
                             &format!(
                                 "Step shorthand ref {} targets step type {}, which has no primary output.",
-                                python_single_quote(ref_value),
-                                python_single_quote(&target_step.type_name)
+                                single_quote(ref_value),
+                                single_quote(&target_step.type_name)
                             ),
                         ));
                     }
@@ -414,8 +411,8 @@ fn validate_step_references(file: &str, recipe: &Recipe) -> Vec<Value> {
                             "unknown_step_output",
                             &format!(
                                 "Step output ref {} targets unsupported output {}.",
-                                python_single_quote(ref_value),
-                                python_single_quote(&field)
+                                single_quote(ref_value),
+                                single_quote(&field)
                             ),
                         ));
                     }
@@ -428,9 +425,9 @@ fn validate_step_references(file: &str, recipe: &Recipe) -> Vec<Value> {
                     "invalid_ref_format",
                     &format!(
                         "Param {} on step {} has an invalid ref {}.",
-                        python_single_quote(param_name),
-                        python_single_quote(&step.id),
-                        python_single_quote(ref_value)
+                        single_quote(param_name),
+                        single_quote(&step.id),
+                        single_quote(ref_value)
                     ),
                 )),
             }
@@ -456,8 +453,8 @@ fn unknown_step_ref_error(
         "unknown_step_ref",
         &format!(
             "Step {} references unknown step {}.",
-            python_single_quote(&step.id),
-            python_single_quote(target_id)
+            single_quote(&step.id),
+            single_quote(target_id)
         ),
     )
 }
@@ -643,6 +640,6 @@ fn diagnostic(
     })
 }
 
-fn python_single_quote(value: &str) -> String {
+fn single_quote(value: &str) -> String {
     format!("'{}'", value.replace('\\', "\\\\").replace('\'', "\\'"))
 }

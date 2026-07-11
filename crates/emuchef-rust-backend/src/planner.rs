@@ -1,9 +1,8 @@
-//! Declarative execution-plan emission for Phase 6M/6N planner fixtures.
+//! Declarative execution-plan emission for authored recipes.
 //!
-//! Python remains the reference planner. This module intentionally models only
-//! the fixture-covered `PlanningResult`/`ExecutionPlan` emission shape and does
-//! not expose protocol requests, run executor operations, inspect devices, or
-//! mutate authored files.
+//! This module builds `PlanningResult` and `ExecutionPlan` values without
+//! exposing protocol requests, running executor operations, probing devices, or
+//! mutating authored files.
 
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::fs;
@@ -669,7 +668,7 @@ fn bool_field(item: &Map<String, Value>, field: &str) -> Option<bool> {
     item.get(field).and_then(Value::as_bool)
 }
 
-// P7D terminology follows the current Rust planner pipeline:
+// Planner terminology follows the current Rust pipeline:
 // - available steps satisfy static runtime capability constraints;
 // - selected steps are available steps retained after dependency expansion and
 //   optional-input pruning;
@@ -1446,12 +1445,12 @@ fn validate_step_param_contracts(
     recipes: &HashMap<String, Recipe>,
     steps: &[(String, String, Step)],
 ) -> Vec<PlannerMessage> {
-    // P7E validates only the emitted-step contract matrix. Ref-valued params are
+    // This pass validates only the emitted-step contract matrix. Ref-valued params are
     // checked for authored `{ref: ...}` shape here; target parsing, shorthand
-    // refs, and explicit output rewrites remain owned by the P7C ref pass.
+    // refs, and explicit output rewrites remain owned by the reference-rewrite pass.
     let mut errors = Vec::new();
     for (_, recipe_id, step) in steps {
-        if !is_p7e_step_type(&step.type_name) {
+        if !is_emitted_step_type(&step.type_name) {
             continue;
         }
         let Some(spec) = step_specs::step_spec_for(&step.type_name) else {
@@ -1475,7 +1474,7 @@ fn validate_step_param_contracts(
     errors
 }
 
-fn is_p7e_step_type(step_type: &str) -> bool {
+fn is_emitted_step_type(step_type: &str) -> bool {
     matches!(
         step_type,
         "copy_files"
