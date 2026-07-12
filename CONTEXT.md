@@ -122,5 +122,11 @@ The canonical operator procedure for macOS release bundles is
 packaged sidecar, packaged runtime, and interactive editor evidence. The editor
 does not expose planning or apply through its Tauri or JSONL command surfaces.
 Public release readiness still requires real packaged GUI evidence on supported
-targets, signing/notarization decisions, updater support, and cross-platform
-release automation.
+targets, updater support, and cross-platform release automation.
+
+The macOS `0.1.0` application and disk image built from commit
+`93f816fc1ea59cd034a40432e4e2a269e11eead7` have completed Developer ID signing,
+hardened-runtime validation, Apple notarization, ticket stapling, local
+Gatekeeper assessment, and installed-application assessment. Sensitive Apple
+identifiers and raw notarization output remain external. This is local-Mac
+evidence; separate clean-Mac validation remains pending.

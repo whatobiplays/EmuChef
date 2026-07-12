@@ -16,15 +16,20 @@
 - The production Tauri CSP is local-only, permits the two required IPC sources,
   and has negative regression coverage for disabled, wildcard, eval, inline,
   and broad-connect policies.
+- [macOS signing and notarization evidence](evidence/macos-signing-notarization-2026-07-11.md)
+  records completed Developer ID signing, hardened runtime, app and DMG
+  notarization and stapling, and local Gatekeeper acceptance for commit
+  `93f816fc1ea59cd034a40432e4e2a269e11eead7`.
 
 ## Required Before Public Release
 
 - Record the
   [macOS packaged Config Editor checklist](../manual/macos-packaged-gui-validation.md)
   and the corresponding checklist for every other supported target.
-- Define and automate code signing and macOS notarization.
+- Validate the signed and notarized application on a separate clean Mac.
+- Automate the existing local signing and notarization release procedure.
 - Decide and implement updater support.
 - Add cross-platform release automation and artifact inspection.
 
-Passing automated tests and one real-device evidence run does not establish
-packaged-GUI or public-release readiness.
+Completed local signing and notarization do not establish clean-Mac packaged-GUI
+or public-release readiness.

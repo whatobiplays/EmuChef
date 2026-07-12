@@ -219,8 +219,11 @@ The exact operator procedure is
 | Packaged sidecar smoke test | Completed | Exact bundled sidecar hello/ping and launch observation passed. |
 | Packaged interactive GUI validation | Pending manual validation | No visual/editor claims were made. |
 | Hardened CSP | Completed | Production policy and regression tests passed. |
-| Signing | Out of scope | Local bundle is ad-hoc signed only. |
-| Notarization | Out of scope | Not configured or claimed. |
+| Developer ID signing | Completed in subsequent release validation | See `docs/release/evidence/macos-signing-notarization-2026-07-11.md`; the build inspected earlier in this report remained ad-hoc signed. |
+| Hardened runtime | Completed in subsequent release validation | Enabled on the Developer-ID-signed application. |
+| App notarization and stapling | Completed in subsequent release validation | Apple acceptance and the stapled ticket were validated locally. |
+| DMG notarization and stapling | Completed in subsequent release validation | The DMG was submitted separately, accepted, stapled, and validated locally. |
+| Local Gatekeeper validation | Completed in subsequent release validation | The app, DMG, and installed app were accepted as Notarized Developer ID. |
 | Updater | Out of scope | Not implemented in this milestone. |
 | Windows packaging | Out of scope | No Windows bundle was built. |
 | Linux packaging | Out of scope | No Linux bundle was built. |
@@ -236,9 +239,11 @@ sidecar inputs, runtime/cache directories, `.DS_Store`, and `__pycache__`
 outputs were removed. `.codegraph`, `.venv`, `node_modules`, lockfiles, authored
 YAML, and fixtures were preserved.
 
-Automated macOS packaging and runtime readiness checks passed. Public release
-readiness remains blocked on the pending interactive packaged-GUI checklist and
-the separately scoped signing, notarization, updater, and cross-platform release
-work. Nothing in this report claims Developer ID signing, notarization,
-Gatekeeper acceptance on another machine, Windows/Linux packaging, updater
-readiness, or interactive GUI success.
+Automated macOS packaging and runtime readiness checks passed. Subsequent local
+release validation completed Developer ID signing, hardened runtime, app and
+DMG notarization and stapling, and Gatekeeper assessment, as recorded in
+`docs/release/evidence/macos-signing-notarization-2026-07-11.md`. Public release
+readiness remains blocked on the pending interactive packaged-GUI checklist,
+separate clean-Mac validation, updater work, and cross-platform release work.
+Nothing in this report claims Gatekeeper acceptance on another machine,
+Windows/Linux packaging, updater readiness, or interactive GUI success.

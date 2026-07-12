@@ -52,9 +52,11 @@ Python backend or backend selector.
 
 Artifact resolution supports absolute `file://`, HTTP, and HTTPS URLs. Network
 downloads use strict Rustls verification, bounded redirects and timeouts,
-same-directory partial files, and no-clobber cache publication. Release signing,
-notarization, updater support, and cross-platform release automation remain
-future work. The packaged frontend uses a local-only production CSP. The
+same-directory partial files, and no-clobber cache publication. Developer ID
+signing, hardened runtime, app and DMG notarization, stapling, and local
+Gatekeeper validation are complete for the recorded macOS release artifacts.
+Clean-Mac validation, updater support, and cross-platform release automation
+remain future work. The packaged frontend uses a local-only production CSP. The
 completed local and HTTP(S) device run is
 recorded in the
 [2026-07-11 RetroArch evidence](docs/release/evidence/real-device-retroarch-2026-07-11.md).
@@ -65,3 +67,5 @@ See [runtime ownership](docs/architecture/runtime-ownership.md), the
 collected with the [RetroArch validation runbook](docs/manual/real-device-retroarch-validation.md),
 and packaged macOS evidence uses the
 [Config Editor validation runbook](docs/manual/macos-packaged-gui-validation.md).
+The completed Developer ID and notarization result is recorded in the
+[macOS signing evidence](docs/release/evidence/macos-signing-notarization-2026-07-11.md).
