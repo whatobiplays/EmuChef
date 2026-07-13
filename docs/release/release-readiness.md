@@ -27,7 +27,9 @@
   [macOS packaged Config Editor checklist](../manual/macos-packaged-gui-validation.md)
   and the corresponding checklist for every other supported target.
 - Validate the signed and notarized application on a separate clean Mac.
-- Automate the existing local signing and notarization release procedure.
+- Execute the maintained
+  [macOS signing and notarization runbook](../manual/macos-signing-notarization.md)
+  and retain external Apple submission evidence for each release.
 - Decide and implement updater support.
 - Add cross-platform release automation and artifact inspection.
 

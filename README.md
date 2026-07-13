@@ -68,4 +68,6 @@ collected with the [RetroArch validation runbook](docs/manual/real-device-retroa
 and packaged macOS evidence uses the
 [Config Editor validation runbook](docs/manual/macos-packaged-gui-validation.md).
 The completed Developer ID and notarization result is recorded in the
-[macOS signing evidence](docs/release/evidence/macos-signing-notarization-2026-07-11.md).
+[macOS signing evidence](docs/release/evidence/macos-signing-notarization-2026-07-11.md),
+and releases follow the
+[signing and notarization runbook](docs/manual/macos-signing-notarization.md).
