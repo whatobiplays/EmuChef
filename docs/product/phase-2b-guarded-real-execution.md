@@ -97,7 +97,9 @@ continues to reject request-level ADB, runtime-root, and cache-root policy.
 
 ## 4. Trusted start sequence
 
-Tauri performs the following sequence for every requested real start:
+The trusted real-start path performs the following sequence. Tauri owns the
+client-side gate, confirmation, reservation, retained-state checks, and sidecar
+request; `startExecution` owns the sidecar processing identified below.
 
 1. Check the platform-specific real-execution rollout gate. If it is disabled,
    return `real_execution_disabled` without inspecting or reserving execution
@@ -121,18 +123,25 @@ Tauri performs the following sequence for every requested real start:
    binding under the Phase 0 matching rules.
 9. Recompute the canonical JSON SHA-256 of the exact retained plan and compare
    it with the retained plan digest.
-10. Perform the artifact-admission checks in Section 5.
+10. Where the retained review contains user-supplied local file or directory
+    input values already owned by Tauri, verify that they still exist, have the
+    expected kind, and are readable. This is a limited trusted-state check, not
+    canonical artifact admission.
 11. Send the exact retained plan, digest, and target to `startExecution` while
     trusted code supplies `mode: real`. The sidecar repeats canonical digest
-    validation and real-device target preflight at its authoritative boundary.
-12. Create and bind a random public execution handle only after the sidecar has
+    validation and real-device target preflight at its authoritative boundary,
+    then performs the canonical artifact admission defined in Section 5.
+12. Only after target preflight and canonical artifact admission succeed may
+    the sidecar allocate, accept, and start the execution attempt.
+13. Create and bind a random public execution handle only after the sidecar has
     returned a successful execution record.
 
 Tauri releases the reservation after every failure following reservation,
 including lock errors, review failures, catalog drift, Platform-Tools failure,
 inventory or probe failure, target mismatch, digest mismatch, artifact
-admission failure, sidecar transport failure, and rejected sidecar start. No
-public execution handle is allocated for a failed start.
+input failure, sidecar transport failure, and every rejected sidecar start,
+including canonical artifact-admission failure. No public execution handle is
+allocated for a failed start.
 
 Start revalidation does not repeat profile matching, select another device
 plan, merge new inputs, or replan. Any changed reviewed state requires a fresh
@@ -141,38 +150,58 @@ configuration description and review.
 ## 5. Artifact readiness and ownership
 
 Artifact readiness is an admission check, not a pre-download phase and not a
-guarantee that a later transfer will succeed. Trusted code evaluates the exact
-retained plan and the sidecar startup policy without accepting paths or URLs
-from the real-start request.
+guarantee that a later transfer will succeed. The real-start request accepts no
+artifact path, URL, cache root, runtime root, or admission override.
 
-Before start, Tauri verifies:
+Tauri may validate only user-supplied local file and directory input values
+that are already retained trusted review state. It may check their current
+existence, expected file/directory kind, and readability so an obviously stale
+BYO input returns `artifact_not_ready` before the sidecar request. Tauri does
+not interpret `file://` sources, inspect artifact cache eligibility, validate
+HTTP(S) source policy, make sandbox decisions, or duplicate canonical resolver
+rules.
 
-1. host file and directory inputs required by the retained plan still exist,
-   have the expected kind, and are readable;
-2. `file://` sources remain admissible under the existing absolute-source and
-   read-only sandbox rules;
-3. every remote source is either an authoritative complete cache hit or is
-   structurally eligible for the existing HTTP(S) resolver;
-4. the configured managed runtime and cache roots are available for the
-   attempt; and
-5. no retained artifact or input requires a source type outside the current
-   executor contract.
+Canonical artifact admission is trusted processing inside the existing
+`startExecution` sidecar operation. It is not a new public preflight or
+admission operation and adds no request field. After canonical digest
+validation and authoritative real-device target preflight, but before an
+execution id, report, active-session record, or worker is allocated, the
+sidecar evaluates the exact retained plan against its configured runtime,
+cache, and read-only sandbox roots.
 
-The admission logic must share or directly reuse the canonical resolver and
-sandbox rules in the later implementation. A second, looser interpretation of
-URL, cache, or filesystem policy is not acceptable.
+Sidecar admission directly reuses the canonical ArtifactResolver URL, cache,
+destination, local-source, and sandbox rules. The later implementation must
+factor a non-mutating admission path from those rules rather than reproduce
+them in Tauri or maintain a second policy. Admission determines whether:
+
+1. an authoritative complete cache hit is structurally admissible;
+2. a `file://` source is absolute, permitted by the read-only sandbox, and
+   presently a readable source of the required kind;
+3. an HTTP(S) source has a supported, structurally valid source URL;
+4. the selected runtime/cache destination is permitted by the authoritative
+   sandbox policy; and
+5. the retained artifact definition is supported by the current executor
+   contract.
 
 Admission performs no DNS lookup, connection attempt, HTTP request, download,
-extraction, cache publication, ADB transfer, or device write. Cold HTTP(S)
-sources may therefore pass admission and later fail during execution. A
-filesystem or cache race after admission is also reported as a runtime
-failure; the executor remains authoritative when it acts.
+extraction, directory creation, partial-file creation or cleanup, cache
+mutation or publication, ADB operation, staging, transfer, or device write.
+Cold HTTP(S) sources may therefore pass admission and later fail during
+execution. A filesystem or cache race after admission is also reported as a
+runtime failure; the executor remains authoritative when it acts.
 
-After start, the existing executor owns artifact resolution, strict TLS,
-redirect and timeout limits, cache hits and publication, unique partial files,
-partial cleanup, archive extraction, host staging, and device transfer. Phase
-2B does not download, redistribute, mirror, proxy, or update catalog content or
-Android Platform-Tools.
+A canonical admission failure rejects `startExecution` before attempt
+allocation. The sidecar returns a typed, credential-safe failure; Tauri maps it
+to `artifact_not_ready`, releases its shared start reservation, and allocates
+no public handle. Raw paths, URLs, sandbox roots, and internal details do not
+cross the React boundary.
+
+Only after admission succeeds does the existing executor own artifact
+resolution, strict TLS, redirect and timeout limits, cache hits and
+publication, unique partial files, partial cleanup, archive extraction, host
+staging, device transfer, and device mutation. Phase 2B does not download,
+redistribute, mirror, proxy, or update catalog content or Android
+Platform-Tools outside that existing execution ownership.
 
 ## 6. Execution store and handle lifecycle
 
@@ -307,7 +336,7 @@ strings.
 | `review_unknown` | The handle was never known or its bounded tombstone aged out; generate a fresh review. |
 | `platform_tools_unavailable` | The validated managed ADB installation cannot be used; repair Platform-Tools and generate a fresh review. |
 | `device_disconnected` | The retained target is not connected and available before start. |
-| `artifact_not_ready` | A local input, source policy, cache/runtime root, or artifact admission check failed before start. |
+| `artifact_not_ready` | A limited retained BYO input check in Tauri or canonical sidecar artifact admission failed before attempt allocation. |
 | `real_execution_start_failed` | The trusted sidecar start failed without a more specific safe mapping. |
 | `execution_state_unavailable` | Tauri could not access its trusted execution store. |
 | `execution_unavailable` | The public handle was evicted/lost or the sidecar no longer retains the execution session; never infer an outcome. |
@@ -384,10 +413,12 @@ negotiation, a connected device, or successful simulation cannot enable it.
 3. Generalize the internal execution mapping with an execution-kind field while
    preserving every Phase 2A command and response contract.
 4. Add the four real-execution Tauri commands from Section 3.
-5. Implement the exact ordered preflight and reservation cleanup from Section
-   4 using retained trusted state only.
-6. Reuse canonical artifact resolver and sandbox admission rules without
-   performing network or mutation work before start.
+5. Implement Tauri's exact ordered retained-state preflight and reservation
+   cleanup from Section 4, limiting local input checks to trusted retained BYO
+   values.
+6. Add a non-mutating canonical admission path inside existing
+   `startExecution`, directly sharing ArtifactResolver and sandbox rules and
+   running before sidecar attempt allocation; add no public sidecar operation.
 7. Build a separate real projection that exposes only the allowlisted fields in
    Section 7 and sanitizes every issue and message.
 8. Implement the public error mapping in Section 10 and distinguish ordinary
@@ -407,10 +438,11 @@ negotiation, a connected device, or successful simulation cannot enable it.
 | --- | --- |
 | Gate and confirmation | Disabled gate touches no store; wrong phrase, case, omitted field, and each false acknowledgment consume no capacity; valid confirmation is single-use and not persisted. |
 | Start payload | React can submit only the opaque review handle and confirmation; Tauri alone supplies the retained plan, digest, target, and real mode; unexpected trusted fields are rejected. |
-| Reservation | Simulation blocks real and real blocks simulation; every post-reservation failure releases capacity; a public handle exists only after successful sidecar start. |
+| Reservation | Simulation blocks real and real blocks simulation; every Tauri or sidecar rejection, including canonical admission failure, releases Tauri capacity; neither sidecar attempt state nor a public handle exists before successful admission and start. |
 | Review and catalog | Live, stale, expired, unknown, evicted, discarded, catalog-changed, and digest-changed reviews return the specified safe code and recovery. |
 | Target and ADB | Missing/replaced Platform-Tools, disconnected/offline/unauthorized target, exact-serial mismatch, normalized manufacturer/model mismatch, API mismatch, and sidecar target-preflight failure allocate no handle and leak no identity. |
-| Artifact admission | Readable file/directory and admissible `file://`; missing, wrong-kind, unreadable, or sandbox-rejected local data; valid cold HTTP(S) with no preflight request; authoritative cache hit; unavailable roots; time-of-check race reported at runtime. |
+| Tauri BYO input checks | Retained user-selected file/directory exists, has the expected kind, and is readable; missing, wrong-kind, and unreadable values fail safely; Tauri performs no URL, cache, or sandbox admission. |
+| Sidecar artifact admission | Existing `startExecution` performs canonical cache-hit, `file://`, HTTP(S), destination, and sandbox admission before attempt allocation; valid cold HTTP(S) performs no request; failures are credential-safe and map to `artifact_not_ready`; no new public operation exists. |
 | Artifact runtime | Successful cold/warm/offline cache paths plus TLS, redirect, timeout, HTTP, partial-cleanup, extraction, and cache-publication failures use stable sanitized issues without leaking URLs or paths. |
 | Shared store | One reservation/active mapping plus one terminal mapping across both modes; old terminal remains during an active run; new terminal replaces it; evicted handles fail safely; handles are never reused. |
 | Snapshots and events | Authoritative replacement, monotonic sequence, sorting, deduplication, missed-event recovery, stale-generation rejection, non-overlapping polling, terminal stop, and ordinary refresh failure mapping. |
