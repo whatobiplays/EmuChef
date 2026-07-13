@@ -1,3 +1,4 @@
+use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use tauri::State;
 
@@ -236,6 +237,35 @@ pub fn close_user_configuration(
     )
 }
 
+#[derive(Debug, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RuntimeConfigurationRequest {
+    authored_root: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    configuration_root: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    user_configuration: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    device_plan: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    selected_recipes: Option<Vec<String>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    bindings: Option<Value>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    device_context: Option<Value>,
+}
+
+#[tauri::command]
+pub fn describe_configuration(
+    state: State<'_, SidecarState>,
+    request: RuntimeConfigurationRequest,
+) -> Result<Value, String> {
+    let payload = serde_json::to_value(request).map_err(|error| {
+        format!("Runtime configuration request could not be serialized: {error}")
+    })?;
+    request_without_transport_id(&state, "describeConfiguration", Some(payload))
+}
+
 fn request_without_transport_id(
     state: &SidecarState,
     request_type: &str,
@@ -435,6 +465,29 @@ mod tests {
                     "message": "bad recipe",
                     "details": {"path": "missing.yaml"}
                 }
+            })
+        );
+    }
+
+    #[test]
+    fn runtime_configuration_request_preserves_explicit_empty_recipe_replacement() {
+        let request = RuntimeConfigurationRequest {
+            authored_root: "/tmp/authored".to_string(),
+            configuration_root: None,
+            user_configuration: Some("saved.default".to_string()),
+            device_plan: None,
+            selected_recipes: Some(Vec::new()),
+            bindings: None,
+            device_context: Some(json!({})),
+        };
+
+        assert_eq!(
+            serde_json::to_value(request).unwrap(),
+            json!({
+                "authoredRoot": "/tmp/authored",
+                "userConfiguration": "saved.default",
+                "selectedRecipes": [],
+                "deviceContext": {},
             })
         );
     }

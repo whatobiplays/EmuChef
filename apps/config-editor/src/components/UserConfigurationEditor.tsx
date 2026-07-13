@@ -13,6 +13,7 @@ import type {
   UserConfigurationDocumentResult,
 } from "../api/types";
 import { parseBindingText } from "./userConfiguration.logic";
+import { RuntimeConfigurationScreen } from "./RuntimeConfigurationScreen";
 
 interface UserConfigurationEditorProps {
   document: UserConfigurationDocumentDto;
@@ -30,9 +31,13 @@ export function UserConfigurationEditor({ document, onClose, onDocument, onError
   const [busy, setBusy] = useState(false);
 
   async function updateBinding(key: string, text: string) {
+    await updateBindingValue(key, parseBindingText(text));
+  }
+
+  async function updateBindingValue(key: string, value: unknown) {
     setBusy(true);
     try {
-      handleDocumentResult(await setUserConfigurationBinding(document.documentId, key, parseBindingText(text)));
+      handleDocumentResult(await setUserConfigurationBinding(document.documentId, key, value));
     } finally {
       setBusy(false);
     }
@@ -117,6 +122,11 @@ export function UserConfigurationEditor({ document, onClose, onDocument, onError
               <dd>{document.configuration.selectedRecipes.length === 0 ? "None (explicit empty selection)" : document.configuration.selectedRecipes.join(", ")}</dd>
             </dl>
           </section>
+          <RuntimeConfigurationScreen
+            disabled={busy}
+            document={document}
+            onBind={updateBindingValue}
+          />
           <section className="mt-5 rounded border border-slate-200 bg-white p-4">
             <h2 className="font-semibold">Bindings</h2>
             <div className="mt-3 space-y-3">

@@ -201,6 +201,7 @@ fn capabilities_include_catalog_context_session_update() {
             "emitUserConfigurationYaml",
             "setUserConfigurationAuthoredRoot",
             "closeUserConfiguration",
+            "describeConfiguration",
             "openRecipe",
             "createRecipeFromTemplate",
             "getDocument",

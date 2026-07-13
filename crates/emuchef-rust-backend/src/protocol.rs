@@ -27,6 +27,7 @@ pub const CAPABILITIES: &[&str] = &[
     "emitUserConfigurationYaml",
     "setUserConfigurationAuthoredRoot",
     "closeUserConfiguration",
+    "describeConfiguration",
     "openRecipe",
     "createRecipeFromTemplate",
     "getDocument",

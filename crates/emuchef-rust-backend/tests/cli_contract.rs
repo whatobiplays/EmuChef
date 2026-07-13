@@ -219,6 +219,7 @@ fn preserves_one_shot_json_and_sidecar_dispatch() {
             "emitUserConfigurationYaml",
             "setUserConfigurationAuthoredRoot",
             "closeUserConfiguration",
+            "describeConfiguration",
             "openRecipe",
             "createRecipeFromTemplate",
             "getDocument",

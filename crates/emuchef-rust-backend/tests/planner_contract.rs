@@ -45,6 +45,7 @@ fn capabilities_stay_editor_scoped_and_planner_requests_are_not_routed() {
             "emitUserConfigurationYaml",
             "setUserConfigurationAuthoredRoot",
             "closeUserConfiguration",
+            "describeConfiguration",
             "openRecipe",
             "createRecipeFromTemplate",
             "getDocument",

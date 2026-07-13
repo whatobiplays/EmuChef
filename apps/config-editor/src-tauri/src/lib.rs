@@ -30,6 +30,7 @@ pub fn run() {
             commands::emit_user_configuration_yaml,
             commands::set_user_configuration_authored_root,
             commands::close_user_configuration,
+            commands::describe_configuration,
             commands::sidecar_status,
             commands::sidecar_ping,
             commands::sidecar_restart,

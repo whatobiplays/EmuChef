@@ -176,6 +176,7 @@ fn capabilities_stay_on_editor_session_surface() {
             "emitUserConfigurationYaml",
             "setUserConfigurationAuthoredRoot",
             "closeUserConfiguration",
+            "describeConfiguration",
             "openRecipe",
             "createRecipeFromTemplate",
             "getDocument",

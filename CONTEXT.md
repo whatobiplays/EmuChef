@@ -101,6 +101,17 @@ may remain explicitly unbound, and required inputs without a winner are
 reported together. The execution plan receives only normalized effective input
 values; the executor does not merge layers or interpret provenance.
 
+The side-effect-free `describeConfiguration` JSON operation accepts an authored
+root plus a request or saved device plan, optional saved configuration,
+syntax-resolved configuration root, optional selected-recipe replacement,
+explicit bindings, and device context. Request-level `devicePlan` and
+`selectedRecipes` fields replace saved values when present, including an
+explicit empty recipe list. Discovery expands dependencies, applies the central
+binding resolver, and returns every effective input with declaration metadata,
+partial values, provenance, per-input diagnostics, and aggregate diagnostics.
+It does not require a complete valid plan and performs no ADB, network,
+extraction, copy, device-write, or persistence operations.
+
 ## Execution
 
 Execution is single-threaded and dependency-aware. A failed step blocks
@@ -153,6 +164,14 @@ is not required to open or emit a structurally valid document. The desktop
 editor provides an initial user-configuration surface for selected recipes,
 direct binding edits, diagnostics, canonical YAML, and saving; recipe authoring
 continues to use its existing document surface.
+
+When a user-configuration document has an authored root, the editor uses
+`describeConfiguration` to group inputs by recipe and choose controls from
+semantic types. Enums use declared options, booleans use checkboxes, host files
+and directories use native pickers, device paths use text entry, and structured
+or multiple values use JSON entry. The screen shows required, optional,
+advanced, sensitive, and effective-source state without hard-coded recipe or
+input identifiers.
 
 ## Testing and Compatibility
 

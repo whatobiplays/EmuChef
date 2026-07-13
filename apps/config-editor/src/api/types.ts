@@ -261,3 +261,26 @@ export interface UserConfigurationDocumentResult {
 export interface UserConfigurationCommandResult extends UserConfigurationDocumentResult {
   commandResult: CommandResultDto;
 }
+
+export interface RuntimeConfigurationDiagnosticDto {
+  severity: string;
+  code: string;
+  message: string;
+  key: string | null;
+  provenance: string | null;
+  details: Record<string, unknown>;
+}
+
+export interface RuntimeConfigurationInputDto extends InputDto {
+  value: unknown;
+  valueSource: "explicit" | "user_configuration" | "device_plan" | "recipe_default" | null;
+  diagnostics: RuntimeConfigurationDiagnosticDto[];
+}
+
+export interface ConfigurationDescriptionResult {
+  devicePlan: string;
+  selectedRecipes: string[];
+  expandedRecipes: string[];
+  inputs: RuntimeConfigurationInputDto[];
+  diagnostics: RuntimeConfigurationDiagnosticDto[];
+}

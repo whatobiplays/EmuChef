@@ -129,6 +129,7 @@ fn assert_hello_result(result: &Value) {
             "emitUserConfigurationYaml",
             "setUserConfigurationAuthoredRoot",
             "closeUserConfiguration",
+            "describeConfiguration",
             "openRecipe",
             "createRecipeFromTemplate",
             "getDocument",

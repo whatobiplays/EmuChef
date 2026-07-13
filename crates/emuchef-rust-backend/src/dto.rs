@@ -43,7 +43,7 @@ fn recipe_to_dto(recipe: &Recipe) -> Value {
     })
 }
 
-fn input_to_dto(recipe_id: &str, input_id: &str, input: &InputDeclaration) -> Value {
+pub(crate) fn input_to_dto(recipe_id: &str, input_id: &str, input: &InputDeclaration) -> Value {
     json!({
         "id": input_id,
         "recipeId": recipe_id,

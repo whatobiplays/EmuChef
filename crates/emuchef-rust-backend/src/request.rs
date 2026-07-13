@@ -5,6 +5,7 @@ use serde_json::{json, Map, Value};
 use crate::envelope;
 use crate::errors::ApiError;
 use crate::protocol;
+use crate::runtime_configuration::{self, ConfigurationContextRequest};
 use crate::session::DocumentSessionManager;
 use crate::step_specs;
 use crate::user_configuration;
@@ -55,6 +56,7 @@ fn handle_validated_object(object: &Map<String, Value>) -> Result<Value, ApiErro
             handle_emit_user_configuration_yaml_from_path(object)
         }
         "validateUserConfigurationPath" => handle_validate_user_configuration_path(object),
+        "describeConfiguration" => handle_describe_configuration(object),
         unknown => Err(ApiError::invalid_request(format!(
             "Unknown request type: {unknown}"
         ))),
@@ -99,6 +101,7 @@ fn handle_validated_sidecar_object(
             handle_set_user_configuration_authored_root(object, sessions)
         }
         "closeUserConfiguration" => handle_close_user_configuration(object, sessions),
+        "describeConfiguration" => handle_describe_configuration(object),
         "openRecipe" => handle_open_recipe(object, sessions),
         "createRecipeFromTemplate" => handle_create_recipe_from_template(object, sessions),
         "getDocument" => handle_get_document(object, sessions),
@@ -213,6 +216,40 @@ fn handle_validate_user_configuration_path(object: &Map<String, Value>) -> Resul
         )
     });
     Ok(envelope::success(json!({ "diagnostics": diagnostics })))
+}
+
+fn handle_describe_configuration(object: &Map<String, Value>) -> Result<Value, ApiError> {
+    let payload = payload_object(object)?;
+    let authored_root = required_string(payload, "authoredRoot")?;
+    let configuration_root = optional_string(payload, "configurationRoot")?;
+    let user_configuration = optional_string(payload, "userConfiguration")?;
+    let device_plan = optional_string(payload, "devicePlan")?;
+    if user_configuration.is_none() && device_plan.is_none() {
+        return Err(ApiError::invalid_request_with_details(
+            "describeConfiguration requires 'devicePlan' or 'userConfiguration'.",
+            json!({ "fields": ["devicePlan", "userConfiguration"] }),
+        ));
+    }
+    let selected_recipes = optional_string_array(payload, "selectedRecipes")?;
+    let explicit_bindings = optional_binding_map(payload, "bindings")?;
+    optional_object_value(payload, "deviceContext")?;
+    let description = runtime_configuration::describe_configuration(ConfigurationContextRequest {
+        authored_root: Path::new(authored_root).to_path_buf(),
+        configuration_root: configuration_root.map(Path::new).map(Path::to_path_buf),
+        user_configuration: user_configuration.map(ToString::to_string),
+        device_plan: device_plan.map(ToString::to_string),
+        selected_recipes,
+        explicit_bindings,
+    })
+    .map_err(|error| {
+        ApiError::load_failed(
+            format!("Failed to describe runtime configuration: {error}"),
+            json!({ "authoredRoot": authored_root }),
+        )
+    })?;
+    Ok(envelope::success(
+        serde_json::to_value(description).expect("configuration description should serialize"),
+    ))
 }
 
 fn handle_open_user_configuration(
@@ -602,6 +639,56 @@ fn required_string_array(
             )),
         })
         .collect()
+}
+
+fn optional_string_array(
+    payload: &Map<String, Value>,
+    field: &str,
+) -> Result<Option<Vec<String>>, ApiError> {
+    if !payload.contains_key(field) {
+        return Ok(None);
+    }
+    required_string_array(payload, field).map(Some)
+}
+
+fn optional_binding_map(
+    payload: &Map<String, Value>,
+    field: &str,
+) -> Result<crate::model::OrderedMap<Value>, ApiError> {
+    let Some(value) = payload.get(field) else {
+        return Ok(crate::model::OrderedMap::new());
+    };
+    let Value::Object(bindings) = value else {
+        return Err(ApiError::invalid_request_with_details(
+            format!("Request field '{field}' must be an object."),
+            json!({ "field": field }),
+        ));
+    };
+    let mut result = crate::model::OrderedMap::new();
+    for (key, value) in bindings {
+        user_configuration::validate_binding_key(key).map_err(|error| {
+            ApiError::invalid_request_with_details(
+                format!("Request binding key is invalid: {error}"),
+                json!({ "field": field, "key": key }),
+            )
+        })?;
+        result.insert(key.clone(), value.clone());
+    }
+    Ok(result)
+}
+
+fn optional_object_value(
+    payload: &Map<String, Value>,
+    field: &str,
+) -> Result<Option<Value>, ApiError> {
+    match payload.get(field) {
+        None => Ok(None),
+        Some(Value::Object(value)) => Ok(Some(Value::Object(value.clone()))),
+        Some(_) => Err(ApiError::invalid_request_with_details(
+            format!("Request field '{field}' must be an object."),
+            json!({ "field": field }),
+        )),
+    }
 }
 
 fn user_configuration_path(payload: &Map<String, Value>) -> Result<std::path::PathBuf, ApiError> {

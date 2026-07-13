@@ -18,6 +18,7 @@ import type {
   ValidateRecipePathResult,
   UserConfigurationCommandResult,
   UserConfigurationDocumentResult,
+  ConfigurationDescriptionResult,
 } from "./types";
 
 export type EditorApiResult<T> =
@@ -217,6 +218,22 @@ export async function setUserConfigurationAuthoredRoot(
 
 export async function closeUserConfiguration(documentId: string): Promise<EditorApiResult<Record<string, never>>> {
   return callApi<Record<string, never>>("close_user_configuration", { documentId });
+}
+
+export interface RuntimeConfigurationRequest {
+  authoredRoot: string;
+  configurationRoot?: string;
+  userConfiguration?: string;
+  devicePlan?: string;
+  selectedRecipes?: string[];
+  bindings?: Record<string, unknown>;
+  deviceContext?: Record<string, unknown>;
+}
+
+export async function describeConfiguration(
+  request: RuntimeConfigurationRequest,
+): Promise<EditorApiResult<ConfigurationDescriptionResult>> {
+  return callApi<ConfigurationDescriptionResult>("describe_configuration", { request });
 }
 
 export interface MenuState {

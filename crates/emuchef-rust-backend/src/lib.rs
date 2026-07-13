@@ -30,6 +30,7 @@ mod planner_tests;
 pub mod protocol;
 pub mod ref_index;
 pub mod request;
+pub mod runtime_configuration;
 pub(crate) mod runtime_refs;
 pub mod session;
 pub mod step_specs;

@@ -530,7 +530,7 @@ fn error_result(errors: Vec<PlannerMessage>) -> PlanningResult {
     }
 }
 
-fn expand_recipe_dependencies(
+pub(crate) fn expand_recipe_dependencies(
     recipes: &HashMap<String, Recipe>,
     selected_recipe_refs: &[String],
 ) -> (Vec<String>, Vec<PlannerMessage>) {

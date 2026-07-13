@@ -24,6 +24,20 @@ const REQUIRED_CAPABILITIES: &[&str] = &[
     "emitYaml",
     "getRefIndex",
     "setDocumentAuthoredRoot",
+    "openUserConfiguration",
+    "createUserConfiguration",
+    "getUserConfigurationDocument",
+    "saveUserConfiguration",
+    "saveUserConfigurationAs",
+    "setUserConfigurationBinding",
+    "removeUserConfigurationBinding",
+    "setUserConfigurationSelectedRecipes",
+    "setUserConfigurationDevicePlan",
+    "validateUserConfiguration",
+    "emitUserConfigurationYaml",
+    "setUserConfigurationAuthoredRoot",
+    "closeUserConfiguration",
+    "describeConfiguration",
     "ping",
 ];
 const RUST_BACKEND_MANIFEST: &str = "crates/emuchef-rust-backend/Cargo.toml";
@@ -1262,27 +1276,17 @@ mod tests {
 
     #[test]
     fn validates_successful_hello_with_extra_capabilities() {
+        let capabilities = REQUIRED_CAPABILITIES
+            .iter()
+            .copied()
+            .chain(["futureCapability"])
+            .collect::<Vec<_>>();
         let compatibility = validate_hello_response(&json!({
             "id": "req-1",
             "ok": true,
             "result": {
                 "protocolVersion": 1,
-                "capabilities": [
-                    "listStepSpecs",
-                    "openRecipe",
-                    "getDocument",
-                    "applyRecipeCommand",
-                    "undo",
-                    "redo",
-                    "saveRecipe",
-                    "saveRecipeAs",
-                    "validate",
-                    "emitYaml",
-                    "getRefIndex",
-                    "setDocumentAuthoredRoot",
-                    "ping",
-                    "futureCapability"
-                ]
+                "capabilities": capabilities
             }
         }))
         .expect("required capabilities should be accepted");
@@ -1296,26 +1300,13 @@ mod tests {
 
     #[test]
     fn rejects_unsupported_hello_protocol_version() {
+        let capabilities = REQUIRED_CAPABILITIES;
         let err = validate_hello_response(&json!({
             "id": "req-1",
             "ok": true,
             "result": {
                 "protocolVersion": 2,
-                "capabilities": [
-                    "listStepSpecs",
-                    "openRecipe",
-                    "getDocument",
-                    "applyRecipeCommand",
-                    "undo",
-                    "redo",
-                    "saveRecipe",
-                    "saveRecipeAs",
-                    "validate",
-                    "emitYaml",
-                    "getRefIndex",
-                    "setDocumentAuthoredRoot",
-                    "ping"
-                ]
+                "capabilities": capabilities
             }
         }))
         .expect_err("unsupported protocol version should fail compatibility");
@@ -1351,6 +1342,7 @@ mod tests {
         assert!(err.message.contains("saveRecipeAs"));
         assert!(err.message.contains("getRefIndex"));
         assert!(err.message.contains("setDocumentAuthoredRoot"));
+        assert!(err.message.contains("describeConfiguration"));
         assert!(err.message.contains("ping"));
     }
 
