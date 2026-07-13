@@ -10,6 +10,8 @@
     "test:sidecar-packaging": "node --test scripts/sidecar-packaging.test.mjs",
     "test:sidecar-bundle-inspection": "node --test scripts/inspect-sidecar-bundle-input.test.mjs",
     "test:macos-packaging": "node --test scripts/check-macos-bundle.test.mjs scripts/smoke-macos-packaged-app.test.mjs scripts/smoke-packaged-runtime-network.test.mjs",
+    "test:apple-release-env": "node --test scripts/check-apple-release-env.test.mjs",
+    "check:apple-release-env": "npm run test:apple-release-env && node scripts/check-apple-release-env.mjs",
     "test:tauri-csp": "node --test scripts/check-tauri-csp.test.mjs scripts/run-tauri.test.mjs",
     "check:tauri-csp": "npm run test:tauri-csp && node scripts/check-tauri-csp.mjs",
     "check:no-python-runtime": "node --test scripts/check-no-python-runtime.test.mjs && node scripts/check-no-python-runtime.mjs",
