@@ -6,7 +6,19 @@ import { EditableTextField } from "./EditableTextField";
 import { ReadOnlyJson } from "./ReadOnlyJson";
 import { ResizableEditorLayout } from "./ResizableEditorLayout";
 
-const INPUT_TYPES = ["file", "directory"] as const;
+const INPUT_TYPES = [
+  "string",
+  "integer",
+  "boolean",
+  "enum",
+  "file",
+  "directory",
+  "path",
+  "device_path",
+  "string_list",
+  "path_list",
+  "object",
+] as const;
 const INPUT_ROLES = ["apk", "bios", "roms", "config_bundle", "generic"] as const;
 const PATH_KIND_VALUES = ["", "file", "directory"] as const;
 
@@ -182,6 +194,7 @@ function InputDetail({ input, inputId, readOnly, onRename, onDelete, onDuplicate
 
       <div className="grid gap-4 rounded border border-slate-200 bg-white p-4">
         <ReadonlyText label="ID" value={input.id} />
+        <ReadonlyText label="Qualified key" value={input.key} />
         <SelectField
           label="Type"
           disabled={readOnly}
@@ -241,10 +254,14 @@ function InputDetail({ input, inputId, readOnly, onRename, onDelete, onDuplicate
             value !== (input.validation.pathKind ?? "") && onUpdateField("validation.path_kind", value || null)
           }
         />
+        <ReadOnlyJson label="Allowed Prefixes" value={input.validation.allowedPrefixes} />
       </div>
 
       <div className="grid gap-4 rounded border border-slate-200 bg-white p-4">
         <ReadOnlyJson label="Default" value={input.default} />
+        <ReadOnlyJson label="Options" value={input.options} />
+        <ReadonlyText label="Sensitive" value={input.sensitive ? "Yes" : "No"} />
+        <ReadonlyText label="Advanced" value={input.advanced ? "Yes" : "No"} />
         <ReadOnlyJson label="Metadata" value={input.metadata} />
       </div>
     </div>

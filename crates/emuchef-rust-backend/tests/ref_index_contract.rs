@@ -42,7 +42,27 @@ fn normalize_document_result(value: &Value) -> Value {
     match value {
         Value::Object(object) => {
             let mut normalized = serde_json::Map::new();
+            let input_definition = object.contains_key("role")
+                && object.contains_key("required")
+                && object.contains_key("validation");
+            let input_validation = object.contains_key("mustExist")
+                && object.contains_key("allowedExtensions")
+                && object.contains_key("pathKind");
             for (key, item) in object {
+                // Frozen v1 fixtures remain immutable compatibility evidence.
+                // Compare their legacy input projection while newer DTO fields
+                // receive Rust-native contract coverage.
+                if input_definition
+                    && matches!(
+                        key.as_str(),
+                        "recipeId" | "inputId" | "key" | "options" | "sensitive" | "advanced"
+                    )
+                {
+                    continue;
+                }
+                if input_validation && key == "allowedPrefixes" {
+                    continue;
+                }
                 let value = match key.as_str() {
                     "documentId" => json!("<documentId>"),
                     "path" => json!("<path>"),

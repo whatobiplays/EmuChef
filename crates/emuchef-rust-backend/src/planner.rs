@@ -1088,25 +1088,19 @@ fn validate_binding_value(
     value: &Value,
 ) -> Vec<PlannerMessage> {
     let mut errors = Vec::new();
-    let values = if declaration.multiple {
-        let Some(values) = value.as_array() else {
-            return vec![PlannerMessage {
-                code: "binding_validation_failed".to_string(),
-                message: format!("Input '{input_id}' requires multiple values."),
-                details: json!({ "input_id": input_id }),
-            }];
-        };
-        values.iter().collect::<Vec<_>>()
-    } else {
-        if !value.is_string() {
-            return vec![PlannerMessage {
-                code: "binding_validation_failed".to_string(),
-                message: format!("Input '{input_id}' requires a single string path value."),
-                details: json!({ "input_id": input_id }),
-            }];
-        }
-        vec![value]
-    };
+    if !declaration.value_matches_type(value) {
+        return vec![PlannerMessage {
+            code: "binding_validation_failed".to_string(),
+            message: format!(
+                "Input '{input_id}' requires a value compatible with type '{}'.",
+                declaration.type_name
+            ),
+            details: json!({ "input_id": input_id, "expected_type": declaration.type_name }),
+        }];
+    }
+    let values = declaration
+        .binding_items(value)
+        .expect("type-compatible list inputs should expose binding items");
 
     if declaration.required && values.is_empty() {
         errors.push(PlannerMessage {
@@ -1118,25 +1112,94 @@ fn validate_binding_value(
     }
 
     for raw_value in values {
-        let Some(raw_path) = raw_value.as_str() else {
+        if declaration.type_name == "enum"
+            && !declaration
+                .options
+                .iter()
+                .any(|option| option.value == *raw_value)
+        {
             errors.push(PlannerMessage {
                 code: "binding_validation_failed".to_string(),
-                message: format!("Input '{input_id}' values must be string paths."),
-                details: json!({ "input_id": input_id }),
+                message: format!("Input '{input_id}' must use a declared enum option."),
+                details: json!({
+                    "input_id": input_id,
+                    "expected": declaration.options.iter().map(|option| option.value.clone()).collect::<Vec<_>>(),
+                }),
             });
             continue;
+        }
+        let Some(raw_path) = raw_value.as_str() else {
+            continue;
         };
+        if declaration.validation.must_exist && input_uses_host_path(&declaration.type_name) {
+            let path = Path::new(raw_path);
+            let expected_kind = declaration.validation.path_kind.as_deref().or(
+                match declaration.type_name.as_str() {
+                    "file" => Some("file"),
+                    "directory" => Some("directory"),
+                    _ => None,
+                },
+            );
+            let exists_with_kind = match expected_kind {
+                Some("file") => path.is_file(),
+                Some("directory") => path.is_dir(),
+                _ => path.exists(),
+            };
+            if !exists_with_kind {
+                errors.push(PlannerMessage {
+                    code: "binding_validation_failed".to_string(),
+                    message: format!(
+                        "Input '{input_id}' must reference an existing {}.",
+                        expected_kind.unwrap_or("host path")
+                    ),
+                    details: json!({
+                        "input_id": input_id,
+                        "expected_path_kind": expected_kind,
+                    }),
+                });
+            }
+        }
+        if !declaration.validation.allowed_prefixes.is_empty()
+            && !declaration
+                .validation
+                .allowed_prefixes
+                .iter()
+                .any(|prefix| path_has_prefix(raw_path, prefix))
+        {
+            errors.push(PlannerMessage {
+                code: "binding_validation_failed".to_string(),
+                message: format!("Input '{input_id}' is outside its allowed path prefixes."),
+                details: json!({
+                    "input_id": input_id,
+                    "allowed_prefixes": declaration.validation.allowed_prefixes,
+                }),
+            });
+        }
         if !declaration.validation.allowed_extensions.is_empty()
             && extension_is_disallowed(raw_path, &declaration.validation.allowed_extensions)
         {
             errors.push(PlannerMessage {
                 code: "binding_validation_failed".to_string(),
-                message: format!("Input path '{raw_path}' has an unsupported extension."),
-                details: json!({ "input_id": input_id, "path": raw_path }),
+                message: format!("Input '{input_id}' has an unsupported path extension."),
+                details: json!({
+                    "input_id": input_id,
+                    "allowed_extensions": declaration.validation.allowed_extensions,
+                }),
             });
         }
     }
     errors
+}
+
+fn input_uses_host_path(type_name: &str) -> bool {
+    matches!(type_name, "file" | "directory" | "path" | "path_list")
+}
+
+fn path_has_prefix(path: &str, prefix: &str) -> bool {
+    path == prefix
+        || path
+            .strip_prefix(prefix)
+            .is_some_and(|suffix| suffix.starts_with('/'))
 }
 
 fn emit_execution_inputs(
@@ -1152,11 +1215,7 @@ fn emit_execution_inputs(
             let value = binding_value(declaration, input_id, input_bindings)?;
             Some(ExecutionInputValue {
                 id: input_id.clone(),
-                value: binding_to_runtime_value(
-                    declaration_type(declaration),
-                    declaration.multiple,
-                    value,
-                ),
+                value: binding_to_runtime_value(declaration, value),
             })
         })
         .collect()
@@ -1175,8 +1234,10 @@ fn binding_value(
 }
 
 fn normalize_binding_value(declaration: &crate::model::InputDeclaration, value: Value) -> Value {
-    let expected_kind = declaration_type(declaration);
-    if expected_kind != "file" && expected_kind != "directory" {
+    if !matches!(
+        declaration.type_name.as_str(),
+        "file" | "directory" | "path"
+    ) {
         return value;
     }
     if declaration.multiple {
@@ -1248,51 +1309,39 @@ fn normalize_allowed_extension(extension: &str) -> Option<String> {
     }
 }
 
-fn declaration_type(declaration: &crate::model::InputDeclaration) -> &str {
-    declaration
-        .validation
-        .path_kind
-        .as_deref()
-        .unwrap_or(&declaration.type_name)
-}
-
-fn binding_to_runtime_value(type_name: &str, multiple: bool, value: Value) -> RuntimeValue {
-    if multiple {
+fn binding_to_runtime_value(
+    declaration: &crate::model::InputDeclaration,
+    value: Value,
+) -> RuntimeValue {
+    if declaration.multiple {
+        let (type_name, location) = match declaration.type_name.as_str() {
+            "string" | "enum" => ("string_list", None),
+            "device_path" => ("path_list", Some("device".to_string())),
+            _ => ("path_list", Some("host".to_string())),
+        };
         return RuntimeValue {
-            type_name: "path_list".to_string(),
+            type_name: type_name.to_string(),
             value,
-            location: Some("host".to_string()),
+            location,
         };
     }
-    if type_name == "file" {
-        return RuntimeValue {
-            type_name: "file_path".to_string(),
-            value,
-            location: Some("host".to_string()),
-        };
-    }
-    if type_name == "directory" {
-        return RuntimeValue {
-            type_name: "directory_path".to_string(),
-            value,
-            location: Some("host".to_string()),
-        };
-    }
-    let runtime_type = if value.is_null() {
-        "null"
-    } else if value.is_boolean() {
-        "boolean"
-    } else if value.is_i64() || value.is_u64() {
-        "integer"
-    } else if value.is_string() {
-        "string"
-    } else {
-        "object"
+    let (runtime_type, location) = match declaration.type_name.as_str() {
+        "file" => ("file_path", Some("host".to_string())),
+        "directory" => ("directory_path", Some("host".to_string())),
+        "path" => ("path", Some("host".to_string())),
+        "device_path" => ("device_path", Some("device".to_string())),
+        "enum" | "string" => ("string", None),
+        "integer" => ("integer", None),
+        "boolean" => ("boolean", None),
+        "string_list" => ("string_list", None),
+        "path_list" => ("path_list", Some("host".to_string())),
+        "object" => ("object", None),
+        _ => ("null", None),
     };
     RuntimeValue {
         type_name: runtime_type.to_string(),
         value,
-        location: None,
+        location,
     }
 }
 

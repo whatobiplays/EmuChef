@@ -11,7 +11,7 @@ use serde_json::Value as JsonValue;
 use serde_yaml::{Mapping, Value as YamlValue};
 
 use crate::model::{
-    InputDeclaration, InputValidation, OrderedMap, ParamValue, Recipe, RecipeProvides,
+    InputDeclaration, InputOption, InputValidation, OrderedMap, ParamValue, Recipe, RecipeProvides,
     RemoteFileArtifact, Step, StepCondition, StepConstraints,
 };
 use crate::step_specs;
@@ -264,34 +264,172 @@ fn parse_inputs(value: Option<&YamlValue>) -> Result<OrderedMap<InputDeclaration
                 single_quote(&input_id)
             ));
         };
-        let validation = get_yaml(input_map, "validation").and_then(YamlValue::as_mapping);
-        inputs.insert(
-            input_id.clone(),
-            InputDeclaration {
-                type_name: required_scalar_string(input_map, "type")?,
-                role: get_scalar_string(input_map, "role").unwrap_or_else(|| "generic".to_string()),
-                label: get_scalar_string(input_map, "label").unwrap_or(input_id),
-                description: optional_string(get_yaml(input_map, "description")),
-                required: get_bool(input_map, "required").unwrap_or(true),
-                multiple: get_bool(input_map, "multiple").unwrap_or(false),
-                validation: InputValidation {
-                    must_exist: validation
-                        .and_then(|mapping| get_bool(mapping, "must_exist"))
-                        .unwrap_or(false),
-                    allowed_extensions: validation
-                        .and_then(|mapping| {
-                            parse_string_vec(get_yaml(mapping, "allowed_extensions")).ok()
-                        })
-                        .unwrap_or_default(),
-                    path_kind: validation
-                        .and_then(|mapping| get_scalar_string(mapping, "path_kind")),
-                },
-                default: yaml_to_json(get_yaml(input_map, "default").unwrap_or(&YamlValue::Null)),
-                metadata: parse_json_map(get_yaml(input_map, "metadata"))?,
-            },
-        );
+        let input = InputDeclaration {
+            type_name: required_scalar_string(input_map, "type")?,
+            role: get_scalar_string(input_map, "role").unwrap_or_else(|| "generic".to_string()),
+            label: get_scalar_string(input_map, "label").unwrap_or_else(|| input_id.clone()),
+            description: optional_string(get_yaml(input_map, "description")),
+            required: optional_strict_bool(input_map, "required", true)?,
+            multiple: optional_strict_bool(input_map, "multiple", false)?,
+            validation: parse_input_validation(get_yaml(input_map, "validation"))?,
+            default: yaml_to_json(get_yaml(input_map, "default").unwrap_or(&YamlValue::Null)),
+            options: parse_input_options(get_yaml(input_map, "options"))?,
+            sensitive: optional_strict_bool(input_map, "sensitive", false)?,
+            advanced: optional_strict_bool(input_map, "advanced", false)?,
+            metadata: parse_json_map(get_yaml(input_map, "metadata"))?,
+        };
+        validate_input_declaration(&input_id, &input)?;
+        inputs.insert(input_id, input);
     }
     Ok(inputs)
+}
+
+fn parse_input_validation(value: Option<&YamlValue>) -> Result<InputValidation, String> {
+    let mapping = match value {
+        None | Some(YamlValue::Null) => None,
+        Some(YamlValue::Mapping(mapping)) => Some(mapping),
+        Some(_) => return Err("input validation must be a mapping".to_string()),
+    };
+    Ok(InputValidation {
+        must_exist: mapping
+            .map(|mapping| optional_strict_bool(mapping, "must_exist", false))
+            .transpose()?
+            .unwrap_or(false),
+        allowed_extensions: mapping
+            .map(|mapping| parse_string_vec(get_yaml(mapping, "allowed_extensions")))
+            .transpose()?
+            .unwrap_or_default(),
+        path_kind: mapping.and_then(|mapping| get_scalar_string(mapping, "path_kind")),
+        allowed_prefixes: mapping
+            .map(|mapping| parse_string_vec(get_yaml(mapping, "allowed_prefixes")))
+            .transpose()?
+            .unwrap_or_default(),
+    })
+}
+
+fn parse_input_options(value: Option<&YamlValue>) -> Result<Vec<InputOption>, String> {
+    let Some(value) = value else {
+        return Ok(Vec::new());
+    };
+    if value.is_null() {
+        return Ok(Vec::new());
+    }
+    let YamlValue::Sequence(items) = value else {
+        return Err("input options must be a list".to_string());
+    };
+    items
+        .iter()
+        .map(|item| {
+            let YamlValue::Mapping(mapping) = item else {
+                return Err("input option must be a mapping".to_string());
+            };
+            let value = get_yaml(mapping, "value")
+                .map(yaml_to_json)
+                .ok_or_else(|| "input option requires 'value'".to_string())?;
+            let label = get_scalar_string(mapping, "label")
+                .unwrap_or_else(|| deterministic_option_label(&value));
+            if label.trim().is_empty() {
+                return Err("input option label must not be empty".to_string());
+            }
+            Ok(InputOption { value, label })
+        })
+        .collect()
+}
+
+fn deterministic_option_label(value: &JsonValue) -> String {
+    value
+        .as_str()
+        .map(ToString::to_string)
+        .unwrap_or_else(|| serde_json::to_string(value).unwrap_or_default())
+}
+
+fn validate_input_declaration(input_id: &str, input: &InputDeclaration) -> Result<(), String> {
+    const SUPPORTED_TYPES: &[&str] = &[
+        "string",
+        "integer",
+        "boolean",
+        "enum",
+        "file",
+        "directory",
+        "path",
+        "device_path",
+        "string_list",
+        "path_list",
+        "object",
+    ];
+    if !SUPPORTED_TYPES.contains(&input.type_name.as_str()) {
+        return Err(format!(
+            "input {} has unsupported type {}",
+            single_quote(input_id),
+            single_quote(&input.type_name)
+        ));
+    }
+    if let Some(path_kind) = &input.validation.path_kind {
+        if !matches!(path_kind.as_str(), "file" | "directory") {
+            return Err(format!(
+                "input {} validation.path_kind must be 'file' or 'directory'",
+                single_quote(input_id)
+            ));
+        }
+    }
+    if input
+        .validation
+        .allowed_prefixes
+        .iter()
+        .any(|prefix| !prefix.starts_with('/'))
+    {
+        return Err(format!(
+            "input {} validation.allowed_prefixes entries must be absolute paths",
+            single_quote(input_id)
+        ));
+    }
+    if input.type_name == "enum" && input.options.is_empty() {
+        return Err(format!(
+            "enum input {} requires at least one option",
+            single_quote(input_id)
+        ));
+    }
+    let mut option_values = Vec::new();
+    for option in &input.options {
+        if option_values.contains(&option.value) {
+            return Err(format!(
+                "input {} has duplicate option value {}",
+                single_quote(input_id),
+                stable_json_repr(&option.value)
+            ));
+        }
+        option_values.push(option.value.clone());
+    }
+    if !input.default.is_null() && !input.value_matches_type(&input.default) {
+        return Err(format!(
+            "input {} default is incompatible with type {}",
+            single_quote(input_id),
+            single_quote(&input.type_name)
+        ));
+    }
+    if input.type_name == "enum"
+        && !input.default.is_null()
+        && !option_values.contains(&input.default)
+    {
+        return Err(format!(
+            "input {} default {} is not an enum option",
+            single_quote(input_id),
+            stable_json_repr(&input.default)
+        ));
+    }
+    Ok(())
+}
+
+fn stable_json_repr(value: &JsonValue) -> String {
+    serde_json::to_string(value).unwrap_or_else(|_| "null".to_string())
+}
+
+fn optional_strict_bool(mapping: &Mapping, key: &str, default: bool) -> Result<bool, String> {
+    match get_yaml(mapping, key) {
+        None => Ok(default),
+        Some(YamlValue::Bool(value)) => Ok(*value),
+        Some(_) => Err(format!("'{key}' must be a boolean")),
+    }
 }
 
 fn parse_artifacts(value: Option<&YamlValue>) -> Result<OrderedMap<RemoteFileArtifact>, String> {
@@ -612,8 +750,47 @@ fn inputs_to_yaml(inputs: &OrderedMap<InputDeclaration>) -> YamlValue {
                 YamlValue::String(path_kind.clone()),
             );
         }
+        if !input.validation.allowed_prefixes.is_empty() {
+            insert(
+                &mut validation,
+                "allowed_prefixes",
+                string_sequence(&input.validation.allowed_prefixes),
+            );
+        }
         insert(&mut payload, "validation", YamlValue::Mapping(validation));
         insert(&mut payload, "default", json_to_yaml_sorted(&input.default));
+        if !input.options.is_empty() {
+            insert(
+                &mut payload,
+                "options",
+                YamlValue::Sequence(
+                    input
+                        .options
+                        .iter()
+                        .map(|option| {
+                            let mut option_mapping = Mapping::new();
+                            insert(
+                                &mut option_mapping,
+                                "value",
+                                json_to_yaml_sorted(&option.value),
+                            );
+                            insert(
+                                &mut option_mapping,
+                                "label",
+                                YamlValue::String(option.label.clone()),
+                            );
+                            YamlValue::Mapping(option_mapping)
+                        })
+                        .collect(),
+                ),
+            );
+        }
+        if input.sensitive {
+            insert(&mut payload, "sensitive", YamlValue::Bool(true));
+        }
+        if input.advanced {
+            insert(&mut payload, "advanced", YamlValue::Bool(true));
+        }
         if !input.metadata.is_empty() {
             insert(
                 &mut payload,

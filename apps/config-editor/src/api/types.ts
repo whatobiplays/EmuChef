@@ -48,6 +48,9 @@ export interface CommandResultDto {
 
 export interface InputDto {
   id: string;
+  recipeId: string;
+  inputId: string;
+  key: string;
   type: string;
   role: string;
   label: string;
@@ -58,8 +61,12 @@ export interface InputDto {
     mustExist: boolean;
     allowedExtensions: string[];
     pathKind: string | null;
+    allowedPrefixes: string[];
   };
   default: unknown;
+  options: Array<{ value: unknown; label: string }>;
+  sensitive: boolean;
+  advanced: boolean;
   metadata: Record<string, unknown>;
 }
 

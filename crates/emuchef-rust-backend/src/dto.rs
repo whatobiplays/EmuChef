@@ -36,16 +36,19 @@ fn recipe_to_dto(recipe: &Recipe) -> Value {
         "description": recipe.description.clone().unwrap_or_default(),
         "recipeDependencies": recipe.recipe_dependencies,
         "provides": {"features": recipe.provides.features},
-        "inputs": map_values(recipe.inputs.iter().map(|(id, input)| (id, input_to_dto(id, input)))),
+        "inputs": map_values(recipe.inputs.iter().map(|(id, input)| (id, input_to_dto(&recipe.id, id, input)))),
         "artifacts": map_values(recipe.artifacts.iter().map(|(id, artifact)| (id, artifact_to_dto(id, artifact)))),
         "artifactGroups": map_values(recipe.artifact_groups.iter().map(|(id, members)| (id, json!(members)))),
         "steps": recipe.steps.iter().map(step_to_dto).collect::<Vec<_>>(),
     })
 }
 
-fn input_to_dto(input_id: &str, input: &InputDeclaration) -> Value {
+fn input_to_dto(recipe_id: &str, input_id: &str, input: &InputDeclaration) -> Value {
     json!({
         "id": input_id,
+        "recipeId": recipe_id,
+        "inputId": input_id,
+        "key": format!("{recipe_id}/{input_id}"),
         "type": input.type_name,
         "role": input.role,
         "label": input.label,
@@ -56,8 +59,15 @@ fn input_to_dto(input_id: &str, input: &InputDeclaration) -> Value {
             "mustExist": input.validation.must_exist,
             "allowedExtensions": input.validation.allowed_extensions,
             "pathKind": input.validation.path_kind,
+            "allowedPrefixes": input.validation.allowed_prefixes,
         },
         "default": input.default,
+        "options": input.options.iter().map(|option| json!({
+            "value": option.value,
+            "label": option.label,
+        })).collect::<Vec<_>>(),
+        "sensitive": input.sensitive,
+        "advanced": input.advanced,
         "metadata": map_values(input.metadata.iter().map(|(key, value)| (key, value.clone()))),
     })
 }

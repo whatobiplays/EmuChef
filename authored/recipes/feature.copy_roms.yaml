@@ -1,0 +1,74 @@
+schema_version: 1
+kind: recipe
+id: feature.copy_roms
+name: Copy ROM library
+recipe_dependencies: []
+provides:
+  features:
+    - rom_library
+inputs:
+  source:
+    type: directory
+    role: rom_library
+    label: ROM source folder
+    required: true
+    multiple: false
+    validation:
+      must_exist: true
+      allowed_extensions: []
+      path_kind: directory
+    default: null
+  destination:
+    type: device_path
+    role: rom_destination
+    label: Device ROM folder
+    required: true
+    multiple: false
+    validation:
+      must_exist: false
+      allowed_extensions: []
+      path_kind: directory
+      allowed_prefixes:
+        - /sdcard
+        - /storage/emulated/0
+    default: /sdcard/ROMs
+  policy:
+    type: enum
+    role: copy_policy
+    label: Copy policy
+    required: false
+    multiple: false
+    validation:
+      must_exist: false
+      allowed_extensions: []
+    default: merge
+    options:
+      - value: merge
+        label: Merge files
+      - value: replace
+        label: Replace destination
+      - value: sync
+        label: Mirror source
+artifacts: {}
+artifact_groups: {}
+steps:
+  - id: copy_rom_library
+    type: copy_files
+    name: Copy ROM library
+    user_toggleable: false
+    dependencies: []
+    constraints:
+      capabilities:
+        - shared_storage_write
+      conflicts_with: []
+    skip_if: []
+    params:
+      source:
+        ref: inputs.source
+      dest:
+        ref: inputs.destination
+      copy_policy:
+        ref: inputs.policy
+    verify:
+      - type: path_exists
+        path: /sdcard/ROMs

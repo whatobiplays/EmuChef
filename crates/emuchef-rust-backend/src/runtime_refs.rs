@@ -76,7 +76,6 @@ pub(crate) fn input_value_type(type_name: &str, multiple: bool) -> &'static str 
     if multiple {
         return match type_name {
             "string" | "enum" => "string_list",
-            "device_path" => "device_path_list",
             _ => "path_list",
         };
     }

@@ -159,6 +159,7 @@ fn authored_corpus_planner_input_with_bindings(
 ) -> PlannerInput {
     let mut input = authored_corpus_planner_input(selected_recipe_refs);
     for (input_id, value) in input_bindings {
+        materialize_required_test_host_binding(input_id, value);
         input
             .input_bindings
             .insert((*input_id).to_string(), value.clone());
@@ -172,6 +173,7 @@ fn repo_device_plan_planner_input_with_bindings(
 ) -> PlannerInput {
     let mut bindings = OrderedMap::new();
     for (input_id, value) in input_bindings {
+        materialize_required_test_host_binding(input_id, value);
         bindings.insert((*input_id).to_string(), value.clone());
     }
     PlannerInput::from_authored_device_plan(
@@ -190,6 +192,7 @@ fn repo_detected_context_planner_input_with_bindings(
 ) -> PlannerInput {
     let mut bindings = OrderedMap::new();
     for (input_id, value) in input_bindings {
+        materialize_required_test_host_binding(input_id, value);
         bindings.insert((*input_id).to_string(), value.clone());
     }
     planner_input_from_authored_device_plan_with_detected_facts(
@@ -212,6 +215,7 @@ fn repo_detected_context_planning_result_with_bindings(
 ) -> Value {
     let mut bindings = OrderedMap::new();
     for (input_id, value) in input_bindings {
+        materialize_required_test_host_binding(input_id, value);
         bindings.insert((*input_id).to_string(), value.clone());
     }
     serde_json::to_value(
@@ -248,6 +252,7 @@ fn repo_device_plan_planner_input_with_bindings_and_plan_id(
 ) -> PlannerInput {
     let mut bindings = OrderedMap::new();
     for (input_id, value) in input_bindings {
+        materialize_required_test_host_binding(input_id, value);
         bindings.insert((*input_id).to_string(), value.clone());
     }
     PlannerInput::from_authored_device_plan(
@@ -257,6 +262,49 @@ fn repo_device_plan_planner_input_with_bindings_and_plan_id(
         bindings,
     )
     .unwrap_or_else(|error| panic!("{device_plan_ref} should build PlannerInput: {error}"))
+}
+
+fn materialize_required_test_host_binding(input_id: &str, value: &Value) {
+    let Some((recipe_id, local_input_id)) = input_id.split_once('/') else {
+        return;
+    };
+    let Some(entry) = authored_corpus_recipe_inventory()
+        .iter()
+        .find(|entry| entry.recipe_id == recipe_id)
+    else {
+        return;
+    };
+    let recipe = crate::yaml::load_recipe_from_path(repo_root().join(entry.path))
+        .expect("test binding recipe should load");
+    let Some(declaration) = recipe.inputs.get(local_input_id) else {
+        return;
+    };
+    if !declaration.validation.must_exist
+        || !matches!(
+            declaration.type_name.as_str(),
+            "file" | "directory" | "path" | "path_list"
+        )
+    {
+        return;
+    }
+    for item in declaration.binding_items(value).into_iter().flatten() {
+        let Some(path) = item.as_str().map(Path::new) else {
+            continue;
+        };
+        let expected_kind = declaration
+            .validation
+            .path_kind
+            .as_deref()
+            .unwrap_or(declaration.type_name.as_str());
+        if expected_kind == "directory" {
+            fs::create_dir_all(path).expect("test binding directory should be created");
+        } else {
+            if let Some(parent) = path.parent() {
+                fs::create_dir_all(parent).expect("test binding parent should be created");
+            }
+            fs::write(path, b"emuchef-test-binding").expect("test binding file should be created");
+        }
+    }
 }
 
 fn assert_planning_result_stable_non_context_fields_eq(baseline: &Value, actual: &Value) {
@@ -2667,6 +2715,90 @@ fn authored_corpus_planner_uses_rust_inputs_and_preserves_checked_in_evidence() 
 }
 
 #[test]
+fn runtime_input_metadata_validates_enum_and_device_path_bindings() {
+    let valid = planning_result_value(authored_corpus_planner_input_with_bindings(
+        &["feature.copy_roms"],
+        &[
+            ("feature.copy_roms/source", json!("/tmp/ROMs")),
+            ("feature.copy_roms/destination", json!("/sdcard/Games")),
+            ("feature.copy_roms/policy", json!("sync")),
+        ],
+    ));
+    assert_eq!(valid["status"], "success", "{valid:#}");
+    let inputs = valid["execution_plan"]["inputs"]
+        .as_array()
+        .expect("execution inputs should be present");
+    assert!(inputs.iter().any(|input| {
+        input["id"] == "feature.copy_roms/destination"
+            && input["value"]["type"] == "device_path"
+            && input["value"]["location"] == "device"
+    }));
+    assert!(inputs.iter().any(|input| {
+        input["id"] == "feature.copy_roms/policy"
+            && input["value"]["type"] == "string"
+            && input["value"]["value"] == "sync"
+    }));
+
+    let invalid_enum = planning_result_value(authored_corpus_planner_input_with_bindings(
+        &["feature.copy_roms"],
+        &[
+            ("feature.copy_roms/source", json!("/tmp/ROMs")),
+            ("feature.copy_roms/policy", json!("overwrite")),
+        ],
+    ));
+    assert_eq!(invalid_enum["status"], "error");
+    assert!(invalid_enum["errors"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|error| {
+            error["code"] == "binding_validation_failed"
+                && error["details"]["input_id"] == "feature.copy_roms/policy"
+        }));
+
+    let invalid_prefix = planning_result_value(authored_corpus_planner_input_with_bindings(
+        &["feature.copy_roms"],
+        &[
+            ("feature.copy_roms/source", json!("/tmp/ROMs")),
+            ("feature.copy_roms/destination", json!("/data/local/ROMs")),
+        ],
+    ));
+    assert_eq!(invalid_prefix["status"], "error");
+    assert!(invalid_prefix["errors"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|error| {
+            error["code"] == "binding_validation_failed"
+                && error["details"]["input_id"] == "feature.copy_roms/destination"
+                && error["message"]
+                    .as_str()
+                    .is_some_and(|message| message.contains("allowed path prefixes"))
+        }));
+
+    let temp = TempDir::new().expect("missing-path test root should be created");
+    let missing_path = temp.path().join("missing-roms");
+    let mut missing_host_path = authored_corpus_planner_input(&["feature.copy_roms"]);
+    missing_host_path.input_bindings.insert(
+        "feature.copy_roms/source".to_string(),
+        json!(missing_path.to_string_lossy()),
+    );
+    let missing_host_path = planning_result_value(missing_host_path);
+    assert_eq!(missing_host_path["status"], "error");
+    assert!(missing_host_path["errors"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|error| {
+            error["code"] == "binding_validation_failed"
+                && error["details"]["input_id"] == "feature.copy_roms/source"
+                && error["message"]
+                    .as_str()
+                    .is_some_and(|message| message.contains("existing directory"))
+        }));
+}
+
+#[test]
 fn repo_device_profile_inventory_is_explicit_by_path_and_id() {
     let actual = discover_device_profile_inventory(repo_authored_root())
         .expect("repo device profile inventory should parse")
@@ -3021,6 +3153,10 @@ fn detected_context_planner_input_accepts_fake_probe_facts_without_live_probe() 
 #[test]
 fn detected_context_planner_input_does_not_emit_profile_mismatch_warning() {
     let mut bindings = OrderedMap::new();
+    materialize_required_test_host_binding(
+        "app.retroarch.provision/retroarch_cfg",
+        &json!("/tmp/emuchef-p8o-retroarch.cfg"),
+    );
     bindings.insert(
         "app.retroarch.provision/retroarch_cfg".to_string(),
         json!("/tmp/emuchef-p8o-retroarch.cfg"),
@@ -4952,6 +5088,10 @@ fn authored_corpus_recipe_inventory() -> &'static [AuthoredCorpusRecipeEntry] {
         AuthoredCorpusRecipeEntry {
             path: "authored/recipes/feature.copy_bios.yaml",
             recipe_id: "feature.copy_bios",
+        },
+        AuthoredCorpusRecipeEntry {
+            path: "authored/recipes/feature.copy_roms.yaml",
+            recipe_id: "feature.copy_roms",
         },
     ]
 }

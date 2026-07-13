@@ -368,8 +368,12 @@ impl RecipeDocument {
                     must_exist: false,
                     allowed_extensions: Vec::new(),
                     path_kind: Some("file".to_string()),
+                    allowed_prefixes: Vec::new(),
                 },
                 default: Value::Null,
+                options: Vec::new(),
+                sensitive: false,
+                advanced: false,
                 metadata: OrderedMap::new(),
             },
         );
@@ -1383,7 +1387,8 @@ fn json_truthy(value: &Value) -> bool {
 fn coerce_input_type(value: &Value) -> Result<String, String> {
     let value = json_value_to_string(value);
     match value.as_str() {
-        "file" | "directory" => Ok(value),
+        "string" | "integer" | "boolean" | "enum" | "file" | "directory" | "path"
+        | "device_path" | "string_list" | "path_list" | "object" => Ok(value),
         _ => Err(format!("Invalid input type {value:?}.")),
     }
 }
@@ -1396,7 +1401,10 @@ fn coerce_optional_input_type(value: &Value) -> Result<Option<String>, String> {
     if value.is_empty() {
         return Ok(None);
     }
-    coerce_input_type(&Value::String(value)).map(Some)
+    match value.as_str() {
+        "file" | "directory" => Ok(Some(value)),
+        _ => Err(format!("Invalid input path kind {value:?}.")),
+    }
 }
 
 fn coerce_input_role(value: &Value) -> Result<String, String> {

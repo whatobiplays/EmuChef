@@ -1,8 +1,8 @@
 //! Authored recipe model used by the Rust runtime and editor protocol.
 //!
-//! These types intentionally cover only the authored YAML sections needed for
-//! load/emit parity tests. They are not a planner, executor, or editor document
-//! model, and they should not grow those responsibilities in this phase.
+//! Recipe inputs are the public runtime-configuration declaration surface.
+//! Presentation metadata stays semantic and toolkit-neutral so protocol clients
+//! can choose controls without recipe-specific behavior.
 
 use indexmap::IndexMap;
 use serde_json::Value;
@@ -39,7 +39,56 @@ pub struct InputDeclaration {
     pub multiple: bool,
     pub validation: InputValidation,
     pub default: Value,
+    pub options: Vec<InputOption>,
+    pub sensitive: bool,
+    pub advanced: bool,
     pub metadata: OrderedMap<Value>,
+}
+
+impl InputDeclaration {
+    /// Return whether a JSON value has the authored input's declared shape.
+    /// Constraint checks such as enum membership and path prefixes are separate
+    /// so callers can report precise diagnostics without reparsing the type.
+    pub fn value_matches_type(&self, value: &Value) -> bool {
+        if self.multiple {
+            return value.as_array().is_some_and(|items| {
+                items
+                    .iter()
+                    .all(|item| scalar_input_value_matches(&self.type_name, item))
+            });
+        }
+        match self.type_name.as_str() {
+            "string_list" | "path_list" => value
+                .as_array()
+                .is_some_and(|items| items.iter().all(Value::is_string)),
+            type_name => scalar_input_value_matches(type_name, value),
+        }
+    }
+
+    /// Flatten a valid single or list-like binding for per-value constraints.
+    pub fn binding_items<'a>(&self, value: &'a Value) -> Option<Vec<&'a Value>> {
+        if self.multiple || matches!(self.type_name.as_str(), "string_list" | "path_list") {
+            return value.as_array().map(|items| items.iter().collect());
+        }
+        Some(vec![value])
+    }
+}
+
+fn scalar_input_value_matches(type_name: &str, value: &Value) -> bool {
+    match type_name {
+        "string" | "enum" | "file" | "directory" | "path" | "device_path" => value.is_string(),
+        "integer" => value.as_i64().is_some() || value.as_u64().is_some(),
+        "boolean" => value.is_boolean(),
+        "object" => value.is_object(),
+        "string_list" | "path_list" => value.is_array(),
+        _ => false,
+    }
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub struct InputOption {
+    pub value: Value,
+    pub label: String,
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -47,6 +96,7 @@ pub struct InputValidation {
     pub must_exist: bool,
     pub allowed_extensions: Vec<String>,
     pub path_kind: Option<String>,
+    pub allowed_prefixes: Vec<String>,
 }
 
 #[derive(Clone, Debug, PartialEq)]

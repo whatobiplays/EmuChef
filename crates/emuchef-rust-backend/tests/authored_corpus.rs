@@ -9,6 +9,7 @@ const EXPECTED_AUTHORED_RECIPES: &[&str] = &[
     "app.retroarch.provision.yaml",
     "app.xaniteog.install.yaml",
     "feature.copy_bios.yaml",
+    "feature.copy_roms.yaml",
 ];
 
 fn repo_root() -> PathBuf {

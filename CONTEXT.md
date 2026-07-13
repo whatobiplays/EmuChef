@@ -48,6 +48,22 @@ whose declared runtime type is incompatible. `copy_files.dest` and
 output refs. Canonical recipe YAML continues emitting direct literal values and
 single-field `{ ref: ... }` mappings.
 
+Recipe input declarations support `string`, `integer`, `boolean`, `enum`,
+`file`, `directory`, `path`, `device_path`, `string_list`, `path_list`, and
+`object`. Each declaration carries semantic label, description, and role
+metadata; required and multiple flags; a JSON-compatible default; structured
+enum options; sensitive and advanced presentation flags; extensible metadata;
+and validation for existence, extensions, path kind, and allowed device-path
+prefixes. Enum option values are unique, defaults match the declared type and
+enum options, and canonical YAML preserves declaration and option order.
+
+Planner runtime types map host files and directories to `file_path` and
+`directory_path`, device paths to `device_path`, enums to strings, and declared
+list types to typed arrays. Device paths retain device location and are not
+expanded or rewritten as host paths. The authored `feature.copy_roms` recipe
+demonstrates a host directory, constrained device destination, and enum policy
+consumed through recipe-local input refs.
+
 ## Execution
 
 Execution is single-threaded and dependency-aware. A failed step blocks
