@@ -1,4 +1,4 @@
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::fs;
 use std::path::{Path, PathBuf};
 
@@ -12,7 +12,8 @@ use crate::model::{
     StepConstraints,
 };
 use crate::planner::{
-    build_permission_intent, plan_execution, DeviceContext, PlannerInput, RuntimeCapabilities,
+    build_permission_intent, plan_execution, resolve_runtime_bindings, BindingSource,
+    DeviceContext, PlannerInput, RuntimeCapabilities,
 };
 use crate::planner_device_plan::{
     discover_device_plan_inventory, discover_device_profile_inventory,
@@ -161,7 +162,7 @@ fn authored_corpus_planner_input_with_bindings(
     for (input_id, value) in input_bindings {
         materialize_required_test_host_binding(input_id, value);
         input
-            .input_bindings
+            .explicit_input_bindings
             .insert((*input_id).to_string(), value.clone());
     }
     input
@@ -340,7 +341,18 @@ fn assert_planning_result_stable_non_context_fields_eq(baseline: &Value, actual:
 fn assert_non_context_planner_input_fields_eq(baseline: &PlannerInput, actual: &PlannerInput) {
     assert_eq!(actual.recipes, baseline.recipes);
     assert_eq!(actual.selected_recipe_refs, baseline.selected_recipe_refs);
-    assert_eq!(actual.input_bindings, baseline.input_bindings);
+    assert_eq!(
+        actual.explicit_input_bindings,
+        baseline.explicit_input_bindings
+    );
+    assert_eq!(
+        actual.user_configuration_bindings,
+        baseline.user_configuration_bindings
+    );
+    assert_eq!(
+        actual.device_plan_input_bindings,
+        baseline.device_plan_input_bindings
+    );
     assert_eq!(actual.plan_id, baseline.plan_id);
     assert_eq!(actual.device_plan_ref, baseline.device_plan_ref);
     assert_eq!(actual.device_profile_ref, baseline.device_profile_ref);
@@ -580,7 +592,7 @@ fn stepspec_defaults_do_not_mutate_source_recipe_model() {
 #[test]
 fn required_input_bindings_match_compatibility_success_and_missing_error() {
     let mut bound = planner_input("planner_inputs", &["planner.inputs"]);
-    bound.input_bindings.insert(
+    bound.explicit_input_bindings.insert(
         "planner.inputs/required_cfg".to_string(),
         json!("/tmp/example.cfg"),
     );
@@ -770,7 +782,9 @@ fn permission_intent_defaults_policy_required_and_empty_grants_without_serialize
             steps: vec![grant_with_defaults],
         }],
         selected_recipe_refs: vec!["planner.permission_intent".to_string()],
-        input_bindings: OrderedMap::new(),
+        explicit_input_bindings: OrderedMap::new(),
+        user_configuration_bindings: OrderedMap::new(),
+        device_plan_input_bindings: OrderedMap::new(),
         plan_id: "plan.permission_intent.001".to_string(),
         device_plan_ref: "example.device_plan".to_string(),
         device_profile_ref: "example.device_profile".to_string(),
@@ -965,7 +979,7 @@ fn optional_inputs_prune_and_rebind_like_compatibility() {
         "planner_phase6n_optional_inputs",
         &["planner.phase6n.optional_inputs"],
     );
-    bound.input_bindings.insert(
+    bound.explicit_input_bindings.insert(
         "planner.phase6n.optional_inputs/optional_cfg".to_string(),
         json!("relative/optional.cfg"),
     );
@@ -1255,9 +1269,16 @@ fn recipe_expansion_checked_in_device_plan_selected_sets_match_expanded_refs_for
             .iter()
             .map(String::as_str)
             .collect::<Vec<_>>();
+        let selected_bindings = corpus_recipe_expansion_bindings()
+            .into_iter()
+            .filter(|(key, _)| {
+                key.split_once('/')
+                    .is_some_and(|(recipe_id, _)| selected_recipe_refs.contains(&recipe_id))
+            })
+            .collect::<Vec<_>>();
         let actual = planning_result_value(authored_corpus_planner_input_with_bindings(
             &selected_recipe_refs,
-            &corpus_recipe_expansion_bindings(),
+            &selected_bindings,
         ));
 
         assert_eq!(actual["status"], "success", "{}: {actual:#}", plan.id);
@@ -2714,6 +2735,227 @@ fn authored_corpus_planner_uses_rust_inputs_and_preserves_checked_in_evidence() 
     assert_eq!(snapshot_files(&golden_dir()), goldens_before);
 }
 
+fn resolve_authored_bindings(
+    selected_recipe_refs: &[&str],
+    explicit: OrderedMap<Value>,
+    user_configuration: OrderedMap<Value>,
+    device_plan: OrderedMap<Value>,
+) -> crate::planner::BindingResolution {
+    let input = authored_corpus_planner_input(selected_recipe_refs);
+    let recipes = input
+        .recipes
+        .into_iter()
+        .map(|recipe| (recipe.id.clone(), recipe))
+        .collect::<HashMap<_, _>>();
+    resolve_runtime_bindings(
+        &recipes,
+        &selected_recipe_refs
+            .iter()
+            .map(|recipe| (*recipe).to_string())
+            .collect::<Vec<_>>(),
+        &explicit,
+        &user_configuration,
+        &device_plan,
+    )
+}
+
+fn binding_map(values: &[(&str, Value)]) -> OrderedMap<Value> {
+    values
+        .iter()
+        .map(|(key, value)| ((*key).to_string(), value.clone()))
+        .collect()
+}
+
+#[test]
+fn binding_resolution_applies_precedence_and_preserves_provenance() {
+    materialize_required_test_host_binding(
+        "feature.copy_roms/source",
+        &json!("/tmp/emuchef-binding-resolution-roms"),
+    );
+    let resolution = resolve_authored_bindings(
+        &["feature.copy_roms"],
+        binding_map(&[
+            (
+                "feature.copy_roms/source",
+                json!("/tmp/emuchef-binding-resolution-roms"),
+            ),
+            ("feature.copy_roms/policy", json!("sync")),
+        ]),
+        binding_map(&[
+            ("feature.copy_roms/destination", json!("/sdcard/User")),
+            ("feature.copy_roms/policy", json!("invalid-shadowed")),
+        ]),
+        binding_map(&[("feature.copy_roms/destination", json!("/sdcard/DevicePlan"))]),
+    );
+
+    assert!(resolution.diagnostics.is_empty(), "{resolution:#?}");
+    let by_key = resolution
+        .resolved_inputs
+        .iter()
+        .map(|input| (input.key.as_str(), input))
+        .collect::<HashMap<_, _>>();
+    assert_eq!(
+        by_key["feature.copy_roms/source"].source,
+        Some(BindingSource::Explicit)
+    );
+    assert_eq!(
+        by_key["feature.copy_roms/destination"].value,
+        Some(json!("/sdcard/User"))
+    );
+    assert_eq!(
+        by_key["feature.copy_roms/destination"].source,
+        Some(BindingSource::UserConfiguration)
+    );
+    assert_eq!(
+        serde_json::to_value(by_key["feature.copy_roms/destination"]).unwrap(),
+        json!({
+            "key": "feature.copy_roms/destination",
+            "recipeId": "feature.copy_roms",
+            "inputId": "destination",
+            "type": "device_path",
+            "value": "/sdcard/User",
+            "source": "user_configuration",
+        })
+    );
+    assert_eq!(
+        by_key["feature.copy_roms/policy"].value,
+        Some(json!("sync"))
+    );
+    assert_eq!(
+        by_key["feature.copy_roms/policy"].source,
+        Some(BindingSource::Explicit)
+    );
+
+    let default_only = resolve_authored_bindings(
+        &["feature.copy_roms"],
+        binding_map(&[(
+            "feature.copy_roms/source",
+            json!("/tmp/emuchef-binding-resolution-roms"),
+        )]),
+        OrderedMap::new(),
+        OrderedMap::new(),
+    );
+    let destination = default_only
+        .resolved_inputs
+        .iter()
+        .find(|input| input.key == "feature.copy_roms/destination")
+        .unwrap();
+    assert_eq!(destination.value, Some(json!("/sdcard/ROMs")));
+    assert_eq!(destination.source, Some(BindingSource::RecipeDefault));
+}
+
+#[test]
+fn binding_resolution_validates_only_the_winner_and_redacts_sensitive_values() {
+    materialize_required_test_host_binding(
+        "feature.copy_roms/source",
+        &json!("/tmp/emuchef-binding-resolution-roms"),
+    );
+    let mut input = authored_corpus_planner_input(&["feature.copy_roms"]);
+    input
+        .recipes
+        .iter_mut()
+        .find(|recipe| recipe.id == "feature.copy_roms")
+        .unwrap()
+        .inputs
+        .get_mut("policy")
+        .unwrap()
+        .sensitive = true;
+    let recipes = input
+        .recipes
+        .into_iter()
+        .map(|recipe| (recipe.id.clone(), recipe))
+        .collect::<HashMap<_, _>>();
+    let resolution = resolve_runtime_bindings(
+        &recipes,
+        &["feature.copy_roms".to_string()],
+        &binding_map(&[
+            ("feature.copy_roms/source", json!(42)),
+            ("feature.copy_roms/policy", json!("DO_NOT_LEAK")),
+        ]),
+        &binding_map(&[("feature.copy_roms/policy", json!("sync"))]),
+        &binding_map(&[("feature.copy_roms/policy", json!("merge"))]),
+    );
+
+    assert_eq!(resolution.diagnostics.len(), 2, "{resolution:#?}");
+    let serialized = serde_json::to_string(&resolution.diagnostics).unwrap();
+    assert!(!serialized.contains("DO_NOT_LEAK"));
+    assert!(resolution.diagnostics.iter().all(|diagnostic| {
+        diagnostic.provenance == Some(BindingSource::Explicit)
+            && diagnostic.details["provenance"] == "explicit"
+    }));
+
+    let invalid_user = resolve_runtime_bindings(
+        &recipes,
+        &["feature.copy_roms".to_string()],
+        &binding_map(&[(
+            "feature.copy_roms/source",
+            json!("/tmp/emuchef-binding-resolution-roms"),
+        )]),
+        &binding_map(&[("feature.copy_roms/policy", json!("DO_NOT_LEAK"))]),
+        &binding_map(&[("feature.copy_roms/policy", json!("sync"))]),
+    );
+    assert!(invalid_user.diagnostics.iter().any(|diagnostic| {
+        diagnostic.key == "feature.copy_roms/policy"
+            && diagnostic.provenance == Some(BindingSource::UserConfiguration)
+    }));
+}
+
+#[test]
+fn binding_resolution_reports_missing_unknown_unselected_and_optional_unbound_inputs() {
+    let missing = resolve_authored_bindings(
+        &["feature.copy_roms"],
+        binding_map(&[
+            ("unknown.recipe/value", json!("ignored")),
+            ("app.retroarch.provision/retroarch_cfg", json!("ignored")),
+        ]),
+        OrderedMap::new(),
+        OrderedMap::new(),
+    );
+    assert!(missing
+        .diagnostics
+        .iter()
+        .any(|diagnostic| diagnostic.code == "binding_missing"));
+    assert!(missing
+        .diagnostics
+        .iter()
+        .any(|diagnostic| diagnostic.code == "unknown_binding"));
+    assert!(missing
+        .diagnostics
+        .iter()
+        .any(|diagnostic| diagnostic.code == "binding_recipe_not_selected"));
+
+    let optional = resolve_authored_bindings(
+        &["app.retroarch.provision"],
+        OrderedMap::new(),
+        OrderedMap::new(),
+        OrderedMap::new(),
+    );
+    let retroarch = optional
+        .resolved_inputs
+        .iter()
+        .find(|input| input.key == "app.retroarch.provision/retroarch_cfg")
+        .unwrap();
+    assert_eq!(retroarch.value, None);
+    assert_eq!(retroarch.source, None);
+
+    let first = resolve_authored_bindings(
+        &["app.retroarch.provision"],
+        binding_map(&[("z.unknown/value", json!(1)), ("a.unknown/value", json!(2))]),
+        OrderedMap::new(),
+        OrderedMap::new(),
+    );
+    let second = resolve_authored_bindings(
+        &["app.retroarch.provision"],
+        binding_map(&[("a.unknown/value", json!(2)), ("z.unknown/value", json!(1))]),
+        OrderedMap::new(),
+        OrderedMap::new(),
+    );
+    assert_eq!(
+        serde_json::to_value(first).unwrap(),
+        serde_json::to_value(second).unwrap()
+    );
+}
+
 #[test]
 fn runtime_input_metadata_validates_enum_and_device_path_bindings() {
     let valid = planning_result_value(authored_corpus_planner_input_with_bindings(
@@ -2779,7 +3021,7 @@ fn runtime_input_metadata_validates_enum_and_device_path_bindings() {
     let temp = TempDir::new().expect("missing-path test root should be created");
     let missing_path = temp.path().join("missing-roms");
     let mut missing_host_path = authored_corpus_planner_input(&["feature.copy_roms"]);
-    missing_host_path.input_bindings.insert(
+    missing_host_path.explicit_input_bindings.insert(
         "feature.copy_roms/source".to_string(),
         json!(missing_path.to_string_lossy()),
     );
@@ -3764,18 +4006,20 @@ fn repo_device_plan_ingestion_accepts_supplied_bindings_without_applying_metadat
     );
     assert_eq!(
         input
-            .input_bindings
+            .explicit_input_bindings
             .get("feature.copy_bios/bios_source_dir"),
         Some(&json!("/tmp/emuchef-p7i-bios"))
     );
     assert_eq!(
         input
-            .input_bindings
+            .explicit_input_bindings
             .get("app.xaniteog.install/xaniteog_apk"),
         Some(&json!("/tmp/emuchef-p7i-xaniteog.apk"))
     );
     assert!(
-        !input.input_bindings.contains_key("config_variants"),
+        !input
+            .device_plan_input_bindings
+            .contains_key("config_variants"),
         "metadata-only device plan overrides must not become bindings"
     );
 }
@@ -3808,12 +4052,16 @@ fn repo_device_plan_defaults_and_config_variants_are_checked_in_metadata_only() 
 
         let input = repo_device_plan_planner_input_with_bindings(&plan.id, &[]);
         assert!(
-            !input.input_bindings.contains_key("show_advanced_steps"),
+            !input
+                .device_plan_input_bindings
+                .contains_key("show_advanced_steps"),
             "{} defaults.show_advanced_steps must not become a planner binding",
             plan.id
         );
         assert!(
-            !input.input_bindings.contains_key("config_variants"),
+            !input
+                .device_plan_input_bindings
+                .contains_key("config_variants"),
             "{} overrides.config_variants must not become a planner binding",
             plan.id
         );
@@ -3903,36 +4151,37 @@ metadata: {}
 
     assert_eq!(
         input
-            .input_bindings
+            .device_plan_input_bindings
             .keys()
             .map(String::as_str)
             .collect::<Vec<_>>(),
         vec![
             "feature.copy_bios/bios_source_dir",
             "app.xaniteog.install/xaniteog_apk",
-            "app.retroarch.provision/retroarch_cfg",
         ]
     );
     assert_eq!(
         input
-            .input_bindings
+            .explicit_input_bindings
             .get("feature.copy_bios/bios_source_dir"),
         Some(&json!("/tmp/explicit-bios"))
     );
     assert_eq!(
         input
-            .input_bindings
+            .device_plan_input_bindings
             .get("app.xaniteog.install/xaniteog_apk"),
         Some(&json!("/tmp/override-xaniteog.apk"))
     );
     assert_eq!(
         input
-            .input_bindings
+            .explicit_input_bindings
             .get("app.retroarch.provision/retroarch_cfg"),
         Some(&json!("/tmp/explicit-retroarch.cfg"))
     );
     assert!(
-        !input.input_bindings.contains_key("config_variants"),
+        !input
+            .device_plan_input_bindings
+            .contains_key("config_variants"),
         "config variant metadata must not become a binding"
     );
 }
@@ -3965,7 +4214,7 @@ metadata: {}
     .expect("ref-shaped defaults should stay inactive in current contract");
 
     assert!(
-        input.input_bindings.is_empty(),
+        input.device_plan_input_bindings.is_empty(),
         "device_plan.defaults must not populate Rust planner bindings in current contract"
     );
 }
@@ -4488,7 +4737,9 @@ fn artifact_selection_input(
             }],
         }],
         selected_recipe_refs: vec!["planner.artifact_selection".to_string()],
-        input_bindings: OrderedMap::new(),
+        explicit_input_bindings: OrderedMap::new(),
+        user_configuration_bindings: OrderedMap::new(),
+        device_plan_input_bindings: OrderedMap::new(),
         plan_id: "plan.artifact_selection.001".to_string(),
         device_plan_ref: "example.device_plan".to_string(),
         device_profile_ref: "example.device_profile".to_string(),
@@ -4531,7 +4782,9 @@ fn ref_validation_input(steps: Vec<Step>) -> PlannerInput {
             steps,
         }],
         selected_recipe_refs: vec!["planner.ref_validation".to_string()],
-        input_bindings: OrderedMap::new(),
+        explicit_input_bindings: OrderedMap::new(),
+        user_configuration_bindings: OrderedMap::new(),
+        device_plan_input_bindings: OrderedMap::new(),
         plan_id: "plan.ref_validation.001".to_string(),
         device_plan_ref: "example.device_plan".to_string(),
         device_profile_ref: "example.device_profile".to_string(),
@@ -4619,7 +4872,9 @@ fn dependency_validation_input(steps: Vec<Step>) -> PlannerInput {
             steps,
         }],
         selected_recipe_refs: vec!["planner.dependency_validation".to_string()],
-        input_bindings: OrderedMap::new(),
+        explicit_input_bindings: OrderedMap::new(),
+        user_configuration_bindings: OrderedMap::new(),
+        device_plan_input_bindings: OrderedMap::new(),
         plan_id: "plan.dependency_validation.001".to_string(),
         device_plan_ref: "example.device_plan".to_string(),
         device_profile_ref: "example.device_profile".to_string(),
@@ -4686,7 +4941,9 @@ fn recipe_expansion_input(recipes: Vec<Recipe>, selected_recipe_refs: Vec<&str>)
             .into_iter()
             .map(ToString::to_string)
             .collect(),
-        input_bindings: OrderedMap::new(),
+        explicit_input_bindings: OrderedMap::new(),
+        user_configuration_bindings: OrderedMap::new(),
+        device_plan_input_bindings: OrderedMap::new(),
         plan_id: "plan.recipe_expansion.001".to_string(),
         device_plan_ref: "example.device_plan".to_string(),
         device_profile_ref: "example.device_profile".to_string(),
@@ -4803,7 +5060,9 @@ fn param_contract_input(steps: Vec<Step>) -> PlannerInput {
             steps,
         }],
         selected_recipe_refs: vec!["planner.param_contract".to_string()],
-        input_bindings: OrderedMap::new(),
+        explicit_input_bindings: OrderedMap::new(),
+        user_configuration_bindings: OrderedMap::new(),
+        device_plan_input_bindings: OrderedMap::new(),
         plan_id: "plan.param_contract.001".to_string(),
         device_plan_ref: "example.device_plan".to_string(),
         device_profile_ref: "example.device_profile".to_string(),

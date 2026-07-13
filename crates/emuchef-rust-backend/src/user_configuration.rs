@@ -465,7 +465,7 @@ fn validate_with_recipes(
         &configuration.device_plan,
         recipes,
     ) {
-        Ok(parts) => parts.override_input_bindings,
+        Ok(parts) => parts.device_plan_input_bindings,
         Err(error) => {
             diagnostics.push(configuration_diagnostic(
                 error.code(),

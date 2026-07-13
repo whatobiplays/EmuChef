@@ -48,7 +48,7 @@ pub(crate) struct PlannerInputParts {
     pub device_profile_ref: String,
     pub recipe_refs: Vec<String>,
     pub selected_recipe_refs: Vec<String>,
-    pub override_input_bindings: OrderedMap<JsonValue>,
+    pub device_plan_input_bindings: OrderedMap<JsonValue>,
     pub device_context: DeviceContext,
     pub runtime_capabilities: RuntimeCapabilities,
 }
@@ -160,21 +160,22 @@ pub(crate) fn discover_device_plan_inventory(
 /// Build planner input from authored device-plan data with detected facts applied.
 ///
 /// This keeps the existing authored device-plan constructor as the source of
-/// selected recipes, bindings, profile context, and runtime capabilities. It
+/// selected recipes, device-plan bindings, profile context, and runtime
+/// capabilities. It
 /// only layers detected facts over the resulting planner context; route-specific
 /// explicit context overrides remain separate and are not applied here.
 pub(crate) fn planner_input_from_authored_device_plan_with_detected_facts(
     authored_root: impl AsRef<Path>,
     device_plan_ref: &str,
     plan_id: String,
-    input_bindings: OrderedMap<JsonValue>,
+    explicit_input_bindings: OrderedMap<JsonValue>,
     detected_facts: &DetectedDeviceFacts,
 ) -> Result<PlannerInput, PlannerLoadError> {
     let mut input = PlannerInput::from_authored_device_plan(
         authored_root,
         device_plan_ref,
         plan_id,
-        input_bindings,
+        explicit_input_bindings,
     )?;
     input.device_context =
         apply_detected_device_facts_to_context(input.device_context, detected_facts);
@@ -191,7 +192,7 @@ pub(crate) fn plan_from_authored_device_plan_with_detected_facts(
     authored_root: impl AsRef<Path>,
     device_plan_ref: &str,
     plan_id: String,
-    input_bindings: OrderedMap<JsonValue>,
+    explicit_input_bindings: OrderedMap<JsonValue>,
     detected_facts: &DetectedDeviceFacts,
 ) -> Result<PlanningResult, PlannerLoadError> {
     let authored_root = authored_root.as_ref();
@@ -199,7 +200,7 @@ pub(crate) fn plan_from_authored_device_plan_with_detected_facts(
         authored_root,
         device_plan_ref,
         plan_id,
-        input_bindings,
+        explicit_input_bindings,
         detected_facts,
     )?;
     let profile_match = load_device_plan_profile_match_criteria(authored_root, device_plan_ref)?;
@@ -317,7 +318,7 @@ pub(crate) fn load_planner_input_parts(
             .map(|selection| selection.recipe_ref.clone())
             .collect(),
         selected_recipe_refs: selected_recipe_refs(&plan.plan),
-        override_input_bindings: override_input_bindings(&plan.plan, recipes)?,
+        device_plan_input_bindings: device_plan_input_bindings(&plan.plan, recipes)?,
         device_context: synthetic_device_context(&profile.profile),
         runtime_capabilities: runtime_capabilities(&profile.profile.capability_defaults),
     })
@@ -480,7 +481,7 @@ fn selected_recipe_refs(plan: &DevicePlanYaml) -> Vec<String> {
         .collect()
 }
 
-fn override_input_bindings(
+fn device_plan_input_bindings(
     plan: &DevicePlanYaml,
     recipes: &[Recipe],
 ) -> Result<OrderedMap<JsonValue>, PlannerLoadError> {

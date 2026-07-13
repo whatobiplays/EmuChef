@@ -87,6 +87,20 @@ slash or backslash, and case-insensitive `.yaml` or `.yml` suffixes are always
 paths, including when missing. Other values must be valid configuration IDs;
 resolution never searches the authored root or current working directory.
 
+Planning keeps explicit request bindings, persisted user-configuration
+bindings, and device-plan input overrides as separate maps until the planner
+resolves them. For every input in the dependency-expanded selected recipe set,
+the winning value is chosen in this order: explicit request, saved user
+configuration, device plan, recipe default, then unbound. Only the winning
+value is validated for a planning request; a valid higher-precedence value may
+therefore shadow an invalid saved value. An invalid winner produces a
+diagnostic and never falls back. Resolved records retain `explicit`,
+`user_configuration`, `device_plan`, or `recipe_default` provenance. Unknown
+keys and bindings outside the effective recipe set are errors, optional inputs
+may remain explicitly unbound, and required inputs without a winner are
+reported together. The execution plan receives only normalized effective input
+values; the executor does not merge layers or interpret provenance.
+
 ## Execution
 
 Execution is single-threaded and dependency-aware. A failed step blocks

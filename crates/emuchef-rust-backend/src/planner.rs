@@ -201,12 +201,58 @@ pub(crate) enum PermissionIntentAction {
 pub struct PlannerInput {
     pub recipes: Vec<Recipe>,
     pub selected_recipe_refs: Vec<String>,
-    pub input_bindings: OrderedMap<Value>,
+    pub explicit_input_bindings: OrderedMap<Value>,
+    pub user_configuration_bindings: OrderedMap<Value>,
+    pub device_plan_input_bindings: OrderedMap<Value>,
     pub plan_id: String,
     pub device_plan_ref: String,
     pub device_profile_ref: String,
     pub device_context: DeviceContext,
     pub runtime_capabilities: RuntimeCapabilities,
+}
+
+/// Identifies the layer that supplied an effective runtime input value.
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum BindingSource {
+    Explicit,
+    UserConfiguration,
+    DevicePlan,
+    RecipeDefault,
+}
+
+/// One effective input value, including its declaration identity and provenance.
+#[derive(Clone, Debug, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ResolvedInputBinding {
+    pub key: String,
+    pub recipe_id: String,
+    pub input_id: String,
+    #[serde(rename = "type")]
+    pub type_name: String,
+    pub value: Option<Value>,
+    pub source: Option<BindingSource>,
+}
+
+/// A catalog-aware runtime binding diagnostic with no supplied value material.
+#[derive(Clone, Debug, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct BindingDiagnostic {
+    pub code: String,
+    pub message: String,
+    pub key: String,
+    pub provenance: Option<BindingSource>,
+    pub details: Value,
+    #[serde(skip)]
+    planner_message: PlannerMessage,
+}
+
+/// Deterministic output from the planner-owned binding precedence resolver.
+#[derive(Clone, Debug, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct BindingResolution {
+    pub resolved_inputs: Vec<ResolvedInputBinding>,
+    pub diagnostics: Vec<BindingDiagnostic>,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -231,7 +277,9 @@ impl PlannerInput {
         Ok(Self {
             recipes,
             selected_recipe_refs,
-            input_bindings: OrderedMap::new(),
+            explicit_input_bindings: OrderedMap::new(),
+            user_configuration_bindings: OrderedMap::new(),
+            device_plan_input_bindings: OrderedMap::new(),
             plan_id,
             device_plan_ref,
             device_profile_ref,
@@ -244,7 +292,7 @@ impl PlannerInput {
         authored_root: impl AsRef<Path>,
         device_plan_ref: &str,
         plan_id: String,
-        input_bindings: OrderedMap<Value>,
+        explicit_input_bindings: OrderedMap<Value>,
     ) -> Result<Self, PlannerLoadError> {
         let authored_root = authored_root.as_ref();
         let recipes = load_top_level_recipes(authored_root)?;
@@ -268,15 +316,12 @@ impl PlannerInput {
                 ));
             }
         }
-        let mut merged_input_bindings = parts.override_input_bindings;
-        for (input_id, value) in input_bindings {
-            merged_input_bindings.insert(input_id, value);
-        }
-
         Ok(Self {
             recipes,
             selected_recipe_refs: parts.selected_recipe_refs,
-            input_bindings: merged_input_bindings,
+            explicit_input_bindings,
+            user_configuration_bindings: OrderedMap::new(),
+            device_plan_input_bindings: parts.device_plan_input_bindings,
             plan_id,
             device_plan_ref: parts.device_plan_ref,
             device_profile_ref: parts.device_profile_ref,
@@ -320,10 +365,37 @@ pub fn plan_execution(input: PlannerInput) -> PlanningResult {
         return error_result(dependency_errors);
     }
 
+    let binding_resolution = resolve_runtime_bindings(
+        &recipes,
+        &expanded_recipe_refs,
+        &input.explicit_input_bindings,
+        &input.user_configuration_bindings,
+        &input.device_plan_input_bindings,
+    );
+    if !binding_resolution.diagnostics.is_empty() {
+        return error_result(
+            binding_resolution
+                .diagnostics
+                .into_iter()
+                .map(|diagnostic| diagnostic.planner_message)
+                .collect(),
+        );
+    }
+    let effective_input_bindings = binding_resolution
+        .resolved_inputs
+        .iter()
+        .filter_map(|resolved| {
+            resolved
+                .value
+                .clone()
+                .map(|value| (resolved.key.clone(), value))
+        })
+        .collect::<OrderedMap<_>>();
+
     let (selected_step_ids, selection_errors) = selected_step_ids(
         &recipes,
         &expanded_recipe_refs,
-        &input.input_bindings,
+        &effective_input_bindings,
         &input.runtime_capabilities,
     );
     if !selection_errors.is_empty() {
@@ -331,12 +403,6 @@ pub fn plan_execution(input: PlannerInput) -> PlanningResult {
     }
     let selected_input_ids =
         selected_input_ids(&recipes, &expanded_recipe_refs, &selected_step_ids);
-    let input_errors =
-        validate_input_bindings(&recipes, &selected_input_ids, &input.input_bindings);
-    if !input_errors.is_empty() {
-        return error_result(input_errors);
-    }
-
     let authored_steps = authored_steps(&recipes, &expanded_recipe_refs, &selected_step_ids);
     let step_param_errors = validate_step_param_contracts(&recipes, &authored_steps);
     if !step_param_errors.is_empty() {
@@ -376,7 +442,7 @@ pub fn plan_execution(input: PlannerInput) -> PlanningResult {
         },
         device_context: input.device_context,
         runtime_capabilities: input.runtime_capabilities,
-        inputs: emit_execution_inputs(&recipes, &selected_input_ids, &input.input_bindings),
+        inputs: emit_execution_inputs(&recipes, &selected_input_ids, &effective_input_bindings),
         artifacts: emit_execution_artifacts(&recipes, &expanded_recipe_refs),
         steps: ordered_steps
             .into_iter()
@@ -1052,36 +1118,179 @@ fn selected_input_ids(
     input_ids
 }
 
-fn validate_input_bindings(
+pub(crate) fn resolve_runtime_bindings(
     recipes: &HashMap<String, Recipe>,
-    input_ids: &[String],
-    input_bindings: &OrderedMap<Value>,
-) -> Vec<PlannerMessage> {
-    let mut errors = Vec::new();
-    for input_id in input_ids {
-        let Some((recipe_id, local_input_id)) = input_id.split_once('/') else {
-            continue;
-        };
-        let Some(declaration) = recipes
-            .get(recipe_id)
-            .and_then(|recipe| recipe.inputs.get(local_input_id))
-        else {
-            continue;
-        };
-        let Some(value) = binding_value(declaration, input_id, input_bindings) else {
-            if !declaration.required {
+    expanded_recipe_refs: &[String],
+    explicit_bindings: &OrderedMap<Value>,
+    user_configuration_bindings: &OrderedMap<Value>,
+    device_plan_bindings: &OrderedMap<Value>,
+) -> BindingResolution {
+    let selected = expanded_recipe_refs
+        .iter()
+        .map(String::as_str)
+        .collect::<HashSet<_>>();
+    let layers = [
+        (BindingSource::Explicit, explicit_bindings),
+        (
+            BindingSource::UserConfiguration,
+            user_configuration_bindings,
+        ),
+        (BindingSource::DevicePlan, device_plan_bindings),
+    ];
+    let mut diagnostics = Vec::new();
+
+    for (source, bindings) in layers {
+        let mut keys = bindings.keys().collect::<Vec<_>>();
+        keys.sort();
+        for key in keys {
+            let Some((recipe_id, input_id)) = split_binding_key(key) else {
+                diagnostics.push(binding_diagnostic(
+                    PlannerMessage {
+                        code: "unknown_binding".to_string(),
+                        message: format!("Binding '{key}' is not a qualified recipe input key."),
+                        details: json!({ "input_id": key }),
+                    },
+                    key,
+                    Some(source),
+                ));
+                continue;
+            };
+            let Some(recipe) = recipes.get(recipe_id) else {
+                diagnostics.push(binding_diagnostic(
+                    PlannerMessage {
+                        code: "unknown_binding".to_string(),
+                        message: format!("Binding '{key}' references an unknown recipe."),
+                        details: json!({ "input_id": key }),
+                    },
+                    key,
+                    Some(source),
+                ));
+                continue;
+            };
+            if !recipe.inputs.contains_key(input_id) {
+                diagnostics.push(binding_diagnostic(
+                    PlannerMessage {
+                        code: "unknown_binding".to_string(),
+                        message: format!("Binding '{key}' references an unknown input."),
+                        details: json!({ "input_id": key }),
+                    },
+                    key,
+                    Some(source),
+                ));
                 continue;
             }
-            errors.push(PlannerMessage {
-                code: "binding_missing".to_string(),
-                message: format!("Required binding '{input_id}' is missing."),
-                details: json!({ "input_id": input_id }),
-            });
+            if !selected.contains(recipe_id) {
+                diagnostics.push(binding_diagnostic(
+                    PlannerMessage {
+                        code: "binding_recipe_not_selected".to_string(),
+                        message: format!(
+                            "Binding '{key}' is outside the selected recipe dependency set."
+                        ),
+                        details: json!({ "input_id": key }),
+                    },
+                    key,
+                    Some(source),
+                ));
+            }
+        }
+    }
+
+    let mut resolved_inputs = Vec::new();
+    for recipe_id in expanded_recipe_refs {
+        let Some(recipe) = recipes.get(recipe_id) else {
             continue;
         };
-        errors.extend(validate_binding_value(input_id, declaration, &value));
+        for (input_id, declaration) in &recipe.inputs {
+            let key = make_execution_input_id(recipe_id, input_id);
+            let (raw_value, source) = explicit_bindings
+                .get(&key)
+                .map(|value| (Some(value.clone()), Some(BindingSource::Explicit)))
+                .or_else(|| {
+                    user_configuration_bindings
+                        .get(&key)
+                        .map(|value| (Some(value.clone()), Some(BindingSource::UserConfiguration)))
+                })
+                .or_else(|| {
+                    device_plan_bindings
+                        .get(&key)
+                        .map(|value| (Some(value.clone()), Some(BindingSource::DevicePlan)))
+                })
+                .unwrap_or_else(|| {
+                    if declaration.default.is_null() {
+                        (None, None)
+                    } else {
+                        (
+                            Some(declaration.default.clone()),
+                            Some(BindingSource::RecipeDefault),
+                        )
+                    }
+                });
+            let value = raw_value.map(|value| normalize_binding_value(declaration, value));
+
+            if let Some(value) = &value {
+                diagnostics.extend(
+                    validate_binding_value(&key, declaration, value)
+                        .into_iter()
+                        .map(|message| binding_diagnostic(message, &key, source)),
+                );
+            } else if declaration.required {
+                diagnostics.push(binding_diagnostic(
+                    PlannerMessage {
+                        code: "binding_missing".to_string(),
+                        message: format!("Required binding '{key}' is missing."),
+                        details: json!({ "input_id": key }),
+                    },
+                    &key,
+                    None,
+                ));
+            }
+
+            resolved_inputs.push(ResolvedInputBinding {
+                key,
+                recipe_id: recipe_id.clone(),
+                input_id: input_id.clone(),
+                type_name: declaration.type_name.clone(),
+                value,
+                source,
+            });
+        }
     }
-    errors
+
+    BindingResolution {
+        resolved_inputs,
+        diagnostics,
+    }
+}
+
+fn split_binding_key(key: &str) -> Option<(&str, &str)> {
+    let (recipe_id, input_id) = key.split_once('/')?;
+    (!recipe_id.is_empty() && !input_id.is_empty() && !input_id.contains('/'))
+        .then_some((recipe_id, input_id))
+}
+
+fn binding_diagnostic(
+    planner_message: PlannerMessage,
+    key: &str,
+    provenance: Option<BindingSource>,
+) -> BindingDiagnostic {
+    let mut details = planner_message.details.clone();
+    if let Value::Object(object) = &mut details {
+        object.insert("key".to_string(), Value::String(key.to_string()));
+        object.insert(
+            "provenance".to_string(),
+            provenance.map_or(Value::Null, |source| {
+                serde_json::to_value(source).expect("binding source should serialize")
+            }),
+        );
+    }
+    BindingDiagnostic {
+        code: planner_message.code.clone(),
+        message: planner_message.message.clone(),
+        key: key.to_string(),
+        provenance,
+        details,
+        planner_message,
+    }
 }
 
 fn validate_binding_value(

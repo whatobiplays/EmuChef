@@ -173,7 +173,7 @@ fn planning_request(config: &PlanCliConfig) -> Result<PlanningRequest, ProcessOu
             .device_plan
             .clone()
             .expect("device plan should be present after parsing"),
-        input_bindings: parse_plan_bindings(&config.bindings)?,
+        explicit_input_bindings: parse_plan_bindings(&config.bindings)?,
         explicit_context: ExplicitDeviceContext {
             manufacturer: config.manufacturer.clone(),
             model: config.model.clone(),

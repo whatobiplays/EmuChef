@@ -28,7 +28,7 @@ pub(crate) struct ExplicitDeviceContext {
 pub(crate) struct PlanningRequest {
     pub authored_root: PathBuf,
     pub device_plan: String,
-    pub input_bindings: OrderedMap<Value>,
+    pub explicit_input_bindings: OrderedMap<Value>,
     pub explicit_context: ExplicitDeviceContext,
     pub adb_probe: Option<AdbProbeConfig>,
 }
@@ -40,7 +40,7 @@ pub(crate) fn plan_with_adb_runner<R: CommandRunner>(
     let PlanningRequest {
         authored_root,
         device_plan,
-        input_bindings,
+        explicit_input_bindings,
         explicit_context,
         adb_probe,
     } = request;
@@ -56,7 +56,7 @@ pub(crate) fn plan_with_adb_runner<R: CommandRunner>(
             &authored_root,
             &device_plan,
             plan_id,
-            input_bindings,
+            explicit_input_bindings,
             &detected_facts,
         )
         .map_err(planner_load_error_output)?;
@@ -68,7 +68,7 @@ pub(crate) fn plan_with_adb_runner<R: CommandRunner>(
         &authored_root,
         &device_plan,
         plan_id,
-        input_bindings,
+        explicit_input_bindings,
     )
     .map_err(planner_load_error_output)?;
     apply_explicit_device_context(&mut input.device_context, &explicit_context);
@@ -158,7 +158,7 @@ mod tests {
         PlanningRequest {
             authored_root: authored_root(),
             device_plan: "ayaneo.pocket_s_mini.base".to_string(),
-            input_bindings: OrderedMap::new(),
+            explicit_input_bindings: OrderedMap::new(),
             explicit_context: ExplicitDeviceContext::default(),
             adb_probe,
         }
