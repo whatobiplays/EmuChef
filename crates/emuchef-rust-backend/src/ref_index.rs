@@ -8,16 +8,8 @@
 use serde_json::{json, Value};
 
 use crate::model::Recipe;
+use crate::runtime_refs::{artifact_field_value_type, input_value_type, RUNTIME_ARTIFACT_FIELDS};
 use crate::step_specs;
-
-const RUNTIME_ARTIFACT_FIELDS: &[&str] = &[
-    "cache_hit",
-    "error",
-    "filename",
-    "local_path",
-    "resolved_url",
-    "status",
-];
 
 pub fn ref_index_to_dto(recipe: &Recipe) -> Value {
     let input_refs = input_refs(recipe);
@@ -148,23 +140,4 @@ fn step_output_candidates(recipe: &Recipe) -> Vec<Value> {
                 })
         })
         .collect()
-}
-
-fn input_value_type(type_name: &str, multiple: bool) -> &'static str {
-    if multiple {
-        "path_list"
-    } else if type_name == "directory" {
-        "directory_path"
-    } else {
-        "file_path"
-    }
-}
-
-fn artifact_field_value_type(field: &str) -> &'static str {
-    match field {
-        "cache_hit" => "boolean",
-        "local_path" => "file_path",
-        "error" | "filename" | "resolved_url" | "status" => "string",
-        _ => unreachable!("runtime artifact fields are fixed by RUNTIME_ARTIFACT_FIELDS"),
-    }
 }

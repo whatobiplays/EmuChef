@@ -21,6 +21,7 @@ import {
   buildUpdateStepParamsCommand,
   displayValueForObjectField,
   isAuthoredRefValue,
+  literalSeedForParam,
   moveObjectListRow,
   moveStringListValue,
   objectListValue,
@@ -138,7 +139,9 @@ function StepParamRow({
   const structuredKind = structuredParamEditorKind(stepSpec, paramName, value);
   const isStructuredParam = structuredKind !== null;
   const enumValues = typeof value === "string" ? paramSpec?.enumValues ?? [] : [];
-  const allowedValueTypes = stepSpec?.refFilters[paramName] ?? [];
+  const acceptedSources = paramSpec?.acceptedSources ?? [];
+  const allowedRefSources = acceptedSources.filter((source) => source !== "literal");
+  const allowedValueTypes = paramSpec?.acceptedValueTypes ?? [];
 
   let control: ReactNode;
   if (structuredKind === "artifact-id-list" && shape) {
@@ -178,6 +181,7 @@ function StepParamRow({
     });
     control = (
       <RefPicker
+        allowedSources={allowedRefSources}
         allowedValueTypes={allowedValueTypes}
         currentRef={value.ref}
         dependencyWarning={dependencyWarning}
@@ -197,6 +201,47 @@ function StepParamRow({
     control = <StringParamInput readOnly={readOnly} value={value} onUpdate={onUpdate} />;
   } else {
     control = <JsonValueEditor readOnly={readOnly} value={value} onUpdate={onUpdate} />;
+  }
+
+  if (!isStructuredParam && acceptedSources.includes("literal") && allowedRefSources.length > 0) {
+    const compatibleRefs = buildRefPickerOptions(refIndex, {
+      allowedSources: allowedRefSources,
+      allowedValueTypes,
+      currentRef: null,
+      showAll: false,
+    });
+    const refSeed = compatibleRefs.find((option) => !option.missing && !option.incompatible)?.ref ?? null;
+    control = (
+      <div className="grid gap-2">
+        <div className="flex gap-1" role="group" aria-label={`${paramName} value source`}>
+          <button
+            className="rounded border border-slate-300 px-2 py-1 text-xs disabled:opacity-40"
+            disabled={readOnly || !isAuthoredRefValue(value)}
+            type="button"
+            onClick={() =>
+              void onUpdate(
+                literalSeedForParam(allowedValueTypes, paramSpec?.enumValues ?? [], stepSpec?.defaults[paramName]),
+              )
+            }
+          >
+            Literal
+          </button>
+          <button
+            className="rounded border border-slate-300 px-2 py-1 text-xs disabled:opacity-40"
+            disabled={readOnly || isAuthoredRefValue(value) || refSeed === null}
+            type="button"
+            onClick={() => {
+              if (refSeed !== null) {
+                void onUpdate({ ref: refSeed });
+              }
+            }}
+          >
+            Ref
+          </button>
+        </div>
+        {control}
+      </div>
+    );
   }
 
   if (isStructuredParam) {
@@ -250,7 +295,7 @@ function ParamNameBlock({
       <div className="break-words text-sm font-medium text-slate-950">{paramName}</div>
       {paramSpec ? (
         <div className="mt-1 text-xs text-slate-500">
-          {paramSpec.required ? "Required" : "Optional"} · {paramSpec.mode}
+          {paramSpec.required ? "Required" : "Optional"} · {paramSpec.acceptedSources.join(" / ")}
         </div>
       ) : null}
     </div>
@@ -1089,6 +1134,7 @@ function BooleanParamInput({ disabled = false, value, onUpdate }: { disabled?: b
 
 function RefPicker({
   currentRef,
+  allowedSources,
   allowedValueTypes,
   dependencyWarning,
   disabled = false,
@@ -1097,6 +1143,7 @@ function RefPicker({
   onUpdate,
 }: {
   currentRef: string;
+  allowedSources: readonly string[];
   allowedValueTypes: readonly string[];
   dependencyWarning: StepRefDependencyWarning | null;
   disabled?: boolean;
@@ -1106,8 +1153,8 @@ function RefPicker({
 }) {
   const [showAll, setShowAll] = useState(false);
   const options = useMemo(
-    () => buildRefPickerOptions(refIndex, { allowedValueTypes, currentRef, showAll }),
-    [allowedValueTypes, currentRef, refIndex, showAll],
+    () => buildRefPickerOptions(refIndex, { allowedSources, allowedValueTypes, currentRef, showAll }),
+    [allowedSources, allowedValueTypes, currentRef, refIndex, showAll],
   );
 
   return (
@@ -1128,7 +1175,7 @@ function RefPicker({
           </option>
         ))}
       </select>
-      {allowedValueTypes.length > 0 ? (
+      {allowedSources.length > 0 || allowedValueTypes.length > 0 ? (
         <button
           className="w-fit rounded border border-slate-300 px-2 py-1 text-xs text-slate-700 hover:bg-slate-50"
           disabled={disabled}

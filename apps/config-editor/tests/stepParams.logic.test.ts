@@ -13,6 +13,7 @@ import {
   buildUpdateStepParamsCommand,
   displayValueForObjectField,
   isAuthoredRefValue,
+  literalSeedForParam,
   moveStringListValue,
   orderedParamNames,
   parseJsonParamDraft,
@@ -33,12 +34,26 @@ const copySpec: StepSpecDto = {
   outputs: [],
   paramOrder: ["source", "dest", "copy_policy"],
   params: {
-    source: { mode: "ref", required: true, enumValues: [] },
-    dest: { mode: "literal", required: true, enumValues: [] },
-    copy_policy: { mode: "literal", required: false, enumValues: ["merge", "sync"] },
+    source: {
+      acceptedSources: ["input_ref", "artifact_ref", "step_output_ref"],
+      acceptedValueTypes: ["path_list"],
+      required: true,
+      enumValues: [],
+    },
+    dest: {
+      acceptedSources: ["literal", "input_ref"],
+      acceptedValueTypes: ["device_path"],
+      required: true,
+      enumValues: [],
+    },
+    copy_policy: {
+      acceptedSources: ["literal", "input_ref"],
+      acceptedValueTypes: ["string"],
+      required: false,
+      enumValues: ["merge", "sync"],
+    },
   },
   defaults: {},
-  refFilters: { source: ["path_list"] },
 };
 
 const resolveSpec: StepSpecDto = {
@@ -50,7 +65,8 @@ const resolveSpec: StepSpecDto = {
   paramOrder: ["artifacts", "artifact_groups"],
   params: {
     artifacts: {
-      mode: "literal",
+      acceptedSources: ["literal"],
+      acceptedValueTypes: ["string_list"],
       required: false,
       enumValues: [],
       shape: {
@@ -63,7 +79,8 @@ const resolveSpec: StepSpecDto = {
       },
     },
     artifact_groups: {
-      mode: "literal",
+      acceptedSources: ["literal"],
+      acceptedValueTypes: ["string_list"],
       required: false,
       enumValues: [],
       shape: {
@@ -77,7 +94,6 @@ const resolveSpec: StepSpecDto = {
     },
   },
   defaults: {},
-  refFilters: {},
 };
 
 const grantSpec: StepSpecDto = {
@@ -89,7 +105,8 @@ const grantSpec: StepSpecDto = {
   paramOrder: ["runtime", "appops", "policy"],
   params: {
     runtime: {
-      mode: "literal",
+      acceptedSources: ["literal"],
+      acceptedValueTypes: ["object_list"],
       required: false,
       enumValues: [],
       shape: {
@@ -104,7 +121,8 @@ const grantSpec: StepSpecDto = {
       },
     },
     appops: {
-      mode: "literal",
+      acceptedSources: ["literal"],
+      acceptedValueTypes: ["object_list"],
       required: false,
       enumValues: [],
       shape: {
@@ -120,7 +138,8 @@ const grantSpec: StepSpecDto = {
       },
     },
     policy: {
-      mode: "literal",
+      acceptedSources: ["literal"],
+      acceptedValueTypes: ["object"],
       required: false,
       enumValues: [],
       shape: {
@@ -135,7 +154,6 @@ const grantSpec: StepSpecDto = {
     },
   },
   defaults: {},
-  refFilters: {},
 };
 
 const refIndex: RefIndexDto = {
@@ -230,7 +248,7 @@ test("schema-less string arrays do not become artifact or artifact-group editors
     type: "custom_step",
     paramOrder: ["ids"],
     params: {
-      ids: { mode: "literal", required: false, enumValues: [] },
+      ids: { acceptedSources: ["literal"], acceptedValueTypes: ["object"], required: false, enumValues: [] },
     },
   };
 
@@ -359,7 +377,7 @@ test("policy-like params remain raw JSON unless schema-backed", () => {
     type: "custom_step",
     paramOrder: ["policy"],
     params: {
-      policy: { mode: "literal", required: false, enumValues: [] },
+      policy: { acceptedSources: ["literal"], acceptedValueTypes: ["object"], required: false, enumValues: [] },
     },
   };
 
@@ -435,6 +453,7 @@ test("parseJsonParamDraft parses literal null and rejects invalid JSON", () => {
 
 test("buildRefPickerOptions keeps current incompatible and missing refs visible", () => {
   const incompatibleOptions = buildRefPickerOptions(refIndex, {
+    allowedSources: ["input_ref", "step_output_ref"],
     allowedValueTypes: ["path_list"],
     currentRef: "inputs.source_dir",
     showAll: false,
@@ -460,10 +479,17 @@ test("buildRefPickerOptions keeps current incompatible and missing refs visible"
         missing: false,
         incompatible: false,
       },
+      {
+        ref: "steps.extract",
+        current: false,
+        missing: false,
+        incompatible: false,
+      },
     ],
   );
 
   const missingOptions = buildRefPickerOptions(refIndex, {
+    allowedSources: ["input_ref", "step_output_ref"],
     allowedValueTypes: ["path_list"],
     currentRef: "steps.missing.outputs.value",
     showAll: false,
@@ -479,6 +505,24 @@ test("buildRefPickerOptions keeps current incompatible and missing refs visible"
     missing: true,
     incompatible: false,
   });
+});
+
+test("buildRefPickerOptions filters ref namespaces as well as value types", () => {
+  const options = buildRefPickerOptions(refIndex, {
+    allowedSources: ["step_output_ref"],
+    allowedValueTypes: ["path_list"],
+    currentRef: null,
+    showAll: false,
+  });
+
+  assert.deepEqual(options.map((option) => option.ref), ["steps.extract.outputs.extracted_paths", "steps.extract"]);
+});
+
+test("literalSeedForParam uses defaults, enum values, and stable type seeds", () => {
+  assert.equal(literalSeedForParam(["device_path"], [], "/sdcard/ROMs"), "/sdcard/ROMs");
+  assert.equal(literalSeedForParam(["string"], ["merge", "sync"], undefined), "merge");
+  assert.equal(literalSeedForParam(["boolean"], [], undefined), false);
+  assert.deepEqual(literalSeedForParam(["path_list"], [], undefined), []);
 });
 
 test("stepProducerRefInfo detects bare step refs and step output refs", () => {

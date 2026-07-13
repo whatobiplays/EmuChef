@@ -29,8 +29,6 @@ pub struct StepSpecDto {
     pub param_order: Vec<String>,
     pub params: BTreeMap<String, StepParamDto>,
     pub defaults: BTreeMap<String, Value>,
-    #[serde(rename = "refFilters")]
-    pub ref_filters: BTreeMap<String, Vec<String>>,
 }
 
 #[derive(Debug, Clone, PartialEq, Deserialize, Serialize)]
@@ -43,7 +41,10 @@ pub struct StepOutputDto {
 
 #[derive(Debug, Clone, PartialEq, Deserialize, Serialize)]
 pub struct StepParamDto {
-    pub mode: String,
+    #[serde(rename = "acceptedSources")]
+    pub accepted_sources: Vec<String>,
+    #[serde(rename = "acceptedValueTypes")]
+    pub accepted_value_types: Vec<String>,
     pub required: bool,
     #[serde(rename = "enumValues")]
     pub enum_values: Vec<String>,
@@ -68,15 +69,26 @@ pub fn step_specs_result() -> StepSpecsResult {
                 map(vec![
                     (
                         "artifact_groups",
-                        param("literal", false, vec![], Some(artifact_group_list_shape())),
+                        param(
+                            &["literal"],
+                            &["string_list"],
+                            false,
+                            vec![],
+                            Some(artifact_group_list_shape()),
+                        ),
                     ),
                     (
                         "artifacts",
-                        param("literal", false, vec![], Some(artifact_list_shape())),
+                        param(
+                            &["literal"],
+                            &["string_list"],
+                            false,
+                            vec![],
+                            Some(artifact_list_shape()),
+                        ),
                     ),
                 ]),
                 map(vec![]),
-                ref_filters(vec![]),
             ),
             spec(
                 "extract_artifacts",
@@ -87,19 +99,36 @@ pub fn step_specs_result() -> StepSpecsResult {
                 map(vec![
                     (
                         "artifact_groups",
-                        param("literal", false, vec![], Some(artifact_group_list_shape())),
+                        param(
+                            &["literal"],
+                            &["string_list"],
+                            false,
+                            vec![],
+                            Some(artifact_group_list_shape()),
+                        ),
                     ),
                     (
                         "artifacts",
-                        param("literal", false, vec![], Some(artifact_list_shape())),
+                        param(
+                            &["literal"],
+                            &["string_list"],
+                            false,
+                            vec![],
+                            Some(artifact_list_shape()),
+                        ),
                     ),
                     (
                         "extract_on",
-                        param("literal", false, vec!["host", "device"], None),
+                        param(
+                            &["literal"],
+                            &["string"],
+                            false,
+                            vec!["host", "device"],
+                            None,
+                        ),
                     ),
                 ]),
                 map(vec![("extract_on", json!("host"))]),
-                ref_filters(vec![]),
             ),
             spec(
                 "extract_archive",
@@ -114,20 +143,43 @@ pub fn step_specs_result() -> StepSpecsResult {
                     "cleanup",
                 ],
                 map(vec![
-                    ("archive", param("ref", true, vec![], None)),
-                    ("cleanup", param("literal", false, vec![], None)),
-                    ("dest", param("literal", false, vec![], None)),
-                    ("device_temp_path", param("literal", false, vec![], None)),
+                    (
+                        "archive",
+                        param(
+                            &["input_ref", "artifact_ref", "step_output_ref"],
+                            &["file_path"],
+                            true,
+                            vec![],
+                            None,
+                        ),
+                    ),
+                    (
+                        "cleanup",
+                        param(&["literal"], &["boolean"], false, vec![], None),
+                    ),
+                    (
+                        "dest",
+                        param(&["literal"], &["string"], false, vec![], None),
+                    ),
+                    (
+                        "device_temp_path",
+                        param(&["literal"], &["device_path"], false, vec![], None),
+                    ),
                     (
                         "extract_on",
-                        param("literal", false, vec!["host", "device"], None),
+                        param(
+                            &["literal"],
+                            &["string"],
+                            false,
+                            vec!["host", "device"],
+                            None,
+                        ),
                     ),
                 ]),
                 map(vec![
                     ("cleanup", json!(true)),
                     ("extract_on", json!("host")),
                 ]),
-                ref_filters(vec![("archive", vec!["file_path"])]),
             ),
             spec(
                 "copy_files",
@@ -138,16 +190,36 @@ pub fn step_specs_result() -> StepSpecsResult {
                 map(vec![
                     (
                         "copy_policy",
-                        param("literal", false, vec!["merge", "sync", "replace"], None),
+                        param(
+                            &["literal", "input_ref"],
+                            &["string"],
+                            false,
+                            vec!["merge", "sync", "replace"],
+                            None,
+                        ),
                     ),
-                    ("dest", param("literal", true, vec![], None)),
-                    ("source", param("ref", true, vec![], None)),
+                    (
+                        "dest",
+                        param(
+                            &["literal", "input_ref"],
+                            &["device_path"],
+                            true,
+                            vec![],
+                            None,
+                        ),
+                    ),
+                    (
+                        "source",
+                        param(
+                            &["input_ref", "artifact_ref", "step_output_ref"],
+                            &["file_path", "directory_path", "path_list"],
+                            true,
+                            vec![],
+                            None,
+                        ),
+                    ),
                 ]),
                 map(vec![("copy_policy", json!("merge"))]),
-                ref_filters(vec![(
-                    "source",
-                    vec!["file_path", "directory_path", "path_list"],
-                )]),
             ),
             spec(
                 "install_apk",
@@ -156,11 +228,22 @@ pub fn step_specs_result() -> StepSpecsResult {
                 vec![],
                 vec!["app", "replace_existing"],
                 map(vec![
-                    ("app", param("ref", true, vec![], None)),
-                    ("replace_existing", param("literal", false, vec![], None)),
+                    (
+                        "app",
+                        param(
+                            &["input_ref", "artifact_ref", "step_output_ref"],
+                            &["file_path"],
+                            true,
+                            vec![],
+                            None,
+                        ),
+                    ),
+                    (
+                        "replace_existing",
+                        param(&["literal"], &["boolean"], false, vec![], None),
+                    ),
                 ]),
                 map(vec![("replace_existing", json!(false))]),
-                ref_filters(vec![("app", vec!["file_path"])]),
             ),
             spec(
                 "grant_permissions",
@@ -171,19 +254,36 @@ pub fn step_specs_result() -> StepSpecsResult {
                 map(vec![
                     (
                         "appops",
-                        param("literal", false, vec![], Some(appops_shape())),
+                        param(
+                            &["literal"],
+                            &["object"],
+                            false,
+                            vec![],
+                            Some(appops_shape()),
+                        ),
                     ),
                     (
                         "policy",
-                        param("literal", false, vec![], Some(policy_shape())),
+                        param(
+                            &["literal"],
+                            &["object"],
+                            false,
+                            vec![],
+                            Some(policy_shape()),
+                        ),
                     ),
                     (
                         "runtime",
-                        param("literal", false, vec![], Some(runtime_permissions_shape())),
+                        param(
+                            &["literal"],
+                            &["object"],
+                            false,
+                            vec![],
+                            Some(runtime_permissions_shape()),
+                        ),
                     ),
                 ]),
                 map(vec![]),
-                ref_filters(vec![]),
             ),
             spec(
                 "launch_app",
@@ -192,11 +292,16 @@ pub fn step_specs_result() -> StepSpecsResult {
                 vec![],
                 vec!["package_name", "activity"],
                 map(vec![
-                    ("activity", param("literal", false, vec![], None)),
-                    ("package_name", param("literal", true, vec![], None)),
+                    (
+                        "activity",
+                        param(&["literal"], &["string"], false, vec![], None),
+                    ),
+                    (
+                        "package_name",
+                        param(&["literal"], &["string"], true, vec![], None),
+                    ),
                 ]),
                 map(vec![]),
-                ref_filters(vec![]),
             ),
             spec(
                 "wait",
@@ -204,9 +309,11 @@ pub fn step_specs_result() -> StepSpecsResult {
                 None,
                 vec![],
                 vec!["duration_ms"],
-                map(vec![("duration_ms", param("literal", true, vec![], None))]),
+                map(vec![(
+                    "duration_ms",
+                    param(&["literal"], &["integer"], true, vec![], None),
+                )]),
                 map(vec![]),
-                ref_filters(vec![]),
             ),
             spec(
                 "force_stop_app",
@@ -214,9 +321,11 @@ pub fn step_specs_result() -> StepSpecsResult {
                 None,
                 vec![],
                 vec!["package_name"],
-                map(vec![("package_name", param("literal", true, vec![], None))]),
+                map(vec![(
+                    "package_name",
+                    param(&["literal"], &["string"], true, vec![], None),
+                )]),
                 map(vec![]),
-                ref_filters(vec![]),
             ),
         ],
     }
@@ -244,7 +353,6 @@ fn spec(
     param_order: Vec<&str>,
     params: BTreeMap<String, StepParamDto>,
     defaults: BTreeMap<String, Value>,
-    ref_filters: BTreeMap<String, Vec<String>>,
 ) -> StepSpecDto {
     StepSpecDto {
         type_name: type_name.to_string(),
@@ -255,7 +363,6 @@ fn spec(
         param_order: param_order.into_iter().map(str::to_string).collect(),
         params,
         defaults,
-        ref_filters,
     }
 }
 
@@ -267,9 +374,19 @@ fn output(name: &str, value_type: &str, primary: bool) -> StepOutputDto {
     }
 }
 
-fn param(mode: &str, required: bool, enum_values: Vec<&str>, shape: Option<Value>) -> StepParamDto {
+fn param(
+    accepted_sources: &[&str],
+    accepted_value_types: &[&str],
+    required: bool,
+    enum_values: Vec<&str>,
+    shape: Option<Value>,
+) -> StepParamDto {
     StepParamDto {
-        mode: mode.to_string(),
+        accepted_sources: accepted_sources.iter().map(ToString::to_string).collect(),
+        accepted_value_types: accepted_value_types
+            .iter()
+            .map(ToString::to_string)
+            .collect(),
         required,
         enum_values: enum_values.into_iter().map(str::to_string).collect(),
         shape,
@@ -280,18 +397,6 @@ fn map<T>(entries: Vec<(&str, T)>) -> BTreeMap<String, T> {
     entries
         .into_iter()
         .map(|(key, value)| (key.to_string(), value))
-        .collect()
-}
-
-fn ref_filters(entries: Vec<(&str, Vec<&str>)>) -> BTreeMap<String, Vec<String>> {
-    entries
-        .into_iter()
-        .map(|(key, values)| {
-            (
-                key.to_string(),
-                values.into_iter().map(str::to_string).collect(),
-            )
-        })
         .collect()
 }
 

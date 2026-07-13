@@ -76,8 +76,16 @@ fn assert_step_specs_surface(result: &Value) {
         Some("copied_paths")
     );
     assert_eq!(
-        copy_files.ref_filters["source"],
+        copy_files.params["source"].accepted_sources,
+        vec!["input_ref", "artifact_ref", "step_output_ref"]
+    );
+    assert_eq!(
+        copy_files.params["source"].accepted_value_types,
         vec!["file_path", "directory_path", "path_list"]
+    );
+    assert_eq!(
+        copy_files.params["dest"].accepted_sources,
+        vec!["literal", "input_ref"]
     );
 
     let grant_permissions = parsed

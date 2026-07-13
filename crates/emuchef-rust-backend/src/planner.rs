@@ -14,6 +14,9 @@ use serde_json::{json, Value};
 
 use crate::model::{OrderedMap, ParamValue, Recipe, Step, StepCondition, StepConstraints};
 use crate::planner_device_plan;
+use crate::runtime_refs::{
+    artifact_field_value_type, input_value_type, parse_reference, RuntimeRef,
+};
 use crate::step_specs;
 use crate::yaml;
 
@@ -989,7 +992,7 @@ fn referenced_input_ids(recipe_id: &str, step: &Step) -> Vec<String> {
         let ParamValue::Ref(ref_value) = value else {
             continue;
         };
-        if let RuntimeRef::Input { target_id } = parse_reference(ref_value) {
+        if let Ok(RuntimeRef::Input { target_id }) = parse_reference(ref_value) {
             let input_id = make_execution_input_id(recipe_id, &target_id);
             if !input_ids.iter().any(|existing| existing == &input_id) {
                 input_ids.push(input_id);
@@ -1458,7 +1461,8 @@ fn validate_step_param_contracts(
         };
         let normalized = params_with_defaults(step);
         errors.extend(validate_unknown_params(recipe_id, step, &spec));
-        errors.extend(validate_spec_param_modes(
+        errors.extend(validate_spec_param_contracts(
+            recipes,
             recipe_id,
             step,
             &spec,
@@ -1522,7 +1526,8 @@ fn validate_unknown_params(
         .collect()
 }
 
-fn validate_spec_param_modes(
+fn validate_spec_param_contracts(
+    recipes: &HashMap<String, Recipe>,
     recipe_id: &str,
     step: &Step,
     spec: &step_specs::StepSpecDto,
@@ -1533,35 +1538,126 @@ fn validate_spec_param_modes(
         let Some(value) = normalized.get(param_name) else {
             continue;
         };
-        match (param_spec.mode.as_str(), value) {
-            ("ref", ParamValue::Literal(_)) => errors.push(param_contract_message(
-                "invalid_param_mode",
-                format!(
-                    "Param '{}' must be a ref for step type '{}'.",
-                    param_name, step.type_name
-                ),
-                recipe_id,
-                step,
-                param_name,
-                json!("ref"),
-                param_value_to_json(value),
-            )),
-            ("literal", ParamValue::Ref(_)) => errors.push(param_contract_message(
-                "invalid_param_mode",
-                format!(
-                    "Param '{}' must be a literal for step type '{}'.",
-                    param_name, step.type_name
-                ),
-                recipe_id,
-                step,
-                param_name,
-                json!("literal"),
-                param_value_to_json(value),
+        match value {
+            ParamValue::Literal(_) if !accepts_param_source(param_spec, "literal") => {
+                errors.push(param_contract_message(
+                    "invalid_param_source",
+                    format!(
+                        "Param '{}' does not accept literal values for step type '{}'.",
+                        param_name, step.type_name
+                    ),
+                    recipe_id,
+                    step,
+                    param_name,
+                    json!(param_spec.accepted_sources),
+                    param_value_to_json(value),
+                ));
+            }
+            ParamValue::Ref(ref_value) => errors.extend(validate_ref_param_contract(
+                recipes, recipe_id, step, param_name, ref_value, param_spec,
             )),
             _ => {}
         }
     }
     errors
+}
+
+fn accepts_param_source(spec: &step_specs::StepParamDto, source: &str) -> bool {
+    spec.accepted_sources
+        .iter()
+        .any(|accepted| accepted == source)
+}
+
+fn validate_ref_param_contract(
+    recipes: &HashMap<String, Recipe>,
+    recipe_id: &str,
+    step: &Step,
+    param_name: &str,
+    ref_value: &str,
+    spec: &step_specs::StepParamDto,
+) -> Vec<PlannerMessage> {
+    let Ok(reference) = parse_reference(ref_value) else {
+        return Vec::new();
+    };
+    let source = reference.source_kind();
+    if !accepts_param_source(spec, source) {
+        return vec![param_contract_message(
+            "invalid_param_source",
+            format!(
+                "Param '{}' does not accept {} values for step type '{}'.",
+                param_name, source, step.type_name
+            ),
+            recipe_id,
+            step,
+            param_name,
+            json!(spec.accepted_sources),
+            param_value_to_json(&ParamValue::Ref(ref_value.to_string())),
+        )];
+    }
+
+    let Some(recipe) = recipes.get(recipe_id) else {
+        return Vec::new();
+    };
+    let value_type = match reference {
+        RuntimeRef::Input { target_id } => recipe
+            .inputs
+            .get(&target_id)
+            .map(|input| input_value_type(&input.type_name, input.multiple).to_string()),
+        RuntimeRef::ArtifactField { target_id, field } => recipe
+            .artifacts
+            .contains_key(&target_id)
+            .then(|| artifact_field_value_type(&field).map(ToString::to_string))
+            .flatten(),
+        RuntimeRef::StepShorthand { target_id } => recipe
+            .steps
+            .iter()
+            .find(|candidate| candidate.id == target_id)
+            .and_then(primary_output_value_type),
+        RuntimeRef::StepOutput { target_id, field } => recipe
+            .steps
+            .iter()
+            .find(|candidate| candidate.id == target_id)
+            .and_then(|candidate| step_output_value_type(candidate, &field)),
+    };
+    let Some(value_type) = value_type else {
+        return Vec::new();
+    };
+    if spec
+        .accepted_value_types
+        .iter()
+        .any(|accepted| accepted == &value_type)
+    {
+        return Vec::new();
+    }
+    vec![param_contract_message(
+        "invalid_param_value_type",
+        format!(
+            "Param '{}' does not accept value type '{}' for step type '{}'.",
+            param_name, value_type, step.type_name
+        ),
+        recipe_id,
+        step,
+        param_name,
+        json!(spec.accepted_value_types),
+        json!({ "ref": ref_value, "valueType": value_type }),
+    )]
+}
+
+fn primary_output_value_type(step: &Step) -> Option<String> {
+    let spec = step_specs::step_spec_for(&step.type_name)?;
+    let primary = spec.primary_output_name?;
+    spec.outputs
+        .into_iter()
+        .find(|output| output.name == primary)
+        .map(|output| output.value_type)
+}
+
+fn step_output_value_type(step: &Step, field: &str) -> Option<String> {
+    step_specs::step_spec_for(&step.type_name)?
+        .outputs
+        .into_iter()
+        .find(|output| output.name == field)
+        .map(|output| output.value_type)
 }
 
 fn validate_focused_param_values(
@@ -1594,14 +1690,14 @@ fn validate_copy_files_param_values(
         step,
         normalized,
         "source",
-        json!("ref"),
+        json!(["input_ref", "artifact_ref", "step_output_ref"]),
     ));
     errors.extend(require_param(
         recipe_id,
         step,
         normalized,
         "dest",
-        json!("literal"),
+        json!(["literal", "input_ref"]),
     ));
     errors.extend(validate_enum_param(
         recipe_id,
@@ -2552,7 +2648,7 @@ fn validate_step_ref(
     selected_steps: &HashMap<String, Step>,
 ) -> Vec<PlannerMessage> {
     match parse_reference(ref_value) {
-        RuntimeRef::StepShorthand { target_id } => {
+        Ok(RuntimeRef::StepShorthand { target_id }) => {
             let Some(target_step) = selected_steps.get(&target_id) else {
                 return vec![unknown_step_ref_message(
                     recipe_id, step, param_name, ref_value, &target_id,
@@ -2579,7 +2675,7 @@ fn validate_step_ref(
             };
             Vec::new()
         }
-        RuntimeRef::StepOutput { target_id, field } => {
+        Ok(RuntimeRef::StepOutput { target_id, field }) => {
             let Some(target_step) = selected_steps.get(&target_id) else {
                 return vec![unknown_step_ref_message(
                     recipe_id, step, param_name, ref_value, &target_id,
@@ -2607,7 +2703,7 @@ fn validate_step_ref(
                 }]
             }
         }
-        RuntimeRef::Invalid => vec![PlannerMessage {
+        Err(()) => vec![PlannerMessage {
             code: "invalid_ref_format".to_string(),
             message: format!(
                 "Step '{}' param '{}' has invalid ref '{}'.",
@@ -2620,7 +2716,7 @@ fn validate_step_ref(
                 "ref": ref_value,
             }),
         }],
-        RuntimeRef::Input { .. } | RuntimeRef::ArtifactField { .. } => Vec::new(),
+        Ok(RuntimeRef::Input { .. }) | Ok(RuntimeRef::ArtifactField { .. }) => Vec::new(),
     }
 }
 
@@ -2764,17 +2860,17 @@ fn string_list(value: Option<&ParamValue>) -> Vec<String> {
 
 fn normalize_ref_for_execution(recipe: &Recipe, ref_value: &str) -> String {
     match parse_reference(ref_value) {
-        RuntimeRef::Input { target_id } => {
+        Ok(RuntimeRef::Input { target_id }) => {
             format!("inputs.{}", make_execution_input_id(&recipe.id, &target_id))
         }
-        RuntimeRef::ArtifactField { target_id, field } => {
+        Ok(RuntimeRef::ArtifactField { target_id, field }) => {
             format!(
                 "artifacts.{}.{}",
                 make_execution_artifact_id(&recipe.id, &target_id),
                 field
             )
         }
-        RuntimeRef::StepShorthand { target_id } => {
+        Ok(RuntimeRef::StepShorthand { target_id }) => {
             let primary_output = recipe
                 .steps
                 .iter()
@@ -2788,65 +2884,15 @@ fn normalize_ref_for_execution(recipe: &Recipe, ref_value: &str) -> String {
                 primary_output
             )
         }
-        RuntimeRef::StepOutput { target_id, field } => {
+        Ok(RuntimeRef::StepOutput { target_id, field }) => {
             format!(
                 "steps.{}.outputs.{}",
                 make_execution_step_id(&recipe.id, &target_id),
                 field
             )
         }
-        RuntimeRef::Invalid => ref_value.to_string(),
+        Err(()) => ref_value.to_string(),
     }
-}
-
-enum RuntimeRef {
-    Input { target_id: String },
-    ArtifactField { target_id: String, field: String },
-    StepShorthand { target_id: String },
-    StepOutput { target_id: String, field: String },
-    Invalid,
-}
-
-fn parse_reference(value: &str) -> RuntimeRef {
-    if let Some(target_id) = value.strip_prefix("inputs.") {
-        if !target_id.is_empty() {
-            return RuntimeRef::Input {
-                target_id: target_id.to_string(),
-            };
-        }
-        return RuntimeRef::Invalid;
-    }
-
-    if let Some(step_body) = value.strip_prefix("steps.") {
-        if let Some((step_id, output_name)) = step_body.split_once(".outputs.") {
-            if !step_id.is_empty() && !output_name.is_empty() {
-                return RuntimeRef::StepOutput {
-                    target_id: step_id.to_string(),
-                    field: output_name.to_string(),
-                };
-            }
-            return RuntimeRef::Invalid;
-        }
-        if !step_body.is_empty() {
-            return RuntimeRef::StepShorthand {
-                target_id: step_body.to_string(),
-            };
-        }
-        return RuntimeRef::Invalid;
-    }
-
-    if let Some(body) = value.strip_prefix("artifacts.") {
-        if let Some((artifact_id, field)) = body.rsplit_once('.') {
-            if !artifact_id.is_empty() && !field.is_empty() {
-                return RuntimeRef::ArtifactField {
-                    target_id: artifact_id.to_string(),
-                    field: field.to_string(),
-                };
-            }
-        }
-    }
-
-    RuntimeRef::Invalid
 }
 
 fn make_execution_step_id(recipe_ref: &str, step_id: &str) -> String {

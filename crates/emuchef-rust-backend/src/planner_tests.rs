@@ -1470,7 +1470,7 @@ fn dto_error_result_shape_uses_current_focused_step_param_diagnostic() {
                     "step_id": "copy",
                     "step_type": "copy_files",
                     "param": "source",
-                    "expected": "ref",
+                    "expected": ["input_ref", "artifact_ref", "step_output_ref"],
                     "actual": null
                 }
             }
@@ -2117,7 +2117,7 @@ fn param_contract_accepts_valid_enum_and_bool_values() {
 }
 
 #[test]
-fn param_contract_reports_required_mode_enum_bool_and_integer_violations() {
+fn param_contract_reports_required_source_enum_bool_and_integer_violations() {
     let cases = vec![
         (
             param_contract_step(
@@ -2129,7 +2129,7 @@ fn param_contract_reports_required_mode_enum_bool_and_integer_violations() {
             "copy",
             "source",
             "missing_required_param",
-            json!("ref"),
+            json!(["input_ref", "artifact_ref", "step_output_ref"]),
             Value::Null,
         ),
         (
@@ -2139,14 +2139,17 @@ fn param_contract_reports_required_mode_enum_bool_and_integer_violations() {
                 vec![],
                 ref_params(vec![
                     ("source", ParamValue::Ref("steps.extract".to_string())),
-                    ("dest", ParamValue::Ref("inputs.output_dir".to_string())),
+                    (
+                        "dest",
+                        ParamValue::Ref("artifacts.app_apk.local_path".to_string()),
+                    ),
                 ]),
             ),
             "copy",
             "dest",
-            "invalid_param_mode",
-            json!("literal"),
-            json!({"ref": "inputs.output_dir"}),
+            "invalid_param_source",
+            json!(["literal", "input_ref"]),
+            json!({"ref": "artifacts.app_apk.local_path"}),
         ),
         (
             param_contract_step(

@@ -288,36 +288,45 @@ export function parseJsonParamDraft(draft: string): ParseResult {
 export function buildRefPickerOptions(
   refIndex: RefIndexDto,
   {
+    allowedSources,
     allowedValueTypes,
     currentRef,
     showAll,
   }: {
+    allowedSources: readonly string[];
     allowedValueTypes: readonly string[];
     currentRef: string | null;
     showAll: boolean;
   },
 ): RefPickerOption[] {
+  const acceptedSources = new Set(allowedSources);
   const allowed = new Set(allowedValueTypes);
-  const hasFilter = allowed.size > 0 && !showAll;
+  const hasSourceFilter = acceptedSources.size > 0 && !showAll;
+  const hasTypeFilter = allowed.size > 0 && !showAll;
   const candidates = candidateOptions(refIndex.candidates);
   const candidateRefs = new Set(candidates.map((option) => option.ref));
   const fallbackOptions = refIndex.allRefs
     .filter((ref) => !candidateRefs.has(ref))
-    .map((ref) => rawRefOption(ref));
+    .map((ref) => rawRefOption(ref, false, refIndex.candidates));
   const allOptions = [...candidates, ...fallbackOptions];
-  const filteredOptions = hasFilter
-    ? allOptions.filter((option) => option.valueType !== null && allowed.has(option.valueType))
-    : allOptions;
+  const filteredOptions = allOptions.filter(
+    (option) =>
+      (!hasSourceFilter || acceptedSources.has(option.sourceKind)) &&
+      (!hasTypeFilter || (option.valueType !== null && allowed.has(option.valueType))),
+  );
   const optionsByRef = new Map(filteredOptions.map((option) => [option.ref, option]));
 
   if (currentRef) {
     const currentFromAll = allOptions.find((option) => option.ref === currentRef) ?? rawRefOption(currentRef, true);
+    const currentIsMissing = !allOptions.some((option) => option.ref === currentRef);
     optionsByRef.set(currentRef, {
       ...currentFromAll,
       current: true,
-      missing: !allOptions.some((option) => option.ref === currentRef),
+      missing: currentIsMissing,
       incompatible:
-        hasFilter && currentFromAll.valueType !== null && !allowed.has(currentFromAll.valueType),
+        !currentIsMissing &&
+        ((hasSourceFilter && !acceptedSources.has(currentFromAll.sourceKind)) ||
+          (hasTypeFilter && currentFromAll.valueType !== null && !allowed.has(currentFromAll.valueType))),
     });
   }
 
@@ -327,6 +336,33 @@ export function buildRefPickerOptions(
     }
     return 0;
   });
+}
+
+export function literalSeedForParam(
+  acceptedValueTypes: readonly string[],
+  enumValues: readonly string[],
+  defaultValue: unknown,
+): unknown {
+  if (defaultValue !== undefined) {
+    return defaultValue;
+  }
+  if (enumValues.length > 0) {
+    return enumValues[0];
+  }
+  const primaryType = acceptedValueTypes[0];
+  if (primaryType === "boolean") {
+    return false;
+  }
+  if (primaryType === "integer" || primaryType === "number") {
+    return 0;
+  }
+  if (primaryType?.endsWith("_list")) {
+    return [];
+  }
+  if (primaryType === "object") {
+    return {};
+  }
+  return "";
 }
 
 export function stepProducerRefInfo(refIndex: RefIndexDto, ref: unknown): StepProducerRefInfo {
@@ -427,7 +463,7 @@ function candidateOptions(candidates: readonly RefCandidateDto[]): RefPickerOpti
     ref: candidate.ref,
     label: candidate.label,
     valueType: candidate.valueType,
-    sourceKind: candidate.sourceKind,
+    sourceKind: normalizedRefSource(candidate.sourceKind, candidate.ref),
     sourceId: candidate.sourceId,
     current: false,
     missing: false,
@@ -439,20 +475,13 @@ function structuredStepProducerInfo(candidate: RefCandidateDto): StepProducerRef
   if (!candidate.sourceId) {
     return { kind: "non-step" };
   }
-  if (candidate.sourceKind === "step_output") {
+  if (normalizedRefSource(candidate.sourceKind, candidate.ref) === "step_output_ref") {
+    const output = parseStepOutputRef(candidate.ref);
     return {
       kind: "step",
       producerStepId: candidate.sourceId,
-      outputName: parseStepOutputRef(candidate.ref)?.outputName ?? null,
-      shorthandStepRef: false,
-    };
-  }
-  if (candidate.sourceKind === "step" || candidate.sourceKind === "step_ref") {
-    return {
-      kind: "step",
-      producerStepId: candidate.sourceId,
-      outputName: null,
-      shorthandStepRef: true,
+      outputName: output?.outputName ?? null,
+      shorthandStepRef: output === null,
     };
   }
   return { kind: "non-step" };
@@ -474,15 +503,40 @@ function parseStepOutputRef(ref: string): { producerStepId: string; outputName: 
   };
 }
 
-function rawRefOption(ref: string, missing = false): RefPickerOption {
+function rawRefOption(
+  ref: string,
+  missing = false,
+  candidates: readonly RefCandidateDto[] = [],
+): RefPickerOption {
+  const stepId = parseBareStepRef(ref);
+  const primaryOutput = stepId === null
+    ? undefined
+    : candidates.find(
+        (candidate) =>
+          normalizedRefSource(candidate.sourceKind, candidate.ref) === "step_output_ref" &&
+          candidate.sourceId === stepId,
+      );
   return {
     ref,
     label: ref,
-    valueType: null,
-    sourceKind: missing ? "unknown" : "raw",
+    valueType: primaryOutput?.valueType ?? null,
+    sourceKind: missing ? "unknown" : normalizedRefSource("raw", ref),
     sourceId: ref,
     current: false,
     missing,
     incompatible: false,
   };
+}
+
+function normalizedRefSource(sourceKind: string, ref: string): string {
+  if (sourceKind === "input" || ref.startsWith("inputs.")) {
+    return "input_ref";
+  }
+  if (sourceKind === "artifact" || ref.startsWith("artifacts.")) {
+    return "artifact_ref";
+  }
+  if (sourceKind === "step" || sourceKind === "step_ref" || sourceKind === "step_output" || ref.startsWith("steps.")) {
+    return "step_output_ref";
+  }
+  return sourceKind;
 }

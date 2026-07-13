@@ -38,6 +38,16 @@ bindings, optional explicit device context, optional ADB path/serial, an output
 path, and verbose output. Supplying `--adb` or `--serial` enables live device
 probing. Generated execution plans use `plan.<device-plan>.001` identifiers.
 
+Step parameter specifications declare their accepted value sources and runtime
+value types. Authored recipe refs remain recipe-local (`inputs.<id>`,
+`artifacts.<id>.<field>`, and `steps.<id>[.outputs.<name>]`). Validation rejects
+literal or ref namespaces that a parameter does not accept and rejects refs
+whose declared runtime type is incompatible. `copy_files.dest` and
+`copy_files.copy_policy` accept either literals or compatible input refs, while
+`copy_files.source` remains limited to compatible input, artifact, and step
+output refs. Canonical recipe YAML continues emitting direct literal values and
+single-field `{ ref: ... }` mappings.
+
 ## Execution
 
 Execution is single-threaded and dependency-aware. A failed step blocks
@@ -86,7 +96,8 @@ reach frontend code.
 ## Testing and Compatibility
 
 Rust unit and integration tests are the product behavior authority. Frontend
-logic tests and Tauri tests cover editor behavior and sidecar packaging.
+typechecking, linting, logic tests, and Tauri tests cover editor behavior and
+sidecar packaging.
 macOS packaging automation inspects a caller-supplied `.app` rather than a
 developer-specific path. It verifies Info.plist identity, host architecture,
 the main executable and bundled `emuchef` sidecar, embedded frontend markers,

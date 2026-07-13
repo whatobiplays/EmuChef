@@ -13,17 +13,11 @@ use serde_json::{json, Value};
 
 use crate::catalog;
 use crate::model::{ParamValue, Recipe, Step};
-use crate::step_specs::{self, StepSpecDto};
+use crate::runtime_refs::{
+    artifact_field_value_type, input_value_type, parse_reference, RuntimeRef,
+};
+use crate::step_specs::{self, StepParamDto, StepSpecDto};
 use crate::yaml::{self, LoadErrorKind, LoadIssue, RecipeLoadError};
-
-const RUNTIME_ARTIFACT_FIELDS: &[&str] = &[
-    "status",
-    "local_path",
-    "resolved_url",
-    "filename",
-    "cache_hit",
-    "error",
-];
 
 pub fn validate_recipe_path_result(path: impl AsRef<Path>, authored_root: Option<&Path>) -> Value {
     let path = path.as_ref();
@@ -285,29 +279,20 @@ fn validate_step_params(
         let Some(value) = step.params.get(param_name) else {
             continue;
         };
-        match (param_spec.mode.as_str(), value) {
-            ("ref", ParamValue::Literal(_)) => errors.push(param_contract_error(
-                file,
-                recipe,
-                step_index,
-                param_name,
-                &format!(
-                    "Param {} must use {{ref: ...}} for step type {}.",
-                    single_quote(param_name),
-                    single_quote(&step.type_name)
-                ),
-            )),
-            ("literal", ParamValue::Ref(_)) => errors.push(param_contract_error(
-                file,
-                recipe,
-                step_index,
-                param_name,
-                &format!(
-                    "Param {} must remain a literal for step type {}.",
-                    single_quote(param_name),
-                    single_quote(&step.type_name)
-                ),
-            )),
+        match value {
+            ParamValue::Literal(_) if !accepts_source(param_spec, "literal") => {
+                errors.push(param_contract_error(
+                    file,
+                    recipe,
+                    step_index,
+                    param_name,
+                    &format!(
+                        "Param {} does not accept literal values for step type {}.",
+                        single_quote(param_name),
+                        single_quote(&step.type_name)
+                    ),
+                ))
+            }
             _ => {}
         }
     }
@@ -323,13 +308,40 @@ fn validate_step_references(file: &str, recipe: &Recipe) -> Vec<Value> {
         .collect::<HashMap<_, _>>();
 
     for (step_index, step) in recipe.steps.iter().enumerate() {
+        let step_spec = step_specs::step_spec_for(&step.type_name);
         for (param_name, value) in &step.params {
             let ParamValue::Ref(ref_value) = value else {
                 continue;
             };
+            let param_spec = step_spec
+                .as_ref()
+                .and_then(|spec| spec.params.get(param_name));
             match parse_reference(ref_value) {
                 Ok(RuntimeRef::Input { target_id }) => {
-                    if !recipe.inputs.contains_key(&target_id) {
+                    if source_is_rejected(
+                        file,
+                        recipe,
+                        step_index,
+                        param_name,
+                        ref_value,
+                        param_spec,
+                        "input_ref",
+                        &mut errors,
+                    ) {
+                        continue;
+                    }
+                    if let Some(input) = recipe.inputs.get(&target_id) {
+                        validate_ref_value_type(
+                            file,
+                            recipe,
+                            step_index,
+                            param_name,
+                            ref_value,
+                            param_spec,
+                            input_value_type(&input.type_name, input.multiple),
+                            &mut errors,
+                        );
+                    } else {
                         errors.push(ref_error(
                             file,
                             recipe,
@@ -345,6 +357,18 @@ fn validate_step_references(file: &str, recipe: &Recipe) -> Vec<Value> {
                     }
                 }
                 Ok(RuntimeRef::ArtifactField { target_id, field }) => {
+                    if source_is_rejected(
+                        file,
+                        recipe,
+                        step_index,
+                        param_name,
+                        ref_value,
+                        param_spec,
+                        "artifact_ref",
+                        &mut errors,
+                    ) {
+                        continue;
+                    }
                     if !recipe.artifacts.contains_key(&target_id) {
                         errors.push(ref_error(
                             file,
@@ -358,7 +382,18 @@ fn validate_step_references(file: &str, recipe: &Recipe) -> Vec<Value> {
                                 single_quote(&target_id)
                             ),
                         ));
-                    } else if !RUNTIME_ARTIFACT_FIELDS.contains(&field.as_str()) {
+                    } else if let Some(value_type) = artifact_field_value_type(&field) {
+                        validate_ref_value_type(
+                            file,
+                            recipe,
+                            step_index,
+                            param_name,
+                            ref_value,
+                            param_spec,
+                            value_type,
+                            &mut errors,
+                        );
+                    } else {
                         errors.push(ref_error(
                             file,
                             recipe,
@@ -374,13 +409,25 @@ fn validate_step_references(file: &str, recipe: &Recipe) -> Vec<Value> {
                     }
                 }
                 Ok(RuntimeRef::StepShorthand { target_id }) => {
+                    if source_is_rejected(
+                        file,
+                        recipe,
+                        step_index,
+                        param_name,
+                        ref_value,
+                        param_spec,
+                        "step_output_ref",
+                        &mut errors,
+                    ) {
+                        continue;
+                    }
                     let Some(target_step) = step_by_id.get(target_id.as_str()) else {
                         errors.push(unknown_step_ref_error(
                             file, recipe, step_index, step, param_name, &target_id,
                         ));
                         continue;
                     };
-                    if primary_output_name(target_step).is_none() {
+                    let Some(output) = primary_output(target_step) else {
                         errors.push(ref_error(
                             file,
                             recipe,
@@ -393,16 +440,54 @@ fn validate_step_references(file: &str, recipe: &Recipe) -> Vec<Value> {
                                 single_quote(&target_step.type_name)
                             ),
                         ));
-                    }
+                        continue;
+                    };
+                    validate_ref_value_type(
+                        file,
+                        recipe,
+                        step_index,
+                        param_name,
+                        ref_value,
+                        param_spec,
+                        &output.value_type,
+                        &mut errors,
+                    );
                 }
                 Ok(RuntimeRef::StepOutput { target_id, field }) => {
+                    if source_is_rejected(
+                        file,
+                        recipe,
+                        step_index,
+                        param_name,
+                        ref_value,
+                        param_spec,
+                        "step_output_ref",
+                        &mut errors,
+                    ) {
+                        continue;
+                    }
                     let Some(target_step) = step_by_id.get(target_id.as_str()) else {
                         errors.push(unknown_step_ref_error(
                             file, recipe, step_index, step, param_name, &target_id,
                         ));
                         continue;
                     };
-                    if primary_output_name(target_step).as_deref() != Some(field.as_str()) {
+                    let output =
+                        step_specs::step_spec_for(&target_step.type_name).and_then(|spec| {
+                            spec.outputs.into_iter().find(|output| output.name == field)
+                        });
+                    if let Some(output) = output {
+                        validate_ref_value_type(
+                            file,
+                            recipe,
+                            step_index,
+                            param_name,
+                            ref_value,
+                            param_spec,
+                            &output.value_type,
+                            &mut errors,
+                        );
+                    } else {
                         errors.push(ref_error(
                             file,
                             recipe,
@@ -459,58 +544,87 @@ fn unknown_step_ref_error(
     )
 }
 
-fn primary_output_name(step: &Step) -> Option<String> {
-    step_specs::step_spec_for(&step.type_name).and_then(|spec| spec.primary_output_name)
+fn primary_output(step: &Step) -> Option<crate::step_specs::StepOutputDto> {
+    let spec = step_specs::step_spec_for(&step.type_name)?;
+    let primary = spec.primary_output_name?;
+    spec.outputs
+        .into_iter()
+        .find(|output| output.name == primary)
 }
 
-enum RuntimeRef {
-    Input { target_id: String },
-    ArtifactField { target_id: String, field: String },
-    StepShorthand { target_id: String },
-    StepOutput { target_id: String, field: String },
+fn accepts_source(spec: &StepParamDto, source: &str) -> bool {
+    spec.accepted_sources
+        .iter()
+        .any(|accepted| accepted == source)
 }
 
-fn parse_reference(value: &str) -> Result<RuntimeRef, ()> {
-    if let Some(target_id) = value.strip_prefix("inputs.") {
-        if !target_id.is_empty() {
-            return Ok(RuntimeRef::Input {
-                target_id: target_id.to_string(),
-            });
-        }
-        return Err(());
+#[allow(clippy::too_many_arguments)]
+fn source_is_rejected(
+    file: &str,
+    recipe: &Recipe,
+    step_index: usize,
+    param_name: &str,
+    ref_value: &str,
+    spec: Option<&StepParamDto>,
+    source: &str,
+    errors: &mut Vec<Value>,
+) -> bool {
+    if spec.is_none_or(|spec| accepts_source(spec, source)) {
+        return false;
     }
+    errors.push(ref_error(
+        file,
+        recipe,
+        step_index,
+        param_name,
+        "param_source_not_accepted",
+        &format!(
+            "Param {} on step {} does not accept {} ref {}.",
+            single_quote(param_name),
+            single_quote(&recipe.steps[step_index].id),
+            source,
+            single_quote(ref_value)
+        ),
+    ));
+    true
+}
 
-    if let Some(step_body) = value.strip_prefix("steps.") {
-        if let Some((step_id, output_name)) = step_body.split_once(".outputs.") {
-            if !step_id.is_empty() && !output_name.is_empty() {
-                return Ok(RuntimeRef::StepOutput {
-                    target_id: step_id.to_string(),
-                    field: output_name.to_string(),
-                });
-            }
-            return Err(());
-        }
-        if !step_body.is_empty() {
-            return Ok(RuntimeRef::StepShorthand {
-                target_id: step_body.to_string(),
-            });
-        }
-        return Err(());
+#[allow(clippy::too_many_arguments)]
+fn validate_ref_value_type(
+    file: &str,
+    recipe: &Recipe,
+    step_index: usize,
+    param_name: &str,
+    ref_value: &str,
+    spec: Option<&StepParamDto>,
+    actual_type: &str,
+    errors: &mut Vec<Value>,
+) {
+    let Some(spec) = spec else {
+        return;
+    };
+    if spec.accepted_value_types.is_empty()
+        || spec
+            .accepted_value_types
+            .iter()
+            .any(|accepted| accepted == actual_type)
+    {
+        return;
     }
-
-    if let Some(body) = value.strip_prefix("artifacts.") {
-        if let Some((artifact_id, field)) = body.rsplit_once('.') {
-            if !artifact_id.is_empty() && !field.is_empty() {
-                return Ok(RuntimeRef::ArtifactField {
-                    target_id: artifact_id.to_string(),
-                    field: field.to_string(),
-                });
-            }
-        }
-        return Err(());
-    }
-
-    Err(())
+    errors.push(ref_error(
+        file,
+        recipe,
+        step_index,
+        param_name,
+        "param_value_type_not_accepted",
+        &format!(
+            "Param {} on step {} does not accept ref {} with value type {}.",
+            single_quote(param_name),
+            single_quote(&recipe.steps[step_index].id),
+            single_quote(ref_value),
+            single_quote(actual_type)
+        ),
+    ));
 }
 
 fn param_contract_error(

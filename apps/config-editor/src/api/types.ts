@@ -134,14 +134,14 @@ export interface StepSpecDto {
   params: Record<
     string,
     {
-      mode: string;
+      acceptedSources: string[];
+      acceptedValueTypes: string[];
       required: boolean;
       enumValues: string[];
       shape?: StepParamShapeDto;
     }
   >;
   defaults: Record<string, unknown>;
-  refFilters: Record<string, string[]>;
 }
 
 export interface StepParamShapeFieldDto {

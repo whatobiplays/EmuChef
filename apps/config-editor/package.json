@@ -33,6 +33,7 @@
     "dev": "vite",
     "test:logic": "node -e \"require('node:fs').rmSync('/tmp/emuchef-config-editor-tests',{recursive:true,force:true})\" && tsc --ignoreConfig --module NodeNext --moduleResolution NodeNext --target ES2022 --outDir /tmp/emuchef-config-editor-tests --rootDir . --types node --skipLibCheck --strict tests/advancedStepInternals.logic.test.ts tests/editorState.logic.test.ts tests/stepDependencies.logic.test.ts tests/stepParams.logic.test.ts tests/textInputGuards.logic.test.ts src/components/advancedStepInternals.logic.ts src/components/editorState.logic.ts src/components/stepDependencies.logic.ts src/components/stepParams.logic.ts src/components/textInputGuards.logic.ts src/api/types.ts src/api/commands.ts && node --test /tmp/emuchef-config-editor-tests/tests/*.test.js",
     "typecheck": "tsc --noEmit",
+    "lint": "eslint src tests",
     "build": "tsc && vite build",
     "tauri": "node scripts/run-tauri.mjs"
   },
@@ -43,16 +44,22 @@
     "react-dom": "^19.2.5"
   },
   "devDependencies": {
+    "@eslint/js": "^10.0.1",
     "@tauri-apps/cli": "^2.11.0",
     "@types/node": "^25.6.0",
     "@types/react": "^19.2.14",
     "@types/react-dom": "^19.2.3",
     "@vitejs/plugin-react": "^6.0.1",
     "autoprefixer": "^10.5.0",
+    "eslint": "^10.7.0",
+    "eslint-plugin-react-hooks": "^7.1.1",
+    "eslint-plugin-react-refresh": "^0.5.3",
     "esbuild": "^0.28.0",
+    "globals": "^17.7.0",
     "postcss": "^8.5.13",
     "tailwindcss": "^3.4.19",
     "typescript": "^6.0.3",
+    "typescript-eslint": "^8.63.0",
     "vite": "^8.0.10"
   }
 }

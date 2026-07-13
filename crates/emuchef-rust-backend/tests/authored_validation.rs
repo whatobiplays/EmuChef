@@ -351,6 +351,53 @@ fn stepspec_ref_mode_and_invalid_ref_format_diagnostics_are_covered() {
 }
 
 #[test]
+fn stepspec_ref_sources_and_value_types_are_validated_independently() {
+    let temp_recipe = TempRecipe::copy_fixture("phase6i_commands.yaml");
+    let path = temp_recipe.path.to_string_lossy().into_owned();
+    let responses = sidecar_responses(&jsonl_input(vec![
+        open_request("open", path.as_str()),
+        command_request(
+            "wrong-type",
+            json!({
+                "type": "UpdateStepParams",
+                "stepId": "copy_input",
+                "params": {
+                    "source": {"ref": "inputs.source_dir"},
+                    "dest": {"ref": "inputs.source_dir"}
+                }
+            }),
+        ),
+        document_request("validate-wrong-type", "validate"),
+        command_request(
+            "wrong-source",
+            json!({
+                "type": "UpdateStepParams",
+                "stepId": "copy_input",
+                "params": {
+                    "source": {"ref": "inputs.source_dir"},
+                    "dest": {"ref": "artifacts.target_zip.local_path"}
+                }
+            }),
+        ),
+        document_request("validate-wrong-source", "validate"),
+    ]));
+
+    assert_eq!(responses.len(), 5);
+    assert_error_diagnostic(
+        &responses[2]["result"]["diagnostics"],
+        "param_value_type_not_accepted",
+        "phase6i.commands",
+        Some("steps[2].params.dest"),
+    );
+    assert_error_diagnostic(
+        &responses[4]["result"]["diagnostics"],
+        "param_source_not_accepted",
+        "phase6i.commands",
+        Some("steps[2].params.dest"),
+    );
+}
+
+#[test]
 fn invalid_step_internals_keep_load_error_classification() {
     for fixture in [
         "phase6k_invalid_constraints.yaml",
