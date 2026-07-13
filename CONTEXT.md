@@ -274,17 +274,20 @@ input identifiers.
 
 ## End-User App
 
-`apps/emuchef-app` is the separate Phase 1 React/Tauri application for guided
+`apps/emuchef-app` is the separate React/Tauri application for guided
 end-user setup. It packages the Rust `emuchef --sidecar` runtime and a bundled
 catalog snapshot but shares no frontend modules or runtime state with
 `apps/config-editor`. The workflow is Connect Device, Confirm Device, Choose
-Setup, Provide Inputs, and Review Plan. Phase 1 performs no execution, dry-run,
-apply, cancellation, device writes, artifact resolution, saved-configuration
-persistence, catalog networking, wireless onboarding, or parallel-device work.
+Setup, Provide Inputs, Review Plan, and Simulated Run. The execution stage is a
+fake-device dry run of the exact retained reviewed plan. It performs no real
+apply, device writes, artifact resolution, saved-configuration persistence,
+catalog networking, wireless onboarding, rollback, resume, or parallel-device
+work, and its result is not real-device evidence.
 
 Tauri launches the sidecar and negotiates the `phase0_end_user_runtime`
 extension plus `describeCatalog`, `listAdbDevices`, `probeDevice`,
-`matchDevice`, `describeConfiguration`, and `planConfiguration` before ADB is
+`matchDevice`, `describeConfiguration`, `planConfiguration`, `startExecution`,
+`getExecution`, `getExecutionEvents`, and `cancelExecution` before ADB is
 needed. Runtime and catalog startup are independent from Platform-Tools setup.
 A missing ADB installation blocks only device discovery and displays the
 Platform-Tools setup flow.
@@ -342,6 +345,31 @@ and 64 bounded tombstones. Device disappearance, changed facts, catalog change,
 Platform-Tools replacement/removal, discard, or capacity eviction returns
 `review_stale`; time expiry returns `review_expired`; an unrecognized handle
 returns `review_unknown`.
+
+Simulation start accepts only the opaque review handle at the React boundary.
+Tauri revalidates review lifetime, current catalog identity/digest, connected
+device presence, the retained serial/manufacturer/model/API target facts, and a
+new canonical plan digest without repeating profile matching or planning. It
+then sends the exact retained plan, digest, and target to `startExecution` with
+trusted code forcing `dry_run`. A device disconnect blocks start but cannot
+cancel or erase a dry run after it has started.
+
+Random execution handles are session-scoped, never reused, and lost on restart.
+The store retains one start reservation or active mapping and at most the latest
+terminal mapping. Every failed preflight or start releases the reservation; a
+public handle is bound only after the sidecar returns a successful execution
+identifier. Reviews retain their independent stale, expiry, discard, and
+capacity lifecycle during and after simulation.
+
+`getExecution` snapshots are authoritative for recipe-grouped progress and
+terminal state. Incremental events are presentation data only; after accepting
+a snapshot the UI resumes event polling after its `latestSequence`. Polling
+stops on a terminal snapshot and ignores stale handles or generations.
+Cancellation is cooperative: completed simulated steps remain visible in the
+report, no new simulated steps start, the current simulated atomic step may
+finish, and no real device changes or rollback exist. React projections omit
+the sidecar execution id, full plan, target binding, exact serial, catalog root,
+step outputs, arbitrary paths, and raw sidecar errors.
 
 EmuChef never bundles, vendors, redistributes, mirrors, proxies, or downloads
 Android SDK Platform-Tools. The setup UI opens only Google's official

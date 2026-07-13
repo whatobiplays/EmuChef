@@ -5,6 +5,7 @@ import type {
   AdbSetupStatus,
   CatalogSummary,
   DeviceSummary,
+  ExecutionSnapshot,
   InputDescriptor,
   RuntimeStatus,
 } from "./types";
@@ -19,7 +20,14 @@ import {
   workflowReducer,
 } from "./workflow";
 
-const STEP_LABELS = ["Connect", "Device", "Setup", "Inputs", "Review"];
+const WORKFLOW_STEPS = [
+  { step: "connect", label: "Connect" },
+  { step: "device", label: "Device" },
+  { step: "setup", label: "Setup" },
+  { step: "inputs", label: "Inputs" },
+  { step: "review", label: "Review" },
+  { step: "execution", label: "Simulated Run" },
+] as const;
 
 function errorMessage(error: unknown): string {
   const raw = error instanceof Error ? error.message : String(error);
@@ -29,6 +37,24 @@ function errorMessage(error: unknown): string {
   } catch {
     return raw;
   }
+}
+
+function errorCode(error: unknown): string | null {
+  const raw = error instanceof Error ? error.message : String(error);
+  try {
+    const parsed = JSON.parse(raw) as { code?: unknown };
+    return typeof parsed.code === "string" ? parsed.code : null;
+  } catch {
+    return null;
+  }
+}
+
+function executionDuration(snapshot: ExecutionSnapshot): string | null {
+  if (!snapshot.startedAt) return null;
+  const start = Date.parse(snapshot.startedAt);
+  const finish = snapshot.finishedAt ? Date.parse(snapshot.finishedAt) : Date.now();
+  if (!Number.isFinite(start) || !Number.isFinite(finish) || finish < start) return null;
+  return `${Math.max(0, Math.round((finish - start) / 1000))}s`;
 }
 
 export function App() {
@@ -202,6 +228,83 @@ export function App() {
     }
   };
 
+  const startSimulation = async () => {
+    if (!workflow.review || workflow.execution.kind === "starting") return;
+    const generation = workflow.executionGeneration + 1;
+    dispatch({ type: "execution-starting", generation });
+    setBusy(true);
+    setNotice(null);
+    try {
+      const snapshot = await api.startSimulatedExecution(workflow.review.reviewHandle);
+      dispatch({ type: "execution-started", generation, snapshot });
+    } catch (error) {
+      dispatch({ type: "execution-start-failed", generation });
+      setNotice(errorMessage(error));
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const activeExecution =
+    workflow.execution.kind === "active" ? workflow.execution : null;
+
+  useEffect(() => {
+    if (!activeExecution) return;
+    let disposed = false;
+    let timer: number | null = null;
+    const { generation, snapshot } = activeExecution;
+    const executionHandle = snapshot.executionHandle;
+    let eventCursor = activeExecution.eventCursor;
+
+    async function pollExecution() {
+      try {
+        const nextSnapshot = await api.getSimulatedExecution(executionHandle);
+        if (disposed) return;
+        dispatch({ type: "execution-snapshot", generation, snapshot: nextSnapshot });
+        eventCursor = Math.max(eventCursor, nextSnapshot.latestSequence);
+        if (nextSnapshot.terminal) return;
+
+        const batch = await api.getSimulatedExecutionEvents(executionHandle, eventCursor);
+        if (disposed) return;
+        dispatch({ type: "execution-events", generation, batch });
+        for (const event of batch.events) eventCursor = Math.max(eventCursor, event.sequence);
+        timer = window.setTimeout(pollExecution, 500);
+      } catch (error) {
+        if (disposed) return;
+        if (errorCode(error) === "execution_unavailable") {
+          dispatch({
+            type: "execution-unavailable",
+            generation,
+            executionHandle,
+            message: errorMessage(error),
+          });
+          return;
+        }
+        setNotice(errorMessage(error));
+        timer = window.setTimeout(pollExecution, 1000);
+      }
+    }
+
+    void pollExecution();
+    return () => {
+      disposed = true;
+      if (timer !== null) window.clearTimeout(timer);
+    };
+  }, [activeExecution?.generation, activeExecution?.snapshot.executionHandle]);
+
+  const cancelSimulation = async () => {
+    if (workflow.execution.kind !== "active" || workflow.execution.cancellationRequested) return;
+    const { generation, snapshot } = workflow.execution;
+    try {
+      const cancellation = await api.cancelSimulatedExecution(snapshot.executionHandle);
+      if (cancellation.accepted) {
+        dispatch({ type: "execution-cancellation-requested", generation });
+      }
+    } catch (error) {
+      setNotice(errorMessage(error));
+    }
+  };
+
   const pickInputValue = async (input: InputDescriptor) => {
     if (!input.pathKind) return;
     setNotice(null);
@@ -221,7 +324,7 @@ export function App() {
     });
   };
 
-  const stepIndex = STEP_LABELS.findIndex((label) => label.toLowerCase() === workflow.step);
+  const stepIndex = WORKFLOW_STEPS.findIndex((item) => item.step === workflow.step);
   const planOptions = useMemo(
     () => [...(workflow.match?.candidates ?? []), ...(workflow.match?.safeGenericPlans ?? [])],
     [workflow.match],
@@ -277,9 +380,9 @@ export function App() {
         <main className="workflow-layout" ref={mainRef} tabIndex={-1}>
           <nav aria-label="Setup progress" className="progress-nav">
             <ol>
-              {STEP_LABELS.map((label, index) => (
-                <li key={label} className={index === stepIndex ? "current" : index < stepIndex ? "complete" : ""}>
-                  <span>{index + 1}</span>{label}
+              {WORKFLOW_STEPS.map((item, index) => (
+                <li key={item.step} className={index === stepIndex ? "current" : index < stepIndex ? "complete" : ""}>
+                  <span>{index + 1}</span>{item.label}
                 </li>
               ))}
             </ol>
@@ -442,7 +545,10 @@ export function App() {
             {workflow.step === "review" && workflow.review && (
               <>
                 <p className="eyebrow">REVIEW PLAN</p>
-                <h2>Ready for a future configure step</h2>
+                <h2>Ready for a simulated dry run</h2>
+                <p className="simulation-banner">
+                  Simulated / Dry Run only. This does not change or verify the real device.
+                </p>
                 <p>
                   Target: {workflow.review.target.manufacturer ?? "Android"} {workflow.review.target.model ?? "device"}
                   · Android {workflow.review.target.androidVersion ?? "unknown"}
@@ -479,8 +585,106 @@ export function App() {
                 <p className="digest">Plan digest: {workflow.review.planDigest}</p>
                 <div className="button-row">
                   <button className="secondary" onClick={() => dispatch({ type: "back" })}>Back</button>
-                  <button disabled title="Device configuration begins in Phase 2">Configure Device — Phase 2</button>
+                  <button onClick={startSimulation} disabled={busy || workflow.execution.kind === "starting"}>
+                    {workflow.execution.kind === "starting" ? "Starting simulated run…" : "Start Simulated Dry Run"}
+                  </button>
                 </div>
+              </>
+            )}
+
+            {workflow.step === "execution" &&
+              (workflow.execution.kind === "active" || workflow.execution.kind === "terminal") && (
+                <>
+                  <p className="eyebrow">SIMULATED / DRY RUN</p>
+                  <h2>
+                    {workflow.execution.kind === "terminal"
+                      ? `Simulation ${workflow.execution.snapshot.status.replaceAll("_", " ")}`
+                      : "Simulating the reviewed setup"}
+                  </h2>
+                  <p className="simulation-banner">
+                    No real device changes are made. This report is simulated evidence only.
+                  </p>
+                  <dl className="execution-summary">
+                    <div><dt>Status</dt><dd>{workflow.execution.snapshot.status.replaceAll("_", " ")}</dd></div>
+                    <div><dt>Started</dt><dd>{workflow.execution.snapshot.startedAt ?? "Starting"}</dd></div>
+                    {executionDuration(workflow.execution.snapshot) && (
+                      <div><dt>Duration</dt><dd>{executionDuration(workflow.execution.snapshot)}</dd></div>
+                    )}
+                  </dl>
+                  {workflow.execution.snapshot.warnings.map((issue) => (
+                    <p className="warning" key={`warning-${issue.code}-${issue.stepId ?? "run"}`}>{issue.message}</p>
+                  ))}
+                  {workflow.execution.snapshot.errors.map((issue) => (
+                    <p className="error" key={`error-${issue.code}-${issue.stepId ?? "run"}`}>{issue.message}</p>
+                  ))}
+                  {workflow.execution.snapshot.recipes.map((recipe) => (
+                    <article className={`execution-group status-${recipe.status}`} key={recipe.recipeId}>
+                      <div className="execution-heading">
+                        <div><h3>{recipe.name}</h3>{recipe.description && <p>{recipe.description}</p>}</div>
+                        <span className="execution-status">{recipe.status.replaceAll("_", " ")}</span>
+                      </div>
+                      <ol>
+                        {recipe.steps.map((step) => (
+                          <li key={step.stepId} className={`step-${step.status}`}>
+                            <strong>{step.note ?? step.name}</strong>
+                            <span>{step.status.replaceAll("_", " ")}</span>
+                            {step.note && step.note !== step.name && <small>{step.name}</small>}
+                            {step.message && <small>{step.message}</small>}
+                          </li>
+                        ))}
+                      </ol>
+                    </article>
+                  ))}
+                  {workflow.execution.events.length > 0 && (
+                    <details className="execution-events">
+                      <summary>Incremental simulated event log</summary>
+                      <ol>
+                        {workflow.execution.events.map((event) => (
+                          <li key={event.sequence}>
+                            <time>{event.timestamp}</time> {event.note ?? event.message ?? event.eventType}
+                            {event.phase && ` · ${event.phase.replaceAll("_", " ")}`}
+                            {event.status && ` · ${event.status.replaceAll("_", " ")}`}
+                          </li>
+                        ))}
+                      </ol>
+                    </details>
+                  )}
+                  {workflow.execution.kind === "active" ? (
+                    <>
+                      {workflow.execution.cancellationRequested && (
+                        <p className="warning">
+                          Cancellation requested. Completed simulated steps remain visible in this report. No new
+                          simulated steps start, the current simulated atomic step may finish, and no real device
+                          changes or rollback exist.
+                        </p>
+                      )}
+                      <button
+                        className="danger"
+                        onClick={cancelSimulation}
+                        disabled={workflow.execution.cancellationRequested}
+                      >
+                        {workflow.execution.cancellationRequested ? "Cancellation requested" : "Cancel simulated run"}
+                      </button>
+                    </>
+                  ) : (
+                    <div className="button-row">
+                      <button className="secondary" onClick={() => dispatch({ type: "return-to-review" })}>
+                        Return to Review
+                      </button>
+                    </div>
+                  )}
+                </>
+              )}
+
+            {workflow.step === "execution" && workflow.execution.kind === "unavailable" && (
+              <>
+                <p className="eyebrow">SIMULATED RUN UNAVAILABLE</p>
+                <h2>This in-memory simulation cannot be resumed</h2>
+                <p className="warning">{workflow.execution.message}</p>
+                <p>No execution history is persisted across an app or sidecar restart.</p>
+                <button className="secondary" onClick={() => dispatch({ type: "return-to-review" })}>
+                  Return to Review
+                </button>
               </>
             )}
           </section>
@@ -491,11 +695,11 @@ export function App() {
               <div><dt>Rust runtime</dt><dd>Ready</dd></div>
               <div><dt>Platform-Tools</dt><dd>{adb.version}</dd></div>
               <div><dt>Catalog</dt><dd>{catalog?.catalog.version ?? "Ready"}</dd></div>
-              <div><dt>Mode</dt><dd>Read-only</dd></div>
+              <div><dt>Mode</dt><dd>Simulation only</dd></div>
             </dl>
             {adb.warning && <p className="warning">{adb.warning}</p>}
-            <button className="text-button" onClick={importPlatformTools} disabled={busy}>Replace Platform-Tools</button>
-            <button className="text-button danger-text" onClick={removePlatformTools} disabled={busy}>Remove Platform-Tools</button>
+            <button className="text-button" onClick={importPlatformTools} disabled={busy || workflow.step === "execution"}>Replace Platform-Tools</button>
+            <button className="text-button danger-text" onClick={removePlatformTools} disabled={busy || workflow.step === "execution"}>Remove Platform-Tools</button>
           </aside>
         </main>
       )}

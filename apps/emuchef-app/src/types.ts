@@ -152,3 +152,92 @@ export interface ReviewSummary {
   selectedInputs: ReviewInput[];
   warnings: Array<{ code: string; message: string }>;
 }
+
+export type ExecutionStatus =
+  | "queued"
+  | "running"
+  | "succeeded"
+  | "succeeded_with_warnings"
+  | "failed"
+  | "cancelled";
+
+export type RecipeExecutionStatus =
+  | "pending"
+  | "running"
+  | "succeeded"
+  | "succeeded_with_warnings"
+  | "failed"
+  | "blocked"
+  | "cancelled";
+
+export type StepExecutionStatus =
+  | "pending"
+  | "running"
+  | "succeeded"
+  | "skipped"
+  | "failed"
+  | "blocked"
+  | "cancelled";
+
+export interface ExecutionIssue {
+  code: string;
+  message: string;
+  recipeId: string | null;
+  stepId: string | null;
+}
+
+export interface ExecutionStep {
+  stepId: string;
+  name: string;
+  note: string | null;
+  status: StepExecutionStatus;
+  message: string | null;
+}
+
+export interface ExecutionRecipe {
+  recipeId: string;
+  name: string;
+  description: string | null;
+  status: RecipeExecutionStatus;
+  steps: ExecutionStep[];
+}
+
+export interface ExecutionSnapshot {
+  executionHandle: string;
+  reviewHandle: string;
+  simulated: true;
+  status: ExecutionStatus;
+  startedAt: string | null;
+  finishedAt: string | null;
+  latestSequence: number;
+  terminal: boolean;
+  recipes: ExecutionRecipe[];
+  warnings: ExecutionIssue[];
+  errors: ExecutionIssue[];
+}
+
+export interface ExecutionEvent {
+  sequence: number;
+  timestamp: string;
+  eventType: string;
+  recipeId: string | null;
+  stepId: string | null;
+  phase: string | null;
+  status: string | null;
+  note: string | null;
+  message: string | null;
+  issue: ExecutionIssue | null;
+}
+
+export interface ExecutionEventBatch {
+  executionHandle: string;
+  events: ExecutionEvent[];
+  latestSequence: number;
+  terminal: boolean;
+}
+
+export interface ExecutionCancellation {
+  executionHandle: string;
+  accepted: boolean;
+  status: ExecutionStatus;
+}

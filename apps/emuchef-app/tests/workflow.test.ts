@@ -4,6 +4,7 @@ import test from "node:test";
 import {
   initialWorkflowState,
   inputDiagnosticsForDisplay,
+  mergeExecutionEvents,
   pageDiagnosticsForDisplay,
   recipeSelectionDisabled,
   reviewReady,
@@ -11,6 +12,7 @@ import {
   updateRecipeSelection,
   workflowReducer,
 } from "../src/workflow";
+import type { ExecutionEvent, ExecutionSnapshot } from "../src/types";
 
 const facts = {
   deviceHandle: "device-opaque",
@@ -30,6 +32,70 @@ const match = {
   blocked: false,
   blockReason: null,
 };
+
+const review = {
+  reviewHandle: "review-opaque",
+  planDigest: "digest",
+  target: { manufacturer: "AYANEO", model: "Pocket S Mini", androidVersion: 13, androidApiLevel: 33 },
+  groups: [],
+  selectedInputs: [],
+  warnings: [],
+};
+
+function executionSnapshot(
+  latestSequence: number,
+  status: ExecutionSnapshot["status"] = "running",
+  executionHandle = "execution-opaque",
+): ExecutionSnapshot {
+  const recipeStatus = status === "queued" ? "pending" : status === "failed" ? "blocked" : status;
+  const stepStatus = status === "queued"
+    ? "pending"
+    : status === "failed"
+      ? "blocked"
+      : status === "succeeded_with_warnings"
+        ? "succeeded"
+        : status;
+  return {
+    executionHandle,
+    reviewHandle: review.reviewHandle,
+    simulated: true,
+    status,
+    startedAt: "2026-07-13T00:00:00Z",
+    finishedAt: status === "running" ? null : "2026-07-13T00:00:01Z",
+    latestSequence,
+    terminal: status !== "running" && status !== "queued",
+    recipes: [{
+      recipeId: "recipe.one",
+      name: "Recipe One",
+      description: null,
+      status: recipeStatus,
+      steps: [{
+        stepId: "step.one",
+        name: "Step One",
+        note: "Simulate step one",
+        status: stepStatus,
+        message: null,
+      }],
+    }],
+    warnings: [],
+    errors: [],
+  };
+}
+
+function executionEvent(sequence: number): ExecutionEvent {
+  return {
+    sequence,
+    timestamp: `2026-07-13T00:00:0${sequence}Z`,
+    eventType: "step_progress",
+    recipeId: "recipe.one",
+    stepId: "step.one",
+    phase: "action",
+    status: "running",
+    note: `Event ${sequence}`,
+    message: null,
+    issue: null,
+  };
+}
 
 test("device selection and probing advance without exposing a serial", () => {
   const selected = workflowReducer(initialWorkflowState, {
@@ -382,4 +448,162 @@ test("path-picker errors settle and clear frontend busy state", async () => {
 
   assert.match(String(handledError), /picker unavailable/);
   assert.deepEqual(busyStates, [true, false]);
+});
+
+test("simulation start preserves the retained review until start succeeds", () => {
+  const reviewed = { ...initialWorkflowState, step: "review" as const, review };
+  const starting = workflowReducer(reviewed, { type: "execution-starting", generation: 1 });
+  assert.equal(starting.step, "review");
+  assert.equal(starting.review, review);
+  assert.equal(starting.execution.kind, "starting");
+
+  const active = workflowReducer(starting, {
+    type: "execution-started",
+    generation: 1,
+    snapshot: executionSnapshot(2),
+  });
+  assert.equal(active.step, "execution");
+  assert.equal(active.review, review);
+  assert.equal(active.execution.kind, "active");
+  assert.equal(active.execution.kind === "active" && active.execution.eventCursor, 2);
+});
+
+test("authoritative snapshots replace progress and reject older responses", () => {
+  const starting = workflowReducer(
+    { ...initialWorkflowState, step: "review", review },
+    { type: "execution-starting", generation: 1 },
+  );
+  const active = workflowReducer(starting, {
+    type: "execution-started",
+    generation: 1,
+    snapshot: executionSnapshot(4),
+  });
+  assert.equal(
+    workflowReducer(active, {
+      type: "execution-snapshot",
+      generation: 1,
+      snapshot: executionSnapshot(3, "failed"),
+    }),
+    active,
+  );
+  const terminal = workflowReducer(active, {
+    type: "execution-snapshot",
+    generation: 1,
+    snapshot: executionSnapshot(6, "failed"),
+  });
+  assert.equal(terminal.execution.kind, "terminal");
+  assert.equal(terminal.execution.kind === "terminal" && terminal.execution.snapshot.recipes[0].status, "blocked");
+  assert.equal(terminal.execution.kind === "terminal" && terminal.execution.eventCursor, 6);
+});
+
+test("every Phase 0 terminal status produces a terminal simulated result", () => {
+  for (const status of ["succeeded", "succeeded_with_warnings", "failed", "cancelled"] as const) {
+    const starting = workflowReducer(
+      { ...initialWorkflowState, step: "review", review },
+      { type: "execution-starting", generation: 1 },
+    );
+    const terminal = workflowReducer(starting, {
+      type: "execution-started",
+      generation: 1,
+      snapshot: executionSnapshot(4, status),
+    });
+    assert.equal(terminal.execution.kind, "terminal", status);
+    assert.equal(terminal.execution.kind === "terminal" && terminal.execution.snapshot.status, status);
+  }
+});
+
+test("events are presentation-only, monotonic, and deduplicated after the snapshot cursor", () => {
+  const merged = mergeExecutionEvents(
+    [executionEvent(3)],
+    [executionEvent(7), executionEvent(5), executionEvent(7), executionEvent(4)],
+    4,
+  );
+  assert.deepEqual(merged.events.map((event) => event.sequence), [3, 5, 7]);
+  assert.equal(merged.cursor, 7);
+});
+
+test("stale execution handles and generations cannot overwrite a newer run", () => {
+  const starting = workflowReducer(
+    { ...initialWorkflowState, step: "review", review },
+    { type: "execution-starting", generation: 2 },
+  );
+  const active = workflowReducer(starting, {
+    type: "execution-started",
+    generation: 2,
+    snapshot: executionSnapshot(2, "running", "new-handle"),
+  });
+  assert.equal(workflowReducer(active, {
+    type: "execution-snapshot",
+    generation: 1,
+    snapshot: executionSnapshot(20, "failed", "old-handle"),
+  }), active);
+  assert.equal(workflowReducer(active, {
+    type: "execution-snapshot",
+    generation: 2,
+    snapshot: executionSnapshot(20, "failed", "wrong-handle"),
+  }), active);
+});
+
+test("cooperative cancellation disables repeats but waits for a terminal snapshot", () => {
+  const starting = workflowReducer(
+    { ...initialWorkflowState, step: "review", review },
+    { type: "execution-starting", generation: 1 },
+  );
+  const active = workflowReducer(starting, {
+    type: "execution-started",
+    generation: 1,
+    snapshot: executionSnapshot(1),
+  });
+  const cancelling = workflowReducer(active, { type: "execution-cancellation-requested", generation: 1 });
+  assert.equal(cancelling.execution.kind, "active");
+  assert.equal(cancelling.execution.kind === "active" && cancelling.execution.cancellationRequested, true);
+  const cancelled = workflowReducer(cancelling, {
+    type: "execution-snapshot",
+    generation: 1,
+    snapshot: executionSnapshot(3, "cancelled"),
+  });
+  assert.equal(cancelled.execution.kind, "terminal");
+});
+
+test("device disappearance after start does not erase simulated progress", () => {
+  const starting = workflowReducer(
+    { ...initialWorkflowState, step: "review", review },
+    { type: "execution-starting", generation: 1 },
+  );
+  const active = workflowReducer(starting, {
+    type: "execution-started",
+    generation: 1,
+    snapshot: executionSnapshot(1),
+  });
+  assert.equal(workflowReducer(active, { type: "device-disappeared" }), active);
+});
+
+test("device polling cannot erase a start that is still being revalidated", () => {
+  const starting = workflowReducer(
+    { ...initialWorkflowState, step: "review", review },
+    { type: "execution-starting", generation: 1 },
+  );
+  assert.equal(workflowReducer(starting, { type: "device-disappeared" }), starting);
+});
+
+test("lost in-memory runs retain the review recovery path without claiming resume", () => {
+  const starting = workflowReducer(
+    { ...initialWorkflowState, step: "review", review },
+    { type: "execution-starting", generation: 1 },
+  );
+  const active = workflowReducer(starting, {
+    type: "execution-started",
+    generation: 1,
+    snapshot: executionSnapshot(1),
+  });
+  const unavailable = workflowReducer(active, {
+    type: "execution-unavailable",
+    generation: 1,
+    executionHandle: "execution-opaque",
+    message: "The in-memory simulated run was lost.",
+  });
+  assert.equal(unavailable.execution.kind, "unavailable");
+  const reviewed = workflowReducer(unavailable, { type: "return-to-review" });
+  assert.equal(reviewed.step, "review");
+  assert.equal(reviewed.review, review);
 });

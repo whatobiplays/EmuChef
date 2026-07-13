@@ -7,6 +7,9 @@ import type {
   DeviceFacts,
   DeviceMatch,
   DeviceSummary,
+  ExecutionCancellation,
+  ExecutionEventBatch,
+  ExecutionSnapshot,
   ReviewSummary,
   RuntimeStatus,
 } from "./types";
@@ -36,6 +39,17 @@ export const api = {
     bindings: Record<string, unknown>;
   }) => invoke<ReviewSummary>("create_review", request),
   discardReview: (reviewHandle: string) => invoke<void>("discard_review", { reviewHandle }),
+  startSimulatedExecution: (reviewHandle: string) =>
+    invoke<ExecutionSnapshot>("start_simulated_execution", { reviewHandle }),
+  getSimulatedExecution: (executionHandle: string) =>
+    invoke<ExecutionSnapshot>("get_simulated_execution", { executionHandle }),
+  getSimulatedExecutionEvents: (executionHandle: string, afterSequence: number) =>
+    invoke<ExecutionEventBatch>("get_simulated_execution_events", {
+      executionHandle,
+      afterSequence,
+    }),
+  cancelSimulatedExecution: (executionHandle: string) =>
+    invoke<ExecutionCancellation>("cancel_simulated_execution", { executionHandle }),
   pickInputPath: (pathKind: "file" | "directory", multiple: boolean) =>
     invoke<string[] | null>("pick_input_path", { pathKind, multiple }),
 };

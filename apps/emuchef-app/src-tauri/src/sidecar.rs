@@ -16,6 +16,10 @@ const REQUIRED_CAPABILITIES: &[&str] = &[
     "matchDevice",
     "describeConfiguration",
     "planConfiguration",
+    "startExecution",
+    "getExecution",
+    "getExecutionEvents",
+    "cancelExecution",
 ];
 
 #[derive(Clone, Debug, Serialize)]
@@ -154,15 +158,12 @@ impl SidecarClient {
             ));
         }
         let negotiation = self
-            .raw_request(
-                "negotiateCapabilities",
-                json!({ "required": REQUIRED_CAPABILITIES, "optional": [] }),
-            )
+            .raw_request("negotiateCapabilities", capability_negotiation_payload())
             .map_err(StartFailure::Failed)?;
         let result = successful_result(&negotiation).map_err(StartFailure::Unsupported)?;
         if result.get("compatible").and_then(Value::as_bool) != Some(true) {
             return Err(StartFailure::Unsupported(
-                "Rust runtime is missing one or more required read-only product operations."
+                "Rust runtime is missing one or more required end-user product operations."
                     .to_string(),
             ));
         }
@@ -222,6 +223,14 @@ impl SidecarClient {
             let _ = process.child.wait();
         }
     }
+}
+
+/// Build the backend-defined capability negotiation payload used at startup.
+fn capability_negotiation_payload() -> Value {
+    json!({
+        "requiredCapabilities": REQUIRED_CAPABILITIES,
+        "optionalCapabilities": [],
+    })
 }
 
 impl Drop for SidecarClient {
@@ -324,11 +333,78 @@ fn successful_result(envelope: &Value) -> Result<&Value, String> {
 mod tests {
     use super::*;
 
+    fn negotiate(payload: Value, request_id: &str) -> Value {
+        let request = json!({
+            "id": request_id,
+            "type": "negotiateCapabilities",
+            "payload": payload,
+        });
+        let output = emuchef_rust_backend::jsonl::process_jsonl(&format!("{request}\n"));
+        serde_json::from_str(output.trim()).expect("negotiation response should be valid JSON")
+    }
+
     #[test]
-    fn phase_one_operations_are_all_negotiated() {
-        assert_eq!(REQUIRED_CAPABILITIES.len(), 6);
-        assert!(REQUIRED_CAPABILITIES.contains(&"listAdbDevices"));
-        assert!(!REQUIRED_CAPABILITIES.contains(&"startExecution"));
-        assert!(!REQUIRED_CAPABILITIES.contains(&"cancelExecution"));
+    fn end_user_operations_are_all_negotiated() {
+        assert_eq!(
+            REQUIRED_CAPABILITIES,
+            [
+                "describeCatalog",
+                "listAdbDevices",
+                "probeDevice",
+                "matchDevice",
+                "describeConfiguration",
+                "planConfiguration",
+                "startExecution",
+                "getExecution",
+                "getExecutionEvents",
+                "cancelExecution",
+            ]
+        );
+    }
+
+    #[test]
+    fn startup_negotiation_payload_uses_the_real_backend_contract() {
+        let payload = capability_negotiation_payload();
+        assert_eq!(
+            payload["requiredCapabilities"],
+            serde_json::to_value(REQUIRED_CAPABILITIES).unwrap()
+        );
+        assert_eq!(
+            payload["requiredCapabilities"].as_array().unwrap().len(),
+            10
+        );
+        assert_eq!(payload["optionalCapabilities"], json!([]));
+        assert!(payload.get("required").is_none());
+        assert!(payload.get("optional").is_none());
+
+        let supported = negotiate(payload.clone(), "all-required-supported");
+        assert_eq!(supported["ok"], true, "{supported:#}");
+        assert_eq!(supported["result"]["compatible"], true, "{supported:#}");
+        assert_eq!(
+            supported["result"]["enabledRequired"]
+                .as_array()
+                .unwrap()
+                .len(),
+            10
+        );
+
+        let mut missing_execution = payload;
+        missing_execution["requiredCapabilities"]
+            .as_array_mut()
+            .unwrap()
+            .iter_mut()
+            .find(|capability| capability.as_str() == Some("cancelExecution"))
+            .expect("cancelExecution should be required")
+            .clone_from(&json!("missingExecutionCapability"));
+        let incompatible = negotiate(missing_execution, "missing-required-execution");
+        assert_eq!(incompatible["ok"], true, "{incompatible:#}");
+        assert_eq!(
+            incompatible["result"]["compatible"], false,
+            "{incompatible:#}"
+        );
+        assert_eq!(
+            incompatible["result"]["unsupportedRequired"],
+            json!(["missingExecutionCapability"])
+        );
     }
 }

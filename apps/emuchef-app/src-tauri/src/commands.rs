@@ -15,6 +15,7 @@ use tauri_plugin_opener::OpenerExt;
 
 use crate::adb::{AdbManager, AdbSetupStatusDto, PLATFORM_TOOLS_URL};
 use crate::catalog::CatalogDescriptor;
+use crate::execution::ExecutionHandleStore;
 use crate::handles::{ReviewedPlanSnapshot, SessionHandles};
 use crate::sidecar::{RuntimeStatusDto, SidecarState};
 
@@ -23,6 +24,7 @@ pub struct AppState {
     pub catalog: Result<CatalogDescriptor, String>,
     pub adb: Mutex<AdbManager>,
     pub handles: Mutex<SessionHandles>,
+    pub executions: Mutex<ExecutionHandleStore>,
 }
 
 #[tauri::command]
@@ -524,7 +526,7 @@ pub async fn pick_input_path(
     }))
 }
 
-fn catalog(state: &AppState) -> Result<&CatalogDescriptor, String> {
+pub(crate) fn catalog(state: &AppState) -> Result<&CatalogDescriptor, String> {
     state.catalog.as_ref().map_err(|_| {
         safe_error(
             "catalog_resource_invalid",
@@ -533,7 +535,7 @@ fn catalog(state: &AppState) -> Result<&CatalogDescriptor, String> {
     })
 }
 
-fn current_adb_path(state: &AppState) -> Result<String, String> {
+pub(crate) fn current_adb_path(state: &AppState) -> Result<String, String> {
     Ok(state
         .adb
         .lock()
@@ -886,7 +888,7 @@ fn public_input_value(value: &Value) -> String {
     }
 }
 
-fn redact_exact_serial(value: &mut Value, exact_serial: &str) {
+pub(crate) fn redact_exact_serial(value: &mut Value, exact_serial: &str) {
     match value {
         Value::String(text) => {
             if text.contains(exact_serial) {
@@ -907,7 +909,7 @@ fn redact_exact_serial(value: &mut Value, exact_serial: &str) {
     }
 }
 
-fn safe_error(code: &str, message: &str) -> String {
+pub(crate) fn safe_error(code: &str, message: &str) -> String {
     json!({ "code": code, "message": message }).to_string()
 }
 
@@ -959,8 +961,7 @@ fn redact_internal_sidecar_error(internal_error: &str, exact_serial: &str) -> St
     redact_absolute_paths(&without_serial)
 }
 
-#[cfg(debug_assertions)]
-fn redact_absolute_paths(value: &str) -> String {
+pub(crate) fn redact_absolute_paths(value: &str) -> String {
     let characters = value.chars().collect::<Vec<_>>();
     let mut redacted = String::with_capacity(value.len());
     let mut index = 0;

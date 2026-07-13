@@ -42,7 +42,7 @@ and side-effect-free discovery and planning operations are documented in
 [runtime recipe configuration](docs/architecture/runtime-recipe-configuration.md).
 
 The Rust sidecar also implements the additive Phase 0 contract used by the
-Phase 1 end-user application: resolved catalog inventory, canonical reviewed-plan
+end-user application: resolved catalog inventory, canonical reviewed-plan
 digests, target-bound real and simulated execution, retained recipe-grouped
 reports, ordered incremental events, and cooperative cancellation. Filesystem
 roots are configured when the sidecar starts. Execution has no rollback or
@@ -57,15 +57,18 @@ npm --prefix apps/emuchef-app run tauri:dev
 ```
 
 `apps/emuchef-app` launches and negotiates the Rust sidecar independently of
-ADB availability. Phase 1 provides the non-mutating Connect Device, Confirm
-Device, Choose Setup, Provide Inputs, and Review Plan workflow. It stops before
-execution and has no apply, dry-run, device-write, artifact-download, or remote
-catalog path.
+ADB availability. The app provides Connect Device, Confirm Device, Choose
+Setup, Provide Inputs, Review Plan, and Simulated Run. The final stage executes
+only the retained reviewed plan through fake-device dry-run adapters; it makes
+no real device changes and is not real-device evidence. Real apply,
+artifact-download execution, persistence/resume, rollback, and remote catalog
+paths remain unavailable.
 
 Android SDK Platform-Tools is a user-supplied prerequisite. EmuChef does not
 bundle or download it. The app links to Google's official page and can import a
 macOS Platform-Tools ZIP through a native picker into validated application
-data. See the [Phase 1 application contract](docs/product/phase-1-read-only-app.md)
+data. See the [Phase 1 review contract](docs/product/phase-1-read-only-app.md),
+the [Phase 2A simulated execution contract](docs/product/phase-2a-simulated-execution.md),
 and [Platform-Tools import policy](docs/product/platform-tools-import.md).
 
 ## Config Editor
@@ -97,6 +100,7 @@ See [runtime ownership](docs/architecture/runtime-ownership.md), the
 [planner/executor architecture](docs/architecture/planner-executor.md),
 [runtime recipe configuration](docs/architecture/runtime-recipe-configuration.md),
 [Phase 1 read-only app](docs/product/phase-1-read-only-app.md),
+[Phase 2A simulated execution](docs/product/phase-2a-simulated-execution.md),
 and [release readiness](docs/release/release-readiness.md). Real-device evidence is
 collected with the [RetroArch validation runbook](docs/manual/real-device-retroarch-validation.md),
 and packaged macOS evidence uses the

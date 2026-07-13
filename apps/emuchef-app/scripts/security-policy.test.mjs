@@ -72,7 +72,7 @@ test("Platform-Tools import uses the non-blocking picker before blocking worker 
 test("recipe input path dialogs use only non-blocking picker callbacks", () => {
   const commands = read("src-tauri/src/commands.rs");
   const start = commands.indexOf("pub async fn pick_input_path");
-  const end = commands.indexOf("\nfn catalog", start);
+  const end = commands.indexOf("\npub(crate) fn catalog", start);
   const pickerCommand = commands.slice(start, end);
   assert.notEqual(start, -1);
   assert.notEqual(end, -1);
@@ -133,10 +133,14 @@ test("configuration failures are mapped and raw sidecar diagnostics are debug-on
   );
 });
 
-test("runtime startup is independent from ADB and Phase 1 exposes no execution command", () => {
+test("runtime startup is independent from ADB and execution is review-handle-only dry run", () => {
   const app = read("src-tauri/src/lib.rs");
-  const commands = read("src-tauri/src/commands.rs");
   const api = read("src/api.ts");
+  const execution = read("src-tauri/src/execution.rs");
   assert.ok(app.indexOf("sidecar.initialize()") < app.indexOf("AdbManager::new"));
-  assert.doesNotMatch(`${commands}\n${api}`, /startExecution|getExecutionEvents|cancelExecution|start_execution|apply_device/);
+  assert.match(api, /startSimulatedExecution: \(reviewHandle: string\)/);
+  assert.doesNotMatch(api, /startSimulatedExecution:[\s\S]{0,180}\b(?:plan|planDigest|mode|serial|catalog)\b/);
+  assert.match(execution, /"startExecution"[\s\S]*"mode": "dry_run"/);
+  assert.match(execution, /pub fn start_simulated_execution\(\s*review_handle: String,/);
+  assert.doesNotMatch(execution, /"mode": "real"|apply_device/);
 });

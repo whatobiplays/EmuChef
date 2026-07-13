@@ -2,13 +2,34 @@ import type {
   ConfigurationDescription,
   DeviceFacts,
   DeviceMatch,
+  ExecutionEvent,
+  ExecutionEventBatch,
+  ExecutionSnapshot,
   InputDescriptor,
   ReviewSummary,
   RecipeOption,
   ValidationDiagnostic,
 } from "./types";
 
-export type WorkflowStep = "connect" | "device" | "setup" | "inputs" | "review";
+export type WorkflowStep = "connect" | "device" | "setup" | "inputs" | "review" | "execution";
+
+export type ExecutionWorkflowState =
+  | { kind: "idle" }
+  | { kind: "starting"; generation: number }
+  | {
+      kind: "active" | "terminal";
+      generation: number;
+      snapshot: ExecutionSnapshot;
+      events: ExecutionEvent[];
+      eventCursor: number;
+      cancellationRequested: boolean;
+    }
+  | {
+      kind: "unavailable";
+      generation: number;
+      executionHandle: string;
+      message: string;
+    };
 
 export interface WorkflowState {
   step: WorkflowStep;
@@ -22,6 +43,8 @@ export interface WorkflowState {
   descriptionDirty: boolean;
   review: ReviewSummary | null;
   requestGeneration: number;
+  executionGeneration: number;
+  execution: ExecutionWorkflowState;
 }
 
 export const initialWorkflowState: WorkflowState = {
@@ -36,6 +59,8 @@ export const initialWorkflowState: WorkflowState = {
   descriptionDirty: false,
   review: null,
   requestGeneration: 0,
+  executionGeneration: 0,
+  execution: { kind: "idle" },
 };
 
 export type WorkflowAction =
@@ -46,6 +71,14 @@ export type WorkflowAction =
   | { type: "set-recipes"; selectedRecipes: string[] }
   | { type: "set-binding"; key: string; value: unknown }
   | { type: "review"; review: ReviewSummary }
+  | { type: "execution-starting"; generation: number }
+  | { type: "execution-started"; generation: number; snapshot: ExecutionSnapshot }
+  | { type: "execution-start-failed"; generation: number }
+  | { type: "execution-snapshot"; generation: number; snapshot: ExecutionSnapshot }
+  | { type: "execution-events"; generation: number; batch: ExecutionEventBatch }
+  | { type: "execution-cancellation-requested"; generation: number }
+  | { type: "execution-unavailable"; generation: number; executionHandle: string; message: string }
+  | { type: "return-to-review" }
   | { type: "back" }
   | { type: "device-disappeared" }
   | { type: "runtime-invalidated" };
@@ -56,6 +89,7 @@ const previousStep: Record<WorkflowStep, WorkflowStep> = {
   setup: "connect",
   inputs: "setup",
   review: "inputs",
+  execution: "review",
 };
 
 export function workflowReducer(state: WorkflowState, action: WorkflowAction): WorkflowState {
@@ -121,12 +155,124 @@ export function workflowReducer(state: WorkflowState, action: WorkflowAction): W
       };
     case "review":
       return { ...state, step: "review", review: action.review };
+    case "execution-starting":
+      if (!state.review || action.generation <= state.executionGeneration) return state;
+      return {
+        ...state,
+        executionGeneration: action.generation,
+        execution: { kind: "starting", generation: action.generation },
+      };
+    case "execution-started":
+      if (!executionGenerationMatches(state, action.generation, "starting")) return state;
+      return {
+        ...state,
+        step: "execution",
+        execution: {
+          kind: action.snapshot.terminal ? "terminal" : "active",
+          generation: action.generation,
+          snapshot: action.snapshot,
+          events: [],
+          eventCursor: action.snapshot.latestSequence,
+          cancellationRequested: false,
+        },
+      };
+    case "execution-start-failed":
+      if (!executionGenerationMatches(state, action.generation, "starting")) return state;
+      return { ...state, step: "review", execution: { kind: "idle" } };
+    case "execution-snapshot": {
+      if (!executionResponseMatches(state, action.generation, action.snapshot.executionHandle)) return state;
+      const current = state.execution;
+      if (current.kind !== "active" && current.kind !== "terminal") return state;
+      if (action.snapshot.latestSequence < current.snapshot.latestSequence) return state;
+      return {
+        ...state,
+        execution: {
+          ...current,
+          kind: action.snapshot.terminal ? "terminal" : "active",
+          snapshot: action.snapshot,
+          eventCursor: Math.max(current.eventCursor, action.snapshot.latestSequence),
+        },
+      };
+    }
+    case "execution-events": {
+      if (!executionResponseMatches(state, action.generation, action.batch.executionHandle)) return state;
+      const current = state.execution;
+      if (current.kind !== "active" && current.kind !== "terminal") return state;
+      const merged = mergeExecutionEvents(current.events, action.batch.events, current.eventCursor);
+      return {
+        ...state,
+        execution: {
+          ...current,
+          events: merged.events,
+          eventCursor: merged.cursor,
+        },
+      };
+    }
+    case "execution-cancellation-requested": {
+      if (!executionGenerationMatches(state, action.generation, "active")) return state;
+      const current = state.execution;
+      if (current.kind !== "active") return state;
+      return { ...state, execution: { ...current, cancellationRequested: true } };
+    }
+    case "execution-unavailable":
+      if (!executionResponseMatches(state, action.generation, action.executionHandle)) return state;
+      return {
+        ...state,
+        step: "execution",
+        execution: {
+          kind: "unavailable",
+          generation: action.generation,
+          executionHandle: action.executionHandle,
+          message: action.message,
+        },
+      };
+    case "return-to-review":
+      if (!state.review) return state;
+      return { ...state, step: "review", execution: { kind: "idle" } };
     case "back":
       return { ...state, step: previousStep[state.step], review: null };
     case "device-disappeared":
+      if (state.step === "execution" || state.execution.kind === "starting") return state;
     case "runtime-invalidated":
       return { ...initialWorkflowState, requestGeneration: state.requestGeneration + 1 };
   }
+}
+
+function executionGenerationMatches(
+  state: WorkflowState,
+  generation: number,
+  kind: ExecutionWorkflowState["kind"],
+): boolean {
+  return state.execution.kind === kind && state.executionGeneration === generation;
+}
+
+function executionResponseMatches(
+  state: WorkflowState,
+  generation: number,
+  executionHandle: string,
+): boolean {
+  if (state.executionGeneration !== generation) return false;
+  if (state.execution.kind !== "active" && state.execution.kind !== "terminal") return false;
+  return state.execution.snapshot.executionHandle === executionHandle;
+}
+
+/** Merge presentation-only events once while preserving monotonic sequence order. */
+export function mergeExecutionEvents(
+  current: ExecutionEvent[],
+  incoming: ExecutionEvent[],
+  cursor: number,
+): { events: ExecutionEvent[]; cursor: number } {
+  const bySequence = new Map(current.map((event) => [event.sequence, event]));
+  let nextCursor = cursor;
+  for (const event of incoming) {
+    if (!Number.isSafeInteger(event.sequence) || event.sequence <= cursor) continue;
+    bySequence.set(event.sequence, event);
+    nextCursor = Math.max(nextCursor, event.sequence);
+  }
+  return {
+    events: [...bySequence.values()].sort((left, right) => left.sequence - right.sequence),
+    cursor: nextCursor,
+  };
 }
 
 export function reviewReady(state: WorkflowState): boolean {

@@ -8,6 +8,12 @@ Review Plan. Phase 1 is non-mutating: the application has no execution,
 dry-run, apply, cancel, artifact download, saved-configuration, remote catalog,
 wireless ADB, or multi-device execution surface.
 
+This document defines the completed Phase 1 review boundary. The current app
+adds simulated execution after Review as specified by
+[Phase 2A Simulated End-User Execution](phase-2a-simulated-execution.md); that
+addition does not change the Phase 1 discovery, configuration, or review
+contracts described here.
+
 The Rust sidecar launches and negotiates the `phase0_end_user_runtime`
 extension plus the required read-only capabilities independently of ADB setup.
 Runtime or catalog failure blocks the application. Missing ADB blocks only the
@@ -88,8 +94,9 @@ grouped by recipe, selected input summaries, warnings, target facts without a
 serial, action categories, capability requirements, and collapsed technical
 step identifiers/types.
 
-The final Configure Device control is disabled and explicitly reserved for
-Phase 2.
+The Phase 1 implementation ended with a disabled future execution control.
+Phase 2A replaces that placeholder with a simulation-only start action while
+retaining the reviewed snapshot and trust boundary defined here.
 
 ## 5. Handle lifecycle and errors
 

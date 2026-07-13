@@ -1,6 +1,7 @@
 mod adb;
 mod catalog;
 mod commands;
+mod execution;
 mod handles;
 mod sidecar;
 
@@ -25,6 +26,7 @@ pub fn run() {
                 catalog,
                 adb: Mutex::new(adb::AdbManager::new(app_data.join("platform-tools"))),
                 handles: Mutex::new(handles::SessionHandles::default()),
+                executions: Mutex::new(execution::ExecutionHandleStore::default()),
             });
             Ok(())
         })
@@ -43,6 +45,10 @@ pub fn run() {
             commands::discard_review,
             commands::get_review_status,
             commands::pick_input_path,
+            execution::start_simulated_execution,
+            execution::get_simulated_execution,
+            execution::get_simulated_execution_events,
+            execution::cancel_simulated_execution,
         ])
         .run(tauri::generate_context!())
         .expect("error while running EmuChef");

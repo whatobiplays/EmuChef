@@ -9,7 +9,7 @@
 | Real-ADB apply | Rust | Active; manual device validation required |
 | Tauri editor backend | Rust JSONL sidecar | Active |
 | Phase 0 end-user runtime protocol | Rust JSONL sidecar | Active backend contract |
-| Phase 1 end-user desktop app | React UI with trusted Rust/Tauri bridge | Active, read-only through reviewed plan |
+| End-user desktop app | React UI with trusted Rust/Tauri bridge | Active through reviewed-plan simulation; no real execution surface |
 | Platform-Tools import and verification | Rust/Tauri | User-supplied, app-managed, macOS-only |
 | Catalog source resolution | Rust | Bundled/local snapshots active; cached remote reserved |
 | Execution reports and incremental events | Rust JSONL sidecar | Active in-memory session contract |
@@ -30,9 +30,15 @@ frontend. Filesystem roots are sidecar startup policy, not `startExecution`
 payload fields. Execution retry creates a new attempt; rollback and device-state
 undo are not runtime capabilities.
 
-The Phase 1 app launches and negotiates the sidecar independently of ADB.
+The end-user app launches and negotiates the sidecar independently of ADB.
 Platform-Tools availability gates device discovery only. Sidecar-internal DTOs
 may carry exact serials and resolved paths; React DTOs use opaque device/review
 handles and never contain exact serials, managed executable paths, catalog
 roots, or full reviewed plans. The trusted bridge retains target-bound review
-snapshots for the future execution phase.
+snapshots for trusted Phase 2A simulated execution. Tauri revalidates the
+retained target, catalog, and canonical digest, then forces `dry_run` through
+the existing Phase 0 operations. Its execution-handle store is bounded to one
+active mapping and the latest terminal mapping. Complete snapshots are the UI
+authority; incremental events are presentation data only. React receives no
+sidecar execution identifier, full plan, exact serial, output path, or raw
+sidecar response.
