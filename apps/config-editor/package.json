@@ -16,6 +16,8 @@
     "check:signed-macos-release": "npm run test:signed-macos-release && node scripts/check-signed-macos-release.mjs",
     "test:macos-release-manifest": "node --test scripts/generate-macos-release-manifest.test.mjs",
     "release:macos:manifest": "node scripts/generate-macos-release-manifest.mjs",
+    "test:macos-release-verify": "node --test scripts/verify-macos-release.test.mjs",
+    "release:macos:verify": "node scripts/verify-macos-release.mjs",
     "test:tauri-csp": "node --test scripts/check-tauri-csp.test.mjs scripts/run-tauri.test.mjs",
     "check:tauri-csp": "npm run test:tauri-csp && node scripts/check-tauri-csp.mjs",
     "check:no-python-runtime": "node --test scripts/check-no-python-runtime.test.mjs && node scripts/check-no-python-runtime.mjs",

@@ -130,3 +130,10 @@ hardened-runtime validation, Apple notarization, ticket stapling, local
 Gatekeeper assessment, and installed-application assessment. Sensitive Apple
 identifiers and raw notarization output remain external. This is local-Mac
 evidence; separate clean-Mac validation remains pending.
+
+Release tooling validates the Apple environment without printing credential
+values, verifies Developer ID signatures, Gatekeeper notarization, and stapled
+tickets independently, and generates a path-safe SHA-256 manifest. The
+maintained macOS release verification command supports exact Tauri artifact
+discovery or explicit artifact paths, runs the existing bundle and packaged
+runtime smokes, and never submits, staples, uploads, or publishes artifacts.
