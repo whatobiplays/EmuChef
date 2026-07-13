@@ -19,6 +19,7 @@ import type {
   UserConfigurationCommandResult,
   UserConfigurationDocumentResult,
   ConfigurationDescriptionResult,
+  PlanConfigurationResult,
 } from "./types";
 
 export type EditorApiResult<T> =
@@ -234,6 +235,12 @@ export async function describeConfiguration(
   request: RuntimeConfigurationRequest,
 ): Promise<EditorApiResult<ConfigurationDescriptionResult>> {
   return callApi<ConfigurationDescriptionResult>("describe_configuration", { request });
+}
+
+export async function planConfiguration(
+  request: RuntimeConfigurationRequest,
+): Promise<EditorApiResult<PlanConfigurationResult>> {
+  return callApi<PlanConfigurationResult>("plan_configuration", { request });
 }
 
 export interface MenuState {

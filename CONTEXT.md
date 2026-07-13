@@ -33,10 +33,20 @@ Authored source lives under `authored/`:
 - `device_profiles/` defines match criteria and capability defaults;
 - `device_plans/` selects profiles and recipes.
 
-`emuchef plan` accepts an authored root, device-plan id, optional input
-bindings, optional explicit device context, optional ADB path/serial, an output
-path, and verbose output. Supplying `--adb` or `--serial` enables live device
-probing. Generated execution plans use `plan.<device-plan>.001` identifiers.
+`emuchef plan` accepts an authored root; either a device-plan id or a saved
+user-configuration ID/path; an optional configuration-root override; optional
+recipe and input-binding overrides; optional explicit device context; optional
+ADB path/serial; an output path; and verbose output. Supplying `--adb` or
+`--serial` enables live device probing. Generated execution plans use
+`plan.<device-plan>.001` identifiers. No `--recipe` and no `--clear-recipes`
+leaves request selection absent, one or more `--recipe` values replace saved or
+device-plan selection, and `--clear-recipes` supplies an explicit empty
+replacement. The clear flag conflicts with any recipe occurrence.
+
+Each `--bind <recipe-id>/<input-id>=<JSON_OR_STRING>` key may occur once.
+Values parse as JSON when valid and otherwise remain strings, so list and
+`multiple: true` inputs use JSON arrays. Duplicate explicit keys are CLI errors
+and are never converted into arrays.
 
 Step parameter specifications declare their accepted value sources and runtime
 value types. Authored recipe refs remain recipe-local (`inputs.<id>`,
@@ -111,6 +121,16 @@ binding resolver, and returns every effective input with declaration metadata,
 partial values, provenance, per-input diagnostics, and aggregate diagnostics.
 It does not require a complete valid plan and performs no ADB, network,
 extraction, copy, device-write, or persistence operations.
+
+The `planConfiguration` JSON operation accepts the same context and performs
+complete catalog, dependency, winning-binding, ref, constraint, and required
+value validation before returning an in-memory normalized execution plan,
+resolved inputs, and diagnostics. It performs no ADB commands, downloads,
+extraction, host or device copies, writes, or plan-file persistence. A
+request-level `devicePlan` replaces the saved required `device_plan`; the saved
+document itself remains unchanged and self-contained. The desktop editor can
+request and inspect this structured plan result without shelling out through
+the CLI.
 
 ## Execution
 
@@ -211,7 +231,8 @@ Host-target Tauri builds and simulated bundled-sidecar tests are available.
 The canonical operator procedure for macOS release bundles is
 `docs/manual/macos-packaged-gui-validation.md`; it separates static bundle,
 packaged sidecar, packaged runtime, and interactive editor evidence. The editor
-does not expose planning or apply through its Tauri or JSONL command surfaces.
+exposes side-effect-free planning, but not apply, through its Tauri and JSONL
+command surfaces.
 Public release readiness still requires real packaged GUI evidence on supported
 targets, updater support, and cross-platform release automation.
 

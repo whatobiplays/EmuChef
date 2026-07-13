@@ -57,6 +57,7 @@ fn handle_validated_object(object: &Map<String, Value>) -> Result<Value, ApiErro
         }
         "validateUserConfigurationPath" => handle_validate_user_configuration_path(object),
         "describeConfiguration" => handle_describe_configuration(object),
+        "planConfiguration" => handle_plan_configuration(object),
         unknown => Err(ApiError::invalid_request(format!(
             "Unknown request type: {unknown}"
         ))),
@@ -102,6 +103,7 @@ fn handle_validated_sidecar_object(
         }
         "closeUserConfiguration" => handle_close_user_configuration(object, sessions),
         "describeConfiguration" => handle_describe_configuration(object),
+        "planConfiguration" => handle_plan_configuration(object),
         "openRecipe" => handle_open_recipe(object, sessions),
         "createRecipeFromTemplate" => handle_create_recipe_from_template(object, sessions),
         "getDocument" => handle_get_document(object, sessions),
@@ -219,6 +221,17 @@ fn handle_validate_user_configuration_path(object: &Map<String, Value>) -> Resul
 }
 
 fn handle_describe_configuration(object: &Map<String, Value>) -> Result<Value, ApiError> {
+    handle_runtime_configuration_request(object, false)
+}
+
+fn handle_plan_configuration(object: &Map<String, Value>) -> Result<Value, ApiError> {
+    handle_runtime_configuration_request(object, true)
+}
+
+fn handle_runtime_configuration_request(
+    object: &Map<String, Value>,
+    plan: bool,
+) -> Result<Value, ApiError> {
     let payload = payload_object(object)?;
     let authored_root = required_string(payload, "authoredRoot")?;
     let configuration_root = optional_string(payload, "configurationRoot")?;
@@ -226,30 +239,52 @@ fn handle_describe_configuration(object: &Map<String, Value>) -> Result<Value, A
     let device_plan = optional_string(payload, "devicePlan")?;
     if user_configuration.is_none() && device_plan.is_none() {
         return Err(ApiError::invalid_request_with_details(
-            "describeConfiguration requires 'devicePlan' or 'userConfiguration'.",
+            "Runtime configuration requires 'devicePlan' or 'userConfiguration'.",
             json!({ "fields": ["devicePlan", "userConfiguration"] }),
         ));
     }
     let selected_recipes = optional_string_array(payload, "selectedRecipes")?;
     let explicit_bindings = optional_binding_map(payload, "bindings")?;
-    optional_object_value(payload, "deviceContext")?;
-    let description = runtime_configuration::describe_configuration(ConfigurationContextRequest {
+    let device_context = optional_device_context(payload, "deviceContext")?;
+    let request = ConfigurationContextRequest {
         authored_root: Path::new(authored_root).to_path_buf(),
         configuration_root: configuration_root.map(Path::new).map(Path::to_path_buf),
         user_configuration: user_configuration.map(ToString::to_string),
         device_plan: device_plan.map(ToString::to_string),
         selected_recipes,
         explicit_bindings,
-    })
+        device_context,
+    };
+    let result = if plan {
+        runtime_configuration::plan_configuration(request).and_then(|result| {
+            serde_json::to_value(result).map_err(|error| {
+                runtime_configuration::ConfigurationContextError::Catalog(
+                    crate::planner::PlannerLoadError::new(
+                        "serialization_failed",
+                        error.to_string(),
+                    ),
+                )
+            })
+        })
+    } else {
+        runtime_configuration::describe_configuration(request).and_then(|result| {
+            serde_json::to_value(result).map_err(|error| {
+                runtime_configuration::ConfigurationContextError::Catalog(
+                    crate::planner::PlannerLoadError::new(
+                        "serialization_failed",
+                        error.to_string(),
+                    ),
+                )
+            })
+        })
+    }
     .map_err(|error| {
         ApiError::load_failed(
-            format!("Failed to describe runtime configuration: {error}"),
+            format!("Failed to prepare runtime configuration: {error}"),
             json!({ "authoredRoot": authored_root }),
         )
     })?;
-    Ok(envelope::success(
-        serde_json::to_value(description).expect("configuration description should serialize"),
-    ))
+    Ok(envelope::success(result))
 }
 
 fn handle_open_user_configuration(
@@ -677,13 +712,20 @@ fn optional_binding_map(
     Ok(result)
 }
 
-fn optional_object_value(
+fn optional_device_context(
     payload: &Map<String, Value>,
     field: &str,
-) -> Result<Option<Value>, ApiError> {
+) -> Result<Option<runtime_configuration::DeviceContextOverride>, ApiError> {
     match payload.get(field) {
-        None => Ok(None),
-        Some(Value::Object(value)) => Ok(Some(Value::Object(value.clone()))),
+        None | Some(Value::Null) => Ok(None),
+        Some(Value::Object(value)) => serde_json::from_value(Value::Object(value.clone()))
+            .map(Some)
+            .map_err(|error| {
+                ApiError::invalid_request_with_details(
+                    format!("Request field '{field}' is invalid: {error}"),
+                    json!({ "field": field }),
+                )
+            }),
         Some(_) => Err(ApiError::invalid_request_with_details(
             format!("Request field '{field}' must be an object."),
             json!({ "field": field }),

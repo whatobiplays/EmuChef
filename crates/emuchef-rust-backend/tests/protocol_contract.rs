@@ -130,6 +130,7 @@ fn assert_hello_result(result: &Value) {
             "setUserConfigurationAuthoredRoot",
             "closeUserConfiguration",
             "describeConfiguration",
+            "planConfiguration",
             "openRecipe",
             "createRecipeFromTemplate",
             "getDocument",

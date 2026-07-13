@@ -7,16 +7,16 @@
 use std::collections::HashMap;
 use std::path::PathBuf;
 
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 
 use crate::dto;
 use crate::model::{OrderedMap, Recipe};
 use crate::planner::{
     expand_recipe_dependencies, resolve_runtime_bindings, BindingDiagnostic, BindingResolution,
-    BindingSource, PlannerLoadError, PlannerMessage,
+    BindingSource, ExecutionPlan, PlannerInput, PlannerLoadError, PlannerMessage,
 };
-use crate::planner_device_plan;
+use crate::planner_device_plan::{self, PlannerInputParts};
 use crate::user_configuration::{self, UserConfigurationLoadError};
 
 #[derive(Clone, Debug)]
@@ -27,6 +27,18 @@ pub(crate) struct ConfigurationContextRequest {
     pub device_plan: Option<String>,
     pub selected_recipes: Option<Vec<String>>,
     pub explicit_bindings: OrderedMap<Value>,
+    pub device_context: Option<DeviceContextOverride>,
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub(crate) struct DeviceContextOverride {
+    pub manufacturer: Option<String>,
+    pub model: Option<String>,
+    pub android_version: Option<i64>,
+    pub android_api_level: Option<i64>,
+    #[serde(default)]
+    pub device_tags: Option<Vec<String>>,
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize)]
@@ -42,10 +54,16 @@ pub struct RuntimeConfigurationDiagnostic {
 
 #[derive(Clone, Debug)]
 pub(crate) struct PreparedConfiguration {
+    pub authored_root: PathBuf,
     pub effective_device_plan: String,
     pub recipes: Vec<Recipe>,
     pub selected_recipe_refs: Vec<String>,
     pub expanded_recipe_refs: Vec<String>,
+    pub explicit_bindings: OrderedMap<Value>,
+    pub user_configuration_bindings: OrderedMap<Value>,
+    pub device_plan_input_bindings: OrderedMap<Value>,
+    pub device_plan_parts: Option<PlannerInputParts>,
+    pub device_context: Option<DeviceContextOverride>,
     pub binding_resolution: BindingResolution,
     pub diagnostics: Vec<RuntimeConfigurationDiagnostic>,
 }
@@ -57,6 +75,14 @@ pub struct ConfigurationDescription {
     pub selected_recipes: Vec<String>,
     pub expanded_recipes: Vec<String>,
     pub inputs: Vec<Value>,
+    pub diagnostics: Vec<RuntimeConfigurationDiagnostic>,
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PlanConfigurationResult {
+    pub plan: Option<ExecutionPlan>,
+    pub resolved_inputs: Vec<crate::planner::ResolvedInputBinding>,
     pub diagnostics: Vec<RuntimeConfigurationDiagnostic>,
 }
 
@@ -170,11 +196,92 @@ pub(crate) fn prepare_configuration(
     );
 
     Ok(PreparedConfiguration {
+        authored_root: request.authored_root,
         effective_device_plan,
         recipes,
         selected_recipe_refs,
         expanded_recipe_refs,
+        explicit_bindings: request.explicit_bindings,
+        user_configuration_bindings,
+        device_plan_input_bindings,
+        device_plan_parts,
+        device_context: request.device_context,
         binding_resolution,
+        diagnostics,
+    })
+}
+
+impl PreparedConfiguration {
+    pub(crate) fn planner_input(&self, plan_id: String) -> Option<PlannerInput> {
+        let parts = self.device_plan_parts.as_ref()?;
+        let mut device_context = parts.device_context.clone();
+        if let Some(overrides) = &self.device_context {
+            if let Some(manufacturer) = &overrides.manufacturer {
+                device_context.manufacturer = manufacturer.clone();
+            }
+            if let Some(model) = &overrides.model {
+                device_context.model = model.clone();
+            }
+            if let Some(android_version) = overrides.android_version {
+                device_context.android_version = android_version;
+            }
+            if let Some(android_api_level) = overrides.android_api_level {
+                device_context.android_api_level = Some(android_api_level);
+            }
+            if let Some(device_tags) = &overrides.device_tags {
+                device_context.device_tags = device_tags.clone();
+            }
+        }
+        Some(PlannerInput {
+            recipes: self.recipes.clone(),
+            selected_recipe_refs: self.selected_recipe_refs.clone(),
+            explicit_input_bindings: self.explicit_bindings.clone(),
+            user_configuration_bindings: self.user_configuration_bindings.clone(),
+            device_plan_input_bindings: self.device_plan_input_bindings.clone(),
+            plan_id,
+            device_plan_ref: parts.device_plan_ref.clone(),
+            device_profile_ref: parts.device_profile_ref.clone(),
+            device_context,
+            runtime_capabilities: parts.runtime_capabilities.clone(),
+        })
+    }
+}
+
+pub(crate) fn plan_configuration(
+    request: ConfigurationContextRequest,
+) -> Result<PlanConfigurationResult, ConfigurationContextError> {
+    let prepared = prepare_configuration(request)?;
+    let resolved_inputs = prepared.binding_resolution.resolved_inputs.clone();
+    if !prepared.diagnostics.is_empty() {
+        return Ok(PlanConfigurationResult {
+            plan: None,
+            resolved_inputs,
+            diagnostics: prepared.diagnostics,
+        });
+    }
+    let plan_id = format!("plan.{}.001", prepared.effective_device_plan);
+    let Some(input) = prepared.planner_input(plan_id) else {
+        return Ok(PlanConfigurationResult {
+            plan: None,
+            resolved_inputs,
+            diagnostics: prepared.diagnostics,
+        });
+    };
+    let result = crate::planner::plan_execution(input);
+    let mut diagnostics = result
+        .warnings
+        .into_iter()
+        .map(|message| planner_result_diagnostic("warning", message))
+        .collect::<Vec<_>>();
+    diagnostics.extend(
+        result
+            .errors
+            .into_iter()
+            .map(|message| planner_result_diagnostic("error", message)),
+    );
+    Ok(PlanConfigurationResult {
+        plan: result.execution_plan,
+        resolved_inputs,
         diagnostics,
     })
 }
@@ -242,8 +349,15 @@ fn binding_diagnostic(diagnostic: &BindingDiagnostic) -> RuntimeConfigurationDia
 }
 
 fn planner_message_diagnostic(message: PlannerMessage) -> RuntimeConfigurationDiagnostic {
+    planner_result_diagnostic("error", message)
+}
+
+fn planner_result_diagnostic(
+    severity: &'static str,
+    message: PlannerMessage,
+) -> RuntimeConfigurationDiagnostic {
     RuntimeConfigurationDiagnostic {
-        severity: "error",
+        severity,
         code: message.code,
         message: message.message,
         key: None,

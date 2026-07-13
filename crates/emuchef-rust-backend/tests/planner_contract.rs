@@ -46,6 +46,7 @@ fn capabilities_stay_editor_scoped_and_planner_requests_are_not_routed() {
             "setUserConfigurationAuthoredRoot",
             "closeUserConfiguration",
             "describeConfiguration",
+            "planConfiguration",
             "openRecipe",
             "createRecipeFromTemplate",
             "getDocument",

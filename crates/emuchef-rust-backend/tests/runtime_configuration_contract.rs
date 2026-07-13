@@ -17,7 +17,7 @@ fn write_authored_root(temp: &TempDir) -> PathBuf {
     .unwrap();
     fs::write(
         root.join("recipes/feature.test.yaml"),
-        "schema_version: 1\nkind: recipe\nid: feature.test\nname: Feature test\nrecipe_dependencies: [feature.dep]\nprovides:\n  features: []\ninputs:\n  value:\n    type: enum\n    role: mode\n    label: Runtime value\n    description: Select a runtime value.\n    required: true\n    sensitive: true\n    options:\n      - value: device\n        label: Device\n      - value: saved\n        label: Saved\n      - value: explicit\n        label: Explicit\n  required_missing:\n    type: string\n    label: Missing value\n    required: true\n  destination:\n    type: device_path\n    label: Destination\n    required: true\n    default: /sdcard/Default\n    validation:\n      allowed_prefixes: [/sdcard]\n  toggle:\n    type: boolean\n    label: Advanced toggle\n    advanced: true\n    required: false\n    default: false\nartifacts: {}\nartifact_groups: {}\nsteps: []\n",
+        "schema_version: 1\nkind: recipe\nid: feature.test\nname: Feature test\nrecipe_dependencies: [feature.dep]\nprovides:\n  features: []\ninputs:\n  value:\n    type: enum\n    role: mode\n    label: Runtime value\n    description: Select a runtime value.\n    required: true\n    sensitive: true\n    options:\n      - value: device\n        label: Device\n      - value: saved\n        label: Saved\n      - value: explicit\n        label: Explicit\n  required_missing:\n    type: string\n    label: Missing value\n    required: true\n  destination:\n    type: device_path\n    label: Destination\n    required: true\n    default: /sdcard/Default\n    validation:\n      allowed_prefixes: [/sdcard]\n  toggle:\n    type: boolean\n    label: Advanced toggle\n    advanced: true\n    required: false\n    default: false\nartifacts: {}\nartifact_groups: {}\nsteps:\n  - id: wait\n    type: wait\n    name: Wait\n    user_toggleable: false\n    dependencies: []\n    constraints:\n      capabilities: []\n      conflicts_with: []\n    skip_if: []\n    params:\n      duration_ms: 1\n    verify: []\n",
     )
     .unwrap();
     fs::write(
@@ -47,7 +47,11 @@ fn write_configuration(temp: &TempDir, value: &str) -> PathBuf {
 }
 
 fn describe(payload: Value) -> Value {
-    let request = json!({ "type": "describeConfiguration", "payload": payload });
+    runtime_request("describeConfiguration", payload)
+}
+
+fn runtime_request(operation: &str, payload: Value) -> Value {
+    let request = json!({ "type": operation, "payload": payload });
     let output = run_with_args_and_input(&[request.to_string()], "");
     assert_eq!(output.exit_code, 0, "{}", output.stderr);
     serde_json::from_str(output.stdout.trim()).unwrap()
@@ -161,6 +165,79 @@ fn request_device_plan_and_explicit_empty_selection_replace_saved_values() {
         .collect::<Vec<_>>();
     assert!(codes.contains(&"device_plan_not_found"));
     assert!(codes.contains(&"binding_recipe_not_selected"));
+}
+
+#[test]
+fn plan_configuration_returns_a_structured_plan_without_writing_a_plan_file() {
+    let temp = TempDir::new().unwrap();
+    let authored_root = write_authored_root(&temp);
+    let configuration_root = write_configuration(&temp, "DO_NOT_LEAK");
+    let plan_path = temp.path().join("must-not-be-written.yaml");
+    let response = runtime_request(
+        "planConfiguration",
+        json!({
+            "authoredRoot": authored_root,
+            "configurationRoot": configuration_root,
+            "userConfiguration": "saved.default",
+            "bindings": {
+                "feature.test/value": "explicit",
+                "feature.test/required_missing": "complete",
+            },
+            "deviceContext": {
+                "manufacturer": "Explicit",
+                "model": "Planning Device",
+                "androidVersion": 14,
+                "androidApiLevel": 34,
+                "deviceTags": ["configured"],
+            },
+            "planPath": plan_path,
+        }),
+    );
+
+    assert_eq!(response["ok"], true, "{response:#}");
+    assert_eq!(response["result"]["diagnostics"], json!([]));
+    assert_eq!(response["result"]["plan"]["id"], "plan.test.plan.001");
+    assert_eq!(
+        response["result"]["plan"]["device_context"],
+        json!({
+            "manufacturer": "Explicit",
+            "model": "Planning Device",
+            "android_version": 14,
+            "android_api_level": 34,
+            "device_tags": ["configured"],
+        })
+    );
+    assert_eq!(
+        response["result"]["plan"]["steps"]
+            .as_array()
+            .unwrap()
+            .len(),
+        1
+    );
+    let value = response["result"]["resolvedInputs"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|input| input["key"] == "feature.test/value")
+        .unwrap();
+    assert_eq!(value["value"], "explicit");
+    assert_eq!(value["source"], "explicit");
+    assert!(!plan_path.exists());
+
+    let incomplete = runtime_request(
+        "planConfiguration",
+        json!({
+            "authoredRoot": authored_root,
+            "devicePlan": "test.plan",
+        }),
+    );
+    assert_eq!(incomplete["ok"], true);
+    assert_eq!(incomplete["result"]["plan"], Value::Null);
+    assert!(incomplete["result"]["diagnostics"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|diagnostic| diagnostic["code"] == "binding_missing"));
 }
 
 #[test]

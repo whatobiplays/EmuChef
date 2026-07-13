@@ -38,6 +38,7 @@ const REQUIRED_CAPABILITIES: &[&str] = &[
     "setUserConfigurationAuthoredRoot",
     "closeUserConfiguration",
     "describeConfiguration",
+    "planConfiguration",
     "ping",
 ];
 const RUST_BACKEND_MANIFEST: &str = "crates/emuchef-rust-backend/Cargo.toml";

@@ -13,6 +13,7 @@ use serde_json::Map;
 use serde_json::{json, Value};
 
 use crate::model::{OrderedMap, ParamValue, Recipe, Step, StepCondition, StepConstraints};
+#[cfg(test)]
 use crate::planner_device_plan;
 use crate::runtime_refs::{
     artifact_field_value_type, input_value_type, parse_reference, RuntimeRef,
@@ -288,6 +289,7 @@ impl PlannerInput {
         })
     }
 
+    #[cfg(test)]
     pub(crate) fn from_authored_device_plan(
         authored_root: impl AsRef<Path>,
         device_plan_ref: &str,

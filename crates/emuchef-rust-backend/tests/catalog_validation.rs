@@ -202,6 +202,7 @@ fn capabilities_include_catalog_context_session_update() {
             "setUserConfigurationAuthoredRoot",
             "closeUserConfiguration",
             "describeConfiguration",
+            "planConfiguration",
             "openRecipe",
             "createRecipeFromTemplate",
             "getDocument",

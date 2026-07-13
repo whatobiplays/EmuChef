@@ -13,8 +13,9 @@ use crate::executor::{
 };
 use crate::model::OrderedMap;
 use crate::planner::{
-    DeviceContext, ExecutionArtifact, ExecutionParamValue, ExecutionPlan, ExecutionPlanSource,
-    ExecutionStep, ExecutionStepCondition, ExecutionStepConstraints, RuntimeCapabilities,
+    plan_execution, DeviceContext, ExecutionArtifact, ExecutionParamValue, ExecutionPlan,
+    ExecutionPlanSource, ExecutionStep, ExecutionStepCondition, ExecutionStepConstraints,
+    PlannerInput, RuntimeCapabilities,
 };
 
 fn golden_path(name: &str) -> PathBuf {
@@ -154,6 +155,74 @@ fn sandbox_adapters(
         fake_device_root.to_path_buf(),
         read_only_roots,
     )
+}
+
+#[test]
+fn planned_rom_copy_input_refs_resolve_to_typed_executor_values() {
+    let tmp = tempfile::tempdir().expect("runtime configuration temp root should be created");
+    let source = tmp.path().join("roms");
+    fs::create_dir_all(&source).unwrap();
+    fs::write(source.join("game.rom"), b"rom").unwrap();
+    let mut input = PlannerInput::from_authored_root(
+        Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../..")
+            .join("authored"),
+        vec!["feature.copy_roms".to_string()],
+        "plan.feature.copy_roms.001".to_string(),
+        "test.plan".to_string(),
+        "test.profile".to_string(),
+        fixture_device_context(),
+        fixture_runtime_capabilities(),
+    )
+    .unwrap();
+    input.explicit_input_bindings.insert(
+        "feature.copy_roms/source".to_string(),
+        json!(source.to_string_lossy()),
+    );
+    input.explicit_input_bindings.insert(
+        "feature.copy_roms/destination".to_string(),
+        json!("/sdcard/Games"),
+    );
+    input
+        .explicit_input_bindings
+        .insert("feature.copy_roms/policy".to_string(), json!("sync"));
+    let result = plan_execution(input);
+    let execution_plan = result.execution_plan.expect("ROM copy should plan");
+    let step = execution_plan
+        .steps
+        .iter()
+        .find(|step| step.id == "feature.copy_roms/copy_rom_library")
+        .unwrap();
+    for (param, expected_ref) in [
+        ("source", "inputs.feature.copy_roms/source"),
+        ("dest", "inputs.feature.copy_roms/destination"),
+        ("copy_policy", "inputs.feature.copy_roms/policy"),
+    ] {
+        assert_eq!(
+            step.params.get(param),
+            Some(&ExecutionParamValue::Ref {
+                ref_value: expected_ref.to_string(),
+            })
+        );
+    }
+
+    let runtime_root = tmp.path().join("runtime");
+    let cache_root = tmp.path().join("cache");
+    let fake_device_root = tmp.path().join("device");
+    let (actual, _) = run_value(
+        &execution_plan,
+        sandbox_adapters(
+            &runtime_root,
+            &cache_root,
+            &fake_device_root,
+            vec![source.clone()],
+        ),
+    );
+    assert_eq!(actual["success"], true, "{actual:#}");
+    assert_eq!(
+        fs::read(fake_device_root.join("sdcard/Games/game.rom")).unwrap(),
+        b"rom"
+    );
 }
 
 fn normalize_tmp_paths(value: Value, tmp_root: &Path) -> Value {

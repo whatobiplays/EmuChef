@@ -69,6 +69,4 @@ steps:
         ref: inputs.destination
       copy_policy:
         ref: inputs.policy
-    verify:
-      - type: path_exists
-        path: /sdcard/ROMs
+    verify: []

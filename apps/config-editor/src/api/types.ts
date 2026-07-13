@@ -284,3 +284,16 @@ export interface ConfigurationDescriptionResult {
   inputs: RuntimeConfigurationInputDto[];
   diagnostics: RuntimeConfigurationDiagnosticDto[];
 }
+
+export interface PlanConfigurationResult {
+  plan: Record<string, unknown> | null;
+  resolvedInputs: Array<{
+    key: string;
+    recipeId: string;
+    inputId: string;
+    type: string;
+    value: unknown;
+    source: "explicit" | "user_configuration" | "device_plan" | "recipe_default" | null;
+  }>;
+  diagnostics: RuntimeConfigurationDiagnosticDto[];
+}

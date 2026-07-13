@@ -1823,12 +1823,18 @@ impl SandboxRoots {
 struct ExecutionState {
     steps: HashMap<String, StepRuntimeState>,
     artifacts: HashMap<String, ArtifactRuntimeState>,
+    inputs: HashMap<String, RuntimeValue>,
 }
 
 impl ExecutionState {
     fn from_plan(plan: &ExecutionPlan) -> Self {
         Self {
             steps: HashMap::new(),
+            inputs: plan
+                .inputs
+                .iter()
+                .map(|input| (input.id.clone(), input.value.clone()))
+                .collect(),
             artifacts: plan
                 .artifacts
                 .iter()
@@ -2041,6 +2047,21 @@ fn resolve_step_params(
 }
 
 fn resolve_runtime_ref(state: &ExecutionState, ref_value: &str) -> Result<Value, StepFailure> {
+    if let Some(input_ref) = ref_value.strip_prefix("inputs.") {
+        let Some(input) = state.inputs.get(input_ref) else {
+            return Err(StepFailure::new(format!(
+                "unknown_input_ref: Unknown input ref: {ref_value:?}."
+            )));
+        };
+        if matches!(
+            input.type_name.as_str(),
+            "file_path" | "directory_path" | "path_list"
+        ) {
+            return serde_json::to_value(input)
+                .map_err(|error| StepFailure::new(error.to_string()));
+        }
+        return Ok(input.value.clone());
+    }
     if let Some(artifact_ref) = ref_value.strip_prefix("artifacts.") {
         let Some((artifact_id, field)) = artifact_ref.rsplit_once('.') else {
             return Err(StepFailure::new(format!(

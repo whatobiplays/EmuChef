@@ -266,6 +266,17 @@ pub fn describe_configuration(
     request_without_transport_id(&state, "describeConfiguration", Some(payload))
 }
 
+#[tauri::command]
+pub fn plan_configuration(
+    state: State<'_, SidecarState>,
+    request: RuntimeConfigurationRequest,
+) -> Result<Value, String> {
+    let payload = serde_json::to_value(request).map_err(|error| {
+        format!("Runtime configuration request could not be serialized: {error}")
+    })?;
+    request_without_transport_id(&state, "planConfiguration", Some(payload))
+}
+
 fn request_without_transport_id(
     state: &SidecarState,
     request_type: &str,

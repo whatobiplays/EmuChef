@@ -48,7 +48,11 @@ pub(crate) fn run(args: &[String]) -> ProcessOutput {
 #[derive(Debug, Default)]
 struct PlanCliConfig {
     authored_root: String,
+    configuration_root: Option<String>,
+    user_configuration: Option<String>,
     device_plan: Option<String>,
+    recipes: Vec<String>,
+    clear_recipes: bool,
     bindings: Vec<String>,
     manufacturer: Option<String>,
     model: Option<String>,
@@ -89,8 +93,19 @@ fn parse_plan_args(args: &[String]) -> Result<PlanCliConfig, ProcessOutput> {
     while index < args.len() {
         let option = args[index].as_str();
         match option {
-            "--authored-root" | "--device-plan" | "--bind" | "--manufacturer" | "--model"
-            | "--android-version" | "--device-tag" | "--adb" | "--serial" | "--output" => {
+            "--authored-root"
+            | "--configuration-root"
+            | "--user-configuration"
+            | "--device-plan"
+            | "--recipe"
+            | "--bind"
+            | "--manufacturer"
+            | "--model"
+            | "--android-version"
+            | "--device-tag"
+            | "--adb"
+            | "--serial"
+            | "--output" => {
                 index += 1;
                 let Some(value) = args.get(index) else {
                     return Err(usage_error(
@@ -100,7 +115,10 @@ fn parse_plan_args(args: &[String]) -> Result<PlanCliConfig, ProcessOutput> {
                 };
                 match option {
                     "--authored-root" => config.authored_root = value.clone(),
+                    "--configuration-root" => config.configuration_root = Some(value.clone()),
+                    "--user-configuration" => config.user_configuration = Some(value.clone()),
                     "--device-plan" => config.device_plan = Some(value.clone()),
+                    "--recipe" => config.recipes.push(value.clone()),
                     "--bind" => config.bindings.push(value.clone()),
                     "--manufacturer" => config.manufacturer = Some(value.clone()),
                     "--model" => config.model = Some(value.clone()),
@@ -112,6 +130,7 @@ fn parse_plan_args(args: &[String]) -> Result<PlanCliConfig, ProcessOutput> {
                     _ => unreachable!("matched plan option should be handled"),
                 }
             }
+            "--clear-recipes" => config.clear_recipes = true,
             "--verbose" => config.verbose = true,
             "--debug" | "--ops" => {
                 return Err(usage_error(
@@ -135,10 +154,16 @@ fn parse_plan_args(args: &[String]) -> Result<PlanCliConfig, ProcessOutput> {
         }
         index += 1;
     }
-    if config.device_plan.is_none() {
+    if config.clear_recipes && !config.recipes.is_empty() {
         return Err(usage_error(
             plan_usage(),
-            "emuchef plan: error: the following arguments are required: --device-plan",
+            "emuchef plan: error: --clear-recipes cannot be combined with --recipe",
+        ));
+    }
+    if config.device_plan.is_none() && config.user_configuration.is_none() {
+        return Err(usage_error(
+            plan_usage(),
+            "emuchef plan: error: one of --device-plan or --user-configuration is required",
         ));
     }
     Ok(config)
@@ -169,10 +194,16 @@ fn planning_request(config: &PlanCliConfig) -> Result<PlanningRequest, ProcessOu
     });
     Ok(PlanningRequest {
         authored_root: PathBuf::from(&config.authored_root),
-        device_plan: config
-            .device_plan
-            .clone()
-            .expect("device plan should be present after parsing"),
+        configuration_root: config.configuration_root.as_deref().map(PathBuf::from),
+        user_configuration: config.user_configuration.clone(),
+        device_plan: config.device_plan.clone(),
+        selected_recipes: if config.clear_recipes {
+            Some(Vec::new())
+        } else if config.recipes.is_empty() {
+            None
+        } else {
+            Some(config.recipes.clone())
+        },
         explicit_input_bindings: parse_plan_bindings(&config.bindings)?,
         explicit_context: ExplicitDeviceContext {
             manufacturer: config.manufacturer.clone(),
@@ -185,7 +216,7 @@ fn planning_request(config: &PlanCliConfig) -> Result<PlanningRequest, ProcessOu
 }
 
 fn parse_plan_bindings(raw_bindings: &[String]) -> Result<OrderedMap<JsonValue>, ProcessOutput> {
-    let mut grouped: OrderedMap<Vec<String>> = OrderedMap::new();
+    let mut parsed = OrderedMap::new();
     for raw_binding in raw_bindings {
         let Some((binding_ref, raw_value)) = raw_binding.split_once('=') else {
             return Err(invalid_plan_binding(raw_binding));
@@ -196,27 +227,19 @@ fn parse_plan_bindings(raw_bindings: &[String]) -> Result<OrderedMap<JsonValue>,
         if recipe_ref.is_empty() || input_id.is_empty() || input_id.contains('/') {
             return Err(invalid_plan_binding(raw_binding));
         }
-        grouped
-            .entry(binding_ref.to_string())
-            .or_default()
-            .push(raw_value.to_string());
+        if parsed.contains_key(binding_ref) {
+            return Err(usage_error(
+                plan_usage(),
+                &format!(
+                    "emuchef plan: error: Duplicate --bind key: '{binding_ref}'. Each binding key may be supplied at most once."
+                ),
+            ));
+        }
+        let value = serde_json::from_str(raw_value)
+            .unwrap_or_else(|_| JsonValue::String(raw_value.to_string()));
+        parsed.insert(binding_ref.to_string(), value);
     }
-    Ok(grouped
-        .into_iter()
-        .map(|(binding_ref, values)| {
-            let value = if values.len() == 1 {
-                JsonValue::String(
-                    values
-                        .into_iter()
-                        .next()
-                        .expect("binding value should exist"),
-                )
-            } else {
-                JsonValue::Array(values.into_iter().map(JsonValue::String).collect())
-            };
-            (binding_ref, value)
-        })
-        .collect())
+    Ok(parsed)
 }
 
 fn invalid_plan_binding(raw_binding: &str) -> ProcessOutput {
@@ -1219,7 +1242,7 @@ fn apply_usage() -> &'static str {
 }
 
 fn plan_usage() -> &'static str {
-    "usage: emuchef plan [-h] [--verbose] [--adb ADB] [--serial SERIAL]\n                    [--authored-root AUTHORED_ROOT] --device-plan DEVICE_PLAN\n                    [--bind REF=VALUE] [--manufacturer VALUE] [--model VALUE]\n                    [--android-version INTEGER] [--device-tag VALUE] [--output PATH]"
+    "usage: emuchef plan [-h] [--verbose] [--adb ADB] [--serial SERIAL]\n                    [--authored-root AUTHORED_ROOT] [--device-plan DEVICE_PLAN]\n                    [--configuration-root PATH] [--user-configuration ID_OR_PATH]\n                    [--recipe ID ... | --clear-recipes] [--bind REF=JSON_OR_STRING]\n                    [--manufacturer VALUE] [--model VALUE] [--android-version INTEGER]\n                    [--device-tag VALUE] [--output PATH]"
 }
 
 fn cli_usage() -> &'static str {
@@ -1230,6 +1253,7 @@ fn cli_usage() -> &'static str {
 mod tests {
     use std::cell::RefCell;
 
+    use serde_json::json;
     use tempfile::TempDir;
 
     use super::*;
@@ -1311,6 +1335,111 @@ mod tests {
                 "getprop".to_string(),
             ]]
         );
+    }
+
+    #[test]
+    fn runtime_recipe_override_cli_preserves_absent_present_and_explicit_empty_states() {
+        let base = vec!["--device-plan".to_string(), "test.plan".to_string()];
+        let inherited = parse_plan_args(&base).unwrap();
+        assert!(inherited.recipes.is_empty());
+        assert!(!inherited.clear_recipes);
+        assert_eq!(planning_request(&inherited).unwrap().selected_recipes, None);
+
+        let recipes = parse_plan_args(&[
+            base[0].clone(),
+            base[1].clone(),
+            "--recipe".to_string(),
+            "feature.one".to_string(),
+            "--recipe".to_string(),
+            "feature.two".to_string(),
+        ])
+        .unwrap();
+        assert_eq!(
+            planning_request(&recipes).unwrap().selected_recipes,
+            Some(vec!["feature.one".to_string(), "feature.two".to_string()])
+        );
+
+        let cleared = parse_plan_args(&[
+            base[0].clone(),
+            base[1].clone(),
+            "--clear-recipes".to_string(),
+        ])
+        .unwrap();
+        assert_eq!(
+            planning_request(&cleared).unwrap().selected_recipes,
+            Some(Vec::new())
+        );
+
+        let conflict = parse_plan_args(&[
+            base[0].clone(),
+            base[1].clone(),
+            "--clear-recipes".to_string(),
+            "--recipe".to_string(),
+            "feature.one".to_string(),
+        ])
+        .unwrap_err();
+        assert_eq!(conflict.exit_code, 2);
+        assert!(conflict
+            .stderr
+            .contains("--clear-recipes cannot be combined with --recipe"));
+        assert!(plan_usage().contains("--clear-recipes"));
+    }
+
+    #[test]
+    fn runtime_bind_cli_rejects_duplicates_and_uses_json_or_string_values() {
+        let parsed = parse_plan_bindings(&[
+            "feature.example/extensions=[\"zip\",\"7z\"]".to_string(),
+            "feature.copy_roms/destination=/sdcard/ROMs".to_string(),
+            "feature.example/enabled=true".to_string(),
+        ])
+        .unwrap();
+        assert_eq!(parsed["feature.example/extensions"], json!(["zip", "7z"]));
+        assert_eq!(
+            parsed["feature.copy_roms/destination"],
+            json!("/sdcard/ROMs")
+        );
+        assert_eq!(parsed["feature.example/enabled"], json!(true));
+
+        let duplicate = parse_plan_bindings(&[
+            "feature.copy_roms/policy=merge".to_string(),
+            "feature.copy_roms/policy=sync".to_string(),
+        ])
+        .unwrap_err();
+        assert_eq!(duplicate.exit_code, 2);
+        assert!(duplicate.stderr.contains("Duplicate --bind key"));
+        assert!(!duplicate.stderr.contains("[\"merge\",\"sync\"]"));
+    }
+
+    #[test]
+    fn canonical_plan_loads_saved_configuration_and_honors_request_overrides() {
+        let temp = TempDir::new().expect("configuration root should be created");
+        let configuration_root = temp.path().join("configurations");
+        fs::create_dir_all(&configuration_root).unwrap();
+        fs::write(
+            configuration_root.join("saved.default.yaml"),
+            "schema_version: 1\nkind: user_configuration\nid: saved.default\nname: Saved default\ndevice_plan: missing.saved.plan\nselected_recipes: [feature.copy_roms]\nbindings: {}\n",
+        )
+        .unwrap();
+        let output = run_plan_with_adb_runner(
+            &[
+                "--authored-root".to_string(),
+                repo_authored_root(),
+                "--configuration-root".to_string(),
+                configuration_root.to_string_lossy().to_string(),
+                "--user-configuration".to_string(),
+                "saved.default".to_string(),
+                "--device-plan".to_string(),
+                "ayaneo.pocket_s_mini.base".to_string(),
+                "--recipe".to_string(),
+                "app.obtainium.install".to_string(),
+            ],
+            &FakeProbeRunner {
+                calls: RefCell::new(Vec::new()),
+            },
+        );
+
+        assert_eq!(output.exit_code, 0, "{}", output.stderr);
+        assert!(output.stdout.contains("Planning status: success"));
     }
 
     #[test]

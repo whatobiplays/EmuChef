@@ -170,6 +170,7 @@ fn capabilities_stay_on_editor_session_surface() {
             "setUserConfigurationAuthoredRoot",
             "closeUserConfiguration",
             "describeConfiguration",
+            "planConfiguration",
             "openRecipe",
             "createRecipeFromTemplate",
             "getDocument",

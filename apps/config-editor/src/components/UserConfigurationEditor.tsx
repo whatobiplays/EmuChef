@@ -3,6 +3,7 @@ import { useState } from "react";
 import {
   closeUserConfiguration,
   emitUserConfigurationYaml,
+  planConfiguration,
   saveUserConfiguration,
   setUserConfigurationBinding,
   type EditorApiResult,
@@ -29,6 +30,7 @@ interface UserConfigurationEditorProps {
  */
 export function UserConfigurationEditor({ document, onClose, onDocument, onError }: UserConfigurationEditorProps) {
   const [busy, setBusy] = useState(false);
+  const [plannedJson, setPlannedJson] = useState<string | null>(null);
 
   async function updateBinding(key: string, text: string) {
     await updateBindingValue(key, parseBindingText(text));
@@ -83,6 +85,28 @@ export function UserConfigurationEditor({ document, onClose, onDocument, onError
     }
   }
 
+  async function plan() {
+    if (!document.authoredRoot) {
+      onError("Set an authored root before planning this user configuration.");
+      return;
+    }
+    setBusy(true);
+    try {
+      const response = await planConfiguration({
+        authoredRoot: document.authoredRoot,
+        userConfiguration: document.path,
+        deviceContext: {},
+      });
+      if (response.kind === "success") {
+        setPlannedJson(JSON.stringify(response.result, null, 2));
+      } else {
+        onError(apiFailureMessage(response, "Runtime configuration planning failed."));
+      }
+    } finally {
+      setBusy(false);
+    }
+  }
+
   function handleDocumentResult(
     response: EditorApiResult<UserConfigurationDocumentResult | UserConfigurationCommandResult>,
   ) {
@@ -107,6 +131,9 @@ export function UserConfigurationEditor({ document, onClose, onDocument, onError
         </button>
         <button className="rounded bg-slate-900 px-3 py-1.5 text-sm font-medium text-white" disabled={busy || !document.dirty} onClick={() => void save()}>
           Save
+        </button>
+        <button className="rounded bg-emerald-700 px-3 py-1.5 text-sm font-medium text-white" disabled={busy || !document.authoredRoot} onClick={() => void plan()}>
+          Plan
         </button>
         <button className="rounded border border-slate-300 px-3 py-1.5 text-sm" disabled={busy} onClick={() => void close()}>
           Close
@@ -153,6 +180,12 @@ export function UserConfigurationEditor({ document, onClose, onDocument, onError
           </div>
           <h2 className="mt-6 font-semibold">Canonical YAML</h2>
           <pre className="mt-3 overflow-x-auto whitespace-pre-wrap rounded bg-slate-950 p-3 text-xs text-slate-100">{document.yaml}</pre>
+          {plannedJson ? (
+            <>
+              <h2 className="mt-6 font-semibold">In-memory plan result</h2>
+              <pre className="mt-3 overflow-x-auto whitespace-pre-wrap rounded bg-slate-950 p-3 text-xs text-slate-100">{plannedJson}</pre>
+            </>
+          ) : null}
         </aside>
       </div>
     </main>

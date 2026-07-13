@@ -12,8 +12,11 @@ use crate::device_probe::{
     AdbDeviceProbe, AdbProbeConfig, CommandRunner, DeviceProbe, DeviceProbeError,
 };
 use crate::model::OrderedMap;
-use crate::planner::{plan_execution, DeviceContext, PlannerInput, PlanningResult};
-use crate::planner_device_plan::plan_from_authored_device_plan_with_detected_facts;
+use crate::planner::{plan_execution, DeviceContext, PlanningResult};
+use crate::planner_device_plan::{
+    add_detected_profile_mismatch_warning, load_device_plan_profile_match_criteria,
+};
+use crate::runtime_configuration::{self, ConfigurationContextRequest};
 use crate::ProcessOutput;
 
 #[derive(Clone, Debug, Default, PartialEq)]
@@ -27,7 +30,10 @@ pub(crate) struct ExplicitDeviceContext {
 #[derive(Debug, PartialEq)]
 pub(crate) struct PlanningRequest {
     pub authored_root: PathBuf,
-    pub device_plan: String,
+    pub configuration_root: Option<PathBuf>,
+    pub user_configuration: Option<String>,
+    pub device_plan: Option<String>,
+    pub selected_recipes: Option<Vec<String>>,
     pub explicit_input_bindings: OrderedMap<Value>,
     pub explicit_context: ExplicitDeviceContext,
     pub adb_probe: Option<AdbProbeConfig>,
@@ -39,12 +45,28 @@ pub(crate) fn plan_with_adb_runner<R: CommandRunner>(
 ) -> Result<PlanningResult, ProcessOutput> {
     let PlanningRequest {
         authored_root,
+        configuration_root,
+        user_configuration,
         device_plan,
+        selected_recipes,
         explicit_input_bindings,
         explicit_context,
         adb_probe,
     } = request;
-    let plan_id = format!("plan.{device_plan}.001");
+    let prepared = runtime_configuration::prepare_configuration(ConfigurationContextRequest {
+        authored_root,
+        configuration_root,
+        user_configuration,
+        device_plan,
+        selected_recipes,
+        explicit_bindings: explicit_input_bindings,
+        device_context: None,
+    })
+    .map_err(configuration_context_error_output)?;
+    let plan_id = format!("plan.{}.001", prepared.effective_device_plan);
+    let mut input = prepared
+        .planner_input(plan_id)
+        .ok_or_else(|| prepared_configuration_error_output(&prepared))?;
 
     if let Some(config) = adb_probe {
         let probe = AdbDeviceProbe {
@@ -52,27 +74,47 @@ pub(crate) fn plan_with_adb_runner<R: CommandRunner>(
             runner: adb_runner,
         };
         let detected_facts = probe.detect().map_err(adb_probe_error_output)?;
-        let mut result = plan_from_authored_device_plan_with_detected_facts(
-            &authored_root,
-            &device_plan,
-            plan_id,
-            explicit_input_bindings,
+        input.device_context = crate::device_probe::apply_detected_device_facts_to_context(
+            input.device_context,
             &detected_facts,
+        );
+        let profile_match = load_device_plan_profile_match_criteria(
+            &prepared.authored_root,
+            &prepared.effective_device_plan,
         )
         .map_err(planner_load_error_output)?;
+        let mut result = plan_execution(input);
+        add_detected_profile_mismatch_warning(&mut result, &detected_facts, &profile_match);
         apply_explicit_device_context_to_result(&mut result, &explicit_context);
         return Ok(result);
     }
 
-    let mut input = PlannerInput::from_authored_device_plan(
-        &authored_root,
-        &device_plan,
-        plan_id,
-        explicit_input_bindings,
-    )
-    .map_err(planner_load_error_output)?;
     apply_explicit_device_context(&mut input.device_context, &explicit_context);
     Ok(plan_execution(input))
+}
+
+fn configuration_context_error_output(
+    error: runtime_configuration::ConfigurationContextError,
+) -> ProcessOutput {
+    ProcessOutput {
+        exit_code: 1,
+        stdout: String::new(),
+        stderr: format!("Error: configuration_context_invalid: {error}\n"),
+    }
+}
+
+fn prepared_configuration_error_output(
+    prepared: &runtime_configuration::PreparedConfiguration,
+) -> ProcessOutput {
+    let diagnostic = prepared.diagnostics.first();
+    ProcessOutput {
+        exit_code: 1,
+        stdout: String::new(),
+        stderr: diagnostic.map_or_else(
+            || "Error: configuration_context_invalid\n".to_string(),
+            |diagnostic| format!("Error: {}: {}\n", diagnostic.code, diagnostic.message),
+        ),
+    }
 }
 
 fn planner_load_error_output(error: crate::planner::PlannerLoadError) -> ProcessOutput {
@@ -157,7 +199,10 @@ mod tests {
     fn request(adb_probe: Option<AdbProbeConfig>) -> PlanningRequest {
         PlanningRequest {
             authored_root: authored_root(),
-            device_plan: "ayaneo.pocket_s_mini.base".to_string(),
+            configuration_root: None,
+            user_configuration: None,
+            device_plan: Some("ayaneo.pocket_s_mini.base".to_string()),
+            selected_recipes: None,
             explicit_input_bindings: OrderedMap::new(),
             explicit_context: ExplicitDeviceContext::default(),
             adb_probe,
