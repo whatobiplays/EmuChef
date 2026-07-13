@@ -84,11 +84,40 @@ pub(crate) struct PreparedConfiguration {
 pub struct ConfigurationDescription {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub catalog: Option<CatalogIdentity>,
+    /// Exact target binding retained only in the trusted sidecar/Tauri response.
+    /// React projections must omit this field.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub target_device: Option<ConfigurationTargetDevice>,
     pub device_plan: String,
     pub selected_recipes: Vec<String>,
     pub expanded_recipes: Vec<String>,
+    pub recipe_options: Vec<Value>,
     pub inputs: Vec<Value>,
     pub diagnostics: Vec<RuntimeConfigurationDiagnostic>,
+}
+
+/// Trusted sidecar DTO for the target retained with a configuration description.
+///
+/// This type keeps the sidecar's camelCase protocol independent from the
+/// snake_case execution-plan serialization of [`TargetDeviceBinding`].
+#[derive(Clone, Debug, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ConfigurationTargetDevice {
+    pub serial: String,
+    pub manufacturer: Option<String>,
+    pub model: Option<String>,
+    pub android_api_level: Option<i64>,
+}
+
+impl From<TargetDeviceBinding> for ConfigurationTargetDevice {
+    fn from(target: TargetDeviceBinding) -> Self {
+        Self {
+            serial: target.serial,
+            manufacturer: target.manufacturer,
+            model: target.model,
+            android_api_level: target.android_api_level,
+        }
+    }
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize)]
@@ -327,6 +356,49 @@ pub(crate) fn describe_configuration(
         .iter()
         .map(|recipe| (recipe.id.as_str(), recipe))
         .collect::<HashMap<_, _>>();
+    let recipe_options = prepared
+        .recipes
+        .iter()
+        .map(|recipe| {
+            let required_capabilities = recipe
+                .steps
+                .iter()
+                .flat_map(|step| step.constraints.capabilities.iter())
+                .cloned()
+                .collect::<std::collections::BTreeSet<_>>();
+            let unavailable_capabilities = prepared
+                .device_plan_parts
+                .as_ref()
+                .map(|parts| {
+                    required_capabilities
+                        .iter()
+                        .filter(|capability| {
+                            !runtime_capability_available(&parts.runtime_capabilities, capability)
+                        })
+                        .cloned()
+                        .collect::<Vec<_>>()
+                })
+                .unwrap_or_default();
+            let explicitly_selected = prepared.selected_recipe_refs.contains(&recipe.id);
+            let recommended = prepared
+                .device_plan_parts
+                .as_ref()
+                .is_some_and(|parts| parts.selected_recipe_refs.contains(&recipe.id));
+            let dependency_required =
+                prepared.expanded_recipe_refs.contains(&recipe.id) && !explicitly_selected;
+            json!({
+                "id": recipe.id,
+                "name": recipe.name,
+                "description": recipe.description,
+                "selected": explicitly_selected,
+                "recommended": recommended,
+                "dependencyRequired": dependency_required,
+                "available": unavailable_capabilities.is_empty(),
+                "requiredCapabilities": required_capabilities,
+                "unavailableCapabilities": unavailable_capabilities,
+            })
+        })
+        .collect();
     let inputs = prepared
         .binding_resolution
         .resolved_inputs
@@ -362,12 +434,31 @@ pub(crate) fn describe_configuration(
 
     Ok(ConfigurationDescription {
         catalog: prepared.catalog.identity().cloned(),
+        target_device: prepared.target_device.map(ConfigurationTargetDevice::from),
         device_plan: prepared.effective_device_plan,
         selected_recipes: prepared.selected_recipe_refs,
         expanded_recipes: prepared.expanded_recipe_refs,
+        recipe_options,
         inputs,
         diagnostics: prepared.diagnostics,
     })
+}
+
+fn runtime_capability_available(
+    capabilities: &crate::planner::RuntimeCapabilities,
+    capability: &str,
+) -> bool {
+    match capability {
+        "adb_available" => capabilities.adb_available,
+        "apk_install" => capabilities.apk_install,
+        "shared_storage_write" => capabilities.shared_storage_write,
+        "app_launch" => capabilities.app_launch,
+        "shell_command" => capabilities.shell_command,
+        "package_remove_for_user" => capabilities.package_remove_for_user,
+        "root_shell" => capabilities.root_shell,
+        "app_data_write" => capabilities.app_data_write,
+        _ => false,
+    }
 }
 
 fn binding_diagnostic(diagnostic: &BindingDiagnostic) -> RuntimeConfigurationDiagnostic {

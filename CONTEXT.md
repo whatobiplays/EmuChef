@@ -18,6 +18,8 @@ Rust is the sole product runtime. The Cargo package
 - dry-run and real-ADB adapters;
 - the one-shot and JSONL editor protocols;
 - the additive Phase 0 end-user catalog and execution-session protocol;
+- read-only end-user device inventory, probing, deterministic matching, and
+  product configuration operations;
 - document sessions, command application, undo/redo, save, YAML emission, and
   reference indexing.
 
@@ -181,8 +183,9 @@ the step action and can fail the step.
 
 The JSONL sidecar's additive `phase0_end_user_runtime` extension is explicitly
 negotiated. It supports `describeCatalog`, `startExecution`, `getExecution`,
-`getExecutionEvents`, and `cancelExecution` while retaining the existing
-configuration operations. One execution may be active in a sidecar process;
+`getExecutionEvents`, `cancelExecution`, `listAdbDevices`, `probeDevice`, and
+`matchDevice` while retaining the existing configuration operations. One
+execution may be active in a sidecar process;
 terminal attempts remain inspectable in memory until process exit.
 
 `startExecution` requires a complete plan and its canonical digest, recomputes
@@ -268,6 +271,97 @@ and directories use native pickers, device paths use text entry, and structured
 or multiple values use JSON entry. The screen shows required, optional,
 advanced, sensitive, and effective-source state without hard-coded recipe or
 input identifiers.
+
+## End-User App
+
+`apps/emuchef-app` is the separate Phase 1 React/Tauri application for guided
+end-user setup. It packages the Rust `emuchef --sidecar` runtime and a bundled
+catalog snapshot but shares no frontend modules or runtime state with
+`apps/config-editor`. The workflow is Connect Device, Confirm Device, Choose
+Setup, Provide Inputs, and Review Plan. Phase 1 performs no execution, dry-run,
+apply, cancellation, device writes, artifact resolution, saved-configuration
+persistence, catalog networking, wireless onboarding, or parallel-device work.
+
+Tauri launches the sidecar and negotiates the `phase0_end_user_runtime`
+extension plus `describeCatalog`, `listAdbDevices`, `probeDevice`,
+`matchDevice`, `describeConfiguration`, and `planConfiguration` before ADB is
+needed. Runtime and catalog startup are independent from Platform-Tools setup.
+A missing ADB installation blocks only device discovery and displays the
+Platform-Tools setup flow.
+
+Packaged catalog data is materialized under the application resource directory.
+The trusted backend requires the four product directories, ignores only regular
+`.gitkeep` placeholders, rejects symlinks and every other unsupported entry,
+computes the canonical catalog SHA-256, and passes a
+resolved snapshot to the sidecar. React receives source identity, version, and
+digest without a catalog filesystem path. The catalog remains a bundled MVP
+source; no network or update implementation exists.
+
+Exact ADB serials and executable paths exist only inside trusted Rust/Tauri
+communication. Tauri assigns stable opaque device handles while a serial
+remains present during one application session and invalidates them on device
+disappearance. React receives the opaque handle, masked serial, display facts,
+connection state, and actionable errors. Exact serials never enter React
+payloads, state, logs, storage, or markup.
+
+The backend owns exact/high/low/none device matching. A unique exact/high match
+may recommend a plan. Low/no matches are never auto-selected. Backend-approved
+safe generic plans may be offered for explicit user choice, and the workflow
+blocks only when the backend reports no safe candidate.
+
+`describeConfiguration` is authoritative for recommended/default, optional,
+dependency-required, and unavailable recipes; effective dependency expansion;
+input declarations, values, provenance, and diagnostics; and review readiness.
+React does not reconstruct planner rules. Native Tauri dialogs supply host file
+and directory recipe inputs without blocking the IPC executor. Single-file,
+multi-file, and directory cancellation leaves the input unchanged. Input-level
+diagnostics render only with their field; aggregate diagnostics remain at page
+level only when no input diagnostic represents the same binding key and code,
+or the same code and message when no binding key is available. React and Tauri
+send camelCase product fields;
+probe facts remain snake_case inside the trusted inventory DTO and are converted
+to camelCase `deviceContext` and `targetDevice` objects for the sidecar.
+`selectedRecipes: null` selects device-plan defaults, while an explicit empty
+array selects no recipes. Missing required input values remain successful
+description results with `binding_missing` diagnostics instead of transport
+failures.
+
+The trusted configuration-description response retains the exact target device
+binding and verified catalog identity/digest. The React projection omits the
+target binding, catalog root, raw sidecar payload, and all exact serials.
+Sidecar failures map to stable sanitized configuration error codes and useful
+recovery messages. Debug builds log the complete internal error to the Rust
+terminal only after redacting exact serials and absolute paths; release builds
+do not expose raw internal errors.
+
+Tauri retains the complete immutable reviewed-plan result, exact target binding,
+catalog identity and digest, and canonical plan digest behind an opaque review
+handle. React receives only a serial-free human review. At most 16 live reviews
+are kept in memory, with a 30-minute idle lifetime, two-hour absolute lifetime,
+and 64 bounded tombstones. Device disappearance, changed facts, catalog change,
+Platform-Tools replacement/removal, discard, or capacity eviction returns
+`review_stale`; time expiry returns `review_expired`; an unrecognized handle
+returns `review_unknown`.
+
+EmuChef never bundles, vendors, redistributes, mirrors, proxies, or downloads
+Android SDK Platform-Tools. The setup UI opens only Google's official
+Platform-Tools page and imports a macOS ZIP through a backend-owned native
+picker. React cannot submit an archive path. Validation limits archive size and
+expansion, rejects encryption, traversal, symlinks, special entries, and
+case-colliding names, and extracts only `adb`, `NOTICE.txt`, and
+`source.properties` to private application data. The backend records and
+rechecks SHA-256 for all three retained files, native Mach-O compatibility,
+Google signer Team Identifier `EQHXZ8M8AV`, supported version, and controlled
+`adb version` execution.
+
+Platform-Tools 35.0.0 is the minimum supported release and 37.0.0 is the tested
+upper bound. Valid newer releases are accepted with an untested-version warning.
+Release builds resolve only the validated managed installation and never depend
+on `PATH`. Debug builds may use an explicit `EMUCHEF_ADB_PATH` override first or
+deliberately enable system ADB lookup with `EMUCHEF_ALLOW_SYSTEM_ADB=1` after
+managed lookup. Failed replacements preserve the prior active installation and
+settings; removal and cleanup are restricted to the managed application-data
+root.
 
 ## Testing and Compatibility
 

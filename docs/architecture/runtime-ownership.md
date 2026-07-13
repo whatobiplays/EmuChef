@@ -8,7 +8,9 @@
 | Executor | Rust | Active |
 | Real-ADB apply | Rust | Active; manual device validation required |
 | Tauri editor backend | Rust JSONL sidecar | Active |
-| Phase 0 end-user runtime protocol | Rust JSONL sidecar | Active backend contract; UI future |
+| Phase 0 end-user runtime protocol | Rust JSONL sidecar | Active backend contract |
+| Phase 1 end-user desktop app | React UI with trusted Rust/Tauri bridge | Active, read-only through reviewed plan |
+| Platform-Tools import and verification | Rust/Tauri | User-supplied, app-managed, macOS-only |
 | Catalog source resolution | Rust | Bundled/local snapshots active; cached remote reserved |
 | Execution reports and incremental events | Rust JSONL sidecar | Active in-memory session contract |
 | Python runtime | Frozen legacy/reference only | Pending deletion |
@@ -27,3 +29,10 @@ and cooperative cancellation without adding product behavior to the editor
 frontend. Filesystem roots are sidecar startup policy, not `startExecution`
 payload fields. Execution retry creates a new attempt; rollback and device-state
 undo are not runtime capabilities.
+
+The Phase 1 app launches and negotiates the sidecar independently of ADB.
+Platform-Tools availability gates device discovery only. Sidecar-internal DTOs
+may carry exact serials and resolved paths; React DTOs use opaque device/review
+handles and never contain exact serials, managed executable paths, catalog
+roots, or full reviewed plans. The trusted bridge retains target-bound review
+snapshots for the future execution phase.

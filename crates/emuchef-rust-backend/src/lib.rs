@@ -14,6 +14,7 @@ pub(crate) mod device_probe;
 pub(crate) mod device_profile_match;
 pub mod document;
 pub mod dto;
+mod end_user_runtime;
 pub mod envelope;
 pub mod errors;
 pub mod execution_session;

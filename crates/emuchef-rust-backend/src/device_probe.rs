@@ -6,7 +6,7 @@
 
 use std::process::Command;
 
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 
 use crate::planner::DeviceContext;
 
@@ -16,8 +16,8 @@ use crate::planner::DeviceContext;
 /// profile-derived `DeviceContext` without inventing placeholder facts. The
 /// Unknown serialized fields are rejected so misspelled facts cannot silently
 /// weaken tests or other structured inputs.
-#[derive(Clone, Debug, Default, Deserialize, PartialEq, Eq)]
-#[serde(deny_unknown_fields)]
+#[derive(Clone, Debug, Default, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(default, deny_unknown_fields)]
 pub(crate) struct DetectedDeviceFacts {
     pub serial: Option<String>,
     pub manufacturer: Option<String>,

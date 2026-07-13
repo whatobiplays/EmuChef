@@ -59,6 +59,9 @@ fn handle_validated_object(object: &Map<String, Value>) -> Result<Value, ApiErro
         }
         "validateUserConfigurationPath" => handle_validate_user_configuration_path(object),
         "describeCatalog" => handle_describe_catalog(object),
+        "listAdbDevices" => handle_list_adb_devices(object),
+        "probeDevice" => handle_probe_device(object),
+        "matchDevice" => handle_match_device(object),
         "describeConfiguration" => handle_describe_configuration(object),
         "planConfiguration" => handle_plan_configuration(object),
         unknown => Err(ApiError::invalid_request(format!(
@@ -86,6 +89,9 @@ fn handle_validated_sidecar_object(
         }
         "validateUserConfigurationPath" => handle_validate_user_configuration_path(object),
         "describeCatalog" => handle_describe_catalog(object),
+        "listAdbDevices" => handle_list_adb_devices(object),
+        "probeDevice" => handle_probe_device(object),
+        "matchDevice" => handle_match_device(object),
         "openUserConfiguration" => handle_open_user_configuration(object, sessions),
         "createUserConfiguration" => handle_create_user_configuration(object, sessions),
         "getUserConfigurationDocument" => handle_get_user_configuration_document(object, sessions),
@@ -345,6 +351,43 @@ fn handle_describe_catalog(object: &Map<String, Value>) -> Result<Value, ApiErro
     let snapshot = resolved_catalog(payload_object(object)?, false)?;
     Ok(envelope::success(crate::product_catalog::describe(
         &snapshot,
+    )?))
+}
+
+fn handle_list_adb_devices(object: &Map<String, Value>) -> Result<Value, ApiError> {
+    let payload = payload_object(object)?;
+    let adb_path = required_string(payload, "adbPath")?;
+    Ok(envelope::success(
+        crate::end_user_runtime::list_adb_devices(adb_path)?,
+    ))
+}
+
+fn handle_probe_device(object: &Map<String, Value>) -> Result<Value, ApiError> {
+    let payload = payload_object(object)?;
+    let adb_path = required_string(payload, "adbPath")?;
+    let serial = required_string(payload, "serial")?;
+    Ok(envelope::success(crate::end_user_runtime::probe_device(
+        adb_path, serial,
+    )?))
+}
+
+fn handle_match_device(object: &Map<String, Value>) -> Result<Value, ApiError> {
+    let payload = payload_object(object)?;
+    let snapshot = resolved_catalog(payload, false)?;
+    let facts = payload.get("facts").cloned().ok_or_else(|| {
+        ApiError::invalid_request_with_details(
+            "Request field 'facts' is required.",
+            json!({ "field": "facts" }),
+        )
+    })?;
+    let facts = serde_json::from_value(facts).map_err(|error| {
+        ApiError::invalid_request_with_details(
+            format!("Request field 'facts' is invalid: {error}"),
+            json!({ "field": "facts" }),
+        )
+    })?;
+    Ok(envelope::success(crate::end_user_runtime::match_device(
+        &snapshot, &facts,
     )?))
 }
 
@@ -902,10 +945,10 @@ fn optional_string_array(
     payload: &Map<String, Value>,
     field: &str,
 ) -> Result<Option<Vec<String>>, ApiError> {
-    if !payload.contains_key(field) {
-        return Ok(None);
+    match payload.get(field) {
+        None | Some(Value::Null) => Ok(None),
+        Some(_) => required_string_array(payload, field).map(Some),
     }
-    required_string_array(payload, field).map(Some)
 }
 
 fn optional_binding_map(

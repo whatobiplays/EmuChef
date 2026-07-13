@@ -1,0 +1,12 @@
+{
+  "$schema": "https://schema.tauri.app/config/2",
+  "build": {
+    "beforeDevCommand": "npm run sidecar:dev && npm run dev",
+    "devUrl": "http://localhost:5174"
+  },
+  "app": {
+    "security": {
+      "devCsp": "default-src 'self'; base-uri 'none'; connect-src 'self' ipc: http://ipc.localhost ws://localhost:5174; font-src 'self'; form-action 'self'; frame-ancestors 'none'; img-src 'self' data: blob:; object-src 'none'; script-src 'self'; style-src 'self' 'unsafe-inline'"
+    }
+  }
+}

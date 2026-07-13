@@ -2,7 +2,7 @@
 
 ## 1. Scope
 
-Phase 0 is the backend contract for a future guided EmuChef application. It
+Phase 0 is the backend contract used by the guided EmuChef application. It
 adds product-facing catalog discovery, reviewed-plan integrity, target binding,
 execution sessions, snapshots, and incremental events to the Rust sidecar. It
 does not add an end-user UI, multi-device execution, catalog networking,
@@ -35,6 +35,19 @@ makes `compatible` false; an unsupported optional entry does not. Phase 0 adds:
 4. `getExecution`
 5. `getExecutionEvents`
 6. `cancelExecution`
+
+The Phase 1 read-only client also negotiates additive product capabilities:
+
+7. `listAdbDevices`
+8. `probeDevice`
+9. `matchDevice`
+10. `describeConfiguration`
+11. `planConfiguration`
+
+The first three are sidecar-internal product DTOs. They may carry exact serials
+between trusted Rust components; React receives separate opaque-handle DTOs.
+Phase 1 does not invoke the execution capabilities as application workflow
+operations.
 
 ## 3. Resolved catalog snapshots
 

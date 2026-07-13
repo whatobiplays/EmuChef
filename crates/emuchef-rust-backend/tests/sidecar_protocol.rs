@@ -1,6 +1,9 @@
 use std::io::Cursor;
+use std::path::{Path, PathBuf};
 
-use emuchef_rust_backend::{jsonl, protocol, run_with_args_and_input};
+use emuchef_rust_backend::{
+    catalog_source::compute_catalog_sha256, jsonl, protocol, run_with_args_and_input,
+};
 use serde_json::{json, Value};
 
 fn one_shot_response(request: Value) -> Value {
@@ -32,6 +35,45 @@ fn sidecar_raw_response(request: &str) -> Value {
     let lines = output.lines().collect::<Vec<_>>();
     assert_eq!(lines.len(), 1);
     serde_json::from_str(lines[0]).expect("sidecar response should be valid JSON")
+}
+
+fn authored_root() -> PathBuf {
+    Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("../..")
+        .join("authored")
+        .canonicalize()
+        .unwrap()
+}
+
+fn phase_one_configuration_payload(root: &Path, selected_recipes: Value, serial: &str) -> Value {
+    let digest = compute_catalog_sha256(root).expect("authored catalog should be hashable");
+    json!({
+        "catalog": {
+            "root": root,
+            "sourceKind": "bundled",
+            "sourceId": "emuchef.phase1.bundled",
+            "version": "phase1-bundled-1",
+            "contentDigest": {
+                "algorithm": "sha256",
+                "value": digest,
+            },
+        },
+        "devicePlan": "ayaneo.pocket_s_mini.base",
+        "selectedRecipes": selected_recipes,
+        "bindings": {},
+        "deviceContext": {
+            "manufacturer": "AYANEO",
+            "model": "Pocket S mini",
+            "androidVersion": 13,
+            "androidApiLevel": 33,
+        },
+        "targetDevice": {
+            "serial": serial,
+            "manufacturer": "AYANEO",
+            "model": "Pocket S mini",
+            "androidApiLevel": 33,
+        },
+    })
 }
 
 #[test]
@@ -74,6 +116,9 @@ fn keeps_executor_internal_and_protocol_capabilities_editor_scoped() {
             "emitUserConfigurationYamlFromPath",
             "validateUserConfigurationPath",
             "describeCatalog",
+            "listAdbDevices",
+            "probeDevice",
+            "matchDevice",
             "negotiateCapabilities",
             "openUserConfiguration",
             "createUserConfiguration",
@@ -138,6 +183,9 @@ fn keeps_filesystem_executor_internal_and_protocol_capabilities_editor_scoped() 
             "emitUserConfigurationYamlFromPath",
             "validateUserConfigurationPath",
             "describeCatalog",
+            "listAdbDevices",
+            "probeDevice",
+            "matchDevice",
             "negotiateCapabilities",
             "openUserConfiguration",
             "createUserConfiguration",
@@ -202,6 +250,9 @@ fn keeps_fake_device_executor_internal_and_protocol_capabilities_editor_scoped()
             "emitUserConfigurationYamlFromPath",
             "validateUserConfigurationPath",
             "describeCatalog",
+            "listAdbDevices",
+            "probeDevice",
+            "matchDevice",
             "negotiateCapabilities",
             "openUserConfiguration",
             "createUserConfiguration",
@@ -266,6 +317,9 @@ fn keeps_real_adb_executor_internal_and_protocol_capabilities_editor_scoped() {
             "emitUserConfigurationYamlFromPath",
             "validateUserConfigurationPath",
             "describeCatalog",
+            "listAdbDevices",
+            "probeDevice",
+            "matchDevice",
             "negotiateCapabilities",
             "openUserConfiguration",
             "createUserConfiguration",
@@ -317,4 +371,159 @@ fn keeps_real_adb_executor_internal_and_protocol_capabilities_editor_scoped() {
     }));
     assert_eq!(sidecar["ok"], false);
     assert_eq!(sidecar["error"]["code"], "invalid_request");
+}
+
+#[test]
+fn phase_one_device_matching_returns_exact_and_safe_generic_choices() {
+    let root = authored_root();
+    let response = sidecar_response(json!({
+        "id": "match",
+        "type": "matchDevice",
+        "payload": {
+            "catalog": {
+                "root": root,
+                "sourceKind": "bundled",
+                "sourceId": "test.catalog",
+                "version": "1",
+                "cacheKey": null,
+                "contentDigest": null
+            },
+            "facts": {
+                "serial": "trusted-internal-serial",
+                "manufacturer": "AYANEO",
+                "brand": "AYANEO",
+                "model": "Pocket S mini",
+                "android_version": 13,
+                "android_api_level": 33,
+                "device_tags": []
+            }
+        }
+    }));
+    assert_eq!(response["ok"], true);
+    assert_eq!(response["result"]["confidence"], "exact");
+    assert_eq!(
+        response["result"]["recommendedPlanId"],
+        "ayaneo.pocket_s_mini.base"
+    );
+    assert!(response["result"]["safeGenericPlans"].is_array());
+    assert!(!response["result"]["blocked"].as_bool().unwrap());
+}
+
+#[test]
+fn phase_one_describes_pocket_s_mini_defaults_with_internal_target_and_safe_missing_inputs() {
+    let root = authored_root();
+    let serial = "trusted-internal-serial";
+    let response = sidecar_response(json!({
+        "id": "describe-pocket-s-mini",
+        "type": "describeConfiguration",
+        "payload": phase_one_configuration_payload(&root, Value::Null, serial),
+    }));
+
+    assert_eq!(response["ok"], true, "{response:#}");
+    let result = &response["result"];
+    assert_eq!(result["devicePlan"], "ayaneo.pocket_s_mini.base");
+    assert_eq!(
+        result["selectedRecipes"],
+        json!(["app.retroarch.provision"])
+    );
+    assert_eq!(
+        result["expandedRecipes"],
+        json!(["app.retroarch.provision"])
+    );
+    assert_eq!(result["targetDevice"]["serial"], serial);
+    assert_eq!(result["targetDevice"]["androidApiLevel"], 33);
+    assert!(result["targetDevice"].get("android_api_level").is_none());
+    assert_eq!(result["catalog"]["sourceId"], "emuchef.phase1.bundled");
+    assert_eq!(result["catalog"]["contentDigest"]["algorithm"], "sha256");
+    assert_eq!(
+        result["catalog"]["contentDigest"]["value"]
+            .as_str()
+            .unwrap()
+            .len(),
+        64
+    );
+
+    let options = result["recipeOptions"].as_array().unwrap();
+    let retroarch = options
+        .iter()
+        .find(|recipe| recipe["id"] == "app.retroarch.provision")
+        .expect("default RetroArch recipe option should be present");
+    assert_eq!(retroarch["selected"], true);
+    assert_eq!(retroarch["recommended"], true);
+    let inputs = result["inputs"].as_array().unwrap();
+    let config = inputs
+        .iter()
+        .find(|input| input["key"] == "app.retroarch.provision/retroarch_cfg")
+        .expect("RetroArch input descriptor should be present");
+    assert_eq!(config["type"], "file");
+    assert_eq!(config["value"], Value::Null);
+    assert_eq!(config["diagnostics"], json!([]));
+
+    let missing_input_response = sidecar_response(json!({
+        "id": "describe-pocket-s-mini-missing-input",
+        "type": "describeConfiguration",
+        "payload": phase_one_configuration_payload(
+            &root,
+            json!(["app.retroarch.provision", "feature.copy_roms"]),
+            serial,
+        ),
+    }));
+    assert_eq!(
+        missing_input_response["ok"], true,
+        "{missing_input_response:#}"
+    );
+    let missing = missing_input_response["result"]["inputs"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|input| input["key"] == "feature.copy_roms/source")
+        .expect("required missing input should remain an input descriptor");
+    assert_eq!(missing["value"], Value::Null);
+    assert!(missing["diagnostics"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|diagnostic| diagnostic["code"] == "binding_missing"));
+}
+
+#[cfg(unix)]
+#[test]
+fn phase_one_fake_adb_inventory_and_probe_cover_product_states() {
+    use std::fs;
+    use std::os::unix::fs::PermissionsExt;
+
+    let temp = tempfile::tempdir().unwrap();
+    let fake = temp.path().join("adb");
+    fs::write(
+        &fake,
+        r#"#!/bin/sh
+if [ "$1" = "devices" ]; then
+  printf 'List of devices attached\navailable-1 device model:Pocket_S_mini transport_id:1\nunauthorized-1 unauthorized usb:1\noffline-1 offline\n'
+  exit 0
+fi
+printf '[ro.product.manufacturer]: [AYANEO]\n[ro.product.brand]: [AYANEO]\n[ro.product.model]: [Pocket S mini]\n[ro.build.version.release]: [13]\n[ro.build.version.sdk]: [33]\n'
+"#,
+    )
+    .unwrap();
+    fs::set_permissions(&fake, fs::Permissions::from_mode(0o755)).unwrap();
+
+    let inventory = sidecar_response(json!({
+        "id": "devices",
+        "type": "listAdbDevices",
+        "payload": { "adbPath": fake }
+    }));
+    assert_eq!(inventory["ok"], true);
+    assert_eq!(inventory["result"]["devices"][0]["state"], "available");
+    assert_eq!(inventory["result"]["devices"][1]["state"], "unauthorized");
+    assert_eq!(inventory["result"]["devices"][2]["state"], "offline");
+
+    let probe = sidecar_response(json!({
+        "id": "probe",
+        "type": "probeDevice",
+        "payload": { "adbPath": fake, "serial": "available-1" }
+    }));
+    assert_eq!(probe["ok"], true);
+    assert_eq!(probe["result"]["serial"], "available-1");
+    assert_eq!(probe["result"]["manufacturer"], "AYANEO");
+    assert_eq!(probe["result"]["android_api_level"], 33);
 }

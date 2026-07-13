@@ -1,8 +1,8 @@
 # EmuChef
 
 EmuChef is a Rust application for planning and applying reproducible Android
-handheld configurations. The repository also contains a React/Tauri editor for
-authored recipe YAML.
+handheld configurations. The repository contains separate React/Tauri apps for
+the guided end-user workflow and authored recipe editing.
 
 ## Runtime
 
@@ -41,13 +41,32 @@ configuration. The canonical contract, CLI examples, configuration-root rules,
 and side-effect-free discovery and planning operations are documented in
 [runtime recipe configuration](docs/architecture/runtime-recipe-configuration.md).
 
-The Rust sidecar also implements the additive Phase 0 contract for a future
-end-user application: resolved catalog inventory, canonical reviewed-plan
+The Rust sidecar also implements the additive Phase 0 contract used by the
+Phase 1 end-user application: resolved catalog inventory, canonical reviewed-plan
 digests, target-bound real and simulated execution, retained recipe-grouped
 reports, ordered incremental events, and cooperative cancellation. Filesystem
 roots are configured when the sidecar starts. Execution has no rollback or
 device-state undo. See the
 [Phase 0 runtime contracts](docs/product/phase-0-runtime-contracts.md).
+
+## End-User App
+
+```bash
+npm --prefix apps/emuchef-app install
+npm --prefix apps/emuchef-app run tauri:dev
+```
+
+`apps/emuchef-app` launches and negotiates the Rust sidecar independently of
+ADB availability. Phase 1 provides the non-mutating Connect Device, Confirm
+Device, Choose Setup, Provide Inputs, and Review Plan workflow. It stops before
+execution and has no apply, dry-run, device-write, artifact-download, or remote
+catalog path.
+
+Android SDK Platform-Tools is a user-supplied prerequisite. EmuChef does not
+bundle or download it. The app links to Google's official page and can import a
+macOS Platform-Tools ZIP through a native picker into validated application
+data. See the [Phase 1 application contract](docs/product/phase-1-read-only-app.md)
+and [Platform-Tools import policy](docs/product/platform-tools-import.md).
 
 ## Config Editor
 
@@ -77,6 +96,7 @@ recorded in the
 See [runtime ownership](docs/architecture/runtime-ownership.md), the
 [planner/executor architecture](docs/architecture/planner-executor.md),
 [runtime recipe configuration](docs/architecture/runtime-recipe-configuration.md),
+[Phase 1 read-only app](docs/product/phase-1-read-only-app.md),
 and [release readiness](docs/release/release-readiness.md). Real-device evidence is
 collected with the [RetroArch validation runbook](docs/manual/real-device-retroarch-validation.md),
 and packaged macOS evidence uses the

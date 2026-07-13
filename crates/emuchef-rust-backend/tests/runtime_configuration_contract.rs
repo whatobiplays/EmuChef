@@ -99,6 +99,19 @@ fn describes_defaults_dependencies_metadata_and_missing_values_without_side_effe
         response["result"]["expandedRecipes"],
         json!(["feature.dep", "feature.test"])
     );
+    let options = response["result"]["recipeOptions"].as_array().unwrap();
+    let selected = options
+        .iter()
+        .find(|recipe| recipe["id"] == "feature.test")
+        .unwrap();
+    assert_eq!(selected["selected"], true);
+    assert_eq!(selected["recommended"], true);
+    let dependency = options
+        .iter()
+        .find(|recipe| recipe["id"] == "feature.dep")
+        .unwrap();
+    assert_eq!(dependency["recommended"], false);
+    assert_eq!(dependency["dependencyRequired"], true);
     assert_eq!(
         input_by_key(&response, "feature.dep/dep_value")["valueSource"],
         "recipe_default"

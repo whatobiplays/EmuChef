@@ -1,0 +1,34 @@
+{
+  "name": "emuchef-app",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "sidecar:dev": "node scripts/prepare-rust-sidecar.mjs --profile debug",
+    "sidecar:build": "node scripts/prepare-rust-sidecar.mjs --profile release",
+    "dev": "vite",
+    "typecheck": "tsc --noEmit",
+    "test:logic": "node --test --import tsx tests/*.test.ts",
+    "test:security": "node --test scripts/security-policy.test.mjs",
+    "build": "tsc && vite build",
+    "check:packaged-resources": "node scripts/check-packaged-resources.mjs",
+    "tauri:dev": "tauri dev --config src-tauri/tauri.dev.conf.json",
+    "tauri:build": "tauri build",
+    "tauri": "tauri"
+  },
+  "dependencies": {
+    "@tauri-apps/api": "^2.11.0",
+    "react": "^19.2.5",
+    "react-dom": "^19.2.5"
+  },
+  "devDependencies": {
+    "@tauri-apps/cli": "^2.11.0",
+    "@types/node": "^25.6.0",
+    "@types/react": "^19.2.14",
+    "@types/react-dom": "^19.2.3",
+    "@vitejs/plugin-react": "^6.0.1",
+    "tsx": "^4.20.6",
+    "typescript": "^6.0.3",
+    "vite": "^8.0.10"
+  }
+}
