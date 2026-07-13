@@ -122,7 +122,9 @@ export function appTreeDigest(appPath, fsApi = fs) {
       absolute,
       relative: path.relative(appPath, absolute).split(path.sep).join("/"),
     }))
-    .sort((left, right) => left.relative.localeCompare(right.relative, "en"))
+    .sort((left, right) =>
+      Buffer.compare(Buffer.from(left.relative, "utf8"), Buffer.from(right.relative, "utf8")),
+    )
     .map(({ absolute, relative }) => `${sha256File(absolute, fsApi)}  ${relative}\n`)
     .join("");
   return crypto.createHash("sha256").update(records).digest("hex");

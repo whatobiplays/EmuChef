@@ -84,8 +84,9 @@ retained signed application and disk image passed the real command.
 generates schema version 1 only after signed-release verification passes. It
 records product identity and version, a locally resolvable full build commit
 SHA, host architecture, artifact basenames, main/sidecar/DMG SHA-256 digests, a
-canonical app-tree digest, independent verification booleans, and a UTC
-generation timestamp.
+canonical app-tree digest ordered by ascending bytewise UTF-8 normalized
+relative paths (equivalent to `LC_ALL=C sort`), independent verification
+booleans, and a UTC generation timestamp.
 
 No absolute path or Apple signing identifier is included. Implicit `HEAD`
 selection requires a clean tracked worktree. `--build-commit` requires a full

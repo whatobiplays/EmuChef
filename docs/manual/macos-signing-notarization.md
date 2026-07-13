@@ -185,8 +185,9 @@ shasum -a 256 "$APP_PATH/Contents/MacOS/emuchef"
 shasum -a 256 "$DMG_PATH"
 ```
 
-Build a canonical app-tree digest from sorted relative file paths and file
-digests:
+Build a canonical app-tree digest from file digests ordered by ascending
+bytewise UTF-8 order of normalized relative paths. This is equivalent to
+`LC_ALL=C sort` for the path stream used below:
 
 ```bash
 app_tree_records="$(mktemp)"

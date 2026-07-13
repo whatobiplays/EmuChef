@@ -1,8 +1,10 @@
 import assert from "node:assert/strict";
+import crypto from "node:crypto";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import test from "node:test";
+import { fileURLToPath } from "node:url";
 
 import {
   appTreeDigest,
@@ -116,6 +118,70 @@ test("hashes file contents and canonical sorted app-tree records", (t) => {
   assert.equal(first, second);
   assert.match(first, /^[0-9a-f]{64}$/);
   assert.notEqual(sha256File(value.dmgPath), first);
+});
+
+test("sorts canonical app-tree records by normalized UTF-8 path bytes", () => {
+  const appPath = path.join(path.sep, "virtual", "Canonical.app");
+  const orderingDirectory = path.join(appPath, "ordering");
+  const filenames = ["é", "a", "_", "A", "-"];
+  const fileContents = new Map(
+    filenames.map((name) => [path.join(orderingDirectory, name), Buffer.from(`contents:${name}`)]),
+  );
+  const mockFs = {
+    readdirSync(directory) {
+      if (directory === appPath) {
+        return [{ name: "ordering", isDirectory: () => true, isFile: () => false }];
+      }
+      if (directory === orderingDirectory) {
+        return filenames.map((name) => ({
+          name,
+          isDirectory: () => false,
+          isFile: () => true,
+        }));
+      }
+      throw new Error("unexpected mock directory");
+    },
+    readFileSync(filePath) {
+      const contents = fileContents.get(filePath);
+      if (contents === undefined) throw new Error("unexpected mock file");
+      return contents;
+    },
+  };
+
+  const orderedRelativePaths = [...fileContents.keys()]
+    .map((filePath) => path.relative(appPath, filePath).split(path.sep).join("/"))
+    .sort((left, right) => Buffer.compare(Buffer.from(left, "utf8"), Buffer.from(right, "utf8")));
+  assert.deepEqual(orderedRelativePaths, [
+    "ordering/-",
+    "ordering/A",
+    "ordering/_",
+    "ordering/a",
+    "ordering/é",
+  ]);
+
+  const canonicalRecords = orderedRelativePaths
+    .map((relativePath) => {
+      const contentDigest = crypto
+        .createHash("sha256")
+        .update(fileContents.get(path.join(appPath, relativePath)))
+        .digest("hex");
+      return `${contentDigest}  ${relativePath}\n`;
+    })
+    .join("");
+  const expectedDigest = crypto.createHash("sha256").update(canonicalRecords).digest("hex");
+  assert.equal(appTreeDigest(appPath, mockFs), expectedDigest);
+});
+
+test("app-tree ordering does not use locale collation", () => {
+  const sourcePath = fileURLToPath(new URL("./generate-macos-release-manifest.mjs", import.meta.url));
+  const source = fs.readFileSync(sourcePath, "utf8");
+  const start = source.indexOf("export function appTreeDigest");
+  const end = source.indexOf("\n}\n\nfunction runSafe", start);
+  assert.notEqual(start, -1);
+  assert.notEqual(end, -1);
+  const implementation = source.slice(start, end);
+  assert.doesNotMatch(implementation, /localeCompare/);
+  assert.match(implementation, /Buffer\.compare/);
 });
 
 test("writes the safe schema only after signed verification passes", (t) => {
