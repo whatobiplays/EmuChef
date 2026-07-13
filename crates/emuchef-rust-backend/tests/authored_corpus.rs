@@ -1,6 +1,10 @@
 use std::fs;
 use std::path::{Path, PathBuf};
 
+use emuchef_rust_backend::user_configuration::{
+    emit_user_configuration_yaml, load_user_configuration, parse_user_configuration,
+    validate_user_configuration_with_catalog,
+};
 use emuchef_rust_backend::{request, session::DocumentSessionManager};
 use serde_json::{json, Value};
 
@@ -25,6 +29,10 @@ fn repo_authored_root() -> PathBuf {
 
 fn repo_authored_recipes_dir() -> PathBuf {
     repo_authored_root().join("recipes")
+}
+
+fn documented_user_configuration_path() -> PathBuf {
+    repo_root().join("examples/user-configurations/example.pocket-s-mini.roms.yaml")
 }
 
 fn authored_recipe_names() -> Vec<String> {
@@ -227,4 +235,20 @@ fn real_authored_recipes_open_validate_emit_and_index_through_editor_sessions() 
         run_editor_session_flow(&recipe_name, Value::Null);
         run_editor_session_flow(&recipe_name, json!(repo_authored_root()));
     }
+}
+
+#[test]
+fn documented_user_configuration_loads_emits_and_validates_against_the_real_catalog() {
+    let path = documented_user_configuration_path();
+    let configuration = load_user_configuration(&path)
+        .expect("documented user configuration should load structurally");
+    let emitted = emit_user_configuration_yaml(&configuration)
+        .expect("documented user configuration should emit canonically");
+    let reparsed = parse_user_configuration(&emitted)
+        .expect("canonical documented user configuration should parse");
+    assert_eq!(reparsed, configuration);
+
+    let diagnostics =
+        validate_user_configuration_with_catalog(&configuration, &path, &repo_authored_root());
+    assert!(diagnostics.is_empty(), "{diagnostics:#?}");
 }

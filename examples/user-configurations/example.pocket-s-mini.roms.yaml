@@ -1,0 +1,14 @@
+schema_version: 1
+kind: user_configuration
+id: example.pocket-s-mini.roms
+name: Pocket S Mini ROM Setup
+device_plan: ayaneo.pocket_s_mini.base
+selected_recipes:
+  - feature.copy_roms
+bindings:
+  feature.copy_roms/destination:
+    value: /sdcard/Emulation/ROMs
+  feature.copy_roms/policy:
+    value: sync
+  feature.copy_roms/source:
+    value: /Users/example/Emulation/ROMs

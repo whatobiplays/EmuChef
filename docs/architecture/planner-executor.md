@@ -5,6 +5,13 @@ input bindings, expands dependencies, normalizes steps, and emits a typed
 execution plan. Optional live ADB probing supplies detected facts before
 explicit CLI context overrides are applied to the emitted context.
 
+Runtime input declarations, saved user configurations, binding precedence,
+provenance, discovery, and side-effect-free plan creation are specified in
+[Runtime Recipe Configuration](runtime-recipe-configuration.md). The planner is
+the only layer that merges those sources. The execution plan contains normalized
+effective inputs; the executor does not load saved configuration or apply
+precedence.
+
 The executor processes steps in dependency order on one thread. Failure blocks
 dependent work, skip conditions produce skipped results, and verification can
 fail a completed action. Progress events report execution and per-step state.

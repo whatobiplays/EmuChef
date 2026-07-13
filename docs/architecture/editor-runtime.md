@@ -14,6 +14,15 @@ The sidecar is in-memory and process-local. Restart invalidates document ids;
 the frontend keeps stale documents read-only and offers a controlled reopen
 from disk where possible.
 
+User-configuration documents use a separate session surface from authored
+recipe documents. Catalog-independent loading and canonical emission keep a
+structurally valid document editable even when its catalog entries or saved
+values are semantically invalid. `describeConfiguration` provides partial form
+state and `planConfiguration` returns a structured in-memory plan without ADB,
+network, copy, execution, or persistence side effects. The complete contract is
+documented in
+[Runtime Recipe Configuration](runtime-recipe-configuration.md).
+
 ## Content Security Policy
 
 The production Tauri configuration contains no development URL and applies a

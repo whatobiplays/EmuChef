@@ -36,6 +36,11 @@ Typical CLI flow:
 
 Mutating apply requires ADB and should be run only against a safe test device.
 
+Runtime recipe inputs can be supplied directly or loaded from a persisted user
+configuration. The canonical contract, CLI examples, configuration-root rules,
+and side-effect-free discovery and planning operations are documented in
+[runtime recipe configuration](docs/architecture/runtime-recipe-configuration.md).
+
 ## Config Editor
 
 ```bash
@@ -62,8 +67,9 @@ recorded in the
 [2026-07-11 RetroArch evidence](docs/release/evidence/real-device-retroarch-2026-07-11.md).
 
 See [runtime ownership](docs/architecture/runtime-ownership.md), the
-[planner/executor architecture](docs/architecture/planner-executor.md), and
-[release readiness](docs/release/release-readiness.md). Real-device evidence is
+[planner/executor architecture](docs/architecture/planner-executor.md),
+[runtime recipe configuration](docs/architecture/runtime-recipe-configuration.md),
+and [release readiness](docs/release/release-readiness.md). Real-device evidence is
 collected with the [RetroArch validation runbook](docs/manual/real-device-retroarch-validation.md),
 and packaged macOS evidence uses the
 [Config Editor validation runbook](docs/manual/macos-packaged-gui-validation.md).
