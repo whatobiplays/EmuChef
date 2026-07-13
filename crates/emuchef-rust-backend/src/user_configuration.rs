@@ -206,12 +206,28 @@ pub fn parse_user_configuration(
 ) -> Result<UserConfiguration, UserConfigurationLoadError> {
     let value = serde_yaml::from_str::<YamlValue>(text)
         .map_err(|error| UserConfigurationLoadError::yaml(error.to_string()))?;
+    parse_user_configuration_value(&value)
+}
+
+/// Parse an inline JSON document through the canonical user-configuration schema.
+///
+/// Protocol field names surrounding the document use camelCase, but the
+/// document itself retains the persisted schema's snake_case field names.
+pub fn parse_inline_user_configuration(
+    value: &JsonValue,
+) -> Result<UserConfiguration, UserConfigurationLoadError> {
+    parse_user_configuration_value(&json_to_yaml(value))
+}
+
+fn parse_user_configuration_value(
+    value: &YamlValue,
+) -> Result<UserConfiguration, UserConfigurationLoadError> {
     let YamlValue::Mapping(mapping) = value else {
         return Err(UserConfigurationLoadError::structural(
             "User configuration must be a top-level mapping.",
         ));
     };
-    parse_user_configuration_mapping(&mapping)
+    parse_user_configuration_mapping(mapping)
 }
 
 fn parse_user_configuration_mapping(

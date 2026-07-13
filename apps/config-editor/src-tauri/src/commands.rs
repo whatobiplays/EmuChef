@@ -244,7 +244,7 @@ pub struct RuntimeConfigurationRequest {
     #[serde(skip_serializing_if = "Option::is_none")]
     configuration_root: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
-    user_configuration: Option<String>,
+    user_configuration: Option<RuntimeUserConfigurationSource>,
     #[serde(skip_serializing_if = "Option::is_none")]
     device_plan: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -253,6 +253,15 @@ pub struct RuntimeConfigurationRequest {
     bindings: Option<Value>,
     #[serde(skip_serializing_if = "Option::is_none")]
     device_context: Option<Value>,
+}
+
+/// A runtime request may identify a persisted document or carry the canonical
+/// schema-v1 document object inline. The backend remains the schema authority.
+#[derive(Debug, Deserialize, Serialize)]
+#[serde(untagged)]
+enum RuntimeUserConfigurationSource {
+    Reference(String),
+    Inline(serde_json::Map<String, Value>),
 }
 
 #[tauri::command]
@@ -485,7 +494,9 @@ mod tests {
         let request = RuntimeConfigurationRequest {
             authored_root: "/tmp/authored".to_string(),
             configuration_root: None,
-            user_configuration: Some("saved.default".to_string()),
+            user_configuration: Some(RuntimeUserConfigurationSource::Reference(
+                "saved.default".to_string(),
+            )),
             device_plan: None,
             selected_recipes: Some(Vec::new()),
             bindings: None,
@@ -499,6 +510,38 @@ mod tests {
                 "userConfiguration": "saved.default",
                 "selectedRecipes": [],
                 "deviceContext": {},
+            })
+        );
+    }
+
+    #[test]
+    fn runtime_configuration_request_forwards_inline_document_without_recasing_fields() {
+        let inline = json!({
+            "schema_version": 1,
+            "kind": "user_configuration",
+            "id": "inline.default",
+            "name": "Inline default",
+            "device_plan": "test.plan",
+            "selected_recipes": ["feature.test"],
+            "bindings": {},
+        });
+        let request = RuntimeConfigurationRequest {
+            authored_root: "/tmp/authored".to_string(),
+            configuration_root: None,
+            user_configuration: Some(RuntimeUserConfigurationSource::Inline(
+                inline.as_object().unwrap().clone(),
+            )),
+            device_plan: None,
+            selected_recipes: None,
+            bindings: None,
+            device_context: None,
+        };
+
+        assert_eq!(
+            serde_json::to_value(request).unwrap(),
+            json!({
+                "authoredRoot": "/tmp/authored",
+                "userConfiguration": inline,
             })
         );
     }

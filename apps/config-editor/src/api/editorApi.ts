@@ -1,6 +1,10 @@
 import { invoke } from "@tauri-apps/api/core";
 
 import type { EditorCommand } from "./commands";
+import {
+  runtimeConfigurationInvokeArgs,
+  type RuntimeConfigurationRequest,
+} from "./runtimeConfiguration";
 import type {
   ApiEnvelope,
   ApiError,
@@ -221,26 +225,26 @@ export async function closeUserConfiguration(documentId: string): Promise<Editor
   return callApi<Record<string, never>>("close_user_configuration", { documentId });
 }
 
-export interface RuntimeConfigurationRequest {
-  authoredRoot: string;
-  configurationRoot?: string;
-  userConfiguration?: string;
-  devicePlan?: string;
-  selectedRecipes?: string[];
-  bindings?: Record<string, unknown>;
-  deviceContext?: Record<string, unknown>;
-}
+export type {
+  InlineUserConfiguration,
+  InlineUserConfigurationBinding,
+  RuntimeConfigurationRequest,
+  RuntimeUserConfigurationSource,
+} from "./runtimeConfiguration";
 
 export async function describeConfiguration(
   request: RuntimeConfigurationRequest,
 ): Promise<EditorApiResult<ConfigurationDescriptionResult>> {
-  return callApi<ConfigurationDescriptionResult>("describe_configuration", { request });
+  return callApi<ConfigurationDescriptionResult>(
+    "describe_configuration",
+    runtimeConfigurationInvokeArgs(request),
+  );
 }
 
 export async function planConfiguration(
   request: RuntimeConfigurationRequest,
 ): Promise<EditorApiResult<PlanConfigurationResult>> {
-  return callApi<PlanConfigurationResult>("plan_configuration", { request });
+  return callApi<PlanConfigurationResult>("plan_configuration", runtimeConfigurationInvokeArgs(request));
 }
 
 export interface MenuState {

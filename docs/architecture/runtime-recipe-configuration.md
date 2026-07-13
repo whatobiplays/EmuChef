@@ -373,6 +373,37 @@ optional request replacements:
 }
 ```
 
+The surrounding protocol uses camelCase request fields. `userConfiguration`
+accepts either an ID/path string or an inline document object. An inline object
+uses the canonical persisted document schema and therefore keeps snake_case
+document fields:
+
+```json
+{
+  "type": "describeConfiguration",
+  "payload": {
+    "authoredRoot": "/path/to/authored",
+    "userConfiguration": {
+      "schema_version": 1,
+      "kind": "user_configuration",
+      "id": "example.config",
+      "name": "Example",
+      "device_plan": "ayaneo.pocket_s_mini.base",
+      "selected_recipes": ["feature.copy_roms"],
+      "bindings": {
+        "feature.copy_roms/destination": {
+          "value": "/sdcard/ROMs"
+        }
+      }
+    }
+  }
+}
+```
+
+Inline documents are structurally parsed by the same schema-v1 parser as YAML
+documents, do not perform file lookup, and do not accept camelCase aliases for
+document fields.
+
 An explicitly present `devicePlan` replaces the saved `device_plan`. An
 explicitly present `selectedRecipes` replaces saved or device-plan selection;
 `[]` is an explicit empty replacement. An absent field inherits the lower

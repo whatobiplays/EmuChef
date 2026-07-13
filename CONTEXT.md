@@ -122,6 +122,14 @@ partial values, provenance, per-input diagnostics, and aggregate diagnostics.
 It does not require a complete valid plan and performs no ADB, network,
 extraction, copy, device-write, or persistence operations.
 
+For both discovery and planning, the camelCase protocol field
+`userConfiguration` accepts either an ID/path string or an inline schema-v1
+document object. Inline documents use the persisted schema's snake_case fields,
+including `schema_version`, `device_plan`, and `selected_recipes`; camelCase
+aliases inside the document are not accepted. Inline objects use the same
+structural parser and model as file-backed documents and perform no
+configuration-file lookup.
+
 The `planConfiguration` JSON operation accepts the same context and performs
 complete catalog, dependency, winning-binding, ref, constraint, and required
 value validation before returning an in-memory normalized execution plan,

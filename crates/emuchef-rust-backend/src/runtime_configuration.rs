@@ -17,13 +17,20 @@ use crate::planner::{
     BindingSource, ExecutionPlan, PlannerInput, PlannerLoadError, PlannerMessage,
 };
 use crate::planner_device_plan::{self, PlannerInputParts};
-use crate::user_configuration::{self, UserConfigurationLoadError};
+use crate::user_configuration::{self, UserConfiguration, UserConfigurationLoadError};
+
+/// A persisted configuration reference or an already parsed inline document.
+#[derive(Clone, Debug)]
+pub(crate) enum UserConfigurationSource {
+    Reference(String),
+    Inline(UserConfiguration),
+}
 
 #[derive(Clone, Debug)]
 pub(crate) struct ConfigurationContextRequest {
     pub authored_root: PathBuf,
     pub configuration_root: Option<PathBuf>,
-    pub user_configuration: Option<String>,
+    pub user_configuration: Option<UserConfigurationSource>,
     pub device_plan: Option<String>,
     pub selected_recipes: Option<Vec<String>>,
     pub explicit_bindings: OrderedMap<Value>,
@@ -118,18 +125,18 @@ pub(crate) fn prepare_configuration(
         .map(|recipe| (recipe.id.clone(), recipe))
         .collect::<HashMap<_, _>>();
 
-    let saved = request
-        .user_configuration
-        .as_deref()
-        .map(|reference| {
+    let saved = match request.user_configuration {
+        Some(UserConfigurationSource::Reference(reference)) => Some(
             user_configuration::load_user_configuration_reference(
                 request.configuration_root.as_deref(),
-                reference,
+                &reference,
             )
             .map(|(_, configuration)| configuration)
-            .map_err(ConfigurationContextError::UserConfiguration)
-        })
-        .transpose()?;
+            .map_err(ConfigurationContextError::UserConfiguration)?,
+        ),
+        Some(UserConfigurationSource::Inline(configuration)) => Some(configuration),
+        None => None,
+    };
     let effective_device_plan = request
         .device_plan
         .clone()

@@ -16,7 +16,7 @@ use crate::planner::{plan_execution, DeviceContext, PlanningResult};
 use crate::planner_device_plan::{
     add_detected_profile_mismatch_warning, load_device_plan_profile_match_criteria,
 };
-use crate::runtime_configuration::{self, ConfigurationContextRequest};
+use crate::runtime_configuration::{self, ConfigurationContextRequest, UserConfigurationSource};
 use crate::ProcessOutput;
 
 #[derive(Clone, Debug, Default, PartialEq)]
@@ -56,7 +56,7 @@ pub(crate) fn plan_with_adb_runner<R: CommandRunner>(
     let prepared = runtime_configuration::prepare_configuration(ConfigurationContextRequest {
         authored_root,
         configuration_root,
-        user_configuration,
+        user_configuration: user_configuration.map(UserConfigurationSource::Reference),
         device_plan,
         selected_recipes,
         explicit_bindings: explicit_input_bindings,

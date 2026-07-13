@@ -5,7 +5,7 @@ use serde_json::{json, Map, Value};
 use crate::envelope;
 use crate::errors::ApiError;
 use crate::protocol;
-use crate::runtime_configuration::{self, ConfigurationContextRequest};
+use crate::runtime_configuration::{self, ConfigurationContextRequest, UserConfigurationSource};
 use crate::session::DocumentSessionManager;
 use crate::step_specs;
 use crate::user_configuration;
@@ -235,7 +235,7 @@ fn handle_runtime_configuration_request(
     let payload = payload_object(object)?;
     let authored_root = required_string(payload, "authoredRoot")?;
     let configuration_root = optional_string(payload, "configurationRoot")?;
-    let user_configuration = optional_string(payload, "userConfiguration")?;
+    let user_configuration = optional_user_configuration_source(payload)?;
     let device_plan = optional_string(payload, "devicePlan")?;
     if user_configuration.is_none() && device_plan.is_none() {
         return Err(ApiError::invalid_request_with_details(
@@ -249,7 +249,7 @@ fn handle_runtime_configuration_request(
     let request = ConfigurationContextRequest {
         authored_root: Path::new(authored_root).to_path_buf(),
         configuration_root: configuration_root.map(Path::new).map(Path::to_path_buf),
-        user_configuration: user_configuration.map(ToString::to_string),
+        user_configuration,
         device_plan: device_plan.map(ToString::to_string),
         selected_recipes,
         explicit_bindings,
@@ -710,6 +710,32 @@ fn optional_binding_map(
         result.insert(key.clone(), value.clone());
     }
     Ok(result)
+}
+
+fn optional_user_configuration_source(
+    payload: &Map<String, Value>,
+) -> Result<Option<UserConfigurationSource>, ApiError> {
+    match payload.get("userConfiguration") {
+        None | Some(Value::Null) => Ok(None),
+        Some(Value::String(reference)) if !reference.is_empty() => {
+            Ok(Some(UserConfigurationSource::Reference(reference.clone())))
+        }
+        Some(value @ Value::Object(_)) => {
+            user_configuration::parse_inline_user_configuration(value)
+                .map(UserConfigurationSource::Inline)
+                .map(Some)
+                .map_err(|error| {
+                    ApiError::load_failed(
+                        format!("Failed to load inline user configuration: {error}"),
+                        json!({ "field": "userConfiguration" }),
+                    )
+                })
+        }
+        Some(_) => Err(ApiError::invalid_request_with_details(
+            "Request field 'userConfiguration' must be a non-empty string or an object.",
+            json!({ "field": "userConfiguration" }),
+        )),
+    }
 }
 
 fn optional_device_context(

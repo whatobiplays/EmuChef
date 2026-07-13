@@ -46,6 +46,21 @@ fn write_configuration(temp: &TempDir, value: &str) -> PathBuf {
     root
 }
 
+fn inline_configuration(value: &str) -> Value {
+    json!({
+        "schema_version": 1,
+        "kind": "user_configuration",
+        "id": "inline.default",
+        "name": "Inline default",
+        "device_plan": "test.plan",
+        "selected_recipes": ["feature.test"],
+        "bindings": {
+            "feature.test/value": { "value": value },
+            "feature.test/required_missing": { "value": "complete" },
+        },
+    })
+}
+
 fn describe(payload: Value) -> Value {
     runtime_request("describeConfiguration", payload)
 }
@@ -138,6 +153,147 @@ fn explicit_values_shadow_invalid_saved_values_and_keep_provenance() {
         .unwrap()
         .iter()
         .any(|diagnostic| diagnostic["key"] == "feature.test/value"));
+}
+
+#[test]
+fn inline_configuration_is_shared_by_discovery_and_planning() {
+    let temp = TempDir::new().unwrap();
+    let authored_root = write_authored_root(&temp);
+    let missing_configuration_root = temp.path().join("must-not-be-read");
+    let inline = inline_configuration("saved");
+
+    let description = describe(json!({
+        "authoredRoot": authored_root,
+        "configurationRoot": missing_configuration_root,
+        "userConfiguration": inline,
+    }));
+    assert_eq!(description["ok"], true, "{description:#}");
+    assert_eq!(description["result"]["devicePlan"], "test.plan");
+    let value = input_by_key(&description, "feature.test/value");
+    assert_eq!(value["value"], "saved");
+    assert_eq!(value["valueSource"], "user_configuration");
+    assert!(!missing_configuration_root.exists());
+
+    let planning = runtime_request(
+        "planConfiguration",
+        json!({
+            "authoredRoot": authored_root,
+            "userConfiguration": inline_configuration("saved"),
+        }),
+    );
+    assert_eq!(planning["ok"], true, "{planning:#}");
+    assert_eq!(planning["result"]["diagnostics"], json!([]));
+    assert_eq!(planning["result"]["plan"]["id"], "plan.test.plan.001");
+}
+
+#[test]
+fn inline_configuration_honors_explicit_device_plan_replacement() {
+    let temp = TempDir::new().unwrap();
+    let authored_root = write_authored_root(&temp);
+    let mut inline = inline_configuration("saved");
+    inline["device_plan"] = json!("missing.saved.plan");
+
+    let response = describe(json!({
+        "authoredRoot": authored_root,
+        "userConfiguration": inline,
+        "devicePlan": "test.plan",
+    }));
+    assert_eq!(response["ok"], true, "{response:#}");
+    assert_eq!(response["result"]["devicePlan"], "test.plan");
+    assert!(!response["result"]["diagnostics"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|diagnostic| diagnostic["code"] == "device_plan_not_found"));
+}
+
+#[test]
+fn inline_configuration_honors_explicit_recipe_replacement() {
+    let temp = TempDir::new().unwrap();
+    let authored_root = write_authored_root(&temp);
+    let mut inline = inline_configuration("saved");
+    inline["selected_recipes"] = json!(["missing.saved.recipe"]);
+
+    let response = describe(json!({
+        "authoredRoot": authored_root,
+        "userConfiguration": inline,
+        "selectedRecipes": ["feature.test"],
+    }));
+    assert_eq!(response["ok"], true, "{response:#}");
+    assert_eq!(
+        response["result"]["selectedRecipes"],
+        json!(["feature.test"])
+    );
+    assert!(!response["result"]["diagnostics"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|diagnostic| diagnostic["code"] == "unknown_recipe"));
+}
+
+#[test]
+fn inline_configuration_rejects_invalid_structure_and_camel_case_aliases() {
+    let temp = TempDir::new().unwrap();
+    let authored_root = write_authored_root(&temp);
+    let mut inline = inline_configuration("saved");
+    inline.as_object_mut().unwrap().remove("device_plan");
+    inline["devicePlan"] = json!("test.plan");
+
+    let response = describe(json!({
+        "authoredRoot": authored_root,
+        "userConfiguration": inline,
+    }));
+    assert_eq!(response["ok"], false);
+    assert_eq!(response["error"]["code"], "load_failed");
+    assert_eq!(
+        response["error"]["details"],
+        json!({ "field": "userConfiguration" })
+    );
+    assert!(response["error"]["message"]
+        .as_str()
+        .unwrap()
+        .contains("device_plan"));
+}
+
+#[test]
+fn inline_sensitive_invalid_saved_value_can_be_shadowed_without_leaking() {
+    let temp = TempDir::new().unwrap();
+    let authored_root = write_authored_root(&temp);
+    let response = describe(json!({
+        "authoredRoot": authored_root,
+        "userConfiguration": inline_configuration("DO_NOT_LEAK"),
+        "bindings": { "feature.test/value": "explicit" },
+    }));
+
+    assert_eq!(response["ok"], true, "{response:#}");
+    let value = input_by_key(&response, "feature.test/value");
+    assert_eq!(value["value"], "explicit");
+    assert_eq!(value["valueSource"], "explicit");
+    let serialized = serde_json::to_string(&response).unwrap();
+    assert!(!serialized.contains("DO_NOT_LEAK"));
+}
+
+#[test]
+fn inline_semantic_errors_remain_diagnostics_in_a_success_envelope() {
+    let temp = TempDir::new().unwrap();
+    let authored_root = write_authored_root(&temp);
+    let response = describe(json!({
+        "authoredRoot": authored_root,
+        "userConfiguration": inline_configuration("not-an-option"),
+    }));
+
+    assert_eq!(response["ok"], true, "{response:#}");
+    let diagnostic = response["result"]["diagnostics"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|diagnostic| diagnostic["key"] == "feature.test/value")
+        .unwrap();
+    assert_eq!(diagnostic["code"], "binding_validation_failed");
+    assert_eq!(diagnostic["provenance"], "user_configuration");
+    assert!(!serde_json::to_string(diagnostic)
+        .unwrap()
+        .contains("not-an-option"));
 }
 
 #[test]
