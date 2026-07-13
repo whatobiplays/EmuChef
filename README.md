@@ -64,6 +64,11 @@ no real device changes and is not real-device evidence. Real apply,
 artifact-download execution, persistence/resume, rollback, and remote catalog
 paths remain unavailable.
 
+The planned, default-disabled trust boundary for a later real-device workflow
+is documented in the
+[Phase 2B guarded real-execution contract](docs/product/phase-2b-guarded-real-execution.md).
+That specification does not enable real execution in the current application.
+
 Android SDK Platform-Tools is a user-supplied prerequisite. EmuChef does not
 bundle or download it. The app links to Google's official page and can import a
 macOS Platform-Tools ZIP through a native picker into validated application
@@ -101,6 +106,7 @@ See [runtime ownership](docs/architecture/runtime-ownership.md), the
 [runtime recipe configuration](docs/architecture/runtime-recipe-configuration.md),
 [Phase 1 read-only app](docs/product/phase-1-read-only-app.md),
 [Phase 2A simulated execution](docs/product/phase-2a-simulated-execution.md),
+[Phase 2B guarded real execution](docs/product/phase-2b-guarded-real-execution.md),
 and [release readiness](docs/release/release-readiness.md). Real-device evidence is
 collected with the [RetroArch validation runbook](docs/manual/real-device-retroarch-validation.md),
 and packaged macOS evidence uses the

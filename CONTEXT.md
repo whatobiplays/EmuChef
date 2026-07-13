@@ -284,6 +284,14 @@ apply, device writes, artifact resolution, saved-configuration persistence,
 catalog networking, wireless onboarding, rollback, resume, or parallel-device
 work, and its result is not real-device evidence.
 
+Phase 2B defines a planned, default-disabled guarded real-device execution
+contract. It does not add a real-execution surface to the current application.
+The planned boundary keeps execution mode, exact target identity, reviewed
+plans, digests, paths, and sidecar identifiers inside trusted Rust/Tauri code;
+requires explicit irreversible-action confirmation; shares the bounded
+simulated/real execution store; and requires platform-specific packaged-device
+evidence plus a separate release decision before enablement.
+
 Tauri launches the sidecar and negotiates the `phase0_end_user_runtime`
 extension plus `describeCatalog`, `listAdbDevices`, `probeDevice`,
 `matchDevice`, `describeConfiguration`, `planConfiguration`, `startExecution`,

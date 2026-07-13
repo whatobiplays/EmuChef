@@ -2,12 +2,17 @@
 
 ## 1. Purpose
 
-`apps/emuchef-app` is the read-only React/Tauri workflow for end users. It
-guides a user through connecting one Android device, confirming detected facts,
+`apps/emuchef-app` is the guided React/Tauri workflow for end users. It guides
+a user through connecting one Android device, confirming detected facts,
 choosing a backend-approved device plan, selecting recipes, resolving recipe
-inputs, and reviewing a target-bound plan. Phase 1 stops at review and has no
-execution, dry-run, cancellation, apply, device-write, catalog-networking, or
-artifact-resolution path.
+inputs, reviewing a target-bound plan, and running the retained plan through a
+fake-device simulation. The current application has no real execution,
+device-write, or artifact-resolution surface.
+
+The planned, default-disabled trust boundary for a later real-device workflow
+is documented in the
+[Phase 2B guarded real-execution contract](../../docs/product/phase-2b-guarded-real-execution.md).
+The specification does not enable real execution or change Phase 2A behavior.
 
 The application is independent from `apps/config-editor`. Both applications
 package the same Rust `emuchef --sidecar` runtime, but they do not import each
@@ -88,4 +93,3 @@ npm --prefix apps/emuchef-app run build
 cargo test --manifest-path apps/emuchef-app/src-tauri/Cargo.toml
 cargo clippy --manifest-path apps/emuchef-app/src-tauri/Cargo.toml --all-targets -- -D warnings
 ```
-

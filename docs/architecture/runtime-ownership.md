@@ -9,7 +9,7 @@
 | Real-ADB apply | Rust | Active; manual device validation required |
 | Tauri editor backend | Rust JSONL sidecar | Active |
 | Phase 0 end-user runtime protocol | Rust JSONL sidecar | Active backend contract |
-| End-user desktop app | React UI with trusted Rust/Tauri bridge | Active through reviewed-plan simulation; no real execution surface |
+| End-user desktop app | React UI with trusted Rust/Tauri bridge | Active through reviewed-plan simulation; guarded real execution is specified but default-disabled and not implemented |
 | Platform-Tools import and verification | Rust/Tauri | User-supplied, app-managed, macOS-only |
 | Catalog source resolution | Rust | Bundled/local snapshots active; cached remote reserved |
 | Execution reports and incremental events | Rust JSONL sidecar | Active in-memory session contract |
@@ -42,3 +42,9 @@ active mapping and the latest terminal mapping. Complete snapshots are the UI
 authority; incremental events are presentation data only. React receives no
 sidecar execution identifier, full plan, exact serial, output path, or raw
 sidecar response.
+
+[Phase 2B guarded real-device execution](../product/phase-2b-guarded-real-execution.md)
+defines the planned trust boundary for a later real workflow. The specification
+keeps trusted start data and real mode selection in Tauri, reuses the existing
+Phase 0 sidecar operations, and requires explicit platform-specific rollout
+approval. It does not change current runtime ownership or enable real execution.
