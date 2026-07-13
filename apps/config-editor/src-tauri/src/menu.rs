@@ -5,6 +5,7 @@ use tauri::{
 };
 
 const ACTION_OPEN_RECIPE: &str = "openRecipe";
+const ACTION_OPEN_USER_CONFIGURATION: &str = "openUserConfiguration";
 const ACTION_SAVE_RECIPE: &str = "saveRecipe";
 const ACTION_SAVE_RECIPE_AS: &str = "saveRecipeAs";
 const ACTION_RESTART_SIDECAR: &str = "restartSidecar";
@@ -87,6 +88,7 @@ pub fn build_editor_menu<R: Runtime>(
 pub fn handle_menu_event<R: Runtime>(app: &AppHandle<R>, action: &str) {
     match action {
         ACTION_OPEN_RECIPE
+        | ACTION_OPEN_USER_CONFIGURATION
         | ACTION_SAVE_RECIPE
         | ACTION_SAVE_RECIPE_AS
         | ACTION_RESTART_SIDECAR
@@ -153,6 +155,13 @@ fn build_file_menu<R: Runtime>(
                 "Open Recipe",
                 open_recipe_ready,
                 Some("CmdOrCtrl+O"),
+            )?,
+            &MenuItem::with_id(
+                app,
+                ACTION_OPEN_USER_CONFIGURATION,
+                "Open User Configuration...",
+                open_recipe_ready,
+                None::<&str>,
             )?,
             &PredefinedMenuItem::separator(app)?,
             &MenuItem::with_id(

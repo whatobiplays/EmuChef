@@ -16,6 +16,8 @@ import type {
   SidecarStatusResult,
   ValidateResult,
   ValidateRecipePathResult,
+  UserConfigurationCommandResult,
+  UserConfigurationDocumentResult,
 } from "./types";
 
 export type EditorApiResult<T> =
@@ -120,6 +122,101 @@ export async function setDocumentAuthoredRoot(
   authoredRoot: string | null,
 ): Promise<EditorApiResult<DocumentResult>> {
   return callApi<DocumentResult>("set_document_authored_root", { documentId, authoredRoot });
+}
+
+export async function openUserConfiguration(
+  path: string,
+  authoredRoot: string | null = null,
+): Promise<EditorApiResult<UserConfigurationDocumentResult>> {
+  return callApi<UserConfigurationDocumentResult>("open_user_configuration", { path, authoredRoot });
+}
+
+export async function createUserConfiguration(args: {
+  path: string;
+  configurationId: string;
+  name: string;
+  devicePlan: string;
+  selectedRecipes: string[];
+  authoredRoot: string | null;
+}): Promise<EditorApiResult<UserConfigurationDocumentResult>> {
+  return callApi<UserConfigurationDocumentResult>("create_user_configuration", args);
+}
+
+export async function getUserConfigurationDocument(
+  documentId: string,
+): Promise<EditorApiResult<UserConfigurationDocumentResult>> {
+  return callApi<UserConfigurationDocumentResult>("get_user_configuration_document", { documentId });
+}
+
+export async function saveUserConfiguration(
+  documentId: string,
+): Promise<EditorApiResult<UserConfigurationDocumentResult>> {
+  return callApi<UserConfigurationDocumentResult>("save_user_configuration", { documentId });
+}
+
+export async function saveUserConfigurationAs(
+  documentId: string,
+  path: string,
+): Promise<EditorApiResult<UserConfigurationDocumentResult>> {
+  return callApi<UserConfigurationDocumentResult>("save_user_configuration_as", { documentId, path });
+}
+
+export async function setUserConfigurationBinding(
+  documentId: string,
+  key: string,
+  value: unknown,
+): Promise<EditorApiResult<UserConfigurationCommandResult>> {
+  return callApi<UserConfigurationCommandResult>("set_user_configuration_binding", { documentId, key, value });
+}
+
+export async function removeUserConfigurationBinding(
+  documentId: string,
+  key: string,
+): Promise<EditorApiResult<UserConfigurationCommandResult>> {
+  return callApi<UserConfigurationCommandResult>("remove_user_configuration_binding", { documentId, key });
+}
+
+export async function setUserConfigurationSelectedRecipes(
+  documentId: string,
+  selectedRecipes: string[],
+): Promise<EditorApiResult<UserConfigurationCommandResult>> {
+  return callApi<UserConfigurationCommandResult>("set_user_configuration_selected_recipes", {
+    documentId,
+    selectedRecipes,
+  });
+}
+
+export async function setUserConfigurationDevicePlan(
+  documentId: string,
+  devicePlan: string,
+): Promise<EditorApiResult<UserConfigurationCommandResult>> {
+  return callApi<UserConfigurationCommandResult>("set_user_configuration_device_plan", { documentId, devicePlan });
+}
+
+export async function validateUserConfiguration(
+  documentId: string,
+): Promise<EditorApiResult<ValidateResult>> {
+  return callApi<ValidateResult>("validate_user_configuration", { documentId });
+}
+
+export async function emitUserConfigurationYaml(
+  documentId: string,
+): Promise<EditorApiResult<EmitYamlResult>> {
+  return callApi<EmitYamlResult>("emit_user_configuration_yaml", { documentId });
+}
+
+export async function setUserConfigurationAuthoredRoot(
+  documentId: string,
+  authoredRoot: string | null,
+): Promise<EditorApiResult<UserConfigurationDocumentResult>> {
+  return callApi<UserConfigurationDocumentResult>("set_user_configuration_authored_root", {
+    documentId,
+    authoredRoot,
+  });
+}
+
+export async function closeUserConfiguration(documentId: string): Promise<EditorApiResult<Record<string, never>>> {
+  return callApi<Record<string, never>>("close_user_configuration", { documentId });
 }
 
 export interface MenuState {

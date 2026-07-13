@@ -64,6 +64,29 @@ expanded or rewritten as host paths. The authored `feature.copy_roms` recipe
 demonstrates a host directory, constrained device destination, and enum policy
 consumed through recipe-local input refs.
 
+Schema-v1 user configurations persist recipe selection and direct runtime input
+bindings independently from authored recipes. A document requires a non-empty
+`device_plan`, keeps fully qualified `<recipe-id>/<input-id>` binding keys, and
+preserves unknown top-level extension fields deterministically. Structural
+loading is catalog-independent: malformed YAML, unsupported schema identity,
+invalid required field shapes, malformed binding keys, duplicate mappings, and
+ambiguous binding value sources prevent loading. Recipe and input existence,
+dependency-expanded selection membership, value compatibility, enum and path
+constraints, device-plan existence, and missing required inputs are semantic
+diagnostics, so a structurally valid document remains editable and canonically
+emittable when its catalog is unavailable or its saved values are invalid.
+
+User-configuration identifiers resolve as `<configuration-root>/<id>.yaml`.
+The configuration root is the directory containing configuration files and may
+be set explicitly. Otherwise EmuChef uses the platform configuration directory:
+`~/Library/Application Support/EmuChef/user-configurations` on macOS,
+`%APPDATA%\EmuChef\user-configurations` on Windows, and
+`$XDG_CONFIG_HOME/emuchef/user-configurations` or
+`~/.config/emuchef/user-configurations` on Linux. Absolute values, values with a
+slash or backslash, and case-insensitive `.yaml` or `.yml` suffixes are always
+paths, including when missing. Other values must be valid configuration IDs;
+resolution never searches the authored root or current working directory.
+
 ## Execution
 
 Execution is single-threaded and dependency-aware. A failed step blocks
@@ -108,6 +131,14 @@ Product-facing Tauri commands use non-prefixed document names:
 `sidecar_ping`, and `sidecar_restart` retain the prefix because they manage the
 sidecar process. Transport request identifiers are removed before responses
 reach frontend code.
+
+The editor and JSONL protocol also expose catalog-independent user-configuration
+open, create, inspect, edit, validate, canonical-emission, save, authored-root,
+and close operations. Supplying an authored root adds semantic diagnostics but
+is not required to open or emit a structurally valid document. The desktop
+editor provides an initial user-configuration surface for selected recipes,
+direct binding edits, diagnostics, canonical YAML, and saving; recipe authoring
+continues to use its existing document surface.
 
 ## Testing and Compatibility
 

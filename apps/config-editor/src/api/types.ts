@@ -223,3 +223,41 @@ export interface EmitYamlResult {
 export interface GetRefIndexResult {
   refIndex: RefIndexDto;
 }
+
+export interface UserConfigurationDiagnosticDto {
+  severity: string;
+  code: string;
+  message: string;
+  key: string | null;
+  provenance: string;
+  details: Record<string, unknown>;
+}
+
+export interface UserConfigurationDto {
+  schemaVersion: number;
+  kind: "user_configuration";
+  id: string;
+  name: string;
+  devicePlan: string;
+  selectedRecipes: string[];
+  bindings: Record<string, unknown>;
+  extensions: Record<string, unknown>;
+}
+
+export interface UserConfigurationDocumentDto {
+  documentId: string;
+  path: string;
+  authoredRoot: string | null;
+  dirty: boolean;
+  configuration: UserConfigurationDto;
+  yaml: string;
+  diagnostics: UserConfigurationDiagnosticDto[];
+}
+
+export interface UserConfigurationDocumentResult {
+  document: UserConfigurationDocumentDto;
+}
+
+export interface UserConfigurationCommandResult extends UserConfigurationDocumentResult {
+  commandResult: CommandResultDto;
+}

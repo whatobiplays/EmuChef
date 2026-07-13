@@ -7,6 +7,7 @@ use crate::errors::ApiError;
 use crate::protocol;
 use crate::session::DocumentSessionManager;
 use crate::step_specs;
+use crate::user_configuration;
 use crate::validation;
 use crate::yaml;
 
@@ -50,6 +51,10 @@ fn handle_validated_object(object: &Map<String, Value>) -> Result<Value, ApiErro
         "listStepSpecs" => Ok(envelope::success(step_specs::list_step_specs_result())),
         "emitRecipeYamlFromPath" => handle_emit_recipe_yaml_from_path(object),
         "validateRecipePath" => handle_validate_recipe_path(object),
+        "emitUserConfigurationYamlFromPath" => {
+            handle_emit_user_configuration_yaml_from_path(object)
+        }
+        "validateUserConfigurationPath" => handle_validate_user_configuration_path(object),
         unknown => Err(ApiError::invalid_request(format!(
             "Unknown request type: {unknown}"
         ))),
@@ -69,6 +74,31 @@ fn handle_validated_sidecar_object(
         "listStepSpecs" => Ok(envelope::success(step_specs::list_step_specs_result())),
         "emitRecipeYamlFromPath" => handle_emit_recipe_yaml_from_path(object),
         "validateRecipePath" => handle_validate_recipe_path(object),
+        "emitUserConfigurationYamlFromPath" => {
+            handle_emit_user_configuration_yaml_from_path(object)
+        }
+        "validateUserConfigurationPath" => handle_validate_user_configuration_path(object),
+        "openUserConfiguration" => handle_open_user_configuration(object, sessions),
+        "createUserConfiguration" => handle_create_user_configuration(object, sessions),
+        "getUserConfigurationDocument" => handle_get_user_configuration_document(object, sessions),
+        "saveUserConfiguration" => handle_save_user_configuration(object, sessions),
+        "saveUserConfigurationAs" => handle_save_user_configuration_as(object, sessions),
+        "setUserConfigurationBinding" => handle_set_user_configuration_binding(object, sessions),
+        "removeUserConfigurationBinding" => {
+            handle_remove_user_configuration_binding(object, sessions)
+        }
+        "setUserConfigurationSelectedRecipes" => {
+            handle_set_user_configuration_selected_recipes(object, sessions)
+        }
+        "setUserConfigurationDevicePlan" => {
+            handle_set_user_configuration_device_plan(object, sessions)
+        }
+        "validateUserConfiguration" => handle_validate_user_configuration(object, sessions),
+        "emitUserConfigurationYaml" => handle_emit_user_configuration_yaml(object, sessions),
+        "setUserConfigurationAuthoredRoot" => {
+            handle_set_user_configuration_authored_root(object, sessions)
+        }
+        "closeUserConfiguration" => handle_close_user_configuration(object, sessions),
         "openRecipe" => handle_open_recipe(object, sessions),
         "createRecipeFromTemplate" => handle_create_recipe_from_template(object, sessions),
         "getDocument" => handle_get_document(object, sessions),
@@ -142,6 +172,214 @@ fn handle_validate_recipe_path(object: &Map<String, Value>) -> Result<Value, Api
         Path::new(path),
         authored_root.map(Path::new),
     )))
+}
+
+fn handle_emit_user_configuration_yaml_from_path(
+    object: &Map<String, Value>,
+) -> Result<Value, ApiError> {
+    let payload = payload_object(object)?;
+    let path = user_configuration_path(payload)?;
+    let configuration = user_configuration::load_user_configuration(&path).map_err(|error| {
+        ApiError::load_failed(
+            format!("Failed to load user configuration: {error}"),
+            json!({ "path": path }),
+        )
+    })?;
+    let yaml =
+        user_configuration::emit_user_configuration_yaml(&configuration).map_err(|error| {
+            ApiError::load_failed(
+                format!("Failed to emit user configuration: {error}"),
+                json!({ "path": path }),
+            )
+        })?;
+    Ok(envelope::success(json!({ "yaml": yaml })))
+}
+
+fn handle_validate_user_configuration_path(object: &Map<String, Value>) -> Result<Value, ApiError> {
+    let payload = payload_object(object)?;
+    let path = user_configuration_path(payload)?;
+    let authored_root = optional_string(payload, "authoredRoot")?;
+    let configuration = user_configuration::load_user_configuration(&path).map_err(|error| {
+        ApiError::load_failed(
+            format!("Failed to load user configuration: {error}"),
+            json!({ "path": path }),
+        )
+    })?;
+    let diagnostics = authored_root.map_or_else(Vec::new, |root| {
+        user_configuration::validate_user_configuration_with_catalog(
+            &configuration,
+            &path,
+            Path::new(root),
+        )
+    });
+    Ok(envelope::success(json!({ "diagnostics": diagnostics })))
+}
+
+fn handle_open_user_configuration(
+    object: &Map<String, Value>,
+    sessions: &mut DocumentSessionManager,
+) -> Result<Value, ApiError> {
+    let payload = payload_object(object)?;
+    let path = user_configuration_path(payload)?;
+    let authored_root = optional_string(payload, "authoredRoot")?;
+    Ok(envelope::success(sessions.open_user_configuration(
+        &path.to_string_lossy(),
+        authored_root,
+    )?))
+}
+
+fn handle_create_user_configuration(
+    object: &Map<String, Value>,
+    sessions: &mut DocumentSessionManager,
+) -> Result<Value, ApiError> {
+    let payload = payload_object(object)?;
+    let path = required_string(payload, "path")?;
+    let configuration_id = required_string(payload, "configurationId")?;
+    let name = required_string(payload, "name")?;
+    let device_plan = required_string(payload, "devicePlan")?;
+    let selected_recipes = required_string_array(payload, "selectedRecipes")?;
+    let authored_root = optional_string(payload, "authoredRoot")?;
+    Ok(envelope::success(sessions.create_user_configuration(
+        path,
+        configuration_id,
+        name,
+        device_plan,
+        selected_recipes,
+        authored_root,
+    )?))
+}
+
+fn handle_get_user_configuration_document(
+    object: &Map<String, Value>,
+    sessions: &DocumentSessionManager,
+) -> Result<Value, ApiError> {
+    let payload = payload_object(object)?;
+    Ok(envelope::success(
+        sessions.get_user_configuration_document(required_document_id(payload)?)?,
+    ))
+}
+
+fn handle_save_user_configuration(
+    object: &Map<String, Value>,
+    sessions: &mut DocumentSessionManager,
+) -> Result<Value, ApiError> {
+    let payload = payload_object(object)?;
+    Ok(envelope::success(
+        sessions.save_user_configuration(required_document_id(payload)?)?,
+    ))
+}
+
+fn handle_save_user_configuration_as(
+    object: &Map<String, Value>,
+    sessions: &mut DocumentSessionManager,
+) -> Result<Value, ApiError> {
+    let payload = payload_object(object)?;
+    let document_id = required_document_id(payload)?;
+    let path = required_path(payload)?;
+    Ok(envelope::success(
+        sessions.save_user_configuration_as(document_id, path)?,
+    ))
+}
+
+fn handle_set_user_configuration_binding(
+    object: &Map<String, Value>,
+    sessions: &mut DocumentSessionManager,
+) -> Result<Value, ApiError> {
+    let payload = payload_object(object)?;
+    let document_id = required_document_id(payload)?;
+    let key = required_string(payload, "key")?;
+    let value = payload.get("value").cloned().ok_or_else(|| {
+        ApiError::invalid_request_with_details(
+            "Request payload is missing required field: value",
+            json!({ "field": "value" }),
+        )
+    })?;
+    Ok(envelope::success(sessions.set_user_configuration_binding(
+        document_id,
+        key,
+        Some(value),
+    )?))
+}
+
+fn handle_remove_user_configuration_binding(
+    object: &Map<String, Value>,
+    sessions: &mut DocumentSessionManager,
+) -> Result<Value, ApiError> {
+    let payload = payload_object(object)?;
+    Ok(envelope::success(sessions.set_user_configuration_binding(
+        required_document_id(payload)?,
+        required_string(payload, "key")?,
+        None,
+    )?))
+}
+
+fn handle_set_user_configuration_selected_recipes(
+    object: &Map<String, Value>,
+    sessions: &mut DocumentSessionManager,
+) -> Result<Value, ApiError> {
+    let payload = payload_object(object)?;
+    Ok(envelope::success(
+        sessions.set_user_configuration_selected_recipes(
+            required_document_id(payload)?,
+            required_string_array(payload, "selectedRecipes")?,
+        )?,
+    ))
+}
+
+fn handle_set_user_configuration_device_plan(
+    object: &Map<String, Value>,
+    sessions: &mut DocumentSessionManager,
+) -> Result<Value, ApiError> {
+    let payload = payload_object(object)?;
+    Ok(envelope::success(
+        sessions.set_user_configuration_device_plan(
+            required_document_id(payload)?,
+            required_string(payload, "devicePlan")?.to_string(),
+        )?,
+    ))
+}
+
+fn handle_validate_user_configuration(
+    object: &Map<String, Value>,
+    sessions: &mut DocumentSessionManager,
+) -> Result<Value, ApiError> {
+    let payload = payload_object(object)?;
+    Ok(envelope::success(sessions.validate_user_configuration(
+        required_document_id(payload)?,
+    )?))
+}
+
+fn handle_emit_user_configuration_yaml(
+    object: &Map<String, Value>,
+    sessions: &DocumentSessionManager,
+) -> Result<Value, ApiError> {
+    let payload = payload_object(object)?;
+    Ok(envelope::success(sessions.emit_user_configuration_yaml(
+        required_document_id(payload)?,
+    )?))
+}
+
+fn handle_set_user_configuration_authored_root(
+    object: &Map<String, Value>,
+    sessions: &mut DocumentSessionManager,
+) -> Result<Value, ApiError> {
+    let payload = payload_object(object)?;
+    Ok(envelope::success(
+        sessions.set_user_configuration_authored_root(
+            required_document_id(payload)?,
+            required_nullable_string(payload, "authoredRoot")?,
+        )?,
+    ))
+}
+
+fn handle_close_user_configuration(
+    object: &Map<String, Value>,
+    sessions: &mut DocumentSessionManager,
+) -> Result<Value, ApiError> {
+    let payload = payload_object(object)?;
+    Ok(envelope::success(sessions.close_user_configuration(
+        required_document_id(payload)?,
+    )?))
 }
 
 fn handle_open_recipe(
@@ -342,4 +580,54 @@ fn required_nullable_string<'a>(
             json!({ "field": field }),
         )),
     }
+}
+
+fn required_string_array(
+    payload: &Map<String, Value>,
+    field: &str,
+) -> Result<Vec<String>, ApiError> {
+    let Some(Value::Array(values)) = payload.get(field) else {
+        return Err(ApiError::invalid_request_with_details(
+            format!("Request field '{field}' must be an array of strings."),
+            json!({ "field": field }),
+        ));
+    };
+    values
+        .iter()
+        .map(|value| match value {
+            Value::String(value) if !value.is_empty() => Ok(value.clone()),
+            _ => Err(ApiError::invalid_request_with_details(
+                format!("Request field '{field}' must be an array of non-empty strings."),
+                json!({ "field": field }),
+            )),
+        })
+        .collect()
+}
+
+fn user_configuration_path(payload: &Map<String, Value>) -> Result<std::path::PathBuf, ApiError> {
+    let path = optional_string(payload, "path")?;
+    let reference = optional_string(payload, "userConfiguration")?;
+    let value = match (path, reference) {
+        (Some(path), None) | (None, Some(path)) => path,
+        (Some(_), Some(_)) => {
+            return Err(ApiError::invalid_request_with_details(
+                "Request must provide only one of 'path' or 'userConfiguration'.",
+                json!({ "fields": ["path", "userConfiguration"] }),
+            ));
+        }
+        (None, None) => {
+            return Err(ApiError::invalid_request_with_details(
+                "Request must provide 'path' or 'userConfiguration'.",
+                json!({ "fields": ["path", "userConfiguration"] }),
+            ));
+        }
+    };
+    let configuration_root = optional_string(payload, "configurationRoot")?;
+    user_configuration::resolve_user_configuration_path(configuration_root.map(Path::new), value)
+        .map_err(|error| {
+            ApiError::invalid_request_with_details(
+                format!("Invalid user-configuration reference: {error}"),
+                json!({ "userConfiguration": value }),
+            )
+        })
 }

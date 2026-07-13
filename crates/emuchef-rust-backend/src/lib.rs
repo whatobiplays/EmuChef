@@ -33,6 +33,8 @@ pub mod request;
 pub(crate) mod runtime_refs;
 pub mod session;
 pub mod step_specs;
+pub mod user_configuration;
+pub mod user_configuration_document;
 pub mod validation;
 pub mod yaml;
 

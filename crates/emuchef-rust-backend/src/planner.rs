@@ -413,7 +413,9 @@ pub fn plan_execution(input: PlannerInput) -> PlanningResult {
     }
 }
 
-fn load_top_level_recipes(authored_root: &Path) -> Result<Vec<Recipe>, PlannerLoadError> {
+pub(crate) fn load_top_level_recipes(
+    authored_root: &Path,
+) -> Result<Vec<Recipe>, PlannerLoadError> {
     let recipe_root = authored_root.join("recipes");
     let entries = fs::read_dir(&recipe_root).map_err(|error| {
         PlannerLoadError::new(

@@ -3,6 +3,7 @@ import { useEffect, useRef } from "react";
 
 export type MenuAction =
   | "openRecipe"
+  | "openUserConfiguration"
   | "saveRecipe"
   | "saveRecipeAs"
   | "restartSidecar"

@@ -6,6 +6,7 @@ import type { EditorCommand } from "./api/commands";
 import {
   applyRecipeCommand,
   emitYaml,
+  openUserConfiguration as openUserConfigurationDocument,
   listStepSpecs,
   openRecipe as openRecipeDocument,
   redo as redoDocument,
@@ -24,6 +25,7 @@ import type {
   RecipeDocumentDto,
   SidecarStatusResult,
   StepSpecDto,
+  UserConfigurationDocumentDto,
 } from "./api/types";
 import { AppShell } from "./components/AppShell";
 import { ArtifactGroupsEditor } from "./components/ArtifactGroupsEditor";
@@ -56,6 +58,7 @@ import { Sidebar, type EditorView } from "./components/Sidebar";
 import { StepSpecsPanel } from "./components/StepSpecsPanel";
 import { StepsEditor } from "./components/StepsEditor";
 import { Toolbar } from "./components/Toolbar";
+import { UserConfigurationEditor } from "./components/UserConfigurationEditor";
 import { YamlPreview } from "./components/YamlPreview";
 
 interface TextPromptRequest {
@@ -83,6 +86,7 @@ export default function App() {
   const [stepSpecsLoaded, setStepSpecsLoaded] = useState(false);
   const [stepSpecsLoading, setStepSpecsLoading] = useState(true);
   const [currentDocument, setCurrentDocument] = useState<RecipeDocumentDto | null>(null);
+  const [userConfigurationDocument, setUserConfigurationDocument] = useState<UserConfigurationDocumentDto | null>(null);
   const [currentPath, setCurrentPath] = useState<string | null>(null);
   const [selectedAuthoredRoot, setSelectedAuthoredRoot] = useState<string | null>(null);
   const [diagnostics, setDiagnostics] = useState<DiagnosticDto[]>([]);
@@ -310,6 +314,7 @@ export default function App() {
 
   const menuHandlers: Record<MenuAction, () => void> = {
     openRecipe: () => void openRecipe(),
+    openUserConfiguration: () => void openUserConfiguration(),
     saveRecipe: () => void saveRecipe(),
     saveRecipeAs: () => void saveRecipeAs(),
     restartSidecar: () => void restartSidecar(),
@@ -320,6 +325,52 @@ export default function App() {
     setAuthoredRoot: () => void setAuthoredRootFromDialog(),
     clearAuthoredRoot: () => void clearAuthoredRoot(),
   };
+
+  async function openUserConfiguration() {
+    if (commandInFlightRef.current !== null) {
+      return;
+    }
+    const recipeDocument = currentDocumentRef.current;
+    if (recipeDocument?.dirty) {
+      const confirmed = await confirmAction(
+        "Discard unsaved changes",
+        `Discard unsaved changes to ${recipeDocument.recipe.id}?`,
+        { confirmLabel: "Discard", destructive: true },
+      );
+      if (!confirmed) {
+        return;
+      }
+    }
+    let selected: string | string[] | null;
+    try {
+      selected = await open({
+        multiple: false,
+        directory: false,
+        filters: [{ name: "YAML user configurations", extensions: ["yaml", "yml"] }],
+      });
+    } catch (error) {
+      setErrorMessage(`File dialog failed: ${errorMessageFromUnknown(error)}`);
+      return;
+    }
+    const path = Array.isArray(selected) ? selected[0] : selected;
+    if (!path) {
+      return;
+    }
+    setLoadingLabel("Opening user configuration");
+    try {
+      const response = await openUserConfigurationDocument(path, selectedAuthoredRootRef.current);
+      if (response.kind === "success") {
+        currentDocumentRef.current = null;
+        setCurrentDocument(null);
+        setUserConfigurationDocument(response.result.document);
+        setErrorMessage(null);
+      } else {
+        handleOperationFailure(response, "User configuration failed to open.");
+      }
+    } finally {
+      setLoadingLabel(null);
+    }
+  }
 
   async function openRecipe() {
     if (commandInFlightRef.current !== null) {
@@ -1117,6 +1168,21 @@ export default function App() {
           />
         );
     }
+  }
+
+  if (userConfigurationDocument !== null) {
+    return (
+      <>
+        <MenuEventBridge handlers={menuHandlers} />
+        {errorMessage ? <ErrorBanner message={errorMessage} onDismiss={() => setErrorMessage(null)} /> : null}
+        <UserConfigurationEditor
+          document={userConfigurationDocument}
+          onClose={() => setUserConfigurationDocument(null)}
+          onDocument={setUserConfigurationDocument}
+          onError={(message) => setErrorMessage(message)}
+        />
+      </>
+    );
   }
 
   return (
