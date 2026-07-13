@@ -134,6 +134,7 @@ __pypackages__/
 # Node / Tauri frontend dependencies
 node_modules/
 apps/config-editor/src-tauri/gen/
+release-artifacts/
 
 # Celery stuff
 celerybeat-schedule
@@ -221,4 +222,3 @@ __marimo__/
 AGENTS.md
 .codex
 .codegraph
-
