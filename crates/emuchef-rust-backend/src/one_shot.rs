@@ -14,9 +14,9 @@ pub fn run(args: &[String]) -> ProcessOutput {
             "Expected exactly one JSON request argument.",
         ))
     } else {
-        match serde_json::from_str(&args[0]) {
+        match crate::raw_request::parse(&args[0]) {
             Ok(request) => request::handle_one_shot_value(request),
-            Err(_) => envelope::failure(ApiError::invalid_request("Invalid JSON request.")),
+            Err(error) => envelope::failure(error.api_error("Invalid JSON request.")),
         }
     };
 

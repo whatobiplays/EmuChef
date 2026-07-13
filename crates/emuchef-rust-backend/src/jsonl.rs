@@ -1,5 +1,4 @@
 use crate::envelope;
-use crate::errors::ApiError;
 use crate::request;
 use crate::session::DocumentSessionManager;
 
@@ -13,11 +12,11 @@ pub fn process_jsonl(input: &str) -> String {
     let mut output = String::new();
     let mut sessions = DocumentSessionManager::default();
     for line in input.lines() {
-        let response = match serde_json::from_str(line) {
+        let response = match crate::raw_request::parse(line) {
             Ok(request) => request::handle_sidecar_value(request, &mut sessions),
-            Err(_) => envelope::with_id(
-                envelope::failure(ApiError::invalid_request("Malformed JSON line")),
-                None,
+            Err(error) => envelope::with_id(
+                envelope::failure(error.api_error("Malformed JSON line")),
+                error.request_id(),
             ),
         };
         output.push_str(
@@ -47,11 +46,11 @@ where
             break;
         }
 
-        let response = match serde_json::from_str(line.trim_end_matches(['\r', '\n'])) {
+        let response = match crate::raw_request::parse(line.trim_end_matches(['\r', '\n'])) {
             Ok(request) => request::handle_sidecar_value(request, &mut sessions),
-            Err(_) => envelope::with_id(
-                envelope::failure(ApiError::invalid_request("Malformed JSON line")),
-                None,
+            Err(error) => envelope::with_id(
+                envelope::failure(error.api_error("Malformed JSON line")),
+                error.request_id(),
             ),
         };
         serde_json::to_writer(&mut writer, &response)?;

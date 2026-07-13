@@ -28,6 +28,7 @@ mod planner_runtime;
 #[cfg(test)]
 mod planner_tests;
 pub mod protocol;
+mod raw_request;
 pub mod ref_index;
 pub mod request;
 pub mod runtime_configuration;

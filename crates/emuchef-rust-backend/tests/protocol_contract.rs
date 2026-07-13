@@ -42,6 +42,26 @@ fn assert_invalid_request(response: &Value) {
     assert_eq!(response["error"]["details"], json!({}));
 }
 
+fn assert_duplicate_binding_error(response: &Value, key: &str) {
+    assert_eq!(response["ok"], false);
+    assert_eq!(response["error"]["code"], "invalid_request");
+    assert_eq!(
+        response["error"]["message"],
+        "Request field 'bindings' contains a duplicate key."
+    );
+    assert_eq!(
+        response["error"]["details"],
+        json!({
+            "reason": "duplicate_binding_key",
+            "field": "bindings",
+            "key": key,
+        })
+    );
+    let serialized = serde_json::to_string(response).unwrap();
+    assert!(!serialized.contains("merge"));
+    assert!(!serialized.contains("sync"));
+}
+
 fn assert_step_specs_surface(result: &Value) {
     let parsed: step_specs::StepSpecsResult = serde_json::from_value(result.clone())
         .expect("StepSpec result should match Rust DTO surface");
@@ -258,6 +278,24 @@ fn one_shot_empty_request_type_returns_invalid_request() {
 #[test]
 fn one_shot_malformed_json_returns_invalid_request() {
     assert_invalid_request(&one_shot_response("{not-json"));
+}
+
+#[test]
+fn one_shot_runtime_configuration_rejects_duplicate_raw_binding_keys() {
+    for operation in ["describeConfiguration", "planConfiguration"] {
+        let request = format!(
+            r#"{{"type":"{operation}","payload":{{"authoredRoot":"/tmp/authored","devicePlan":"example.plan","bindings":{{"feature.copy_roms/policy":"merge","feature.copy_roms/policy":"sync"}}}}}}"#
+        );
+        let response = one_shot_response(&request);
+        assert_duplicate_binding_error(&response, "feature.copy_roms/policy");
+    }
+}
+
+#[test]
+fn one_shot_runtime_configuration_rejects_duplicate_raw_inline_binding_keys() {
+    let request = r#"{"type":"planConfiguration","payload":{"authoredRoot":"/tmp/authored","userConfiguration":{"schema_version":1,"kind":"user_configuration","id":"inline.default","name":"Inline default","device_plan":"example.plan","selected_recipes":["feature.copy_roms"],"bindings":{"feature.copy_roms/policy":{"value":"merge"},"feature.copy_roms/policy":{"value":"sync"}}}}}"#;
+    let response = one_shot_response(request);
+    assert_duplicate_binding_error(&response, "feature.copy_roms/policy");
 }
 
 #[test]

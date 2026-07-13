@@ -48,6 +48,14 @@ Values parse as JSON when valid and otherwise remain strings, so list and
 `multiple: true` inputs use JSON arrays. Duplicate explicit keys are CLI errors
 and are never converted into arrays.
 
+Raw one-shot and sidecar requests for `describeConfiguration` and
+`planConfiguration` reject duplicate qualified keys in a `bindings` object
+before JSON object entries are collapsed into a map. The failure keeps the
+existing `invalid_request` code and reports `duplicate_binding_key`, the
+`bindings` field, and the qualified key in structured details without either
+supplied value. CLI duplicate handling remains a separate argument-parsing
+contract.
+
 Step parameter specifications declare their accepted value sources and runtime
 value types. Authored recipe refs remain recipe-local (`inputs.<id>`,
 `artifacts.<id>.<field>`, and `steps.<id>[.outputs.<name>]`). Validation rejects

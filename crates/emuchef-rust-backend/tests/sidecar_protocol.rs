@@ -1,3 +1,5 @@
+use std::io::Cursor;
+
 use emuchef_rust_backend::{jsonl, protocol, run_with_args_and_input};
 use serde_json::{json, Value};
 
@@ -20,6 +22,45 @@ fn sidecar_response(request: Value) -> Value {
         .collect::<Vec<_>>();
     assert_eq!(responses.len(), 1);
     responses.into_iter().next().unwrap()
+}
+
+fn sidecar_raw_response(request: &str) -> Value {
+    let mut output = Vec::new();
+    jsonl::run_jsonl_sidecar(Cursor::new(format!("{request}\n")), &mut output)
+        .expect("interactive sidecar should process the request");
+    let output = String::from_utf8(output).expect("sidecar response should be UTF-8");
+    let lines = output.lines().collect::<Vec<_>>();
+    assert_eq!(lines.len(), 1);
+    serde_json::from_str(lines[0]).expect("sidecar response should be valid JSON")
+}
+
+#[test]
+fn sidecar_runtime_configuration_rejects_duplicate_raw_binding_keys_without_values() {
+    for operation in ["describeConfiguration", "planConfiguration"] {
+        let request = format!(
+            r#"{{"id":"req-1","type":"{operation}","payload":{{"authoredRoot":"/tmp/authored","devicePlan":"example.plan","bindings":{{"feature.copy_roms/policy":"merge","feature.copy_roms/policy":"sync"}}}}}}"#
+        );
+        let response = sidecar_raw_response(&request);
+        assert_eq!(
+            response,
+            json!({
+                "id": "req-1",
+                "ok": false,
+                "error": {
+                    "code": "invalid_request",
+                    "message": "Request field 'bindings' contains a duplicate key.",
+                    "details": {
+                        "reason": "duplicate_binding_key",
+                        "field": "bindings",
+                        "key": "feature.copy_roms/policy",
+                    },
+                },
+            })
+        );
+        let serialized = serde_json::to_string(&response).unwrap();
+        assert!(!serialized.contains("merge"));
+        assert!(!serialized.contains("sync"));
+    }
 }
 
 #[test]

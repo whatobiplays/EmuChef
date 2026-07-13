@@ -342,6 +342,29 @@ values therefore use a JSON array:
 Two occurrences of `--bind feature.copy_roms/policy=...` are a structured CLI
 error and are never converted into an array.
 
+The JSON protocol enforces the same one-value-per-qualified-key rule at its raw
+request boundary. For `describeConfiguration` and `planConfiguration`, a
+duplicate key in the request `bindings` object, or in an inline configuration's
+`bindings` object, fails before conversion to a JSON map:
+
+```json
+{
+  "ok": false,
+  "error": {
+    "code": "invalid_request",
+    "message": "Request field 'bindings' contains a duplicate key.",
+    "details": {
+      "reason": "duplicate_binding_key",
+      "field": "bindings",
+      "key": "feature.copy_roms/policy"
+    }
+  }
+}
+```
+
+The error contains the qualified key but neither duplicate value. This raw JSON
+rule is distinct from CLI `--bind` argument parsing.
+
 Recipe selection has three states:
 
 1. No `--recipe` and no `--clear-recipes` leaves the explicit selection absent,
