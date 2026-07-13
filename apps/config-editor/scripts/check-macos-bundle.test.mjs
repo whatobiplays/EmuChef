@@ -66,9 +66,9 @@ test("rejects Python, legacy, shadow, and development-server remnants", () => {
   assert.deepEqual(forbiddenStringReasons("main", "http://ipc.localhost"), []);
 });
 
-test("accepts only unsigned or ad-hoc local signing", () => {
+test("classifies unsigned, ad-hoc, and Developer ID signing", () => {
   assert.equal(signingState("Signature=adhoc", 0), "ad-hoc");
   assert.equal(signingState("code object is not signed at all", 1), "unsigned");
-  assert.throws(() => signingState("Authority=Developer ID Application", 0), /unsigned or ad-hoc/);
+  assert.equal(signingState("Authority=Developer ID Application: REDACTED", 0), "developer-id");
+  assert.throws(() => signingState("Authority=Apple Development: REDACTED", 0), /Developer ID/);
 });
-

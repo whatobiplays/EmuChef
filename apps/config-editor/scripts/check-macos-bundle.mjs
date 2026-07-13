@@ -109,10 +109,13 @@ export function signingState(output, status) {
   if (status === 0 && /Signature=adhoc/.test(output)) {
     return "ad-hoc";
   }
+  if (status === 0 && /^Authority=Developer ID Application:/m.test(output)) {
+    return "developer-id";
+  }
   if (status !== 0 && /code object is not signed at all/i.test(output)) {
     return "unsigned";
   }
-  throw new Error("bundle must be unsigned or ad-hoc signed for local validation");
+  throw new Error("bundle must be unsigned, ad-hoc signed, or Developer ID signed");
 }
 
 function listRelativeFiles(root) {
@@ -230,4 +233,3 @@ if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) 
     process.exit(1);
   }
 }
-
