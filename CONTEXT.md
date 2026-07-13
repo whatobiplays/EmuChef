@@ -17,6 +17,7 @@ Rust is the sole product runtime. The Cargo package
 - execution-plan generation and single-threaded execution;
 - dry-run and real-ADB adapters;
 - the one-shot and JSONL editor protocols;
+- the additive Phase 0 end-user catalog and execution-session protocol;
 - document sessions, command application, undo/redo, save, YAML emission, and
   reference indexing.
 
@@ -32,6 +33,15 @@ Authored source lives under `authored/`:
 - `recipes/` defines inputs, artifacts, groups, and ordered steps;
 - `device_profiles/` defines match criteria and capability defaults;
 - `device_plans/` selects profiles and recipes.
+
+Product catalog operations consume a resolved local snapshot rather than a
+repository-specific global root. A snapshot carries `bundled` or
+`local_directory` source kind, source id, optional version and cache key, and an
+independent optional SHA-256 content digest. `cached_remote` is reserved but
+has no resolver, networking, synchronization, signature, or update behavior.
+The legacy `authoredRoot` request field remains a compatibility adapter for
+existing configuration operations; new product catalog operations require a
+resolved `catalog` object.
 
 `emuchef plan` accepts an authored root; either a device-plan id or a saved
 user-configuration ID/path; an optional configuration-root override; optional
@@ -148,12 +158,59 @@ document itself remains unchanged and self-contained. The desktop editor can
 request and inspect this structured plan result without shelling out through
 the CLI.
 
+Product planning returns canonical JSON SHA-256 `planDigest` data and captures
+resolved catalog identity, a reviewed target binding, ordered recipe
+name/description snapshots, and normalized step notes. Canonical plan JSON
+recursively sorts object keys, emits no insignificant whitespace, and preserves
+array order. Target serial compares exactly after trimming; manufacturer and
+model compare case-insensitively after whitespace normalization; Android API
+level compares exactly. Missing or different actual values are hard failures
+when the reviewed plan contains the fact.
+
+Authored steps may include optional `progress_note` presentation text. Runtime
+fallback order is progress note, step name, humanized step type, then step id.
+This metadata does not change planner selection, dependencies, parameters,
+execution, or verification. Existing recipes remain valid without it.
+
 ## Execution
 
 Execution is single-threaded and dependency-aware. A failed step blocks
 dependent steps while unrelated steps may continue. Skip conditions produce
 skipped steps according to the execution-plan contract. Verification runs after
 the step action and can fail the step.
+
+The JSONL sidecar's additive `phase0_end_user_runtime` extension is explicitly
+negotiated. It supports `describeCatalog`, `startExecution`, `getExecution`,
+`getExecutionEvents`, and `cancelExecution` while retaining the existing
+configuration operations. One execution may be active in a sidecar process;
+terminal attempts remain inspectable in memory until process exit.
+
+`startExecution` requires a complete plan and its canonical digest, recomputes
+the digest before apply, and rejects `runtimeRoot` and `cacheRoot`. Those roots
+are configured at sidecar startup and each attempt derives its own runtime
+directory. Real execution requires reviewed target facts and performs ADB
+preflight. Dry-run performs fake-device execution only and reports
+`simulated: true` with `simulated_only` verification scope; it is not
+real-device verification.
+
+Execution reports contain the full reviewed plan, digest, target, RFC 3339 UTC
+timestamps, overall status, structured issues, ordered recipe groups with
+captured names/descriptions, and ordered step results with recipe ownership,
+notes, messages, and outputs. Overall status is `running`, `succeeded`,
+`succeeded_with_warnings`, `failed`, or `cancelled`. Blocked required work makes
+the overall attempt failed; `blocked` is primarily a step or recipe-group
+state. Incremental events use per-execution sequence numbers and
+`getExecutionEvents(afterSequence)` while `getExecution` remains the complete
+snapshot recovery surface.
+
+Cancellation is cooperative between atomic operations. It stops new step
+scheduling, may allow the current operation to finish, preserves completed
+results, marks unscheduled work cancelled, and performs no rollback. A worker
+panic yields `execution_worker_panicked`, leaves a terminal inspectable report,
+and releases the active slot. Retry or repair means generating and reviewing a
+fresh plan and starting a new execution id. There is no runtime rollback,
+device-state undo, reverse-step generation, automatic backup, or restoration
+promise.
 
 Supported steps include artifact resolution/extraction, file copy, APK install,
 launch, force-stop, permission/app-op grants, and waits. Device-target archive
@@ -177,7 +234,10 @@ without preventing unrelated work.
 
 `apps/config-editor` is a React/Tauri application. Tauri builds and packages the
 Rust `emuchef` binary as an external sidecar and launches it with `--sidecar`.
-The JSONL sidecar owns persistent document sessions.
+The JSONL sidecar owns persistent document sessions and in-memory Phase 0
+execution reports/events. Sidecar startup may set `--runtime-root`,
+`--cache-root`, and `--adb`; defaults are working-directory-local runtime/cache
+directories and `adb`.
 
 Release builds use a local-only production CSP with no Vite development URL.
 Frontend sources are limited to the packaged application, while Tauri IPC uses

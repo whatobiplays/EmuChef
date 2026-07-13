@@ -8,11 +8,12 @@ use std::path::PathBuf;
 
 use serde_json::Value;
 
+use crate::catalog_source::CatalogSnapshot;
 use crate::device_probe::{
     AdbDeviceProbe, AdbProbeConfig, CommandRunner, DeviceProbe, DeviceProbeError,
 };
 use crate::model::OrderedMap;
-use crate::planner::{plan_execution, DeviceContext, PlanningResult};
+use crate::planner::{plan_execution, DeviceContext, PlanningResult, TargetDeviceBinding};
 use crate::planner_device_plan::{
     add_detected_profile_mismatch_warning, load_device_plan_profile_match_criteria,
 };
@@ -53,14 +54,20 @@ pub(crate) fn plan_with_adb_runner<R: CommandRunner>(
         explicit_context,
         adb_probe,
     } = request;
+    let catalog = CatalogSnapshot::legacy_local(&authored_root).map_err(|error| ProcessOutput {
+        exit_code: 1,
+        stdout: String::new(),
+        stderr: format!("Error: {}: {error}\n", error.code()),
+    })?;
     let prepared = runtime_configuration::prepare_configuration(ConfigurationContextRequest {
-        authored_root,
+        catalog,
         configuration_root,
         user_configuration: user_configuration.map(UserConfigurationSource::Reference),
         device_plan,
         selected_recipes,
         explicit_bindings: explicit_input_bindings,
         device_context: None,
+        target_device: None,
     })
     .map_err(configuration_context_error_output)?;
     let plan_id = format!("plan.{}.001", prepared.effective_device_plan);
@@ -78,8 +85,17 @@ pub(crate) fn plan_with_adb_runner<R: CommandRunner>(
             input.device_context,
             &detected_facts,
         );
+        input.target_device = detected_facts
+            .serial
+            .as_ref()
+            .map(|serial| TargetDeviceBinding {
+                serial: serial.clone(),
+                manufacturer: detected_facts.manufacturer.clone(),
+                model: detected_facts.model.clone(),
+                android_api_level: detected_facts.android_api_level,
+            });
         let profile_match = load_device_plan_profile_match_criteria(
-            &prepared.authored_root,
+            prepared.catalog.root(),
             &prepared.effective_device_plan,
         )
         .map_err(planner_load_error_output)?;

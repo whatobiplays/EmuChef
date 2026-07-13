@@ -28,6 +28,7 @@ steps:
   - id: copy_bios_dir
     type: copy_files
     name: Copy BIOS folder
+    progress_note: Copying BIOS files to RetroArch system storage
     user_toggleable: true
     dependencies: []
     constraints:

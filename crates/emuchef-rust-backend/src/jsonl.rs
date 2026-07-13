@@ -1,4 +1,5 @@
 use crate::envelope;
+use crate::execution_session::SidecarRuntimeConfig;
 use crate::request;
 use crate::session::DocumentSessionManager;
 
@@ -9,8 +10,13 @@ use std::io::{self, BufRead, Write};
 /// Each input line produces exactly one response line. Request-level protocol
 /// errors are encoded as `ok: false` envelopes and do not stop processing.
 pub fn process_jsonl(input: &str) -> String {
+    process_jsonl_with_config(input, SidecarRuntimeConfig::default())
+}
+
+/// Process JSON Lines with filesystem policy fixed for this sidecar process.
+pub fn process_jsonl_with_config(input: &str, config: SidecarRuntimeConfig) -> String {
     let mut output = String::new();
-    let mut sessions = DocumentSessionManager::default();
+    let mut sessions = DocumentSessionManager::with_runtime_config(config);
     for line in input.lines() {
         let response = match crate::raw_request::parse(line) {
             Ok(request) => request::handle_sidecar_value(request, &mut sessions),
@@ -37,7 +43,20 @@ where
     R: BufRead,
     W: Write,
 {
-    let mut sessions = DocumentSessionManager::default();
+    run_jsonl_sidecar_with_config(&mut reader, &mut writer, SidecarRuntimeConfig::default())
+}
+
+/// Run an interactive sidecar with roots and ADB policy fixed at startup.
+pub fn run_jsonl_sidecar_with_config<R, W>(
+    mut reader: R,
+    mut writer: W,
+    config: SidecarRuntimeConfig,
+) -> io::Result<()>
+where
+    R: BufRead,
+    W: Write,
+{
+    let mut sessions = DocumentSessionManager::with_runtime_config(config);
     let mut line = String::new();
     loop {
         line.clear();

@@ -8,10 +8,11 @@ use std::collections::{HashMap, HashSet, VecDeque};
 use std::fs;
 use std::path::Path;
 
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use serde_json::Map;
 use serde_json::{json, Value};
 
+use crate::catalog_source::CatalogIdentity;
 use crate::model::{OrderedMap, ParamValue, Recipe, Step, StepCondition, StepConstraints};
 #[cfg(test)]
 use crate::planner_device_plan;
@@ -52,6 +53,10 @@ pub struct PlannerMessage {
 pub struct ExecutionPlan {
     pub id: String,
     pub source: ExecutionPlanSource,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub recipes: Vec<ExecutionRecipeSnapshot>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub target_device: Option<TargetDeviceBinding>,
     pub device_context: DeviceContext,
     pub runtime_capabilities: RuntimeCapabilities,
     pub inputs: Vec<ExecutionInputValue>,
@@ -67,6 +72,29 @@ pub struct ExecutionPlanSource {
     pub device_plan_ref: String,
     pub selected_recipe_refs: Vec<String>,
     pub expanded_recipe_refs: Vec<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub catalog: Option<CatalogIdentity>,
+}
+
+/// Immutable recipe presentation captured in normalized plan order.
+#[derive(Clone, Debug, PartialEq, Serialize)]
+pub struct ExecutionRecipeSnapshot {
+    pub id: String,
+    pub name: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub description: Option<String>,
+}
+
+/// Reviewed target facts that bind a plan to one ADB device.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct TargetDeviceBinding {
+    pub serial: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub manufacturer: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub model: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub android_api_level: Option<i64>,
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize)]
@@ -120,6 +148,8 @@ pub struct ExecutionStep {
     #[serde(rename = "type")]
     pub type_name: String,
     pub name: String,
+    #[serde(skip_serializing_if = "String::is_empty")]
+    pub note: String,
     pub dependencies: Vec<String>,
     pub constraints: ExecutionStepConstraints,
     pub params: OrderedMap<ExecutionParamValue>,
@@ -210,6 +240,8 @@ pub struct PlannerInput {
     pub device_profile_ref: String,
     pub device_context: DeviceContext,
     pub runtime_capabilities: RuntimeCapabilities,
+    pub catalog_identity: Option<CatalogIdentity>,
+    pub target_device: Option<TargetDeviceBinding>,
 }
 
 /// Identifies the layer that supplied an effective runtime input value.
@@ -286,6 +318,8 @@ impl PlannerInput {
             device_profile_ref,
             device_context,
             runtime_capabilities,
+            catalog_identity: None,
+            target_device: None,
         })
     }
 
@@ -329,6 +363,8 @@ impl PlannerInput {
             device_profile_ref: parts.device_profile_ref,
             device_context: parts.device_context,
             runtime_capabilities: parts.runtime_capabilities,
+            catalog_identity: None,
+            target_device: None,
         })
     }
 }
@@ -434,6 +470,7 @@ pub fn plan_execution(input: PlannerInput) -> PlanningResult {
         }]);
     }
 
+    let emit_product_contract = input.catalog_identity.is_some() || input.target_device.is_some();
     let execution_plan = ExecutionPlan {
         id: input.plan_id,
         source: ExecutionPlanSource {
@@ -441,7 +478,22 @@ pub fn plan_execution(input: PlannerInput) -> PlanningResult {
             device_plan_ref: input.device_plan_ref,
             selected_recipe_refs: input.selected_recipe_refs,
             expanded_recipe_refs: expanded_recipe_refs.clone(),
+            catalog: input.catalog_identity,
         },
+        recipes: if emit_product_contract {
+            expanded_recipe_refs
+                .iter()
+                .filter_map(|recipe_id| recipes.get(recipe_id))
+                .map(|recipe| ExecutionRecipeSnapshot {
+                    id: recipe.id.clone(),
+                    name: recipe.name.clone(),
+                    description: recipe.description.clone(),
+                })
+                .collect()
+        } else {
+            Vec::new()
+        },
+        target_device: input.target_device,
         device_context: input.device_context,
         runtime_capabilities: input.runtime_capabilities,
         inputs: emit_execution_inputs(&recipes, &selected_input_ids, &effective_input_bindings),
@@ -455,6 +507,11 @@ pub fn plan_execution(input: PlannerInput) -> PlanningResult {
                     recipe_ref: recipe_id,
                     type_name: step.type_name.clone(),
                     name: step.name.clone(),
+                    note: if emit_product_contract {
+                        normalized_progress_note(&step)
+                    } else {
+                        String::new()
+                    },
                     dependencies: step
                         .dependencies
                         .iter()
@@ -479,6 +536,90 @@ pub fn plan_execution(input: PlannerInput) -> PlanningResult {
         schema_version: SCHEMA_VERSION,
         kind: "planning_result",
     }
+}
+
+/// Resolve user-facing progress text without exposing blank presentation data.
+pub(crate) fn normalized_progress_note(step: &Step) -> String {
+    normalized_plan_step_note(
+        step.progress_note.as_deref(),
+        &step.name,
+        &step.type_name,
+        &step.id,
+    )
+}
+
+pub(crate) fn normalized_plan_step_note(
+    progress_note: Option<&str>,
+    name: &str,
+    type_name: &str,
+    step_id: &str,
+) -> String {
+    non_blank(progress_note)
+        .or_else(|| non_blank(Some(name)))
+        .map(ToString::to_string)
+        .or_else(|| humanized_step_type(type_name))
+        .unwrap_or_else(|| step_id.to_string())
+}
+
+fn non_blank(value: Option<&str>) -> Option<&str> {
+    value.map(str::trim).filter(|value| !value.is_empty())
+}
+
+fn humanized_step_type(type_name: &str) -> Option<String> {
+    let words = type_name
+        .split(['_', '-'])
+        .filter(|word| !word.is_empty())
+        .collect::<Vec<_>>();
+    if words.is_empty() {
+        return None;
+    }
+    let mut result = words.join(" ").to_lowercase();
+    if let Some(first) = result.get_mut(0..1) {
+        first.make_ascii_uppercase();
+    }
+    Some(result)
+}
+
+/// Normalize device text for comparison while preserving reviewed display text.
+pub(crate) fn normalize_target_text(value: &str) -> String {
+    value
+        .split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ")
+        .to_lowercase()
+}
+
+/// Compare every reviewed target fact. Missing actual facts are hard failures.
+pub(crate) fn target_mismatch_field(
+    reviewed: &TargetDeviceBinding,
+    actual: &TargetDeviceBinding,
+) -> Option<&'static str> {
+    if reviewed.serial.trim() != actual.serial.trim() {
+        return Some("serial");
+    }
+    if reviewed.manufacturer.as_deref().is_some_and(|expected| {
+        actual
+            .manufacturer
+            .as_deref()
+            .is_none_or(|actual| normalize_target_text(expected) != normalize_target_text(actual))
+    }) {
+        return Some("manufacturer");
+    }
+    if reviewed.model.as_deref().is_some_and(|expected| {
+        actual
+            .model
+            .as_deref()
+            .is_none_or(|actual| normalize_target_text(expected) != normalize_target_text(actual))
+    }) {
+        return Some("model");
+    }
+    if reviewed
+        .android_api_level
+        .is_some_and(|expected| actual.android_api_level != Some(expected))
+    {
+        return Some("android_api_level");
+    }
+    None
 }
 
 pub(crate) fn load_top_level_recipes(

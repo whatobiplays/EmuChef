@@ -41,6 +41,14 @@ configuration. The canonical contract, CLI examples, configuration-root rules,
 and side-effect-free discovery and planning operations are documented in
 [runtime recipe configuration](docs/architecture/runtime-recipe-configuration.md).
 
+The Rust sidecar also implements the additive Phase 0 contract for a future
+end-user application: resolved catalog inventory, canonical reviewed-plan
+digests, target-bound real and simulated execution, retained recipe-grouped
+reports, ordered incremental events, and cooperative cancellation. Filesystem
+roots are configured when the sidecar starts. Execution has no rollback or
+device-state undo. See the
+[Phase 0 runtime contracts](docs/product/phase-0-runtime-contracts.md).
+
 ## Config Editor
 
 ```bash

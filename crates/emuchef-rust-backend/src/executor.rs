@@ -24,8 +24,14 @@ use crate::planner::{
 #[derive(Clone, Debug, PartialEq, Serialize)]
 pub struct ExecutionRunResult {
     pub success: bool,
+    #[serde(skip_serializing_if = "is_false")]
+    pub cancelled: bool,
     pub total_steps: usize,
     pub steps: Vec<StepRunRecord>,
+}
+
+fn is_false(value: &bool) -> bool {
+    !*value
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize)]
@@ -43,6 +49,7 @@ pub enum StepRunStatus {
     Skipped,
     Blocked,
     Failed,
+    Cancelled,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize)]
@@ -61,6 +68,7 @@ pub enum ProgressStatus {
     Blocked,
     Succeeded,
     Failed,
+    Cancelled,
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize)]
@@ -68,7 +76,9 @@ pub struct ExecutionProgressEvent {
     pub step_index: usize,
     pub total_steps: usize,
     pub step_id: String,
+    pub recipe_ref: String,
     pub step_name: String,
+    pub note: String,
     pub phase: ProgressPhase,
     pub status: Option<ProgressStatus>,
     pub message: Option<String>,
@@ -130,7 +140,22 @@ impl<D: ExecutorDevice> ExecutorRunner<D> {
     pub fn run_with_progress(
         &mut self,
         plan: &ExecutionPlan,
+        progress_callback: impl FnMut(ExecutionProgressEvent),
+    ) -> ExecutionRunResult {
+        self.run_with_progress_and_cancel(plan, progress_callback, || false)
+    }
+
+    /// Execute in plan order and observe cancellation only between atomic steps.
+    ///
+    /// A cancellation request never interrupts or rolls back the current device
+    /// operation. Once observed, no later step resolves parameters, executes,
+    /// or verifies; completed records remain intact and later records are marked
+    /// `cancelled` for an inspectable ordered snapshot.
+    pub fn run_with_progress_and_cancel(
+        &mut self,
+        plan: &ExecutionPlan,
         mut progress_callback: impl FnMut(ExecutionProgressEvent),
+        should_cancel: impl Fn() -> bool,
     ) -> ExecutionRunResult {
         let total_steps = plan.steps.len();
         let step_ids_in_plan = plan
@@ -140,8 +165,28 @@ impl<D: ExecutorDevice> ExecutorRunner<D> {
             .collect::<HashSet<_>>();
         let mut state = ExecutionState::from_plan(plan);
         let mut records = Vec::new();
+        let mut cancelled = false;
 
         for step in &plan.steps {
+            if cancelled || should_cancel() {
+                cancelled = true;
+                let message = "execution cancelled before step scheduling".to_string();
+                progress_callback(progress_event(
+                    step,
+                    total_steps,
+                    plan,
+                    ProgressPhase::Finished,
+                    Some(ProgressStatus::Cancelled),
+                    Some(message.clone()),
+                ));
+                records.push(record(
+                    step,
+                    StepRunStatus::Cancelled,
+                    Some(message),
+                    OrderedMap::new(),
+                ));
+                continue;
+            }
             progress_callback(progress_event(
                 step,
                 total_steps,
@@ -357,6 +402,7 @@ impl<D: ExecutorDevice> ExecutorRunner<D> {
                 StepRunStatus::Skipped => ProgressStatus::Skipped,
                 StepRunStatus::Blocked => ProgressStatus::Blocked,
                 StepRunStatus::Failed => ProgressStatus::Failed,
+                StepRunStatus::Cancelled => ProgressStatus::Cancelled,
             };
             progress_callback(progress_event(
                 step,
@@ -372,11 +418,12 @@ impl<D: ExecutorDevice> ExecutorRunner<D> {
         let success = !records.iter().any(|record| {
             matches!(
                 record.status,
-                StepRunStatus::Failed | StepRunStatus::Blocked
+                StepRunStatus::Failed | StepRunStatus::Blocked | StepRunStatus::Cancelled
             )
         });
         ExecutionRunResult {
             success,
+            cancelled,
             total_steps,
             steps: records,
         }
@@ -1974,7 +2021,14 @@ fn progress_event(
         step_index,
         total_steps,
         step_id: step.id.clone(),
+        recipe_ref: step.recipe_ref.clone(),
         step_name: step.name.clone(),
+        note: crate::planner::normalized_plan_step_note(
+            Some(&step.note),
+            &step.name,
+            &step.type_name,
+            &step.id,
+        ),
         phase,
         status,
         message,

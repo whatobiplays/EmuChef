@@ -197,7 +197,7 @@ fn assert_editor_local_fixture_diagnostics(
 }
 
 #[test]
-fn capabilities_stay_on_editor_session_surface() {
+fn capabilities_include_additive_product_runtime_surface() {
     assert_eq!(
         protocol::CAPABILITIES,
         &[
@@ -206,6 +206,8 @@ fn capabilities_stay_on_editor_session_surface() {
             "validateRecipePath",
             "emitUserConfigurationYamlFromPath",
             "validateUserConfigurationPath",
+            "describeCatalog",
+            "negotiateCapabilities",
             "openUserConfiguration",
             "createUserConfiguration",
             "getUserConfigurationDocument",
@@ -221,6 +223,10 @@ fn capabilities_stay_on_editor_session_surface() {
             "closeUserConfiguration",
             "describeConfiguration",
             "planConfiguration",
+            "startExecution",
+            "getExecution",
+            "getExecutionEvents",
+            "cancelExecution",
             "openRecipe",
             "createRecipeFromTemplate",
             "getDocument",

@@ -82,7 +82,7 @@ fn artifact_to_dto(artifact_id: &str, artifact: &RemoteFileArtifact) -> Value {
 }
 
 fn step_to_dto(step: &Step) -> Value {
-    json!({
+    let mut dto = json!({
         "id": step.id,
         "type": step.type_name,
         "name": step.name,
@@ -96,7 +96,11 @@ fn step_to_dto(step: &Step) -> Value {
         "skipIf": step.skip_if.iter().map(condition_to_dto).collect::<Vec<_>>(),
         "params": map_values(step.params.iter().map(|(key, value)| (key, param_to_dto(value)))),
         "verify": step.verify.iter().map(condition_to_dto).collect::<Vec<_>>(),
-    })
+    });
+    if let (Some(progress_note), Some(object)) = (&step.progress_note, dto.as_object_mut()) {
+        object.insert("progressNote".to_string(), json!(progress_note));
+    }
+    dto
 }
 
 fn condition_to_dto(condition: &StepCondition) -> Value {

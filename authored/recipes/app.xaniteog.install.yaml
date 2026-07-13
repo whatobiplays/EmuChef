@@ -23,6 +23,7 @@ steps:
   - id: install_xaniteog
     type: install_apk
     name: Install XaniteOG APK
+    progress_note: Installing XaniteOG on the selected device
     user_toggleable: false
     dependencies: []
     constraints:

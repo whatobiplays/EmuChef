@@ -519,6 +519,7 @@ fn parse_step(value: &YamlValue) -> Result<Step, String> {
         type_name: required_scalar_string(mapping, "type")?,
         name: required_scalar_string(mapping, "name")?,
         description: optional_string(get_yaml(mapping, "description")),
+        progress_note: optional_string(get_yaml(mapping, "progress_note")),
         user_toggleable: get_bool(mapping, "user_toggleable")
             .ok_or_else(|| "'user_toggleable'".to_string())?,
         dependencies: parse_string_vec(get_yaml(mapping, "dependencies"))?,
@@ -845,6 +846,13 @@ fn step_to_yaml(step: &Step) -> YamlValue {
             &mut mapping,
             "description",
             YamlValue::String(description.clone()),
+        );
+    }
+    if let Some(progress_note) = &step.progress_note {
+        insert(
+            &mut mapping,
+            "progress_note",
+            YamlValue::String(progress_note.clone()),
         );
     }
     insert(

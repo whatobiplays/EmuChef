@@ -2,8 +2,10 @@ use std::path::Path;
 
 use serde_json::{json, Map, Value};
 
+use crate::catalog_source::{CatalogIdentity, CatalogSnapshot, CatalogSource, LocalCatalogSource};
 use crate::envelope;
 use crate::errors::ApiError;
+use crate::planner::TargetDeviceBinding;
 use crate::protocol;
 use crate::runtime_configuration::{self, ConfigurationContextRequest, UserConfigurationSource};
 use crate::session::DocumentSessionManager;
@@ -56,6 +58,7 @@ fn handle_validated_object(object: &Map<String, Value>) -> Result<Value, ApiErro
             handle_emit_user_configuration_yaml_from_path(object)
         }
         "validateUserConfigurationPath" => handle_validate_user_configuration_path(object),
+        "describeCatalog" => handle_describe_catalog(object),
         "describeConfiguration" => handle_describe_configuration(object),
         "planConfiguration" => handle_plan_configuration(object),
         unknown => Err(ApiError::invalid_request(format!(
@@ -73,6 +76,7 @@ fn handle_validated_sidecar_object(
 
     match request_type {
         "hello" => Ok(envelope::success(protocol::hello_result())),
+        "negotiateCapabilities" => handle_negotiate_capabilities(object),
         "ping" => Ok(envelope::success(protocol::ping_result())),
         "listStepSpecs" => Ok(envelope::success(step_specs::list_step_specs_result())),
         "emitRecipeYamlFromPath" => handle_emit_recipe_yaml_from_path(object),
@@ -81,6 +85,7 @@ fn handle_validated_sidecar_object(
             handle_emit_user_configuration_yaml_from_path(object)
         }
         "validateUserConfigurationPath" => handle_validate_user_configuration_path(object),
+        "describeCatalog" => handle_describe_catalog(object),
         "openUserConfiguration" => handle_open_user_configuration(object, sessions),
         "createUserConfiguration" => handle_create_user_configuration(object, sessions),
         "getUserConfigurationDocument" => handle_get_user_configuration_document(object, sessions),
@@ -104,6 +109,10 @@ fn handle_validated_sidecar_object(
         "closeUserConfiguration" => handle_close_user_configuration(object, sessions),
         "describeConfiguration" => handle_describe_configuration(object),
         "planConfiguration" => handle_plan_configuration(object),
+        "startExecution" => handle_start_execution(object, sessions),
+        "getExecution" => handle_get_execution(object, sessions),
+        "getExecutionEvents" => handle_get_execution_events(object, sessions),
+        "cancelExecution" => handle_cancel_execution(object, sessions),
         "openRecipe" => handle_open_recipe(object, sessions),
         "createRecipeFromTemplate" => handle_create_recipe_from_template(object, sessions),
         "getDocument" => handle_get_document(object, sessions),
@@ -121,6 +130,114 @@ fn handle_validated_sidecar_object(
             "Unknown request type: {unknown}"
         ))),
     }
+}
+
+fn handle_negotiate_capabilities(object: &Map<String, Value>) -> Result<Value, ApiError> {
+    let payload = payload_object(object)?;
+    let required = optional_string_array(payload, "requiredCapabilities")?.unwrap_or_default();
+    let optional = optional_string_array(payload, "optionalCapabilities")?.unwrap_or_default();
+    Ok(envelope::success(protocol::negotiate_capabilities(
+        &required, &optional,
+    )))
+}
+
+fn handle_start_execution(
+    object: &Map<String, Value>,
+    sessions: &DocumentSessionManager,
+) -> Result<Value, ApiError> {
+    let payload = payload_object(object)?;
+    for forbidden in ["runtimeRoot", "cacheRoot", "adbPath"] {
+        if payload.contains_key(forbidden) {
+            return Err(ApiError::invalid_request_with_details(
+                format!("Execution runtime policy is configured only at sidecar startup; '{forbidden}' is not accepted."),
+                json!({ "field": forbidden }),
+            ));
+        }
+    }
+    let plan = payload.get("plan").ok_or_else(|| {
+        ApiError::invalid_request_with_details(
+            "Request payload is missing required field: plan",
+            json!({ "field": "plan" }),
+        )
+    })?;
+    let plan = crate::cli::parse_execution_plan_json(plan).map_err(|message| {
+        ApiError::new(
+            crate::errors::ApiErrorCode::InvalidExecutionPlan,
+            message,
+            json!({ "field": "plan" }),
+        )
+    })?;
+    let plan_digest = required_string(payload, "planDigest")?.to_string();
+    if plan_digest.len() != 64 || !plan_digest.bytes().all(|byte| byte.is_ascii_hexdigit()) {
+        return Err(ApiError::invalid_request_with_details(
+            "Request field 'planDigest' must be a 64-character SHA-256 hexadecimal value.",
+            json!({ "field": "planDigest" }),
+        ));
+    }
+    let mode_value = required_string(payload, "mode")?;
+    let mode = crate::execution_session::ExecutionMode::parse(mode_value).ok_or_else(|| {
+        ApiError::invalid_request_with_details(
+            "Request field 'mode' must be 'real' or 'dry_run'.",
+            json!({ "field": "mode" }),
+        )
+    })?;
+    let target = optional_target_device(payload, "targetDevice")?;
+    Ok(envelope::success(sessions.executions().start(
+        plan,
+        plan_digest,
+        mode,
+        target,
+    )?))
+}
+
+fn handle_get_execution(
+    object: &Map<String, Value>,
+    sessions: &DocumentSessionManager,
+) -> Result<Value, ApiError> {
+    let payload = payload_object(object)?;
+    Ok(envelope::success(
+        sessions
+            .executions()
+            .get(required_string(payload, "executionId")?)?,
+    ))
+}
+
+fn handle_get_execution_events(
+    object: &Map<String, Value>,
+    sessions: &DocumentSessionManager,
+) -> Result<Value, ApiError> {
+    let payload = payload_object(object)?;
+    let after_sequence = match payload.get("afterSequence") {
+        None | Some(Value::Null) => 0,
+        Some(Value::Number(number)) => number.as_u64().ok_or_else(|| {
+            ApiError::invalid_request_with_details(
+                "Request field 'afterSequence' must be a non-negative integer.",
+                json!({ "field": "afterSequence" }),
+            )
+        })?,
+        Some(_) => {
+            return Err(ApiError::invalid_request_with_details(
+                "Request field 'afterSequence' must be a non-negative integer.",
+                json!({ "field": "afterSequence" }),
+            ));
+        }
+    };
+    Ok(envelope::success(sessions.executions().events(
+        required_string(payload, "executionId")?,
+        after_sequence,
+    )?))
+}
+
+fn handle_cancel_execution(
+    object: &Map<String, Value>,
+    sessions: &DocumentSessionManager,
+) -> Result<Value, ApiError> {
+    let payload = payload_object(object)?;
+    Ok(envelope::success(
+        sessions
+            .executions()
+            .cancel(required_string(payload, "executionId")?)?,
+    ))
 }
 
 fn validate_request_object(request: Value) -> Result<Map<String, Value>, ApiError> {
@@ -224,6 +341,13 @@ fn handle_describe_configuration(object: &Map<String, Value>) -> Result<Value, A
     handle_runtime_configuration_request(object, false)
 }
 
+fn handle_describe_catalog(object: &Map<String, Value>) -> Result<Value, ApiError> {
+    let snapshot = resolved_catalog(payload_object(object)?, false)?;
+    Ok(envelope::success(crate::product_catalog::describe(
+        &snapshot,
+    )?))
+}
+
 fn handle_plan_configuration(object: &Map<String, Value>) -> Result<Value, ApiError> {
     handle_runtime_configuration_request(object, true)
 }
@@ -233,7 +357,7 @@ fn handle_runtime_configuration_request(
     plan: bool,
 ) -> Result<Value, ApiError> {
     let payload = payload_object(object)?;
-    let authored_root = required_string(payload, "authoredRoot")?;
+    let catalog = resolved_catalog(payload, true)?;
     let configuration_root = optional_string(payload, "configurationRoot")?;
     let user_configuration = optional_user_configuration_source(payload)?;
     let device_plan = optional_string(payload, "devicePlan")?;
@@ -246,14 +370,16 @@ fn handle_runtime_configuration_request(
     let selected_recipes = optional_string_array(payload, "selectedRecipes")?;
     let explicit_bindings = optional_binding_map(payload, "bindings")?;
     let device_context = optional_device_context(payload, "deviceContext")?;
+    let target_device = optional_target_device(payload, "targetDevice")?;
     let request = ConfigurationContextRequest {
-        authored_root: Path::new(authored_root).to_path_buf(),
+        catalog,
         configuration_root: configuration_root.map(Path::new).map(Path::to_path_buf),
         user_configuration,
         device_plan: device_plan.map(ToString::to_string),
         selected_recipes,
         explicit_bindings,
         device_context,
+        target_device,
     };
     let result = if plan {
         runtime_configuration::plan_configuration(request).and_then(|result| {
@@ -281,10 +407,106 @@ fn handle_runtime_configuration_request(
     .map_err(|error| {
         ApiError::load_failed(
             format!("Failed to prepare runtime configuration: {error}"),
-            json!({ "authoredRoot": authored_root }),
+            json!({ "operation": if plan { "planConfiguration" } else { "describeConfiguration" } }),
         )
     })?;
     Ok(envelope::success(result))
+}
+
+fn resolved_catalog(
+    payload: &Map<String, Value>,
+    allow_legacy_authored_root: bool,
+) -> Result<CatalogSnapshot, ApiError> {
+    let catalog = payload.get("catalog").filter(|value| !value.is_null());
+    let authored_root = optional_string(payload, "authoredRoot")?;
+    if catalog.is_some() && authored_root.is_some() {
+        return Err(ApiError::invalid_request_with_details(
+            "Request must provide only one of 'catalog' or legacy 'authoredRoot'.",
+            json!({ "fields": ["catalog", "authoredRoot"] }),
+        ));
+    }
+    if let Some(Value::Object(catalog)) = catalog {
+        let root = required_string(catalog, "root")?;
+        let mut identity = catalog.clone();
+        identity.remove("root");
+        let identity: CatalogIdentity =
+            serde_json::from_value(Value::Object(identity)).map_err(|error| {
+                ApiError::invalid_request_with_details(
+                    format!("Request field 'catalog' is invalid: {error}"),
+                    json!({ "field": "catalog" }),
+                )
+            })?;
+        return LocalCatalogSource::new(root, identity)
+            .resolve()
+            .map_err(|error| {
+                ApiError::load_failed(
+                    format!("Failed to resolve catalog snapshot: {error}"),
+                    json!({ "code": error.code() }),
+                )
+            });
+    }
+    if catalog.is_some() {
+        return Err(ApiError::invalid_request_with_details(
+            "Request field 'catalog' must be an object.",
+            json!({ "field": "catalog" }),
+        ));
+    }
+    if allow_legacy_authored_root {
+        if let Some(root) = authored_root {
+            return CatalogSnapshot::legacy_local(root).map_err(|error| {
+                ApiError::load_failed(
+                    format!("Failed to resolve legacy authored catalog: {error}"),
+                    json!({ "code": error.code() }),
+                )
+            });
+        }
+    }
+    Err(ApiError::invalid_request_with_details(
+        "Product request requires a resolved 'catalog' snapshot.",
+        json!({ "field": "catalog" }),
+    ))
+}
+
+fn optional_target_device(
+    payload: &Map<String, Value>,
+    field: &str,
+) -> Result<Option<TargetDeviceBinding>, ApiError> {
+    let Some(value) = payload.get(field).filter(|value| !value.is_null()) else {
+        return Ok(None);
+    };
+    let object = value.as_object().ok_or_else(|| {
+        ApiError::invalid_request_with_details(
+            format!("Request field '{field}' must be an object."),
+            json!({ "field": field }),
+        )
+    })?;
+    let serial = required_string(object, "serial")?.trim().to_string();
+    if serial.is_empty() {
+        return Err(ApiError::invalid_request_with_details(
+            "Target device serial must be non-empty.",
+            json!({ "field": format!("{field}.serial") }),
+        ));
+    }
+    Ok(Some(TargetDeviceBinding {
+        serial,
+        manufacturer: optional_string(object, "manufacturer")?.map(ToString::to_string),
+        model: optional_string(object, "model")?.map(ToString::to_string),
+        android_api_level: match object.get("androidApiLevel") {
+            None | Some(Value::Null) => None,
+            Some(Value::Number(value)) => Some(value.as_i64().ok_or_else(|| {
+                ApiError::invalid_request_with_details(
+                    "Target Android API level must be an integer.",
+                    json!({ "field": format!("{field}.androidApiLevel") }),
+                )
+            })?),
+            Some(_) => {
+                return Err(ApiError::invalid_request_with_details(
+                    "Target Android API level must be an integer.",
+                    json!({ "field": format!("{field}.androidApiLevel") }),
+                ));
+            }
+        },
+    }))
 }
 
 fn handle_open_user_configuration(

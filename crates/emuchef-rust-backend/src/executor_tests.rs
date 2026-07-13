@@ -1,3 +1,4 @@
+use std::cell::Cell;
 use std::fs;
 use std::io::Write;
 use std::net::TcpListener;
@@ -70,7 +71,10 @@ fn plan_with_artifacts(
             device_plan_ref: "example.device_plan".to_string(),
             selected_recipe_refs: vec!["example.recipe".to_string()],
             expanded_recipe_refs: vec!["example.recipe".to_string()],
+            catalog: None,
         },
+        recipes: Vec::new(),
+        target_device: None,
         device_context: fixture_device_context(),
         runtime_capabilities: fixture_runtime_capabilities(),
         inputs: Vec::new(),
@@ -100,6 +104,7 @@ fn wait_step(id: &str, name: &str, duration_ms: i64) -> ExecutionStep {
         recipe_ref: "example.recipe".to_string(),
         type_name: "wait".to_string(),
         name: name.to_string(),
+        note: name.to_string(),
         dependencies: Vec::new(),
         constraints: constraints(),
         params,
@@ -293,6 +298,7 @@ fn extract_archive_step(id: &str, archive_path: &Path) -> ExecutionStep {
         recipe_ref: "example.recipe".to_string(),
         type_name: "extract_archive".to_string(),
         name: "Extract Archive".to_string(),
+        note: "Extract Archive".to_string(),
         dependencies: Vec::new(),
         constraints: constraints(),
         params,
@@ -319,6 +325,7 @@ fn install_apk_step(id: &str, apk_path: &Path, replace_existing: bool) -> Execut
         recipe_ref: "example.recipe".to_string(),
         type_name: "install_apk".to_string(),
         name: "Install APK".to_string(),
+        note: "Install APK".to_string(),
         dependencies: Vec::new(),
         constraints: constraints(),
         params,
@@ -338,6 +345,7 @@ fn launch_app_step(id: &str, package_name: &str, activity: Option<&str>) -> Exec
         recipe_ref: "example.recipe".to_string(),
         type_name: "launch_app".to_string(),
         name: "Launch App".to_string(),
+        note: "Launch App".to_string(),
         dependencies: Vec::new(),
         constraints: constraints(),
         params,
@@ -354,6 +362,7 @@ fn force_stop_app_step(id: &str, package_name: &str) -> ExecutionStep {
         recipe_ref: "example.recipe".to_string(),
         type_name: "force_stop_app".to_string(),
         name: "Force Stop App".to_string(),
+        note: "Force Stop App".to_string(),
         dependencies: Vec::new(),
         constraints: constraints(),
         params,
@@ -462,6 +471,7 @@ fn grant_permissions_dry_run_result_matches_compatibility_without_exposing_recor
         recipe_ref: "example.recipe".to_string(),
         type_name: "grant_permissions".to_string(),
         name: "Grant".to_string(),
+        note: "Grant".to_string(),
         dependencies: Vec::new(),
         constraints: constraints(),
         params,
@@ -503,6 +513,7 @@ fn grant_permissions_dry_run_failure_preserves_compatibility_step_outputs_and_bl
             recipe_ref: "example.recipe".to_string(),
             type_name: "grant_permissions".to_string(),
             name: "Grant Fail".to_string(),
+            note: "Grant Fail".to_string(),
             dependencies: Vec::new(),
             constraints: constraints(),
             params,
@@ -585,6 +596,7 @@ fn optional_permission_command_failure_is_reported_without_failing_the_step() {
         recipe_ref: "example.recipe".to_string(),
         type_name: "grant_permissions".to_string(),
         name: "Grant Optional".to_string(),
+        note: "Grant Optional".to_string(),
         dependencies: Vec::new(),
         constraints: constraints(),
         params,
@@ -638,6 +650,7 @@ fn require_all_policy_promotes_optional_permission_failure_to_step_failure() {
         recipe_ref: "example.recipe".to_string(),
         type_name: "grant_permissions".to_string(),
         name: "Grant Require All".to_string(),
+        note: "Grant Require All".to_string(),
         dependencies: Vec::new(),
         constraints: constraints(),
         params,
@@ -746,6 +759,7 @@ fn install_apk_validation_stays_at_compatibility_executor_layer_with_compatibili
         recipe_ref: "example.recipe".to_string(),
         type_name: "install_apk".to_string(),
         name: "Invalid Runtime".to_string(),
+        note: "Invalid Runtime".to_string(),
         dependencies: Vec::new(),
         constraints: constraints(),
         params,
@@ -929,6 +943,7 @@ fn permission_required_failure_preserves_partial_permission_results_like_compati
         recipe_ref: "example.recipe".to_string(),
         type_name: "grant_permissions".to_string(),
         name: "Grant Partial".to_string(),
+        note: "Grant Partial".to_string(),
         dependencies: Vec::new(),
         constraints: constraints(),
         params,
@@ -1012,6 +1027,7 @@ fn permission_policy_matrix_covers_appops_api_root_and_failure_policies() {
         recipe_ref: "example.recipe".to_string(),
         type_name: "grant_permissions".to_string(),
         name: "Grant Matrix".to_string(),
+        note: "Grant Matrix".to_string(),
         dependencies: Vec::new(),
         constraints: constraints(),
         params,
@@ -1465,6 +1481,7 @@ fn executor_can_use_explicit_real_adb_device_for_selected_handlers() {
         recipe_ref: "example.recipe".to_string(),
         type_name: "grant_permissions".to_string(),
         name: "Grant".to_string(),
+        note: "Grant".to_string(),
         dependencies: Vec::new(),
         constraints: constraints(),
         params,
@@ -1665,6 +1682,7 @@ fn resolve_extract_and_copy_flow_matches_compatibility_and_stays_in_sandbox() {
         recipe_ref: "example.recipe".to_string(),
         type_name: "extract_artifacts".to_string(),
         name: "Extract".to_string(),
+        note: "Extract".to_string(),
         dependencies: vec!["example.recipe/resolve".to_string()],
         constraints: constraints(),
         params: extract_params,
@@ -1676,6 +1694,7 @@ fn resolve_extract_and_copy_flow_matches_compatibility_and_stays_in_sandbox() {
         recipe_ref: "example.recipe".to_string(),
         type_name: "copy_files".to_string(),
         name: "Copy".to_string(),
+        note: "Copy".to_string(),
         dependencies: vec!["example.recipe/extract".to_string()],
         constraints: constraints(),
         params: copy_params,
@@ -1705,6 +1724,7 @@ fn resolve_extract_and_copy_flow_matches_compatibility_and_stays_in_sandbox() {
                 recipe_ref: "example.recipe".to_string(),
                 type_name: "resolve_artifacts".to_string(),
                 name: "Resolve".to_string(),
+                note: "Resolve".to_string(),
                 dependencies: Vec::new(),
                 constraints: constraints(),
                 params: resolve_params,
@@ -1809,6 +1829,7 @@ fn unsupported_artifact_scheme_fails_without_network_download_attempt() {
                 recipe_ref: "example.recipe".to_string(),
                 type_name: "resolve_artifacts".to_string(),
                 name: "Resolve".to_string(),
+                note: "Resolve".to_string(),
                 dependencies: Vec::new(),
                 constraints: constraints(),
                 params: resolve_params,
@@ -1871,6 +1892,7 @@ fn http_status_failure_blocks_dependents_allows_unrelated_steps_and_cleans_parti
                 recipe_ref: "example.recipe".to_string(),
                 type_name: "resolve_artifacts".to_string(),
                 name: "Resolve".to_string(),
+                note: "Resolve".to_string(),
                 dependencies: Vec::new(),
                 constraints: constraints(),
                 params: resolve_params,
@@ -2155,6 +2177,7 @@ fn copy_replace_deletes_only_inside_fake_device_root() {
         recipe_ref: "example.recipe".to_string(),
         type_name: "copy_files".to_string(),
         name: "Copy".to_string(),
+        note: "Copy".to_string(),
         dependencies: Vec::new(),
         constraints: constraints(),
         params,
@@ -2210,6 +2233,7 @@ fn copy_sync_preserves_stale_files_like_compatibility_push_sync() {
         recipe_ref: "example.recipe".to_string(),
         type_name: "copy_files".to_string(),
         name: "Copy".to_string(),
+        note: "Copy".to_string(),
         dependencies: Vec::new(),
         constraints: constraints(),
         params,
@@ -2264,6 +2288,7 @@ fn copy_rejects_destination_traversal_before_writing() {
         recipe_ref: "example.recipe".to_string(),
         type_name: "copy_files".to_string(),
         name: "Copy".to_string(),
+        note: "Copy".to_string(),
         dependencies: Vec::new(),
         constraints: constraints(),
         params,
@@ -2319,6 +2344,7 @@ fn copy_rejects_fake_device_symlink_escape() {
         recipe_ref: "example.recipe".to_string(),
         type_name: "copy_files".to_string(),
         name: "Copy".to_string(),
+        note: "Copy".to_string(),
         dependencies: Vec::new(),
         constraints: constraints(),
         params,
@@ -2373,6 +2399,7 @@ fn copy_rejects_symlinked_fake_device_root_before_writing() {
         recipe_ref: "example.recipe".to_string(),
         type_name: "copy_files".to_string(),
         name: "Copy".to_string(),
+        note: "Copy".to_string(),
         dependencies: Vec::new(),
         constraints: constraints(),
         params,
@@ -2396,4 +2423,40 @@ fn copy_rejects_symlinked_fake_device_root_before_writing() {
         .unwrap()
         .contains("symlink"));
     assert!(!outside.join("sdcard/core.so").exists());
+}
+
+#[test]
+fn cooperative_cancellation_preserves_completed_work_and_schedules_no_later_steps() {
+    let execution_plan = plan(vec![
+        wait_step("example.recipe/first", "First", 1),
+        wait_step("example.recipe/second", "Second", 1),
+        wait_step("example.recipe/third", "Third", 1),
+    ]);
+    let checks = Cell::new(0usize);
+    let mut runner = ExecutorRunner::default();
+    let result = runner.run_with_progress_and_cancel(
+        &execution_plan,
+        |_| {},
+        || {
+            let current = checks.get();
+            checks.set(current + 1);
+            current >= 1
+        },
+    );
+
+    assert!(!result.success);
+    assert!(result.cancelled);
+    assert_eq!(
+        result.steps[0].status,
+        crate::executor::StepRunStatus::Executed
+    );
+    assert_eq!(
+        result.steps[1].status,
+        crate::executor::StepRunStatus::Cancelled
+    );
+    assert_eq!(
+        result.steps[2].status,
+        crate::executor::StepRunStatus::Cancelled
+    );
+    assert_eq!(runner.adapters().sleep_calls(), &[0.001]);
 }

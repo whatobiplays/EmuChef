@@ -12,9 +12,31 @@ the only layer that merges those sources. The execution plan contains normalized
 effective inputs; the executor does not load saved configuration or apply
 precedence.
 
-The executor processes steps in dependency order on one thread. Failure blocks
-dependent work, skip conditions produce skipped results, and verification can
-fail a completed action. Progress events report execution and per-step state.
+The executor processes normalized steps on one thread. Failed or blocked
+dependencies make downstream work `blocked`; blocked work does not resolve
+parameters, execute, or verify. Skip conditions produce `skipped` results, and
+verification can fail a completed action. Unrelated work may continue.
+
+Product plans retain resolved catalog identity, reviewed target facts, ordered
+recipe name/description snapshots, recipe ownership for every step, and
+human-readable notes. Notes use `progress_note`, step name, humanized step type,
+then step id. The plan SHA-256 digest is calculated from recursively key-sorted,
+whitespace-free canonical JSON while preserving every array's normalized order.
+
+The sidecar execution manager is outside the pure planner/executor boundary. It
+owns attempt ids, one-active-attempt coordination, RFC 3339 UTC timestamps,
+full-plan report snapshots, recipe-grouped status, ordered sequence-numbered
+events, target preflight, and cooperative cancellation. Cancellation is checked
+between atomic steps, schedules no later work, preserves completed results, and
+never rolls back. A caught worker panic produces `execution_worker_panicked`, a
+terminal inspectable report, and releases the active slot.
+
+Dry-run and real execution use the same normalized plan and report shape.
+Dry-run reports are explicitly simulated and are not real-device verification.
+Retry or repair creates a new attempt from a freshly validated and reviewed
+plan. Execution has no undo, rollback, inverse-step, backup, or restoration
+contract. The complete product protocol is documented in
+[Phase 0 End-User Runtime Contracts](../product/phase-0-runtime-contracts.md).
 
 Artifact resolution supports absolute `file://`, HTTP, and HTTPS URLs inside the
 runtime/cache sandbox. The resolver owns compatible URL-based filenames,

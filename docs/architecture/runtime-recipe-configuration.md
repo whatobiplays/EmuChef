@@ -467,6 +467,20 @@ commands, downloads, extraction, host copies, device writes, plan-file writes,
 or execution. Saving returned plan JSON is a separate frontend or future
 explicit persistence action.
 
+Product callers provide a resolved `catalog` snapshot containing local root,
+source kind/id, optional version/cache key, and optional content integrity
+digest. `authoredRoot` remains the legacy compatibility adapter. Catalog
+identity/version and content integrity are separate concepts; `cached_remote`
+is reserved and has no networking implementation.
+
+Product planning may include reviewed `targetDevice` facts. A successful result
+also contains `planDigest`, computed from canonical JSON SHA-256. The plan
+captures catalog identity, target binding, ordered recipe display snapshots,
+and ordered step notes. `startExecution` requires the digest and recomputes it
+before accepting an attempt. See
+[Phase 0 End-User Runtime Contracts](../product/phase-0-runtime-contracts.md)
+for the canonical JSON, target matching, and report definitions.
+
 ## 12. Executor boundary
 
 Execution plans retain normalized typed input values so refs such as
@@ -500,3 +514,9 @@ or ref-only step parameters retain their source restrictions; the typed source
 contract does not make arbitrary refs valid. Frozen compatibility goldens are
 not regenerated for this feature. New runtime-configuration behavior is covered
 by Rust-native tests and the current authored corpus.
+
+Recipe steps may provide an optional `progress_note` for the end-user execution
+surface. Its absence does not change schema validity or execution semantics.
+The runtime falls back to step name, humanized step type, then step id. Only
+representative checked-in recipes need authored notes; deterministic fallback
+keeps the rest of the catalog usable without a bulk migration.

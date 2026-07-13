@@ -7,6 +7,7 @@ use serde_json::Value as JsonValue;
 use serde_yaml::Value as YamlValue;
 
 use crate::artifact_resolver::file_url_to_path;
+use crate::catalog_source::CatalogIdentity;
 use crate::device_probe::{CommandRunner, ProcessCommandRunner};
 use crate::executor::{
     adb::RealAdbDevice, ExecutionProgressEvent, ExecutionRunResult, ExecutorAdapters,
@@ -15,8 +16,9 @@ use crate::executor::{
 use crate::model::OrderedMap;
 use crate::planner::{
     DeviceContext, ExecutionArtifact, ExecutionInputValue, ExecutionParamValue, ExecutionPlan,
-    ExecutionPlanSource, ExecutionStep, ExecutionStepCondition, ExecutionStepConstraints,
-    PlanningResult, PlanningStatus, RuntimeCapabilities, RuntimeValue as PlanRuntimeValue,
+    ExecutionPlanSource, ExecutionRecipeSnapshot, ExecutionStep, ExecutionStepCondition,
+    ExecutionStepConstraints, PlanningResult, PlanningStatus, RuntimeCapabilities,
+    RuntimeValue as PlanRuntimeValue, TargetDeviceBinding,
 };
 use crate::planner_runtime::{plan_with_adb_runner, ExplicitDeviceContext, PlanningRequest};
 use crate::{validation, yaml, ProcessOutput};
@@ -462,6 +464,14 @@ where
             };
         }
     };
+    if crate::plan_digest::execution_plan_digest(&plan).is_err() {
+        return ProcessOutput {
+            exit_code: 1,
+            stdout: String::new(),
+            stderr: "Error: execution plan could not be canonically hashed before apply\n"
+                .to_string(),
+        };
+    }
     let workspace = apply_workspace(&plan_path, &plan);
     if config.dry_run {
         let adapters = ExecutorAdapters::with_sandbox_roots(
@@ -723,6 +733,7 @@ fn format_execution_progress_event(event: &ExecutionProgressEvent, dry_run: bool
             Some(ProgressStatus::Blocked) => "blocked",
             Some(ProgressStatus::Succeeded) => "succeeded",
             Some(ProgressStatus::Failed) => "failed",
+            Some(ProgressStatus::Cancelled) => "cancelled",
             None => "finished",
         };
         return format!(
@@ -752,6 +763,7 @@ fn format_execution_summary(result: &ExecutionRunResult, dry_run: bool) -> Strin
     let skipped = count_steps(result, StepRunStatus::Skipped);
     let blocked = count_steps(result, StepRunStatus::Blocked);
     let failed = count_steps(result, StepRunStatus::Failed);
+    let cancelled = count_steps(result, StepRunStatus::Cancelled);
     let not_run = result.total_steps.saturating_sub(result.steps.len());
     let mut lines = vec![
         format!(
@@ -765,6 +777,9 @@ fn format_execution_summary(result: &ExecutionRunResult, dry_run: bool) -> Strin
         format!("- failed: {failed}"),
         format!("- not run: {not_run}"),
     ];
+    if cancelled > 0 {
+        lines.insert(lines.len() - 1, format!("- cancelled: {cancelled}"));
+    }
     let permission_results = collect_permission_results(result);
     if !permission_results.is_empty() {
         let permission_executed = permission_results
@@ -928,6 +943,8 @@ fn parse_execution_plan(data: &serde_yaml::Mapping) -> Result<ExecutionPlan, Cli
     let source = mapping_value(data, "source")?;
     let device_context = mapping_value(data, "device_context")?;
     let runtime_capabilities = mapping_value(data, "runtime_capabilities")?;
+    let steps = parse_steps(data)?;
+    let recipes = parse_recipe_snapshots(data, &steps)?;
     Ok(ExecutionPlan {
         id: required_string(data, "id")?,
         source: ExecutionPlanSource {
@@ -935,7 +952,16 @@ fn parse_execution_plan(data: &serde_yaml::Mapping) -> Result<ExecutionPlan, Cli
             device_plan_ref: required_string(source, "device_plan_ref")?,
             selected_recipe_refs: string_list(source, "selected_recipe_refs")?,
             expanded_recipe_refs: string_list(source, "expanded_recipe_refs")?,
+            catalog: source
+                .get(yaml_key("catalog"))
+                .map(parse_catalog_identity)
+                .transpose()?,
         },
+        recipes,
+        target_device: data
+            .get(yaml_key("target_device"))
+            .map(parse_target_device)
+            .transpose()?,
         device_context: DeviceContext {
             manufacturer: required_string(device_context, "manufacturer")?,
             model: required_string(device_context, "model")?,
@@ -958,10 +984,75 @@ fn parse_execution_plan(data: &serde_yaml::Mapping) -> Result<ExecutionPlan, Cli
         },
         inputs: parse_inputs(data)?,
         artifacts: parse_artifacts(data)?,
-        steps: parse_steps(data)?,
+        steps,
         schema_version: required_i64(data, "schema_version")?,
         kind: "execution_plan",
     })
+}
+
+/// Decode a product protocol plan using the same compatibility parser as CLI
+/// apply, including fallback notes and legacy plans without recipe snapshots.
+pub(crate) fn parse_execution_plan_json(value: &JsonValue) -> Result<ExecutionPlan, String> {
+    let yaml = serde_yaml::to_value(value).map_err(|error| error.to_string())?;
+    let mapping = as_mapping(&yaml, "Execution plan must be an object.")
+        .map_err(|error| error.to_string())?;
+    if string_value(mapping, "kind") != "execution_plan" {
+        return Err("Execution plan kind must be 'execution_plan'.".to_string());
+    }
+    parse_execution_plan(mapping).map_err(|error| error.to_string())
+}
+
+fn parse_catalog_identity(value: &YamlValue) -> Result<CatalogIdentity, CliError> {
+    serde_json::from_value(yaml_to_json(value)?)
+        .map_err(|error| CliError::Message(format!("Invalid catalog identity: {error}")))
+}
+
+fn parse_target_device(value: &YamlValue) -> Result<TargetDeviceBinding, CliError> {
+    let mapping = as_mapping(value, "target_device must be a mapping")?;
+    Ok(TargetDeviceBinding {
+        serial: required_string(mapping, "serial")?,
+        manufacturer: optional_string_value(mapping, "manufacturer"),
+        model: optional_string_value(mapping, "model"),
+        android_api_level: optional_i64(mapping, "android_api_level")?,
+    })
+}
+
+fn parse_recipe_snapshots(
+    data: &serde_yaml::Mapping,
+    steps: &[ExecutionStep],
+) -> Result<Vec<ExecutionRecipeSnapshot>, CliError> {
+    if let Some(value) = data.get(yaml_key("recipes")) {
+        let items = value
+            .as_sequence()
+            .ok_or_else(|| CliError::Message("execution recipes must be a list".to_string()))?;
+        return items
+            .iter()
+            .map(|item| {
+                let mapping = as_mapping(item, "execution recipe must be a mapping")?;
+                Ok(ExecutionRecipeSnapshot {
+                    id: required_string(mapping, "id")?,
+                    name: required_string(mapping, "name")?,
+                    description: optional_string_value(mapping, "description"),
+                })
+            })
+            .collect();
+    }
+
+    let mut recipes = Vec::new();
+    for step in steps {
+        if recipes
+            .iter()
+            .any(|recipe: &ExecutionRecipeSnapshot| recipe.id == step.recipe_ref)
+        {
+            continue;
+        }
+        recipes.push(ExecutionRecipeSnapshot {
+            id: step.recipe_ref.clone(),
+            name: step.recipe_ref.clone(),
+            description: None,
+        });
+    }
+    Ok(recipes)
 }
 
 fn parse_inputs(data: &serde_yaml::Mapping) -> Result<Vec<ExecutionInputValue>, CliError> {
@@ -1006,11 +1097,20 @@ fn parse_steps(data: &serde_yaml::Mapping) -> Result<Vec<ExecutionStep>, CliErro
         .map(|item| {
             let mapping = as_mapping(item, "execution step must be a mapping")?;
             let constraints = optional_mapping_value(mapping, "constraints")?;
+            let id = required_string(mapping, "id")?;
+            let type_name = required_string(mapping, "type")?;
+            let name = required_string(mapping, "name")?;
             Ok(ExecutionStep {
-                id: required_string(mapping, "id")?,
+                id: id.clone(),
                 recipe_ref: required_string(mapping, "recipe_ref")?,
-                type_name: required_string(mapping, "type")?,
-                name: required_string(mapping, "name")?,
+                type_name: type_name.clone(),
+                name: name.clone(),
+                note: crate::planner::normalized_plan_step_note(
+                    optional_string_value(mapping, "note").as_deref(),
+                    &name,
+                    &type_name,
+                    &id,
+                ),
                 dependencies: string_list(mapping, "dependencies")?,
                 constraints: ExecutionStepConstraints {
                     capabilities: constraints

@@ -1,7 +1,7 @@
 use serde::Serialize;
 use serde_json::{json, Value};
 
-/// Stable error codes exposed by the editor API protocol.
+/// Stable error codes exposed by the JSON protocol surfaces.
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ApiErrorCode {
@@ -13,6 +13,12 @@ pub enum ApiErrorCode {
     UnknownDocument,
     ValidationFailed,
     InternalError,
+    InvalidExecutionPlan,
+    PlanDigestMismatch,
+    TargetDeviceMismatch,
+    ExecutionInProgress,
+    UnknownExecution,
+    ExecutionStartFailed,
 }
 
 /// JSON-serializable API failure payload used inside `ok: false` envelopes.
@@ -24,6 +30,14 @@ pub struct ApiError {
 }
 
 impl ApiError {
+    /// Build a failure with a product-protocol code and structured details.
+    pub fn new(code: ApiErrorCode, message: impl Into<String>, details: Value) -> Self {
+        Self {
+            code,
+            message: message.into(),
+            details,
+        }
+    }
     /// Build an `invalid_request` error with default empty details.
     pub fn invalid_request(message: impl Into<String>) -> Self {
         Self {

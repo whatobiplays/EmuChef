@@ -12,9 +12,34 @@ use crate::model::{
     StepConstraints,
 };
 use crate::planner::{
-    build_permission_intent, plan_execution, resolve_runtime_bindings, BindingSource,
-    DeviceContext, PlannerInput, RuntimeCapabilities,
+    build_permission_intent, normalized_plan_step_note, plan_execution, resolve_runtime_bindings,
+    BindingSource, DeviceContext, PlannerInput, RuntimeCapabilities,
 };
+
+#[test]
+fn progress_note_fallback_order_is_deterministic() {
+    assert_eq!(
+        normalized_plan_step_note(
+            Some("  Copying files  "),
+            "Copy Files",
+            "copy_files",
+            "copy"
+        ),
+        "Copying files"
+    );
+    assert_eq!(
+        normalized_plan_step_note(None, " Copy Files ", "copy_files", "copy"),
+        "Copy Files"
+    );
+    assert_eq!(
+        normalized_plan_step_note(None, "", "grant_permissions", "grant"),
+        "Grant permissions"
+    );
+    assert_eq!(
+        normalized_plan_step_note(None, "", "", "fallback-id"),
+        "fallback-id"
+    );
+}
 use crate::planner_device_plan::{
     discover_device_plan_inventory, discover_device_profile_inventory,
     load_device_plan_profile_match_criteria, plan_from_authored_device_plan_with_detected_facts,
@@ -790,6 +815,8 @@ fn permission_intent_defaults_policy_required_and_empty_grants_without_serialize
         device_profile_ref: "example.device_profile".to_string(),
         device_context: fixture_device_context(),
         runtime_capabilities: fixture_runtime_capabilities(),
+        catalog_identity: None,
+        target_device: None,
     });
     assert!(!plan["execution_plan"]
         .as_object()
@@ -4725,6 +4752,7 @@ fn artifact_selection_input(
                 type_name: step_type.to_string(),
                 name: "Artifact Selection".to_string(),
                 description: None,
+                progress_note: None,
                 user_toggleable: false,
                 dependencies: Vec::new(),
                 constraints: StepConstraints {
@@ -4745,6 +4773,8 @@ fn artifact_selection_input(
         device_profile_ref: "example.device_profile".to_string(),
         device_context: fixture_device_context(),
         runtime_capabilities: fixture_runtime_capabilities(),
+        catalog_identity: None,
+        target_device: None,
     }
 }
 
@@ -4790,6 +4820,8 @@ fn ref_validation_input(steps: Vec<Step>) -> PlannerInput {
         device_profile_ref: "example.device_profile".to_string(),
         device_context: fixture_device_context(),
         runtime_capabilities: fixture_runtime_capabilities(),
+        catalog_identity: None,
+        target_device: None,
     }
 }
 
@@ -4821,6 +4853,7 @@ fn ref_validation_step(
         type_name: step_type.to_string(),
         name: id.to_string(),
         description: None,
+        progress_note: None,
         user_toggleable: false,
         dependencies: dependencies.into_iter().map(ToString::to_string).collect(),
         constraints: StepConstraints {
@@ -4880,6 +4913,8 @@ fn dependency_validation_input(steps: Vec<Step>) -> PlannerInput {
         device_profile_ref: "example.device_profile".to_string(),
         device_context: fixture_device_context(),
         runtime_capabilities: fixture_runtime_capabilities(),
+        catalog_identity: None,
+        target_device: None,
     }
 }
 
@@ -4903,6 +4938,7 @@ fn dependency_step_with_capabilities(
         type_name: "wait".to_string(),
         name: id.to_string(),
         description: None,
+        progress_note: None,
         user_toggleable: false,
         dependencies: dependencies.into_iter().map(ToString::to_string).collect(),
         constraints: StepConstraints {
@@ -4949,6 +4985,8 @@ fn recipe_expansion_input(recipes: Vec<Recipe>, selected_recipe_refs: Vec<&str>)
         device_profile_ref: "example.device_profile".to_string(),
         device_context: fixture_device_context(),
         runtime_capabilities: fixture_runtime_capabilities(),
+        catalog_identity: None,
+        target_device: None,
     }
 }
 
@@ -4981,6 +5019,7 @@ fn recipe_expansion_wait_step() -> Step {
         type_name: "wait".to_string(),
         name: "Wait".to_string(),
         description: None,
+        progress_note: None,
         user_toggleable: false,
         dependencies: Vec::new(),
         constraints: StepConstraints {
@@ -5068,6 +5107,8 @@ fn param_contract_input(steps: Vec<Step>) -> PlannerInput {
         device_profile_ref: "example.device_profile".to_string(),
         device_context: fixture_device_context(),
         runtime_capabilities: fixture_runtime_capabilities(),
+        catalog_identity: None,
+        target_device: None,
     }
 }
 
@@ -5082,6 +5123,7 @@ fn param_contract_step(
         type_name: step_type.to_string(),
         name: id.to_string(),
         description: None,
+        progress_note: None,
         user_toggleable: false,
         dependencies: dependencies.into_iter().map(ToString::to_string).collect(),
         constraints: StepConstraints {

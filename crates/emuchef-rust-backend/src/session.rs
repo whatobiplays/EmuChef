@@ -1,8 +1,9 @@
-//! Sidecar-only document session manager for the experimental Rust backend.
+//! Sidecar-only document and product execution session state.
 //!
 //! Session state is intentionally in-memory and process-local. It persists
 //! across JSONL requests handled by one sidecar process and is never shared with
-//! one-shot CLI invocations.
+//! one-shot CLI invocations. Product execution workers retain their own shared
+//! report/event state after the request dispatcher returns.
 
 use indexmap::IndexMap;
 use serde_json::{json, Value};
@@ -11,6 +12,7 @@ use crate::commands;
 use crate::document::RecipeDocument;
 use crate::dto;
 use crate::errors::ApiError;
+use crate::execution_session::{ExecutionSessionManager, SidecarRuntimeConfig};
 use crate::ref_index;
 use crate::user_configuration_document::{self, UserConfigurationDocument};
 
@@ -19,9 +21,22 @@ pub struct DocumentSessionManager {
     documents: IndexMap<String, RecipeDocument>,
     user_configurations: IndexMap<String, UserConfigurationDocument>,
     next_id: u64,
+    executions: ExecutionSessionManager,
 }
 
 impl DocumentSessionManager {
+    /// Build process-local document and product execution state using roots
+    /// fixed by sidecar startup arguments.
+    pub fn with_runtime_config(config: SidecarRuntimeConfig) -> Self {
+        Self {
+            executions: ExecutionSessionManager::new(config),
+            ..Self::default()
+        }
+    }
+
+    pub(crate) fn executions(&self) -> &ExecutionSessionManager {
+        &self.executions
+    }
     pub fn open_recipe(
         &mut self,
         path: &str,

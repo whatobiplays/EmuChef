@@ -1,11 +1,13 @@
 //! EmuChef's canonical Rust CLI, executor, planner, validation, and sidecar runtime.
 //!
 //! The crate exposes the product `emuchef` executable and the one-shot and JSONL
-//! protocol surfaces used by the Tauri configuration editor.
+//! protocol surfaces used by the Tauri configuration editor and the additive
+//! Phase 0 contract for a future end-user application.
 
 mod artifact_resolver;
 mod artifact_transport;
 pub mod catalog;
+pub mod catalog_source;
 mod cli;
 pub mod commands;
 pub(crate) mod device_probe;
@@ -14,6 +16,7 @@ pub mod document;
 pub mod dto;
 pub mod envelope;
 pub mod errors;
+pub mod execution_session;
 mod executor;
 #[cfg(test)]
 mod executor_real_adb_tests;
@@ -22,11 +25,13 @@ mod executor_tests;
 pub mod jsonl;
 pub mod model;
 pub mod one_shot;
+mod plan_digest;
 mod planner;
 pub(crate) mod planner_device_plan;
 mod planner_runtime;
 #[cfg(test)]
 mod planner_tests;
+mod product_catalog;
 pub mod protocol;
 mod raw_request;
 pub mod ref_index;

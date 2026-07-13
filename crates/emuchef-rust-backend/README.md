@@ -25,7 +25,26 @@ run non-dry-run apply against a device that is not safe to reset or modify.
 
 `emuchef --sidecar` reads JSONL requests on stdin and writes JSONL responses on
 stdout. The sidecar maintains in-memory document sessions used by the Tauri
-editor. One-shot requests remain available for stateless protocol operations.
+editor and Phase 0 product execution sessions for a future end-user app.
+One-shot requests remain available for stateless protocol operations.
+
+Sidecar filesystem and ADB policy can be fixed at process startup:
+
+```bash
+emuchef --sidecar \
+  --runtime-root /private/emuchef-runtime \
+  --cache-root /shared/emuchef-artifacts \
+  --adb /path/to/adb
+```
+
+The additive `phase0_end_user_runtime` extension must be negotiated before use.
+It provides resolved catalog description, canonical JSON SHA-256 plan digests,
+target preflight, one active real or dry-run attempt, complete retained
+snapshots, ordered sequence-numbered events, and cooperative cancellation.
+Dry-run reports are explicitly simulated. Retry creates a new attempt from a
+fresh reviewed plan; execution rollback and undo do not exist. The stable DTOs
+and matching rules are documented in
+[`docs/product/phase-0-runtime-contracts.md`](../../docs/product/phase-0-runtime-contracts.md).
 
 ## Artifact Boundary
 

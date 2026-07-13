@@ -112,6 +112,8 @@ pub struct Step {
     pub type_name: String,
     pub name: String,
     pub description: Option<String>,
+    /// Optional user-facing action text shown while the step runs.
+    pub progress_note: Option<String>,
     pub user_toggleable: bool,
     pub dependencies: Vec<String>,
     pub constraints: StepConstraints,

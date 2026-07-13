@@ -10,11 +10,13 @@ use std::path::PathBuf;
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 
+use crate::catalog_source::{CatalogIdentity, CatalogSnapshot};
 use crate::dto;
 use crate::model::{OrderedMap, Recipe};
 use crate::planner::{
     expand_recipe_dependencies, resolve_runtime_bindings, BindingDiagnostic, BindingResolution,
     BindingSource, ExecutionPlan, PlannerInput, PlannerLoadError, PlannerMessage,
+    TargetDeviceBinding,
 };
 use crate::planner_device_plan::{self, PlannerInputParts};
 use crate::user_configuration::{self, UserConfiguration, UserConfigurationLoadError};
@@ -28,13 +30,14 @@ pub(crate) enum UserConfigurationSource {
 
 #[derive(Clone, Debug)]
 pub(crate) struct ConfigurationContextRequest {
-    pub authored_root: PathBuf,
+    pub catalog: CatalogSnapshot,
     pub configuration_root: Option<PathBuf>,
     pub user_configuration: Option<UserConfigurationSource>,
     pub device_plan: Option<String>,
     pub selected_recipes: Option<Vec<String>>,
     pub explicit_bindings: OrderedMap<Value>,
     pub device_context: Option<DeviceContextOverride>,
+    pub target_device: Option<TargetDeviceBinding>,
 }
 
 #[derive(Clone, Debug, Default, PartialEq, Deserialize)]
@@ -61,7 +64,7 @@ pub struct RuntimeConfigurationDiagnostic {
 
 #[derive(Clone, Debug)]
 pub(crate) struct PreparedConfiguration {
-    pub authored_root: PathBuf,
+    pub catalog: CatalogSnapshot,
     pub effective_device_plan: String,
     pub recipes: Vec<Recipe>,
     pub selected_recipe_refs: Vec<String>,
@@ -71,6 +74,7 @@ pub(crate) struct PreparedConfiguration {
     pub device_plan_input_bindings: OrderedMap<Value>,
     pub device_plan_parts: Option<PlannerInputParts>,
     pub device_context: Option<DeviceContextOverride>,
+    pub target_device: Option<TargetDeviceBinding>,
     pub binding_resolution: BindingResolution,
     pub diagnostics: Vec<RuntimeConfigurationDiagnostic>,
 }
@@ -78,6 +82,8 @@ pub(crate) struct PreparedConfiguration {
 #[derive(Clone, Debug, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ConfigurationDescription {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub catalog: Option<CatalogIdentity>,
     pub device_plan: String,
     pub selected_recipes: Vec<String>,
     pub expanded_recipes: Vec<String>,
@@ -89,6 +95,8 @@ pub struct ConfigurationDescription {
 #[serde(rename_all = "camelCase")]
 pub struct PlanConfigurationResult {
     pub plan: Option<ExecutionPlan>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub plan_digest: Option<String>,
     pub resolved_inputs: Vec<crate::planner::ResolvedInputBinding>,
     pub diagnostics: Vec<RuntimeConfigurationDiagnostic>,
 }
@@ -117,7 +125,7 @@ impl std::error::Error for ConfigurationContextError {}
 pub(crate) fn prepare_configuration(
     request: ConfigurationContextRequest,
 ) -> Result<PreparedConfiguration, ConfigurationContextError> {
-    let recipes = crate::planner::load_top_level_recipes(&request.authored_root)
+    let recipes = crate::planner::load_top_level_recipes(request.catalog.root())
         .map_err(ConfigurationContextError::Catalog)?;
     let recipe_map = recipes
         .iter()
@@ -149,7 +157,7 @@ pub(crate) fn prepare_configuration(
 
     let mut diagnostics = Vec::new();
     let device_plan_parts = match planner_device_plan::load_planner_input_parts(
-        &request.authored_root,
+        request.catalog.root(),
         &effective_device_plan,
         &recipes,
     ) {
@@ -203,7 +211,7 @@ pub(crate) fn prepare_configuration(
     );
 
     Ok(PreparedConfiguration {
-        authored_root: request.authored_root,
+        catalog: request.catalog,
         effective_device_plan,
         recipes,
         selected_recipe_refs,
@@ -213,6 +221,7 @@ pub(crate) fn prepare_configuration(
         device_plan_input_bindings,
         device_plan_parts,
         device_context: request.device_context,
+        target_device: request.target_device,
         binding_resolution,
         diagnostics,
     })
@@ -250,6 +259,8 @@ impl PreparedConfiguration {
             device_profile_ref: parts.device_profile_ref.clone(),
             device_context,
             runtime_capabilities: parts.runtime_capabilities.clone(),
+            catalog_identity: self.catalog.identity().cloned(),
+            target_device: self.target_device.clone(),
         })
     }
 }
@@ -262,6 +273,7 @@ pub(crate) fn plan_configuration(
     if !prepared.diagnostics.is_empty() {
         return Ok(PlanConfigurationResult {
             plan: None,
+            plan_digest: None,
             resolved_inputs,
             diagnostics: prepared.diagnostics,
         });
@@ -270,6 +282,7 @@ pub(crate) fn plan_configuration(
     let Some(input) = prepared.planner_input(plan_id) else {
         return Ok(PlanConfigurationResult {
             plan: None,
+            plan_digest: None,
             resolved_inputs,
             diagnostics: prepared.diagnostics,
         });
@@ -286,8 +299,20 @@ pub(crate) fn plan_configuration(
             .into_iter()
             .map(|message| planner_result_diagnostic("error", message)),
     );
+    let plan_digest = result
+        .execution_plan
+        .as_ref()
+        .map(crate::plan_digest::execution_plan_digest)
+        .transpose()
+        .map_err(|error| {
+            ConfigurationContextError::Catalog(PlannerLoadError::new(
+                "plan_digest_failed",
+                error.to_string(),
+            ))
+        })?;
     Ok(PlanConfigurationResult {
         plan: result.execution_plan,
+        plan_digest,
         resolved_inputs,
         diagnostics,
     })
@@ -336,6 +361,7 @@ pub(crate) fn describe_configuration(
         .collect();
 
     Ok(ConfigurationDescription {
+        catalog: prepared.catalog.identity().cloned(),
         device_plan: prepared.effective_device_plan,
         selected_recipes: prepared.selected_recipe_refs,
         expanded_recipes: prepared.expanded_recipe_refs,

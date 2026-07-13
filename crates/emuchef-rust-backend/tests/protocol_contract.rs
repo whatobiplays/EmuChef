@@ -1,4 +1,6 @@
+use std::fs;
 use std::io::{BufRead, BufReader, Write};
+use std::path::PathBuf;
 use std::process::{Command, Stdio};
 
 use emuchef_rust_backend::{jsonl, run_with_args_and_input, step_specs};
@@ -136,6 +138,8 @@ fn assert_hello_result(result: &Value) {
             "validateRecipePath",
             "emitUserConfigurationYamlFromPath",
             "validateUserConfigurationPath",
+            "describeCatalog",
+            "negotiateCapabilities",
             "openUserConfiguration",
             "createUserConfiguration",
             "getUserConfigurationDocument",
@@ -151,6 +155,10 @@ fn assert_hello_result(result: &Value) {
             "closeUserConfiguration",
             "describeConfiguration",
             "planConfiguration",
+            "startExecution",
+            "getExecution",
+            "getExecutionEvents",
+            "cancelExecution",
             "openRecipe",
             "createRecipeFromTemplate",
             "getDocument",
@@ -166,6 +174,10 @@ fn assert_hello_result(result: &Value) {
             "setDocumentAuthoredRoot",
             "ping"
         ])
+    );
+    assert_eq!(
+        result["protocolExtensions"],
+        json!([{"id": "phase0_end_user_runtime", "version": 1}])
     );
     assert!(!result["capabilities"]
         .as_array()
@@ -316,6 +328,218 @@ fn sidecar_hello_echoes_id() {
     let responses = sidecar_responses(r#"{"id":"hello-1","type":"hello"}"#);
     assert_eq!(responses[0]["id"], "hello-1");
     assert_hello_response(&responses[0]);
+}
+
+#[test]
+fn phase0_capabilities_are_negotiated_explicitly() {
+    let request = json!({
+        "id": "negotiate-1",
+        "type": "negotiateCapabilities",
+        "payload": {
+            "requiredCapabilities": ["startExecution", "getExecutionEvents"],
+            "optionalCapabilities": ["futureCapability"]
+        }
+    });
+    let responses = sidecar_responses(&request.to_string());
+    assert_eq!(responses[0]["ok"], true);
+    assert_eq!(responses[0]["result"]["compatible"], true);
+    assert_eq!(
+        responses[0]["result"]["extension"],
+        json!({"id": "phase0_end_user_runtime", "version": 1})
+    );
+    assert_eq!(
+        responses[0]["result"]["unsupportedOptional"],
+        json!(["futureCapability"])
+    );
+}
+
+#[test]
+fn start_execution_rejects_request_supplied_filesystem_roots() {
+    for field in ["runtimeRoot", "cacheRoot"] {
+        let request = json!({
+            "id": field,
+            "type": "startExecution",
+            "payload": {(field): "/tmp/not-allowed"}
+        });
+        let response = &sidecar_responses(&request.to_string())[0];
+        assert_eq!(response["ok"], false);
+        assert_eq!(response["error"]["code"], "invalid_request");
+        assert_eq!(response["error"]["details"]["field"], field);
+    }
+}
+
+#[test]
+fn product_catalog_and_plan_use_resolved_snapshot_identity_and_digest() {
+    let authored = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("../../authored")
+        .canonicalize()
+        .unwrap();
+    let catalog = json!({
+        "root": authored,
+        "sourceKind": "bundled",
+        "sourceId": "emuchef.bundled",
+        "version": "phase0",
+        "cacheKey": "bundled-phase0"
+    });
+    let description_request = json!({
+        "type": "describeCatalog",
+        "payload": {"catalog": catalog.clone()}
+    });
+    let description = one_shot_response(&description_request.to_string());
+    assert_eq!(description["ok"], true, "{description:#}");
+    assert_eq!(
+        description["result"]["catalog"]["sourceId"],
+        "emuchef.bundled"
+    );
+    assert!(description["result"].get("root").is_none());
+    assert!(!description["result"]["devicePlans"]
+        .as_array()
+        .unwrap()
+        .is_empty());
+    assert!(!description["result"]["deviceProfiles"]
+        .as_array()
+        .unwrap()
+        .is_empty());
+    assert!(!description["result"]["recipes"]
+        .as_array()
+        .unwrap()
+        .is_empty());
+
+    let plan_request = json!({
+        "type": "planConfiguration",
+        "payload": {
+            "catalog": catalog,
+            "devicePlan": "ayaneo.konkr_pocket_fit.base",
+            "targetDevice": {
+                "serial": "SERIAL-REVIEWED",
+                "manufacturer": "AYANEO",
+                "model": "Pocket FIT",
+                "androidApiLevel": 35
+            }
+        }
+    });
+    let planned = one_shot_response(&plan_request.to_string());
+    assert_eq!(planned["ok"], true, "{planned:#}");
+    assert_eq!(planned["result"]["planDigest"].as_str().unwrap().len(), 64);
+    assert_eq!(
+        planned["result"]["plan"]["source"]["catalog"]["sourceId"],
+        "emuchef.bundled"
+    );
+    assert_eq!(
+        planned["result"]["plan"]["target_device"]["serial"],
+        "SERIAL-REVIEWED"
+    );
+    assert!(!planned["result"]["plan"]["recipes"]
+        .as_array()
+        .unwrap()
+        .is_empty());
+    assert!(planned["result"]["plan"]["steps"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .all(|step| step["note"].as_str().is_some_and(|note| !note.is_empty())));
+}
+
+#[test]
+fn sidecar_start_execution_requires_matching_digest_and_returns_simulated_snapshot() {
+    let temp = tempfile::tempdir().unwrap();
+    for directory in ["apps", "recipes", "device_profiles", "device_plans"] {
+        fs::create_dir_all(temp.path().join(directory)).unwrap();
+    }
+    fs::write(
+        temp.path().join("recipes/wait.yaml"),
+        r#"schema_version: 1
+kind: recipe
+id: recipe.wait
+name: Wait Recipe
+description: A deterministic execution fixture.
+recipe_dependencies: []
+provides: {features: [wait]}
+inputs: {}
+artifacts: {}
+artifact_groups: {}
+steps:
+  - id: wait
+    type: wait
+    name: Wait
+    progress_note: Waiting safely
+    user_toggleable: false
+    dependencies: []
+    constraints: {capabilities: [], conflicts_with: []}
+    skip_if: []
+    params: {duration_ms: 1}
+    verify: []
+"#,
+    )
+    .unwrap();
+    fs::write(
+        temp.path().join("device_profiles/example.yaml"),
+        r#"schema_version: 1
+kind: device_profile
+id: profile.example
+name: Example
+match: {manufacturer_contains: [Example]}
+capability_defaults: {adb_available: true, apk_install: true, shared_storage_write: true, app_launch: true, shell_command: true, package_remove_for_user: true, root_shell: false, app_data_write: false}
+device_tags: []
+"#,
+    )
+    .unwrap();
+    fs::write(
+        temp.path().join("device_plans/example.yaml"),
+        r#"schema_version: 1
+kind: device_plan
+id: plan.example
+name: Example
+device_profile_ref: profile.example
+recipes: [{recipe_ref: recipe.wait, selected_by_default: true}]
+defaults: {}
+overrides: {}
+"#,
+    )
+    .unwrap();
+    let planned = one_shot_response(
+        &json!({
+            "type": "planConfiguration",
+            "payload": {
+                "catalog": {
+                    "root": temp.path(),
+                    "sourceKind": "local_directory",
+                    "sourceId": "test.local"
+                },
+                "devicePlan": "plan.example",
+                "targetDevice": {"serial": "SIMULATED-SERIAL"}
+            }
+        })
+        .to_string(),
+    );
+    assert_eq!(planned["ok"], true, "{planned:#}");
+    let plan = planned["result"]["plan"].clone();
+    let digest = planned["result"]["planDigest"].clone();
+    let start = json!({
+        "id": "start-1",
+        "type": "startExecution",
+        "payload": {"plan": plan.clone(), "planDigest": digest, "mode": "dry_run"}
+    });
+    let started = &sidecar_responses(&start.to_string())[0];
+    assert_eq!(started["ok"], true, "{started:#}");
+    assert_eq!(started["result"]["execution"]["simulated"], true);
+    assert_eq!(
+        started["result"]["execution"]["verificationScope"],
+        "simulated_only"
+    );
+    assert_eq!(
+        started["result"]["execution"]["reviewedPlan"]["id"],
+        "plan.plan.example.001"
+    );
+
+    let rejected = json!({
+        "id": "start-bad-digest",
+        "type": "startExecution",
+        "payload": {"plan": plan, "planDigest": "0".repeat(64), "mode": "dry_run"}
+    });
+    let rejected = &sidecar_responses(&rejected.to_string())[0];
+    assert_eq!(rejected["ok"], false);
+    assert_eq!(rejected["error"]["code"], "plan_digest_mismatch");
 }
 
 #[test]

@@ -761,6 +761,7 @@ impl RecipeDocument {
                 type_name: step_type,
                 name: required_text(&Value::String(name), "step name")?,
                 description: None,
+                progress_note: None,
                 user_toggleable: false,
                 dependencies: Vec::new(),
                 constraints: StepConstraints {
