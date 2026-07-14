@@ -9,7 +9,7 @@
 | Real-ADB apply | Rust | Active; manual device validation required |
 | Tauri editor backend | Rust JSONL sidecar | Active |
 | Phase 0 end-user runtime protocol | Rust JSONL sidecar | Active backend contract |
-| End-user desktop app | React UI with trusted Rust/Tauri bridge | Active through reviewed-plan simulation; guarded real execution is specified but default-disabled and not implemented |
+| End-user desktop app | React UI with trusted Rust/Tauri bridge | Phase 2C completion/report/repair active; guarded real execution remains default-disabled |
 | Platform-Tools import and verification | Rust/Tauri | User-supplied, app-managed, macOS-only |
 | Catalog source resolution | Rust | Bundled/local snapshots active; cached remote reserved |
 | Execution reports and incremental events | Rust JSONL sidecar | Active in-memory session contract |
@@ -50,3 +50,11 @@ defines the implemented trust boundary. The default-off `real-execution` Cargo
 feature is the authoritative gate and its availability query exposes only that
 policy boolean. Platform-specific packaged evidence and approval remain
 external release prerequisites; ordinary builds do not enable real execution.
+## Phase 2C authority boundary
+
+React owns presentation and user intent only. Tauri owns native report writing,
+retained review/execution associations, remediation projection, and opaque
+one-shot launch actions. The Rust sidecar owns authoritative execution reports,
+launch-candidate rederivation, target preflight, and the typed ADB launch
+operation. One-shot consumption is intentionally not duplicated in the
+sidecar; it belongs solely to the Tauri action-handle store.

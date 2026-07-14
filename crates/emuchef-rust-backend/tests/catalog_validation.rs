@@ -212,6 +212,7 @@ fn capabilities_include_catalog_context_session_update() {
             "getExecution",
             "getExecutionEvents",
             "cancelExecution",
+            "launchExecutionApp",
             "openRecipe",
             "createRecipeFromTemplate",
             "getDocument",

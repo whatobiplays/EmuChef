@@ -119,6 +119,7 @@ fn handle_validated_sidecar_object(
         "getExecution" => handle_get_execution(object, sessions),
         "getExecutionEvents" => handle_get_execution_events(object, sessions),
         "cancelExecution" => handle_cancel_execution(object, sessions),
+        "launchExecutionApp" => handle_launch_execution_app(object, sessions),
         "openRecipe" => handle_open_recipe(object, sessions),
         "createRecipeFromTemplate" => handle_create_recipe_from_template(object, sessions),
         "getDocument" => handle_get_document(object, sessions),
@@ -243,6 +244,18 @@ fn handle_cancel_execution(
         sessions
             .executions()
             .cancel(required_string(payload, "executionId")?)?,
+    ))
+}
+
+fn handle_launch_execution_app(
+    object: &Map<String, Value>,
+    sessions: &DocumentSessionManager,
+) -> Result<Value, ApiError> {
+    let payload = payload_object(object)?;
+    Ok(envelope::success(
+        sessions
+            .executions()
+            .launch_app(required_string(payload, "executionId")?)?,
     ))
 }
 

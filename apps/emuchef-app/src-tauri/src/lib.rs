@@ -54,6 +54,8 @@ pub fn run() {
             execution::get_real_execution,
             execution::get_real_execution_events,
             execution::cancel_real_execution,
+            execution::export_execution_report,
+            execution::launch_configured_app,
         ])
         .run(tauri::generate_context!())
         .expect("error while running EmuChef");

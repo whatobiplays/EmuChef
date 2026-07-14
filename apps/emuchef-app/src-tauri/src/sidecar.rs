@@ -20,6 +20,7 @@ const REQUIRED_CAPABILITIES: &[&str] = &[
     "getExecution",
     "getExecutionEvents",
     "cancelExecution",
+    "launchExecutionApp",
 ];
 
 #[derive(Clone, Debug, Serialize)]
@@ -358,6 +359,7 @@ mod tests {
                 "getExecution",
                 "getExecutionEvents",
                 "cancelExecution",
+                "launchExecutionApp",
             ]
         );
     }
@@ -371,7 +373,7 @@ mod tests {
         );
         assert_eq!(
             payload["requiredCapabilities"].as_array().unwrap().len(),
-            10
+            11
         );
         assert_eq!(payload["optionalCapabilities"], json!([]));
         assert!(payload.get("required").is_none());
@@ -385,7 +387,7 @@ mod tests {
                 .as_array()
                 .unwrap()
                 .len(),
-            10
+            11
         );
 
         let mut missing_execution = payload;

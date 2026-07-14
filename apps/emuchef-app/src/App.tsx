@@ -15,6 +15,7 @@ import {
 } from "./realExecution";
 import {
   initialWorkflowState,
+  filterRepairBindings,
   inputDiagnosticsForDisplay,
   pageDiagnosticsForDisplay,
   recipeSelectionDisabled,
@@ -71,6 +72,9 @@ export function App() {
   const [realExecutionEnabled, setRealExecutionEnabled] = useState(false);
   const [realConfirmationOpen, setRealConfirmationOpen] = useState(false);
   const [realConfirmation, setRealConfirmation] = useState(emptyRealExecutionConfirmation);
+  const [reportState, setReportState] = useState<"idle" | "exporting" | "saved" | "failed">("idle");
+  const [launchState, setLaunchState] = useState<"idle" | "launching" | "launched" | "failed">("idle");
+  const [repairPreparing, setRepairPreparing] = useState(false);
   const [workflow, dispatch] = useReducer(workflowReducer, initialWorkflowState);
   const mainRef = useRef<HTMLElement>(null);
 
@@ -340,6 +344,115 @@ export function App() {
       }
     } catch (error) {
       setNotice(errorMessage(error));
+    }
+  };
+
+  const exportExecutionReport = async () => {
+    if (workflow.execution.kind !== "terminal") return;
+    setReportState("exporting");
+    setNotice(null);
+    try {
+      const result = await api.exportExecutionReport(workflow.execution.snapshot.executionHandle);
+      setReportState(result.outcome === "saved" ? "saved" : "idle");
+    } catch (error) {
+      setReportState("failed");
+      setNotice(errorMessage(error));
+    }
+  };
+
+  const launchConfiguredApp = async () => {
+    if (
+      workflow.execution.kind !== "terminal"
+      || workflow.execution.snapshot.simulated
+      || !workflow.execution.snapshot.launchAction
+    ) return;
+    const { generation, snapshot } = workflow.execution;
+    const launchAction = snapshot.launchAction;
+    if (!launchAction) return;
+    const consumedHandle = launchAction.handle;
+    setLaunchState("launching");
+    setNotice(null);
+    try {
+      const result = await api.launchConfiguredApp(consumedHandle);
+      setLaunchState("launched");
+      setNotice(result.message);
+    } catch (error) {
+      setLaunchState("failed");
+      setNotice(errorMessage(error));
+      try {
+        const refreshed = await api.getRealExecution(snapshot.executionHandle);
+        dispatch({ type: "execution-snapshot", generation, snapshot: refreshed });
+      } catch {
+        // The original sanitized launch error remains the useful result. A lost
+        // execution cannot mint another action and is handled by normal polling.
+      }
+    }
+  };
+
+  const prepareRepair = async () => {
+    if (repairPreparing) return;
+    const prior = workflow;
+    setRepairPreparing(true);
+    setReportState("idle");
+    setLaunchState("idle");
+    setRealConfirmationOpen(false);
+    setRealConfirmation(emptyRealExecutionConfirmation);
+    dispatch({ type: "prepare-repair" });
+    setNotice(null);
+    try {
+      if (prior.review) {
+        await api.discardReview(prior.review.reviewHandle).catch(() => undefined);
+      }
+      const [freshCatalog, freshDevices] = await Promise.all([api.catalog(), api.pollDevices()]);
+      setCatalog(freshCatalog);
+      setDevices(freshDevices);
+      if (!prior.deviceHandle || !freshDevices.some((device) => device.deviceHandle === prior.deviceHandle)) {
+        setNotice("Reconnect the intended device to continue the fresh repair flow.");
+        return;
+      }
+      const [facts, match] = await Promise.all([
+        api.probeDevice(prior.deviceHandle),
+        api.matchDevice(prior.deviceHandle),
+      ]);
+      const plans = [...match.candidates, ...match.safeGenericPlans];
+      const devicePlan = prior.devicePlan && plans.some((plan) => plan.planId === prior.devicePlan)
+        ? prior.devicePlan
+        : match.recommendedPlanId;
+      if (!devicePlan) {
+        dispatch({ type: "select-device", deviceHandle: prior.deviceHandle });
+        dispatch({ type: "device-probed", facts, match });
+        setNotice("Choose a current device plan before regenerating this configuration.");
+        return;
+      }
+      const catalogRecipes = new Set(freshCatalog.recipes.map((recipe) => recipe.id));
+      const selectedRecipes = (prior.selectedRecipes ?? []).filter((recipe) => catalogRecipes.has(recipe));
+      const baseline = await api.describeConfiguration({
+        deviceHandle: prior.deviceHandle,
+        devicePlan,
+        selectedRecipes,
+        bindings: {},
+      });
+      const bindings = filterRepairBindings(prior.description, baseline, prior.bindings);
+      const description = await api.describeConfiguration({
+        deviceHandle: prior.deviceHandle,
+        devicePlan,
+        selectedRecipes,
+        bindings,
+      });
+      dispatch({
+        type: "repair-ready",
+        facts,
+        match,
+        devicePlan,
+        description,
+        selectedRecipes: description.selectedRecipes,
+        bindings,
+      });
+      setNotice("Configuration refreshed. Resolve any diagnostics, then create and review a new plan.");
+    } catch (error) {
+      setNotice(errorMessage(error));
+    } finally {
+      setRepairPreparing(false);
     }
   };
 
@@ -745,12 +858,26 @@ export function App() {
                     {executionDuration(workflow.execution.snapshot) && (
                       <div><dt>Duration</dt><dd>{executionDuration(workflow.execution.snapshot)}</dd></div>
                     )}
+                    <div><dt>Completed</dt><dd>{workflow.execution.snapshot.completion.counts.completed}</dd></div>
+                    <div><dt>Skipped</dt><dd>{workflow.execution.snapshot.completion.counts.skipped}</dd></div>
+                    <div><dt>Blocked</dt><dd>{workflow.execution.snapshot.completion.counts.blocked}</dd></div>
+                    <div><dt>Failed</dt><dd>{workflow.execution.snapshot.completion.counts.failed}</dd></div>
                   </dl>
+                  {workflow.execution.snapshot.completion.partialChangesPossible && (
+                    <p className="warning">
+                      Some device changes completed before this {workflow.execution.snapshot.status} result.
+                      The result remains {workflow.execution.snapshot.status}; EmuChef does not infer partial success or rollback completed work.
+                    </p>
+                  )}
                   {workflow.execution.snapshot.warnings.map((issue) => (
-                    <p className="warning" key={`warning-${issue.code}-${issue.stepId ?? "run"}`}>{issue.message}</p>
+                    <div className="warning" key={`warning-${issue.code}-${issue.stepId ?? "run"}`}>
+                      <p>{issue.message}</p><small><strong>{issue.remediation.title}:</strong> {issue.remediation.message}</small>
+                    </div>
                   ))}
                   {workflow.execution.snapshot.errors.map((issue) => (
-                    <p className="error" key={`error-${issue.code}-${issue.stepId ?? "run"}`}>{issue.message}</p>
+                    <div className="error" key={`error-${issue.code}-${issue.stepId ?? "run"}`}>
+                      <p>{issue.message}</p><small><strong>{issue.remediation.title}:</strong> {issue.remediation.message}</small>
+                    </div>
                   ))}
                   {workflow.execution.snapshot.recipes.map((recipe) => (
                     <article className={`execution-group status-${recipe.status}`} key={recipe.recipeId}>
@@ -809,6 +936,34 @@ export function App() {
                     <div className="button-row">
                       <button
                         className="secondary"
+                        onClick={exportExecutionReport}
+                        disabled={reportState === "exporting"}
+                      >
+                        {reportState === "exporting" ? "Exporting…" : reportState === "saved" ? "Report saved" : "Export report"}
+                      </button>
+                      {workflow.execution.snapshot.status !== "succeeded" && (
+                        <button onClick={prepareRepair} disabled={repairPreparing}>
+                          {repairPreparing
+                            ? "Preparing fresh plan…"
+                            : workflow.execution.snapshot.status === "succeeded_with_warnings"
+                              ? "Repair configuration"
+                              : "Retry failed work"}
+                        </button>
+                      )}
+                      {!workflow.execution.snapshot.simulated && workflow.execution.snapshot.launchAction && (
+                        <button
+                          onClick={launchConfiguredApp}
+                          disabled={launchState === "launching" || launchState === "launched"}
+                        >
+                          {launchState === "launching"
+                            ? "Launching…"
+                            : launchState === "launched"
+                              ? "App launched"
+                              : workflow.execution.snapshot.launchAction.label}
+                        </button>
+                      )}
+                      <button
+                        className="secondary"
                         onClick={() => {
                           if (workflow.execution.kind !== "terminal") return;
                           dispatch({
@@ -839,6 +994,9 @@ export function App() {
                     ? "The outcome cannot be inferred. Reconnect and create a fresh review; this execution cannot be resumed, retried in place, restored, or rolled back."
                     : "No execution history is persisted across an app or sidecar restart."}
                 </p>
+                <button onClick={prepareRepair} disabled={repairPreparing}>
+                  {repairPreparing ? "Preparing fresh plan…" : "Repair configuration"}
+                </button>
                 <button
                   className="secondary"
                   onClick={() => {

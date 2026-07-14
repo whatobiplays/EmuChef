@@ -5,7 +5,7 @@
 //! exit. Cancellation is cooperative between atomic steps and never rolls back
 //! completed work. Retrying or repairing always creates a new execution id.
 
-use std::collections::HashMap;
+use std::collections::{BTreeSet, HashMap};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
@@ -24,7 +24,7 @@ use crate::executor::{
     FakeDryRunDevice, ProgressPhase, ProgressStatus, SandboxRoots, StepRunStatus,
 };
 use crate::model::OrderedMap;
-use crate::planner::{ExecutionPlan, RuntimeValue, TargetDeviceBinding};
+use crate::planner::{ExecutionParamValue, ExecutionPlan, RuntimeValue, TargetDeviceBinding};
 
 /// Filesystem and executable policy fixed when the sidecar starts.
 #[derive(Clone, Debug)]
@@ -384,6 +384,116 @@ impl ExecutionSessionManager {
             "status": "running",
         }))
     }
+
+    /// Launch the single app proven eligible by a retained successful real execution.
+    ///
+    /// The execution remains reusable because one-shot authority belongs to the
+    /// Tauri opaque-action store. This operation rederives eligibility on every
+    /// invocation and never accepts package, activity, serial, path, or command
+    /// input from its caller.
+    pub(crate) fn launch_app(&self, execution_id: &str) -> Result<Value, ApiError> {
+        let (plan, retained_target, package_name, activity) = {
+            let state = lock(&self.state);
+            let record = state
+                .records
+                .get(execution_id)
+                .ok_or_else(|| unknown_execution(execution_id))?;
+            let (package_name, activity) = eligible_launch_candidate(&record.report)?;
+            (
+                record.report.reviewed_plan.clone(),
+                record.report.target_device.clone(),
+                package_name,
+                activity,
+            )
+        };
+
+        let target = preflight_target(
+            &plan,
+            ExecutionMode::Real,
+            retained_target,
+            &self.config.adb_path,
+        )?
+        .ok_or_else(|| {
+            ApiError::new(
+                ApiErrorCode::LaunchUnavailable,
+                "The retained execution no longer has an eligible launch target.",
+                json!({}),
+            )
+        })?;
+        RealAdbDevice::new(&self.config.adb_path, Some(target.serial))
+            .launch_app(&package_name, activity.as_deref())
+            .map_err(|_| {
+                ApiError::new(
+                    ApiErrorCode::LaunchFailed,
+                    "The configured app could not be launched.",
+                    json!({}),
+                )
+            })?;
+        Ok(json!({ "launched": true }))
+    }
+}
+
+fn eligible_launch_candidate(
+    report: &ExecutionReport,
+) -> Result<(String, Option<String>), ApiError> {
+    if report.mode != ExecutionMode::Real
+        || !matches!(
+            report.status,
+            ExecutionStatus::Succeeded | ExecutionStatus::SucceededWithWarnings
+        )
+    {
+        return Err(ApiError::new(
+            ApiErrorCode::LaunchUnavailable,
+            "This execution is not eligible to launch an app.",
+            json!({}),
+        ));
+    }
+
+    let succeeded_steps = report
+        .recipes
+        .iter()
+        .flat_map(|recipe| recipe.steps.iter())
+        .filter(|step| step.status == StepExecutionStatus::Succeeded)
+        .map(|step| step.step_id.as_str())
+        .collect::<BTreeSet<_>>();
+    let mut candidates = BTreeSet::new();
+    for step in &report.reviewed_plan.steps {
+        if step.type_name != "launch_app" || !succeeded_steps.contains(step.id.as_str()) {
+            continue;
+        }
+        let Some(ExecutionParamValue::Literal {
+            value: package_name,
+        }) = step.params.get("package_name")
+        else {
+            continue;
+        };
+        let Some(package_name) = package_name
+            .as_str()
+            .filter(|value| !value.trim().is_empty())
+        else {
+            continue;
+        };
+        let activity = match step.params.get("activity") {
+            None | Some(ExecutionParamValue::Literal { value: Value::Null }) => None,
+            Some(ExecutionParamValue::Literal { value }) => {
+                let Some(value) = value.as_str().filter(|value| !value.trim().is_empty()) else {
+                    continue;
+                };
+                Some(value.to_string())
+            }
+            Some(ExecutionParamValue::Ref { .. }) => continue,
+        };
+        candidates.insert((package_name.to_string(), activity));
+    }
+
+    if candidates.len() != 1 {
+        return Err(ApiError::new(
+            ApiErrorCode::LaunchUnavailable,
+            "The retained execution does not establish exactly one safe launch candidate.",
+            json!({}),
+        ));
+    }
+    Ok(candidates.into_iter().next().expect("one candidate"))
 }
 
 /// Admit every retained artifact while the caller holds the execution-state
@@ -1295,6 +1405,84 @@ mod tests {
             .unwrap()
             .iter()
             .any(|event| event["eventType"] == "cancel_requested"));
+    }
+
+    fn eligible_report(status: ExecutionStatus) -> ExecutionReport {
+        let mut plan = test_plan("plan.launch");
+        plan.steps[0].id = "recipe.example/launch".to_string();
+        plan.steps[0].type_name = "launch_app".to_string();
+        plan.steps[0].params.clear();
+        plan.steps[0].params.insert(
+            "package_name".to_string(),
+            ExecutionParamValue::Literal {
+                value: json!("com.example.app"),
+            },
+        );
+        plan.steps[0].params.insert(
+            "activity".to_string(),
+            ExecutionParamValue::Literal {
+                value: json!(".MainActivity"),
+            },
+        );
+        let mut report = initial_report(
+            "execution-launch",
+            &plan,
+            "digest",
+            ExecutionMode::Real,
+            None,
+        );
+        report.status = status;
+        report.recipes[0].status = RecipeExecutionStatus::Succeeded;
+        report.recipes[0].steps[0].status = StepExecutionStatus::Succeeded;
+        report
+    }
+
+    #[test]
+    fn launch_candidate_is_rederived_without_sidecar_consumption() {
+        let report = eligible_report(ExecutionStatus::SucceededWithWarnings);
+        let first = eligible_launch_candidate(&report).unwrap();
+        let second = eligible_launch_candidate(&report).unwrap();
+        assert_eq!(
+            first,
+            (
+                "com.example.app".to_string(),
+                Some(".MainActivity".to_string())
+            )
+        );
+        assert_eq!(first, second);
+    }
+
+    #[test]
+    fn launch_candidate_rejects_non_success_dynamic_and_ambiguous_plans() {
+        let mut failed = eligible_report(ExecutionStatus::Failed);
+        assert_eq!(
+            eligible_launch_candidate(&failed).unwrap_err().code,
+            ApiErrorCode::LaunchUnavailable
+        );
+
+        failed.status = ExecutionStatus::Succeeded;
+        failed.reviewed_plan.steps[0].params.insert(
+            "package_name".to_string(),
+            ExecutionParamValue::Ref {
+                ref_value: "steps.other.outputs.package".to_string(),
+            },
+        );
+        assert!(eligible_launch_candidate(&failed).is_err());
+
+        let mut ambiguous = eligible_report(ExecutionStatus::Succeeded);
+        let mut second = ambiguous.reviewed_plan.steps[0].clone();
+        second.id = "recipe.example/launch-two".to_string();
+        second.params.insert(
+            "package_name".to_string(),
+            ExecutionParamValue::Literal {
+                value: json!("com.example.other"),
+            },
+        );
+        ambiguous.reviewed_plan.steps.push(second);
+        let mut second_report = ambiguous.recipes[0].steps[0].clone();
+        second_report.step_id = "recipe.example/launch-two".to_string();
+        ambiguous.recipes[0].steps.push(second_report);
+        assert!(eligible_launch_candidate(&ambiguous).is_err());
     }
 
     fn manager(root: &Path) -> ExecutionSessionManager {

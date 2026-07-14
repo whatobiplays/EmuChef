@@ -3,6 +3,7 @@ import test from "node:test";
 
 import {
   initialWorkflowState,
+  filterRepairBindings,
   inputDiagnosticsForDisplay,
   mergeExecutionEvents,
   pageDiagnosticsForDisplay,
@@ -63,6 +64,7 @@ function executionSnapshot(
     executionHandle,
     reviewHandle: review.reviewHandle,
     simulated: true,
+    verificationScope: "simulation_only",
     status,
     startedAt: "2026-07-13T00:00:00Z",
     finishedAt: status === "running" ? null : "2026-07-13T00:00:01Z",
@@ -83,8 +85,79 @@ function executionSnapshot(
     }],
     warnings: [],
     errors: [],
+    completion: {
+      classification: status === "failed" ? "failed" : status === "cancelled" ? "cancelled" : status === "succeeded_with_warnings" ? "success_with_warnings" : status === "succeeded" ? "success" : "in_progress",
+      counts: {
+        total: 1,
+        completed: stepStatus === "succeeded" ? 1 : 0,
+        skipped: 0,
+        blocked: stepStatus === "blocked" ? 1 : 0,
+        failed: 0,
+        cancelled: stepStatus === "cancelled" ? 1 : 0,
+        pending: stepStatus === "pending" ? 1 : 0,
+      },
+      warningCount: 0,
+      partialChangesPossible: false,
+      features: [],
+    },
   };
 }
+
+test("repair keeps authoritative failed and cancelled labels while preserving safe intent", () => {
+  for (const status of ["failed", "cancelled"] as const) {
+    const snapshot = executionSnapshot(2, status);
+    const terminal = {
+      ...initialWorkflowState,
+      step: "execution" as const,
+      deviceHandle: facts.deviceHandle,
+      devicePlan: "plan.one",
+      selectedRecipes: ["recipe.one"],
+      bindings: { "recipe.one/file": "/chosen/file" },
+      executionGeneration: 1,
+      execution: {
+        kind: "terminal" as const,
+        generation: 1,
+        mode: "simulated" as const,
+        snapshot,
+        events: [],
+        eventCursor: 2,
+        cancellationRequested: false,
+      },
+    };
+    const repairing = workflowReducer(terminal, { type: "prepare-repair" });
+    assert.equal(snapshot.completion.classification, status);
+    assert.equal(repairing.repairIntent, true);
+    assert.deepEqual(repairing.selectedRecipes, ["recipe.one"]);
+    assert.deepEqual(repairing.bindings, { "recipe.one/file": "/chosen/file" });
+    assert.equal(repairing.review, null);
+    assert.equal(repairing.execution.kind, "idle");
+  }
+});
+
+test("repair bindings survive only unchanged input contracts", () => {
+  const oldDescription = {
+    devicePlan: "plan.one",
+    selectedRecipes: ["recipe.one"],
+    expandedRecipes: ["recipe.one"],
+    recipeOptions: [],
+    diagnostics: [],
+    inputs: [
+      { key: "same", recipeId: "recipe.one", inputId: "same", type: "file", label: "Same", description: null, required: true, pathKind: "file" as const, value: null, valueSource: null, diagnostics: [] },
+      { key: "changed", recipeId: "recipe.one", inputId: "changed", type: "file", label: "Changed", description: null, required: true, pathKind: "file" as const, value: null, valueSource: null, diagnostics: [] },
+    ],
+  };
+  const current = {
+    ...oldDescription,
+    inputs: [
+      oldDescription.inputs[0],
+      { ...oldDescription.inputs[1], type: "directory", pathKind: "directory" as const },
+    ],
+  };
+  assert.deepEqual(
+    filterRepairBindings(oldDescription, current, { same: "/safe", changed: "/stale", removed: "x" }),
+    { same: "/safe" },
+  );
+});
 
 function executionEvent(sequence: number): ExecutionEvent {
   return {
@@ -645,6 +718,7 @@ test("real execution state retains mode and invalidates the review on session lo
     simulated: false as const,
     verificationScope: "real_device" as const,
     target: { label: "Connected Android device" as const, androidApiLevel: 33 },
+    launchAction: null,
   };
   const active = workflowReducer(starting, {
     type: "execution-started",

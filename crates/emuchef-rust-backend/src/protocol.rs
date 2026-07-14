@@ -40,6 +40,7 @@ pub const CAPABILITIES: &[&str] = &[
     "getExecution",
     "getExecutionEvents",
     "cancelExecution",
+    "launchExecutionApp",
     "openRecipe",
     "createRecipeFromTemplate",
     "getDocument",

@@ -48,6 +48,7 @@ export interface WorkflowState {
   requestGeneration: number;
   executionGeneration: number;
   execution: ExecutionWorkflowState;
+  repairIntent: boolean;
 }
 
 export const initialWorkflowState: WorkflowState = {
@@ -64,6 +65,7 @@ export const initialWorkflowState: WorkflowState = {
   requestGeneration: 0,
   executionGeneration: 0,
   execution: { kind: "idle" },
+  repairIntent: false,
 };
 
 export type WorkflowAction =
@@ -81,6 +83,16 @@ export type WorkflowAction =
   | { type: "execution-events"; generation: number; batch: ExecutionEventBatch }
   | { type: "execution-cancellation-requested"; generation: number }
   | { type: "execution-unavailable"; generation: number; executionHandle: string; message: string }
+  | { type: "prepare-repair" }
+  | {
+      type: "repair-ready";
+      facts: DeviceFacts;
+      match: DeviceMatch;
+      devicePlan: string;
+      description: ConfigurationDescription;
+      selectedRecipes: string[];
+      bindings: Record<string, unknown>;
+    }
   | { type: "return-to-review" }
   | { type: "back" }
   | { type: "device-disappeared" }
@@ -98,6 +110,19 @@ const previousStep: Record<WorkflowStep, WorkflowStep> = {
 export function workflowReducer(state: WorkflowState, action: WorkflowAction): WorkflowState {
   switch (action.type) {
     case "select-device":
+      if (state.repairIntent) {
+        return {
+          ...state,
+          step: "device",
+          deviceHandle: action.deviceHandle,
+          facts: null,
+          match: null,
+          description: null,
+          review: null,
+          execution: { kind: "idle" },
+          requestGeneration: state.requestGeneration + 1,
+        };
+      }
       return {
         ...initialWorkflowState,
         step: "device",
@@ -111,7 +136,9 @@ export function workflowReducer(state: WorkflowState, action: WorkflowAction): W
         step: "setup",
         facts: action.facts,
         match: action.match,
-        devicePlan: action.match.recommendedPlanId,
+        devicePlan: state.repairIntent && planStillAvailable(state.devicePlan, action.match)
+          ? state.devicePlan
+          : action.match.recommendedPlanId,
       };
     case "select-plan":
       return {
@@ -120,6 +147,7 @@ export function workflowReducer(state: WorkflowState, action: WorkflowAction): W
         description: null,
         descriptionDirty: true,
         review: null,
+        repairIntent: false,
         requestGeneration: state.requestGeneration + 1,
       };
     case "description":
@@ -131,6 +159,7 @@ export function workflowReducer(state: WorkflowState, action: WorkflowAction): W
         descriptionDirty: false,
         selectedRecipes: action.description.selectedRecipes,
         review: null,
+        repairIntent: false,
       };
     case "set-recipes":
       return {
@@ -235,6 +264,37 @@ export function workflowReducer(state: WorkflowState, action: WorkflowAction): W
         },
       };
     }
+    case "prepare-repair":
+      return {
+        ...state,
+        step: state.deviceHandle ? "device" : "connect",
+        facts: null,
+        match: null,
+        description: null,
+        descriptionDirty: true,
+        review: null,
+        requestGeneration: state.requestGeneration + 1,
+        executionGeneration: state.executionGeneration + 1,
+        execution: { kind: "idle" },
+        repairIntent: true,
+      };
+    case "repair-ready":
+      return {
+        ...state,
+        step: "inputs",
+        deviceHandle: action.facts.deviceHandle,
+        facts: action.facts,
+        match: action.match,
+        devicePlan: action.devicePlan,
+        selectedRecipes: action.selectedRecipes,
+        bindings: action.bindings,
+        description: action.description,
+        descriptionDirty: false,
+        review: null,
+        requestGeneration: state.requestGeneration + 1,
+        execution: { kind: "idle" },
+        repairIntent: false,
+      };
     case "return-to-review":
       if (!state.review) return state;
       return { ...state, step: "review", execution: { kind: "idle" } };
@@ -242,9 +302,51 @@ export function workflowReducer(state: WorkflowState, action: WorkflowAction): W
       return { ...state, step: previousStep[state.step], review: null };
     case "device-disappeared":
       if (state.step === "execution" || state.execution.kind === "starting") return state;
+      if (state.repairIntent) {
+        return {
+          ...state,
+          step: "connect",
+          deviceHandle: null,
+          facts: null,
+          match: null,
+          description: null,
+          review: null,
+          execution: { kind: "idle" },
+          requestGeneration: state.requestGeneration + 1,
+        };
+      }
     case "runtime-invalidated":
       return { ...initialWorkflowState, requestGeneration: state.requestGeneration + 1 };
   }
+}
+
+function planStillAvailable(planId: string | null, match: DeviceMatch): boolean {
+  if (!planId) return false;
+  return [...match.candidates, ...match.safeGenericPlans].some((plan) => plan.planId === planId);
+}
+
+/** Preserve only bindings whose current input contract still matches the reviewed workflow. */
+export function filterRepairBindings(
+  previous: ConfigurationDescription | null,
+  current: ConfigurationDescription,
+  bindings: Record<string, unknown>,
+): Record<string, unknown> {
+  if (!previous) return {};
+  const previousInputs = new Map(previous.inputs.map((input) => [input.key, input]));
+  const result: Record<string, unknown> = {};
+  for (const input of current.inputs) {
+    const old = previousInputs.get(input.key);
+    if (
+      old
+      && old.type === input.type
+      && Boolean(old.multiple) === Boolean(input.multiple)
+      && old.pathKind === input.pathKind
+      && Object.hasOwn(bindings, input.key)
+    ) {
+      result[input.key] = bindings[input.key];
+    }
+  }
+  return result;
 }
 
 function executionGenerationMatches(

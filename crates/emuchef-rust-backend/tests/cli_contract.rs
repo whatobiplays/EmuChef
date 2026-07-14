@@ -230,6 +230,7 @@ fn preserves_one_shot_json_and_sidecar_dispatch() {
             "getExecution",
             "getExecutionEvents",
             "cancelExecution",
+            "launchExecutionApp",
             "openRecipe",
             "createRecipeFromTemplate",
             "getDocument",

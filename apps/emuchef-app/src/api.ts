@@ -13,8 +13,10 @@ import type {
   RealExecutionAvailability,
   RealExecutionConfirmation,
   RealExecutionSnapshot,
+  ReportExportResult,
   ReviewSummary,
   RuntimeStatus,
+  LaunchResult,
 } from "./types";
 
 export const api = {
@@ -68,6 +70,10 @@ export const api = {
     }),
   cancelRealExecution: (executionHandle: string) =>
     invoke<ExecutionCancellation>("cancel_real_execution", { executionHandle }),
+  exportExecutionReport: (executionHandle: string) =>
+    invoke<ReportExportResult>("export_execution_report", { executionHandle }),
+  launchConfiguredApp: (launchActionHandle: string) =>
+    invoke<LaunchResult>("launch_configured_app", { launchActionHandle }),
   pickInputPath: (pathKind: "file" | "directory", multiple: boolean) =>
     invoke<string[] | null>("pick_input_path", { pathKind, multiple }),
 };

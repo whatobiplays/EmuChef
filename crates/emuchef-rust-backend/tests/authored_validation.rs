@@ -230,6 +230,7 @@ fn capabilities_include_additive_product_runtime_surface() {
             "getExecution",
             "getExecutionEvents",
             "cancelExecution",
+            "launchExecutionApp",
             "openRecipe",
             "createRecipeFromTemplate",
             "getDocument",

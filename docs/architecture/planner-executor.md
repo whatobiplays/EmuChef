@@ -77,3 +77,17 @@ and client construction. New files use unique partials in the destination
 directory, `sync_all`, and `persist_noclobber`; the exact underlying
 no-overwrite primitive is platform-dependent. `cache: none` always transfers
 and uses a unique runtime filename when the compatible base path already exists.
+## Phase 2C completion actions
+
+The end-user Tauri application derives completion summaries and report exports
+from retained authoritative execution snapshots. Fresh repair returns through
+configuration description, planning, and review; it never replays an execution
+or treats the old review as current authority.
+
+Final app launch uses split responsibility without split authority. Tauri owns
+and atomically consumes each opaque launch-action handle. The sidecar's internal
+`launchExecutionApp` request remains stateless with respect to one-shot action
+consumption: it rederives the single eligible candidate from the retained plan
+and report and invokes the existing typed `launch_app` adapter. This permits
+Tauri to issue a new handle after a failed attempt while preventing duplicate
+use of any individual handle.

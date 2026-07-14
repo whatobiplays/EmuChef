@@ -184,6 +184,46 @@ export interface ExecutionIssue {
   message: string;
   recipeId: string | null;
   stepId: string | null;
+  remediation: RemediationGuidance;
+}
+
+export type RemediationKind =
+  | "reconnect_device"
+  | "repair_platform_tools"
+  | "review_inputs"
+  | "generate_fresh_plan"
+  | "view_report";
+
+export interface RemediationGuidance {
+  kind: RemediationKind;
+  title: string;
+  message: string;
+}
+
+export interface ExecutionCompletionSummary {
+  classification: "in_progress" | "success" | "success_with_warnings" | "failed" | "cancelled";
+  counts: {
+    total: number;
+    completed: number;
+    skipped: number;
+    blocked: number;
+    failed: number;
+    cancelled: number;
+    pending: number;
+  };
+  warningCount: number;
+  partialChangesPossible: boolean;
+  features: Array<{
+    recipeId: string;
+    name: string;
+    status: RecipeExecutionStatus;
+    counts: Partial<Record<"completed" | "skipped" | "blocked" | "failed" | "cancelled" | "pending", number>>;
+  }>;
+}
+
+export interface LaunchAction {
+  handle: string;
+  label: string;
 }
 
 export interface ExecutionStep {
@@ -206,6 +246,7 @@ export interface ExecutionSnapshot {
   executionHandle: string;
   reviewHandle: string;
   simulated: true;
+  verificationScope: "simulation_only";
   status: ExecutionStatus;
   startedAt: string | null;
   finishedAt: string | null;
@@ -214,6 +255,7 @@ export interface ExecutionSnapshot {
   recipes: ExecutionRecipe[];
   warnings: ExecutionIssue[];
   errors: ExecutionIssue[];
+  completion: ExecutionCompletionSummary;
 }
 
 export interface RealExecutionTarget {
@@ -238,6 +280,8 @@ export interface RealExecutionSnapshot {
   recipes: ExecutionRecipe[];
   warnings: ExecutionIssue[];
   errors: ExecutionIssue[];
+  completion: ExecutionCompletionSummary;
+  launchAction: LaunchAction | null;
 }
 
 export type AnyExecutionSnapshot = ExecutionSnapshot | RealExecutionSnapshot;
@@ -277,4 +321,13 @@ export interface ExecutionCancellation {
   executionHandle: string;
   accepted: boolean;
   status: ExecutionStatus;
+}
+
+export interface ReportExportResult {
+  outcome: "saved" | "cancelled";
+}
+
+export interface LaunchResult {
+  launched: true;
+  message: string;
 }

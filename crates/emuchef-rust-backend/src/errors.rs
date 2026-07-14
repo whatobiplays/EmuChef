@@ -19,6 +19,8 @@ pub enum ApiErrorCode {
     ExecutionInProgress,
     UnknownExecution,
     ExecutionStartFailed,
+    LaunchUnavailable,
+    LaunchFailed,
 }
 
 /// JSON-serializable API failure payload used inside `ok: false` envelopes.

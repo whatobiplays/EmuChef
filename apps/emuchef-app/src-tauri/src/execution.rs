@@ -4,14 +4,15 @@
 //! and digest revalidation, selects the execution mode inside Tauri, and projects
 //! sidecar reports into serial-free, path-safe DTOs.
 
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::fs::{self, File};
 use std::path::Path;
 
 use serde::Deserialize;
 use serde_json::{json, Map, Value};
 use sha2::{Digest, Sha256};
-use tauri::State;
+use tauri::{AppHandle, Manager, State};
+use tauri_plugin_dialog::{DialogExt, FilePath};
 use uuid::Uuid;
 
 use crate::adb::AdbRevalidationError;
@@ -31,6 +32,13 @@ struct ExecutionMapping {
     review: ReviewedPlanSnapshot,
 }
 
+#[derive(Clone, Debug)]
+struct LaunchActionRecord {
+    action_handle: String,
+    label: String,
+    mapping: ExecutionMapping,
+}
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum ExecutionKind {
     Simulated,
@@ -47,6 +55,8 @@ pub struct ExecutionHandleStore {
     start_reserved: Option<ExecutionKind>,
     active: Option<ExecutionMapping>,
     latest_terminal: Option<ExecutionMapping>,
+    launch_actions: HashMap<String, LaunchActionRecord>,
+    successful_launches: HashSet<String>,
 }
 
 impl ExecutionHandleStore {
@@ -100,14 +110,84 @@ impl ExecutionHandleStore {
             .ok_or_else(|| safe_error("execution_unavailable", unavailable_message))
     }
 
+    fn mapping_any(&self, public_handle: &str) -> Result<ExecutionMapping, String> {
+        self.active
+            .as_ref()
+            .filter(|mapping| mapping.public_handle == public_handle)
+            .or_else(|| {
+                self.latest_terminal
+                    .as_ref()
+                    .filter(|mapping| mapping.public_handle == public_handle)
+            })
+            .cloned()
+            .ok_or_else(|| {
+                safe_error(
+                    "execution_unavailable",
+                    "This execution report is no longer available in this app session.",
+                )
+            })
+    }
+
     fn mark_terminal(&mut self, kind: ExecutionKind, public_handle: &str) {
         if self
             .active
             .as_ref()
             .is_some_and(|mapping| mapping.kind == kind && mapping.public_handle == public_handle)
         {
+            if let Some(previous) = self.latest_terminal.as_ref() {
+                let previous_handle = previous.public_handle.clone();
+                self.discard_launch_actions_for_execution(&previous_handle);
+                self.successful_launches.remove(&previous_handle);
+            }
             self.latest_terminal = self.active.take();
         }
+    }
+
+    fn launch_action(&mut self, mapping: &ExecutionMapping, report: &Value) -> Option<Value> {
+        if self.successful_launches.contains(&mapping.public_handle) {
+            return None;
+        }
+        if let Some(existing) = self
+            .launch_actions
+            .values()
+            .find(|action| action.mapping.public_handle == mapping.public_handle)
+        {
+            return Some(json!({
+                "handle": existing.action_handle,
+                "label": existing.label,
+            }));
+        }
+        let label = eligible_launch_label(mapping, report)?;
+        let action_handle = format!("launch_{}", Uuid::new_v4().simple());
+        self.launch_actions.insert(
+            action_handle.clone(),
+            LaunchActionRecord {
+                action_handle: action_handle.clone(),
+                label: label.clone(),
+                mapping: mapping.clone(),
+            },
+        );
+        Some(json!({ "handle": action_handle, "label": label }))
+    }
+
+    /// Atomically remove one opaque action before any external revalidation or ADB work.
+    fn consume_launch_action(&mut self, action_handle: &str) -> Result<LaunchActionRecord, String> {
+        self.launch_actions.remove(action_handle).ok_or_else(|| {
+            safe_error(
+                "launch_unavailable",
+                "This launch action is unavailable. Refresh the completed execution before trying again.",
+            )
+        })
+    }
+
+    fn mark_launch_succeeded(&mut self, public_handle: &str) {
+        self.successful_launches.insert(public_handle.to_string());
+        self.discard_launch_actions_for_execution(public_handle);
+    }
+
+    fn discard_launch_actions_for_execution(&mut self, public_handle: &str) {
+        self.launch_actions
+            .retain(|_, action| action.mapping.public_handle != public_handle);
     }
 
     fn forget_mapping(
@@ -120,6 +200,8 @@ impl ExecutionHandleStore {
             .as_ref()
             .is_some_and(|mapping| mapping.kind == kind && mapping.public_handle == public_handle)
         {
+            self.discard_launch_actions_for_execution(public_handle);
+            self.successful_launches.remove(public_handle);
             return self.active.take();
         }
         if self
@@ -127,6 +209,8 @@ impl ExecutionHandleStore {
             .as_ref()
             .is_some_and(|mapping| mapping.kind == kind && mapping.public_handle == public_handle)
         {
+            self.discard_launch_actions_for_execution(public_handle);
+            self.successful_launches.remove(public_handle);
             return self.latest_terminal.take();
         }
         None
@@ -138,6 +222,8 @@ impl ExecutionHandleStore {
             .as_ref()
             .is_some_and(|mapping| mapping.kind == kind && mapping.public_handle == public_handle)
         {
+            self.discard_launch_actions_for_execution(public_handle);
+            self.successful_launches.remove(public_handle);
             self.active = None;
         }
     }
@@ -669,13 +755,18 @@ pub fn get_real_execution(
             "Real-device execution returned an invalid status report.",
         )
     })?;
-    let public = project_real_snapshot(&mapping, report);
+    let mut public = project_real_snapshot(&mapping, report);
     if is_terminal_status(report.get("status").and_then(Value::as_str)) {
-        state
+        let mut executions = state
             .executions
             .lock()
-            .map_err(|_| real_execution_state_error())?
-            .mark_terminal(ExecutionKind::Real, &execution_handle);
+            .map_err(|_| real_execution_state_error())?;
+        executions.mark_terminal(ExecutionKind::Real, &execution_handle);
+        public["launchAction"] = executions
+            .launch_action(&mapping, report)
+            .unwrap_or(Value::Null);
+    } else {
+        public["launchAction"] = Value::Null;
     }
     Ok(public)
 }
@@ -760,6 +851,273 @@ pub fn cancel_real_execution(
         "accepted": response.get("accepted").and_then(Value::as_bool).unwrap_or(false),
         "status": response.get("status").and_then(Value::as_str).unwrap_or("running"),
     }))
+}
+
+/// Consume one opaque launch action before revalidating any external state.
+///
+/// A failed invocation leaves the retained execution eligible, so a subsequent
+/// authoritative snapshot refresh may mint a new action handle. The consumed
+/// handle itself is never reusable.
+#[tauri::command]
+pub fn launch_configured_app(
+    launch_action_handle: String,
+    state: State<'_, AppState>,
+) -> Result<Value, String> {
+    if !cfg!(feature = "real-execution") {
+        return Err(launch_unavailable());
+    }
+    let action = state
+        .executions
+        .lock()
+        .map_err(|_| real_execution_state_error())?
+        .consume_launch_action(&launch_action_handle)?;
+    let mapping = action.mapping;
+
+    let review = state
+        .handles
+        .lock()
+        .map_err(|_| session_error())?
+        .review(&mapping.review_handle)
+        .map_err(|_| launch_stale_target())?
+        .clone();
+    validate_catalog(&review, &state).map_err(|_| launch_stale_target())?;
+    let expected_adb = review
+        .platform_tools_identity
+        .as_ref()
+        .ok_or_else(platform_tools_unavailable)?;
+    let adb_path = state
+        .adb
+        .lock()
+        .map_err(|_| platform_tools_unavailable())?
+        .revalidate_for_execution(expected_adb)
+        .map_err(|error| match error {
+            AdbRevalidationError::Unavailable => platform_tools_unavailable(),
+            AdbRevalidationError::Changed => launch_stale_target(),
+        })?
+        .to_string_lossy()
+        .into_owned();
+
+    let inventory = runtime_request(
+        &state.sidecar,
+        "listAdbDevices",
+        json!({ "adbPath": &adb_path }),
+    )
+    .map_err(|_| device_disconnected())?;
+    let (serial, refreshed_review) = {
+        let mut handles = state.handles.lock().map_err(|_| session_error())?;
+        handles
+            .update_devices(&inventory)
+            .map_err(|_| device_disconnected())?;
+        let refreshed = handles
+            .review(&mapping.review_handle)
+            .map_err(|_| launch_stale_target())?
+            .clone();
+        let device = handles
+            .device(&refreshed.device_handle)
+            .map_err(|_| device_disconnected())?;
+        if device.state != "available" {
+            return Err(device_disconnected());
+        }
+        (device.serial.clone(), refreshed)
+    };
+    let facts = runtime_request(
+        &state.sidecar,
+        "probeDevice",
+        json!({ "adbPath": adb_path, "serial": &serial }),
+    )
+    .map_err(|_| device_disconnected())?;
+    validate_target(&refreshed_review.target, &serial, &facts)
+        .map_err(|_| launch_stale_target())?;
+    validate_plan_digest(&refreshed_review).map_err(|_| launch_stale_target())?;
+
+    let report_response = runtime_request(
+        &state.sidecar,
+        "getExecution",
+        json!({ "executionId": mapping.sidecar_id }),
+    )
+    .map_err(|_| launch_unavailable())?;
+    let report = report_response
+        .get("execution")
+        .ok_or_else(launch_unavailable)?;
+    eligible_launch_label(&mapping, report).ok_or_else(launch_unavailable)?;
+
+    runtime_request(
+        &state.sidecar,
+        "launchExecutionApp",
+        json!({ "executionId": mapping.sidecar_id }),
+    )
+    .map_err(|_| {
+        safe_error(
+            "launch_failed",
+            "The configured app could not be launched. Refresh the completed execution to create a new launch action.",
+        )
+    })?;
+    state
+        .executions
+        .lock()
+        .map_err(|_| real_execution_state_error())?
+        .mark_launch_succeeded(&mapping.public_handle);
+    Ok(json!({
+        "launched": true,
+        "message": "The configured app was launched.",
+    }))
+}
+
+#[tauri::command]
+pub async fn export_execution_report(
+    app: AppHandle,
+    execution_handle: String,
+) -> Result<Value, String> {
+    let state = app.state::<AppState>();
+    let mapping = state
+        .executions
+        .lock()
+        .map_err(|_| real_execution_state_error())?
+        .mapping_any(&execution_handle)?;
+    let response = runtime_request(
+        &state.sidecar,
+        "getExecution",
+        json!({ "executionId": mapping.sidecar_id }),
+    )
+    .map_err(|_| {
+        safe_error(
+            "report_unavailable",
+            "This execution report is no longer available in this app session.",
+        )
+    })?;
+    let report = response.get("execution").ok_or_else(|| {
+        safe_error(
+            "report_unavailable",
+            "This execution report could not be prepared.",
+        )
+    })?;
+    if !is_terminal_status(report.get("status").and_then(Value::as_str)) {
+        return Err(safe_error(
+            "report_not_terminal",
+            "Wait for execution to finish before exporting its report.",
+        ));
+    }
+    let public = match mapping.kind {
+        ExecutionKind::Simulated => project_snapshot(&mapping, report),
+        ExecutionKind::Real => project_real_snapshot(&mapping, report),
+    };
+    let runtime = serde_json::to_value(state.sidecar.status()).map_err(|_| {
+        safe_error(
+            "report_serialization_failed",
+            "Runtime metadata could not be prepared for the report.",
+        )
+    })?;
+    let document = execution_report_document(&mapping, report, &public, runtime);
+    let mut serialized = serde_json::to_string_pretty(&document).map_err(|_| {
+        safe_error(
+            "report_serialization_failed",
+            "The sanitized execution report could not be serialized.",
+        )
+    })?;
+    serialized.push('\n');
+
+    let picker = app
+        .dialog()
+        .file()
+        .set_file_name("emuchef-execution-report.json")
+        .add_filter("EmuChef execution report", &["json"]);
+    let (sender, mut receiver) = tauri::async_runtime::channel(1);
+    picker.save_file(move |selection| {
+        let _ = sender.try_send(selection);
+    });
+    let selected: Option<FilePath> = receiver.recv().await.ok_or_else(|| {
+        safe_error(
+            "report_picker_failed",
+            "The report save dialog could not be opened.",
+        )
+    })?;
+    let Some(selected) = selected else {
+        return Ok(json!({ "outcome": "cancelled" }));
+    };
+    let path = selected.into_path().map_err(|_| {
+        safe_error(
+            "report_destination_unavailable",
+            "The selected report destination is unavailable.",
+        )
+    })?;
+    tauri::async_runtime::spawn_blocking(move || fs::write(path, serialized))
+        .await
+        .map_err(|_| {
+            safe_error(
+                "report_write_failed",
+                "The execution report could not be written.",
+            )
+        })?
+        .map_err(|_| {
+            safe_error(
+                "report_write_failed",
+                "The execution report could not be written.",
+            )
+        })?;
+    Ok(json!({ "outcome": "saved" }))
+}
+
+fn execution_report_document(
+    mapping: &ExecutionMapping,
+    report: &Value,
+    public: &Value,
+    runtime: Value,
+) -> Value {
+    let mut document = json!({
+        "schema": "emuchef.execution-report",
+        "schemaVersion": 1,
+        "app": {
+            "name": "EmuChef",
+            "version": env!("CARGO_PKG_VERSION"),
+        },
+        "runtime": runtime,
+        "catalog": mapping.review.catalog_identity,
+        "plan": {
+            "planId": report.get("planId"),
+            "planDigest": mapping.review.plan_digest,
+        },
+        "execution": {
+            "simulated": public.get("simulated"),
+            "verificationScope": public.get("verificationScope"),
+            "status": public.get("status"),
+            "startedAt": public.get("startedAt"),
+            "finishedAt": public.get("finishedAt"),
+            "completion": public.get("completion"),
+            "recipes": public.get("recipes"),
+            "warnings": public.get("warnings"),
+            "errors": public.get("errors"),
+            "target": public.get("target"),
+        },
+    });
+    let exact_serial = mapping
+        .review
+        .target
+        .get("serial")
+        .and_then(Value::as_str)
+        .unwrap_or_default();
+    sanitize_real_projection(&mut document, exact_serial);
+    document
+}
+
+fn launch_unavailable() -> String {
+    safe_error(
+        "launch_unavailable",
+        "This launch action is unavailable. Refresh the completed execution before trying again.",
+    )
+}
+
+fn launch_stale_target() -> String {
+    safe_error(
+        "launch_stale_target",
+        "The reviewed device or configuration changed. Generate and review a fresh plan.",
+    )
+}
+
+fn platform_tools_unavailable() -> String {
+    safe_error(
+        "platform_tools_unavailable",
+        "The reviewed Platform-Tools installation is unavailable. Repair it before trying again.",
+    )
 }
 
 fn forget_lost_real_mapping(state: &AppState, public_handle: &str) -> Result<(), String> {
@@ -1072,8 +1430,81 @@ fn project_real_snapshot(mapping: &ExecutionMapping, report: &Value) -> Value {
         }
     }
     public["target"] = project_real_target(mapping, exact_serial);
+    public["completion"] = completion_summary(&public, true);
     sanitize_real_projection(&mut public, exact_serial);
     public
+}
+
+fn eligible_launch_label(mapping: &ExecutionMapping, report: &Value) -> Option<String> {
+    if report.get("simulated").and_then(Value::as_bool) != Some(false)
+        || !matches!(
+            report.get("status").and_then(Value::as_str),
+            Some("succeeded" | "succeeded_with_warnings")
+        )
+    {
+        return None;
+    }
+    let succeeded = report
+        .get("recipes")
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+        .flat_map(|recipe| {
+            recipe
+                .get("steps")
+                .and_then(Value::as_array)
+                .into_iter()
+                .flatten()
+        })
+        .filter(|step| step.get("status").and_then(Value::as_str) == Some("succeeded"))
+        .filter_map(|step| step.get("stepId").and_then(Value::as_str))
+        .collect::<HashSet<_>>();
+    let mut candidates = HashMap::<(String, Option<String>), String>::new();
+    for step in mapping
+        .review
+        .response
+        .pointer("/plan/steps")
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+    {
+        let step_id = step.get("id").and_then(Value::as_str)?;
+        if step.get("type").and_then(Value::as_str) != Some("launch_app")
+            || !succeeded.contains(step_id)
+        {
+            continue;
+        }
+        let params = step.get("params")?;
+        let package_name = params
+            .pointer("/package_name/value")
+            .and_then(Value::as_str)
+            .filter(|value| !value.trim().is_empty())?;
+        let activity = match params.get("activity") {
+            None => None,
+            Some(value) if value.get("value").is_some_and(Value::is_null) => None,
+            Some(value) => Some(
+                value
+                    .get("value")
+                    .and_then(Value::as_str)
+                    .filter(|value| !value.trim().is_empty())?
+                    .to_string(),
+            ),
+        };
+        let label = step
+            .get("note")
+            .or_else(|| step.get("name"))
+            .and_then(Value::as_str)
+            .filter(|value| !value.trim().is_empty())
+            .unwrap_or("Launch configured app")
+            .to_string();
+        candidates
+            .entry((package_name.to_string(), activity))
+            .or_insert(label);
+    }
+    if candidates.len() != 1 {
+        return None;
+    }
+    candidates.into_values().next()
 }
 
 fn project_real_target(mapping: &ExecutionMapping, exact_serial: &str) -> Value {
@@ -1157,7 +1588,42 @@ fn project_real_issue(issue: &Value) -> Value {
         "message": message,
         "recipeId": issue.get("recipeId"),
         "stepId": issue.get("stepId"),
+        "remediation": remediation_for_code(code),
     })
+}
+
+fn remediation_for_code(code: &str) -> Value {
+    let (kind, title, message) = match code {
+        "artifact_tls_verification_failed"
+        | "artifact_digest_mismatch"
+        | "artifact_size_mismatch"
+        | "unknown_artifact_ref"
+        | "missing_capability"
+        | "step_conflict" => (
+            "review_inputs",
+            "Review this configuration",
+            "Refresh the configuration and review its inputs before creating a new plan.",
+        ),
+        "artifact_http_status" | "artifact_transport_failed" => (
+            "generate_fresh_plan",
+            "Try again with a fresh plan",
+            "After resolving connectivity or artifact availability, generate and review a fresh plan.",
+        ),
+        "dependency_blocked"
+        | "verification_failed"
+        | "step_execution_failed"
+        | "optional_permission_failed" => (
+            "generate_fresh_plan",
+            "Repair and retry",
+            "Resolve the reported feature problem, then generate and review a fresh plan.",
+        ),
+        _ => (
+            "view_report",
+            "Review the execution report",
+            "Export the sanitized report for support, then start a fresh planning flow.",
+        ),
+    };
+    json!({ "kind": kind, "title": title, "message": message })
 }
 
 fn project_real_event_batch(mapping: &ExecutionMapping, response: &Value) -> Value {
@@ -1272,8 +1738,6 @@ fn sanitize_real_projection(value: &mut Value, exact_serial: &str) {
                     key.as_str(),
                     "executionHandle"
                         | "reviewHandle"
-                        | "label"
-                        | "message"
                         | "simulated"
                         | "verificationScope"
                         | "status"
@@ -1284,6 +1748,11 @@ fn sanitize_real_projection(value: &mut Value, exact_serial: &str) {
                         | "phase"
                         | "accepted"
                         | "code"
+                        | "classification"
+                        | "kind"
+                        | "schema"
+                        | "schemaVersion"
+                        | "protocolVersion"
                 ) {
                     continue;
                 }
@@ -1395,6 +1864,7 @@ fn project_snapshot(mapping: &ExecutionMapping, report: &Value) -> Value {
         "executionHandle": mapping.public_handle,
         "reviewHandle": mapping.review_handle,
         "simulated": true,
+        "verificationScope": "simulation_only",
         "status": status,
         "startedAt": report.get("startedAt"),
         "finishedAt": report.get("finishedAt"),
@@ -1404,6 +1874,7 @@ fn project_snapshot(mapping: &ExecutionMapping, report: &Value) -> Value {
         "warnings": warnings,
         "errors": errors,
     });
+    public["completion"] = completion_summary(&public, false);
     if !exact_serial.is_empty() {
         redact_exact_serial(&mut public, exact_serial);
     }
@@ -1470,15 +1941,77 @@ fn project_issues(value: Option<&Value>, exact_serial: &str) -> Vec<Value> {
         .and_then(Value::as_array)
         .into_iter()
         .flatten()
-        .map(|issue| {
-            json!({
-                "code": issue.get("code").and_then(Value::as_str).unwrap_or("execution_issue"),
-                "message": issue.get("message").and_then(Value::as_str).map(|value| sanitize_text(value, exact_serial)).unwrap_or_else(|| "Simulated work reported an issue.".to_string()),
-                "recipeId": issue.get("recipeId"),
-                "stepId": issue.get("stepId"),
-            })
+        .map(project_real_issue)
+        .map(|mut issue| {
+            redact_exact_serial(&mut issue, exact_serial);
+            issue
         })
         .collect()
+}
+
+fn completion_summary(snapshot: &Value, real: bool) -> Value {
+    let status = snapshot
+        .get("status")
+        .and_then(Value::as_str)
+        .unwrap_or("running");
+    let mut counts = BTreeMap::<&'static str, u64>::from([
+        ("total", 0),
+        ("completed", 0),
+        ("skipped", 0),
+        ("blocked", 0),
+        ("failed", 0),
+        ("cancelled", 0),
+        ("pending", 0),
+    ]);
+    let mut features = Vec::new();
+    for recipe in snapshot
+        .get("recipes")
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+    {
+        let mut feature_counts = BTreeMap::<&'static str, u64>::new();
+        for step in recipe
+            .get("steps")
+            .and_then(Value::as_array)
+            .into_iter()
+            .flatten()
+        {
+            *counts.get_mut("total").expect("count exists") += 1;
+            let key = match step.get("status").and_then(Value::as_str) {
+                Some("succeeded") => "completed",
+                Some("skipped") => "skipped",
+                Some("blocked") => "blocked",
+                Some("failed") => "failed",
+                Some("cancelled") => "cancelled",
+                _ => "pending",
+            };
+            *counts.get_mut(key).expect("count exists") += 1;
+            *feature_counts.entry(key).or_default() += 1;
+        }
+        features.push(json!({
+            "recipeId": recipe.get("recipeId"),
+            "name": recipe.get("name"),
+            "status": recipe.get("status"),
+            "counts": feature_counts,
+        }));
+    }
+    let classification = match status {
+        "succeeded" => "success",
+        "succeeded_with_warnings" => "success_with_warnings",
+        "failed" => "failed",
+        "cancelled" => "cancelled",
+        _ => "in_progress",
+    };
+    json!({
+        "classification": classification,
+        "counts": counts,
+        "warningCount": snapshot.get("warnings").and_then(Value::as_array).map_or(0, Vec::len),
+        "features": features,
+        "partialChangesPossible": real
+            && matches!(status, "failed" | "cancelled")
+            && counts.get("completed").copied().unwrap_or(0) > 0,
+    })
 }
 
 fn project_event_batch(mapping: &ExecutionMapping, response: &Value) -> Value {
@@ -1682,6 +2215,172 @@ mod tests {
         store.reserve_start(ExecutionKind::Simulated).unwrap();
         store.release_start();
         store.reserve_start(ExecutionKind::Real).unwrap();
+    }
+
+    fn launch_review() -> ReviewedPlanSnapshot {
+        let mut reviewed = review();
+        reviewed.response["plan"]["steps"] = json!([{
+            "id": "recipe.one/launch",
+            "recipe_ref": "recipe.one",
+            "type": "launch_app",
+            "name": "Launch app",
+            "note": "Launch configured app",
+            "params": {
+                "package_name": { "value": "com.example.app" },
+                "activity": { "value": ".MainActivity" }
+            }
+        }]);
+        reviewed
+    }
+
+    fn eligible_launch_report(status: &str) -> Value {
+        json!({
+            "simulated": false,
+            "status": status,
+            "recipes": [{
+                "recipeId": "recipe.one",
+                "name": "Recipe One",
+                "status": status,
+                "steps": [{
+                    "stepId": "recipe.one/launch",
+                    "status": "succeeded"
+                }]
+            }]
+        })
+    }
+
+    #[test]
+    fn tauri_consumes_each_launch_handle_once_and_can_regenerate_after_failure() {
+        let mut store = ExecutionHandleStore::default();
+        store.reserve_start(ExecutionKind::Real).unwrap();
+        let mapping = store.bind_started(
+            ExecutionKind::Real,
+            "sidecar-real".into(),
+            "review-real".into(),
+            launch_review(),
+        );
+        let report = eligible_launch_report("succeeded_with_warnings");
+        store.mark_terminal(ExecutionKind::Real, &mapping.public_handle);
+        let first = store.launch_action(&mapping, &report).unwrap();
+        let first_handle = first.get("handle").and_then(Value::as_str).unwrap();
+        let consumed = store.consume_launch_action(first_handle).unwrap();
+        assert_eq!(consumed.mapping.public_handle, mapping.public_handle);
+        assert!(store.consume_launch_action(first_handle).is_err());
+
+        let replacement = store.launch_action(&mapping, &report).unwrap();
+        assert_ne!(replacement.get("handle"), first.get("handle"));
+        store.mark_launch_succeeded(&mapping.public_handle);
+        assert!(store.launch_action(&mapping, &report).is_none());
+    }
+
+    #[test]
+    fn concurrent_duplicate_launch_consumption_has_one_winner() {
+        use std::sync::{Arc, Barrier};
+
+        let mut store = ExecutionHandleStore::default();
+        store.reserve_start(ExecutionKind::Real).unwrap();
+        let mapping = store.bind_started(
+            ExecutionKind::Real,
+            "sidecar-real".into(),
+            "review-real".into(),
+            launch_review(),
+        );
+        let report = eligible_launch_report("succeeded");
+        store.mark_terminal(ExecutionKind::Real, &mapping.public_handle);
+        let action = store.launch_action(&mapping, &report).unwrap();
+        let handle = action
+            .get("handle")
+            .and_then(Value::as_str)
+            .unwrap()
+            .to_string();
+        let store = Arc::new(Mutex::new(store));
+        let barrier = Arc::new(Barrier::new(3));
+        let mut workers = Vec::new();
+        for _ in 0..2 {
+            let store = Arc::clone(&store);
+            let barrier = Arc::clone(&barrier);
+            let handle = handle.clone();
+            workers.push(std::thread::spawn(move || {
+                barrier.wait();
+                store.lock().unwrap().consume_launch_action(&handle).is_ok()
+            }));
+        }
+        barrier.wait();
+        let successes = workers
+            .into_iter()
+            .map(|worker| worker.join().unwrap())
+            .filter(|succeeded| *succeeded)
+            .count();
+        assert_eq!(successes, 1);
+    }
+
+    #[test]
+    fn failed_completion_keeps_failure_primary_and_reports_partial_changes() {
+        let snapshot = json!({
+            "status": "failed",
+            "warnings": [{ "code": "optional_permission_failed" }],
+            "recipes": [{
+                "recipeId": "recipe.one",
+                "name": "Recipe One",
+                "status": "failed",
+                "steps": [
+                    { "status": "succeeded" },
+                    { "status": "blocked" },
+                    { "status": "failed" }
+                ]
+            }]
+        });
+        let summary = completion_summary(&snapshot, true);
+        assert_eq!(summary["classification"], "failed");
+        assert_eq!(summary["counts"]["completed"], 1);
+        assert_eq!(summary["counts"]["blocked"], 1);
+        assert_eq!(summary["counts"]["failed"], 1);
+        assert_eq!(summary["warningCount"], 1);
+        assert_eq!(summary["partialChangesPossible"], true);
+        assert_eq!(remediation_for_code("unrecognized")["kind"], "view_report");
+    }
+
+    #[test]
+    fn report_document_is_deterministic_and_excludes_private_authority() {
+        let mut store = ExecutionHandleStore::default();
+        store.reserve_start(ExecutionKind::Real).unwrap();
+        let mapping = store.bind_started(
+            ExecutionKind::Real,
+            "sidecar-private-id".into(),
+            "review-private-id".into(),
+            review(),
+        );
+        let report = json!({ "planId": "/private/plan", "status": "failed" });
+        let public = json!({
+            "executionHandle": mapping.public_handle,
+            "reviewHandle": mapping.review_handle,
+            "simulated": false,
+            "verificationScope": "real_device",
+            "status": "failed",
+            "startedAt": "2026-07-14T00:00:00Z",
+            "finishedAt": "2026-07-14T00:00:01Z",
+            "completion": { "classification": "failed" },
+            "recipes": [{ "name": "/Users/private/input.apk", "status": "failed" }],
+            "warnings": [],
+            "errors": [{ "message": "https://user:secret@example.invalid/file" }],
+            "target": { "model": "sensitive-serial" }
+        });
+        let runtime = json!({ "status": "ready", "protocolVersion": 1 });
+        let first = execution_report_document(&mapping, &report, &public, runtime.clone());
+        let second = execution_report_document(&mapping, &report, &public, runtime);
+        assert_eq!(first, second);
+        let serialized = serde_json::to_string_pretty(&first).unwrap();
+        for forbidden in [
+            "sidecar-private-id",
+            "review-private-id",
+            "sensitive-serial",
+            "/Users/private",
+            "user:secret",
+        ] {
+            assert!(!serialized.contains(forbidden), "leaked {forbidden}");
+        }
+        assert_eq!(first["schemaVersion"], 1);
+        assert_eq!(first["execution"]["verificationScope"], "real_device");
     }
 
     #[test]

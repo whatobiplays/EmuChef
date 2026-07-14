@@ -162,6 +162,7 @@ fn assert_hello_result(result: &Value) {
             "getExecution",
             "getExecutionEvents",
             "cancelExecution",
+            "launchExecutionApp",
             "openRecipe",
             "createRecipeFromTemplate",
             "getDocument",
