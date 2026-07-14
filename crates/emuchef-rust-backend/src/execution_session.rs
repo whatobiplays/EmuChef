@@ -1092,6 +1092,14 @@ mod tests {
     };
 
     #[test]
+    fn backend_default_cache_root_remains_working_directory_local() {
+        let current = std::env::current_dir().unwrap();
+        let config = SidecarRuntimeConfig::default();
+        assert_eq!(config.cache_root, current.join(".emuchef_cache/artifacts"));
+        assert_eq!(config.runtime_root, current.join(".emuchef_runtime"));
+    }
+
+    #[test]
     fn target_matching_normalizes_display_text_but_not_serial_or_api() {
         let reviewed = TargetDeviceBinding {
             serial: "SERIAL-1".to_string(),

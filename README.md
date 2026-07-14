@@ -79,6 +79,13 @@ execution plan or runtime authority. Opening or reusing one always performs a
 fresh device probe, validation, description, plan generation, and review. See
 the [Phase 3A contract](docs/product/phase-3a-saved-configurations.md).
 
+Phase 3B adds a Support & Storage panel with a bounded sanitized local
+diagnostics ZIP and opaque management of the app-owned artifact cache. The
+end-user app injects its application-data cache root without changing backend,
+CLI, or config-editor defaults. Cache payloads and optional metadata are one
+logical entry. See the
+[Phase 3B contract](docs/product/phase-3b-support-diagnostics-and-cache.md).
+
 Android SDK Platform-Tools is a user-supplied prerequisite. EmuChef does not
 bundle or download it. The app links to Google's official page and can import a
 macOS Platform-Tools ZIP through a native picker into validated application

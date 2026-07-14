@@ -68,6 +68,36 @@ impl ExecutionHandleStore {
         *self = Self::default();
     }
 
+    /// Return aggregate-only execution retention state for support diagnostics.
+    pub fn support_summary(&self, sidecar: &SidecarState) -> Value {
+        let latest_terminal = self.latest_terminal.as_ref().and_then(|mapping| {
+            let response = runtime_request(
+                sidecar,
+                "getExecution",
+                json!({ "executionId": mapping.sidecar_id }),
+            )
+            .ok()?;
+            let report = response.get("execution")?;
+            Some(json!({
+                "mode": match mapping.kind {
+                    ExecutionKind::Simulated => "simulated",
+                    ExecutionKind::Real => "real",
+                },
+                "status": allowlisted_real_string(
+                    report.get("status"),
+                    &["succeeded", "succeeded_with_warnings", "failed", "cancelled"],
+                    "failed",
+                ),
+                "completion": completion_summary(report, mapping.kind == ExecutionKind::Real),
+            }))
+        });
+        json!({
+            "startingOrActive": self.has_in_flight(),
+            "retainedTerminalCount": usize::from(latest_terminal.is_some()),
+            "latestTerminal": latest_terminal,
+        })
+    }
+
     fn reserve_start(&mut self, kind: ExecutionKind) -> Result<(), ()> {
         if self.start_reserved.is_some() || self.active.is_some() {
             return Err(());

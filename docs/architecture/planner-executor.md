@@ -63,6 +63,16 @@ runtime/cache sandbox. The resolver owns compatible URL-based filenames,
 destination selection, partial-file cleanup, and no-clobber publication. The
 transport owns serial blocking HTTP requests and fixed-size response streaming.
 
+For default-cache publication, the resolver also prepares an optional schema-v1
+metadata sidecar containing only a safe artifact label, source kind, source
+fingerprint, payload filename, and expected size. The payload remains execution
+authority. The sidecar also binds those fields to the payload modification
+fingerprint captured before promotion. Metadata failure leaves a usable
+unindexed payload, and stale metadata cannot validate a replaced payload; it
+never changes execution success into failure. The end-user Tauri app alone
+interprets this payload-plus-sidecar pair as one manageable cache entry under
+its explicitly injected application-data root.
+
 The resolver also owns side-effect-free artifact admission. It validates
 supported artifact and cache definitions, the selected destination and sandbox
 policy, readable regular `file://` sources, and structurally valid HTTP(S)

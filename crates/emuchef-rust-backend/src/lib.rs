@@ -5,6 +5,7 @@
 //! Phase 0 contract for a future end-user application.
 
 mod artifact_resolver;
+mod artifact_store;
 mod artifact_transport;
 pub mod catalog;
 pub mod catalog_source;

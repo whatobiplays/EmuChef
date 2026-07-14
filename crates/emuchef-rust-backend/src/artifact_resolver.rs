@@ -11,6 +11,7 @@ use sha2::{Digest, Sha256};
 use tempfile::{Builder as TempFileBuilder, NamedTempFile};
 use url::Url;
 
+use crate::artifact_store::{prepare_metadata, publish_metadata};
 use crate::artifact_transport::{
     ArtifactTransport, HttpArtifactTransport, HttpClientConfig, LocalFileTransport,
 };
@@ -285,8 +286,36 @@ impl<'a> ArtifactResolver<'a> {
             return Err(cleanup_partial(partial, error, false));
         }
 
+        let payload_fingerprint = partial.as_file().metadata().ok().map(|metadata| {
+            let modified_nanos = metadata
+                .modified()
+                .ok()
+                .and_then(|value| value.duration_since(std::time::UNIX_EPOCH).ok())
+                .map(|value| value.as_nanos());
+            (metadata.len(), modified_nanos)
+        });
+        let prepared_metadata = if admitted.default_cache {
+            payload_fingerprint.and_then(|(size, modified_nanos)| {
+                prepare_metadata(
+                    &admitted.final_path,
+                    request.artifact_id,
+                    request.url,
+                    size,
+                    modified_nanos,
+                )
+            })
+        } else {
+            None
+        };
         let (local_path, cache_hit) =
             finish_partial(partial, &admitted.final_path, admitted.default_cache, None)?;
+        if !cache_hit {
+            if let Some(metadata) = prepared_metadata.as_ref() {
+                // Metadata is optional support state. Failure intentionally
+                // leaves the payload usable and unindexed.
+                let _ = publish_metadata(&local_path, metadata);
+            }
+        }
 
         Ok(ResolvedArtifact {
             local_path,

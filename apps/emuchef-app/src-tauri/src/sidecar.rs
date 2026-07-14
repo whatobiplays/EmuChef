@@ -65,9 +65,13 @@ pub struct SidecarState {
 }
 
 impl SidecarState {
-    pub fn new() -> Self {
+    /// Construct the end-user runtime with its trusted app-owned cache root.
+    ///
+    /// This explicit path is supplied only by the Tauri app. Backend defaults,
+    /// CLI behavior, and other sidecar embedders remain unchanged.
+    pub fn new(cache_root: PathBuf) -> Self {
         Self {
-            inner: Mutex::new(SidecarClient::new()),
+            inner: Mutex::new(SidecarClient::new(cache_root)),
         }
     }
 
@@ -84,6 +88,33 @@ impl SidecarState {
             .clone()
     }
 
+    /// Return fixed, path-free runtime compatibility data for support export.
+    pub fn diagnostics(&self) -> Value {
+        let status = match self.status() {
+            RuntimeStatusDto::Starting => json!({ "status": "starting" }),
+            RuntimeStatusDto::Ready {
+                protocol_version,
+                catalog_version,
+            } => json!({
+                "status": "ready",
+                "protocolVersion": protocol_version,
+                "catalogVersion": catalog_version,
+            }),
+            RuntimeStatusDto::Unsupported { error } => json!({
+                "status": "unsupported",
+                "error": { "code": error.code, "actions": error.actions },
+            }),
+            RuntimeStatusDto::Failed { error } => json!({
+                "status": "failed",
+                "error": { "code": error.code, "actions": error.actions },
+            }),
+        };
+        json!({
+            "status": status,
+            "requiredCapabilities": REQUIRED_CAPABILITIES,
+        })
+    }
+
     pub fn request(&self, request_type: &str, payload: Value) -> Result<Value, String> {
         self.inner
             .lock()
@@ -96,14 +127,16 @@ struct SidecarClient {
     process: Option<SidecarProcess>,
     status: RuntimeStatusDto,
     next_request_id: u64,
+    cache_root: PathBuf,
 }
 
 impl SidecarClient {
-    fn new() -> Self {
+    fn new(cache_root: PathBuf) -> Self {
         Self {
             process: None,
             status: RuntimeStatusDto::Starting,
             next_request_id: 1,
+            cache_root,
         }
     }
 
@@ -141,7 +174,7 @@ impl SidecarClient {
     }
 
     fn start_and_negotiate(&mut self) -> Result<u64, StartFailure> {
-        self.process = Some(start_process().map_err(StartFailure::Failed)?);
+        self.process = Some(start_process(&self.cache_root).map_err(StartFailure::Failed)?);
         let hello = self
             .raw_request("hello", json!({}))
             .map_err(StartFailure::Failed)?;
@@ -262,14 +295,9 @@ struct SidecarProcess {
     stdout: BufReader<ChildStdout>,
 }
 
-fn start_process() -> Result<SidecarProcess, String> {
+fn start_process(cache_root: &Path) -> Result<SidecarProcess, String> {
     let (program, cwd) = resolve_sidecar()?;
-    let mut command = Command::new(&program);
-    command
-        .arg("--sidecar")
-        .stdin(Stdio::piped())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::null());
+    let mut command = sidecar_command(&program, cache_root);
     if let Some(cwd) = cwd {
         command.current_dir(cwd);
     }
@@ -289,6 +317,18 @@ fn start_process() -> Result<SidecarProcess, String> {
         stdin,
         stdout: BufReader::new(stdout),
     })
+}
+
+fn sidecar_command(program: &Path, cache_root: &Path) -> Command {
+    let mut command = Command::new(program);
+    command
+        .arg("--sidecar")
+        .arg("--cache-root")
+        .arg(cache_root)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null());
+    command
 }
 
 fn resolve_sidecar() -> Result<(PathBuf, Option<PathBuf>), String> {
@@ -430,5 +470,40 @@ mod tests {
             incompatible["result"]["unsupportedRequired"],
             json!(["missingExecutionCapability"])
         );
+    }
+
+    #[test]
+    fn end_user_command_injects_only_the_trusted_cache_root() {
+        let command = sidecar_command(Path::new("emuchef"), Path::new("/trusted/app/cache"));
+        let args = command
+            .get_args()
+            .map(|arg| arg.to_string_lossy().to_string())
+            .collect::<Vec<_>>();
+        assert_eq!(args, ["--sidecar", "--cache-root", "/trusted/app/cache"]);
+    }
+
+    #[test]
+    fn diagnostics_omit_runtime_error_messages() {
+        let state = SidecarState {
+            inner: Mutex::new(SidecarClient {
+                process: None,
+                status: RuntimeStatusDto::Failed {
+                    error: RuntimeErrorDto {
+                        code: "runtime_start_failed",
+                        message: "/Users/alice/private/runtime failed".to_string(),
+                        actions: vec!["retry"],
+                    },
+                },
+                next_request_id: 1,
+                cache_root: PathBuf::from("/trusted/app/cache"),
+            }),
+        };
+        let diagnostics = state.diagnostics();
+        assert_eq!(diagnostics["status"]["status"], "failed");
+        assert_eq!(
+            diagnostics["status"]["error"],
+            json!({ "code": "runtime_start_failed", "actions": ["retry"] })
+        );
+        assert!(!diagnostics.to_string().contains("/Users/alice"));
     }
 }

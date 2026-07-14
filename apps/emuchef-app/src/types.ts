@@ -370,3 +370,45 @@ export type SavedConfigurationMutation =
   | { kind: "selected_recipes"; value: string[] }
   | { kind: "binding"; key: string; value: unknown }
   | { kind: "remove_binding"; key: string };
+
+export interface CacheEntry {
+  cacheEntryHandle: string;
+  category: "artifact" | "partial";
+  artifactLabel: string;
+  sourceKind: "file" | "http" | "https" | "unknown";
+  integrityState: "complete" | "incomplete" | "unindexed" | "metadata_mismatch";
+  sizeBytes: number;
+  ageBucket: "under_1_day" | "1_to_7_days" | "8_to_30_days" | "over_30_days" | "unknown";
+  inUse: boolean;
+  removable: boolean;
+}
+
+export interface CacheInventory {
+  generation: string;
+  entries: CacheEntry[];
+  summary: {
+    entryCount: number;
+    totalSizeBytes: number;
+    inUseCount: number;
+    unmanagedCount: number;
+    unmanagedSizeBytes: number;
+  };
+}
+
+export type CacheCleanupMode = "selected" | "unused" | "all_removable";
+
+export interface CacheCleanupOutcome {
+  entryHandle: string;
+  outcome: "removed" | "skipped_in_use" | "already_missing" | "invalidated" | "failed";
+  code: string;
+  message: string;
+}
+
+export interface CacheCleanupResult {
+  outcomes: CacheCleanupOutcome[];
+  inventory: CacheInventory;
+}
+
+export interface SupportDiagnosticsExportResult {
+  outcome: "saved" | "cancelled";
+}

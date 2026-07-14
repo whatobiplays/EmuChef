@@ -21,6 +21,10 @@ import type {
   SavedConfigurationDialogResult,
   SavedConfigurationDocument,
   SavedConfigurationMutation,
+  CacheCleanupMode,
+  CacheCleanupResult,
+  CacheInventory,
+  SupportDiagnosticsExportResult,
 } from "./types";
 
 export const api = {
@@ -119,4 +123,13 @@ export const api = {
     }),
   closeSavedConfiguration: (configurationHandle: string) =>
     invoke<void>("close_saved_configuration", { request: { configurationHandle } }),
+  cacheInventory: () => invoke<CacheInventory>("get_cache_inventory"),
+  cleanupCache: (request: {
+    mode: CacheCleanupMode;
+    inventoryGeneration: string;
+    entryHandles: string[];
+    confirmation: { confirmed: true; entryCount: number; totalSizeBytes: number };
+  }) => invoke<CacheCleanupResult>("cleanup_cache", { request }),
+  exportSupportDiagnostics: () =>
+    invoke<SupportDiagnosticsExportResult>("export_support_diagnostics"),
 };

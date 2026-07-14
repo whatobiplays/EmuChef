@@ -125,6 +125,30 @@ test("React DTOs contain opaque handles and no exact serial property", () => {
   assert.match(commands, /Sidecar DTOs are never returned directly/);
 });
 
+test("support and cache IPC expose opaque logical entries without filesystem authority", () => {
+  const api = read("src/api.ts");
+  const types = read("src/types.ts");
+  const support = read("src-tauri/src/support.rs");
+  const frontendApi = sourceSlice(api, "cacheInventory:", "\n};");
+  assert.match(types, /cacheEntryHandle: string/);
+  assert.doesNotMatch(frontendApi, /\b(?:cacheRoot|path|fileName|metadataPath|destination|rawBundle|url)\b/i);
+  assert.match(support, /pub struct SupportStore/);
+  assert.match(support, /fn canonical_cache_root/);
+  assert.match(support, /fn delete_logical_entry/);
+  assert.doesNotMatch(types, /(?:cache|diagnostics)[\s\S]{0,800}\b(?:path|fileName|metadataPath|destination|rawBundle|url)\??:/i);
+});
+
+test("end-user cache root is injected only from trusted app-data startup", () => {
+  const app = read("src-tauri/src/lib.rs");
+  const sidecar = read("src-tauri/src/sidecar.rs");
+  const backend = read("../../crates/emuchef-rust-backend/src/execution_session.rs");
+  assert.match(app, /let cache_root = app_data\.join\("artifact-cache"\)/);
+  assert.match(app, /SidecarState::new\(cache_root\.clone\(\)\)/);
+  assert.match(sidecar, /\.arg\("--cache-root"\)\s*\.arg\(cache_root\)/s);
+  assert.match(backend, /cache_root: root\.join\("\.emuchef_cache"\)\.join\("artifacts"\)/);
+  assert.doesNotMatch(`${app}\n${sidecar}`, /EMUCHEF_(?:CACHE|ARTIFACT)|std::env::var[^\n]*CACHE/i);
+});
+
 test("saved configuration file authority remains behind opaque Tauri handles", () => {
   const api = read("src/api.ts");
   const types = read("src/types.ts");

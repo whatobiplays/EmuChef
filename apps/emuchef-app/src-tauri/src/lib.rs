@@ -5,6 +5,7 @@ mod execution;
 mod handles;
 mod saved_configurations;
 mod sidecar;
+mod support;
 
 use std::sync::Mutex;
 
@@ -15,13 +16,14 @@ pub fn run() {
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_opener::init())
         .setup(|app| {
-            let sidecar = sidecar::SidecarState::new();
-            sidecar.initialize();
-            let catalog = catalog::CatalogDescriptor::resolve(app.handle());
             let app_data = app
                 .path()
                 .app_data_dir()
                 .map_err(|error| format!("Application data directory is unavailable: {error}"))?;
+            let cache_root = app_data.join("artifact-cache");
+            let sidecar = sidecar::SidecarState::new(cache_root.clone());
+            sidecar.initialize();
+            let catalog = catalog::CatalogDescriptor::resolve(app.handle());
             app.manage(commands::AppState {
                 sidecar,
                 catalog,
@@ -33,6 +35,7 @@ pub fn run() {
                         app_data.join("recent-configurations.json"),
                     ),
                 ),
+                support: Mutex::new(support::SupportStore::new(cache_root)),
             });
             Ok(())
         })
@@ -74,6 +77,9 @@ pub fn run() {
             execution::cancel_real_execution,
             execution::export_execution_report,
             execution::launch_configured_app,
+            support::get_cache_inventory,
+            support::cleanup_cache,
+            support::export_support_diagnostics,
         ])
         .run(tauri::generate_context!())
         .expect("error while running EmuChef");

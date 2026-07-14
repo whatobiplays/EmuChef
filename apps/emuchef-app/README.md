@@ -17,6 +17,12 @@ requires a fresh device probe, current catalog validation, fresh description,
 fresh plan generation, and fresh review. Generated plans, digests, device facts,
 serials, and review or execution authority are never saved.
 
+The Support & Storage panel exports a sanitized, bounded local diagnostics ZIP
+and inventories the app-owned artifact cache without exposing filesystem
+authority to React. Tauri fixes `<app-data>/artifact-cache` at startup and
+passes it explicitly to this app's sidecar. Backend defaults and other sidecar
+clients are unaffected.
+
 The implemented, default-disabled real-device trust boundary is documented in the
 [Phase 2B guarded real-execution contract](../../docs/product/phase-2b-guarded-real-execution.md).
 The feature is not release approval: each platform still requires packaged
@@ -40,6 +46,14 @@ device handles, opaque review handles, masked serial presentation, catalog
 identity, plan digest, human-readable review data, and actionable errors. Exact
 serials, ADB executable paths, full reviewed plans, and catalog roots never
 cross the React IPC boundary or enter frontend state, logs, storage, or markup.
+
+Cache payloads and their optional safe metadata sidecars are one logical entry.
+React receives only an opaque entry handle, safe classification, combined size,
+age bucket, integrity state, and in-use/removable flags. Tauri revalidates both
+components and the approved root before deletion. Cleanup is disabled while an
+execution is starting or active. Diagnostics exports contain aggregate
+allowlisted data only and never include configuration names or contents, paths,
+serials, URLs, logs, process output, or credentials.
 
 The trusted Tauri backend retains the complete immutable reviewed-plan response,
 exact target binding, catalog identity and digest, and canonical plan digest.

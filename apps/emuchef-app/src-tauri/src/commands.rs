@@ -19,6 +19,7 @@ use crate::execution::ExecutionHandleStore;
 use crate::handles::{ReviewedPlanSnapshot, SessionHandles};
 use crate::saved_configurations::SavedConfigurationState;
 use crate::sidecar::{RuntimeStatusDto, SidecarState};
+use crate::support::SupportStore;
 
 pub struct AppState {
     pub sidecar: SidecarState,
@@ -27,6 +28,7 @@ pub struct AppState {
     pub handles: Mutex<SessionHandles>,
     pub executions: Mutex<ExecutionHandleStore>,
     pub saved_configurations: SavedConfigurationState,
+    pub support: Mutex<SupportStore>,
 }
 
 #[tauri::command]
@@ -98,6 +100,11 @@ fn reset_app_session(state: &AppState, close_documents: bool) -> Result<(), Stri
             )
         })?
         .reset();
+    state
+        .support
+        .lock()
+        .map_err(|_| safe_error("support_state_unavailable", "Support state is unavailable."))?
+        .invalidate();
     Ok(())
 }
 

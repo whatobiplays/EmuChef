@@ -188,6 +188,42 @@ negotiated. It supports `describeCatalog`, `startExecution`, `getExecution`,
 execution may be active in a sidecar process;
 terminal attempts remain inspectable in memory until process exit.
 
+## End-User Support and Artifact Cache
+
+The end-user Tauri application owns a dedicated artifact cache at
+`<app-data>/artifact-cache`. Tauri derives and injects that root when it starts
+the sidecar. React, environment variables, and current-working-directory policy
+cannot redirect it. The backend default remains `.emuchef_cache/artifacts` when
+no explicit cache root is supplied, so CLI, config-editor, tests, and other
+embedders retain their existing behavior. Legacy caches are neither migrated
+nor deleted.
+
+Each managed cache entry consists of one payload and an optional schema-v1
+metadata sidecar. The sidecar contains a safe artifact label, source-kind enum,
+SHA-256 source fingerprint, expected payload size, and internal payload
+filename plus the payload modification fingerprint captured before promotion;
+it contains no raw URL or path and provides no execution authority.
+Metadata publication failure leaves a usable unindexed payload and does not
+fail execution. Inventory count and size treat payload and metadata as one
+logical entry. Orphan metadata and unrecognized files remain unmanaged and
+non-removable.
+
+React receives generation-scoped opaque cache-entry handles plus safe category,
+label, source kind, structural integrity state, combined size, age bucket,
+in-use state, and removability. Tauri owns selective, unused, and all-removable
+cleanup. It requires exact count/size confirmation, blocks cleanup while an
+execution is starting or active, and revalidates root confinement, symlink
+status, logical association, and both component fingerprints immediately before
+deletion. Cleanup returns stable sanitized outcomes and a fresh inventory.
+
+The Support & Storage panel exports a deterministic schema-v1 ZIP through a
+native save dialog. Tauri owns the destination and bundle bytes. The 2 MiB
+bundle includes only app/runtime status, OS class, feature gates, public catalog
+identity, aggregate saved-configuration and retained-execution state, and
+aggregate cache counts/sizes. It excludes names, configuration contents,
+bindings, handles, paths, serials, environment values, URLs, credentials, logs,
+process or ADB output, reviewed plans, files, and crash data.
+
 `startExecution` requires a complete plan and its canonical digest, recomputes
 the digest before apply, and rejects `runtimeRoot` and `cacheRoot`. Those roots
 are configured at sidecar startup and each attempt derives its own runtime

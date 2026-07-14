@@ -9,7 +9,7 @@
 | Real-ADB apply | Rust | Active; manual device validation required |
 | Tauri editor backend | Rust JSONL sidecar | Active |
 | Phase 0 end-user runtime protocol | Rust JSONL sidecar | Active backend contract |
-| End-user desktop app | React UI with trusted Rust/Tauri bridge | Phase 3A portable saved configurations active; guarded real execution remains default-disabled |
+| End-user desktop app | React UI with trusted Rust/Tauri bridge | Phase 3B support diagnostics and app-owned cache management active; guarded real execution remains default-disabled |
 | Platform-Tools import and verification | Rust/Tauri | User-supplied, app-managed, macOS-only |
 | Catalog source resolution | Rust | Bundled/local snapshots active; cached remote reserved |
 | Execution reports and incremental events | Rust JSONL sidecar | Active in-memory session contract |
@@ -72,3 +72,17 @@ execution plan. Opening or reusing a document invalidates prior device facts,
 generated plans, digests, reviews, executions, confirmations, and launch
 actions. Fresh probe, match, catalog validation, description, planning, and
 review are required before execution.
+
+## Phase 3B support and cache boundary
+
+The end-user Tauri app injects its trusted application-data artifact-cache root
+when it starts the sidecar. This is app-specific runtime construction; backend
+defaults, CLI behavior, and config-editor startup remain unchanged. React never
+supplies or receives the root, a cache path, filename, metadata identity,
+diagnostics destination, or diagnostics bytes.
+
+The sidecar publishes optional safe metadata beside new default-cache payloads.
+Tauri inventories payload plus metadata as one logical opaque entry, includes
+both components in size accounting and stale checks, blocks cleanup while
+execution use is possible, and owns every filesystem deletion. Unrecognized
+files and orphan metadata remain unmanaged and non-removable.

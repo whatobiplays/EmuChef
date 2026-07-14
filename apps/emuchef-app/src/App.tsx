@@ -2,6 +2,7 @@ import { useCallback, useEffect, useMemo, useReducer, useRef, useState } from "r
 import { getCurrentWindow } from "@tauri-apps/api/window";
 
 import { api } from "./api";
+import { SupportPanel } from "./SupportPanel";
 import type {
   AdbSetupStatus,
   AnyExecutionSnapshot,
@@ -13,6 +14,7 @@ import type {
   RuntimeStatus,
   SavedConfigurationDocument,
   SavedConfigurationMutation,
+  CacheCleanupMode,
 } from "./types";
 import {
   formatLastOpened,
@@ -34,6 +36,13 @@ import {
   updateRecipeSelection,
   workflowReducer,
 } from "./workflow";
+import {
+  cleanupConfirmation,
+  entriesForCleanup,
+  formatBytes,
+  initialSupportState,
+  supportReducer,
+} from "./support";
 
 const WORKFLOW_STEPS = [
   { step: "connect", label: "Connect" },
@@ -88,11 +97,13 @@ export function App() {
   const [savedConfiguration, setSavedConfiguration] = useState<SavedConfigurationDocument | null>(null);
   const [recentConfigurations, setRecentConfigurations] = useState<RecentConfiguration[]>([]);
   const [workflow, dispatch] = useReducer(workflowReducer, initialWorkflowState);
+  const [support, supportDispatch] = useReducer(supportReducer, initialSupportState);
   const mainRef = useRef<HTMLElement>(null);
   const savedConfigurationRef = useRef<SavedConfigurationDocument | null>(null);
   const workflowRef = useRef(workflow);
   const configurationMutationQueue = useRef<Promise<void>>(Promise.resolve());
   const sessionInitializedRef = useRef(false);
+  const supportGenerationRef = useRef(0);
   const allowWindowCloseRef = useRef(false);
 
   const initialize = useCallback(async () => {
@@ -376,12 +387,76 @@ export function App() {
         setSavedConfiguration(null);
         dispatch({ type: "runtime-invalidated" });
         setRuntime(status);
+        supportDispatch({ type: "runtime-restarted" });
         await initialize();
+        if (support.open) await refreshSupportInventory();
         setNotice("Rust runtime restarted. Reopen a portable configuration before continuing.");
       } catch (error) {
         setNotice(errorMessage(error));
       }
     });
+  };
+
+  const refreshSupportInventory = async () => {
+    const generation = ++supportGenerationRef.current;
+    supportDispatch({ type: "inventory-requested", generation });
+    try {
+      const inventory = await api.cacheInventory();
+      supportDispatch({ type: "inventory-loaded", generation, inventory });
+    } catch (error) {
+      supportDispatch({ type: "inventory-failed", generation, message: errorMessage(error) });
+    }
+  };
+
+  const openSupport = () => {
+    supportDispatch({ type: "open" });
+    void refreshSupportInventory();
+  };
+
+  const cleanupSupportCache = async (mode: CacheCleanupMode) => {
+    if (!support.inventory) return;
+    const entries = entriesForCleanup(support.inventory, mode, support.selectedHandles);
+    const confirmation = cleanupConfirmation(entries);
+    if (confirmation.entryCount === 0) {
+      supportDispatch({
+        type: "cleanup-failed",
+        message: "No removable cache entries match this action.",
+      });
+      return;
+    }
+    const accepted = window.confirm(
+      `Remove ${confirmation.entryCount} cache ${confirmation.entryCount === 1 ? "entry" : "entries"} totaling ${formatBytes(confirmation.totalSizeBytes)}?`,
+    );
+    if (!accepted) return;
+    const generation = ++supportGenerationRef.current;
+    supportDispatch({ type: "cleanup-started", generation });
+    try {
+      const result = await api.cleanupCache({
+        mode,
+        inventoryGeneration: support.inventory.generation,
+        entryHandles: mode === "selected" ? support.selectedHandles : [],
+        confirmation: { confirmed: true, ...confirmation },
+      });
+      supportDispatch({
+        type: "cleanup-finished",
+        generation,
+        inventory: result.inventory,
+        outcomes: result.outcomes,
+      });
+    } catch (error) {
+      supportDispatch({ type: "cleanup-failed", message: errorMessage(error) });
+    }
+  };
+
+  const exportSupportDiagnostics = async () => {
+    const generation = ++supportGenerationRef.current;
+    supportDispatch({ type: "export-started", generation });
+    try {
+      const result = await api.exportSupportDiagnostics();
+      supportDispatch({ type: "export-finished", generation, outcome: result.outcome });
+    } catch (error) {
+      supportDispatch({ type: "export-failed", generation, message: errorMessage(error) });
+    }
   };
 
   useEffect(() => {
@@ -837,7 +912,17 @@ export function App() {
         <div className="runtime-chip" aria-live="polite">
           {runtime.status === "ready" ? `Runtime ready · ${catalog?.catalog.version ?? "catalog"}` : runtime.status}
         </div>
+        <button className="secondary" onClick={openSupport}>Support & Storage</button>
       </header>
+
+      <SupportPanel
+        state={support}
+        onClose={() => supportDispatch({ type: "close" })}
+        onRefresh={() => void refreshSupportInventory()}
+        onToggleSelection={(handle) => supportDispatch({ type: "toggle-selection", handle })}
+        onCleanup={(mode) => void cleanupSupportCache(mode)}
+        onExport={() => void exportSupportDiagnostics()}
+      />
 
       {runtime.status === "ready" && (
         <section className="configuration-bar" aria-label="Saved configurations">

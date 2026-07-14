@@ -108,6 +108,21 @@ impl SavedConfigurationStore {
             .collect()
     }
 
+    /// Return aggregate-only support data without names, identifiers, or paths.
+    pub fn support_summary(&self) -> Value {
+        let available = self
+            .recents
+            .iter()
+            .filter(|entry| entry.path.is_file() && fs::File::open(&entry.path).is_ok())
+            .count();
+        json!({
+            "openCount": self.documents.len(),
+            "recentCount": self.recents.len(),
+            "availableRecentCount": available,
+            "missingRecentCount": self.recents.len().saturating_sub(available),
+        })
+    }
+
     fn touch_recent(&mut self, document: &OpenDocument) -> Result<(), String> {
         self.recents.retain(|entry| {
             entry.path != document.path && entry.configuration_id != document.configuration_id
