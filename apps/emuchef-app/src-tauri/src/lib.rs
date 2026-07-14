@@ -49,6 +49,11 @@ pub fn run() {
             execution::get_simulated_execution,
             execution::get_simulated_execution_events,
             execution::cancel_simulated_execution,
+            execution::get_real_execution_availability,
+            execution::start_real_execution,
+            execution::get_real_execution,
+            execution::get_real_execution_events,
+            execution::cancel_real_execution,
         ])
         .run(tauri::generate_context!())
         .expect("error while running EmuChef");

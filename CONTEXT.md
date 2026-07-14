@@ -298,13 +298,15 @@ apply, device writes, artifact resolution, saved-configuration persistence,
 catalog networking, wireless onboarding, rollback, resume, or parallel-device
 work, and its result is not real-device evidence.
 
-Phase 2B defines a planned, default-disabled guarded real-device execution
-contract. It does not add a real-execution surface to the current application.
-The planned boundary keeps execution mode, exact target identity, reviewed
-plans, digests, paths, and sidecar identifiers inside trusted Rust/Tauri code;
-requires explicit irreversible-action confirmation; shares the bounded
-simulated/real execution store; and requires platform-specific packaged-device
-evidence plus a separate release decision before enablement.
+Phase 2B guarded real-device execution is implemented behind the
+default-disabled Cargo feature `real-execution`. The compile-time feature is the
+only product gate, and a policy-only Tauri query reports its boolean state.
+Ordinary builds remain simulation-only. Trusted Tauri code owns confirmation,
+mode selection, exact target identity, reviewed plans and digests,
+Platform-Tools revalidation, unambiguous retained BYO file/directory checks,
+and sidecar identifiers. Platform-specific packaged-device evidence, privacy
+and security approval, an operator runbook, and a separate release decision are
+required before a release build opts into the feature.
 
 Tauri launches the sidecar and negotiates the `phase0_end_user_runtime`
 extension plus `describeCatalog`, `listAdbDevices`, `probeDevice`,
@@ -377,21 +379,28 @@ trusted code forcing `dry_run`. A device disconnect blocks start but cannot
 cancel or erase a dry run after it has started.
 
 Random execution handles are session-scoped, never reused, and lost on restart.
-The store retains one start reservation or active mapping and at most the latest
-terminal mapping. Every failed preflight or start releases the reservation; a
-public handle is bound only after the sidecar returns a successful execution
-identifier. Reviews retain their independent stale, expiry, discard, and
-capacity lifecycle during and after simulation.
+The shared simulated/real store retains one kind-aware start reservation or
+active mapping and at most the latest terminal mapping. Every failed preflight
+or start releases the reservation; a public handle is bound only after the
+sidecar returns a successful execution identifier. Wrong-kind lookups are
+indistinguishable from unknown handles. A lost real sidecar session removes
+only the matching active or latest-terminal mapping, invalidates its originating
+review, and reports an unknown outcome without inferring terminal status.
+Reviews otherwise retain their independent stale, expiry, discard, and capacity
+lifecycle.
 
 `getExecution` snapshots are authoritative for recipe-grouped progress and
 terminal state. Incremental events are presentation data only; after accepting
 a snapshot the UI resumes event polling after its `latestSequence`. Polling
 stops on a terminal snapshot and ignores stale handles or generations.
-Cancellation is cooperative: completed simulated steps remain visible in the
-report, no new simulated steps start, the current simulated atomic step may
-finish, and no real device changes or rollback exist. React projections omit
-the sidecar execution id, full plan, target binding, exact serial, catalog root,
-step outputs, arbitrary paths, and raw sidecar errors.
+Cancellation is cooperative: completed steps remain visible, no new work starts
+after cancellation is observed, and the current atomic operation may finish.
+Real execution provides no rollback or restoration. New real projections are
+serial-free and allowlist messages, target facts, and report fields; Android
+version is omitted unless an existing trusted string supplies it and is never
+derived from API level. React projections omit the sidecar execution id, full
+plan, target binding, catalog root, step outputs, arbitrary paths, and raw
+sidecar errors.
 
 EmuChef never bundles, vendors, redistributes, mirrors, proxies, or downloads
 Android SDK Platform-Tools. The setup UI opens only Google's official

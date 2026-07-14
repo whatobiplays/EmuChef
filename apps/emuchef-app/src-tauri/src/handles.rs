@@ -7,6 +7,8 @@ use serde::Serialize;
 use serde_json::{json, Value};
 use uuid::Uuid;
 
+use crate::adb::AdbInstallationIdentity;
+
 const MAX_REVIEWS: usize = 16;
 const MAX_TOMBSTONES: usize = 64;
 const REVIEW_IDLE_TTL: Duration = Duration::from_secs(30 * 60);
@@ -38,6 +40,7 @@ pub struct ReviewedPlanSnapshot {
     pub catalog_digest: String,
     pub plan_digest: String,
     pub device_handle: String,
+    pub platform_tools_identity: Option<AdbInstallationIdentity>,
     pub created: Instant,
     pub last_access: Instant,
 }
@@ -211,6 +214,14 @@ impl SessionHandles {
         }
     }
 
+    /// Invalidates one retained review without disturbing any unrelated review.
+    pub fn invalidate_review(&mut self, handle: &str, code: &'static str) {
+        if self.reviews.remove(handle).is_some() {
+            self.review_order.retain(|candidate| candidate != handle);
+            self.push_tombstone(handle.to_string(), code);
+        }
+    }
+
     pub fn invalidate_all(&mut self) {
         let handles = self.reviews.keys().cloned().collect::<Vec<_>>();
         for handle in handles {
@@ -300,6 +311,7 @@ mod tests {
             catalog_digest: "sha256:catalog".to_string(),
             plan_digest: "sha256:plan".to_string(),
             device_handle: device_handle.to_string(),
+            platform_tools_identity: None,
             created: Instant::now(),
             last_access: Instant::now(),
         }
@@ -410,6 +422,21 @@ mod tests {
         let review = store.insert_review(review_snapshot(&handle));
         store.update_devices(&json!({ "devices": [] })).unwrap();
         assert!(store.review(&review).unwrap_err().contains("review_stale"));
+    }
+
+    #[test]
+    fn targeted_review_invalidation_preserves_unrelated_reviews() {
+        let mut store = SessionHandles::default();
+        let invalidated = store.insert_review(review_snapshot("device_one"));
+        let retained = store.insert_review(review_snapshot("device_two"));
+
+        store.invalidate_review(&invalidated, "review_stale");
+
+        assert!(store
+            .review(&invalidated)
+            .unwrap_err()
+            .contains("review_stale"));
+        assert_eq!(store.review(&retained).unwrap().device_handle, "device_two");
     }
 
     #[test]

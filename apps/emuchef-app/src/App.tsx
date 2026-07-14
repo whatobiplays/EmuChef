@@ -3,12 +3,16 @@ import { useCallback, useEffect, useMemo, useReducer, useRef, useState } from "r
 import { api } from "./api";
 import type {
   AdbSetupStatus,
+  AnyExecutionSnapshot,
   CatalogSummary,
   DeviceSummary,
-  ExecutionSnapshot,
   InputDescriptor,
   RuntimeStatus,
 } from "./types";
+import {
+  emptyRealExecutionConfirmation,
+  realExecutionConfirmationComplete,
+} from "./realExecution";
 import {
   initialWorkflowState,
   inputDiagnosticsForDisplay,
@@ -49,7 +53,7 @@ function errorCode(error: unknown): string | null {
   }
 }
 
-function executionDuration(snapshot: ExecutionSnapshot): string | null {
+function executionDuration(snapshot: AnyExecutionSnapshot): string | null {
   if (!snapshot.startedAt) return null;
   const start = Date.parse(snapshot.startedAt);
   const finish = snapshot.finishedAt ? Date.parse(snapshot.finishedAt) : Date.now();
@@ -64,13 +68,21 @@ export function App() {
   const [devices, setDevices] = useState<DeviceSummary[]>([]);
   const [busy, setBusy] = useState(false);
   const [notice, setNotice] = useState<string | null>(null);
+  const [realExecutionEnabled, setRealExecutionEnabled] = useState(false);
+  const [realConfirmationOpen, setRealConfirmationOpen] = useState(false);
+  const [realConfirmation, setRealConfirmation] = useState(emptyRealExecutionConfirmation);
   const [workflow, dispatch] = useReducer(workflowReducer, initialWorkflowState);
   const mainRef = useRef<HTMLElement>(null);
 
   const initialize = useCallback(async () => {
-    const [runtimeStatus, adbStatus] = await Promise.all([api.runtimeStatus(), api.adbStatus()]);
+    const [runtimeStatus, adbStatus, realAvailability] = await Promise.all([
+      api.runtimeStatus(),
+      api.adbStatus(),
+      api.realExecutionAvailability().catch(() => ({ enabled: false })),
+    ]);
     setRuntime(runtimeStatus);
     setAdb(adbStatus);
+    setRealExecutionEnabled(realAvailability.enabled);
     if (runtimeStatus.status === "ready") {
       setCatalog(await api.catalog());
     }
@@ -245,6 +257,26 @@ export function App() {
     }
   };
 
+  const startRealExecution = async () => {
+    if (!realExecutionEnabled || !workflow.review || workflow.execution.kind === "starting") return;
+    const generation = workflow.executionGeneration + 1;
+    const confirmation = realConfirmation;
+    dispatch({ type: "execution-starting", generation, mode: "real" });
+    setBusy(true);
+    setNotice(null);
+    setRealConfirmationOpen(false);
+    setRealConfirmation(emptyRealExecutionConfirmation);
+    try {
+      const snapshot = await api.startRealExecution(workflow.review.reviewHandle, confirmation);
+      dispatch({ type: "execution-started", generation, snapshot });
+    } catch (error) {
+      dispatch({ type: "execution-start-failed", generation });
+      setNotice(errorMessage(error));
+    } finally {
+      setBusy(false);
+    }
+  };
+
   const activeExecution =
     workflow.execution.kind === "active" ? workflow.execution : null;
 
@@ -252,19 +284,23 @@ export function App() {
     if (!activeExecution) return;
     let disposed = false;
     let timer: number | null = null;
-    const { generation, snapshot } = activeExecution;
+    const { generation, snapshot, mode } = activeExecution;
     const executionHandle = snapshot.executionHandle;
     let eventCursor = activeExecution.eventCursor;
 
     async function pollExecution() {
       try {
-        const nextSnapshot = await api.getSimulatedExecution(executionHandle);
+        const nextSnapshot = mode === "real"
+          ? await api.getRealExecution(executionHandle)
+          : await api.getSimulatedExecution(executionHandle);
         if (disposed) return;
         dispatch({ type: "execution-snapshot", generation, snapshot: nextSnapshot });
         eventCursor = Math.max(eventCursor, nextSnapshot.latestSequence);
         if (nextSnapshot.terminal) return;
 
-        const batch = await api.getSimulatedExecutionEvents(executionHandle, eventCursor);
+        const batch = mode === "real"
+          ? await api.getRealExecutionEvents(executionHandle, eventCursor)
+          : await api.getSimulatedExecutionEvents(executionHandle, eventCursor);
         if (disposed) return;
         dispatch({ type: "execution-events", generation, batch });
         for (const event of batch.events) eventCursor = Math.max(eventCursor, event.sequence);
@@ -290,13 +326,15 @@ export function App() {
       disposed = true;
       if (timer !== null) window.clearTimeout(timer);
     };
-  }, [activeExecution?.generation, activeExecution?.snapshot.executionHandle]);
+  }, [activeExecution?.generation, activeExecution?.snapshot.executionHandle, activeExecution?.mode]);
 
-  const cancelSimulation = async () => {
+  const cancelExecution = async () => {
     if (workflow.execution.kind !== "active" || workflow.execution.cancellationRequested) return;
     const { generation, snapshot } = workflow.execution;
     try {
-      const cancellation = await api.cancelSimulatedExecution(snapshot.executionHandle);
+      const cancellation = workflow.execution.mode === "real"
+        ? await api.cancelRealExecution(snapshot.executionHandle)
+        : await api.cancelSimulatedExecution(snapshot.executionHandle);
       if (cancellation.accepted) {
         dispatch({ type: "execution-cancellation-requested", generation });
       }
@@ -588,22 +626,119 @@ export function App() {
                   <button onClick={startSimulation} disabled={busy || workflow.execution.kind === "starting"}>
                     {workflow.execution.kind === "starting" ? "Starting simulated run…" : "Start Simulated Dry Run"}
                   </button>
+                  {realExecutionEnabled && (
+                    <button
+                      className="danger"
+                      onClick={() => {
+                        setRealConfirmation(emptyRealExecutionConfirmation);
+                        setRealConfirmationOpen(true);
+                      }}
+                      disabled={busy || workflow.execution.kind === "starting"}
+                    >
+                      Apply to Device
+                    </button>
+                  )}
                 </div>
+                {realExecutionEnabled && realConfirmationOpen && (
+                  <section className="real-confirmation" aria-labelledby="real-confirmation-heading">
+                    <p className="eyebrow">REAL DEVICE</p>
+                    <h3 id="real-confirmation-heading">Confirm irreversible device changes</h3>
+                    <p>
+                      Connected Android device · {workflow.review.target.manufacturer ?? "Android"}
+                      {` ${workflow.review.target.model ?? "device"}`} · API {workflow.review.target.androidApiLevel ?? "unknown"}
+                    </p>
+                    <p className="error">
+                      This can install software, transfer or replace files, change permissions and app operations,
+                      and launch or stop applications on the connected device.
+                    </p>
+                    <p className="warning">
+                      EmuChef provides no rollback, restore, automatic backup, or prior-state recovery. Cancellation
+                      is cooperative: the current operation may finish, and completed changes are not undone.
+                    </p>
+                    <p className="warning">
+                      Artifact transfer can fail after execution starts. Keep the intended device connected and stable
+                      until a terminal result is shown.
+                    </p>
+                    <label className="input-field">
+                      <span>Type APPLY TO DEVICE</span>
+                      <input
+                        value={realConfirmation.phrase}
+                        autoComplete="off"
+                        onChange={(event) => setRealConfirmation({ ...realConfirmation, phrase: event.target.value })}
+                      />
+                    </label>
+                    <label>
+                      <input
+                        type="checkbox"
+                        checked={realConfirmation.irreversibleChangesAcknowledged}
+                        onChange={(event) => setRealConfirmation({
+                          ...realConfirmation,
+                          irreversibleChangesAcknowledged: event.target.checked,
+                        })}
+                      /> I understand this can irreversibly change the device.
+                    </label>
+                    <label>
+                      <input
+                        type="checkbox"
+                        checked={realConfirmation.noRollbackAcknowledged}
+                        onChange={(event) => setRealConfirmation({
+                          ...realConfirmation,
+                          noRollbackAcknowledged: event.target.checked,
+                        })}
+                      /> I understand there is no rollback, restore, or backup recovery.
+                    </label>
+                    <label>
+                      <input
+                        type="checkbox"
+                        checked={realConfirmation.keepDeviceConnectedAcknowledged}
+                        onChange={(event) => setRealConfirmation({
+                          ...realConfirmation,
+                          keepDeviceConnectedAcknowledged: event.target.checked,
+                        })}
+                      /> I will keep the intended device connected and stable.
+                    </label>
+                    <div className="button-row">
+                      <button
+                        className="secondary"
+                        onClick={() => {
+                          setRealConfirmationOpen(false);
+                          setRealConfirmation(emptyRealExecutionConfirmation);
+                        }}
+                      >Cancel</button>
+                      <button
+                        className="danger"
+                        onClick={startRealExecution}
+                        disabled={busy || !realExecutionConfirmationComplete(realConfirmation)}
+                      >Start Real-Device Execution</button>
+                    </div>
+                  </section>
+                )}
               </>
             )}
 
             {workflow.step === "execution" &&
               (workflow.execution.kind === "active" || workflow.execution.kind === "terminal") && (
                 <>
-                  <p className="eyebrow">SIMULATED / DRY RUN</p>
+                  <p className="eyebrow">
+                    {workflow.execution.mode === "real" ? "REAL DEVICE" : "SIMULATED / DRY RUN"}
+                  </p>
                   <h2>
                     {workflow.execution.kind === "terminal"
-                      ? `Simulation ${workflow.execution.snapshot.status.replaceAll("_", " ")}`
-                      : "Simulating the reviewed setup"}
+                      ? `${workflow.execution.mode === "real" ? "Real-device execution" : "Simulation"} ${workflow.execution.snapshot.status.replaceAll("_", " ")}`
+                      : workflow.execution.mode === "real"
+                        ? "Applying the reviewed setup"
+                        : "Simulating the reviewed setup"}
                   </h2>
-                  <p className="simulation-banner">
-                    No real device changes are made. This report is simulated evidence only.
-                  </p>
+                  {workflow.execution.mode === "real" ? (
+                    <p className="warning">
+                      Keep the device connected. Failure or cancellation may leave completed changes on the device;
+                      there is no rollback, restore, or automatic recovery.
+                    </p>
+                  ) : (
+                    <p className="simulation-banner">
+                      No real device changes are made. This report is simulated evidence only.
+                    </p>
+                  )}
                   <dl className="execution-summary">
                     <div><dt>Status</dt><dd>{workflow.execution.snapshot.status.replaceAll("_", " ")}</dd></div>
                     <div><dt>Started</dt><dd>{workflow.execution.snapshot.startedAt ?? "Starting"}</dd></div>
@@ -637,7 +772,7 @@ export function App() {
                   ))}
                   {workflow.execution.events.length > 0 && (
                     <details className="execution-events">
-                      <summary>Incremental simulated event log</summary>
+                      <summary>Incremental {workflow.execution.mode === "real" ? "real-device" : "simulated"} event log</summary>
                       <ol>
                         {workflow.execution.events.map((event) => (
                           <li key={event.sequence}>
@@ -653,23 +788,35 @@ export function App() {
                     <>
                       {workflow.execution.cancellationRequested && (
                         <p className="warning">
-                          Cancellation requested. Completed simulated steps remain visible in this report. No new
-                          simulated steps start, the current simulated atomic step may finish, and no real device
-                          changes or rollback exist.
+                          {workflow.execution.mode === "real"
+                            ? "Cancellation requested. The current atomic operation may finish; completed device changes are not reversed, and no new work starts after cancellation is observed."
+                            : "Cancellation requested. Completed simulated steps remain visible in this report. No new simulated steps start, the current simulated atomic step may finish, and no real device changes or rollback exist."}
                         </p>
                       )}
                       <button
                         className="danger"
-                        onClick={cancelSimulation}
+                        onClick={cancelExecution}
                         disabled={workflow.execution.cancellationRequested}
                       >
-                        {workflow.execution.cancellationRequested ? "Cancellation requested" : "Cancel simulated run"}
+                        {workflow.execution.cancellationRequested
+                          ? "Cancellation requested"
+                          : workflow.execution.mode === "real"
+                            ? "Request cancellation"
+                            : "Cancel simulated run"}
                       </button>
                     </>
                   ) : (
                     <div className="button-row">
-                      <button className="secondary" onClick={() => dispatch({ type: "return-to-review" })}>
-                        Return to Review
+                      <button
+                        className="secondary"
+                        onClick={() => {
+                          if (workflow.execution.kind !== "terminal") return;
+                          dispatch({
+                            type: workflow.execution.mode === "real" ? "runtime-invalidated" : "return-to-review",
+                          });
+                        }}
+                      >
+                        {workflow.execution.mode === "real" ? "Start a fresh workflow" : "Return to Review"}
                       </button>
                     </div>
                   )}
@@ -678,12 +825,30 @@ export function App() {
 
             {workflow.step === "execution" && workflow.execution.kind === "unavailable" && (
               <>
-                <p className="eyebrow">SIMULATED RUN UNAVAILABLE</p>
-                <h2>This in-memory simulation cannot be resumed</h2>
+                <p className="eyebrow">
+                  {workflow.execution.mode === "real" ? "REAL-DEVICE OUTCOME UNKNOWN" : "SIMULATED RUN UNAVAILABLE"}
+                </p>
+                <h2>
+                  {workflow.execution.mode === "real"
+                    ? "The device may have been partially changed"
+                    : "This in-memory simulation cannot be resumed"}
+                </h2>
                 <p className="warning">{workflow.execution.message}</p>
-                <p>No execution history is persisted across an app or sidecar restart.</p>
-                <button className="secondary" onClick={() => dispatch({ type: "return-to-review" })}>
-                  Return to Review
+                <p>
+                  {workflow.execution.mode === "real"
+                    ? "The outcome cannot be inferred. Reconnect and create a fresh review; this execution cannot be resumed, retried in place, restored, or rolled back."
+                    : "No execution history is persisted across an app or sidecar restart."}
+                </p>
+                <button
+                  className="secondary"
+                  onClick={() => {
+                    if (workflow.execution.kind !== "unavailable") return;
+                    dispatch({
+                      type: workflow.execution.mode === "real" ? "runtime-invalidated" : "return-to-review",
+                    });
+                  }}
+                >
+                  {workflow.execution.mode === "real" ? "Start a fresh workflow" : "Return to Review"}
                 </button>
               </>
             )}
@@ -695,7 +860,7 @@ export function App() {
               <div><dt>Rust runtime</dt><dd>Ready</dd></div>
               <div><dt>Platform-Tools</dt><dd>{adb.version}</dd></div>
               <div><dt>Catalog</dt><dd>{catalog?.catalog.version ?? "Ready"}</dd></div>
-              <div><dt>Mode</dt><dd>Simulation only</dd></div>
+              <div><dt>Mode</dt><dd>{realExecutionEnabled ? "Simulation and guarded real execution" : "Simulation only"}</dd></div>
             </dl>
             {adb.warning && <p className="warning">{adb.warning}</p>}
             <button className="text-button" onClick={importPlatformTools} disabled={busy || workflow.step === "execution"}>Replace Platform-Tools</button>

@@ -10,6 +10,9 @@ import type {
   ExecutionCancellation,
   ExecutionEventBatch,
   ExecutionSnapshot,
+  RealExecutionAvailability,
+  RealExecutionConfirmation,
+  RealExecutionSnapshot,
   ReviewSummary,
   RuntimeStatus,
 } from "./types";
@@ -50,6 +53,21 @@ export const api = {
     }),
   cancelSimulatedExecution: (executionHandle: string) =>
     invoke<ExecutionCancellation>("cancel_simulated_execution", { executionHandle }),
+  realExecutionAvailability: () =>
+    invoke<RealExecutionAvailability>("get_real_execution_availability"),
+  startRealExecution: (reviewHandle: string, confirmation: RealExecutionConfirmation) =>
+    invoke<RealExecutionSnapshot>("start_real_execution", {
+      request: { reviewHandle, confirmation },
+    }),
+  getRealExecution: (executionHandle: string) =>
+    invoke<RealExecutionSnapshot>("get_real_execution", { executionHandle }),
+  getRealExecutionEvents: (executionHandle: string, afterSequence: number) =>
+    invoke<ExecutionEventBatch>("get_real_execution_events", {
+      executionHandle,
+      afterSequence,
+    }),
+  cancelRealExecution: (executionHandle: string) =>
+    invoke<ExecutionCancellation>("cancel_real_execution", { executionHandle }),
   pickInputPath: (pathKind: "file" | "directory", multiple: boolean) =>
     invoke<string[] | null>("pick_input_path", { pathKind, multiple }),
 };

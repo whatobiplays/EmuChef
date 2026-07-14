@@ -216,6 +216,43 @@ export interface ExecutionSnapshot {
   errors: ExecutionIssue[];
 }
 
+export interface RealExecutionTarget {
+  label: "Connected Android device";
+  manufacturer?: string;
+  model?: string;
+  androidVersion?: string;
+  androidApiLevel?: number;
+}
+
+export interface RealExecutionSnapshot {
+  executionHandle: string;
+  reviewHandle: string;
+  simulated: false;
+  verificationScope: "real_device";
+  target: RealExecutionTarget;
+  status: ExecutionStatus;
+  startedAt: string | null;
+  finishedAt: string | null;
+  latestSequence: number;
+  terminal: boolean;
+  recipes: ExecutionRecipe[];
+  warnings: ExecutionIssue[];
+  errors: ExecutionIssue[];
+}
+
+export type AnyExecutionSnapshot = ExecutionSnapshot | RealExecutionSnapshot;
+
+export interface RealExecutionAvailability {
+  enabled: boolean;
+}
+
+export interface RealExecutionConfirmation {
+  phrase: string;
+  irreversibleChangesAcknowledged: boolean;
+  noRollbackAcknowledged: boolean;
+  keepDeviceConnectedAcknowledged: boolean;
+}
+
 export interface ExecutionEvent {
   sequence: number;
   timestamp: string;

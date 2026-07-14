@@ -76,6 +76,34 @@ struct ResolvedAdb {
     managed_relative_path: Option<String>,
 }
 
+/// Trusted identity of the Platform-Tools installation associated with a review.
+/// Paths remain Tauri-private and are never serialized to the frontend.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct AdbInstallationIdentity {
+    path: PathBuf,
+    version: String,
+    managed_relative_path: Option<String>,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+/// Stable classification for trusted Platform-Tools revalidation failures.
+pub enum AdbRevalidationError {
+    /// The retained installation cannot currently be validated or used.
+    Unavailable,
+    /// Cached review identity no longer names the current installation.
+    Changed,
+}
+
+impl ResolvedAdb {
+    fn identity(&self) -> AdbInstallationIdentity {
+        AdbInstallationIdentity {
+            path: self.path.clone(),
+            version: self.version.clone(),
+            managed_relative_path: self.managed_relative_path.clone(),
+        }
+    }
+}
+
 pub struct AdbManager {
     root: PathBuf,
     current: Option<ResolvedAdb>,
@@ -137,6 +165,78 @@ impl AdbManager {
                     "Import Android SDK Platform-Tools before connecting a device.",
                 )
             })
+    }
+
+    pub fn installation_identity(&self) -> Result<AdbInstallationIdentity, String> {
+        self.current
+            .as_ref()
+            .map(ResolvedAdb::identity)
+            .ok_or_else(|| {
+                actionable_json(
+                    "adb_setup_required",
+                    "Import Android SDK Platform-Tools before connecting a device.",
+                )
+            })
+    }
+
+    /// Revalidates the exact installation retained by a review and returns its
+    /// trusted executable path. Validation repeats the existing managed or
+    /// development checks instead of trusting cached startup state.
+    pub fn revalidate_for_execution(
+        &self,
+        expected: &AdbInstallationIdentity,
+    ) -> Result<PathBuf, AdbRevalidationError> {
+        self.revalidate_for_execution_with_executor(expected, &RealProcessExecutor)
+    }
+
+    fn revalidate_for_execution_with_executor(
+        &self,
+        expected: &AdbInstallationIdentity,
+        executor: &impl ProcessExecutor,
+    ) -> Result<PathBuf, AdbRevalidationError> {
+        let current = self
+            .current
+            .as_ref()
+            .ok_or(AdbRevalidationError::Unavailable)?;
+        if current.identity() != *expected {
+            return Err(AdbRevalidationError::Changed);
+        }
+
+        let validated = if let Some(relative) = &current.managed_relative_path {
+            let settings = read_settings(&self.settings_path())
+                .map_err(|_| AdbRevalidationError::Unavailable)?;
+            if settings.install_relative_path != *relative {
+                return Err(AdbRevalidationError::Changed);
+            }
+            let install = checked_install_path(&self.root, relative)
+                .map_err(|_| AdbRevalidationError::Unavailable)?;
+            validate_managed_install(&install, &settings, executor)
+                .map_err(|_| AdbRevalidationError::Unavailable)?
+        } else {
+            #[cfg(debug_assertions)]
+            {
+                validate_development_adb(&current.path, executor)
+                    .map_err(|_| AdbRevalidationError::Unavailable)?
+            }
+            #[cfg(not(debug_assertions))]
+            {
+                return Err(AdbRevalidationError::Unavailable);
+            }
+        };
+        let validated_identity = validated.identity();
+        let same_path = validated_identity
+            .path
+            .canonicalize()
+            .ok()
+            .zip(expected.path.canonicalize().ok())
+            .is_some_and(|(validated, retained)| validated == retained);
+        if validated_identity.version != expected.version
+            || validated_identity.managed_relative_path != expected.managed_relative_path
+            || !same_path
+        {
+            return Err(AdbRevalidationError::Changed);
+        }
+        Ok(validated.path)
     }
 
     pub fn import_zip(&mut self, source: &Path) -> Result<AdbSetupStatusDto, String> {
@@ -1769,6 +1869,48 @@ mod tests {
             settings_before
         );
         assert_eq!(fs::read_dir(root.join("staging")).unwrap().count(), 0);
+    }
+
+    #[test]
+    fn execution_revalidation_repeats_managed_checks_and_classifies_identity_changes() {
+        let temp = tempfile::tempdir().unwrap();
+        let zip = temp.path().join("platform-tools.zip");
+        write_platform_tools_zip(&zip, &[]);
+        let root = temp.path().join("managed");
+        fs::create_dir_all(root.join("installs")).unwrap();
+        fs::create_dir_all(root.join("staging")).unwrap();
+        let mut manager = AdbManager {
+            root,
+            current: None,
+            last_error: None,
+        };
+        let installed = manager
+            .import_zip_inner_with_executor(&zip, &FakeExecutor::default())
+            .unwrap();
+        let identity = installed.identity();
+        manager.current = Some(installed);
+
+        assert_eq!(
+            manager
+                .revalidate_for_execution_with_executor(&identity, &FakeExecutor::default())
+                .unwrap(),
+            identity.path.canonicalize().unwrap()
+        );
+
+        let changed = AdbInstallationIdentity {
+            version: "36.0.0".to_string(),
+            ..identity.clone()
+        };
+        assert_eq!(
+            manager.revalidate_for_execution_with_executor(&changed, &FakeExecutor::default()),
+            Err(AdbRevalidationError::Changed)
+        );
+
+        fs::remove_file(&identity.path).unwrap();
+        assert_eq!(
+            manager.revalidate_for_execution_with_executor(&identity, &FakeExecutor::default()),
+            Err(AdbRevalidationError::Unavailable)
+        );
     }
 
     #[test]

@@ -58,16 +58,19 @@ npm --prefix apps/emuchef-app run tauri:dev
 
 `apps/emuchef-app` launches and negotiates the Rust sidecar independently of
 ADB availability. The app provides Connect Device, Confirm Device, Choose
-Setup, Provide Inputs, Review Plan, and Simulated Run. The final stage executes
-only the retained reviewed plan through fake-device dry-run adapters; it makes
-no real device changes and is not real-device evidence. Real apply,
-artifact-download execution, persistence/resume, rollback, and remote catalog
-paths remain unavailable.
+Setup, Provide Inputs, Review Plan, and Simulated Run. Ordinary builds execute
+only the retained reviewed plan through fake-device dry-run adapters; this
+makes no real device changes and is not real-device evidence. Guarded
+real-device execution is implemented but unavailable unless a release build is
+explicitly compiled with the default-off `real-execution` feature.
 
-The planned, default-disabled trust boundary for a later real-device workflow
+The implemented, default-disabled trust boundary for the real-device workflow
 is documented in the
 [Phase 2B guarded real-execution contract](docs/product/phase-2b-guarded-real-execution.md).
-That specification does not enable real execution in the current application.
+Platform-specific packaged-device evidence, privacy/security approval, an
+operator runbook, and a separate release decision remain required before any
+release build enables it. Persistence, resume, rollback, and remote catalog
+paths remain unavailable.
 
 Android SDK Platform-Tools is a user-supplied prerequisite. EmuChef does not
 bundle or download it. The app links to Google's official page and can import a

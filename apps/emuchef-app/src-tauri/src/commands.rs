@@ -401,6 +401,16 @@ pub fn create_review(
         })?
         .to_string();
     let catalog_digest = catalog(&state)?.digest().to_string();
+    let platform_tools_identity = state
+        .adb
+        .lock()
+        .map_err(|_| {
+            safe_error(
+                "adb_state_unavailable",
+                "Platform-Tools setup state is unavailable.",
+            )
+        })?
+        .installation_identity()?;
     let snapshot = ReviewedPlanSnapshot {
         response: result.clone(),
         target,
@@ -408,6 +418,7 @@ pub fn create_review(
         catalog_digest,
         plan_digest: digest.clone(),
         device_handle,
+        platform_tools_identity: Some(platform_tools_identity),
         created: Instant::now(),
         last_access: Instant::now(),
     };

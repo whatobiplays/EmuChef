@@ -2,22 +2,23 @@
 
 ## 1. Status and product boundary
 
-Phase 2B defines the planned trust boundary and product behavior for guarded
-real-device execution in `apps/emuchef-app`. Canonical backend artifact
-admission is implemented as prerequisite groundwork, but guarded real-device
-execution is not an implemented product capability. The shipped end-user
-application remains limited to the Phase 2A Simulated Run workflow and does not
-expose real execution.
+Phase 2B defines the implemented trust boundary and product behavior for
+guarded real-device execution in `apps/emuchef-app`. The Tauri commands,
+shared execution store, trusted revalidation, serial-free projection, and
+frontend workflow are implemented behind the default-disabled Cargo feature
+`real-execution`. Ordinary builds expose only the Phase 2A Simulated Run
+workflow and cannot start real execution.
 
-The future product implementation reuses the Phase 0 `startExecution`,
+The guarded product implementation reuses the Phase 0 `startExecution`,
 `getExecution`, `getExecutionEvents`, and `cancelExecution` sidecar operations.
 It adds no sidecar protocol extension. React communicates only with trusted
 Tauri commands and never calls those sidecar operations directly.
 
-Phase 2B is disabled in ordinary builds until the rollout gates in this
-document are satisfied for a specific platform and a separate release decision
-enables it. Detecting that the sidecar supports `mode: real` is not sufficient
-to enable the product surface.
+Phase 2B is disabled through `[features] default = []`; the authoritative gate
+is `cfg!(feature = "real-execution")`. A platform-specific release build may
+opt into that feature only after the rollout gates in this document are
+satisfied for that platform and a separate release decision enables it.
+Detecting sidecar support for `mode: real` is not sufficient.
 
 ## 2. User workflow and confirmation
 
@@ -67,7 +68,7 @@ confirmation and confirm again.
 
 ## 3. Public Tauri contract
 
-The later implementation adds a real-execution command family without
+The implementation adds a real-execution command family without
 changing the Phase 2A command behavior:
 
 1. `start_real_execution` accepts an opaque `reviewHandle` and the confirmation
@@ -76,6 +77,11 @@ changing the Phase 2A command behavior:
 3. `get_real_execution_events` accepts an opaque `executionHandle` and a
    non-negative `afterSequence`.
 4. `cancel_real_execution` accepts only an opaque `executionHandle`.
+
+`get_real_execution_availability` is a policy-only query returning exactly
+`{ "enabled": boolean }`. It reflects only the compile-time `real-execution`
+feature and does not inspect devices, sidecar capability, reviews, or execution
+capacity.
 
 React cannot submit an execution mode, complete plan, plan digest, target
 binding, device serial, ADB executable path, catalog root, runtime root, cache
@@ -159,6 +165,9 @@ Tauri may validate only user-supplied local file and directory input values
 that are already retained trusted review state. It may check their current
 existence, expected file/directory kind, and readability so an obviously stale
 BYO input returns `artifact_not_ready` before the sidecar request. Tauri does
+not partially accept malformed retained values: a scalar must be a string, and
+every member of an array must be a string. Empty arrays and unsupported value
+shapes also return `artifact_not_ready`. Tauri does
 not interpret `file://` sources, inspect artifact cache eligibility, validate
 HTTP(S) source policy, make sandbox decisions, or duplicate canonical resolver
 rules.
@@ -252,6 +261,11 @@ The public real-execution snapshot contains only:
    and
 7. public target facts that do not derive from the device serial.
 
+Manufacturer, model, and Android API level are included when retained trusted
+facts provide them. Android version is included only when an existing trusted
+string provides it; the app never derives a marketing version from API level
+or extends the protocol to obtain one.
+
 The projection omits the complete reviewed plan, exact target binding, every
 serial representation, catalog root, sidecar execution id, step outputs,
 arbitrary filesystem paths, source URLs containing credentials/query/fragment,
@@ -322,6 +336,9 @@ Whole-application restart and sidecar execution-session loss are distinct:
    originating review before allowing another real start. The UI states that
    the device may have been partially changed and that the outcome is unknown.
    It never synthesizes a failed, cancelled, or successful terminal result.
+   An `unknown_execution` response to snapshot, event, or cancellation removes
+   only the matching real active or latest-terminal mapping and preserves every
+   unrelated mapping.
 
 Neither case supports execution persistence, session recovery, resume,
 reattachment, automatic retry, or retry in place.
@@ -394,7 +411,7 @@ Phase 2B does not define or add:
 
 ## 13. Rollout gates
 
-The later implementation must keep real execution disabled in ordinary builds
+The implementation keeps real execution disabled in ordinary builds
 until all of these gates pass:
 
 1. the complete automated trust-boundary and lifecycle matrix in Section 15;
@@ -412,31 +429,24 @@ Enablement is platform-specific. Passing macOS evidence does not enable Windows
 or Linux. The enabled state must be explicit product policy; capability
 negotiation, a connected device, or successful simulation cannot enable it.
 
-## 14. Remaining implementation checklist
+## 14. Implementation and remaining release work
 
-The canonical backend admission prerequisite is implemented inside
-`startExecution`. The remaining product work is:
+The default-disabled product implementation includes the shared kind-aware
+store, strict one-request confirmation, ordered retained-state preflight,
+trusted `mode: real` request construction, canonical backend admission,
+allowlisted real projections, lost-session cleanup, cooperative cancellation,
+and confirmation/progress/terminal/unknown-outcome UI. Retained BYO checks use
+only trusted `resolvedInputs` whose existing type is explicitly `file` or
+`directory`; ambiguous path types are not reinterpreted. The real target
+projection includes Android version only when an existing trusted string
+provides it and never derives a version from API level.
 
-1. Add the default-off platform/build gate and enforce it before store access.
-2. Add the real confirmation DTO and trusted validation without persisting it.
-3. Generalize the internal execution mapping with an execution-kind field while
-   preserving every Phase 2A command and response contract.
-4. Add the four real-execution Tauri commands from Section 3.
-5. Implement Tauri's exact ordered retained-state preflight and reservation
-   cleanup from Section 4, limiting local input checks to trusted retained BYO
-   values.
-6. Build a separate real projection that exposes only the allowlisted fields in
-   Section 7 and sanitizes every issue and message.
-7. Implement the public error mapping in Section 10 and distinguish ordinary
-   refresh failure from session loss.
-8. Invalidate the originating review on sidecar real-session loss and implement
-   the distinct whole-app restart UX.
-9. Add the confirmation, progress, cancellation, terminal, unknown-outcome,
-    and fresh-review UX without displaying any serial-derived value.
-10. Add unit, integration, frontend logic, security, packaged-app, and manual
-    disposable-device coverage from Section 15.
-11. Complete the rollout evidence and make enablement a separate reviewed
-    release change.
+The product remains disabled in ordinary builds. The remaining work is external
+release work: platform-specific packaged disposable-device evidence, privacy
+and security review, a maintained operator runbook and sanitized evidence
+format, and an explicit reviewed decision to build that platform with the
+`real-execution` feature. None of those gates is implied by automated tests or
+by the presence of the implementation.
 
 ## 15. Phase 2B test matrix
 

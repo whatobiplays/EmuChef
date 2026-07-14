@@ -13,6 +13,10 @@ import {
   workflowReducer,
 } from "../src/workflow";
 import type { ExecutionEvent, ExecutionSnapshot } from "../src/types";
+import {
+  emptyRealExecutionConfirmation,
+  realExecutionConfirmationComplete,
+} from "../src/realExecution";
 
 const facts = {
   deviceHandle: "device-opaque",
@@ -606,4 +610,54 @@ test("lost in-memory runs retain the review recovery path without claiming resum
   const reviewed = workflowReducer(unavailable, { type: "return-to-review" });
   assert.equal(reviewed.step, "review");
   assert.equal(reviewed.review, review);
+});
+
+test("real confirmation requires the exact phrase and every acknowledgment", () => {
+  assert.equal(realExecutionConfirmationComplete(emptyRealExecutionConfirmation), false);
+  const complete = {
+    phrase: "APPLY TO DEVICE",
+    irreversibleChangesAcknowledged: true,
+    noRollbackAcknowledged: true,
+    keepDeviceConnectedAcknowledged: true,
+  };
+  assert.equal(realExecutionConfirmationComplete(complete), true);
+  assert.equal(realExecutionConfirmationComplete({ ...complete, phrase: " APPLY TO DEVICE " }), true);
+  assert.equal(realExecutionConfirmationComplete({ ...complete, phrase: "apply to device" }), false);
+  assert.equal(realExecutionConfirmationComplete({ ...complete, phrase: "Apply To Device" }), false);
+  assert.equal(realExecutionConfirmationComplete({ ...complete, phrase: "APPLY  TO DEVICE" }), false);
+  for (const acknowledgment of [
+    "irreversibleChangesAcknowledged",
+    "noRollbackAcknowledged",
+    "keepDeviceConnectedAcknowledged",
+  ] as const) {
+    assert.equal(realExecutionConfirmationComplete({ ...complete, [acknowledgment]: false }), false);
+  }
+});
+
+test("real execution state retains mode and invalidates the review on session loss", () => {
+  const starting = workflowReducer(
+    { ...initialWorkflowState, step: "review", review },
+    { type: "execution-starting", generation: 1, mode: "real" },
+  );
+  const simulated = executionSnapshot(1);
+  const realSnapshot = {
+    ...simulated,
+    simulated: false as const,
+    verificationScope: "real_device" as const,
+    target: { label: "Connected Android device" as const, androidApiLevel: 33 },
+  };
+  const active = workflowReducer(starting, {
+    type: "execution-started",
+    generation: 1,
+    snapshot: realSnapshot,
+  });
+  assert.equal(active.execution.kind === "active" && active.execution.mode, "real");
+  const unavailable = workflowReducer(active, {
+    type: "execution-unavailable",
+    generation: 1,
+    executionHandle: realSnapshot.executionHandle,
+    message: "Outcome unknown.",
+  });
+  assert.equal(unavailable.execution.kind, "unavailable");
+  assert.equal(unavailable.review, null);
 });

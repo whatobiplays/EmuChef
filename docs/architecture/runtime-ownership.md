@@ -35,16 +35,18 @@ Platform-Tools availability gates device discovery only. Sidecar-internal DTOs
 may carry exact serials and resolved paths; React DTOs use opaque device/review
 handles and never contain exact serials, managed executable paths, catalog
 roots, or full reviewed plans. The trusted bridge retains target-bound review
-snapshots for trusted Phase 2A simulated execution. Tauri revalidates the
-retained target, catalog, and canonical digest, then forces `dry_run` through
-the existing Phase 0 operations. Its execution-handle store is bounded to one
-active mapping and the latest terminal mapping. Complete snapshots are the UI
-authority; incremental events are presentation data only. React receives no
-sidecar execution identifier, full plan, exact serial, output path, or raw
-sidecar response.
+snapshots for Phase 2A simulation and default-disabled Phase 2B real execution.
+Tauri revalidates the retained target, catalog, canonical digest,
+Platform-Tools identity, and unambiguous user-supplied file/directory inputs,
+then selects `dry_run` or `real` without accepting mode from React. Its
+kind-aware execution-handle store is bounded to one shared active mapping and
+the latest shared terminal mapping. Complete snapshots are the UI authority;
+incremental events are presentation data only. React receives no sidecar
+execution identifier, full plan, real-flow serial representation, output path,
+or raw sidecar response.
 
 [Phase 2B guarded real-device execution](../product/phase-2b-guarded-real-execution.md)
-defines the planned trust boundary for a later real workflow. The specification
-keeps trusted start data and real mode selection in Tauri, reuses the existing
-Phase 0 sidecar operations, and requires explicit platform-specific rollout
-approval. It does not change current runtime ownership or enable real execution.
+defines the implemented trust boundary. The default-off `real-execution` Cargo
+feature is the authoritative gate and its availability query exposes only that
+policy boolean. Platform-specific packaged evidence and approval remain
+external release prerequisites; ordinary builds do not enable real execution.

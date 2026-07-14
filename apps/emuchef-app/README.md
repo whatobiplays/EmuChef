@@ -6,13 +6,15 @@
 a user through connecting one Android device, confirming detected facts,
 choosing a backend-approved device plan, selecting recipes, resolving recipe
 inputs, reviewing a target-bound plan, and running the retained plan through a
-fake-device simulation. The current application has no real execution,
-device-write, or artifact-resolution surface.
+fake-device simulation. Guarded real-device execution is also implemented but
+is absent from ordinary builds because the Cargo feature `real-execution` is
+default-disabled.
 
-The planned, default-disabled trust boundary for a later real-device workflow
-is documented in the
+The implemented, default-disabled real-device trust boundary is documented in the
 [Phase 2B guarded real-execution contract](../../docs/product/phase-2b-guarded-real-execution.md).
-The specification does not enable real execution or change Phase 2A behavior.
+The feature is not release approval: each platform still requires packaged
+disposable-device evidence, privacy/security review, an operator runbook, and
+an explicit release decision. Phase 2A behavior remains unchanged.
 
 The application is independent from `apps/config-editor`. Both applications
 package the same Rust `emuchef --sidecar` runtime, but they do not import each

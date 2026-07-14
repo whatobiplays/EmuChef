@@ -4,7 +4,7 @@ import type {
   DeviceMatch,
   ExecutionEvent,
   ExecutionEventBatch,
-  ExecutionSnapshot,
+  AnyExecutionSnapshot,
   InputDescriptor,
   ReviewSummary,
   RecipeOption,
@@ -12,14 +12,16 @@ import type {
 } from "./types";
 
 export type WorkflowStep = "connect" | "device" | "setup" | "inputs" | "review" | "execution";
+export type ExecutionMode = "simulated" | "real";
 
 export type ExecutionWorkflowState =
   | { kind: "idle" }
-  | { kind: "starting"; generation: number }
+  | { kind: "starting"; generation: number; mode: ExecutionMode }
   | {
       kind: "active" | "terminal";
       generation: number;
-      snapshot: ExecutionSnapshot;
+      snapshot: AnyExecutionSnapshot;
+      mode: ExecutionMode;
       events: ExecutionEvent[];
       eventCursor: number;
       cancellationRequested: boolean;
@@ -29,6 +31,7 @@ export type ExecutionWorkflowState =
       generation: number;
       executionHandle: string;
       message: string;
+      mode: ExecutionMode;
     };
 
 export interface WorkflowState {
@@ -71,10 +74,10 @@ export type WorkflowAction =
   | { type: "set-recipes"; selectedRecipes: string[] }
   | { type: "set-binding"; key: string; value: unknown }
   | { type: "review"; review: ReviewSummary }
-  | { type: "execution-starting"; generation: number }
-  | { type: "execution-started"; generation: number; snapshot: ExecutionSnapshot }
+  | { type: "execution-starting"; generation: number; mode?: ExecutionMode }
+  | { type: "execution-started"; generation: number; snapshot: AnyExecutionSnapshot }
   | { type: "execution-start-failed"; generation: number }
-  | { type: "execution-snapshot"; generation: number; snapshot: ExecutionSnapshot }
+  | { type: "execution-snapshot"; generation: number; snapshot: AnyExecutionSnapshot }
   | { type: "execution-events"; generation: number; batch: ExecutionEventBatch }
   | { type: "execution-cancellation-requested"; generation: number }
   | { type: "execution-unavailable"; generation: number; executionHandle: string; message: string }
@@ -160,7 +163,7 @@ export function workflowReducer(state: WorkflowState, action: WorkflowAction): W
       return {
         ...state,
         executionGeneration: action.generation,
-        execution: { kind: "starting", generation: action.generation },
+        execution: { kind: "starting", generation: action.generation, mode: action.mode ?? "simulated" },
       };
     case "execution-started":
       if (!executionGenerationMatches(state, action.generation, "starting")) return state;
@@ -169,6 +172,7 @@ export function workflowReducer(state: WorkflowState, action: WorkflowAction): W
         step: "execution",
         execution: {
           kind: action.snapshot.terminal ? "terminal" : "active",
+          mode: action.snapshot.simulated ? "simulated" : "real",
           generation: action.generation,
           snapshot: action.snapshot,
           events: [],
@@ -214,18 +218,23 @@ export function workflowReducer(state: WorkflowState, action: WorkflowAction): W
       if (current.kind !== "active") return state;
       return { ...state, execution: { ...current, cancellationRequested: true } };
     }
-    case "execution-unavailable":
+    case "execution-unavailable": {
       if (!executionResponseMatches(state, action.generation, action.executionHandle)) return state;
+      const current = state.execution;
+      if (current.kind !== "active" && current.kind !== "terminal") return state;
       return {
         ...state,
         step: "execution",
+        review: current.mode === "real" ? null : state.review,
         execution: {
           kind: "unavailable",
           generation: action.generation,
           executionHandle: action.executionHandle,
           message: action.message,
+          mode: current.mode,
         },
       };
+    }
     case "return-to-review":
       if (!state.review) return state;
       return { ...state, step: "review", execution: { kind: "idle" } };

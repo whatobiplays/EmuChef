@@ -41,6 +41,12 @@ unused.
 
 Dry-run and real execution use the same normalized plan and report shape.
 Dry-run reports are explicitly simulated and are not real-device verification.
+The end-user Tauri app exposes guarded real execution only when compiled with
+the default-disabled `real-execution` feature. Tauri retains the reviewed plan,
+digest, target, Platform-Tools identity, and existing trusted `resolvedInputs`;
+it does not add a sidecar metadata operation or derive Android version from API
+level. File/directory prechecks apply only to resolved inputs whose existing
+authoritative type is explicitly `file` or `directory`.
 Retry or repair creates a new attempt from a freshly validated and reviewed
 plan. Execution has no undo, rollback, inverse-step, backup, or restoration
 contract. The complete product protocol is documented in

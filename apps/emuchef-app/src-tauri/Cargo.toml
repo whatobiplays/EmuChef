@@ -4,6 +4,10 @@ version = "0.1.0"
 description = "EmuChef end-user review and simulated-execution application"
 edition = "2021"
 
+[features]
+default = []
+real-execution = []
+
 [build-dependencies]
 tauri-build = { version = "2.5.1", features = [] }
 
