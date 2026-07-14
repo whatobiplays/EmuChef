@@ -94,6 +94,13 @@ resilience. It changes React presentation only; Rust and trusted Tauri retain
 all runtime, device, file, diagnostics, cache, and execution authority. See the
 [Phase 3C contract](docs/product/phase-3c-accessibility-and-interaction-resilience.md).
 
+Phase 3D adds one bounded, atomic, app-owned recovery draft for dirty portable
+intent. Startup offers Restore, Discard, or Not now before device selection;
+Not now retains the draft for a future launch, while newer dirty intent
+atomically supersedes it. Recovery excludes all runtime authority and omits
+sensitive binding values according to authored input metadata. See the
+[Phase 3D contract](docs/product/phase-3d-crash-safe-draft-restoration.md).
+
 Android SDK Platform-Tools is a user-supplied prerequisite. EmuChef does not
 bundle or download it. The app links to Google's official page and can import a
 macOS Platform-Tools ZIP through a native picker into validated application

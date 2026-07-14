@@ -9,7 +9,7 @@
 | Real-ADB apply | Rust | Active; manual device validation required |
 | Tauri editor backend | Rust JSONL sidecar | Active |
 | Phase 0 end-user runtime protocol | Rust JSONL sidecar | Active backend contract |
-| End-user desktop app | React UI with trusted Rust/Tauri bridge | Phase 3C accessible and resilient presentation active; guarded real execution remains default-disabled |
+| End-user desktop app | React UI with trusted Rust/Tauri bridge | Phase 3D crash-safe portable-intent recovery active; guarded real execution remains default-disabled |
 | Platform-Tools import and verification | Rust/Tauri | User-supplied, app-managed, macOS-only |
 | Catalog source resolution | Rust | Bundled/local snapshots active; cached remote reserved |
 | Execution reports and incremental events | Rust JSONL sidecar | Active in-memory session contract |
@@ -103,3 +103,22 @@ implicitly saving, discarding, deleting, cleaning, or starting execution.
 Focus restoration validates the original invoker and otherwise follows the
 documented workflow, main-content, and header fallback order. A stale dialog or
 native-picker return cannot steal focus from a newer transition.
+
+## Phase 3D recovery boundary
+
+Tauri owns one fixed-path, bounded, versioned recovery record and the
+interrupted-session marker. React can submit only portable intent through a
+strict DTO; it cannot choose the recovery path or submit device, review,
+execution, dialog, cache, diagnostics, or sidecar authority. Atomic writes and
+request, draft, and record generations prevent stale replacement or clearing.
+
+Binding persistence is controlled only by trusted authored `sensitive`
+metadata from the sidecar description. Sensitive and unclassified values are
+omitted and represented by key-only re-entry requirements. The source saved
+configuration is referenced by its embedded identity rather than a React
+handle or path. Restore creates fresh document authority and leaves every
+device, plan, review, execution, confirmation, and launch association invalid.
+
+Deferred recovery disposition is independent of current-session dirty state.
+Not now survives clean shutdown and is offered on the next launch; explicit
+discard, successful save, or an atomic newer dirty generation supersedes it.

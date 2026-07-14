@@ -25,10 +25,42 @@ import type {
   CacheCleanupResult,
   CacheInventory,
   SupportDiagnosticsExportResult,
+  AppSessionStart,
+  RecoveryRestoreResult,
+  RecoveryWriteAck,
 } from "./types";
 
 export const api = {
-  beginAppSession: () => invoke<void>("begin_app_session"),
+  beginAppSession: () => invoke<AppSessionStart>("begin_app_session"),
+  stageRecoveryDraft: (request: {
+    sessionGeneration: number;
+    requestGeneration: number;
+    draftGeneration: number;
+    displayName: string | null;
+    sourceConfigurationHandle: string | null;
+    devicePlan: string;
+    selectedRecipes: string[];
+    bindings: Record<string, unknown>;
+  }) => invoke<RecoveryWriteAck>("stage_recovery_draft", { request }),
+  deferRecoveryDraft: (sessionGeneration: number, recordGeneration: number) =>
+    invoke<void>("defer_recovery_draft", {
+      request: { sessionGeneration, recordGeneration },
+    }),
+  restoreRecoveryDraft: (
+    sessionGeneration: number,
+    recordGeneration: number,
+    requestGeneration: number,
+  ) => invoke<RecoveryRestoreResult>("restore_recovery_draft", {
+    request: { sessionGeneration, recordGeneration, requestGeneration },
+  }),
+  discardRecoveryDraft: (sessionGeneration: number, recordGeneration: number) =>
+    invoke<void>("discard_recovery_draft", {
+      request: { sessionGeneration, recordGeneration },
+    }),
+  finishAppSession: (sessionGeneration: number, currentSessionDirty: boolean) =>
+    invoke<void>("finish_app_session", {
+      request: { sessionGeneration, currentSessionDirty },
+    }),
   runtimeStatus: () => invoke<RuntimeStatus>("get_runtime_status"),
   restartRuntime: () => invoke<RuntimeStatus>("restart_runtime"),
   catalog: () => invoke<CatalogSummary>("get_catalog"),

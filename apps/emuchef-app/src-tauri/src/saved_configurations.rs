@@ -17,6 +17,7 @@ use tauri_plugin_dialog::{DialogExt, FilePath};
 use uuid::Uuid;
 
 use crate::commands::{await_picker_selection, catalog, safe_error, AppState};
+use crate::recovery::clear_recovery_after_save;
 
 const RECENT_SCHEMA_VERSION: u64 = 1;
 const MAX_RECENTS: usize = 10;
@@ -76,6 +77,19 @@ impl SavedConfigurationStore {
                 "This saved configuration is no longer open. Reopen the portable file to continue.",
             )
         })
+    }
+
+    fn recovery_source_identity(&self, handle: &str) -> Result<(String, String), String> {
+        let document = self.document(handle)?;
+        Ok((document.configuration_id.clone(), safe_name(&document.name)))
+    }
+
+    fn recovery_source_path(&self, configuration_id: &str) -> Option<PathBuf> {
+        self.recents
+            .iter()
+            .find(|entry| entry.configuration_id == configuration_id)
+            .filter(|entry| entry.path.is_file() && fs::File::open(&entry.path).is_ok())
+            .map(|entry| entry.path.clone())
     }
 
     fn insert_document(&mut self, path: PathBuf, document: &Value) -> Result<String, String> {
@@ -217,6 +231,109 @@ impl SavedConfigurationStore {
 
 pub type SavedConfigurationState = Mutex<SavedConfigurationStore>;
 
+/// Portable recovery overlay after Tauri has removed sensitive values.
+pub struct RecoveryPortableIntent {
+    pub device_plan: String,
+    pub selected_recipes: Vec<String>,
+    pub bindings: Map<String, Value>,
+    pub omitted_bindings: Vec<String>,
+}
+
+pub(crate) fn recovery_source_identity(
+    state: &AppState,
+    handle: &str,
+) -> Result<(String, String), String> {
+    state
+        .saved_configurations
+        .lock()
+        .map_err(|_| state_error())?
+        .recovery_source_identity(handle)
+}
+
+/// Reopen a saved source into a fresh sidecar session and apply the recovery
+/// overlay without writing the source file. Missing private recent-file state
+/// intentionally returns `None` so the caller can restore unsaved intent.
+pub(crate) fn restore_recovery_source(
+    state: &AppState,
+    configuration_id: &str,
+    intent: &RecoveryPortableIntent,
+) -> Result<Option<Value>, String> {
+    let path = state
+        .saved_configurations
+        .lock()
+        .map_err(|_| state_error())?
+        .recovery_source_path(configuration_id);
+    let Some(path) = path else {
+        return Ok(None);
+    };
+    let opened = request_open(state, &path)?;
+    let document = opened.get("document").ok_or_else(invalid_document)?;
+    let actual_id = document
+        .pointer("/configuration/id")
+        .and_then(Value::as_str)
+        .ok_or_else(invalid_document)?;
+    if actual_id != configuration_id {
+        close_sidecar_document(state, document);
+        return Ok(None);
+    }
+    let document_id = document_string(document, "documentId")?;
+    let current_bindings = document
+        .pointer("/configuration/bindings")
+        .and_then(Value::as_object)
+        .cloned()
+        .ok_or_else(invalid_document)?;
+    let apply = (|| {
+        state.sidecar.request(
+            "setUserConfigurationDevicePlan",
+            json!({ "documentId": document_id, "devicePlan": intent.device_plan }),
+        )?;
+        state.sidecar.request(
+            "setUserConfigurationSelectedRecipes",
+            json!({ "documentId": document_id, "selectedRecipes": intent.selected_recipes }),
+        )?;
+        for key in current_bindings.keys() {
+            state.sidecar.request(
+                "removeUserConfigurationBinding",
+                json!({ "documentId": document_id, "key": key }),
+            )?;
+        }
+        for (key, value) in &intent.bindings {
+            state.sidecar.request(
+                "setUserConfigurationBinding",
+                json!({ "documentId": document_id, "key": key, "value": value }),
+            )?;
+        }
+        // Omitted keys are deliberately absent. Reading the final document
+        // proves the source remains a dirty in-memory overlay only.
+        let _ = &intent.omitted_bindings;
+        state.sidecar.request(
+            "getUserConfigurationDocument",
+            json!({ "documentId": document_id }),
+        )
+    })();
+    let result = match apply {
+        Ok(result) => result,
+        Err(_) => {
+            close_sidecar_document(state, document);
+            return Err(configuration_error(
+                "recovery_restore_failed",
+                "The saved source could not be restored safely. The recovery draft remains available.",
+            ));
+        }
+    };
+    let final_document = result.get("document").ok_or_else(invalid_document)?;
+    let mut store = state
+        .saved_configurations
+        .lock()
+        .map_err(|_| state_error())?;
+    let handle = store.insert_document(path, final_document)?;
+    let record = store.document(&handle)?.clone();
+    let _ = store.touch_recent(&record);
+    let mut projected = project_document(&handle, record.revision, final_document)?;
+    projected["outcome"] = json!("opened");
+    Ok(Some(projected))
+}
+
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct CreateSavedConfigurationRequest {
@@ -327,7 +444,9 @@ pub async fn create_saved_configuration(
                 "The configuration could not be created.",
             )
         })?;
-    open_result(&state, path, &result)
+    let projected = open_result(&state, path, &result)?;
+    clear_recovery_after_save(&state)?;
+    Ok(projected)
 }
 
 #[tauri::command]
@@ -530,7 +649,10 @@ pub fn save_saved_configuration(
         .cloned()
         .ok_or_else(state_error)?;
     let _ = store.touch_recent(&record);
-    project_document(&request.configuration_handle, record.revision, document)
+    let projected = project_document(&request.configuration_handle, record.revision, document)?;
+    drop(store);
+    clear_recovery_after_save(&state)?;
+    Ok(projected)
 }
 
 #[tauri::command]
@@ -600,6 +722,8 @@ pub async fn save_saved_configuration_as(
     let _ = store.touch_recent(&record);
     let mut projected = project_document(&request.configuration_handle, record.revision, document)?;
     projected["outcome"] = json!("saved");
+    drop(store);
+    clear_recovery_after_save(&state)?;
     Ok(projected)
 }
 
@@ -951,5 +1075,19 @@ mod tests {
             .is_empty());
         fs::write(&path, br#"{"schemaVersion":99,"entries":[]}"#).unwrap();
         assert!(SavedConfigurationStore::load(path).recents.is_empty());
+    }
+
+    #[test]
+    fn recovery_source_lookup_fails_closed_when_private_source_is_missing() {
+        let temp = tempfile::tempdir().unwrap();
+        let mut store = SavedConfigurationStore::load(temp.path().join("recents.json"));
+        store.recents.push(RecentEntry {
+            recent_handle: "recent_source".to_string(),
+            configuration_id: "saved.source".to_string(),
+            name: "Source".to_string(),
+            path: temp.path().join("missing.yaml"),
+            last_opened_epoch_ms: 1,
+        });
+        assert_eq!(store.recovery_source_path("saved.source"), None);
     }
 }

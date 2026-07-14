@@ -4,7 +4,7 @@
 //! exact serials, raw command output, and internal plan snapshots at the IPC
 //! boundary.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::sync::Mutex;
 use std::time::Instant;
 
@@ -17,6 +17,7 @@ use crate::adb::{AdbManager, AdbSetupStatusDto, PLATFORM_TOOLS_URL};
 use crate::catalog::CatalogDescriptor;
 use crate::execution::ExecutionHandleStore;
 use crate::handles::{ReviewedPlanSnapshot, SessionHandles};
+use crate::recovery::RecoveryState;
 use crate::saved_configurations::SavedConfigurationState;
 use crate::sidecar::{RuntimeStatusDto, SidecarState};
 use crate::support::SupportStore;
@@ -28,6 +29,7 @@ pub struct AppState {
     pub handles: Mutex<SessionHandles>,
     pub executions: Mutex<ExecutionHandleStore>,
     pub saved_configurations: SavedConfigurationState,
+    pub recovery: RecoveryState,
     pub support: Mutex<SupportStore>,
 }
 
@@ -38,8 +40,18 @@ pub fn get_runtime_status(state: State<'_, AppState>) -> RuntimeStatusDto {
 
 /// Begin a new frontend session without retaining process-local authority.
 #[tauri::command]
-pub fn begin_app_session(state: State<'_, AppState>) -> Result<(), String> {
-    reset_app_session(&state, true)
+pub fn begin_app_session(state: State<'_, AppState>) -> Result<Value, String> {
+    reset_app_session(&state, true)?;
+    state
+        .recovery
+        .lock()
+        .map_err(|_| {
+            safe_error(
+                "recovery_state_unavailable",
+                "Recovery state is temporarily unavailable.",
+            )
+        })?
+        .begin_session()
 }
 
 /// Restart the Rust sidecar after proving no execution is in flight.
@@ -425,6 +437,7 @@ pub fn describe_configuration(
     bindings: HashMap<String, Value>,
     state: State<'_, AppState>,
 ) -> Result<Value, String> {
+    let binding_keys = bindings.keys().cloned().collect::<HashSet<_>>();
     let payload = configuration_payload(
         &state,
         &device_handle,
@@ -447,7 +460,20 @@ pub fn describe_configuration(
         .sidecar
         .request("describeConfiguration", payload)
         .map_err(|error| configuration_sidecar_error(&error, &exact_serial))?;
-    Ok(public_configuration_description(&result, &exact_serial))
+    let required_reentry = {
+        let mut recovery = state.recovery.lock().map_err(|_| {
+            safe_error(
+                "recovery_state_unavailable",
+                "Recovery state is temporarily unavailable.",
+            )
+        })?;
+        recovery.record_schema(&result);
+        recovery.note_current_binding_keys(&binding_keys);
+        recovery.required_reentry()
+    };
+    let mut public = public_configuration_description(&result, &exact_serial);
+    add_recovery_reentry_diagnostics(&mut public, &required_reentry, &binding_keys);
+    Ok(public)
 }
 
 #[tauri::command]
@@ -458,6 +484,24 @@ pub fn create_review(
     bindings: HashMap<String, Value>,
     state: State<'_, AppState>,
 ) -> Result<Value, String> {
+    let missing_reentry = state
+        .recovery
+        .lock()
+        .map_err(|_| {
+            safe_error(
+                "recovery_state_unavailable",
+                "Recovery state is temporarily unavailable.",
+            )
+        })?
+        .required_reentry()
+        .into_iter()
+        .any(|key| !bindings.contains_key(&key));
+    if missing_reentry {
+        return Err(safe_error(
+            "recovery_sensitive_input_required",
+            "Re-enter the omitted sensitive configuration values before creating a new review.",
+        ));
+    }
     let payload = configuration_payload(
         &state,
         &device_handle,
@@ -823,6 +867,7 @@ fn public_configuration_description(result: &Value, exact_serial: &str) -> Value
                 "description": input.get("description"),
                 "required": input.get("required"),
                 "multiple": input.get("multiple"),
+                "sensitive": input.get("sensitive"),
                 "options": options,
                 "pathKind": validation.get("pathKind"),
                 "acceptedExtensions": validation.get("allowedExtensions"),
@@ -844,6 +889,46 @@ fn public_configuration_description(result: &Value, exact_serial: &str) -> Value
         redact_exact_serial(&mut public, exact_serial);
     }
     public
+}
+
+fn add_recovery_reentry_diagnostics(
+    description: &mut Value,
+    required_reentry: &[String],
+    supplied_bindings: &HashSet<String>,
+) {
+    for key in required_reentry {
+        if supplied_bindings.contains(key) {
+            continue;
+        }
+        let diagnostic = json!({
+            "key": key,
+            "code": "recovery_sensitive_input_required",
+            "message": "This sensitive value was not stored in recovery. Re-enter it before review.",
+            "severity": "error",
+        });
+        let mut attached = false;
+        if let Some(inputs) = description.get_mut("inputs").and_then(Value::as_array_mut) {
+            if let Some(input) = inputs
+                .iter_mut()
+                .find(|input| input.get("key").and_then(Value::as_str) == Some(key))
+            {
+                if let Some(diagnostics) =
+                    input.get_mut("diagnostics").and_then(Value::as_array_mut)
+                {
+                    diagnostics.push(diagnostic.clone());
+                    attached = true;
+                }
+            }
+        }
+        if !attached {
+            if let Some(diagnostics) = description
+                .get_mut("diagnostics")
+                .and_then(Value::as_array_mut)
+            {
+                diagnostics.push(diagnostic);
+            }
+        }
+    }
 }
 
 fn public_diagnostics(value: Option<&Value>) -> Vec<Value> {

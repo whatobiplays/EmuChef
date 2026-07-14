@@ -94,6 +94,7 @@ export interface InputDescriptor {
   description: string | null;
   required: boolean;
   multiple?: boolean;
+  sensitive: boolean;
   options?: string[];
   pathKind?: "file" | "directory";
   acceptedExtensions?: string[];
@@ -370,6 +371,45 @@ export type SavedConfigurationMutation =
   | { kind: "selected_recipes"; value: string[] }
   | { kind: "binding"; key: string; value: unknown }
   | { kind: "remove_binding"; key: string };
+
+export interface RecoveryDraftAvailable {
+  state: "available";
+  draftGeneration: number;
+  displayName: string | null;
+  savedAtEpochMs: number;
+  sourceSavedConfiguration: boolean;
+}
+
+export type RecoveryDraftStatus =
+  | { state: "none" }
+  | { state: "invalid_removed"; reason: string }
+  | RecoveryDraftAvailable;
+
+export interface AppSessionStart {
+  sessionGeneration: number;
+  interruptedSession: boolean;
+  recovery: RecoveryDraftStatus;
+}
+
+export interface RecoveryWriteAck {
+  requestGeneration: number;
+  draftGeneration: number;
+  recordGeneration: number;
+}
+
+export interface RecoveryRestoreResult {
+  requestGeneration: number;
+  draftGeneration: number;
+  displayName: string | null;
+  sourceStatus: "available" | "missing" | "unsaved";
+  document: SavedConfigurationDocument | null;
+  intent: {
+    devicePlan: string;
+    selectedRecipes: string[];
+    bindings: Record<string, unknown>;
+    requiredReentryBindings: string[];
+  };
+}
 
 export interface CacheEntry {
   cacheEntryHandle: string;

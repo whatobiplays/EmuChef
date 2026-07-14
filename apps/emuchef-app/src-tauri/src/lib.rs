@@ -3,6 +3,7 @@ mod catalog;
 mod commands;
 mod execution;
 mod handles;
+mod recovery;
 mod saved_configurations;
 mod sidecar;
 mod support;
@@ -35,6 +36,10 @@ pub fn run() {
                         app_data.join("recent-configurations.json"),
                     ),
                 ),
+                recovery: Mutex::new(recovery::RecoveryStore::load(
+                    app_data.join("recovery-draft.json"),
+                    app_data.join("session-active.marker"),
+                )),
                 support: Mutex::new(support::SupportStore::new(cache_root)),
             });
             Ok(())
@@ -42,6 +47,11 @@ pub fn run() {
         .invoke_handler(tauri::generate_handler![
             commands::get_runtime_status,
             commands::begin_app_session,
+            recovery::stage_recovery_draft,
+            recovery::defer_recovery_draft,
+            recovery::restore_recovery_draft,
+            recovery::discard_recovery_draft,
+            recovery::finish_app_session,
             commands::restart_runtime,
             commands::get_catalog,
             commands::get_adb_setup_status,

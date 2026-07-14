@@ -26,6 +26,8 @@ import type {
   SavedConfigurationDocument,
   SavedConfigurationMutation,
   CacheCleanupMode,
+  RecoveryDraftAvailable,
+  RecoveryRestoreResult,
 } from "./types";
 import {
   formatLastOpened,
@@ -53,6 +55,7 @@ import {
   initialSupportState,
   supportReducer,
 } from "./support";
+import { portableIntentSignature, recoveryResultIsCurrent } from "./recovery";
 
 const WORKFLOW_STEPS = [
   { step: "connect", label: "Connect" },
@@ -79,6 +82,10 @@ type AppDialogPayload =
   | {
       kind: "real-execution";
       invoker: HTMLElement | null;
+    }
+  | {
+      kind: "recovery";
+      draft: RecoveryDraftAvailable;
     };
 
 type AppDialogResult = UnsavedDecision | string | boolean | null;
@@ -138,6 +145,8 @@ export function App({ dialogController: suppliedDialogController }: AppProps = {
   const [reportState, setReportState] = useState<"idle" | "exporting" | "saved" | "failed">("idle");
   const [launchState, setLaunchState] = useState<"idle" | "launching" | "launched" | "failed">("idle");
   const [repairPreparing, setRepairPreparing] = useState(false);
+  const [startupReady, setStartupReady] = useState(false);
+  const [recoveredName, setRecoveredName] = useState<string | null>(null);
   const [savedConfiguration, setSavedConfiguration] = useState<SavedConfigurationDocument | null>(null);
   const [recentConfigurations, setRecentConfigurations] = useState<RecentConfiguration[]>([]);
   const [workflow, dispatch] = useReducer(workflowReducer, initialWorkflowState);
@@ -159,6 +168,12 @@ export function App({ dialogController: suppliedDialogController }: AppProps = {
   const sessionInitializedRef = useRef(false);
   const supportGenerationRef = useRef(0);
   const allowWindowCloseRef = useRef(false);
+  const recoveryNotNowRef = useRef<HTMLButtonElement>(null);
+  const recoverySessionGenerationRef = useRef(0);
+  const recoveryRecordGenerationRef = useRef<number | null>(null);
+  const recoveryRequestGenerationRef = useRef(0);
+  const recoveryDraftGenerationRef = useRef(0);
+  const lastRecoverySignatureRef = useRef<string | null>(null);
 
   const announce = useCallback((text: string, assertive = false) => {
     const update = (previous: { id: number; text: string }) => ({ id: previous.id + 1, text });
@@ -234,17 +249,6 @@ export function App({ dialogController: suppliedDialogController }: AppProps = {
   }, []);
 
   useEffect(() => {
-    if (sessionInitializedRef.current) return;
-    sessionInitializedRef.current = true;
-    api.beginAppSession().then(initialize).catch((error) => {
-      setRuntime({
-        status: "failed",
-        error: { code: "runtime_start_failed", message: errorMessage(error), actions: ["retry"] },
-      });
-    });
-  }, [initialize]);
-
-  useEffect(() => {
     savedConfigurationRef.current = savedConfiguration;
   }, [savedConfiguration]);
 
@@ -261,7 +265,7 @@ export function App({ dialogController: suppliedDialogController }: AppProps = {
         generation,
       });
     });
-  }, [adb?.status, runtime.status, workflow.step]);
+  }, [adb?.status, runtime.status, startupReady, workflow.step]);
 
   useEffect(() => {
     if (!notice) return;
@@ -287,6 +291,44 @@ export function App({ dialogController: suppliedDialogController }: AppProps = {
     setRecentConfigurations(await api.listRecentConfigurations());
   };
 
+  const persistRecoveryNow = async (force = false): Promise<number | null> => {
+    const current = workflowRef.current;
+    const sessionGeneration = recoverySessionGenerationRef.current;
+    if (!sessionGeneration || !current.portableIntentDirty || !current.devicePlan) return null;
+    const signature = portableIntentSignature(current);
+    if (!force && signature === lastRecoverySignatureRef.current) {
+      return recoveryRecordGenerationRef.current;
+    }
+    const requestGeneration = ++recoveryRequestGenerationRef.current;
+    const draftGeneration = ++recoveryDraftGenerationRef.current;
+    const result = await api.stageRecoveryDraft({
+      sessionGeneration,
+      requestGeneration,
+      draftGeneration,
+      displayName: savedConfigurationRef.current?.name ?? recoveredName,
+      sourceConfigurationHandle: savedConfigurationRef.current?.configurationHandle ?? null,
+      devicePlan: current.devicePlan,
+      selectedRecipes: current.selectedRecipes ?? [],
+      bindings: current.bindings,
+    });
+    if (!recoveryResultIsCurrent(result, requestGeneration, draftGeneration)) return null;
+    recoveryRecordGenerationRef.current = result.recordGeneration;
+    lastRecoverySignatureRef.current = signature;
+    return result.recordGeneration;
+  };
+
+  const discardCurrentRecovery = async () => {
+    const recordGeneration = recoveryRecordGenerationRef.current;
+    if (!recordGeneration) return;
+    await api.discardRecoveryDraft(
+      recoverySessionGenerationRef.current,
+      recordGeneration,
+    );
+    recoveryRecordGenerationRef.current = null;
+    lastRecoverySignatureRef.current = null;
+    setRecoveredName(null);
+  };
+
   const applySavedDocument = async (document: SavedConfigurationDocument) => {
     cancelPendingDialog();
     const previous = savedConfigurationRef.current;
@@ -301,10 +343,123 @@ export function App({ dialogController: suppliedDialogController }: AppProps = {
       selectedRecipes: document.selectedRecipes,
       bindings: document.bindings,
       dirty: document.dirty,
+      requiredReentryBindings: [],
     });
     await refreshRecents();
     setNotice(`Opened ${document.name}. Connect and select the current device to validate it.`);
   };
+
+  const applyRecoveryResult = async (result: RecoveryRestoreResult) => {
+    const previous = savedConfigurationRef.current;
+    if (previous && previous.configurationHandle !== result.document?.configurationHandle) {
+      await api.closeSavedConfiguration(previous.configurationHandle).catch(() => undefined);
+    }
+    savedConfigurationRef.current = result.document;
+    setSavedConfiguration(result.document);
+    setRecoveredName(result.document?.name ?? result.displayName ?? "Recovered configuration");
+    dispatch({
+      type: "load-portable-intent",
+      devicePlan: result.intent.devicePlan,
+      selectedRecipes: result.intent.selectedRecipes,
+      bindings: result.intent.bindings,
+      dirty: true,
+      requiredReentryBindings: result.intent.requiredReentryBindings,
+    });
+    lastRecoverySignatureRef.current = portableIntentSignature({
+      devicePlan: result.intent.devicePlan,
+      selectedRecipes: result.intent.selectedRecipes,
+      bindings: result.intent.bindings,
+    });
+    await refreshRecents();
+    const reentry = result.intent.requiredReentryBindings.length;
+    const sourceNotice = result.sourceStatus === "missing"
+      ? "The original saved file is missing, so this is an unsaved recovered configuration."
+      : "The recovered intent is unsaved and will not overwrite its source until you save.";
+    setNotice(`${sourceNotice} Connect a device and validate again.${
+      reentry > 0 ? ` Re-enter ${reentry} sensitive input${reentry === 1 ? "" : "s"}.` : ""
+    }`);
+  };
+
+  const restoreRecovery = async (draftGeneration: number): Promise<boolean> => {
+    const requestGeneration = ++recoveryRequestGenerationRef.current;
+    try {
+      const result = await api.restoreRecoveryDraft(
+        recoverySessionGenerationRef.current,
+        draftGeneration,
+        requestGeneration,
+      );
+      if (!recoveryResultIsCurrent(result, requestGeneration, draftGeneration)) return false;
+      recoveryRecordGenerationRef.current = result.draftGeneration;
+      await applyRecoveryResult(result);
+      return true;
+    } catch (error) {
+      setNotice(errorMessage(error));
+      return false;
+    }
+  };
+
+  const offerRecovery = async (draft: RecoveryDraftAvailable) => {
+    recoveryRecordGenerationRef.current = draft.draftGeneration;
+    const decision = await requestAppDialog({ kind: "recovery", draft }, "not-now");
+    if (decision === "restore" && await restoreRecovery(draft.draftGeneration)) return;
+    try {
+      if (decision === "discard-recovery") {
+        await discardCurrentRecovery();
+        setNotice("The recovery draft was discarded.");
+      } else {
+        await api.deferRecoveryDraft(
+          recoverySessionGenerationRef.current,
+          draft.draftGeneration,
+        );
+        setNotice("Recovery was deferred. The same draft will be offered next launch unless newer edits supersede it.");
+      }
+    } catch (error) {
+      setNotice(errorMessage(error));
+    }
+  };
+
+  useEffect(() => {
+    if (sessionInitializedRef.current) return;
+    sessionInitializedRef.current = true;
+    void (async () => {
+      try {
+        const session = await api.beginAppSession();
+        recoverySessionGenerationRef.current = session.sessionGeneration;
+        await initialize();
+        if (session.recovery.state === "available") {
+          await offerRecovery(session.recovery);
+          if (session.interruptedSession) {
+            setNotice((current) => `${current ? `${current} ` : ""}The previous session ended unexpectedly. Execution was not resumed.`);
+          }
+        } else if (session.recovery.state === "invalid_removed") {
+          setNotice("An invalid recovery draft was removed. Start a new configuration or open a saved one.");
+        } else if (session.interruptedSession) {
+          setNotice("The previous session ended unexpectedly. Execution was not resumed.");
+        }
+        setStartupReady(true);
+      } catch (error) {
+        setStartupReady(true);
+        setRuntime({
+          status: "failed",
+          error: { code: "runtime_start_failed", message: errorMessage(error), actions: ["retry"] },
+        });
+      }
+    })();
+  }, [initialize]);
+
+  useEffect(() => {
+    if (!startupReady || !workflow.portableIntentDirty || !workflow.devicePlan) return;
+    const timer = window.setTimeout(() => {
+      void persistRecoveryNow().catch((error) => setNotice(errorMessage(error)));
+    }, 350);
+    return () => window.clearTimeout(timer);
+  }, [
+    startupReady,
+    workflow.portableIntentDirty,
+    workflow.devicePlan,
+    workflow.selectedRecipes,
+    workflow.bindings,
+  ]);
 
   const createFromCurrentIntent = async (): Promise<boolean> => {
     const current = workflowRef.current;
@@ -321,6 +476,7 @@ export function App({ dialogController: suppliedDialogController }: AppProps = {
     const name = typeof nameResult === "string" ? nameResult.trim() : "";
     if (!name) return false;
     try {
+      await persistRecoveryNow(true);
       const result = await withNativeDialogFocus(() => api.createSavedConfiguration({
           name,
           devicePlan: current.devicePlan!,
@@ -330,6 +486,9 @@ export function App({ dialogController: suppliedDialogController }: AppProps = {
       if (result.outcome === "cancelled") return false;
       await applySavedDocument(result);
       dispatch({ type: "portable-intent-saved" });
+      recoveryRecordGenerationRef.current = null;
+      lastRecoverySignatureRef.current = null;
+      setRecoveredName(null);
       return true;
     } catch (error) {
       setNotice(errorMessage(error));
@@ -342,10 +501,14 @@ export function App({ dialogController: suppliedDialogController }: AppProps = {
     const current = savedConfigurationRef.current;
     if (!current) return createFromCurrentIntent();
     try {
+      await persistRecoveryNow(true);
       const saved = await api.saveSavedConfiguration(current.configurationHandle);
       savedConfigurationRef.current = saved;
       setSavedConfiguration(saved);
       dispatch({ type: "portable-intent-saved" });
+      recoveryRecordGenerationRef.current = null;
+      lastRecoverySignatureRef.current = null;
+      setRecoveredName(null);
       await refreshRecents();
       setNotice(`Saved ${saved.name}.`);
       return true;
@@ -367,9 +530,19 @@ export function App({ dialogController: suppliedDialogController }: AppProps = {
   };
 
   const runProtectedTransition = async (transition: () => Promise<void>) => {
+    const hadDirtyIntent = workflowRef.current.portableIntentDirty
+      || Boolean(savedConfigurationRef.current?.dirty);
     const decision = await dirtyDecision();
     if (decision === "cancel") return;
     if (decision === "save" && !(await saveCurrentConfiguration())) return;
+    if (decision === "discard" && hadDirtyIntent) {
+      try {
+        await discardCurrentRecovery();
+      } catch (error) {
+        setNotice(errorMessage(error));
+        return;
+      }
+    }
     await configurationMutationQueue.current;
     await transition();
   };
@@ -437,6 +610,7 @@ export function App({ dialogController: suppliedDialogController }: AppProps = {
     const name = typeof nameResult === "string" ? nameResult.trim() : "";
     if (!name) return;
     try {
+      await persistRecoveryNow(true);
       const result = await withNativeDialogFocus(
         () => api.saveSavedConfigurationAs(current.configurationHandle, name),
       );
@@ -444,6 +618,9 @@ export function App({ dialogController: suppliedDialogController }: AppProps = {
       savedConfigurationRef.current = result;
       setSavedConfiguration(result);
       dispatch({ type: "portable-intent-saved" });
+      recoveryRecordGenerationRef.current = null;
+      lastRecoverySignatureRef.current = null;
+      setRecoveredName(null);
       await refreshRecents();
       setNotice(`Saved the new portable configuration ${result.name}.`);
     } catch (error) {
@@ -543,23 +720,28 @@ export function App({ dialogController: suppliedDialogController }: AppProps = {
   };
 
   const restartRuntime = async () => {
-    await runProtectedTransition(async () => {
-      try {
-        cancelPendingDialog();
-        announce("Restarting the Rust runtime.");
-        const status = await api.restartRuntime();
-        savedConfigurationRef.current = null;
-        setSavedConfiguration(null);
-        dispatch({ type: "runtime-invalidated" });
-        setRuntime(status);
-        supportDispatch({ type: "runtime-restarted" });
-        await initialize();
-        if (support.open) await refreshSupportInventory();
+    try {
+      const dirty = workflowRef.current.portableIntentDirty
+        || Boolean(savedConfigurationRef.current?.dirty);
+      const draftGeneration = dirty ? await persistRecoveryNow(true) : null;
+      cancelPendingDialog();
+      announce("Restarting the Rust runtime.");
+      const status = await api.restartRuntime();
+      savedConfigurationRef.current = null;
+      setSavedConfiguration(null);
+      dispatch({ type: "runtime-invalidated" });
+      setRuntime(status);
+      supportDispatch({ type: "runtime-restarted" });
+      await initialize();
+      if (draftGeneration) {
+        await restoreRecovery(draftGeneration);
+      } else {
         setNotice("Rust runtime restarted. Reopen a portable configuration before continuing.");
-      } catch (error) {
-        setNotice(errorMessage(error));
       }
-    });
+      if (support.open) await refreshSupportInventory();
+    } catch (error) {
+      setNotice(errorMessage(error));
+    }
   };
 
   const refreshSupportInventory = async () => {
@@ -649,13 +831,36 @@ export function App({ dialogController: suppliedDialogController }: AppProps = {
         allowWindowCloseRef.current = false;
         return;
       }
+      event.preventDefault();
       const dirty = workflowRef.current.portableIntentDirty
         || Boolean(savedConfigurationRef.current?.dirty);
-      if (!dirty) return;
-      event.preventDefault();
-      const decision = await dirtyDecision();
-      if (decision === "cancel") return;
-      if (decision === "save" && !(await saveCurrentConfiguration())) return;
+      if (dirty) {
+        try {
+          await persistRecoveryNow(true);
+        } catch (error) {
+          setNotice(errorMessage(error));
+          return;
+        }
+        const decision = await dirtyDecision();
+        if (decision === "cancel") return;
+        if (decision === "save" && !(await saveCurrentConfiguration())) return;
+        if (decision === "discard") {
+          try {
+            await discardCurrentRecovery();
+          } catch (error) {
+            setNotice(errorMessage(error));
+            return;
+          }
+        }
+      }
+      try {
+        if (recoverySessionGenerationRef.current) {
+          await api.finishAppSession(recoverySessionGenerationRef.current, false);
+        }
+      } catch (error) {
+        setNotice(errorMessage(error));
+        return;
+      }
       allowWindowCloseRef.current = true;
       await windowHandle.close();
     }).then((unlisten) => {
@@ -1147,7 +1352,7 @@ export function App({ dialogController: suppliedDialogController }: AppProps = {
     [workflow.match],
   );
   const savedPlanUnavailable = Boolean(
-    savedConfiguration
+    workflow.savedIntentLoaded
       && workflow.match
       && (!workflow.devicePlan
         || !planOptions.some((candidate) => candidate.planId === workflow.devicePlan)),
@@ -1164,7 +1369,8 @@ export function App({ dialogController: suppliedDialogController }: AppProps = {
         })),
       ].filter((diagnostic) => diagnostic.severity === "error")
     : [];
-  const configurationActionsLocked = busy
+  const configurationActionsLocked = !startupReady
+    || busy
     || workflow.execution.kind === "active"
     || workflow.execution.kind === "starting";
   const saveDisabled = busy
@@ -1213,11 +1419,13 @@ export function App({ dialogController: suppliedDialogController }: AppProps = {
       {runtime.status === "ready" && (
         <section className="configuration-bar" aria-label="Saved configurations">
           <div>
-            <strong>{savedConfiguration?.name ?? "Unsaved configuration"}</strong>
+            <strong>{savedConfiguration?.name ?? recoveredName ?? "Unsaved configuration"}</strong>
             <small>
               {savedConfiguration
                 ? `${savedConfiguration.validation.state.replaceAll("_", " ")}${savedConfiguration.dirty ? " · unsaved edits" : ""}`
-                : "Portable intent only; generated plans and device authority are never saved"}
+                : recoveredName
+                  ? "Recovered unsaved intent; reconnect and validate before creating a fresh review"
+                  : "Portable intent only; generated plans and device authority are never saved"}
             </small>
           </div>
           <div className="button-row">
@@ -1233,7 +1441,13 @@ export function App({ dialogController: suppliedDialogController }: AppProps = {
         </section>
       )}
 
-      {runtime.status === "unsupported" || runtime.status === "failed" ? (
+      {!startupReady ? (
+        <main className="blocking-card" data-focus-fallback="main" id="main-content" ref={mainRef} tabIndex={-1}>
+          <p className="eyebrow">RECOVERY CHECK</p>
+          <h2 data-step-heading tabIndex={-1}>Checking for recoverable work</h2>
+          <p>EmuChef is validating its app-owned recovery record before the normal workflow starts.</p>
+        </main>
+      ) : runtime.status === "unsupported" || runtime.status === "failed" ? (
         <main className="blocking-card" data-focus-fallback="main" id="main-content" role="alert" ref={mainRef} tabIndex={-1}>
           <p className="eyebrow">RUNTIME UNAVAILABLE</p>
           <h2 data-step-heading tabIndex={-1}>EmuChef could not start its Rust runtime</h2>
@@ -1844,6 +2058,44 @@ export function App({ dialogController: suppliedDialogController }: AppProps = {
             )}
           </aside>
         </main>
+      )}
+
+      {activeDialog?.payload.kind === "recovery" && (
+        <AccessibleDialog
+          currentDialogId={() => dialogController.activeId}
+          descriptionId="recovery-dialog-description"
+          dialogId={activeDialog.id}
+          initialFocusRef={recoveryNotNowRef}
+          onDismiss={() => dialogController.settle(activeDialog.id, "not-now")}
+          returnFocus={null}
+          role="alertdialog"
+          titleId="recovery-dialog-title"
+        >
+          <p className="eyebrow">RECOVERABLE WORK</p>
+          <h2 id="recovery-dialog-title">Restore the unsaved configuration?</h2>
+          <div id="recovery-dialog-description">
+            <p>
+              EmuChef found unsaved portable intent
+              {activeDialog.payload.draft.displayName
+                ? ` for ${activeDialog.payload.draft.displayName}`
+                : " from an earlier session"}.
+            </p>
+            <p>
+              Restore requires a fresh device connection, validation, plan, and review. Sensitive
+              input values were not retained and must be entered again.
+            </p>
+            <p>Not now keeps this draft for the next launch unless newer edits supersede it.</p>
+          </div>
+          <div className="button-row">
+            <button onClick={() => dialogController.settle(activeDialog.id, "restore")}>Restore</button>
+            <button className="danger" onClick={() => dialogController.settle(activeDialog.id, "discard-recovery")}>Discard</button>
+            <button
+              className="secondary"
+              onClick={() => dialogController.settle(activeDialog.id, "not-now")}
+              ref={recoveryNotNowRef}
+            >Not now</button>
+          </div>
+        </AccessibleDialog>
       )}
 
       {activeDialog?.payload.kind === "unsaved" && (

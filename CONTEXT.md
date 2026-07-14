@@ -406,6 +406,30 @@ the active document and dirty edits intact while invalidating device, review,
 execution, confirmation, and launch authority, so removal itself does not
 require the dirty prompt.
 
+The end-user app keeps at most one schema-v1 recovery record for dirty portable
+intent under a Tauri-owned fixed application-data path. The record is bounded,
+atomically replaced, owner-only on Unix, and generation checked. It can contain
+a safe display name, authored device-plan reference, recipe IDs,
+schema-permitted bindings, key-only omitted-binding markers, and a source
+saved-configuration identity. It never contains device, generated-plan,
+review, execution, confirmation, launch, dialog, cache, diagnostics, sidecar,
+log, process-output, or raw-error authority.
+
+Startup validates the recovery record before normal workflow use and offers
+Restore, Discard, or Not now. Restore creates fresh document/frontend sessions
+and requires current device selection, probing, validation, description,
+planning, and review. Not now keeps the exact generation on disk across clean
+shutdown and offers it on the next launch. Deferred disposition is separate
+from current-session dirty state. Explicit discard, successful Save or Save As,
+or a newer atomically staged dirty generation clears or supersedes it.
+
+Only authored input `sensitive` metadata controls binding recovery. Explicitly
+non-sensitive values follow the existing portable saved-configuration rules,
+including existing file/directory bindings. Sensitive and unclassified values
+are omitted without hashes, masks, or length leakage and produce a sanitized
+required-re-entry diagnostic after restore. Key names and value shapes never
+classify secrecy.
+
 Packaged catalog data is materialized under the application resource directory.
 The trusted backend requires the four product directories, ignores only regular
 `.gitkeep` placeholders, rejects symlinks and every other unsupported entry,

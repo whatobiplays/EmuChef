@@ -58,6 +58,15 @@ execution plan or its digest. Reopening a configuration therefore always
 re-probes the selected current device and runs current validation, description,
 planning, and review before an execution can start.
 
+Crash recovery uses the same portable-intent boundary without becoming a
+planner or executor input source. Tauri restores selected authored references
+and schema-permitted bindings into a fresh document session, after which the
+ordinary current-catalog description and planning path runs. Authored input
+`sensitive` metadata alone controls whether a binding value can enter the
+recovery record; omitted bindings produce a re-entry diagnostic before a fresh
+review can be created. No generated plan, digest, target, review, or execution
+state is reconstructed.
+
 Artifact resolution supports absolute `file://`, HTTP, and HTTPS URLs inside the
 runtime/cache sandbox. The resolver owns compatible URL-based filenames,
 destination selection, partial-file cleanup, and no-clobber publication. The

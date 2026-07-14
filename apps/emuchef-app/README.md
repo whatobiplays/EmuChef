@@ -32,6 +32,15 @@ cancel result during teardown. These behaviors are presentation-only and do
 not move authority out of Rust or trusted Tauri. See the
 [Phase 3C contract](../../docs/product/phase-3c-accessibility-and-interaction-resilience.md).
 
+The app keeps at most one bounded recovery record for dirty portable intent.
+Tauri owns its fixed application-data path, validation, atomic replacement,
+generation checks, and removal. Startup offers an accessible Restore, Discard,
+or Not now choice before device selection. Not now keeps the same draft for a
+future launch; a later valid dirty edit atomically supersedes it. Authored
+`sensitive` input metadata is the only secret classification: sensitive or
+unknown values are omitted and must be re-entered after restore. See the
+[Phase 3D contract](../../docs/product/phase-3d-crash-safe-draft-restoration.md).
+
 The implemented, default-disabled real-device trust boundary is documented in the
 [Phase 2B guarded real-execution contract](../../docs/product/phase-2b-guarded-real-execution.md).
 The feature is not release approval: each platform still requires packaged

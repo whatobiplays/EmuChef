@@ -51,6 +51,7 @@ export interface WorkflowState {
   repairIntent: boolean;
   portableIntentDirty: boolean;
   savedIntentLoaded: boolean;
+  requiredReentryBindings: string[];
 }
 
 export const initialWorkflowState: WorkflowState = {
@@ -70,6 +71,7 @@ export const initialWorkflowState: WorkflowState = {
   repairIntent: false,
   portableIntentDirty: false,
   savedIntentLoaded: false,
+  requiredReentryBindings: [],
 };
 
 export type WorkflowAction =
@@ -94,6 +96,7 @@ export type WorkflowAction =
       selectedRecipes: string[];
       bindings: Record<string, unknown>;
       dirty: boolean;
+      requiredReentryBindings?: string[];
     }
   | { type: "portable-intent-saved" }
   | {
@@ -201,6 +204,7 @@ export function workflowReducer(state: WorkflowState, action: WorkflowAction): W
         descriptionDirty: true,
         review: null,
         portableIntentDirty: true,
+        requiredReentryBindings: state.requiredReentryBindings.filter((key) => key !== action.key),
         requestGeneration: state.requestGeneration + 1,
       };
     case "review":
@@ -306,6 +310,7 @@ export function workflowReducer(state: WorkflowState, action: WorkflowAction): W
         descriptionDirty: true,
         portableIntentDirty: action.dirty,
         savedIntentLoaded: true,
+        requiredReentryBindings: action.requiredReentryBindings ?? [],
         requestGeneration: state.requestGeneration + 1,
         executionGeneration: state.executionGeneration + 1,
       };
@@ -453,6 +458,7 @@ export function mergeExecutionEvents(
 export function reviewReady(state: WorkflowState): boolean {
   if (!state.deviceHandle || !state.devicePlan || !state.description) return false;
   if (state.descriptionDirty) return false;
+  if (state.requiredReentryBindings.length > 0) return false;
   if (state.description.diagnostics.some((item) => item.severity === "error")) return false;
   return !state.description.inputs.some(
     (input) => input.required && missingRequiredValue(input.value),

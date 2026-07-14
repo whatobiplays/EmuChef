@@ -304,3 +304,29 @@ test("Tauri alone constructs the fixed real-mode sidecar request", () => {
   assert.match(trustedRequest, /"targetDevice": review\.target/);
   assert.doesNotMatch(trustedRequest, /std::env|http|remote|device.*enabled|enabled.*device/i);
 });
+
+test("recovery persistence is fixed-path, strict, and schema-sensitive", () => {
+  const frontend = read("src/App.tsx");
+  const app = read("src-tauri/src/lib.rs");
+  const api = read("src/api.ts");
+  const recovery = read("src-tauri/src/recovery.rs");
+  const productionRecovery = recovery.slice(0, recovery.indexOf("#[cfg(test)]"));
+  const stageApi = sourceSlice(api, "stageRecoveryDraft:", "\n  deferRecoveryDraft:");
+
+  assert.match(app, /app_data\.join\("recovery-draft\.json"\)/);
+  assert.match(app, /app_data\.join\("session-active\.marker"\)/);
+  assert.doesNotMatch(stageApi, /(?:recovery|draft|marker)(?:File)?Path|executionHandle|reviewHandle|deviceHandle/);
+  assert.match(recovery, /serde\(rename_all = "camelCase", deny_unknown_fields\)/);
+  assert.match(productionRecovery, /self\.sensitivity\.get\(&key\)\.copied\(\) == Some\(false\)/);
+  assert.doesNotMatch(
+    productionRecovery,
+    /Regex|to_(?:ascii_)?lowercase|contains\("(?:password|token|credential|apiKey)"\)/,
+  );
+  assert.doesNotMatch(productionRecovery, /secret-value|masked|hash(?:ed)?_value/i);
+  assert.match(frontend, /activeDialog\?\.payload\.kind === "recovery"/);
+  assert.match(frontend, />Restore<\/button>/);
+  assert.match(frontend, />Discard<\/button>/);
+  assert.match(frontend, />Not now<\/button>/);
+  assert.match(frontend, /onDismiss=\{\(\) => dialogController\.settle\(activeDialog\.id, "not-now"\)\}/);
+  assert.ok(frontend.indexOf("await offerRecovery(session.recovery)") < frontend.indexOf("setStartupReady(true)"));
+});
