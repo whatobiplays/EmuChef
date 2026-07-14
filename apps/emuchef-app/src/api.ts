@@ -17,10 +17,16 @@ import type {
   ReviewSummary,
   RuntimeStatus,
   LaunchResult,
+  RecentConfiguration,
+  SavedConfigurationDialogResult,
+  SavedConfigurationDocument,
+  SavedConfigurationMutation,
 } from "./types";
 
 export const api = {
+  beginAppSession: () => invoke<void>("begin_app_session"),
   runtimeStatus: () => invoke<RuntimeStatus>("get_runtime_status"),
+  restartRuntime: () => invoke<RuntimeStatus>("restart_runtime"),
   catalog: () => invoke<CatalogSummary>("get_catalog"),
   adbStatus: () => invoke<AdbSetupStatus>("get_adb_setup_status"),
   openPlatformToolsPage: () => invoke<void>("open_platform_tools_download_page"),
@@ -76,4 +82,41 @@ export const api = {
     invoke<LaunchResult>("launch_configured_app", { launchActionHandle }),
   pickInputPath: (pathKind: "file" | "directory", multiple: boolean) =>
     invoke<string[] | null>("pick_input_path", { pathKind, multiple }),
+  listRecentConfigurations: () =>
+    invoke<RecentConfiguration[]>("list_recent_configurations"),
+  createSavedConfiguration: (request: {
+    name: string;
+    devicePlan: string;
+    selectedRecipes: string[];
+    bindings: Record<string, unknown>;
+  }) => invoke<SavedConfigurationDialogResult>("create_saved_configuration", { request }),
+  openSavedConfiguration: () =>
+    invoke<SavedConfigurationDialogResult>("open_saved_configuration"),
+  openRecentConfiguration: (recentHandle: string) =>
+    invoke<SavedConfigurationDocument>("open_recent_configuration", {
+      request: { recentHandle },
+    }),
+  relinkRecentConfiguration: (recentHandle: string) =>
+    invoke<SavedConfigurationDialogResult>("relink_recent_configuration", {
+      request: { recentHandle },
+    }),
+  removeRecentConfiguration: (recentHandle: string) =>
+    invoke<void>("remove_recent_configuration", { request: { recentHandle } }),
+  updateSavedConfiguration: (
+    configurationHandle: string,
+    expectedRevision: number,
+    mutation: SavedConfigurationMutation,
+  ) => invoke<SavedConfigurationDocument>("update_saved_configuration", {
+    request: { configurationHandle, expectedRevision, mutation },
+  }),
+  saveSavedConfiguration: (configurationHandle: string) =>
+    invoke<SavedConfigurationDocument>("save_saved_configuration", {
+      request: { configurationHandle },
+    }),
+  saveSavedConfigurationAs: (configurationHandle: string, name: string) =>
+    invoke<SavedConfigurationDialogResult>("save_saved_configuration_as", {
+      request: { configurationHandle, name },
+    }),
+  closeSavedConfiguration: (configurationHandle: string) =>
+    invoke<void>("close_saved_configuration", { request: { configurationHandle } }),
 };

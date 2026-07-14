@@ -3,6 +3,7 @@ mod catalog;
 mod commands;
 mod execution;
 mod handles;
+mod saved_configurations;
 mod sidecar;
 
 use std::sync::Mutex;
@@ -27,11 +28,18 @@ pub fn run() {
                 adb: Mutex::new(adb::AdbManager::new(app_data.join("platform-tools"))),
                 handles: Mutex::new(handles::SessionHandles::default()),
                 executions: Mutex::new(execution::ExecutionHandleStore::default()),
+                saved_configurations: Mutex::new(
+                    saved_configurations::SavedConfigurationStore::load(
+                        app_data.join("recent-configurations.json"),
+                    ),
+                ),
             });
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
             commands::get_runtime_status,
+            commands::begin_app_session,
+            commands::restart_runtime,
             commands::get_catalog,
             commands::get_adb_setup_status,
             commands::open_platform_tools_download_page,
@@ -45,6 +53,16 @@ pub fn run() {
             commands::discard_review,
             commands::get_review_status,
             commands::pick_input_path,
+            saved_configurations::list_recent_configurations,
+            saved_configurations::create_saved_configuration,
+            saved_configurations::open_saved_configuration,
+            saved_configurations::open_recent_configuration,
+            saved_configurations::relink_recent_configuration,
+            saved_configurations::remove_recent_configuration,
+            saved_configurations::update_saved_configuration,
+            saved_configurations::save_saved_configuration,
+            saved_configurations::save_saved_configuration_as,
+            saved_configurations::close_saved_configuration,
             execution::start_simulated_execution,
             execution::get_simulated_execution,
             execution::get_simulated_execution_events,

@@ -9,7 +9,7 @@
 | Real-ADB apply | Rust | Active; manual device validation required |
 | Tauri editor backend | Rust JSONL sidecar | Active |
 | Phase 0 end-user runtime protocol | Rust JSONL sidecar | Active backend contract |
-| End-user desktop app | React UI with trusted Rust/Tauri bridge | Phase 2C completion/report/repair active; guarded real execution remains default-disabled |
+| End-user desktop app | React UI with trusted Rust/Tauri bridge | Phase 3A portable saved configurations active; guarded real execution remains default-disabled |
 | Platform-Tools import and verification | Rust/Tauri | User-supplied, app-managed, macOS-only |
 | Catalog source resolution | Rust | Bundled/local snapshots active; cached remote reserved |
 | Execution reports and incremental events | Rust JSONL sidecar | Active in-memory session contract |
@@ -58,3 +58,17 @@ one-shot launch actions. The Rust sidecar owns authoritative execution reports,
 launch-candidate rederivation, target preflight, and the typed ADB launch
 operation. One-shot consumption is intentionally not duplicated in the
 sidecar; it belongs solely to the Tauri action-handle store.
+
+## Phase 3A saved-configuration boundary
+
+The sidecar owns schema-v1 configuration documents and persistence. Tauri owns
+native file dialogs, configuration paths, sidecar document IDs, opaque document
+handles, and the private recent-file index. React receives only safe document
+names, portable intent, dirty state, validation status, and sanitized
+diagnostics.
+
+The saved device-plan value is an authored plan reference, not a generated
+execution plan. Opening or reusing a document invalidates prior device facts,
+generated plans, digests, reviews, executions, confirmations, and launch
+actions. Fresh probe, match, catalog validation, description, planning, and
+review are required before execution.

@@ -283,3 +283,124 @@ fn sidecar_user_configuration_document_remains_editable_with_semantic_errors() {
         .unwrap()
         .contains("selected_recipes: []"));
 }
+
+#[test]
+fn create_with_bindings_and_save_as_identity_preserve_portable_intent() {
+    let temp = TempDir::new().expect("temp root should be created");
+    let authored_root = write_authored_root(&temp, false);
+    let original = temp.path().join("original.yaml");
+    let copy = temp.path().join("copy.yaml");
+    let requests = [
+        json!({
+            "id": "create",
+            "type": "createUserConfiguration",
+            "payload": {
+                "path": original,
+                "configurationId": "saved.original",
+                "name": "Original",
+                "devicePlan": "test.plan",
+                "selectedRecipes": ["feature.test"],
+                "bindings": { "feature.test/value": "saved" },
+                "authoredRoot": authored_root,
+            }
+        }),
+        json!({
+            "id": "save-as",
+            "type": "saveUserConfigurationAs",
+            "payload": {
+                "documentId": "doc-1",
+                "path": copy,
+                "configurationId": "saved.copy",
+                "name": "Copy",
+            }
+        }),
+    ];
+    let input = format!(
+        "{}\n",
+        requests
+            .iter()
+            .map(Value::to_string)
+            .collect::<Vec<_>>()
+            .join("\n")
+    );
+    let responses = jsonl::process_jsonl(&input)
+        .lines()
+        .map(|line| serde_json::from_str::<Value>(line).unwrap())
+        .collect::<Vec<_>>();
+
+    assert_eq!(responses[0]["ok"], true, "{:#}", responses[0]);
+    assert_eq!(
+        responses[0]["result"]["document"]["configuration"]["bindings"]["feature.test/value"],
+        "saved"
+    );
+    assert_eq!(responses[1]["ok"], true, "{:#}", responses[1]);
+    assert_eq!(
+        responses[1]["result"]["document"]["configuration"]["id"],
+        "saved.copy"
+    );
+    assert_eq!(
+        responses[1]["result"]["document"]["configuration"]["name"],
+        "Copy"
+    );
+    assert!(fs::read_to_string(&original)
+        .unwrap()
+        .contains("id: saved.original"));
+    let copy_text = fs::read_to_string(&copy).unwrap();
+    assert!(copy_text.contains("id: saved.copy"));
+    assert!(copy_text.contains("feature.test/value"));
+}
+
+#[test]
+fn failed_save_as_keeps_the_current_document_identity_and_path() {
+    let temp = TempDir::new().expect("temp root should be created");
+    let path = write_configuration(&temp, valid_yaml());
+    let missing = temp.path().join("missing").join("copy.yaml");
+    let requests = [
+        json!({
+            "id": "open",
+            "type": "openUserConfiguration",
+            "payload": { "path": path }
+        }),
+        json!({
+            "id": "save-as",
+            "type": "saveUserConfigurationAs",
+            "payload": {
+                "documentId": "doc-1",
+                "path": missing,
+                "configurationId": "saved.failed-copy",
+                "name": "Failed Copy",
+            }
+        }),
+        json!({
+            "id": "get",
+            "type": "getUserConfigurationDocument",
+            "payload": { "documentId": "doc-1" }
+        }),
+    ];
+    let input = format!(
+        "{}\n",
+        requests
+            .iter()
+            .map(Value::to_string)
+            .collect::<Vec<_>>()
+            .join("\n")
+    );
+    let responses = jsonl::process_jsonl(&input)
+        .lines()
+        .map(|line| serde_json::from_str::<Value>(line).unwrap())
+        .collect::<Vec<_>>();
+
+    assert_eq!(responses[1]["ok"], false);
+    assert_eq!(
+        responses[2]["result"]["document"]["configuration"]["id"],
+        "test.default"
+    );
+    assert_eq!(
+        responses[2]["result"]["document"]["configuration"]["name"],
+        "Test Default"
+    );
+    assert_eq!(
+        responses[2]["result"]["document"]["path"],
+        responses[0]["result"]["document"]["path"]
+    );
+}

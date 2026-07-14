@@ -21,6 +21,17 @@ const REQUIRED_CAPABILITIES: &[&str] = &[
     "getExecutionEvents",
     "cancelExecution",
     "launchExecutionApp",
+    "openUserConfiguration",
+    "createUserConfiguration",
+    "getUserConfigurationDocument",
+    "saveUserConfiguration",
+    "saveUserConfigurationAs",
+    "setUserConfigurationBinding",
+    "removeUserConfigurationBinding",
+    "setUserConfigurationSelectedRecipes",
+    "setUserConfigurationDevicePlan",
+    "validateUserConfiguration",
+    "closeUserConfiguration",
 ];
 
 #[derive(Clone, Debug, Serialize)]
@@ -360,6 +371,17 @@ mod tests {
                 "getExecutionEvents",
                 "cancelExecution",
                 "launchExecutionApp",
+                "openUserConfiguration",
+                "createUserConfiguration",
+                "getUserConfigurationDocument",
+                "saveUserConfiguration",
+                "saveUserConfigurationAs",
+                "setUserConfigurationBinding",
+                "removeUserConfigurationBinding",
+                "setUserConfigurationSelectedRecipes",
+                "setUserConfigurationDevicePlan",
+                "validateUserConfiguration",
+                "closeUserConfiguration",
             ]
         );
     }
@@ -373,7 +395,7 @@ mod tests {
         );
         assert_eq!(
             payload["requiredCapabilities"].as_array().unwrap().len(),
-            11
+            22
         );
         assert_eq!(payload["optionalCapabilities"], json!([]));
         assert!(payload.get("required").is_none());
@@ -387,7 +409,7 @@ mod tests {
                 .as_array()
                 .unwrap()
                 .len(),
-            11
+            22
         );
 
         let mut missing_execution = payload;

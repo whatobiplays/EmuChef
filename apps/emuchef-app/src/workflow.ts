@@ -49,6 +49,8 @@ export interface WorkflowState {
   executionGeneration: number;
   execution: ExecutionWorkflowState;
   repairIntent: boolean;
+  portableIntentDirty: boolean;
+  savedIntentLoaded: boolean;
 }
 
 export const initialWorkflowState: WorkflowState = {
@@ -66,6 +68,8 @@ export const initialWorkflowState: WorkflowState = {
   executionGeneration: 0,
   execution: { kind: "idle" },
   repairIntent: false,
+  portableIntentDirty: false,
+  savedIntentLoaded: false,
 };
 
 export type WorkflowAction =
@@ -85,6 +89,14 @@ export type WorkflowAction =
   | { type: "execution-unavailable"; generation: number; executionHandle: string; message: string }
   | { type: "prepare-repair" }
   | {
+      type: "load-portable-intent";
+      devicePlan: string;
+      selectedRecipes: string[];
+      bindings: Record<string, unknown>;
+      dirty: boolean;
+    }
+  | { type: "portable-intent-saved" }
+  | {
       type: "repair-ready";
       facts: DeviceFacts;
       match: DeviceMatch;
@@ -96,6 +108,7 @@ export type WorkflowAction =
   | { type: "return-to-review" }
   | { type: "back" }
   | { type: "device-disappeared" }
+  | { type: "infrastructure-invalidated" }
   | { type: "runtime-invalidated" };
 
 const previousStep: Record<WorkflowStep, WorkflowStep> = {
@@ -110,7 +123,7 @@ const previousStep: Record<WorkflowStep, WorkflowStep> = {
 export function workflowReducer(state: WorkflowState, action: WorkflowAction): WorkflowState {
   switch (action.type) {
     case "select-device":
-      if (state.repairIntent) {
+      if (state.repairIntent || state.savedIntentLoaded) {
         return {
           ...state,
           step: "device",
@@ -136,9 +149,11 @@ export function workflowReducer(state: WorkflowState, action: WorkflowAction): W
         step: "setup",
         facts: action.facts,
         match: action.match,
-        devicePlan: state.repairIntent && planStillAvailable(state.devicePlan, action.match)
+        devicePlan: state.savedIntentLoaded
           ? state.devicePlan
-          : action.match.recommendedPlanId,
+          : state.repairIntent && planStillAvailable(state.devicePlan, action.match)
+            ? state.devicePlan
+            : action.match.recommendedPlanId,
       };
     case "select-plan":
       return {
@@ -148,6 +163,7 @@ export function workflowReducer(state: WorkflowState, action: WorkflowAction): W
         descriptionDirty: true,
         review: null,
         repairIntent: false,
+        portableIntentDirty: true,
         requestGeneration: state.requestGeneration + 1,
       };
     case "description":
@@ -167,6 +183,7 @@ export function workflowReducer(state: WorkflowState, action: WorkflowAction): W
         selectedRecipes: action.selectedRecipes,
         descriptionDirty: true,
         review: null,
+        portableIntentDirty: true,
         requestGeneration: state.requestGeneration + 1,
       };
     case "set-binding":
@@ -183,6 +200,7 @@ export function workflowReducer(state: WorkflowState, action: WorkflowAction): W
           : null,
         descriptionDirty: true,
         review: null,
+        portableIntentDirty: true,
         requestGeneration: state.requestGeneration + 1,
       };
     case "review":
@@ -278,6 +296,21 @@ export function workflowReducer(state: WorkflowState, action: WorkflowAction): W
         execution: { kind: "idle" },
         repairIntent: true,
       };
+    case "load-portable-intent":
+      return {
+        ...initialWorkflowState,
+        step: "connect",
+        devicePlan: action.devicePlan,
+        selectedRecipes: action.selectedRecipes,
+        bindings: action.bindings,
+        descriptionDirty: true,
+        portableIntentDirty: action.dirty,
+        savedIntentLoaded: true,
+        requestGeneration: state.requestGeneration + 1,
+        executionGeneration: state.executionGeneration + 1,
+      };
+    case "portable-intent-saved":
+      return { ...state, portableIntentDirty: false };
     case "repair-ready":
       return {
         ...state,
@@ -294,6 +327,7 @@ export function workflowReducer(state: WorkflowState, action: WorkflowAction): W
         requestGeneration: state.requestGeneration + 1,
         execution: { kind: "idle" },
         repairIntent: false,
+        portableIntentDirty: true,
       };
     case "return-to-review":
       if (!state.review) return state;
@@ -315,6 +349,36 @@ export function workflowReducer(state: WorkflowState, action: WorkflowAction): W
           requestGeneration: state.requestGeneration + 1,
         };
       }
+      if (state.savedIntentLoaded) {
+        return {
+          ...state,
+          step: "connect",
+          deviceHandle: null,
+          facts: null,
+          match: null,
+          description: null,
+          descriptionDirty: true,
+          review: null,
+          execution: { kind: "idle" },
+          requestGeneration: state.requestGeneration + 1,
+        };
+      }
+      return { ...initialWorkflowState, requestGeneration: state.requestGeneration + 1 };
+    case "infrastructure-invalidated":
+      return {
+        ...state,
+        step: "connect",
+        deviceHandle: null,
+        facts: null,
+        match: null,
+        description: null,
+        descriptionDirty: true,
+        review: null,
+        executionGeneration: state.executionGeneration + 1,
+        execution: { kind: "idle" },
+        repairIntent: false,
+        requestGeneration: state.requestGeneration + 1,
+      };
     case "runtime-invalidated":
       return { ...initialWorkflowState, requestGeneration: state.requestGeneration + 1 };
   }

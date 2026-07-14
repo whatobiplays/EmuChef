@@ -294,9 +294,24 @@ catalog snapshot but shares no frontend modules or runtime state with
 `apps/config-editor`. The workflow is Connect Device, Confirm Device, Choose
 Setup, Provide Inputs, Review Plan, and Simulated Run. The execution stage is a
 fake-device dry run of the exact retained reviewed plan. It performs no real
-apply, device writes, artifact resolution, saved-configuration persistence,
-catalog networking, wireless onboarding, rollback, resume, or parallel-device
-work, and its result is not real-device evidence.
+apply, device writes, artifact resolution, catalog networking, wireless
+onboarding, rollback, resume, or parallel-device work, and its result is not
+real-device evidence.
+
+The app creates, opens, edits, saves, saves under a new identity, and reuses
+named schema-v1 portable configurations. A saved document contains its
+generated configuration identity and name, one authored device-plan reference,
+selected recipe IDs, user bindings, and safe schema extensions. It never
+contains a generated execution plan, plan digest, review or execution handle,
+real-execution confirmation, launch action, target serial, probed device facts,
+catalog root, ADB path, or runtime session state.
+
+Tauri owns native configuration dialogs, absolute configuration paths, sidecar
+document identifiers, opaque configuration handles, and a private ten-entry
+recent-file index. React receives safe names, portable intent, dirty state, and
+sanitized diagnostics. Missing recent files can be removed or relinked only to
+a file with the same embedded configuration identity. Save As creates a new
+name and generated identity while leaving the original file unchanged.
 
 Phase 2B guarded real-device execution is implemented behind the
 default-disabled Cargo feature `real-execution`. The compile-time feature is the
@@ -311,10 +326,25 @@ required before a release build opts into the feature.
 Tauri launches the sidecar and negotiates the `phase0_end_user_runtime`
 extension plus `describeCatalog`, `listAdbDevices`, `probeDevice`,
 `matchDevice`, `describeConfiguration`, `planConfiguration`, `startExecution`,
-`getExecution`, `getExecutionEvents`, and `cancelExecution` before ADB is
-needed. Runtime and catalog startup are independent from Platform-Tools setup.
+`getExecution`, `getExecutionEvents`, `cancelExecution`, and the schema-v1
+user-configuration document operations before ADB is needed. Runtime and
+catalog startup are independent from Platform-Tools setup.
 A missing ADB installation blocks only device discovery and displays the
 Platform-Tools setup flow.
+
+Opening or reusing a portable configuration invalidates every prior generated
+plan, digest, review, execution, confirmation, launch action, target binding,
+and probed device fact. The user must select and freshly probe a current device,
+validate against the current catalog and device capabilities, generate a fresh
+description and plan, and complete a fresh review before execution. Stale plan
+references, recipes, and bindings remain visible for correction and are never
+silently substituted.
+
+Save/Discard/Cancel protection applies before actions that would lose, replace,
+close, reload, or invalidate dirty portable edits. Platform-Tools removal keeps
+the active document and dirty edits intact while invalidating device, review,
+execution, confirmation, and launch authority, so removal itself does not
+require the dirty prompt.
 
 Packaged catalog data is materialized under the application resource directory.
 The trusted backend requires the four product directories, ignores only regular

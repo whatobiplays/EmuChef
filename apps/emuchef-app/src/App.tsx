@@ -1,14 +1,24 @@
 import { useCallback, useEffect, useMemo, useReducer, useRef, useState } from "react";
+import { getCurrentWindow } from "@tauri-apps/api/window";
 
 import { api } from "./api";
 import type {
   AdbSetupStatus,
   AnyExecutionSnapshot,
   CatalogSummary,
+  ConfigurationDescription,
   DeviceSummary,
   InputDescriptor,
+  RecentConfiguration,
   RuntimeStatus,
+  SavedConfigurationDocument,
+  SavedConfigurationMutation,
 } from "./types";
+import {
+  formatLastOpened,
+  resolveUnsavedDecision,
+  savedDevicePlanAvailable,
+} from "./savedConfigurations";
 import {
   emptyRealExecutionConfirmation,
   realExecutionConfirmationComplete,
@@ -75,8 +85,15 @@ export function App() {
   const [reportState, setReportState] = useState<"idle" | "exporting" | "saved" | "failed">("idle");
   const [launchState, setLaunchState] = useState<"idle" | "launching" | "launched" | "failed">("idle");
   const [repairPreparing, setRepairPreparing] = useState(false);
+  const [savedConfiguration, setSavedConfiguration] = useState<SavedConfigurationDocument | null>(null);
+  const [recentConfigurations, setRecentConfigurations] = useState<RecentConfiguration[]>([]);
   const [workflow, dispatch] = useReducer(workflowReducer, initialWorkflowState);
   const mainRef = useRef<HTMLElement>(null);
+  const savedConfigurationRef = useRef<SavedConfigurationDocument | null>(null);
+  const workflowRef = useRef(workflow);
+  const configurationMutationQueue = useRef<Promise<void>>(Promise.resolve());
+  const sessionInitializedRef = useRef(false);
+  const allowWindowCloseRef = useRef(false);
 
   const initialize = useCallback(async () => {
     const [runtimeStatus, adbStatus, realAvailability] = await Promise.all([
@@ -88,12 +105,19 @@ export function App() {
     setAdb(adbStatus);
     setRealExecutionEnabled(realAvailability.enabled);
     if (runtimeStatus.status === "ready") {
-      setCatalog(await api.catalog());
+      const [nextCatalog, recents] = await Promise.all([
+        api.catalog(),
+        api.listRecentConfigurations(),
+      ]);
+      setCatalog(nextCatalog);
+      setRecentConfigurations(recents);
     }
   }, []);
 
   useEffect(() => {
-    initialize().catch((error) => {
+    if (sessionInitializedRef.current) return;
+    sessionInitializedRef.current = true;
+    api.beginAppSession().then(initialize).catch((error) => {
       setRuntime({
         status: "failed",
         error: { code: "runtime_start_failed", message: errorMessage(error), actions: ["retry"] },
@@ -102,8 +126,291 @@ export function App() {
   }, [initialize]);
 
   useEffect(() => {
+    savedConfigurationRef.current = savedConfiguration;
+  }, [savedConfiguration]);
+
+  useEffect(() => {
+    workflowRef.current = workflow;
+  }, [workflow]);
+
+  useEffect(() => {
     mainRef.current?.focus();
   }, [adb?.status, runtime.status, workflow.step]);
+
+  const refreshRecents = async () => {
+    setRecentConfigurations(await api.listRecentConfigurations());
+  };
+
+  const applySavedDocument = async (document: SavedConfigurationDocument) => {
+    const previous = savedConfigurationRef.current;
+    if (previous && previous.configurationHandle !== document.configurationHandle) {
+      await api.closeSavedConfiguration(previous.configurationHandle).catch(() => undefined);
+    }
+    savedConfigurationRef.current = document;
+    setSavedConfiguration(document);
+    dispatch({
+      type: "load-portable-intent",
+      devicePlan: document.devicePlan,
+      selectedRecipes: document.selectedRecipes,
+      bindings: document.bindings,
+      dirty: document.dirty,
+    });
+    await refreshRecents();
+    setNotice(`Opened ${document.name}. Connect and select the current device to validate it.`);
+  };
+
+  const createFromCurrentIntent = async (): Promise<boolean> => {
+    const current = workflowRef.current;
+    if (!current.devicePlan) {
+      setNotice("Choose a device plan reference before saving this portable configuration.");
+      return false;
+    }
+    const name = window.prompt("Name this portable configuration:", "My EmuChef setup")?.trim();
+    if (!name) return false;
+    try {
+      const result = await api.createSavedConfiguration({
+        name,
+        devicePlan: current.devicePlan,
+        selectedRecipes: current.selectedRecipes ?? [],
+        bindings: current.bindings,
+      });
+      if (result.outcome === "cancelled") return false;
+      await applySavedDocument(result);
+      dispatch({ type: "portable-intent-saved" });
+      return true;
+    } catch (error) {
+      setNotice(errorMessage(error));
+      return false;
+    }
+  };
+
+  const saveCurrentConfiguration = async (): Promise<boolean> => {
+    await configurationMutationQueue.current;
+    const current = savedConfigurationRef.current;
+    if (!current) return createFromCurrentIntent();
+    try {
+      const saved = await api.saveSavedConfiguration(current.configurationHandle);
+      savedConfigurationRef.current = saved;
+      setSavedConfiguration(saved);
+      dispatch({ type: "portable-intent-saved" });
+      await refreshRecents();
+      setNotice(`Saved ${saved.name}.`);
+      return true;
+    } catch (error) {
+      setNotice(errorMessage(error));
+      return false;
+    }
+  };
+
+  const dirtyDecision = async (): Promise<"save" | "discard" | "cancel"> => {
+    const dirty = workflowRef.current.portableIntentDirty || Boolean(savedConfigurationRef.current?.dirty);
+    if (!dirty) return "discard";
+    const saveConfirmed = window.confirm(
+      "This portable configuration has unsaved edits. Save them before continuing?",
+    );
+    const discardConfirmed = saveConfirmed
+      ? false
+      : window.confirm("Discard the unsaved portable configuration edits?");
+    return resolveUnsavedDecision(dirty, saveConfirmed, discardConfirmed);
+  };
+
+  const runProtectedTransition = async (transition: () => Promise<void>) => {
+    const decision = await dirtyDecision();
+    if (decision === "cancel") return;
+    if (decision === "save" && !(await saveCurrentConfiguration())) return;
+    await configurationMutationQueue.current;
+    await transition();
+  };
+
+  const startNewConfiguration = async () => {
+    await runProtectedTransition(async () => {
+      const current = savedConfigurationRef.current;
+      if (current) await api.closeSavedConfiguration(current.configurationHandle).catch(() => undefined);
+      savedConfigurationRef.current = null;
+      setSavedConfiguration(null);
+      dispatch({ type: "runtime-invalidated" });
+      setNotice("Started a new portable configuration.");
+    });
+  };
+
+  const openConfiguration = async () => {
+    await runProtectedTransition(async () => {
+      try {
+        const result = await api.openSavedConfiguration();
+        if (result.outcome !== "cancelled") await applySavedDocument(result);
+      } catch (error) {
+        setNotice(errorMessage(error));
+      }
+    });
+  };
+
+  const openRecentConfiguration = async (recentHandle: string) => {
+    await runProtectedTransition(async () => {
+      try {
+        await applySavedDocument(await api.openRecentConfiguration(recentHandle));
+      } catch (error) {
+        setNotice(errorMessage(error));
+        await refreshRecents();
+      }
+    });
+  };
+
+  const relinkRecentConfiguration = async (recentHandle: string) => {
+    await runProtectedTransition(async () => {
+      try {
+        const result = await api.relinkRecentConfiguration(recentHandle);
+        if (result.outcome !== "cancelled") await applySavedDocument(result);
+      } catch (error) {
+        setNotice(errorMessage(error));
+      } finally {
+        await refreshRecents();
+      }
+    });
+  };
+
+  const saveConfigurationAs = async () => {
+    await configurationMutationQueue.current;
+    const current = savedConfigurationRef.current;
+    if (!current) {
+      await createFromCurrentIntent();
+      return;
+    }
+    const name = window.prompt("Name the new portable configuration:", current.name)?.trim();
+    if (!name) return;
+    try {
+      const result = await api.saveSavedConfigurationAs(current.configurationHandle, name);
+      if (result.outcome === "cancelled") return;
+      savedConfigurationRef.current = result;
+      setSavedConfiguration(result);
+      dispatch({ type: "portable-intent-saved" });
+      await refreshRecents();
+      setNotice(`Saved the new portable configuration ${result.name}.`);
+    } catch (error) {
+      setNotice(errorMessage(error));
+    }
+  };
+
+  const queueSavedMutation = (mutation: SavedConfigurationMutation) => {
+    if (!savedConfigurationRef.current) return;
+    configurationMutationQueue.current = configurationMutationQueue.current
+      .then(async () => {
+        const current = savedConfigurationRef.current;
+        if (!current) return;
+        const updated = await api.updateSavedConfiguration(
+          current.configurationHandle,
+          current.revision,
+          mutation,
+        );
+        if (savedConfigurationRef.current?.configurationHandle !== updated.configurationHandle) return;
+        savedConfigurationRef.current = updated;
+        setSavedConfiguration(updated);
+      })
+      .catch((error) => setNotice(errorMessage(error)));
+  };
+
+  const updateDevicePlanIntent = (devicePlan: string) => {
+    dispatch({ type: "select-plan", devicePlan });
+    queueSavedMutation({ kind: "device_plan", value: devicePlan });
+  };
+
+  const updateRecipeIntent = (selectedRecipes: string[]) => {
+    dispatch({ type: "set-recipes", selectedRecipes });
+    queueSavedMutation({ kind: "selected_recipes", value: selectedRecipes });
+  };
+
+  const updateBindingIntent = (key: string, value: unknown) => {
+    dispatch({ type: "set-binding", key, value });
+    queueSavedMutation({ kind: "binding", key, value });
+  };
+
+  const applyDescriptionValidation = (description: ConfigurationDescription) => {
+    const current = savedConfigurationRef.current;
+    if (!current) return;
+    const diagnostics = [
+      ...description.diagnostics,
+      ...description.inputs.flatMap((input) => input.diagnostics),
+    ];
+    const state = diagnostics.some((diagnostic) => diagnostic.severity === "error")
+      ? "requires_attention"
+      : diagnostics.length > 0
+        ? "valid_with_warnings"
+        : "valid";
+    const updated: SavedConfigurationDocument = {
+      ...current,
+      validation: { state, diagnostics },
+    };
+    savedConfigurationRef.current = updated;
+    setSavedConfiguration(updated);
+  };
+
+  const syncSavedIntent = (
+    devicePlan: string,
+    selectedRecipes: string[],
+    bindings: Record<string, unknown>,
+  ) => {
+    const current = savedConfigurationRef.current;
+    if (!current) return;
+    if (current.devicePlan !== devicePlan) {
+      queueSavedMutation({ kind: "device_plan", value: devicePlan });
+    }
+    if (JSON.stringify(current.selectedRecipes) !== JSON.stringify(selectedRecipes)) {
+      queueSavedMutation({ kind: "selected_recipes", value: selectedRecipes });
+    }
+    for (const key of Object.keys(current.bindings)) {
+      if (!Object.hasOwn(bindings, key)) {
+        queueSavedMutation({ kind: "remove_binding", key });
+      }
+    }
+    for (const [key, value] of Object.entries(bindings)) {
+      if (!Object.hasOwn(current.bindings, key) || current.bindings[key] !== value) {
+        queueSavedMutation({ kind: "binding", key, value });
+      }
+    }
+  };
+
+  const restartRuntime = async () => {
+    await runProtectedTransition(async () => {
+      try {
+        const status = await api.restartRuntime();
+        savedConfigurationRef.current = null;
+        setSavedConfiguration(null);
+        dispatch({ type: "runtime-invalidated" });
+        setRuntime(status);
+        await initialize();
+        setNotice("Rust runtime restarted. Reopen a portable configuration before continuing.");
+      } catch (error) {
+        setNotice(errorMessage(error));
+      }
+    });
+  };
+
+  useEffect(() => {
+    let disposed = false;
+    let cleanup: (() => void) | null = null;
+    const windowHandle = getCurrentWindow();
+    void windowHandle.onCloseRequested(async (event) => {
+      if (allowWindowCloseRef.current) {
+        allowWindowCloseRef.current = false;
+        return;
+      }
+      const dirty = workflowRef.current.portableIntentDirty
+        || Boolean(savedConfigurationRef.current?.dirty);
+      if (!dirty) return;
+      event.preventDefault();
+      const decision = await dirtyDecision();
+      if (decision === "cancel") return;
+      if (decision === "save" && !(await saveCurrentConfiguration())) return;
+      allowWindowCloseRef.current = true;
+      await windowHandle.close();
+    }).then((unlisten) => {
+      if (disposed) unlisten();
+      else cleanup = unlisten;
+    });
+    return () => {
+      disposed = true;
+      cleanup?.();
+    };
+  }, []);
 
   const pollDevices = useCallback(async () => {
     if (adb?.status !== "ready" || runtime.status !== "ready") return;
@@ -130,7 +437,16 @@ export function App() {
     await runBusyAction({
       setBusy,
       action: api.importPlatformTools,
-      onSuccess: setAdb,
+      onSuccess: (status) => {
+        setAdb(status);
+        if (workflowRef.current.deviceHandle || workflowRef.current.review) {
+          setDevices([]);
+          dispatch({ type: "infrastructure-invalidated" });
+          setNotice(savedConfigurationRef.current?.dirty
+            ? "Platform-Tools replaced. Unsaved configuration edits remain open; select and validate a device again."
+            : "Platform-Tools replaced. Device, review, and execution authority were invalidated.");
+        }
+      },
       onError: async (error) => {
         setNotice(errorMessage(error));
         setAdb(await api.adbStatus());
@@ -152,7 +468,10 @@ export function App() {
     try {
       setAdb(await api.removePlatformTools());
       setDevices([]);
-      dispatch({ type: "runtime-invalidated" });
+      dispatch({ type: "infrastructure-invalidated" });
+      setNotice(savedConfigurationRef.current?.dirty
+        ? "Platform-Tools removed. Unsaved configuration edits remain open; reconnect after reinstalling Platform-Tools."
+        : "Platform-Tools removed. Device, review, and execution authority were invalidated.");
     } catch (error) {
       setNotice(errorMessage(error));
     } finally {
@@ -168,6 +487,23 @@ export function App() {
       const facts = await api.probeDevice(deviceHandle);
       const match = await api.matchDevice(deviceHandle);
       dispatch({ type: "device-probed", facts, match });
+      const currentSaved = savedConfigurationRef.current;
+      if (currentSaved && !savedDevicePlanAvailable(currentSaved, match)) {
+        const updated: SavedConfigurationDocument = {
+          ...currentSaved,
+          validation: {
+            state: "cannot_use",
+            diagnostics: [{
+              code: "saved_device_plan_incompatible",
+              message: "The saved device plan reference is unavailable or incompatible with the current device.",
+              severity: "error",
+              key: null,
+            }, ...currentSaved.validation.diagnostics],
+          },
+        };
+        savedConfigurationRef.current = updated;
+        setSavedConfiguration(updated);
+      }
     } catch (error) {
       setNotice(errorMessage(error));
       dispatch({ type: "device-disappeared" });
@@ -189,6 +525,9 @@ export function App() {
         bindings: workflow.bindings,
       });
       dispatch({ type: "description", description, generation });
+      if (workflowRef.current.requestGeneration === generation) {
+        applyDescriptionValidation(description);
+      }
     } catch (error) {
       setNotice(errorMessage(error));
     } finally {
@@ -212,6 +551,9 @@ export function App() {
         bindings: workflow.bindings,
       }).then((description) => {
         dispatch({ type: "description", description, generation });
+        if (workflowRef.current.requestGeneration === generation) {
+          applyDescriptionValidation(description);
+        }
       }).catch((error) => setNotice(errorMessage(error)));
     }, 250);
     return () => window.clearTimeout(timer);
@@ -448,6 +790,7 @@ export function App() {
         selectedRecipes: description.selectedRecipes,
         bindings,
       });
+      syncSavedIntent(devicePlan, description.selectedRecipes, bindings);
       setNotice("Configuration refreshed. Resolve any diagnostics, then create and review a new plan.");
     } catch (error) {
       setNotice(errorMessage(error));
@@ -464,11 +807,7 @@ export function App() {
       action: () => api.pickInputPath(input.pathKind!, Boolean(input.multiple)),
       onSuccess: (values) => {
         if (values) {
-          dispatch({
-            type: "set-binding",
-            key: input.key,
-            value: input.multiple ? values : values[0],
-          });
+          updateBindingIntent(input.key, input.multiple ? values : values[0]);
         }
       },
       onError: (error) => setNotice(errorMessage(error)),
@@ -479,6 +818,12 @@ export function App() {
   const planOptions = useMemo(
     () => [...(workflow.match?.candidates ?? []), ...(workflow.match?.safeGenericPlans ?? [])],
     [workflow.match],
+  );
+  const savedPlanUnavailable = Boolean(
+    savedConfiguration
+      && workflow.match
+      && (!workflow.devicePlan
+        || !planOptions.some((candidate) => candidate.planId === workflow.devicePlan)),
   );
 
   return (
@@ -494,12 +839,32 @@ export function App() {
         </div>
       </header>
 
+      {runtime.status === "ready" && (
+        <section className="configuration-bar" aria-label="Saved configurations">
+          <div>
+            <strong>{savedConfiguration?.name ?? "Unsaved configuration"}</strong>
+            <small>
+              {savedConfiguration
+                ? `${savedConfiguration.validation.state.replaceAll("_", " ")}${savedConfiguration.dirty ? " · unsaved edits" : ""}`
+                : "Portable intent only; generated plans and device authority are never saved"}
+            </small>
+          </div>
+          <div className="button-row">
+            <button className="secondary" onClick={startNewConfiguration} disabled={busy || workflow.execution.kind === "active" || workflow.execution.kind === "starting"}>New</button>
+            <button className="secondary" onClick={openConfiguration} disabled={busy || workflow.execution.kind === "active" || workflow.execution.kind === "starting"}>Open…</button>
+            <button onClick={saveCurrentConfiguration} disabled={busy || !workflow.devicePlan || (!workflow.portableIntentDirty && !savedConfiguration?.dirty)}>Save</button>
+            <button className="secondary" onClick={saveConfigurationAs} disabled={busy || !workflow.devicePlan}>Save As…</button>
+            <button className="text-button" onClick={restartRuntime} disabled={busy || workflow.execution.kind === "active" || workflow.execution.kind === "starting"}>Restart runtime</button>
+          </div>
+        </section>
+      )}
+
       {runtime.status === "unsupported" || runtime.status === "failed" ? (
         <main className="blocking-card" role="alert" ref={mainRef} tabIndex={-1}>
           <p className="eyebrow">RUNTIME UNAVAILABLE</p>
           <h2>EmuChef could not start its Rust runtime</h2>
           <p>{runtime.error.message}</p>
-          <button onClick={initialize}>Retry runtime startup</button>
+          <button onClick={restartRuntime}>Retry runtime startup</button>
         </main>
       ) : adb?.status !== "ready" ? (
         <main className="blocking-card" aria-labelledby="adb-heading" ref={mainRef} tabIndex={-1}>
@@ -547,6 +912,46 @@ export function App() {
                 <p className="eyebrow">CONNECT DEVICE</p>
                 <h2>Choose an Android device</h2>
                 <p>Connect with USB debugging enabled. EmuChef only reads device information in this phase.</p>
+                {recentConfigurations.length > 0 && (
+                  <section className="recent-configurations" aria-labelledby="recent-configurations-heading">
+                    <h3 id="recent-configurations-heading">Recent configurations</h3>
+                    {recentConfigurations.map((recent) => (
+                      <article key={recent.recentHandle}>
+                        <div>
+                          <strong>{recent.name}</strong>
+                          <small>{formatLastOpened(recent.lastOpenedEpochMs)}</small>
+                        </div>
+                        {recent.availability === "available" ? (
+                          <button className="secondary" onClick={() => openRecentConfiguration(recent.recentHandle)}>Open</button>
+                        ) : (
+                          <>
+                            <span className="error">Missing</span>
+                            <button className="secondary" onClick={() => relinkRecentConfiguration(recent.recentHandle)}>Relink…</button>
+                            <button
+                              className="text-button danger-text"
+                              onClick={async () => {
+                                await api.removeRecentConfiguration(recent.recentHandle);
+                                await refreshRecents();
+                              }}
+                            >Remove</button>
+                          </>
+                        )}
+                      </article>
+                    ))}
+                  </section>
+                )}
+                {savedConfiguration && (
+                  <section className={`configuration-validation ${savedConfiguration.validation.state}`}>
+                    <strong>{savedConfiguration.name}</strong>
+                    <span>{savedConfiguration.validation.state.replaceAll("_", " ")}</span>
+                    {savedConfiguration.validation.diagnostics.map((diagnostic) => (
+                      <details key={`${diagnostic.key ?? "configuration"}-${diagnostic.code}`}>
+                        <summary>{diagnostic.message}</summary>
+                        <code>{diagnostic.code}{diagnostic.key ? ` · ${diagnostic.key}` : ""}</code>
+                      </details>
+                    ))}
+                  </section>
+                )}
                 <div className="device-list">
                   {devices.length === 0 && <div className="empty-state">No ADB devices detected yet.</div>}
                   {devices.map((device) => (
@@ -573,6 +978,12 @@ export function App() {
                 <h2>{workflow.facts.manufacturer ?? "Android"} {workflow.facts.model ?? "device"}</h2>
                 <p>Android {workflow.facts.androidVersion ?? "unknown"} · API {workflow.facts.androidApiLevel ?? "unknown"}</p>
                 <div className="confidence">Match confidence: <strong>{workflow.match.confidence}</strong></div>
+                {savedPlanUnavailable && (
+                  <p className="error">
+                    The saved device plan reference is unavailable or incompatible with this current device.
+                    Choose an offered device plan explicitly; EmuChef will not substitute one automatically.
+                  </p>
+                )}
                 {workflow.match.blocked ? (
                   <p className="error">{workflow.match.blockReason}</p>
                 ) : (
@@ -584,7 +995,7 @@ export function App() {
                           type="radio"
                           name="device-plan"
                           checked={workflow.devicePlan === plan.planId}
-                          onChange={() => dispatch({ type: "select-plan", devicePlan: plan.planId })}
+                          onChange={() => updateDevicePlanIntent(plan.planId)}
                         />
                         <span><strong>{plan.name}</strong><small>{plan.description}</small></span>
                       </label>
@@ -593,7 +1004,7 @@ export function App() {
                 )}
                 <div className="button-row">
                   <button className="secondary" onClick={() => dispatch({ type: "back" })}>Back</button>
-                  <button disabled={!workflow.devicePlan || busy} onClick={describe}>Continue</button>
+                  <button disabled={!workflow.devicePlan || savedPlanUnavailable || busy} onClick={describe}>Continue</button>
                 </div>
               </>
             )}
@@ -615,7 +1026,7 @@ export function App() {
                             recipe,
                             event.target.checked,
                           );
-                          dispatch({ type: "set-recipes", selectedRecipes: selected });
+                          updateRecipeIntent(selected);
                         }}
                       />
                       <span>
@@ -641,12 +1052,12 @@ export function App() {
                       <input
                         type="checkbox"
                         checked={Boolean(workflow.bindings[input.key] ?? input.value)}
-                        onChange={(event) => dispatch({ type: "set-binding", key: input.key, value: event.target.checked })}
+                        onChange={(event) => updateBindingIntent(input.key, event.target.checked)}
                       />
                     ) : input.options?.length ? (
                       <select
                         value={String(workflow.bindings[input.key] ?? input.value ?? "")}
-                        onChange={(event) => dispatch({ type: "set-binding", key: input.key, value: event.target.value })}
+                        onChange={(event) => updateBindingIntent(input.key, event.target.value)}
                       >
                         <option value="">Choose…</option>
                         {input.options.map((option) => <option key={option}>{option}</option>)}
@@ -663,7 +1074,7 @@ export function App() {
                     ) : (
                       <input
                         value={String(workflow.bindings[input.key] ?? input.value ?? "")}
-                        onChange={(event) => dispatch({ type: "set-binding", key: input.key, value: event.target.value })}
+                        onChange={(event) => updateBindingIntent(input.key, event.target.value)}
                       />
                     )}
                     {input.description && <small>{input.description}</small>}

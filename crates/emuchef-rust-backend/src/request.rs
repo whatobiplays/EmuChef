@@ -588,6 +588,7 @@ fn handle_create_user_configuration(
     let name = required_string(payload, "name")?;
     let device_plan = required_string(payload, "devicePlan")?;
     let selected_recipes = required_string_array(payload, "selectedRecipes")?;
+    let bindings = optional_binding_map(payload, "bindings")?;
     let authored_root = optional_string(payload, "authoredRoot")?;
     Ok(envelope::success(sessions.create_user_configuration(
         path,
@@ -595,6 +596,7 @@ fn handle_create_user_configuration(
         name,
         device_plan,
         selected_recipes,
+        bindings,
         authored_root,
     )?))
 }
@@ -626,9 +628,14 @@ fn handle_save_user_configuration_as(
     let payload = payload_object(object)?;
     let document_id = required_document_id(payload)?;
     let path = required_path(payload)?;
-    Ok(envelope::success(
-        sessions.save_user_configuration_as(document_id, path)?,
-    ))
+    let configuration_id = optional_string(payload, "configurationId")?;
+    let name = optional_string(payload, "name")?;
+    Ok(envelope::success(sessions.save_user_configuration_as(
+        document_id,
+        path,
+        configuration_id,
+        name,
+    )?))
 }
 
 fn handle_set_user_configuration_binding(

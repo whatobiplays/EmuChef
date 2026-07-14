@@ -208,6 +208,7 @@ impl DocumentSessionManager {
         name: &str,
         device_plan: &str,
         selected_recipes: Vec<String>,
+        bindings: IndexMap<String, Value>,
         authored_root: Option<&str>,
     ) -> Result<Value, ApiError> {
         let document = UserConfigurationDocument::create(
@@ -216,6 +217,7 @@ impl DocumentSessionManager {
             name,
             device_plan,
             selected_recipes,
+            bindings,
             authored_root,
         )
         .map_err(|error| user_configuration_load_error("create", error, json!({ "path": path })))?;
@@ -249,14 +251,18 @@ impl DocumentSessionManager {
         &mut self,
         document_id: &str,
         path: &str,
+        configuration_id: Option<&str>,
+        name: Option<&str>,
     ) -> Result<Value, ApiError> {
         let document = self.user_configuration_document_mut(document_id)?;
-        document.save_as(path).map_err(|error| {
-            ApiError::save_failed(
-                format!("Failed to save user configuration as: {error}"),
-                json!({ "documentId": document_id, "path": path }),
-            )
-        })?;
+        document
+            .save_as_with_identity(path, configuration_id, name)
+            .map_err(|error| {
+                ApiError::save_failed(
+                    format!("Failed to save user configuration as: {error}"),
+                    json!({ "documentId": document_id, "path": path }),
+                )
+            })?;
         Ok(json!({
             "document": user_configuration_document::document_to_dto(document, document_id)
         }))

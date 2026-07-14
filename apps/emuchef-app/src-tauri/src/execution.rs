@@ -60,6 +60,14 @@ pub struct ExecutionHandleStore {
 }
 
 impl ExecutionHandleStore {
+    pub fn has_in_flight(&self) -> bool {
+        self.start_reserved.is_some() || self.active.is_some()
+    }
+
+    pub fn reset(&mut self) {
+        *self = Self::default();
+    }
+
     fn reserve_start(&mut self, kind: ExecutionKind) -> Result<(), ()> {
         if self.start_reserved.is_some() || self.active.is_some() {
             return Err(());

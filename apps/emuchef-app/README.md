@@ -10,6 +10,13 @@ fake-device simulation. Guarded real-device execution is also implemented but
 is absent from ordinary builds because the Cargo feature `real-execution` is
 default-disabled.
 
+The app also creates, opens, edits, saves, and reuses named schema-v1 portable
+configurations. Saved files retain only a generated configuration identity,
+name, selected device-plan reference, recipe IDs, and user bindings. Every open
+requires a fresh device probe, current catalog validation, fresh description,
+fresh plan generation, and fresh review. Generated plans, digests, device facts,
+serials, and review or execution authority are never saved.
+
 The implemented, default-disabled real-device trust boundary is documented in the
 [Phase 2B guarded real-execution contract](../../docs/product/phase-2b-guarded-real-execution.md).
 The feature is not release approval: each platform still requires packaged

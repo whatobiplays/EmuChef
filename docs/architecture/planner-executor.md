@@ -52,6 +52,12 @@ plan. Execution has no undo, rollback, inverse-step, backup, or restoration
 contract. The complete product protocol is documented in
 [Phase 0 End-User Runtime Contracts](../product/phase-0-runtime-contracts.md).
 
+Portable schema-v1 configurations store only an authored device-plan
+reference, recipe selection, and user bindings. They never store a generated
+execution plan or its digest. Reopening a configuration therefore always
+re-probes the selected current device and runs current validation, description,
+planning, and review before an execution can start.
+
 Artifact resolution supports absolute `file://`, HTTP, and HTTPS URLs inside the
 runtime/cache sandbox. The resolver owns compatible URL-based filenames,
 destination selection, partial-file cleanup, and no-clobber publication. The

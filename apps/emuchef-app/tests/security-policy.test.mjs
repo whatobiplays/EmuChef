@@ -125,6 +125,40 @@ test("React DTOs contain opaque handles and no exact serial property", () => {
   assert.match(commands, /Sidecar DTOs are never returned directly/);
 });
 
+test("saved configuration file authority remains behind opaque Tauri handles", () => {
+  const api = read("src/api.ts");
+  const types = read("src/types.ts");
+  const saved = read("src-tauri/src/saved_configurations.rs");
+  const frontendSavedApi = sourceSlice(
+    api,
+    "listRecentConfigurations:",
+    "\n};",
+  );
+  assert.doesNotMatch(frontendSavedApi, /\b(?:path|documentId|configurationId|yaml|planDigest|reviewHandle|executionHandle|serial)\b/);
+  assert.match(types, /configurationHandle: string/);
+  assert.match(types, /devicePlan: string/);
+  assert.doesNotMatch(types, /interface SavedConfigurationDocument[\s\S]{0,700}\b(?:path|documentId|configurationId|yaml|planDigest|reviewHandle|executionHandle|serial)\b/);
+  assert.match(saved, /Configuration file[\s\S]*paths[\s\S]*remain in this module/);
+  assert.match(saved, /picker\.save_file\(/);
+  assert.match(saved, /picker\.pick_file\(/);
+  assert.match(saved, /configurationHandle/);
+  const projection = sourceSlice(saved, "fn project_document", "\nfn public_diagnostics");
+  assert.doesNotMatch(projection, /"(?:path|documentId|configurationId|yaml|planDigest|reviewHandle|executionHandle|serial)"/);
+});
+
+test("portable saved state excludes generated plan and device authority", () => {
+  const saved = read("src-tauri/src/saved_configurations.rs");
+  const createRequest = sourceSlice(
+    saved,
+    "pub struct CreateSavedConfigurationRequest",
+    "\n\n#[derive(Debug, Deserialize)]",
+  );
+  assert.match(createRequest, /device_plan: String/);
+  assert.match(createRequest, /selected_recipes: Vec<String>/);
+  assert.match(createRequest, /bindings: HashMap<String, Value>/);
+  assert.doesNotMatch(createRequest, /\b(?:plan|digest|review|execution|confirmation|launch|serial|facts)\b/);
+});
+
 test("configuration failures are mapped and raw sidecar diagnostics are debug-only", () => {
   const commands = read("src-tauri/src/commands.rs");
   assert.match(

@@ -17,6 +17,7 @@ use crate::adb::{AdbManager, AdbSetupStatusDto, PLATFORM_TOOLS_URL};
 use crate::catalog::CatalogDescriptor;
 use crate::execution::ExecutionHandleStore;
 use crate::handles::{ReviewedPlanSnapshot, SessionHandles};
+use crate::saved_configurations::SavedConfigurationState;
 use crate::sidecar::{RuntimeStatusDto, SidecarState};
 
 pub struct AppState {
@@ -25,11 +26,79 @@ pub struct AppState {
     pub adb: Mutex<AdbManager>,
     pub handles: Mutex<SessionHandles>,
     pub executions: Mutex<ExecutionHandleStore>,
+    pub saved_configurations: SavedConfigurationState,
 }
 
 #[tauri::command]
 pub fn get_runtime_status(state: State<'_, AppState>) -> RuntimeStatusDto {
     state.sidecar.status()
+}
+
+/// Begin a new frontend session without retaining process-local authority.
+#[tauri::command]
+pub fn begin_app_session(state: State<'_, AppState>) -> Result<(), String> {
+    reset_app_session(&state, true)
+}
+
+/// Restart the Rust sidecar after proving no execution is in flight.
+#[tauri::command]
+pub fn restart_runtime(state: State<'_, AppState>) -> Result<RuntimeStatusDto, String> {
+    if state
+        .executions
+        .lock()
+        .map_err(|_| {
+            safe_error(
+                "execution_state_unavailable",
+                "Execution state is unavailable.",
+            )
+        })?
+        .has_in_flight()
+    {
+        return Err(safe_error(
+            "execution_active",
+            "The Rust runtime cannot restart while an execution is starting or active.",
+        ));
+    }
+    state.sidecar.initialize();
+    reset_app_session(&state, false)?;
+    Ok(state.sidecar.status())
+}
+
+fn reset_app_session(state: &AppState, close_documents: bool) -> Result<(), String> {
+    let document_ids = state
+        .saved_configurations
+        .lock()
+        .map_err(|_| {
+            safe_error(
+                "configuration_state_unavailable",
+                "Saved-configuration session state is unavailable.",
+            )
+        })?
+        .drain_document_ids();
+    if close_documents {
+        for document_id in document_ids {
+            let _ = state.sidecar.request(
+                "closeUserConfiguration",
+                json!({ "documentId": document_id }),
+            );
+        }
+    }
+    state
+        .handles
+        .lock()
+        .map_err(|_| safe_error("session_state_unavailable", "Session state is unavailable."))?
+        .invalidate_all();
+    state
+        .executions
+        .lock()
+        .map_err(|_| {
+            safe_error(
+                "execution_state_unavailable",
+                "Execution state is unavailable.",
+            )
+        })?
+        .reset();
+    Ok(())
 }
 
 #[tauri::command]
@@ -146,13 +215,13 @@ pub async fn import_platform_tools_zip(app: AppHandle) -> Result<AdbSetupStatusD
     Ok(result)
 }
 
-type PickerCompletion<T> = Box<dyn FnOnce(Option<T>) + Send>;
+pub(crate) type PickerCompletion<T> = Box<dyn FnOnce(Option<T>) + Send>;
 
 /// Bridges the dialog plugin's non-blocking callback into the Tauri async runtime.
 ///
 /// The callback is dropped if the native dialog cannot be opened, which closes
 /// the channel and produces a stable actionable error instead of hanging IPC.
-async fn await_picker_selection<T, F>(
+pub(crate) async fn await_picker_selection<T, F>(
     open_picker: F,
     error_code: &'static str,
     error_message: &'static str,
@@ -189,6 +258,22 @@ where
 
 #[tauri::command]
 pub fn remove_platform_tools(state: State<'_, AppState>) -> Result<AdbSetupStatusDto, String> {
+    if state
+        .executions
+        .lock()
+        .map_err(|_| {
+            safe_error(
+                "execution_state_unavailable",
+                "Execution state is unavailable.",
+            )
+        })?
+        .has_in_flight()
+    {
+        return Err(safe_error(
+            "execution_active",
+            "Platform-Tools cannot be removed while an execution is starting or active.",
+        ));
+    }
     let result = state
         .adb
         .lock()
@@ -209,6 +294,16 @@ pub fn remove_platform_tools(state: State<'_, AppState>) -> Result<AdbSetupStatu
             )
         })?
         .invalidate_all();
+    state
+        .executions
+        .lock()
+        .map_err(|_| {
+            safe_error(
+                "execution_state_unavailable",
+                "Execution state is unavailable.",
+            )
+        })?
+        .reset();
     Ok(result)
 }
 

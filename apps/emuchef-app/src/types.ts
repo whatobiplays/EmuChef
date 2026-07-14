@@ -331,3 +331,42 @@ export interface LaunchResult {
   launched: true;
   message: string;
 }
+
+export type SavedConfigurationValidationState =
+  | "valid"
+  | "valid_with_warnings"
+  | "requires_attention"
+  | "cannot_use";
+
+/** Safe React projection of one Tauri-owned sidecar document session. */
+export interface SavedConfigurationDocument {
+  outcome?: "opened" | "saved";
+  configurationHandle: string;
+  name: string;
+  dirty: boolean;
+  revision: number;
+  devicePlan: string;
+  selectedRecipes: string[];
+  bindings: Record<string, unknown>;
+  validation: {
+    state: SavedConfigurationValidationState;
+    diagnostics: ValidationDiagnostic[];
+  };
+}
+
+export interface RecentConfiguration {
+  recentHandle: string;
+  name: string;
+  lastOpenedEpochMs: number;
+  availability: "available" | "missing";
+}
+
+export type SavedConfigurationDialogResult =
+  | { outcome: "cancelled" }
+  | SavedConfigurationDocument;
+
+export type SavedConfigurationMutation =
+  | { kind: "device_plan"; value: string }
+  | { kind: "selected_recipes"; value: string[] }
+  | { kind: "binding"; key: string; value: unknown }
+  | { kind: "remove_binding"; key: string };

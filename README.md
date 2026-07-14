@@ -69,8 +69,15 @@ is documented in the
 [Phase 2B guarded real-execution contract](docs/product/phase-2b-guarded-real-execution.md).
 Platform-specific packaged-device evidence, privacy/security approval, an
 operator runbook, and a separate release decision remain required before any
-release build enables it. Persistence, resume, rollback, and remote catalog
-paths remain unavailable.
+release build enables it. Execution-history persistence, resume, rollback, and
+remote catalog paths remain unavailable.
+
+Phase 3A adds named portable saved configurations and a private recent-file
+index to the end-user app. A saved configuration contains a selected
+device-plan reference, selected recipes, and user bindings, not a generated
+execution plan or runtime authority. Opening or reusing one always performs a
+fresh device probe, validation, description, plan generation, and review. See
+the [Phase 3A contract](docs/product/phase-3a-saved-configurations.md).
 
 Android SDK Platform-Tools is a user-supplied prerequisite. EmuChef does not
 bundle or download it. The app links to Google's official page and can import a
