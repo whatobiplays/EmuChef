@@ -1,0 +1,9 @@
+{
+  "schemaVersion": 1,
+  "qualificationPolicyVersion": 1,
+  "appVersion": "0.1.0",
+  "targetTriple": "aarch64-apple-darwin",
+  "architecture": "arm64",
+  "buildMode": "release",
+  "realExecutionEnabled": false
+}

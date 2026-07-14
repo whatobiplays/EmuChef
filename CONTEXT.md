@@ -392,6 +392,38 @@ catalog startup are independent from Platform-Tools setup.
 A missing ADB installation blocks only device discovery and displays the
 Platform-Tools setup flow.
 
+The end-user app's maintained macOS packaging target is a thin Apple Silicon
+`aarch64-apple-darwin` release bundle with a macOS 11.0 minimum. It bundles the
+release Rust sidecar, authored catalog snapshot, and checked-in qualification
+policy through Tauri resources. Intel and universal end-user bundles are not
+qualified. Platform-Tools and user content remain external.
+
+Local macOS qualification is ad-hoc, requires no private Apple credentials,
+removes the fixed Apple credential allowlist from its child environment, and
+explicitly sets the ad-hoc signing identity. It statically verifies product
+metadata, thin arm64 executables, nested and deep signatures, resources,
+catalog content, production CSP, minimal capabilities, path independence, and
+default-disabled real execution. A copied-app probe uses a canonical temporary
+root and temporary home/data/cache locations to negotiate the packaged sidecar,
+load the bundled catalog, and perform a read-only catalog operation without
+ADB, network access, a device, Platform-Tools, BIOS files, or ROMs.
+
+Credentialed developer-id mode is an explicit separate operation. Only that
+mode validates the fixed supported Apple variable allowlist; values stay in
+the caller environment or keychain and are not printed or serialized. Local
+qualification cannot establish Developer ID identity, notarization, stapling,
+Gatekeeper acceptance, clean-Mac behavior, or public release readiness.
+
+End-user macOS manifests record toolchain versions, target, release mode,
+source commit, tracked dirty state, qualification-policy version, normalized
+security-relevant content, and raw per-build artifact identities. Normalized
+content covers signature-removed executable bytes, Info.plist semantics,
+catalog resources, capability policy, Tauri security configuration, sidecar
+identity, and default-disabled real execution. Code signatures, timestamps,
+DMG container metadata, mtimes, temporary names, and caller-specific absolute
+paths are excluded or normalized. Raw app and DMG hashes identify one build
+and are not claimed to remain byte-identical across rebuilds.
+
 Opening or reusing a portable configuration invalidates every prior generated
 plan, digest, review, execution, confirmation, launch action, target binding,
 and probed device fact. The user must select and freshly probe a current device,

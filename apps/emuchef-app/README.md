@@ -41,6 +41,14 @@ future launch; a later valid dirty edit atomically supersedes it. Authored
 unknown values are omitted and must be re-entered after restore. See the
 [Phase 3D contract](../../docs/product/phase-3d-crash-safe-draft-restoration.md).
 
+Phase 3E provides the maintained thin Apple Silicon macOS package, static
+bundle verifier, clean copied-app probe, sanitized release manifest, normalized
+repeat-build comparison, and separate credentialed release verification. Local
+qualification is explicitly ad-hoc and credential-agnostic; it does not prove
+Developer ID signing, notarization, stapling, Gatekeeper acceptance, or public
+distribution readiness. See the
+[Phase 3E contract](../../docs/product/phase-3e-macos-packaging-and-release-readiness.md).
+
 The implemented, default-disabled real-device trust boundary is documented in the
 [Phase 2B guarded real-execution contract](../../docs/product/phase-2b-guarded-real-execution.md).
 The feature is not release approval: each platform still requires packaged
@@ -112,10 +120,13 @@ npm --prefix apps/emuchef-app run tauri:dev
 The development command builds a debug `emuchef` sidecar, copies it to the
 Tauri external-binary location, starts Vite on port 5174, and launches Tauri
 with the development-only config. Production builds use the local-only CSP and
-package the release Rust sidecar plus the catalog snapshot:
+package the release Rust sidecar, catalog snapshot, and qualification policy.
+The maintained local qualification is Apple Silicon-only and creates both an
+app and DMG:
 
 ```bash
 npm --prefix apps/emuchef-app run tauri:build
+npm --prefix apps/emuchef-app run package:macos:qualify
 ```
 
 Debug builds may opt into an explicit ADB override with `EMUCHEF_ADB_PATH`.
@@ -125,10 +136,16 @@ never depend on `PATH` for ADB resolution.
 
 ## 5. Verification
 
+`test:packaging` enforces 95% minimum line, branch, and function coverage over
+the production pure packaging policy. `package:macos:qualify` is a separate
+mandatory integration gate for the macOS filesystem, toolchain, bundle, and
+copied-app orchestration that percentage coverage cannot prove.
+
 ```bash
 npm --prefix apps/emuchef-app run typecheck
 npm --prefix apps/emuchef-app run test:logic
 npm --prefix apps/emuchef-app run test:security
+npm --prefix apps/emuchef-app run test:packaging
 npm --prefix apps/emuchef-app run check:packaged-resources
 npm --prefix apps/emuchef-app run build
 cargo test --manifest-path apps/emuchef-app/src-tauri/Cargo.toml

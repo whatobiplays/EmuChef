@@ -9,14 +9,15 @@
 | Real-ADB apply | Rust | Active; manual device validation required |
 | Tauri editor backend | Rust JSONL sidecar | Active |
 | Phase 0 end-user runtime protocol | Rust JSONL sidecar | Active backend contract |
-| End-user desktop app | React UI with trusted Rust/Tauri bridge | Phase 3D crash-safe portable-intent recovery active; guarded real execution remains default-disabled |
+| End-user desktop app | React UI with trusted Rust/Tauri bridge | Phase 3E Apple Silicon packaging qualification active; guarded real execution remains default-disabled |
 | Platform-Tools import and verification | Rust/Tauri | User-supplied, app-managed, macOS-only |
 | Catalog source resolution | Rust | Bundled/local snapshots active; cached remote reserved |
 | Execution reports and incremental events | Rust JSONL sidecar | Active in-memory session contract |
 | Python runtime | Frozen legacy/reference only | Pending deletion |
 | Compatibility fixtures | Frozen v1 evidence | No Python regeneration |
 | Network artifact download | Rust | Active; manual device evidence required |
-| Release signing/notarization/updater | Not implemented | Future work |
+| End-user macOS package qualification | Rust/Tauri and local Node tooling | Apple Silicon ad-hoc content qualification active; credentialed verification is explicit and separate |
+| End-user release signing/notarization/updater | External Apple release operation | No end-user Developer ID/notarization evidence; updater is future work |
 
 There is no supported alternate runtime, planner backend selector, Python
 fallback, or secondary product executable. The retained Python packages have no
@@ -122,3 +123,24 @@ device, plan, review, execution, confirmation, and launch association invalid.
 Deferred recovery disposition is independent of current-session dirty state.
 Not now survives clean shutdown and is offered on the next launch; explicit
 discard, successful save, or an atomic newer dirty generation supersedes it.
+
+## Phase 3E packaging boundary
+
+Tauri resolves the bundled catalog through its release resource directory and
+the sidecar beside the packaged main executable. The release probe uses those
+same paths and the normal negotiated protocol; it adds no planner, device,
+filesystem, or execution authority. The probe report contains only readiness,
+catalog-operation, and default-disabled real-execution booleans.
+
+Local qualification deletes the fixed Apple credential allowlist from the
+child build environment and explicitly selects ad-hoc signing. Credential
+validation occurs only after an operator selects developer-id mode. The local
+manifest records safe provenance, normalized executable/resource/configuration
+content, and per-build raw identities without environment dumps or credential
+values.
+
+The normalized content digest is the repeatability contract. Code-signature
+blobs, signing timestamps, DMG container metadata, mtimes, temporary names, and
+caller-specific absolute paths are volatile and excluded. Final signed app and
+DMG hashes are identities of one produced build and are not asserted to be
+stable across rebuilds.

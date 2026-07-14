@@ -1,0 +1,44 @@
+name: EmuChef macOS qualification
+
+on:
+  pull_request:
+    paths:
+      - "apps/emuchef-app/**"
+      - "crates/emuchef-rust-backend/**"
+      - "authored/**"
+      - ".github/workflows/emuchef-macos-qualification.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  normalized-repeatability:
+    runs-on: macos-14
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: apps/emuchef-app/package-lock.json
+      - name: Install JavaScript dependencies
+        run: npm ci --prefix apps/emuchef-app
+      - name: Verify packaging policy
+        run: npm --prefix apps/emuchef-app run test:packaging
+      - name: Build and qualify first local artifact
+        run: npm --prefix apps/emuchef-app run package:macos:qualify -- --manifest "$RUNNER_TEMP/first.json"
+      - name: Build and qualify second local artifact
+        run: npm --prefix apps/emuchef-app run package:macos:qualify -- --manifest "$RUNNER_TEMP/second.json"
+      - name: Compare normalized content
+        run: npm --prefix apps/emuchef-app run package:macos:compare -- "$RUNNER_TEMP/first.json" "$RUNNER_TEMP/second.json"
+      - name: Retain sanitized qualification manifests
+        uses: actions/upload-artifact@v4
+        with:
+          name: emuchef-macos-normalized-manifests
+          path: |
+            ${{ runner.temp }}/first.json
+            ${{ runner.temp }}/second.json
+          if-no-files-found: error
+          retention-days: 14

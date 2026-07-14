@@ -101,6 +101,14 @@ atomically supersedes it. Recovery excludes all runtime authority and omits
 sensitive binding values according to authored input metadata. See the
 [Phase 3D contract](docs/product/phase-3d-crash-safe-draft-restoration.md).
 
+Phase 3E qualifies the end-user app's thin Apple Silicon macOS package. The
+maintained local path builds an ad-hoc-signed app and DMG, verifies their
+sidecar, resources, metadata, signatures, capabilities, and path independence,
+and runs a clean copied-app probe. Its sanitized manifest distinguishes
+normalized semantic repeatability from per-build raw artifact hashes; it does
+not claim byte-identical signed apps or DMGs. See the
+[Phase 3E contract](docs/product/phase-3e-macos-packaging-and-release-readiness.md).
+
 Android SDK Platform-Tools is a user-supplied prerequisite. EmuChef does not
 bundle or download it. The app links to Google's official page and can import a
 macOS Platform-Tools ZIP through a native picker into validated application
@@ -126,9 +134,12 @@ Artifact resolution supports absolute `file://`, HTTP, and HTTPS URLs. Network
 downloads use strict Rustls verification, bounded redirects and timeouts,
 same-directory partial files, and no-clobber cache publication. Developer ID
 signing, hardened runtime, app and DMG notarization, stapling, and local
-Gatekeeper validation are complete for the recorded macOS release artifacts.
-Clean-Mac validation, updater support, and cross-platform release automation
-remain future work. The packaged frontend uses a local-only production CSP. The
+Gatekeeper validation are complete for the recorded Config Editor macOS release
+artifacts. The end-user app has qualified Apple Silicon ad-hoc packaging and an
+explicit credentialed verification path, but it has no recorded Developer ID,
+notarization, stapling, Gatekeeper, or clean-Mac evidence. Updater support and
+cross-platform release automation remain future work. The packaged frontend
+uses a local-only production CSP. The
 completed local and HTTP(S) device run is
 recorded in the
 [2026-07-11 RetroArch evidence](docs/release/evidence/real-device-retroarch-2026-07-11.md).
@@ -143,6 +154,8 @@ and [release readiness](docs/release/release-readiness.md). Real-device evidence
 collected with the [RetroArch validation runbook](docs/manual/real-device-retroarch-validation.md),
 and packaged macOS evidence uses the
 [Config Editor validation runbook](docs/manual/macos-packaged-gui-validation.md).
+End-user app packaging follows the
+[Phase 3E packaging contract](docs/product/phase-3e-macos-packaging-and-release-readiness.md).
 The completed Developer ID and notarization result is recorded in the
 [macOS signing evidence](docs/release/evidence/macos-signing-notarization-2026-07-11.md),
 and releases follow the

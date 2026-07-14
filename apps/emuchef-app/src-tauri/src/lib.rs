@@ -3,6 +3,7 @@ mod catalog;
 mod commands;
 mod execution;
 mod handles;
+mod qualification;
 mod recovery;
 mod saved_configurations;
 mod sidecar;
@@ -13,10 +14,12 @@ use std::sync::Mutex;
 use tauri::Manager;
 
 pub fn run() {
+    let arguments = std::env::args().skip(1).collect::<Vec<_>>();
+    let qualification_probe = qualification::requested(&arguments);
     tauri::Builder::default()
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_opener::init())
-        .setup(|app| {
+        .setup(move |app| {
             let app_data = app
                 .path()
                 .app_data_dir()
@@ -25,6 +28,22 @@ pub fn run() {
             let sidecar = sidecar::SidecarState::new(cache_root.clone());
             sidecar.initialize();
             let catalog = catalog::CatalogDescriptor::resolve(app.handle());
+            if qualification_probe {
+                let (report, exit_code) = match catalog.as_ref() {
+                    Ok(catalog) => match qualification::run(&sidecar, catalog) {
+                        Ok(report) => (report, 0),
+                        Err(code) => (qualification::failure_report(code), 1),
+                    },
+                    Err(_) => (qualification::failure_report("catalog_unavailable"), 1),
+                };
+                println!(
+                    "{}",
+                    serde_json::to_string(&report)
+                        .unwrap_or_else(|_| "{\"kind\":\"macos_packaged_app_qualification\",\"status\":\"failed\",\"code\":\"qualification_failed\"}".to_string())
+                );
+                app.handle().exit(exit_code);
+                return Ok(());
+            }
             app.manage(commands::AppState {
                 sidecar,
                 catalog,

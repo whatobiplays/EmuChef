@@ -13,7 +13,16 @@
     "build": "tsc && vite build",
     "check:packaged-resources": "node scripts/check-packaged-resources.mjs",
     "tauri:dev": "tauri dev --config src-tauri/tauri.dev.conf.json",
-    "tauri:build": "tauri build",
+    "package:macos:preflight": "node scripts/macos-package.mjs preflight",
+    "package:macos:build": "node scripts/macos-package.mjs build",
+    "package:macos:verify": "node scripts/macos-package.mjs verify",
+    "package:macos:smoke": "node scripts/macos-package.mjs smoke",
+    "package:macos:manifest": "node scripts/macos-package.mjs manifest",
+    "package:macos:qualify": "node scripts/macos-package.mjs qualify",
+    "package:macos:compare": "node scripts/macos-package.mjs compare",
+    "release:macos:verify": "node scripts/macos-package.mjs release-verify",
+    "test:packaging": "node --test --experimental-test-coverage --test-coverage-include=scripts/macos-packaging-policy.mjs --test-coverage-include=scripts/sidecar-packaging.mjs --test-coverage-lines=95 --test-coverage-functions=95 --test-coverage-branches=95 scripts/macos-packaging.test.mjs scripts/sidecar-packaging.test.mjs",
+    "tauri:build": "node scripts/macos-package.mjs build",
     "tauri": "tauri"
   },
   "dependencies": {
