@@ -31,6 +31,14 @@ between atomic steps, schedules no later work, preserves completed results, and
 never rolls back. A caught worker panic produces `execution_worker_panicked`, a
 terminal inspectable report, and releases the active slot.
 
+After plan-digest validation and real-target preflight, `startExecution`
+admits every retained artifact before committing an attempt id, report, event,
+active record, cancellation token, or worker. Admission remains under the
+execution-state lock so the prospective attempt number and one-active-attempt
+invariant are atomic; it neither creates persistent reservation state nor
+reacquires execution state. Rejection leaves the attempt number and active slot
+unused.
+
 Dry-run and real execution use the same normalized plan and report shape.
 Dry-run reports are explicitly simulated and are not real-device verification.
 Retry or repair creates a new attempt from a freshly validated and reviewed
@@ -42,6 +50,14 @@ Artifact resolution supports absolute `file://`, HTTP, and HTTPS URLs inside the
 runtime/cache sandbox. The resolver owns compatible URL-based filenames,
 destination selection, partial-file cleanup, and no-clobber publication. The
 transport owns serial blocking HTTP requests and fixed-size response streaming.
+
+The resolver also owns side-effect-free artifact admission. It validates
+supported artifact and cache definitions, the selected destination and sandbox
+policy, readable regular `file://` sources, and structurally valid HTTP(S)
+sources. It performs no DNS, network, directory creation, partial-file,
+publication, cache, staging, ADB, or device work. A complete authoritative
+default-cache regular file still bypasses original-source URL parsing and
+contact after its definition, destination, file kind, and sandbox policy pass.
 
 HTTPS uses strict Rustls certificate and hostname validation. The client has a
 15-second connect timeout, one five-minute deadline across headers, redirects,

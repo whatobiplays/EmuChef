@@ -546,6 +546,112 @@ overrides: {}
 }
 
 #[test]
+fn sidecar_start_execution_returns_typed_redacted_artifact_admission_failure() {
+    let temp = tempfile::tempdir().unwrap();
+    for directory in ["apps", "recipes", "device_profiles", "device_plans"] {
+        fs::create_dir_all(temp.path().join(directory)).unwrap();
+    }
+    fs::write(
+        temp.path().join("recipes/artifact.yaml"),
+        r#"schema_version: 1
+kind: recipe
+id: recipe.artifact
+name: Artifact Recipe
+recipe_dependencies: []
+provides: {features: [artifact]}
+inputs: {}
+artifacts:
+  rejected:
+    type: remote_file
+    url: "ftp://user:password@example.com/archive.zip?token=secret#private"
+    cache: none
+artifact_groups: {}
+steps:
+  - id: wait
+    type: wait
+    name: Wait
+    user_toggleable: false
+    dependencies: []
+    constraints: {capabilities: [], conflicts_with: []}
+    skip_if: []
+    params: {duration_ms: 1}
+    verify: []
+"#,
+    )
+    .unwrap();
+    fs::write(
+        temp.path().join("device_profiles/example.yaml"),
+        r#"schema_version: 1
+kind: device_profile
+id: profile.example
+name: Example
+match: {manufacturer_contains: [Example]}
+capability_defaults: {adb_available: true, apk_install: true, shared_storage_write: true, app_launch: true, shell_command: true, package_remove_for_user: true, root_shell: false, app_data_write: false}
+device_tags: []
+"#,
+    )
+    .unwrap();
+    fs::write(
+        temp.path().join("device_plans/example.yaml"),
+        r#"schema_version: 1
+kind: device_plan
+id: plan.example
+name: Example
+device_profile_ref: profile.example
+recipes: [{recipe_ref: recipe.artifact, selected_by_default: true}]
+defaults: {}
+overrides: {}
+"#,
+    )
+    .unwrap();
+
+    let planned = one_shot_response(
+        &json!({
+            "type": "planConfiguration",
+            "payload": {
+                "catalog": {
+                    "root": temp.path(),
+                    "sourceKind": "local_directory",
+                    "sourceId": "test.artifact-admission"
+                },
+                "devicePlan": "plan.example",
+                "targetDevice": {"serial": "SIMULATED-SERIAL"}
+            }
+        })
+        .to_string(),
+    );
+    assert_eq!(planned["ok"], true, "{planned:#}");
+    let start = json!({
+        "id": "start-artifact-rejected",
+        "type": "startExecution",
+        "payload": {
+            "plan": planned["result"]["plan"].clone(),
+            "planDigest": planned["result"]["planDigest"].clone(),
+            "mode": "dry_run"
+        }
+    });
+    let response = &sidecar_responses(&start.to_string())[0];
+    assert_eq!(response["id"], "start-artifact-rejected");
+    assert_eq!(response["ok"], false);
+    assert_eq!(response["error"]["code"], "execution_start_failed");
+    assert_eq!(
+        response["error"]["message"],
+        "Execution artifacts are not ready."
+    );
+    assert_eq!(
+        response["error"]["details"],
+        json!({
+            "code": "artifact_not_ready",
+            "artifactCode": "artifact_scheme_unsupported"
+        })
+    );
+    let serialized = response.to_string();
+    for sensitive in ["user", "password", "secret", "private", "example.com"] {
+        assert!(!serialized.contains(sensitive));
+    }
+}
+
+#[test]
 fn sidecar_hello_accepts_omitted_payload() {
     assert_hello_response(&sidecar_responses(r#"{"id":"hello-1","type":"hello"}"#)[0]);
 }

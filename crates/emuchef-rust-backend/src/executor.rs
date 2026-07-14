@@ -560,12 +560,14 @@ impl<D: ExecutorDevice> ExecutorRunner<D> {
             let result = resolver
                 .resolve(ArtifactResolveRequest {
                     artifact_id: &artifact.id,
+                    type_name: &artifact.type_name,
                     url: &artifact.url,
                     cache_mode: &artifact.cache,
                 })
                 .map_err(|error| {
                     StepFailure::new(error.executor_message(ArtifactResolveRequest {
                         artifact_id: &artifact.id,
+                        type_name: &artifact.type_name,
                         url: &artifact.url,
                         cache_mode: &artifact.cache,
                     }))

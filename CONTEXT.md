@@ -196,6 +196,18 @@ preflight. Dry-run performs fake-device execution only and reports
 `simulated: true` with `simulated_only` verification scope; it is not
 real-device verification.
 
+After digest validation and real-target preflight, `startExecution` performs
+canonical admission for every retained artifact before committing an execution
+number, report, event, active record, cancellation state, or worker. Admission
+runs under the execution-state lock without creating persistent reservation
+state or reacquiring execution state. It shares the resolver's artifact type,
+cache mode, destination, URL, local-source, and sandbox policy; performs no
+network or filesystem/device mutation; and leaves the execution number and
+single-active slot unused on failure. Safe failures use
+`execution_start_failed`, `artifact_not_ready`, and a stable artifact cause code
+without artifact identifiers, URLs, credentials, paths, roots, or raw sandbox
+details.
+
 Execution reports contain the full reviewed plan, digest, target, RFC 3339 UTC
 timestamps, overall status, structured issues, ordered recipe groups with
 captured names/descriptions, and ordered step results with recipe ownership,
@@ -227,11 +239,13 @@ redirects, and no automatic retries. HTTPS-to-HTTP redirects are rejected.
 
 Cache keys continue to hash the original URL bytes, including query and
 fragment. Complete default-cache files are authoritative and bypass URL parsing
-and network setup. New bytes are streamed to unique same-directory partial
-files, flushed, synced, and published without clobbering. `cache: none` always
-transfers and uses a unique runtime path on collision. Failures are typed and
-redacted, remove partial files when cleanup succeeds, and block dependent steps
-without preventing unrelated work.
+and network setup after their artifact type, cache mode, destination, regular
+file kind, and sandbox policy pass. Without a valid cache hit, malformed and
+unsupported source URLs fail admission. New bytes are streamed to unique
+same-directory partial files, flushed, synced, and published without
+clobbering. `cache: none` always transfers and uses a unique runtime path on
+collision. Failures are typed and redacted, remove partial files when cleanup
+succeeds, and block dependent steps without preventing unrelated work.
 
 ## Editor
 

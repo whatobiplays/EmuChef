@@ -15,12 +15,13 @@ use serde_json::{json, Value};
 use time::format_description::well_known::Rfc3339;
 use time::OffsetDateTime;
 
+use crate::artifact_resolver::{ArtifactResolveRequest, ArtifactResolver};
 use crate::device_probe::{AdbDeviceProbe, AdbProbeConfig, DeviceProbe, ProcessCommandRunner};
 use crate::errors::{ApiError, ApiErrorCode};
 use crate::executor::adb::RealAdbDevice;
 use crate::executor::{
     ExecutionProgressEvent, ExecutionRunResult, ExecutorAdapters, ExecutorDevice, ExecutorRunner,
-    FakeDryRunDevice, ProgressPhase, ProgressStatus, StepRunStatus,
+    FakeDryRunDevice, ProgressPhase, ProgressStatus, SandboxRoots, StepRunStatus,
 };
 use crate::model::OrderedMap;
 use crate::planner::{ExecutionPlan, RuntimeValue, TargetDeviceBinding};
@@ -236,8 +237,7 @@ impl ExecutionSessionManager {
         }
         let target = preflight_target(&plan, mode, supplied_target, &self.config.adb_path)?;
 
-        let cancel_requested = Arc::new(AtomicBool::new(false));
-        let (execution_id, report) = {
+        let (execution_id, report, cancel_requested) = {
             let mut state = lock(&self.state);
             if let Some(active) = &state.active_execution_id {
                 return Err(ApiError::new(
@@ -246,8 +246,25 @@ impl ExecutionSessionManager {
                     json!({ "activeExecutionId": active }),
                 ));
             }
-            state.next_execution_id += 1;
-            let execution_id = format!("execution-{}", state.next_execution_id);
+            let prospective_number = state.next_execution_id + 1;
+            let execution_id = format!("execution-{prospective_number}");
+            let attempt_root = self
+                .config
+                .runtime_root
+                .join("executions")
+                .join(&execution_id);
+            admit_plan_artifacts(
+                &plan,
+                SandboxRoots {
+                    runtime_root: attempt_root.clone(),
+                    cache_root: self.config.cache_root.clone(),
+                    fake_device_root: attempt_root.join("simulated-device"),
+                    read_only_roots: read_only_roots(&plan),
+                },
+            )?;
+
+            let cancel_requested = Arc::new(AtomicBool::new(false));
+            state.next_execution_id = prospective_number;
             let report = initial_report(&execution_id, &plan, &actual_digest, mode, target.clone());
             let mut record = ExecutionRecord {
                 report: report.clone(),
@@ -273,7 +290,7 @@ impl ExecutionSessionManager {
             let report = record.report.clone();
             state.active_execution_id = Some(execution_id.clone());
             state.records.insert(execution_id.clone(), record);
-            (execution_id, report)
+            (execution_id, report, cancel_requested)
         };
 
         let state = Arc::clone(&self.state);
@@ -367,6 +384,32 @@ impl ExecutionSessionManager {
             "status": "running",
         }))
     }
+}
+
+/// Admit every retained artifact while the caller holds the execution-state
+/// lock. This helper performs only bounded local metadata/readability checks and
+/// URL parsing; it must never acquire execution state or perform network or
+/// filesystem mutation.
+fn admit_plan_artifacts(plan: &ExecutionPlan, sandbox: SandboxRoots) -> Result<(), ApiError> {
+    let resolver = ArtifactResolver::new(&sandbox);
+    for artifact in &plan.artifacts {
+        if let Err(error) = resolver.admit(ArtifactResolveRequest {
+            artifact_id: &artifact.id,
+            type_name: &artifact.type_name,
+            url: &artifact.url,
+            cache_mode: &artifact.cache,
+        }) {
+            return Err(ApiError::new(
+                ApiErrorCode::ExecutionStartFailed,
+                "Execution artifacts are not ready.",
+                json!({
+                    "code": "artifact_not_ready",
+                    "artifactCode": error.code(),
+                }),
+            ));
+        }
+    }
+    Ok(())
 }
 
 fn preflight_target(
@@ -934,8 +977,8 @@ mod tests {
 
     use super::*;
     use crate::planner::{
-        DeviceContext, ExecutionParamValue, ExecutionPlanSource, ExecutionRecipeSnapshot,
-        ExecutionStep, ExecutionStepConstraints, RuntimeCapabilities,
+        DeviceContext, ExecutionArtifact, ExecutionParamValue, ExecutionPlanSource,
+        ExecutionRecipeSnapshot, ExecutionStep, ExecutionStepConstraints, RuntimeCapabilities,
     };
 
     #[test]
@@ -1050,6 +1093,135 @@ mod tests {
             .unwrap()
             .iter()
             .all(|event| event["sequence"].as_u64().unwrap() > 1));
+    }
+
+    #[test]
+    fn failed_artifact_admission_allocates_no_attempt_and_leaves_the_slot_reusable() {
+        let temp = tempfile::tempdir().unwrap();
+        let manager = manager(temp.path());
+        let plan = plan_with_artifact(
+            "plan.rejected",
+            "ftp://user:password@example.com/archive.zip?token=secret#private",
+            "default",
+        );
+        let digest = crate::plan_digest::execution_plan_digest(&plan).unwrap();
+        let error = manager
+            .start(plan, digest, ExecutionMode::DryRun, None)
+            .unwrap_err();
+        assert_eq!(error.code, ApiErrorCode::ExecutionStartFailed);
+        assert_eq!(error.message, "Execution artifacts are not ready.");
+        assert_eq!(error.details["code"], "artifact_not_ready");
+        assert_eq!(error.details["artifactCode"], "artifact_scheme_unsupported");
+        let serialized = error.to_value().to_string();
+        for sensitive in ["user", "password", "secret", "private", "example.com"] {
+            assert!(!serialized.contains(sensitive));
+        }
+        assert_eq!(
+            manager.get("execution-1").unwrap_err().code,
+            ApiErrorCode::UnknownExecution
+        );
+        assert_eq!(
+            manager.events("execution-1", 0).unwrap_err().code,
+            ApiErrorCode::UnknownExecution
+        );
+        assert!(!temp.path().join("runtime").exists());
+        assert!(!temp.path().join("cache").exists());
+
+        let valid = test_plan("plan.after-admission-failure");
+        let digest = crate::plan_digest::execution_plan_digest(&valid).unwrap();
+        let started = manager
+            .start(valid, digest, ExecutionMode::DryRun, None)
+            .unwrap();
+        assert_eq!(started["execution"]["executionId"], "execution-1");
+        let report = wait_for_terminal(&manager, "execution-1");
+        assert_eq!(report["status"], "succeeded");
+    }
+
+    #[test]
+    fn cold_http_artifact_admission_starts_without_contacting_the_source() {
+        use std::net::TcpListener;
+
+        let temp = tempfile::tempdir().unwrap();
+        let manager = manager(temp.path());
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        listener.set_nonblocking(true).unwrap();
+        let url = format!("http://{}/artifact.bin", listener.local_addr().unwrap());
+        let plan = plan_with_artifact("plan.cold-http", &url, "none");
+        let digest = crate::plan_digest::execution_plan_digest(&plan).unwrap();
+        let started = manager
+            .start(plan, digest, ExecutionMode::DryRun, None)
+            .unwrap();
+        assert_eq!(started["execution"]["executionId"], "execution-1");
+        assert_eq!(
+            listener.accept().unwrap_err().kind(),
+            std::io::ErrorKind::WouldBlock
+        );
+        let report = wait_for_terminal(&manager, "execution-1");
+        assert_eq!(report["status"], "succeeded");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn real_mode_admission_runs_after_target_preflight_without_allocating_on_failure() {
+        use std::fs;
+        use std::os::unix::fs::PermissionsExt;
+
+        let temp = tempfile::tempdir().unwrap();
+        let fake_adb = temp.path().join("adb");
+        fs::write(
+            &fake_adb,
+            "#!/bin/sh\nprintf '[ro.product.manufacturer]: [Example]\\n[ro.product.model]: [Example]\\n[ro.build.version.sdk]: [35]\\n'\n",
+        )
+        .unwrap();
+        fs::set_permissions(&fake_adb, fs::Permissions::from_mode(0o755)).unwrap();
+        let manager = ExecutionSessionManager::new(SidecarRuntimeConfig {
+            runtime_root: temp.path().join("runtime"),
+            cache_root: temp.path().join("cache"),
+            adb_path: fake_adb.to_string_lossy().into_owned(),
+        });
+        let mut plan =
+            plan_with_artifact("plan.real-rejected", "file:relative/artifact.bin", "none");
+        plan.target_device = Some(TargetDeviceBinding {
+            serial: "REAL-1".to_string(),
+            manufacturer: Some("Example".to_string()),
+            model: Some("Example".to_string()),
+            android_api_level: Some(35),
+        });
+        let mut mismatched = plan.clone();
+        mismatched.target_device.as_mut().unwrap().model = Some("Different".to_string());
+        let mismatch_digest = crate::plan_digest::execution_plan_digest(&mismatched).unwrap();
+        let mismatch = manager
+            .start(mismatched, mismatch_digest, ExecutionMode::Real, None)
+            .unwrap_err();
+        assert_eq!(mismatch.code, ApiErrorCode::TargetDeviceMismatch);
+
+        let digest = crate::plan_digest::execution_plan_digest(&plan).unwrap();
+        let error = manager
+            .start(plan, digest, ExecutionMode::Real, None)
+            .unwrap_err();
+        assert_eq!(error.details["code"], "artifact_not_ready");
+        assert_eq!(error.details["artifactCode"], "artifact_url_invalid");
+        assert_eq!(
+            manager.get("execution-1").unwrap_err().code,
+            ApiErrorCode::UnknownExecution
+        );
+        assert!(!temp.path().join("runtime").exists());
+        assert!(!temp.path().join("cache").exists());
+
+        let mut valid = test_plan("plan.real-after-admission-failure");
+        valid.target_device = Some(TargetDeviceBinding {
+            serial: "REAL-1".to_string(),
+            manufacturer: Some("Example".to_string()),
+            model: Some("Example".to_string()),
+            android_api_level: Some(35),
+        });
+        let digest = crate::plan_digest::execution_plan_digest(&valid).unwrap();
+        let started = manager
+            .start(valid, digest, ExecutionMode::Real, None)
+            .unwrap();
+        assert_eq!(started["execution"]["executionId"], "execution-1");
+        let report = wait_for_terminal(&manager, "execution-1");
+        assert_eq!(report["status"], "succeeded");
     }
 
     #[test]
@@ -1202,5 +1374,16 @@ mod tests {
             schema_version: 1,
             kind: "execution_plan",
         }
+    }
+
+    fn plan_with_artifact(id: &str, url: &str, cache: &str) -> ExecutionPlan {
+        let mut plan = test_plan(id);
+        plan.artifacts.push(ExecutionArtifact {
+            id: "recipe.example/artifact".to_string(),
+            type_name: "remote_file".to_string(),
+            url: url.to_string(),
+            cache: cache.to_string(),
+        });
+        plan
     }
 }

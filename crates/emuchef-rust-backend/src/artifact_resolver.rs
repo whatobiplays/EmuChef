@@ -3,7 +3,7 @@
 //! The resolver is crate-private because execution plans remain the product
 //! interface. It preserves the original URL bytes when deriving cache keys.
 
-use std::fs;
+use std::fs::{self, File};
 use std::io::{self, Write};
 use std::path::{Path, PathBuf};
 
@@ -20,6 +20,7 @@ use crate::executor::SandboxRoots;
 #[derive(Clone, Copy, Debug)]
 pub(crate) struct ArtifactResolveRequest<'a> {
     pub artifact_id: &'a str,
+    pub type_name: &'a str,
     pub url: &'a str,
     pub cache_mode: &'a str,
 }
@@ -35,9 +36,13 @@ pub(crate) struct ResolvedArtifact {
 /// Typed artifact failures converted to stable messages only by the executor.
 #[derive(Debug)]
 pub(crate) enum ArtifactResolveError {
+    TypeUnsupported,
+    CacheModeUnsupported,
     UrlInvalid,
     SchemeUnsupported { scheme: String },
     SourceNotFound,
+    SourceWrongKind,
+    SourceUnreadable,
     DownloadFailed,
     HttpStatus { status: u16 },
     RedirectLimitExceeded { redirects: usize },
@@ -57,9 +62,13 @@ impl ArtifactResolveError {
     /// Stable code embedded in executor messages without changing protocol fields.
     pub(crate) fn code(&self) -> &'static str {
         match self {
+            Self::TypeUnsupported => "artifact_type_unsupported",
+            Self::CacheModeUnsupported => "artifact_cache_mode_unsupported",
             Self::UrlInvalid => "artifact_url_invalid",
             Self::SchemeUnsupported { .. } => "artifact_scheme_unsupported",
             Self::SourceNotFound => "artifact_source_not_found",
+            Self::SourceWrongKind => "artifact_source_wrong_kind",
+            Self::SourceUnreadable => "artifact_source_unreadable",
             Self::DownloadFailed => "artifact_download_failed",
             Self::HttpStatus { .. } => "artifact_http_status",
             Self::RedirectLimitExceeded { .. } => "artifact_redirect_limit_exceeded",
@@ -90,11 +99,17 @@ impl ArtifactResolveError {
             .map(|url| format!(" from {url}"))
             .unwrap_or_default();
         let detail = match self {
+            Self::TypeUnsupported => "uses an unsupported artifact type".to_string(),
+            Self::CacheModeUnsupported => "uses an unsupported cache mode".to_string(),
             Self::UrlInvalid => "has an invalid artifact URL".to_string(),
             Self::SchemeUnsupported { scheme } => {
                 format!("uses unsupported URL scheme {scheme:?}")
             }
             Self::SourceNotFound => "references a local source that does not exist".to_string(),
+            Self::SourceWrongKind => {
+                "references a local source that is not a regular file".to_string()
+            }
+            Self::SourceUnreadable => "references a local source that is not readable".to_string(),
             Self::DownloadFailed => "could not be downloaded".to_string(),
             Self::HttpStatus { status } => format!("returned HTTP {status}"),
             Self::RedirectLimitExceeded { redirects } => {
@@ -121,12 +136,31 @@ impl ArtifactResolveError {
     }
 }
 
-/// Resolve artifacts within the executor's authoritative sandbox roots.
+#[derive(Debug)]
+enum AdmittedArtifactSource {
+    CacheHit,
+    LocalFile(PathBuf),
+    Http(Url),
+}
+
+/// Non-mutating result shared by start admission and runtime resolution.
+#[derive(Debug)]
+pub(crate) struct AdmittedArtifact {
+    final_path: PathBuf,
+    filename: String,
+    default_cache: bool,
+    source: AdmittedArtifactSource,
+}
+
+type SourceReadabilityCheck = fn(&Path) -> io::Result<()>;
+
+/// Resolve and admit artifacts within the executor's authoritative sandbox roots.
 #[derive(Debug)]
 pub(crate) struct ArtifactResolver<'a> {
     sandbox: &'a SandboxRoots,
     local_transport: LocalFileTransport,
     http_transport: Option<HttpArtifactTransport>,
+    source_readability_check: SourceReadabilityCheck,
 }
 
 impl<'a> ArtifactResolver<'a> {
@@ -135,17 +169,37 @@ impl<'a> ArtifactResolver<'a> {
             sandbox,
             local_transport: LocalFileTransport,
             http_transport: None,
+            source_readability_check: check_source_readable,
         }
     }
 
-    pub(crate) fn resolve(
-        &mut self,
+    #[cfg(test)]
+    fn with_source_readability_check(
+        sandbox: &'a SandboxRoots,
+        source_readability_check: SourceReadabilityCheck,
+    ) -> Self {
+        Self {
+            source_readability_check,
+            ..Self::new(sandbox)
+        }
+    }
+
+    /// Classify one artifact without network access or filesystem mutation.
+    ///
+    /// A structurally valid authoritative default-cache file is accepted before
+    /// parsing its original URL. Cold sources repeat the canonical URL, local
+    /// source, destination, and sandbox checks used immediately before runtime
+    /// resolution performs any transfer or publication work.
+    pub(crate) fn admit(
+        &self,
         request: ArtifactResolveRequest<'_>,
-    ) -> Result<ResolvedArtifact, ArtifactResolveError> {
+    ) -> Result<AdmittedArtifact, ArtifactResolveError> {
+        validate_artifact_definition(request)?;
         let filename = artifact_filename(request.artifact_id, request.url);
         let local_filename =
             artifact_local_filename(request.artifact_id, request.url, request.cache_mode);
-        let final_path = if request.cache_mode == "default" {
+        let default_cache = request.cache_mode == "default";
+        let final_path = if default_cache {
             self.sandbox.cache_root.join(&local_filename)
         } else {
             self.sandbox
@@ -158,30 +212,18 @@ impl<'a> ArtifactResolver<'a> {
             .ensure_runtime_or_cache_write(&final_path)
             .map_err(|_| ArtifactResolveError::SandboxRejected)?;
         let existing = existing_regular_file(&final_path)?;
-        if request.cache_mode == "default" && existing {
-            return Ok(ResolvedArtifact {
-                local_path: final_path,
+        if default_cache && existing {
+            return Ok(AdmittedArtifact {
+                final_path,
                 filename,
-                cache_hit: true,
+                default_cache,
+                source: AdmittedArtifactSource::CacheHit,
             });
         }
 
         let parsed_url = Url::parse(request.url).map_err(|_| ArtifactResolveError::UrlInvalid)?;
         validate_source_url(&parsed_url)?;
-        let parent = final_path
-            .parent()
-            .expect("artifact destination has a parent");
-        fs::create_dir_all(parent).map_err(|_| ArtifactResolveError::CacheWriteFailed)?;
-        self.sandbox
-            .ensure_runtime_or_cache_write(&final_path)
-            .map_err(|_| ArtifactResolveError::SandboxRejected)?;
-        let mut partial = TempFileBuilder::new()
-            .prefix(".emuchef-artifact-")
-            .suffix(".partial")
-            .tempfile_in(parent)
-            .map_err(|_| ArtifactResolveError::CacheWriteFailed)?;
-
-        let transfer_result = match parsed_url.scheme() {
+        let source = match parsed_url.scheme() {
             "file" => {
                 let source_path = file_url_to_path(request.url)
                     .filter(|path| path.is_absolute())
@@ -189,28 +231,66 @@ impl<'a> ArtifactResolver<'a> {
                 self.sandbox
                     .ensure_read_allowed(&source_path)
                     .map_err(|_| ArtifactResolveError::SandboxRejected)?;
-                if !source_path.is_file() {
-                    Err(ArtifactResolveError::SourceNotFound)
-                } else {
-                    self.local_transport
-                        .download(&source_path, partial.as_file_mut())
-                }
+                validate_local_source(&source_path, self.source_readability_check)?;
+                AdmittedArtifactSource::LocalFile(source_path)
             }
-            "http" | "https" => self
+            "http" | "https" => AdmittedArtifactSource::Http(parsed_url),
+            _ => unreachable!("source scheme was validated"),
+        };
+        Ok(AdmittedArtifact {
+            final_path,
+            filename,
+            default_cache,
+            source,
+        })
+    }
+
+    pub(crate) fn resolve(
+        &mut self,
+        request: ArtifactResolveRequest<'_>,
+    ) -> Result<ResolvedArtifact, ArtifactResolveError> {
+        let admitted = self.admit(request)?;
+        if matches!(admitted.source, AdmittedArtifactSource::CacheHit) {
+            return Ok(ResolvedArtifact {
+                local_path: admitted.final_path,
+                filename: admitted.filename,
+                cache_hit: true,
+            });
+        }
+
+        let parent = admitted
+            .final_path
+            .parent()
+            .expect("artifact destination has a parent");
+        fs::create_dir_all(parent).map_err(|_| ArtifactResolveError::CacheWriteFailed)?;
+        self.sandbox
+            .ensure_runtime_or_cache_write(&admitted.final_path)
+            .map_err(|_| ArtifactResolveError::SandboxRejected)?;
+        let mut partial = TempFileBuilder::new()
+            .prefix(".emuchef-artifact-")
+            .suffix(".partial")
+            .tempfile_in(parent)
+            .map_err(|_| ArtifactResolveError::CacheWriteFailed)?;
+
+        let transfer_result = match admitted.source {
+            AdmittedArtifactSource::LocalFile(source_path) => self
+                .local_transport
+                .download(&source_path, partial.as_file_mut()),
+            AdmittedArtifactSource::Http(parsed_url) => self
                 .http_transport()?
                 .download(&parsed_url, partial.as_file_mut()),
-            _ => unreachable!("source scheme was validated"),
+            AdmittedArtifactSource::CacheHit => unreachable!("cache hit returned above"),
         };
         if let Err(error) = transfer_result {
             return Err(cleanup_partial(partial, error, false));
         }
 
         let (local_path, cache_hit) =
-            finish_partial(partial, &final_path, request.cache_mode == "default", None)?;
+            finish_partial(partial, &admitted.final_path, admitted.default_cache, None)?;
 
         Ok(ResolvedArtifact {
             local_path,
-            filename,
+            filename: admitted.filename,
             cache_hit,
         })
     }
@@ -223,6 +303,43 @@ impl<'a> ArtifactResolver<'a> {
             .as_ref()
             .ok_or(ArtifactResolveError::DownloadFailed)
     }
+}
+
+fn validate_artifact_definition(
+    request: ArtifactResolveRequest<'_>,
+) -> Result<(), ArtifactResolveError> {
+    if request.type_name != "remote_file" {
+        return Err(ArtifactResolveError::TypeUnsupported);
+    }
+    if !matches!(request.cache_mode, "default" | "none") {
+        return Err(ArtifactResolveError::CacheModeUnsupported);
+    }
+    Ok(())
+}
+
+fn check_source_readable(path: &Path) -> io::Result<()> {
+    File::open(path).map(drop)
+}
+
+fn validate_local_source(
+    path: &Path,
+    source_readability_check: SourceReadabilityCheck,
+) -> Result<(), ArtifactResolveError> {
+    match fs::metadata(path) {
+        Ok(metadata) if metadata.is_file() => {}
+        Ok(_) => return Err(ArtifactResolveError::SourceWrongKind),
+        Err(error) if error.kind() == io::ErrorKind::NotFound => {
+            return Err(ArtifactResolveError::SourceNotFound)
+        }
+        Err(_) => return Err(ArtifactResolveError::SourceUnreadable),
+    }
+    source_readability_check(path).map_err(|error| {
+        if error.kind() == io::ErrorKind::NotFound {
+            ArtifactResolveError::SourceNotFound
+        } else {
+            ArtifactResolveError::SourceUnreadable
+        }
+    })
 }
 
 fn validate_source_url(url: &Url) -> Result<(), ArtifactResolveError> {
@@ -494,6 +611,7 @@ mod tests {
     fn request() -> ArtifactResolveRequest<'static> {
         ArtifactResolveRequest {
             artifact_id: "example.recipe/archive",
+            type_name: "remote_file",
             url: "https://user:password@example.com/archive.zip?token=secret#private",
             cache_mode: "default",
         }
@@ -502,11 +620,15 @@ mod tests {
     #[test]
     fn every_artifact_error_has_a_stable_code_and_message() {
         let failures = vec![
+            ArtifactResolveError::TypeUnsupported,
+            ArtifactResolveError::CacheModeUnsupported,
             ArtifactResolveError::UrlInvalid,
             ArtifactResolveError::SchemeUnsupported {
                 scheme: "ftp".to_string(),
             },
             ArtifactResolveError::SourceNotFound,
+            ArtifactResolveError::SourceWrongKind,
+            ArtifactResolveError::SourceUnreadable,
             ArtifactResolveError::DownloadFailed,
             ArtifactResolveError::HttpStatus { status: 404 },
             ArtifactResolveError::RedirectLimitExceeded { redirects: 6 },
@@ -551,6 +673,194 @@ mod tests {
     }
 
     #[test]
+    fn admission_classifies_cold_http_local_files_and_authoritative_cache_hits_without_mutation() {
+        let temp = tempfile::tempdir().unwrap();
+        let roots = sandbox(temp.path());
+        let resolver = ArtifactResolver::new(&roots);
+
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        listener.set_nonblocking(true).unwrap();
+        let url = format!("http://{}/artifact.bin", listener.local_addr().unwrap());
+        let admitted = resolver
+            .admit(ArtifactResolveRequest {
+                artifact_id: "example/http",
+                type_name: "remote_file",
+                url: &url,
+                cache_mode: "none",
+            })
+            .unwrap();
+        assert!(matches!(admitted.source, AdmittedArtifactSource::Http(_)));
+        assert!(resolver.http_transport.is_none());
+        assert_eq!(
+            listener.accept().unwrap_err().kind(),
+            io::ErrorKind::WouldBlock
+        );
+        assert!(!roots.runtime_root.exists());
+        assert!(!roots.cache_root.exists());
+
+        let source = temp.path().join("source.bin");
+        fs::write(&source, b"source").unwrap();
+        let file_url = format!("file://{}", source.display());
+        let admitted = resolver
+            .admit(ArtifactResolveRequest {
+                artifact_id: "example/local",
+                type_name: "remote_file",
+                url: &file_url,
+                cache_mode: "none",
+            })
+            .unwrap();
+        assert!(matches!(
+            admitted.source,
+            AdmittedArtifactSource::LocalFile(path) if path == source
+        ));
+        assert!(!roots.runtime_root.exists());
+
+        fs::create_dir_all(&roots.cache_root).unwrap();
+        let malformed_url = "not a valid URL";
+        let cached_path = roots.cache_root.join(artifact_local_filename(
+            "example/cached",
+            malformed_url,
+            "default",
+        ));
+        fs::write(&cached_path, b"cached").unwrap();
+        let mut before = fs::read_dir(&roots.cache_root)
+            .unwrap()
+            .map(|entry| entry.unwrap().file_name())
+            .collect::<Vec<_>>();
+        before.sort();
+        let admitted = resolver
+            .admit(ArtifactResolveRequest {
+                artifact_id: "example/cached",
+                type_name: "remote_file",
+                url: malformed_url,
+                cache_mode: "default",
+            })
+            .unwrap();
+        assert!(matches!(admitted.source, AdmittedArtifactSource::CacheHit));
+        assert_eq!(admitted.final_path, cached_path);
+        assert_eq!(fs::read(&cached_path).unwrap(), b"cached");
+        let mut after = fs::read_dir(&roots.cache_root)
+            .unwrap()
+            .map(|entry| entry.unwrap().file_name())
+            .collect::<Vec<_>>();
+        after.sort();
+        assert_eq!(after, before);
+    }
+
+    #[test]
+    fn admission_rejects_unsupported_definitions_before_using_cache_or_source() {
+        let temp = tempfile::tempdir().unwrap();
+        let roots = sandbox(temp.path());
+        fs::create_dir_all(&roots.cache_root).unwrap();
+        let cached_path = roots.cache_root.join(artifact_local_filename(
+            "example/cached",
+            "not a valid URL",
+            "default",
+        ));
+        fs::write(cached_path, b"cached").unwrap();
+        let resolver = ArtifactResolver::new(&roots);
+
+        let unsupported_type = ArtifactResolveRequest {
+            artifact_id: "example/cached",
+            type_name: "archive",
+            url: "not a valid URL",
+            cache_mode: "default",
+        };
+        assert_eq!(
+            resolver.admit(unsupported_type).unwrap_err().code(),
+            "artifact_type_unsupported"
+        );
+        let unsupported_cache = ArtifactResolveRequest {
+            type_name: "remote_file",
+            cache_mode: "forever",
+            ..unsupported_type
+        };
+        assert_eq!(
+            resolver.admit(unsupported_cache).unwrap_err().code(),
+            "artifact_cache_mode_unsupported"
+        );
+    }
+
+    #[test]
+    fn admission_classifies_local_source_failures_without_permission_assumptions() {
+        fn permission_denied(_: &Path) -> io::Result<()> {
+            Err(io::Error::from(io::ErrorKind::PermissionDenied))
+        }
+
+        let temp = tempfile::tempdir().unwrap();
+        let roots = sandbox(temp.path());
+        let source = temp.path().join("source.bin");
+        fs::write(&source, b"source").unwrap();
+        let source_url = format!("file://{}", source.display());
+        let request = ArtifactResolveRequest {
+            artifact_id: "example/local",
+            type_name: "remote_file",
+            url: &source_url,
+            cache_mode: "none",
+        };
+        let unreadable = ArtifactResolver::with_source_readability_check(&roots, permission_denied)
+            .admit(request)
+            .unwrap_err();
+        assert_eq!(unreadable.code(), "artifact_source_unreadable");
+
+        let directory = temp.path().join("directory");
+        fs::create_dir(&directory).unwrap();
+        let directory_url = format!("file://{}", directory.display());
+        let resolver = ArtifactResolver::new(&roots);
+        let wrong_kind = resolver
+            .admit(ArtifactResolveRequest {
+                url: &directory_url,
+                ..request
+            })
+            .unwrap_err();
+        assert_eq!(wrong_kind.code(), "artifact_source_wrong_kind");
+
+        let missing = temp.path().join("missing.bin");
+        let missing_url = format!("file://{}", missing.display());
+        let missing = resolver
+            .admit(ArtifactResolveRequest {
+                url: &missing_url,
+                ..request
+            })
+            .unwrap_err();
+        assert_eq!(missing.code(), "artifact_source_not_found");
+
+        let restricted_root = temp.path().join("restricted");
+        let restricted_roots = SandboxRoots {
+            runtime_root: restricted_root.join("runtime"),
+            cache_root: restricted_root.join("cache"),
+            fake_device_root: restricted_root.join("device"),
+            read_only_roots: Vec::new(),
+        };
+        let rejected = ArtifactResolver::new(&restricted_roots)
+            .admit(request)
+            .unwrap_err();
+        assert_eq!(rejected.code(), "artifact_sandbox_rejected");
+        assert!(!roots.runtime_root.exists());
+        assert!(!roots.cache_root.exists());
+    }
+
+    #[test]
+    fn admission_rejects_non_file_cache_destinations() {
+        let temp = tempfile::tempdir().unwrap();
+        let roots = sandbox(temp.path());
+        let request = ArtifactResolveRequest {
+            artifact_id: "example/cached",
+            type_name: "remote_file",
+            url: "https://example.com/artifact.bin",
+            cache_mode: "default",
+        };
+        let final_path = roots.cache_root.join(artifact_local_filename(
+            request.artifact_id,
+            request.url,
+            request.cache_mode,
+        ));
+        fs::create_dir_all(&final_path).unwrap();
+        let error = ArtifactResolver::new(&roots).admit(request).unwrap_err();
+        assert_eq!(error.code(), "artifact_cache_publish_failed");
+    }
+
+    #[test]
     fn local_files_publish_atomically_and_default_cache_hits_skip_url_parsing() {
         let temp = tempfile::tempdir().unwrap();
         let source = temp.path().join("source.bin");
@@ -561,6 +871,7 @@ mod tests {
         let first = resolver
             .resolve(ArtifactResolveRequest {
                 artifact_id: "example/artifact",
+                type_name: "remote_file",
                 url: &url,
                 cache_mode: "default",
             })
@@ -583,6 +894,7 @@ mod tests {
         let cached = resolver
             .resolve(ArtifactResolveRequest {
                 artifact_id: "example/cached",
+                type_name: "remote_file",
                 url: invalid_url,
                 cache_mode: "default",
             })
@@ -600,6 +912,7 @@ mod tests {
         let url = format!("file://{}", source.display());
         let request = ArtifactResolveRequest {
             artifact_id: "example/artifact",
+            type_name: "remote_file",
             url: &url,
             cache_mode: "none",
         };
@@ -659,6 +972,7 @@ mod tests {
         let url = format!("{base_url}/encoded%20artifact.apk?token=one#fragment");
         let request = ArtifactResolveRequest {
             artifact_id: "example/network",
+            type_name: "remote_file",
             url: &url,
             cache_mode: "default",
         };
@@ -702,6 +1016,7 @@ mod tests {
             let error = resolver
                 .resolve(ArtifactResolveRequest {
                     artifact_id: "example/invalid",
+                    type_name: "remote_file",
                     url,
                     cache_mode: "none",
                 })
@@ -719,6 +1034,7 @@ mod tests {
         let url = format!("{base_url}/artifact.bin");
         let request = ArtifactResolveRequest {
             artifact_id: "example/network",
+            type_name: "remote_file",
             url: &url,
             cache_mode: "none",
         };

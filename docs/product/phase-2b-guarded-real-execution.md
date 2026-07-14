@@ -3,11 +3,13 @@
 ## 1. Status and product boundary
 
 Phase 2B defines the planned trust boundary and product behavior for guarded
-real-device execution in `apps/emuchef-app`. It is a specification, not an
-implemented capability. The shipped end-user application remains limited to
-the Phase 2A Simulated Run workflow and does not expose real execution.
+real-device execution in `apps/emuchef-app`. Canonical backend artifact
+admission is implemented as prerequisite groundwork, but guarded real-device
+execution is not an implemented product capability. The shipped end-user
+application remains limited to the Phase 2A Simulated Run workflow and does not
+expose real execution.
 
-The future implementation reuses the Phase 0 `startExecution`,
+The future product implementation reuses the Phase 0 `startExecution`,
 `getExecution`, `getExecutionEvents`, and `cancelExecution` sidecar operations.
 It adds no sidecar protocol extension. React communicates only with trusted
 Tauri commands and never calls those sidecar operations directly.
@@ -170,9 +172,9 @@ sidecar evaluates the exact retained plan against its configured runtime,
 cache, and read-only sandbox roots.
 
 Sidecar admission directly reuses the canonical ArtifactResolver URL, cache,
-destination, local-source, and sandbox rules. The later implementation must
-factor a non-mutating admission path from those rules rather than reproduce
-them in Tauri or maintain a second policy. Admission determines whether:
+destination, local-source, and sandbox rules. The resolver factors one
+non-mutating admission path from those rules rather than reproducing them in
+Tauri or maintaining a second policy. Admission determines whether:
 
 1. an authoritative complete cache hit is structurally admissible;
 2. a `file://` source is absolute, permitted by the read-only sandbox, and
@@ -191,10 +193,14 @@ execution. A filesystem or cache race after admission is also reported as a
 runtime failure; the executor remains authoritative when it acts.
 
 A canonical admission failure rejects `startExecution` before attempt
-allocation. The sidecar returns a typed, credential-safe failure; Tauri maps it
-to `artifact_not_ready`, releases its shared start reservation, and allocates
-no public handle. Raw paths, URLs, sandbox roots, and internal details do not
-cross the React boundary.
+allocation. Admission runs under the execution-state lock so the prospective
+execution number and single-active invariant remain atomic, but it creates no
+persistent reservation or session state and does not reacquire execution
+state. The sidecar returns `execution_start_failed` with the safe discriminator
+`artifact_not_ready` and a stable artifact cause code; Tauri maps that failure,
+releases its shared start reservation, and allocates no public handle. Raw
+artifact identifiers, paths, URLs, credentials, sandbox roots, and internal
+details are absent from the rejection.
 
 Only after admission succeeds does the existing executor own artifact
 resolution, strict TLS, redirect and timeout limits, cache hits and
@@ -406,7 +412,10 @@ Enablement is platform-specific. Passing macOS evidence does not enable Windows
 or Linux. The enabled state must be explicit product policy; capability
 negotiation, a connected device, or successful simulation cannot enable it.
 
-## 14. Later implementation checklist
+## 14. Remaining implementation checklist
+
+The canonical backend admission prerequisite is implemented inside
+`startExecution`. The remaining product work is:
 
 1. Add the default-off platform/build gate and enforce it before store access.
 2. Add the real confirmation DTO and trusted validation without persisting it.
@@ -416,23 +425,20 @@ negotiation, a connected device, or successful simulation cannot enable it.
 5. Implement Tauri's exact ordered retained-state preflight and reservation
    cleanup from Section 4, limiting local input checks to trusted retained BYO
    values.
-6. Add a non-mutating canonical admission path inside existing
-   `startExecution`, directly sharing ArtifactResolver and sandbox rules and
-   running before sidecar attempt allocation; add no public sidecar operation.
-7. Build a separate real projection that exposes only the allowlisted fields in
+6. Build a separate real projection that exposes only the allowlisted fields in
    Section 7 and sanitizes every issue and message.
-8. Implement the public error mapping in Section 10 and distinguish ordinary
+7. Implement the public error mapping in Section 10 and distinguish ordinary
    refresh failure from session loss.
-9. Invalidate the originating review on sidecar real-session loss and implement
+8. Invalidate the originating review on sidecar real-session loss and implement
    the distinct whole-app restart UX.
-10. Add the confirmation, progress, cancellation, terminal, unknown-outcome,
+9. Add the confirmation, progress, cancellation, terminal, unknown-outcome,
     and fresh-review UX without displaying any serial-derived value.
-11. Add unit, integration, frontend logic, security, packaged-app, and manual
+10. Add unit, integration, frontend logic, security, packaged-app, and manual
     disposable-device coverage from Section 15.
-12. Complete the rollout evidence and make enablement a separate reviewed
+11. Complete the rollout evidence and make enablement a separate reviewed
     release change.
 
-## 15. Future implementation test matrix
+## 15. Phase 2B test matrix
 
 | Area | Required scenarios |
 | --- | --- |
