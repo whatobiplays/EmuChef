@@ -5,6 +5,9 @@
 - Rust backend format, check, tests, and clippy run locally.
 - Frontend typechecking, logic tests, and production build run locally.
 - Tauri shell format, check, tests, and clippy run locally.
+- The [Phase 4A Python runtime retirement](../product/phase-4a-python-runtime-retirement.md)
+  guard rejects Python product code, package metadata, runtime commands,
+  sidecars, and backend selectors.
 - Host-target sidecar preparation and bundle-input inspection are automated.
 - A simulated packaged sidecar smoke exercises protocol behavior.
 - Local HTTP/TLS tests and process-level CLI tests cover network artifact

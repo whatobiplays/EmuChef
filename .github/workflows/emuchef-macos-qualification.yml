@@ -3,6 +3,17 @@ name: EmuChef macOS qualification
 on:
   pull_request:
     paths:
+      - "**/*.py"
+      - "**/*.pyi"
+      - "**/*.pyw"
+      - "**/*.pyc"
+      - "pyproject.toml"
+      - "requirements*.txt"
+      - "Pipfile*"
+      - "poetry.lock"
+      - "uv.lock"
+      - "scripts/**"
+      - "apps/config-editor/package.json"
       - "apps/emuchef-app/**"
       - "crates/emuchef-rust-backend/**"
       - "authored/**"
@@ -13,6 +24,17 @@ permissions:
   contents: read
 
 jobs:
+  python-runtime-retirement:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - name: Verify Python runtime retirement
+        run: node --test --experimental-test-coverage --test-coverage-include=scripts/check-python-runtime-retirement.mjs --test-coverage-lines=95 --test-coverage-functions=95 --test-coverage-branches=95 scripts/check-python-runtime-retirement.test.mjs && node scripts/check-python-runtime-retirement.mjs
+
   normalized-repeatability:
     runs-on: macos-14
     timeout-minutes: 45

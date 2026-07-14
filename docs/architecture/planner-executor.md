@@ -1,5 +1,9 @@
 # Planner and Executor
 
+The Rust package `crates/emuchef-rust-backend` is the sole planner and executor
+implementation. There is no alternate backend, compatibility executable, or
+runtime fallback.
+
 The planner loads an authored device plan and profile, selects recipes, applies
 input bindings, expands dependencies, normalizes steps, and emits a typed
 execution plan. Optional live ADB probing supplies detected facts before

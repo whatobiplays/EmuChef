@@ -23,9 +23,13 @@ Rust is the sole product runtime. The Cargo package
 - document sessions, command application, undo/redo, save, YAML emission, and
   reference indexing.
 
-The Python packages under `src/` are frozen reference code pending deletion.
-They expose no console script or `python -m emuchef` entrypoint. Product builds,
-runtime checks, packaging, and the editor do not execute Python.
+The retired Python implementation, tests, dependencies, package metadata, and
+entrypoints are absent from the repository. Python is not required for product
+builds, development, tests, packaging, release qualification, or either Tauri
+application. Repository policy rejects reintroduced Python product/runtime
+code and alternate-backend selection paths.
+The canonical retirement contract and evidence checklist are in
+`docs/product/phase-4a-python-runtime-retirement.md`.
 
 ## Authored Data and Planning
 

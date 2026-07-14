@@ -2,7 +2,8 @@
 
 This crate is EmuChef's product runtime. It builds one executable, `emuchef`,
 and provides CLI, planning, validation, execution, real-ADB apply, and editor
-sidecar behavior.
+sidecar behavior. It is the sole implementation; Python is not a build, test,
+runtime, packaging, or release prerequisite.
 
 ## Commands
 
@@ -69,6 +70,7 @@ cargo fmt --manifest-path crates/emuchef-rust-backend/Cargo.toml --all -- --chec
 cargo check --manifest-path crates/emuchef-rust-backend/Cargo.toml
 cargo test --manifest-path crates/emuchef-rust-backend/Cargo.toml
 cargo clippy --manifest-path crates/emuchef-rust-backend/Cargo.toml --all-targets -- -D warnings
+node scripts/check-python-runtime-retirement.mjs
 ```
 
 Frozen v1 expected results live under

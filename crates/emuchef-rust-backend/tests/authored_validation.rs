@@ -275,7 +275,7 @@ fn valid_minimal_and_top_level_permissions_keep_compatibility_request_classifica
 
 #[test]
 fn editor_local_step_dependency_diagnostics_match_compatibility_fields() {
-    // Mirrors src/emuchef/io/validation.py _annotate_recipe_step_cycle_errors.
+    // Exercises deterministic annotation for every step in a dependency cycle.
     assert_editor_local_fixture_diagnostics(
         "phase6k_missing_step_dependency.yaml",
         "step_not_found",

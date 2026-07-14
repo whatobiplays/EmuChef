@@ -8,8 +8,11 @@ the guided end-user workflow and authored recipe editing.
 
 Rust is the sole product runtime. It owns the `emuchef` CLI, authored-data
 validation, planning, execution, real-ADB apply, the editor document protocol,
-and the JSONL sidecar used by Tauri. The Python source under `src/` is frozen
-reference code pending deletion and has no executable entrypoint.
+and the JSONL sidecar used by Tauri. The retired Python implementation, tests,
+package metadata, and entrypoints are absent from the repository. Python is not
+a product, development, test, packaging, or release prerequisite.
+The canonical repository policy and evidence checklist are documented in
+[Phase 4A Python runtime retirement](docs/product/phase-4a-python-runtime-retirement.md).
 
 Build and test the CLI:
 
@@ -125,8 +128,8 @@ npm run check:rust-runtime
 npm run tauri dev
 ```
 
-The editor launches the Rust `emuchef --sidecar` process. It does not use a
-Python backend or backend selector.
+The editor launches the Rust `emuchef --sidecar` process. No alternate backend
+or backend selector exists.
 
 ## Current Limitations
 

@@ -26,8 +26,12 @@ cargo test --manifest-path src-tauri/Cargo.toml
 ```
 
 `check:rust-runtime` validates sidecar packaging metadata, rejects Python
-runtime/editor/PySide surfaces, typechecks the frontend, and runs frontend logic
-tests.
+product/runtime code and alternate-backend surfaces through the repository-wide
+retirement guard, typechecks the frontend, and runs frontend logic tests.
+
+```bash
+npm run check:python-runtime-retirement
+```
 
 ## Packaging
 

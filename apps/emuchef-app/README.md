@@ -110,6 +110,7 @@ cleanup. See [Platform-Tools import and trust policy](../../docs/product/platfor
 ## 4. Development
 
 Prerequisites are Node.js, npm, Rust, and the normal Tauri macOS build tools.
+Python is not required for development, testing, packaging, or runtime.
 ADB is not required to start or inspect runtime/catalog status.
 
 ```bash
@@ -145,6 +146,7 @@ copied-app orchestration that percentage coverage cannot prove.
 npm --prefix apps/emuchef-app run typecheck
 npm --prefix apps/emuchef-app run test:logic
 npm --prefix apps/emuchef-app run test:security
+npm --prefix apps/emuchef-app run check:python-runtime-retirement
 npm --prefix apps/emuchef-app run test:packaging
 npm --prefix apps/emuchef-app run check:packaged-resources
 npm --prefix apps/emuchef-app run build

@@ -2,7 +2,8 @@
 
 ## 1. Purpose and ownership
 
-Recipe inputs are EmuChef's public runtime-configuration surface. Recipe authors
+Recipe inputs are EmuChef's public runtime-configuration surface. The Rust
+runtime is the sole implementation of this contract. Recipe authors
 declare what can be configured, saved user-configuration documents persist user
 choices without changing recipe YAML, and planning resolves those choices into a
 normalized execution plan.

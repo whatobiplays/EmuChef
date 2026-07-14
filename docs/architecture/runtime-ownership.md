@@ -13,15 +13,15 @@
 | Platform-Tools import and verification | Rust/Tauri | User-supplied, app-managed, macOS-only |
 | Catalog source resolution | Rust | Bundled/local snapshots active; cached remote reserved |
 | Execution reports and incremental events | Rust JSONL sidecar | Active in-memory session contract |
-| Python runtime | Frozen legacy/reference only | Pending deletion |
+| Python runtime | None | Retired; no implementation, package, dependency, or entrypoint is retained |
 | Compatibility fixtures | Frozen v1 evidence | No Python regeneration |
 | Network artifact download | Rust | Active; manual device evidence required |
 | End-user macOS package qualification | Rust/Tauri and local Node tooling | Apple Silicon ad-hoc content qualification active; credentialed verification is explicit and separate |
 | End-user release signing/notarization/updater | External Apple release operation | No end-user Developer ID/notarization evidence; updater is future work |
 
-There is no supported alternate runtime, planner backend selector, Python
-fallback, or secondary product executable. The retained Python packages have no
-entrypoint and do not participate in product verification.
+There is no supported alternate runtime, planner backend selector, fallback,
+or secondary product executable. Python is not a repository prerequisite and
+does not participate in product verification.
 
 The additive `phase0_end_user_runtime` protocol extension is negotiated
 explicitly. It exposes product catalog inventory, reviewed-plan digests,
