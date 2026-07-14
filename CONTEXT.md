@@ -334,6 +334,30 @@ apply, device writes, artifact resolution, catalog networking, wireless
 onboarding, rollback, resume, or parallel-device work, and its result is not
 real-device evidence.
 
+The React frontend is keyboard and screen-reader operable across the workflow,
+saved configurations, execution results, and Support & Storage. It provides a
+skip link, stable landmarks and headings, semantic collections, associated
+input diagnostics, focusable error summaries, bounded polite/assertive live
+regions, and native determinate execution progress. Status and availability
+always have text in addition to color. Reduced-motion, forced-colors, 200% zoom,
+and narrow desktop windows are supported without changing the workflow
+architecture.
+
+Custom prompts and confirmations use exactly-once controllers. Each pending
+request has one safe cancellation result, teardown never implies a destructive
+or execution-confirming choice, and an overlapping request cannot replace the
+live resolver. Runtime restart, configuration replacement, app reset, unmount,
+and the top-level frontend error boundary safely cancel pending prompts.
+Support & Storage owns and cancels its nested cleanup confirmation before the
+parent closes.
+
+Modal and native-dialog focus restoration first validates the recorded invoker,
+then uses a transition-specific workflow or error destination, the current
+workflow fallback, main content, and finally the header Support & Storage
+action. Disconnected, hidden, disabled, or inert invokers are skipped. Focus
+never silently falls to the document body, and generation checks prevent stale
+restoration from stealing focus from a newer modal or workflow transition.
+
 The app creates, opens, edits, saves, saves under a new identity, and reuses
 named schema-v1 portable configurations. A saved document contains its
 generated configuration identity and name, one authored device-plan reference,

@@ -23,6 +23,15 @@ authority to React. Tauri fixes `<app-data>/artifact-cache` at startup and
 passes it explicitly to this app's sidecar. Backend defaults and other sidecar
 clients are unaffected.
 
+Phase 3C makes every frontend surface keyboard and screen-reader operable. It
+adds stable landmarks, validation summaries, bounded live announcements,
+determinate execution progress, focus-contained dialogs, deterministic focus
+restoration, reduced-motion and forced-colors support, and narrow-window/zoom
+resilience. Promise-backed prompts settle exactly once and always use a safe
+cancel result during teardown. These behaviors are presentation-only and do
+not move authority out of Rust or trusted Tauri. See the
+[Phase 3C contract](../../docs/product/phase-3c-accessibility-and-interaction-resilience.md).
+
 The implemented, default-disabled real-device trust boundary is documented in the
 [Phase 2B guarded real-execution contract](../../docs/product/phase-2b-guarded-real-execution.md).
 The feature is not release approval: each platform still requires packaged

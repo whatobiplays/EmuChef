@@ -3,6 +3,17 @@ import { getCurrentWindow } from "@tauri-apps/api/window";
 
 import { api } from "./api";
 import { SupportPanel } from "./SupportPanel";
+import { AccessibleDialog } from "./AccessibleDialog";
+import {
+  DialogController,
+  claimFocusTransition,
+  describedBy,
+  executionAnnouncement,
+  lifecycleBoundResult,
+  restoreAccessibleFocus,
+  stableDomId,
+  type DialogSnapshot,
+} from "./accessibility";
 import type {
   AdbSetupStatus,
   AnyExecutionSnapshot,
@@ -39,7 +50,6 @@ import {
 import {
   cleanupConfirmation,
   entriesForCleanup,
-  formatBytes,
   initialSupportState,
   supportReducer,
 } from "./support";
@@ -52,6 +62,35 @@ const WORKFLOW_STEPS = [
   { step: "review", label: "Review" },
   { step: "execution", label: "Simulated Run" },
 ] as const;
+
+type UnsavedDecision = "save" | "discard" | "cancel";
+
+type AppDialogPayload =
+  | {
+      kind: "unsaved";
+      invoker: HTMLElement | null;
+    }
+  | {
+      kind: "name";
+      title: string;
+      initialValue: string;
+      invoker: HTMLElement | null;
+    }
+  | {
+      kind: "real-execution";
+      invoker: HTMLElement | null;
+    };
+
+type AppDialogResult = UnsavedDecision | string | boolean | null;
+export type AppDialogController = DialogController<AppDialogPayload, AppDialogResult>;
+
+export function createAppDialogController(): AppDialogController {
+  return new DialogController<AppDialogPayload, AppDialogResult>();
+}
+
+interface AppProps {
+  dialogController?: AppDialogController;
+}
 
 function errorMessage(error: unknown): string {
   const raw = error instanceof Error ? error.message : String(error);
@@ -81,15 +120,20 @@ function executionDuration(snapshot: AnyExecutionSnapshot): string | null {
   return `${Math.max(0, Math.round((finish - start) / 1000))}s`;
 }
 
-export function App() {
+export function App({ dialogController: suppliedDialogController }: AppProps = {}) {
+  const ownedDialogControllerRef = useRef<AppDialogController | null>(null);
+  if (!ownedDialogControllerRef.current) {
+    ownedDialogControllerRef.current = suppliedDialogController ?? createAppDialogController();
+  }
+  const dialogController = ownedDialogControllerRef.current;
   const [runtime, setRuntime] = useState<RuntimeStatus>({ status: "starting" });
   const [catalog, setCatalog] = useState<CatalogSummary | null>(null);
   const [adb, setAdb] = useState<AdbSetupStatus | null>(null);
   const [devices, setDevices] = useState<DeviceSummary[]>([]);
   const [busy, setBusy] = useState(false);
   const [notice, setNotice] = useState<string | null>(null);
+  const [operationError, setOperationError] = useState<string | null>(null);
   const [realExecutionEnabled, setRealExecutionEnabled] = useState(false);
-  const [realConfirmationOpen, setRealConfirmationOpen] = useState(false);
   const [realConfirmation, setRealConfirmation] = useState(emptyRealExecutionConfirmation);
   const [reportState, setReportState] = useState<"idle" | "exporting" | "saved" | "failed">("idle");
   const [launchState, setLaunchState] = useState<"idle" | "launching" | "launched" | "failed">("idle");
@@ -98,13 +142,77 @@ export function App() {
   const [recentConfigurations, setRecentConfigurations] = useState<RecentConfiguration[]>([]);
   const [workflow, dispatch] = useReducer(workflowReducer, initialWorkflowState);
   const [support, supportDispatch] = useReducer(supportReducer, initialSupportState);
+  const [activeDialog, setActiveDialog] = useState<DialogSnapshot<AppDialogPayload> | null>(
+    dialogController.snapshot,
+  );
+  const [namePromptValue, setNamePromptValue] = useState("");
+  const [politeAnnouncement, setPoliteAnnouncement] = useState({ id: 0, text: "" });
+  const [assertiveAnnouncement, setAssertiveAnnouncement] = useState({ id: 0, text: "" });
   const mainRef = useRef<HTMLElement>(null);
+  const supportInvokerRef = useRef<HTMLElement | null>(null);
+  const validationSummaryRef = useRef<HTMLElement>(null);
+  const executionAnnouncementKeyRef = useRef<string | null>(null);
+  const appLifecycleGenerationRef = useRef(0);
   const savedConfigurationRef = useRef<SavedConfigurationDocument | null>(null);
   const workflowRef = useRef(workflow);
   const configurationMutationQueue = useRef<Promise<void>>(Promise.resolve());
   const sessionInitializedRef = useRef(false);
   const supportGenerationRef = useRef(0);
   const allowWindowCloseRef = useRef(false);
+
+  const announce = useCallback((text: string, assertive = false) => {
+    const update = (previous: { id: number; text: string }) => ({ id: previous.id + 1, text });
+    if (assertive) setAssertiveAnnouncement(update);
+    else setPoliteAnnouncement(update);
+  }, []);
+
+  useEffect(() => {
+    const unsubscribe = dialogController.subscribe((snapshot) => {
+      setActiveDialog(snapshot);
+      if (snapshot?.payload.kind === "name") setNamePromptValue(snapshot.payload.initialValue);
+    });
+    return () => {
+      appLifecycleGenerationRef.current += 1;
+      unsubscribe();
+      dialogController.cancelActive();
+    };
+  }, [dialogController]);
+
+  const cancelPendingDialog = useCallback(() => {
+    appLifecycleGenerationRef.current += 1;
+    dialogController.cancelActive();
+    setRealConfirmation(emptyRealExecutionConfirmation);
+  }, [dialogController]);
+
+  const requestAppDialog = useCallback(
+    async (payload: AppDialogPayload, safeResult: AppDialogResult): Promise<AppDialogResult> => {
+      const lifecycleGeneration = appLifecycleGenerationRef.current;
+      const request = dialogController.request(payload, safeResult);
+      if (!request.accepted) {
+        announce("Another confirmation is already open. The new request was cancelled.");
+      }
+      return lifecycleBoundResult(
+        request.result,
+        safeResult,
+        lifecycleGeneration,
+        () => appLifecycleGenerationRef.current,
+      );
+    },
+    [announce, dialogController],
+  );
+
+  const withNativeDialogFocus = useCallback(async <Result,>(
+    action: () => Promise<Result>,
+    preferred: Array<HTMLElement | null | undefined> = [],
+  ): Promise<Result> => {
+    const invoker = document.activeElement instanceof HTMLElement ? document.activeElement : null;
+    const generation = claimFocusTransition();
+    try {
+      return await action();
+    } finally {
+      queueMicrotask(() => restoreAccessibleFocus({ invoker, preferred, generation }));
+    }
+  }, []);
 
   const initialize = useCallback(async () => {
     const [runtimeStatus, adbStatus, realAvailability] = await Promise.all([
@@ -145,14 +253,42 @@ export function App() {
   }, [workflow]);
 
   useEffect(() => {
-    mainRef.current?.focus();
+    const generation = claimFocusTransition();
+    queueMicrotask(() => {
+      const destination = mainRef.current?.querySelector<HTMLElement>("[data-step-heading]");
+      restoreAccessibleFocus({
+        preferred: [destination, mainRef.current],
+        generation,
+      });
+    });
   }, [adb?.status, runtime.status, workflow.step]);
+
+  useEffect(() => {
+    if (!notice) return;
+    announce(notice, /failed|error|could not|unavailable|disconnected/i.test(notice));
+  }, [announce, notice]);
+
+  useEffect(() => {
+    if (activeDialog?.payload.kind === "real-execution" && !workflow.review) {
+      dialogController.cancelActive();
+    }
+  }, [activeDialog?.id, activeDialog?.payload.kind, dialogController, workflow.review]);
+
+  useEffect(() => {
+    if (!savedConfiguration?.configurationHandle) return;
+    const generation = claimFocusTransition();
+    queueMicrotask(() => restoreAccessibleFocus({
+      preferred: [mainRef.current?.querySelector<HTMLElement>("[data-step-heading]")],
+      generation,
+    }));
+  }, [savedConfiguration?.configurationHandle]);
 
   const refreshRecents = async () => {
     setRecentConfigurations(await api.listRecentConfigurations());
   };
 
   const applySavedDocument = async (document: SavedConfigurationDocument) => {
+    cancelPendingDialog();
     const previous = savedConfigurationRef.current;
     if (previous && previous.configurationHandle !== document.configurationHandle) {
       await api.closeSavedConfiguration(previous.configurationHandle).catch(() => undefined);
@@ -176,15 +312,21 @@ export function App() {
       setNotice("Choose a device plan reference before saving this portable configuration.");
       return false;
     }
-    const name = window.prompt("Name this portable configuration:", "My EmuChef setup")?.trim();
+    const nameResult = await requestAppDialog({
+      kind: "name",
+      title: "Name this portable configuration",
+      initialValue: "My EmuChef setup",
+      invoker: document.activeElement instanceof HTMLElement ? document.activeElement : null,
+    }, null);
+    const name = typeof nameResult === "string" ? nameResult.trim() : "";
     if (!name) return false;
     try {
-      const result = await api.createSavedConfiguration({
-        name,
-        devicePlan: current.devicePlan,
-        selectedRecipes: current.selectedRecipes ?? [],
-        bindings: current.bindings,
-      });
+      const result = await withNativeDialogFocus(() => api.createSavedConfiguration({
+          name,
+          devicePlan: current.devicePlan!,
+          selectedRecipes: current.selectedRecipes ?? [],
+          bindings: current.bindings,
+        }));
       if (result.outcome === "cancelled") return false;
       await applySavedDocument(result);
       dispatch({ type: "portable-intent-saved" });
@@ -216,13 +358,12 @@ export function App() {
   const dirtyDecision = async (): Promise<"save" | "discard" | "cancel"> => {
     const dirty = workflowRef.current.portableIntentDirty || Boolean(savedConfigurationRef.current?.dirty);
     if (!dirty) return "discard";
-    const saveConfirmed = window.confirm(
-      "This portable configuration has unsaved edits. Save them before continuing?",
-    );
-    const discardConfirmed = saveConfirmed
-      ? false
-      : window.confirm("Discard the unsaved portable configuration edits?");
-    return resolveUnsavedDecision(dirty, saveConfirmed, discardConfirmed);
+    const result = await requestAppDialog({
+      kind: "unsaved",
+      invoker: document.activeElement instanceof HTMLElement ? document.activeElement : null,
+    }, "cancel");
+    if (result !== "save" && result !== "discard") return "cancel";
+    return resolveUnsavedDecision(dirty, result === "save", result === "discard");
   };
 
   const runProtectedTransition = async (transition: () => Promise<void>) => {
@@ -235,6 +376,7 @@ export function App() {
 
   const startNewConfiguration = async () => {
     await runProtectedTransition(async () => {
+      cancelPendingDialog();
       const current = savedConfigurationRef.current;
       if (current) await api.closeSavedConfiguration(current.configurationHandle).catch(() => undefined);
       savedConfigurationRef.current = null;
@@ -247,7 +389,7 @@ export function App() {
   const openConfiguration = async () => {
     await runProtectedTransition(async () => {
       try {
-        const result = await api.openSavedConfiguration();
+        const result = await withNativeDialogFocus(api.openSavedConfiguration);
         if (result.outcome !== "cancelled") await applySavedDocument(result);
       } catch (error) {
         setNotice(errorMessage(error));
@@ -269,7 +411,7 @@ export function App() {
   const relinkRecentConfiguration = async (recentHandle: string) => {
     await runProtectedTransition(async () => {
       try {
-        const result = await api.relinkRecentConfiguration(recentHandle);
+        const result = await withNativeDialogFocus(() => api.relinkRecentConfiguration(recentHandle));
         if (result.outcome !== "cancelled") await applySavedDocument(result);
       } catch (error) {
         setNotice(errorMessage(error));
@@ -286,10 +428,18 @@ export function App() {
       await createFromCurrentIntent();
       return;
     }
-    const name = window.prompt("Name the new portable configuration:", current.name)?.trim();
+    const nameResult = await requestAppDialog({
+      kind: "name",
+      title: "Name the new portable configuration",
+      initialValue: current.name,
+      invoker: document.activeElement instanceof HTMLElement ? document.activeElement : null,
+    }, null);
+    const name = typeof nameResult === "string" ? nameResult.trim() : "";
     if (!name) return;
     try {
-      const result = await api.saveSavedConfigurationAs(current.configurationHandle, name);
+      const result = await withNativeDialogFocus(
+        () => api.saveSavedConfigurationAs(current.configurationHandle, name),
+      );
       if (result.outcome === "cancelled") return;
       savedConfigurationRef.current = result;
       setSavedConfiguration(result);
@@ -354,6 +504,19 @@ export function App() {
     setSavedConfiguration(updated);
   };
 
+  const focusValidationSummary = (description: ConfigurationDescription) => {
+    const hasErrors = [
+      ...description.diagnostics,
+      ...description.inputs.flatMap((input) => input.diagnostics),
+    ].some((diagnostic) => diagnostic.severity === "error");
+    if (!hasErrors) return;
+    const generation = claimFocusTransition();
+    queueMicrotask(() => restoreAccessibleFocus({
+      preferred: [validationSummaryRef.current],
+      generation,
+    }));
+  };
+
   const syncSavedIntent = (
     devicePlan: string,
     selectedRecipes: string[],
@@ -382,6 +545,8 @@ export function App() {
   const restartRuntime = async () => {
     await runProtectedTransition(async () => {
       try {
+        cancelPendingDialog();
+        announce("Restarting the Rust runtime.");
         const status = await api.restartRuntime();
         savedConfigurationRef.current = null;
         setSavedConfiguration(null);
@@ -400,21 +565,28 @@ export function App() {
   const refreshSupportInventory = async () => {
     const generation = ++supportGenerationRef.current;
     supportDispatch({ type: "inventory-requested", generation });
+    announce("Refreshing the app-owned artifact cache inventory.");
     try {
       const inventory = await api.cacheInventory();
       supportDispatch({ type: "inventory-loaded", generation, inventory });
+      announce(`Cache inventory refreshed. ${inventory.summary.entryCount} entries available.`);
     } catch (error) {
       supportDispatch({ type: "inventory-failed", generation, message: errorMessage(error) });
     }
   };
 
-  const openSupport = () => {
+  const openSupport = (invoker: HTMLElement) => {
+    if (dialogController.activeId !== null) {
+      announce("Close the current confirmation before opening Support and Storage.");
+      return;
+    }
+    supportInvokerRef.current = invoker;
     supportDispatch({ type: "open" });
     void refreshSupportInventory();
   };
 
-  const cleanupSupportCache = async (mode: CacheCleanupMode) => {
-    if (!support.inventory) return;
+  const prepareSupportCleanup = (mode: CacheCleanupMode) => {
+    if (!support.inventory) return null;
     const entries = entriesForCleanup(support.inventory, mode, support.selectedHandles);
     const confirmation = cleanupConfirmation(entries);
     if (confirmation.entryCount === 0) {
@@ -422,14 +594,20 @@ export function App() {
         type: "cleanup-failed",
         message: "No removable cache entries match this action.",
       });
-      return;
+      announce("No removable cache entries match this action.", true);
+      return null;
     }
-    const accepted = window.confirm(
-      `Remove ${confirmation.entryCount} cache ${confirmation.entryCount === 1 ? "entry" : "entries"} totaling ${formatBytes(confirmation.totalSizeBytes)}?`,
-    );
-    if (!accepted) return;
+    return confirmation;
+  };
+
+  const cleanupSupportCache = async (mode: CacheCleanupMode) => {
+    if (!support.inventory) return;
+    const entries = entriesForCleanup(support.inventory, mode, support.selectedHandles);
+    const confirmation = cleanupConfirmation(entries);
+    if (confirmation.entryCount === 0) return;
     const generation = ++supportGenerationRef.current;
     supportDispatch({ type: "cleanup-started", generation });
+    announce(`Removing ${confirmation.entryCount} confirmed cache ${confirmation.entryCount === 1 ? "entry" : "entries"}.`);
     try {
       const result = await api.cleanupCache({
         mode,
@@ -443,6 +621,7 @@ export function App() {
         inventory: result.inventory,
         outcomes: result.outcomes,
       });
+      announce(`Cache cleanup finished. ${result.outcomes.length} outcomes are available.`);
     } catch (error) {
       supportDispatch({ type: "cleanup-failed", message: errorMessage(error) });
     }
@@ -451,9 +630,11 @@ export function App() {
   const exportSupportDiagnostics = async () => {
     const generation = ++supportGenerationRef.current;
     supportDispatch({ type: "export-started", generation });
+    announce("Preparing a sanitized diagnostics export.");
     try {
-      const result = await api.exportSupportDiagnostics();
+      const result = await withNativeDialogFocus(api.exportSupportDiagnostics);
       supportDispatch({ type: "export-finished", generation, outcome: result.outcome });
+      announce(result.outcome === "saved" ? "Sanitized diagnostics saved." : "Diagnostics export cancelled.");
     } catch (error) {
       supportDispatch({ type: "export-failed", generation, message: errorMessage(error) });
     }
@@ -511,7 +692,7 @@ export function App() {
     setNotice(null);
     await runBusyAction({
       setBusy,
-      action: api.importPlatformTools,
+      action: () => withNativeDialogFocus(api.importPlatformTools),
       onSuccess: (status) => {
         setAdb(status);
         if (workflowRef.current.deviceHandle || workflowRef.current.review) {
@@ -558,10 +739,12 @@ export function App() {
     dispatch({ type: "select-device", deviceHandle });
     setBusy(true);
     setNotice(null);
+    announce("Reading the selected device properties.");
     try {
       const facts = await api.probeDevice(deviceHandle);
       const match = await api.matchDevice(deviceHandle);
       dispatch({ type: "device-probed", facts, match });
+      announce("Device properties loaded. Confirm the matched setup.");
       const currentSaved = savedConfigurationRef.current;
       if (currentSaved && !savedDevicePlanAvailable(currentSaved, match)) {
         const updated: SavedConfigurationDocument = {
@@ -591,6 +774,7 @@ export function App() {
     if (!workflow.deviceHandle || !workflow.devicePlan) return;
     setBusy(true);
     setNotice(null);
+    setOperationError(null);
     try {
       const generation = workflow.requestGeneration;
       const description = await api.describeConfiguration({
@@ -602,9 +786,23 @@ export function App() {
       dispatch({ type: "description", description, generation });
       if (workflowRef.current.requestGeneration === generation) {
         applyDescriptionValidation(description);
+        focusValidationSummary(description);
+        const errorCount = [
+          ...description.diagnostics,
+          ...description.inputs.flatMap((input) => input.diagnostics),
+        ].filter((item) => item.severity === "error").length;
+        announce(errorCount > 0
+          ? `Validation needs attention. ${errorCount} ${errorCount === 1 ? "error" : "errors"} found.`
+          : "Validation complete. The configuration is ready for review.", errorCount > 0);
+      } else {
+        announce("An outdated validation response was ignored.");
       }
     } catch (error) {
-      setNotice(errorMessage(error));
+      const message = errorMessage(error);
+      setNotice(message);
+      setOperationError(message);
+      const generation = claimFocusTransition();
+      queueMicrotask(() => restoreAccessibleFocus({ preferred: [validationSummaryRef.current], generation }));
     } finally {
       setBusy(false);
     }
@@ -628,6 +826,8 @@ export function App() {
         dispatch({ type: "description", description, generation });
         if (workflowRef.current.requestGeneration === generation) {
           applyDescriptionValidation(description);
+        } else {
+          announce("An outdated validation response was ignored.");
         }
       }).catch((error) => setNotice(errorMessage(error)));
     }, 250);
@@ -646,6 +846,8 @@ export function App() {
     if (!workflow.deviceHandle || !workflow.devicePlan) return;
     setBusy(true);
     setNotice(null);
+    setOperationError(null);
+    announce("Creating a fresh reviewed plan.");
     try {
       const review = await api.createReview({
         deviceHandle: workflow.deviceHandle,
@@ -654,8 +856,16 @@ export function App() {
         bindings: workflow.bindings,
       });
       dispatch({ type: "review", review });
+      announce("The reviewed plan is ready.");
     } catch (error) {
-      setNotice(errorMessage(error));
+      const message = errorMessage(error);
+      setNotice(message);
+      setOperationError(message);
+      const generation = claimFocusTransition();
+      queueMicrotask(() => restoreAccessibleFocus({
+        preferred: [validationSummaryRef.current],
+        generation,
+      }));
     } finally {
       setBusy(false);
     }
@@ -667,6 +877,7 @@ export function App() {
     dispatch({ type: "execution-starting", generation });
     setBusy(true);
     setNotice(null);
+    announce("Starting the simulated dry run.");
     try {
       const snapshot = await api.startSimulatedExecution(workflow.review.reviewHandle);
       dispatch({ type: "execution-started", generation, snapshot });
@@ -685,7 +896,6 @@ export function App() {
     dispatch({ type: "execution-starting", generation, mode: "real" });
     setBusy(true);
     setNotice(null);
-    setRealConfirmationOpen(false);
     setRealConfirmation(emptyRealExecutionConfirmation);
     try {
       const snapshot = await api.startRealExecution(workflow.review.reviewHandle, confirmation);
@@ -698,8 +908,35 @@ export function App() {
     }
   };
 
+  const requestRealExecution = async (invoker: HTMLElement) => {
+    setRealConfirmation(emptyRealExecutionConfirmation);
+    const result = await requestAppDialog({
+      kind: "real-execution",
+      invoker,
+    }, false);
+    if (result === true) await startRealExecution();
+  };
+
   const activeExecution =
     workflow.execution.kind === "active" ? workflow.execution : null;
+
+  useEffect(() => {
+    if (workflow.execution.kind !== "active" && workflow.execution.kind !== "terminal") return;
+    const next = executionAnnouncement(
+      workflow.execution.snapshot,
+      executionAnnouncementKeyRef.current,
+    );
+    if (!next) return;
+    executionAnnouncementKeyRef.current = next.key;
+    announce(next.message, next.assertive);
+    if (workflow.execution.kind === "terminal") {
+      const generation = claimFocusTransition();
+      queueMicrotask(() => restoreAccessibleFocus({
+        preferred: [mainRef.current?.querySelector<HTMLElement>("[data-step-heading]")],
+        generation,
+      }));
+    }
+  }, [announce, workflow.execution]);
 
   useEffect(() => {
     if (!activeExecution) return;
@@ -715,6 +952,15 @@ export function App() {
           ? await api.getRealExecution(executionHandle)
           : await api.getSimulatedExecution(executionHandle);
         if (disposed) return;
+        const currentExecution = workflowRef.current.execution;
+        if (
+          workflowRef.current.executionGeneration !== generation
+          || (currentExecution.kind !== "active" && currentExecution.kind !== "terminal")
+          || currentExecution.snapshot.executionHandle !== executionHandle
+        ) {
+          announce("An outdated execution response was ignored.");
+          return;
+        }
         dispatch({ type: "execution-snapshot", generation, snapshot: nextSnapshot });
         eventCursor = Math.max(eventCursor, nextSnapshot.latestSequence);
         if (nextSnapshot.terminal) return;
@@ -766,10 +1012,13 @@ export function App() {
 
   const exportExecutionReport = async () => {
     if (workflow.execution.kind !== "terminal") return;
+    const executionHandle = workflow.execution.snapshot.executionHandle;
     setReportState("exporting");
     setNotice(null);
     try {
-      const result = await api.exportExecutionReport(workflow.execution.snapshot.executionHandle);
+      const result = await withNativeDialogFocus(
+        () => api.exportExecutionReport(executionHandle),
+      );
       setReportState(result.outcome === "saved" ? "saved" : "idle");
     } catch (error) {
       setReportState("failed");
@@ -812,7 +1061,7 @@ export function App() {
     setRepairPreparing(true);
     setReportState("idle");
     setLaunchState("idle");
-    setRealConfirmationOpen(false);
+    cancelPendingDialog();
     setRealConfirmation(emptyRealExecutionConfirmation);
     dispatch({ type: "prepare-repair" });
     setNotice(null);
@@ -879,7 +1128,10 @@ export function App() {
     setNotice(null);
     await runBusyAction({
       setBusy,
-      action: () => api.pickInputPath(input.pathKind!, Boolean(input.multiple)),
+      action: () => withNativeDialogFocus(
+        () => api.pickInputPath(input.pathKind!, Boolean(input.multiple)),
+        [document.getElementById(stableDomId("input", input.key))],
+      ),
       onSuccess: (values) => {
         if (values) {
           updateBindingIntent(input.key, input.multiple ? values : values[0]);
@@ -900,9 +1152,36 @@ export function App() {
       && (!workflow.devicePlan
         || !planOptions.some((candidate) => candidate.planId === workflow.devicePlan)),
   );
+  const validationErrors = workflow.description
+    ? [
+        ...workflow.description.inputs.flatMap((input) => inputDiagnosticsForDisplay(input).map((diagnostic) => ({
+          ...diagnostic,
+          targetId: stableDomId("input", input.key),
+        }))),
+        ...pageDiagnosticsForDisplay(workflow.description).map((diagnostic) => ({
+          ...diagnostic,
+          targetId: null,
+        })),
+      ].filter((diagnostic) => diagnostic.severity === "error")
+    : [];
+  const configurationActionsLocked = busy
+    || workflow.execution.kind === "active"
+    || workflow.execution.kind === "starting";
+  const saveDisabled = busy
+    || !workflow.devicePlan
+    || (!workflow.portableIntentDirty && !savedConfiguration?.dirty);
 
   return (
     <div className="app-shell">
+      <a className="skip-link" href="#main-content">Skip to main content</a>
+      <div className="live-regions" aria-label="Application notifications">
+        <p aria-atomic="true" aria-live="polite" className="visually-hidden" key={`polite-${politeAnnouncement.id}`} role="status">
+          {politeAnnouncement.text}
+        </p>
+        <p aria-atomic="true" aria-live="assertive" className="visually-hidden" key={`assertive-${assertiveAnnouncement.id}`} role="alert">
+          {assertiveAnnouncement.text}
+        </p>
+      </div>
       <header className="app-header">
         <div className="brand-mark" aria-hidden="true">E</div>
         <div>
@@ -912,16 +1191,23 @@ export function App() {
         <div className="runtime-chip" aria-live="polite">
           {runtime.status === "ready" ? `Runtime ready · ${catalog?.catalog.version ?? "catalog"}` : runtime.status}
         </div>
-        <button className="secondary" onClick={openSupport}>Support & Storage</button>
+        <button
+          className="secondary"
+          data-focus-fallback="header"
+          onClick={(event) => openSupport(event.currentTarget)}
+        >Support & Storage</button>
       </header>
 
       <SupportPanel
         state={support}
+        returnFocus={supportInvokerRef.current}
         onClose={() => supportDispatch({ type: "close" })}
         onRefresh={() => void refreshSupportInventory()}
         onToggleSelection={(handle) => supportDispatch({ type: "toggle-selection", handle })}
+        onPrepareCleanup={prepareSupportCleanup}
         onCleanup={(mode) => void cleanupSupportCache(mode)}
         onExport={() => void exportSupportDiagnostics()}
+        onAnnounce={announce}
       />
 
       {runtime.status === "ready" && (
@@ -935,26 +1221,29 @@ export function App() {
             </small>
           </div>
           <div className="button-row">
-            <button className="secondary" onClick={startNewConfiguration} disabled={busy || workflow.execution.kind === "active" || workflow.execution.kind === "starting"}>New</button>
-            <button className="secondary" onClick={openConfiguration} disabled={busy || workflow.execution.kind === "active" || workflow.execution.kind === "starting"}>Open…</button>
-            <button onClick={saveCurrentConfiguration} disabled={busy || !workflow.devicePlan || (!workflow.portableIntentDirty && !savedConfiguration?.dirty)}>Save</button>
-            <button className="secondary" onClick={saveConfigurationAs} disabled={busy || !workflow.devicePlan}>Save As…</button>
-            <button className="text-button" onClick={restartRuntime} disabled={busy || workflow.execution.kind === "active" || workflow.execution.kind === "starting"}>Restart runtime</button>
+            <button aria-describedby={configurationActionsLocked ? "configuration-actions-reason" : undefined} className="secondary" onClick={startNewConfiguration} disabled={configurationActionsLocked}>New</button>
+            <button aria-describedby={configurationActionsLocked ? "configuration-actions-reason" : undefined} className="secondary" onClick={openConfiguration} disabled={configurationActionsLocked}>Open…</button>
+            <button aria-describedby={saveDisabled ? "save-configuration-reason" : undefined} onClick={saveCurrentConfiguration} disabled={saveDisabled}>Save</button>
+            <button aria-describedby={busy || !workflow.devicePlan ? "save-as-reason" : undefined} className="secondary" onClick={saveConfigurationAs} disabled={busy || !workflow.devicePlan}>Save As…</button>
+            <button aria-describedby={configurationActionsLocked ? "configuration-actions-reason" : undefined} className="text-button" onClick={restartRuntime} disabled={configurationActionsLocked}>Restart runtime</button>
           </div>
+          {configurationActionsLocked && <p className="disabled-reason" id="configuration-actions-reason">Configuration replacement and runtime restart are unavailable while another operation or execution is active.</p>}
+          {saveDisabled && <p className="disabled-reason" id="save-configuration-reason">Save requires a selected device plan and unsaved portable changes.</p>}
+          {(busy || !workflow.devicePlan) && <p className="disabled-reason" id="save-as-reason">Save As requires a selected device plan and no other active operation.</p>}
         </section>
       )}
 
       {runtime.status === "unsupported" || runtime.status === "failed" ? (
-        <main className="blocking-card" role="alert" ref={mainRef} tabIndex={-1}>
+        <main className="blocking-card" data-focus-fallback="main" id="main-content" role="alert" ref={mainRef} tabIndex={-1}>
           <p className="eyebrow">RUNTIME UNAVAILABLE</p>
-          <h2>EmuChef could not start its Rust runtime</h2>
+          <h2 data-step-heading tabIndex={-1}>EmuChef could not start its Rust runtime</h2>
           <p>{runtime.error.message}</p>
           <button onClick={restartRuntime}>Retry runtime startup</button>
         </main>
       ) : adb?.status !== "ready" ? (
-        <main className="blocking-card" aria-labelledby="adb-heading" ref={mainRef} tabIndex={-1}>
+        <main className="blocking-card" aria-labelledby="adb-heading" data-focus-fallback="main" id="main-content" ref={mainRef} tabIndex={-1}>
           <p className="eyebrow">ONE-TIME SETUP</p>
-          <h2 id="adb-heading">Android SDK Platform-Tools is required</h2>
+          <h2 data-step-heading id="adb-heading" tabIndex={-1}>Android SDK Platform-Tools is required</h2>
           <p>
             EmuChef does not include or download ADB. Download the macOS Platform-Tools ZIP directly
             from Google, then import it here for local validation and managed installation.
@@ -967,41 +1256,56 @@ export function App() {
             <button className="secondary" onClick={openPlatformToolsPage}>
               Open Android Platform-Tools Download Page
             </button>
-            <button onClick={importPlatformTools} disabled={busy}>
+            <button aria-describedby={busy ? "platform-tools-busy" : undefined} onClick={importPlatformTools} disabled={busy}>
               {busy ? "Validating…" : "Import Platform-Tools ZIP"}
             </button>
             {adb?.canRemove && <button className="danger" onClick={removePlatformTools}>Remove</button>}
           </div>
+          {busy && <p className="disabled-reason" id="platform-tools-busy" role="status">Platform-Tools validation is in progress.</p>}
           <p className="fine-print">
             EmuChef keeps only adb, NOTICE.txt, and source.properties in its application data. The
             selected ZIP remains yours and is never copied into the app bundle or repository.
           </p>
         </main>
       ) : (
-        <main className="workflow-layout" ref={mainRef} tabIndex={-1}>
+        <main className="workflow-layout" data-focus-fallback="main" id="main-content" ref={mainRef} tabIndex={-1}>
           <nav aria-label="Setup progress" className="progress-nav">
             <ol>
               {WORKFLOW_STEPS.map((item, index) => (
-                <li key={item.step} className={index === stepIndex ? "current" : index < stepIndex ? "complete" : ""}>
-                  <span>{index + 1}</span>{item.label}
+                <li
+                  aria-current={index === stepIndex ? "step" : undefined}
+                  key={item.step}
+                  className={index === stepIndex ? "current" : index < stepIndex ? "complete" : ""}
+                >
+                  <span aria-hidden="true">{index + 1}</span>
+                  <span className="visually-hidden">{index < stepIndex ? "Completed: " : index === stepIndex ? "Current step: " : "Upcoming: "}</span>
+                  {item.label}
                 </li>
               ))}
             </ol>
           </nav>
 
           <section className="workflow-card" aria-busy={busy}>
-            {notice && <p className="warning" role="status">{notice}</p>}
+            {notice && !operationError && <p className="warning" role="status">Attention: {notice}</p>}
+            {operationError && (
+              <section className="error error-summary" ref={validationSummaryRef} role="alert" tabIndex={-1}>
+                <h2>Action could not be completed</h2>
+                <p>Error: {operationError}</p>
+                <p>Review the current selections and try the action again.</p>
+              </section>
+            )}
 
             {workflow.step === "connect" && (
               <>
                 <p className="eyebrow">CONNECT DEVICE</p>
-                <h2>Choose an Android device</h2>
+                <h2 data-focus-fallback="workflow" data-step-heading tabIndex={-1}>Choose an Android device</h2>
                 <p>Connect with USB debugging enabled. EmuChef only reads device information in this phase.</p>
                 {recentConfigurations.length > 0 && (
                   <section className="recent-configurations" aria-labelledby="recent-configurations-heading">
                     <h3 id="recent-configurations-heading">Recent configurations</h3>
+                    <ul>
                     {recentConfigurations.map((recent) => (
-                      <article key={recent.recentHandle}>
+                      <li key={recent.recentHandle}>
                         <div>
                           <strong>{recent.name}</strong>
                           <small>{formatLastOpened(recent.lastOpenedEpochMs)}</small>
@@ -1010,7 +1314,7 @@ export function App() {
                           <button className="secondary" onClick={() => openRecentConfiguration(recent.recentHandle)}>Open</button>
                         ) : (
                           <>
-                            <span className="error">Missing</span>
+                            <span className="error">Unavailable: file missing</span>
                             <button className="secondary" onClick={() => relinkRecentConfiguration(recent.recentHandle)}>Relink…</button>
                             <button
                               className="text-button danger-text"
@@ -1021,8 +1325,9 @@ export function App() {
                             >Remove</button>
                           </>
                         )}
-                      </article>
+                      </li>
                     ))}
+                    </ul>
                   </section>
                 )}
                 {savedConfiguration && (
@@ -1037,30 +1342,39 @@ export function App() {
                     ))}
                   </section>
                 )}
-                <div className="device-list">
-                  {devices.length === 0 && <div className="empty-state">No ADB devices detected yet.</div>}
+                <div className="device-list" aria-busy={busy} role="region" aria-label="Detected Android devices">
+                  {devices.length === 0 && <div className="empty-state" role="status">No ADB devices detected yet. Refresh after connecting a device.</div>}
+                  <ul>
                   {devices.map((device) => (
-                    <button
-                      className="device-row"
-                      key={device.deviceHandle}
-                      disabled={device.state !== "available" || busy}
-                      onClick={() => selectDevice(device.deviceHandle)}
-                    >
-                      <span><strong>{device.displayName}</strong><small>{device.maskedSerial}</small></span>
-                      <span className={`status ${device.state}`}>{device.state}</span>
-                    </button>
+                    <li key={device.deviceHandle}>
+                      <button
+                        aria-describedby={device.state !== "available" ? stableDomId("device-reason", device.deviceHandle) : undefined}
+                        className="device-row"
+                        disabled={device.state !== "available" || busy}
+                        onClick={() => selectDevice(device.deviceHandle)}
+                      >
+                        <span><strong>{device.displayName}</strong><small>{device.maskedSerial}</small></span>
+                        <span className={`status ${device.state}`}>Status: {device.state}</span>
+                      </button>
+                      {device.state !== "available" && (
+                        <small className="disabled-reason" id={stableDomId("device-reason", device.deviceHandle)}>
+                          This device cannot be selected until its status is available.
+                        </small>
+                      )}
+                    </li>
                   ))}
+                  </ul>
                 </div>
                 <button className="text-button" onClick={pollDevices}>Refresh devices</button>
               </>
             )}
 
-            {workflow.step === "device" && <div className="empty-state">Reading device properties…</div>}
+            {workflow.step === "device" && <div className="empty-state" role="status"><h2 data-focus-fallback="workflow" data-step-heading tabIndex={-1}>Reading device properties</h2><p>Keep the selected device connected.</p></div>}
 
             {workflow.step === "setup" && workflow.facts && workflow.match && (
               <>
                 <p className="eyebrow">CONFIRM DEVICE</p>
-                <h2>{workflow.facts.manufacturer ?? "Android"} {workflow.facts.model ?? "device"}</h2>
+                <h2 data-focus-fallback="workflow" data-step-heading tabIndex={-1}>{workflow.facts.manufacturer ?? "Android"} {workflow.facts.model ?? "device"}</h2>
                 <p>Android {workflow.facts.androidVersion ?? "unknown"} · API {workflow.facts.androidApiLevel ?? "unknown"}</p>
                 <div className="confidence">Match confidence: <strong>{workflow.match.confidence}</strong></div>
                 {savedPlanUnavailable && (
@@ -1089,16 +1403,41 @@ export function App() {
                 )}
                 <div className="button-row">
                   <button className="secondary" onClick={() => dispatch({ type: "back" })}>Back</button>
-                  <button disabled={!workflow.devicePlan || savedPlanUnavailable || busy} onClick={describe}>Continue</button>
+                  <button aria-describedby={!workflow.devicePlan || savedPlanUnavailable || busy ? "setup-continue-reason" : undefined} disabled={!workflow.devicePlan || savedPlanUnavailable || busy} onClick={describe}>Continue</button>
                 </div>
+                {(!workflow.devicePlan || savedPlanUnavailable || busy) && (
+                  <p className="disabled-reason" id="setup-continue-reason">
+                    {busy ? "Device validation is in progress." : savedPlanUnavailable ? "Choose an available setup explicitly." : "Choose a safe setup first."}
+                  </p>
+                )}
               </>
             )}
 
             {workflow.step === "inputs" && workflow.description && (
               <>
                 <p className="eyebrow">CHOOSE SETUP</p>
-                <h2>Customize your setup</h2>
-                <div className="recipe-list">
+                <h2 data-focus-fallback="workflow" data-step-heading tabIndex={-1}>Customize your setup</h2>
+                {validationErrors.length > 0 && (
+                  <section
+                    aria-labelledby="validation-summary-heading"
+                    className="error error-summary"
+                    ref={validationSummaryRef}
+                    role="alert"
+                    tabIndex={-1}
+                  >
+                    <h3 id="validation-summary-heading">Resolve {validationErrors.length} configuration {validationErrors.length === 1 ? "error" : "errors"}</h3>
+                    <ul>
+                      {validationErrors.map((item, index) => (
+                        <li key={`${item.key ?? "global"}-${item.code}-${index}`}>
+                          {item.targetId ? <a href={`#${item.targetId}`}>{item.message}</a> : item.message}
+                          <details><summary>Technical details</summary><code>{item.code}</code></details>
+                        </li>
+                      ))}
+                    </ul>
+                  </section>
+                )}
+                <fieldset className="recipe-list">
+                  <legend>Choose recipes</legend>
                   {workflow.description.recipeOptions.map((recipe) => (
                     <label key={recipe.id} className={!recipe.available ? "unavailable" : ""}>
                       <input
@@ -1128,19 +1467,32 @@ export function App() {
                       </span>
                     </label>
                   ))}
-                </div>
+                </fieldset>
 
-                {workflow.description.inputs.map((input) => (
-                  <label className="input-field" key={input.key}>
-                    <span>{input.label}{input.required ? " *" : ""}</span>
+                {workflow.description.inputs.map((input) => {
+                  const inputId = stableDomId("input", input.key);
+                  const descriptionId = `${inputId}-description`;
+                  const extensionsId = `${inputId}-extensions`;
+                  const sourceId = `${inputId}-source`;
+                  const diagnostics = inputDiagnosticsForDisplay(input);
+                  const diagnosticIds = diagnostics.map((_, index) => `${inputId}-error-${index}`);
+                  return (
+                  <div className="input-field" key={input.key}>
+                    <label htmlFor={inputId}>{input.label}{input.required ? " (required)" : ""}</label>
                     {input.type === "boolean" ? (
                       <input
+                        aria-describedby={describedBy(input.description && descriptionId, ...diagnosticIds)}
+                        aria-invalid={diagnostics.some((item) => item.severity === "error") || undefined}
+                        id={inputId}
                         type="checkbox"
                         checked={Boolean(workflow.bindings[input.key] ?? input.value)}
                         onChange={(event) => updateBindingIntent(input.key, event.target.checked)}
                       />
                     ) : input.options?.length ? (
                       <select
+                        aria-describedby={describedBy(input.description && descriptionId, input.valueSource && sourceId, ...diagnosticIds)}
+                        aria-invalid={diagnostics.some((item) => item.severity === "error") || undefined}
+                        id={inputId}
                         value={String(workflow.bindings[input.key] ?? input.value ?? "")}
                         onChange={(event) => updateBindingIntent(input.key, event.target.value)}
                       >
@@ -1149,50 +1501,67 @@ export function App() {
                       </select>
                     ) : input.pathKind ? (
                       <div className="path-picker">
-                        <input readOnly value={String(workflow.bindings[input.key] ?? input.value ?? "")} />
+                        <input
+                          aria-describedby={describedBy(input.description && descriptionId, Boolean(input.acceptedExtensions?.length) && extensionsId, input.valueSource && sourceId, ...diagnosticIds)}
+                          aria-invalid={diagnostics.some((item) => item.severity === "error") || undefined}
+                          id={inputId}
+                          readOnly
+                          value={String(workflow.bindings[input.key] ?? input.value ?? "")}
+                        />
                         <button
+                          aria-describedby={busy ? `${inputId}-browse-reason` : undefined}
                           className="secondary"
                           disabled={busy}
                           onClick={() => pickInputValue(input)}
                         >Browse…</button>
+                        {busy && <small className="disabled-reason" id={`${inputId}-browse-reason`}>A file or validation operation is already in progress.</small>}
                       </div>
                     ) : (
                       <input
+                        aria-describedby={describedBy(input.description && descriptionId, input.valueSource && sourceId, ...diagnosticIds)}
+                        aria-invalid={diagnostics.some((item) => item.severity === "error") || undefined}
+                        id={inputId}
                         value={String(workflow.bindings[input.key] ?? input.value ?? "")}
                         onChange={(event) => updateBindingIntent(input.key, event.target.value)}
                       />
                     )}
-                    {input.description && <small>{input.description}</small>}
+                    {input.description && <small id={descriptionId}>{input.description}</small>}
                     {input.acceptedExtensions?.length ? (
-                      <small>Accepted file types: {input.acceptedExtensions.join(", ")}</small>
+                      <small id={extensionsId}>Accepted file types: {input.acceptedExtensions.join(", ")}</small>
                     ) : null}
                     {input.valueSource ? (
-                      <small>Value source: {input.valueSource.replaceAll("_", " ")}</small>
+                      <small id={sourceId}>Value source: {input.valueSource.replaceAll("_", " ")}</small>
                     ) : null}
-                    {inputDiagnosticsForDisplay(input).map((item) => (
-                      <small className="error" key={`${item.key ?? input.key}-${item.code}`}>{item.message}</small>
+                    {diagnostics.map((item, index) => (
+                      <small className="error" id={diagnosticIds[index]} key={`${item.key ?? input.key}-${item.code}`}>Error: {item.message}</small>
                     ))}
-                  </label>
-                ))}
+                  </div>
+                  );
+                })}
 
                 {pageDiagnosticsForDisplay(workflow.description).map((item) => (
                   <p
                     className={item.severity === "error" ? "error" : "warning"}
                     key={`${item.key ?? "global"}-${item.code}-${item.message}`}
-                  >{item.message}</p>
+                  >{item.severity === "error" ? "Error: " : "Warning: "}{item.message}</p>
                 ))}
                 <div className="button-row">
                   <button className="secondary" onClick={() => dispatch({ type: "back" })}>Back</button>
                   <button className="secondary" onClick={describe} disabled={busy}>Refresh validation</button>
-                  <button onClick={generateReview} disabled={!reviewReady(workflow) || busy}>Review plan</button>
+                  <button aria-describedby={!reviewReady(workflow) || busy ? "review-disabled-reason" : undefined} onClick={generateReview} disabled={!reviewReady(workflow) || busy}>Review plan</button>
                 </div>
+                {(!reviewReady(workflow) || busy) && (
+                  <p className="disabled-reason" id="review-disabled-reason">
+                    {busy ? "Validation is in progress." : "Resolve required values and validation errors before review."}
+                  </p>
+                )}
               </>
             )}
 
             {workflow.step === "review" && workflow.review && (
               <>
                 <p className="eyebrow">REVIEW PLAN</p>
-                <h2>Ready for a simulated dry run</h2>
+                <h2 data-focus-fallback="workflow" data-step-heading tabIndex={-1}>Ready for a simulated dry run</h2>
                 <p className="simulation-banner">
                   Simulated / Dry Run only. This does not change or verify the real device.
                 </p>
@@ -1232,96 +1601,20 @@ export function App() {
                 <p className="digest">Plan digest: {workflow.review.planDigest}</p>
                 <div className="button-row">
                   <button className="secondary" onClick={() => dispatch({ type: "back" })}>Back</button>
-                  <button onClick={startSimulation} disabled={busy || workflow.execution.kind === "starting"}>
+                  <button aria-describedby={busy || workflow.execution.kind === "starting" ? "execution-start-reason" : undefined} onClick={startSimulation} disabled={busy || workflow.execution.kind === "starting"}>
                     {workflow.execution.kind === "starting" ? "Starting simulated run…" : "Start Simulated Dry Run"}
                   </button>
                   {realExecutionEnabled && (
                     <button
                       className="danger"
-                      onClick={() => {
-                        setRealConfirmation(emptyRealExecutionConfirmation);
-                        setRealConfirmationOpen(true);
-                      }}
+                      onClick={(event) => void requestRealExecution(event.currentTarget)}
                       disabled={busy || workflow.execution.kind === "starting"}
                     >
                       Apply to Device
                     </button>
                   )}
                 </div>
-                {realExecutionEnabled && realConfirmationOpen && (
-                  <section className="real-confirmation" aria-labelledby="real-confirmation-heading">
-                    <p className="eyebrow">REAL DEVICE</p>
-                    <h3 id="real-confirmation-heading">Confirm irreversible device changes</h3>
-                    <p>
-                      Connected Android device · {workflow.review.target.manufacturer ?? "Android"}
-                      {` ${workflow.review.target.model ?? "device"}`} · API {workflow.review.target.androidApiLevel ?? "unknown"}
-                    </p>
-                    <p className="error">
-                      This can install software, transfer or replace files, change permissions and app operations,
-                      and launch or stop applications on the connected device.
-                    </p>
-                    <p className="warning">
-                      EmuChef provides no rollback, restore, automatic backup, or prior-state recovery. Cancellation
-                      is cooperative: the current operation may finish, and completed changes are not undone.
-                    </p>
-                    <p className="warning">
-                      Artifact transfer can fail after execution starts. Keep the intended device connected and stable
-                      until a terminal result is shown.
-                    </p>
-                    <label className="input-field">
-                      <span>Type APPLY TO DEVICE</span>
-                      <input
-                        value={realConfirmation.phrase}
-                        autoComplete="off"
-                        onChange={(event) => setRealConfirmation({ ...realConfirmation, phrase: event.target.value })}
-                      />
-                    </label>
-                    <label>
-                      <input
-                        type="checkbox"
-                        checked={realConfirmation.irreversibleChangesAcknowledged}
-                        onChange={(event) => setRealConfirmation({
-                          ...realConfirmation,
-                          irreversibleChangesAcknowledged: event.target.checked,
-                        })}
-                      /> I understand this can irreversibly change the device.
-                    </label>
-                    <label>
-                      <input
-                        type="checkbox"
-                        checked={realConfirmation.noRollbackAcknowledged}
-                        onChange={(event) => setRealConfirmation({
-                          ...realConfirmation,
-                          noRollbackAcknowledged: event.target.checked,
-                        })}
-                      /> I understand there is no rollback, restore, or backup recovery.
-                    </label>
-                    <label>
-                      <input
-                        type="checkbox"
-                        checked={realConfirmation.keepDeviceConnectedAcknowledged}
-                        onChange={(event) => setRealConfirmation({
-                          ...realConfirmation,
-                          keepDeviceConnectedAcknowledged: event.target.checked,
-                        })}
-                      /> I will keep the intended device connected and stable.
-                    </label>
-                    <div className="button-row">
-                      <button
-                        className="secondary"
-                        onClick={() => {
-                          setRealConfirmationOpen(false);
-                          setRealConfirmation(emptyRealExecutionConfirmation);
-                        }}
-                      >Cancel</button>
-                      <button
-                        className="danger"
-                        onClick={startRealExecution}
-                        disabled={busy || !realExecutionConfirmationComplete(realConfirmation)}
-                      >Start Real-Device Execution</button>
-                    </div>
-                  </section>
-                )}
+                {(busy || workflow.execution.kind === "starting") && <p className="disabled-reason" id="execution-start-reason">Execution start is already being prepared.</p>}
               </>
             )}
 
@@ -1331,13 +1624,38 @@ export function App() {
                   <p className="eyebrow">
                     {workflow.execution.mode === "real" ? "REAL DEVICE" : "SIMULATED / DRY RUN"}
                   </p>
-                  <h2>
+                  <h2 data-focus-fallback="workflow" data-step-heading tabIndex={-1}>
                     {workflow.execution.kind === "terminal"
                       ? `${workflow.execution.mode === "real" ? "Real-device execution" : "Simulation"} ${workflow.execution.snapshot.status.replaceAll("_", " ")}`
                       : workflow.execution.mode === "real"
                         ? "Applying the reviewed setup"
                         : "Simulating the reviewed setup"}
                   </h2>
+                  {workflow.execution.snapshot.completion.counts.total > 0 ? (
+                    <div className="execution-progress">
+                      <label htmlFor="execution-progress">
+                        Execution progress: {Math.round((
+                          (workflow.execution.snapshot.completion.counts.completed
+                            + workflow.execution.snapshot.completion.counts.skipped
+                            + workflow.execution.snapshot.completion.counts.blocked
+                            + workflow.execution.snapshot.completion.counts.failed
+                            + workflow.execution.snapshot.completion.counts.cancelled)
+                          / workflow.execution.snapshot.completion.counts.total
+                        ) * 100)}%
+                      </label>
+                      <progress
+                        id="execution-progress"
+                        max={workflow.execution.snapshot.completion.counts.total}
+                        value={workflow.execution.snapshot.completion.counts.completed
+                          + workflow.execution.snapshot.completion.counts.skipped
+                          + workflow.execution.snapshot.completion.counts.blocked
+                          + workflow.execution.snapshot.completion.counts.failed
+                          + workflow.execution.snapshot.completion.counts.cancelled}
+                      />
+                    </div>
+                  ) : (
+                    <p aria-busy="true" role="status">Execution progress is starting; the total step count is not available yet.</p>
+                  )}
                   {workflow.execution.mode === "real" ? (
                     <p className="warning">
                       Keep the device connected. Failure or cancellation may leave completed changes on the device;
@@ -1417,6 +1735,7 @@ export function App() {
                         </p>
                       )}
                       <button
+                        aria-describedby={workflow.execution.cancellationRequested ? "cancellation-requested-reason" : undefined}
                         className="danger"
                         onClick={cancelExecution}
                         disabled={workflow.execution.cancellationRequested}
@@ -1427,6 +1746,7 @@ export function App() {
                             ? "Request cancellation"
                             : "Cancel simulated run"}
                       </button>
+                      {workflow.execution.cancellationRequested && <p className="disabled-reason" id="cancellation-requested-reason">A cancellation request is already pending; the current atomic operation may still finish.</p>}
                     </>
                   ) : (
                     <div className="button-row">
@@ -1479,7 +1799,7 @@ export function App() {
                 <p className="eyebrow">
                   {workflow.execution.mode === "real" ? "REAL-DEVICE OUTCOME UNKNOWN" : "SIMULATED RUN UNAVAILABLE"}
                 </p>
-                <h2>
+                <h2 data-focus-fallback="workflow" data-step-heading tabIndex={-1}>
                   {workflow.execution.mode === "real"
                     ? "The device may have been partially changed"
                     : "This in-memory simulation cannot be resumed"}
@@ -1519,8 +1839,110 @@ export function App() {
             {adb.warning && <p className="warning">{adb.warning}</p>}
             <button className="text-button" onClick={importPlatformTools} disabled={busy || workflow.step === "execution"}>Replace Platform-Tools</button>
             <button className="text-button danger-text" onClick={removePlatformTools} disabled={busy || workflow.step === "execution"}>Remove Platform-Tools</button>
+            {(busy || workflow.step === "execution") && (
+              <p className="disabled-reason">Platform-Tools changes are unavailable during another operation or execution.</p>
+            )}
           </aside>
         </main>
+      )}
+
+      {activeDialog?.payload.kind === "unsaved" && (
+        <AccessibleDialog
+          currentDialogId={() => dialogController.activeId}
+          descriptionId="unsaved-dialog-description"
+          dialogId={activeDialog.id}
+          onDismiss={() => dialogController.settle(activeDialog.id, "cancel")}
+          returnFocus={activeDialog.payload.invoker}
+          role="alertdialog"
+          titleId="unsaved-dialog-title"
+        >
+          <p className="eyebrow">UNSAVED CONFIGURATION</p>
+          <h2 id="unsaved-dialog-title">Save edits before continuing?</h2>
+          <p id="unsaved-dialog-description">
+            Save preserves the portable configuration edits. Discard permanently abandons the unsaved edits. Cancel keeps the current configuration open.
+          </p>
+          <div className="button-row">
+            <button className="secondary" onClick={() => dialogController.settle(activeDialog.id, "cancel")}>Cancel</button>
+            <button onClick={() => dialogController.settle(activeDialog.id, "save")}>Save</button>
+            <button className="danger" onClick={() => dialogController.settle(activeDialog.id, "discard")}>Discard edits</button>
+          </div>
+        </AccessibleDialog>
+      )}
+
+      {activeDialog?.payload.kind === "name" && (
+        <AccessibleDialog
+          currentDialogId={() => dialogController.activeId}
+          descriptionId="name-dialog-description"
+          dialogId={activeDialog.id}
+          onDismiss={() => dialogController.settle(activeDialog.id, null)}
+          returnFocus={activeDialog.payload.invoker}
+          titleId="name-dialog-title"
+        >
+          <form onSubmit={(event) => {
+            event.preventDefault();
+            const value = namePromptValue.trim();
+            if (value) dialogController.settle(activeDialog.id, value);
+          }}>
+            <h2 id="name-dialog-title">{activeDialog.payload.title}</h2>
+            <p id="name-dialog-description">The name identifies this portable configuration. Runtime authority and device details are not saved.</p>
+            <label className="input-field" htmlFor="configuration-name">Configuration name</label>
+            <input
+              autoComplete="off"
+              id="configuration-name"
+              onChange={(event) => setNamePromptValue(event.target.value)}
+              required
+              value={namePromptValue}
+            />
+            <div className="button-row">
+              <button className="secondary" onClick={() => dialogController.settle(activeDialog.id, null)} type="button">Cancel</button>
+              <button disabled={!namePromptValue.trim()} type="submit">Continue</button>
+            </div>
+            {!namePromptValue.trim() && <p className="disabled-reason">Enter a configuration name to continue.</p>}
+          </form>
+        </AccessibleDialog>
+      )}
+
+      {activeDialog?.payload.kind === "real-execution" && workflow.review && (
+        <AccessibleDialog
+          currentDialogId={() => dialogController.activeId}
+          descriptionId="real-confirmation-description"
+          dialogId={activeDialog.id}
+          onDismiss={() => dialogController.settle(activeDialog.id, false)}
+          returnFocus={activeDialog.payload.invoker}
+          role="alertdialog"
+          titleId="real-confirmation-heading"
+        >
+          <p className="eyebrow">REAL DEVICE</p>
+          <h2 id="real-confirmation-heading">Confirm irreversible device changes</h2>
+          <div id="real-confirmation-description">
+            <p>
+              Connected Android device · {workflow.review.target.manufacturer ?? "Android"}
+              {` ${workflow.review.target.model ?? "device"}`} · API {workflow.review.target.androidApiLevel ?? "unknown"}
+            </p>
+            <p className="error">Danger: this can install software, transfer or replace files, change permissions and app operations, and launch or stop applications.</p>
+            <p className="warning">No rollback, restore, automatic backup, or prior-state recovery exists. Cancellation is cooperative and does not undo completed changes.</p>
+          </div>
+          <label className="input-field" htmlFor="real-confirmation-phrase">Type APPLY TO DEVICE</label>
+          <input
+            autoComplete="off"
+            id="real-confirmation-phrase"
+            value={realConfirmation.phrase}
+            onChange={(event) => setRealConfirmation({ ...realConfirmation, phrase: event.target.value })}
+          />
+          <label><input type="checkbox" checked={realConfirmation.irreversibleChangesAcknowledged} onChange={(event) => setRealConfirmation({ ...realConfirmation, irreversibleChangesAcknowledged: event.target.checked })} /> I understand this can irreversibly change the device.</label>
+          <label><input type="checkbox" checked={realConfirmation.noRollbackAcknowledged} onChange={(event) => setRealConfirmation({ ...realConfirmation, noRollbackAcknowledged: event.target.checked })} /> I understand there is no rollback, restore, or backup recovery.</label>
+          <label><input type="checkbox" checked={realConfirmation.keepDeviceConnectedAcknowledged} onChange={(event) => setRealConfirmation({ ...realConfirmation, keepDeviceConnectedAcknowledged: event.target.checked })} /> I will keep the intended device connected and stable.</label>
+          <div className="button-row">
+            <button className="secondary" onClick={() => dialogController.settle(activeDialog.id, false)}>Cancel</button>
+            <button
+              aria-describedby={!realExecutionConfirmationComplete(realConfirmation) ? "real-confirmation-reason" : undefined}
+              className="danger"
+              disabled={!realExecutionConfirmationComplete(realConfirmation)}
+              onClick={() => dialogController.settle(activeDialog.id, true)}
+            >Start Real-Device Execution</button>
+          </div>
+          {!realExecutionConfirmationComplete(realConfirmation) && <p className="disabled-reason" id="real-confirmation-reason">Enter the exact phrase and acknowledge all three safety statements.</p>}
+        </AccessibleDialog>
       )}
     </div>
   );

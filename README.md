@@ -86,6 +86,14 @@ CLI, or config-editor defaults. Cache payloads and optional metadata are one
 logical entry. See the
 [Phase 3B contract](docs/product/phase-3b-support-diagnostics-and-cache.md).
 
+Phase 3C adds keyboard-complete interaction, semantic landmarks and
+collections, accessible validation and progress, bounded live announcements,
+focus-contained dialogs with exactly-once safe teardown, deterministic focus
+fallbacks, reduced-motion and forced-colors handling, and narrow-window/zoom
+resilience. It changes React presentation only; Rust and trusted Tauri retain
+all runtime, device, file, diagnostics, cache, and execution authority. See the
+[Phase 3C contract](docs/product/phase-3c-accessibility-and-interaction-resilience.md).
+
 Android SDK Platform-Tools is a user-supplied prerequisite. EmuChef does not
 bundle or download it. The app links to Google's official page and can import a
 macOS Platform-Tools ZIP through a native picker into validated application

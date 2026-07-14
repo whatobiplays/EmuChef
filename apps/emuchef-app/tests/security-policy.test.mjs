@@ -243,9 +243,22 @@ test("real execution is default-disabled with compile-time-only enablement", () 
     `${execution}\n${packageJson}`,
     /EMUCHEF_(?:ENABLE|ALLOW)_REAL_EXECUTION|--(?:enable-)?real-execution|std::env::args(?:_os)?\(/,
   );
-  assert.match(app, /useState\(false\)[\s\S]{0,1800}realExecutionAvailability\(\)\.catch\(\(\) => \(\{ enabled: false \}\)\)/);
+  assert.match(app, /\[realExecutionEnabled, setRealExecutionEnabled\] = useState\(false\)/);
+  assert.match(app, /realExecutionAvailability\(\)\.catch\(\(\) => \(\{ enabled: false \}\)\)/);
   assert.match(app, /\{realExecutionEnabled && \(\s*<button[\s\S]{0,400}>\s*Apply to Device\s*<\/button>/);
-  assert.match(app, /\{realExecutionEnabled && realConfirmationOpen && \(/);
+  assert.match(app, /activeDialog\?\.payload\.kind === "real-execution" && workflow\.review/);
+});
+
+test("accessible fallbacks and technical details cannot expose protected data", () => {
+  const fallback = read("src/ErrorBoundary.tsx");
+  const app = read("src/App.tsx");
+  const supportPanel = read("src/SupportPanel.tsx");
+  const fallbackView = sourceSlice(fallback, "export function FrontendErrorFallback", "\n\n/** Top-level boundary");
+  assert.doesNotMatch(fallbackView, /error\.(?:message|stack)|String\(error\)|console\.|serial|handle|path|raw/i);
+  assert.match(fallbackView, /Reload EmuChef safely/);
+  assert.match(app, /<summary>Technical details<\/summary><code>\{item\.code\}<\/code>/);
+  assert.match(supportPanel, /<summary>Technical details<\/summary><code>\{outcome\.code\}<\/code>/);
+  assert.doesNotMatch(supportPanel, /<code>\{(?:entry\.cacheEntryHandle|outcome\.entryHandle)\}<\/code>|>\{(?:entry\.cacheEntryHandle|outcome\.entryHandle)\}</);
 });
 
 test("React cannot supply trusted real-execution or launch data", () => {

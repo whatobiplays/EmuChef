@@ -9,7 +9,7 @@
 | Real-ADB apply | Rust | Active; manual device validation required |
 | Tauri editor backend | Rust JSONL sidecar | Active |
 | Phase 0 end-user runtime protocol | Rust JSONL sidecar | Active backend contract |
-| End-user desktop app | React UI with trusted Rust/Tauri bridge | Phase 3B support diagnostics and app-owned cache management active; guarded real execution remains default-disabled |
+| End-user desktop app | React UI with trusted Rust/Tauri bridge | Phase 3C accessible and resilient presentation active; guarded real execution remains default-disabled |
 | Platform-Tools import and verification | Rust/Tauri | User-supplied, app-managed, macOS-only |
 | Catalog source resolution | Rust | Bundled/local snapshots active; cached remote reserved |
 | Execution reports and incremental events | Rust JSONL sidecar | Active in-memory session contract |
@@ -86,3 +86,20 @@ Tauri inventories payload plus metadata as one logical opaque entry, includes
 both components in size accounting and stale checks, blocks cleanup while
 execution use is possible, and owns every filesystem deletion. Unrecognized
 files and orphan metadata remain unmanaged and non-removable.
+
+## Phase 3C presentation boundary
+
+React owns semantic HTML, keyboard interaction, focus containment and
+restoration, validation summaries, live announcements, progress presentation,
+responsive layout, and the sanitized top-level render fallback. These
+presentation responsibilities do not authorize React to supply or retain
+paths, exact serials, raw sidecar data, reviewed plans, execution modes, cache
+roots, diagnostics destinations, or filesystem actions.
+
+Promise-backed frontend prompts have exactly one resolver and a safe cancel
+result. Runtime restart, configuration replacement, app reset, unmount, and
+error-boundary activation cancel pending presentation requests without
+implicitly saving, discarding, deleting, cleaning, or starting execution.
+Focus restoration validates the original invoker and otherwise follows the
+documented workflow, main-content, and header fallback order. A stale dialog or
+native-picker return cannot steal focus from a newer transition.
