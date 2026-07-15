@@ -31,7 +31,7 @@ The following foundations are already implemented:
 
 | Phase | Name | Status | Primary outcome |
 |---|---|---|---|
-| 5A | End-to-end UX and feature-gap audit | Next | Evidence-based prioritized app backlog |
+| 5A | End-to-end UX and feature-gap audit | In progress | Evidence-based prioritized app backlog |
 | 5B | Workflow navigation and state polish | Planned | Predictable movement, recovery, and state transitions |
 | 5C | Recipe and setup selection experience | Planned | Nontechnical setup discovery and selection |
 | 5D | Input collection and file-management polish | Planned | Early, understandable, recoverable input validation |
