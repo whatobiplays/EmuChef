@@ -27,7 +27,7 @@ pub fn document_to_dto(document: &RecipeDocument, document_id: &str) -> Value {
     })
 }
 
-fn recipe_to_dto(recipe: &Recipe) -> Value {
+pub(crate) fn recipe_to_dto(recipe: &Recipe) -> Value {
     json!({
         "schemaVersion": recipe.schema_version,
         "kind": recipe.kind,

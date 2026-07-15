@@ -6,9 +6,265 @@ use std::path::Path;
 use regex::Regex;
 use serde::Serialize;
 
-use crate::authored_models::{load_device_profile, DeviceProfileV1};
+use serde::Deserialize;
+
+use crate::authored_models::{
+    load_app_definition, load_device_profile, AppDefinitionV1, DeviceProfileV1,
+};
 
 use super::device_profile::SafeDetectedDeviceFacts;
+
+#[derive(Clone, Debug, Deserialize)]
+#[serde(deny_unknown_fields, rename_all = "camelCase")]
+pub(crate) struct AppRecipeCollisionRequest {
+    pub app: AppDefinitionV1,
+    pub recipe_id: String,
+}
+
+#[derive(Clone, Debug, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct AppRecipeCollisionDiagnostic {
+    severity: CollisionSeverity,
+    code: String,
+    message: String,
+    existing_id: Option<String>,
+    relative_path: Option<String>,
+}
+
+#[derive(Clone, Debug, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct AppRecipeCollisionCheckResult {
+    pub collisions: Vec<AppRecipeCollisionDiagnostic>,
+    pub blocking: bool,
+}
+
+/// Scan top-level app and recipe documents for deterministic Phase 3 conflicts.
+pub(crate) fn check_app_recipe_collisions(
+    authored_root: &Path,
+    request: &AppRecipeCollisionRequest,
+) -> AppRecipeCollisionCheckResult {
+    let mut collisions = Vec::new();
+    scan_apps(authored_root, request, &mut collisions);
+    scan_recipes(authored_root, request, &mut collisions);
+    collisions.sort_by(|left, right| {
+        left.severity
+            .cmp(&right.severity)
+            .then_with(|| left.code.cmp(&right.code))
+            .then_with(|| left.existing_id.cmp(&right.existing_id))
+            .then_with(|| left.relative_path.cmp(&right.relative_path))
+    });
+    let blocking = collisions
+        .iter()
+        .any(|collision| collision.severity == CollisionSeverity::Blocking);
+    AppRecipeCollisionCheckResult {
+        collisions,
+        blocking,
+    }
+}
+
+fn scan_apps(
+    authored_root: &Path,
+    request: &AppRecipeCollisionRequest,
+    collisions: &mut Vec<AppRecipeCollisionDiagnostic>,
+) {
+    let directory = authored_root.join("apps");
+    let proposed_file = format!("{}.yaml", request.app.id);
+    for path in yaml_paths(
+        &directory,
+        "app_collision_scan_incomplete",
+        "apps",
+        collisions,
+    ) {
+        let file_name = path
+            .file_name()
+            .and_then(|value| value.to_str())
+            .map(str::to_string);
+        let relative_path = file_name.as_ref().map(|name| format!("apps/{name}"));
+        if file_name.as_deref() == Some(proposed_file.as_str()) {
+            collisions.push(app_collision(
+                CollisionSeverity::Blocking,
+                "app_destination_conflict",
+                "The proposed app-definition destination already exists.",
+                None,
+                relative_path.clone(),
+            ));
+        }
+        let existing = match load_app_definition(&path) {
+            Ok(value) => value,
+            Err(_) => {
+                collisions.push(app_collision(
+                    CollisionSeverity::Blocking,
+                    "app_collision_scan_incomplete",
+                    "The app-definition collision scan could not be completed.",
+                    None,
+                    relative_path,
+                ));
+                continue;
+            }
+        };
+        if existing.id == request.app.id {
+            collisions.push(app_collision(
+                CollisionSeverity::Blocking,
+                "app_id_conflict",
+                "An app definition with the proposed id already exists.",
+                Some(existing.id.clone()),
+                relative_path.clone(),
+            ));
+        } else if existing.package.primary == request.app.package.primary {
+            collisions.push(app_collision(
+                CollisionSeverity::Warning,
+                "app_package_overlap",
+                "An app definition with a different id uses the same primary package.",
+                Some(existing.id.clone()),
+                relative_path.clone(),
+            ));
+        }
+        let comparable_source = !request.app.install_source.options.is_empty()
+            || !request.app.tracking_source.fields.is_empty();
+        if existing.id != request.app.id
+            && comparable_source
+            && existing.install_source == request.app.install_source
+            && existing.tracking_source == request.app.tracking_source
+        {
+            collisions.push(app_collision(
+                CollisionSeverity::Warning,
+                "app_source_overlap",
+                "An app definition with a different id uses matching non-empty source metadata.",
+                Some(existing.id),
+                relative_path,
+            ));
+        }
+    }
+}
+
+fn scan_recipes(
+    authored_root: &Path,
+    request: &AppRecipeCollisionRequest,
+    collisions: &mut Vec<AppRecipeCollisionDiagnostic>,
+) {
+    let directory = authored_root.join("recipes");
+    let proposed_file = format!("{}.yaml", request.recipe_id);
+    for path in yaml_paths(
+        &directory,
+        "recipe_collision_scan_incomplete",
+        "recipes",
+        collisions,
+    ) {
+        let file_name = path
+            .file_name()
+            .and_then(|value| value.to_str())
+            .map(str::to_string);
+        let relative_path = file_name.as_ref().map(|name| format!("recipes/{name}"));
+        if file_name.as_deref() == Some(proposed_file.as_str()) {
+            collisions.push(app_collision(
+                CollisionSeverity::Blocking,
+                "recipe_destination_conflict",
+                "The proposed recipe destination already exists.",
+                None,
+                relative_path.clone(),
+            ));
+        }
+        let existing = match crate::yaml::load_recipe_from_path(&path) {
+            Ok(value) => value,
+            Err(_) => {
+                collisions.push(app_collision(
+                    CollisionSeverity::Blocking,
+                    "recipe_collision_scan_incomplete",
+                    "The recipe collision scan could not be completed.",
+                    None,
+                    relative_path,
+                ));
+                continue;
+            }
+        };
+        if existing.id == request.recipe_id {
+            collisions.push(app_collision(
+                CollisionSeverity::Blocking,
+                "recipe_id_conflict",
+                "A recipe with the proposed id already exists.",
+                Some(existing.id),
+                relative_path,
+            ));
+        }
+    }
+}
+
+fn yaml_paths(
+    directory: &Path,
+    code: &str,
+    relative_directory: &str,
+    collisions: &mut Vec<AppRecipeCollisionDiagnostic>,
+) -> Vec<std::path::PathBuf> {
+    let entries = match fs::read_dir(directory) {
+        Ok(entries) => entries,
+        Err(_) => {
+            collisions.push(app_collision(
+                CollisionSeverity::Blocking,
+                code,
+                "The generated catalog collision scan could not be completed.",
+                None,
+                Some(relative_directory.to_string()),
+            ));
+            return Vec::new();
+        }
+    };
+    let mut paths = Vec::new();
+    for entry in entries {
+        let Ok(entry) = entry else {
+            collisions.push(app_collision(
+                CollisionSeverity::Blocking,
+                code,
+                "The generated catalog collision scan could not be completed.",
+                None,
+                Some(relative_directory.to_string()),
+            ));
+            continue;
+        };
+        let path = entry.path();
+        let yaml = path
+            .extension()
+            .and_then(|value| value.to_str())
+            .is_some_and(|value| {
+                value.eq_ignore_ascii_case("yaml") || value.eq_ignore_ascii_case("yml")
+            });
+        if !yaml {
+            continue;
+        }
+        if !fs::symlink_metadata(&path).is_ok_and(|metadata| metadata.file_type().is_file()) {
+            let relative_path = path
+                .file_name()
+                .and_then(|value| value.to_str())
+                .map(|name| format!("{relative_directory}/{name}"));
+            collisions.push(app_collision(
+                CollisionSeverity::Blocking,
+                code,
+                "The generated catalog collision scan could not be completed.",
+                None,
+                relative_path,
+            ));
+            continue;
+        }
+        paths.push(path);
+    }
+    paths.sort();
+    paths
+}
+
+fn app_collision(
+    severity: CollisionSeverity,
+    code: &str,
+    message: &str,
+    existing_id: Option<String>,
+    relative_path: Option<String>,
+) -> AppRecipeCollisionDiagnostic {
+    AppRecipeCollisionDiagnostic {
+        severity,
+        code: code.to_string(),
+        message: message.to_string(),
+        existing_id,
+        relative_path,
+    }
+}
 
 #[derive(Clone, Copy, Debug, Serialize, PartialEq, Eq, PartialOrd, Ord)]
 #[serde(rename_all = "snake_case")]
@@ -258,6 +514,50 @@ mod tests {
         }
     }
 
+    fn app(id: &str, package: &str) -> AppDefinitionV1 {
+        crate::authored_models::parse_app_definition_yaml(&format!(
+            r#"schema_version: 1
+kind: app_definition
+id: {id}
+name: Example
+category: utility
+package:
+  primary: {package}
+  aliases: []
+install_source:
+  type: user_provided_apk
+  resolver: none
+  options: {{}}
+tracking_source:
+  type: local_apk
+artifacts:
+  apk:
+    required: false
+  shared_storage_config:
+    supported: false
+  app_data_config:
+    supported: false
+  byo_apk:
+    required: true
+provisioning:
+  launch_once_recommended: false
+  shared_storage_paths: []
+  app_data_paths: []
+  config_targets: []
+inputs: []
+metadata: {{}}
+"#
+        ))
+        .unwrap()
+    }
+
+    fn app_recipe_root(label: &str) -> std::path::PathBuf {
+        let root = temp_root(label);
+        fs::create_dir_all(root.join("apps")).unwrap();
+        fs::create_dir_all(root.join("recipes")).unwrap();
+        root
+    }
+
     fn temp_root(label: &str) -> std::path::PathBuf {
         let nonce = SystemTime::now()
             .duration_since(UNIX_EPOCH)
@@ -344,5 +644,65 @@ mod tests {
         );
         fs::remove_dir_all(root).unwrap();
         fs::remove_dir_all(outside).unwrap();
+    }
+
+    #[test]
+    fn app_and_recipe_collisions_block_ids_and_destinations_and_warn_for_package_overlap() {
+        let root = app_recipe_root("app-recipe-collisions");
+        let existing = app("existing", "com.example.app");
+        fs::write(
+            root.join("apps/existing.yaml"),
+            crate::authored_models::emit_app_definition_yaml(&existing).unwrap(),
+        )
+        .unwrap();
+        fs::write(
+            root.join("recipes/app.existing.install.yaml"),
+            "schema_version: 1\nkind: recipe\nid: app.existing.install\nname: Install Example\nprovides:\n  features: []\nsteps: []\n",
+        )
+        .unwrap();
+
+        let exact = check_app_recipe_collisions(
+            &root,
+            &AppRecipeCollisionRequest {
+                app: existing.clone(),
+                recipe_id: "app.existing.install".to_string(),
+            },
+        );
+        assert!(exact.blocking);
+        assert!(exact
+            .collisions
+            .iter()
+            .any(|item| item.code == "app_id_conflict"));
+        assert!(exact
+            .collisions
+            .iter()
+            .any(|item| item.code == "recipe_id_conflict"));
+
+        let overlap = check_app_recipe_collisions(
+            &root,
+            &AppRecipeCollisionRequest {
+                app: app("different", "com.example.app"),
+                recipe_id: "app.different.install".to_string(),
+            },
+        );
+        assert!(!overlap.blocking);
+        assert_eq!(overlap.collisions[0].code, "app_package_overlap");
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn unreadable_app_or_recipe_scan_is_blocking() {
+        let root = app_recipe_root("app-recipe-incomplete");
+        fs::write(root.join("apps/broken.yaml"), "not: [valid").unwrap();
+        let result = check_app_recipe_collisions(
+            &root,
+            &AppRecipeCollisionRequest {
+                app: app("different", "com.example.app"),
+                recipe_id: "app.different.install".to_string(),
+            },
+        );
+        assert!(result.blocking);
+        assert_eq!(result.collisions[0].code, "app_collision_scan_incomplete");
+        fs::remove_dir_all(root).unwrap();
     }
 }

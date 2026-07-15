@@ -177,6 +177,8 @@ fn keeps_executor_internal_and_protocol_capabilities_editor_scoped() {
             "describeCatalog",
             "listAdbDevices",
             "probeDevice",
+            "inspectApk",
+            "generateAppRecipeDraft",
             "generateDeviceProfileDraft",
             "checkGeneratedCatalogCollisions",
             "matchDevice",
@@ -247,6 +249,8 @@ fn keeps_filesystem_executor_internal_and_protocol_capabilities_editor_scoped() 
             "describeCatalog",
             "listAdbDevices",
             "probeDevice",
+            "inspectApk",
+            "generateAppRecipeDraft",
             "generateDeviceProfileDraft",
             "checkGeneratedCatalogCollisions",
             "matchDevice",
@@ -317,6 +321,8 @@ fn keeps_fake_device_executor_internal_and_protocol_capabilities_editor_scoped()
             "describeCatalog",
             "listAdbDevices",
             "probeDevice",
+            "inspectApk",
+            "generateAppRecipeDraft",
             "generateDeviceProfileDraft",
             "checkGeneratedCatalogCollisions",
             "matchDevice",
@@ -387,6 +393,8 @@ fn keeps_real_adb_executor_internal_and_protocol_capabilities_editor_scoped() {
             "describeCatalog",
             "listAdbDevices",
             "probeDevice",
+            "inspectApk",
+            "generateAppRecipeDraft",
             "generateDeviceProfileDraft",
             "checkGeneratedCatalogCollisions",
             "matchDevice",
@@ -597,4 +605,60 @@ printf '[ro.product.manufacturer]: [AYANEO]\n[ro.product.brand]: [AYANEO]\n[ro.p
     assert_eq!(probe["result"]["serial"], "available-1");
     assert_eq!(probe["result"]["manufacturer"], "AYANEO");
     assert_eq!(probe["result"]["android_api_level"], 33);
+}
+
+#[test]
+fn local_apk_generation_protocol_is_safe_typed_and_additive() {
+    let inspected = sidecar_response(json!({
+        "id": "inspect-apk",
+        "type": "inspectApk",
+        "payload": {
+            "analyzer": "apkanalyzer",
+            "facts": {
+                "packageName": "com.example.player",
+                "applicationLabel": "Example Player",
+                "launcherActivities": ["com.example.player/.MainActivity"],
+                "split": false,
+                "base": true
+            }
+        }
+    }));
+    assert_eq!(inspected["ok"], true, "{inspected:#}");
+    assert_eq!(inspected["result"]["blocking"], false);
+    assert!(!inspected.to_string().contains("/tmp/example.apk"));
+
+    let generated = sidecar_response(json!({
+        "id": "generate-app-recipe",
+        "type": "generateAppRecipeDraft",
+        "payload": { "facts": inspected["result"]["facts"] }
+    }));
+    assert_eq!(generated["ok"], true, "{generated:#}");
+    assert_eq!(
+        generated["result"]["app"]["install_source"]["type"],
+        "user_provided_apk"
+    );
+    assert_eq!(
+        generated["result"]["app"]["artifacts"]["byo_apk"]["required"],
+        true
+    );
+    assert_eq!(
+        generated["result"]["recipe"]["id"],
+        "app.example_player.install"
+    );
+    assert_eq!(
+        generated["result"]["recipe"]["inputs"]["example_player_apk"]["role"],
+        "apk"
+    );
+    assert!(!generated.to_string().contains("/tmp/example.apk"));
+
+    let rejected = sidecar_response(json!({
+        "id": "inspect-path-rejected",
+        "type": "inspectApk",
+        "payload": {
+            "analyzer": "apkanalyzer",
+            "facts": { "packageName": "com.example.player", "apkPath": "/tmp/example.apk" }
+        }
+    }));
+    assert_eq!(rejected["ok"], false);
+    assert!(!rejected.to_string().contains("/tmp/example.apk"));
 }

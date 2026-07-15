@@ -22,12 +22,14 @@ import {
 } from "./api/editorApi";
 import type {
   DiagnosticDto,
+  AppRecipeSaveResult,
   RecipeDocumentDto,
   SidecarStatusResult,
   StepSpecDto,
   UserConfigurationDocumentDto,
 } from "./api/types";
 import { AppShell } from "./components/AppShell";
+import { AppGenerator } from "./components/AppGenerator";
 import { ArtifactGroupsEditor } from "./components/ArtifactGroupsEditor";
 import { ArtifactsEditor } from "./components/ArtifactsEditor";
 import { DiagnosticsPanel } from "./components/DiagnosticsPanel";
@@ -102,6 +104,7 @@ export default function App() {
   const [statusMessage, setStatusMessage] = useState<string | null>(null);
   const [textPrompt, setTextPrompt] = useState<TextPromptRequest | null>(null);
   const [deviceProfileGeneratorOpen, setDeviceProfileGeneratorOpen] = useState(false);
+  const [appGeneratorOpen, setAppGeneratorOpen] = useState(false);
 
   const currentDocumentRef = useRef<RecipeDocumentDto | null>(null);
   const selectedAuthoredRootRef = useRef<string | null>(null);
@@ -111,6 +114,7 @@ export default function App() {
   const sessionInvalidReasonRef = useRef<string | null>(null);
   const promptActiveRef = useRef(false);
   const deviceProfileGeneratorOpenRef = useRef(false);
+  const appGeneratorOpenRef = useRef(false);
   // Confirmed window closes are reissued through Tauri, which emits one more close-request event.
   // This guard lets only that intentional second event pass without reopening the confirmation.
   const allowCloseRef = useRef(false);
@@ -201,6 +205,11 @@ export default function App() {
     deviceProfileGeneratorOpenRef.current = deviceProfileGeneratorOpen;
     void syncMenuState(currentDocumentRef.current);
   }, [deviceProfileGeneratorOpen]);
+
+  useEffect(() => {
+    appGeneratorOpenRef.current = appGeneratorOpen;
+    void syncMenuState(currentDocumentRef.current);
+  }, [appGeneratorOpen]);
 
   useEffect(() => {
     void syncMenuState(currentDocument, commandInFlight, documentSessionValid);
@@ -323,10 +332,12 @@ export default function App() {
   const menuHandlers: Record<MenuAction, () => void> = {
     openRecipe: () => void openRecipe(),
     openUserConfiguration: () => void openUserConfiguration(),
+    generateAppRecipe: () => void openAppGenerator(),
     generateDeviceProfile: () => {
       const status = sidecarStateRef.current;
       if (
         commandInFlightRef.current === null &&
+        !appGeneratorOpenRef.current &&
         !deviceProfileGeneratorOpenRef.current &&
         status?.compatible === true &&
         status.running === true
@@ -344,6 +355,45 @@ export default function App() {
     setAuthoredRoot: () => void setAuthoredRootFromDialog(),
     clearAuthoredRoot: () => void clearAuthoredRoot(),
   };
+
+  async function openAppGenerator() {
+    const status = sidecarStateRef.current;
+    if (
+      commandInFlightRef.current !== null ||
+      appGeneratorOpenRef.current ||
+      deviceProfileGeneratorOpenRef.current ||
+      status?.compatible !== true ||
+      status.running !== true
+    ) {
+      return;
+    }
+    const document = currentDocumentRef.current;
+    if (document?.dirty) {
+      const confirmed = await confirmAction(
+        "Discard unsaved changes",
+        `Generating and opening a recipe will replace the unsaved ${document.recipe.id} document. Discard those changes?`,
+        { confirmLabel: "Discard", destructive: true },
+      );
+      if (!confirmed) {
+        return;
+      }
+    }
+    setAppGeneratorOpen(true);
+  }
+
+  function handleGeneratedAppRecipeSaved(result: AppRecipeSaveResult) {
+    setAppGeneratorOpen(false);
+    setUserConfigurationDocument(null);
+    applyDocument(result.openedRecipe.document);
+    documentSessionValidRef.current = true;
+    setDocumentSessionValid(true);
+    sessionInvalidReasonRef.current = null;
+    setSessionInvalidReason(null);
+    setActiveView("overview");
+    setErrorMessage(null);
+    setStatusMessage(`Saved ${result.appRelativePath} and ${result.recipeRelativePath}.`);
+    void syncMenuState(result.openedRecipe.document, null, true);
+  }
 
   async function openUserConfiguration() {
     if (commandInFlightRef.current !== null) {
@@ -555,6 +605,7 @@ export default function App() {
       }
 
       const status = response.result.status;
+      setAppGeneratorOpen(false);
       setDeviceProfileGeneratorOpen(false);
       sidecarStateRef.current = status;
       setSidecarState(status);
@@ -1054,7 +1105,7 @@ export default function App() {
         documentSessionValid: menuDocumentSessionValid,
         backendCompatible: status?.compatible ?? null,
         sidecarRunning: status?.running ?? null,
-        generatorActive: deviceProfileGeneratorOpenRef.current,
+        generatorActive: deviceProfileGeneratorOpenRef.current || appGeneratorOpenRef.current,
       });
     } catch (error) {
       setErrorMessage(`Menu state update failed: ${errorMessageFromUnknown(error)}`);
@@ -1195,6 +1246,12 @@ export default function App() {
     return (
       <>
         <MenuEventBridge handlers={menuHandlers} />
+        {appGeneratorOpen ? (
+          <AppGenerator
+            onClose={() => setAppGeneratorOpen(false)}
+            onSaved={handleGeneratedAppRecipeSaved}
+          />
+        ) : null}
         {deviceProfileGeneratorOpen ? (
           <DeviceProfileGenerator
             onClose={() => setDeviceProfileGeneratorOpen(false)}
@@ -1214,6 +1271,12 @@ export default function App() {
 
   return (
     <>
+      {appGeneratorOpen ? (
+        <AppGenerator
+          onClose={() => setAppGeneratorOpen(false)}
+          onSaved={handleGeneratedAppRecipeSaved}
+        />
+      ) : null}
       {deviceProfileGeneratorOpen ? (
         <DeviceProfileGenerator
           onClose={() => setDeviceProfileGeneratorOpen(false)}

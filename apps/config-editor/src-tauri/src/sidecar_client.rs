@@ -41,6 +41,8 @@ const REQUIRED_CAPABILITIES: &[&str] = &[
     "planConfiguration",
     "listAdbDevices",
     "probeDevice",
+    "inspectApk",
+    "generateAppRecipeDraft",
     "generateDeviceProfileDraft",
     "checkGeneratedCatalogCollisions",
     "ping",

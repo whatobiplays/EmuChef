@@ -32,6 +32,15 @@ import type {
   DeviceProfileRootSelectionResult,
   DeviceProfileSaveResult,
   DeviceProfileV1Dto,
+  AppDefinitionV1Dto,
+  AppGeneratorSelectionResult,
+  AppGeneratorSessionResult,
+  ApkInspectionResult,
+  AppMappingEditsDto,
+  AppRecipeCollisionResult,
+  AppRecipeDraftResult,
+  AppRecipeEditsDto,
+  AppRecipeSaveResult,
 } from "./types";
 
 export type EditorApiResult<T> =
@@ -331,6 +340,93 @@ export async function cancelDeviceProfileGenerator(
   sessionHandle: string,
 ): Promise<EditorApiResult<Record<string, never>>> {
   return callApi<Record<string, never>>("cancel_device_profile_generator", { sessionHandle });
+}
+
+export async function beginAppGenerator(): Promise<EditorApiResult<AppGeneratorSessionResult>> {
+  return callApi("begin_app_generator");
+}
+
+export async function chooseAppGeneratorApk(
+  sessionHandle: string,
+): Promise<EditorApiResult<AppGeneratorSelectionResult>> {
+  return callApi("choose_app_generator_apk", { sessionHandle });
+}
+
+export async function chooseAppGeneratorAnalyzer(
+  sessionHandle: string,
+  analyzerKind: "apkanalyzer" | "aapt2",
+): Promise<EditorApiResult<AppGeneratorSelectionResult>> {
+  return callApi("choose_app_generator_analyzer", { sessionHandle, analyzerKind });
+}
+
+export async function chooseAppGeneratorAuthoredRoot(
+  sessionHandle: string,
+): Promise<EditorApiResult<AppGeneratorSelectionResult>> {
+  return callApi("choose_app_generator_authored_root", { sessionHandle });
+}
+
+export async function inspectAppGeneratorApk(
+  sessionHandle: string,
+  apkHandle: string,
+  analyzerHandle: string,
+): Promise<EditorApiResult<ApkInspectionResult>> {
+  return callApi("inspect_app_generator_apk", { sessionHandle, apkHandle, analyzerHandle });
+}
+
+export async function generateAppRecipeDraft(
+  sessionHandle: string,
+  apkHandle: string,
+  app: AppDefinitionV1Dto | null,
+  recipe: AppRecipeEditsDto | null,
+  mappings: AppMappingEditsDto | null,
+  regenerateIdentifiers = false,
+): Promise<EditorApiResult<AppRecipeDraftResult>> {
+  return callApi("generate_app_recipe_draft", {
+    sessionHandle,
+    apkHandle,
+    app,
+    recipe,
+    mappings,
+    regenerateIdentifiers,
+  });
+}
+
+export async function checkAppRecipeCollisions(
+  sessionHandle: string,
+  rootHandle: string,
+  app: AppDefinitionV1Dto,
+  recipeId: string,
+): Promise<EditorApiResult<AppRecipeCollisionResult>> {
+  return callApi("check_app_recipe_collisions", {
+    sessionHandle,
+    rootHandle,
+    app,
+    recipeId,
+  });
+}
+
+export async function saveGeneratedAppRecipe(
+  sessionHandle: string,
+  apkHandle: string,
+  rootHandle: string,
+  app: AppDefinitionV1Dto,
+  recipe: AppRecipeEditsDto,
+  mappings: AppMappingEditsDto,
+): Promise<EditorApiResult<AppRecipeSaveResult>> {
+  return callApi("save_generated_app_recipe", {
+    sessionHandle,
+    apkHandle,
+    rootHandle,
+    app,
+    recipe,
+    mappings,
+  });
+}
+
+export async function cancelAppGenerator(
+  sessionHandle: string,
+): Promise<EditorApiResult<Record<string, never>>> {
+  return callApi("cancel_app_generator", { sessionHandle });
 }
 
 export interface MenuState {

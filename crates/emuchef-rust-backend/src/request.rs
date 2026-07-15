@@ -61,6 +61,8 @@ fn handle_validated_object(object: &Map<String, Value>) -> Result<Value, ApiErro
         "describeCatalog" => handle_describe_catalog(object),
         "listAdbDevices" => handle_list_adb_devices(object),
         "probeDevice" => handle_probe_device(object),
+        "inspectApk" => handle_inspect_apk(object),
+        "generateAppRecipeDraft" => handle_generate_app_recipe_draft(object),
         "generateDeviceProfileDraft" => handle_generate_device_profile_draft(object),
         "checkGeneratedCatalogCollisions" => handle_check_generated_catalog_collisions(object),
         "matchDevice" => handle_match_device(object),
@@ -93,6 +95,8 @@ fn handle_validated_sidecar_object(
         "describeCatalog" => handle_describe_catalog(object),
         "listAdbDevices" => handle_list_adb_devices(object),
         "probeDevice" => handle_probe_device(object),
+        "inspectApk" => handle_inspect_apk(object),
+        "generateAppRecipeDraft" => handle_generate_app_recipe_draft(object),
         "generateDeviceProfileDraft" => handle_generate_device_profile_draft(object),
         "checkGeneratedCatalogCollisions" => handle_check_generated_catalog_collisions(object),
         "matchDevice" => handle_match_device(object),
@@ -388,6 +392,48 @@ fn handle_probe_device(object: &Map<String, Value>) -> Result<Value, ApiError> {
     )?))
 }
 
+fn handle_inspect_apk(object: &Map<String, Value>) -> Result<Value, ApiError> {
+    let payload = payload_object(object)?;
+    let request = serde_json::from_value::<crate::generation::ApkInspectionRequest>(Value::Object(
+        payload.clone(),
+    ))
+    .map_err(|_| {
+        ApiError::invalid_request_with_details(
+            "APK inspection facts are invalid.",
+            json!({ "field": "payload" }),
+        )
+    })?;
+    let result =
+        serde_json::to_value(crate::generation::inspect_apk_facts(request)).map_err(|_| {
+            ApiError::command_failed(
+                "APK inspection facts could not be represented.",
+                json!({ "reason": "apk_inspection_serialization_failed" }),
+            )
+        })?;
+    Ok(envelope::success(result))
+}
+
+fn handle_generate_app_recipe_draft(object: &Map<String, Value>) -> Result<Value, ApiError> {
+    let payload = payload_object(object)?;
+    let request = serde_json::from_value::<crate::generation::AppRecipeDraftRequest>(
+        Value::Object(payload.clone()),
+    )
+    .map_err(|_| {
+        ApiError::invalid_request_with_details(
+            "App-and-recipe draft input is invalid.",
+            json!({ "field": "payload" }),
+        )
+    })?;
+    let result = serde_json::to_value(crate::generation::generate_app_recipe_draft(request))
+        .map_err(|_| {
+            ApiError::command_failed(
+                "App-and-recipe draft could not be represented.",
+                json!({ "reason": "app_recipe_draft_serialization_failed" }),
+            )
+        })?;
+    Ok(envelope::success(result))
+}
+
 fn handle_generate_device_profile_draft(object: &Map<String, Value>) -> Result<Value, ApiError> {
     let payload = payload_object(object)?;
     let request = serde_json::from_value::<crate::generation::DeviceProfileDraftRequest>(
@@ -414,6 +460,29 @@ fn handle_check_generated_catalog_collisions(
 ) -> Result<Value, ApiError> {
     let payload = payload_object(object)?;
     let authored_root = required_string(payload, "authoredRoot")?;
+    if payload.contains_key("app") || payload.contains_key("recipeId") {
+        let request =
+            serde_json::from_value::<crate::generation::AppRecipeCollisionRequest>(json!({
+                "app": payload.get("app").cloned().unwrap_or(Value::Null),
+                "recipeId": payload.get("recipeId").cloned().unwrap_or(Value::Null),
+            }))
+            .map_err(|_| {
+                ApiError::invalid_request_with_details(
+                    "App-and-recipe collision input is invalid.",
+                    json!({ "field": "payload" }),
+                )
+            })?;
+        let collisions =
+            crate::generation::check_app_recipe_collisions(Path::new(authored_root), &request);
+        let result = serde_json::to_value(collisions).map_err(|_| {
+            ApiError::command_failed(
+                "App-and-recipe collision results could not be represented.",
+                json!({ "reason": "app_recipe_collision_serialization_failed" }),
+            )
+        })?;
+        return Ok(envelope::success(result));
+    }
+
     let facts = payload.get("facts").cloned().ok_or_else(|| {
         ApiError::invalid_request_with_details(
             "Request payload is missing required field: facts",

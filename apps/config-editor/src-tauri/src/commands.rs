@@ -317,9 +317,11 @@ pub fn sidecar_ping(state: State<'_, SidecarState>) -> Result<Value, String> {
 pub fn sidecar_restart(
     state: State<'_, SidecarState>,
     generator_state: State<'_, crate::device_profile_generator::DeviceProfileGeneratorState>,
+    app_generator_state: State<'_, crate::app_generator::AppGeneratorState>,
 ) -> Result<Value, String> {
     let result = state.restart()?;
     generator_state.clear()?;
+    app_generator_state.clear()?;
     Ok(result)
 }
 

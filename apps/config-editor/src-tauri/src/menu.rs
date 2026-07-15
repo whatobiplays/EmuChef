@@ -6,6 +6,7 @@ use tauri::{
 
 const ACTION_OPEN_RECIPE: &str = "openRecipe";
 const ACTION_OPEN_USER_CONFIGURATION: &str = "openUserConfiguration";
+const ACTION_GENERATE_APP_RECIPE: &str = "generateAppRecipe";
 const ACTION_GENERATE_DEVICE_PROFILE: &str = "generateDeviceProfile";
 const ACTION_SAVE_RECIPE: &str = "saveRecipe";
 const ACTION_SAVE_RECIPE_AS: &str = "saveRecipeAs";
@@ -92,6 +93,7 @@ pub fn handle_menu_event<R: Runtime>(app: &AppHandle<R>, action: &str) {
     match action {
         ACTION_OPEN_RECIPE
         | ACTION_OPEN_USER_CONFIGURATION
+        | ACTION_GENERATE_APP_RECIPE
         | ACTION_GENERATE_DEVICE_PROFILE
         | ACTION_SAVE_RECIPE
         | ACTION_SAVE_RECIPE_AS
@@ -167,6 +169,13 @@ fn build_file_menu<R: Runtime>(
                 ACTION_OPEN_USER_CONFIGURATION,
                 "Open User Configuration...",
                 open_recipe_ready,
+                None::<&str>,
+            )?,
+            &MenuItem::with_id(
+                app,
+                ACTION_GENERATE_APP_RECIPE,
+                "Generate App and Recipe...",
+                generator_ready,
                 None::<&str>,
             )?,
             &MenuItem::with_id(

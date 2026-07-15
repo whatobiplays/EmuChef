@@ -33,11 +33,45 @@ The canonical retirement contract and evidence checklist are in
 
 ## Config Editor Authored Generation
 
-The Config Editor provides guided generation workflows for a starter app definition and installation recipe from a local APK, direct remote APK, GitHub repository, or GitHub release, and for a starter device profile from one connected ADB device. Rust owns source analysis, APK inspection contracts, typed authored models, validation, canonical draft generation, collision detection, evidence classification, and sidecar operations. Tauri owns native paths, configured external tools, exact ADB serials, native save destinations, final collision revalidation, and trusted writes. React owns presentation and explicit author choices.
+The Config Editor provides guided generation workflows for a starter app
+definition and installation recipe from a local APK and for a starter device
+profile from one connected ADB device. Direct remote APK, GitHub repository,
+and GitHub release generation remain roadmap work and are not available in the
+current product. Rust owns APK inspection contracts, typed authored models,
+validation, canonical draft generation, collision detection, evidence
+classification, and sidecar operations. Tauri owns native paths, configured
+external tools, exact ADB serials, native save destinations, final collision
+revalidation, and trusted writes. React owns presentation and explicit author
+choices.
 
 Generation produces reviewable drafts and performs no authored-data writes until explicit save. The generated recipe opens through the existing recipe document session. App definitions and device profiles initially use dedicated draft forms and canonical YAML previews rather than new persistent editor-session types. App definitions remain catalog and tracking metadata; generated recipes remain execution authority.
 
-GitHub analysis uses validated GitHub API origins and excludes drafts and prereleases by default. Android package facts come from APK inspection rather than repository naming. The initial APK-inspection contract uses a separately configured user-supplied `apkanalyzer` or `aapt2`; EmuChef does not bundle Android SDK build tools. Local APK generation defaults to a required user-provided APK recipe input, while a selected stable GitHub release asset defaults to a pinned `remote_file` artifact. No local absolute APK path is persisted.
+Android package facts come from APK inspection rather than filenames. The
+APK-inspection contract uses a separately configured user-supplied
+`apkanalyzer` or `aapt2`; EmuChef does not bundle Android SDK build tools.
+Local APK generation uses a required user-provided APK recipe input. Generated
+app definitions use `user_provided_apk` install-source metadata with resolver
+`none`, `local_apk` tracking metadata, `artifacts.apk.required: false`, and
+`artifacts.byo_apk.required: true`. The selected APK and analyzer paths are
+never persisted, and verified APK facts remain review evidence unless the
+author explicitly enters metadata.
+
+The local APK wizard accepts regular `.apk` files no larger than 2 GiB and a
+regular executable whose basename matches the selected analyzer adapter.
+Analyzer commands use direct arguments, a 30-second timeout, and a 4 MiB bound
+per output stream. The current analyzer command surfaces do not provide a
+signing-certificate SHA-256 fingerprint, so that fact remains missing with a
+deterministic warning. Split and non-base APKs are rejected.
+
+App-generator sessions retain APK, analyzer, and authored-root paths behind
+opaque process-memory handles. Authored roots must contain existing canonical
+`apps` and `recipes` directories. Saving rechecks APK file identity,
+revalidates both typed drafts, reruns both-directory collision analysis, writes
+and syncs temporary siblings, and publishes both files with create-new
+semantics. A failed second publication removes the first publication when
+safe. Successful publication opens the generated recipe through the existing
+recipe document session and invalidates the generator session. The Config
+Editor permits only one app or device generator wizard at a time.
 
 Generated recipes are minimal: artifact resolution when needed, APK installation, a verified package-installed skip condition, and an optional explicit launch step only when a launcher component was verified and the author enables it. Generation does not infer configuration-copy, root, permission, force-stop, app-data, or device-plan behavior from repository prose.
 

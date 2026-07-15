@@ -342,6 +342,26 @@ Generator state is separate from `RecipeDocumentDto`. A sidecar restart invalida
 - dual-document validation and save; and
 - opening the generated recipe.
 
+The implemented local workflow uses explicit BYO metadata:
+`install_source.type` is `user_provided_apk`, its resolver is `none`,
+`tracking_source.type` is `local_apk`, direct APK support is not required, and
+BYO APK support is required. Verified APK facts are review evidence rather than
+automatically persisted metadata.
+
+Native selection accepts regular APK files up to 2 GiB and regular executable
+files whose basename matches the explicitly selected `apkanalyzer` or `aapt2`
+adapter. Analyzer processes use direct argument vectors, a 30-second timeout,
+and a 4 MiB bound per output stream. Both adapters report certificate SHA-256
+as missing because neither supported command surface exposes signing identity;
+the missing fact is a deterministic warning rather than invented data.
+
+The Config Editor enforces one active generator wizard. App-generator paths and
+file identities remain behind session-scoped Tauri handles. Final dual-file
+publication revalidates and rescans, uses synced temporary siblings and
+create-new hard-link publication, removes the first publication when the
+second fails and rollback is safe, then opens the recipe in the existing
+document session.
+
 ### Phase 4: GitHub and remote APK sources
 
 - repository and release analysis;

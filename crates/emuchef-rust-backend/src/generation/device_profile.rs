@@ -8,6 +8,8 @@ use crate::authored_models::{
     OrderedValueMap, DEVICE_PROFILE_KIND, SCHEMA_VERSION_V1,
 };
 
+use super::identifiers::normalize_identifier_component;
+
 /// Device facts safe to expose to authored-generation clients.
 ///
 /// The exact ADB serial is deliberately absent. Unknown fields are rejected so
@@ -184,24 +186,6 @@ fn proposed_profile(facts: &SafeDetectedDeviceFacts) -> DeviceProfileV1 {
 
 fn present(value: Option<&str>) -> Option<&str> {
     value.map(str::trim).filter(|value| !value.is_empty())
-}
-
-/// Normalize one device identity component into the shared authored-id grammar.
-fn normalize_identifier_component(value: &str) -> String {
-    let mut normalized = String::new();
-    let mut separator_pending = false;
-    for character in value.chars() {
-        if character.is_ascii_alphanumeric() {
-            if separator_pending && !normalized.is_empty() {
-                normalized.push('_');
-            }
-            normalized.push(character.to_ascii_lowercase());
-            separator_pending = false;
-        } else if !normalized.is_empty() {
-            separator_pending = true;
-        }
-    }
-    normalized
 }
 
 fn missing_fact_diagnostics(facts: &SafeDetectedDeviceFacts) -> Vec<GenerationDiagnostic> {

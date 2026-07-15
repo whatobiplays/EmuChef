@@ -1,3 +1,4 @@
+pub mod app_generator;
 pub mod commands;
 pub mod device_profile_generator;
 pub mod menu;
@@ -10,6 +11,7 @@ pub fn run() {
             sidecar_client::SidecarRuntime::for_current_process(),
         ))
         .manage(device_profile_generator::DeviceProfileGeneratorState::default())
+        .manage(app_generator::AppGeneratorState::default())
         .menu(|app| menu::build_editor_menu(app, menu::EditorMenuState::default()))
         .on_menu_event(|app, event| {
             menu::handle_menu_event(app, event.id().as_ref());
@@ -37,6 +39,15 @@ pub fn run() {
             commands::sidecar_status,
             commands::sidecar_ping,
             commands::sidecar_restart,
+            app_generator::begin_app_generator,
+            app_generator::choose_app_generator_apk,
+            app_generator::choose_app_generator_analyzer,
+            app_generator::choose_app_generator_authored_root,
+            app_generator::inspect_app_generator_apk,
+            app_generator::generate_app_recipe_draft,
+            app_generator::check_app_recipe_collisions,
+            app_generator::save_generated_app_recipe,
+            app_generator::cancel_app_generator,
             device_profile_generator::begin_device_profile_generator,
             device_profile_generator::choose_device_profile_authored_root,
             device_profile_generator::list_device_profile_generator_devices,

@@ -409,3 +409,134 @@ export interface DeviceProfileSaveResult {
   fileName: string;
   displayPath: string;
 }
+
+export interface AppGeneratorSessionResult {
+  sessionHandle: string;
+}
+
+export interface AppGeneratorSelectionResult {
+  cancelled: boolean;
+  apkHandle?: string;
+  analyzerHandle?: string;
+  rootHandle?: string;
+  kind?: "apkanalyzer" | "aapt2";
+  label?: string;
+}
+
+export interface ApkInspectionFactsDto {
+  packageName: string | null;
+  applicationLabel: string | null;
+  versionCode: string | null;
+  versionName: string | null;
+  minSdk: number | null;
+  targetSdk: number | null;
+  abis: string[];
+  launcherActivities: string[];
+  requestedPermissions: string[];
+  debuggable: boolean | null;
+  split: boolean | null;
+  base: boolean | null;
+  certificateSha256: string | null;
+}
+
+export interface AppGeneratorDiagnosticDto {
+  severity: "error" | "warning";
+  code: string;
+  message: string;
+  field: string;
+}
+
+export interface ApkInspectionResult {
+  analyzer: "apkanalyzer" | "aapt2";
+  facts: ApkInspectionFactsDto;
+  evidence: Array<{ field: string; state: "verified" | "missing"; source: string }>;
+  diagnostics: AppGeneratorDiagnosticDto[];
+  blocking: boolean;
+}
+
+export interface AppDefinitionV1Dto {
+  schema_version: 1;
+  kind: "app_definition";
+  id: string;
+  name: string;
+  description?: string;
+  category: string;
+  package: { primary: string; aliases: string[] };
+  install_source: { type: string; resolver: string; options: Record<string, unknown> };
+  tracking_source: { type: string; [key: string]: unknown };
+  artifacts: {
+    apk: { required: boolean };
+    shared_storage_config: { supported: boolean };
+    app_data_config: { supported: boolean };
+    byo_apk: { required: boolean };
+  };
+  provisioning: {
+    launch_once_recommended: boolean;
+    shared_storage_paths: string[];
+    app_data_paths: string[];
+    config_targets: Array<Record<string, unknown>>;
+  };
+  inputs: Array<Record<string, unknown>>;
+  metadata: Record<string, unknown>;
+}
+
+export interface GeneratedRecipeIdsDto {
+  recipeId: string;
+  inputId: string;
+  featureId: string;
+  installStepId: string;
+  launchStepId: string;
+}
+
+export interface AppRecipeEditsDto {
+  ids: GeneratedRecipeIdsDto | null;
+  name: string;
+  description: string;
+  inputLabel: string;
+  inputDescription: string;
+  replaceExisting: boolean;
+  launchEnabled: boolean;
+  launcherActivity: string | null;
+}
+
+export interface AppMappingEditsDto {
+  installSourceOptions: string;
+  trackingSourceFields: string;
+  metadata: string;
+  inputs: string[];
+  configTargets: string[];
+}
+
+export interface AppRecipeDraftResult {
+  app: AppDefinitionV1Dto;
+  recipe: RecipeDto;
+  recipeEdits: AppRecipeEditsDto;
+  appCanonicalYaml: string | null;
+  recipeCanonicalYaml: string | null;
+  appDestination: { fileName: string | null; relativePath: string | null };
+  recipeDestination: { fileName: string | null; relativePath: string | null };
+  evidence: DeviceProfileFieldEvidenceDto[];
+  diagnostics: AppGeneratorDiagnosticDto[];
+  blocking: boolean;
+}
+
+export interface AppRecipeCollisionDto {
+  severity: "blocking" | "warning";
+  code: string;
+  message: string;
+  existingId: string | null;
+  relativePath: string | null;
+}
+
+export interface AppRecipeCollisionResult {
+  collisions: AppRecipeCollisionDto[];
+  blocking: boolean;
+}
+
+export interface AppRecipeSaveResult {
+  appFileName: string;
+  recipeFileName: string;
+  appRelativePath: string;
+  recipeRelativePath: string;
+  openedRecipe: OpenRecipeResult;
+}
