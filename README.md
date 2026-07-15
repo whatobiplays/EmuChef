@@ -54,6 +54,16 @@ device-state undo. See the
 
 ## End-User App
 
+The Apple Silicon end-user app includes a user-triggered Updates dialog for
+signed fixed-origin release discovery and manual DMG delivery. Rust validates
+one bounded canonical Ed25519-signed manifest and can open only its retained
+newer stable DMG URL in the default browser after safety revalidation. React
+receives no URL, key, signature, path, or opener authority. Production trust is
+currently fail-closed and unconfigured; hosting, reviewed endpoint/key pinning,
+credentialed release metadata, and clean-Mac manual replacement evidence are
+still required. This is not an in-place updater, and EmuChef never downloads,
+installs, replaces, or restarts itself.
+
 ```bash
 npm --prefix apps/emuchef-app install
 npm --prefix apps/emuchef-app run tauri:dev

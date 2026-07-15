@@ -22,7 +22,8 @@
     "package:macos:qualify": "node scripts/macos-package.mjs qualify",
     "package:macos:compare": "node scripts/macos-package.mjs compare",
     "release:macos:verify": "node scripts/macos-package.mjs release-verify",
-    "test:packaging": "node --test --experimental-test-coverage --test-coverage-include=scripts/macos-packaging-policy.mjs --test-coverage-include=scripts/sidecar-packaging.mjs --test-coverage-lines=95 --test-coverage-functions=95 --test-coverage-branches=95 scripts/macos-packaging.test.mjs scripts/sidecar-packaging.test.mjs",
+    "release:macos:update-manifest": "node scripts/macos-update-manifest.mjs",
+    "test:packaging": "node --test --experimental-test-coverage --test-coverage-include=scripts/macos-packaging-policy.mjs --test-coverage-include=scripts/sidecar-packaging.mjs --test-coverage-include=scripts/macos-update-manifest-policy.mjs --test-coverage-lines=95 --test-coverage-functions=95 --test-coverage-branches=95 scripts/macos-packaging.test.mjs scripts/sidecar-packaging.test.mjs scripts/macos-update-manifest.test.mjs",
     "tauri:build": "node scripts/macos-package.mjs build",
     "tauri": "tauri"
   },

@@ -28,6 +28,8 @@ import type {
   AppSessionStart,
   RecoveryRestoreResult,
   RecoveryWriteAck,
+  UpdateInteractionSession,
+  UpdateStatus,
 } from "./types";
 
 export const api = {
@@ -164,4 +166,16 @@ export const api = {
   }) => invoke<CacheCleanupResult>("cleanup_cache", { request }),
   exportSupportDiagnostics: () =>
     invoke<SupportDiagnosticsExportResult>("export_support_diagnostics"),
+  getUpdateStatus: () => invoke<UpdateStatus>("get_update_status"),
+  checkForUpdates: () => invoke<UpdateStatus>("check_for_updates"),
+  beginUpdateInteractionSession: () =>
+    invoke<UpdateInteractionSession>("begin_update_interaction_session"),
+  setUpdateInteractionState: (request: {
+    sessionId: string;
+    generation: number;
+    blocked: boolean;
+  }) => invoke<void>("set_update_interaction_state", { request }),
+  endUpdateInteractionSession: (sessionId: string) =>
+    invoke<void>("end_update_interaction_session", { sessionId }),
+  openUpdateDownload: () => invoke<void>("open_update_download"),
 };

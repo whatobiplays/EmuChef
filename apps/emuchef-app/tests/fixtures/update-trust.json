@@ -1,0 +1,9 @@
+{
+  "schemaVersion": 1,
+  "configured": true,
+  "manifestUrl": "https://updates.example.test/emuchef/stable.json",
+  "dmgOrigin": "https://downloads.example.test",
+  "dmgPathPrefix": "/emuchef/stable/",
+  "metadataKeyId": "test-metadata-2026",
+  "metadataPublicKey": "79b5562e8fe654f94078b112e8a98ba7901f853ae695bed7e0e3910bad049664"
+}

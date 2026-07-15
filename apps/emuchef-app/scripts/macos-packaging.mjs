@@ -404,3 +404,44 @@ export function verifyCredentialedRelease(appPath, dmgPath, { run = spawnSync } 
   runChecked("xcrun", ["stapler", "validate", dmgPath], { run });
   return { status: "passed", developerId: true, notarized: true, stapled: true, gatekeeper: true };
 }
+
+/**
+ * Reuses the Phase 3E credentialed verification and proves that the supplied
+ * DMG contains the exact verified app tree. The read-only mount exists only in
+ * release tooling; the product never mounts or inspects a DMG.
+ */
+export function verifyCredentialedUpdateArtifacts(
+  appPath,
+  dmgPath,
+  { paths = workspacePaths(), run = spawnSync, fsApi = fs } = {},
+) {
+  const app = verifyMacosBundle(appPath, { paths, run, fsApi });
+  if (app.signingState !== "developer-id") throw new Error("update app must use Developer ID signing");
+  verifyCredentialedRelease(app.appPath, dmgPath, { run });
+  const mountRoot = fsApi.mkdtempSync(path.join(os.tmpdir(), "emuchef-update-dmg-"));
+  let attached = false;
+  try {
+    runChecked("hdiutil", ["attach", "-readonly", "-nobrowse", "-mountpoint", mountRoot, dmgPath], { run });
+    attached = true;
+    const apps = fsApi.readdirSync(mountRoot)
+      .filter((name) => name.endsWith(".app"))
+      .map((name) => path.join(mountRoot, name));
+    if (apps.length !== 1) throw new Error("update DMG must contain exactly one application bundle");
+    const contained = verifyMacosBundle(apps[0], { paths, run, fsApi });
+    for (const field of ["CFBundleIdentifier", "CFBundleShortVersionString", "CFBundleVersion"]) {
+      if (contained.info[field] !== app.info[field]) throw new Error(`update DMG app ${field} does not match`);
+    }
+    if (appTreeDigest(contained.appPath, fsApi) !== appTreeDigest(app.appPath, fsApi)) {
+      throw new Error("update DMG does not contain the exact verified application");
+    }
+    return { app, dmgPath: path.resolve(dmgPath) };
+  } finally {
+    let detachError;
+    if (attached) {
+      try { runChecked("hdiutil", ["detach", mountRoot], { run }); }
+      catch (error) { detachError = error; }
+    }
+    fsApi.rmSync(mountRoot, { recursive: true, force: true });
+    if (detachError) throw detachError;
+  }
+}

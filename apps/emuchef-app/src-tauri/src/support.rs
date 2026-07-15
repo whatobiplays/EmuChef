@@ -285,6 +285,9 @@ pub fn cleanup_cache(
     request: CacheCleanupRequest,
     state: State<'_, AppState>,
 ) -> Result<Value, String> {
+    // Reserve destructive work before reading execution state so navigation,
+    // cleanup, and execution-start paths share one lock order.
+    let _activity = state.update_activity.reserve_cleanup()?;
     if state
         .executions
         .lock()
@@ -402,6 +405,10 @@ pub async fn export_support_diagnostics(app: AppHandle) -> Result<Value, String>
         ("cache-summary.json", cache_summary),
     ];
     let bytes = build_diagnostics_zip(members)?;
+    let _dialog_activity = app
+        .state::<AppState>()
+        .update_activity
+        .reserve_native_dialog()?;
     let picker = app
         .dialog()
         .file()

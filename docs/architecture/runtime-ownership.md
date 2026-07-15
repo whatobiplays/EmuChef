@@ -17,7 +17,8 @@
 | Compatibility fixtures | Frozen v1 evidence | No Python regeneration |
 | Network artifact download | Rust | Active; manual device evidence required |
 | End-user macOS package qualification | Rust/Tauri and local Node tooling | Apple Silicon ad-hoc content qualification active; credentialed verification is explicit and separate |
-| End-user release signing/notarization/updater | External Apple release operation | No end-user Developer ID/notarization evidence; updater is future work |
+| End-user update discovery | Rust/Tauri | User-triggered signed metadata validation and retained fixed-origin DMG browser handoff; production trust unconfigured |
+| End-user release signing/notarization/manual replacement | External Apple release operation | Credentialed artifact verification and manifest tooling implemented; hosting, production trust, and clean-Mac evidence pending |
 
 There is no supported alternate runtime, planner backend selector, fallback,
 or secondary product executable. Python is not a repository prerequisite and
@@ -144,3 +145,23 @@ blobs, signing timestamps, DMG container metadata, mtimes, temporary names, and
 caller-specific absolute paths are volatile and excluded. Final signed app and
 DMG hashes are identities of one produced build and are not asserted to be
 stable across rebuilds.
+
+## Phase 4B update-discovery boundary
+
+Rust owns the fixed manifest endpoint, DMG origin/path policy, metadata public
+key, no-proxy identity-only HTTP client, bounded response reader, exact
+fixed-JSON parser, Ed25519 verification, target/version/expiry policy, retained
+candidate, interaction leases, and browser call. React receives display-only
+metadata and action availability; it cannot supply or receive an update URL,
+key, signature, path, raw manifest, response, or opener argument.
+
+Production trust is a source document containing only schema version 1 and
+`configured: false`. This returns a local unconfigured state without network or
+browser activity. The browser downloads a DMG only after a user action; EmuChef
+does not read or verify that local file. Apple Developer ID, notarization,
+stapling, and Gatekeeper remain executable trust. Platform-Tools and all
+application-data state remain outside update authority.
+
+The prior in-place updater remains rejected because its pinned public API could
+not preserve the required single-response pre-deserialization validation model.
+Phase 4B implements manual discovery only, not in-place installation.

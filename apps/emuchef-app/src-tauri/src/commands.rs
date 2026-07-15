@@ -21,6 +21,7 @@ use crate::recovery::RecoveryState;
 use crate::saved_configurations::SavedConfigurationState;
 use crate::sidecar::{RuntimeStatusDto, SidecarState};
 use crate::support::SupportStore;
+use crate::updates::{ActivityGate, UpdateService};
 
 pub struct AppState {
     pub sidecar: SidecarState,
@@ -31,6 +32,8 @@ pub struct AppState {
     pub saved_configurations: SavedConfigurationState,
     pub recovery: RecoveryState,
     pub support: Mutex<SupportStore>,
+    pub updates: UpdateService,
+    pub update_activity: ActivityGate,
 }
 
 #[tauri::command]
@@ -184,6 +187,10 @@ pub fn open_platform_tools_download_page(app: AppHandle) -> Result<(), String> {
 
 #[tauri::command]
 pub async fn import_platform_tools_zip(app: AppHandle) -> Result<AdbSetupStatusDto, String> {
+    let _dialog_activity = app
+        .state::<AppState>()
+        .update_activity
+        .reserve_native_dialog()?;
     let picker = app
         .dialog()
         .file()
@@ -643,6 +650,10 @@ pub async fn pick_input_path(
     path_kind: String,
     multiple: bool,
 ) -> Result<Option<Vec<String>>, String> {
+    let _dialog_activity = app
+        .state::<AppState>()
+        .update_activity
+        .reserve_native_dialog()?;
     let picker = app.dialog().file();
     let selected = match (path_kind.as_str(), multiple) {
         ("file", true) => {

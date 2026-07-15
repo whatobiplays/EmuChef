@@ -290,6 +290,9 @@ pub fn start_simulated_execution(
     review_handle: String,
     state: State<'_, AppState>,
 ) -> Result<Value, String> {
+    // ActivityGate is always acquired before the execution store. The short
+    // lease closes the race with an already-reserved browser handoff.
+    let _activity = state.update_activity.reserve_execution_start()?;
     let mut executions = state.executions.lock().map_err(|_| {
         safe_error(
             "execution_state_unavailable",
@@ -598,6 +601,7 @@ pub fn start_real_execution(request: Value, state: State<'_, AppState>) -> Resul
         ));
     }
     let request = parse_real_start_request(request)?;
+    let _activity = state.update_activity.reserve_execution_start()?;
     let mut executions = state.executions.lock().map_err(|_| {
         safe_error(
             "execution_state_unavailable",
@@ -1054,6 +1058,10 @@ pub async fn export_execution_report(
     })?;
     serialized.push('\n');
 
+    let _dialog_activity = app
+        .state::<AppState>()
+        .update_activity
+        .reserve_native_dialog()?;
     let picker = app
         .dialog()
         .file()

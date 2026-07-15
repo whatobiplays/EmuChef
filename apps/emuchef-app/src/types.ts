@@ -452,3 +452,24 @@ export interface CacheCleanupResult {
 export interface SupportDiagnosticsExportResult {
   outcome: "saved" | "cancelled";
 }
+
+/** Display-only update state. URL, signature, key, path, and opener authority stay in Rust. */
+export interface UpdateStatus {
+  state: "unconfigured" | "idle" | "checking" | "up_to_date" | "update_available" | "failed";
+  currentVersion: string;
+  latestVersion: string | null;
+  publishedAt: string | null;
+  expiresAt: string | null;
+  notes: string | null;
+  dmgSizeBytes: number | null;
+  dmgSha256: string | null;
+  minimumMacosVersion: string | null;
+  minimumMacosVersionIsInformational: true;
+  canOpenDownload: boolean;
+  message: string | null;
+}
+
+export interface UpdateInteractionSession {
+  sessionId: string;
+  generation: number;
+}

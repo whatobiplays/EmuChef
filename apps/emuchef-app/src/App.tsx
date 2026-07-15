@@ -3,6 +3,7 @@ import { getCurrentWindow } from "@tauri-apps/api/window";
 
 import { api } from "./api";
 import { SupportPanel } from "./SupportPanel";
+import { UpdatesPanel } from "./UpdatesPanel";
 import { AccessibleDialog } from "./AccessibleDialog";
 import {
   DialogController,
@@ -28,6 +29,7 @@ import type {
   CacheCleanupMode,
   RecoveryDraftAvailable,
   RecoveryRestoreResult,
+  UpdateInteractionSession,
 } from "./types";
 import {
   formatLastOpened,
@@ -56,6 +58,11 @@ import {
   supportReducer,
 } from "./support";
 import { portableIntentSignature, recoveryResultIsCurrent } from "./recovery";
+import {
+  initialUpdatePanelState,
+  nextInteractionGeneration,
+  updateNavigationBlocked,
+} from "./update-policy";
 
 const WORKFLOW_STEPS = [
   { step: "connect", label: "Connect" },
@@ -151,6 +158,7 @@ export function App({ dialogController: suppliedDialogController }: AppProps = {
   const [recentConfigurations, setRecentConfigurations] = useState<RecentConfiguration[]>([]);
   const [workflow, dispatch] = useReducer(workflowReducer, initialWorkflowState);
   const [support, supportDispatch] = useReducer(supportReducer, initialSupportState);
+  const [updates, setUpdates] = useState(initialUpdatePanelState);
   const [activeDialog, setActiveDialog] = useState<DialogSnapshot<AppDialogPayload> | null>(
     dialogController.snapshot,
   );
@@ -159,6 +167,7 @@ export function App({ dialogController: suppliedDialogController }: AppProps = {
   const [assertiveAnnouncement, setAssertiveAnnouncement] = useState({ id: 0, text: "" });
   const mainRef = useRef<HTMLElement>(null);
   const supportInvokerRef = useRef<HTMLElement | null>(null);
+  const updatesInvokerRef = useRef<HTMLElement | null>(null);
   const validationSummaryRef = useRef<HTMLElement>(null);
   const executionAnnouncementKeyRef = useRef<string | null>(null);
   const appLifecycleGenerationRef = useRef(0);
@@ -174,6 +183,9 @@ export function App({ dialogController: suppliedDialogController }: AppProps = {
   const recoveryRequestGenerationRef = useRef(0);
   const recoveryDraftGenerationRef = useRef(0);
   const lastRecoverySignatureRef = useRef<string | null>(null);
+  const updateInteractionSessionRef = useRef<UpdateInteractionSession | null>(null);
+  const updateInteractionQueueRef = useRef<Promise<void>>(Promise.resolve());
+  const [updateInteractionRevision, setUpdateInteractionRevision] = useState(0);
 
   const announce = useCallback((text: string, assertive = false) => {
     const update = (previous: { id: number; text: string }) => ({ id: previous.id + 1, text });
@@ -228,6 +240,64 @@ export function App({ dialogController: suppliedDialogController }: AppProps = {
       queueMicrotask(() => restoreAccessibleFocus({ invoker, preferred, generation }));
     }
   }, []);
+
+  const navigationBlocked = updateNavigationBlocked({
+    startupReady,
+    busy,
+    executionKind: workflow.execution.kind,
+    appDialogOpen: activeDialog !== null,
+    supportOpen: support.open,
+    updatePanelOpen: updates.open,
+    updateChecking: updates.checking,
+    updateOpening: updates.opening,
+  });
+
+  useEffect(() => {
+    let disposed = false;
+    void api.beginUpdateInteractionSession().then((session) => {
+      if (disposed) {
+        void api.endUpdateInteractionSession(session.sessionId).catch(() => undefined);
+        return;
+      }
+      updateInteractionSessionRef.current = session;
+      setUpdateInteractionRevision((value) => value + 1);
+    }).catch(() => {
+      updateInteractionSessionRef.current = null;
+    });
+    return () => {
+      disposed = true;
+      const session = updateInteractionSessionRef.current;
+      updateInteractionSessionRef.current = null;
+      if (session) void api.endUpdateInteractionSession(session.sessionId).catch(() => undefined);
+    };
+  }, []);
+
+  useEffect(() => {
+    const blocked = navigationBlocked;
+    updateInteractionQueueRef.current = updateInteractionQueueRef.current.then(async () => {
+      const session = updateInteractionSessionRef.current;
+      if (!session) return;
+      const generation = nextInteractionGeneration(session.generation);
+      if (generation === null) {
+        updateInteractionSessionRef.current = await api.beginUpdateInteractionSession();
+        setUpdateInteractionRevision((value) => value + 1);
+        return;
+      }
+      session.generation = generation;
+      try {
+        await api.setUpdateInteractionState({
+          sessionId: session.sessionId,
+          generation,
+          blocked,
+        });
+      } catch {
+        // Rotating the session returns Rust to blocked even if the page reloads,
+        // teardown races, or a stale release update is rejected.
+        updateInteractionSessionRef.current = await api.beginUpdateInteractionSession().catch(() => null);
+        setUpdateInteractionRevision((value) => value + 1);
+      }
+    });
+  }, [navigationBlocked, updateInteractionRevision]);
 
   const initialize = useCallback(async () => {
     const [runtimeStatus, adbStatus, realAvailability] = await Promise.all([
@@ -765,6 +835,44 @@ export function App({ dialogController: suppliedDialogController }: AppProps = {
     supportInvokerRef.current = invoker;
     supportDispatch({ type: "open" });
     void refreshSupportInventory();
+  };
+
+  const openUpdates = async (invoker: HTMLElement) => {
+    if (dialogController.activeId !== null || support.open) {
+      announce("Close the current panel or confirmation before opening Updates.");
+      return;
+    }
+    updatesInvokerRef.current = invoker;
+    setUpdates((current) => ({ ...current, open: true }));
+    try {
+      const status = await api.getUpdateStatus();
+      setUpdates((current) => ({ ...current, status }));
+    } catch (error) {
+      announce(errorMessage(error), true);
+    }
+  };
+
+  const checkForUpdates = async () => {
+    setUpdates((current) => ({ ...current, checking: true }));
+    try {
+      const status = await api.checkForUpdates();
+      setUpdates((current) => ({ ...current, checking: false, status }));
+    } catch (error) {
+      setUpdates((current) => ({ ...current, checking: false }));
+      announce(errorMessage(error), true);
+    }
+  };
+
+  const openUpdateDownload = async () => {
+    setUpdates((current) => ({ ...current, opening: true }));
+    try {
+      await api.openUpdateDownload();
+      announce("The validated DMG address was opened in your default browser.");
+    } catch (error) {
+      announce(errorMessage(error), true);
+    } finally {
+      setUpdates((current) => ({ ...current, opening: false }));
+    }
   };
 
   const prepareSupportCleanup = (mode: CacheCleanupMode) => {
@@ -1397,12 +1505,32 @@ export function App({ dialogController: suppliedDialogController }: AppProps = {
         <div className="runtime-chip" aria-live="polite">
           {runtime.status === "ready" ? `Runtime ready · ${catalog?.catalog.version ?? "catalog"}` : runtime.status}
         </div>
-        <button
-          className="secondary"
-          data-focus-fallback="header"
-          onClick={(event) => openSupport(event.currentTarget)}
-        >Support & Storage</button>
+        <div className="button-row header-actions">
+          <button
+            className="secondary"
+            data-focus-fallback="header"
+            onClick={(event) => void openUpdates(event.currentTarget)}
+          >Updates</button>
+          <button
+            className="secondary"
+            onClick={(event) => openSupport(event.currentTarget)}
+          >Support & Storage</button>
+        </div>
       </header>
+
+      <UpdatesPanel
+        state={updates}
+        returnFocus={updatesInvokerRef.current}
+        navigationBlocked={navigationBlocked}
+        onClose={() => {
+          if (!updates.checking && !updates.opening) {
+            setUpdates((current) => ({ ...current, open: false }));
+          }
+        }}
+        onCheck={() => void checkForUpdates()}
+        onOpenDownload={() => void openUpdateDownload()}
+        onAnnounce={announce}
+      />
 
       <SupportPanel
         state={support}

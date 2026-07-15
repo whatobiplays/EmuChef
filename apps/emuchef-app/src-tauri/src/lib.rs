@@ -8,6 +8,7 @@ mod recovery;
 mod saved_configurations;
 mod sidecar;
 mod support;
+mod updates;
 
 use std::sync::Mutex;
 
@@ -60,6 +61,8 @@ pub fn run() {
                     app_data.join("session-active.marker"),
                 )),
                 support: Mutex::new(support::SupportStore::new(cache_root)),
+                updates: updates::UpdateService::from_production_document()?,
+                update_activity: updates::ActivityGate::default(),
             });
             Ok(())
         })
@@ -109,6 +112,12 @@ pub fn run() {
             support::get_cache_inventory,
             support::cleanup_cache,
             support::export_support_diagnostics,
+            updates::get_update_status,
+            updates::check_for_updates,
+            updates::begin_update_interaction_session,
+            updates::set_update_interaction_state,
+            updates::end_update_interaction_session,
+            updates::open_update_download,
         ])
         .run(tauri::generate_context!())
         .expect("error while running EmuChef");

@@ -328,6 +328,35 @@ input identifiers.
 
 ## End-User App
 
+The Apple Silicon end-user app implements user-triggered signed update
+discovery and manual DMG browser handoff. Rust owns the source-pinned manifest
+and DMG URL policies, dedicated metadata public key, no-proxy identity-only HTTP
+client, response status/header/length checks, 64 KiB streamed body bound,
+canonical fixed-JSON parsing, Ed25519 verification, stable target and version
+policy, expiry, retained candidate, activity leases, and operating-system
+opener. React receives only display metadata and availability; no URL, key,
+signature, raw response, path, or generic opener argument crosses IPC.
+
+Production update trust contains only schema version 1 and `configured: false`.
+The local unconfigured status performs no DNS, HTTP, proxy discovery, browser
+action, or network-dependent migration. Checks are user-triggered only and
+never block startup or ordinary local operation.
+
+The browser downloads the DMG. EmuChef does not inspect or verify the local
+file, mount it, install it, replace the app, or restart. Signed size and SHA-256
+are release identity metadata rather than proof of the local download. Apple
+Developer ID, hardened runtime, notarization, stapling, and Gatekeeper are the
+executable trust controls. Saved configurations, recovery, diagnostics, cache,
+and managed Platform-Tools remain in app data and outside update authority.
+
+Release tooling reuses Phase 3E credentialed verification, proves that a
+read-only release-tooling mount contains the exact verified app tree, emits
+deterministic unsigned fixed JSON, and finalizes only after verifying an
+external Ed25519 signature. Production trust, hosting, credentialed release
+metadata, and clean-Mac manual replacement evidence remain pending. The former
+in-place updater remains rejected because its pinned API could not meet the
+single-response pre-deserialization trust model.
+
 `apps/emuchef-app` is the separate React/Tauri application for guided
 end-user setup. It packages the Rust `emuchef --sidecar` runtime and a bundled
 catalog snapshot but shares no frontend modules or runtime state with
@@ -472,7 +501,7 @@ The trusted backend requires the four product directories, ignores only regular
 computes the canonical catalog SHA-256, and passes a
 resolved snapshot to the sidecar. React receives source identity, version, and
 digest without a catalog filesystem path. The catalog remains a bundled MVP
-source; no network or update implementation exists.
+source; Phase 4B release discovery does not update or replace catalog content.
 
 Exact ADB serials and executable paths exist only inside trusted Rust/Tauri
 communication. Tauri assigns stable opaque device handles while a serial
@@ -613,7 +642,9 @@ packaged sidecar, packaged runtime, and interactive editor evidence. The editor
 exposes side-effect-free planning, but not apply, through its Tauri and JSONL
 command surfaces.
 Public release readiness still requires real packaged GUI evidence on supported
-targets, updater support, and cross-platform release automation.
+targets, reviewed production update trust and hosting, credentialed signed
+release metadata, clean-Mac manual replacement evidence, and cross-platform
+release automation.
 
 The macOS `0.1.0` application and disk image built from commit
 `93f816fc1ea59cd034a40432e4e2a269e11eead7` have completed Developer ID signing,

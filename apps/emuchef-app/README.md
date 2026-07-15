@@ -1,5 +1,23 @@
 # EmuChef End-User App
 
+## Secure manual updates
+
+The Updates dialog performs user-triggered signed release discovery. Rust owns
+the fixed HTTPS manifest and DMG policies, bounded identity-only HTTP client,
+fixed-JSON/Ed25519 validation, retained candidate, safety gate, and browser
+handoff. React receives no URL, key, signature, response, filesystem path, or
+generic opener authority. Production trust is intentionally unconfigured, so
+the shipped source performs no update network or browser action until reviewed
+values are pinned.
+
+An available release opens its validated DMG address in the default browser.
+EmuChef never downloads, mounts, verifies, installs, replaces, or restarts the
+app. The browser-downloaded file is governed by Developer ID, notarization,
+stapling, and Gatekeeper when the user opens it. The displayed size and SHA-256
+identify signed release metadata but do not prove the local download. Manual
+replacement preserves application-data configurations, recovery, diagnostics,
+cache, and user-managed Platform-Tools.
+
 ## 1. Purpose
 
 `apps/emuchef-app` is the guided React/Tauri workflow for end users. It guides

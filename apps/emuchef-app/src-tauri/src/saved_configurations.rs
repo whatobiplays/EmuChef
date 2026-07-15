@@ -407,6 +407,10 @@ pub async fn create_saved_configuration(
     request: CreateSavedConfigurationRequest,
 ) -> Result<Value, String> {
     let name = validated_name(&request.name)?;
+    let _dialog_activity = app
+        .state::<AppState>()
+        .update_activity
+        .reserve_native_dialog()?;
     let picker = app
         .dialog()
         .file()
@@ -451,6 +455,10 @@ pub async fn create_saved_configuration(
 
 #[tauri::command]
 pub async fn open_saved_configuration(app: AppHandle) -> Result<Value, String> {
+    let _dialog_activity = app
+        .state::<AppState>()
+        .update_activity
+        .reserve_native_dialog()?;
     let picker = app
         .dialog()
         .file()
@@ -495,6 +503,10 @@ pub async fn relink_recent_configuration(
     app: AppHandle,
     request: RecentHandleRequest,
 ) -> Result<Value, String> {
+    let _dialog_activity = app
+        .state::<AppState>()
+        .update_activity
+        .reserve_native_dialog()?;
     let picker = app
         .dialog()
         .file()
@@ -661,6 +673,10 @@ pub async fn save_saved_configuration_as(
     request: SaveAsRequest,
 ) -> Result<Value, String> {
     let name = validated_name(&request.name)?;
+    let _dialog_activity = app
+        .state::<AppState>()
+        .update_activity
+        .reserve_native_dialog()?;
     let picker = app
         .dialog()
         .file()

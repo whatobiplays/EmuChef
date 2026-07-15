@@ -41,10 +41,64 @@ test("app does not bundle or fetch Platform-Tools", () => {
   assert.equal(/axios|node-fetch|updater/i.test(packageJson), false);
   const rustSources = fs
     .readdirSync(rustSourceDir)
-    .filter((name) => name.endsWith(".rs"))
+    .filter((name) => name.endsWith(".rs") && name !== "updates.rs")
     .map((name) => read(`src-tauri/src/${name}`))
     .join("\n");
   assert.equal(/reqwest|hyper::client|ureq|download_to|latest-darwin\.zip/i.test(rustSources), false);
+});
+
+test("manual update discovery keeps all navigation and trust authority in Rust", () => {
+  const api = read("src/api.ts");
+  const types = read("src/types.ts");
+  const updates = read("src-tauri/src/updates.rs");
+  const app = read("src-tauri/src/lib.rs");
+  const capability = JSON.parse(read("src-tauri/capabilities/default.json"));
+  const cargo = read("src-tauri/Cargo.toml");
+  const frontend = `${read("src/App.tsx")}\n${read("src/UpdatesPanel.tsx")}`;
+  const updateApi = sourceSlice(api, "getUpdateStatus:", "\n};");
+
+  assert.doesNotMatch(`${cargo}\n${app}`, /tauri-plugin-updater|tauri_plugin_updater/i);
+  assert.deepEqual(capability.permissions, ["core:default"]);
+  assert.doesNotMatch(frontend, /@tauri-apps\/plugin-opener|openUrl|openPath|https?:\/\//i);
+  assert.doesNotMatch(updateApi, /\b(?:url|uri|path|signature|publicKey|privateKey|endpoint|origin)\b/i);
+  assert.doesNotMatch(types, /interface UpdateStatus[\s\S]{0,900}\b(?:url|uri|path|signature|key|endpoint|origin)\??:/i);
+  assert.match(updates, /app\.opener\(\)\s*\.open_url\(candidate\.manifest\.dmg_url/s);
+  assert.match(updates, /redirect\(reqwest::redirect::Policy::none\(\)\)/);
+  assert.match(updates, /\.no_proxy\(\)/);
+  assert.match(updates, /\.header\(ACCEPT_ENCODING, "identity"\)/);
+});
+
+test("production update trust is fail-closed and fixture authority is separate", () => {
+  assert.deepEqual(JSON.parse(read("src-tauri/update-trust.json")), {
+    schemaVersion: 1,
+    configured: false,
+  });
+  const fixture = JSON.parse(read("tests/fixtures/update-trust.json"));
+  assert.equal(fixture.configured, true);
+  assert.match(fixture.metadataKeyId, /^test-/);
+  assert.notEqual(read("src-tauri/update-trust.json").includes(fixture.metadataPublicKey), true);
+});
+
+test("Updates UI is accessible, manual, and explicit about browser download trust", () => {
+  const panel = read("src/UpdatesPanel.tsx");
+  assert.match(panel, /<AccessibleDialog/);
+  assert.match(panel, /initialFocusRef=\{closeRef\}/);
+  assert.match(panel, /Manual replacement/);
+  assert.match(panel, /EmuChef does not inspect or verify the local DMG/);
+  assert.match(panel, /Developer ID signing, notarization,[\s\S]*stapling, and Gatekeeper/);
+  assert.match(panel, /role=\{status\.state === "failed" \? "alert" : "status"\}/);
+});
+
+test("update manifest release preparation reuses Phase 3E credentialed verification", () => {
+  const packaging = read("scripts/macos-packaging.mjs");
+  const release = read("scripts/macos-update-manifest.mjs");
+  const packageJson = JSON.parse(read("package.json"));
+  assert.match(packaging, /verifyCredentialedRelease\(app\.appPath, dmgPath/);
+  assert.match(packaging, /hdiutil", \["attach", "-readonly", "-nobrowse"/);
+  assert.match(packaging, /appTreeDigest\(contained\.appPath[\s\S]*appTreeDigest\(app\.appPath/);
+  assert.match(release, /verifyCredentialedUpdateArtifacts\(appPath, dmgPath\)/);
+  assert.doesNotMatch(release, /private[-_ ]?key|sign\(/i);
+  assert.equal(packageJson.scripts["release:macos:update-manifest"], "node scripts/macos-update-manifest.mjs");
 });
 
 test("Platform-Tools setup exposes only the official page and no React path argument", () => {

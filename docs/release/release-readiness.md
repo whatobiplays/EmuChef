@@ -33,8 +33,16 @@
 - Execute the maintained
   [macOS signing and notarization runbook](../manual/macos-signing-notarization.md)
   and retain external Apple submission evidence for each release.
-- Decide and implement updater support.
+- Pin reviewed production Phase 4B manifest/DMG origins and the metadata public
+  key, publish credentialed signed release metadata, and record clean-Mac manual
+  DMG replacement evidence under the
+  [Phase 4B contract](../product/phase-4b-secure-end-user-update-delivery.md).
 - Add cross-platform release automation and artifact inspection.
 
 Completed local signing and notarization do not establish clean-Mac packaged-GUI
 or public-release readiness.
+
+Phase 4B signed discovery and manual browser handoff are implemented but
+fail-closed in production because trust remains unconfigured. This is not an
+in-place updater: EmuChef never downloads or verifies the local browser DMG,
+installs an app, or restarts itself.
