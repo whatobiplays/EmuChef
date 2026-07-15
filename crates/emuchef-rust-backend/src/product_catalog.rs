@@ -10,6 +10,7 @@ use std::path::{Path, PathBuf};
 
 use serde_json::{json, Value};
 
+use crate::authored_models::{self, DEVICE_PROFILE_KIND};
 use crate::catalog_source::CatalogSnapshot;
 use crate::errors::ApiError;
 
@@ -74,6 +75,9 @@ fn authored_inventory(
 }
 
 fn inventory_entry(path: &Path, expected_kind: &str) -> Result<Value, ApiError> {
+    if expected_kind == DEVICE_PROFILE_KIND {
+        return device_profile_inventory_entry(path);
+    }
     let bytes = fs::read(path).map_err(|_| {
         ApiError::load_failed(
             "Catalog inventory entry is unreadable.",
@@ -104,56 +108,68 @@ fn inventory_entry(path: &Path, expected_kind: &str) -> Result<Value, ApiError> 
             json!({ "expectedKind": expected_kind }),
         ));
     }
-    let value = if expected_kind == "device_plan" {
-        let recipes = object
-            .get("recipes")
-            .and_then(Value::as_array)
-            .into_iter()
-            .flatten()
-            .map(|selection| {
-                json!({
-                    "recipeId": selection.get("recipe_ref"),
-                    "selectedByDefault": selection.get("selected_by_default"),
-                })
+    let recipes = object
+        .get("recipes")
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+        .map(|selection| {
+            json!({
+                "recipeId": selection.get("recipe_ref"),
+                "selectedByDefault": selection.get("selected_by_default"),
             })
-            .collect::<Vec<_>>();
-        json!({
-            "id": object.get("id"),
-            "name": object.get("name"),
-            "description": object.get("description"),
-            "deviceProfileId": object.get("device_profile_ref"),
-            "recipes": recipes,
-            "showAdvancedSteps": object.get("defaults").and_then(Value::as_object).and_then(|value| value.get("show_advanced_steps")),
-            "metadata": object.get("metadata"),
         })
-    } else {
-        let matches = object.get("match").and_then(Value::as_object);
-        let capabilities = object.get("capability_defaults").and_then(Value::as_object);
-        json!({
-            "id": object.get("id"),
-            "name": object.get("name"),
-            "description": object.get("description"),
-            "matchCriteria": {
-                "manufacturerContains": matches.and_then(|value| value.get("manufacturer_contains")),
-                "brandContains": matches.and_then(|value| value.get("brand_contains")),
-                "modelPatterns": matches.and_then(|value| value.get("model_patterns")),
-                "androidVersion": matches.and_then(|value| value.get("android_version")),
-            },
-            "capabilities": {
-                "adbAvailable": capabilities.and_then(|value| value.get("adb_available")),
-                "apkInstall": capabilities.and_then(|value| value.get("apk_install")),
-                "sharedStorageWrite": capabilities.and_then(|value| value.get("shared_storage_write")),
-                "appLaunch": capabilities.and_then(|value| value.get("app_launch")),
-                "shellCommand": capabilities.and_then(|value| value.get("shell_command")),
-                "packageRemoveForUser": capabilities.and_then(|value| value.get("package_remove_for_user")),
-                "rootShell": capabilities.and_then(|value| value.get("root_shell")),
-                "appDataWrite": capabilities.and_then(|value| value.get("app_data_write")),
-            },
-            "deviceTags": object.get("device_tags"),
-            "metadata": object.get("metadata"),
-        })
-    };
+        .collect::<Vec<_>>();
+    let value = json!({
+        "id": object.get("id"),
+        "name": object.get("name"),
+        "description": object.get("description"),
+        "deviceProfileId": object.get("device_profile_ref"),
+        "recipes": recipes,
+        "showAdvancedSteps": object.get("defaults").and_then(Value::as_object).and_then(|value| value.get("show_advanced_steps")),
+        "metadata": object.get("metadata"),
+    });
     Ok(value)
+}
+
+fn device_profile_inventory_entry(path: &Path) -> Result<Value, ApiError> {
+    let profile = authored_models::load_device_profile(path).map_err(|error| {
+        ApiError::load_failed(
+            error.message(),
+            json!({ "kind": DEVICE_PROFILE_KIND, "code": error.code() }),
+        )
+    })?;
+    let diagnostics = authored_models::validate_device_profile(&profile);
+    if !diagnostics.is_empty() {
+        return Err(ApiError::load_failed(
+            "Catalog device profile failed semantic validation.",
+            json!({ "kind": DEVICE_PROFILE_KIND, "diagnostics": diagnostics }),
+        ));
+    }
+
+    Ok(json!({
+        "id": profile.id,
+        "name": profile.name,
+        "description": profile.description,
+        "matchCriteria": {
+            "manufacturerContains": profile.match_criteria.manufacturer_contains,
+            "brandContains": profile.match_criteria.brand_contains,
+            "modelPatterns": profile.match_criteria.model_patterns,
+            "androidVersion": profile.match_criteria.android_version,
+        },
+        "capabilities": {
+            "adbAvailable": profile.capability_defaults.adb_available,
+            "apkInstall": profile.capability_defaults.apk_install,
+            "sharedStorageWrite": profile.capability_defaults.shared_storage_write,
+            "appLaunch": profile.capability_defaults.app_launch,
+            "shellCommand": profile.capability_defaults.shell_command,
+            "packageRemoveForUser": profile.capability_defaults.package_remove_for_user,
+            "rootShell": profile.capability_defaults.root_shell,
+            "appDataWrite": profile.capability_defaults.app_data_write,
+        },
+        "deviceTags": profile.device_tags,
+        "metadata": profile.metadata,
+    }))
 }
 
 fn is_yaml(path: &Path) -> bool {
@@ -251,5 +267,36 @@ overrides: {}
         assert!(result.get("root").is_none());
         assert!(result.get("documentId").is_none());
         assert!(result.get("yaml").is_none());
+    }
+
+    #[test]
+    fn product_inventory_rejects_semantically_invalid_typed_device_profiles() {
+        let temp = tempfile::tempdir().unwrap();
+        let path = temp.path().join("invalid-profile.yaml");
+        fs::write(
+            &path,
+            r#"schema_version: 1
+kind: device_profile
+id: profile.example
+name: Example Profile
+match: {model_patterns: ['[']}
+capability_defaults: {adb_available: true, apk_install: true, shared_storage_write: true, app_launch: true, shell_command: true, package_remove_for_user: true, root_shell: false, app_data_write: false}
+device_tags: []
+metadata: {}
+"#,
+        )
+        .unwrap();
+
+        let error = inventory_entry(&path, DEVICE_PROFILE_KIND).unwrap_err();
+        let value = error.to_value();
+        assert_eq!(value["code"], "load_failed");
+        assert_eq!(
+            value["details"]["diagnostics"][0]["code"],
+            "device_model_pattern_invalid"
+        );
+        assert_eq!(
+            value["details"]["diagnostics"][0]["field"],
+            "match.model_patterns[0]"
+        );
     }
 }

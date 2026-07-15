@@ -7,6 +7,7 @@
 mod artifact_resolver;
 mod artifact_store;
 mod artifact_transport;
+pub mod authored_models;
 pub mod catalog;
 pub mod catalog_source;
 mod cli;

@@ -31,6 +31,20 @@ code and alternate-backend selection paths.
 The canonical retirement contract and evidence checklist are in
 `docs/product/phase-4a-python-runtime-retirement.md`.
 
+## Config Editor Authored Generation
+
+The Config Editor provides guided generation workflows for a starter app definition and installation recipe from a local APK, direct remote APK, GitHub repository, or GitHub release, and for a starter device profile from one connected ADB device. Rust owns source analysis, APK inspection contracts, typed authored models, validation, canonical draft generation, collision detection, evidence classification, and sidecar operations. Tauri owns native paths, configured external tools, exact ADB serials, native save destinations, final collision revalidation, and trusted writes. React owns presentation and explicit author choices.
+
+Generation produces reviewable drafts and performs no authored-data writes until explicit save. The generated recipe opens through the existing recipe document session. App definitions and device profiles initially use dedicated draft forms and canonical YAML previews rather than new persistent editor-session types. App definitions remain catalog and tracking metadata; generated recipes remain execution authority.
+
+GitHub analysis uses validated GitHub API origins and excludes drafts and prereleases by default. Android package facts come from APK inspection rather than repository naming. The initial APK-inspection contract uses a separately configured user-supplied `apkanalyzer` or `aapt2`; EmuChef does not bundle Android SDK build tools. Local APK generation defaults to a required user-provided APK recipe input, while a selected stable GitHub release asset defaults to a pinned `remote_file` artifact. No local absolute APK path is persisted.
+
+Generated recipes are minimal: artifact resolution when needed, APK installation, a verified package-installed skip condition, and an optional explicit launch step only when a launcher component was verified and the author enables it. Generation does not infer configuration-copy, root, permission, force-stop, app-data, or device-plan behavior from repository prose.
+
+Device profile generation reuses the existing device-listing and probing implementation. Standard capture is read-only and proposes conservative exact match criteria: detected manufacturer and brand tokens, a regex-escaped anchored model pattern, and detected Android major version as the minimum. Exact serials remain trusted transport state and are never emitted into authored YAML. Extended shared-storage, command-availability, and optional root checks require a separate explicit action and install no probe APK.
+
+Typed schema-v1 `AppDefinitionV1` and `DeviceProfileV1` models are the shared authority for generator output, structural parsing, canonical emission, save validation, catalog loading, and future dedicated editors. Proposed values retain verified, derived, suggested, or missing evidence in draft DTOs; final YAML contains only reviewed authored values. The complete approved plan is documented in `docs/product/config-editor-authored-generation.md`.
+
 ## Authored Data and Planning
 
 Authored source lives under `authored/`:

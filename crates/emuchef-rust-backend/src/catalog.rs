@@ -2,10 +2,10 @@
 //!
 //! Validation scans these authored-root-relative top-level patterns:
 //! `apps/*.y*ml`, `recipes/*.y*ml`,
-//! `device_profiles/*.y*ml`, and `device_plans/*.y*ml`. The catalog models only
-//! recipe metadata needed for recipe dependency diagnostics.
-//! It does not build planner data structures, execution plans, or executor
-//! state.
+//! `device_profiles/*.y*ml`, and `device_plans/*.y*ml`. The catalog models
+//! recipe metadata needed for dependency diagnostics and validates typed app
+//! definitions and device profiles. It does not build planner data structures,
+//! execution plans, or executor state.
 
 use std::collections::{HashMap, HashSet};
 use std::fs;
@@ -13,6 +13,7 @@ use std::path::{Path, PathBuf};
 
 use serde_json::{json, Value};
 
+use crate::authored_models::{self, AuthoredModelDiagnostic};
 use crate::model::Recipe;
 use crate::yaml;
 
@@ -23,12 +24,11 @@ pub const AUTHORED_CATALOG_GLOBS: &[&str] = &[
     "device_plans/*.y*ml",
 ];
 
-const CATALOG_DIRECTORIES: &[&str] = &["apps", "recipes", "device_profiles", "device_plans"];
-
 #[derive(Clone, Debug, Default)]
 struct ValidationCatalog {
     recipes: HashMap<String, Recipe>,
     recipe_files: HashMap<String, Vec<PathBuf>>,
+    authored_model_diagnostics: Vec<Value>,
 }
 
 pub fn normalize_authored_root(authored_root: Option<&str>, recipe_path: &Path) -> Option<PathBuf> {
@@ -59,6 +59,22 @@ pub fn validate_recipe_with_catalog(
     catalog.validate_recipe(file, recipe, recipe_path, authored_root)
 }
 
+/// Validate every top-level schema-v1 app definition and device profile.
+///
+/// Diagnostics are ordered by authored directory, file name, and semantic
+/// field order. File fields are relative to the authored root so messages do
+/// not expose machine-specific paths.
+pub fn validate_authored_catalog_models(authored_root: &Path) -> Vec<Value> {
+    let mut diagnostics = Vec::new();
+    for path in top_level_yaml_files(&authored_root.join("apps")) {
+        diagnostics.extend(validate_app_definition_path(authored_root, &path));
+    }
+    for path in top_level_yaml_files(&authored_root.join("device_profiles")) {
+        diagnostics.extend(validate_device_profile_path(authored_root, &path));
+    }
+    diagnostics
+}
+
 fn infer_authored_root(recipe_path: &Path) -> Option<PathBuf> {
     let target_path = PathBuf::from(yaml::resolved_path_string(recipe_path));
     for parent in target_path.ancestors().skip(1) {
@@ -77,16 +93,13 @@ fn resolved_path(path: impl AsRef<Path>) -> PathBuf {
 
 impl ValidationCatalog {
     fn collect(authored_root: &Path) -> Self {
-        let mut catalog = Self::default();
-
-        for directory_name in CATALOG_DIRECTORIES {
-            for path in top_level_yaml_files(&authored_root.join(directory_name)) {
-                if *directory_name == "recipes" {
-                    catalog.collect_recipe(path);
-                }
-            }
+        let mut catalog = Self {
+            authored_model_diagnostics: validate_authored_catalog_models(authored_root),
+            ..Self::default()
+        };
+        for path in top_level_yaml_files(&authored_root.join("recipes")) {
+            catalog.collect_recipe(path);
         }
-
         catalog
     }
 
@@ -124,7 +137,9 @@ impl ValidationCatalog {
             recipes.remove(existing_id);
         }
 
-        let mut errors = Vec::new();
+        // Authored-model diagnostics are additive. Recipe diagnostics continue
+        // to run even when an app definition or device profile is malformed.
+        let mut errors = self.authored_model_diagnostics.clone();
         let existing_path = (replaced_recipe_id.as_deref() != Some(recipe.id.as_str()))
             .then(|| {
                 self.recipe_files
@@ -180,6 +195,79 @@ impl ValidationCatalog {
 
         errors
     }
+}
+
+fn validate_app_definition_path(authored_root: &Path, path: &Path) -> Vec<Value> {
+    match authored_models::load_app_definition(path) {
+        Ok(value) => model_diagnostics(
+            authored_root,
+            path,
+            "app_definition",
+            Some(&value.id),
+            authored_models::validate_app_definition(&value),
+        ),
+        Err(error) => vec![diagnostic(
+            "error",
+            error.code(),
+            error.message(),
+            &authored_relative_path(authored_root, path),
+            Some("app_definition"),
+            None,
+            None,
+        )],
+    }
+}
+
+fn validate_device_profile_path(authored_root: &Path, path: &Path) -> Vec<Value> {
+    match authored_models::load_device_profile(path) {
+        Ok(value) => model_diagnostics(
+            authored_root,
+            path,
+            "device_profile",
+            Some(&value.id),
+            authored_models::validate_device_profile(&value),
+        ),
+        Err(error) => vec![diagnostic(
+            "error",
+            error.code(),
+            error.message(),
+            &authored_relative_path(authored_root, path),
+            Some("device_profile"),
+            None,
+            None,
+        )],
+    }
+}
+
+fn model_diagnostics(
+    authored_root: &Path,
+    path: &Path,
+    object_kind: &str,
+    object_id: Option<&str>,
+    diagnostics: Vec<AuthoredModelDiagnostic>,
+) -> Vec<Value> {
+    let file = authored_relative_path(authored_root, path);
+    diagnostics
+        .into_iter()
+        .map(|item| {
+            diagnostic(
+                "error",
+                &item.code,
+                &item.message,
+                &file,
+                Some(object_kind),
+                object_id,
+                Some(&item.field),
+            )
+        })
+        .collect()
+}
+
+fn authored_relative_path(authored_root: &Path, path: &Path) -> String {
+    path.strip_prefix(authored_root)
+        .unwrap_or(path)
+        .to_string_lossy()
+        .replace('\\', "/")
 }
 
 fn top_level_yaml_files(directory: &Path) -> Vec<PathBuf> {

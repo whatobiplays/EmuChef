@@ -1,0 +1,357 @@
+# Config Editor Authored Generation
+
+## Status
+
+Approved implementation plan.
+
+This document defines the Config Editor workflows for generating:
+
+- a starter app definition and installation recipe from a GitHub source, remote APK, or local APK; and
+- a starter device profile from a connected ADB device.
+
+Rust is the sole product runtime. All analysis, validation, canonical generation, collision detection, and sidecar protocol behavior belong to `crates/emuchef-rust-backend`. Tauri owns native paths, trusted filesystem writes, configured external tools, and exact ADB serials. React owns presentation and explicit user choices.
+
+## Product boundaries
+
+Generation creates reviewable authored drafts. It does not silently alter the catalog.
+
+The generated recipe becomes a normal recipe document and uses the existing recipe editor, validation, undo/redo, reference indexing, and canonical YAML path. App definitions and device profiles initially use dedicated draft forms and YAML previews rather than new persistent editor-session types.
+
+Generation operations are side-effect free until an explicit save. Network analysis may retrieve bounded metadata and a selected APK into a generator-owned temporary workspace, but it does not install APKs, execute repository content, modify a device, or publish catalog files.
+
+App definitions describe catalog and tracking metadata. They are not execution authority. The generated recipe remains the executable provisioning authority.
+
+This scope does not generate device plans, infer configuration-copy behavior from README prose, or automatically add root, permission, force-stop, app-data, or configuration steps.
+
+## App and recipe generator
+
+### Supported sources
+
+The first complete workflow supports:
+
+1. local APK;
+2. GitHub repository URL;
+3. GitHub release URL; and
+4. direct remote APK URL.
+
+GitHub support uses the GitHub API and accepts only canonical GitHub repository and release identities. It does not scrape rendered HTML or implement a generic arbitrary-site crawler.
+
+GitHub analysis collects bounded repository metadata, stable release metadata, and APK release assets. Drafts and prereleases are excluded by default. When multiple APK assets remain, the user must choose one.
+
+### APK inspection
+
+APK inspection is authoritative for Android-specific facts:
+
+- package name;
+- application label;
+- version code and version name;
+- minimum and target SDK;
+- supported ABIs;
+- launcher activities;
+- requested permissions;
+- debuggable status;
+- split/base APK status; and
+- signing-certificate SHA-256 fingerprint.
+
+GitHub names, topics, descriptions, filenames, and release metadata may suggest values but may not substitute for manifest evidence.
+
+The first implementation uses a separately configured user-supplied Android APK analysis tool. Preferred order is `apkanalyzer`, then `aapt2`. Neither tool is part of Android Platform-Tools, so this configuration is independent from ADB setup. EmuChef does not bundle Android SDK build tools.
+
+APK analyzers run with direct argv, bounded output, and a timeout. APK inspection never installs the package. Split APKs are rejected for the starter single-APK recipe until an explicit split-install contract exists.
+
+### Installation strategies
+
+The wizard offers two recipe strategies.
+
+#### Pinned remote asset
+
+This is the default for a selected stable GitHub release asset. The recipe declares a `remote_file` artifact with the exact release asset URL, resolves it, and installs it.
+
+#### User-provided APK
+
+This is the default for a local APK and is available for any source. The recipe declares a required `file` input with role `apk` and installs that input. It never persists the developer's local absolute APK path.
+
+### Generated recipe
+
+The starter recipe is intentionally minimal:
+
+- optional `resolve_artifacts` for a pinned remote source;
+- `install_apk` constrained by `apk_install`;
+- `package_installed` skip condition using the verified package name; and
+- optional `launch_app` only when a launcher component was verified and the author explicitly enables launch-once generation.
+
+The generator uses the existing recipe model and step specifications. It does not maintain a second recipe representation.
+
+### Generated app definition
+
+The app definition preserves schema version 1 and the existing authored shape under `authored/apps`:
+
+- identity and display metadata;
+- primary package and aliases;
+- free-form install-source metadata;
+- free-form tracking-source metadata;
+- artifact support declarations;
+- provisioning metadata;
+- input metadata; and
+- extensible metadata.
+
+`install_source` and `tracking_source` describe source and tracking intent. They do not dynamically resolve recipe artifacts.
+
+### Evidence
+
+Each proposed value carries one of these confidence states:
+
+- `verified`: supplied by APK manifest or exact source metadata;
+- `derived`: deterministically transformed from verified data;
+- `suggested`: heuristic authoring recommendation; or
+- `missing`: no value is proposed.
+
+The draft response includes provenance and warnings. Final YAML contains authored values, not evidence wrappers.
+
+### Collision detection
+
+Before saving, Rust scans the selected authored root for:
+
+- duplicate app ID;
+- duplicate primary package;
+- duplicate recipe ID;
+- duplicate destination path;
+- existing repository metadata; and
+- existing pinned asset URL.
+
+ID and path conflicts are blocking. Matching package or repository data under a different ID is a warning requiring review.
+
+## Device profile generator
+
+### Existing runtime reuse
+
+The workflow reuses the existing sidecar operations and ADB implementation:
+
+- `listAdbDevices`;
+- `probeDevice`; and
+- the existing detected-device fact and profile-matching logic.
+
+The Config Editor adds trusted Tauri wrappers and frontend projections for those operations rather than creating another ADB process runner.
+
+### Standard capture
+
+Standard capture is the default and performs no device writes. It collects only facts useful for authored matching and diagnostics:
+
+- manufacturer;
+- brand;
+- model;
+- product;
+- device;
+- board;
+- hardware;
+- ABI list;
+- Android major version; and
+- Android API level.
+
+The exact ADB serial remains trusted transport state. It is not included in generated YAML, React persistence, or normal logs.
+
+### Extended capability checks
+
+Extended checks are an explicit separate action. They may test:
+
+- temporary shared-storage write, read, and cleanup;
+- package-manager command availability;
+- activity-manager command availability; and
+- optional root-shell access through `su -c id`.
+
+The UI states the exact checks before execution. Root probing never runs automatically. The first implementation does not install a probe APK.
+
+### Capability defaults
+
+Generated profiles contain all current capability-default fields. Evidence remains separate from the final booleans.
+
+A successful standard ADB probe verifies `adb_available` and `shell_command`. Other normal-device capabilities may be suggested conservatively. `package_remove_for_user`, `root_shell`, and `app_data_write` default to false unless explicitly supported by evidence and author choice.
+
+### Match generation
+
+Generated matching is conservative:
+
+- manufacturer and brand use detected exact tokens in their respective contains lists;
+- the model is regex escaped and emitted as an anchored exact pattern;
+- Android major version becomes `android_version.min`;
+- no Android maximum is generated;
+- no alternate model, OEM alias, product-family pattern, or generic vendor regex is invented.
+
+The user can edit every proposed match field before saving.
+
+The default profile ID is `<normalized-manufacturer>.<normalized-model>`. The author may change it before save.
+
+## Backend architecture
+
+New implementation belongs under a focused Rust module family:
+
+```text
+crates/emuchef-rust-backend/src/generation/
+  mod.rs
+  diagnostics.rs
+  identifiers.rs
+  collisions.rs
+  app.rs
+  app_definition.rs
+  recipe.rs
+  github.rs
+  apk.rs
+  device_profile.rs
+  device_capabilities.rs
+```
+
+The implementation reuses existing `device_probe`, `end_user_runtime`, `model`, `step_specs`, `validation`, `yaml`, and catalog behavior. Authoring-time GitHub/APK analysis does not belong in the execution artifact resolver.
+
+## Typed authored models
+
+Before generation ships, Rust owns typed schema-v1 models for app definitions and device profiles. These models provide:
+
+- structural parsing;
+- canonical YAML emission;
+- stable validation;
+- regex and Android-range validation for device profiles;
+- package and source-shape validation for app definitions; and
+- the common authority used by generator output, save validation, catalog loading, and future dedicated editors.
+
+Generated YAML is never treated as an unvalidated `serde_json::Value` blob.
+
+Schema-v1 parsing rejects unknown fields in fixed top-level and nested
+structures. Extensibility is limited to `install_source.options`, fields after
+`tracking_source.type`, and `metadata`; these mappings retain nested
+JSON-compatible values and insertion order without silently discarding data.
+Authored IDs use lowercase alphanumeric segments separated by `.`, `_`, or
+`-`.
+
+Canonical YAML emits fixed fields in schema order and emits empty collection
+fields explicitly. Optional scalar values and optional Android range bounds are
+omitted when absent. Re-emitting canonical YAML is byte-stable, while ordered
+extension mappings retain their authored order.
+
+## Sidecar protocol
+
+Add negotiated capabilities for:
+
+- `analyzeAppSource`;
+- `inspectApk`;
+- `generateAppRecipeDraft`;
+- `generateDeviceProfileDraft`; and
+- `checkGeneratedCatalogCollisions`.
+
+Existing `listAdbDevices` and `probeDevice` capabilities are reused.
+
+Analysis and draft generation return structured data and perform no authored-data writes. Backend responses use stable error codes and redact credentials, exact serials, absolute paths, raw analyzer output, and unsafe network details from product-facing errors.
+
+## Tauri and save ownership
+
+Tauri owns:
+
+- native local-APK selection;
+- configured APK-analyzer paths;
+- exact ADB serials and device handles;
+- native save destinations;
+- final collision revalidation; and
+- trusted writes.
+
+Saving an app and recipe is one logical operation. Both drafts are validated before publication. Temporary files are written and synced before either final path is published. Existing files are never overwritten without explicit approval. If final publication partially fails, Tauri removes any newly published counterpart when safe and reports the incomplete outcome.
+
+After a successful app-and-recipe save, the generated recipe opens through the existing recipe document session.
+
+## Config Editor workflow
+
+Top-level actions:
+
+```text
+File
+  Generate App and Recipe...
+  Generate Device Profile...
+```
+
+App workflow:
+
+1. choose source;
+2. inspect repository or release;
+3. select APK when needed;
+4. review APK facts;
+5. configure app draft;
+6. configure recipe draft;
+7. review YAML and collisions; and
+8. save and open the recipe.
+
+Device workflow:
+
+1. list and select one connected device;
+2. review detected facts;
+3. optionally run extended checks;
+4. configure match criteria;
+5. review capability defaults;
+6. review YAML and collisions; and
+7. save the profile.
+
+Generator state is separate from `RecipeDocumentDto`. A sidecar restart invalidates active analysis and requires the wizard to rerun it.
+
+## Security requirements
+
+- GitHub mode permits only validated HTTPS GitHub/API origins.
+- Network bodies, redirects, transfer duration, and APK size are bounded.
+- HTTPS-to-HTTP downgrade is rejected.
+- Repository content and downloaded scripts are never executed.
+- README HTML is not rendered or interpreted as execution instructions.
+- GitHub credentials, when added later, remain in trusted OS-backed storage and never cross into React.
+- APK filenames, labels, repository fields, and analyzer output are untrusted input.
+- External tools use direct argv and never a shell.
+- Standard device capture performs no writes.
+- Extended checks require explicit user action and clean up temporary material.
+
+## Delivery phases
+
+### Phase 1: typed authored foundations
+
+- typed `AppDefinitionV1` and `DeviceProfileV1` models;
+- structural parsing and canonical emission;
+- focused validation;
+- identifier normalization;
+- collision classification; and
+- generation evidence/diagnostic DTO foundations.
+
+### Phase 2: device profile generator
+
+- Config Editor access to existing device listing and probing;
+- expanded safe device facts;
+- profile draft generation;
+- optional extended capability checks;
+- collision checking;
+- native profile save; and
+- fake-runner tests.
+
+### Phase 3: local APK generator
+
+- configured APK analyzer;
+- native APK picker;
+- APK inspection;
+- app-definition draft;
+- user-provided-APK recipe draft;
+- dual-document validation and save; and
+- opening the generated recipe.
+
+### Phase 4: GitHub and remote APK sources
+
+- repository and release analysis;
+- stable asset filtering and selection;
+- bounded temporary APK download;
+- pinned-release recipe generation;
+- direct remote APK mode; and
+- network, timeout, and redaction tests.
+
+### Phase 5: refinement
+
+Potential later work includes OS-keychain GitHub credentials, dedicated app/profile editors, release-pattern testing, Obtainium import, source-update checks, aliases, and device-plan assistance.
+
+## Verification
+
+Rust tests cover typed parsing/emission, identifier normalization, regex escaping, Android ranges, evidence assignment, collision classification, generated recipe validity, URL parsing, release filtering, analyzer parsing, timeouts, and redaction.
+
+Protocol tests cover capability negotiation, malformed requests, side-effect-free generation, stable errors, and absence of unsafe paths or serials.
+
+Config Editor tests cover wizard transitions, cancellation, ambiguous APK selection, backend restart invalidation, collision blocking, dirty-document protection, save recovery, and opening the generated recipe.
+
+Normal automated tests use local APK fixtures, fake GitHub HTTP endpoints, and fake ADB runners. They do not require public GitHub access, a real device, or installed Android SDK tools.
