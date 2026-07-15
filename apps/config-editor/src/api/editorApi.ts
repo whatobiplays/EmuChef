@@ -24,6 +24,14 @@ import type {
   UserConfigurationDocumentResult,
   ConfigurationDescriptionResult,
   PlanConfigurationResult,
+  DeviceProfileCollisionResult,
+  DeviceProfileDraftResult,
+  DeviceProfileGeneratorDeviceListResult,
+  DeviceProfileGeneratorSessionResult,
+  DeviceProfileProbeResult,
+  DeviceProfileRootSelectionResult,
+  DeviceProfileSaveResult,
+  DeviceProfileV1Dto,
 } from "./types";
 
 export type EditorApiResult<T> =
@@ -247,6 +255,84 @@ export async function planConfiguration(
   return callApi<PlanConfigurationResult>("plan_configuration", runtimeConfigurationInvokeArgs(request));
 }
 
+export async function beginDeviceProfileGenerator(): Promise<
+  EditorApiResult<DeviceProfileGeneratorSessionResult>
+> {
+  return callApi<DeviceProfileGeneratorSessionResult>("begin_device_profile_generator");
+}
+
+export async function chooseDeviceProfileAuthoredRoot(
+  sessionHandle: string,
+): Promise<EditorApiResult<DeviceProfileRootSelectionResult>> {
+  return callApi<DeviceProfileRootSelectionResult>("choose_device_profile_authored_root", {
+    sessionHandle,
+  });
+}
+
+export async function listDeviceProfileGeneratorDevices(
+  sessionHandle: string,
+): Promise<EditorApiResult<DeviceProfileGeneratorDeviceListResult>> {
+  return callApi<DeviceProfileGeneratorDeviceListResult>("list_device_profile_generator_devices", {
+    sessionHandle,
+  });
+}
+
+export async function probeDeviceProfileGeneratorDevice(
+  sessionHandle: string,
+  deviceHandle: string,
+): Promise<EditorApiResult<DeviceProfileProbeResult>> {
+  return callApi<DeviceProfileProbeResult>("probe_device_profile_generator_device", {
+    sessionHandle,
+    deviceHandle,
+  });
+}
+
+export async function generateDeviceProfileDraft(
+  sessionHandle: string,
+  deviceHandle: string,
+  profile: DeviceProfileV1Dto | null = null,
+): Promise<EditorApiResult<DeviceProfileDraftResult>> {
+  return callApi<DeviceProfileDraftResult>("generate_device_profile_draft", {
+    sessionHandle,
+    deviceHandle,
+    profile,
+  });
+}
+
+export async function checkDeviceProfileCollisions(
+  sessionHandle: string,
+  deviceHandle: string,
+  rootHandle: string,
+  profile: DeviceProfileV1Dto,
+): Promise<EditorApiResult<DeviceProfileCollisionResult>> {
+  return callApi<DeviceProfileCollisionResult>("check_device_profile_collisions", {
+    sessionHandle,
+    deviceHandle,
+    rootHandle,
+    profile,
+  });
+}
+
+export async function saveGeneratedDeviceProfile(
+  sessionHandle: string,
+  deviceHandle: string,
+  rootHandle: string,
+  profile: DeviceProfileV1Dto,
+): Promise<EditorApiResult<DeviceProfileSaveResult>> {
+  return callApi<DeviceProfileSaveResult>("save_generated_device_profile", {
+    sessionHandle,
+    deviceHandle,
+    rootHandle,
+    profile,
+  });
+}
+
+export async function cancelDeviceProfileGenerator(
+  sessionHandle: string,
+): Promise<EditorApiResult<Record<string, never>>> {
+  return callApi<Record<string, never>>("cancel_device_profile_generator", { sessionHandle });
+}
+
 export interface MenuState {
   hasDocument: boolean;
   hasSelectedAuthoredRoot: boolean;
@@ -259,6 +345,7 @@ export interface MenuState {
   documentSessionValid: boolean;
   backendCompatible: boolean | null;
   sidecarRunning: boolean | null;
+  generatorActive: boolean;
 }
 
 export async function updateMenuState(state: MenuState): Promise<void> {

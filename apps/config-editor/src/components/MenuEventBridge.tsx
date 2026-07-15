@@ -4,6 +4,7 @@ import { useEffect, useRef } from "react";
 export type MenuAction =
   | "openRecipe"
   | "openUserConfiguration"
+  | "generateDeviceProfile"
   | "saveRecipe"
   | "saveRecipeAs"
   | "restartSidecar"

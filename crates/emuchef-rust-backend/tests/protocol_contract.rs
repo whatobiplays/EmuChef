@@ -141,6 +141,8 @@ fn assert_hello_result(result: &Value) {
             "describeCatalog",
             "listAdbDevices",
             "probeDevice",
+            "generateDeviceProfileDraft",
+            "checkGeneratedCatalogCollisions",
             "matchDevice",
             "negotiateCapabilities",
             "openUserConfiguration",

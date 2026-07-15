@@ -41,9 +41,33 @@ GitHub analysis uses validated GitHub API origins and excludes drafts and prerel
 
 Generated recipes are minimal: artifact resolution when needed, APK installation, a verified package-installed skip condition, and an optional explicit launch step only when a launcher component was verified and the author enables it. Generation does not infer configuration-copy, root, permission, force-stop, app-data, or device-plan behavior from repository prose.
 
-Device profile generation reuses the existing device-listing and probing implementation. Standard capture is read-only and proposes conservative exact match criteria: detected manufacturer and brand tokens, a regex-escaped anchored model pattern, and detected Android major version as the minimum. Exact serials remain trusted transport state and are never emitted into authored YAML. Extended shared-storage, command-availability, and optional root checks require a separate explicit action and install no probe APK.
+Device profile generation is available from the Config Editor File menu as an
+ephemeral guided wizard. Tauri invokes the existing device-listing and probing
+operations with literal `adb` resolved from `PATH`. Generator-session handles
+scope every selected device and authored root; exact serials and native root
+paths remain in trusted process memory and never enter React state, generated
+YAML, or product-facing errors. React receives only safe device facts and a
+constant authored-root label.
 
-Typed schema-v1 `AppDefinitionV1` and `DeviceProfileV1` models are the shared authority for generator output, structural parsing, canonical emission, save validation, catalog loading, and future dedicated editors. Proposed values retain verified, derived, suggested, or missing evidence in draft DTOs; final YAML contains only reviewed authored values. The complete approved plan is documented in `docs/product/config-editor-authored-generation.md`.
+Standard capture is read-only and includes manufacturer, brand, model, product,
+device, board, hardware, ordered de-duplicated ABI values, Android major
+version, and Android API level. Drafts propose exact manufacturer and brand
+tokens, a regex-escaped anchored model pattern, and Android major as the minimum
+without a maximum. Schema version 1 and `device_profile` kind are fixed; all
+other proposed authored values remain editable with their original evidence
+classification and an edited-from-proposal marker.
+
+Device-profile draft generation, canonical YAML emission, validation, and
+collision analysis are side-effect free. Existing ID and destination conflicts
+block saving; likely matching overlap warns. An incomplete collision scan still
+allows draft review but produces a blocking diagnostic. Final save revalidates
+and rescans, derives the destination under the selected root's existing
+`device_profiles` directory, rejects overwrite and path escapes, and publishes a
+synced temporary sibling with atomic create-new/no-clobber semantics. Extended
+shared-storage, package-manager, activity-manager, root, APK, or other capability
+checks are not implemented.
+
+Typed schema-v1 `AppDefinitionV1` and `DeviceProfileV1` models are the shared authority for generator output, structural parsing, canonical emission, save validation, catalog loading, and future dedicated editors. Proposed values retain verified, derived, suggested, or missing evidence in draft DTOs; author edits do not replace that provenance, and final YAML contains only reviewed authored values. The complete approved plan is documented in `docs/product/config-editor-authored-generation.md`.
 
 ## Authored Data and Planning
 

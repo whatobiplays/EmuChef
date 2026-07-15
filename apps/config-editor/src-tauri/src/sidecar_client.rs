@@ -39,6 +39,10 @@ const REQUIRED_CAPABILITIES: &[&str] = &[
     "closeUserConfiguration",
     "describeConfiguration",
     "planConfiguration",
+    "listAdbDevices",
+    "probeDevice",
+    "generateDeviceProfileDraft",
+    "checkGeneratedCatalogCollisions",
     "ping",
 ];
 const RUST_BACKEND_MANIFEST: &str = "crates/emuchef-rust-backend/Cargo.toml";

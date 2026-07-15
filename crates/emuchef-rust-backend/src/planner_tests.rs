@@ -3242,6 +3242,7 @@ fn detected_context_planner_input_overrides_profile_scalars() {
             android_version: Some(15),
             android_api_level: Some(35),
             device_tags: Vec::new(),
+            ..DetectedDeviceFacts::default()
         },
     );
 
@@ -3397,6 +3398,7 @@ fn detected_context_planner_input_accepts_fake_probe_facts_without_live_probe() 
         android_version: Some(16),
         android_api_level: Some(36),
         device_tags: vec!["probe_detected".to_string()],
+        ..DetectedDeviceFacts::default()
     };
     let probe = FakeDeviceProbe::new(Ok(facts.clone()));
     let detected_facts = probe
@@ -3443,6 +3445,7 @@ fn detected_context_planner_input_does_not_emit_profile_mismatch_warning() {
             android_version: Some(9),
             android_api_level: Some(28),
             device_tags: vec!["unmatched".to_string()],
+            ..DetectedDeviceFacts::default()
         },
     )
     .expect("detected-context PlannerInput should build");
@@ -3476,6 +3479,7 @@ fn detected_context_planning_result_matching_facts_keeps_success_without_mismatc
             android_version: Some(13),
             android_api_level: Some(33),
             device_tags: vec!["detected_handheld".to_string()],
+            ..DetectedDeviceFacts::default()
         },
     );
 
@@ -3632,6 +3636,7 @@ fn detected_context_planning_result_accepts_fake_probe_facts() {
         android_version: Some(12),
         android_api_level: Some(32),
         device_tags: vec!["fake_probe".to_string()],
+        ..DetectedDeviceFacts::default()
     }));
     let facts = probe
         .detect()

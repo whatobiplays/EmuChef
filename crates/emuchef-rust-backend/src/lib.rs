@@ -25,6 +25,7 @@ mod executor;
 mod executor_real_adb_tests;
 #[cfg(test)]
 mod executor_tests;
+pub(crate) mod generation;
 pub mod jsonl;
 pub mod model;
 pub mod one_shot;

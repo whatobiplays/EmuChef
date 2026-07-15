@@ -4,6 +4,7 @@
 //! facts into planner context. The canonical Rust `emuchef plan` route uses the
 //! adapter when `--adb` or `--serial` requests live probing.
 
+use std::collections::HashSet;
 use std::process::Command;
 
 use serde::{Deserialize, Serialize};
@@ -23,6 +24,12 @@ pub(crate) struct DetectedDeviceFacts {
     pub manufacturer: Option<String>,
     pub brand: Option<String>,
     pub model: Option<String>,
+    pub product: Option<String>,
+    pub device: Option<String>,
+    pub board: Option<String>,
+    pub hardware: Option<String>,
+    #[serde(default)]
+    pub abis: Vec<String>,
     pub android_version: Option<i64>,
     pub android_api_level: Option<i64>,
     #[serde(default)]
@@ -129,6 +136,8 @@ pub(crate) fn detected_facts_from_getprop_output(
         serial: present_text(serial.as_deref()).map(ToString::to_string),
         ..DetectedDeviceFacts::default()
     };
+    let mut primary_abis = None;
+    let mut fallback_abis = Vec::new();
 
     for line in getprop_stdout.lines() {
         let Some((key, value)) = parse_getprop_line(line) else {
@@ -144,6 +153,24 @@ pub(crate) fn detected_facts_from_getprop_output(
             "ro.product.model" => {
                 facts.model = present_text(Some(value)).map(ToString::to_string);
             }
+            "ro.product.name" => {
+                facts.product = present_text(Some(value)).map(ToString::to_string);
+            }
+            "ro.product.device" => {
+                facts.device = present_text(Some(value)).map(ToString::to_string);
+            }
+            "ro.product.board" => {
+                facts.board = present_text(Some(value)).map(ToString::to_string);
+            }
+            "ro.hardware" => {
+                facts.hardware = present_text(Some(value)).map(ToString::to_string);
+            }
+            "ro.product.cpu.abilist" => {
+                primary_abis = Some(normalize_abis(value.split(',')));
+            }
+            "ro.product.cpu.abi" | "ro.product.cpu.abi2" => {
+                fallback_abis.push(value);
+            }
             "ro.build.version.release" => {
                 facts.android_version = parse_android_release(value);
             }
@@ -154,7 +181,22 @@ pub(crate) fn detected_facts_from_getprop_output(
         }
     }
 
+    facts.abis = primary_abis
+        .filter(|abis| !abis.is_empty())
+        .unwrap_or_else(|| normalize_abis(fallback_abis));
+
     facts
+}
+
+/// Preserve reported ABI preference order while removing blanks and duplicates.
+fn normalize_abis<'a>(values: impl IntoIterator<Item = &'a str>) -> Vec<String> {
+    let mut seen = HashSet::new();
+    values
+        .into_iter()
+        .filter_map(|value| present_text(Some(value)))
+        .filter(|value| seen.insert((*value).to_string()))
+        .map(ToString::to_string)
+        .collect()
 }
 
 fn parse_getprop_line(line: &str) -> Option<(&str, &str)> {
@@ -341,6 +383,7 @@ mod tests {
             android_version: Some(13),
             android_api_level: Some(33),
             device_tags: vec!["detected".to_string()],
+            ..DetectedDeviceFacts::default()
         };
         let probe = FakeDeviceProbe::new(Ok(facts.clone()));
 
@@ -438,6 +481,7 @@ mod tests {
                 android_version: Some(13),
                 android_api_level: Some(33),
                 device_tags: Vec::new(),
+                ..DetectedDeviceFacts::default()
             }
         );
     }
@@ -563,6 +607,7 @@ mod tests {
                 android_version: None,
                 android_api_level: None,
                 device_tags: Vec::new(),
+                ..DetectedDeviceFacts::default()
             }
         );
     }
@@ -745,6 +790,7 @@ mod tests {
                 android_version: Some(13),
                 android_api_level: Some(33),
                 device_tags: Vec::new(),
+                ..DetectedDeviceFacts::default()
             }
         );
     }
@@ -909,6 +955,47 @@ not a getprop line
             errors[1],
             DeviceProbeError::Failed { ref message } if message == "probe failed"
         ));
+    }
+
+    #[test]
+    fn getprop_parser_expands_safe_identity_facts_and_preserves_abi_order() {
+        let facts = detected_facts_from_getprop_output(
+            "\
+[ro.product.name]: [pocket_s_mini]
+[ro.product.device]: [pocket_s_mini]
+[ro.product.board]: [kalama]
+[ro.hardware]: [qcom]
+[ro.product.cpu.abilist]: [ arm64-v8a,armeabi-v7a,arm64-v8a, ,x86_64 ]
+",
+            None,
+        );
+        assert_eq!(facts.product.as_deref(), Some("pocket_s_mini"));
+        assert_eq!(facts.device.as_deref(), Some("pocket_s_mini"));
+        assert_eq!(facts.board.as_deref(), Some("kalama"));
+        assert_eq!(facts.hardware.as_deref(), Some("qcom"));
+        assert_eq!(facts.abis, ["arm64-v8a", "armeabi-v7a", "x86_64"]);
+    }
+
+    #[test]
+    fn getprop_parser_uses_ordered_abi_fallback_only_when_abilist_is_absent() {
+        let fallback = detected_facts_from_getprop_output(
+            "\
+[ro.product.cpu.abi]: [arm64-v8a]
+[ro.product.cpu.abi2]: [ armeabi-v7a ]
+[ro.product.cpu.abi2]: [arm64-v8a]
+",
+            None,
+        );
+        assert_eq!(fallback.abis, ["arm64-v8a", "armeabi-v7a"]);
+
+        let primary = detected_facts_from_getprop_output(
+            "\
+[ro.product.cpu.abi]: [fallback]
+[ro.product.cpu.abilist]: [primary,secondary]
+",
+            None,
+        );
+        assert_eq!(primary.abis, ["primary", "secondary"]);
     }
 
     fn production_source_without_line_comments() -> String {

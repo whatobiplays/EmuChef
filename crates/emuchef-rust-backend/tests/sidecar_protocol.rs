@@ -45,6 +45,65 @@ fn authored_root() -> PathBuf {
         .unwrap()
 }
 
+#[test]
+fn device_profile_generation_protocol_is_side_effect_free_and_rejects_serials() {
+    let root = authored_root();
+    let before = compute_catalog_sha256(&root).unwrap();
+    let facts = json!({
+        "manufacturer": "AYANEO",
+        "brand": "AYANEO",
+        "model": "Pocket S Mini",
+        "product": "pocket_s_mini",
+        "device": "pocket_s_mini",
+        "board": "kalama",
+        "hardware": "qcom",
+        "abis": ["arm64-v8a"],
+        "androidVersion": 13,
+        "androidApiLevel": 33,
+    });
+    let generated = sidecar_response(json!({
+        "id": "generate-profile",
+        "type": "generateDeviceProfileDraft",
+        "payload": { "facts": facts }
+    }));
+    assert_eq!(generated["ok"], true, "{generated:#}");
+    assert_eq!(generated["result"]["profile"]["id"], "ayaneo.pocket_s_mini");
+    assert!(generated["result"]["canonicalYaml"]
+        .as_str()
+        .unwrap()
+        .contains("kind: device_profile"));
+
+    let collisions = sidecar_response(json!({
+        "id": "profile-collisions",
+        "type": "checkGeneratedCatalogCollisions",
+        "payload": {
+            "authoredRoot": root,
+            "facts": facts,
+            "profile": generated["result"]["profile"].clone(),
+        }
+    }));
+    assert_eq!(collisions["ok"], true, "{collisions:#}");
+    assert_eq!(collisions["result"]["blocking"], true);
+    assert_eq!(compute_catalog_sha256(&authored_root()).unwrap(), before);
+
+    let rejected = sidecar_response(json!({
+        "id": "serial-rejected",
+        "type": "generateDeviceProfileDraft",
+        "payload": {
+            "facts": {
+                "manufacturer": "AYANEO",
+                "model": "Pocket S Mini",
+                "serial": "SECRET-SERIAL"
+            }
+        }
+    }));
+    assert_eq!(rejected["ok"], false);
+    assert_eq!(rejected["error"]["code"], "invalid_request");
+    assert!(!serde_json::to_string(&rejected)
+        .unwrap()
+        .contains("SECRET-SERIAL"));
+}
+
 fn phase_one_configuration_payload(root: &Path, selected_recipes: Value, serial: &str) -> Value {
     let digest = compute_catalog_sha256(root).expect("authored catalog should be hashable");
     json!({
@@ -118,6 +177,8 @@ fn keeps_executor_internal_and_protocol_capabilities_editor_scoped() {
             "describeCatalog",
             "listAdbDevices",
             "probeDevice",
+            "generateDeviceProfileDraft",
+            "checkGeneratedCatalogCollisions",
             "matchDevice",
             "negotiateCapabilities",
             "openUserConfiguration",
@@ -186,6 +247,8 @@ fn keeps_filesystem_executor_internal_and_protocol_capabilities_editor_scoped() 
             "describeCatalog",
             "listAdbDevices",
             "probeDevice",
+            "generateDeviceProfileDraft",
+            "checkGeneratedCatalogCollisions",
             "matchDevice",
             "negotiateCapabilities",
             "openUserConfiguration",
@@ -254,6 +317,8 @@ fn keeps_fake_device_executor_internal_and_protocol_capabilities_editor_scoped()
             "describeCatalog",
             "listAdbDevices",
             "probeDevice",
+            "generateDeviceProfileDraft",
+            "checkGeneratedCatalogCollisions",
             "matchDevice",
             "negotiateCapabilities",
             "openUserConfiguration",
@@ -322,6 +387,8 @@ fn keeps_real_adb_executor_internal_and_protocol_capabilities_editor_scoped() {
             "describeCatalog",
             "listAdbDevices",
             "probeDevice",
+            "generateDeviceProfileDraft",
+            "checkGeneratedCatalogCollisions",
             "matchDevice",
             "negotiateCapabilities",
             "openUserConfiguration",

@@ -166,6 +166,8 @@ fn capabilities_stay_on_editor_session_surface() {
             "describeCatalog",
             "listAdbDevices",
             "probeDevice",
+            "generateDeviceProfileDraft",
+            "checkGeneratedCatalogCollisions",
             "matchDevice",
             "negotiateCapabilities",
             "openUserConfiguration",

@@ -6,6 +6,7 @@ use tauri::{
 
 const ACTION_OPEN_RECIPE: &str = "openRecipe";
 const ACTION_OPEN_USER_CONFIGURATION: &str = "openUserConfiguration";
+const ACTION_GENERATE_DEVICE_PROFILE: &str = "generateDeviceProfile";
 const ACTION_SAVE_RECIPE: &str = "saveRecipe";
 const ACTION_SAVE_RECIPE_AS: &str = "saveRecipeAs";
 const ACTION_RESTART_SIDECAR: &str = "restartSidecar";
@@ -29,6 +30,7 @@ pub struct EditorMenuState {
     document_session_valid: bool,
     backend_compatible: Option<bool>,
     sidecar_running: Option<bool>,
+    generator_active: bool,
 }
 
 impl Default for EditorMenuState {
@@ -44,6 +46,7 @@ impl Default for EditorMenuState {
             document_session_valid: true,
             backend_compatible: None,
             sidecar_running: None,
+            generator_active: false,
         }
     }
 }
@@ -89,6 +92,7 @@ pub fn handle_menu_event<R: Runtime>(app: &AppHandle<R>, action: &str) {
     match action {
         ACTION_OPEN_RECIPE
         | ACTION_OPEN_USER_CONFIGURATION
+        | ACTION_GENERATE_DEVICE_PROFILE
         | ACTION_SAVE_RECIPE
         | ACTION_SAVE_RECIPE_AS
         | ACTION_RESTART_SIDECAR
@@ -136,12 +140,14 @@ fn build_file_menu<R: Runtime>(
     state: EditorMenuState,
 ) -> tauri::Result<Submenu<R>> {
     let command_idle = !state.command_in_flight;
+    let editor_idle = command_idle && !state.generator_active;
     let backend_ready = state.backend_compatible != Some(false);
     let backend_usable =
         state.backend_compatible == Some(true) && state.sidecar_running == Some(true);
-    let session_ready = command_idle && state.document_session_valid && backend_ready;
+    let session_ready = editor_idle && state.document_session_valid && backend_ready;
     let open_recipe_ready =
-        command_idle && backend_ready && (state.document_session_valid || backend_usable);
+        editor_idle && backend_ready && (state.document_session_valid || backend_usable);
+    let generator_ready = editor_idle && backend_usable;
     let has_root_to_clear = state.has_selected_authored_root
         || (state.has_document && state.has_document_authored_root);
     Submenu::with_items(
@@ -161,6 +167,13 @@ fn build_file_menu<R: Runtime>(
                 ACTION_OPEN_USER_CONFIGURATION,
                 "Open User Configuration...",
                 open_recipe_ready,
+                None::<&str>,
+            )?,
+            &MenuItem::with_id(
+                app,
+                ACTION_GENERATE_DEVICE_PROFILE,
+                "Generate Device Profile...",
+                generator_ready,
                 None::<&str>,
             )?,
             &PredefinedMenuItem::separator(app)?,
@@ -206,6 +219,7 @@ fn build_edit_menu<R: Runtime>(
     state: EditorMenuState,
 ) -> tauri::Result<Submenu<R>> {
     let document_ready = !state.command_in_flight
+        && !state.generator_active
         && state.document_session_valid
         && state.backend_compatible != Some(false)
         && state.has_document;
@@ -243,6 +257,7 @@ fn build_utilities_menu<R: Runtime>(
 ) -> tauri::Result<Submenu<R>> {
     let restart_ready = !state.command_in_flight;
     let document_ready = !state.command_in_flight
+        && !state.generator_active
         && state.document_session_valid
         && state.backend_compatible != Some(false)
         && state.has_document;

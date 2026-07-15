@@ -31,6 +31,7 @@ import { AppShell } from "./components/AppShell";
 import { ArtifactGroupsEditor } from "./components/ArtifactGroupsEditor";
 import { ArtifactsEditor } from "./components/ArtifactsEditor";
 import { DiagnosticsPanel } from "./components/DiagnosticsPanel";
+import { DeviceProfileGenerator } from "./components/DeviceProfileGenerator";
 import { EmptyState } from "./components/EmptyState";
 import { ErrorBanner } from "./components/ErrorBanner";
 import { InputsEditor } from "./components/InputsEditor";
@@ -100,6 +101,7 @@ export default function App() {
   const [errorMessage, setErrorMessage] = useState<string | null>(null);
   const [statusMessage, setStatusMessage] = useState<string | null>(null);
   const [textPrompt, setTextPrompt] = useState<TextPromptRequest | null>(null);
+  const [deviceProfileGeneratorOpen, setDeviceProfileGeneratorOpen] = useState(false);
 
   const currentDocumentRef = useRef<RecipeDocumentDto | null>(null);
   const selectedAuthoredRootRef = useRef<string | null>(null);
@@ -108,6 +110,7 @@ export default function App() {
   const documentSessionValidRef = useRef(true);
   const sessionInvalidReasonRef = useRef<string | null>(null);
   const promptActiveRef = useRef(false);
+  const deviceProfileGeneratorOpenRef = useRef(false);
   // Confirmed window closes are reissued through Tauri, which emits one more close-request event.
   // This guard lets only that intentional second event pass without reopening the confirmation.
   const allowCloseRef = useRef(false);
@@ -193,6 +196,11 @@ export default function App() {
   useEffect(() => {
     sessionInvalidReasonRef.current = sessionInvalidReason;
   }, [sessionInvalidReason]);
+
+  useEffect(() => {
+    deviceProfileGeneratorOpenRef.current = deviceProfileGeneratorOpen;
+    void syncMenuState(currentDocumentRef.current);
+  }, [deviceProfileGeneratorOpen]);
 
   useEffect(() => {
     void syncMenuState(currentDocument, commandInFlight, documentSessionValid);
@@ -315,6 +323,17 @@ export default function App() {
   const menuHandlers: Record<MenuAction, () => void> = {
     openRecipe: () => void openRecipe(),
     openUserConfiguration: () => void openUserConfiguration(),
+    generateDeviceProfile: () => {
+      const status = sidecarStateRef.current;
+      if (
+        commandInFlightRef.current === null &&
+        !deviceProfileGeneratorOpenRef.current &&
+        status?.compatible === true &&
+        status.running === true
+      ) {
+        setDeviceProfileGeneratorOpen(true);
+      }
+    },
     saveRecipe: () => void saveRecipe(),
     saveRecipeAs: () => void saveRecipeAs(),
     restartSidecar: () => void restartSidecar(),
@@ -536,6 +555,7 @@ export default function App() {
       }
 
       const status = response.result.status;
+      setDeviceProfileGeneratorOpen(false);
       sidecarStateRef.current = status;
       setSidecarState(status);
       const document = currentDocumentRef.current;
@@ -1034,6 +1054,7 @@ export default function App() {
         documentSessionValid: menuDocumentSessionValid,
         backendCompatible: status?.compatible ?? null,
         sidecarRunning: status?.running ?? null,
+        generatorActive: deviceProfileGeneratorOpenRef.current,
       });
     } catch (error) {
       setErrorMessage(`Menu state update failed: ${errorMessageFromUnknown(error)}`);
@@ -1174,6 +1195,12 @@ export default function App() {
     return (
       <>
         <MenuEventBridge handlers={menuHandlers} />
+        {deviceProfileGeneratorOpen ? (
+          <DeviceProfileGenerator
+            onClose={() => setDeviceProfileGeneratorOpen(false)}
+            onSaved={(path) => setStatusMessage(`Saved ${path}.`)}
+          />
+        ) : null}
         {errorMessage ? <ErrorBanner message={errorMessage} onDismiss={() => setErrorMessage(null)} /> : null}
         <UserConfigurationEditor
           document={userConfigurationDocument}
@@ -1187,6 +1214,12 @@ export default function App() {
 
   return (
     <>
+      {deviceProfileGeneratorOpen ? (
+        <DeviceProfileGenerator
+          onClose={() => setDeviceProfileGeneratorOpen(false)}
+          onSaved={(path) => setStatusMessage(`Saved ${path}.`)}
+        />
+      ) : null}
       {textPrompt ? (
         <TextPromptDialog
           confirmLabel={textPrompt.confirmLabel}

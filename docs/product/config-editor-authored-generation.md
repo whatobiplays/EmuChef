@@ -2,7 +2,9 @@
 
 ## Status
 
-Approved implementation plan.
+Approved implementation plan. The typed authored foundations and the standard,
+read-only device-profile generator are implemented. App/recipe generation and
+extended device capability checks remain later work.
 
 This document defines the Config Editor workflows for generating:
 
@@ -149,10 +151,13 @@ Standard capture is the default and performs no device writes. It collects only 
 - Android API level.
 
 The exact ADB serial remains trusted transport state. It is not included in generated YAML, React persistence, or normal logs.
+The Config Editor resolves the standard probe executable as literal `adb` from
+`PATH`; executable selection and Android SDK environment discovery are deferred.
 
 ### Extended capability checks
 
-Extended checks are an explicit separate action. They may test:
+Extended checks are deferred and are not part of the implemented standard
+device-profile generator. A later explicit action may test:
 
 - temporary shared-storage write, read, and cleanup;
 - package-manager command availability;
@@ -256,6 +261,12 @@ Saving an app and recipe is one logical operation. Both drafts are validated bef
 
 After a successful app-and-recipe save, the generated recipe opens through the existing recipe document session.
 
+Device-profile roots and device serials use handles scoped to one ephemeral
+generator session. React receives no native root path. A profile save
+revalidates and rescans immediately, rejects incomplete collision scans and
+existing destinations, writes and syncs a temporary sibling, and publishes with
+atomic create-new/no-clobber semantics.
+
 ## Config Editor workflow
 
 Top-level actions:
@@ -281,11 +292,10 @@ Device workflow:
 
 1. list and select one connected device;
 2. review detected facts;
-3. optionally run extended checks;
-4. configure match criteria;
-5. review capability defaults;
-6. review YAML and collisions; and
-7. save the profile.
+3. configure match criteria;
+4. review capability defaults;
+5. review YAML and collisions; and
+6. save the profile.
 
 Generator state is separate from `RecipeDocumentDto`. A sidecar restart invalidates active analysis and requires the wizard to rerun it.
 
@@ -300,7 +310,7 @@ Generator state is separate from `RecipeDocumentDto`. A sidecar restart invalida
 - APK filenames, labels, repository fields, and analyzer output are untrusted input.
 - External tools use direct argv and never a shell.
 - Standard device capture performs no writes.
-- Extended checks require explicit user action and clean up temporary material.
+- Any future extended checks require explicit user action and cleanup of temporary material.
 
 ## Delivery phases
 
@@ -318,7 +328,6 @@ Generator state is separate from `RecipeDocumentDto`. A sidecar restart invalida
 - Config Editor access to existing device listing and probing;
 - expanded safe device facts;
 - profile draft generation;
-- optional extended capability checks;
 - collision checking;
 - native profile save; and
 - fake-runner tests.

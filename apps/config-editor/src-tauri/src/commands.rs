@@ -314,8 +314,13 @@ pub fn sidecar_ping(state: State<'_, SidecarState>) -> Result<Value, String> {
 }
 
 #[tauri::command]
-pub fn sidecar_restart(state: State<'_, SidecarState>) -> Result<Value, String> {
-    state.restart()
+pub fn sidecar_restart(
+    state: State<'_, SidecarState>,
+    generator_state: State<'_, crate::device_profile_generator::DeviceProfileGeneratorState>,
+) -> Result<Value, String> {
+    let result = state.restart()?;
+    generator_state.clear()?;
+    Ok(result)
 }
 
 #[tauri::command]

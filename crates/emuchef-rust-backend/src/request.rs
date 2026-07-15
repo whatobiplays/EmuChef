@@ -61,6 +61,8 @@ fn handle_validated_object(object: &Map<String, Value>) -> Result<Value, ApiErro
         "describeCatalog" => handle_describe_catalog(object),
         "listAdbDevices" => handle_list_adb_devices(object),
         "probeDevice" => handle_probe_device(object),
+        "generateDeviceProfileDraft" => handle_generate_device_profile_draft(object),
+        "checkGeneratedCatalogCollisions" => handle_check_generated_catalog_collisions(object),
         "matchDevice" => handle_match_device(object),
         "describeConfiguration" => handle_describe_configuration(object),
         "planConfiguration" => handle_plan_configuration(object),
@@ -91,6 +93,8 @@ fn handle_validated_sidecar_object(
         "describeCatalog" => handle_describe_catalog(object),
         "listAdbDevices" => handle_list_adb_devices(object),
         "probeDevice" => handle_probe_device(object),
+        "generateDeviceProfileDraft" => handle_generate_device_profile_draft(object),
+        "checkGeneratedCatalogCollisions" => handle_check_generated_catalog_collisions(object),
         "matchDevice" => handle_match_device(object),
         "openUserConfiguration" => handle_open_user_configuration(object, sessions),
         "createUserConfiguration" => handle_create_user_configuration(object, sessions),
@@ -382,6 +386,72 @@ fn handle_probe_device(object: &Map<String, Value>) -> Result<Value, ApiError> {
     Ok(envelope::success(crate::end_user_runtime::probe_device(
         adb_path, serial,
     )?))
+}
+
+fn handle_generate_device_profile_draft(object: &Map<String, Value>) -> Result<Value, ApiError> {
+    let payload = payload_object(object)?;
+    let request = serde_json::from_value::<crate::generation::DeviceProfileDraftRequest>(
+        Value::Object(payload.clone()),
+    )
+    .map_err(|_| {
+        ApiError::invalid_request_with_details(
+            "Device-profile draft input is invalid.",
+            json!({ "field": "payload" }),
+        )
+    })?;
+    let draft = crate::generation::generate_device_profile_draft(request);
+    let result = serde_json::to_value(draft).map_err(|_| {
+        ApiError::command_failed(
+            "Device-profile draft could not be represented.",
+            json!({ "reason": "device_profile_draft_serialization_failed" }),
+        )
+    })?;
+    Ok(envelope::success(result))
+}
+
+fn handle_check_generated_catalog_collisions(
+    object: &Map<String, Value>,
+) -> Result<Value, ApiError> {
+    let payload = payload_object(object)?;
+    let authored_root = required_string(payload, "authoredRoot")?;
+    let facts = payload.get("facts").cloned().ok_or_else(|| {
+        ApiError::invalid_request_with_details(
+            "Request payload is missing required field: facts",
+            json!({ "field": "facts" }),
+        )
+    })?;
+    let facts = serde_json::from_value::<crate::generation::SafeDetectedDeviceFacts>(facts)
+        .map_err(|_| {
+            ApiError::invalid_request_with_details(
+                "Request field 'facts' is invalid.",
+                json!({ "field": "facts" }),
+            )
+        })?;
+    let profile = payload.get("profile").cloned().ok_or_else(|| {
+        ApiError::invalid_request_with_details(
+            "Request payload is missing required field: profile",
+            json!({ "field": "profile" }),
+        )
+    })?;
+    let profile = serde_json::from_value::<crate::authored_models::DeviceProfileV1>(profile)
+        .map_err(|_| {
+            ApiError::invalid_request_with_details(
+                "Request field 'profile' is invalid.",
+                json!({ "field": "profile" }),
+            )
+        })?;
+    let collisions = crate::generation::check_device_profile_collisions(
+        Path::new(authored_root),
+        &facts,
+        &profile,
+    );
+    let result = serde_json::to_value(collisions).map_err(|_| {
+        ApiError::command_failed(
+            "Device-profile collision results could not be represented.",
+            json!({ "reason": "device_profile_collision_serialization_failed" }),
+        )
+    })?;
+    Ok(envelope::success(result))
 }
 
 fn handle_match_device(object: &Map<String, Value>) -> Result<Value, ApiError> {

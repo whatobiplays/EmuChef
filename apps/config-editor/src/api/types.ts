@@ -297,3 +297,115 @@ export interface PlanConfigurationResult {
   }>;
   diagnostics: RuntimeConfigurationDiagnosticDto[];
 }
+
+export interface DeviceProfileGeneratorSessionResult {
+  sessionHandle: string;
+}
+
+export interface DeviceProfileGeneratorDeviceDto {
+  deviceHandle: string;
+  state: string;
+  model: string | null;
+}
+
+export interface DeviceProfileGeneratorDeviceListResult {
+  state: string;
+  devices: DeviceProfileGeneratorDeviceDto[];
+}
+
+export interface SafeDetectedDeviceFactsDto {
+  manufacturer: string | null;
+  brand: string | null;
+  model: string | null;
+  product: string | null;
+  device: string | null;
+  board: string | null;
+  hardware: string | null;
+  abis: string[];
+  androidVersion: number | null;
+  androidApiLevel: number | null;
+}
+
+export interface DeviceProfileProbeResult {
+  facts: SafeDetectedDeviceFactsDto;
+}
+
+export interface DeviceProfileV1Dto {
+  schema_version: 1;
+  kind: "device_profile";
+  id: string;
+  name: string;
+  description?: string;
+  match: {
+    manufacturer_contains: string[];
+    brand_contains: string[];
+    model_patterns: string[];
+    android_version?: {
+      min?: number;
+      max?: number;
+    };
+  };
+  capability_defaults: {
+    adb_available: boolean;
+    apk_install: boolean;
+    shared_storage_write: boolean;
+    app_launch: boolean;
+    shell_command: boolean;
+    package_remove_for_user: boolean;
+    root_shell: boolean;
+    app_data_write: boolean;
+  };
+  device_tags: string[];
+  metadata: Record<string, unknown>;
+}
+
+export type DeviceProfileEvidenceState = "verified" | "derived" | "suggested" | "missing";
+
+export interface DeviceProfileFieldEvidenceDto {
+  field: string;
+  state: DeviceProfileEvidenceState;
+  source: string;
+  editedFromProposal: boolean;
+}
+
+export interface DeviceProfileGenerationDiagnosticDto {
+  severity: "error" | "warning";
+  code: string;
+  message: string;
+  field: string;
+}
+
+export interface DeviceProfileDraftResult {
+  profile: DeviceProfileV1Dto;
+  canonicalYaml: string | null;
+  evidence: DeviceProfileFieldEvidenceDto[];
+  diagnostics: DeviceProfileGenerationDiagnosticDto[];
+  destination: {
+    fileName: string | null;
+    relativePath: string | null;
+  };
+}
+
+export interface DeviceProfileRootSelectionResult {
+  cancelled: boolean;
+  rootHandle?: string;
+  label?: string;
+}
+
+export interface DeviceProfileCollisionDto {
+  severity: "blocking" | "warning";
+  code: string;
+  message: string;
+  existingProfileId: string | null;
+  fileName: string | null;
+}
+
+export interface DeviceProfileCollisionResult {
+  collisions: DeviceProfileCollisionDto[];
+  blocking: boolean;
+}
+
+export interface DeviceProfileSaveResult {
+  fileName: string;
+  displayPath: string;
+}
