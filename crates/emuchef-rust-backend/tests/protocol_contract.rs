@@ -75,6 +75,9 @@ fn assert_step_specs_surface(result: &Value) {
     assert_eq!(
         step_types,
         vec![
+            "resolve_remote_release",
+            "resolve_github_release",
+            "download_remote_file",
             "resolve_artifacts",
             "extract_artifacts",
             "extract_archive",
@@ -143,6 +146,7 @@ fn assert_hello_result(result: &Value) {
             "probeDevice",
             "inspectApk",
             "generateAppRecipeDraft",
+            "generateRemoteAppRecipeDraft",
             "generateDeviceProfileDraft",
             "checkGeneratedCatalogCollisions",
             "matchDevice",

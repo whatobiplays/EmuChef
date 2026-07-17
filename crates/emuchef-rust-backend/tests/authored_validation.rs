@@ -211,6 +211,7 @@ fn capabilities_include_additive_product_runtime_surface() {
             "probeDevice",
             "inspectApk",
             "generateAppRecipeDraft",
+            "generateRemoteAppRecipeDraft",
             "generateDeviceProfileDraft",
             "checkGeneratedCatalogCollisions",
             "matchDevice",

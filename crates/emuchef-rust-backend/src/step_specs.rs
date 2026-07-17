@@ -61,6 +61,54 @@ pub fn step_specs_result() -> StepSpecsResult {
     StepSpecsResult {
         step_specs: vec![
             spec(
+                "resolve_remote_release",
+                "Resolve Remote Release",
+                Some("download_url"),
+                vec![
+                    output("download_url", "string", true),
+                    output("asset_name", "string", false),
+                    output("release_tag", "string", false),
+                    output("published_at", "string", false),
+                    output("size", "integer", false),
+                ],
+                vec![
+                    "provider",
+                    "base_url",
+                    "repository",
+                    "include_prereleases",
+                    "asset_pattern",
+                ],
+                map(vec![
+                    (
+                        "provider",
+                        param(
+                            &["literal"],
+                            &["string"],
+                            true,
+                            vec!["github", "gitlab", "forgejo"],
+                            None,
+                        ),
+                    ),
+                    (
+                        "base_url",
+                        param(&["literal"], &["string"], true, vec![], None),
+                    ),
+                    (
+                        "repository",
+                        param(&["literal"], &["string"], true, vec![], None),
+                    ),
+                    (
+                        "include_prereleases",
+                        param(&["literal"], &["boolean"], false, vec![], None),
+                    ),
+                    (
+                        "asset_pattern",
+                        param(&["literal"], &["string"], true, vec![], None),
+                    ),
+                ]),
+                map(vec![("include_prereleases", json!(false))]),
+            ),
+            spec(
                 "resolve_github_release",
                 "Resolve GitHub Release",
                 Some("download_url"),

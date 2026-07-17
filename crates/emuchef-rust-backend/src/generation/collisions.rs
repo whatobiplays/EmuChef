@@ -145,7 +145,7 @@ fn scan_apps(
             collisions.push(app_collision(
                 CollisionSeverity::Warning,
                 "app_source_repository_overlap",
-                "An app definition with a different id tracks the same GitHub repository.",
+                "An app definition with a different id tracks the same release-provider repository.",
                 Some(existing.id.clone()),
                 relative_path.clone(),
             ));
@@ -159,7 +159,7 @@ fn scan_apps(
             collisions.push(app_collision(
                 CollisionSeverity::Warning,
                 "app_source_release_overlap",
-                "An app definition with a different id tracks the same GitHub release.",
+                "An app definition with a different id tracks the same release-provider release.",
                 Some(existing.id.clone()),
                 relative_path.clone(),
             ));
@@ -167,12 +167,13 @@ fn scan_apps(
         let proposed_url = source_string(&request.app, "url");
         let existing_url = source_string(&existing, "url");
         if existing.id != request.app.id && proposed_url.is_some() && proposed_url == existing_url {
-            let github = request.app.tracking_source.type_name == "github_release";
+            let provider_release = request.app.tracking_source.type_name == "provider_release"
+                || request.app.tracking_source.type_name == "github_release";
             collisions.push(app_collision(
                 CollisionSeverity::Warning,
                 "app_source_url_overlap",
-                if github {
-                    "An app definition with a different id uses the same GitHub release APK asset."
+                if provider_release {
+                    "An app definition with a different id uses the same release-provider APK asset."
                 } else {
                     "An app definition with a different id uses the same remote APK URL."
                 },
@@ -207,9 +208,14 @@ fn source_string<'a>(app: &'a AppDefinitionV1, key: &str) -> Option<&'a str> {
 }
 
 fn latest_policy_fingerprint(app: &AppDefinitionV1) -> Option<String> {
-    if app.install_source.resolver != "github_latest_release" {
+    if !matches!(
+        app.install_source.resolver.as_str(),
+        "github_latest_release" | "provider_latest_release"
+    ) {
         return None;
     }
+    let provider = source_string(app, "provider").unwrap_or("github");
+    let base_url = source_string(app, "base_url").unwrap_or("https://github.com");
     let repository = source_string(app, "repository")?;
     let pattern = source_string(app, "asset_pattern")?;
     let include_prereleases = app
@@ -219,7 +225,7 @@ fn latest_policy_fingerprint(app: &AppDefinitionV1) -> Option<String> {
         .and_then(Value::as_bool)
         .unwrap_or(false);
     Some(format!(
-        "github_latest_release\nrepository={repository}\nasset_pattern={pattern}\ninclude_prereleases={include_prereleases}"
+        "provider_latest_release\nprovider={provider}\nbase_url={base_url}\nrepository={repository}\nasset_pattern={pattern}\ninclude_prereleases={include_prereleases}"
     ))
 }
 

@@ -19,7 +19,7 @@ impl ProviderCapabilities {
         }
     }
 
-    pub const fn github_repository() -> Self {
+    pub const fn repository_release_provider() -> Self {
         Self {
             pinned_artifact: true,
             latest_release: true,
@@ -42,12 +42,12 @@ impl AppSourceProvider for DirectHttpsProvider {
     }
 }
 
-#[derive(Clone, Copy, Debug, Default)]
-pub struct GithubProvider {
+#[derive(Clone, Copy, Debug)]
+pub struct ReleaseProvider {
     repository_mode: bool,
 }
 
-impl GithubProvider {
+impl ReleaseProvider {
     pub const fn repository() -> Self {
         Self {
             repository_mode: true,
@@ -61,10 +61,10 @@ impl GithubProvider {
     }
 }
 
-impl AppSourceProvider for GithubProvider {
+impl AppSourceProvider for ReleaseProvider {
     fn capabilities(&self) -> ProviderCapabilities {
         if self.repository_mode {
-            ProviderCapabilities::github_repository()
+            ProviderCapabilities::repository_release_provider()
         } else {
             ProviderCapabilities::pinned_only()
         }
@@ -73,8 +73,12 @@ impl AppSourceProvider for GithubProvider {
 
 pub fn capabilities_for_mode(mode: &str) -> ProviderCapabilities {
     match mode {
-        "github_repository" => GithubProvider::repository().capabilities(),
-        "github_release" => GithubProvider::release().capabilities(),
+        "github_repository" | "gitlab_repository" | "forgejo_repository" => {
+            ReleaseProvider::repository().capabilities()
+        }
+        "github_release" | "gitlab_release" | "forgejo_release" => {
+            ReleaseProvider::release().capabilities()
+        }
         "direct_apk" => DirectHttpsProvider.capabilities(),
         _ => ProviderCapabilities::pinned_only(),
     }
@@ -85,9 +89,21 @@ mod tests {
     use super::*;
 
     #[test]
-    fn only_github_repository_advertises_latest_release() {
-        assert!(capabilities_for_mode("github_repository").latest_release);
-        assert!(!capabilities_for_mode("github_release").latest_release);
-        assert!(!capabilities_for_mode("direct_apk").latest_release);
+    fn repository_modes_advertise_latest_release() {
+        for mode in [
+            "github_repository",
+            "gitlab_repository",
+            "forgejo_repository",
+        ] {
+            assert!(capabilities_for_mode(mode).latest_release, "{mode}");
+        }
+        for mode in [
+            "github_release",
+            "gitlab_release",
+            "forgejo_release",
+            "direct_apk",
+        ] {
+            assert!(!capabilities_for_mode(mode).latest_release, "{mode}");
+        }
     }
 }

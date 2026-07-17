@@ -5,6 +5,7 @@ import type {
   AppRecipeDraftResult,
   AppRecipeSaveResult,
 } from "../src/api/types.js";
+import type { AppGeneratorState } from "../src/components/appGenerator.logic.js";
 import {
   assetPatternError,
   diagnosticDisplayTitle,
@@ -303,6 +304,8 @@ test("remote download preserves the selected strategy in trusted source state", 
       mode: "direct_apk",
       strategy: "pinned_remote_asset",
       downloadUrl: "https://example.com/app.apk",
+      provider: null,
+      baseUrl: null,
       repository: null,
       releaseTag: null,
       assetName: "app.apk",
@@ -312,6 +315,35 @@ test("remote download preserves the selected strategy in trusted source state", 
   });
   assert.equal(state.apkHandle, "apk");
   assert.equal(state.remoteSource?.strategy, "user_provided_apk");
+});
+
+test("remote download preserves the selected latest-release asset policy", () => {
+  let state: AppGeneratorState = {
+    ...initialAppGeneratorState,
+    installStrategy: "latest_compatible_release" as const,
+    assetPattern: "^app-v.*-arm64\\.apk$",
+    includePrereleases: true,
+  };
+  state = reduceAppGenerator(state, {
+    type: "remote-downloaded",
+    apkHandle: "apk",
+    label: "app-v1-arm64.apk",
+    source: {
+      mode: "github_repository",
+      strategy: "pinned_remote_asset",
+      downloadUrl: "https://example.com/app-v1-arm64.apk",
+      provider: "github",
+      baseUrl: "https://github.com",
+      repository: "example/project",
+      releaseTag: "v1",
+      assetName: "app-v1-arm64.apk",
+      assetPattern: null,
+      includePrereleases: false,
+    },
+  });
+  assert.equal(state.remoteSource?.strategy, "latest_compatible_release");
+  assert.equal(state.remoteSource?.assetPattern, "^app-v.*-arm64\\.apk$");
+  assert.equal(state.remoteSource?.includePrereleases, true);
 });
 
 test("reducer records the opened recipe result after an explicit save", () => {

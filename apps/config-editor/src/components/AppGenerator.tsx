@@ -138,8 +138,15 @@ export function AppGenerator({ initialAuthoredRoot, onAuthoredRootSelected, onCl
 
   async function downloadRemoteApk() {
     if (!state.sessionHandle || !state.selectedAssetHandle || !state.analyzerHandle) return;
-    const selectedAsset = state.sourceAnalysis?.assets.find((asset) => asset.assetHandle === state.selectedAssetHandle);
-    if (selectedAsset?.prerelease && !window.confirm("This release is marked as a prerelease. Continue with this APK?")) return;
+    const selectedAsset = state.sourceAnalysis?.assets.find(
+      (asset) => asset.assetHandle === state.selectedAssetHandle,
+    );
+    if (
+      selectedAsset?.prerelease &&
+      !window.confirm("This release is marked as a prerelease. Continue with this APK?")
+    ) {
+      return;
+    }
     dispatch({ type: "downloading" });
     await new Promise<void>((resolve) => window.requestAnimationFrame(() => resolve()));
     const downloaded = await downloadAppGeneratorRemoteApk(
@@ -153,6 +160,9 @@ export function AppGenerator({ initialAuthoredRoot, onAuthoredRootSelected, onCl
     const source: RemoteSourceDescriptorDto = {
       ...downloaded.result.source,
       strategy: state.installStrategy,
+      assetPattern:
+        state.installStrategy === "latest_compatible_release" ? state.assetPattern : null,
+      includePrereleases: state.includePrereleases,
     };
     dispatch({
       type: "remote-downloaded",
@@ -416,6 +426,10 @@ export function AppGenerator({ initialAuthoredRoot, onAuthoredRootSelected, onCl
               <option value="local_apk">Local APK</option>
               <option value="github_repository">GitHub repository</option>
               <option value="github_release">GitHub release</option>
+              <option value="gitlab_repository">GitLab repository</option>
+              <option value="gitlab_release">GitLab release</option>
+              <option value="forgejo_repository">Codeberg / Forgejo repository</option>
+              <option value="forgejo_release">Codeberg / Forgejo release</option>
               <option value="direct_apk">Direct APK URL</option>
             </select>
             <p className="mt-1 text-xs text-slate-500">Choose where the APK and update identity come from.</p>
@@ -441,7 +455,7 @@ export function AppGenerator({ initialAuthoredRoot, onAuthoredRootSelected, onCl
                     {state.phase === "inspecting" && !state.apkHandle ? "Checking source..." : "Check source"}
                   </button>
                 </div>
-                {state.sourceMode === "github_repository" ? <Check label="Include prereleases" checked={state.includePrereleases} disabled={busy} onChange={(value) => dispatch({ type: "include-prereleases", value })} /> : null}
+                {state.sourceMode.endsWith("_repository") ? <Check label="Include prereleases" checked={state.includePrereleases} disabled={busy} onChange={(value) => dispatch({ type: "include-prereleases", value })} /> : null}
                 {state.sourceAnalysis ? <RemoteAssetPicker analysis={state.sourceAnalysis} selectedAssetHandle={state.selectedAssetHandle} disabled={busy} onSelect={(assetHandle) => dispatch({ type: "asset-selected", assetHandle })} /> : null}
                 <div className="grid gap-4 md:grid-cols-3">
                   <AnalyzerPicker state={state} busy={busy} chooseAnalyzer={chooseAnalyzer} dispatch={dispatch} />
@@ -605,8 +619,8 @@ function AppFields({ sourceMode, installStrategy, form, disabled, updateForm, ch
         <Field label="Primary package" help="Android application ID verified from the APK manifest. Change only when the manifest information is known to be wrong." value={app.package.primary} disabled={disabled} onChange={(primary) => updateForm((next) => { next.app.package.primary = primary; })} />
         <PackageAliasList values={form.aliases} disabled={disabled} onChange={(aliases) => updateForm((next) => { next.aliases = aliases; })} />
         <Fixed label="Installation method" help="Controls whether the recipe pins an APK, resolves the latest compatible release, or asks for a local file." value={installStrategy === "pinned_remote_asset" ? "Pinned release" : installStrategy === "latest_compatible_release" ? "Latest compatible release" : "User-provided APK"} />
-        <Fixed label="Source resolver" help="Describes how the generated app definition identifies its installation source." value={installStrategy === "pinned_remote_asset" ? "Direct HTTPS download" : installStrategy === "latest_compatible_release" ? "GitHub latest release" : "None required"} />
-        <Fixed label="Update tracking" help="Describes the source identity retained for future catalog review." value={installStrategy === "user_provided_apk" ? "Local APK" : sourceMode.startsWith("github_") ? "GitHub release" : sourceMode === "direct_apk" ? "Direct APK URL" : "Local APK"} />
+        <Fixed label="Source resolver" help="Describes how the generated app definition identifies its installation source." value={installStrategy === "pinned_remote_asset" ? "Direct HTTPS download" : installStrategy === "latest_compatible_release" ? "Latest provider release" : "None required"} />
+        <Fixed label="Update tracking" help="Describes the source identity retained for future catalog review." value={installStrategy === "user_provided_apk" ? "Local APK" : sourceMode.endsWith("_repository") || sourceMode.endsWith("_release") ? "Provider release" : sourceMode === "direct_apk" ? "Direct APK URL" : "Local APK"} />
         <Area label="Install-source options (strict JSON object)" value={form.mappings.installSourceOptions} disabled={disabled} onChange={(installSourceOptions) => changeMapping({ installSourceOptions })} />
         <Area label="Tracking-source fields (strict JSON object)" value={form.mappings.trackingSourceFields} disabled={disabled} onChange={(trackingSourceFields) => changeMapping({ trackingSourceFields })} />
         <Area label="Metadata (strict JSON object)" value={form.mappings.metadata} disabled={disabled} onChange={(metadata) => changeMapping({ metadata })} />

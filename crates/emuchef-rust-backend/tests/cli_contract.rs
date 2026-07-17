@@ -211,6 +211,7 @@ fn preserves_one_shot_json_and_sidecar_dispatch() {
             "probeDevice",
             "inspectApk",
             "generateAppRecipeDraft",
+            "generateRemoteAppRecipeDraft",
             "generateDeviceProfileDraft",
             "checkGeneratedCatalogCollisions",
             "matchDevice",

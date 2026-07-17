@@ -193,6 +193,7 @@ fn capabilities_include_catalog_context_session_update() {
             "probeDevice",
             "inspectApk",
             "generateAppRecipeDraft",
+            "generateRemoteAppRecipeDraft",
             "generateDeviceProfileDraft",
             "checkGeneratedCatalogCollisions",
             "matchDevice",

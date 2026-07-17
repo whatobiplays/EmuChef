@@ -43,6 +43,10 @@ pub(crate) struct RemoteSource {
     pub strategy: String,
     pub download_url: String,
     #[serde(default)]
+    pub provider: Option<String>,
+    #[serde(default)]
+    pub base_url: Option<String>,
+    #[serde(default)]
     pub repository: Option<String>,
     #[serde(default)]
     pub release_tag: Option<String>,
@@ -215,7 +219,13 @@ fn validate_source(source: &RemoteSource) -> Vec<DraftDiagnostic> {
     let mut diagnostics = Vec::new();
     if !matches!(
         source.mode.as_str(),
-        "github_repository" | "github_release" | "direct_apk"
+        "github_repository"
+            | "github_release"
+            | "gitlab_repository"
+            | "gitlab_release"
+            | "forgejo_repository"
+            | "forgejo_release"
+            | "direct_apk"
     ) {
         diagnostics.push(error(
             "remote_source_mode_invalid",
@@ -234,10 +244,14 @@ fn validate_source(source: &RemoteSource) -> Vec<DraftDiagnostic> {
         ));
     }
     if source.strategy == "latest_compatible_release" {
-        if source.mode != "github_repository" || source.repository.is_none() {
+        if !source.mode.ends_with("_repository")
+            || source.repository.is_none()
+            || source.provider.is_none()
+            || source.base_url.is_none()
+        {
             diagnostics.push(error(
                 "latest_release_source_unsupported",
-                "Latest compatible release currently requires a GitHub repository source.",
+                "Latest compatible release requires a supported repository source.",
                 "source.strategy",
             ));
         }
@@ -284,6 +298,12 @@ fn proposed_app(facts: &ApkInspectionFacts, source: &RemoteSource) -> AppDefinit
     if let Some(repository) = &source.repository {
         options.insert("repository".to_string(), Value::String(repository.clone()));
     }
+    if let Some(provider) = &source.provider {
+        options.insert("provider".to_string(), Value::String(provider.clone()));
+    }
+    if let Some(base_url) = &source.base_url {
+        options.insert("base_url".to_string(), Value::String(base_url.clone()));
+    }
     if let Some(tag) = &source.release_tag {
         options.insert("release_tag".to_string(), Value::String(tag.clone()));
     }
@@ -302,6 +322,12 @@ fn proposed_app(facts: &ApkInspectionFacts, source: &RemoteSource) -> AppDefinit
     let mut tracking = OrderedValueMap::new();
     if let Some(repository) = &source.repository {
         tracking.insert("repository".to_string(), Value::String(repository.clone()));
+    }
+    if let Some(provider) = &source.provider {
+        tracking.insert("provider".to_string(), Value::String(provider.clone()));
+    }
+    if let Some(base_url) = &source.base_url {
+        tracking.insert("base_url".to_string(), Value::String(base_url.clone()));
     }
     if let Some(tag) = &source.release_tag {
         tracking.insert("release_tag".to_string(), Value::String(tag.clone()));
@@ -337,7 +363,7 @@ fn proposed_app(facts: &ApkInspectionFacts, source: &RemoteSource) -> AppDefinit
             resolver: if pinned {
                 "direct_url"
             } else if latest {
-                "github_latest_release"
+                "provider_latest_release"
             } else {
                 "none"
             }
@@ -351,8 +377,8 @@ fn proposed_app(facts: &ApkInspectionFacts, source: &RemoteSource) -> AppDefinit
         tracking_source: AppTrackingSource {
             type_name: if !pinned && !latest {
                 "local_apk"
-            } else if source.mode.starts_with("github_") {
-                "github_release"
+            } else if source.mode.ends_with("_repository") || source.mode.ends_with("_release") {
+                "provider_release"
             } else {
                 "remote_apk"
             }
@@ -491,6 +517,14 @@ fn build_recipe(
     } else if latest {
         let mut resolve_params = OrderedMap::new();
         resolve_params.insert(
+            "provider".to_string(),
+            ParamValue::Literal(Value::String(source.provider.clone().unwrap_or_default())),
+        );
+        resolve_params.insert(
+            "base_url".to_string(),
+            ParamValue::Literal(Value::String(source.base_url.clone().unwrap_or_default())),
+        );
+        resolve_params.insert(
             "repository".to_string(),
             ParamValue::Literal(Value::String(source.repository.clone().unwrap_or_default())),
         );
@@ -506,10 +540,10 @@ fn build_recipe(
         );
         steps.push(Step {
             id: ids.latest_resolve_step_id.clone(),
-            type_name: "resolve_github_release".to_string(),
+            type_name: "resolve_remote_release".to_string(),
             name: format!("Resolve latest {} release", app.name),
             description: Some(
-                "Select the newest eligible GitHub release and require one matching APK."
+                "Select the newest eligible provider release and require one matching APK."
                     .to_string(),
             ),
             progress_note: Some(format!("Resolving latest {} release", app.name)),
@@ -1015,6 +1049,8 @@ mod tests {
             strategy: "pinned_remote_asset".to_string(),
             download_url: "https://github.com/example/project/releases/download/v1/app.apk"
                 .to_string(),
+            provider: Some("github".to_string()),
+            base_url: Some("https://github.com".to_string()),
             repository: Some("example/project".to_string()),
             release_tag: Some("v1".to_string()),
             asset_name: Some("app.apk".to_string()),
@@ -1089,7 +1125,7 @@ mod tests {
         });
         assert!(!draft.blocking);
         let recipe = draft.recipe_canonical_yaml.unwrap();
-        assert!(recipe.contains("type: resolve_github_release"));
+        assert!(recipe.contains("type: resolve_remote_release"));
         assert!(recipe.contains("type: download_remote_file"));
         assert!(recipe.contains("include_prereleases: true"));
         assert!(recipe.contains("ref: steps.download_remote_example.outputs.local_path"));

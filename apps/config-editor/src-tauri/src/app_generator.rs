@@ -72,6 +72,8 @@ struct TrustedApk {
 #[derive(Clone)]
 struct TrustedRemoteSource {
     mode: String,
+    provider: Option<String>,
+    base_url: Option<String>,
     repository: Option<String>,
     release_tag: Option<String>,
     direct_url: Option<String>,
@@ -479,8 +481,19 @@ pub fn analyze_app_generator_source(
         })
     } else {
         drop(registry);
-        let analyzed = match analyze_github_source(&client, &mode, &normalized, include_prereleases)
-        {
+        let analyzed = match normalized.provider.as_deref() {
+            Some("github") => {
+                analyze_github_source(&client, &mode, &normalized, include_prereleases)
+            }
+            Some("gitlab") => {
+                analyze_gitlab_source(&client, &mode, &normalized, include_prereleases)
+            }
+            Some("forgejo") => {
+                analyze_forgejo_source(&client, &mode, &normalized, include_prereleases)
+            }
+            _ => Err(provider_url_error("remote provider")),
+        };
+        let analyzed = match analyzed {
             Ok(value) => value,
             Err(error) => return Ok(error),
         };
@@ -546,6 +559,8 @@ pub fn analyze_app_generator_source(
         source_handle.clone(),
         TrustedRemoteSource {
             mode: mode.clone(),
+            provider: normalized.provider.clone(),
+            base_url: normalized.base_url.clone(),
             repository: normalized.repository.clone(),
             release_tag: normalized.release_tag.clone(),
             direct_url: (mode == "direct_apk").then(|| normalized.url.to_string()),
@@ -686,6 +701,8 @@ pub async fn download_app_generator_remote_apk(
             "mode": source.as_ref().map(|value| value.mode.as_str()).unwrap_or("direct_apk"),
             "strategy": "pinned_remote_asset",
             "downloadUrl": final_url,
+            "provider": source.as_ref().and_then(|value| value.provider.clone()),
+            "baseUrl": source.as_ref().and_then(|value| value.base_url.clone()),
             "repository": source.as_ref().and_then(|value| value.repository.clone()),
             "releaseTag": asset.release_tag,
             "assetName": file_name,
@@ -698,6 +715,8 @@ pub async fn download_app_generator_remote_apk(
 #[derive(Clone)]
 struct NormalizedRemoteSource {
     url: Url,
+    provider: Option<String>,
+    base_url: Option<String>,
     repository: Option<String>,
     release_tag: Option<String>,
 }
@@ -723,87 +742,159 @@ struct GitHubAsset {
 fn normalize_remote_source(mode: &str, input: &str) -> Result<NormalizedRemoteSource, Value> {
     let mut url = Url::parse(input.trim())
         .map_err(|_| remote_source_error("remote_url_invalid", "Enter a valid HTTPS address."))?;
-    if !safe_remote_url(&url) || url.fragment().is_some() {
+    if !safe_remote_url(&url) || url.fragment().is_some() || url.query().is_some() {
         return Err(remote_source_error(
             "remote_url_invalid",
-            "Enter a valid public HTTPS address without credentials or a fragment.",
+            "Enter a valid public HTTPS address without credentials, query parameters, or a fragment.",
         ));
     }
     url.set_fragment(None);
     if mode == "direct_apk" {
-        if url.query().is_some() {
-            return Err(remote_source_error(
-                "remote_url_invalid",
-                "Enter a direct APK address without query parameters.",
-            ));
-        }
         return Ok(NormalizedRemoteSource {
             url,
+            provider: None,
+            base_url: None,
             repository: None,
             release_tag: None,
         });
     }
-    if !url
-        .host_str()
-        .is_some_and(|host| host.eq_ignore_ascii_case("github.com"))
-        || url.query().is_some()
-    {
-        return Err(remote_source_error(
-            "github_url_invalid",
-            "Enter a public github.com repository or release address.",
-        ));
-    }
+    let host = url.host_str().unwrap_or_default().to_ascii_lowercase();
     let segments = url
         .path_segments()
         .map(|items| items.filter(|item| !item.is_empty()).collect::<Vec<_>>())
         .unwrap_or_default();
-    let (owner, repository, release_tag) = match mode {
-        "github_repository" if segments.len() == 2 => {
-            (segments[0], segments[1].trim_end_matches(".git"), None)
+    let (provider, base_url, repository, release_tag, normalized_url) = match mode {
+        "github_repository" | "github_release" => {
+            if host != "github.com" {
+                return Err(provider_url_error("GitHub"));
+            }
+            let release = mode.ends_with("_release");
+            let (repository, tag) = parse_owner_repository_release(&segments, release)?;
+            let normalized = if let Some(tag) = &tag {
+                format!("https://github.com/{repository}/releases/tag/{tag}")
+            } else {
+                format!("https://github.com/{repository}")
+            };
+            (
+                "github",
+                "https://github.com".to_string(),
+                repository,
+                tag,
+                normalized,
+            )
         }
-        "github_release"
-            if segments.len() == 5 && segments[2] == "releases" && segments[3] == "tag" =>
-        {
-            (segments[0], segments[1], Some(segments[4].to_string()))
+        "gitlab_repository" | "gitlab_release" => {
+            if host != "gitlab.com" {
+                return Err(provider_url_error("GitLab"));
+            }
+            let release = mode.ends_with("_release");
+            let (repository, tag) = parse_gitlab_source(&segments, release)?;
+            let normalized = if let Some(tag) = &tag {
+                format!("https://gitlab.com/{repository}/-/releases/{tag}")
+            } else {
+                format!("https://gitlab.com/{repository}")
+            };
+            (
+                "gitlab",
+                "https://gitlab.com".to_string(),
+                repository,
+                tag,
+                normalized,
+            )
         }
-        _ => {
-            return Err(remote_source_error(
-                "github_url_invalid",
-                "Enter a supported GitHub repository or release address.",
-            ))
+        "forgejo_repository" | "forgejo_release" => {
+            let release = mode.ends_with("_release");
+            let (repository, tag) = parse_owner_repository_release(&segments, release)?;
+            let base = format!("https://{host}");
+            let normalized = if let Some(tag) = &tag {
+                format!("{base}/{repository}/releases/tag/{tag}")
+            } else {
+                format!("{base}/{repository}")
+            };
+            ("forgejo", base, repository, tag, normalized)
         }
-    };
-    if !valid_github_component(owner)
-        || !valid_github_component(repository)
-        || release_tag.as_deref().is_some_and(|tag| tag.is_empty())
-    {
-        return Err(remote_source_error(
-            "github_url_invalid",
-            "The GitHub owner, repository, or release tag is invalid.",
-        ));
-    }
-    let repository_id = format!("{owner}/{repository}");
-    let normalized_url = if let Some(tag) = &release_tag {
-        Url::parse(&format!(
-            "https://github.com/{repository_id}/releases/tag/{tag}"
-        ))
-        .unwrap()
-    } else {
-        Url::parse(&format!("https://github.com/{repository_id}")).unwrap()
+        _ => return Err(provider_url_error("remote provider")),
     };
     Ok(NormalizedRemoteSource {
-        url: normalized_url,
-        repository: Some(repository_id),
+        url: Url::parse(&normalized_url).map_err(|_| provider_url_error(provider))?,
+        provider: Some(provider.to_string()),
+        base_url: Some(base_url),
+        repository: Some(repository),
         release_tag,
     })
 }
 
-fn valid_github_component(value: &str) -> bool {
+fn parse_owner_repository_release(
+    segments: &[&str],
+    release: bool,
+) -> Result<(String, Option<String>), Value> {
+    let (owner, repository, tag) = if release {
+        if segments.len() != 5 || segments[2] != "releases" || segments[3] != "tag" {
+            return Err(provider_url_error("release provider"));
+        }
+        (segments[0], segments[1], Some(segments[4].to_string()))
+    } else {
+        if segments.len() != 2 {
+            return Err(provider_url_error("repository provider"));
+        }
+        (segments[0], segments[1].trim_end_matches(".git"), None)
+    };
+    if !valid_repository_component(owner)
+        || !valid_repository_component(repository)
+        || tag.as_deref().is_some_and(str::is_empty)
+    {
+        return Err(provider_url_error("repository provider"));
+    }
+    Ok((format!("{owner}/{repository}"), tag))
+}
+
+fn parse_gitlab_source(
+    segments: &[&str],
+    release: bool,
+) -> Result<(String, Option<String>), Value> {
+    let (repository_segments, tag) = if release {
+        let Some(marker) = segments
+            .windows(2)
+            .position(|pair| pair == ["-", "releases"])
+        else {
+            return Err(provider_url_error("GitLab"));
+        };
+        if marker < 2 || marker + 2 >= segments.len() || marker + 3 != segments.len() {
+            return Err(provider_url_error("GitLab"));
+        }
+        (&segments[..marker], Some(segments[marker + 2].to_string()))
+    } else {
+        (segments, None)
+    };
+    if repository_segments.len() < 2
+        || repository_segments.len() > 20
+        || !repository_segments
+            .iter()
+            .all(|component| valid_repository_component(component))
+        || tag.as_deref().is_some_and(str::is_empty)
+    {
+        return Err(provider_url_error("GitLab"));
+    }
+    let mut parts = repository_segments.to_vec();
+    if let Some(last) = parts.last_mut() {
+        *last = last.trim_end_matches(".git");
+    }
+    Ok((parts.join("/"), tag))
+}
+
+fn valid_repository_component(value: &str) -> bool {
     !value.is_empty()
         && value.len() <= 100
         && value
             .bytes()
             .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_' | b'.'))
+}
+
+fn provider_url_error(provider: &str) -> Value {
+    remote_source_error(
+        "provider_url_invalid",
+        &format!("Enter a supported public {provider} repository or release address."),
+    )
 }
 
 fn safe_remote_url(url: &Url) -> bool {
@@ -940,6 +1031,263 @@ fn analyze_github_source(
         }),
         releases,
     })
+}
+
+fn analyze_gitlab_source(
+    client: &Client,
+    mode: &str,
+    source: &NormalizedRemoteSource,
+    include_prereleases: bool,
+) -> Result<GitHubAnalysis, Value> {
+    let repository = source
+        .repository
+        .as_deref()
+        .ok_or_else(|| provider_url_error("GitLab"))?;
+    let encoded = url::form_urlencoded::byte_serialize(repository.as_bytes()).collect::<String>();
+    let repository_value = get_provider_json_bounded(
+        client,
+        &format!("https://gitlab.com/api/v4/projects/{encoded}"),
+        "GitLab",
+    )?;
+    let releases_value = if mode == "gitlab_release" {
+        let tag = source.release_tag.as_deref().unwrap_or_default();
+        let encoded_tag = url::form_urlencoded::byte_serialize(tag.as_bytes()).collect::<String>();
+        Value::Array(vec![get_provider_json_bounded(
+            client,
+            &format!("https://gitlab.com/api/v4/projects/{encoded}/releases/{encoded_tag}"),
+            "GitLab",
+        )?])
+    } else {
+        get_provider_json_bounded(
+            client,
+            &format!("https://gitlab.com/api/v4/projects/{encoded}/releases?per_page=30"),
+            "GitLab",
+        )?
+    };
+    let mut releases = Vec::new();
+    for release in releases_value.as_array().into_iter().flatten() {
+        if release.get("upcoming_release").and_then(Value::as_bool) == Some(true) {
+            continue;
+        }
+        let Some(tag) = release.get("tag_name").and_then(Value::as_str) else {
+            continue;
+        };
+        let name = release.get("name").and_then(Value::as_str);
+        let prerelease = likely_provider_prerelease(tag, name.unwrap_or_default());
+        if mode == "gitlab_repository" && prerelease && !include_prereleases {
+            continue;
+        }
+        let mut assets = Vec::new();
+        for asset in release
+            .get("assets")
+            .and_then(|value| value.get("links"))
+            .and_then(Value::as_array)
+            .into_iter()
+            .flatten()
+        {
+            let Some(file_name) = asset.get("name").and_then(Value::as_str) else {
+                continue;
+            };
+            let Some(download_url) = asset
+                .get("direct_asset_url")
+                .or_else(|| asset.get("url"))
+                .and_then(Value::as_str)
+            else {
+                continue;
+            };
+            if !file_name.to_ascii_lowercase().ends_with(".apk")
+                || !Url::parse(download_url)
+                    .ok()
+                    .as_ref()
+                    .is_some_and(safe_remote_url)
+            {
+                continue;
+            }
+            assets.push(GitHubAsset {
+                file_name: file_name.to_string(),
+                size: 0,
+                content_type: None,
+                download_url: download_url.to_string(),
+            });
+        }
+        releases.push(GitHubRelease {
+            tag: tag.to_string(),
+            name: name.map(str::to_string),
+            prerelease,
+            published_at: release
+                .get("released_at")
+                .and_then(Value::as_str)
+                .map(str::to_string),
+            assets,
+        });
+    }
+    Ok(GitHubAnalysis {
+        repository: json!({
+            "fullName": repository_value.get("path_with_namespace").cloned().unwrap_or_else(|| Value::String(repository.to_string())),
+            "name": repository_value.get("name").cloned().unwrap_or(Value::Null),
+            "description": repository_value.get("description").cloned().unwrap_or(Value::Null),
+            "htmlUrl": source.url,
+        }),
+        releases,
+    })
+}
+
+fn analyze_forgejo_source(
+    client: &Client,
+    mode: &str,
+    source: &NormalizedRemoteSource,
+    include_prereleases: bool,
+) -> Result<GitHubAnalysis, Value> {
+    let repository = source
+        .repository
+        .as_deref()
+        .ok_or_else(|| provider_url_error("Forgejo"))?;
+    let base_url = source
+        .base_url
+        .as_deref()
+        .ok_or_else(|| provider_url_error("Forgejo"))?;
+    let api_root = format!(
+        "{}/api/v1/repos/{repository}",
+        base_url.trim_end_matches('/')
+    );
+    let repository_value = get_provider_json_bounded(client, &api_root, "Forgejo")?;
+    let releases_value = if mode == "forgejo_release" {
+        let tag = source.release_tag.as_deref().unwrap_or_default();
+        Value::Array(vec![get_provider_json_bounded(
+            client,
+            &format!("{api_root}/releases/tags/{tag}"),
+            "Forgejo",
+        )?])
+    } else {
+        get_provider_json_bounded(client, &format!("{api_root}/releases?limit=30"), "Forgejo")?
+    };
+    let expected_host = source.url.host_str().unwrap_or_default();
+    let mut releases = Vec::new();
+    for release in releases_value.as_array().into_iter().flatten() {
+        if release.get("draft").and_then(Value::as_bool) == Some(true) {
+            continue;
+        }
+        let prerelease = release
+            .get("prerelease")
+            .and_then(Value::as_bool)
+            .unwrap_or(false);
+        if mode == "forgejo_repository" && prerelease && !include_prereleases {
+            continue;
+        }
+        let Some(tag) = release.get("tag_name").and_then(Value::as_str) else {
+            continue;
+        };
+        let mut assets = Vec::new();
+        for asset in release
+            .get("assets")
+            .and_then(Value::as_array)
+            .into_iter()
+            .flatten()
+        {
+            let Some(file_name) = asset.get("name").and_then(Value::as_str) else {
+                continue;
+            };
+            let Some(download_url) = asset.get("browser_download_url").and_then(Value::as_str)
+            else {
+                continue;
+            };
+            let parsed = Url::parse(download_url).ok();
+            if !file_name.to_ascii_lowercase().ends_with(".apk")
+                || !parsed.as_ref().is_some_and(safe_remote_url)
+                || parsed.as_ref().and_then(Url::host_str) != Some(expected_host)
+            {
+                continue;
+            }
+            let size = asset.get("size").and_then(Value::as_u64).unwrap_or(0);
+            if size > MAX_APK_BYTES {
+                continue;
+            }
+            assets.push(GitHubAsset {
+                file_name: file_name.to_string(),
+                size,
+                content_type: asset
+                    .get("content_type")
+                    .and_then(Value::as_str)
+                    .map(str::to_string),
+                download_url: download_url.to_string(),
+            });
+        }
+        releases.push(GitHubRelease {
+            tag: tag.to_string(),
+            name: release
+                .get("name")
+                .and_then(Value::as_str)
+                .map(str::to_string),
+            prerelease,
+            published_at: release
+                .get("published_at")
+                .or_else(|| release.get("created_at"))
+                .and_then(Value::as_str)
+                .map(str::to_string),
+            assets,
+        });
+    }
+    Ok(GitHubAnalysis {
+        repository: json!({
+            "fullName": repository_value.get("full_name").cloned().unwrap_or_else(|| Value::String(repository.to_string())),
+            "name": repository_value.get("name").cloned().unwrap_or(Value::Null),
+            "description": repository_value.get("description").cloned().unwrap_or(Value::Null),
+            "htmlUrl": source.url,
+        }),
+        releases,
+    })
+}
+
+fn likely_provider_prerelease(tag: &str, name: &str) -> bool {
+    let value = format!("{tag} {name}").to_ascii_lowercase();
+    ["alpha", "beta", "preview", "prerelease", "pre-release"]
+        .iter()
+        .any(|marker| value.contains(marker))
+        || value
+            .split(|character: char| !character.is_ascii_alphanumeric())
+            .any(|part| part == "rc")
+}
+
+fn get_provider_json_bounded(client: &Client, url: &str, provider: &str) -> Result<Value, Value> {
+    let mut response = client
+        .get(url)
+        .header(USER_AGENT, HTTP_USER_AGENT)
+        .header("Accept", "application/json")
+        .send()
+        .map_err(|_| provider_request_error(provider))?;
+    if !response.status().is_success() {
+        return Err(provider_request_error(provider));
+    }
+    if response
+        .content_length()
+        .is_some_and(|length| length > MAX_METADATA_BYTES)
+    {
+        return Err(provider_response_error(provider));
+    }
+    let mut bytes = Vec::new();
+    response
+        .by_ref()
+        .take(MAX_METADATA_BYTES + 1)
+        .read_to_end(&mut bytes)
+        .map_err(|_| provider_response_error(provider))?;
+    if bytes.len() as u64 > MAX_METADATA_BYTES {
+        return Err(provider_response_error(provider));
+    }
+    serde_json::from_slice(&bytes).map_err(|_| provider_response_error(provider))
+}
+
+fn provider_request_error(provider: &str) -> Value {
+    remote_source_error(
+        "provider_request_failed",
+        &format!("{provider} information could not be retrieved."),
+    )
+}
+
+fn provider_response_error(provider: &str) -> Value {
+    remote_source_error(
+        "provider_response_invalid",
+        &format!("{provider} returned information the generator could not safely process."),
+    )
 }
 
 fn get_json_bounded(client: &Client, url: &str) -> Result<Value, Value> {
@@ -1397,6 +1745,8 @@ fn trusted_remote_source_payload(
         "mode": source.mode,
         "strategy": strategy,
         "downloadUrl": source.direct_url.as_ref().unwrap_or(&asset.download_url),
+        "provider": source.provider,
+        "baseUrl": source.base_url,
         "repository": source.repository,
         "releaseTag": asset.release_tag.as_ref().or(source.release_tag.as_ref()),
         "assetName": asset.file_name,

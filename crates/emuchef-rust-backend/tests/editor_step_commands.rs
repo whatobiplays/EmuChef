@@ -168,6 +168,7 @@ fn capabilities_stay_on_editor_session_surface() {
             "probeDevice",
             "inspectApk",
             "generateAppRecipeDraft",
+            "generateRemoteAppRecipeDraft",
             "generateDeviceProfileDraft",
             "checkGeneratedCatalogCollisions",
             "matchDevice",

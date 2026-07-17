@@ -417,7 +417,15 @@ export interface DeviceProfileSaveResult {
   displayPath: string;
 }
 
-export type AppGeneratorSourceMode = "local_apk" | "github_repository" | "github_release" | "direct_apk";
+export type AppGeneratorSourceMode =
+  | "local_apk"
+  | "github_repository"
+  | "github_release"
+  | "gitlab_repository"
+  | "gitlab_release"
+  | "forgejo_repository"
+  | "forgejo_release"
+  | "direct_apk";
 export type AppGeneratorInstallStrategy =
   | "pinned_remote_asset"
   | "latest_compatible_release"
@@ -467,6 +475,8 @@ export interface RemoteSourceDescriptorDto {
   mode: AppGeneratorSourceMode;
   strategy: AppGeneratorInstallStrategy;
   downloadUrl: string;
+  provider: "github" | "gitlab" | "forgejo" | null;
+  baseUrl: string | null;
   repository: string | null;
   releaseTag: string | null;
   assetName: string | null;
