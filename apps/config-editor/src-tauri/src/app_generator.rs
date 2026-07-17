@@ -553,113 +553,114 @@ pub fn analyze_app_generator_source(
 }
 
 #[tauri::command]
-pub fn download_app_generator_remote_apk(
+pub async fn download_app_generator_remote_apk(
     state: State<'_, AppGeneratorState>,
     session_handle: String,
     asset_handle: String,
 ) -> Result<Value, String> {
-    let asset = {
-        let registry = lock_registry(&state)?;
-        let session = match registry.session(&session_handle) {
+    let (asset, path) = {
+        let mut registry = lock_registry(&state)?;
+        let session = match registry.session_mut(&session_handle) {
             Ok(session) => session,
             Err(error) => return Ok(error),
         };
-        let Some(asset) = session.remote_assets.get(&asset_handle) else {
+        let Some(asset) = session.remote_assets.get(&asset_handle).cloned() else {
             return Ok(invalid_handle_error());
         };
-        asset.clone()
+        if session.temp_directory.is_none() {
+            session.temp_directory = tempfile::Builder::new()
+                .prefix("emuchef-app-generator-")
+                .tempdir()
+                .ok();
+        }
+        let Some(directory) = session.temp_directory.as_ref() else {
+            return Ok(remote_source_error(
+                "remote_workspace_failed",
+                "A temporary download workspace could not be created.",
+            ));
+        };
+        (asset, directory.path().join("selected.apk"))
     };
-    let client = match remote_http_client() {
-        Ok(client) => client,
-        Err(error) => return Ok(error),
-    };
-    let response = match client
-        .get(&asset.download_url)
-        .header(USER_AGENT, HTTP_USER_AGENT)
-        .send()
-    {
-        Ok(response) => response,
+
+    let download_asset = asset.clone();
+    let download_path = path.clone();
+    let downloaded = tauri::async_runtime::spawn_blocking(move || {
+        let client = remote_http_client()?;
+        let response = client
+            .get(&download_asset.download_url)
+            .header(USER_AGENT, HTTP_USER_AGENT)
+            .send()
+            .map_err(|_| {
+                remote_source_error("remote_download_failed", "The APK could not be downloaded.")
+            })?;
+        let final_url = response.url().clone();
+        if final_url.scheme() != "https" || !safe_remote_url(&final_url) {
+            return Err(remote_source_error(
+                "remote_redirect_unsafe",
+                "The APK download redirected to an unsafe address.",
+            ));
+        }
+        if !response.status().is_success() {
+            return Err(remote_source_error(
+                "remote_download_failed",
+                "The APK download did not succeed.",
+            ));
+        }
+        let content_length = response.content_length().or_else(|| {
+            response
+                .headers()
+                .get(CONTENT_LENGTH)
+                .and_then(|value| value.to_str().ok())
+                .and_then(|value| value.parse().ok())
+        });
+        if download_asset.size > MAX_APK_BYTES
+            || content_length.is_some_and(|value| value == 0 || value > MAX_APK_BYTES)
+        {
+            return Err(remote_source_error(
+                "remote_apk_size_invalid",
+                "The selected APK is empty or larger than 2 GiB.",
+            ));
+        }
+        if clearly_non_apk_content_type(
+            response
+                .headers()
+                .get(CONTENT_TYPE)
+                .and_then(|value| value.to_str().ok()),
+        ) {
+            return Err(remote_source_error(
+                "remote_content_type_invalid",
+                "The selected download is not an APK file.",
+            ));
+        }
+        let file_name =
+            response_file_name(&response).unwrap_or_else(|| download_asset.file_name.clone());
+        if !file_name.to_ascii_lowercase().ends_with(".apk") {
+            return Err(remote_source_error(
+                "remote_apk_name_invalid",
+                "The selected download does not identify an APK file.",
+            ));
+        }
+        let _ = fs::remove_file(&download_path);
+        if let Err(error) = stream_apk_response(response, &download_path) {
+            let _ = fs::remove_file(&download_path);
+            return Err(error);
+        }
+        let (path, identity) = validate_apk(&download_path)?;
+        Ok::<_, Value>((path, identity, file_name, final_url))
+    })
+    .await;
+
+    let (path, identity, file_name, final_url) = match downloaded {
+        Ok(Ok(value)) => value,
+        Ok(Err(error)) => return Ok(error),
         Err(_) => {
             return Ok(remote_source_error(
                 "remote_download_failed",
-                "The APK could not be downloaded.",
+                "The APK download could not be completed.",
             ))
         }
     };
-    let final_url = response.url().clone();
-    if final_url.scheme() != "https" || !safe_remote_url(&final_url) {
-        return Ok(remote_source_error(
-            "remote_redirect_unsafe",
-            "The APK download redirected to an unsafe address.",
-        ));
-    }
-    if !response.status().is_success() {
-        return Ok(remote_source_error(
-            "remote_download_failed",
-            "The APK download did not succeed.",
-        ));
-    }
-    let content_length = response.content_length().or_else(|| {
-        response
-            .headers()
-            .get(CONTENT_LENGTH)
-            .and_then(|value| value.to_str().ok())
-            .and_then(|value| value.parse().ok())
-    });
-    if asset.size > MAX_APK_BYTES
-        || content_length.is_some_and(|value| value == 0 || value > MAX_APK_BYTES)
-    {
-        return Ok(remote_source_error(
-            "remote_apk_size_invalid",
-            "The selected APK is empty or larger than 2 GiB.",
-        ));
-    }
-    if clearly_non_apk_content_type(
-        response
-            .headers()
-            .get(CONTENT_TYPE)
-            .and_then(|value| value.to_str().ok()),
-    ) {
-        return Ok(remote_source_error(
-            "remote_content_type_invalid",
-            "The selected download is not an APK file.",
-        ));
-    }
-    let file_name = response_file_name(&response).unwrap_or_else(|| asset.file_name.clone());
-    if !file_name.to_ascii_lowercase().ends_with(".apk") {
-        return Ok(remote_source_error(
-            "remote_apk_name_invalid",
-            "The selected download does not identify an APK file.",
-        ));
-    }
-    let mut registry = lock_registry(&state)?;
-    let session = match registry.session_mut(&session_handle) {
-        Ok(session) => session,
-        Err(error) => return Ok(error),
-    };
-    if session.temp_directory.is_none() {
-        session.temp_directory = tempfile::Builder::new()
-            .prefix("emuchef-app-generator-")
-            .tempdir()
-            .ok();
-    }
-    let Some(directory) = session.temp_directory.as_ref() else {
-        return Ok(remote_source_error(
-            "remote_workspace_failed",
-            "A temporary download workspace could not be created.",
-        ));
-    };
-    let path = directory.path().join("selected.apk");
-    drop(registry);
-    let _ = fs::remove_file(&path);
-    if let Err(error) = stream_apk_response(response, &path) {
-        let _ = fs::remove_file(&path);
-        return Ok(error);
-    }
-    let (path, identity) = match validate_apk(&path) {
-        Ok(value) => value,
-        Err(error) => return Ok(error),
-    };
+
     let mut registry = lock_registry(&state)?;
     let apk_handle = registry.allocate("apk");
     let session = match registry.session_mut(&session_handle) {

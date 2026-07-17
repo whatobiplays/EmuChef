@@ -138,6 +138,7 @@ export function AppGenerator({ initialAuthoredRoot, onAuthoredRootSelected, onCl
     const selectedAsset = state.sourceAnalysis?.assets.find((asset) => asset.assetHandle === state.selectedAssetHandle);
     if (selectedAsset?.prerelease && !window.confirm("This release is marked as a prerelease. Continue with this APK?")) return;
     dispatch({ type: "downloading" });
+    await new Promise<void>((resolve) => window.requestAnimationFrame(() => resolve()));
     const downloaded = await downloadAppGeneratorRemoteApk(
       state.sessionHandle,
       state.selectedAssetHandle,
