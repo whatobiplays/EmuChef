@@ -39,6 +39,7 @@ mod product_catalog;
 pub mod protocol;
 mod raw_request;
 pub mod ref_index;
+mod remote_release_resolver;
 pub mod request;
 pub mod runtime_configuration;
 pub(crate) mod runtime_refs;

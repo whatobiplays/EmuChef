@@ -48,6 +48,7 @@ export interface AppGeneratorState {
   selectedAssetHandle: string | null;
   remoteSource: RemoteSourceDescriptorDto | null;
   installStrategy: AppGeneratorInstallStrategy;
+  assetPattern: string;
   rootHandle: string | null;
   rootLabel: string | null;
   inspection: ApkInspectionResult | null;
@@ -75,6 +76,7 @@ export type AppGeneratorAction =
   | { type: "source-analyzing" }
   | { type: "source-analyzed"; analysis: RemoteSourceAnalysisResult }
   | { type: "asset-selected"; assetHandle: string }
+  | { type: "asset-pattern"; value: string }
   | { type: "install-strategy"; strategy: AppGeneratorInstallStrategy }
   | { type: "downloading" }
   | { type: "remote-downloaded"; apkHandle: string; label: string; source: RemoteSourceDescriptorDto }
@@ -105,6 +107,7 @@ export const initialAppGeneratorState: AppGeneratorState = {
   selectedAssetHandle: null,
   remoteSource: null,
   installStrategy: "pinned_remote_asset",
+  assetPattern: "",
   rootHandle: null,
   rootLabel: null,
   inspection: null,
@@ -140,6 +143,7 @@ export function reduceAppGenerator(
         sourceUrl: "",
         sourceAnalysis: null,
         selectedAssetHandle: null,
+        assetPattern: "",
         remoteSource: null,
         apkHandle: null,
         apkLabel: null,
@@ -187,6 +191,10 @@ export function reduceAppGenerator(
         phase: "selecting",
         sourceAnalysis: action.analysis,
         selectedAssetHandle: action.analysis.preselectedAssetHandle,
+        assetPattern: suggestedPatternForHandle(
+          action.analysis,
+          action.analysis.preselectedAssetHandle,
+        ),
         remoteSource: null,
         apkHandle: null,
         apkLabel: null,
@@ -200,10 +208,20 @@ export function reduceAppGenerator(
       return {
         ...state,
         selectedAssetHandle: action.assetHandle,
+        assetPattern: suggestedPatternForHandle(state.sourceAnalysis, action.assetHandle),
         remoteSource: null,
         apkHandle: null,
         apkLabel: null,
         inspection: null,
+        draft: null,
+        form: null,
+        collisions: null,
+        error: null,
+      };
+    case "asset-pattern":
+      return {
+        ...state,
+        assetPattern: action.value,
         draft: null,
         form: null,
         collisions: null,
@@ -225,7 +243,13 @@ export function reduceAppGenerator(
         ...state,
         apkHandle: action.apkHandle,
         apkLabel: action.label,
-        remoteSource: { ...action.source, strategy: state.installStrategy },
+        remoteSource: {
+          ...action.source,
+          strategy: state.installStrategy,
+          assetPattern:
+            state.installStrategy === "latest_compatible_release" ? state.assetPattern : null,
+          includePrereleases: state.includePrereleases,
+        },
         inspection: null,
         draft: null,
         form: null,
@@ -405,3 +429,79 @@ export function formToRequest(form: AppGeneratorFormState): FormRequestResult {
     mappings: structuredClone(form.mappings),
   };
 }
+
+export function eligibleApkAssets(
+  analysis: RemoteSourceAnalysisResult | null,
+  releaseTag?: string | null,
+) {
+  if (!analysis) return [];
+  return analysis.assets.filter(
+    (asset) =>
+      asset.fileName.toLowerCase().endsWith(".apk") &&
+      (!releaseTag || asset.releaseTag === releaseTag),
+  );
+}
+
+export function matchingAssetNames(pattern: string, fileNames: string[]): string[] {
+  try {
+    const expression = new RegExp(pattern, "u");
+    return fileNames.filter((fileName) => expression.test(fileName));
+  } catch {
+    return [];
+  }
+}
+
+export function assetPatternError(pattern: string, fileNames: string[]): string | null {
+  if (!pattern.trim()) return "Enter an APK filename pattern.";
+  try {
+    const expression = new RegExp(pattern, "u");
+    const matches = fileNames.filter((fileName) => expression.test(fileName));
+    if (matches.length === 0) {
+      return "The pattern does not match an APK in the selected release.";
+    }
+    if (matches.length > 1) {
+      return "The pattern matches multiple APKs. Make it more specific.";
+    }
+    return null;
+  } catch {
+    return "Enter a valid regular expression.";
+  }
+}
+
+export function suggestAssetPattern(
+  selectedFileName: string,
+  siblingFileNames: string[],
+): string {
+  if (!selectedFileName) return "";
+  const escaped = escapeRegex(selectedFileName);
+  const versionSegment = selectedFileName.match(/v?\d+(?:[._-]\d+){1,4}/u)?.[0];
+  const generalized = versionSegment
+    ? escaped.replace(
+        escapeRegex(versionSegment),
+        "v?\\d+(?:[._-]\\d+){1,4}",
+      )
+    : escaped;
+  const suggested = `^${generalized}$`;
+  const matches = matchingAssetNames(suggested, siblingFileNames);
+  return matches.length === 1 && matches[0] === selectedFileName
+    ? suggested
+    : `^${escaped}$`;
+}
+
+function suggestedPatternForHandle(
+  analysis: RemoteSourceAnalysisResult | null,
+  assetHandle: string | null,
+): string {
+  if (!analysis || !assetHandle) return "";
+  const selected = analysis.assets.find((asset) => asset.assetHandle === assetHandle);
+  if (!selected) return "";
+  const siblings = eligibleApkAssets(analysis, selected.releaseTag).map(
+    (asset) => asset.fileName,
+  );
+  return suggestAssetPattern(selected.fileName, siblings);
+}
+
+function escapeRegex(value: string): string {
+  return value.replace(/[.*+?^${}()|[\]\\]/gu, "\\$&");
+}
+

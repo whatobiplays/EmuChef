@@ -29,9 +29,12 @@ import type {
   RemoteSourceDescriptorDto,
 } from "../api/types";
 import {
+  assetPatternError,
   diagnosticDisplayTitle,
+  eligibleApkAssets,
   formToRequest,
   initialAppGeneratorState,
+  matchingAssetNames,
   reduceAppGenerator,
   visibleDraftDiagnostics,
   type AppGeneratorFormState,
@@ -189,6 +192,8 @@ export function AppGenerator({ initialAuthoredRoot, onAuthoredRootSelected, onCl
           apkHandle,
           assetHandle,
           remoteSource.strategy,
+          remoteSource.assetPattern,
+          remoteSource.includePrereleases,
           null,
           null,
           null,
@@ -242,6 +247,8 @@ export function AppGenerator({ initialAuthoredRoot, onAuthoredRootSelected, onCl
             state.apkHandle,
             state.selectedAssetHandle,
             state.installStrategy,
+            state.installStrategy === "latest_compatible_release" ? state.assetPattern : null,
+            state.includePrereleases,
             request.app,
             request.recipe,
             request.mappings,
@@ -300,6 +307,8 @@ export function AppGenerator({ initialAuthoredRoot, onAuthoredRootSelected, onCl
             state.apkHandle,
             state.selectedAssetHandle,
             state.installStrategy,
+            state.installStrategy === "latest_compatible_release" ? state.assetPattern : null,
+            state.includePrereleases,
             state.rootHandle,
             request.app,
             request.recipe,
@@ -350,6 +359,22 @@ export function AppGenerator({ initialAuthoredRoot, onAuthoredRootSelected, onCl
       form.mappings = { ...form.mappings, ...update };
     });
   }
+
+  const selectedAsset = state.sourceAnalysis?.assets.find(
+    (asset) => asset.assetHandle === state.selectedAssetHandle,
+  );
+  const selectedReleaseFileNames = eligibleApkAssets(
+    state.sourceAnalysis,
+    selectedAsset?.releaseTag,
+  ).map((asset) => asset.fileName);
+  const latestPatternError =
+    state.installStrategy === "latest_compatible_release"
+      ? assetPatternError(state.assetPattern, selectedReleaseFileNames)
+      : null;
+  const latestPatternMatches = matchingAssetNames(
+    state.assetPattern,
+    selectedReleaseFileNames,
+  );
 
   const busy =
     state.phase === "starting" ||
@@ -420,10 +445,35 @@ export function AppGenerator({ initialAuthoredRoot, onAuthoredRootSelected, onCl
                 {state.sourceAnalysis ? <RemoteAssetPicker analysis={state.sourceAnalysis} selectedAssetHandle={state.selectedAssetHandle} disabled={busy} onSelect={(assetHandle) => dispatch({ type: "asset-selected", assetHandle })} /> : null}
                 <div className="grid gap-4 md:grid-cols-3">
                   <AnalyzerPicker state={state} busy={busy} chooseAnalyzer={chooseAnalyzer} dispatch={dispatch} />
+                  {state.installStrategy === "latest_compatible_release" ? (
+                    <section className="rounded border border-slate-200 bg-slate-50 p-3 text-sm md:col-span-3">
+                      <label>
+                        <HelpLabel label="APK filename pattern" help="This regular expression is derived from the selected APK and used to identify exactly one APK in future releases." />
+                        <input
+                          className="mt-1 w-full rounded border border-slate-300 px-3 py-2 font-mono text-xs"
+                          disabled={busy}
+                          value={state.assetPattern}
+                          onChange={(event) => dispatch({ type: "asset-pattern", value: event.target.value })}
+                        />
+                      </label>
+                      {latestPatternError ? (
+                        <p className="mt-2 text-red-700">{latestPatternError}</p>
+                      ) : (
+                        <div className="mt-2 text-slate-600">
+                          <p>Current release match:</p>
+                          <ul className="mt-1 list-disc pl-5">
+                            {latestPatternMatches.map((fileName) => <li key={fileName}>{fileName}</li>)}
+                          </ul>
+                        </div>
+                      )}
+                      <p className="mt-2 text-xs text-amber-700">Future releases are resolved when provisioning runs. Resolution fails safely if the rule matches zero or multiple APKs.</p>
+                    </section>
+                  ) : null}
                   <label className="text-sm">
-                    <HelpLabel label="Installation method" help="Pinned download creates a recipe that downloads this exact APK. User-provided APK creates a local file input instead." />
-                    <select className="mt-1 w-full rounded border border-slate-300 px-3 py-2" disabled={busy} value={state.installStrategy} onChange={(event) => dispatch({ type: "install-strategy", strategy: event.target.value as "pinned_remote_asset" | "user_provided_apk" })}>
-                      <option value="pinned_remote_asset">Pinned download</option>
+                    <HelpLabel label="APK resolution" help="Pinned installs this exact APK. Latest compatible release resolves a future release using the saved filename rule. User-provided APK creates a local file input." />
+                    <select className="mt-1 w-full rounded border border-slate-300 px-3 py-2" disabled={busy} value={state.installStrategy} onChange={(event) => dispatch({ type: "install-strategy", strategy: event.target.value as import("../api/types").AppGeneratorInstallStrategy })}>
+                      <option value="pinned_remote_asset">Pinned release</option>
+                      {state.sourceAnalysis?.capabilities.latestRelease ? <option value="latest_compatible_release">Latest compatible release</option> : null}
                       <option value="user_provided_apk">User-provided APK</option>
                     </select>
                   </label>
@@ -465,7 +515,7 @@ export function AppGenerator({ initialAuthoredRoot, onAuthoredRootSelected, onCl
                 <Picker label="Authored root" value={state.rootHandle ? "Selected and ready" : null} button={state.rootHandle ? "Change authored root..." : "Choose authored root..."} disabled={busy} onClick={() => void chooseRoot()} />
                 <button
                   className="self-end rounded bg-indigo-700 px-4 py-2 text-sm font-medium text-white disabled:bg-slate-300"
-                  disabled={busy || !state.rootHandle}
+                  disabled={busy || !state.rootHandle || latestPatternError !== null}
                   onClick={() => void buildReview()}
                 >
                   Validate and review
@@ -535,7 +585,7 @@ function Facts({ facts, diagnostics }: { facts: ApkInspectionFactsDto; diagnosti
 
 function AppFields({ sourceMode, installStrategy, form, disabled, updateForm, changeApp, changeMapping }: {
   sourceMode: AppGeneratorSourceMode;
-  installStrategy: "pinned_remote_asset" | "user_provided_apk";
+  installStrategy: import("../api/types").AppGeneratorInstallStrategy;
   form: AppGeneratorFormState;
   disabled: boolean;
   updateForm: (update: (form: AppGeneratorFormState) => void) => void;
@@ -554,8 +604,8 @@ function AppFields({ sourceMode, installStrategy, form, disabled, updateForm, ch
         <Field label="Description" help="Optional short description of the app." value={app.description ?? ""} disabled={disabled} onChange={(description) => changeApp({ description: description || undefined })} />
         <Field label="Primary package" help="Android application ID verified from the APK manifest. Change only when the manifest information is known to be wrong." value={app.package.primary} disabled={disabled} onChange={(primary) => updateForm((next) => { next.app.package.primary = primary; })} />
         <PackageAliasList values={form.aliases} disabled={disabled} onChange={(aliases) => updateForm((next) => { next.aliases = aliases; })} />
-        <Fixed label="Installation method" help="Controls whether the generated recipe downloads this exact APK or asks the user to provide one." value={installStrategy === "pinned_remote_asset" ? "Pinned download" : "User-provided APK"} />
-        <Fixed label="Source resolver" help="Describes how the generated app definition identifies its installation source." value={installStrategy === "pinned_remote_asset" ? "Direct HTTPS download" : "None required"} />
+        <Fixed label="Installation method" help="Controls whether the recipe pins an APK, resolves the latest compatible release, or asks for a local file." value={installStrategy === "pinned_remote_asset" ? "Pinned release" : installStrategy === "latest_compatible_release" ? "Latest compatible release" : "User-provided APK"} />
+        <Fixed label="Source resolver" help="Describes how the generated app definition identifies its installation source." value={installStrategy === "pinned_remote_asset" ? "Direct HTTPS download" : installStrategy === "latest_compatible_release" ? "GitHub latest release" : "None required"} />
         <Fixed label="Update tracking" help="Describes the source identity retained for future catalog review." value={installStrategy === "user_provided_apk" ? "Local APK" : sourceMode.startsWith("github_") ? "GitHub release" : sourceMode === "direct_apk" ? "Direct APK URL" : "Local APK"} />
         <Area label="Install-source options (strict JSON object)" value={form.mappings.installSourceOptions} disabled={disabled} onChange={(installSourceOptions) => changeMapping({ installSourceOptions })} />
         <Area label="Tracking-source fields (strict JSON object)" value={form.mappings.trackingSourceFields} disabled={disabled} onChange={(trackingSourceFields) => changeMapping({ trackingSourceFields })} />

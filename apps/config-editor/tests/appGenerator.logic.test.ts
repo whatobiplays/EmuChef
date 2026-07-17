@@ -6,12 +6,15 @@ import type {
   AppRecipeSaveResult,
 } from "../src/api/types.js";
 import {
+  assetPatternError,
   diagnosticDisplayTitle,
   draftToForm,
   formToRequest,
   initialAppGeneratorState,
+  matchingAssetNames,
   readableNameFromPackage,
   reduceAppGenerator,
+  suggestAssetPattern,
   visibleDraftDiagnostics,
 } from "../src/components/appGenerator.logic.js";
 
@@ -103,6 +106,26 @@ test("package fallback creates a readable app name and matching recipe text", ()
   assert.equal(form.app.name, "Eden Emulator");
   assert.equal(form.recipe.name, "Install Eden Emulator");
   assert.equal(form.recipe.inputLabel, "Eden Emulator APK");
+});
+
+test("asset pattern generalizes version while preserving selected variant", () => {
+  const files = [
+    "Eden-0.0.4-android-arm64-v8a.apk",
+    "Eden-0.0.4-android-x86_64.apk",
+    "Eden-0.0.4-debug-arm64-v8a.apk",
+  ];
+  const pattern = suggestAssetPattern(files[0], files);
+  assert.doesNotMatch(pattern, /0\\\.0\\\.4/u);
+  assert.match(pattern, /arm64-v8a/u);
+  assert.deepEqual(matchingAssetNames(pattern, files), [files[0]]);
+  assert.equal(assetPatternError(pattern, files), null);
+});
+
+test("asset pattern validation rejects invalid zero-match and ambiguous rules", () => {
+  const files = ["app-v1.2.3-arm64.apk", "app-v1.2.3-x86_64.apk"];
+  assert.match(assetPatternError("[", files) ?? "", /valid regular expression/u);
+  assert.match(assetPatternError("^missing", files) ?? "", /does not match/u);
+  assert.match(assetPatternError("^app-.*\\.apk$", files) ?? "", /multiple APKs/u);
 });
 
 test("started session restores trusted analyzer and root handles", () => {
@@ -224,6 +247,12 @@ test("changing source mode clears stale analysis and APK state", () => {
       sourceHandle: "source",
       mode: "github_repository",
       normalizedUrl: "https://github.com/example/project",
+      capabilities: {
+        pinnedArtifact: true,
+        latestRelease: true,
+        prereleaseFiltering: true,
+        deterministicAssetFiltering: true,
+      },
       repository: { fullName: "example/project", name: "project", description: null, htmlUrl: "https://github.com/example/project" },
       releases: [],
       assets: [{ assetHandle: "asset", fileName: "app.apk", size: 10, contentType: "application/vnd.android.package-archive", releaseTag: "v1", releaseName: null, prerelease: false, publishedAt: null }],
@@ -244,6 +273,12 @@ test("remote analysis preselects one asset and strategy changes invalidate draft
       sourceHandle: "source",
       mode: "github_release",
       normalizedUrl: "https://github.com/example/project/releases/tag/v1",
+      capabilities: {
+        pinnedArtifact: true,
+        latestRelease: false,
+        prereleaseFiltering: false,
+        deterministicAssetFiltering: false,
+      },
       repository: { fullName: "example/project", name: "project", description: null, htmlUrl: "https://github.com/example/project" },
       releases: [],
       assets: [{ assetHandle: "asset", fileName: "app.apk", size: 10, contentType: null, releaseTag: "v1", releaseName: null, prerelease: false, publishedAt: null }],
@@ -271,6 +306,8 @@ test("remote download preserves the selected strategy in trusted source state", 
       repository: null,
       releaseTag: null,
       assetName: "app.apk",
+      assetPattern: null,
+      includePrereleases: false,
     },
   });
   assert.equal(state.apkHandle, "apk");

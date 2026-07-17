@@ -24,6 +24,7 @@ use tauri_plugin_dialog::DialogExt;
 use tempfile::TempDir;
 use url::Url;
 
+use crate::app_sources::capabilities_for_mode;
 use crate::sidecar_client::SidecarState;
 
 const MAX_APK_BYTES: u64 = 2 * 1024 * 1024 * 1024;
@@ -462,6 +463,7 @@ pub fn analyze_app_generator_source(
             "mode": mode,
             "normalizedUrl": normalized.url,
             "repository": Value::Null,
+            "capabilities": capabilities_for_mode(&mode),
             "releases": [],
             "assets": [{
                 "assetHandle": asset_handle,
@@ -530,6 +532,7 @@ pub fn analyze_app_generator_source(
             "mode": mode,
             "normalizedUrl": normalized.url,
             "repository": analyzed.repository,
+            "capabilities": capabilities_for_mode(&mode),
             "releases": releases,
             "assets": flat_assets,
             "preselectedAssetHandle": preselected,
@@ -686,6 +689,8 @@ pub async fn download_app_generator_remote_apk(
             "repository": source.as_ref().and_then(|value| value.repository.clone()),
             "releaseTag": asset.release_tag,
             "assetName": file_name,
+            "assetPattern": Value::Null,
+            "includePrereleases": false,
         }
     })))
 }
@@ -1164,6 +1169,8 @@ pub fn generate_remote_app_recipe_draft(
     apk_handle: String,
     asset_handle: String,
     strategy: String,
+    asset_pattern: Option<String>,
+    include_prereleases: bool,
     app: Option<Value>,
     recipe: Option<Value>,
     mappings: Option<Value>,
@@ -1173,11 +1180,17 @@ pub fn generate_remote_app_recipe_draft(
         Ok(facts) => facts,
         Err(error) => return Ok(error),
     };
-    let source =
-        match trusted_remote_source_payload(&state, &session_handle, &asset_handle, &strategy)? {
-            Ok(source) => source,
-            Err(error) => return Ok(error),
-        };
+    let source = match trusted_remote_source_payload(
+        &state,
+        &session_handle,
+        &asset_handle,
+        &strategy,
+        asset_pattern.as_deref(),
+        include_prereleases,
+    )? {
+        Ok(source) => source,
+        Err(error) => return Ok(error),
+    };
     let mut payload = Map::new();
     payload.insert("facts".to_string(), facts);
     payload.insert("source".to_string(), source);
@@ -1210,6 +1223,8 @@ pub fn save_generated_remote_app_recipe(
     apk_handle: String,
     asset_handle: String,
     strategy: String,
+    asset_pattern: Option<String>,
+    include_prereleases: bool,
     root_handle: String,
     app: Value,
     recipe: Value,
@@ -1235,11 +1250,17 @@ pub fn save_generated_remote_app_recipe(
     if current_file_identity(&apk_path).as_ref() != Some(&identity) {
         return Ok(apk_changed_error());
     }
-    let source =
-        match trusted_remote_source_payload(&state, &session_handle, &asset_handle, &strategy)? {
-            Ok(source) => source,
-            Err(error) => return Ok(error),
-        };
+    let source = match trusted_remote_source_payload(
+        &state,
+        &session_handle,
+        &asset_handle,
+        &strategy,
+        asset_pattern.as_deref(),
+        include_prereleases,
+    )? {
+        Ok(source) => source,
+        Err(error) => return Ok(error),
+    };
     let validation = request_sidecar(
         &sidecar,
         "generateRemoteAppRecipeDraft",
@@ -1335,8 +1356,13 @@ fn trusted_remote_source_payload(
     session_handle: &str,
     asset_handle: &str,
     strategy: &str,
+    asset_pattern: Option<&str>,
+    include_prereleases: bool,
 ) -> Result<Result<Value, Value>, String> {
-    if !matches!(strategy, "pinned_remote_asset" | "user_provided_apk") {
+    if !matches!(
+        strategy,
+        "pinned_remote_asset" | "latest_compatible_release" | "user_provided_apk"
+    ) {
         return Ok(Err(remote_source_error(
             "remote_strategy_invalid",
             "Choose a supported installation method.",
@@ -1353,6 +1379,20 @@ fn trusted_remote_source_payload(
     let Some(source) = session.remote_sources.get(&asset.source_handle) else {
         return Ok(Err(invalid_handle_error()));
     };
+    if strategy == "latest_compatible_release" {
+        if source.mode != "github_repository" || source.repository.is_none() {
+            return Ok(Err(remote_source_error(
+                "latest_release_source_unsupported",
+                "Latest compatible release currently requires a GitHub repository source.",
+            )));
+        }
+        let Some(_pattern) = asset_pattern.filter(|value| !value.trim().is_empty()) else {
+            return Ok(Err(remote_source_error(
+                "latest_release_asset_pattern_invalid",
+                "Enter an APK filename pattern for latest-release resolution.",
+            )));
+        };
+    }
     Ok(Ok(json!({
         "mode": source.mode,
         "strategy": strategy,
@@ -1360,6 +1400,8 @@ fn trusted_remote_source_payload(
         "repository": source.repository,
         "releaseTag": asset.release_tag.as_ref().or(source.release_tag.as_ref()),
         "assetName": asset.file_name,
+        "assetPattern": asset_pattern,
+        "includePrereleases": include_prereleases,
     })))
 }
 

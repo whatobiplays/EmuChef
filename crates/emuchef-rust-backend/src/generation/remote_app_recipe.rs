@@ -48,6 +48,10 @@ pub(crate) struct RemoteSource {
     pub release_tag: Option<String>,
     #[serde(default)]
     pub asset_name: Option<String>,
+    #[serde(default)]
+    pub asset_pattern: Option<String>,
+    #[serde(default)]
+    pub include_prereleases: bool,
 }
 
 #[derive(Clone, Debug, Default, Deserialize, Serialize)]
@@ -60,6 +64,8 @@ struct GeneratedRecipeIds {
     launch_step_id: String,
     artifact_id: String,
     resolve_step_id: String,
+    latest_resolve_step_id: String,
+    download_step_id: String,
 }
 
 #[derive(Clone, Debug, Default, Deserialize, Serialize)]
@@ -219,13 +225,30 @@ fn validate_source(source: &RemoteSource) -> Vec<DraftDiagnostic> {
     }
     if !matches!(
         source.strategy.as_str(),
-        "pinned_remote_asset" | "user_provided_apk"
+        "pinned_remote_asset" | "latest_compatible_release" | "user_provided_apk"
     ) {
         diagnostics.push(error(
             "remote_strategy_invalid",
             "Choose a supported installation method.",
             "source.strategy",
         ));
+    }
+    if source.strategy == "latest_compatible_release" {
+        if source.mode != "github_repository" || source.repository.is_none() {
+            diagnostics.push(error(
+                "latest_release_source_unsupported",
+                "Latest compatible release currently requires a GitHub repository source.",
+                "source.strategy",
+            ));
+        }
+        match source.asset_pattern.as_deref() {
+            Some(pattern) if regex::Regex::new(pattern).is_ok() => {}
+            _ => diagnostics.push(error(
+                "latest_release_asset_pattern_invalid",
+                "Latest compatible release requires a valid APK filename pattern.",
+                "source.assetPattern",
+            )),
+        }
     }
     let valid_url = url::Url::parse(&source.download_url)
         .ok()
@@ -252,6 +275,7 @@ fn proposed_app(facts: &ApkInspectionFacts, source: &RemoteSource) -> AppDefinit
         .or(facts.package_name.as_deref())
         .unwrap_or_default();
     let pinned = source.strategy == "pinned_remote_asset";
+    let latest = source.strategy == "latest_compatible_release";
     let mut options = OrderedValueMap::new();
     options.insert(
         "url".to_string(),
@@ -265,6 +289,15 @@ fn proposed_app(facts: &ApkInspectionFacts, source: &RemoteSource) -> AppDefinit
     }
     if let Some(asset) = &source.asset_name {
         options.insert("asset_name".to_string(), Value::String(asset.clone()));
+    }
+    if let Some(pattern) = &source.asset_pattern {
+        options.insert("asset_pattern".to_string(), Value::String(pattern.clone()));
+    }
+    if latest {
+        options.insert(
+            "include_prereleases".to_string(),
+            Value::Bool(source.include_prereleases),
+        );
     }
     let mut tracking = OrderedValueMap::new();
     if let Some(repository) = &source.repository {
@@ -295,19 +328,28 @@ fn proposed_app(facts: &ApkInspectionFacts, source: &RemoteSource) -> AppDefinit
         install_source: AppInstallSource {
             type_name: if pinned {
                 "remote_apk"
+            } else if latest {
+                "remote_release"
             } else {
                 "user_provided_apk"
             }
             .to_string(),
-            resolver: if pinned { "direct_url" } else { "none" }.to_string(),
-            options: if pinned {
+            resolver: if pinned {
+                "direct_url"
+            } else if latest {
+                "github_latest_release"
+            } else {
+                "none"
+            }
+            .to_string(),
+            options: if pinned || latest {
                 options
             } else {
                 OrderedValueMap::new()
             },
         },
         tracking_source: AppTrackingSource {
-            type_name: if !pinned {
+            type_name: if !pinned && !latest {
                 "local_apk"
             } else if source.mode.starts_with("github_") {
                 "github_release"
@@ -315,17 +357,21 @@ fn proposed_app(facts: &ApkInspectionFacts, source: &RemoteSource) -> AppDefinit
                 "remote_apk"
             }
             .to_string(),
-            fields: if pinned {
+            fields: if pinned || latest {
                 tracking
             } else {
                 OrderedValueMap::new()
             },
         },
         artifacts: AppArtifactSupport {
-            apk: RequiredArtifactSupport { required: pinned },
+            apk: RequiredArtifactSupport {
+                required: pinned || latest,
+            },
             shared_storage_config: ConfigArtifactSupport { supported: false },
             app_data_config: ConfigArtifactSupport { supported: false },
-            byo_apk: RequiredArtifactSupport { required: !pinned },
+            byo_apk: RequiredArtifactSupport {
+                required: !pinned && !latest,
+            },
         },
         provisioning: AppProvisioning::default(),
         inputs: Vec::new(),
@@ -343,16 +389,24 @@ fn generated_ids(app_id: &str) -> GeneratedRecipeIds {
         launch_step_id: format!("launch_{local}"),
         artifact_id: format!("{local}_apk"),
         resolve_step_id: "resolve_artifacts".to_string(),
+        latest_resolve_step_id: format!("resolve_latest_{local}"),
+        download_step_id: format!("download_{local}"),
     }
 }
 
 fn proposed_recipe_edits(app: &AppDefinitionV1, source: &RemoteSource) -> RemoteRecipeEdits {
     let pinned = source.strategy == "pinned_remote_asset";
+    let latest = source.strategy == "latest_compatible_release";
     RemoteRecipeEdits {
         ids: Some(generated_ids(&app.id)),
         name: format!("Install {}", app.name),
         description: if pinned {
             format!("Download and install {}.", app.name)
+        } else if latest {
+            format!(
+                "Resolve the latest compatible release and install {}.",
+                app.name
+            )
         } else {
             format!("Install a user-provided {} APK.", app.name)
         },
@@ -373,6 +427,11 @@ fn fill_empty_recipe_text(
     if edits.description.trim().is_empty() {
         edits.description = if source.strategy == "pinned_remote_asset" {
             format!("Download and install {}.", app.name)
+        } else if source.strategy == "latest_compatible_release" {
+            format!(
+                "Resolve the latest compatible release and install {}.",
+                app.name
+            )
         } else {
             format!("Install a user-provided {} APK.", app.name)
         };
@@ -391,6 +450,7 @@ fn build_recipe(
 ) -> Recipe {
     let ids = edits.ids.clone().unwrap_or_else(|| generated_ids(&app.id));
     let pinned = source.strategy == "pinned_remote_asset";
+    let latest = source.strategy == "latest_compatible_release";
     let mut inputs = OrderedMap::new();
     let mut artifacts = OrderedMap::new();
     let mut steps = Vec::new();
@@ -428,6 +488,71 @@ fn build_recipe(
         });
         app_ref = format!("artifacts.{}.local_path", ids.artifact_id);
         install_dependencies = vec![ids.resolve_step_id.clone()];
+    } else if latest {
+        let mut resolve_params = OrderedMap::new();
+        resolve_params.insert(
+            "repository".to_string(),
+            ParamValue::Literal(Value::String(source.repository.clone().unwrap_or_default())),
+        );
+        resolve_params.insert(
+            "include_prereleases".to_string(),
+            ParamValue::Literal(Value::Bool(source.include_prereleases)),
+        );
+        resolve_params.insert(
+            "asset_pattern".to_string(),
+            ParamValue::Literal(Value::String(
+                source.asset_pattern.clone().unwrap_or_default(),
+            )),
+        );
+        steps.push(Step {
+            id: ids.latest_resolve_step_id.clone(),
+            type_name: "resolve_github_release".to_string(),
+            name: format!("Resolve latest {} release", app.name),
+            description: Some(
+                "Select the newest eligible GitHub release and require one matching APK."
+                    .to_string(),
+            ),
+            progress_note: Some(format!("Resolving latest {} release", app.name)),
+            user_toggleable: false,
+            dependencies: Vec::new(),
+            constraints: StepConstraints {
+                capabilities: Vec::new(),
+                conflicts_with: Vec::new(),
+            },
+            skip_if: Vec::new(),
+            params: resolve_params,
+            verify: Vec::new(),
+        });
+        let mut download_params = OrderedMap::new();
+        download_params.insert(
+            "url".to_string(),
+            ParamValue::Ref(format!(
+                "steps.{}.outputs.download_url",
+                ids.latest_resolve_step_id
+            )),
+        );
+        download_params.insert(
+            "cache".to_string(),
+            ParamValue::Literal(Value::String("default".to_string())),
+        );
+        steps.push(Step {
+            id: ids.download_step_id.clone(),
+            type_name: "download_remote_file".to_string(),
+            name: format!("Download latest {} APK", app.name),
+            description: None,
+            progress_note: Some(format!("Downloading latest {} APK", app.name)),
+            user_toggleable: false,
+            dependencies: vec![ids.latest_resolve_step_id.clone()],
+            constraints: StepConstraints {
+                capabilities: Vec::new(),
+                conflicts_with: Vec::new(),
+            },
+            skip_if: Vec::new(),
+            params: download_params,
+            verify: Vec::new(),
+        });
+        app_ref = format!("steps.{}.outputs.local_path", ids.download_step_id);
+        install_dependencies = vec![ids.download_step_id.clone()];
     } else {
         inputs.insert(
             ids.input_id.clone(),
@@ -893,6 +1018,8 @@ mod tests {
             repository: Some("example/project".to_string()),
             release_tag: Some("v1".to_string()),
             asset_name: Some("app.apk".to_string()),
+            asset_pattern: None,
+            include_prereleases: false,
         }
     }
 
@@ -941,6 +1068,31 @@ mod tests {
         let recipe = draft.recipe_canonical_yaml.unwrap();
         assert!(!recipe.contains("type: remote_file"));
         assert!(recipe.contains("ref: inputs.remote_example_apk"));
+    }
+
+    #[test]
+    fn latest_strategy_generates_explicit_resolve_download_install_chain() {
+        let mut latest = source();
+        latest.mode = "github_repository".to_string();
+        latest.strategy = "latest_compatible_release".to_string();
+        latest.asset_pattern = Some("^app-v.*-arm64\\.apk$".to_string());
+        latest.include_prereleases = true;
+        let mut app = proposed_app(&facts(), &latest);
+        app.category = "emulator".to_string();
+        let draft = generate_remote_app_recipe_draft(RemoteAppRecipeDraftRequest {
+            facts: facts(),
+            source: latest,
+            app: Some(app),
+            recipe: None,
+            mappings: None,
+            regenerate_identifiers: false,
+        });
+        assert!(!draft.blocking);
+        let recipe = draft.recipe_canonical_yaml.unwrap();
+        assert!(recipe.contains("type: resolve_github_release"));
+        assert!(recipe.contains("type: download_remote_file"));
+        assert!(recipe.contains("include_prereleases: true"));
+        assert!(recipe.contains("ref: steps.download_remote_example.outputs.local_path"));
     }
 
     #[test]

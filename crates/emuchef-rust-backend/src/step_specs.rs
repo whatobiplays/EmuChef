@@ -61,6 +61,67 @@ pub fn step_specs_result() -> StepSpecsResult {
     StepSpecsResult {
         step_specs: vec![
             spec(
+                "resolve_github_release",
+                "Resolve GitHub Release",
+                Some("download_url"),
+                vec![
+                    output("download_url", "string", true),
+                    output("asset_name", "string", false),
+                    output("release_tag", "string", false),
+                    output("published_at", "string", false),
+                    output("size", "integer", false),
+                ],
+                vec!["repository", "include_prereleases", "asset_pattern"],
+                map(vec![
+                    (
+                        "repository",
+                        param(&["literal"], &["string"], true, vec![], None),
+                    ),
+                    (
+                        "include_prereleases",
+                        param(&["literal"], &["boolean"], false, vec![], None),
+                    ),
+                    (
+                        "asset_pattern",
+                        param(&["literal"], &["string"], true, vec![], None),
+                    ),
+                ]),
+                map(vec![("include_prereleases", json!(false))]),
+            ),
+            spec(
+                "download_remote_file",
+                "Download Remote File",
+                Some("local_path"),
+                vec![
+                    output("local_path", "file_path", true),
+                    output("filename", "string", false),
+                ],
+                vec!["url", "cache"],
+                map(vec![
+                    (
+                        "url",
+                        param(
+                            &["literal", "step_output_ref"],
+                            &["string"],
+                            true,
+                            vec![],
+                            None,
+                        ),
+                    ),
+                    (
+                        "cache",
+                        param(
+                            &["literal"],
+                            &["string"],
+                            false,
+                            vec!["default", "none"],
+                            None,
+                        ),
+                    ),
+                ]),
+                map(vec![("cache", json!("default"))]),
+            ),
+            spec(
                 "resolve_artifacts",
                 "Resolve Artifacts",
                 None,

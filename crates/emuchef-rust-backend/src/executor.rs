@@ -20,6 +20,7 @@ use crate::model::OrderedMap;
 use crate::planner::{
     ExecutionParamValue, ExecutionPlan, ExecutionStep, ExecutionStepCondition, RuntimeValue,
 };
+use crate::remote_release_resolver::resolve_github_latest;
 
 #[derive(Clone, Debug, PartialEq, Serialize)]
 pub struct ExecutionRunResult {
@@ -449,6 +450,8 @@ impl<D: ExecutorDevice> ExecutorRunner<D> {
         match step.type_name.as_str() {
             "wait" => self.execute_wait(&resolved_params),
             "grant_permissions" => self.execute_grant_permissions(plan, step, &resolved_params),
+            "resolve_github_release" => self.execute_resolve_github_release(&resolved_params),
+            "download_remote_file" => self.execute_download_remote_file(step, &resolved_params),
             "resolve_artifacts" => self.execute_resolve_artifacts(plan, state, &resolved_params),
             "extract_artifacts" => self.execute_extract_artifacts(state, step, &resolved_params),
             "extract_archive" => self.execute_extract_archive(step, &resolved_params),
@@ -536,6 +539,120 @@ impl<D: ExecutorDevice> ExecutorRunner<D> {
         if let Some(message) = failure_message {
             return Err(StepFailure { message, outputs });
         }
+        Ok(outputs)
+    }
+
+    fn execute_resolve_github_release(
+        &mut self,
+        resolved_params: &OrderedMap<Value>,
+    ) -> Result<OrderedMap<RuntimeValue>, StepFailure> {
+        let repository = resolved_params
+            .get("repository")
+            .and_then(Value::as_str)
+            .ok_or_else(|| {
+                StepFailure::new("resolve_github_release requires repository".to_string())
+            })?;
+        let asset_pattern = resolved_params
+            .get("asset_pattern")
+            .and_then(Value::as_str)
+            .ok_or_else(|| {
+                StepFailure::new("resolve_github_release requires asset_pattern".to_string())
+            })?;
+        let include_prereleases = resolved_params
+            .get("include_prereleases")
+            .and_then(Value::as_bool)
+            .unwrap_or(false);
+        let resolved = resolve_github_latest(repository, include_prereleases, asset_pattern)
+            .map_err(StepFailure::new)?;
+        let mut outputs = OrderedMap::new();
+        outputs.insert(
+            "download_url".to_string(),
+            RuntimeValue {
+                type_name: "string".to_string(),
+                value: Value::String(resolved.download_url),
+                location: None,
+            },
+        );
+        outputs.insert(
+            "asset_name".to_string(),
+            RuntimeValue {
+                type_name: "string".to_string(),
+                value: Value::String(resolved.asset_name),
+                location: None,
+            },
+        );
+        outputs.insert(
+            "release_tag".to_string(),
+            RuntimeValue {
+                type_name: "string".to_string(),
+                value: Value::String(resolved.release_tag),
+                location: None,
+            },
+        );
+        if let Some(published_at) = resolved.published_at {
+            outputs.insert(
+                "published_at".to_string(),
+                RuntimeValue {
+                    type_name: "string".to_string(),
+                    value: Value::String(published_at),
+                    location: None,
+                },
+            );
+        }
+        if let Some(size) = resolved.size {
+            outputs.insert(
+                "size".to_string(),
+                RuntimeValue {
+                    type_name: "integer".to_string(),
+                    value: Value::from(size),
+                    location: None,
+                },
+            );
+        }
+        Ok(outputs)
+    }
+
+    fn execute_download_remote_file(
+        &mut self,
+        step: &ExecutionStep,
+        resolved_params: &OrderedMap<Value>,
+    ) -> Result<OrderedMap<RuntimeValue>, StepFailure> {
+        let url = resolved_params
+            .get("url")
+            .and_then(Value::as_str)
+            .ok_or_else(|| StepFailure::new("download_remote_file requires url".to_string()))?;
+        let cache = resolved_params
+            .get("cache")
+            .and_then(Value::as_str)
+            .unwrap_or("default");
+        let artifact_id = format!("dynamic.{}", step.id);
+        let mut resolver = ArtifactResolver::new(self.adapters.sandbox()?);
+        let request = ArtifactResolveRequest {
+            artifact_id: &artifact_id,
+            type_name: "remote_file",
+            url,
+            cache_mode: cache,
+        };
+        let resolved = resolver
+            .resolve(request)
+            .map_err(|error| StepFailure::new(error.executor_message(request)))?;
+        let mut outputs = OrderedMap::new();
+        outputs.insert(
+            "local_path".to_string(),
+            RuntimeValue {
+                type_name: "file_path".to_string(),
+                value: Value::String(resolved.local_path.to_string_lossy().into_owned()),
+                location: Some("host".to_string()),
+            },
+        );
+        outputs.insert(
+            "filename".to_string(),
+            RuntimeValue {
+                type_name: "string".to_string(),
+                value: Value::String(resolved.filename),
+                location: None,
+            },
+        );
         Ok(outputs)
     }
 

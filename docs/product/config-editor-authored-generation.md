@@ -64,11 +64,17 @@ APK analyzers run with direct argv, bounded output, and a timeout. APK inspectio
 
 ### Installation strategies
 
-The wizard offers two recipe strategies.
+The wizard exposes three source-neutral recipe strategies when the selected source supports them.
 
-#### Pinned remote asset
+#### Pinned release
 
-This is the default for a selected stable GitHub release asset. The recipe declares a `remote_file` artifact with the exact release asset URL, resolves it, and installs it.
+This is the default for a selected GitHub release asset or direct HTTPS APK. The recipe declares a `remote_file` artifact with the exact asset URL, resolves it, and installs it. This mode is reproducible because the concrete artifact is fixed at authoring time.
+
+#### Latest compatible release
+
+This is available for public GitHub repository sources. The author selects one APK from the current release and EmuChef derives an editable filename regular expression by generalizing version-like segments while preserving variant, platform, and architecture text. The rule is previewed against the selected release and review is blocked unless it matches exactly one APK.
+
+The generated recipe uses explicit `resolve_github_release` and `download_remote_file` steps. Runtime resolution excludes drafts, excludes prereleases unless the author enables them, orders releases deterministically by publication time and tag, and fails safely when the saved rule matches zero or multiple assets. Future releases may differ from the APK inspected during authoring.
 
 #### User-provided APK
 
@@ -79,11 +85,14 @@ This is the default for a local APK and is available for any source. The recipe 
 The starter recipe is intentionally minimal:
 
 - optional `resolve_artifacts` for a pinned remote source;
+- optional `resolve_github_release` followed by `download_remote_file` for latest-compatible GitHub sources;
 - `install_apk` constrained by `apk_install`;
 - `package_installed` skip condition using the verified package name; and
 - optional `launch_app` only when a launcher component was verified and the author explicitly enables launch-once generation.
 
 The generator uses the existing recipe model and step specifications. It does not maintain a second recipe representation.
+
+Current limitation: the runtime resolver and downloader are implemented, but executor-side APK package and signing-certificate reinspection is not yet available. Latest recipes therefore retain authoring-time identity evidence but do not yet enforce package or certificate identity immediately before install. That enforcement must be added before latest mode is considered supply-chain complete.
 
 ### Generated app definition
 
@@ -119,10 +128,11 @@ Before saving, Rust scans the selected authored root for:
 - duplicate primary package;
 - duplicate recipe ID;
 - duplicate destination path;
-- existing repository metadata; and
-- existing pinned asset URL.
+- existing repository metadata;
+- existing pinned asset URL; and
+- an identical latest-release policy fingerprint composed of resolver, repository, asset pattern, and prerelease policy.
 
-ID and path conflicts are blocking. Matching package or repository data under a different ID is a warning requiring review.
+ID, path, and identical latest-policy conflicts are blocking. Matching package or repository data under a different ID is otherwise a warning requiring review. A pinned source and latest source for the same repository therefore warn through repository overlap without being treated as the same immutable artifact.
 
 ## Device profile generator
 

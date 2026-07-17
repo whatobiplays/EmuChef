@@ -418,7 +418,10 @@ export interface DeviceProfileSaveResult {
 }
 
 export type AppGeneratorSourceMode = "local_apk" | "github_repository" | "github_release" | "direct_apk";
-export type AppGeneratorInstallStrategy = "pinned_remote_asset" | "user_provided_apk";
+export type AppGeneratorInstallStrategy =
+  | "pinned_remote_asset"
+  | "latest_compatible_release"
+  | "user_provided_apk";
 
 export interface RemoteAssetDto {
   assetHandle: string;
@@ -443,6 +446,12 @@ export interface RemoteSourceAnalysisResult {
   sourceHandle: string;
   mode: AppGeneratorSourceMode;
   normalizedUrl: string;
+  capabilities: {
+    pinnedArtifact: boolean;
+    latestRelease: boolean;
+    prereleaseFiltering: boolean;
+    deterministicAssetFiltering: boolean;
+  };
   repository: {
     fullName: string;
     name: string | null;
@@ -461,6 +470,8 @@ export interface RemoteSourceDescriptorDto {
   repository: string | null;
   releaseTag: string | null;
   assetName: string | null;
+  assetPattern: string | null;
+  includePrereleases: boolean;
 }
 
 export interface RemoteApkDownloadResult {

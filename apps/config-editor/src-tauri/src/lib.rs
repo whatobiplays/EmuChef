@@ -1,4 +1,5 @@
 pub mod app_generator;
+pub mod app_sources;
 pub mod commands;
 pub mod device_profile_generator;
 pub mod menu;
