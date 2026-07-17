@@ -1132,6 +1132,68 @@ mod tests {
     }
 
     #[test]
+    fn gitlab_latest_strategy_preserves_provider_identity() {
+        let mut latest = source();
+        latest.mode = "gitlab_repository".to_string();
+        latest.provider = Some("gitlab".to_string());
+        latest.base_url = Some("https://gitlab.com".to_string());
+        latest.repository = Some("example/group/project".to_string());
+        latest.download_url = "https://gitlab.com/example/group/project".to_string();
+        latest.strategy = "latest_compatible_release".to_string();
+        latest.asset_pattern = Some("^app-v.*-arm64\\.apk$".to_string());
+        let mut app = proposed_app(&facts(), &latest);
+        app.category = "emulator".to_string();
+        let draft = generate_remote_app_recipe_draft(RemoteAppRecipeDraftRequest {
+            facts: facts(),
+            source: latest,
+            app: Some(app),
+            recipe: None,
+            mappings: None,
+            regenerate_identifiers: false,
+        });
+        assert!(!draft.blocking);
+        assert_eq!(draft.app.install_source.resolver, "provider_latest_release");
+        assert_eq!(
+            draft.app.install_source.options["provider"],
+            Value::String("gitlab".to_string())
+        );
+        let recipe = draft.recipe_canonical_yaml.unwrap();
+        assert!(recipe.contains("provider: gitlab"));
+        assert!(recipe.contains("base_url: https://gitlab.com"));
+        assert!(recipe.contains("repository: example/group/project"));
+    }
+
+    #[test]
+    fn forgejo_latest_strategy_preserves_custom_base_url() {
+        let mut latest = source();
+        latest.mode = "forgejo_repository".to_string();
+        latest.provider = Some("forgejo".to_string());
+        latest.base_url = Some("https://codeberg.org".to_string());
+        latest.repository = Some("example/project".to_string());
+        latest.download_url = "https://codeberg.org/example/project".to_string();
+        latest.strategy = "latest_compatible_release".to_string();
+        latest.asset_pattern = Some("^app-v.*-arm64\\.apk$".to_string());
+        let mut app = proposed_app(&facts(), &latest);
+        app.category = "emulator".to_string();
+        let draft = generate_remote_app_recipe_draft(RemoteAppRecipeDraftRequest {
+            facts: facts(),
+            source: latest,
+            app: Some(app),
+            recipe: None,
+            mappings: None,
+            regenerate_identifiers: false,
+        });
+        assert!(!draft.blocking);
+        assert_eq!(
+            draft.app.install_source.options["base_url"],
+            Value::String("https://codeberg.org".to_string())
+        );
+        let recipe = draft.recipe_canonical_yaml.unwrap();
+        assert!(recipe.contains("provider: forgejo"));
+        assert!(recipe.contains("base_url: https://codeberg.org"));
+    }
+
+    #[test]
     fn unsafe_download_url_is_blocking() {
         let mut source = source();
         source.download_url = "http://example.com/app.apk".to_string();

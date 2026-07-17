@@ -884,6 +884,59 @@ metadata: {{}}
     }
 
     #[test]
+    fn latest_policy_fingerprint_separates_provider_and_base_url() {
+        let root = app_recipe_root("provider-aware-latest-policy");
+        let mut existing = app("latest.gitlab", "com.example.gitlab");
+        existing.install_source.type_name = "remote_release".to_string();
+        existing.install_source.resolver = "provider_latest_release".to_string();
+        for (key, value) in [
+            ("provider", Value::String("gitlab".to_string())),
+            ("base_url", Value::String("https://gitlab.com".to_string())),
+            ("repository", Value::String("example/project".to_string())),
+            ("asset_pattern", Value::String("^app-.*\\.apk$".to_string())),
+            ("include_prereleases", Value::Bool(false)),
+        ] {
+            existing
+                .install_source
+                .options
+                .insert(key.to_string(), value);
+        }
+        existing.tracking_source.type_name = "provider_release".to_string();
+        existing.tracking_source.fields = existing.install_source.options.clone();
+        fs::write(
+            root.join("apps/latest.gitlab.yaml"),
+            crate::authored_models::emit_app_definition_yaml(&existing).unwrap(),
+        )
+        .unwrap();
+
+        let mut different_provider = existing.clone();
+        different_provider.id = "latest.forgejo".to_string();
+        different_provider.package.primary = "com.example.forgejo".to_string();
+        different_provider
+            .install_source
+            .options
+            .insert("provider".to_string(), Value::String("forgejo".to_string()));
+        different_provider.install_source.options.insert(
+            "base_url".to_string(),
+            Value::String("https://codeberg.org".to_string()),
+        );
+        different_provider.tracking_source.fields =
+            different_provider.install_source.options.clone();
+        let result = check_app_recipe_collisions(
+            &root,
+            &AppRecipeCollisionRequest {
+                app: different_provider,
+                recipe_id: "app.latest.forgejo.install".to_string(),
+            },
+        );
+        assert!(!result
+            .collisions
+            .iter()
+            .any(|item| item.code == "app_latest_policy_conflict"));
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
     fn unreadable_app_or_recipe_scan_is_blocking() {
         let root = app_recipe_root("app-recipe-incomplete");
         fs::write(root.join("apps/broken.yaml"), "not: [valid").unwrap();

@@ -3,9 +3,10 @@
 ## Status
 
 Implemented current-state design. Typed authored foundations, standard
-read-only device-profile generation, local APK generation, and public GitHub or
-direct HTTPS APK source generation are implemented. Extended device capability
-checks and authenticated/private source access remain later work.
+read-only device-profile generation, local APK generation, and public GitHub,
+GitLab, Forgejo/Codeberg, or direct HTTPS APK source generation are implemented.
+Extended device capability checks and authenticated/private source access remain
+later work.
 
 This document defines the Config Editor workflows for generating:
 
@@ -30,16 +31,17 @@ This scope does not generate device plans, infer configuration-copy behavior fro
 
 ### Supported sources
 
-The first complete workflow supports:
+The complete workflow supports:
 
 1. local APK;
-2. GitHub repository URL;
-3. GitHub release URL; and
-4. direct remote APK URL.
+2. GitHub repository or release URL;
+3. GitLab repository or release URL;
+4. Forgejo-compatible repository or release URL, including Codeberg; and
+5. direct remote APK URL.
 
-GitHub support uses the GitHub API and accepts only canonical GitHub repository and release identities. It does not scrape rendered HTML or implement a generic arbitrary-site crawler.
+Provider support uses documented release APIs and accepts only normalized repository and release identities. It does not scrape rendered HTML or implement a generic arbitrary-site crawler.
 
-GitHub analysis collects bounded repository metadata, stable release metadata, and APK release assets. Drafts and prereleases are excluded by default. When multiple APK assets remain, the user must choose one.
+Source analysis collects bounded repository metadata, stable release metadata, and APK release assets. Drafts are excluded, prereleases are excluded by default, and multiple eligible APK assets require explicit selection.
 
 ### APK inspection
 
@@ -72,9 +74,9 @@ This is the default for a selected GitHub release asset or direct HTTPS APK. The
 
 #### Latest compatible release
 
-This is available for public GitHub repository sources. The author selects one APK from the current release and EmuChef derives an editable filename regular expression by generalizing version-like segments while preserving variant, platform, and architecture text. The rule is previewed against the selected release and review is blocked unless it matches exactly one APK.
+This is available for public GitHub, GitLab, and Forgejo-compatible repository sources. The author selects one APK from the current release and EmuChef derives an editable filename regular expression by generalizing version-like segments while preserving variant, platform, and architecture text. The rule is previewed against the selected release and review is blocked unless it matches exactly one APK.
 
-The generated recipe uses explicit `resolve_github_release` and `download_remote_file` steps. Runtime resolution excludes drafts, excludes prereleases unless the author enables them, orders releases deterministically by publication time and tag, and fails safely when the saved rule matches zero or multiple assets. Future releases may differ from the APK inspected during authoring.
+The generated recipe uses explicit `resolve_remote_release` and `download_remote_file` steps. Runtime resolution dispatches by provider, excludes drafts or unpublished releases, excludes prereleases unless the author enables them, orders releases deterministically, and fails safely when the saved rule matches zero or multiple assets. Future releases may differ from the APK inspected during authoring.
 
 #### User-provided APK
 
@@ -85,7 +87,7 @@ This is the default for a local APK and is available for any source. The recipe 
 The starter recipe is intentionally minimal:
 
 - optional `resolve_artifacts` for a pinned remote source;
-- optional `resolve_github_release` followed by `download_remote_file` for latest-compatible GitHub sources;
+- optional `resolve_remote_release` followed by `download_remote_file` for latest-compatible provider sources;
 - `install_apk` constrained by `apk_install`;
 - `package_installed` skip condition using the verified package name; and
 - optional `launch_app` only when a launcher component was verified and the author explicitly enables launch-once generation.
@@ -130,7 +132,7 @@ Before saving, Rust scans the selected authored root for:
 - duplicate destination path;
 - existing repository metadata;
 - existing pinned asset URL; and
-- an identical latest-release policy fingerprint composed of resolver, repository, asset pattern, and prerelease policy.
+- an identical latest-release policy fingerprint composed of provider, base URL, repository, asset pattern, and prerelease policy.
 
 ID, path, and identical latest-policy conflicts are blocking. Matching package or repository data under a different ID is otherwise a warning requiring review. A pinned source and latest source for the same repository therefore warn through repository overlap without being treated as the same immutable artifact.
 
@@ -373,7 +375,7 @@ create-new hard-link publication, removes the first publication when the
 second fails and rollback is safe, then opens the recipe in the existing
 document session.
 
-### Phase 4: GitHub and remote APK sources
+### Phase 4: Provider-hosted and remote APK sources
 
 - repository and release analysis;
 - stable asset filtering and selection;
@@ -382,7 +384,8 @@ document session.
 - direct remote APK mode; and
 - network, timeout, and redaction tests.
 
-The implemented workflow uses only the GitHub REST API. Drafts are excluded,
+The implemented workflow uses provider release APIs for GitHub, GitLab, and
+Forgejo-compatible hosts. Drafts or unpublished releases are excluded,
 repository prereleases are opt-in, exact prereleases require confirmation, and
 eligible assets are non-empty `.apk` files no larger than 2 GiB. Direct URLs
 must use public HTTPS without credentials, fragments, or query parameters.

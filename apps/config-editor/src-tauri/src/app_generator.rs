@@ -2809,6 +2809,32 @@ mod tests {
     }
 
     #[test]
+    fn remote_source_normalization_accepts_gitlab_and_forgejo_shapes() {
+        let gitlab = normalize_remote_source(
+            "gitlab_release",
+            "https://gitlab.com/example/group/project/-/releases/v1.2.3",
+        )
+        .unwrap();
+        assert_eq!(gitlab.provider.as_deref(), Some("gitlab"));
+        assert_eq!(gitlab.repository.as_deref(), Some("example/group/project"));
+        assert_eq!(gitlab.release_tag.as_deref(), Some("v1.2.3"));
+        assert_eq!(
+            gitlab.url.as_str(),
+            "https://gitlab.com/example/group/project/-/releases/v1.2.3"
+        );
+
+        let forgejo = normalize_remote_source(
+            "forgejo_release",
+            "https://codeberg.org/example/project/releases/tag/v2.0.0",
+        )
+        .unwrap();
+        assert_eq!(forgejo.provider.as_deref(), Some("forgejo"));
+        assert_eq!(forgejo.base_url.as_deref(), Some("https://codeberg.org"));
+        assert_eq!(forgejo.repository.as_deref(), Some("example/project"));
+        assert_eq!(forgejo.release_tag.as_deref(), Some("v2.0.0"));
+    }
+
+    #[test]
     fn remote_source_normalization_rejects_unsafe_or_unsupported_addresses() {
         assert!(
             normalize_remote_source("github_repository", "http://github.com/example/project",)
