@@ -106,6 +106,17 @@ test("package fallback creates a readable app name and matching recipe text", ()
 });
 
 test("started session restores trusted analyzer and root handles", () => {
+test("remote download has a distinct busy phase before inspection", () => {
+  let state = reduceAppGenerator(initialAppGeneratorState, {
+    type: "started",
+    sessionHandle: "session",
+  });
+  state = reduceAppGenerator(state, { type: "downloading" });
+  assert.equal(state.phase, "downloading");
+  state = reduceAppGenerator(state, { type: "inspecting" });
+  assert.equal(state.phase, "inspecting");
+});
+
   const state = reduceAppGenerator(initialAppGeneratorState, {
     type: "started",
     sessionHandle: "session",
@@ -200,6 +211,70 @@ test("root-backed review hides the pre-root validation warning", () => {
 test("diagnostic titles do not expose internal codes", () => {
   assert.equal(diagnosticDisplayTitle("validation_context_limited", "warning"), "Catalog validation not yet available");
   assert.equal(diagnosticDisplayTitle("unknown_internal_code", "error"), "Action required");
+});
+
+test("changing source mode clears stale analysis and APK state", () => {
+  let state = reduceAppGenerator(initialAppGeneratorState, {
+    type: "started",
+    sessionHandle: "session",
+  });
+  state = reduceAppGenerator(state, {
+    type: "source-analyzed",
+    analysis: {
+      sourceHandle: "source",
+      mode: "github_repository",
+      normalizedUrl: "https://github.com/example/project",
+      repository: { fullName: "example/project", name: "project", description: null, htmlUrl: "https://github.com/example/project" },
+      releases: [],
+      assets: [{ assetHandle: "asset", fileName: "app.apk", size: 10, contentType: "application/vnd.android.package-archive", releaseTag: "v1", releaseName: null, prerelease: false, publishedAt: null }],
+      preselectedAssetHandle: "asset",
+    },
+  });
+  state = reduceAppGenerator(state, { type: "source-mode", mode: "direct_apk" });
+  assert.equal(state.sourceMode, "direct_apk");
+  assert.equal(state.sourceAnalysis, null);
+  assert.equal(state.selectedAssetHandle, null);
+  assert.equal(state.apkHandle, null);
+});
+
+test("remote analysis preselects one asset and strategy changes invalidate drafts", () => {
+  let state = reduceAppGenerator(initialAppGeneratorState, {
+    type: "source-analyzed",
+    analysis: {
+      sourceHandle: "source",
+      mode: "github_release",
+      normalizedUrl: "https://github.com/example/project/releases/tag/v1",
+      repository: { fullName: "example/project", name: "project", description: null, htmlUrl: "https://github.com/example/project" },
+      releases: [],
+      assets: [{ assetHandle: "asset", fileName: "app.apk", size: 10, contentType: null, releaseTag: "v1", releaseName: null, prerelease: false, publishedAt: null }],
+      preselectedAssetHandle: "asset",
+    },
+  });
+  assert.equal(state.selectedAssetHandle, "asset");
+  state = { ...state, draft: draft(), form: draftToForm(draft()) };
+  state = reduceAppGenerator(state, { type: "install-strategy", strategy: "user_provided_apk" });
+  assert.equal(state.installStrategy, "user_provided_apk");
+  assert.equal(state.draft, null);
+  assert.equal(state.form, null);
+});
+
+test("remote download preserves the selected strategy in trusted source state", () => {
+  let state = reduceAppGenerator(initialAppGeneratorState, { type: "install-strategy", strategy: "user_provided_apk" });
+  state = reduceAppGenerator(state, {
+    type: "remote-downloaded",
+    apkHandle: "apk",
+    label: "app.apk",
+    source: {
+      mode: "direct_apk",
+      strategy: "pinned_remote_asset",
+      downloadUrl: "https://example.com/app.apk",
+      repository: null,
+      releaseTag: null,
+      assetName: "app.apk",
+    },
+  });
+  assert.equal(state.apkHandle, "apk");
+  assert.equal(state.remoteSource?.strategy, "user_provided_apk");
 });
 
 test("reducer records the opened recipe result after an explicit save", () => {

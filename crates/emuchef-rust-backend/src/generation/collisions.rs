@@ -7,6 +7,7 @@ use regex::Regex;
 use serde::Serialize;
 
 use serde::Deserialize;
+use serde_json::Value;
 
 use crate::authored_models::{
     load_app_definition, load_device_profile, AppDefinitionV1, DeviceProfileV1,
@@ -119,6 +120,52 @@ fn scan_apps(
                 relative_path.clone(),
             ));
         }
+        let proposed_repository = source_string(&request.app, "repository");
+        let existing_repository = source_string(&existing, "repository");
+        let proposed_release_tag = source_string(&request.app, "release_tag");
+        let existing_release_tag = source_string(&existing, "release_tag");
+        if existing.id != request.app.id
+            && proposed_repository.is_some()
+            && proposed_repository == existing_repository
+        {
+            collisions.push(app_collision(
+                CollisionSeverity::Warning,
+                "app_source_repository_overlap",
+                "An app definition with a different id tracks the same GitHub repository.",
+                Some(existing.id.clone()),
+                relative_path.clone(),
+            ));
+        }
+        if existing.id != request.app.id
+            && proposed_repository.is_some()
+            && proposed_repository == existing_repository
+            && proposed_release_tag.is_some()
+            && proposed_release_tag == existing_release_tag
+        {
+            collisions.push(app_collision(
+                CollisionSeverity::Warning,
+                "app_source_release_overlap",
+                "An app definition with a different id tracks the same GitHub release.",
+                Some(existing.id.clone()),
+                relative_path.clone(),
+            ));
+        }
+        let proposed_url = source_string(&request.app, "url");
+        let existing_url = source_string(&existing, "url");
+        if existing.id != request.app.id && proposed_url.is_some() && proposed_url == existing_url {
+            let github = request.app.tracking_source.type_name == "github_release";
+            collisions.push(app_collision(
+                CollisionSeverity::Warning,
+                "app_source_url_overlap",
+                if github {
+                    "An app definition with a different id uses the same GitHub release APK asset."
+                } else {
+                    "An app definition with a different id uses the same remote APK URL."
+                },
+                Some(existing.id.clone()),
+                relative_path.clone(),
+            ));
+        }
         let comparable_source = !request.app.install_source.options.is_empty()
             || !request.app.tracking_source.fields.is_empty();
         if existing.id != request.app.id
@@ -135,6 +182,14 @@ fn scan_apps(
             ));
         }
     }
+}
+
+fn source_string<'a>(app: &'a AppDefinitionV1, key: &str) -> Option<&'a str> {
+    app.install_source
+        .options
+        .get(key)
+        .or_else(|| app.tracking_source.fields.get(key))
+        .and_then(Value::as_str)
 }
 
 fn scan_recipes(
@@ -687,6 +742,60 @@ metadata: {{}}
         );
         assert!(!overlap.blocking);
         assert_eq!(overlap.collisions[0].code, "app_package_overlap");
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn remote_source_collisions_distinguish_repository_release_and_download_url() {
+        let root = app_recipe_root("remote-source-collisions");
+        let mut existing = app("remote.example", "com.example.remote");
+        existing.install_source.type_name = "remote_apk".to_string();
+        existing.install_source.resolver = "direct_url".to_string();
+        existing.install_source.options.insert(
+            "url".to_string(),
+            Value::String(
+                "https://github.com/example/project/releases/download/v1/app.apk".to_string(),
+            ),
+        );
+        existing.install_source.options.insert(
+            "repository".to_string(),
+            Value::String("example/project".to_string()),
+        );
+        existing
+            .install_source
+            .options
+            .insert("release_tag".to_string(), Value::String("v1".to_string()));
+        existing.tracking_source.type_name = "github_release".to_string();
+        existing.tracking_source.fields = existing.install_source.options.clone();
+        fs::write(
+            root.join("apps/remote.example.yaml"),
+            crate::authored_models::emit_app_definition_yaml(&existing).unwrap(),
+        )
+        .unwrap();
+
+        let mut proposed = app("remote.other", "com.example.other");
+        proposed.install_source = existing.install_source.clone();
+        proposed.tracking_source = existing.tracking_source.clone();
+        let result = check_app_recipe_collisions(
+            &root,
+            &AppRecipeCollisionRequest {
+                app: proposed,
+                recipe_id: "app.remote.other.install".to_string(),
+            },
+        );
+        assert!(!result.blocking);
+        assert!(result
+            .collisions
+            .iter()
+            .any(|item| item.code == "app_source_repository_overlap"));
+        assert!(result
+            .collisions
+            .iter()
+            .any(|item| item.code == "app_source_release_overlap"));
+        assert!(result
+            .collisions
+            .iter()
+            .any(|item| item.code == "app_source_url_overlap"));
         fs::remove_dir_all(root).unwrap();
     }
 

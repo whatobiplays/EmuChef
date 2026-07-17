@@ -63,6 +63,7 @@ fn handle_validated_object(object: &Map<String, Value>) -> Result<Value, ApiErro
         "probeDevice" => handle_probe_device(object),
         "inspectApk" => handle_inspect_apk(object),
         "generateAppRecipeDraft" => handle_generate_app_recipe_draft(object),
+        "generateRemoteAppRecipeDraft" => handle_generate_remote_app_recipe_draft(object),
         "generateDeviceProfileDraft" => handle_generate_device_profile_draft(object),
         "checkGeneratedCatalogCollisions" => handle_check_generated_catalog_collisions(object),
         "matchDevice" => handle_match_device(object),
@@ -97,6 +98,7 @@ fn handle_validated_sidecar_object(
         "probeDevice" => handle_probe_device(object),
         "inspectApk" => handle_inspect_apk(object),
         "generateAppRecipeDraft" => handle_generate_app_recipe_draft(object),
+        "generateRemoteAppRecipeDraft" => handle_generate_remote_app_recipe_draft(object),
         "generateDeviceProfileDraft" => handle_generate_device_profile_draft(object),
         "checkGeneratedCatalogCollisions" => handle_check_generated_catalog_collisions(object),
         "matchDevice" => handle_match_device(object),
@@ -429,6 +431,27 @@ fn handle_generate_app_recipe_draft(object: &Map<String, Value>) -> Result<Value
             ApiError::command_failed(
                 "App-and-recipe draft could not be represented.",
                 json!({ "reason": "app_recipe_draft_serialization_failed" }),
+            )
+        })?;
+    Ok(envelope::success(result))
+}
+
+fn handle_generate_remote_app_recipe_draft(object: &Map<String, Value>) -> Result<Value, ApiError> {
+    let payload = payload_object(object)?;
+    let request = serde_json::from_value::<crate::generation::RemoteAppRecipeDraftRequest>(
+        Value::Object(payload.clone()),
+    )
+    .map_err(|_| {
+        ApiError::invalid_request_with_details(
+            "Remote app-and-recipe draft input is invalid.",
+            json!({ "field": "payload" }),
+        )
+    })?;
+    let result = serde_json::to_value(crate::generation::generate_remote_app_recipe_draft(request))
+        .map_err(|_| {
+            ApiError::command_failed(
+                "Remote app-and-recipe draft could not be represented.",
+                json!({ "reason": "remote_app_recipe_draft_serialization_failed" }),
             )
         })?;
     Ok(envelope::success(result))

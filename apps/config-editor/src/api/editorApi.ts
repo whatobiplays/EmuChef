@@ -42,6 +42,11 @@ import type {
   AppRecipeDraftResult,
   AppRecipeEditsDto,
   AppRecipeSaveResult,
+  AppGeneratorSourceMode,
+  AppGeneratorInstallStrategy,
+  RemoteApkDownloadResult,
+  RemoteSourceAnalysisResult,
+  RemoteSourceDescriptorDto,
 } from "./types";
 
 export type EditorApiResult<T> =
@@ -397,6 +402,27 @@ export async function setAppGeneratorAuthoredRoot(
   return callApi("set_app_generator_authored_root", { sessionHandle, authoredRoot });
 }
 
+export async function analyzeAppGeneratorSource(
+  sessionHandle: string,
+  mode: AppGeneratorSourceMode,
+  sourceUrl: string,
+  includePrereleases: boolean,
+): Promise<EditorApiResult<RemoteSourceAnalysisResult>> {
+  return callApi("analyze_app_generator_source", {
+    sessionHandle,
+    mode,
+    sourceUrl,
+    includePrereleases,
+  });
+}
+
+export async function downloadAppGeneratorRemoteApk(
+  sessionHandle: string,
+  assetHandle: string,
+): Promise<EditorApiResult<RemoteApkDownloadResult>> {
+  return callApi("download_app_generator_remote_apk", { sessionHandle, assetHandle });
+}
+
 export async function inspectAppGeneratorApk(
   sessionHandle: string,
   apkHandle: string,
@@ -416,6 +442,28 @@ export async function generateAppRecipeDraft(
   return callApi("generate_app_recipe_draft", {
     sessionHandle,
     apkHandle,
+    app,
+    recipe,
+    mappings,
+    regenerateIdentifiers,
+  });
+}
+
+export async function generateRemoteAppRecipeDraft(
+  sessionHandle: string,
+  apkHandle: string,
+  assetHandle: string,
+  strategy: AppGeneratorInstallStrategy,
+  app: AppDefinitionV1Dto | null,
+  recipe: AppRecipeEditsDto | null,
+  mappings: AppMappingEditsDto | null,
+  regenerateIdentifiers = false,
+): Promise<EditorApiResult<AppRecipeDraftResult>> {
+  return callApi("generate_remote_app_recipe_draft", {
+    sessionHandle,
+    apkHandle,
+    assetHandle,
+    strategy,
     app,
     recipe,
     mappings,
@@ -448,6 +496,28 @@ export async function saveGeneratedAppRecipe(
   return callApi("save_generated_app_recipe", {
     sessionHandle,
     apkHandle,
+    rootHandle,
+    app,
+    recipe,
+    mappings,
+  });
+}
+
+export async function saveGeneratedRemoteAppRecipe(
+  sessionHandle: string,
+  apkHandle: string,
+  assetHandle: string,
+  strategy: AppGeneratorInstallStrategy,
+  rootHandle: string,
+  app: AppDefinitionV1Dto,
+  recipe: AppRecipeEditsDto,
+  mappings: AppMappingEditsDto,
+): Promise<EditorApiResult<AppRecipeSaveResult>> {
+  return callApi("save_generated_remote_app_recipe", {
+    sessionHandle,
+    apkHandle,
+    assetHandle,
+    strategy,
     rootHandle,
     app,
     recipe,

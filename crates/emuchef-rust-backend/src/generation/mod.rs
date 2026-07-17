@@ -9,6 +9,7 @@ mod app_recipe;
 mod collisions;
 mod device_profile;
 mod identifiers;
+mod remote_app_recipe;
 
 pub(crate) use apk::{inspect_apk_facts, ApkInspectionRequest};
 pub(crate) use app_recipe::{generate_app_recipe_draft, AppRecipeDraftRequest};
@@ -18,3 +19,4 @@ pub(crate) use collisions::{
 pub(crate) use device_profile::{
     generate_device_profile_draft, DeviceProfileDraftRequest, SafeDetectedDeviceFacts,
 };
+pub(crate) use remote_app_recipe::{generate_remote_app_recipe_draft, RemoteAppRecipeDraftRequest};

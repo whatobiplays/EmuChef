@@ -7,16 +7,22 @@
 use std::collections::HashMap;
 use std::fs::{self, File, OpenOptions};
 use std::io::{self, Read, Write};
+use std::net::IpAddr;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::sync::Mutex;
 use std::thread;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
+use reqwest::blocking::{Client, Response};
+use reqwest::header::{CONTENT_DISPOSITION, CONTENT_LENGTH, CONTENT_TYPE, USER_AGENT};
+use reqwest::redirect::Policy;
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Map, Value};
 use tauri::{AppHandle, Manager, State};
 use tauri_plugin_dialog::DialogExt;
+use tempfile::TempDir;
+use url::Url;
 
 use crate::sidecar_client::SidecarState;
 
@@ -26,6 +32,11 @@ const ANALYZER_TIMEOUT: Duration = Duration::from_secs(30);
 const SAFE_APK_LABEL: &str = "Selected local APK";
 const SAFE_ROOT_LABEL: &str = "Selected authored root";
 const PREFERENCES_FILE_NAME: &str = "app-generator-preferences.json";
+const MAX_METADATA_BYTES: u64 = 2 * 1024 * 1024;
+const NETWORK_TIMEOUT: Duration = Duration::from_secs(30);
+const CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
+const MAX_REDIRECTS: usize = 5;
+const HTTP_USER_AGENT: &str = "EmuChef-Config-Editor/0.1";
 
 #[derive(Clone, Debug, Default, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -46,12 +57,32 @@ struct GeneratorSession {
     apks: HashMap<String, TrustedApk>,
     analyzers: HashMap<String, TrustedAnalyzer>,
     roots: HashMap<String, TrustedRoot>,
+    remote_sources: HashMap<String, TrustedRemoteSource>,
+    remote_assets: HashMap<String, TrustedRemoteAsset>,
+    temp_directory: Option<TempDir>,
 }
 
 struct TrustedApk {
     path: PathBuf,
     identity: FileIdentity,
     facts: Option<Value>,
+}
+
+#[derive(Clone)]
+struct TrustedRemoteSource {
+    mode: String,
+    repository: Option<String>,
+    release_tag: Option<String>,
+    direct_url: Option<String>,
+}
+
+#[derive(Clone)]
+struct TrustedRemoteAsset {
+    source_handle: String,
+    download_url: String,
+    file_name: String,
+    size: u64,
+    release_tag: Option<String>,
 }
 
 #[derive(Clone)]
@@ -195,7 +226,9 @@ pub fn begin_app_generator(
             if let Ok(path) = validate_analyzer(path, kind) {
                 let handle = registry.allocate("analyzer");
                 if let Ok(session) = registry.session_mut(&session_handle) {
-                    session.analyzers.insert(handle.clone(), TrustedAnalyzer { path, kind });
+                    session
+                        .analyzers
+                        .insert(handle.clone(), TrustedAnalyzer { path, kind });
                     analyzer_handle = Some(handle);
                     analyzer_kind = Some(kind.protocol_name());
                     analyzer_label = Some(kind.display_label());
@@ -254,6 +287,10 @@ pub async fn choose_app_generator_apk(
         Ok(session) => session,
         Err(error) => return Ok(error),
     };
+    session.remote_sources.clear();
+    session.remote_assets.clear();
+    session.temp_directory = None;
+    session.apks.clear();
     session.apks.insert(
         apk_handle.clone(),
         TrustedApk {
@@ -376,6 +413,655 @@ pub async fn choose_app_generator_authored_root(
 }
 
 #[tauri::command]
+pub fn analyze_app_generator_source(
+    state: State<'_, AppGeneratorState>,
+    session_handle: String,
+    mode: String,
+    source_url: String,
+    include_prereleases: bool,
+) -> Result<Value, String> {
+    require_session(&state, &session_handle)?;
+    let normalized = match normalize_remote_source(&mode, &source_url) {
+        Ok(value) => value,
+        Err(error) => return Ok(error),
+    };
+    let client = match remote_http_client() {
+        Ok(client) => client,
+        Err(error) => return Ok(error),
+    };
+    let mut registry = lock_registry(&state)?;
+    let source_handle = registry.allocate("remote-source");
+    let session = match registry.session_mut(&session_handle) {
+        Ok(session) => session,
+        Err(error) => return Ok(error),
+    };
+    session.remote_sources.clear();
+    session.remote_assets.clear();
+    session.apks.clear();
+    session.temp_directory = None;
+    let mut trusted_assets = Vec::new();
+    let result = if mode == "direct_apk" {
+        let file_name = normalized
+            .url
+            .path_segments()
+            .and_then(|mut segments| segments.next_back())
+            .filter(|value| value.to_ascii_lowercase().ends_with(".apk"))
+            .map(str::to_string)
+            .unwrap_or_else(|| "Remote APK".to_string());
+        let asset_handle = registry.allocate("remote-asset");
+        let asset = TrustedRemoteAsset {
+            source_handle: source_handle.clone(),
+            download_url: normalized.url.to_string(),
+            file_name: file_name.clone(),
+            size: 0,
+            release_tag: None,
+        };
+        trusted_assets.push((asset_handle.clone(), asset));
+        json!({
+            "sourceHandle": source_handle,
+            "mode": mode,
+            "normalizedUrl": normalized.url,
+            "repository": Value::Null,
+            "releases": [],
+            "assets": [{
+                "assetHandle": asset_handle,
+                "fileName": file_name,
+                "size": Value::Null,
+                "contentType": Value::Null,
+                "releaseTag": Value::Null,
+                "releaseName": Value::Null,
+                "prerelease": false,
+                "publishedAt": Value::Null,
+            }],
+            "preselectedAssetHandle": asset_handle,
+        })
+    } else {
+        drop(registry);
+        let analyzed = match analyze_github_source(&client, &mode, &normalized, include_prereleases)
+        {
+            Ok(value) => value,
+            Err(error) => return Ok(error),
+        };
+        registry = lock_registry(&state)?;
+        let mut releases = Vec::new();
+        let mut flat_assets = Vec::new();
+        for release in analyzed.releases {
+            let mut release_assets = Vec::new();
+            for asset in release.assets {
+                let asset_handle = registry.allocate("remote-asset");
+                let safe = json!({
+                    "assetHandle": asset_handle,
+                    "fileName": asset.file_name,
+                    "size": asset.size,
+                    "contentType": asset.content_type,
+                    "releaseTag": release.tag,
+                    "releaseName": release.name,
+                    "prerelease": release.prerelease,
+                    "publishedAt": release.published_at,
+                });
+                release_assets.push(safe.clone());
+                flat_assets.push(safe);
+                trusted_assets.push((
+                    asset_handle,
+                    TrustedRemoteAsset {
+                        source_handle: source_handle.clone(),
+                        download_url: asset.download_url,
+                        file_name: asset.file_name,
+                        size: asset.size,
+                        release_tag: Some(release.tag.clone()),
+                    },
+                ));
+            }
+            if !release_assets.is_empty() {
+                releases.push(json!({
+                    "tag": release.tag,
+                    "name": release.name,
+                    "prerelease": release.prerelease,
+                    "publishedAt": release.published_at,
+                    "assets": release_assets,
+                }));
+            }
+        }
+        let preselected = (flat_assets.len() == 1)
+            .then(|| flat_assets[0].get("assetHandle").cloned())
+            .flatten();
+        json!({
+            "sourceHandle": source_handle,
+            "mode": mode,
+            "normalizedUrl": normalized.url,
+            "repository": analyzed.repository,
+            "releases": releases,
+            "assets": flat_assets,
+            "preselectedAssetHandle": preselected,
+        })
+    };
+    let session = match registry.session_mut(&session_handle) {
+        Ok(session) => session,
+        Err(error) => return Ok(error),
+    };
+    session.remote_sources.insert(
+        source_handle.clone(),
+        TrustedRemoteSource {
+            mode: mode.clone(),
+            repository: normalized.repository.clone(),
+            release_tag: normalized.release_tag.clone(),
+            direct_url: (mode == "direct_apk").then(|| normalized.url.to_string()),
+        },
+    );
+    session.remote_assets.extend(trusted_assets);
+    Ok(success(result))
+}
+
+#[tauri::command]
+pub fn download_app_generator_remote_apk(
+    state: State<'_, AppGeneratorState>,
+    session_handle: String,
+    asset_handle: String,
+) -> Result<Value, String> {
+    let asset = {
+        let registry = lock_registry(&state)?;
+        let session = match registry.session(&session_handle) {
+            Ok(session) => session,
+            Err(error) => return Ok(error),
+        };
+        let Some(asset) = session.remote_assets.get(&asset_handle) else {
+            return Ok(invalid_handle_error());
+        };
+        asset.clone()
+    };
+    let client = match remote_http_client() {
+        Ok(client) => client,
+        Err(error) => return Ok(error),
+    };
+    let response = match client
+        .get(&asset.download_url)
+        .header(USER_AGENT, HTTP_USER_AGENT)
+        .send()
+    {
+        Ok(response) => response,
+        Err(_) => {
+            return Ok(remote_source_error(
+                "remote_download_failed",
+                "The APK could not be downloaded.",
+            ))
+        }
+    };
+    let final_url = response.url().clone();
+    if final_url.scheme() != "https" || !safe_remote_url(&final_url) {
+        return Ok(remote_source_error(
+            "remote_redirect_unsafe",
+            "The APK download redirected to an unsafe address.",
+        ));
+    }
+    if !response.status().is_success() {
+        return Ok(remote_source_error(
+            "remote_download_failed",
+            "The APK download did not succeed.",
+        ));
+    }
+    let content_length = response.content_length().or_else(|| {
+        response
+            .headers()
+            .get(CONTENT_LENGTH)
+            .and_then(|value| value.to_str().ok())
+            .and_then(|value| value.parse().ok())
+    });
+    if asset.size > MAX_APK_BYTES
+        || content_length.is_some_and(|value| value == 0 || value > MAX_APK_BYTES)
+    {
+        return Ok(remote_source_error(
+            "remote_apk_size_invalid",
+            "The selected APK is empty or larger than 2 GiB.",
+        ));
+    }
+    if clearly_non_apk_content_type(
+        response
+            .headers()
+            .get(CONTENT_TYPE)
+            .and_then(|value| value.to_str().ok()),
+    ) {
+        return Ok(remote_source_error(
+            "remote_content_type_invalid",
+            "The selected download is not an APK file.",
+        ));
+    }
+    let file_name = response_file_name(&response).unwrap_or_else(|| asset.file_name.clone());
+    if !file_name.to_ascii_lowercase().ends_with(".apk") {
+        return Ok(remote_source_error(
+            "remote_apk_name_invalid",
+            "The selected download does not identify an APK file.",
+        ));
+    }
+    let mut registry = lock_registry(&state)?;
+    let session = match registry.session_mut(&session_handle) {
+        Ok(session) => session,
+        Err(error) => return Ok(error),
+    };
+    if session.temp_directory.is_none() {
+        session.temp_directory = tempfile::Builder::new()
+            .prefix("emuchef-app-generator-")
+            .tempdir()
+            .ok();
+    }
+    let Some(directory) = session.temp_directory.as_ref() else {
+        return Ok(remote_source_error(
+            "remote_workspace_failed",
+            "A temporary download workspace could not be created.",
+        ));
+    };
+    let path = directory.path().join("selected.apk");
+    drop(registry);
+    let _ = fs::remove_file(&path);
+    if let Err(error) = stream_apk_response(response, &path) {
+        let _ = fs::remove_file(&path);
+        return Ok(error);
+    }
+    let (path, identity) = match validate_apk(&path) {
+        Ok(value) => value,
+        Err(error) => return Ok(error),
+    };
+    let mut registry = lock_registry(&state)?;
+    let apk_handle = registry.allocate("apk");
+    let session = match registry.session_mut(&session_handle) {
+        Ok(session) => session,
+        Err(error) => return Ok(error),
+    };
+    session.apks.insert(
+        apk_handle.clone(),
+        TrustedApk {
+            path,
+            identity,
+            facts: None,
+        },
+    );
+    let source = session.remote_sources.get(&asset.source_handle).cloned();
+    Ok(success(json!({
+        "apkHandle": apk_handle,
+        "label": file_name,
+        "source": {
+            "mode": source.as_ref().map(|value| value.mode.as_str()).unwrap_or("direct_apk"),
+            "strategy": "pinned_remote_asset",
+            "downloadUrl": final_url,
+            "repository": source.as_ref().and_then(|value| value.repository.clone()),
+            "releaseTag": asset.release_tag,
+            "assetName": file_name,
+        }
+    })))
+}
+
+#[derive(Clone)]
+struct NormalizedRemoteSource {
+    url: Url,
+    repository: Option<String>,
+    release_tag: Option<String>,
+}
+
+struct GitHubAnalysis {
+    repository: Value,
+    releases: Vec<GitHubRelease>,
+}
+struct GitHubRelease {
+    tag: String,
+    name: Option<String>,
+    prerelease: bool,
+    published_at: Option<String>,
+    assets: Vec<GitHubAsset>,
+}
+struct GitHubAsset {
+    file_name: String,
+    size: u64,
+    content_type: Option<String>,
+    download_url: String,
+}
+
+fn normalize_remote_source(mode: &str, input: &str) -> Result<NormalizedRemoteSource, Value> {
+    let mut url = Url::parse(input.trim())
+        .map_err(|_| remote_source_error("remote_url_invalid", "Enter a valid HTTPS address."))?;
+    if !safe_remote_url(&url) || url.fragment().is_some() {
+        return Err(remote_source_error(
+            "remote_url_invalid",
+            "Enter a valid public HTTPS address without credentials or a fragment.",
+        ));
+    }
+    url.set_fragment(None);
+    if mode == "direct_apk" {
+        if url.query().is_some() {
+            return Err(remote_source_error(
+                "remote_url_invalid",
+                "Enter a direct APK address without query parameters.",
+            ));
+        }
+        return Ok(NormalizedRemoteSource {
+            url,
+            repository: None,
+            release_tag: None,
+        });
+    }
+    if !url
+        .host_str()
+        .is_some_and(|host| host.eq_ignore_ascii_case("github.com"))
+        || url.query().is_some()
+    {
+        return Err(remote_source_error(
+            "github_url_invalid",
+            "Enter a public github.com repository or release address.",
+        ));
+    }
+    let segments = url
+        .path_segments()
+        .map(|items| items.filter(|item| !item.is_empty()).collect::<Vec<_>>())
+        .unwrap_or_default();
+    let (owner, repository, release_tag) = match mode {
+        "github_repository" if segments.len() == 2 => {
+            (segments[0], segments[1].trim_end_matches(".git"), None)
+        }
+        "github_release"
+            if segments.len() == 5 && segments[2] == "releases" && segments[3] == "tag" =>
+        {
+            (segments[0], segments[1], Some(segments[4].to_string()))
+        }
+        _ => {
+            return Err(remote_source_error(
+                "github_url_invalid",
+                "Enter a supported GitHub repository or release address.",
+            ))
+        }
+    };
+    if !valid_github_component(owner)
+        || !valid_github_component(repository)
+        || release_tag.as_deref().is_some_and(|tag| tag.is_empty())
+    {
+        return Err(remote_source_error(
+            "github_url_invalid",
+            "The GitHub owner, repository, or release tag is invalid.",
+        ));
+    }
+    let repository_id = format!("{owner}/{repository}");
+    let normalized_url = if let Some(tag) = &release_tag {
+        Url::parse(&format!(
+            "https://github.com/{repository_id}/releases/tag/{tag}"
+        ))
+        .unwrap()
+    } else {
+        Url::parse(&format!("https://github.com/{repository_id}")).unwrap()
+    };
+    Ok(NormalizedRemoteSource {
+        url: normalized_url,
+        repository: Some(repository_id),
+        release_tag,
+    })
+}
+
+fn valid_github_component(value: &str) -> bool {
+    !value.is_empty()
+        && value.len() <= 100
+        && value
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_' | b'.'))
+}
+
+fn safe_remote_url(url: &Url) -> bool {
+    if url.scheme() != "https" || !url.username().is_empty() || url.password().is_some() {
+        return false;
+    }
+    let Some(host) = url.host_str() else {
+        return false;
+    };
+    if host.eq_ignore_ascii_case("localhost") || host.ends_with(".localhost") {
+        return false;
+    }
+    if let Ok(address) = host.parse::<IpAddr>() {
+        return !(address.is_loopback() || address.is_unspecified() || address.is_multicast());
+    }
+    true
+}
+
+fn remote_http_client() -> Result<Client, Value> {
+    Client::builder()
+        .connect_timeout(CONNECT_TIMEOUT)
+        .timeout(NETWORK_TIMEOUT)
+        .redirect(Policy::custom(|attempt| {
+            if attempt.previous().len() >= MAX_REDIRECTS {
+                return attempt.stop();
+            }
+            let next = attempt.url();
+            if next.scheme() != "https" || !safe_remote_url(next) {
+                return attempt.stop();
+            }
+            attempt.follow()
+        }))
+        .build()
+        .map_err(|_| {
+            remote_source_error(
+                "remote_client_failed",
+                "Network access could not be initialized.",
+            )
+        })
+}
+
+fn analyze_github_source(
+    client: &Client,
+    mode: &str,
+    source: &NormalizedRemoteSource,
+    include_prereleases: bool,
+) -> Result<GitHubAnalysis, Value> {
+    let repository = source.repository.as_deref().ok_or_else(|| {
+        remote_source_error("github_url_invalid", "The GitHub repository is missing.")
+    })?;
+    let repository_value = get_json_bounded(
+        client,
+        &format!("https://api.github.com/repos/{repository}"),
+    )?;
+    let releases_value = if mode == "github_release" {
+        let tag = source.release_tag.as_deref().unwrap_or_default();
+        Value::Array(vec![get_json_bounded(
+            client,
+            &format!("https://api.github.com/repos/{repository}/releases/tags/{tag}"),
+        )?])
+    } else {
+        get_json_bounded(
+            client,
+            &format!("https://api.github.com/repos/{repository}/releases?per_page=30"),
+        )?
+    };
+    let mut releases = Vec::new();
+    for release in releases_value.as_array().into_iter().flatten() {
+        if release.get("draft").and_then(Value::as_bool) == Some(true) {
+            continue;
+        }
+        let prerelease = release
+            .get("prerelease")
+            .and_then(Value::as_bool)
+            .unwrap_or(false);
+        if mode == "github_repository" && prerelease && !include_prereleases {
+            continue;
+        }
+        let Some(tag) = release.get("tag_name").and_then(Value::as_str) else {
+            continue;
+        };
+        let mut assets = Vec::new();
+        for asset in release
+            .get("assets")
+            .and_then(Value::as_array)
+            .into_iter()
+            .flatten()
+        {
+            let Some(name) = asset.get("name").and_then(Value::as_str) else {
+                continue;
+            };
+            let size = asset.get("size").and_then(Value::as_u64).unwrap_or(0);
+            let Some(download_url) = asset.get("browser_download_url").and_then(Value::as_str)
+            else {
+                continue;
+            };
+            if !name.to_ascii_lowercase().ends_with(".apk") || size == 0 || size > MAX_APK_BYTES {
+                continue;
+            }
+            let parsed = Url::parse(download_url).ok();
+            if !parsed.as_ref().is_some_and(safe_remote_url) {
+                continue;
+            }
+            assets.push(GitHubAsset {
+                file_name: name.to_string(),
+                size,
+                content_type: asset
+                    .get("content_type")
+                    .and_then(Value::as_str)
+                    .map(str::to_string),
+                download_url: download_url.to_string(),
+            });
+        }
+        releases.push(GitHubRelease {
+            tag: tag.to_string(),
+            name: release
+                .get("name")
+                .and_then(Value::as_str)
+                .map(str::to_string),
+            prerelease,
+            published_at: release
+                .get("published_at")
+                .and_then(Value::as_str)
+                .map(str::to_string),
+            assets,
+        });
+    }
+    Ok(GitHubAnalysis {
+        repository: json!({
+            "fullName": repository_value.get("full_name").cloned().unwrap_or_else(|| Value::String(repository.to_string())),
+            "name": repository_value.get("name").cloned().unwrap_or(Value::Null),
+            "description": repository_value.get("description").cloned().unwrap_or(Value::Null),
+            "htmlUrl": source.url,
+        }),
+        releases,
+    })
+}
+
+fn get_json_bounded(client: &Client, url: &str) -> Result<Value, Value> {
+    let mut response = client
+        .get(url)
+        .header(USER_AGENT, HTTP_USER_AGENT)
+        .header("Accept", "application/vnd.github+json")
+        .send()
+        .map_err(|_| {
+            remote_source_error(
+                "github_request_failed",
+                "GitHub information could not be retrieved.",
+            )
+        })?;
+    if !response.status().is_success() {
+        return Err(remote_source_error(
+            "github_request_failed",
+            "GitHub information could not be retrieved.",
+        ));
+    }
+    if response
+        .content_length()
+        .is_some_and(|length| length > MAX_METADATA_BYTES)
+    {
+        return Err(remote_source_error(
+            "github_response_too_large",
+            "GitHub returned more information than the generator can safely process.",
+        ));
+    }
+    let mut bytes = Vec::new();
+    response
+        .by_ref()
+        .take(MAX_METADATA_BYTES + 1)
+        .read_to_end(&mut bytes)
+        .map_err(|_| {
+            remote_source_error(
+                "github_response_failed",
+                "GitHub information could not be read.",
+            )
+        })?;
+    if bytes.len() as u64 > MAX_METADATA_BYTES {
+        return Err(remote_source_error(
+            "github_response_too_large",
+            "GitHub returned more information than the generator can safely process.",
+        ));
+    }
+    serde_json::from_slice(&bytes).map_err(|_| {
+        remote_source_error(
+            "github_response_invalid",
+            "GitHub returned information in an unexpected format.",
+        )
+    })
+}
+
+fn stream_apk_response(mut response: Response, path: &Path) -> Result<(), Value> {
+    let mut file = OpenOptions::new()
+        .create_new(true)
+        .write(true)
+        .open(path)
+        .map_err(|_| {
+            remote_source_error(
+                "remote_workspace_failed",
+                "The temporary APK could not be created.",
+            )
+        })?;
+    let mut total = 0_u64;
+    let mut buffer = [0_u8; 64 * 1024];
+    loop {
+        let count = response.read(&mut buffer).map_err(|_| {
+            remote_source_error(
+                "remote_download_failed",
+                "The APK download was interrupted.",
+            )
+        })?;
+        if count == 0 {
+            break;
+        }
+        total = total.saturating_add(count as u64);
+        if total > MAX_APK_BYTES {
+            return Err(remote_source_error(
+                "remote_apk_size_invalid",
+                "The selected APK is larger than 2 GiB.",
+            ));
+        }
+        file.write_all(&buffer[..count]).map_err(|_| {
+            remote_source_error(
+                "remote_workspace_failed",
+                "The temporary APK could not be written.",
+            )
+        })?;
+    }
+    if total == 0 {
+        return Err(remote_source_error(
+            "remote_apk_size_invalid",
+            "The selected APK is empty.",
+        ));
+    }
+    file.sync_all().map_err(|_| {
+        remote_source_error(
+            "remote_workspace_failed",
+            "The temporary APK could not be finalized.",
+        )
+    })
+}
+
+fn response_file_name(response: &Response) -> Option<String> {
+    let header = response.headers().get(CONTENT_DISPOSITION)?.to_str().ok()?;
+    header.split(';').map(str::trim).find_map(|part| {
+        part.strip_prefix("filename=")
+            .map(|value| value.trim_matches(['\"', '\'']).to_string())
+    })
+}
+
+fn clearly_non_apk_content_type(value: Option<&str>) -> bool {
+    value.is_some_and(|content_type| {
+        let content_type = content_type.to_ascii_lowercase();
+        content_type.starts_with("text/")
+            || content_type.contains("html")
+            || content_type.contains("json")
+            || content_type.starts_with("image/")
+    })
+}
+
+fn remote_source_error(code: &str, message: &str) -> Value {
+    api_error(code, message, json!({}))
+}
+
+#[tauri::command]
 pub fn inspect_app_generator_apk(
     sidecar: State<'_, SidecarState>,
     state: State<'_, AppGeneratorState>,
@@ -466,6 +1152,214 @@ pub fn generate_app_recipe_draft(
         "generateAppRecipeDraft",
         Some(Value::Object(payload)),
     )
+}
+
+#[tauri::command]
+#[allow(clippy::too_many_arguments)]
+pub fn generate_remote_app_recipe_draft(
+    sidecar: State<'_, SidecarState>,
+    state: State<'_, AppGeneratorState>,
+    session_handle: String,
+    apk_handle: String,
+    asset_handle: String,
+    strategy: String,
+    app: Option<Value>,
+    recipe: Option<Value>,
+    mappings: Option<Value>,
+    regenerate_identifiers: bool,
+) -> Result<Value, String> {
+    let facts = match stored_facts(&state, &session_handle, &apk_handle)? {
+        Ok(facts) => facts,
+        Err(error) => return Ok(error),
+    };
+    let source =
+        match trusted_remote_source_payload(&state, &session_handle, &asset_handle, &strategy)? {
+            Ok(source) => source,
+            Err(error) => return Ok(error),
+        };
+    let mut payload = Map::new();
+    payload.insert("facts".to_string(), facts);
+    payload.insert("source".to_string(), source);
+    payload.insert(
+        "regenerateIdentifiers".to_string(),
+        Value::Bool(regenerate_identifiers),
+    );
+    if let Some(app) = app {
+        payload.insert("app".to_string(), app);
+    }
+    if let Some(recipe) = recipe {
+        payload.insert("recipe".to_string(), recipe);
+    }
+    if let Some(mappings) = mappings {
+        payload.insert("mappings".to_string(), mappings);
+    }
+    request_sidecar(
+        &sidecar,
+        "generateRemoteAppRecipeDraft",
+        Some(Value::Object(payload)),
+    )
+}
+
+#[tauri::command]
+#[allow(clippy::too_many_arguments)]
+pub fn save_generated_remote_app_recipe(
+    sidecar: State<'_, SidecarState>,
+    state: State<'_, AppGeneratorState>,
+    session_handle: String,
+    apk_handle: String,
+    asset_handle: String,
+    strategy: String,
+    root_handle: String,
+    app: Value,
+    recipe: Value,
+    mappings: Value,
+) -> Result<Value, String> {
+    let (facts, apk_path, identity, root) = {
+        let registry = lock_registry(&state)?;
+        let session = match registry.session(&session_handle) {
+            Ok(session) => session,
+            Err(error) => return Ok(error),
+        };
+        let Some(apk) = session.apks.get(&apk_handle) else {
+            return Ok(invalid_handle_error());
+        };
+        let Some(facts) = apk.facts.clone() else {
+            return Ok(inspection_required_error());
+        };
+        let Some(root) = session.roots.get(&root_handle) else {
+            return Ok(invalid_handle_error());
+        };
+        (facts, apk.path.clone(), apk.identity.clone(), root.clone())
+    };
+    if current_file_identity(&apk_path).as_ref() != Some(&identity) {
+        return Ok(apk_changed_error());
+    }
+    let source =
+        match trusted_remote_source_payload(&state, &session_handle, &asset_handle, &strategy)? {
+            Ok(source) => source,
+            Err(error) => return Ok(error),
+        };
+    let validation = request_sidecar(
+        &sidecar,
+        "generateRemoteAppRecipeDraft",
+        Some(json!({
+            "facts": facts,
+            "source": source,
+            "app": app,
+            "recipe": recipe,
+            "mappings": mappings,
+            "regenerateIdentifiers": false,
+        })),
+    )?;
+    let Some(draft) = success_result(&validation) else {
+        return Ok(validation);
+    };
+    if draft.get("blocking").and_then(Value::as_bool) != Some(false) {
+        return Ok(api_error(
+            "app_recipe_invalid",
+            "The app and recipe must pass validation before they can be saved.",
+            json!({ "diagnostics": draft.get("diagnostics").cloned().unwrap_or_else(|| json!([])) }),
+        ));
+    }
+    let Some(app_yaml) = draft.get("appCanonicalYaml").and_then(Value::as_str) else {
+        return Ok(generator_protocol_error());
+    };
+    let Some(recipe_yaml) = draft.get("recipeCanonicalYaml").and_then(Value::as_str) else {
+        return Ok(generator_protocol_error());
+    };
+    let Some(app_file) = destination_file(draft, "appDestination") else {
+        return Ok(invalid_destination_error());
+    };
+    let Some(recipe_file) = destination_file(draft, "recipeDestination") else {
+        return Ok(invalid_destination_error());
+    };
+    let Some(final_app) = draft.get("app").cloned() else {
+        return Ok(generator_protocol_error());
+    };
+    let recipe_id = draft
+        .get("recipe")
+        .and_then(|value| value.get("id"))
+        .and_then(Value::as_str)
+        .unwrap_or_default();
+    let collisions = request_sidecar(
+        &sidecar,
+        "checkGeneratedCatalogCollisions",
+        Some(json!({ "authoredRoot": root.root, "app": final_app, "recipeId": recipe_id })),
+    )?;
+    let Some(collision_result) = success_result(&collisions) else {
+        return Ok(collisions);
+    };
+    if collision_result.get("blocking").and_then(Value::as_bool) != Some(false) {
+        return Ok(api_error(
+            "app_recipe_collision_blocking",
+            "Blocking app or recipe collisions must be resolved before saving.",
+            json!({ "collisions": collision_result.get("collisions").cloned().unwrap_or_else(|| json!([])) }),
+        ));
+    }
+    let (_, recipe_path) = match publish_pair_create_new(
+        &root,
+        &app_file,
+        app_yaml.as_bytes(),
+        &recipe_file,
+        recipe_yaml.as_bytes(),
+    ) {
+        Ok(paths) => paths,
+        Err(error) => return Ok(error),
+    };
+    let opened = request_sidecar(
+        &sidecar,
+        "openRecipe",
+        Some(json!({ "path": recipe_path, "authoredRoot": root.root })),
+    )?;
+    let Some(opened_result) = success_result(&opened).cloned() else {
+        return Ok(api_error(
+            "app_recipe_saved_open_failed",
+            "The app and recipe were saved, but the generated recipe could not be opened.",
+            json!({ "appRelativePath": format!("apps/{app_file}"), "recipeRelativePath": format!("recipes/{recipe_file}") }),
+        ));
+    };
+    let mut registry = lock_registry(&state)?;
+    registry.sessions.remove(&session_handle);
+    Ok(success(json!({
+        "appFileName": app_file,
+        "recipeFileName": recipe_file,
+        "appRelativePath": format!("apps/{app_file}"),
+        "recipeRelativePath": format!("recipes/{recipe_file}"),
+        "openedRecipe": opened_result,
+    })))
+}
+
+fn trusted_remote_source_payload(
+    state: &AppGeneratorState,
+    session_handle: &str,
+    asset_handle: &str,
+    strategy: &str,
+) -> Result<Result<Value, Value>, String> {
+    if !matches!(strategy, "pinned_remote_asset" | "user_provided_apk") {
+        return Ok(Err(remote_source_error(
+            "remote_strategy_invalid",
+            "Choose a supported installation method.",
+        )));
+    }
+    let registry = lock_registry(state)?;
+    let session = match registry.session(session_handle) {
+        Ok(session) => session,
+        Err(error) => return Ok(Err(error)),
+    };
+    let Some(asset) = session.remote_assets.get(asset_handle) else {
+        return Ok(Err(invalid_handle_error()));
+    };
+    let Some(source) = session.remote_sources.get(&asset.source_handle) else {
+        return Ok(Err(invalid_handle_error()));
+    };
+    Ok(Ok(json!({
+        "mode": source.mode,
+        "strategy": strategy,
+        "downloadUrl": source.direct_url.as_ref().unwrap_or(&asset.download_url),
+        "repository": source.repository,
+        "releaseTag": asset.release_tag.as_ref().or(source.release_tag.as_ref()),
+        "assetName": asset.file_name,
+    })))
 }
 
 #[tauri::command]
@@ -1498,6 +2392,52 @@ mod tests {
         fs::write(&path, b"second-longer").unwrap();
         assert_ne!(current_file_identity(&path), Some(identity));
         fs::remove_file(path).unwrap();
+    }
+
+    #[test]
+    fn remote_source_normalization_accepts_supported_github_shapes() {
+        let repository = normalize_remote_source(
+            "github_repository",
+            "https://github.com/example/project.git/",
+        )
+        .unwrap();
+        assert_eq!(repository.repository.as_deref(), Some("example/project"));
+        assert_eq!(
+            repository.url.as_str(),
+            "https://github.com/example/project"
+        );
+
+        let release = normalize_remote_source(
+            "github_release",
+            "https://github.com/example/project/releases/tag/v1.2.3",
+        )
+        .unwrap();
+        assert_eq!(release.release_tag.as_deref(), Some("v1.2.3"));
+    }
+
+    #[test]
+    fn remote_source_normalization_rejects_unsafe_or_unsupported_addresses() {
+        assert!(
+            normalize_remote_source("github_repository", "http://github.com/example/project",)
+                .is_err()
+        );
+        assert!(normalize_remote_source(
+            "github_repository",
+            "https://user@example.com/example/project",
+        )
+        .is_err());
+        assert!(normalize_remote_source("direct_apk", "https://127.0.0.1/app.apk",).is_err());
+        assert!(normalize_remote_source(
+            "direct_apk",
+            "https://example.com/download?variant=stable",
+        )
+        .is_err());
+    }
+
+    #[test]
+    fn direct_url_can_defer_apk_filename_to_response_headers() {
+        let source = normalize_remote_source("direct_apk", "https://example.com/download").unwrap();
+        assert_eq!(source.url.as_str(), "https://example.com/download");
     }
 
     #[cfg(unix)]

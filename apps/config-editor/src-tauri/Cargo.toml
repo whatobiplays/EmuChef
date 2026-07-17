@@ -10,6 +10,9 @@ tauri-build = { version = "2.5.1", features = [] }
 [dependencies]
 serde = { version = "1.0", features = ["derive"] }
 serde_json = { version = "1.0", features = ["preserve_order"] }
+reqwest = { version = "0.13.4", default-features = false, features = ["blocking", "rustls", "system-proxy"] }
+tempfile = "3.27.0"
+url = "2.5.8"
 tauri = { version = "2.11.0", features = [] }
 tauri-plugin-dialog = "2.7.1"
 

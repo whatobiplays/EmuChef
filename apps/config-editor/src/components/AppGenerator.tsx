@@ -1,16 +1,20 @@
-import { useEffect, useReducer, useRef } from "react";
+import { useEffect, useReducer, useRef, type Dispatch } from "react";
 
 import {
   beginAppGenerator,
+  analyzeAppGeneratorSource,
   cancelAppGenerator,
   checkAppRecipeCollisions,
   chooseAppGeneratorAnalyzer,
   chooseAppGeneratorApk,
   chooseAppGeneratorAuthoredRoot,
+  downloadAppGeneratorRemoteApk,
   setAppGeneratorAuthoredRoot,
   generateAppRecipeDraft,
+  generateRemoteAppRecipeDraft,
   inspectAppGeneratorApk,
   saveGeneratedAppRecipe,
+  saveGeneratedRemoteAppRecipe,
   type EditorApiResult,
 } from "../api/editorApi";
 import type {
@@ -21,6 +25,8 @@ import type {
   AppRecipeDraftResult,
   AppRecipeEditsDto,
   AppRecipeSaveResult,
+  AppGeneratorSourceMode,
+  RemoteSourceDescriptorDto,
 } from "../api/types";
 import {
   diagnosticDisplayTitle,
@@ -29,6 +35,8 @@ import {
   reduceAppGenerator,
   visibleDraftDiagnostics,
   type AppGeneratorFormState,
+  type AppGeneratorAction,
+  type AppGeneratorState,
 } from "./appGenerator.logic";
 
 interface AppGeneratorProps {
@@ -109,12 +117,63 @@ export function AppGenerator({ initialAuthoredRoot, onAuthoredRootSelected, onCl
     }
   }
 
+  async function analyzeRemoteSource() {
+    if (!state.sessionHandle || state.sourceMode === "local_apk" || !state.sourceUrl.trim()) return;
+    dispatch({ type: "source-analyzing" });
+    const response = await analyzeAppGeneratorSource(
+      state.sessionHandle,
+      state.sourceMode,
+      state.sourceUrl,
+      state.includePrereleases,
+    );
+    if (response.kind === "success") {
+      dispatch({ type: "source-analyzed", analysis: response.result });
+    } else {
+      dispatch({ type: "failure", message: apiFailure(response) });
+    }
+  }
+
+  async function downloadRemoteApk() {
+    if (!state.sessionHandle || !state.selectedAssetHandle || !state.analyzerHandle) return;
+    const selectedAsset = state.sourceAnalysis?.assets.find((asset) => asset.assetHandle === state.selectedAssetHandle);
+    if (selectedAsset?.prerelease && !window.confirm("This release is marked as a prerelease. Continue with this APK?")) return;
+    dispatch({ type: "downloading" });
+    const downloaded = await downloadAppGeneratorRemoteApk(
+      state.sessionHandle,
+      state.selectedAssetHandle,
+    );
+    if (downloaded.kind !== "success") {
+      dispatch({ type: "failure", message: apiFailure(downloaded) });
+      return;
+    }
+    const source: RemoteSourceDescriptorDto = {
+      ...downloaded.result.source,
+      strategy: state.installStrategy,
+    };
+    dispatch({
+      type: "remote-downloaded",
+      apkHandle: downloaded.result.apkHandle,
+      label: downloaded.result.label,
+      source,
+    });
+    await inspectApkHandle(downloaded.result.apkHandle, state.selectedAssetHandle, source);
+  }
+
   async function inspectApk() {
-    if (!state.sessionHandle || !state.apkHandle || !state.analyzerHandle) return;
+    if (!state.apkHandle) return;
+    await inspectApkHandle(state.apkHandle, state.selectedAssetHandle, state.remoteSource);
+  }
+
+  async function inspectApkHandle(
+    apkHandle: string,
+    assetHandle: string | null,
+    remoteSource: RemoteSourceDescriptorDto | null,
+  ) {
+    if (!state.sessionHandle || !state.analyzerHandle) return;
     dispatch({ type: "inspecting" });
     const inspected = await inspectAppGeneratorApk(
       state.sessionHandle,
-      state.apkHandle,
+      apkHandle,
       state.analyzerHandle,
     );
     if (inspected.kind !== "success") {
@@ -123,13 +182,23 @@ export function AppGenerator({ initialAuthoredRoot, onAuthoredRootSelected, onCl
     }
     dispatch({ type: "inspected", inspection: inspected.result });
     if (inspected.result.blocking) return;
-    const drafted = await generateAppRecipeDraft(
-      state.sessionHandle,
-      state.apkHandle,
-      null,
-      null,
-      null,
-    );
+    const drafted = remoteSource && assetHandle
+      ? await generateRemoteAppRecipeDraft(
+          state.sessionHandle,
+          apkHandle,
+          assetHandle,
+          remoteSource.strategy,
+          null,
+          null,
+          null,
+        )
+      : await generateAppRecipeDraft(
+          state.sessionHandle,
+          apkHandle,
+          null,
+          null,
+          null,
+        );
     if (drafted.kind === "success") {
       dispatch({ type: "drafted", draft: drafted.result });
     } else {
@@ -157,14 +226,31 @@ export function AppGenerator({ initialAuthoredRoot, onAuthoredRootSelected, onCl
       dispatch({ type: "failure", message: request.message });
       return;
     }
-    const drafted = await generateAppRecipeDraft(
-      state.sessionHandle,
-      state.apkHandle,
-      request.app,
-      request.recipe,
-      request.mappings,
-      regenerateIdentifiers,
-    );
+    const drafted = state.sourceMode === "local_apk"
+      ? await generateAppRecipeDraft(
+          state.sessionHandle,
+          state.apkHandle,
+          request.app,
+          request.recipe,
+          request.mappings,
+          regenerateIdentifiers,
+        )
+      : state.selectedAssetHandle
+        ? await generateRemoteAppRecipeDraft(
+            state.sessionHandle,
+            state.apkHandle,
+            state.selectedAssetHandle,
+            state.installStrategy,
+            request.app,
+            request.recipe,
+            request.mappings,
+            regenerateIdentifiers,
+          )
+        : null;
+    if (!drafted) {
+      dispatch({ type: "failure", message: "Select and download an APK asset before reviewing." });
+      return;
+    }
     if (drafted.kind !== "success") {
       dispatch({ type: "failure", message: apiFailure(drafted) });
       return;
@@ -198,14 +284,31 @@ export function AppGenerator({ initialAuthoredRoot, onAuthoredRootSelected, onCl
       return;
     }
     dispatch({ type: "saving" });
-    const response = await saveGeneratedAppRecipe(
-      state.sessionHandle,
-      state.apkHandle,
-      state.rootHandle,
-      request.app,
-      request.recipe,
-      request.mappings,
-    );
+    const response = state.sourceMode === "local_apk"
+      ? await saveGeneratedAppRecipe(
+          state.sessionHandle,
+          state.apkHandle,
+          state.rootHandle,
+          request.app,
+          request.recipe,
+          request.mappings,
+        )
+      : state.selectedAssetHandle
+        ? await saveGeneratedRemoteAppRecipe(
+            state.sessionHandle,
+            state.apkHandle,
+            state.selectedAssetHandle,
+            state.installStrategy,
+            state.rootHandle,
+            request.app,
+            request.recipe,
+            request.mappings,
+          )
+        : null;
+    if (!response) {
+      dispatch({ type: "failure", message: "Select and download an APK asset before saving." });
+      return;
+    }
     if (response.kind === "success") {
       savedRef.current = true;
       dispatch({ type: "saved", result: response.result });
@@ -247,7 +350,11 @@ export function AppGenerator({ initialAuthoredRoot, onAuthoredRootSelected, onCl
     });
   }
 
-  const busy = state.phase === "starting" || state.phase === "inspecting" || state.phase === "saving";
+  const busy =
+    state.phase === "starting" ||
+    state.phase === "downloading" ||
+    state.phase === "inspecting" ||
+    state.phase === "saving";
   const saveBlocked =
     busy ||
     !state.draft ||
@@ -260,7 +367,7 @@ export function AppGenerator({ initialAuthoredRoot, onAuthoredRootSelected, onCl
       <section className="flex max-h-[94vh] w-full max-w-6xl flex-col overflow-hidden rounded-lg bg-white shadow-2xl">
         <header className="flex items-center justify-between border-b border-slate-200 px-5 py-3">
           <div>
-            <p className="text-xs font-semibold uppercase tracking-wide text-slate-500">Local APK generator</p>
+            <p className="text-xs font-semibold uppercase tracking-wide text-slate-500">App source generator</p>
             <h1 className="text-lg font-semibold">Generate App and Recipe</h1>
           </div>
           <button className="rounded border border-slate-300 px-3 py-1.5 text-sm" disabled={busy} onClick={() => void close()}>
@@ -271,40 +378,87 @@ export function AppGenerator({ initialAuthoredRoot, onAuthoredRootSelected, onCl
         <div className="min-h-0 flex-1 overflow-y-auto p-5">
           {state.error ? <p className="mb-4 rounded border border-red-300 bg-red-50 p-3 text-sm text-red-800">{state.error}</p> : null}
 
-          <section className="grid gap-4 rounded border border-slate-200 p-4 md:grid-cols-3">
-            <Picker label="APK" value={state.apkLabel} button="Choose APK..." disabled={busy} onClick={() => void chooseApk()} />
-            <div>
-              <label className="text-xs font-semibold uppercase tracking-wide text-slate-500" htmlFor="apk-analyzer-kind">Analyzer type</label>
-              <select
-                id="apk-analyzer-kind"
-                className="mt-1 w-full rounded border border-slate-300 px-3 py-2 text-sm"
-                disabled={busy}
-                value={state.analyzerKind}
-                onChange={(event) => dispatch({ type: "analyzer-kind", kind: event.target.value as "apkanalyzer" | "aapt2" })}
-              >
-                <option value="apkanalyzer">apkanalyzer</option>
-                <option value="aapt2">aapt2</option>
-              </select>
-              <button className="mt-2 rounded border border-slate-300 px-3 py-1.5 text-sm" disabled={busy} onClick={() => void chooseAnalyzer()}>
-                {state.analyzerHandle ? "Change executable..." : "Choose executable..."}
-              </button>
-              <p className="mt-1 text-xs text-slate-500">{state.analyzerLabel ?? "No analyzer configured"}</p>
-            </div>
-            <div className="flex items-end">
-              <button
-                className="w-full rounded bg-slate-900 px-3 py-2 text-sm font-medium text-white disabled:bg-slate-300"
-                disabled={busy || !state.apkHandle || !state.analyzerHandle}
-                onClick={() => void inspectApk()}
-              >
-                {state.phase === "inspecting" ? "Inspecting..." : "Inspect APK"}
-              </button>
-            </div>
+          <section className="rounded border border-slate-200 p-4">
+            <label className="text-sm font-medium" htmlFor="app-source-mode">App source</label>
+            <select
+              id="app-source-mode"
+              className="mt-1 w-full rounded border border-slate-300 px-3 py-2 text-sm"
+              disabled={busy}
+              value={state.sourceMode}
+              onChange={(event) => dispatch({ type: "source-mode", mode: event.target.value as AppGeneratorSourceMode })}
+            >
+              <option value="local_apk">Local APK</option>
+              <option value="github_repository">GitHub repository</option>
+              <option value="github_release">GitHub release</option>
+              <option value="direct_apk">Direct APK URL</option>
+            </select>
+            <p className="mt-1 text-xs text-slate-500">Choose where the APK and update identity come from.</p>
+
+            {state.sourceMode === "local_apk" ? (
+              <div className="mt-4 grid gap-4 md:grid-cols-3">
+                <Picker label="APK" value={state.apkLabel} button="Choose APK..." disabled={busy} onClick={() => void chooseApk()} />
+                <AnalyzerPicker state={state} busy={busy} chooseAnalyzer={chooseAnalyzer} dispatch={dispatch} />
+                <div className="flex items-end">
+                  <button className="w-full rounded bg-slate-900 px-3 py-2 text-sm font-medium text-white disabled:bg-slate-300" disabled={busy || !state.apkHandle || !state.analyzerHandle} onClick={() => void inspectApk()}>
+                    {state.phase === "inspecting" ? "Inspecting..." : "Inspect APK"}
+                  </button>
+                </div>
+              </div>
+            ) : (
+              <div className="mt-4 space-y-4">
+                <div className="grid gap-3 md:grid-cols-[1fr_auto]">
+                  <label className="text-sm">
+                    <HelpLabel label={state.sourceMode === "direct_apk" ? "APK download URL" : "GitHub URL"} help={state.sourceMode === "github_repository" ? "Enter a public GitHub repository URL." : state.sourceMode === "github_release" ? "Enter a public GitHub release URL ending in /releases/tag/<tag>." : "Enter a public HTTPS URL that ends in .apk."} />
+                    <input className="mt-1 w-full rounded border border-slate-300 px-3 py-2" disabled={busy} value={state.sourceUrl} onChange={(event) => dispatch({ type: "source-url", value: event.target.value })} />
+                  </label>
+                  <button className="self-end rounded bg-slate-900 px-4 py-2 text-sm font-medium text-white disabled:bg-slate-300" disabled={busy || !state.sourceUrl.trim()} onClick={() => void analyzeRemoteSource()}>
+                    {state.phase === "inspecting" && !state.apkHandle ? "Checking source..." : "Check source"}
+                  </button>
+                </div>
+                {state.sourceMode === "github_repository" ? <Check label="Include prereleases" checked={state.includePrereleases} disabled={busy} onChange={(value) => dispatch({ type: "include-prereleases", value })} /> : null}
+                {state.sourceAnalysis ? <RemoteAssetPicker analysis={state.sourceAnalysis} selectedAssetHandle={state.selectedAssetHandle} disabled={busy} onSelect={(assetHandle) => dispatch({ type: "asset-selected", assetHandle })} /> : null}
+                <div className="grid gap-4 md:grid-cols-3">
+                  <AnalyzerPicker state={state} busy={busy} chooseAnalyzer={chooseAnalyzer} dispatch={dispatch} />
+                  <label className="text-sm">
+                    <HelpLabel label="Installation method" help="Pinned download creates a recipe that downloads this exact APK. User-provided APK creates a local file input instead." />
+                    <select className="mt-1 w-full rounded border border-slate-300 px-3 py-2" disabled={busy} value={state.installStrategy} onChange={(event) => dispatch({ type: "install-strategy", strategy: event.target.value as "pinned_remote_asset" | "user_provided_apk" })}>
+                      <option value="pinned_remote_asset">Pinned download</option>
+                      <option value="user_provided_apk">User-provided APK</option>
+                    </select>
+                  </label>
+                  <div className="flex items-end">
+                    <button
+                      className="flex w-full items-center justify-center gap-2 rounded bg-slate-900 px-3 py-2 text-sm font-medium text-white disabled:bg-slate-300"
+                      disabled={busy || !state.selectedAssetHandle || !state.analyzerHandle}
+                      onClick={() => void downloadRemoteApk()}
+                    >
+                      {state.phase === "downloading" || state.phase === "inspecting" ? (
+                        <span
+                          aria-hidden="true"
+                          className="h-4 w-4 animate-spin rounded-full border-2 border-white/40 border-t-white"
+                        />
+                      ) : null}
+                      {state.phase === "downloading"
+                        ? "Downloading APK..."
+                        : state.phase === "inspecting"
+                          ? "Inspecting APK..."
+                          : "Download and inspect APK"}
+                    </button>
+                  </div>
+                  {state.phase === "downloading" ? (
+                    <p className="text-xs text-slate-600 md:col-span-3" role="status" aria-live="polite">
+                      Downloading the selected APK. This may take a moment.
+                    </p>
+                  ) : null}
+                </div>
+              </div>
+            )}
           </section>
 
           {state.inspection ? <Facts facts={state.inspection.facts} diagnostics={state.inspection.diagnostics} /> : null}
           {state.form ? (
             <>
-              <AppFields form={state.form} disabled={busy} updateForm={updateForm} changeApp={changeApp} changeMapping={changeMapping} />
+              <AppFields sourceMode={state.sourceMode} installStrategy={state.installStrategy} form={state.form} disabled={busy} updateForm={updateForm} changeApp={changeApp} changeMapping={changeMapping} />
               <RecipeFields form={state.form} facts={state.inspection?.facts ?? null} disabled={busy} changeRecipe={changeRecipe} regenerateIds={() => void regenerateIds()} />
               <section className="mt-4 grid gap-4 rounded border border-slate-200 p-4 md:grid-cols-[1fr_auto]">
                 <Picker label="Authored root" value={state.rootHandle ? "Selected and ready" : null} button={state.rootHandle ? "Change authored root..." : "Choose authored root..."} disabled={busy} onClick={() => void chooseRoot()} />
@@ -335,6 +489,14 @@ export function AppGenerator({ initialAuthoredRoot, onAuthoredRootSelected, onCl
       </section>
     </div>
   );
+}
+
+function AnalyzerPicker({ state, busy, chooseAnalyzer, dispatch }: { state: AppGeneratorState; busy: boolean; chooseAnalyzer: () => Promise<void>; dispatch: Dispatch<AppGeneratorAction> }) {
+  return <div><label className="text-xs font-semibold uppercase tracking-wide text-slate-500" htmlFor="apk-analyzer-kind">Analyzer type</label><select id="apk-analyzer-kind" className="mt-1 w-full rounded border border-slate-300 px-3 py-2 text-sm" disabled={busy} value={state.analyzerKind} onChange={(event) => dispatch({ type: "analyzer-kind", kind: event.target.value as "apkanalyzer" | "aapt2" })}><option value="apkanalyzer">apkanalyzer</option><option value="aapt2">aapt2</option></select><button className="mt-2 rounded border border-slate-300 px-3 py-1.5 text-sm" disabled={busy} onClick={() => void chooseAnalyzer()}>{state.analyzerHandle ? "Change executable..." : "Choose executable..."}</button><p className="mt-1 text-xs text-slate-500">{state.analyzerLabel ?? "No analyzer configured"}</p></div>;
+}
+
+function RemoteAssetPicker({ analysis, selectedAssetHandle, disabled, onSelect }: { analysis: import("../api/types").RemoteSourceAnalysisResult; selectedAssetHandle: string | null; disabled: boolean; onSelect: (assetHandle: string) => void }) {
+  return <section className="rounded border border-slate-200 bg-slate-50 p-3"><h3 className="text-sm font-semibold">Available APK files</h3>{analysis.repository ? <p className="mt-1 text-sm text-slate-600">{analysis.repository.fullName}{analysis.repository.description ? ` — ${analysis.repository.description}` : ""}</p> : null}<div className="mt-3 space-y-2">{analysis.assets.map((asset) => <label className="flex items-start gap-2 rounded border border-slate-200 bg-white p-3 text-sm" key={asset.assetHandle}><input type="radio" name="remote-apk-asset" checked={selectedAssetHandle === asset.assetHandle} disabled={disabled} onChange={() => onSelect(asset.assetHandle)} /><span><span className="font-medium">{asset.fileName}</span><span className="ml-2 text-xs text-slate-500">{asset.releaseTag ? `${asset.releaseTag}${asset.prerelease ? " (prerelease)" : ""}` : "Direct download"}{asset.size ? ` · ${Math.ceil(asset.size / 1024 / 1024)} MiB` : ""}</span></span></label>)}{analysis.assets.length === 0 ? <p className="text-sm text-amber-700">No eligible APK files were found.</p> : null}</div></section>;
 }
 
 function Picker({ label, value, button, disabled, onClick }: { label: string; value: string | null; button: string; disabled: boolean; onClick: () => void }) {
@@ -370,7 +532,9 @@ function Facts({ facts, diagnostics }: { facts: ApkInspectionFactsDto; diagnosti
   );
 }
 
-function AppFields({ form, disabled, updateForm, changeApp, changeMapping }: {
+function AppFields({ sourceMode, installStrategy, form, disabled, updateForm, changeApp, changeMapping }: {
+  sourceMode: AppGeneratorSourceMode;
+  installStrategy: "pinned_remote_asset" | "user_provided_apk";
   form: AppGeneratorFormState;
   disabled: boolean;
   updateForm: (update: (form: AppGeneratorFormState) => void) => void;
@@ -389,9 +553,9 @@ function AppFields({ form, disabled, updateForm, changeApp, changeMapping }: {
         <Field label="Description" help="Optional short description of the app." value={app.description ?? ""} disabled={disabled} onChange={(description) => changeApp({ description: description || undefined })} />
         <Field label="Primary package" help="Android application ID verified from the APK manifest. Change only when the manifest information is known to be wrong." value={app.package.primary} disabled={disabled} onChange={(primary) => updateForm((next) => { next.app.package.primary = primary; })} />
         <PackageAliasList values={form.aliases} disabled={disabled} onChange={(aliases) => updateForm((next) => { next.aliases = aliases; })} />
-        <Fixed label="Installation method" help="This local workflow creates a recipe that asks the user to provide an APK." value="User-provided APK" />
-        <Fixed label="Source resolver" help="No automatic source resolver is used for a user-provided APK." value="None required" />
-        <Fixed label="Update tracking" help="Updates are tracked as a locally supplied APK rather than a remote release." value="Local APK" />
+        <Fixed label="Installation method" help="Controls whether the generated recipe downloads this exact APK or asks the user to provide one." value={installStrategy === "pinned_remote_asset" ? "Pinned download" : "User-provided APK"} />
+        <Fixed label="Source resolver" help="Describes how the generated app definition identifies its installation source." value={installStrategy === "pinned_remote_asset" ? "Direct HTTPS download" : "None required"} />
+        <Fixed label="Update tracking" help="Describes the source identity retained for future catalog review." value={installStrategy === "user_provided_apk" ? "Local APK" : sourceMode.startsWith("github_") ? "GitHub release" : sourceMode === "direct_apk" ? "Direct APK URL" : "Local APK"} />
         <Area label="Install-source options (strict JSON object)" value={form.mappings.installSourceOptions} disabled={disabled} onChange={(installSourceOptions) => changeMapping({ installSourceOptions })} />
         <Area label="Tracking-source fields (strict JSON object)" value={form.mappings.trackingSourceFields} disabled={disabled} onChange={(trackingSourceFields) => changeMapping({ trackingSourceFields })} />
         <Area label="Metadata (strict JSON object)" value={form.mappings.metadata} disabled={disabled} onChange={(metadata) => changeMapping({ metadata })} />
@@ -523,7 +687,18 @@ function Fixed({ label, help, value }: { label: string; help?: string; value: st
 }
 
 function Check({ label, checked, disabled, onChange }: { label: string; checked: boolean; disabled: boolean; onChange: (value: boolean) => void }) {
-  return <label className="flex items-center gap-2 text-sm"><input type="checkbox" checked={checked} disabled={disabled} onChange={(event) => onChange(event.target.checked)} />{label}</label>;
+  return (
+    <label className={`flex items-center gap-2 text-sm ${disabled ? "cursor-not-allowed text-slate-400" : "cursor-pointer"}`}>
+      <input
+        className={disabled ? "cursor-not-allowed opacity-50" : "cursor-pointer"}
+        type="checkbox"
+        checked={checked}
+        disabled={disabled}
+        onChange={(event) => onChange(event.target.checked)}
+      />
+      {label}
+    </label>
+  );
 }
 
 function MappingList({ label, values, disabled, onChange }: { label: string; values: string[]; disabled: boolean; onChange: (values: string[]) => void }) {

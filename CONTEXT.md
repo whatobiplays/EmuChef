@@ -34,10 +34,9 @@ The canonical retirement contract and evidence checklist are in
 ## Config Editor Authored Generation
 
 The Config Editor provides guided generation workflows for a starter app
-definition and installation recipe from a local APK and for a starter device
-profile from one connected ADB device. Direct remote APK, GitHub repository,
-and GitHub release generation remain roadmap work and are not available in the
-current product. Rust owns APK inspection contracts, typed authored models,
+definition and installation recipe from a local APK, public GitHub repository,
+public GitHub release, or direct public HTTPS APK URL, and for a starter device
+profile from one connected ADB device. Rust owns APK inspection contracts, typed authored models,
 validation, canonical draft generation, collision detection, evidence
 classification, and sidecar operations. Tauri owns native paths, configured
 external tools, exact ADB serials, native save destinations, final collision
@@ -64,8 +63,29 @@ per output stream. The current analyzer command surfaces do not provide a
 signing-certificate SHA-256 fingerprint, so that fact remains missing with a
 deterministic warning. Split and non-base APKs are rejected.
 
-App-generator sessions retain APK, analyzer, and authored-root paths behind
-opaque process-memory handles. The Config Editor also maintains one validated,
+Remote source analysis runs only in the trusted Tauri layer. GitHub modes use
+the GitHub REST API and never scrape rendered HTML. Draft releases are always
+excluded; repository mode excludes prereleases by default, while exact
+prerelease selections require explicit confirmation. Candidate assets must be
+non-empty `.apk` files no larger than 2 GiB. Direct URL mode requires a public
+HTTPS address without credentials, fragments, or query parameters. Metadata
+responses are limited to 2 MiB, redirects to five HTTPS hops, connection time
+to 10 seconds, and complete requests to 30 seconds. APK downloads stream into
+a generator-session temporary directory and are removed when that session is
+cancelled, completed, restarted, or dropped.
+
+Remote sources may generate either a pinned-download recipe or the same
+user-provided APK recipe shape used by local generation. Pinned recipes declare
+a `remote_file` artifact, resolve it, and install its `local_path`; their app
+metadata records normalized GitHub repository/release/asset identity or the
+direct HTTPS APK URL. The user-provided strategy retains the Phase 3
+`user_provided_apk` plus `local_apk` source shape and does not persist remote
+identity. Credentials, temporary paths, response bodies, and inspected APK
+facts are not persisted.
+
+App-generator sessions retain local and downloaded APKs, remote source and
+asset selections, analyzer paths, temporary workspaces, and authored-root
+paths behind opaque process-memory handles. The Config Editor also maintains one validated,
 persistent app-wide authored-root selection. Selecting a root in app generation
 updates that shared selection, applies it to an open recipe document, and makes
 it available to later app-generator and device-profile-generator sessions.

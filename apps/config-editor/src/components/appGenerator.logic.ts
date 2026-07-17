@@ -7,12 +7,17 @@ import type {
   AppRecipeEditsDto,
   AppRecipeSaveResult,
   AppGeneratorDiagnosticDto,
+  AppGeneratorInstallStrategy,
+  AppGeneratorSourceMode,
+  RemoteSourceAnalysisResult,
+  RemoteSourceDescriptorDto,
 } from "../api/types.js";
 import { parseMetadataObject } from "./deviceProfileGenerator.logic.js";
 
 export type AppGeneratorPhase =
   | "starting"
   | "selecting"
+  | "downloading"
   | "inspecting"
   | "editing"
   | "reviewing"
@@ -36,6 +41,13 @@ export interface AppGeneratorState {
   analyzerHandle: string | null;
   analyzerLabel: string | null;
   analyzerKind: "apkanalyzer" | "aapt2";
+  sourceMode: AppGeneratorSourceMode;
+  sourceUrl: string;
+  includePrereleases: boolean;
+  sourceAnalysis: RemoteSourceAnalysisResult | null;
+  selectedAssetHandle: string | null;
+  remoteSource: RemoteSourceDescriptorDto | null;
+  installStrategy: AppGeneratorInstallStrategy;
   rootHandle: string | null;
   rootLabel: string | null;
   inspection: ApkInspectionResult | null;
@@ -57,6 +69,15 @@ export type AppGeneratorAction =
       rootLabel?: string | null;
     }
   | { type: "apk-selected"; apkHandle: string; label: string }
+  | { type: "source-mode"; mode: AppGeneratorSourceMode }
+  | { type: "source-url"; value: string }
+  | { type: "include-prereleases"; value: boolean }
+  | { type: "source-analyzing" }
+  | { type: "source-analyzed"; analysis: RemoteSourceAnalysisResult }
+  | { type: "asset-selected"; assetHandle: string }
+  | { type: "install-strategy"; strategy: AppGeneratorInstallStrategy }
+  | { type: "downloading" }
+  | { type: "remote-downloaded"; apkHandle: string; label: string; source: RemoteSourceDescriptorDto }
   | { type: "analyzer-kind"; kind: "apkanalyzer" | "aapt2" }
   | { type: "analyzer-selected"; analyzerHandle: string; label: string }
   | { type: "inspecting" }
@@ -77,6 +98,13 @@ export const initialAppGeneratorState: AppGeneratorState = {
   analyzerHandle: null,
   analyzerLabel: null,
   analyzerKind: "apkanalyzer",
+  sourceMode: "local_apk",
+  sourceUrl: "",
+  includePrereleases: false,
+  sourceAnalysis: null,
+  selectedAssetHandle: null,
+  remoteSource: null,
+  installStrategy: "pinned_remote_asset",
   rootHandle: null,
   rootLabel: null,
   inspection: null,
@@ -102,6 +130,106 @@ export function reduceAppGenerator(
         analyzerLabel: action.analyzerLabel ?? null,
         rootHandle: action.rootHandle ?? null,
         rootLabel: action.rootLabel ?? null,
+        error: null,
+      };
+    case "source-mode":
+      return {
+        ...state,
+        phase: "selecting",
+        sourceMode: action.mode,
+        sourceUrl: "",
+        sourceAnalysis: null,
+        selectedAssetHandle: null,
+        remoteSource: null,
+        apkHandle: null,
+        apkLabel: null,
+        inspection: null,
+        draft: null,
+        form: null,
+        collisions: null,
+        error: null,
+      };
+    case "source-url":
+      return {
+        ...state,
+        sourceUrl: action.value,
+        sourceAnalysis: null,
+        selectedAssetHandle: null,
+        remoteSource: null,
+        apkHandle: null,
+        apkLabel: null,
+        inspection: null,
+        draft: null,
+        form: null,
+        collisions: null,
+        error: null,
+      };
+    case "include-prereleases":
+      return {
+        ...state,
+        includePrereleases: action.value,
+        sourceAnalysis: null,
+        selectedAssetHandle: null,
+        remoteSource: null,
+        apkHandle: null,
+        apkLabel: null,
+        inspection: null,
+        draft: null,
+        form: null,
+        collisions: null,
+        error: null,
+      };
+    case "source-analyzing":
+      return { ...state, phase: "inspecting", error: null };
+    case "source-analyzed":
+      return {
+        ...state,
+        phase: "selecting",
+        sourceAnalysis: action.analysis,
+        selectedAssetHandle: action.analysis.preselectedAssetHandle,
+        remoteSource: null,
+        apkHandle: null,
+        apkLabel: null,
+        inspection: null,
+        draft: null,
+        form: null,
+        collisions: null,
+        error: null,
+      };
+    case "asset-selected":
+      return {
+        ...state,
+        selectedAssetHandle: action.assetHandle,
+        remoteSource: null,
+        apkHandle: null,
+        apkLabel: null,
+        inspection: null,
+        draft: null,
+        form: null,
+        collisions: null,
+        error: null,
+      };
+    case "install-strategy":
+      return {
+        ...state,
+        installStrategy: action.strategy,
+        draft: null,
+        form: null,
+        collisions: null,
+        error: null,
+      };
+    case "downloading":
+      return { ...state, phase: "downloading", error: null };
+    case "remote-downloaded":
+      return {
+        ...state,
+        apkHandle: action.apkHandle,
+        apkLabel: action.label,
+        remoteSource: { ...action.source, strategy: state.installStrategy },
+        inspection: null,
+        draft: null,
+        form: null,
+        collisions: null,
         error: null,
       };
     case "apk-selected":

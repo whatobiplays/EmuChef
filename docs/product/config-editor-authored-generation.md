@@ -2,9 +2,10 @@
 
 ## Status
 
-Approved implementation plan. The typed authored foundations and the standard,
-read-only device-profile generator are implemented. App/recipe generation and
-extended device capability checks remain later work.
+Implemented current-state design. Typed authored foundations, standard
+read-only device-profile generation, local APK generation, and public GitHub or
+direct HTTPS APK source generation are implemented. Extended device capability
+checks and authenticated/private source access remain later work.
 
 This document defines the Config Editor workflows for generating:
 
@@ -370,6 +371,21 @@ document session.
 - pinned-release recipe generation;
 - direct remote APK mode; and
 - network, timeout, and redaction tests.
+
+The implemented workflow uses only the GitHub REST API. Drafts are excluded,
+repository prereleases are opt-in, exact prereleases require confirmation, and
+eligible assets are non-empty `.apk` files no larger than 2 GiB. Direct URLs
+must use public HTTPS without credentials, fragments, or query parameters.
+Metadata bodies are bounded to 2 MiB, redirects to five safe HTTPS hops,
+connections to 10 seconds, and requests to 30 seconds. Downloads stream into a
+session-owned temporary workspace and reuse the configured APK analyzer.
+
+Pinned generation stores normalized source identity and emits a `remote_file`
+artifact plus resolve/install steps. Authors may instead choose the existing
+user-provided APK strategy, which preserves the Phase 3 `user_provided_apk`
+and `local_apk` source shape without remote tracking fields. Authentication,
+private repositories, arbitrary-site scraping, background refresh, and
+split-package formats remain excluded.
 
 ### Phase 5: refinement
 

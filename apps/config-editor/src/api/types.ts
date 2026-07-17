@@ -417,6 +417,58 @@ export interface DeviceProfileSaveResult {
   displayPath: string;
 }
 
+export type AppGeneratorSourceMode = "local_apk" | "github_repository" | "github_release" | "direct_apk";
+export type AppGeneratorInstallStrategy = "pinned_remote_asset" | "user_provided_apk";
+
+export interface RemoteAssetDto {
+  assetHandle: string;
+  fileName: string;
+  size: number | null;
+  contentType: string | null;
+  releaseTag: string | null;
+  releaseName: string | null;
+  prerelease: boolean;
+  publishedAt: string | null;
+}
+
+export interface RemoteReleaseDto {
+  tag: string;
+  name: string | null;
+  prerelease: boolean;
+  publishedAt: string | null;
+  assets: RemoteAssetDto[];
+}
+
+export interface RemoteSourceAnalysisResult {
+  sourceHandle: string;
+  mode: AppGeneratorSourceMode;
+  normalizedUrl: string;
+  repository: {
+    fullName: string;
+    name: string | null;
+    description: string | null;
+    htmlUrl: string;
+  } | null;
+  releases: RemoteReleaseDto[];
+  assets: RemoteAssetDto[];
+  preselectedAssetHandle: string | null;
+}
+
+export interface RemoteSourceDescriptorDto {
+  mode: AppGeneratorSourceMode;
+  strategy: AppGeneratorInstallStrategy;
+  downloadUrl: string;
+  repository: string | null;
+  releaseTag: string | null;
+  assetName: string | null;
+}
+
+export interface RemoteApkDownloadResult {
+  apkHandle: string;
+  label: string;
+  source: RemoteSourceDescriptorDto;
+}
+
 export interface AppGeneratorSessionResult {
   sessionHandle: string;
   analyzerHandle?: string | null;
