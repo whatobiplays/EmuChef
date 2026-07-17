@@ -97,7 +97,32 @@ pub fn begin_device_profile_generator(
 }
 
 #[tauri::command]
-/// Select and retain one authored root without exposing its native path.
+/// Bind the app-wide authored root to this generator session.
+pub fn set_device_profile_authored_root(
+    state: State<'_, DeviceProfileGeneratorState>,
+    session_handle: String,
+    authored_root: String,
+) -> Result<Value, String> {
+    let trusted_root = match validate_authored_root(Path::new(&authored_root)) {
+        Ok(root) => root,
+        Err(error) => return Ok(error),
+    };
+    let mut registry = lock_registry(&state)?;
+    let root_handle = registry.allocate_handle("root");
+    let session = match registry.session_mut(&session_handle) {
+        Ok(session) => session,
+        Err(error) => return Ok(error),
+    };
+    session.roots.insert(root_handle.clone(), trusted_root);
+    Ok(success(json!({
+        "cancelled": false,
+        "rootHandle": root_handle,
+        "label": SAFE_ROOT_LABEL,
+    })))
+}
+
+#[tauri::command]
+/// Select and retain one authored root, returning its canonical path to the app-level setting.
 pub async fn choose_device_profile_authored_root(
     app: AppHandle,
     state: State<'_, DeviceProfileGeneratorState>,
@@ -120,6 +145,7 @@ pub async fn choose_device_profile_authored_root(
         Ok(root) => root,
         Err(error) => return Ok(error),
     };
+    let canonical_root = trusted_root.root.clone();
     let mut registry = lock_registry(&state)?;
     let root_handle = registry.allocate_handle("root");
     let session = match registry.session_mut(&session_handle) {
@@ -131,6 +157,7 @@ pub async fn choose_device_profile_authored_root(
         "cancelled": false,
         "rootHandle": root_handle,
         "label": SAFE_ROOT_LABEL,
+        "path": canonical_root,
     })))
 }
 

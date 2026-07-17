@@ -5,6 +5,7 @@ import {
   cancelDeviceProfileGenerator,
   checkDeviceProfileCollisions,
   chooseDeviceProfileAuthoredRoot,
+  setDeviceProfileAuthoredRoot,
   generateDeviceProfileDraft,
   listDeviceProfileGeneratorDevices,
   probeDeviceProfileGeneratorDevice,
@@ -25,6 +26,8 @@ import {
 } from "./deviceProfileGenerator.logic";
 
 interface DeviceProfileGeneratorProps {
+  initialAuthoredRoot: string | null;
+  onAuthoredRootSelected: (path: string) => void | Promise<void>;
   onClose: () => void;
   onSaved: (displayPath: string) => void;
 }
@@ -43,13 +46,18 @@ const capabilityLabels: Array<[
   ["app_data_write", "App-data write"],
 ];
 
+function isSelectableDeviceState(state: string): boolean {
+  return state === "available" || state === "device";
+}
+
 /** Focused ephemeral wizard for generating one new authored device profile. */
-export function DeviceProfileGenerator({ onClose, onSaved }: DeviceProfileGeneratorProps) {
+export function DeviceProfileGenerator({ initialAuthoredRoot, onAuthoredRootSelected, onClose, onSaved }: DeviceProfileGeneratorProps) {
   const [state, dispatch] = useReducer(
     reduceDeviceProfileGenerator,
     initialDeviceProfileGeneratorState,
   );
   const sessionRef = useRef<string | null>(null);
+  const initialAuthoredRootRef = useRef(initialAuthoredRoot);
 
   useEffect(() => {
     let disposed = false;
@@ -65,6 +73,13 @@ export function DeviceProfileGenerator({ onClose, onSaved }: DeviceProfileGenera
       }
       sessionRef.current = handle;
       dispatch({ type: "sessionStarted", sessionHandle: handle });
+      if (initialAuthoredRootRef.current) {
+        const root = await setDeviceProfileAuthoredRoot(handle, initialAuthoredRootRef.current);
+        if (disposed) return;
+        if (root.kind === "success" && root.result.rootHandle && root.result.label) {
+          dispatch({ type: "rootSelected", rootHandle: root.result.rootHandle, rootLabel: root.result.label });
+        }
+      }
       dispatch({ type: "devicesLoading" });
       const devices = await listDeviceProfileGeneratorDevices(handle);
       if (disposed) return;
@@ -133,6 +148,7 @@ export function DeviceProfileGenerator({ onClose, onSaved }: DeviceProfileGenera
       return null;
     }
     dispatch({ type: "rootSelected", rootHandle, rootLabel: label });
+    if (response.result.path) await onAuthoredRootSelected(response.result.path);
     return rootHandle;
   }
 
@@ -271,7 +287,7 @@ export function DeviceProfileGenerator({ onClose, onSaved }: DeviceProfileGenera
             <label className="flex items-center gap-3 rounded border border-slate-200 p-3" key={device.deviceHandle}>
               <input
                 checked={state.selectedDeviceHandle === device.deviceHandle}
-                disabled={device.state !== "device"}
+                disabled={!isSelectableDeviceState(device.state)}
                 name="generator-device"
                 type="radio"
                 onChange={() => dispatch({ type: "deviceSelected", deviceHandle: device.deviceHandle })}

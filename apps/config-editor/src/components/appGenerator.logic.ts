@@ -6,6 +6,7 @@ import type {
   AppRecipeDraftResult,
   AppRecipeEditsDto,
   AppRecipeSaveResult,
+  AppGeneratorDiagnosticDto,
 } from "../api/types.js";
 import { parseMetadataObject } from "./deviceProfileGenerator.logic.js";
 
@@ -22,9 +23,9 @@ export interface AppGeneratorFormState {
   app: AppDefinitionV1Dto;
   recipe: AppRecipeEditsDto;
   mappings: AppMappingEditsDto;
-  aliasesText: string;
-  sharedStoragePathsText: string;
-  appDataPathsText: string;
+  aliases: string[];
+  sharedStoragePaths: string[];
+  appDataPaths: string[];
 }
 
 export interface AppGeneratorState {
@@ -46,7 +47,15 @@ export interface AppGeneratorState {
 }
 
 export type AppGeneratorAction =
-  | { type: "started"; sessionHandle: string }
+  | {
+      type: "started";
+      sessionHandle: string;
+      analyzerHandle?: string | null;
+      analyzerKind?: "apkanalyzer" | "aapt2" | null;
+      analyzerLabel?: string | null;
+      rootHandle?: string | null;
+      rootLabel?: string | null;
+    }
   | { type: "apk-selected"; apkHandle: string; label: string }
   | { type: "analyzer-kind"; kind: "apkanalyzer" | "aapt2" }
   | { type: "analyzer-selected"; analyzerHandle: string; label: string }
@@ -84,7 +93,17 @@ export function reduceAppGenerator(
 ): AppGeneratorState {
   switch (action.type) {
     case "started":
-      return { ...state, phase: "selecting", sessionHandle: action.sessionHandle, error: null };
+      return {
+        ...state,
+        phase: "selecting",
+        sessionHandle: action.sessionHandle,
+        analyzerHandle: action.analyzerHandle ?? null,
+        analyzerKind: action.analyzerKind ?? state.analyzerKind,
+        analyzerLabel: action.analyzerLabel ?? null,
+        rootHandle: action.rootHandle ?? null,
+        rootLabel: action.rootLabel ?? null,
+        error: null,
+      };
     case "apk-selected":
       return {
         ...state,
@@ -168,9 +187,20 @@ export function reduceAppGenerator(
 export function draftToForm(draft: AppRecipeDraftResult): AppGeneratorFormState {
   const { type: trackingType, ...trackingFields } = draft.app.tracking_source;
   void trackingType;
+  const app = structuredClone(draft.app);
+  const recipe = structuredClone(draft.recipeEdits);
+  if (app.name === app.package.primary) {
+    const originalName = app.name;
+    const readableName = readableNameFromPackage(app.package.primary);
+    app.name = readableName;
+    recipe.name = recipe.name.replace(originalName, readableName);
+    recipe.description = recipe.description.replace(originalName, readableName);
+    recipe.inputLabel = recipe.inputLabel.replace(originalName, readableName);
+    recipe.inputDescription = recipe.inputDescription.replace(originalName, readableName);
+  }
   return {
-    app: structuredClone(draft.app),
-    recipe: structuredClone(draft.recipeEdits),
+    app,
+    recipe,
     mappings: {
       installSourceOptions: JSON.stringify(draft.app.install_source.options, null, 2),
       trackingSourceFields: JSON.stringify(trackingFields, null, 2),
@@ -180,10 +210,36 @@ export function draftToForm(draft: AppRecipeDraftResult): AppGeneratorFormState 
         JSON.stringify(value, null, 2),
       ),
     },
-    aliasesText: draft.app.package.aliases.join("\n"),
-    sharedStoragePathsText: draft.app.provisioning.shared_storage_paths.join("\n"),
-    appDataPathsText: draft.app.provisioning.app_data_paths.join("\n"),
+    aliases: [...draft.app.package.aliases],
+    sharedStoragePaths: [...draft.app.provisioning.shared_storage_paths],
+    appDataPaths: [...draft.app.provisioning.app_data_paths],
   };
+}
+
+export function readableNameFromPackage(packageName: string): string {
+  const tail = packageName.split(".").filter(Boolean).at(-1) ?? packageName;
+  return tail
+    .split(/[_-]+/u)
+    .filter(Boolean)
+    .map((part) => part.charAt(0).toUpperCase() + part.slice(1))
+    .join(" ");
+}
+
+export function visibleDraftDiagnostics(
+  diagnostics: AppGeneratorDiagnosticDto[],
+  hasRootBackedReview: boolean,
+): AppGeneratorDiagnosticDto[] {
+  if (!hasRootBackedReview) return diagnostics;
+  return diagnostics.filter((diagnostic) => diagnostic.code !== "validation_context_limited");
+}
+
+export function diagnosticDisplayTitle(code: string, severity: string): string {
+  const titles: Record<string, string> = {
+    validation_context_limited: "Catalog validation not yet available",
+    apk_certificate_missing: "Signing certificate unavailable",
+    apk_label_missing: "Application name derived",
+  };
+  return titles[code] ?? (severity === "error" || severity === "blocking" ? "Action required" : "Review recommended");
 }
 
 export type FormRequestResult =
@@ -208,15 +264,12 @@ export function formToRequest(form: AppGeneratorFormState): FormRequestResult {
       return { ok: false, message: `${label}: ${parsed.message}` };
     }
   }
-  const lines = (value: string) =>
-    value
-      .split(/\r?\n/u)
-      .map((item) => item.trim())
-      .filter((item) => item.length > 0);
+  const normalizeList = (values: string[]) =>
+    values.map((item) => item.trim()).filter((item) => item.length > 0);
   const app = structuredClone(form.app);
-  app.package.aliases = lines(form.aliasesText);
-  app.provisioning.shared_storage_paths = lines(form.sharedStoragePathsText);
-  app.provisioning.app_data_paths = lines(form.appDataPathsText);
+  app.package.aliases = normalizeList(form.aliases);
+  app.provisioning.shared_storage_paths = normalizeList(form.sharedStoragePaths);
+  app.provisioning.app_data_paths = normalizeList(form.appDataPaths);
   return {
     ok: true,
     app,

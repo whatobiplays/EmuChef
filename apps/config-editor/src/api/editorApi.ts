@@ -23,6 +23,7 @@ import type {
   UserConfigurationCommandResult,
   UserConfigurationDocumentResult,
   ConfigurationDescriptionResult,
+  ConfigEditorAuthoredRootResult,
   PlanConfigurationResult,
   DeviceProfileCollisionResult,
   DeviceProfileDraftResult,
@@ -264,6 +265,20 @@ export async function planConfiguration(
   return callApi<PlanConfigurationResult>("plan_configuration", runtimeConfigurationInvokeArgs(request));
 }
 
+export async function getConfigEditorAuthoredRoot(): Promise<
+  EditorApiResult<ConfigEditorAuthoredRootResult>
+> {
+  return callApi<ConfigEditorAuthoredRootResult>("get_config_editor_authored_root");
+}
+
+export async function setConfigEditorAuthoredRoot(
+  authoredRoot: string | null,
+): Promise<EditorApiResult<ConfigEditorAuthoredRootResult>> {
+  return callApi<ConfigEditorAuthoredRootResult>("set_config_editor_authored_root", {
+    authoredRoot,
+  });
+}
+
 export async function beginDeviceProfileGenerator(): Promise<
   EditorApiResult<DeviceProfileGeneratorSessionResult>
 > {
@@ -275,6 +290,16 @@ export async function chooseDeviceProfileAuthoredRoot(
 ): Promise<EditorApiResult<DeviceProfileRootSelectionResult>> {
   return callApi<DeviceProfileRootSelectionResult>("choose_device_profile_authored_root", {
     sessionHandle,
+  });
+}
+
+export async function setDeviceProfileAuthoredRoot(
+  sessionHandle: string,
+  authoredRoot: string,
+): Promise<EditorApiResult<DeviceProfileRootSelectionResult>> {
+  return callApi<DeviceProfileRootSelectionResult>("set_device_profile_authored_root", {
+    sessionHandle,
+    authoredRoot,
   });
 }
 
@@ -363,6 +388,13 @@ export async function chooseAppGeneratorAuthoredRoot(
   sessionHandle: string,
 ): Promise<EditorApiResult<AppGeneratorSelectionResult>> {
   return callApi("choose_app_generator_authored_root", { sessionHandle });
+}
+
+export async function setAppGeneratorAuthoredRoot(
+  sessionHandle: string,
+  authoredRoot: string,
+): Promise<EditorApiResult<AppGeneratorSelectionResult>> {
+  return callApi("set_app_generator_authored_root", { sessionHandle, authoredRoot });
 }
 
 export async function inspectAppGeneratorApk(

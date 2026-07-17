@@ -13,8 +13,9 @@ use std::sync::Mutex;
 use std::thread;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
+use serde::{Deserialize, Serialize};
 use serde_json::{json, Map, Value};
-use tauri::{AppHandle, State};
+use tauri::{AppHandle, Manager, State};
 use tauri_plugin_dialog::DialogExt;
 
 use crate::sidecar_client::SidecarState;
@@ -24,6 +25,15 @@ const MAX_ANALYZER_OUTPUT_BYTES: usize = 4 * 1024 * 1024;
 const ANALYZER_TIMEOUT: Duration = Duration::from_secs(30);
 const SAFE_APK_LABEL: &str = "Selected local APK";
 const SAFE_ROOT_LABEL: &str = "Selected authored root";
+const PREFERENCES_FILE_NAME: &str = "app-generator-preferences.json";
+
+#[derive(Clone, Debug, Default, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct AppGeneratorPreferences {
+    analyzer_path: Option<PathBuf>,
+    analyzer_kind: Option<String>,
+    authored_root: Option<PathBuf>,
+}
 
 #[derive(Default)]
 struct GeneratorRegistry {
@@ -137,10 +147,82 @@ impl GeneratorRegistry {
 }
 
 #[tauri::command]
-pub fn begin_app_generator(state: State<'_, AppGeneratorState>) -> Result<Value, String> {
+pub fn get_config_editor_authored_root(app: AppHandle) -> Result<Value, String> {
+    let preferences = load_preferences(&app);
+    let authored_root = preferences
+        .authored_root
+        .filter(|path| validate_authored_root(path).is_ok());
+    Ok(success(json!({ "authoredRoot": authored_root })))
+}
+
+#[tauri::command]
+pub fn set_config_editor_authored_root(
+    app: AppHandle,
+    authored_root: Option<String>,
+) -> Result<Value, String> {
+    let canonical = match authored_root {
+        Some(path) => match validate_authored_root(Path::new(&path)) {
+            Ok(root) => Some(root.root),
+            Err(error) => return Ok(error),
+        },
+        None => None,
+    };
+    update_preferences(&app, |preferences| {
+        preferences.authored_root = canonical.clone();
+    });
+    Ok(success(json!({ "authoredRoot": canonical })))
+}
+
+#[tauri::command]
+pub fn begin_app_generator(
+    app: AppHandle,
+    state: State<'_, AppGeneratorState>,
+) -> Result<Value, String> {
+    let preferences = load_preferences(&app);
     let mut registry = lock_registry(&state)?;
     let session_handle = registry.begin();
-    Ok(success(json!({ "sessionHandle": session_handle })))
+    let mut analyzer_handle = None;
+    let mut analyzer_kind = None;
+    let mut analyzer_label = None;
+    let mut root_handle = None;
+    let mut root_label = None;
+
+    if let (Some(path), Some(kind_name)) = (
+        preferences.analyzer_path.as_deref(),
+        preferences.analyzer_kind.as_deref(),
+    ) {
+        if let Some(kind) = AnalyzerKind::parse(kind_name) {
+            if let Ok(path) = validate_analyzer(path, kind) {
+                let handle = registry.allocate("analyzer");
+                if let Ok(session) = registry.session_mut(&session_handle) {
+                    session.analyzers.insert(handle.clone(), TrustedAnalyzer { path, kind });
+                    analyzer_handle = Some(handle);
+                    analyzer_kind = Some(kind.protocol_name());
+                    analyzer_label = Some(kind.display_label());
+                }
+            }
+        }
+    }
+
+    if let Some(path) = preferences.authored_root.as_deref() {
+        if let Ok(root) = validate_authored_root(path) {
+            let handle = registry.allocate("app-root");
+            if let Ok(session) = registry.session_mut(&session_handle) {
+                session.roots.insert(handle.clone(), root);
+                root_handle = Some(handle);
+                root_label = Some(SAFE_ROOT_LABEL);
+            }
+        }
+    }
+
+    Ok(success(json!({
+        "sessionHandle": session_handle,
+        "analyzerHandle": analyzer_handle,
+        "analyzerKind": analyzer_kind,
+        "analyzerLabel": analyzer_label,
+        "rootHandle": root_handle,
+        "rootLabel": root_label,
+    })))
 }
 
 #[tauri::command]
@@ -215,14 +297,47 @@ pub async fn choose_app_generator_analyzer(
         Ok(session) => session,
         Err(error) => return Ok(error),
     };
-    session
-        .analyzers
-        .insert(analyzer_handle.clone(), TrustedAnalyzer { path, kind });
+    session.analyzers.insert(
+        analyzer_handle.clone(),
+        TrustedAnalyzer {
+            path: path.clone(),
+            kind,
+        },
+    );
+    update_preferences(&app, |preferences| {
+        preferences.analyzer_path = Some(path);
+        preferences.analyzer_kind = Some(kind.protocol_name().to_string());
+    });
     Ok(success(json!({
         "cancelled": false,
         "analyzerHandle": analyzer_handle,
         "kind": kind.protocol_name(),
         "label": kind.display_label(),
+    })))
+}
+
+#[tauri::command]
+pub fn set_app_generator_authored_root(
+    state: State<'_, AppGeneratorState>,
+    session_handle: String,
+    authored_root: String,
+) -> Result<Value, String> {
+    require_session(&state, &session_handle)?;
+    let root = match validate_authored_root(Path::new(&authored_root)) {
+        Ok(root) => root,
+        Err(error) => return Ok(error),
+    };
+    let mut registry = lock_registry(&state)?;
+    let root_handle = registry.allocate("app-root");
+    let session = match registry.session_mut(&session_handle) {
+        Ok(session) => session,
+        Err(error) => return Ok(error),
+    };
+    session.roots.insert(root_handle.clone(), root);
+    Ok(success(json!({
+        "cancelled": false,
+        "rootHandle": root_handle,
+        "label": SAFE_ROOT_LABEL,
     })))
 }
 
@@ -250,11 +365,13 @@ pub async fn choose_app_generator_authored_root(
         Ok(session) => session,
         Err(error) => return Ok(error),
     };
+    let persisted_root = root.root.clone();
     session.roots.insert(root_handle.clone(), root);
     Ok(success(json!({
         "cancelled": false,
         "rootHandle": root_handle,
         "label": SAFE_ROOT_LABEL,
+        "path": persisted_root,
     })))
 }
 
@@ -1041,6 +1158,41 @@ fn safe_file_name(file_name: &str) -> bool {
         && !file_name.contains('\\')
         && file_name != "."
         && file_name != ".."
+}
+
+fn preferences_path(app: &AppHandle) -> Option<PathBuf> {
+    app.path()
+        .app_config_dir()
+        .ok()
+        .map(|directory| directory.join(PREFERENCES_FILE_NAME))
+}
+
+fn load_preferences(app: &AppHandle) -> AppGeneratorPreferences {
+    preferences_path(app)
+        .and_then(|path| fs::read_to_string(path).ok())
+        .and_then(|text| serde_json::from_str(&text).ok())
+        .unwrap_or_default()
+}
+
+fn update_preferences<F>(app: &AppHandle, update: F)
+where
+    F: FnOnce(&mut AppGeneratorPreferences),
+{
+    let Some(path) = preferences_path(app) else {
+        return;
+    };
+    let mut preferences = load_preferences(app);
+    update(&mut preferences);
+    let Some(parent) = path.parent() else {
+        return;
+    };
+    if fs::create_dir_all(parent).is_err() {
+        return;
+    }
+    let Ok(bytes) = serde_json::to_vec_pretty(&preferences) else {
+        return;
+    };
+    let _ = fs::write(path, bytes);
 }
 
 fn require_session(state: &AppGeneratorState, handle: &str) -> Result<(), String> {

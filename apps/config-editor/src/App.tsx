@@ -6,6 +6,7 @@ import type { EditorCommand } from "./api/commands";
 import {
   applyRecipeCommand,
   emitYaml,
+  getConfigEditorAuthoredRoot,
   openUserConfiguration as openUserConfigurationDocument,
   listStepSpecs,
   openRecipe as openRecipeDocument,
@@ -13,6 +14,7 @@ import {
   sidecarRestart,
   saveRecipe as saveRecipeDocument,
   saveRecipeAs as saveRecipeDocumentAs,
+  setConfigEditorAuthoredRoot,
   setDocumentAuthoredRoot,
   sidecarStatus,
   undo as undoDocument,
@@ -184,6 +186,18 @@ export default function App() {
   useEffect(() => {
     selectedAuthoredRootRef.current = selectedAuthoredRoot;
   }, [selectedAuthoredRoot]);
+
+  useEffect(() => {
+    let active = true;
+    void getConfigEditorAuthoredRoot().then((response) => {
+      if (!active || response.kind !== "success") return;
+      selectedAuthoredRootRef.current = response.result.authoredRoot;
+      setSelectedAuthoredRoot(response.result.authoredRoot);
+    });
+    return () => {
+      active = false;
+    };
+  }, []);
 
   useEffect(() => {
     sidecarStateRef.current = sidecarState;
@@ -699,8 +713,13 @@ export default function App() {
         kind: "no-document",
         authoredRoot: nextAuthoredRoot,
       });
-      selectedAuthoredRootRef.current = resolution.selectedAuthoredRoot;
-      setSelectedAuthoredRoot(resolution.selectedAuthoredRoot);
+      const persisted = await setConfigEditorAuthoredRoot(resolution.selectedAuthoredRoot);
+      if (persisted.kind !== "success") {
+        setErrorMessage("The authored root could not be saved as the app-wide selection.");
+        return;
+      }
+      selectedAuthoredRootRef.current = persisted.result.authoredRoot;
+      setSelectedAuthoredRoot(persisted.result.authoredRoot);
       setErrorMessage(null);
       setStatusMessage(nextAuthoredRoot === null ? "Authored root selection cleared." : "Authored root selected.");
       await syncMenuState(null);
@@ -725,8 +744,13 @@ export default function App() {
           authoredRoot: nextAuthoredRoot,
           document: response.result.document,
         });
-        selectedAuthoredRootRef.current = resolution.selectedAuthoredRoot;
-        setSelectedAuthoredRoot(resolution.selectedAuthoredRoot);
+        const persisted = await setConfigEditorAuthoredRoot(resolution.selectedAuthoredRoot);
+        if (persisted.kind !== "success") {
+          setErrorMessage("The authored root could not be saved as the app-wide selection.");
+          return;
+        }
+        selectedAuthoredRootRef.current = persisted.result.authoredRoot;
+        setSelectedAuthoredRoot(persisted.result.authoredRoot);
         if (resolution.document !== null) {
           applyDocument(resolution.document);
         }
@@ -1248,12 +1272,16 @@ export default function App() {
         <MenuEventBridge handlers={menuHandlers} />
         {appGeneratorOpen ? (
           <AppGenerator
+            initialAuthoredRoot={selectedAuthoredRoot}
+            onAuthoredRootSelected={updateAuthoredRootSelection}
             onClose={() => setAppGeneratorOpen(false)}
             onSaved={handleGeneratedAppRecipeSaved}
           />
         ) : null}
         {deviceProfileGeneratorOpen ? (
           <DeviceProfileGenerator
+            initialAuthoredRoot={selectedAuthoredRoot}
+            onAuthoredRootSelected={updateAuthoredRootSelection}
             onClose={() => setDeviceProfileGeneratorOpen(false)}
             onSaved={(path) => setStatusMessage(`Saved ${path}.`)}
           />
@@ -1273,12 +1301,16 @@ export default function App() {
     <>
       {appGeneratorOpen ? (
         <AppGenerator
+          initialAuthoredRoot={selectedAuthoredRoot}
+          onAuthoredRootSelected={updateAuthoredRootSelection}
           onClose={() => setAppGeneratorOpen(false)}
           onSaved={handleGeneratedAppRecipeSaved}
         />
       ) : null}
       {deviceProfileGeneratorOpen ? (
         <DeviceProfileGenerator
+          initialAuthoredRoot={selectedAuthoredRoot}
+          onAuthoredRootSelected={updateAuthoredRootSelection}
           onClose={() => setDeviceProfileGeneratorOpen(false)}
           onSaved={(path) => setStatusMessage(`Saved ${path}.`)}
         />

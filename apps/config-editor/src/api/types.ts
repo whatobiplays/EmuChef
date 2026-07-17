@@ -298,8 +298,14 @@ export interface PlanConfigurationResult {
   diagnostics: RuntimeConfigurationDiagnosticDto[];
 }
 
+export interface ConfigEditorAuthoredRootResult {
+  authoredRoot: string | null;
+}
+
 export interface DeviceProfileGeneratorSessionResult {
   sessionHandle: string;
+  rootHandle?: string | null;
+  rootLabel?: string | null;
 }
 
 export interface DeviceProfileGeneratorDeviceDto {
@@ -388,6 +394,7 @@ export interface DeviceProfileDraftResult {
 
 export interface DeviceProfileRootSelectionResult {
   cancelled: boolean;
+  path?: string;
   rootHandle?: string;
   label?: string;
 }
@@ -412,10 +419,16 @@ export interface DeviceProfileSaveResult {
 
 export interface AppGeneratorSessionResult {
   sessionHandle: string;
+  analyzerHandle?: string | null;
+  analyzerKind?: "apkanalyzer" | "aapt2" | null;
+  analyzerLabel?: string | null;
+  rootHandle?: string | null;
+  rootLabel?: string | null;
 }
 
 export interface AppGeneratorSelectionResult {
   cancelled: boolean;
+  path?: string;
   apkHandle?: string;
   analyzerHandle?: string;
   rootHandle?: string;

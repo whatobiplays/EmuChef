@@ -52,9 +52,10 @@ APK-inspection contract uses a separately configured user-supplied
 Local APK generation uses a required user-provided APK recipe input. Generated
 app definitions use `user_provided_apk` install-source metadata with resolver
 `none`, `local_apk` tracking metadata, `artifacts.apk.required: false`, and
-`artifacts.byo_apk.required: true`. The selected APK and analyzer paths are
-never persisted, and verified APK facts remain review evidence unless the
-author explicitly enters metadata.
+`artifacts.byo_apk.required: true`. The selected APK path is session-only. The
+last validated analyzer executable and authored root are persisted by the
+trusted Tauri layer so later generator sessions can restore them. Verified APK
+facts remain review evidence unless the author explicitly enters metadata.
 
 The local APK wizard accepts regular `.apk` files no larger than 2 GiB and a
 regular executable whose basename matches the selected analyzer adapter.
@@ -64,8 +65,12 @@ signing-certificate SHA-256 fingerprint, so that fact remains missing with a
 deterministic warning. Split and non-base APKs are rejected.
 
 App-generator sessions retain APK, analyzer, and authored-root paths behind
-opaque process-memory handles. Authored roots must contain existing canonical
-`apps` and `recipes` directories. Saving rechecks APK file identity,
+opaque process-memory handles. The Config Editor also maintains one validated,
+persistent app-wide authored-root selection. Selecting a root in app generation
+updates that shared selection, applies it to an open recipe document, and makes
+it available to later app-generator and device-profile-generator sessions.
+Authored roots must contain existing canonical `apps`, `recipes`, and applicable
+generator destination directories. Saving rechecks APK file identity,
 revalidates both typed drafts, reruns both-directory collision analysis, writes
 and syncs temporary siblings, and publishes both files with create-new
 semantics. A failed second publication removes the first publication when
@@ -78,10 +83,12 @@ Generated recipes are minimal: artifact resolution when needed, APK installation
 Device profile generation is available from the Config Editor File menu as an
 ephemeral guided wizard. Tauri invokes the existing device-listing and probing
 operations with literal `adb` resolved from `PATH`. Generator-session handles
-scope every selected device and authored root; exact serials and native root
-paths remain in trusted process memory and never enter React state, generated
-YAML, or product-facing errors. React receives only safe device facts and a
-constant authored-root label.
+scope every selected device and the generator-local root handle; exact ADB
+serials remain in trusted process memory and never enter React state, generated
+YAML, or product-facing errors. The generator can bind the existing app-wide
+authored-root selection into a fresh opaque session handle, and selecting a new
+root updates that shared editor setting. Generator UI receives only safe device
+facts and a constant authored-root label.
 
 Standard capture is read-only and includes manufacturer, brand, model, product,
 device, board, hardware, ordered de-duplicated ABI values, Android major
