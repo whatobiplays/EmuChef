@@ -327,7 +327,7 @@ fn normalize_integer_value(
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
     use std::fs;
     use std::io::Write;
@@ -435,6 +435,14 @@ mod tests {
                     )],
                 ),
             ],
+        )
+    }
+
+    /// Write the canonical valid synthetic APK for sibling module tests.
+    pub(crate) fn write_valid_test_apk(workspace: &TempDir) -> std::path::PathBuf {
+        write_apk(
+            workspace,
+            &[(ANDROID_MANIFEST_ENTRY, build_axml(&valid_manifest()))],
         )
     }
 

@@ -1,6 +1,6 @@
 # Phase 5B — APK Manifest Inspection and Permission Automation
 
-Status: in progress (Phases 5B1 through 5B3 complete)
+Status: in progress (Phases 5B1 through 5B4 complete)
 
 ## Purpose
 
@@ -217,18 +217,82 @@ construct or execute that future action.
 
 ## Phase 5B4 — Authoring inspection result
 
-Expose safe structured fields:
+Status: complete
 
-- package and version metadata;
-- SDK metadata;
-- complete requested permissions;
-- deterministic classifications;
-- candidate `pm grant` actions;
-- candidate app-op actions;
-- manual/unsupported warnings;
-- calculated APK SHA-256;
-- publisher checksum status when available;
+The backend `inspectApk` capability now performs native crate-internal
+inspection. Its strict request payload is:
+
+```json
+{
+  "apkPath": "/path/to/selected.apk",
+  "connectedDeviceApi": 35
+}
+```
+
+`connectedDeviceApi` is optional. The request rejects unknown fields, including
+the obsolete analyzer-fed `analyzer` and `facts` fields. Reusing the existing
+capability name with the new payload and result is an intentional compatibility
+break for analyzer-fed clients; the protocol version and capability name remain
+unchanged. Frontend migration belongs to Phase 5B5.
+
+The backend opens the selected APK through the Phase 5B2 bounded manifest
+inspector and returns:
+
+- `manifest`, containing package, version, and SDK metadata;
+- `permissions`, containing every deterministic manifest declaration and, when
+  device API context exists, its classification and applicability;
+- review-only `runtimeGrantCandidates` and `appOpCandidates`;
+- stable permission `warnings`;
+- uppercase `calculatedSha256` metadata;
+- `checksumStatus: "not_compared"` because no trusted expected checksum is
+  accepted or compared in this phase;
 - `signatureVerification: "not_performed"`.
+
+Every candidate is derived only from applicable classifier automation metadata
+and contains `selected: false`. Runtime candidates contain the permission name
+and root requirement. App-op candidates additionally contain the reviewed
+operation name and mode. These DTOs are review metadata, not shell commands;
+Phase 5B4 constructs and executes no command.
+
+When device API context is absent, every permission remains present with null
+classification and applicability, both candidate lists are empty, and exactly
+one `apk_permission_classification_context_unavailable` warning is returned.
+The backend does not guess classifications or emit speculative per-permission
+warnings.
+
+With device context, applicable runtime-restricted, manual-special-access,
+signature-or-privileged, and unknown permissions receive stable per-permission
+warnings and are never candidates. Install-time permissions require no warning
+or automation candidate. Every proven non-applicable permission receives one
+`apk_permission_not_applicable` warning with the permission name and one of:
+
+```text
+declaration_requires_api_23
+max_sdk_version_exceeded
+permission_not_introduced
+permission_replaced
+target_sdk_below_minimum
+```
+
+Every indeterminate permission receives one
+`apk_permission_applicability_indeterminate` warning with the permission name
+and one of:
+
+```text
+invalid_max_sdk_version
+target_sdk_unavailable
+replacement_target_sdk_unavailable
+```
+
+Warnings, errors, and result metadata never expose the selected filesystem
+path, parser diagnostics, raw enum diagnostics, or command strings. Manifest
+failures retain the Phase 5B2 stable redacted reason codes; streamed file-hash
+read failures use `apk_file_read_failed`.
+
+The active inspection result contains no analyzer identity, analyzer evidence,
+certificate fingerprint, signer metadata, or signature-verification claim.
+The former analyzer inspection implementation was removed; its file retains
+only the separate safe facts model consumed by existing draft generators.
 
 All permission selections default to unchecked.
 

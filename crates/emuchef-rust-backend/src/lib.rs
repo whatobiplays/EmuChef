@@ -4,13 +4,11 @@
 //! protocol surfaces used by the Tauri configuration editor and the additive
 //! Phase 0 contract for a future end-user application.
 
-/// Production-compiled Android permission catalog and pure classifier prepared
-/// for later backend integration. Phase 5B3 intentionally has no caller yet.
-#[cfg_attr(not(test), allow(dead_code))]
+/// Production Android permission catalog and pure classifier.
 pub(crate) mod android_permissions;
-/// Production-compiled APK manifest inspection boundary prepared for later
-/// backend integration. Phase 5B2 intentionally has no production caller yet.
-#[cfg_attr(not(test), allow(dead_code))]
+/// Native authoring-time APK inspection and review DTOs.
+pub(crate) mod apk_authoring_inspection;
+/// Production APK manifest inspection boundary for hostile APK input.
 pub(crate) mod apk_manifest;
 mod artifact_resolver;
 mod artifact_store;

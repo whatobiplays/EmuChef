@@ -396,22 +396,34 @@ fn handle_probe_device(object: &Map<String, Value>) -> Result<Value, ApiError> {
 
 fn handle_inspect_apk(object: &Map<String, Value>) -> Result<Value, ApiError> {
     let payload = payload_object(object)?;
-    let request = serde_json::from_value::<crate::generation::ApkInspectionRequest>(Value::Object(
-        payload.clone(),
-    ))
+    let request = serde_json::from_value::<
+        crate::apk_authoring_inspection::ApkAuthoringInspectionRequest,
+    >(Value::Object(payload.clone()))
     .map_err(|_| {
         ApiError::invalid_request_with_details(
-            "APK inspection facts are invalid.",
+            "APK inspection input is invalid.",
             json!({ "field": "payload" }),
         )
     })?;
-    let result =
-        serde_json::to_value(crate::generation::inspect_apk_facts(request)).map_err(|_| {
-            ApiError::command_failed(
-                "APK inspection facts could not be represented.",
-                json!({ "reason": "apk_inspection_serialization_failed" }),
-            )
-        })?;
+    if !request.is_valid() {
+        return Err(ApiError::invalid_request_with_details(
+            "APK inspection input is invalid.",
+            json!({ "field": "payload" }),
+        ));
+    }
+    let result = crate::apk_authoring_inspection::inspect_apk_for_authoring(
+        Path::new(&request.apk_path),
+        request.connected_device_api,
+    )
+    .map_err(|error| {
+        ApiError::command_failed(error.message(), json!({ "reason": error.code() }))
+    })?;
+    let result = serde_json::to_value(result).map_err(|_| {
+        ApiError::command_failed(
+            "APK inspection result could not be represented.",
+            json!({ "reason": "apk_inspection_serialization_failed" }),
+        )
+    })?;
     Ok(envelope::success(result))
 }
 

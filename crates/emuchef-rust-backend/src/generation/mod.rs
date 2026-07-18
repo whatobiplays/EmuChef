@@ -11,7 +11,6 @@ mod device_profile;
 mod identifiers;
 mod remote_app_recipe;
 
-pub(crate) use apk::{inspect_apk_facts, ApkInspectionRequest};
 pub(crate) use app_recipe::{generate_app_recipe_draft, AppRecipeDraftRequest};
 pub(crate) use collisions::{
     check_app_recipe_collisions, check_device_profile_collisions, AppRecipeCollisionRequest,

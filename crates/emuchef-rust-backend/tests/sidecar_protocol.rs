@@ -612,12 +612,11 @@ printf '[ro.product.manufacturer]: [AYANEO]\n[ro.product.brand]: [AYANEO]\n[ro.p
 }
 
 #[test]
-fn local_apk_generation_protocol_is_safe_typed_and_additive() {
-    let inspected = sidecar_response(json!({
-        "id": "inspect-apk",
-        "type": "inspectApk",
+fn local_apk_generation_and_native_inspection_protocols_are_separate_and_safe() {
+    let generated = sidecar_response(json!({
+        "id": "generate-app-recipe",
+        "type": "generateAppRecipeDraft",
         "payload": {
-            "analyzer": "apkanalyzer",
             "facts": {
                 "packageName": "com.example.player",
                 "applicationLabel": "Example Player",
@@ -626,15 +625,6 @@ fn local_apk_generation_protocol_is_safe_typed_and_additive() {
                 "base": true
             }
         }
-    }));
-    assert_eq!(inspected["ok"], true, "{inspected:#}");
-    assert_eq!(inspected["result"]["blocking"], false);
-    assert!(!inspected.to_string().contains("/tmp/example.apk"));
-
-    let generated = sidecar_response(json!({
-        "id": "generate-app-recipe",
-        "type": "generateAppRecipeDraft",
-        "payload": { "facts": inspected["result"]["facts"] }
     }));
     assert_eq!(generated["ok"], true, "{generated:#}");
     assert_eq!(
@@ -655,14 +645,49 @@ fn local_apk_generation_protocol_is_safe_typed_and_additive() {
     );
     assert!(!generated.to_string().contains("/tmp/example.apk"));
 
-    let rejected = sidecar_response(json!({
-        "id": "inspect-path-rejected",
+    let legacy_rejected = sidecar_response(json!({
+        "id": "inspect-legacy-rejected",
         "type": "inspectApk",
         "payload": {
             "analyzer": "apkanalyzer",
-            "facts": { "packageName": "com.example.player", "apkPath": "/tmp/example.apk" }
+            "facts": { "packageName": "com.example.player" }
         }
     }));
-    assert_eq!(rejected["ok"], false);
-    assert!(!rejected.to_string().contains("/tmp/example.apk"));
+    assert_eq!(legacy_rejected["ok"], false);
+    assert_eq!(legacy_rejected["error"]["code"], "invalid_request");
+    assert_eq!(
+        legacy_rejected["error"]["message"],
+        "APK inspection input is invalid."
+    );
+
+    let missing = sidecar_response(json!({
+        "id": "inspect-native-missing",
+        "type": "inspectApk",
+        "payload": {
+            "apkPath": "/Users/private/secret-source-name.apk",
+            "connectedDeviceApi": 35
+        }
+    }));
+    assert_eq!(missing["ok"], false);
+    assert_eq!(missing["error"]["code"], "command_failed");
+    assert_eq!(
+        missing["error"]["details"]["reason"],
+        "apk_manifest_inspection_failed"
+    );
+    assert!(!missing.to_string().contains("/Users/private"));
+    assert!(!missing.to_string().contains("secret-source-name"));
+
+    let mixed_contract_rejected = sidecar_response(json!({
+        "id": "inspect-mixed-rejected",
+        "type": "inspectApk",
+        "payload": {
+            "apkPath": "/tmp/example.apk",
+            "facts": { "packageName": "com.example.player" }
+        }
+    }));
+    assert_eq!(mixed_contract_rejected["ok"], false);
+    assert_eq!(mixed_contract_rejected["error"]["code"], "invalid_request");
+    assert!(!mixed_contract_rejected
+        .to_string()
+        .contains("/tmp/example.apk"));
 }
