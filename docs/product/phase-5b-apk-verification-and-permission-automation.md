@@ -198,16 +198,23 @@ Applicability is an authoring-time API range derived without a device. The
 effective minimum is the maximum of the catalog introduction, the runtime
 permission model at API 23, and API 23 for `uses-permission-sdk-23` declarations.
 The effective maximum is the minimum of a catalog maximum and numeric manifest
-`maxSdkVersion`. Empty ranges are non-applicable. Missing, codename, or
-otherwise non-numeric target SDK data fails closed whenever a target-dependent
-rule is required.
+`maxSdkVersion`. These device API bounds are distinct from application
+target-SDK rules. Empty device API ranges are non-applicable. Missing, codename,
+or otherwise non-numeric target SDK data fails closed whenever a
+target-dependent rule is required.
 
 `READ_EXTERNAL_STORAGE` remains restricted and has an effective maximum API of
 32. `WRITE_EXTERNAL_STORAGE` is the reviewed restricted-storage exception: it
 has platform introduction API 4, runtime-grant minimum API 23, no catalog device
 maximum, and is automatable only for numeric application targets through API
-29. A manifest maximum may constrain it further. Granular media permissions
-start at API 33 and require a numeric target SDK of at least 33.
+29. Target SDK 30 or newer is explicitly non-applicable with
+`target_sdk_above_maximum`, `maximumTargetSdk: 29`, and the numeric
+`actualTargetSdk`; this cutoff does not create a device API maximum. Missing or
+non-numeric target SDK is indeterminate with
+`maximum_target_sdk_unavailable`, `maximumTargetSdk: 29`, and the corresponding
+`targetSdkState`. A manifest `maxSdkVersion` may independently constrain the
+candidate's device API maximum. Granular media permissions start at API 33 and
+require a numeric target SDK of at least 33.
 
 `MANAGE_EXTERNAL_STORAGE` remains the only Phase 5B3 app-op entry. It maps
 exactly to app-op `MANAGE_EXTERNAL_STORAGE`, mode `allow`, with root required
@@ -259,7 +266,7 @@ proven non-applicable permission receives one
 
 ```text
 max_sdk_version_exceeded
-permission_replaced
+target_sdk_above_maximum
 target_sdk_below_minimum
 ```
 
@@ -270,7 +277,7 @@ and one of:
 ```text
 invalid_max_sdk_version
 target_sdk_unavailable
-replacement_target_sdk_unavailable
+maximum_target_sdk_unavailable
 ```
 
 Warnings, errors, and result metadata never expose the selected filesystem
@@ -315,9 +322,12 @@ calculated SHA-256 with `checksumStatus: not_compared`, and
 comparison or APK signature verification occurred. Runtime grant candidates,
 app-op candidates, and all other requested permissions are shown separately.
 Runtime grants explain their `pm grant` and root requirements; root-dependent
-app-ops warn that they may be unavailable on unrooted devices. Stable backend
-warnings and structured applicability distinguish unavailable context,
-not-applicable declarations, and indeterminate declarations.
+app-ops warn that they may be unavailable on unrooted devices. Permission
+declarations are the single UI source for classification and applicability
+outcomes, including unknown, manual, non-applicable, and indeterminate
+permissions. The separate warning-card section renders only inspection-wide
+warnings whose `permissionName` is null and is omitted when no such warnings
+remain.
 
 All candidate checkboxes initialize from backend `selected: false` values.
 Selections are reducer-owned review state only: a new inspection or APK/source

@@ -24,11 +24,11 @@ const APPLICABILITY_REASONS: &[&str] = &[
     "declaration_requires_api_23",
     "max_sdk_version_exceeded",
     "permission_not_introduced",
-    "permission_replaced",
+    "target_sdk_above_maximum",
     "target_sdk_below_minimum",
     "invalid_max_sdk_version",
     "target_sdk_unavailable",
-    "replacement_target_sdk_unavailable",
+    "maximum_target_sdk_unavailable",
 ];
 const TARGET_SDK_STATES: &[&str] = &["missing", "non_numeric"];
 
@@ -74,6 +74,8 @@ pub(crate) struct ApkPermissionApplicabilityFacts {
     pub introduction_api: Option<i64>,
     pub minimum_device_api: Option<i64>,
     pub minimum_target_sdk: Option<i64>,
+    pub maximum_target_sdk: Option<i64>,
+    pub actual_target_sdk: Option<i64>,
     pub target_sdk_state: Option<String>,
 }
 
@@ -308,7 +310,7 @@ fn validate_applicability(
                     reason,
                     "invalid_max_sdk_version"
                         | "target_sdk_unavailable"
-                        | "replacement_target_sdk_unavailable"
+                        | "maximum_target_sdk_unavailable"
                 )
             })
     {
@@ -323,6 +325,8 @@ fn validate_applicability(
         value.introduction_api,
         value.minimum_device_api,
         value.minimum_target_sdk,
+        value.maximum_target_sdk,
+        value.actual_target_sdk,
     ];
     if bounds.into_iter().flatten().any(|bound| bound < 0)
         || value
@@ -342,12 +346,41 @@ fn validate_applicability(
     }
     let target_state_required = matches!(
         value.reason.as_deref(),
-        Some("target_sdk_unavailable" | "replacement_target_sdk_unavailable")
+        Some("target_sdk_unavailable" | "maximum_target_sdk_unavailable")
     );
     if target_state_required != value.target_sdk_state.is_some() {
         issues.push(issue(
             "apk_inspection_metadata_target_sdk_state_invalid",
             "APK permission target-SDK state must match its applicability reason.",
+            field,
+        ));
+    }
+    let maximum_target_fields_valid = match value.reason.as_deref() {
+        Some("target_sdk_above_maximum") => {
+            value.status == "not_applicable"
+                && value.maximum_target_sdk.is_some_and(|maximum| maximum > 0)
+                && value
+                    .actual_target_sdk
+                    .zip(value.maximum_target_sdk)
+                    .is_some_and(|(actual, maximum)| actual > maximum)
+                && value.target_sdk_state.is_none()
+                && value.minimum_device_api.is_none()
+                && value.minimum_target_sdk.is_none()
+        }
+        Some("maximum_target_sdk_unavailable") => {
+            value.status == "indeterminate"
+                && value.maximum_target_sdk.is_some_and(|maximum| maximum > 0)
+                && value.actual_target_sdk.is_none()
+                && value.target_sdk_state.is_some()
+                && value.minimum_device_api.is_none()
+                && value.minimum_target_sdk.is_none()
+        }
+        _ => value.maximum_target_sdk.is_none() && value.actual_target_sdk.is_none(),
+    };
+    if !maximum_target_fields_valid {
+        issues.push(issue(
+            "apk_inspection_metadata_maximum_target_sdk_invalid",
+            "APK permission maximum-target-SDK metadata must match its applicability reason and state.",
             field,
         ));
     }
@@ -384,6 +417,8 @@ fn applicability_value(value: &ApkPermissionApplicabilityFacts) -> Value {
         ("introduction_api", option_i64(value.introduction_api)),
         ("minimum_device_api", option_i64(value.minimum_device_api)),
         ("minimum_target_sdk", option_i64(value.minimum_target_sdk)),
+        ("maximum_target_sdk", option_i64(value.maximum_target_sdk)),
+        ("actual_target_sdk", option_i64(value.actual_target_sdk)),
         ("target_sdk_state", option_string(&value.target_sdk_state)),
     ])
 }
@@ -410,5 +445,139 @@ fn issue(code: &'static str, message: &'static str, field: &str) -> ApkMetadataI
         code,
         message,
         field: field.to_string(),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use serde_json::json;
+
+    use super::*;
+
+    fn applicability(status: &str, reason: Option<&str>) -> ApkPermissionApplicabilityFacts {
+        ApkPermissionApplicabilityFacts {
+            status: status.to_string(),
+            reason: reason.map(str::to_string),
+            maximum_sdk_version: None,
+            introduction_api: Some(4),
+            minimum_device_api: None,
+            minimum_target_sdk: None,
+            maximum_target_sdk: None,
+            actual_target_sdk: None,
+            target_sdk_state: None,
+        }
+    }
+
+    fn validation_codes(value: &ApkPermissionApplicabilityFacts) -> Vec<&'static str> {
+        let mut issues = Vec::new();
+        validate_applicability(value, "permission.applicability", &mut issues);
+        issues.into_iter().map(|issue| issue.code).collect()
+    }
+
+    #[test]
+    fn maximum_target_cutoff_is_valid_and_serializes_explicit_fields() {
+        let mut value = applicability("not_applicable", Some("target_sdk_above_maximum"));
+        value.maximum_target_sdk = Some(29);
+        value.actual_target_sdk = Some(35);
+
+        assert!(validation_codes(&value).is_empty());
+        assert_eq!(
+            serde_json::to_value(&value).unwrap(),
+            json!({
+                "status": "not_applicable",
+                "reason": "target_sdk_above_maximum",
+                "maximumSdkVersion": null,
+                "introductionApi": 4,
+                "minimumDeviceApi": null,
+                "minimumTargetSdk": null,
+                "maximumTargetSdk": 29,
+                "actualTargetSdk": 35,
+                "targetSdkState": null
+            })
+        );
+        let metadata = applicability_value(&value);
+        assert_eq!(metadata["maximum_target_sdk"], 29);
+        assert_eq!(metadata["actual_target_sdk"], 35);
+    }
+
+    #[test]
+    fn unavailable_maximum_target_is_valid_and_serializes_state() {
+        let mut value = applicability("indeterminate", Some("maximum_target_sdk_unavailable"));
+        value.maximum_target_sdk = Some(29);
+        value.target_sdk_state = Some("non_numeric".to_string());
+
+        assert!(validation_codes(&value).is_empty());
+        let serialized = serde_json::to_value(&value).unwrap();
+        assert_eq!(serialized["maximumTargetSdk"], 29);
+        assert_eq!(serialized["actualTargetSdk"], Value::Null);
+        assert_eq!(serialized["targetSdkState"], "non_numeric");
+    }
+
+    #[test]
+    fn maximum_target_reasons_require_their_structured_fields() {
+        let proven = applicability("not_applicable", Some("target_sdk_above_maximum"));
+        assert!(validation_codes(&proven)
+            .contains(&"apk_inspection_metadata_maximum_target_sdk_invalid"));
+
+        let unavailable = applicability("indeterminate", Some("maximum_target_sdk_unavailable"));
+        assert!(validation_codes(&unavailable)
+            .contains(&"apk_inspection_metadata_maximum_target_sdk_invalid"));
+    }
+
+    #[test]
+    fn maximum_target_cutoff_requires_actual_above_maximum() {
+        for actual in [28, 29] {
+            let mut value = applicability("not_applicable", Some("target_sdk_above_maximum"));
+            value.maximum_target_sdk = Some(29);
+            value.actual_target_sdk = Some(actual);
+            assert!(validation_codes(&value)
+                .contains(&"apk_inspection_metadata_maximum_target_sdk_invalid"));
+        }
+    }
+
+    #[test]
+    fn maximum_target_fields_are_rejected_for_unrelated_reasons_and_statuses() {
+        let mut unrelated = applicability("not_applicable", Some("max_sdk_version_exceeded"));
+        unrelated.maximum_target_sdk = Some(29);
+        assert!(validation_codes(&unrelated)
+            .contains(&"apk_inspection_metadata_maximum_target_sdk_invalid"));
+
+        let mut applicable = applicability("applicable", None);
+        applicable.maximum_target_sdk = Some(29);
+        applicable.actual_target_sdk = Some(29);
+        assert!(validation_codes(&applicable)
+            .contains(&"apk_inspection_metadata_maximum_target_sdk_invalid"));
+    }
+
+    #[test]
+    fn obsolete_replacement_reasons_and_fields_are_rejected() {
+        for reason in ["permission_replaced", "replacement_target_sdk_unavailable"] {
+            let value = applicability("not_applicable", Some(reason));
+            assert!(
+                validation_codes(&value).contains(&"apk_inspection_metadata_applicability_invalid")
+            );
+        }
+
+        let mut obsolete_shape = applicability("not_applicable", Some("target_sdk_above_maximum"));
+        obsolete_shape.maximum_target_sdk = Some(29);
+        obsolete_shape.actual_target_sdk = Some(35);
+        obsolete_shape.minimum_device_api = Some(30);
+        obsolete_shape.minimum_target_sdk = Some(30);
+        assert!(validation_codes(&obsolete_shape)
+            .contains(&"apk_inspection_metadata_maximum_target_sdk_invalid"));
+
+        let unknown_field = json!({
+            "status": "not_applicable",
+            "reason": "target_sdk_above_maximum",
+            "maximumSdkVersion": null,
+            "introductionApi": 4,
+            "minimumDeviceApi": null,
+            "minimumTargetSdk": null,
+            "maximumTargetSdk": 29,
+            "actualTargetSdk": 35,
+            "targetSdkState": null,
+            "replacementTargetSdk": 30
+        });
+        assert!(serde_json::from_value::<ApkPermissionApplicabilityFacts>(unknown_field).is_err());
     }
 }

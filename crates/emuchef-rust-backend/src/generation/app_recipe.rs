@@ -1092,6 +1092,8 @@ mod tests {
                 introduction_api: None,
                 minimum_device_api: None,
                 minimum_target_sdk: None,
+                maximum_target_sdk: None,
+                actual_target_sdk: None,
                 target_sdk_state: None,
             }),
         }
@@ -1454,6 +1456,8 @@ mod tests {
                 introduction_api: None,
                 minimum_device_api: None,
                 minimum_target_sdk: Some(-1),
+                maximum_target_sdk: None,
+                actual_target_sdk: None,
                 target_sdk_state: Some("future_state".to_string()),
             }),
         }];

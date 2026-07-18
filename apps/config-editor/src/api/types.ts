@@ -530,11 +530,11 @@ export type ApkPermissionApplicabilityStatus =
 
 export type ApkPermissionApplicabilityReason =
   | "max_sdk_version_exceeded"
-  | "permission_replaced"
+  | "target_sdk_above_maximum"
   | "target_sdk_below_minimum"
   | "invalid_max_sdk_version"
   | "target_sdk_unavailable"
-  | "replacement_target_sdk_unavailable";
+  | "maximum_target_sdk_unavailable";
 
 export interface ApkPermissionApplicabilityDto {
   status: ApkPermissionApplicabilityStatus;
@@ -543,6 +543,8 @@ export interface ApkPermissionApplicabilityDto {
   introductionApi: number | null;
   minimumDeviceApi: number | null;
   minimumTargetSdk: number | null;
+  maximumTargetSdk: number | null;
+  actualTargetSdk: number | null;
   targetSdkState: "missing" | "non_numeric" | null;
 }
 

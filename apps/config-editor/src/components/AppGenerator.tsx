@@ -17,7 +17,6 @@ import {
 } from "../api/editorApi";
 import type {
   ApkInspectionResult,
-  ApkPermissionApplicabilityDto,
   ApkPermissionClassification,
   ApkPermissionReviewDto,
   AppDefinitionV1Dto,
@@ -34,10 +33,13 @@ import {
   diagnosticDisplayTitle,
   eligibleApkAssets,
   formToRequest,
+  globalInspectionWarnings,
   initialAppGeneratorState,
   matchingAssetNames,
   otherRequestedPermissions,
   parseTrustedSha256,
+  permissionApplicabilityLabel,
+  permissionApplicabilityReasonLabel,
   permissionAutomationEligible,
   permissionSelectionForInspection,
   reduceAppGenerator,
@@ -676,15 +678,16 @@ function InspectionReview({ inspection, disabled, automationAvailable, onRuntime
 }
 
 function PermissionWarnings({ inspection }: { inspection: ApkInspectionResult }) {
-  if (inspection.warnings.length === 0) return null;
+  const warnings = globalInspectionWarnings(inspection);
+  if (warnings.length === 0) return null;
   return (
     <section className="mt-3">
       <h3 className="text-sm font-semibold text-amber-800">Inspection context and warnings</h3>
       <div className="mt-2 space-y-2">
-        {inspection.warnings.map((warning, index) => (
+        {warnings.map((warning, index) => (
           <div className="rounded border border-amber-300 bg-amber-50 p-2 text-sm" key={`${warning.code}-${warning.permissionName ?? "global"}-${index}`}>
             {warning.permissionName ? <code className="font-semibold">{warning.permissionName}</code> : null}
-            <p className={warning.permissionName ? "mt-1" : ""}>{warning.message}{warning.applicabilityReason ? ` (${applicabilityReasonLabel(warning.applicabilityReason)})` : ""}</p>
+            <p className={warning.permissionName ? "mt-1" : ""}>{warning.message}{warning.applicabilityReason ? ` (${permissionApplicabilityReasonLabel(warning.applicabilityReason)})` : ""}</p>
           </div>
         ))}
       </div>
@@ -703,7 +706,7 @@ function PermissionDeclaration({ permission }: { permission: ApkPermissionReview
     <div className={`rounded border p-3 text-sm ${tone}`}>
       <code className="font-semibold">{permission.name}</code>
       <p className="mt-1 text-xs text-slate-600">Declaration: {declarationKindLabel(permission.declarationKind)}{permission.maxSdkVersion ? `; maximum SDK ${permission.maxSdkVersion}` : ""}.</p>
-      <p className="mt-1 text-xs text-slate-600">Classification: {classificationLabel(permission.classification)}. Applicability: {applicabilityLabel(applicability)}.</p>
+      <p className="mt-1 text-xs text-slate-600">Classification: {classificationLabel(permission.classification)}. Applicability: {permissionApplicabilityLabel(applicability)}.</p>
     </div>
   );
 }
@@ -724,37 +727,6 @@ function classificationLabel(classification: ApkPermissionClassification | null)
     unknown: "unknown",
   };
   return labels[classification];
-}
-
-function applicabilityLabel(applicability: ApkPermissionApplicabilityDto | null): string {
-  if (applicability === null) return "applicability unavailable";
-  const details = applicabilityDetails(applicability);
-  if (applicability.status === "applicable") return details ? `applicable (${details})` : "applicable";
-  const reason = applicability.reason ? ` — ${applicabilityReasonLabel(applicability.reason)}` : "";
-  const suffix = details ? `; ${details}` : "";
-  return applicability.status === "not_applicable" ? `not applicable${reason}${suffix}` : `indeterminate${reason}${suffix}`;
-}
-
-function applicabilityDetails(applicability: ApkPermissionApplicabilityDto): string {
-  const details: string[] = [];
-  if (applicability.maximumSdkVersion !== null) details.push(`maximum SDK ${applicability.maximumSdkVersion}`);
-  if (applicability.introductionApi !== null) details.push(`introduced in API ${applicability.introductionApi}`);
-  if (applicability.minimumDeviceApi !== null) details.push(`minimum device API ${applicability.minimumDeviceApi}`);
-  if (applicability.minimumTargetSdk !== null) details.push(`minimum target SDK ${applicability.minimumTargetSdk}`);
-  if (applicability.targetSdkState !== null) details.push(`target SDK ${applicability.targetSdkState === "missing" ? "missing" : "non-numeric"}`);
-  return details.join(", ");
-}
-
-function applicabilityReasonLabel(reason: NonNullable<ApkPermissionApplicabilityDto["reason"]>): string {
-  const labels: Record<NonNullable<ApkPermissionApplicabilityDto["reason"]>, string> = {
-    max_sdk_version_exceeded: "the effective maximum is below the required minimum",
-    permission_replaced: "the permission is ineffective for this target SDK",
-    target_sdk_below_minimum: "application target SDK is below the required minimum",
-    invalid_max_sdk_version: "maximum SDK could not be interpreted",
-    target_sdk_unavailable: "target SDK context is unavailable",
-    replacement_target_sdk_unavailable: "replacement target SDK context is unavailable",
-  };
-  return labels[reason];
 }
 
 function androidApiRange(minimum: number, maximum: number | null): string {

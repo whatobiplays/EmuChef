@@ -144,6 +144,15 @@ metadata. Manifest declaration kind, numeric `maxSdkVersion`, and inspected
 target SDK refine candidate bounds. Missing or non-numeric target SDK data
 fails closed only for rules that require it.
 
+Device API bounds and application target-SDK cutoffs remain separate.
+`WRITE_EXTERNAL_STORAGE` is applicable and eligible for a runtime candidate
+only when the application target SDK is numeric and at most 29. Its candidate
+starts at Android API 23 and has no catalog device maximum, although a numeric
+manifest `maxSdkVersion` may cap it. Target SDK 30 or newer is non-applicable
+because it exceeds the reviewed maximum target SDK; `minSdkVersion` does not
+alter that decision. Missing or non-numeric target SDK remains indeterminate
+and fails closed.
+
 Only explicit selections matched back to the trusted native inspection may
 produce automation, and only package-enforced pinned or latest-compatible
 recipes are eligible. Runtime actions use `pm grant`; the initial supported
@@ -171,6 +180,13 @@ signature/privileged, unknown, role-based,
 accessibility, VPN, notification-listener, device-admin, Settings-mediated, and
 other manual special-access cases remain warning-only, unsupported, or manual
 as applicable.
+
+The permission declaration list is the authoritative presentation for
+non-candidate classification and applicability outcomes. Permission-specific
+backend warnings are not repeated as warning cards. The warning-card section
+contains only inspection-wide warnings with no permission name and is omitted
+when none remain, while unknown and custom permission declarations remain
+visible once under Other requested permissions.
 
 ### Generated app definition
 

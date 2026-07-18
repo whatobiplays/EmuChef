@@ -12,10 +12,12 @@ import {
   diagnosticDisplayTitle,
   draftToForm,
   formToRequest,
+  globalInspectionWarnings,
   initialAppGeneratorState,
   matchingAssetNames,
   otherRequestedPermissions,
   parseTrustedSha256,
+  permissionApplicabilityLabel,
   permissionAutomationEligible,
   permissionSelectionForInspection,
   readableNameFromPackage,
@@ -32,6 +34,8 @@ function inspection(): ApkInspectionResult {
     introductionApi: null,
     minimumDeviceApi: null,
     minimumTargetSdk: null,
+    maximumTargetSdk: null,
+    actualTargetSdk: null,
     targetSdkState: null,
   };
   return {
@@ -61,10 +65,26 @@ function inspection(): ApkInspectionResult {
         classification: "unknown",
         applicability: { ...applicable, status: "indeterminate", reason: "invalid_max_sdk_version" },
       },
+      {
+        name: "android.permission.WRITE_EXTERNAL_STORAGE",
+        declarationKind: "uses_permission",
+        maxSdkVersion: null,
+        classification: "runtime_grantable",
+        applicability: {
+          ...applicable,
+          status: "not_applicable",
+          reason: "target_sdk_above_maximum",
+          maximumTargetSdk: 29,
+          actualTargetSdk: 35,
+        },
+      },
     ],
     runtimeGrantCandidates: [{ permissionName: "android.permission.CAMERA", requiresRoot: false, androidApiMin: 23, androidApiMax: null, selected: false }],
     appOpCandidates: [{ permissionName: "android.permission.MANAGE_EXTERNAL_STORAGE", operationName: "MANAGE_EXTERNAL_STORAGE", mode: "allow", requiresRoot: true, androidApiMin: 30, androidApiMax: null, selected: false }],
-    warnings: [{ code: "apk_permission_unknown", message: "Review this permission.", permissionName: "android.permission.UNKNOWN", applicabilityReason: null }],
+    warnings: [
+      { code: "apk_permission_unknown", message: "Review this permission.", permissionName: "android.permission.UNKNOWN", applicabilityReason: null },
+      { code: "apk_permission_not_applicable", message: "This permission is not applicable.", permissionName: "android.permission.WRITE_EXTERNAL_STORAGE", applicabilityReason: "target_sdk_above_maximum" },
+    ],
     calculatedSha256: "ABCD",
     checksumStatus: "not_compared",
     signatureVerification: "not_performed",
@@ -285,7 +305,46 @@ test("trusted checksum resets for strategy, APK, and inspection transitions", ()
 test("permission review keeps candidates separate from all other declarations", () => {
   assert.deepEqual(
     otherRequestedPermissions(inspection()).map((permission) => permission.name),
-    ["android.permission.UNKNOWN", "android.permission.OLD", "android.permission.MAYBE"],
+    [
+      "android.permission.UNKNOWN",
+      "android.permission.OLD",
+      "android.permission.MAYBE",
+      "android.permission.WRITE_EXTERNAL_STORAGE",
+    ],
+  );
+});
+
+test("permission-only warnings omit the inspection warning section", () => {
+  assert.deepEqual(globalInspectionWarnings(inspection()), []);
+});
+
+test("mixed inspection warnings retain only global warnings", () => {
+  const reviewed = inspection();
+  reviewed.warnings.push({
+    code: "apk_permission_applicability_indeterminate",
+    message: "Target SDK context was unavailable.",
+    permissionName: null,
+    applicabilityReason: null,
+  });
+  assert.deepEqual(globalInspectionWarnings(reviewed), [reviewed.warnings[2]]);
+});
+
+test("unknown and maximum-target permissions remain visible exactly once", () => {
+  const names = otherRequestedPermissions(inspection()).map((permission) => permission.name);
+  assert.equal(names.filter((name) => name === "android.permission.UNKNOWN").length, 1);
+  assert.equal(
+    names.filter((name) => name === "android.permission.WRITE_EXTERNAL_STORAGE").length,
+    1,
+  );
+});
+
+test("maximum-target applicability uses exact structured display text", () => {
+  const write = inspection().permissions.find(
+    (permission) => permission.name === "android.permission.WRITE_EXTERNAL_STORAGE",
+  );
+  assert.equal(
+    permissionApplicabilityLabel(write?.applicability ?? null),
+    "not applicable — app target SDK 35 exceeds maximum supported target SDK 29",
   );
 });
 

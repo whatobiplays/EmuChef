@@ -1,6 +1,8 @@
 import type {
   ApkInspectionResult,
+  ApkPermissionApplicabilityDto,
   ApkPermissionReviewDto,
+  ApkPermissionWarningDto,
   AppDefinitionV1Dto,
   AppMappingEditsDto,
   AppRecipeCollisionResult,
@@ -52,6 +54,84 @@ export function otherRequestedPermissions(inspection: ApkInspectionResult): ApkP
     return permission.classification !== "runtime_grantable"
       && permission.classification !== "app_op_grantable";
   });
+}
+
+/** Return only inspection-wide warnings; declaration-specific outcomes render with permissions. */
+export function globalInspectionWarnings(
+  inspection: ApkInspectionResult,
+): ApkPermissionWarningDto[] {
+  return inspection.warnings.filter((warning) => warning.permissionName === null);
+}
+
+/** Format structured permission applicability without inferring from permission names. */
+export function permissionApplicabilityLabel(
+  applicability: ApkPermissionApplicabilityDto | null,
+): string {
+  if (applicability === null) return "applicability unavailable";
+  if (
+    applicability.status === "not_applicable"
+    && applicability.reason === "target_sdk_above_maximum"
+    && applicability.maximumTargetSdk !== null
+    && applicability.actualTargetSdk !== null
+  ) {
+    return `not applicable — app target SDK ${applicability.actualTargetSdk} exceeds maximum supported target SDK ${applicability.maximumTargetSdk}`;
+  }
+  const details = permissionApplicabilityDetails(applicability);
+  if (applicability.status === "applicable") {
+    return details ? `applicable (${details})` : "applicable";
+  }
+  const reason = applicability.reason
+    ? ` — ${permissionApplicabilityReasonLabel(applicability.reason)}`
+    : "";
+  const suffix = details ? `; ${details}` : "";
+  return applicability.status === "not_applicable"
+    ? `not applicable${reason}${suffix}`
+    : `indeterminate${reason}${suffix}`;
+}
+
+/** Format one stable applicability reason for permission and global-warning text. */
+export function permissionApplicabilityReasonLabel(
+  reason: NonNullable<ApkPermissionApplicabilityDto["reason"]>,
+): string {
+  const labels: Record<NonNullable<ApkPermissionApplicabilityDto["reason"]>, string> = {
+    max_sdk_version_exceeded: "the effective maximum is below the required minimum",
+    target_sdk_above_maximum: "application target SDK exceeds the supported maximum",
+    target_sdk_below_minimum: "application target SDK is below the required minimum",
+    invalid_max_sdk_version: "maximum SDK could not be interpreted",
+    target_sdk_unavailable: "target SDK context is unavailable",
+    maximum_target_sdk_unavailable: "maximum target SDK context is unavailable",
+  };
+  return labels[reason];
+}
+
+function permissionApplicabilityDetails(
+  applicability: ApkPermissionApplicabilityDto,
+): string {
+  const details: string[] = [];
+  if (applicability.maximumSdkVersion !== null) {
+    details.push(`maximum SDK ${applicability.maximumSdkVersion}`);
+  }
+  if (applicability.introductionApi !== null) {
+    details.push(`introduced in API ${applicability.introductionApi}`);
+  }
+  if (applicability.minimumDeviceApi !== null) {
+    details.push(`minimum device API ${applicability.minimumDeviceApi}`);
+  }
+  if (applicability.minimumTargetSdk !== null) {
+    details.push(`minimum target SDK ${applicability.minimumTargetSdk}`);
+  }
+  if (applicability.maximumTargetSdk !== null) {
+    details.push(`maximum target SDK ${applicability.maximumTargetSdk}`);
+  }
+  if (applicability.actualTargetSdk !== null) {
+    details.push(`app target SDK ${applicability.actualTargetSdk}`);
+  }
+  if (applicability.targetSdkState !== null) {
+    details.push(
+      `target SDK ${applicability.targetSdkState === "missing" ? "missing" : "non-numeric"}`,
+    );
+  }
+  return details.join(", ");
 }
 
 /** Return whether the inspected APK is the package-enforced artifact used at runtime. */

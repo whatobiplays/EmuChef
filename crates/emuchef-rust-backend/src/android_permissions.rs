@@ -35,10 +35,10 @@ pub(crate) enum AndroidPermissionNonApplicability {
     MaxSdkVersionExceeded {
         maximum: u32,
     },
-    /// A target-SDK rule makes this permission ineffective or replaced.
-    PermissionReplaced {
-        minimum_device_api: u32,
-        minimum_target_sdk: u32,
+    /// The application targets a newer SDK than this permission supports.
+    TargetSdkAboveMaximum {
+        maximum_target_sdk: u32,
+        actual_target_sdk: u32,
     },
     TargetSdkBelowMinimum {
         minimum_target_sdk: u32,
@@ -53,9 +53,8 @@ pub(crate) enum AndroidPermissionIndeterminacy {
         minimum_target_sdk: u32,
         state: TargetSdkState,
     },
-    ReplacementTargetSdkUnavailable {
-        minimum_device_api: u32,
-        minimum_target_sdk: u32,
+    MaximumTargetSdkUnavailable {
+        maximum_target_sdk: u32,
         state: TargetSdkState,
     },
 }
@@ -453,9 +452,9 @@ fn declaration_applicability(
             Ok(target_sdk) if target_sdk > maximum_target_sdk => {
                 return (
                     AndroidPermissionApplicability::NotApplicable(
-                        AndroidPermissionNonApplicability::PermissionReplaced {
-                            minimum_device_api: maximum_target_sdk.saturating_add(1),
-                            minimum_target_sdk: maximum_target_sdk.saturating_add(1),
+                        AndroidPermissionNonApplicability::TargetSdkAboveMaximum {
+                            maximum_target_sdk,
+                            actual_target_sdk: target_sdk,
                         },
                     ),
                     None,
@@ -465,9 +464,8 @@ fn declaration_applicability(
             Err(state) => {
                 return (
                     AndroidPermissionApplicability::Indeterminate(
-                        AndroidPermissionIndeterminacy::ReplacementTargetSdkUnavailable {
-                            minimum_device_api: maximum_target_sdk.saturating_add(1),
-                            minimum_target_sdk: maximum_target_sdk.saturating_add(1),
+                        AndroidPermissionIndeterminacy::MaximumTargetSdkUnavailable {
+                            maximum_target_sdk,
                             state,
                         },
                     ),
@@ -881,6 +879,14 @@ mod tests {
     fn android_permissions_write_external_storage_uses_target_not_device_maximum() {
         let target_29 = classify("android.permission.WRITE_EXTERNAL_STORAGE", Some("29"));
         assert_eq!(
+            target_29.classification,
+            AndroidPermissionClassification::RuntimeGrantable
+        );
+        assert_eq!(
+            target_29.applicability,
+            AndroidPermissionApplicability::Applicable
+        );
+        assert_eq!(
             target_29.api_bounds,
             Some(AndroidApiBounds {
                 minimum: 23,
@@ -893,13 +899,27 @@ mod tests {
         assert!(matches!(
             target_30.applicability,
             AndroidPermissionApplicability::NotApplicable(
-                AndroidPermissionNonApplicability::PermissionReplaced {
-                    minimum_device_api: 30,
-                    minimum_target_sdk: 30,
+                AndroidPermissionNonApplicability::TargetSdkAboveMaximum {
+                    maximum_target_sdk: 29,
+                    actual_target_sdk: 30,
                 }
             )
         ));
+        assert_eq!(target_30.api_bounds, None);
         assert_eq!(target_30.automation, None);
+
+        let target_35 = classify("android.permission.WRITE_EXTERNAL_STORAGE", Some("35"));
+        assert_eq!(
+            target_35.applicability,
+            AndroidPermissionApplicability::NotApplicable(
+                AndroidPermissionNonApplicability::TargetSdkAboveMaximum {
+                    maximum_target_sdk: 29,
+                    actual_target_sdk: 35,
+                }
+            )
+        );
+        assert_eq!(target_35.api_bounds, None);
+        assert_eq!(target_35.automation, None);
 
         for (target_sdk, state) in [
             (None, TargetSdkState::Missing),
@@ -909,13 +929,13 @@ mod tests {
             assert_eq!(
                 result.applicability,
                 AndroidPermissionApplicability::Indeterminate(
-                    AndroidPermissionIndeterminacy::ReplacementTargetSdkUnavailable {
-                        minimum_device_api: 30,
-                        minimum_target_sdk: 30,
+                    AndroidPermissionIndeterminacy::MaximumTargetSdkUnavailable {
+                        maximum_target_sdk: 29,
                         state,
                     }
                 )
             );
+            assert_eq!(result.api_bounds, None);
             assert_eq!(result.automation, None);
         }
     }

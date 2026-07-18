@@ -115,11 +115,11 @@ pub(crate) enum ApkPermissionApplicabilityStatusDto {
 #[serde(rename_all = "snake_case")]
 pub(crate) enum ApkPermissionApplicabilityReasonDto {
     MaxSdkVersionExceeded,
-    PermissionReplaced,
+    TargetSdkAboveMaximum,
     TargetSdkBelowMinimum,
     InvalidMaxSdkVersion,
     TargetSdkUnavailable,
-    ReplacementTargetSdkUnavailable,
+    MaximumTargetSdkUnavailable,
 }
 
 /// Why required target-SDK context could not be interpreted.
@@ -140,6 +140,8 @@ pub(crate) struct ApkPermissionApplicabilityDto {
     introduction_api: Option<u32>,
     minimum_device_api: Option<u32>,
     minimum_target_sdk: Option<u32>,
+    maximum_target_sdk: Option<u32>,
+    actual_target_sdk: Option<u32>,
     target_sdk_state: Option<ApkTargetSdkStateDto>,
 }
 
@@ -397,6 +399,8 @@ fn applicability(permission: &ClassifiedAndroidPermission) -> ApkPermissionAppli
         introduction_api: permission.catalog_introduction_api,
         minimum_device_api: permission.api_bounds.map(|bounds| bounds.minimum),
         minimum_target_sdk: None,
+        maximum_target_sdk: None,
+        actual_target_sdk: None,
         target_sdk_state: None,
     };
     match permission.applicability {
@@ -423,13 +427,13 @@ fn apply_non_applicable_reason(
             result.reason = Some(ApkPermissionApplicabilityReasonDto::MaxSdkVersionExceeded);
             result.maximum_sdk_version = Some(maximum);
         }
-        AndroidPermissionNonApplicability::PermissionReplaced {
-            minimum_device_api,
-            minimum_target_sdk,
+        AndroidPermissionNonApplicability::TargetSdkAboveMaximum {
+            maximum_target_sdk,
+            actual_target_sdk,
         } => {
-            result.reason = Some(ApkPermissionApplicabilityReasonDto::PermissionReplaced);
-            result.minimum_device_api = Some(minimum_device_api);
-            result.minimum_target_sdk = Some(minimum_target_sdk);
+            result.reason = Some(ApkPermissionApplicabilityReasonDto::TargetSdkAboveMaximum);
+            result.maximum_target_sdk = Some(maximum_target_sdk);
+            result.actual_target_sdk = Some(actual_target_sdk);
         }
         AndroidPermissionNonApplicability::TargetSdkBelowMinimum { minimum_target_sdk } => {
             result.reason = Some(ApkPermissionApplicabilityReasonDto::TargetSdkBelowMinimum);
@@ -454,15 +458,12 @@ fn apply_indeterminate_reason(
             result.minimum_target_sdk = Some(minimum_target_sdk);
             result.target_sdk_state = Some(target_sdk_state(state));
         }
-        AndroidPermissionIndeterminacy::ReplacementTargetSdkUnavailable {
-            minimum_device_api,
-            minimum_target_sdk,
+        AndroidPermissionIndeterminacy::MaximumTargetSdkUnavailable {
+            maximum_target_sdk,
             state,
         } => {
-            result.reason =
-                Some(ApkPermissionApplicabilityReasonDto::ReplacementTargetSdkUnavailable);
-            result.minimum_device_api = Some(minimum_device_api);
-            result.minimum_target_sdk = Some(minimum_target_sdk);
+            result.reason = Some(ApkPermissionApplicabilityReasonDto::MaximumTargetSdkUnavailable);
+            result.maximum_target_sdk = Some(maximum_target_sdk);
             result.target_sdk_state = Some(target_sdk_state(state));
         }
     }
@@ -534,8 +535,8 @@ fn non_applicable_reason(
         AndroidPermissionNonApplicability::MaxSdkVersionExceeded { .. } => {
             ApkPermissionApplicabilityReasonDto::MaxSdkVersionExceeded
         }
-        AndroidPermissionNonApplicability::PermissionReplaced { .. } => {
-            ApkPermissionApplicabilityReasonDto::PermissionReplaced
+        AndroidPermissionNonApplicability::TargetSdkAboveMaximum { .. } => {
+            ApkPermissionApplicabilityReasonDto::TargetSdkAboveMaximum
         }
         AndroidPermissionNonApplicability::TargetSdkBelowMinimum { .. } => {
             ApkPermissionApplicabilityReasonDto::TargetSdkBelowMinimum
@@ -553,8 +554,8 @@ fn indeterminate_reason(
         AndroidPermissionIndeterminacy::TargetSdkUnavailable { .. } => {
             ApkPermissionApplicabilityReasonDto::TargetSdkUnavailable
         }
-        AndroidPermissionIndeterminacy::ReplacementTargetSdkUnavailable { .. } => {
-            ApkPermissionApplicabilityReasonDto::ReplacementTargetSdkUnavailable
+        AndroidPermissionIndeterminacy::MaximumTargetSdkUnavailable { .. } => {
+            ApkPermissionApplicabilityReasonDto::MaximumTargetSdkUnavailable
         }
     }
 }
@@ -666,6 +667,19 @@ mod tests {
             .runtime_grant_candidates
             .iter()
             .all(|candidate| !candidate.requires_root && !candidate.selected));
+        let write = result
+            .permissions
+            .iter()
+            .find(|permission| permission.name == "android.permission.WRITE_EXTERNAL_STORAGE")
+            .expect("legacy write permission should remain reviewable");
+        assert_eq!(
+            write.classification,
+            Some(ApkPermissionClassificationDto::RuntimeGrantable)
+        );
+        assert_eq!(
+            write.applicability.as_ref().unwrap().status,
+            ApkPermissionApplicabilityStatusDto::Applicable
+        );
         assert_eq!(result.app_op_candidates.len(), 1);
         assert_eq!(
             result.app_op_candidates[0].permission_name,
@@ -724,34 +738,59 @@ mod tests {
     }
 
     #[test]
-    fn apk_authoring_inspection_target_30_omits_legacy_write_candidate() {
-        let result = build_result(
-            facts(
-                Some("30"),
+    fn apk_authoring_inspection_target_30_and_35_use_explicit_maximum_target_reason() {
+        for actual_target_sdk in [30, 35] {
+            let mut manifest = facts(
+                Some(&actual_target_sdk.to_string()),
                 vec![declaration(
                     "android.permission.WRITE_EXTERNAL_STORAGE",
                     ApkPermissionDeclarationKind::UsesPermission,
                     None,
                 )],
-            ),
-            "C".repeat(64),
-        );
+            );
+            if actual_target_sdk == 35 {
+                manifest.min_sdk_version = Some("29".to_string());
+            }
+            let result = build_result(manifest, "C".repeat(64));
 
-        assert!(result.runtime_grant_candidates.is_empty());
-        assert_eq!(
-            result.permissions[0].applicability.as_ref().unwrap().status,
-            ApkPermissionApplicabilityStatusDto::NotApplicable
-        );
-        assert_eq!(
-            result.permissions[0].applicability.as_ref().unwrap().reason,
-            Some(ApkPermissionApplicabilityReasonDto::PermissionReplaced)
-        );
-        assert_eq!(result.warnings[0].code, "apk_permission_not_applicable");
+            assert!(result.runtime_grant_candidates.is_empty());
+            assert_eq!(
+                result.permissions[0].classification,
+                Some(ApkPermissionClassificationDto::RuntimeGrantable)
+            );
+            let applicability = result.permissions[0].applicability.as_ref().unwrap();
+            assert_eq!(
+                serde_json::to_value(applicability).unwrap(),
+                json!({
+                    "status": "not_applicable",
+                    "reason": "target_sdk_above_maximum",
+                    "maximumSdkVersion": null,
+                    "introductionApi": 4,
+                    "minimumDeviceApi": null,
+                    "minimumTargetSdk": null,
+                    "maximumTargetSdk": 29,
+                    "actualTargetSdk": actual_target_sdk,
+                    "targetSdkState": null
+                })
+            );
+            assert_eq!(result.warnings[0].code, "apk_permission_not_applicable");
+            assert_eq!(
+                result.warnings[0].applicability_reason,
+                Some(ApkPermissionApplicabilityReasonDto::TargetSdkAboveMaximum)
+            );
+            let serialized = serde_json::to_string(&result).unwrap();
+            assert!(!serialized.contains("permission_replaced"));
+            assert!(!serialized.contains("replacement_target_sdk_unavailable"));
+            assert!(!serialized.contains("apiBounds"));
+        }
     }
 
     #[test]
     fn apk_authoring_inspection_missing_target_fails_closed_for_target_rules() {
-        for target_sdk in [None, Some("R")] {
+        for (target_sdk, expected_state) in [
+            (None, ApkTargetSdkStateDto::Missing),
+            (Some("R"), ApkTargetSdkStateDto::NonNumeric),
+        ] {
             let result = build_result(
                 facts(
                     target_sdk,
@@ -764,13 +803,31 @@ mod tests {
                 "D".repeat(64),
             );
             assert!(result.runtime_grant_candidates.is_empty());
+            let applicability = result.permissions[0].applicability.as_ref().unwrap();
             assert_eq!(
-                result.permissions[0].applicability.as_ref().unwrap().status,
-                ApkPermissionApplicabilityStatusDto::Indeterminate
+                serde_json::to_value(applicability).unwrap(),
+                json!({
+                    "status": "indeterminate",
+                    "reason": "maximum_target_sdk_unavailable",
+                    "maximumSdkVersion": null,
+                    "introductionApi": 4,
+                    "minimumDeviceApi": null,
+                    "minimumTargetSdk": null,
+                    "maximumTargetSdk": 29,
+                    "actualTargetSdk": null,
+                    "targetSdkState": match expected_state {
+                        ApkTargetSdkStateDto::Missing => "missing",
+                        ApkTargetSdkStateDto::NonNumeric => "non_numeric",
+                    }
+                })
             );
             assert_eq!(
                 result.warnings[0].code,
                 "apk_permission_applicability_indeterminate"
+            );
+            assert_eq!(
+                result.warnings[0].applicability_reason,
+                Some(ApkPermissionApplicabilityReasonDto::MaximumTargetSdkUnavailable)
             );
         }
     }
