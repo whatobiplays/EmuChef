@@ -419,9 +419,8 @@ export async function downloadAppGeneratorRemoteApk(
 export async function inspectAppGeneratorApk(
   sessionHandle: string,
   apkHandle: string,
-  connectedDeviceApi: number | null,
 ): Promise<EditorApiResult<ApkInspectionResult>> {
-  return callApi("inspect_app_generator_apk", { sessionHandle, apkHandle, connectedDeviceApi });
+  return callApi("inspect_app_generator_apk", { sessionHandle, apkHandle });
 }
 
 export async function generateAppRecipeDraft(

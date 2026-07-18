@@ -16,12 +16,6 @@ import type {
 } from "../api/types.js";
 import { parseMetadataObject } from "./deviceProfileGenerator.logic.js";
 
-const MAX_ANDROID_API_INPUT = 4_294_967_295;
-
-export type ConnectedDeviceApiResult =
-  | { ok: true; value: number | null }
-  | { ok: false; message: string };
-
 export type TrustedSha256Result =
   | { ok: true; value: string | null }
   | { ok: false; message: string };
@@ -49,23 +43,6 @@ export function parseTrustedSha256(input: string): TrustedSha256Result {
     };
   }
   return { ok: true, value: trimmed.toUpperCase() };
-}
-
-/** Parse optional Android API context without relying on Tauri deserialization errors. */
-export function parseConnectedDeviceApi(input: string): ConnectedDeviceApiResult {
-  const trimmed = input.trim();
-  if (trimmed.length === 0) return { ok: true, value: null };
-  if (!/^[0-9]+$/u.test(trimmed)) {
-    return { ok: false, message: "Connected-device API must be a positive integer." };
-  }
-  const value = Number(trimmed);
-  if (!Number.isSafeInteger(value) || value < 1 || value > MAX_ANDROID_API_INPUT) {
-    return {
-      ok: false,
-      message: `Connected-device API must be between 1 and ${MAX_ANDROID_API_INPUT}.`,
-    };
-  }
-  return { ok: true, value };
 }
 
 /** Return declarations not represented by an applicable automation candidate section. */
@@ -151,7 +128,6 @@ export interface AppGeneratorState {
   sessionHandle: string | null;
   apkHandle: string | null;
   apkLabel: string | null;
-  connectedDeviceApiInput: string;
   sourceMode: AppGeneratorSourceMode;
   sourceUrl: string;
   includePrereleases: boolean;
@@ -188,7 +164,6 @@ export type AppGeneratorAction =
   | { type: "asset-pattern"; value: string }
   | { type: "trusted-sha256"; value: string }
   | { type: "install-strategy"; strategy: AppGeneratorInstallStrategy }
-  | { type: "connected-device-api"; value: string }
   | { type: "downloading" }
   | { type: "remote-downloaded"; apkHandle: string; label: string; source: RemoteSourceDescriptorDto }
   | { type: "inspecting" }
@@ -208,7 +183,6 @@ export const initialAppGeneratorState: AppGeneratorState = {
   sessionHandle: null,
   apkHandle: null,
   apkLabel: null,
-  connectedDeviceApiInput: "",
   sourceMode: "local_apk",
   sourceUrl: "",
   includePrereleases: false,
@@ -354,16 +328,6 @@ export function reduceAppGenerator(
         installStrategy: action.strategy,
         trustedSha256: "",
         inspection: clearPermissionSelections(state.inspection),
-        draft: null,
-        form: null,
-        collisions: null,
-        error: null,
-      };
-    case "connected-device-api":
-      return {
-        ...state,
-        connectedDeviceApiInput: action.value,
-        inspection: null,
         draft: null,
         form: null,
         collisions: null,

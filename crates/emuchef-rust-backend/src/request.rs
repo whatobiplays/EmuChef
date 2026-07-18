@@ -412,13 +412,11 @@ fn handle_inspect_apk(object: &Map<String, Value>) -> Result<Value, ApiError> {
             json!({ "field": "payload" }),
         ));
     }
-    let result = crate::apk_authoring_inspection::inspect_apk_for_authoring(
-        Path::new(&request.apk_path),
-        request.connected_device_api,
-    )
-    .map_err(|error| {
-        ApiError::command_failed(error.message(), json!({ "reason": error.code() }))
-    })?;
+    let result =
+        crate::apk_authoring_inspection::inspect_apk_for_authoring(Path::new(&request.apk_path))
+            .map_err(|error| {
+                ApiError::command_failed(error.message(), json!({ "reason": error.code() }))
+            })?;
     let result = serde_json::to_value(result).map_err(|_| {
         ApiError::command_failed(
             "APK inspection result could not be represented.",

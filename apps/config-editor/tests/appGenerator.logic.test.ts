@@ -15,7 +15,6 @@ import {
   initialAppGeneratorState,
   matchingAssetNames,
   otherRequestedPermissions,
-  parseConnectedDeviceApi,
   parseTrustedSha256,
   permissionAutomationEligible,
   permissionSelectionForInspection,
@@ -63,8 +62,8 @@ function inspection(): ApkInspectionResult {
         applicability: { ...applicable, status: "indeterminate", reason: "invalid_max_sdk_version" },
       },
     ],
-    runtimeGrantCandidates: [{ permissionName: "android.permission.CAMERA", requiresRoot: false, selected: false }],
-    appOpCandidates: [{ permissionName: "android.permission.MANAGE_EXTERNAL_STORAGE", operationName: "MANAGE_EXTERNAL_STORAGE", mode: "allow", requiresRoot: true, selected: false }],
+    runtimeGrantCandidates: [{ permissionName: "android.permission.CAMERA", requiresRoot: false, androidApiMin: 23, androidApiMax: null, selected: false }],
+    appOpCandidates: [{ permissionName: "android.permission.MANAGE_EXTERNAL_STORAGE", operationName: "MANAGE_EXTERNAL_STORAGE", mode: "allow", requiresRoot: true, androidApiMin: 30, androidApiMax: null, selected: false }],
     warnings: [{ code: "apk_permission_unknown", message: "Review this permission.", permissionName: "android.permission.UNKNOWN", applicabilityReason: null }],
     calculatedSha256: "ABCD",
     checksumStatus: "not_compared",
@@ -205,15 +204,6 @@ test("started session restores only the trusted root handle", () => {
   assert.equal(state.rootHandle, "root");
 });
 
-test("connected-device API validation accepts blank and positive u32 values", () => {
-  assert.deepEqual(parseConnectedDeviceApi(""), { ok: true, value: null });
-  assert.deepEqual(parseConnectedDeviceApi(" 35 "), { ok: true, value: 35 });
-  assert.deepEqual(parseConnectedDeviceApi("4294967295"), { ok: true, value: 4_294_967_295 });
-  for (const invalid of ["0", "-1", "1.5", "preview", "4294967296"]) {
-    assert.equal(parseConnectedDeviceApi(invalid).ok, false, invalid);
-  }
-});
-
 test("trusted publisher SHA-256 accepts only plain hexadecimal and normalizes uppercase", () => {
   assert.deepEqual(parseTrustedSha256(" \t\r\n"), { ok: true, value: null });
   assert.deepEqual(
@@ -297,15 +287,6 @@ test("permission review keeps candidates separate from all other declarations", 
     otherRequestedPermissions(inspection()).map((permission) => permission.name),
     ["android.permission.UNKNOWN", "android.permission.OLD", "android.permission.MAYBE"],
   );
-  const withoutContext = inspection();
-  withoutContext.permissions = withoutContext.permissions.map((permission) => ({
-    ...permission,
-    classification: null,
-    applicability: null,
-  }));
-  withoutContext.runtimeGrantCandidates = [];
-  withoutContext.appOpCandidates = [];
-  assert.equal(otherRequestedPermissions(withoutContext).length, withoutContext.permissions.length);
 });
 
 test("candidate selections invalidate reviewed work without clearing editable form state", () => {

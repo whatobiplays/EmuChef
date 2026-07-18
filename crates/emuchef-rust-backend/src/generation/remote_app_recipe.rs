@@ -1221,6 +1221,8 @@ mod tests {
         RuntimePermissionSelection {
             permission_name: name.to_string(),
             requires_root,
+            android_api_min: 23,
+            android_api_max: None,
         }
     }
 
@@ -1230,6 +1232,8 @@ mod tests {
             operation_name: operation.to_string(),
             mode: "allow".to_string(),
             requires_root,
+            android_api_min: 30,
+            android_api_max: None,
         }
     }
 
@@ -1301,12 +1305,13 @@ mod tests {
                     "package_name": "com.example.remote",
                     "name": "android.permission.CAMERA",
                     "required": false,
-                    "when": { "rooted": true }
+                    "when": { "rooted": true, "android_api_min": 23 }
                 },
                 {
                     "package_name": "com.example.remote",
                     "name": "android.permission.RECORD_AUDIO",
-                    "required": false
+                    "required": false,
+                    "when": { "android_api_min": 23 }
                 }
             ])
         );
@@ -1318,13 +1323,14 @@ mod tests {
                     "op": "MANAGE_EXTERNAL_STORAGE",
                     "mode": "allow",
                     "required": false,
-                    "when": { "rooted": true }
+                    "when": { "rooted": true, "android_api_min": 30 }
                 },
                 {
                     "package_name": "com.example.remote",
                     "op": "ZETA_OP",
                     "mode": "allow",
-                    "required": false
+                    "required": false,
+                    "when": { "android_api_min": 30 }
                 }
             ])
         );
@@ -1372,7 +1378,8 @@ mod tests {
                 serde_json::json!([{
                     "package_name": "com.example.remote",
                     "name": "android.permission.CAMERA",
-                    "required": false
+                    "required": false,
+                    "when": { "android_api_min": 23 }
                 }]),
                 serde_json::json!([]),
             ),
@@ -1391,7 +1398,7 @@ mod tests {
                     "op": "MANAGE_EXTERNAL_STORAGE",
                     "mode": "allow",
                     "required": false,
-                    "when": { "rooted": true }
+                    "when": { "rooted": true, "android_api_min": 30 }
                 }]),
             ),
         ] {

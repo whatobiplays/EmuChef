@@ -161,7 +161,9 @@ Classify requested permissions as:
 - `SignatureOrPrivileged`;
 - `Unknown`.
 
-Classification must consider declaration kind, `maxSdkVersion`, app target SDK, connected-device API, permission introduction/replacement API, and explicit app-op mappings.
+Classification considers declaration kind, `maxSdkVersion`, app target SDK,
+permission introduction and replacement APIs, restriction metadata, and
+explicit app-op mappings. It does not accept or infer an authoring device API.
 
 Do not infer protection level or app-op identity from permission-name patterns.
 
@@ -183,32 +185,29 @@ or indeterminate results never carry actionable metadata. No ADB command,
 executor, recipe-generation, protocol, Tauri, or frontend integration exists in
 Phase 5B3.
 
-The intentionally small initial catalog contains `CAMERA`,
-`BODY_SENSORS_BACKGROUND`, `MANAGE_EXTERNAL_STORAGE`, `SYSTEM_ALERT_WINDOW`,
-`INTERNET`, `WRITE_SECURE_SETTINGS`, `READ_EXTERNAL_STORAGE`, and
-`READ_MEDIA_IMAGES`. These entries prove the seven classification categories,
-runtime-permission target-SDK handling, introduction boundaries, compound
-replacement conditions, and the sole initial app-op mapping. Every other exact
-permission name classifies as `Unknown` and has no automation metadata; the
-classifier never infers behavior from a prefix or substring.
+The catalog covers the stable public dangerous-permission surface through the
+integer API contracts for `RANGING` at API 36 and `ACCESS_LOCAL_NETWORK` at API
+37. Hidden, SystemApi-only, preview, feature-flag-only, and extension-only
+permissions remain unknown. Ordinary dangerous permissions carry explicit
+runtime-grant metadata. Hard- and soft-restricted SMS, call-log, background
+location, background sensor, and legacy storage permissions remain
+non-automated. Exact-name matching is mandatory; prefixes and substrings never
+imply platform ownership or a protection level.
 
-Applicability evaluates the declaration kind, `maxSdkVersion`, connected-device
-API, cataloged introduction data, application target SDK, and cataloged
-replacement data. `uses-permission-sdk-23` is inapplicable below API 23, and a
-declaration expires only when its numeric `maxSdkVersion` is lower than the
-device API. Missing, codename, or otherwise non-numeric target SDK data fails
-closed whenever a rule requires a numeric target: the result becomes
-indeterminate, exposes no automation metadata, and does not assert an
-unsupported replacement decision.
+Applicability is an authoring-time API range derived without a device. The
+effective minimum is the maximum of the catalog introduction, the runtime
+permission model at API 23, and API 23 for `uses-permission-sdk-23` declarations.
+The effective maximum is the minimum of a catalog maximum and numeric manifest
+`maxSdkVersion`. Empty ranges are non-applicable. Missing, codename, or
+otherwise non-numeric target SDK data fails closed whenever a target-dependent
+rule is required.
 
-The Android 13 storage transition is modeled as a compound catalog rule.
-`READ_EXTERNAL_STORAGE` is replaced by granular media permissions only when the
-connected device is API 33 or newer and the numeric application target SDK is
-33 or newer. Either threshold below 33 leaves its ordinary catalog
-classification applicable. On API 33 or newer, unavailable numeric target SDK
-data is indeterminate rather than being treated as proof of replacement.
-`READ_MEDIA_IMAGES` is runtime-grantable only when both the connected device and
-numeric application target SDK are API 33 or newer.
+`READ_EXTERNAL_STORAGE` remains restricted and has an effective maximum API of
+32. `WRITE_EXTERNAL_STORAGE` is the reviewed restricted-storage exception: it
+has platform introduction API 4, runtime-grant minimum API 23, no catalog device
+maximum, and is automatable only for numeric application targets through API
+29. A manifest maximum may constrain it further. Granular media permissions
+start at API 33 and require a numeric target SDK of at least 33.
 
 `MANAGE_EXTERNAL_STORAGE` remains the only Phase 5B3 app-op entry. It maps
 exactly to app-op `MANAGE_EXTERNAL_STORAGE`, mode `allow`, with root required
@@ -224,23 +223,21 @@ inspection. Its strict request payload is:
 
 ```json
 {
-  "apkPath": "/path/to/selected.apk",
-  "connectedDeviceApi": 35
+  "apkPath": "/path/to/selected.apk"
 }
 ```
 
-`connectedDeviceApi` is optional. The request rejects unknown fields, including
+The request rejects unknown fields, including the retired device-API input and
 the obsolete analyzer-fed `analyzer` and `facts` fields. Reusing the existing
 capability name with the new payload and result is an intentional compatibility
-break for analyzer-fed clients; the protocol version and capability name remain
-unchanged. Frontend migration belongs to Phase 5B5.
+break; the protocol version and capability name remain unchanged.
 
 The backend opens the selected APK through the Phase 5B2 bounded manifest
 inspector and returns:
 
 - `manifest`, containing package, version, and SDK metadata;
-- `permissions`, containing every deterministic manifest declaration and, when
-  device API context exists, its classification and applicability;
+- `permissions`, containing every deterministic manifest declaration plus its
+  backend-owned classification and authoring applicability;
 - review-only `runtimeGrantCandidates` and `appOpCandidates`;
 - stable permission `warnings`;
 - uppercase `calculatedSha256` metadata;
@@ -248,28 +245,20 @@ inspector and returns:
   accepted or compared in this phase;
 - `signatureVerification: "not_performed"`.
 
-Every candidate is derived only from applicable classifier automation metadata
-and contains `selected: false`. Runtime candidates contain the permission name
-and root requirement. App-op candidates additionally contain the reviewed
-operation name and mode. These DTOs are review metadata, not shell commands;
-Phase 5B4 constructs and executes no command.
+Every candidate is derived only from manifest facts and applicable catalog
+automation metadata and contains `selected: false`, a non-null `androidApiMin`,
+and a nullable `androidApiMax`. Runtime candidates also contain the reviewed
+root requirement. App-op candidates additionally contain the exact reviewed
+operation name and mode. These DTOs are review metadata, not shell commands.
 
-When device API context is absent, every permission remains present with null
-classification and applicability, both candidate lists are empty, and exactly
-one `apk_permission_classification_context_unavailable` warning is returned.
-The backend does not guess classifications or emit speculative per-permission
-warnings.
-
-With device context, applicable runtime-restricted, manual-special-access,
-signature-or-privileged, and unknown permissions receive stable per-permission
-warnings and are never candidates. Install-time permissions require no warning
-or automation candidate. Every proven non-applicable permission receives one
+Runtime-restricted, manual-special-access, signature-or-privileged, and unknown
+permissions receive stable per-permission warnings and are never candidates.
+Install-time permissions require no warning or automation candidate. Every
+proven non-applicable permission receives one
 `apk_permission_not_applicable` warning with the permission name and one of:
 
 ```text
-declaration_requires_api_23
 max_sdk_version_exceeded
-permission_not_introduced
 permission_replaced
 target_sdk_below_minimum
 ```
@@ -300,20 +289,18 @@ All permission selections default to unchecked.
 
 Status: complete
 
-The Config Editor app-generator flow now calls the native `inspectApk`
-capability with its trusted, session-scoped APK path and an optional
-connected-device API level. React retains only the opaque APK handle and the
-safe native result. The former executable selection, persisted analyzer
+The Config Editor app-generator flow calls the native `inspectApk` capability
+with only its trusted, session-scoped APK path. React retains only the opaque
+APK handle and the safe native result. The former executable selection, persisted analyzer
 preference, host process execution, output parsing, and analyzer-specific
 errors are removed.
 
 Every successful native inspection is stored separately from the conservative
 facts passed to the existing draft generators, then draft generation continues.
-The native result has no inspection-level blocking state. Missing device API
-context, permission warnings, unsupported classifications, non-applicable or
-indeterminate declarations, and empty candidate arrays are review information
-and never block this transition. Existing draft and collision validation remain
-independently authoritative.
+The native result has no inspection-level blocking state. Permission warnings,
+unsupported classifications, non-applicable or indeterminate declarations, and
+empty candidate arrays are review information and never block this transition.
+Existing draft and collision validation remain independently authoritative.
 
 The legacy generator facts use only native manifest evidence for package name,
 version metadata, numeric SDK metadata, and requested permission names.
@@ -449,9 +436,9 @@ requires the handle to match the currently stored inspection session, and
 matches every submitted identity exactly. A non-empty selection is also
 rejected when the currently trusted APK file identity no longer matches the
 identity captured for that inspection. Package names, root requirements, and
-commands are not accepted from React. Tauri forwards canonical literal-only
-automation using `manifest.packageName` and the root requirement stored on each
-matched candidate.
+commands and API bounds are not accepted from React. Tauri forwards canonical
+literal-only automation using `manifest.packageName`, the API bounds, and the
+root requirement stored on each matched candidate.
 
 No selection preserves the existing generated recipe shape. A verified
 selection produces one deterministic step immediately after `install_apk`.
@@ -462,9 +449,10 @@ The step requires `shell_command`, not blanket `root_shell`.
 
 Runtime actions use `pm grant`. App-op actions use explicit allowlisted
 mappings. Every action is emitted with `required: false`; only actions whose
-stored candidate requires root include `when.rooted: true`. Runtime actions are
-sorted by permission name. App-op actions are sorted by operation, mode, and
-permission identity.
+stored candidate requires root include `when.rooted: true`. Every action
+includes `when.android_api_min`, and includes `when.android_api_max` when the
+stored candidate has an upper bound. Runtime actions are sorted by permission
+name. App-op actions are sorted by operation, mode, and permission identity.
 
 Default policy:
 
@@ -476,8 +464,8 @@ policy:
 
 An unrooted device may execute ordinary runtime grants while root-dependent app-op actions become `not_applicable`.
 
-Candidate selections default to false. Reinspection or a source, APK,
-installation-strategy, or device-API context transition clears them. Editing a
+Candidate selections default to false. Reinspection or a source, APK, or
+installation-strategy transition clears them. Editing a
 candidate invalidates draft, collision, and saved-review output without
 clearing unrelated app or recipe form state. Initial automatic draft generation
 passes no selections; explicit review and save requests submit only the current

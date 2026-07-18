@@ -70,6 +70,8 @@ pub(crate) struct PermissionAutomationSelection {
 pub(crate) struct RuntimePermissionSelection {
     pub(crate) permission_name: String,
     pub(crate) requires_root: bool,
+    pub(crate) android_api_min: u32,
+    pub(crate) android_api_max: Option<u32>,
 }
 
 #[derive(Clone, Debug, Deserialize, PartialEq, Eq)]
@@ -79,6 +81,8 @@ pub(crate) struct AppOpPermissionSelection {
     pub(crate) operation_name: String,
     pub(crate) mode: String,
     pub(crate) requires_root: bool,
+    pub(crate) android_api_min: u32,
+    pub(crate) android_api_max: Option<u32>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -116,9 +120,15 @@ impl PermissionAutomationSelection {
                 issues.push(PermissionAutomationIssue {
                     code: "apk_permission_automation_duplicate",
                     message: "Runtime permission automation contains a duplicate permission.",
-                    field,
+                    field: field.clone(),
                 });
             }
+            validate_permission_api_bounds(
+                action.android_api_min,
+                action.android_api_max,
+                &field,
+                &mut issues,
+            );
         }
 
         let mut app_ops = HashSet::new();
@@ -153,11 +163,32 @@ impl PermissionAutomationSelection {
                 issues.push(PermissionAutomationIssue {
                     code: "apk_permission_automation_duplicate",
                     message: "App-op automation contains a duplicate reviewed action.",
-                    field,
+                    field: field.clone(),
                 });
             }
+            validate_permission_api_bounds(
+                action.android_api_min,
+                action.android_api_max,
+                &field,
+                &mut issues,
+            );
         }
         issues
+    }
+}
+
+fn validate_permission_api_bounds(
+    minimum: u32,
+    maximum: Option<u32>,
+    field: &str,
+    issues: &mut Vec<PermissionAutomationIssue>,
+) {
+    if minimum == 0 || maximum.is_some_and(|maximum| maximum == 0 || maximum < minimum) {
+        issues.push(PermissionAutomationIssue {
+            code: "apk_permission_automation_invalid",
+            message: "Permission automation requires a positive, ordered Android API range.",
+            field: format!("{field}.androidApiMin"),
+        });
     }
 }
 
@@ -181,9 +212,14 @@ pub(crate) fn build_permission_step(
             );
             value.insert("name".to_string(), Value::String(action.permission_name));
             value.insert("required".to_string(), Value::Bool(false));
-            if action.requires_root {
-                value.insert("when".to_string(), json!({ "rooted": true }));
-            }
+            value.insert(
+                "when".to_string(),
+                permission_action_condition(
+                    action.requires_root,
+                    action.android_api_min,
+                    action.android_api_max,
+                ),
+            );
             Value::Object(value)
         })
         .collect();
@@ -198,9 +234,14 @@ pub(crate) fn build_permission_step(
             value.insert("op".to_string(), Value::String(action.operation_name));
             value.insert("mode".to_string(), Value::String(action.mode));
             value.insert("required".to_string(), Value::Bool(false));
-            if action.requires_root {
-                value.insert("when".to_string(), json!({ "rooted": true }));
-            }
+            value.insert(
+                "when".to_string(),
+                permission_action_condition(
+                    action.requires_root,
+                    action.android_api_min,
+                    action.android_api_max,
+                ),
+            );
             Value::Object(value)
         })
         .collect();
@@ -239,6 +280,22 @@ pub(crate) fn build_permission_step(
     }
 }
 
+fn permission_action_condition(
+    requires_root: bool,
+    android_api_min: u32,
+    android_api_max: Option<u32>,
+) -> Value {
+    let mut condition = Map::new();
+    if requires_root {
+        condition.insert("rooted".to_string(), Value::Bool(true));
+    }
+    condition.insert("android_api_min".to_string(), Value::from(android_api_min));
+    if let Some(maximum) = android_api_max {
+        condition.insert("android_api_max".to_string(), Value::from(maximum));
+    }
+    Value::Object(condition)
+}
+
 fn canonical_runtime_permissions(
     selection: &PermissionAutomationSelection,
 ) -> Vec<RuntimePermissionSelection> {
@@ -247,6 +304,8 @@ fn canonical_runtime_permissions(
         left.permission_name
             .cmp(&right.permission_name)
             .then_with(|| left.requires_root.cmp(&right.requires_root))
+            .then_with(|| left.android_api_min.cmp(&right.android_api_min))
+            .then_with(|| left.android_api_max.cmp(&right.android_api_max))
     });
     runtime.dedup_by(|left, right| left.permission_name == right.permission_name);
     runtime
@@ -260,6 +319,8 @@ fn canonical_app_ops(selection: &PermissionAutomationSelection) -> Vec<AppOpPerm
             .then_with(|| left.mode.cmp(&right.mode))
             .then_with(|| left.permission_name.cmp(&right.permission_name))
             .then_with(|| left.requires_root.cmp(&right.requires_root))
+            .then_with(|| left.android_api_min.cmp(&right.android_api_min))
+            .then_with(|| left.android_api_max.cmp(&right.android_api_max))
     });
     app_ops.dedup_by(|left, right| {
         left.permission_name == right.permission_name
@@ -997,7 +1058,12 @@ impl<'de> Deserialize<'de> for StrictJsonValue {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::executor::ExecutorRunner;
     use crate::generation::apk::{ApkPermissionApplicabilityFacts, ApkPermissionDeclarationFacts};
+    use crate::planner::{
+        DeviceContext, ExecutionParamValue, ExecutionPlan, ExecutionPlanSource, ExecutionStep,
+        ExecutionStepConstraints, RuntimeCapabilities,
+    };
 
     fn facts() -> ApkInspectionFacts {
         ApkInspectionFacts {
@@ -1090,6 +1156,8 @@ mod tests {
                 runtime_permissions: vec![RuntimePermissionSelection {
                     permission_name: "android.permission.CAMERA".to_string(),
                     requires_root: false,
+                    android_api_min: 23,
+                    android_api_max: None,
                 }],
                 app_ops: Vec::new(),
             }),
@@ -1104,6 +1172,120 @@ mod tests {
             draft.app.metadata["apk_inspection"]["selected_runtime_permissions"],
             json!([])
         );
+    }
+
+    fn generated_permission_execution_plan(
+        action: RuntimePermissionSelection,
+        android_api_level: i64,
+    ) -> ExecutionPlan {
+        let generated = build_permission_step(
+            &PermissionAutomationSelection {
+                package_name: "com.example.player".to_string(),
+                runtime_permissions: vec![action],
+                app_ops: Vec::new(),
+            },
+            "grant_permissions_example".to_string(),
+            "install_example".to_string(),
+            "Example Player",
+        );
+        let params = generated
+            .params
+            .into_iter()
+            .map(|(name, value)| match value {
+                ParamValue::Literal(value) => (name, ExecutionParamValue::Literal { value }),
+                ParamValue::Ref(_) => panic!("generated permission params must be literal"),
+            })
+            .collect();
+        let step = ExecutionStep {
+            id: generated.id,
+            recipe_ref: "example.recipe".to_string(),
+            type_name: generated.type_name,
+            name: generated.name,
+            note: generated.progress_note.unwrap_or_default(),
+            dependencies: Vec::new(),
+            constraints: ExecutionStepConstraints {
+                capabilities: generated.constraints.capabilities,
+                conflicts_with: generated.constraints.conflicts_with,
+            },
+            params,
+            skip_if: Vec::new(),
+            verify: Vec::new(),
+        };
+        ExecutionPlan {
+            id: "plan.permission-bounds".to_string(),
+            source: ExecutionPlanSource {
+                device_profile_ref: "example.device".to_string(),
+                device_plan_ref: "example.plan".to_string(),
+                selected_recipe_refs: vec!["example.recipe".to_string()],
+                expanded_recipe_refs: vec!["example.recipe".to_string()],
+                catalog: None,
+            },
+            recipes: Vec::new(),
+            target_device: None,
+            device_context: DeviceContext {
+                manufacturer: "Example".to_string(),
+                model: "Example".to_string(),
+                android_version: 11,
+                android_api_level: Some(android_api_level),
+                device_tags: Vec::new(),
+            },
+            runtime_capabilities: RuntimeCapabilities {
+                adb_available: true,
+                apk_install: true,
+                shared_storage_write: true,
+                app_launch: true,
+                shell_command: true,
+                package_remove_for_user: false,
+                root_shell: false,
+                app_data_write: false,
+            },
+            inputs: Vec::new(),
+            artifacts: Vec::new(),
+            steps: vec![step],
+            schema_version: 1,
+            kind: "execution_plan",
+        }
+    }
+
+    #[test]
+    fn generated_api_max_uses_the_real_executor_condition_path() {
+        let plan = generated_permission_execution_plan(
+            RuntimePermissionSelection {
+                permission_name: "android.permission.CAMERA".to_string(),
+                requires_root: false,
+                android_api_min: 23,
+                android_api_max: Some(29),
+            },
+            30,
+        );
+        let mut runner = ExecutorRunner::default();
+        let result = runner.run(&plan);
+        let serialized = serde_json::to_value(result).expect("execution result should serialize");
+        let action =
+            &serialized["steps"][0]["outputs"]["permission_results"]["value"]["actions"][0];
+        assert_eq!(action["status"], "not_applicable");
+        assert_eq!(action["reason_code"], "android_api_out_of_range");
+        assert!(runner.adapters().device().commands().is_empty());
+    }
+
+    #[test]
+    fn generated_target_29_write_storage_remains_applicable_on_api_30() {
+        let plan = generated_permission_execution_plan(
+            RuntimePermissionSelection {
+                permission_name: "android.permission.WRITE_EXTERNAL_STORAGE".to_string(),
+                requires_root: false,
+                android_api_min: 23,
+                android_api_max: None,
+            },
+            30,
+        );
+        let mut runner = ExecutorRunner::default();
+        let result = runner.run(&plan);
+        let serialized = serde_json::to_value(result).expect("execution result should serialize");
+        let action =
+            &serialized["steps"][0]["outputs"]["permission_results"]["value"]["actions"][0];
+        assert_ne!(action["status"], "not_applicable");
+        assert_eq!(runner.adapters().device().commands().len(), 1);
     }
 
     #[test]
@@ -1134,12 +1316,16 @@ mod tests {
             runtime_permissions: vec![RuntimePermissionSelection {
                 permission_name: String::new(),
                 requires_root: false,
+                android_api_min: 23,
+                android_api_max: None,
             }],
             app_ops: vec![AppOpPermissionSelection {
                 permission_name: "android.permission.MANAGE_EXTERNAL_STORAGE".to_string(),
                 operation_name: String::new(),
                 mode: "deny".to_string(),
                 requires_root: true,
+                android_api_min: 30,
+                android_api_max: None,
             }],
         };
         let issues = selection.validation_issues();

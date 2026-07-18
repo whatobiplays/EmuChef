@@ -101,6 +101,8 @@ struct CanonicalPermissionAutomation {
 struct CanonicalRuntimePermission {
     permission_name: String,
     requires_root: bool,
+    android_api_min: u32,
+    android_api_max: Option<u32>,
 }
 
 #[derive(Debug, Serialize, PartialEq, Eq)]
@@ -110,6 +112,8 @@ struct CanonicalAppOpPermission {
     operation_name: String,
     mode: String,
     requires_root: bool,
+    android_api_min: u32,
+    android_api_max: Option<u32>,
 }
 
 #[derive(Clone)]
@@ -1360,7 +1364,6 @@ pub fn inspect_app_generator_apk(
     state: State<'_, AppGeneratorState>,
     session_handle: String,
     apk_handle: String,
-    connected_device_api: Option<u32>,
 ) -> Result<Value, String> {
     let (apk_path, identity) = {
         let registry = lock_registry(&state)?;
@@ -1379,7 +1382,7 @@ pub fn inspect_app_generator_apk(
     let response = request_sidecar(
         &sidecar,
         "inspectApk",
-        Some(native_inspection_payload(&apk_path, connected_device_api)),
+        Some(native_inspection_payload(&apk_path)),
     )?;
     let Some(inspection) = success_result(&response).cloned() else {
         return Ok(response);
@@ -1415,11 +1418,8 @@ pub fn inspect_app_generator_apk(
     Ok(success(Value::Object(public_inspection.clone())))
 }
 
-fn native_inspection_payload(apk_path: &Path, connected_device_api: Option<u32>) -> Value {
-    json!({
-        "apkPath": apk_path,
-        "connectedDeviceApi": connected_device_api,
-    })
+fn native_inspection_payload(apk_path: &Path) -> Value {
+    json!({ "apkPath": apk_path })
 }
 
 #[tauri::command]
@@ -2330,9 +2330,12 @@ fn canonical_permission_automation(
                     .get("requiresRoot")
                     .and_then(Value::as_bool)
                     .ok_or_else(|| permission_selection_error("altered"))?;
+                let (android_api_min, android_api_max) = trusted_candidate_api_bounds(candidate)?;
                 runtime_permissions.push(CanonicalRuntimePermission {
                     permission_name: identity.permission_name,
                     requires_root,
+                    android_api_min,
+                    android_api_max,
                 });
             }
             _ => return Err(permission_selection_error("ambiguous")),
@@ -2382,11 +2385,14 @@ fn canonical_permission_automation(
                     .get("requiresRoot")
                     .and_then(Value::as_bool)
                     .ok_or_else(|| permission_selection_error("altered"))?;
+                let (android_api_min, android_api_max) = trusted_candidate_api_bounds(candidate)?;
                 app_ops.push(CanonicalAppOpPermission {
                     permission_name: identity.permission_name,
                     operation_name: identity.operation_name,
                     mode: identity.mode,
                     requires_root,
+                    android_api_min,
+                    android_api_max,
                 });
             }
             _ => return Err(permission_selection_error("ambiguous")),
@@ -2407,6 +2413,32 @@ fn canonical_permission_automation(
     })
     .map(Some)
     .map_err(|_| generator_protocol_error())
+}
+
+fn trusted_candidate_api_bounds(
+    candidate: &serde_json::Map<String, Value>,
+) -> Result<(u32, Option<u32>), Value> {
+    let minimum = candidate
+        .get("androidApiMin")
+        .and_then(Value::as_u64)
+        .and_then(|value| u32::try_from(value).ok())
+        .filter(|value| *value > 0)
+        .ok_or_else(|| permission_selection_error("altered"))?;
+    let maximum = match candidate.get("androidApiMax") {
+        Some(Value::Null) => None,
+        Some(value) => Some(
+            value
+                .as_u64()
+                .and_then(|value| u32::try_from(value).ok())
+                .filter(|value| *value > 0)
+                .ok_or_else(|| permission_selection_error("altered"))?,
+        ),
+        None => return Err(permission_selection_error("altered")),
+    };
+    if maximum.is_some_and(|maximum| maximum < minimum) {
+        return Err(permission_selection_error("altered"));
+    }
+    Ok((minimum, maximum))
 }
 
 /// Convert native manifest metadata into the deliberately smaller facts model
@@ -2679,6 +2711,8 @@ mod tests {
                     {
                         "permissionName": "android.permission.CAMERA",
                         "requiresRoot": false,
+                        "androidApiMin": 23,
+                        "androidApiMax": null,
                         "selected": false
                     }
                 ],
@@ -2688,6 +2722,8 @@ mod tests {
                         "operationName": "MANAGE_EXTERNAL_STORAGE",
                         "mode": "allow",
                         "requiresRoot": true,
+                        "androidApiMin": 30,
+                        "androidApiMax": null,
                         "selected": false
                     }
                 ]
@@ -2728,7 +2764,9 @@ mod tests {
             canonical["runtimePermissions"],
             json!([{
                 "permissionName": "android.permission.CAMERA",
-                "requiresRoot": false
+                "requiresRoot": false,
+                "androidApiMin": 23,
+                "androidApiMax": null
             }])
         );
         assert_eq!(
@@ -2737,11 +2775,42 @@ mod tests {
                 "permissionName": "android.permission.MANAGE_EXTERNAL_STORAGE",
                 "operationName": "MANAGE_EXTERNAL_STORAGE",
                 "mode": "allow",
-                "requiresRoot": true
+                "requiresRoot": true,
+                "androidApiMin": 30,
+                "androidApiMax": null
             }])
         );
         assert!(!canonical.to_string().contains("selected"));
         fs::remove_file(apk.path).unwrap();
+    }
+
+    #[test]
+    fn permission_selection_rejects_missing_malformed_zero_and_impossible_trusted_bounds() {
+        for (label, minimum, maximum) in [
+            ("missing", Value::Null, Value::Null),
+            ("malformed", json!("23"), Value::Null),
+            ("zero", json!(0), Value::Null),
+            ("impossible", json!(30), json!(29)),
+        ] {
+            let mut apk = permission_test_apk(label);
+            let candidate = apk.inspection.as_mut().unwrap()["runtimeGrantCandidates"][0]
+                .as_object_mut()
+                .unwrap();
+            if label == "missing" {
+                candidate.remove("androidApiMin");
+            } else {
+                candidate.insert("androidApiMin".to_string(), minimum);
+            }
+            candidate.insert("androidApiMax".to_string(), maximum);
+            let selection = json!({
+                "inspectionHandle": "apk-inspection-current",
+                "runtimePermissions": [{ "permissionName": "android.permission.CAMERA" }],
+                "appOps": []
+            });
+            let error = canonical_permission_automation(&apk, Some(selection), true).unwrap_err();
+            assert_eq!(error["error"]["details"]["reason"], "altered");
+            fs::remove_file(apk.path).unwrap();
+        }
     }
 
     #[test]
@@ -2793,11 +2862,15 @@ mod tests {
             {
                 "permissionName": "android.permission.CAMERA",
                 "requiresRoot": false,
+                "androidApiMin": 23,
+                "androidApiMax": null,
                 "selected": false
             },
             {
                 "permissionName": "android.permission.CAMERA",
                 "requiresRoot": false,
+                "androidApiMin": 23,
+                "androidApiMax": null,
                 "selected": false
             }
         ]);
@@ -2951,23 +3024,14 @@ mod tests {
     }
 
     #[test]
-    fn native_inspection_payload_uses_only_trusted_path_and_optional_api_context() {
+    fn native_inspection_payload_uses_only_the_trusted_path() {
         let path = Path::new("/private/internal/selected.apk");
         assert_eq!(
-            native_inspection_payload(path, Some(35)),
-            json!({
-                "apkPath": "/private/internal/selected.apk",
-                "connectedDeviceApi": 35,
-            })
+            native_inspection_payload(path),
+            json!({ "apkPath": "/private/internal/selected.apk" })
         );
-        assert_eq!(
-            native_inspection_payload(path, None)["connectedDeviceApi"],
-            Value::Null
-        );
-        assert!(native_inspection_payload(path, None)
-            .get("analyzer")
-            .is_none());
-        assert!(native_inspection_payload(path, None).get("facts").is_none());
+        assert!(native_inspection_payload(path).get("analyzer").is_none());
+        assert!(native_inspection_payload(path).get("facts").is_none());
     }
 
     #[test]

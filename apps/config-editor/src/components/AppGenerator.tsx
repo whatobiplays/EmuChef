@@ -37,7 +37,6 @@ import {
   initialAppGeneratorState,
   matchingAssetNames,
   otherRequestedPermissions,
-  parseConnectedDeviceApi,
   parseTrustedSha256,
   permissionAutomationEligible,
   permissionSelectionForInspection,
@@ -123,11 +122,6 @@ export function AppGenerator({ initialAuthoredRoot, onAuthoredRootSelected, onCl
 
   async function downloadRemoteApk() {
     if (!state.sessionHandle || !state.selectedAssetHandle) return;
-    const deviceApi = parseConnectedDeviceApi(state.connectedDeviceApiInput);
-    if (!deviceApi.ok) {
-      dispatch({ type: "failure", message: deviceApi.message });
-      return;
-    }
     const selectedAsset = state.sourceAnalysis?.assets.find(
       (asset) => asset.assetHandle === state.selectedAssetHandle,
     );
@@ -174,17 +168,8 @@ export function AppGenerator({ initialAuthoredRoot, onAuthoredRootSelected, onCl
     remoteSource: RemoteSourceDescriptorDto | null,
   ) {
     if (!state.sessionHandle) return;
-    const deviceApi = parseConnectedDeviceApi(state.connectedDeviceApiInput);
-    if (!deviceApi.ok) {
-      dispatch({ type: "failure", message: deviceApi.message });
-      return;
-    }
     dispatch({ type: "inspecting" });
-    const inspected = await inspectAppGeneratorApk(
-      state.sessionHandle,
-      apkHandle,
-      deviceApi.value,
-    );
+    const inspected = await inspectAppGeneratorApk(state.sessionHandle, apkHandle);
     if (inspected.kind !== "success") {
       dispatch({ type: "failure", message: apiFailure(inspected) });
       return;
@@ -396,8 +381,6 @@ export function AppGenerator({ initialAuthoredRoot, onAuthoredRootSelected, onCl
     state.assetPattern,
     selectedReleaseFileNames,
   );
-  const connectedDeviceApi = parseConnectedDeviceApi(state.connectedDeviceApiInput);
-  const connectedDeviceApiError = connectedDeviceApi.ok ? null : connectedDeviceApi.message;
   const trustedSha256 = parseTrustedSha256(state.trustedSha256);
   const trustedSha256Error = trustedSha256.ok ? null : trustedSha256.message;
   const permissionAutomationAvailable = permissionAutomationEligible(
@@ -455,11 +438,10 @@ export function AppGenerator({ initialAuthoredRoot, onAuthoredRootSelected, onCl
             <p className="mt-1 text-xs text-slate-500">Choose where the APK and update identity come from.</p>
 
             {state.sourceMode === "local_apk" ? (
-              <div className="mt-4 grid gap-4 md:grid-cols-3">
+              <div className="mt-4 grid gap-4 md:grid-cols-2">
                 <Picker label="APK" value={state.apkLabel} button="Choose APK..." disabled={busy} onClick={() => void chooseApk()} />
-                <ConnectedDeviceApiField value={state.connectedDeviceApiInput} error={connectedDeviceApiError} disabled={busy} onChange={(value) => dispatch({ type: "connected-device-api", value })} />
                 <div className="flex items-end">
-                  <button className="w-full rounded bg-slate-900 px-3 py-2 text-sm font-medium text-white disabled:bg-slate-300" disabled={busy || !state.apkHandle || connectedDeviceApiError !== null} onClick={() => void inspectApk()}>
+                  <button className="w-full rounded bg-slate-900 px-3 py-2 text-sm font-medium text-white disabled:bg-slate-300" disabled={busy || !state.apkHandle} onClick={() => void inspectApk()}>
                     {state.phase === "inspecting" ? "Inspecting..." : "Inspect APK"}
                   </button>
                 </div>
@@ -478,7 +460,6 @@ export function AppGenerator({ initialAuthoredRoot, onAuthoredRootSelected, onCl
                 {state.sourceMode.endsWith("_repository") ? <Check label="Include prereleases" checked={state.includePrereleases} disabled={busy} onChange={(value) => dispatch({ type: "include-prereleases", value })} /> : null}
                 {state.sourceAnalysis ? <RemoteAssetPicker analysis={state.sourceAnalysis} selectedAssetHandle={state.selectedAssetHandle} disabled={busy} onSelect={(assetHandle) => dispatch({ type: "asset-selected", assetHandle })} /> : null}
                 <div className="grid gap-4 md:grid-cols-3">
-                  <ConnectedDeviceApiField value={state.connectedDeviceApiInput} error={connectedDeviceApiError} disabled={busy} onChange={(value) => dispatch({ type: "connected-device-api", value })} />
                   {state.installStrategy === "latest_compatible_release" ? (
                     <section className="rounded border border-slate-200 bg-slate-50 p-3 text-sm md:col-span-3">
                       <label>
@@ -514,7 +495,7 @@ export function AppGenerator({ initialAuthoredRoot, onAuthoredRootSelected, onCl
                   <div className="flex items-end">
                     <button
                       className="flex w-full items-center justify-center gap-2 rounded bg-slate-900 px-3 py-2 text-sm font-medium text-white disabled:bg-slate-300"
-                      disabled={busy || !state.selectedAssetHandle || connectedDeviceApiError !== null}
+                      disabled={busy || !state.selectedAssetHandle}
                       onClick={() => void downloadRemoteApk()}
                     >
                       {state.phase === "downloading" || state.phase === "inspecting" ? (
@@ -602,25 +583,6 @@ export function AppGenerator({ initialAuthoredRoot, onAuthoredRootSelected, onCl
   );
 }
 
-function ConnectedDeviceApiField({ value, error, disabled, onChange }: { value: string; error: string | null; disabled: boolean; onChange: (value: string) => void }) {
-  return (
-    <label className="text-sm">
-      <HelpLabel label="Connected-device API (optional)" help="Enter the Android API level of the device you plan to use. Leave blank to inspect the manifest without permission applicability or automation candidates." />
-      <input
-        className="mt-1 w-full rounded border border-slate-300 px-3 py-2"
-        disabled={disabled}
-        inputMode="numeric"
-        min="1"
-        placeholder="For example, 35"
-        type="number"
-        value={value}
-        onChange={(event) => onChange(event.target.value)}
-      />
-      {error ? <span className="mt-1 block text-xs text-red-700">{error}</span> : <span className="mt-1 block text-xs text-slate-500">No device probing is performed.</span>}
-    </label>
-  );
-}
-
 function RemoteAssetPicker({ analysis, selectedAssetHandle, disabled, onSelect }: { analysis: import("../api/types").RemoteSourceAnalysisResult; selectedAssetHandle: string | null; disabled: boolean; onSelect: (assetHandle: string) => void }) {
   return <section className="rounded border border-slate-200 bg-slate-50 p-3"><h3 className="text-sm font-semibold">Available APK files</h3>{analysis.repository ? <p className="mt-1 text-sm text-slate-600">{analysis.repository.fullName}{analysis.repository.description ? ` — ${analysis.repository.description}` : ""}</p> : null}<div className="mt-3 space-y-2">{analysis.assets.map((asset) => <label className="flex items-start gap-2 rounded border border-slate-200 bg-white p-3 text-sm" key={asset.assetHandle}><input type="radio" name="remote-apk-asset" checked={selectedAssetHandle === asset.assetHandle} disabled={disabled} onChange={() => onSelect(asset.assetHandle)} /><span><span className="font-medium">{asset.fileName}</span><span className="ml-2 text-xs text-slate-500">{asset.releaseTag ? `${asset.releaseTag}${asset.prerelease ? " (prerelease)" : ""}` : "Direct download"}{asset.size ? ` · ${Math.ceil(asset.size / 1024 / 1024)} MiB` : ""}</span></span></label>)}{analysis.assets.length === 0 ? <p className="text-sm text-amber-700">No eligible APK files were found.</p> : null}</div></section>;
 }
@@ -679,10 +641,10 @@ function InspectionReview({ inspection, disabled, automationAvailable, onRuntime
             {inspection.runtimeGrantCandidates.map((candidate, index) => (
               <label className="flex items-start gap-2 rounded border border-slate-200 bg-white p-3 text-sm" key={`${candidate.permissionName}-${index}`}>
                 <input type="checkbox" checked={candidate.selected} disabled={disabled} onChange={(event) => onRuntimeCandidateChange(index, event.target.checked)} />
-                <span><code>{candidate.permissionName}</code><span className="mt-1 block text-xs text-slate-500">{candidate.requiresRoot ? "Root required" : "No root required"}</span></span>
+                <span><code>{candidate.permissionName}</code><span className="mt-1 block text-xs text-slate-500">{candidate.requiresRoot ? "Root required" : "No root required"}; {androidApiRange(candidate.androidApiMin, candidate.androidApiMax)}.</span></span>
               </label>
             ))}
-            {inspection.runtimeGrantCandidates.length === 0 ? <p className="text-sm text-slate-500">No runtime grant candidates for this inspection context.</p> : null}
+            {inspection.runtimeGrantCandidates.length === 0 ? <p className="text-sm text-slate-500">No runtime grant candidates for this APK.</p> : null}
           </div>
         </section>
 
@@ -693,10 +655,10 @@ function InspectionReview({ inspection, disabled, automationAvailable, onRuntime
             {inspection.appOpCandidates.map((candidate, index) => (
               <label className="flex items-start gap-2 rounded border border-slate-200 bg-white p-3 text-sm" key={`${candidate.permissionName}-${candidate.operationName}-${index}`}>
                 <input type="checkbox" checked={candidate.selected} disabled={disabled} onChange={(event) => onAppOpCandidateChange(index, event.target.checked)} />
-                <span><code>{candidate.permissionName}</code><span className="mt-1 block text-xs text-slate-500">Operation {candidate.operationName}, mode {candidate.mode}; {candidate.requiresRoot ? "root required" : "no root required"}.</span></span>
+                <span><code>{candidate.permissionName}</code><span className="mt-1 block text-xs text-slate-500">Operation {candidate.operationName}, mode {candidate.mode}; {candidate.requiresRoot ? "root required" : "no root required"}; {androidApiRange(candidate.androidApiMin, candidate.androidApiMax)}.</span></span>
               </label>
             ))}
-            {inspection.appOpCandidates.length === 0 ? <p className="text-sm text-slate-500">No app-op candidates for this inspection context.</p> : null}
+            {inspection.appOpCandidates.length === 0 ? <p className="text-sm text-slate-500">No app-op candidates for this APK.</p> : null}
           </div>
         </section>
 
@@ -751,7 +713,7 @@ function declarationKindLabel(kind: ApkPermissionReviewDto["declarationKind"]): 
 }
 
 function classificationLabel(classification: ApkPermissionClassification | null): string {
-  if (classification === null) return "unavailable without device API context";
+  if (classification === null) return "classification unavailable";
   const labels: Record<ApkPermissionClassification, string> = {
     runtime_grantable: "runtime grantable",
     runtime_restricted: "runtime restricted",
@@ -765,7 +727,7 @@ function classificationLabel(classification: ApkPermissionClassification | null)
 }
 
 function applicabilityLabel(applicability: ApkPermissionApplicabilityDto | null): string {
-  if (applicability === null) return "unavailable without device API context";
+  if (applicability === null) return "applicability unavailable";
   const details = applicabilityDetails(applicability);
   if (applicability.status === "applicable") return details ? `applicable (${details})` : "applicable";
   const reason = applicability.reason ? ` — ${applicabilityReasonLabel(applicability.reason)}` : "";
@@ -785,16 +747,20 @@ function applicabilityDetails(applicability: ApkPermissionApplicabilityDto): str
 
 function applicabilityReasonLabel(reason: NonNullable<ApkPermissionApplicabilityDto["reason"]>): string {
   const labels: Record<NonNullable<ApkPermissionApplicabilityDto["reason"]>, string> = {
-    declaration_requires_api_23: "declaration requires Android API 23 or newer",
-    max_sdk_version_exceeded: "the declaration's maximum SDK was exceeded",
-    permission_not_introduced: "permission is not introduced on this device API",
-    permission_replaced: "permission was replaced for this Android context",
+    max_sdk_version_exceeded: "the effective maximum is below the required minimum",
+    permission_replaced: "the permission is ineffective for this target SDK",
     target_sdk_below_minimum: "application target SDK is below the required minimum",
     invalid_max_sdk_version: "maximum SDK could not be interpreted",
     target_sdk_unavailable: "target SDK context is unavailable",
     replacement_target_sdk_unavailable: "replacement target SDK context is unavailable",
   };
   return labels[reason];
+}
+
+function androidApiRange(minimum: number, maximum: number | null): string {
+  return maximum === null
+    ? `Android API ${minimum}+`
+    : `Android API ${minimum}–${maximum}`;
 }
 
 function AppFields({ sourceMode, installStrategy, form, disabled, updateForm, changeApp, changeMapping }: {

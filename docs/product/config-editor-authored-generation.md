@@ -135,13 +135,14 @@ Config Editor flow does not derive a launch step from the inspected APK.
 
 ### Permission automation
 
-With connected-device API context, the backend classifies exact reviewed
-permission names as runtime-grantable, runtime-restricted, app-op-grantable,
-manual special access, install-time, signature-or-privileged, or unknown. It
-filters candidates using declaration kind, `maxSdkVersion`, permission
-introduction/replacement bounds, application target SDK, and device API.
-Missing or non-numeric context fails closed rather than producing speculative
-automation.
+Permission generation is independent of a connected device. The backend
+classifies exact reviewed permission names as runtime-grantable,
+runtime-restricted, app-op-grantable, manual special access, install-time,
+signature-or-privileged, or unknown. The backend registry owns platform
+introduction, maximum, restriction, target-SDK, and explicit automation
+metadata. Manifest declaration kind, numeric `maxSdkVersion`, and inspected
+target SDK refine candidate bounds. Missing or non-numeric target SDK data
+fails closed only for rules that require it.
 
 Only explicit selections matched back to the trusted native inspection may
 produce automation, and only package-enforced pinned or latest-compatible
@@ -158,12 +159,15 @@ policy:
 The step requires `shell_command`, never blanket `root_shell`. Root and Android
 API applicability are action-scoped through supported `when.rooted`,
 `when.android_api_min`, and `when.android_api_max` conditions. Current
-generation emits `rooted: true` only for a selected action whose reviewed
-catalog entry requires root; the executor marks an unmet condition
-`not_applicable` without suppressing eligible non-root actions.
+generation emits a non-null API minimum for every action, an API maximum only
+when catalog or manifest facts provide one, and `rooted: true` only for a
+selected action whose reviewed catalog entry requires root. The executor
+evaluates these conditions against the actual target device and marks an unmet
+condition `not_applicable` without suppressing eligible actions.
 
-The small exact-name catalog does not imply general Android permission
-automation. Runtime-restricted, signature/privileged, unknown, role-based,
+The exact-name catalog covers reviewed public dangerous permissions but does
+not infer platform behavior for arbitrary names. Runtime-restricted,
+signature/privileged, unknown, role-based,
 accessibility, VPN, notification-listener, device-admin, Settings-mediated, and
 other manual special-access cases remain warning-only, unsupported, or manual
 as applicable.

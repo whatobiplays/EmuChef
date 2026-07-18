@@ -1,9 +1,9 @@
 //! Native authoring-time APK inspection and review-only permission actions.
 //!
-//! This boundary accepts only a selected APK path and optional Android device
-//! API level. It returns manifest-owned metadata, a calculated file hash, and
-//! review DTOs. It never verifies signatures, constructs commands, or mutates
-//! recipes and devices.
+//! This boundary accepts only a selected APK path. It returns manifest-owned
+//! metadata, a calculated file hash, and device-independent review DTOs. It
+//! never verifies signatures, constructs commands, or mutates recipes or
+//! devices.
 
 use std::fs::File;
 use std::io::{BufReader, Read};
@@ -29,14 +29,12 @@ const HASH_BUFFER_BYTES: usize = 64 * 1024;
 #[serde(deny_unknown_fields, rename_all = "camelCase")]
 pub(crate) struct ApkAuthoringInspectionRequest {
     pub(crate) apk_path: String,
-    #[serde(default)]
-    pub(crate) connected_device_api: Option<u32>,
 }
 
 impl ApkAuthoringInspectionRequest {
-    /// Reject empty paths and Android's invalid API level zero.
+    /// Reject empty selected paths.
     pub(crate) fn is_valid(&self) -> bool {
-        !self.apk_path.trim().is_empty() && self.connected_device_api != Some(0)
+        !self.apk_path.trim().is_empty()
     }
 }
 
@@ -103,7 +101,7 @@ pub(crate) enum ApkPermissionClassificationDto {
     Unknown,
 }
 
-/// Whether a permission declaration applies to the selected device context.
+/// Whether a permission declaration has a usable authoring-time API range.
 #[derive(Clone, Copy, Debug, Serialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 pub(crate) enum ApkPermissionApplicabilityStatusDto {
@@ -116,9 +114,7 @@ pub(crate) enum ApkPermissionApplicabilityStatusDto {
 #[derive(Clone, Copy, Debug, Serialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 pub(crate) enum ApkPermissionApplicabilityReasonDto {
-    DeclarationRequiresApi23,
     MaxSdkVersionExceeded,
-    PermissionNotIntroduced,
     PermissionReplaced,
     TargetSdkBelowMinimum,
     InvalidMaxSdkVersion,
@@ -164,6 +160,8 @@ pub(crate) struct ApkPermissionReviewDto {
 pub(crate) struct ApkRuntimeGrantCandidateDto {
     permission_name: String,
     requires_root: bool,
+    android_api_min: u32,
+    android_api_max: Option<u32>,
     selected: bool,
 }
 
@@ -182,6 +180,8 @@ pub(crate) struct ApkAppOpCandidateDto {
     operation_name: String,
     mode: ApkAppOpModeDto,
     requires_root: bool,
+    android_api_min: u32,
+    android_api_max: Option<u32>,
     selected: bool,
 }
 
@@ -226,11 +226,10 @@ pub(crate) struct ApkAuthoringInspectionResult {
 /// Inspect a selected APK and build review-only authoring metadata.
 pub(crate) fn inspect_apk_for_authoring(
     apk_path: &Path,
-    connected_device_api: Option<u32>,
 ) -> Result<ApkAuthoringInspectionResult, ApkAuthoringInspectionError> {
     let facts = inspect_apk_manifest(apk_path)?;
     let calculated_sha256 = calculate_sha256(apk_path)?;
-    Ok(build_result(facts, connected_device_api, calculated_sha256))
+    Ok(build_result(facts, calculated_sha256))
 }
 
 fn calculate_sha256(path: &Path) -> Result<String, ApkAuthoringInspectionError> {
@@ -256,7 +255,6 @@ fn calculate_sha256(path: &Path) -> Result<String, ApkAuthoringInspectionError> 
 
 fn build_result(
     facts: ApkManifestFacts,
-    connected_device_api: Option<u32>,
     calculated_sha256: String,
 ) -> ApkAuthoringInspectionResult {
     let manifest = ApkManifestMetadataDto {
@@ -267,28 +265,7 @@ fn build_result(
         target_sdk_version: facts.target_sdk_version,
     };
     let (permissions, runtime_grant_candidates, app_op_candidates, warnings) =
-        match connected_device_api {
-            Some(device_api) => classified_permission_review(
-                &facts.permissions,
-                manifest.target_sdk_version.as_deref(),
-                device_api,
-            ),
-            None => (
-                facts
-                    .permissions
-                    .iter()
-                    .map(permission_without_context)
-                    .collect(),
-                Vec::new(),
-                Vec::new(),
-                vec![ApkPermissionWarningDto {
-                    code: "apk_permission_classification_context_unavailable",
-                    message: "Permission classification requires a connected-device API level.",
-                    permission_name: None,
-                    applicability_reason: None,
-                }],
-            ),
-        };
+        classified_permission_review(&facts.permissions, manifest.target_sdk_version.as_deref());
 
     ApkAuthoringInspectionResult {
         manifest,
@@ -312,9 +289,8 @@ type PermissionReviewParts = (
 fn classified_permission_review(
     declarations: &[ApkPermissionDeclaration],
     target_sdk: Option<&str>,
-    device_api: u32,
 ) -> PermissionReviewParts {
-    let classified = classify_android_permissions(declarations, target_sdk, device_api);
+    let classified = classify_android_permissions(declarations, target_sdk);
     let mut permissions = Vec::with_capacity(classified.len());
     let mut runtime_candidates = Vec::new();
     let mut app_op_candidates = Vec::new();
@@ -329,9 +305,14 @@ fn classified_permission_review(
                 AndroidPermissionClassification::RuntimeGrantable,
                 Some(AndroidPermissionAutomation::RuntimeGrant { requires_root }),
             ) if permission.applicability == AndroidPermissionApplicability::Applicable => {
+                let bounds = permission
+                    .api_bounds
+                    .expect("automated permissions must have reviewed API bounds");
                 runtime_candidates.push(ApkRuntimeGrantCandidateDto {
                     permission_name: permission.declaration.name.clone(),
                     requires_root,
+                    android_api_min: bounds.minimum,
+                    android_api_max: bounds.maximum,
                     selected: false,
                 });
             }
@@ -343,11 +324,16 @@ fn classified_permission_review(
                     requires_root,
                 }),
             ) if permission.applicability == AndroidPermissionApplicability::Applicable => {
+                let bounds = permission
+                    .api_bounds
+                    .expect("automated permissions must have reviewed API bounds");
                 app_op_candidates.push(ApkAppOpCandidateDto {
                     permission_name: permission.declaration.name.clone(),
                     operation_name: app_op.to_string(),
                     mode: app_op_mode(mode),
                     requires_root,
+                    android_api_min: bounds.minimum,
+                    android_api_max: bounds.maximum,
                     selected: false,
                 });
             }
@@ -359,23 +345,14 @@ fn classified_permission_review(
     (permissions, runtime_candidates, app_op_candidates, warnings)
 }
 
-fn permission_without_context(declaration: &ApkPermissionDeclaration) -> ApkPermissionReviewDto {
-    ApkPermissionReviewDto {
-        name: declaration.name.clone(),
-        declaration_kind: declaration_kind(declaration.kind),
-        max_sdk_version: declaration.max_sdk_version.clone(),
-        classification: None,
-        applicability: None,
-    }
-}
-
 fn permission_with_context(permission: ClassifiedAndroidPermission) -> ApkPermissionReviewDto {
+    let applicability = applicability(&permission);
     ApkPermissionReviewDto {
         name: permission.declaration.name,
         declaration_kind: declaration_kind(permission.declaration.kind),
         max_sdk_version: permission.declaration.max_sdk_version,
         classification: Some(classification(permission.classification)),
-        applicability: Some(applicability(permission.applicability)),
+        applicability: Some(applicability),
     }
 }
 
@@ -412,17 +389,17 @@ fn classification(value: AndroidPermissionClassification) -> ApkPermissionClassi
     }
 }
 
-fn applicability(value: AndroidPermissionApplicability) -> ApkPermissionApplicabilityDto {
+fn applicability(permission: &ClassifiedAndroidPermission) -> ApkPermissionApplicabilityDto {
     let mut result = ApkPermissionApplicabilityDto {
         status: ApkPermissionApplicabilityStatusDto::Applicable,
         reason: None,
-        maximum_sdk_version: None,
-        introduction_api: None,
-        minimum_device_api: None,
+        maximum_sdk_version: permission.api_bounds.and_then(|bounds| bounds.maximum),
+        introduction_api: permission.catalog_introduction_api,
+        minimum_device_api: permission.api_bounds.map(|bounds| bounds.minimum),
         minimum_target_sdk: None,
         target_sdk_state: None,
     };
-    match value {
+    match permission.applicability {
         AndroidPermissionApplicability::Applicable => result,
         AndroidPermissionApplicability::NotApplicable(reason) => {
             result.status = ApkPermissionApplicabilityStatusDto::NotApplicable;
@@ -442,16 +419,9 @@ fn apply_non_applicable_reason(
     reason: AndroidPermissionNonApplicability,
 ) {
     match reason {
-        AndroidPermissionNonApplicability::DeclarationRequiresApi23 => {
-            result.reason = Some(ApkPermissionApplicabilityReasonDto::DeclarationRequiresApi23);
-        }
         AndroidPermissionNonApplicability::MaxSdkVersionExceeded { maximum } => {
             result.reason = Some(ApkPermissionApplicabilityReasonDto::MaxSdkVersionExceeded);
             result.maximum_sdk_version = Some(maximum);
-        }
-        AndroidPermissionNonApplicability::PermissionNotIntroduced { introduction_api } => {
-            result.reason = Some(ApkPermissionApplicabilityReasonDto::PermissionNotIntroduced);
-            result.introduction_api = Some(introduction_api);
         }
         AndroidPermissionNonApplicability::PermissionReplaced {
             minimum_device_api,
@@ -517,7 +487,7 @@ fn warning_for_permission(
     let (code, message, applicability_reason) = match permission.applicability {
         AndroidPermissionApplicability::NotApplicable(reason) => (
             "apk_permission_not_applicable",
-            "This permission does not apply to the selected Android context.",
+            "This permission has no supported authoring-time Android API range.",
             Some(non_applicable_reason(reason)),
         ),
         AndroidPermissionApplicability::Indeterminate(reason) => (
@@ -561,14 +531,8 @@ fn non_applicable_reason(
     reason: AndroidPermissionNonApplicability,
 ) -> ApkPermissionApplicabilityReasonDto {
     match reason {
-        AndroidPermissionNonApplicability::DeclarationRequiresApi23 => {
-            ApkPermissionApplicabilityReasonDto::DeclarationRequiresApi23
-        }
         AndroidPermissionNonApplicability::MaxSdkVersionExceeded { .. } => {
             ApkPermissionApplicabilityReasonDto::MaxSdkVersionExceeded
-        }
-        AndroidPermissionNonApplicability::PermissionNotIntroduced { .. } => {
-            ApkPermissionApplicabilityReasonDto::PermissionNotIntroduced
         }
         AndroidPermissionNonApplicability::PermissionReplaced { .. } => {
             ApkPermissionApplicabilityReasonDto::PermissionReplaced
@@ -594,12 +558,11 @@ fn indeterminate_reason(
         }
     }
 }
-
 #[cfg(test)]
 mod tests {
     use std::fs;
 
-    use serde_json::json;
+    use serde_json::{json, Value};
     use tempfile::TempDir;
 
     use super::*;
@@ -634,7 +597,7 @@ mod tests {
     fn apk_authoring_inspection_reads_manifest_and_streams_uppercase_sha256() {
         let workspace = TempDir::new().expect("temporary workspace should be created");
         let apk = crate::apk_manifest::tests::write_valid_test_apk(&workspace);
-        let result = inspect_apk_for_authoring(&apk, Some(35)).expect("APK should inspect");
+        let result = inspect_apk_for_authoring(&apk).expect("APK should inspect");
         let expected = Sha256::digest(fs::read(&apk).expect("fixture should be readable"))
             .iter()
             .map(|byte| format!("{byte:02X}"))
@@ -644,11 +607,6 @@ mod tests {
         assert_eq!(result.manifest.version_code.as_deref(), Some("42"));
         assert_eq!(result.permissions.len(), 3);
         assert_eq!(result.calculated_sha256, expected);
-        assert_eq!(result.calculated_sha256.len(), 64);
-        assert!(result
-            .calculated_sha256
-            .bytes()
-            .all(|byte| byte.is_ascii_digit() || (b'A'..=b'F').contains(&byte)));
         assert_eq!(result.checksum_status, ApkChecksumStatusDto::NotCompared);
         assert_eq!(
             result.signature_verification,
@@ -657,61 +615,174 @@ mod tests {
     }
 
     #[test]
-    fn apk_authoring_inspection_without_device_context_preserves_only_declarations() {
+    fn apk_authoring_inspection_builds_candidates_without_device_context() {
         let result = build_result(
             facts(
-                Some("35"),
+                Some("29"),
                 vec![
                     declaration(
-                        "android.permission.CAMERA",
+                        "android.permission.RECORD_AUDIO",
                         ApkPermissionDeclarationKind::UsesPermission,
                         None,
                     ),
                     declaration(
-                        "android.permission.UNKNOWN_EXAMPLE",
-                        ApkPermissionDeclarationKind::UsesPermission,
-                        None,
-                    ),
-                ],
-            ),
-            None,
-            "A".repeat(64),
-        );
-
-        assert_eq!(result.permissions.len(), 2);
-        assert!(result
-            .permissions
-            .iter()
-            .all(|permission| permission.classification.is_none()
-                && permission.applicability.is_none()));
-        assert!(result.runtime_grant_candidates.is_empty());
-        assert!(result.app_op_candidates.is_empty());
-        assert_eq!(result.warnings.len(), 1);
-        assert_eq!(
-            result.warnings[0].code,
-            "apk_permission_classification_context_unavailable"
-        );
-        assert_eq!(result.warnings[0].permission_name, None);
-    }
-
-    #[test]
-    fn apk_authoring_inspection_exposes_only_applicable_review_candidates() {
-        let result = build_result(
-            facts(
-                Some("35"),
-                vec![
-                    declaration(
-                        "android.permission.CAMERA",
+                        "android.permission.POST_NOTIFICATIONS",
                         ApkPermissionDeclarationKind::UsesPermission,
                         None,
                     ),
                     declaration(
-                        "android.permission.INTERNET",
+                        "android.permission.WRITE_EXTERNAL_STORAGE",
                         ApkPermissionDeclarationKind::UsesPermission,
                         None,
                     ),
                     declaration(
                         "android.permission.MANAGE_EXTERNAL_STORAGE",
+                        ApkPermissionDeclarationKind::UsesPermission,
+                        None,
+                    ),
+                ],
+            ),
+            "A".repeat(64),
+        );
+
+        assert_eq!(result.runtime_grant_candidates.len(), 3);
+        assert_eq!(
+            result
+                .runtime_grant_candidates
+                .iter()
+                .map(|candidate| (
+                    candidate.permission_name.as_str(),
+                    candidate.android_api_min,
+                    candidate.android_api_max,
+                ))
+                .collect::<Vec<_>>(),
+            vec![
+                ("android.permission.POST_NOTIFICATIONS", 33, None),
+                ("android.permission.RECORD_AUDIO", 23, None),
+                ("android.permission.WRITE_EXTERNAL_STORAGE", 23, None),
+            ]
+        );
+        assert!(result
+            .runtime_grant_candidates
+            .iter()
+            .all(|candidate| !candidate.requires_root && !candidate.selected));
+        assert_eq!(result.app_op_candidates.len(), 1);
+        assert_eq!(
+            result.app_op_candidates[0].permission_name,
+            "android.permission.MANAGE_EXTERNAL_STORAGE"
+        );
+        assert_eq!(
+            result.app_op_candidates[0].operation_name,
+            "MANAGE_EXTERNAL_STORAGE"
+        );
+        assert_eq!(result.app_op_candidates[0].android_api_min, 30);
+        assert_eq!(result.app_op_candidates[0].android_api_max, None);
+        assert!(result.app_op_candidates[0].requires_root);
+        assert!(!result.app_op_candidates[0].selected);
+    }
+
+    #[test]
+    fn apk_authoring_inspection_combines_manifest_and_catalog_bounds() {
+        let result = build_result(
+            facts(
+                Some("29"),
+                vec![
+                    declaration(
+                        "android.permission.WRITE_EXTERNAL_STORAGE",
+                        ApkPermissionDeclarationKind::UsesPermissionSdk23,
+                        Some("34"),
+                    ),
+                    declaration(
+                        "android.permission.READ_EXTERNAL_STORAGE",
+                        ApkPermissionDeclarationKind::UsesPermission,
+                        Some("31"),
+                    ),
+                ],
+            ),
+            "B".repeat(64),
+        );
+
+        assert_eq!(result.runtime_grant_candidates.len(), 1);
+        let write = &result.runtime_grant_candidates[0];
+        assert_eq!(write.android_api_min, 23);
+        assert_eq!(write.android_api_max, Some(34));
+        let read = result
+            .permissions
+            .iter()
+            .find(|permission| permission.name == "android.permission.READ_EXTERNAL_STORAGE")
+            .expect("restricted read permission should remain reviewable");
+        assert_eq!(
+            read.classification,
+            Some(ApkPermissionClassificationDto::RuntimeRestricted)
+        );
+        assert_eq!(
+            read.applicability
+                .as_ref()
+                .and_then(|applicability| applicability.maximum_sdk_version),
+            Some(31)
+        );
+    }
+
+    #[test]
+    fn apk_authoring_inspection_target_30_omits_legacy_write_candidate() {
+        let result = build_result(
+            facts(
+                Some("30"),
+                vec![declaration(
+                    "android.permission.WRITE_EXTERNAL_STORAGE",
+                    ApkPermissionDeclarationKind::UsesPermission,
+                    None,
+                )],
+            ),
+            "C".repeat(64),
+        );
+
+        assert!(result.runtime_grant_candidates.is_empty());
+        assert_eq!(
+            result.permissions[0].applicability.as_ref().unwrap().status,
+            ApkPermissionApplicabilityStatusDto::NotApplicable
+        );
+        assert_eq!(
+            result.permissions[0].applicability.as_ref().unwrap().reason,
+            Some(ApkPermissionApplicabilityReasonDto::PermissionReplaced)
+        );
+        assert_eq!(result.warnings[0].code, "apk_permission_not_applicable");
+    }
+
+    #[test]
+    fn apk_authoring_inspection_missing_target_fails_closed_for_target_rules() {
+        for target_sdk in [None, Some("R")] {
+            let result = build_result(
+                facts(
+                    target_sdk,
+                    vec![declaration(
+                        "android.permission.WRITE_EXTERNAL_STORAGE",
+                        ApkPermissionDeclarationKind::UsesPermission,
+                        None,
+                    )],
+                ),
+                "D".repeat(64),
+            );
+            assert!(result.runtime_grant_candidates.is_empty());
+            assert_eq!(
+                result.permissions[0].applicability.as_ref().unwrap().status,
+                ApkPermissionApplicabilityStatusDto::Indeterminate
+            );
+            assert_eq!(
+                result.warnings[0].code,
+                "apk_permission_applicability_indeterminate"
+            );
+        }
+    }
+
+    #[test]
+    fn apk_authoring_inspection_restricted_manual_and_unknown_names_never_automate() {
+        let result = build_result(
+            facts(
+                Some("37"),
+                vec![
+                    declaration(
+                        "android.permission.SEND_SMS",
                         ApkPermissionDeclarationKind::UsesPermission,
                         None,
                     ),
@@ -721,205 +792,79 @@ mod tests {
                         None,
                     ),
                     declaration(
-                        "android.permission.WRITE_SECURE_SETTINGS",
-                        ApkPermissionDeclarationKind::UsesPermission,
-                        None,
-                    ),
-                    declaration(
-                        "android.permission.BODY_SENSORS_BACKGROUND",
-                        ApkPermissionDeclarationKind::UsesPermission,
-                        None,
-                    ),
-                    declaration(
-                        "android.permission.UNKNOWN_EXAMPLE",
+                        "com.example.permission.CUSTOM",
                         ApkPermissionDeclarationKind::UsesPermission,
                         None,
                     ),
                 ],
             ),
-            Some(35),
-            "B".repeat(64),
+            "E".repeat(64),
         );
 
-        assert_eq!(result.runtime_grant_candidates.len(), 1);
-        assert_eq!(
-            result.runtime_grant_candidates[0].permission_name,
-            "android.permission.CAMERA"
-        );
-        assert!(!result.runtime_grant_candidates[0].requires_root);
-        assert!(!result.runtime_grant_candidates[0].selected);
-        assert_eq!(result.app_op_candidates.len(), 1);
-        assert_eq!(
-            result.app_op_candidates[0].operation_name,
-            "MANAGE_EXTERNAL_STORAGE"
-        );
-        assert!(result.app_op_candidates[0].requires_root);
-        assert!(!result.app_op_candidates[0].selected);
+        assert!(result.runtime_grant_candidates.is_empty());
+        assert!(result.app_op_candidates.is_empty());
+        assert_eq!(result.permissions.len(), 3);
+        assert_eq!(result.warnings.len(), 3);
         assert_eq!(
             result
                 .warnings
                 .iter()
                 .map(|warning| warning.code)
                 .collect::<Vec<_>>(),
-            [
+            vec![
                 "apk_permission_runtime_restricted",
                 "apk_permission_manual_special_access",
                 "apk_permission_unknown",
-                "apk_permission_signature_or_privileged",
             ]
         );
-        assert!(result
-            .warnings
-            .iter()
-            .all(|warning| warning.permission_name.is_some()));
     }
 
     #[test]
-    fn apk_authoring_inspection_warns_for_every_non_applicable_reason() {
-        let cases = [
-            (
-                declaration(
-                    "android.permission.CAMERA",
-                    ApkPermissionDeclarationKind::UsesPermissionSdk23,
-                    None,
-                ),
-                "35",
-                22,
-                ApkPermissionApplicabilityReasonDto::DeclarationRequiresApi23,
-            ),
-            (
-                declaration(
-                    "android.permission.CAMERA",
-                    ApkPermissionDeclarationKind::UsesPermission,
-                    Some("34"),
-                ),
-                "35",
-                35,
-                ApkPermissionApplicabilityReasonDto::MaxSdkVersionExceeded,
-            ),
-            (
-                declaration(
-                    "android.permission.READ_MEDIA_IMAGES",
-                    ApkPermissionDeclarationKind::UsesPermission,
-                    None,
-                ),
-                "35",
-                32,
-                ApkPermissionApplicabilityReasonDto::PermissionNotIntroduced,
-            ),
-            (
-                declaration(
-                    "android.permission.READ_EXTERNAL_STORAGE",
-                    ApkPermissionDeclarationKind::UsesPermission,
-                    None,
-                ),
-                "35",
-                35,
-                ApkPermissionApplicabilityReasonDto::PermissionReplaced,
-            ),
-            (
-                declaration(
-                    "android.permission.READ_MEDIA_IMAGES",
-                    ApkPermissionDeclarationKind::UsesPermission,
-                    None,
-                ),
-                "32",
-                35,
-                ApkPermissionApplicabilityReasonDto::TargetSdkBelowMinimum,
-            ),
-        ];
-
-        for (declaration, target_sdk, device_api, expected_reason) in cases {
-            let permission_name = declaration.name.clone();
-            let result = build_result(
-                facts(Some(target_sdk), vec![declaration]),
-                Some(device_api),
-                "C".repeat(64),
-            );
-            assert!(result.runtime_grant_candidates.is_empty());
-            assert!(result.app_op_candidates.is_empty());
-            assert_eq!(result.warnings.len(), 1);
-            assert_eq!(result.warnings[0].code, "apk_permission_not_applicable");
-            assert_eq!(
-                result.warnings[0].permission_name.as_deref(),
-                Some(permission_name.as_str())
-            );
-            assert_eq!(
-                result.warnings[0].applicability_reason,
-                Some(expected_reason)
-            );
-        }
-    }
-
-    #[test]
-    fn apk_authoring_inspection_warns_for_every_indeterminate_reason() {
-        let cases = [
-            (
-                declaration(
-                    "android.permission.UNKNOWN_EXAMPLE",
-                    ApkPermissionDeclarationKind::UsesPermission,
-                    Some("Preview"),
-                ),
-                Some("35"),
-                ApkPermissionApplicabilityReasonDto::InvalidMaxSdkVersion,
-            ),
-            (
-                declaration(
-                    "android.permission.CAMERA",
-                    ApkPermissionDeclarationKind::UsesPermission,
-                    None,
-                ),
-                None,
-                ApkPermissionApplicabilityReasonDto::TargetSdkUnavailable,
-            ),
-            (
-                declaration(
-                    "android.permission.READ_EXTERNAL_STORAGE",
-                    ApkPermissionDeclarationKind::UsesPermission,
-                    None,
-                ),
-                Some("Preview"),
-                ApkPermissionApplicabilityReasonDto::ReplacementTargetSdkUnavailable,
-            ),
-        ];
-
-        for (declaration, target_sdk, expected_reason) in cases {
-            let result = build_result(
-                facts(target_sdk, vec![declaration]),
-                Some(35),
-                "D".repeat(64),
-            );
-            assert!(result.runtime_grant_candidates.is_empty());
-            assert!(result.app_op_candidates.is_empty());
-            assert_eq!(result.warnings.len(), 1);
-            assert_eq!(
-                result.warnings[0].code,
-                "apk_permission_applicability_indeterminate"
-            );
-            assert_eq!(
-                result.warnings[0].applicability_reason,
-                Some(expected_reason)
-            );
-        }
-    }
-
-    #[test]
-    fn apk_authoring_inspection_serialization_contains_no_legacy_or_command_fields() {
+    fn apk_authoring_inspection_impossible_range_has_stable_reason() {
         let result = build_result(
             facts(
                 Some("35"),
                 vec![declaration(
-                    "android.permission.CAMERA",
+                    "android.permission.POST_NOTIFICATIONS",
+                    ApkPermissionDeclarationKind::UsesPermission,
+                    Some("32"),
+                )],
+            ),
+            "F".repeat(64),
+        );
+
+        assert!(result.runtime_grant_candidates.is_empty());
+        let applicability = result.permissions[0].applicability.as_ref().unwrap();
+        assert_eq!(
+            applicability.status,
+            ApkPermissionApplicabilityStatusDto::NotApplicable
+        );
+        assert_eq!(
+            applicability.reason,
+            Some(ApkPermissionApplicabilityReasonDto::MaxSdkVersionExceeded)
+        );
+        assert_eq!(applicability.maximum_sdk_version, Some(32));
+    }
+
+    #[test]
+    fn apk_authoring_inspection_serializes_bounds_without_commands() {
+        let result = build_result(
+            facts(
+                Some("35"),
+                vec![declaration(
+                    "android.permission.POST_NOTIFICATIONS",
                     ApkPermissionDeclarationKind::UsesPermission,
                     None,
                 )],
             ),
-            Some(35),
-            "E".repeat(64),
+            "A".repeat(64),
         );
         let value = serde_json::to_value(result).expect("result should serialize");
-        assert_eq!(value["checksumStatus"], "not_compared");
-        assert_eq!(value["signatureVerification"], "not_performed");
+        assert_eq!(value["runtimeGrantCandidates"][0]["androidApiMin"], 33);
+        assert_eq!(
+            value["runtimeGrantCandidates"][0]["androidApiMax"],
+            Value::Null
+        );
         assert_eq!(value["runtimeGrantCandidates"][0]["selected"], false);
         for forbidden in [
             "analyzer",
@@ -937,7 +882,7 @@ mod tests {
     fn apk_authoring_inspection_errors_are_stable_and_redacted() {
         let private_path = Path::new("/Users/private/secret-source-name.apk");
         let manifest_error =
-            inspect_apk_for_authoring(private_path, Some(35)).expect_err("missing APK should fail");
+            inspect_apk_for_authoring(private_path).expect_err("missing APK should fail");
         assert_eq!(manifest_error.code(), "apk_manifest_inspection_failed");
         assert_eq!(
             manifest_error.message(),
@@ -945,7 +890,6 @@ mod tests {
         );
         let read_error = calculate_sha256(private_path).expect_err("missing file should fail");
         assert_eq!(read_error.code(), "apk_file_read_failed");
-        assert_eq!(read_error.message(), "APK file could not be read.");
         for error in [manifest_error, read_error] {
             let public = format!("{} {}", error.code(), error.message());
             assert!(!public.contains("/Users/private"));
@@ -954,23 +898,21 @@ mod tests {
     }
 
     #[test]
-    fn apk_authoring_inspection_request_rejects_legacy_and_invalid_inputs() {
+    fn apk_authoring_inspection_request_accepts_only_the_apk_path() {
         let request = serde_json::from_value::<ApkAuthoringInspectionRequest>(json!({
-            "apkPath": "/tmp/example.apk",
-            "connectedDeviceApi": 35
+            "apkPath": "/tmp/example.apk"
         }))
         .expect("native request should parse");
         assert!(request.is_valid());
 
-        for invalid in [
-            json!({ "apkPath": "" }),
-            json!({ "apkPath": "/tmp/example.apk", "connectedDeviceApi": 0 }),
-        ] {
-            let request = serde_json::from_value::<ApkAuthoringInspectionRequest>(invalid)
-                .expect("structurally valid request should parse");
-            assert!(!request.is_valid());
-        }
+        let empty = serde_json::from_value::<ApkAuthoringInspectionRequest>(json!({
+            "apkPath": ""
+        }))
+        .expect("empty path is structurally valid");
+        assert!(!empty.is_valid());
+
         for legacy in [
+            json!({ "apkPath": "/tmp/example.apk", "connectedDeviceApi": 35 }),
             json!({ "analyzer": "apkanalyzer", "facts": {} }),
             json!({ "apkPath": "/tmp/example.apk", "facts": {} }),
         ] {

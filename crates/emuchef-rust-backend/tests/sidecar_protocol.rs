@@ -664,8 +664,7 @@ fn local_apk_generation_and_native_inspection_protocols_are_separate_and_safe() 
         "id": "inspect-native-missing",
         "type": "inspectApk",
         "payload": {
-            "apkPath": "/Users/private/secret-source-name.apk",
-            "connectedDeviceApi": 35
+            "apkPath": "/Users/private/secret-source-name.apk"
         }
     }));
     assert_eq!(missing["ok"], false);

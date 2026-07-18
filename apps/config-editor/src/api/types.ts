@@ -529,9 +529,7 @@ export type ApkPermissionApplicabilityStatus =
   | "indeterminate";
 
 export type ApkPermissionApplicabilityReason =
-  | "declaration_requires_api_23"
   | "max_sdk_version_exceeded"
-  | "permission_not_introduced"
   | "permission_replaced"
   | "target_sdk_below_minimum"
   | "invalid_max_sdk_version"
@@ -559,6 +557,8 @@ export interface ApkPermissionReviewDto {
 export interface ApkRuntimeGrantCandidateDto {
   permissionName: string;
   requiresRoot: boolean;
+  androidApiMin: number;
+  androidApiMax: number | null;
   selected: boolean;
 }
 
@@ -567,12 +567,13 @@ export interface ApkAppOpCandidateDto {
   operationName: string;
   mode: "allow";
   requiresRoot: boolean;
+  androidApiMin: number;
+  androidApiMax: number | null;
   selected: boolean;
 }
 
 export interface ApkPermissionWarningDto {
   code:
-    | "apk_permission_classification_context_unavailable"
     | "apk_permission_not_applicable"
     | "apk_permission_applicability_indeterminate"
     | "apk_permission_runtime_restricted"
