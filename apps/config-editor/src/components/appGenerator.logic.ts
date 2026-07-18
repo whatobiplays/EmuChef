@@ -21,6 +21,35 @@ export type ConnectedDeviceApiResult =
   | { ok: true; value: number | null }
   | { ok: false; message: string };
 
+export type TrustedSha256Result =
+  | { ok: true; value: string | null }
+  | { ok: false; message: string };
+
+function trimAsciiWhitespace(value: string): string {
+  let start = 0;
+  let end = value.length;
+  while (start < end && isAsciiWhitespace(value.charCodeAt(start))) start += 1;
+  while (end > start && isAsciiWhitespace(value.charCodeAt(end - 1))) end -= 1;
+  return value.slice(start, end);
+}
+
+function isAsciiWhitespace(codePoint: number): boolean {
+  return codePoint === 0x20 || (codePoint >= 0x09 && codePoint <= 0x0D);
+}
+
+/** Validate an optional publisher-provided checksum without accepting formatted digests. */
+export function parseTrustedSha256(input: string): TrustedSha256Result {
+  const trimmed = trimAsciiWhitespace(input);
+  if (trimmed.length === 0) return { ok: true, value: null };
+  if (!/^[0-9A-Fa-f]{64}$/u.test(trimmed)) {
+    return {
+      ok: false,
+      message: "Trusted publisher SHA-256 must contain exactly 64 hexadecimal characters.",
+    };
+  }
+  return { ok: true, value: trimmed.toUpperCase() };
+}
+
 /** Parse optional Android API context without relying on Tauri deserialization errors. */
 export function parseConnectedDeviceApi(input: string): ConnectedDeviceApiResult {
   const trimmed = input.trim();
@@ -80,6 +109,7 @@ export interface AppGeneratorState {
   remoteSource: RemoteSourceDescriptorDto | null;
   installStrategy: AppGeneratorInstallStrategy;
   assetPattern: string;
+  trustedSha256: string;
   rootHandle: string | null;
   rootLabel: string | null;
   inspection: ApkInspectionResult | null;
@@ -105,6 +135,7 @@ export type AppGeneratorAction =
   | { type: "source-analyzed"; analysis: RemoteSourceAnalysisResult }
   | { type: "asset-selected"; assetHandle: string }
   | { type: "asset-pattern"; value: string }
+  | { type: "trusted-sha256"; value: string }
   | { type: "install-strategy"; strategy: AppGeneratorInstallStrategy }
   | { type: "connected-device-api"; value: string }
   | { type: "downloading" }
@@ -135,6 +166,7 @@ export const initialAppGeneratorState: AppGeneratorState = {
   remoteSource: null,
   installStrategy: "pinned_remote_asset",
   assetPattern: "",
+  trustedSha256: "",
   rootHandle: null,
   rootLabel: null,
   inspection: null,
@@ -168,6 +200,7 @@ export function reduceAppGenerator(
         sourceAnalysis: null,
         selectedAssetHandle: null,
         assetPattern: "",
+        trustedSha256: "",
         remoteSource: null,
         apkHandle: null,
         apkLabel: null,
@@ -183,6 +216,7 @@ export function reduceAppGenerator(
         sourceUrl: action.value,
         sourceAnalysis: null,
         selectedAssetHandle: null,
+        trustedSha256: "",
         remoteSource: null,
         apkHandle: null,
         apkLabel: null,
@@ -198,6 +232,7 @@ export function reduceAppGenerator(
         includePrereleases: action.value,
         sourceAnalysis: null,
         selectedAssetHandle: null,
+        trustedSha256: "",
         remoteSource: null,
         apkHandle: null,
         apkLabel: null,
@@ -208,7 +243,7 @@ export function reduceAppGenerator(
         error: null,
       };
     case "source-analyzing":
-      return { ...state, phase: "inspecting", error: null };
+      return { ...state, phase: "inspecting", trustedSha256: "", error: null };
     case "source-analyzed":
       return {
         ...state,
@@ -219,6 +254,7 @@ export function reduceAppGenerator(
           action.analysis,
           action.analysis.preselectedAssetHandle,
         ),
+        trustedSha256: "",
         remoteSource: null,
         apkHandle: null,
         apkLabel: null,
@@ -233,6 +269,7 @@ export function reduceAppGenerator(
         ...state,
         selectedAssetHandle: action.assetHandle,
         assetPattern: suggestedPatternForHandle(state.sourceAnalysis, action.assetHandle),
+        trustedSha256: "",
         remoteSource: null,
         apkHandle: null,
         apkLabel: null,
@@ -251,10 +288,20 @@ export function reduceAppGenerator(
         collisions: null,
         error: null,
       };
+    case "trusted-sha256":
+      return {
+        ...state,
+        trustedSha256: action.value,
+        draft: null,
+        collisions: null,
+        saved: null,
+        error: null,
+      };
     case "install-strategy":
       return {
         ...state,
         installStrategy: action.strategy,
+        trustedSha256: "",
         draft: null,
         form: null,
         collisions: null,
@@ -284,6 +331,7 @@ export function reduceAppGenerator(
             state.installStrategy === "latest_compatible_release" ? state.assetPattern : null,
           includePrereleases: state.includePrereleases,
         },
+        trustedSha256: "",
         inspection: null,
         draft: null,
         form: null,
@@ -295,6 +343,7 @@ export function reduceAppGenerator(
         ...state,
         apkHandle: action.apkHandle,
         apkLabel: action.label,
+        trustedSha256: "",
         inspection: null,
         draft: null,
         form: null,
@@ -302,7 +351,7 @@ export function reduceAppGenerator(
         error: null,
       };
     case "inspecting":
-      return { ...state, phase: "inspecting", error: null };
+      return { ...state, phase: "inspecting", trustedSha256: "", error: null };
     case "inspected":
       return { ...state, phase: "editing", inspection: action.inspection, error: null };
     case "runtime-candidate-selected":

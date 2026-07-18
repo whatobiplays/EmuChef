@@ -8,12 +8,13 @@
 pub mod adb;
 
 use std::collections::{HashMap, HashSet};
-use std::fs;
-use std::io;
+use std::fs::{self, File};
+use std::io::{self, BufReader, Read};
 use std::path::{Component, Path, PathBuf};
 
 use serde::Serialize;
 use serde_json::{json, Value};
+use sha2::{Digest, Sha256};
 
 use crate::apk_manifest::inspect_apk_manifest;
 use crate::artifact_resolver::{ArtifactResolveRequest, ArtifactResolver};
@@ -22,6 +23,9 @@ use crate::planner::{
     ExecutionParamValue, ExecutionPlan, ExecutionStep, ExecutionStepCondition, RuntimeValue,
 };
 use crate::remote_release_resolver::{resolve_github_latest, resolve_remote_latest};
+use crate::validation::normalize_expected_sha256;
+
+const APK_HASH_BUFFER_BYTES: usize = 64 * 1024;
 
 #[derive(Clone, Debug, PartialEq, Serialize)]
 pub struct ExecutionRunResult {
@@ -1051,6 +1055,27 @@ impl<D: ExecutorDevice> ExecutorRunner<D> {
                 )));
             }
         }
+        if let Some(expected_sha256) = resolved_params.get("expected_sha256") {
+            let expected_sha256 = expected_sha256
+                .as_str()
+                .and_then(normalize_expected_sha256)
+                .ok_or_else(|| {
+                    StepFailure::new(
+                        "install_apk expected_sha256 must be a 64-character hexadecimal string literal."
+                            .to_string(),
+                    )
+                })?;
+            let actual_sha256 = calculate_apk_sha256(&apk_path).map_err(|_| {
+                StepFailure::new(
+                    "apk_checksum_read_failed: APK checksum could not be calculated.".to_string(),
+                )
+            })?;
+            if actual_sha256 != expected_sha256 {
+                return Err(StepFailure::new(format!(
+                    "apk_checksum_mismatch: expected SHA-256 '{expected_sha256}', actual SHA-256 '{actual_sha256}'."
+                )));
+            }
+        }
         let replace_existing = resolved_params
             .get("replace_existing")
             .map(value_is_truthy)
@@ -1114,6 +1139,25 @@ impl<D: ExecutorDevice> ExecutorRunner<D> {
             other => Err(format!("Unsupported condition type: {other}")),
         }
     }
+}
+
+fn calculate_apk_sha256(path: &Path) -> io::Result<String> {
+    let file = File::open(path)?;
+    let mut reader = BufReader::new(file);
+    let mut digest = Sha256::new();
+    let mut buffer = [0_u8; APK_HASH_BUFFER_BYTES];
+    loop {
+        let count = reader.read(&mut buffer)?;
+        if count == 0 {
+            break;
+        }
+        digest.update(&buffer[..count]);
+    }
+    Ok(digest
+        .finalize()
+        .iter()
+        .map(|byte| format!("{byte:02X}"))
+        .collect())
 }
 
 fn remote_release_outputs(

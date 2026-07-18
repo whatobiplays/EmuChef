@@ -39,6 +39,7 @@ import {
   matchingAssetNames,
   otherRequestedPermissions,
   parseConnectedDeviceApi,
+  parseTrustedSha256,
   reduceAppGenerator,
   visibleDraftDiagnostics,
   type AppGeneratorFormState,
@@ -199,6 +200,7 @@ export function AppGenerator({ initialAuthoredRoot, onAuthoredRootSelected, onCl
           null,
           null,
           null,
+          null,
         )
       : await generateAppRecipeDraft(
           state.sessionHandle,
@@ -229,6 +231,11 @@ export function AppGenerator({ initialAuthoredRoot, onAuthoredRootSelected, onCl
 
   async function buildReview(regenerateIdentifiers = false) {
     if (!state.sessionHandle || !state.apkHandle || !state.rootHandle || !state.form) return;
+    const trustedSha256 = parseTrustedSha256(state.trustedSha256);
+    if (!trustedSha256.ok) {
+      dispatch({ type: "failure", message: trustedSha256.message });
+      return;
+    }
     const request = formToRequest(state.form);
     if (!request.ok) {
       dispatch({ type: "failure", message: request.message });
@@ -251,6 +258,7 @@ export function AppGenerator({ initialAuthoredRoot, onAuthoredRootSelected, onCl
             state.installStrategy,
             state.installStrategy === "latest_compatible_release" ? state.assetPattern : null,
             state.includePrereleases,
+            trustedSha256.value,
             request.app,
             request.recipe,
             request.mappings,
@@ -288,6 +296,11 @@ export function AppGenerator({ initialAuthoredRoot, onAuthoredRootSelected, onCl
 
   async function save() {
     if (!state.sessionHandle || !state.apkHandle || !state.rootHandle || !state.form) return;
+    const trustedSha256 = parseTrustedSha256(state.trustedSha256);
+    if (!trustedSha256.ok) {
+      dispatch({ type: "failure", message: trustedSha256.message });
+      return;
+    }
     const request = formToRequest(state.form);
     if (!request.ok) {
       dispatch({ type: "failure", message: request.message });
@@ -311,6 +324,7 @@ export function AppGenerator({ initialAuthoredRoot, onAuthoredRootSelected, onCl
             state.installStrategy,
             state.installStrategy === "latest_compatible_release" ? state.assetPattern : null,
             state.includePrereleases,
+            trustedSha256.value,
             state.rootHandle,
             request.app,
             request.recipe,
@@ -379,6 +393,8 @@ export function AppGenerator({ initialAuthoredRoot, onAuthoredRootSelected, onCl
   );
   const connectedDeviceApi = parseConnectedDeviceApi(state.connectedDeviceApiInput);
   const connectedDeviceApiError = connectedDeviceApi.ok ? null : connectedDeviceApi.message;
+  const trustedSha256 = parseTrustedSha256(state.trustedSha256);
+  const trustedSha256Error = trustedSha256.ok ? null : trustedSha256.message;
 
   const busy =
     state.phase === "starting" ||
@@ -389,6 +405,7 @@ export function AppGenerator({ initialAuthoredRoot, onAuthoredRootSelected, onCl
     busy ||
     !state.draft ||
     state.draft.blocking ||
+    trustedSha256Error !== null ||
     !state.collisions ||
     state.collisions.blocking;
 
@@ -504,6 +521,24 @@ export function AppGenerator({ initialAuthoredRoot, onAuthoredRootSelected, onCl
                           : "Download and inspect APK"}
                     </button>
                   </div>
+                  {state.installStrategy === "pinned_remote_asset" ? (
+                    <label className="text-sm md:col-span-3">
+                      <HelpLabel
+                        label="Trusted publisher SHA-256 (optional)"
+                        help="Enter only a checksum obtained from a trusted publisher source for this exact APK."
+                      />
+                      <input
+                        className="mt-1 w-full rounded border border-slate-300 px-3 py-2 font-mono text-xs"
+                        disabled={busy}
+                        value={state.trustedSha256}
+                        onChange={(event) => dispatch({ type: "trusted-sha256", value: event.target.value })}
+                      />
+                      {trustedSha256Error ? <p className="mt-1 text-xs text-red-700">{trustedSha256Error}</p> : null}
+                      <p className="mt-1 text-xs text-slate-500">
+                        EmuChef does not copy the locally calculated inspection hash into this field. Inspection remains not compared; this trusted value is used only by the generated runtime recipe.
+                      </p>
+                    </label>
+                  ) : null}
                   {state.phase === "downloading" ? (
                     <p className="text-xs text-slate-600 md:col-span-3" role="status" aria-live="polite">
                       Downloading the selected APK. This may take a moment.

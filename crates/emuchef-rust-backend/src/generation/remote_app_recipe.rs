@@ -17,6 +17,7 @@ use crate::model::{
     InputDeclaration, InputValidation, OrderedMap, ParamValue, Recipe, RecipeProvides,
     RemoteFileArtifact, Step, StepCondition, StepConstraints,
 };
+use crate::validation::normalize_expected_sha256;
 
 use super::apk::ApkInspectionFacts;
 use super::identifiers::{normalize_identifier_component, recipe_local_token};
@@ -56,6 +57,8 @@ pub(crate) struct RemoteSource {
     pub asset_pattern: Option<String>,
     #[serde(default)]
     pub include_prereleases: bool,
+    #[serde(default)]
+    pub trusted_sha256: Option<String>,
 }
 
 #[derive(Clone, Debug, Default, Deserialize, Serialize)]
@@ -262,6 +265,25 @@ fn validate_source(source: &RemoteSource) -> Vec<DraftDiagnostic> {
                 "Latest compatible release requires a valid APK filename pattern.",
                 "source.assetPattern",
             )),
+        }
+    }
+    if let Some(trusted_sha256) = source.trusted_sha256.as_deref().filter(|value| {
+        !value
+            .trim_matches(|character: char| character.is_ascii_whitespace())
+            .is_empty()
+    }) {
+        if source.strategy != "pinned_remote_asset" {
+            diagnostics.push(error(
+                "apk_trusted_sha256_strategy_unsupported",
+                "A trusted publisher SHA-256 is supported only for pinned remote APK assets.",
+                "source.trustedSha256",
+            ));
+        } else if normalize_expected_sha256(trusted_sha256).is_none() {
+            diagnostics.push(error(
+                "apk_trusted_sha256_invalid",
+                "Trusted publisher SHA-256 must contain exactly 64 hexadecimal characters.",
+                "source.trustedSha256",
+            ));
         }
     }
     let valid_url = url::Url::parse(&source.download_url)
@@ -628,6 +650,18 @@ fn build_recipe(
                 "Pinned and latest remote APK generation requires a package name verified by APK inspection.",
                 "recipe.expectedPackageName",
             )),
+        }
+    }
+    if pinned {
+        if let Some(expected_sha256) = source
+            .trusted_sha256
+            .as_deref()
+            .and_then(normalize_expected_sha256)
+        {
+            install_params.insert(
+                "expected_sha256".to_string(),
+                ParamValue::Literal(Value::String(expected_sha256)),
+            );
         }
     }
     install_params.insert(
@@ -1071,6 +1105,7 @@ mod tests {
             asset_name: Some("app.apk".to_string()),
             asset_pattern: None,
             include_prereleases: false,
+            trusted_sha256: None,
         }
     }
 
@@ -1094,6 +1129,121 @@ mod tests {
         assert!(recipe.contains("ref: artifacts.remote_example_apk.local_path"));
         assert!(recipe.contains("expected_package_name: com.example.remote"));
         assert!(!recipe.contains("expected_package_name: com.example.edited"));
+        assert!(!recipe.contains("expected_sha256"));
+    }
+
+    #[test]
+    fn pinned_source_emits_only_explicit_valid_trusted_sha256() {
+        let mut source = source();
+        source.trusted_sha256 = Some(
+            " \t0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef\r\n".to_string(),
+        );
+        let mut app = proposed_app(&facts(), &source);
+        app.category = "emulator".to_string();
+
+        let draft = generate_remote_app_recipe_draft(RemoteAppRecipeDraftRequest {
+            facts: facts(),
+            source,
+            app: Some(app),
+            recipe: None,
+            mappings: None,
+            regenerate_identifiers: false,
+        });
+
+        assert!(!draft.blocking, "{:#?}", draft.diagnostics);
+        assert!(draft.recipe_canonical_yaml.unwrap().contains(
+            "expected_sha256: 0123456789ABCDEF0123456789ABCDEF0123456789ABCDEF0123456789ABCDEF"
+        ));
+    }
+
+    #[test]
+    fn pinned_source_rejects_invalid_trusted_sha256() {
+        let mut source = source();
+        source.trusted_sha256 = Some("sha256:not-trusted".to_string());
+        let draft = generate_remote_app_recipe_draft(RemoteAppRecipeDraftRequest {
+            facts: facts(),
+            source,
+            app: None,
+            recipe: None,
+            mappings: None,
+            regenerate_identifiers: false,
+        });
+
+        assert!(draft.blocking);
+        assert!(draft.diagnostics.iter().any(|diagnostic| {
+            diagnostic.code == "apk_trusted_sha256_invalid"
+                && diagnostic.field == "source.trustedSha256"
+        }));
+        assert!(!draft
+            .recipe_canonical_yaml
+            .as_deref()
+            .unwrap_or_default()
+            .contains("expected_sha256"));
+    }
+
+    #[test]
+    fn non_pinned_strategies_reject_non_empty_trusted_sha256() {
+        for strategy in ["latest_compatible_release", "user_provided_apk"] {
+            let mut source = source();
+            source.strategy = strategy.to_string();
+            source.trusted_sha256 = Some("A".repeat(64));
+            if strategy == "latest_compatible_release" {
+                source.mode = "github_repository".to_string();
+                source.asset_pattern = Some("^app\\.apk$".to_string());
+            }
+            let draft = generate_remote_app_recipe_draft(RemoteAppRecipeDraftRequest {
+                facts: facts(),
+                source,
+                app: None,
+                recipe: None,
+                mappings: None,
+                regenerate_identifiers: false,
+            });
+
+            assert!(draft.blocking, "{strategy}");
+            assert!(draft.diagnostics.iter().any(|diagnostic| {
+                diagnostic.code == "apk_trusted_sha256_strategy_unsupported"
+                    && diagnostic.field == "source.trustedSha256"
+            }));
+            assert!(!draft
+                .recipe_canonical_yaml
+                .as_deref()
+                .unwrap_or_default()
+                .contains("expected_sha256"));
+        }
+    }
+
+    #[test]
+    fn all_remote_strategies_accept_blank_trusted_sha256_as_absent() {
+        for strategy in [
+            "pinned_remote_asset",
+            "latest_compatible_release",
+            "user_provided_apk",
+        ] {
+            let mut source = source();
+            source.strategy = strategy.to_string();
+            source.trusted_sha256 = Some(" \t\r\n".to_string());
+            if strategy == "latest_compatible_release" {
+                source.mode = "github_repository".to_string();
+                source.asset_pattern = Some("^app\\.apk$".to_string());
+            }
+            let mut app = proposed_app(&facts(), &source);
+            app.category = "emulator".to_string();
+            let draft = generate_remote_app_recipe_draft(RemoteAppRecipeDraftRequest {
+                facts: facts(),
+                source,
+                app: Some(app),
+                recipe: None,
+                mappings: None,
+                regenerate_identifiers: false,
+            });
+
+            assert!(!draft.blocking, "{strategy}: {:#?}", draft.diagnostics);
+            assert!(!draft
+                .recipe_canonical_yaml
+                .unwrap()
+                .contains("expected_sha256"));
+        }
     }
 
     #[test]
@@ -1123,6 +1273,7 @@ mod tests {
         assert!(!recipe.contains("type: remote_file"));
         assert!(recipe.contains("ref: inputs.remote_example_apk"));
         assert!(!recipe.contains("expected_package_name"));
+        assert!(!recipe.contains("expected_sha256"));
     }
 
     #[test]
@@ -1151,6 +1302,7 @@ mod tests {
         assert!(recipe.contains("ref: steps.download_remote_example.outputs.local_path"));
         assert!(recipe.contains("expected_package_name: com.example.remote"));
         assert!(!recipe.contains("expected_package_name: com.example.edited"));
+        assert!(!recipe.contains("expected_sha256"));
     }
 
     #[test]

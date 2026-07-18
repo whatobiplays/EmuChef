@@ -20,6 +20,7 @@ use crate::runtime_refs::{
     artifact_field_value_type, input_value_type, parse_reference, RuntimeRef,
 };
 use crate::step_specs;
+use crate::validation::normalize_expected_sha256;
 use crate::yaml;
 
 const SCHEMA_VERSION: i64 = 1;
@@ -2258,6 +2259,23 @@ fn validate_install_apk_param_values(
             ));
         }
     }
+    if let Some(value) = normalized.get("expected_sha256") {
+        if matches!(value, ParamValue::Ref(_)) {
+            return errors;
+        }
+        if !matches!(value, ParamValue::Literal(Value::String(value)) if normalize_expected_sha256(value).is_some())
+        {
+            errors.push(param_contract_message(
+                "invalid_param_value",
+                "Param 'expected_sha256' must be a 64-character hexadecimal string literal for step type 'install_apk'.".to_string(),
+                recipe_id,
+                step,
+                "expected_sha256",
+                json!("literal 64-character hexadecimal string"),
+                param_value_to_json(value),
+            ));
+        }
+    }
     errors
 }
 
@@ -3192,12 +3210,16 @@ fn normalize_step_params_for_execution(
                 );
             }
             ParamValue::Literal(value) => {
-                result.insert(
-                    param_name.clone(),
-                    ExecutionParamValue::Literal {
-                        value: value.clone(),
-                    },
-                );
+                let value = if step.type_name == "install_apk" && param_name == "expected_sha256" {
+                    value
+                        .as_str()
+                        .and_then(normalize_expected_sha256)
+                        .map(Value::String)
+                        .unwrap_or_else(|| value.clone())
+                } else {
+                    value.clone()
+                };
+                result.insert(param_name.clone(), ExecutionParamValue::Literal { value });
             }
         }
     }

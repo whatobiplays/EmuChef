@@ -6,6 +6,7 @@ use std::path::{Path, PathBuf};
 use std::thread;
 
 use serde_json::{json, Value};
+use sha2::{Digest, Sha256};
 
 use crate::artifact_resolver::artifact_local_filename;
 use crate::executor::{
@@ -346,6 +347,24 @@ fn install_apk_step_with_expected_package(
         literal(json!(expected_package_name)),
     );
     step
+}
+
+fn install_apk_step_with_expected_sha256(
+    id: &str,
+    apk_path: &Path,
+    expected_sha256: Value,
+) -> ExecutionStep {
+    let mut step = install_apk_step(id, apk_path, false);
+    step.params
+        .insert("expected_sha256".to_string(), literal(expected_sha256));
+    step
+}
+
+fn sha256(bytes: &[u8]) -> String {
+    Sha256::digest(bytes)
+        .iter()
+        .map(|byte| format!("{byte:02X}"))
+        .collect()
 }
 
 fn launch_app_step(id: &str, package_name: &str, activity: Option<&str>) -> ExecutionStep {
@@ -817,6 +836,145 @@ fn install_apk_rejects_invalid_expected_package_value_before_inspection_or_insta
         "install_apk expected_package_name must be a non-empty string literal."
     );
     assert!(runner.adapters().device().commands().is_empty());
+}
+
+#[test]
+fn install_apk_with_matching_expected_sha256_installs_once() {
+    let workspace = tempfile::tempdir().expect("temp root should be created");
+    let apk = workspace.path().join("matching.apk");
+    let bytes = b"trusted APK bytes";
+    fs::write(&apk, bytes).expect("APK fixture should be writable");
+    let expected = format!(" \t{}\r\n", sha256(bytes).to_ascii_lowercase());
+
+    let (actual, runner) = run_value(
+        &plan(vec![install_apk_step_with_expected_sha256(
+            "example.recipe/install",
+            &apk,
+            json!(expected),
+        )]),
+        DryRunExecutorAdapters::default(),
+    );
+
+    assert_eq!(actual["success"], true);
+    assert_eq!(runner.adapters().device().commands().len(), 1);
+    assert_eq!(runner.adapters().device().commands()[0][0], "install_apk");
+}
+
+#[test]
+fn install_apk_checksum_mismatch_is_redacted_and_does_not_install() {
+    let workspace = tempfile::tempdir().expect("temp root should be created");
+    let apk = workspace.path().join("mismatch.apk");
+    fs::write(&apk, b"actual APK bytes").expect("APK fixture should be writable");
+    let expected = "0".repeat(64);
+
+    let (actual, runner) = run_value(
+        &plan(vec![install_apk_step_with_expected_sha256(
+            "example.recipe/install",
+            &apk,
+            json!(expected.clone()),
+        )]),
+        DryRunExecutorAdapters::default(),
+    );
+    let message = actual["steps"][0]["message"].as_str().unwrap();
+
+    assert_eq!(actual["success"], false);
+    assert!(message.starts_with(&format!(
+        "apk_checksum_mismatch: expected SHA-256 '{expected}', actual SHA-256 '"
+    )));
+    assert!(!message.contains(&apk.to_string_lossy().to_string()));
+    assert!(runner.adapters().device().commands().is_empty());
+}
+
+#[test]
+fn install_apk_checksum_read_failure_is_redacted_and_does_not_install() {
+    let workspace = tempfile::tempdir().expect("temp root should be created");
+    let apk = workspace.path().join("unreadable.apk");
+    fs::create_dir(&apk).expect("directory fixture should be created");
+
+    let (actual, runner) = run_value(
+        &plan(vec![install_apk_step_with_expected_sha256(
+            "example.recipe/install",
+            &apk,
+            json!("0".repeat(64)),
+        )]),
+        DryRunExecutorAdapters::default(),
+    );
+    let message = actual["steps"][0]["message"].as_str().unwrap();
+
+    assert_eq!(
+        message,
+        "apk_checksum_read_failed: APK checksum could not be calculated."
+    );
+    assert!(!message.contains(&apk.to_string_lossy().to_string()));
+    assert!(runner.adapters().device().commands().is_empty());
+}
+
+#[test]
+fn install_apk_rejects_invalid_runtime_checksum_before_hashing_or_installation() {
+    let workspace = tempfile::tempdir().expect("temp root should be created");
+    let apk = workspace.path().join("invalid.apk");
+    fs::create_dir(&apk).expect("directory fixture should be created");
+
+    let (actual, runner) = run_value(
+        &plan(vec![install_apk_step_with_expected_sha256(
+            "example.recipe/install",
+            &apk,
+            json!("sha256:not-a-digest"),
+        )]),
+        DryRunExecutorAdapters::default(),
+    );
+
+    assert_eq!(
+        actual["steps"][0]["message"],
+        "install_apk expected_sha256 must be a 64-character hexadecimal string literal."
+    );
+    assert!(runner.adapters().device().commands().is_empty());
+}
+
+#[test]
+fn install_apk_package_enforcement_precedes_checksum_enforcement() {
+    let workspace = tempfile::tempdir().expect("temp root should be created");
+    let apk = crate::apk_manifest::tests::write_valid_test_apk(&workspace);
+    let mut step = install_apk_step_with_expected_package(
+        "example.recipe/install",
+        &apk,
+        false,
+        "com.example.wrong",
+    );
+    step.params.insert(
+        "expected_sha256".to_string(),
+        literal(json!("0".repeat(64))),
+    );
+
+    let (actual, runner) = run_value(&plan(vec![step]), DryRunExecutorAdapters::default());
+
+    assert!(actual["steps"][0]["message"]
+        .as_str()
+        .unwrap()
+        .starts_with("apk_package_mismatch:"));
+    assert!(runner.adapters().device().commands().is_empty());
+}
+
+#[test]
+fn install_apk_matching_package_proceeds_to_matching_checksum() {
+    let workspace = tempfile::tempdir().expect("temp root should be created");
+    let apk = crate::apk_manifest::tests::write_valid_test_apk(&workspace);
+    let mut step = install_apk_step_with_expected_package(
+        "example.recipe/install",
+        &apk,
+        false,
+        "com.example.qualified",
+    );
+    step.params.insert(
+        "expected_sha256".to_string(),
+        literal(json!(sha256(&fs::read(&apk).unwrap()))),
+    );
+
+    let (actual, runner) = run_value(&plan(vec![step]), DryRunExecutorAdapters::default());
+
+    assert_eq!(actual["success"], true);
+    assert_eq!(runner.adapters().device().commands().len(), 1);
+    assert_eq!(runner.adapters().device().commands()[0][0], "install_apk");
 }
 
 #[test]

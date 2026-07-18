@@ -337,6 +337,39 @@ fn install_apk_expected_package_name_requires_non_empty_string_literal() {
 }
 
 #[test]
+fn install_apk_expected_sha256_requires_plain_64_character_hexadecimal_literal() {
+    let fixture = "phase5b7_invalid_expected_sha256.yaml";
+    let path_diagnostics = diagnostics_for_validate_path(fixture);
+    let (open_diagnostics, session_diagnostics) = diagnostics_for_open_and_validate(fixture);
+
+    for diagnostics in [&path_diagnostics, &open_diagnostics, &session_diagnostics] {
+        assert_limited_context_warning(diagnostics, Some("phase5b7.invalid_expected_sha256"));
+        let errors = diagnostics
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter(|diagnostic| diagnostic["code"] == "param_contract_violation")
+            .filter(|diagnostic| {
+                diagnostic["field"]
+                    .as_str()
+                    .is_some_and(|field| field.ends_with(".params.expected_sha256"))
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(errors.len(), 4, "{diagnostics:#?}");
+        for (index, error) in errors.into_iter().enumerate() {
+            assert_diagnostic_shape(error);
+            assert_eq!(error["severity"], "error");
+            assert_eq!(error["objectKind"], "recipe");
+            assert_eq!(error["objectId"], "phase5b7.invalid_expected_sha256");
+            assert_eq!(
+                error["field"],
+                format!("steps[{index}].params.expected_sha256")
+            );
+        }
+    }
+}
+
+#[test]
 fn top_level_param_refs_validate_only_authored_param_refs() {
     assert_editor_local_fixture_diagnostics(
         "phase6k_unknown_input_ref.yaml",

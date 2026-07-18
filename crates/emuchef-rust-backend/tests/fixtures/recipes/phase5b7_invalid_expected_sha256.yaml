@@ -1,0 +1,59 @@
+schema_version: 1
+kind: recipe
+id: phase5b7.invalid_expected_sha256
+name: Phase 5B7 Invalid Expected SHA-256
+recipe_dependencies: []
+provides:
+  features: []
+inputs: {}
+artifacts:
+  app_apk:
+    type: remote_file
+    url: https://example.invalid/app.apk
+    cache: default
+artifact_groups: {}
+steps:
+  - id: non_string
+    type: install_apk
+    name: Non-string Expected SHA-256
+    user_toggleable: false
+    dependencies: []
+    constraints: {capabilities: [], conflicts_with: []}
+    skip_if: []
+    params:
+      app: {ref: artifacts.app_apk.local_path}
+      expected_sha256: false
+    verify: []
+  - id: wrong_length
+    type: install_apk
+    name: Wrong-length Expected SHA-256
+    user_toggleable: false
+    dependencies: []
+    constraints: {capabilities: [], conflicts_with: []}
+    skip_if: []
+    params:
+      app: {ref: artifacts.app_apk.local_path}
+      expected_sha256: "0123456789abcdef"
+    verify: []
+  - id: prefix
+    type: install_apk
+    name: Prefixed Expected SHA-256
+    user_toggleable: false
+    dependencies: []
+    constraints: {capabilities: [], conflicts_with: []}
+    skip_if: []
+    params:
+      app: {ref: artifacts.app_apk.local_path}
+      expected_sha256: "sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
+    verify: []
+  - id: embedded_whitespace
+    type: install_apk
+    name: Embedded-whitespace Expected SHA-256
+    user_toggleable: false
+    dependencies: []
+    constraints: {capabilities: [], conflicts_with: []}
+    skip_if: []
+    params:
+      app: {ref: artifacts.app_apk.local_path}
+      expected_sha256: "0123456789abcdef0123456789abcdef 0123456789abcdef0123456789abcdef"
+    verify: []

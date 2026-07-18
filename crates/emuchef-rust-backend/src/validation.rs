@@ -19,6 +19,17 @@ use crate::runtime_refs::{
 use crate::step_specs::{self, StepParamDto, StepSpecDto};
 use crate::yaml::{self, LoadErrorKind, LoadIssue, RecipeLoadError};
 
+/// Validate and canonicalize a trusted SHA-256 value.
+///
+/// Only ASCII whitespace surrounding the complete digest is ignored. The
+/// digest itself must contain exactly 64 hexadecimal characters; prefixes,
+/// separators, and embedded whitespace are deliberately rejected.
+pub(crate) fn normalize_expected_sha256(value: &str) -> Option<String> {
+    let trimmed = value.trim_matches(|character: char| character.is_ascii_whitespace());
+    (trimmed.len() == 64 && trimmed.bytes().all(|byte| byte.is_ascii_hexdigit()))
+        .then(|| trimmed.to_ascii_uppercase())
+}
+
 pub fn validate_recipe_path_result(path: impl AsRef<Path>, authored_root: Option<&Path>) -> Value {
     let path = path.as_ref();
     let file = yaml::resolved_path_string(path);
@@ -304,6 +315,20 @@ fn validate_step_params(
                         step_index,
                         param_name,
                         "Param 'expected_package_name' must be a non-empty string literal for step type 'install_apk'.",
+                    ));
+                }
+            }
+        }
+        if step.type_name == "install_apk" && param_name == "expected_sha256" {
+            if let ParamValue::Literal(value) = value {
+                if !matches!(value, Value::String(value) if normalize_expected_sha256(value).is_some())
+                {
+                    errors.push(param_contract_error(
+                        file,
+                        recipe,
+                        step_index,
+                        param_name,
+                        "Param 'expected_sha256' must be a 64-character hexadecimal string literal for step type 'install_apk'.",
                     ));
                 }
             }

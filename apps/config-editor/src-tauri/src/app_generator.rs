@@ -1411,6 +1411,7 @@ pub fn generate_remote_app_recipe_draft(
     strategy: String,
     asset_pattern: Option<String>,
     include_prereleases: bool,
+    trusted_sha256: Option<String>,
     app: Option<Value>,
     recipe: Option<Value>,
     mappings: Option<Value>,
@@ -1427,6 +1428,7 @@ pub fn generate_remote_app_recipe_draft(
         &strategy,
         asset_pattern.as_deref(),
         include_prereleases,
+        trusted_sha256.as_deref(),
     )? {
         Ok(source) => source,
         Err(error) => return Ok(error),
@@ -1465,6 +1467,7 @@ pub fn save_generated_remote_app_recipe(
     strategy: String,
     asset_pattern: Option<String>,
     include_prereleases: bool,
+    trusted_sha256: Option<String>,
     root_handle: String,
     app: Value,
     recipe: Value,
@@ -1497,6 +1500,7 @@ pub fn save_generated_remote_app_recipe(
         &strategy,
         asset_pattern.as_deref(),
         include_prereleases,
+        trusted_sha256.as_deref(),
     )? {
         Ok(source) => source,
         Err(error) => return Ok(error),
@@ -1598,6 +1602,7 @@ fn trusted_remote_source_payload(
     strategy: &str,
     asset_pattern: Option<&str>,
     include_prereleases: bool,
+    trusted_sha256: Option<&str>,
 ) -> Result<Result<Value, Value>, String> {
     if !matches!(
         strategy,
@@ -1608,6 +1613,10 @@ fn trusted_remote_source_payload(
             "Choose a supported installation method.",
         )));
     }
+    let trusted_sha256 = match trusted_sha256_request_value(strategy, trusted_sha256) {
+        Ok(value) => value,
+        Err(error) => return Ok(Err(error)),
+    };
     let registry = lock_registry(state)?;
     let session = match registry.session(session_handle) {
         Ok(session) => session,
@@ -1633,7 +1642,7 @@ fn trusted_remote_source_payload(
             )));
         };
     }
-    Ok(Ok(json!({
+    let mut payload = json!({
         "mode": source.mode,
         "strategy": strategy,
         "downloadUrl": source.direct_url.as_ref().unwrap_or(&asset.download_url),
@@ -1644,7 +1653,29 @@ fn trusted_remote_source_payload(
         "assetName": asset.file_name,
         "assetPattern": asset_pattern,
         "includePrereleases": include_prereleases,
-    })))
+    });
+    if let Some(trusted_sha256) = trusted_sha256 {
+        payload["trustedSha256"] = Value::String(trusted_sha256.to_string());
+    }
+    Ok(Ok(payload))
+}
+
+fn trusted_sha256_request_value<'a>(
+    strategy: &str,
+    trusted_sha256: Option<&'a str>,
+) -> Result<Option<&'a str>, Value> {
+    let trusted_sha256 = trusted_sha256.filter(|value| {
+        !value
+            .trim_matches(|character: char| character.is_ascii_whitespace())
+            .is_empty()
+    });
+    if trusted_sha256.is_some() && strategy != "pinned_remote_asset" {
+        return Err(remote_source_error(
+            "apk_trusted_sha256_strategy_unsupported",
+            "A trusted publisher SHA-256 is supported only for pinned remote APK assets.",
+        ));
+    }
+    Ok(trusted_sha256)
 }
 
 #[tauri::command]
@@ -2541,5 +2572,33 @@ mod tests {
     fn direct_url_can_defer_apk_filename_to_response_headers() {
         let source = normalize_remote_source("direct_apk", "https://example.com/download").unwrap();
         assert_eq!(source.url.as_str(), "https://example.com/download");
+    }
+
+    #[test]
+    fn trusted_sha256_request_value_forwards_only_non_empty_pinned_values() {
+        assert_eq!(
+            trusted_sha256_request_value("pinned_remote_asset", Some(" AABB ")).unwrap(),
+            Some(" AABB ")
+        );
+        assert_eq!(
+            trusted_sha256_request_value("pinned_remote_asset", Some(" \t\r\n")).unwrap(),
+            None
+        );
+        assert_eq!(
+            trusted_sha256_request_value("latest_compatible_release", None).unwrap(),
+            None
+        );
+    }
+
+    #[test]
+    fn trusted_sha256_request_value_rejects_unsupported_strategies() {
+        for strategy in ["latest_compatible_release", "user_provided_apk"] {
+            let error = trusted_sha256_request_value(strategy, Some(&"A".repeat(64)))
+                .expect_err("non-pinned checksum should be rejected");
+            assert_eq!(
+                error["error"]["code"],
+                "apk_trusted_sha256_strategy_unsupported"
+            );
+        }
     }
 }

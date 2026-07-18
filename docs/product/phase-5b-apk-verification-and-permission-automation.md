@@ -375,22 +375,61 @@ Do not add certificate, signer, or signature-verification parameters.
 
 ## Phase 5B7 — Optional checksum enforcement
 
-Where a provider or publisher exposes a trustworthy checksum, support:
+Status: complete
+
+`install_apk` accepts one additional optional, backward-compatible parameter:
 
 ```yaml
 expected_sha256: ABCDEF...
 ```
 
-Rules:
+The parameter accepts only a literal string containing exactly 64 hexadecimal
+characters after trimming ASCII whitespace around the complete value. Upper-
+and lowercase input is accepted, and valid input is normalized to 64 uppercase
+hexadecimal characters in generated recipes and execution plans. Embedded
+whitespace, prefixes such as `sha256:`, separators, non-hexadecimal characters,
+references, non-string values, and incorrect lengths are invalid. The parameter
+has no default, and recipes that omit it retain the legacy installation path
+without calculating a checksum.
 
-- normalize to uppercase hexadecimal internally;
-- stream SHA-256 calculation;
-- reject mismatch before installation;
-- do not scrape arbitrary release prose unless checksum format and asset binding are unambiguous;
-- absence of a publisher checksum is not represented as verified;
-- a locally calculated hash is metadata unless compared with trusted expected data.
+Immediately before installation, the executor streams the resolved host APK
+through SHA-256 with a fixed-size buffer. Host runtime-value validation, the
+`.apk` extension check, file existence, and optional package-name enforcement
+all run before checksum calculation. When package-name and checksum enforcement
+are both enabled, a package inspection or comparison failure prevents the
+checksum file read. The device installation call occurs only after every enabled
+check passes.
 
-This phase may be deferred independently.
+A mismatch fails before installation with `apk_checksum_mismatch` and reports
+only the uppercase expected and actual hashes. A file open or read failure uses
+`apk_checksum_read_failed`. These failures expose no APK path, filename, or raw
+I/O diagnostic.
+
+The remote app generator accepts a separate optional `trustedSha256` request
+field. It belongs only to pinned-remote-asset recipe generation and is never
+stored in app-definition metadata, tracking-source metadata, or inspection
+facts. For a pinned asset, an omitted or blank value is accepted and omitted,
+valid input is normalized and emitted as `expected_sha256`, and invalid input
+blocks generation with `apk_trusted_sha256_invalid`. Latest-compatible-release
+and user-provided-APK strategies accept an omitted or blank value but reject a
+non-empty value with `apk_trusted_sha256_strategy_unsupported`.
+
+The Config Editor exposes this field only for pinned assets and labels it as a
+publisher-provided trusted checksum. Changing the source, APK, strategy, or
+inspection session clears it. Editing it after review invalidates generated
+recipe and collision results without clearing unrelated editable app or recipe
+fields.
+
+The authoring inspection result remains intentionally separate:
+
+- `calculatedSha256` remains locally calculated metadata only;
+- `checksumStatus` remains `not_compared`;
+- the calculated value never initializes or supplies `trustedSha256`;
+- absence of a trusted publisher checksum is not represented as verified.
+
+Phase 5B7 adds no latest-release checksum discovery, checksum sidecar resolution,
+release-text scraping, signature or certificate inspection, Java tooling,
+Android Build Tools, Android SDK dependency, or authored-catalog changes.
 
 ## Phase 5B8 — Generated permission step
 

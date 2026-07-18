@@ -2192,6 +2192,12 @@ fn param_contract_accepts_valid_enum_and_bool_values() {
                     "expected_package_name",
                     ParamValue::Literal(json!("com.example.app")),
                 ),
+                (
+                    "expected_sha256",
+                    ParamValue::Literal(json!(
+                        " \t0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef\r\n"
+                    )),
+                ),
                 ("replace_existing", ParamValue::Literal(json!(true))),
             ]),
         ),
@@ -2215,8 +2221,72 @@ fn param_contract_accepts_valid_enum_and_bool_values() {
         json!({"value": "com.example.app"})
     );
     assert_eq!(
+        *param_contract_step_param(&actual, "install", "expected_sha256"),
+        json!({"value": "0123456789ABCDEF0123456789ABCDEF0123456789ABCDEF0123456789ABCDEF"})
+    );
+    assert_eq!(
         *param_contract_step_param(&actual, "install", "replace_existing"),
         json!({"value": true})
+    );
+}
+
+#[test]
+fn install_apk_expected_sha256_rejects_invalid_authored_values() {
+    let invalid_values = [
+        json!(false),
+        json!(""),
+        json!("0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcde"),
+        json!("g123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"),
+        json!("sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"),
+        json!("0123456789abcdef0123456789abcdef 0123456789abcdef0123456789abcdef"),
+        json!("0123456789abcdef0123456789abcdef-0123456789abcdef0123456789abcdef"),
+    ];
+
+    for invalid in invalid_values {
+        let actual = planning_result_value(param_contract_input(vec![param_contract_step(
+            "install",
+            "install_apk",
+            vec![],
+            ref_params(vec![
+                (
+                    "app",
+                    ParamValue::Ref("artifacts.app_apk.local_path".to_string()),
+                ),
+                ("expected_sha256", ParamValue::Literal(invalid.clone())),
+            ]),
+        )]));
+        assert_param_contract_error(
+            &actual,
+            "invalid_param_value",
+            "install",
+            "expected_sha256",
+            json!("literal 64-character hexadecimal string"),
+            invalid,
+        );
+    }
+
+    let ref_value = planning_result_value(param_contract_input(vec![param_contract_step(
+        "install",
+        "install_apk",
+        vec![],
+        ref_params(vec![
+            (
+                "app",
+                ParamValue::Ref("artifacts.app_apk.local_path".to_string()),
+            ),
+            (
+                "expected_sha256",
+                ParamValue::Ref("inputs.expected_sha256".to_string()),
+            ),
+        ]),
+    )]));
+    assert_param_contract_error(
+        &ref_value,
+        "invalid_param_source",
+        "install",
+        "expected_sha256",
+        json!(["literal"]),
+        json!({"ref": "inputs.expected_sha256"}),
     );
 }
 

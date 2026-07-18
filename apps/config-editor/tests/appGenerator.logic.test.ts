@@ -16,6 +16,7 @@ import {
   matchingAssetNames,
   otherRequestedPermissions,
   parseConnectedDeviceApi,
+  parseTrustedSha256,
   readableNameFromPackage,
   reduceAppGenerator,
   suggestAssetPattern,
@@ -206,6 +207,84 @@ test("connected-device API validation accepts blank and positive u32 values", ()
   for (const invalid of ["0", "-1", "1.5", "preview", "4294967296"]) {
     assert.equal(parseConnectedDeviceApi(invalid).ok, false, invalid);
   }
+});
+
+test("trusted publisher SHA-256 accepts only plain hexadecimal and normalizes uppercase", () => {
+  assert.deepEqual(parseTrustedSha256(" \t\r\n"), { ok: true, value: null });
+  assert.deepEqual(
+    parseTrustedSha256(
+      " \t0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef\r\n",
+    ),
+    {
+      ok: true,
+      value: "0123456789ABCDEF0123456789ABCDEF0123456789ABCDEF0123456789ABCDEF",
+    },
+  );
+  for (const invalid of [
+    "sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
+    "0123456789abcdef0123456789abcdef 0123456789abcdef0123456789abcdef",
+    "0123456789abcdef0123456789abcdef-0123456789abcdef0123456789abcdef",
+    "g123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
+    "0123456789abcdef",
+    "\u00A00123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef\u00A0",
+  ]) {
+    assert.equal(parseTrustedSha256(invalid).ok, false, invalid);
+  }
+});
+
+test("trusted checksum edits invalidate reviewed output without clearing editable fields", () => {
+  const generated = draft();
+  const collisions = { collisions: [], blocking: false };
+  const form = draftToForm(generated);
+  const state: AppGeneratorState = {
+    ...initialAppGeneratorState,
+    phase: "reviewing",
+    draft: generated,
+    form,
+    collisions,
+    saved: {} as AppRecipeSaveResult,
+  };
+
+  const next = reduceAppGenerator(state, {
+    type: "trusted-sha256",
+    value: "A".repeat(64),
+  });
+
+  assert.equal(next.trustedSha256, "A".repeat(64));
+  assert.equal(next.form, form);
+  assert.equal(next.draft, null);
+  assert.equal(next.collisions, null);
+  assert.equal(next.saved, null);
+});
+
+test("trusted checksum resets for strategy, APK, and inspection transitions", () => {
+  const withChecksum = {
+    ...initialAppGeneratorState,
+    trustedSha256: "A".repeat(64),
+  };
+  assert.equal(
+    reduceAppGenerator(withChecksum, {
+      type: "install-strategy",
+      strategy: "latest_compatible_release",
+    }).trustedSha256,
+    "",
+  );
+  assert.equal(
+    reduceAppGenerator(withChecksum, {
+      type: "apk-selected",
+      apkHandle: "replacement",
+      label: "Replacement APK",
+    }).trustedSha256,
+    "",
+  );
+  const inspecting = reduceAppGenerator(withChecksum, { type: "inspecting" });
+  assert.equal(inspecting.trustedSha256, "");
+  assert.equal(
+    reduceAppGenerator(inspecting, { type: "inspected", inspection: inspection() })
+      .trustedSha256,
+    "",
+    "calculatedSha256 must never initialize trustedSha256",
+  );
 });
 
 test("permission review keeps candidates separate from all other declarations", () => {
