@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import test from "node:test";
 
 import type {
+  ApkInspectionResult,
   AppRecipeDraftResult,
   AppRecipeSaveResult,
 } from "../src/api/types.js";
@@ -13,11 +14,59 @@ import {
   formToRequest,
   initialAppGeneratorState,
   matchingAssetNames,
+  otherRequestedPermissions,
+  parseConnectedDeviceApi,
   readableNameFromPackage,
   reduceAppGenerator,
   suggestAssetPattern,
   visibleDraftDiagnostics,
 } from "../src/components/appGenerator.logic.js";
+
+function inspection(): ApkInspectionResult {
+  const applicable = {
+    status: "applicable" as const,
+    reason: null,
+    maximumSdkVersion: null,
+    introductionApi: null,
+    minimumDeviceApi: null,
+    minimumTargetSdk: null,
+    targetSdkState: null,
+  };
+  return {
+    manifest: {
+      packageName: "com.example.app",
+      versionCode: "42",
+      versionName: "1.2",
+      minSdkVersion: "23",
+      targetSdkVersion: "35",
+    },
+    permissions: [
+      { name: "android.permission.CAMERA", declarationKind: "uses_permission", maxSdkVersion: null, classification: "runtime_grantable", applicability: applicable },
+      { name: "android.permission.MANAGE_EXTERNAL_STORAGE", declarationKind: "uses_permission", maxSdkVersion: null, classification: "app_op_grantable", applicability: applicable },
+      { name: "android.permission.UNKNOWN", declarationKind: "uses_permission", maxSdkVersion: null, classification: "unknown", applicability: applicable },
+      {
+        name: "android.permission.OLD",
+        declarationKind: "uses_permission",
+        maxSdkVersion: "28",
+        classification: "runtime_grantable",
+        applicability: { ...applicable, status: "not_applicable", reason: "max_sdk_version_exceeded", maximumSdkVersion: 28 },
+      },
+      {
+        name: "android.permission.MAYBE",
+        declarationKind: "uses_permission_sdk_23",
+        maxSdkVersion: "preview",
+        classification: "unknown",
+        applicability: { ...applicable, status: "indeterminate", reason: "invalid_max_sdk_version" },
+      },
+    ],
+    runtimeGrantCandidates: [{ permissionName: "android.permission.CAMERA", requiresRoot: false, selected: false }],
+    appOpCandidates: [{ permissionName: "android.permission.MANAGE_EXTERNAL_STORAGE", operationName: "MANAGE_EXTERNAL_STORAGE", mode: "allow", requiresRoot: true, selected: false }],
+    warnings: [{ code: "apk_permission_unknown", message: "Review this permission.", permissionName: "android.permission.UNKNOWN", applicabilityReason: null }],
+    calculatedSha256: "ABCD",
+    checksumStatus: "not_compared",
+    signatureVerification: "not_performed",
+  };
+}
 
 function draft(): AppRecipeDraftResult {
   return {
@@ -129,7 +178,6 @@ test("asset pattern validation rejects invalid zero-match and ambiguous rules", 
   assert.match(assetPatternError("^app-.*\\.apk$", files) ?? "", /multiple APKs/u);
 });
 
-test("started session restores trusted analyzer and root handles", () => {
 test("remote download has a distinct busy phase before inspection", () => {
   let state = reduceAppGenerator(initialAppGeneratorState, {
     type: "started",
@@ -141,18 +189,61 @@ test("remote download has a distinct busy phase before inspection", () => {
   assert.equal(state.phase, "inspecting");
 });
 
+test("started session restores only the trusted root handle", () => {
   const state = reduceAppGenerator(initialAppGeneratorState, {
     type: "started",
     sessionHandle: "session",
-    analyzerHandle: "analyzer",
-    analyzerKind: "apkanalyzer",
-    analyzerLabel: "Configured apkanalyzer",
     rootHandle: "root",
     rootLabel: "Selected authored root",
   });
-  assert.equal(state.analyzerHandle, "analyzer");
-  assert.equal(state.analyzerKind, "apkanalyzer");
   assert.equal(state.rootHandle, "root");
+});
+
+test("connected-device API validation accepts blank and positive u32 values", () => {
+  assert.deepEqual(parseConnectedDeviceApi(""), { ok: true, value: null });
+  assert.deepEqual(parseConnectedDeviceApi(" 35 "), { ok: true, value: 35 });
+  assert.deepEqual(parseConnectedDeviceApi("4294967295"), { ok: true, value: 4_294_967_295 });
+  for (const invalid of ["0", "-1", "1.5", "preview", "4294967296"]) {
+    assert.equal(parseConnectedDeviceApi(invalid).ok, false, invalid);
+  }
+});
+
+test("permission review keeps candidates separate from all other declarations", () => {
+  assert.deepEqual(
+    otherRequestedPermissions(inspection()).map((permission) => permission.name),
+    ["android.permission.UNKNOWN", "android.permission.OLD", "android.permission.MAYBE"],
+  );
+  const withoutContext = inspection();
+  withoutContext.permissions = withoutContext.permissions.map((permission) => ({
+    ...permission,
+    classification: null,
+    applicability: null,
+  }));
+  withoutContext.runtimeGrantCandidates = [];
+  withoutContext.appOpCandidates = [];
+  assert.equal(otherRequestedPermissions(withoutContext).length, withoutContext.permissions.length);
+});
+
+test("candidate review state resets on inspection and never invalidates generated work", () => {
+  const generated = draft();
+  const collisions = { collisions: [], blocking: false };
+  let state = reduceAppGenerator(initialAppGeneratorState, { type: "drafted", draft: generated });
+  state = reduceAppGenerator(state, { type: "reviewed", draft: generated, collisions });
+  state = reduceAppGenerator(state, { type: "inspected", inspection: inspection() });
+  const form = state.form;
+  state = reduceAppGenerator(state, { type: "runtime-candidate-selected", index: 0, selected: true });
+  state = reduceAppGenerator(state, { type: "app-op-candidate-selected", index: 0, selected: true });
+  assert.equal(state.inspection?.runtimeGrantCandidates[0]?.selected, true);
+  assert.equal(state.inspection?.appOpCandidates[0]?.selected, true);
+  assert.equal(state.draft, generated);
+  assert.equal(state.form, form);
+  assert.equal(state.collisions, collisions);
+
+  state = reduceAppGenerator(state, { type: "inspected", inspection: inspection() });
+  assert.equal(state.inspection?.runtimeGrantCandidates[0]?.selected, false);
+  assert.equal(state.inspection?.appOpCandidates[0]?.selected, false);
+  state = reduceAppGenerator(state, { type: "apk-selected", apkHandle: "new-apk", label: "New APK" });
+  assert.equal(state.inspection, null);
 });
 
 test("reducer clears stale review when the form changes", () => {

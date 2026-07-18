@@ -1,5 +1,6 @@
 import type {
   ApkInspectionResult,
+  ApkPermissionReviewDto,
   AppDefinitionV1Dto,
   AppMappingEditsDto,
   AppRecipeCollisionResult,
@@ -13,6 +14,38 @@ import type {
   RemoteSourceDescriptorDto,
 } from "../api/types.js";
 import { parseMetadataObject } from "./deviceProfileGenerator.logic.js";
+
+const MAX_ANDROID_API_INPUT = 4_294_967_295;
+
+export type ConnectedDeviceApiResult =
+  | { ok: true; value: number | null }
+  | { ok: false; message: string };
+
+/** Parse optional Android API context without relying on Tauri deserialization errors. */
+export function parseConnectedDeviceApi(input: string): ConnectedDeviceApiResult {
+  const trimmed = input.trim();
+  if (trimmed.length === 0) return { ok: true, value: null };
+  if (!/^[0-9]+$/u.test(trimmed)) {
+    return { ok: false, message: "Connected-device API must be a positive integer." };
+  }
+  const value = Number(trimmed);
+  if (!Number.isSafeInteger(value) || value < 1 || value > MAX_ANDROID_API_INPUT) {
+    return {
+      ok: false,
+      message: `Connected-device API must be between 1 and ${MAX_ANDROID_API_INPUT}.`,
+    };
+  }
+  return { ok: true, value };
+}
+
+/** Return declarations not represented by an applicable automation candidate section. */
+export function otherRequestedPermissions(inspection: ApkInspectionResult): ApkPermissionReviewDto[] {
+  return inspection.permissions.filter((permission) => {
+    if (permission.applicability?.status !== "applicable") return true;
+    return permission.classification !== "runtime_grantable"
+      && permission.classification !== "app_op_grantable";
+  });
+}
 
 export type AppGeneratorPhase =
   | "starting"
@@ -38,9 +71,7 @@ export interface AppGeneratorState {
   sessionHandle: string | null;
   apkHandle: string | null;
   apkLabel: string | null;
-  analyzerHandle: string | null;
-  analyzerLabel: string | null;
-  analyzerKind: "apkanalyzer" | "aapt2";
+  connectedDeviceApiInput: string;
   sourceMode: AppGeneratorSourceMode;
   sourceUrl: string;
   includePrereleases: boolean;
@@ -63,9 +94,6 @@ export type AppGeneratorAction =
   | {
       type: "started";
       sessionHandle: string;
-      analyzerHandle?: string | null;
-      analyzerKind?: "apkanalyzer" | "aapt2" | null;
-      analyzerLabel?: string | null;
       rootHandle?: string | null;
       rootLabel?: string | null;
     }
@@ -78,12 +106,13 @@ export type AppGeneratorAction =
   | { type: "asset-selected"; assetHandle: string }
   | { type: "asset-pattern"; value: string }
   | { type: "install-strategy"; strategy: AppGeneratorInstallStrategy }
+  | { type: "connected-device-api"; value: string }
   | { type: "downloading" }
   | { type: "remote-downloaded"; apkHandle: string; label: string; source: RemoteSourceDescriptorDto }
-  | { type: "analyzer-kind"; kind: "apkanalyzer" | "aapt2" }
-  | { type: "analyzer-selected"; analyzerHandle: string; label: string }
   | { type: "inspecting" }
   | { type: "inspected"; inspection: ApkInspectionResult }
+  | { type: "runtime-candidate-selected"; index: number; selected: boolean }
+  | { type: "app-op-candidate-selected"; index: number; selected: boolean }
   | { type: "drafted"; draft: AppRecipeDraftResult }
   | { type: "form"; form: AppGeneratorFormState }
   | { type: "root-selected"; rootHandle: string; label: string }
@@ -97,9 +126,7 @@ export const initialAppGeneratorState: AppGeneratorState = {
   sessionHandle: null,
   apkHandle: null,
   apkLabel: null,
-  analyzerHandle: null,
-  analyzerLabel: null,
-  analyzerKind: "apkanalyzer",
+  connectedDeviceApiInput: "",
   sourceMode: "local_apk",
   sourceUrl: "",
   includePrereleases: false,
@@ -128,9 +155,6 @@ export function reduceAppGenerator(
         ...state,
         phase: "selecting",
         sessionHandle: action.sessionHandle,
-        analyzerHandle: action.analyzerHandle ?? null,
-        analyzerKind: action.analyzerKind ?? state.analyzerKind,
-        analyzerLabel: action.analyzerLabel ?? null,
         rootHandle: action.rootHandle ?? null,
         rootLabel: action.rootLabel ?? null,
         error: null,
@@ -236,6 +260,16 @@ export function reduceAppGenerator(
         collisions: null,
         error: null,
       };
+    case "connected-device-api":
+      return {
+        ...state,
+        connectedDeviceApiInput: action.value,
+        inspection: null,
+        draft: null,
+        form: null,
+        collisions: null,
+        error: null,
+      };
     case "downloading":
       return { ...state, phase: "downloading", error: null };
     case "remote-downloaded":
@@ -267,32 +301,32 @@ export function reduceAppGenerator(
         collisions: null,
         error: null,
       };
-    case "analyzer-kind":
-      return {
-        ...state,
-        analyzerKind: action.kind,
-        analyzerHandle: null,
-        analyzerLabel: null,
-        inspection: null,
-        draft: null,
-        form: null,
-        collisions: null,
-      };
-    case "analyzer-selected":
-      return {
-        ...state,
-        analyzerHandle: action.analyzerHandle,
-        analyzerLabel: action.label,
-        inspection: null,
-        draft: null,
-        form: null,
-        collisions: null,
-        error: null,
-      };
     case "inspecting":
       return { ...state, phase: "inspecting", error: null };
     case "inspected":
       return { ...state, phase: "editing", inspection: action.inspection, error: null };
+    case "runtime-candidate-selected":
+      if (!state.inspection) return state;
+      return {
+        ...state,
+        inspection: {
+          ...state.inspection,
+          runtimeGrantCandidates: state.inspection.runtimeGrantCandidates.map((candidate, index) =>
+            index === action.index ? { ...candidate, selected: action.selected } : candidate,
+          ),
+        },
+      };
+    case "app-op-candidate-selected":
+      if (!state.inspection) return state;
+      return {
+        ...state,
+        inspection: {
+          ...state.inspection,
+          appOpCandidates: state.inspection.appOpCandidates.map((candidate, index) =>
+            index === action.index ? { ...candidate, selected: action.selected } : candidate,
+          ),
+        },
+      };
     case "drafted":
       return {
         ...state,
@@ -504,4 +538,3 @@ function suggestedPatternForHandle(
 function escapeRegex(value: string): string {
   return value.replace(/[.*+?^${}()|[\]\\]/gu, "\\$&");
 }
-

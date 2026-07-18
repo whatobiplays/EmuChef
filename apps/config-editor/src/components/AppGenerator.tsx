@@ -1,11 +1,10 @@
-import { useEffect, useReducer, useRef, type Dispatch } from "react";
+import { useEffect, useReducer, useRef } from "react";
 
 import {
   beginAppGenerator,
   analyzeAppGeneratorSource,
   cancelAppGenerator,
   checkAppRecipeCollisions,
-  chooseAppGeneratorAnalyzer,
   chooseAppGeneratorApk,
   chooseAppGeneratorAuthoredRoot,
   downloadAppGeneratorRemoteApk,
@@ -18,7 +17,10 @@ import {
   type EditorApiResult,
 } from "../api/editorApi";
 import type {
-  ApkInspectionFactsDto,
+  ApkInspectionResult,
+  ApkPermissionApplicabilityDto,
+  ApkPermissionClassification,
+  ApkPermissionReviewDto,
   AppDefinitionV1Dto,
   AppMappingEditsDto,
   AppRecipeCollisionResult,
@@ -35,11 +37,11 @@ import {
   formToRequest,
   initialAppGeneratorState,
   matchingAssetNames,
+  otherRequestedPermissions,
+  parseConnectedDeviceApi,
   reduceAppGenerator,
   visibleDraftDiagnostics,
   type AppGeneratorFormState,
-  type AppGeneratorAction,
-  type AppGeneratorState,
 } from "./appGenerator.logic";
 
 interface AppGeneratorProps {
@@ -80,9 +82,6 @@ export function AppGenerator({ initialAuthoredRoot, onAuthoredRootSelected, onCl
       dispatch({
         type: "started",
         sessionHandle: response.result.sessionHandle,
-        analyzerHandle: response.result.analyzerHandle,
-        analyzerKind: response.result.analyzerKind,
-        analyzerLabel: response.result.analyzerLabel,
         rootHandle,
         rootLabel,
       });
@@ -98,22 +97,6 @@ export function AppGenerator({ initialAuthoredRoot, onAuthoredRootSelected, onCl
     if (response.kind === "success") {
       if (!response.result.cancelled && response.result.apkHandle && response.result.label) {
         dispatch({ type: "apk-selected", apkHandle: response.result.apkHandle, label: response.result.label });
-      }
-    } else {
-      dispatch({ type: "failure", message: apiFailure(response) });
-    }
-  }
-
-  async function chooseAnalyzer() {
-    if (!state.sessionHandle) return;
-    const response = await chooseAppGeneratorAnalyzer(state.sessionHandle, state.analyzerKind);
-    if (response.kind === "success") {
-      if (!response.result.cancelled && response.result.analyzerHandle && response.result.label) {
-        dispatch({
-          type: "analyzer-selected",
-          analyzerHandle: response.result.analyzerHandle,
-          label: response.result.label,
-        });
       }
     } else {
       dispatch({ type: "failure", message: apiFailure(response) });
@@ -137,7 +120,12 @@ export function AppGenerator({ initialAuthoredRoot, onAuthoredRootSelected, onCl
   }
 
   async function downloadRemoteApk() {
-    if (!state.sessionHandle || !state.selectedAssetHandle || !state.analyzerHandle) return;
+    if (!state.sessionHandle || !state.selectedAssetHandle) return;
+    const deviceApi = parseConnectedDeviceApi(state.connectedDeviceApiInput);
+    if (!deviceApi.ok) {
+      dispatch({ type: "failure", message: deviceApi.message });
+      return;
+    }
     const selectedAsset = state.sourceAnalysis?.assets.find(
       (asset) => asset.assetHandle === state.selectedAssetHandle,
     );
@@ -183,19 +171,23 @@ export function AppGenerator({ initialAuthoredRoot, onAuthoredRootSelected, onCl
     assetHandle: string | null,
     remoteSource: RemoteSourceDescriptorDto | null,
   ) {
-    if (!state.sessionHandle || !state.analyzerHandle) return;
+    if (!state.sessionHandle) return;
+    const deviceApi = parseConnectedDeviceApi(state.connectedDeviceApiInput);
+    if (!deviceApi.ok) {
+      dispatch({ type: "failure", message: deviceApi.message });
+      return;
+    }
     dispatch({ type: "inspecting" });
     const inspected = await inspectAppGeneratorApk(
       state.sessionHandle,
       apkHandle,
-      state.analyzerHandle,
+      deviceApi.value,
     );
     if (inspected.kind !== "success") {
       dispatch({ type: "failure", message: apiFailure(inspected) });
       return;
     }
     dispatch({ type: "inspected", inspection: inspected.result });
-    if (inspected.result.blocking) return;
     const drafted = remoteSource && assetHandle
       ? await generateRemoteAppRecipeDraft(
           state.sessionHandle,
@@ -385,6 +377,8 @@ export function AppGenerator({ initialAuthoredRoot, onAuthoredRootSelected, onCl
     state.assetPattern,
     selectedReleaseFileNames,
   );
+  const connectedDeviceApi = parseConnectedDeviceApi(state.connectedDeviceApiInput);
+  const connectedDeviceApiError = connectedDeviceApi.ok ? null : connectedDeviceApi.message;
 
   const busy =
     state.phase === "starting" ||
@@ -437,9 +431,9 @@ export function AppGenerator({ initialAuthoredRoot, onAuthoredRootSelected, onCl
             {state.sourceMode === "local_apk" ? (
               <div className="mt-4 grid gap-4 md:grid-cols-3">
                 <Picker label="APK" value={state.apkLabel} button="Choose APK..." disabled={busy} onClick={() => void chooseApk()} />
-                <AnalyzerPicker state={state} busy={busy} chooseAnalyzer={chooseAnalyzer} dispatch={dispatch} />
+                <ConnectedDeviceApiField value={state.connectedDeviceApiInput} error={connectedDeviceApiError} disabled={busy} onChange={(value) => dispatch({ type: "connected-device-api", value })} />
                 <div className="flex items-end">
-                  <button className="w-full rounded bg-slate-900 px-3 py-2 text-sm font-medium text-white disabled:bg-slate-300" disabled={busy || !state.apkHandle || !state.analyzerHandle} onClick={() => void inspectApk()}>
+                  <button className="w-full rounded bg-slate-900 px-3 py-2 text-sm font-medium text-white disabled:bg-slate-300" disabled={busy || !state.apkHandle || connectedDeviceApiError !== null} onClick={() => void inspectApk()}>
                     {state.phase === "inspecting" ? "Inspecting..." : "Inspect APK"}
                   </button>
                 </div>
@@ -458,7 +452,7 @@ export function AppGenerator({ initialAuthoredRoot, onAuthoredRootSelected, onCl
                 {state.sourceMode.endsWith("_repository") ? <Check label="Include prereleases" checked={state.includePrereleases} disabled={busy} onChange={(value) => dispatch({ type: "include-prereleases", value })} /> : null}
                 {state.sourceAnalysis ? <RemoteAssetPicker analysis={state.sourceAnalysis} selectedAssetHandle={state.selectedAssetHandle} disabled={busy} onSelect={(assetHandle) => dispatch({ type: "asset-selected", assetHandle })} /> : null}
                 <div className="grid gap-4 md:grid-cols-3">
-                  <AnalyzerPicker state={state} busy={busy} chooseAnalyzer={chooseAnalyzer} dispatch={dispatch} />
+                  <ConnectedDeviceApiField value={state.connectedDeviceApiInput} error={connectedDeviceApiError} disabled={busy} onChange={(value) => dispatch({ type: "connected-device-api", value })} />
                   {state.installStrategy === "latest_compatible_release" ? (
                     <section className="rounded border border-slate-200 bg-slate-50 p-3 text-sm md:col-span-3">
                       <label>
@@ -494,7 +488,7 @@ export function AppGenerator({ initialAuthoredRoot, onAuthoredRootSelected, onCl
                   <div className="flex items-end">
                     <button
                       className="flex w-full items-center justify-center gap-2 rounded bg-slate-900 px-3 py-2 text-sm font-medium text-white disabled:bg-slate-300"
-                      disabled={busy || !state.selectedAssetHandle || !state.analyzerHandle}
+                      disabled={busy || !state.selectedAssetHandle || connectedDeviceApiError !== null}
                       onClick={() => void downloadRemoteApk()}
                     >
                       {state.phase === "downloading" || state.phase === "inspecting" ? (
@@ -520,11 +514,18 @@ export function AppGenerator({ initialAuthoredRoot, onAuthoredRootSelected, onCl
             )}
           </section>
 
-          {state.inspection ? <Facts facts={state.inspection.facts} diagnostics={state.inspection.diagnostics} /> : null}
+          {state.inspection ? (
+            <InspectionReview
+              inspection={state.inspection}
+              disabled={busy}
+              onRuntimeCandidateChange={(index, selected) => dispatch({ type: "runtime-candidate-selected", index, selected })}
+              onAppOpCandidateChange={(index, selected) => dispatch({ type: "app-op-candidate-selected", index, selected })}
+            />
+          ) : null}
           {state.form ? (
             <>
               <AppFields sourceMode={state.sourceMode} installStrategy={state.installStrategy} form={state.form} disabled={busy} updateForm={updateForm} changeApp={changeApp} changeMapping={changeMapping} />
-              <RecipeFields form={state.form} facts={state.inspection?.facts ?? null} disabled={busy} changeRecipe={changeRecipe} regenerateIds={() => void regenerateIds()} />
+              <RecipeFields form={state.form} disabled={busy} changeRecipe={changeRecipe} regenerateIds={() => void regenerateIds()} />
               <section className="mt-4 grid gap-4 rounded border border-slate-200 p-4 md:grid-cols-[1fr_auto]">
                 <Picker label="Authored root" value={state.rootHandle ? "Selected and ready" : null} button={state.rootHandle ? "Change authored root..." : "Choose authored root..."} disabled={busy} onClick={() => void chooseRoot()} />
                 <button
@@ -556,8 +557,23 @@ export function AppGenerator({ initialAuthoredRoot, onAuthoredRootSelected, onCl
   );
 }
 
-function AnalyzerPicker({ state, busy, chooseAnalyzer, dispatch }: { state: AppGeneratorState; busy: boolean; chooseAnalyzer: () => Promise<void>; dispatch: Dispatch<AppGeneratorAction> }) {
-  return <div><label className="text-xs font-semibold uppercase tracking-wide text-slate-500" htmlFor="apk-analyzer-kind">Analyzer type</label><select id="apk-analyzer-kind" className="mt-1 w-full rounded border border-slate-300 px-3 py-2 text-sm" disabled={busy} value={state.analyzerKind} onChange={(event) => dispatch({ type: "analyzer-kind", kind: event.target.value as "apkanalyzer" | "aapt2" })}><option value="apkanalyzer">apkanalyzer</option><option value="aapt2">aapt2</option></select><button className="mt-2 rounded border border-slate-300 px-3 py-1.5 text-sm" disabled={busy} onClick={() => void chooseAnalyzer()}>{state.analyzerHandle ? "Change executable..." : "Choose executable..."}</button><p className="mt-1 text-xs text-slate-500">{state.analyzerLabel ?? "No analyzer configured"}</p></div>;
+function ConnectedDeviceApiField({ value, error, disabled, onChange }: { value: string; error: string | null; disabled: boolean; onChange: (value: string) => void }) {
+  return (
+    <label className="text-sm">
+      <HelpLabel label="Connected-device API (optional)" help="Enter the Android API level of the device you plan to use. Leave blank to inspect the manifest without permission applicability or automation candidates." />
+      <input
+        className="mt-1 w-full rounded border border-slate-300 px-3 py-2"
+        disabled={disabled}
+        inputMode="numeric"
+        min="1"
+        placeholder="For example, 35"
+        type="number"
+        value={value}
+        onChange={(event) => onChange(event.target.value)}
+      />
+      {error ? <span className="mt-1 block text-xs text-red-700">{error}</span> : <span className="mt-1 block text-xs text-slate-500">No device probing is performed.</span>}
+    </label>
+  );
 }
 
 function RemoteAssetPicker({ analysis, selectedAssetHandle, disabled, onSelect }: { analysis: import("../api/types").RemoteSourceAnalysisResult; selectedAssetHandle: string | null; disabled: boolean; onSelect: (assetHandle: string) => void }) {
@@ -574,27 +590,161 @@ function Picker({ label, value, button, disabled, onClick }: { label: string; va
   );
 }
 
-function Facts({ facts, diagnostics }: { facts: ApkInspectionFactsDto; diagnostics: Array<{ code: string; message: string; severity: string }> }) {
+function InspectionReview({ inspection, disabled, onRuntimeCandidateChange, onAppOpCandidateChange }: {
+  inspection: ApkInspectionResult;
+  disabled: boolean;
+  onRuntimeCandidateChange: (index: number, selected: boolean) => void;
+  onAppOpCandidateChange: (index: number, selected: boolean) => void;
+}) {
+  const otherPermissions = otherRequestedPermissions(inspection);
   const rows: Array<[string, string]> = [
-    ["Package", facts.packageName ?? "Missing"],
-    ["Label", facts.applicationLabel ?? "Missing"],
-    ["Version", [facts.versionName, facts.versionCode].filter(Boolean).join(" / ") || "Missing"],
-    ["SDK", `min ${facts.minSdk ?? "?"}, target ${facts.targetSdk ?? "?"}`],
-    ["ABIs", facts.abis.join(", ") || "Missing"],
-    ["Launchers", facts.launcherActivities.join(", ") || "None verified"],
-    ["Permissions", facts.requestedPermissions.join(", ") || "None reported"],
-    ["Debuggable", facts.debuggable === null ? "Missing" : String(facts.debuggable)],
-    ["Certificate SHA-256", facts.certificateSha256 ?? "Missing"],
+    ["Package", inspection.manifest.packageName],
+    ["Version name", inspection.manifest.versionName ?? "Not declared"],
+    ["Version code", inspection.manifest.versionCode ?? "Not declared"],
+    ["Minimum SDK", inspection.manifest.minSdkVersion ?? "Not declared"],
+    ["Target SDK", inspection.manifest.targetSdkVersion ?? "Not declared"],
   ];
   return (
-    <section className="mt-4 rounded border border-slate-200 p-4">
-      <h2 className="font-semibold">Verified APK facts</h2>
-      <dl className="mt-3 grid grid-cols-[9rem_1fr] gap-2 text-sm">
-        {rows.map(([label, value]) => <div className="contents" key={label}><dt className="font-medium text-slate-500">{label}</dt><dd className="break-all">{value}</dd></div>)}
-      </dl>
-      <Diagnostics label="APK inspection" emptyMessage="APK inspection completed successfully." items={diagnostics} />
+    <div className="mt-4 space-y-4">
+      <section className="rounded border border-slate-200 p-4">
+        <h2 className="font-semibold">APK manifest and integrity metadata</h2>
+        <p className="mt-1 text-sm text-slate-600">These values were extracted natively from the selected APK manifest.</p>
+        <dl className="mt-3 grid grid-cols-[9rem_1fr] gap-2 text-sm">
+          {rows.map(([label, value]) => <div className="contents" key={label}><dt className="font-medium text-slate-500">{label}</dt><dd className="break-all">{value}</dd></div>)}
+          <div className="contents"><dt className="font-medium text-slate-500">Calculated SHA-256</dt><dd className="break-all font-mono text-xs">{inspection.calculatedSha256}</dd></div>
+          <div className="contents"><dt className="font-medium text-slate-500">Checksum comparison</dt><dd>Not compared with a publisher-provided checksum.</dd></div>
+          <div className="contents"><dt className="font-medium text-slate-500">Signature verification</dt><dd>Not performed. EmuChef does not cryptographically verify APK signatures.</dd></div>
+        </dl>
+      </section>
+
+      <section className="rounded border border-slate-200 p-4">
+        <h2 className="font-semibold">Permission review</h2>
+        <p className="mt-1 text-sm text-slate-600">Selections are review-only in this phase and do not change generated or saved files.</p>
+        <PermissionWarnings inspection={inspection} />
+
+        <section className="mt-4 rounded border border-slate-200 bg-slate-50 p-3">
+          <h3 className="text-sm font-semibold">Runtime grant candidates</h3>
+          <p className="mt-1 text-xs text-slate-600">Runtime grants use <code>pm grant</code>. Candidates marked as not requiring root can run on unrooted devices.</p>
+          <div className="mt-3 space-y-2">
+            {inspection.runtimeGrantCandidates.map((candidate, index) => (
+              <label className="flex items-start gap-2 rounded border border-slate-200 bg-white p-3 text-sm" key={`${candidate.permissionName}-${index}`}>
+                <input type="checkbox" checked={candidate.selected} disabled={disabled} onChange={(event) => onRuntimeCandidateChange(index, event.target.checked)} />
+                <span><code>{candidate.permissionName}</code><span className="mt-1 block text-xs text-slate-500">{candidate.requiresRoot ? "Root required" : "No root required"}</span></span>
+              </label>
+            ))}
+            {inspection.runtimeGrantCandidates.length === 0 ? <p className="text-sm text-slate-500">No runtime grant candidates for this inspection context.</p> : null}
+          </div>
+        </section>
+
+        <section className="mt-4 rounded border border-slate-200 bg-slate-50 p-3">
+          <h3 className="text-sm font-semibold">App-op candidates</h3>
+          <p className="mt-1 text-xs text-slate-600">Root-dependent app-ops may not be available on unrooted devices.</p>
+          <div className="mt-3 space-y-2">
+            {inspection.appOpCandidates.map((candidate, index) => (
+              <label className="flex items-start gap-2 rounded border border-slate-200 bg-white p-3 text-sm" key={`${candidate.permissionName}-${candidate.operationName}-${index}`}>
+                <input type="checkbox" checked={candidate.selected} disabled={disabled} onChange={(event) => onAppOpCandidateChange(index, event.target.checked)} />
+                <span><code>{candidate.permissionName}</code><span className="mt-1 block text-xs text-slate-500">Operation {candidate.operationName}, mode {candidate.mode}; {candidate.requiresRoot ? "root required" : "no root required"}.</span></span>
+              </label>
+            ))}
+            {inspection.appOpCandidates.length === 0 ? <p className="text-sm text-slate-500">No app-op candidates for this inspection context.</p> : null}
+          </div>
+        </section>
+
+        <section className="mt-4">
+          <h3 className="text-sm font-semibold">Other requested permissions</h3>
+          <p className="mt-1 text-xs text-slate-600">Unknown, restricted, privileged, manual, install-time, non-applicable, and indeterminate permissions are not automated here.</p>
+          <div className="mt-3 space-y-2">
+            {otherPermissions.map((permission, index) => <PermissionDeclaration permission={permission} key={`${permission.name}-${permission.declarationKind}-${permission.maxSdkVersion ?? "none"}-${index}`} />)}
+            {otherPermissions.length === 0 ? <p className="text-sm text-slate-500">No other requested permissions.</p> : null}
+          </div>
+        </section>
+      </section>
+    </div>
+  );
+}
+
+function PermissionWarnings({ inspection }: { inspection: ApkInspectionResult }) {
+  if (inspection.warnings.length === 0) return null;
+  return (
+    <section className="mt-3">
+      <h3 className="text-sm font-semibold text-amber-800">Inspection context and warnings</h3>
+      <div className="mt-2 space-y-2">
+        {inspection.warnings.map((warning, index) => (
+          <div className="rounded border border-amber-300 bg-amber-50 p-2 text-sm" key={`${warning.code}-${warning.permissionName ?? "global"}-${index}`}>
+            {warning.permissionName ? <code className="font-semibold">{warning.permissionName}</code> : null}
+            <p className={warning.permissionName ? "mt-1" : ""}>{warning.message}{warning.applicabilityReason ? ` (${applicabilityReasonLabel(warning.applicabilityReason)})` : ""}</p>
+          </div>
+        ))}
+      </div>
     </section>
   );
+}
+
+function PermissionDeclaration({ permission }: { permission: ApkPermissionReviewDto }) {
+  const applicability = permission.applicability;
+  const tone = applicability?.status === "not_applicable"
+    ? "border-slate-300 bg-slate-50"
+    : applicability?.status === "indeterminate"
+      ? "border-amber-300 bg-amber-50"
+      : "border-slate-200 bg-white";
+  return (
+    <div className={`rounded border p-3 text-sm ${tone}`}>
+      <code className="font-semibold">{permission.name}</code>
+      <p className="mt-1 text-xs text-slate-600">Declaration: {declarationKindLabel(permission.declarationKind)}{permission.maxSdkVersion ? `; maximum SDK ${permission.maxSdkVersion}` : ""}.</p>
+      <p className="mt-1 text-xs text-slate-600">Classification: {classificationLabel(permission.classification)}. Applicability: {applicabilityLabel(applicability)}.</p>
+    </div>
+  );
+}
+
+function declarationKindLabel(kind: ApkPermissionReviewDto["declarationKind"]): string {
+  return kind === "uses_permission_sdk_23" ? "uses-permission-sdk-23" : "uses-permission";
+}
+
+function classificationLabel(classification: ApkPermissionClassification | null): string {
+  if (classification === null) return "unavailable without device API context";
+  const labels: Record<ApkPermissionClassification, string> = {
+    runtime_grantable: "runtime grantable",
+    runtime_restricted: "runtime restricted",
+    app_op_grantable: "app-op grantable",
+    manual_special_access: "manual special access",
+    install_time: "install time",
+    signature_or_privileged: "signature or privileged",
+    unknown: "unknown",
+  };
+  return labels[classification];
+}
+
+function applicabilityLabel(applicability: ApkPermissionApplicabilityDto | null): string {
+  if (applicability === null) return "unavailable without device API context";
+  const details = applicabilityDetails(applicability);
+  if (applicability.status === "applicable") return details ? `applicable (${details})` : "applicable";
+  const reason = applicability.reason ? ` — ${applicabilityReasonLabel(applicability.reason)}` : "";
+  const suffix = details ? `; ${details}` : "";
+  return applicability.status === "not_applicable" ? `not applicable${reason}${suffix}` : `indeterminate${reason}${suffix}`;
+}
+
+function applicabilityDetails(applicability: ApkPermissionApplicabilityDto): string {
+  const details: string[] = [];
+  if (applicability.maximumSdkVersion !== null) details.push(`maximum SDK ${applicability.maximumSdkVersion}`);
+  if (applicability.introductionApi !== null) details.push(`introduced in API ${applicability.introductionApi}`);
+  if (applicability.minimumDeviceApi !== null) details.push(`minimum device API ${applicability.minimumDeviceApi}`);
+  if (applicability.minimumTargetSdk !== null) details.push(`minimum target SDK ${applicability.minimumTargetSdk}`);
+  if (applicability.targetSdkState !== null) details.push(`target SDK ${applicability.targetSdkState === "missing" ? "missing" : "non-numeric"}`);
+  return details.join(", ");
+}
+
+function applicabilityReasonLabel(reason: NonNullable<ApkPermissionApplicabilityDto["reason"]>): string {
+  const labels: Record<NonNullable<ApkPermissionApplicabilityDto["reason"]>, string> = {
+    declaration_requires_api_23: "declaration requires Android API 23 or newer",
+    max_sdk_version_exceeded: "the declaration's maximum SDK was exceeded",
+    permission_not_introduced: "permission is not introduced on this device API",
+    permission_replaced: "permission was replaced for this Android context",
+    target_sdk_below_minimum: "application target SDK is below the required minimum",
+    invalid_max_sdk_version: "maximum SDK could not be interpreted",
+    target_sdk_unavailable: "target SDK context is unavailable",
+    replacement_target_sdk_unavailable: "replacement target SDK context is unavailable",
+  };
+  return labels[reason];
 }
 
 function AppFields({ sourceMode, installStrategy, form, disabled, updateForm, changeApp, changeMapping }: {
@@ -616,7 +766,7 @@ function AppFields({ sourceMode, installStrategy, form, disabled, updateForm, ch
         <Field label="Name" help="Human-readable app name shown in EmuChef." value={app.name} disabled={disabled} onChange={(name) => changeApp({ name })} />
         <CategoryField value={app.category} disabled={disabled} onChange={(category) => changeApp({ category: category.toLowerCase() })} />
         <Field label="Description" help="Optional short description of the app." value={app.description ?? ""} disabled={disabled} onChange={(description) => changeApp({ description: description || undefined })} />
-        <Field label="Primary package" help="Android application ID verified from the APK manifest. Change only when the manifest information is known to be wrong." value={app.package.primary} disabled={disabled} onChange={(primary) => updateForm((next) => { next.app.package.primary = primary; })} />
+        <Field label="Primary package" help="Android application ID extracted from the APK manifest. Change only when the manifest information is known to be wrong." value={app.package.primary} disabled={disabled} onChange={(primary) => updateForm((next) => { next.app.package.primary = primary; })} />
         <PackageAliasList values={form.aliases} disabled={disabled} onChange={(aliases) => updateForm((next) => { next.aliases = aliases; })} />
         <Fixed label="Installation method" help="Controls whether the recipe pins an APK, resolves the latest compatible release, or asks for a local file." value={installStrategy === "pinned_remote_asset" ? "Pinned release" : installStrategy === "latest_compatible_release" ? "Latest compatible release" : "User-provided APK"} />
         <Fixed label="Source resolver" help="Describes how the generated app definition identifies its installation source." value={installStrategy === "pinned_remote_asset" ? "Direct HTTPS download" : installStrategy === "latest_compatible_release" ? "Latest provider release" : "None required"} />
@@ -655,9 +805,8 @@ function AppFields({ sourceMode, installStrategy, form, disabled, updateForm, ch
   );
 }
 
-function RecipeFields({ form, facts, disabled, changeRecipe, regenerateIds }: {
+function RecipeFields({ form, disabled, changeRecipe, regenerateIds }: {
   form: AppGeneratorFormState;
-  facts: ApkInspectionFactsDto | null;
   disabled: boolean;
   changeRecipe: (update: Partial<AppRecipeEditsDto>) => void;
   regenerateIds: () => void;
@@ -679,16 +828,9 @@ function RecipeFields({ form, facts, disabled, changeRecipe, regenerateIds }: {
       </div>
       <div className="mt-3 grid gap-3 md:grid-cols-2">
         <Check label="Replace existing installation" checked={recipe.replaceExisting} disabled={disabled} onChange={(replaceExisting) => changeRecipe({ replaceExisting })} />
-        <Check label="Launch once after installation" checked={recipe.launchEnabled} disabled={disabled || !facts?.launcherActivities.length} onChange={(launchEnabled) => changeRecipe({ launchEnabled, launcherActivity: launchEnabled ? facts?.launcherActivities[0] ?? null : null })} />
+        <Check label="Launch once after installation" checked={recipe.launchEnabled} disabled onChange={() => undefined} />
       </div>
-      {recipe.launchEnabled ? (
-        <label className="mt-3 block text-sm">
-          <span className="font-medium">Verified launcher component</span>
-          <select className="mt-1 w-full rounded border border-slate-300 px-3 py-2" disabled={disabled} value={recipe.launcherActivity ?? ""} onChange={(event) => changeRecipe({ launcherActivity: event.target.value || null })}>
-            {(facts?.launcherActivities ?? []).map((value) => <option key={value} value={value}>{value}</option>)}
-          </select>
-        </label>
-      ) : null}
+      <p className="mt-2 text-xs text-slate-500">Launcher activities are unavailable from native manifest inspection, so launch-once generation remains disabled.</p>
     </section>
   );
 }
@@ -793,23 +935,5 @@ function MappingList({ label, values, disabled, onChange }: { label: string; val
 }
 
 function apiFailure<T>(response: Exclude<EditorApiResult<T>, { kind: "success" }>): string {
-  if (response.kind !== "api-error") return response.message;
-  const reason = response.error.details.reason;
-  if (typeof reason !== "string" || reason.length === 0) return response.error.message;
-  return `${response.error.message} Reason: ${formatAnalyzerFailureReason(reason)}.`;
-}
-
-function formatAnalyzerFailureReason(reason: string): string {
-  const labels: Record<string, string> = {
-    analyzer_start_failed: "the analyzer process could not start",
-    analyzer_output_unavailable: "the analyzer output stream was unavailable",
-    analyzer_timeout: "the analyzer timed out after 30 seconds",
-    analyzer_wait_failed: "the analyzer process could not be monitored",
-    analyzer_output_failed: "the analyzer output could not be read",
-    analyzer_output_limit: "the analyzer produced more than the 4 MiB output limit",
-    analyzer_command_failed: "an analyzer command returned a failure status",
-    analyzer_output_invalid: "the analyzer returned invalid text output",
-    analyzer_output_malformed: "the analyzer output did not contain the expected APK facts",
-  };
-  return labels[reason] ?? reason;
+  return response.kind === "api-error" ? response.error.message : response.message;
 }

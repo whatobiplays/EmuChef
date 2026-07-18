@@ -44,7 +44,6 @@ pub fn run() {
             app_generator::set_config_editor_authored_root,
             app_generator::begin_app_generator,
             app_generator::choose_app_generator_apk,
-            app_generator::choose_app_generator_analyzer,
             app_generator::choose_app_generator_authored_root,
             app_generator::analyze_app_generator_source,
             app_generator::download_app_generator_remote_apk,

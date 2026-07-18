@@ -492,9 +492,6 @@ export interface RemoteApkDownloadResult {
 
 export interface AppGeneratorSessionResult {
   sessionHandle: string;
-  analyzerHandle?: string | null;
-  analyzerKind?: "apkanalyzer" | "aapt2" | null;
-  analyzerLabel?: string | null;
   rootHandle?: string | null;
   rootLabel?: string | null;
 }
@@ -503,26 +500,88 @@ export interface AppGeneratorSelectionResult {
   cancelled: boolean;
   path?: string;
   apkHandle?: string;
-  analyzerHandle?: string;
   rootHandle?: string;
-  kind?: "apkanalyzer" | "aapt2";
   label?: string;
 }
 
-export interface ApkInspectionFactsDto {
-  packageName: string | null;
-  applicationLabel: string | null;
+export interface ApkManifestMetadataDto {
+  packageName: string;
   versionCode: string | null;
   versionName: string | null;
-  minSdk: number | null;
-  targetSdk: number | null;
-  abis: string[];
-  launcherActivities: string[];
-  requestedPermissions: string[];
-  debuggable: boolean | null;
-  split: boolean | null;
-  base: boolean | null;
-  certificateSha256: string | null;
+  minSdkVersion: string | null;
+  targetSdkVersion: string | null;
+}
+
+export type ApkPermissionDeclarationKind = "uses_permission" | "uses_permission_sdk_23";
+
+export type ApkPermissionClassification =
+  | "runtime_grantable"
+  | "runtime_restricted"
+  | "app_op_grantable"
+  | "manual_special_access"
+  | "install_time"
+  | "signature_or_privileged"
+  | "unknown";
+
+export type ApkPermissionApplicabilityStatus =
+  | "applicable"
+  | "not_applicable"
+  | "indeterminate";
+
+export type ApkPermissionApplicabilityReason =
+  | "declaration_requires_api_23"
+  | "max_sdk_version_exceeded"
+  | "permission_not_introduced"
+  | "permission_replaced"
+  | "target_sdk_below_minimum"
+  | "invalid_max_sdk_version"
+  | "target_sdk_unavailable"
+  | "replacement_target_sdk_unavailable";
+
+export interface ApkPermissionApplicabilityDto {
+  status: ApkPermissionApplicabilityStatus;
+  reason: ApkPermissionApplicabilityReason | null;
+  maximumSdkVersion: number | null;
+  introductionApi: number | null;
+  minimumDeviceApi: number | null;
+  minimumTargetSdk: number | null;
+  targetSdkState: "missing" | "non_numeric" | null;
+}
+
+export interface ApkPermissionReviewDto {
+  name: string;
+  declarationKind: ApkPermissionDeclarationKind;
+  maxSdkVersion: string | null;
+  classification: ApkPermissionClassification | null;
+  applicability: ApkPermissionApplicabilityDto | null;
+}
+
+export interface ApkRuntimeGrantCandidateDto {
+  permissionName: string;
+  requiresRoot: boolean;
+  selected: boolean;
+}
+
+export interface ApkAppOpCandidateDto {
+  permissionName: string;
+  operationName: string;
+  mode: "allow";
+  requiresRoot: boolean;
+  selected: boolean;
+}
+
+export interface ApkPermissionWarningDto {
+  code:
+    | "apk_permission_classification_context_unavailable"
+    | "apk_permission_not_applicable"
+    | "apk_permission_applicability_indeterminate"
+    | "apk_permission_runtime_restricted"
+    | "apk_permission_manual_special_access"
+    | "apk_permission_signature_or_privileged"
+    | "apk_permission_unknown";
+  message: string;
+  permissionName: string | null;
+  applicabilityReason: ApkPermissionApplicabilityReason | null;
 }
 
 export interface AppGeneratorDiagnosticDto {
@@ -533,11 +592,14 @@ export interface AppGeneratorDiagnosticDto {
 }
 
 export interface ApkInspectionResult {
-  analyzer: "apkanalyzer" | "aapt2";
-  facts: ApkInspectionFactsDto;
-  evidence: Array<{ field: string; state: "verified" | "missing"; source: string }>;
-  diagnostics: AppGeneratorDiagnosticDto[];
-  blocking: boolean;
+  manifest: ApkManifestMetadataDto;
+  permissions: ApkPermissionReviewDto[];
+  runtimeGrantCandidates: ApkRuntimeGrantCandidateDto[];
+  appOpCandidates: ApkAppOpCandidateDto[];
+  warnings: ApkPermissionWarningDto[];
+  calculatedSha256: string;
+  checksumStatus: "not_compared";
+  signatureVerification: "not_performed";
 }
 
 export interface AppDefinitionV1Dto {

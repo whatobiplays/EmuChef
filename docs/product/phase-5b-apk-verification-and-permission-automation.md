@@ -1,6 +1,6 @@
 # Phase 5B — APK Manifest Inspection and Permission Automation
 
-Status: in progress (Phases 5B1 through 5B4 complete)
+Status: in progress (Phases 5B1 through 5B5 complete)
 
 ## Purpose
 
@@ -298,14 +298,45 @@ All permission selections default to unchecked.
 
 ## Phase 5B5 — Permission review UI
 
-Show separate sections for runtime permissions, app-op-backed permissions, and manual/unsupported permissions.
+Status: complete
 
-The UI must explain that:
+The Config Editor app-generator flow now calls the native `inspectApk`
+capability with its trusted, session-scoped APK path and an optional
+connected-device API level. React retains only the opaque APK handle and the
+safe native result. The former executable selection, persisted analyzer
+preference, host process execution, output parsing, and analyzer-specific
+errors are removed.
 
-- runtime grants use `pm grant` and do not require root;
-- root-dependent app-ops are skipped when root is unavailable;
-- unknown or unsupported permissions are not automated;
-- EmuChef does not cryptographically verify APK signatures.
+Every successful native inspection is stored separately from the conservative
+facts passed to the existing draft generators, then draft generation continues.
+The native result has no inspection-level blocking state. Missing device API
+context, permission warnings, unsupported classifications, non-applicable or
+indeterminate declarations, and empty candidate arrays are review information
+and never block this transition. Existing draft and collision validation remain
+independently authoritative.
+
+The legacy generator facts use only native manifest evidence for package name,
+version metadata, numeric SDK metadata, and requested permission names.
+Application label, launcher activities, ABIs, and debuggable state remain
+unavailable. The Config Editor continues to admit one standalone APK, so it
+passes `split: false` and `base: true` as product-admission assumptions rather
+than inspected evidence. Split APK sets remain unsupported.
+
+The review UI displays manifest identity and SDK metadata, the locally
+calculated SHA-256 with `checksumStatus: not_compared`, and
+`signatureVerification: not_performed`. It states that no publisher checksum
+comparison or APK signature verification occurred. Runtime grant candidates,
+app-op candidates, and all other requested permissions are shown separately.
+Runtime grants explain their `pm grant` and root requirements; root-dependent
+app-ops warn that they may be unavailable on unrooted devices. Stable backend
+warnings and structured applicability distinguish unavailable context,
+not-applicable declarations, and indeterminate declarations.
+
+All candidate checkboxes initialize from backend `selected: false` values.
+Selections are reducer-owned review state only: a new inspection or APK/source
+selection resets them, and they are never sent to draft, collision, save, or
+sidecar requests. Phase 5B5 generates no permission step and persists no
+selection.
 
 ## Phase 5B6 — Package-name enforcement
 

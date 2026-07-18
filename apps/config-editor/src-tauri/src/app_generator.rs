@@ -1,18 +1,16 @@
 //! Trusted local-APK generator boundary for the Config Editor.
 //!
-//! Native APK, analyzer, and authored-root paths remain in process memory behind
-//! session-scoped handles. Only safe facts, labels, authored drafts, diagnostics,
-//! canonical previews, and relative destination metadata cross into React.
+//! Native APK and authored-root paths remain in process memory behind
+//! session-scoped handles. Only safe inspection metadata, labels, authored drafts,
+//! diagnostics, canonical previews, and relative destination metadata cross into React.
 
 use std::collections::HashMap;
 use std::fs::{self, File, OpenOptions};
 use std::io::{self, Read, Write};
 use std::net::IpAddr;
 use std::path::{Path, PathBuf};
-use std::process::{Command, Stdio};
 use std::sync::Mutex;
-use std::thread;
-use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use reqwest::blocking::{Client, Response};
 use reqwest::header::{CONTENT_DISPOSITION, CONTENT_LENGTH, CONTENT_TYPE, USER_AGENT};
@@ -28,8 +26,6 @@ use crate::app_sources::capabilities_for_mode;
 use crate::sidecar_client::SidecarState;
 
 const MAX_APK_BYTES: u64 = 2 * 1024 * 1024 * 1024;
-const MAX_ANALYZER_OUTPUT_BYTES: usize = 4 * 1024 * 1024;
-const ANALYZER_TIMEOUT: Duration = Duration::from_secs(30);
 const SAFE_APK_LABEL: &str = "Selected local APK";
 const SAFE_ROOT_LABEL: &str = "Selected authored root";
 const PREFERENCES_FILE_NAME: &str = "app-generator-preferences.json";
@@ -42,8 +38,6 @@ const HTTP_USER_AGENT: &str = "EmuChef-Config-Editor/0.1";
 #[derive(Clone, Debug, Default, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase")]
 struct AppGeneratorPreferences {
-    analyzer_path: Option<PathBuf>,
-    analyzer_kind: Option<String>,
     authored_root: Option<PathBuf>,
 }
 
@@ -56,7 +50,6 @@ struct GeneratorRegistry {
 #[derive(Default)]
 struct GeneratorSession {
     apks: HashMap<String, TrustedApk>,
-    analyzers: HashMap<String, TrustedAnalyzer>,
     roots: HashMap<String, TrustedRoot>,
     remote_sources: HashMap<String, TrustedRemoteSource>,
     remote_assets: HashMap<String, TrustedRemoteAsset>,
@@ -66,6 +59,7 @@ struct GeneratorSession {
 struct TrustedApk {
     path: PathBuf,
     identity: FileIdentity,
+    inspection: Option<Value>,
     facts: Option<Value>,
 }
 
@@ -89,12 +83,6 @@ struct TrustedRemoteAsset {
 }
 
 #[derive(Clone)]
-struct TrustedAnalyzer {
-    path: PathBuf,
-    kind: AnalyzerKind,
-}
-
-#[derive(Clone)]
 struct TrustedRoot {
     root: PathBuf,
     apps_directory: PathBuf,
@@ -109,36 +97,6 @@ struct FileIdentity {
     device: u64,
     #[cfg(unix)]
     inode: u64,
-}
-
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-enum AnalyzerKind {
-    Apkanalyzer,
-    Aapt2,
-}
-
-impl AnalyzerKind {
-    fn parse(value: &str) -> Option<Self> {
-        match value {
-            "apkanalyzer" => Some(Self::Apkanalyzer),
-            "aapt2" => Some(Self::Aapt2),
-            _ => None,
-        }
-    }
-
-    fn protocol_name(self) -> &'static str {
-        match self {
-            Self::Apkanalyzer => "apkanalyzer",
-            Self::Aapt2 => "aapt2",
-        }
-    }
-
-    fn display_label(self) -> &'static str {
-        match self {
-            Self::Apkanalyzer => "Configured apkanalyzer",
-            Self::Aapt2 => "Configured aapt2",
-        }
-    }
 }
 
 /// Process-memory state for local-APK generator sessions.
@@ -215,30 +173,8 @@ pub fn begin_app_generator(
     let preferences = load_preferences(&app);
     let mut registry = lock_registry(&state)?;
     let session_handle = registry.begin();
-    let mut analyzer_handle = None;
-    let mut analyzer_kind = None;
-    let mut analyzer_label = None;
     let mut root_handle = None;
     let mut root_label = None;
-
-    if let (Some(path), Some(kind_name)) = (
-        preferences.analyzer_path.as_deref(),
-        preferences.analyzer_kind.as_deref(),
-    ) {
-        if let Some(kind) = AnalyzerKind::parse(kind_name) {
-            if let Ok(path) = validate_analyzer(path, kind) {
-                let handle = registry.allocate("analyzer");
-                if let Ok(session) = registry.session_mut(&session_handle) {
-                    session
-                        .analyzers
-                        .insert(handle.clone(), TrustedAnalyzer { path, kind });
-                    analyzer_handle = Some(handle);
-                    analyzer_kind = Some(kind.protocol_name());
-                    analyzer_label = Some(kind.display_label());
-                }
-            }
-        }
-    }
 
     if let Some(path) = preferences.authored_root.as_deref() {
         if let Ok(root) = validate_authored_root(path) {
@@ -253,9 +189,6 @@ pub fn begin_app_generator(
 
     Ok(success(json!({
         "sessionHandle": session_handle,
-        "analyzerHandle": analyzer_handle,
-        "analyzerKind": analyzer_kind,
-        "analyzerLabel": analyzer_label,
         "rootHandle": root_handle,
         "rootLabel": root_label,
     })))
@@ -299,6 +232,7 @@ pub async fn choose_app_generator_apk(
         TrustedApk {
             path,
             identity,
+            inspection: None,
             facts: None,
         },
     );
@@ -306,53 +240,6 @@ pub async fn choose_app_generator_apk(
         "cancelled": false,
         "apkHandle": apk_handle,
         "label": SAFE_APK_LABEL,
-    })))
-}
-
-#[tauri::command]
-pub async fn choose_app_generator_analyzer(
-    app: AppHandle,
-    state: State<'_, AppGeneratorState>,
-    session_handle: String,
-    analyzer_kind: String,
-) -> Result<Value, String> {
-    require_session(&state, &session_handle)?;
-    let Some(kind) = AnalyzerKind::parse(&analyzer_kind) else {
-        return Ok(invalid_analyzer_error());
-    };
-    let Some(selection) = app.dialog().file().blocking_pick_file() else {
-        return Ok(success(json!({ "cancelled": true })));
-    };
-    let selected_path = match selection.into_path() {
-        Ok(path) => path,
-        Err(_) => return Ok(invalid_analyzer_error()),
-    };
-    let path = match validate_analyzer(&selected_path, kind) {
-        Ok(path) => path,
-        Err(error) => return Ok(error),
-    };
-    let mut registry = lock_registry(&state)?;
-    let analyzer_handle = registry.allocate("analyzer");
-    let session = match registry.session_mut(&session_handle) {
-        Ok(session) => session,
-        Err(error) => return Ok(error),
-    };
-    session.analyzers.insert(
-        analyzer_handle.clone(),
-        TrustedAnalyzer {
-            path: path.clone(),
-            kind,
-        },
-    );
-    update_preferences(&app, |preferences| {
-        preferences.analyzer_path = Some(path);
-        preferences.analyzer_kind = Some(kind.protocol_name().to_string());
-    });
-    Ok(success(json!({
-        "cancelled": false,
-        "analyzerHandle": analyzer_handle,
-        "kind": kind.protocol_name(),
-        "label": kind.display_label(),
     })))
 }
 
@@ -690,6 +577,7 @@ pub async fn download_app_generator_remote_apk(
         TrustedApk {
             path,
             identity,
+            inspection: None,
             facts: None,
         },
     );
@@ -1421,9 +1309,9 @@ pub fn inspect_app_generator_apk(
     state: State<'_, AppGeneratorState>,
     session_handle: String,
     apk_handle: String,
-    analyzer_handle: String,
+    connected_device_api: Option<u32>,
 ) -> Result<Value, String> {
-    let (apk_path, identity, analyzer) = {
+    let (apk_path, identity) = {
         let registry = lock_registry(&state)?;
         let session = match registry.session(&session_handle) {
             Ok(session) => session,
@@ -1432,32 +1320,25 @@ pub fn inspect_app_generator_apk(
         let Some(apk) = session.apks.get(&apk_handle) else {
             return Ok(invalid_handle_error());
         };
-        let Some(analyzer) = session.analyzers.get(&analyzer_handle) else {
-            return Ok(invalid_handle_error());
-        };
-        (apk.path.clone(), apk.identity.clone(), analyzer.clone())
+        (apk.path.clone(), apk.identity.clone())
     };
     if current_file_identity(&apk_path).as_ref() != Some(&identity) {
         return Ok(apk_changed_error());
     }
-    let facts = match inspect_with_analyzer(&analyzer, &apk_path) {
-        Ok(facts) => facts,
-        Err(error) => return Ok(error),
-    };
     let response = request_sidecar(
         &sidecar,
         "inspectApk",
-        Some(json!({ "analyzer": analyzer.kind.protocol_name(), "facts": facts })),
+        Some(native_inspection_payload(&apk_path, connected_device_api)),
     )?;
-    let Some(result) = success_result(&response) else {
+    let Some(inspection) = success_result(&response).cloned() else {
         return Ok(response);
     };
-    if result.get("blocking").and_then(Value::as_bool) == Some(true) {
-        return Ok(response);
-    }
-    let Some(safe_facts) = result.get("facts").cloned() else {
+    let Some(facts) = facts_from_native_inspection(&inspection) else {
         return Ok(generator_protocol_error());
     };
+    if current_file_identity(&apk_path).as_ref() != Some(&identity) {
+        return Ok(apk_changed_error());
+    }
     let mut registry = lock_registry(&state)?;
     let session = match registry.session_mut(&session_handle) {
         Ok(session) => session,
@@ -1466,8 +1347,19 @@ pub fn inspect_app_generator_apk(
     let Some(apk) = session.apks.get_mut(&apk_handle) else {
         return Ok(invalid_handle_error());
     };
-    apk.facts = Some(safe_facts);
-    Ok(response)
+    apk.inspection = Some(inspection);
+    apk.facts = Some(facts);
+    let Some(stored_inspection) = apk.inspection.clone() else {
+        return Ok(generator_protocol_error());
+    };
+    Ok(success(stored_inspection))
+}
+
+fn native_inspection_payload(apk_path: &Path, connected_device_api: Option<u32>) -> Value {
+    json!({
+        "apkPath": apk_path,
+        "connectedDeviceApi": connected_device_api,
+    })
 }
 
 #[tauri::command]
@@ -1911,304 +1803,6 @@ pub fn cancel_app_generator(
     Ok(success(json!({})))
 }
 
-fn inspect_with_analyzer(analyzer: &TrustedAnalyzer, apk: &Path) -> Result<Value, Value> {
-    match analyzer.kind {
-        AnalyzerKind::Aapt2 => {
-            let output = run_analyzer(&analyzer.path, &["dump", "badging"], apk)?;
-            parse_aapt2_badging(&output)
-        }
-        AnalyzerKind::Apkanalyzer => {
-            let summary = run_analyzer(&analyzer.path, &["apk", "summary"], apk)?;
-            let manifest = run_analyzer(&analyzer.path, &["manifest", "print"], apk)?;
-            let permissions = run_analyzer(&analyzer.path, &["manifest", "permissions"], apk)?;
-            let debuggable = run_analyzer(&analyzer.path, &["manifest", "debuggable"], apk)?;
-            let files = run_analyzer(&analyzer.path, &["files", "list"], apk)?;
-            Ok(parse_apkanalyzer_outputs(
-                &summary,
-                &manifest,
-                &permissions,
-                &debuggable,
-                &files,
-            ))
-        }
-    }
-}
-
-fn run_analyzer(executable: &Path, args: &[&str], apk: &Path) -> Result<String, Value> {
-    run_analyzer_with_limits(
-        executable,
-        args,
-        apk,
-        ANALYZER_TIMEOUT,
-        MAX_ANALYZER_OUTPUT_BYTES,
-    )
-}
-
-fn run_analyzer_with_limits(
-    executable: &Path,
-    args: &[&str],
-    apk: &Path,
-    timeout: Duration,
-    output_limit: usize,
-) -> Result<String, Value> {
-    let mut command = Command::new(executable);
-    command
-        .args(args)
-        .arg(apk)
-        .stdin(Stdio::null())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped());
-    let mut child = command
-        .spawn()
-        .map_err(|_| analyzer_failed_error("analyzer_start_failed"))?;
-    let stdout = child
-        .stdout
-        .take()
-        .ok_or_else(|| analyzer_failed_error("analyzer_output_unavailable"))?;
-    let stderr = child
-        .stderr
-        .take()
-        .ok_or_else(|| analyzer_failed_error("analyzer_output_unavailable"))?;
-    let stdout_thread = thread::spawn(move || read_bounded(stdout, output_limit));
-    let stderr_thread = thread::spawn(move || read_bounded(stderr, output_limit));
-    let deadline = Instant::now() + timeout;
-    let status = loop {
-        match child.try_wait() {
-            Ok(Some(status)) => break status,
-            Ok(None) if Instant::now() < deadline => thread::sleep(Duration::from_millis(10)),
-            Ok(None) => {
-                let _ = child.kill();
-                let _ = child.wait();
-                let _ = stdout_thread.join();
-                let _ = stderr_thread.join();
-                return Err(analyzer_failed_error("analyzer_timeout"));
-            }
-            Err(_) => return Err(analyzer_failed_error("analyzer_wait_failed")),
-        }
-    };
-    let (stdout, stdout_truncated) = stdout_thread
-        .join()
-        .map_err(|_| analyzer_failed_error("analyzer_output_failed"))?;
-    let (_, stderr_truncated) = stderr_thread
-        .join()
-        .map_err(|_| analyzer_failed_error("analyzer_output_failed"))?;
-    if stdout_truncated || stderr_truncated {
-        return Err(analyzer_failed_error("analyzer_output_limit"));
-    }
-    if !status.success() {
-        return Err(analyzer_failed_error("analyzer_command_failed"));
-    }
-    String::from_utf8(stdout).map_err(|_| analyzer_failed_error("analyzer_output_invalid"))
-}
-
-fn read_bounded(mut reader: impl Read, output_limit: usize) -> (Vec<u8>, bool) {
-    let mut retained = Vec::new();
-    let mut truncated = false;
-    let mut buffer = [0_u8; 8192];
-    loop {
-        match reader.read(&mut buffer) {
-            Ok(0) | Err(_) => break,
-            Ok(count) => {
-                let remaining = output_limit.saturating_sub(retained.len());
-                let keep = remaining.min(count);
-                retained.extend_from_slice(&buffer[..keep]);
-                truncated |= keep < count;
-            }
-        }
-    }
-    (retained, truncated)
-}
-
-fn parse_aapt2_badging(output: &str) -> Result<Value, Value> {
-    let package_line = output.lines().find(|line| line.starts_with("package:"));
-    let package = package_line.and_then(|line| quoted_attribute(line, "name"));
-    let version_code = package_line.and_then(|line| quoted_attribute(line, "versionCode"));
-    let version_name = package_line.and_then(|line| quoted_attribute(line, "versionName"));
-    let split_name = package_line.and_then(|line| quoted_attribute(line, "split"));
-    let label = output
-        .lines()
-        .find(|line| line.starts_with("application:"))
-        .and_then(|line| quoted_attribute(line, "label"));
-    let min_sdk = prefixed_quoted_integer(output, "sdkVersion:");
-    let target_sdk = prefixed_quoted_integer(output, "targetSdkVersion:");
-    let launcher_activities = output
-        .lines()
-        .filter(|line| line.starts_with("launchable-activity:"))
-        .filter_map(|line| quoted_attribute(line, "name"))
-        .collect::<Vec<_>>();
-    let requested_permissions = output
-        .lines()
-        .filter(|line| line.starts_with("uses-permission:"))
-        .filter_map(|line| quoted_attribute(line, "name"))
-        .collect::<Vec<_>>();
-    let abis = output
-        .lines()
-        .find(|line| line.starts_with("native-code:"))
-        .map(quoted_values)
-        .unwrap_or_default();
-    let debuggable = Some(
-        output
-            .lines()
-            .any(|line| line.trim() == "application-debuggable"),
-    );
-    if package.is_none() {
-        return Err(analyzer_failed_error("analyzer_output_malformed"));
-    }
-    Ok(json!({
-        "packageName": package,
-        "applicationLabel": label,
-        "versionCode": version_code,
-        "versionName": version_name,
-        "minSdk": min_sdk,
-        "targetSdk": target_sdk,
-        "abis": abis,
-        "launcherActivities": launcher_activities,
-        "requestedPermissions": requested_permissions,
-        "debuggable": debuggable,
-        "split": split_name.is_some(),
-        "base": split_name.is_none(),
-        "certificateSha256": Value::Null,
-    }))
-}
-
-fn parse_apkanalyzer_outputs(
-    summary: &str,
-    manifest: &str,
-    permissions: &str,
-    debuggable: &str,
-    files: &str,
-) -> Value {
-    let summary_fields = summary.split_whitespace().collect::<Vec<_>>();
-    let package = summary_fields.first().map(|value| (*value).to_string());
-    let version_code = summary_fields.get(1).map(|value| (*value).to_string());
-    let version_name = (summary_fields.len() > 2).then(|| summary_fields[2..].join(" "));
-    let manifest_line = manifest.lines().find(|line| line.contains("<manifest"));
-    let application_line = manifest.lines().find(|line| line.contains("<application"));
-    let label = application_line
-        .and_then(|line| xml_attribute(line, "android:label"))
-        .filter(|value| !value.starts_with('@'));
-    let min_sdk = xml_integer(manifest, "android:minSdkVersion");
-    let target_sdk = xml_integer(manifest, "android:targetSdkVersion");
-    let split = manifest_line
-        .and_then(|line| xml_attribute(line, "split"))
-        .is_some()
-        || manifest.contains("android:isFeatureSplit=\"true\"");
-    let launcher_activities = parse_manifest_launchers(manifest);
-    let requested_permissions = permissions
-        .lines()
-        .map(str::trim)
-        .filter(|value| !value.is_empty())
-        .map(str::to_string)
-        .collect::<Vec<_>>();
-    let mut abis = files
-        .lines()
-        .filter_map(|line| line.trim().strip_prefix("/lib/"))
-        .filter_map(|tail| tail.split('/').next())
-        .map(str::to_string)
-        .collect::<Vec<_>>();
-    abis.sort();
-    abis.dedup();
-    let debuggable = match debuggable.trim() {
-        "true" => Some(true),
-        "false" => Some(false),
-        _ => None,
-    };
-    json!({
-        "packageName": package,
-        "applicationLabel": label,
-        "versionCode": version_code,
-        "versionName": version_name,
-        "minSdk": min_sdk,
-        "targetSdk": target_sdk,
-        "abis": abis,
-        "launcherActivities": launcher_activities,
-        "requestedPermissions": requested_permissions,
-        "debuggable": debuggable,
-        "split": split,
-        "base": !split,
-        "certificateSha256": Value::Null,
-    })
-}
-
-fn parse_manifest_launchers(manifest: &str) -> Vec<String> {
-    let mut launchers = Vec::new();
-    let mut activity: Option<String> = None;
-    let mut has_main = false;
-    let mut has_launcher = false;
-    for line in manifest.lines() {
-        let line = line.trim();
-        if line.starts_with("<activity ") || line.starts_with("<activity-alias ") {
-            activity = xml_attribute(line, "android:name");
-            has_main = false;
-            has_launcher = false;
-        } else if activity.is_some() && line.contains("android.intent.action.MAIN") {
-            has_main = true;
-        } else if activity.is_some() && line.contains("android.intent.category.LAUNCHER") {
-            has_launcher = true;
-        } else if (line.starts_with("</activity") || line.starts_with("</activity-alias"))
-            && activity.is_some()
-        {
-            if has_main && has_launcher {
-                launchers.push(activity.take().unwrap_or_default());
-            } else {
-                activity = None;
-            }
-        }
-    }
-    launchers.sort();
-    launchers.dedup();
-    launchers
-}
-
-fn quoted_attribute(line: &str, name: &str) -> Option<String> {
-    for quote in ['\'', '"'] {
-        let needle = format!("{name}={quote}");
-        if let Some(start) = line.find(&needle) {
-            let rest = &line[start + needle.len()..];
-            if let Some(end) = rest.find(quote) {
-                return Some(rest[..end].to_string());
-            }
-        }
-    }
-    None
-}
-
-fn quoted_values(line: &str) -> Vec<String> {
-    let mut values = Vec::new();
-    let mut rest = line;
-    while let Some(start) = rest.find('\'') {
-        rest = &rest[start + 1..];
-        let Some(end) = rest.find('\'') else {
-            break;
-        };
-        values.push(rest[..end].to_string());
-        rest = &rest[end + 1..];
-    }
-    values
-}
-
-fn prefixed_quoted_integer(output: &str, prefix: &str) -> Option<i64> {
-    output
-        .lines()
-        .find(|line| line.starts_with(prefix))
-        .and_then(|line| quoted_values(line).first().cloned())
-        .and_then(|value| value.parse().ok())
-}
-
-fn xml_attribute(line: &str, name: &str) -> Option<String> {
-    let needle = format!("{name}=\"");
-    let start = line.find(&needle)? + needle.len();
-    let rest = &line[start..];
-    Some(rest[..rest.find('"')?].to_string())
-}
-
-fn xml_integer(manifest: &str, name: &str) -> Option<i64> {
-    manifest
-        .lines()
-        .find_map(|line| xml_attribute(line, name))
-        .and_then(|value| value.parse().ok())
-}
-
 fn validate_apk(path: &Path) -> Result<(PathBuf, FileIdentity), Value> {
     let selected_metadata = fs::symlink_metadata(path).map_err(|_| invalid_apk_error())?;
     if !selected_metadata.file_type().is_file() {
@@ -2225,38 +1819,6 @@ fn validate_apk(path: &Path) -> Result<(PathBuf, FileIdentity), Value> {
     }
     let identity = file_identity(&metadata).ok_or_else(invalid_apk_error)?;
     Ok((canonical, identity))
-}
-
-fn validate_analyzer(path: &Path, kind: AnalyzerKind) -> Result<PathBuf, Value> {
-    let selected_metadata = fs::symlink_metadata(path).map_err(|_| invalid_analyzer_error())?;
-    if !selected_metadata.file_type().is_file() {
-        return Err(invalid_analyzer_error());
-    }
-    let canonical = fs::canonicalize(path).map_err(|_| invalid_analyzer_error())?;
-    let metadata = fs::symlink_metadata(&canonical).map_err(|_| invalid_analyzer_error())?;
-    if !metadata.file_type().is_file() {
-        return Err(invalid_analyzer_error());
-    }
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        if metadata.permissions().mode() & 0o111 == 0 {
-            return Err(invalid_analyzer_error());
-        }
-    }
-    let file_name = canonical
-        .file_name()
-        .and_then(|value| value.to_str())
-        .unwrap_or_default()
-        .to_ascii_lowercase();
-    let matches_kind = match kind {
-        AnalyzerKind::Apkanalyzer => file_name == "apkanalyzer" || file_name == "apkanalyzer.exe",
-        AnalyzerKind::Aapt2 => file_name == "aapt2" || file_name == "aapt2.exe",
-    };
-    if !matches_kind {
-        return Err(invalid_analyzer_error());
-    }
-    Ok(canonical)
 }
 
 fn validate_authored_root(path: &Path) -> Result<TrustedRoot, Value> {
@@ -2506,6 +2068,62 @@ fn stored_facts(
     Ok(apk.facts.clone().ok_or_else(inspection_required_error))
 }
 
+/// Convert native manifest metadata into the deliberately smaller facts model
+/// consumed by the existing draft generators. Fields that native inspection
+/// does not prove remain unavailable. This product accepts one standalone APK,
+/// so split/base are admission assumptions rather than inspection evidence.
+fn facts_from_native_inspection(inspection: &Value) -> Option<Value> {
+    let manifest = inspection.get("manifest")?.as_object()?;
+    let package_name = manifest
+        .get("packageName")?
+        .as_str()
+        .filter(|value| !value.trim().is_empty())?
+        .to_string();
+    let version_code = nullable_string(manifest, "versionCode")?;
+    let version_name = nullable_string(manifest, "versionName")?;
+    let min_sdk =
+        nullable_string(manifest, "minSdkVersion")?.and_then(|value| value.parse::<i64>().ok());
+    let target_sdk =
+        nullable_string(manifest, "targetSdkVersion")?.and_then(|value| value.parse::<i64>().ok());
+    let mut requested_permissions = inspection
+        .get("permissions")?
+        .as_array()?
+        .iter()
+        .map(|permission| {
+            permission
+                .get("name")?
+                .as_str()
+                .filter(|value| !value.trim().is_empty())
+                .map(str::to_string)
+        })
+        .collect::<Option<Vec<_>>>()?;
+    requested_permissions.sort();
+    requested_permissions.dedup();
+
+    Some(json!({
+        "packageName": package_name,
+        "applicationLabel": Value::Null,
+        "versionCode": version_code,
+        "versionName": version_name,
+        "minSdk": min_sdk,
+        "targetSdk": target_sdk,
+        "abis": [],
+        "launcherActivities": [],
+        "requestedPermissions": requested_permissions,
+        "debuggable": Value::Null,
+        "split": false,
+        "base": true,
+    }))
+}
+
+fn nullable_string(object: &Map<String, Value>, field: &str) -> Option<Option<String>> {
+    match object.get(field)? {
+        Value::Null => Some(None),
+        Value::String(value) => Some(Some(value.clone())),
+        _ => None,
+    }
+}
+
 fn stored_root(
     state: &AppGeneratorState,
     session_handle: &str,
@@ -2589,13 +2207,6 @@ fn apk_changed_error() -> Value {
         json!({}),
     )
 }
-fn invalid_analyzer_error() -> Value {
-    api_error(
-        "apk_analyzer_invalid",
-        "Choose a regular executable matching the selected analyzer type.",
-        json!({}),
-    )
-}
 fn invalid_root_error() -> Value {
     api_error(
         "app_generator_root_invalid",
@@ -2638,14 +2249,6 @@ fn generator_protocol_error() -> Value {
         json!({}),
     )
 }
-fn analyzer_failed_error(reason: &str) -> Value {
-    api_error(
-        "apk_analyzer_failed",
-        "The configured APK analyzer could not inspect this APK.",
-        json!({ "reason": reason }),
-    )
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -2662,29 +2265,118 @@ mod tests {
     }
 
     #[test]
-    fn aapt2_badging_parser_extracts_safe_manifest_facts() {
-        let output = "package: name='com.example.app' versionCode='42' versionName='1.2'\nuses-permission: name='android.permission.INTERNET'\nsdkVersion:'23'\ntargetSdkVersion:'35'\napplication: label='Example' icon='x'\nlaunchable-activity: name='com.example.app.MainActivity' label='' icon=''\nnative-code: 'arm64-v8a' 'x86_64'\n";
-        let facts = parse_aapt2_badging(output).unwrap();
+    fn native_inspection_derives_only_conservative_generator_facts() {
+        let inspection = json!({
+            "manifest": {
+                "packageName": "com.example.app",
+                "versionCode": "42",
+                "versionName": "1.2",
+                "minSdkVersion": "23",
+                "targetSdkVersion": "35",
+            },
+            "permissions": [
+                { "name": "android.permission.INTERNET" },
+                { "name": "android.permission.CAMERA" },
+                { "name": "android.permission.INTERNET" },
+            ],
+            "runtimeGrantCandidates": [],
+            "appOpCandidates": [],
+            "warnings": [{
+                "code": "apk_permission_unknown",
+                "message": "Review only.",
+                "permissionName": "android.permission.EXAMPLE",
+                "applicabilityReason": null,
+            }],
+            "calculatedSha256": "ABCD",
+            "checksumStatus": "not_compared",
+            "signatureVerification": "not_performed",
+        });
+        let facts = facts_from_native_inspection(&inspection).unwrap();
         assert_eq!(facts["packageName"], "com.example.app");
+        assert_eq!(facts["versionCode"], "42");
+        assert_eq!(facts["minSdk"], 23);
+        assert_eq!(facts["targetSdk"], 35);
         assert_eq!(
-            facts["launcherActivities"][0],
-            "com.example.app.MainActivity"
+            facts["requestedPermissions"],
+            json!(["android.permission.CAMERA", "android.permission.INTERNET"])
         );
+        assert_eq!(facts["applicationLabel"], Value::Null);
+        assert_eq!(facts["launcherActivities"], json!([]));
+        assert_eq!(facts["abis"], json!([]));
+        assert_eq!(facts["debuggable"], Value::Null);
         assert_eq!(facts["split"], false);
+        assert_eq!(facts["base"], true);
     }
 
     #[test]
-    fn apkanalyzer_parser_extracts_launchers_and_never_includes_paths() {
-        let manifest = r#"<manifest package="com.example.app"><uses-sdk android:minSdkVersion="23" android:targetSdkVersion="35"/><application android:label="Example"><activity android:name=".Main"><intent-filter><action android:name="android.intent.action.MAIN"/><category android:name="android.intent.category.LAUNCHER"/></intent-filter></activity></application></manifest>"#;
-        let facts = parse_apkanalyzer_outputs(
-            "com.example.app 7 1.0",
-            manifest,
-            "android.permission.INTERNET",
-            "false",
-            "/lib/arm64-v8a/libx.so",
+    fn native_inspection_keeps_non_numeric_sdk_values_out_of_generator_facts() {
+        let inspection = json!({
+            "manifest": {
+                "packageName": "com.example.preview",
+                "versionCode": null,
+                "versionName": null,
+                "minSdkVersion": "VanillaIceCream",
+                "targetSdkVersion": null,
+            },
+            "permissions": [],
+        });
+        let facts = facts_from_native_inspection(&inspection).unwrap();
+        assert_eq!(facts["minSdk"], Value::Null);
+        assert_eq!(facts["targetSdk"], Value::Null);
+    }
+
+    #[test]
+    fn native_inspection_payload_uses_only_trusted_path_and_optional_api_context() {
+        let path = Path::new("/private/internal/selected.apk");
+        assert_eq!(
+            native_inspection_payload(path, Some(35)),
+            json!({
+                "apkPath": "/private/internal/selected.apk",
+                "connectedDeviceApi": 35,
+            })
         );
-        assert_eq!(facts["packageName"], "com.example.app");
-        assert!(!facts.to_string().contains("/tmp/"));
+        assert_eq!(
+            native_inspection_payload(path, None)["connectedDeviceApi"],
+            Value::Null
+        );
+        assert!(native_inspection_payload(path, None)
+            .get("analyzer")
+            .is_none());
+        assert!(native_inspection_payload(path, None).get("facts").is_none());
+    }
+
+    #[test]
+    fn trusted_apk_keeps_native_inspection_separate_from_generator_facts() {
+        let path = temp_path("stored-inspection").with_extension("apk");
+        fs::write(&path, b"apk").unwrap();
+        let (_, identity) = validate_apk(&path).unwrap();
+        let inspection = json!({
+            "manifest": {
+                "packageName": "com.example.app",
+                "versionCode": null,
+                "versionName": null,
+                "minSdkVersion": null,
+                "targetSdkVersion": null,
+            },
+            "permissions": [],
+            "runtimeGrantCandidates": [],
+            "appOpCandidates": [],
+            "warnings": [],
+            "calculatedSha256": "ABCD",
+            "checksumStatus": "not_compared",
+            "signatureVerification": "not_performed",
+        });
+        let facts = facts_from_native_inspection(&inspection).unwrap();
+        let trusted = TrustedApk {
+            path: path.clone(),
+            identity,
+            inspection: Some(inspection.clone()),
+            facts: Some(facts.clone()),
+        };
+        assert_eq!(trusted.inspection, Some(inspection));
+        assert_eq!(trusted.facts, Some(facts));
+        assert_ne!(trusted.inspection, trusted.facts);
+        fs::remove_file(path).unwrap();
     }
 
     #[test]
@@ -2734,7 +2426,7 @@ mod tests {
     }
 
     #[test]
-    fn apk_analyzer_and_root_validation_reject_unsafe_selections() {
+    fn apk_and_root_validation_reject_unsafe_selections() {
         let directory = temp_path("validation");
         fs::create_dir_all(&directory).unwrap();
 
@@ -2742,15 +2434,6 @@ mod tests {
         fs::write(&wrong_extension, b"not-an-apk").unwrap();
         assert!(validate_apk(&wrong_extension).is_err());
         assert!(validate_apk(&directory).is_err());
-
-        let wrong_analyzer = directory.join("arbitrary-tool");
-        fs::write(&wrong_analyzer, b"tool").unwrap();
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::PermissionsExt;
-            fs::set_permissions(&wrong_analyzer, fs::Permissions::from_mode(0o755)).unwrap();
-        }
-        assert!(validate_analyzer(&wrong_analyzer, AnalyzerKind::Apkanalyzer).is_err());
 
         assert!(validate_authored_root(&directory).is_err());
         fs::create_dir(directory.join("apps")).unwrap();
@@ -2773,6 +2456,7 @@ mod tests {
             TrustedApk {
                 path: path.clone(),
                 identity: identity.clone(),
+                inspection: None,
                 facts: None,
             },
         );
@@ -2857,44 +2541,5 @@ mod tests {
     fn direct_url_can_defer_apk_filename_to_response_headers() {
         let source = normalize_remote_source("direct_apk", "https://example.com/download").unwrap();
         assert_eq!(source.url.as_str(), "https://example.com/download");
-    }
-
-    #[cfg(unix)]
-    #[test]
-    fn analyzer_runner_enforces_timeout_and_output_bounds_without_shell_interpolation() {
-        use std::os::unix::fs::PermissionsExt;
-
-        let directory = temp_path("runner");
-        fs::create_dir_all(&directory).unwrap();
-        let large = directory.join("aapt2");
-        fs::write(
-            &large,
-            "#!/bin/sh\nprintf '0123456789012345678901234567890123456789'\n",
-        )
-        .unwrap();
-        fs::set_permissions(&large, fs::Permissions::from_mode(0o755)).unwrap();
-        let error = run_analyzer_with_limits(
-            &large,
-            &["dump", "badging"],
-            Path::new("literal;not-executed.apk"),
-            Duration::from_secs(1),
-            16,
-        )
-        .unwrap_err();
-        assert_eq!(error["error"]["details"]["reason"], "analyzer_output_limit");
-
-        let slow = directory.join("apkanalyzer");
-        fs::write(&slow, "#!/bin/sh\nsleep 1\n").unwrap();
-        fs::set_permissions(&slow, fs::Permissions::from_mode(0o755)).unwrap();
-        let error = run_analyzer_with_limits(
-            &slow,
-            &["apk", "summary"],
-            Path::new("literal.apk"),
-            Duration::from_millis(25),
-            1024,
-        )
-        .unwrap_err();
-        assert_eq!(error["error"]["details"]["reason"], "analyzer_timeout");
-        fs::remove_dir_all(directory).unwrap();
     }
 }

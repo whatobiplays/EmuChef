@@ -382,13 +382,6 @@ export async function chooseAppGeneratorApk(
   return callApi("choose_app_generator_apk", { sessionHandle });
 }
 
-export async function chooseAppGeneratorAnalyzer(
-  sessionHandle: string,
-  analyzerKind: "apkanalyzer" | "aapt2",
-): Promise<EditorApiResult<AppGeneratorSelectionResult>> {
-  return callApi("choose_app_generator_analyzer", { sessionHandle, analyzerKind });
-}
-
 export async function chooseAppGeneratorAuthoredRoot(
   sessionHandle: string,
 ): Promise<EditorApiResult<AppGeneratorSelectionResult>> {
@@ -426,9 +419,9 @@ export async function downloadAppGeneratorRemoteApk(
 export async function inspectAppGeneratorApk(
   sessionHandle: string,
   apkHandle: string,
-  analyzerHandle: string,
+  connectedDeviceApi: number | null,
 ): Promise<EditorApiResult<ApkInspectionResult>> {
-  return callApi("inspect_app_generator_apk", { sessionHandle, apkHandle, analyzerHandle });
+  return callApi("inspect_app_generator_apk", { sessionHandle, apkHandle, connectedDeviceApi });
 }
 
 export async function generateAppRecipeDraft(
