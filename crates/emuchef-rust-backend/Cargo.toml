@@ -27,3 +27,4 @@ zip = { version = "8.6.0", default-features = false, features = ["deflate"] }
 
 [dev-dependencies]
 rcgen = "0.14.8"
+rusty-axml = { version = "=0.2.1", default-features = false }

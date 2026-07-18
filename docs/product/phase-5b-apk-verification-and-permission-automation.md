@@ -1,0 +1,264 @@
+# Phase 5B — APK Manifest Inspection and Permission Automation
+
+Status: planned
+
+## Purpose
+
+Phase 5B adds lightweight APK manifest inspection and optional permission automation for generated app recipes. It deliberately excludes APK cryptographic signature verification and does not bundle Java, Android Build Tools, or another external verifier runtime.
+
+## Product decisions
+
+1. Parse packaged `AndroidManifest.xml` with a small Rust dependency.
+2. Extract package identity, version metadata, SDK metadata, and requested permissions.
+3. Enforce expected package-name matching for generated remote APK recipes.
+4. Support publisher-provided SHA-256 checksums when trustworthy checksum metadata is available.
+5. Do not inspect, validate, pin, or display APK signer certificates.
+6. Do not claim APK signature verification.
+7. Do not bundle a JVM, `apksigner`, Android Build Tools, or require an installed Android SDK.
+8. Permission automation is author-opt-in and disabled by default.
+9. Ordinary runtime permissions use `pm grant` without requiring root.
+10. Explicitly allowlisted special permissions may use app-ops; root is scoped to individual actions.
+11. Start the app-op allowlist with `MANAGE_EXTERNAL_STORAGE` on Android API 30+.
+12. Unknown, restricted, privileged, role-based, and Settings-mediated permissions are displayed but not automatically granted.
+13. Existing authored catalog files are not modified as part of this phase.
+
+## Trust model
+
+EmuChef may report:
+
+- source provider and repository;
+- selected release and asset;
+- HTTPS download;
+- calculated download SHA-256;
+- publisher checksum verification when available;
+- manifest package-name match;
+- manifest permission review;
+- APK signature status: not verified by EmuChef.
+
+Package matching and checksums are useful integrity controls, but they are not equivalent to Android signature verification. User-facing copy must not imply otherwise.
+
+# Phase plan
+
+## Phase 5B1 — Manifest parser qualification
+
+Qualify a lightweight Rust Android binary XML parser for hostile APK input without adding signature-verification dependencies.
+
+The qualification module must:
+
+- open the APK as a ZIP;
+- read only `AndroidManifest.xml`;
+- enforce a decompressed-size limit;
+- catch parser panics where necessary;
+- map failures to stable redacted errors;
+- extract package name, version code/name, min SDK, target SDK, and requested permissions;
+- parse `uses-permission` and `uses-permission-sdk-23`;
+- preserve `android:maxSdkVersion`;
+- sort and deduplicate permission declarations deterministically.
+
+The qualified parser is the exact, test-only development dependency
+`rusty-axml = { version = "=0.2.1", default-features = false }`. The
+qualification module is compiled only for tests and is not a production
+runtime surface. No `apksig` dependency is permitted.
+
+Exit criteria:
+
+- malformed ZIP, missing manifest, malformed binary XML, oversized manifest, and missing package fail safely;
+- returned errors contain no absolute paths, URLs, filenames, or raw parser diagnostics;
+- focused tests pass;
+- the parser is acceptable for production manifest extraction.
+
+Qualification result: `rusty-axml 0.2.1` qualifies as the parser candidate for
+later production manifest extraction only when retained behind the tested
+defensive wrapper. Phase 5B1 does not promote that wrapper into production.
+
+The wrapper requirements established by qualification are:
+
+- accept exactly one root ZIP entry named `AndroidManifest.xml`, including an
+  entry-count check that detects duplicate names collapsed by the ZIP reader;
+- reject manifests whose declared decompressed size exceeds the selected 4 MiB
+  defensive limit and enforce the same limit while reading;
+- validate the binary XML root chunk type, header size, and declared total size
+  before parsing;
+- contain parser and traversal panics and discard panic payloads and third-party
+  diagnostics;
+- accept only tested typed decimal and hexadecimal integer renderings and reject
+  unknown or malformed typed metadata;
+- inspect permission declarations only when they are direct manifest children.
+
+The remaining parser risks are its known panic paths on malformed chunks, its
+permissive handling of some malformed binary XML, and its string-rendered typed
+values. These behaviors make the structural checks, integer validation, and
+panic boundary mandatory. The dependency also brings its own test-only ZIP
+parser version transitively, and the deterministic generated qualification
+fixtures do not replace broader real-world APK corpus testing before production
+promotion.
+
+## Phase 5B2 — Stable APK manifest model
+
+Create backend-owned types for package, version, SDK, and permission facts. Parser-specific types must not cross backend, protocol, or executor boundaries.
+
+Stable errors should include:
+
+```text
+apk_zip_invalid
+apk_manifest_missing
+apk_manifest_too_large
+apk_manifest_invalid
+apk_package_missing
+apk_package_mismatch
+apk_manifest_inspection_failed
+```
+
+## Phase 5B3 — Android permission catalog and classifier
+
+Classify requested permissions as:
+
+- `RuntimeGrantable`;
+- `RuntimeRestricted`;
+- `AppOpGrantable`;
+- `ManualSpecialAccess`;
+- `InstallTime`;
+- `SignatureOrPrivileged`;
+- `Unknown`.
+
+Classification must consider declaration kind, `maxSdkVersion`, app target SDK, connected-device API, permission introduction/replacement API, and explicit app-op mappings.
+
+Do not infer protection level or app-op identity from permission-name patterns.
+
+Initial explicit mapping:
+
+```text
+android.permission.MANAGE_EXTERNAL_STORAGE
+  -> MANAGE_EXTERNAL_STORAGE
+  -> mode allow
+  -> API 30+
+  -> root required for the action
+```
+
+## Phase 5B4 — Authoring inspection result
+
+Expose safe structured fields:
+
+- package and version metadata;
+- SDK metadata;
+- complete requested permissions;
+- deterministic classifications;
+- candidate `pm grant` actions;
+- candidate app-op actions;
+- manual/unsupported warnings;
+- calculated APK SHA-256;
+- publisher checksum status when available;
+- `signatureVerification: "not_performed"`.
+
+All permission selections default to unchecked.
+
+## Phase 5B5 — Permission review UI
+
+Show separate sections for runtime permissions, app-op-backed permissions, and manual/unsupported permissions.
+
+The UI must explain that:
+
+- runtime grants use `pm grant` and do not require root;
+- root-dependent app-ops are skipped when root is unavailable;
+- unknown or unsupported permissions are not automated;
+- EmuChef does not cryptographically verify APK signatures.
+
+## Phase 5B6 — Package-name enforcement
+
+Extend `install_apk` with one optional backward-compatible parameter:
+
+```yaml
+expected_package_name: com.example.app
+```
+
+Generated remote pinned/latest recipes set this field from authoring-time manifest inspection. Immediately before installation, the executor reinspects the resolved APK and rejects a mismatch before ADB install.
+
+Do not add certificate, signer, or signature-verification parameters.
+
+## Phase 5B7 — Optional checksum enforcement
+
+Where a provider or publisher exposes a trustworthy checksum, support:
+
+```yaml
+expected_sha256: ABCDEF...
+```
+
+Rules:
+
+- normalize to uppercase hexadecimal internally;
+- stream SHA-256 calculation;
+- reject mismatch before installation;
+- do not scrape arbitrary release prose unless checksum format and asset binding are unambiguous;
+- absence of a publisher checksum is not represented as verified;
+- a locally calculated hash is metadata unless compared with trusted expected data.
+
+This phase may be deferred independently.
+
+## Phase 5B8 — Generated permission step
+
+Generate one optional `grant_permissions` step after installation and before first launch.
+
+The step requires `shell_command`, not blanket `root_shell`.
+
+Runtime actions use `pm grant`. App-op actions use explicit allowlisted mappings and may include `when.rooted: true`.
+
+Default policy:
+
+```yaml
+policy:
+  on_failure: warn
+  require_all: false
+```
+
+An unrooted device may execute ordinary runtime grants while root-dependent app-op actions become `not_applicable`.
+
+## Phase 5B9 — Metadata and collision semantics
+
+Persist safe manifest and permission metadata, including package name, target SDK, calculated SHA-256, checksum status, and `signature_verification: not_performed`.
+
+Collision fingerprints should include expected package name, trusted expected checksum when present, selected runtime permissions, selected app-op actions, and API/root conditions.
+
+## Phase 5B10 — Tests
+
+Cover:
+
+- package/version/SDK extraction;
+- both permission declaration kinds;
+- `maxSdkVersion`;
+- deterministic ordering and deduplication;
+- malformed/missing/oversized manifests;
+- redacted errors;
+- permission classification and API filtering;
+- runtime-only, app-op-only, and mixed generated steps;
+- no blanket root capability;
+- package mismatch rejection;
+- checksum mismatch rejection when enabled;
+- legacy recipe compatibility;
+- mixed permission action behavior.
+
+## Phase 5B11 — Documentation and release gates
+
+Document manifest inspection, package-name enforcement, checksum semantics, absence of APK signature verification, permission classification, runtime grants, app-op behavior, root-scoped conditions, and unsupported/manual special access.
+
+Run the normal backend, Tauri, frontend, lint, snapshot, and `git diff --check` gates before release.
+
+# Delivery order
+
+1. Manifest parser qualification.
+2. Stable manifest model.
+3. Permission catalog and classifier.
+4. Authoring DTO and UI.
+5. Package-name enforcement.
+6. Optional checksum enforcement.
+7. Generated permission step.
+8. Metadata, collisions, documentation, and regression coverage.
+
+# Non-goals
+
+- APK v1/v2/v3/v4 cryptographic signature verification.
+- Signer certificate extraction or pinning.
+- Proof-of-rotation handling.
+- Bundled Java runtime or Android Build Tools.
+- Installed Android SDK dependency.
+- Split APK/APKS/AAB support.
+- Automatic approval of role-, accessibility-, VPN-, or Settings-mediated access.

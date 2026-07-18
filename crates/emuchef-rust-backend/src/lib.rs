@@ -4,6 +4,8 @@
 //! protocol surfaces used by the Tauri configuration editor and the additive
 //! Phase 0 contract for a future end-user application.
 
+#[cfg(test)]
+mod apk_manifest;
 mod artifact_resolver;
 mod artifact_store;
 mod artifact_transport;
