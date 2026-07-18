@@ -335,7 +335,7 @@ pub fn step_specs_result() -> StepSpecsResult {
                 "Install APK",
                 None,
                 vec![],
-                vec!["app", "replace_existing"],
+                vec!["app", "expected_package_name", "replace_existing"],
                 map(vec![
                     (
                         "app",
@@ -346,6 +346,10 @@ pub fn step_specs_result() -> StepSpecsResult {
                             vec![],
                             None,
                         ),
+                    ),
+                    (
+                        "expected_package_name",
+                        param(&["literal"], &["string"], false, vec![], None),
                     ),
                     (
                         "replace_existing",

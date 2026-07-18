@@ -295,6 +295,19 @@ fn validate_step_params(
             }
             _ => {}
         }
+        if step.type_name == "install_apk" && param_name == "expected_package_name" {
+            if let ParamValue::Literal(value) = value {
+                if !matches!(value, Value::String(value) if !value.trim().is_empty()) {
+                    errors.push(param_contract_error(
+                        file,
+                        recipe,
+                        step_index,
+                        param_name,
+                        "Param 'expected_package_name' must be a non-empty string literal for step type 'install_apk'.",
+                    ));
+                }
+            }
+        }
     }
     errors
 }

@@ -2242,6 +2242,22 @@ fn validate_install_apk_param_values(
         normalized,
         "replace_existing",
     ));
+    if let Some(value) = normalized.get("expected_package_name") {
+        if matches!(value, ParamValue::Ref(_)) {
+            return errors;
+        }
+        if !matches!(value, ParamValue::Literal(Value::String(value)) if !value.trim().is_empty()) {
+            errors.push(param_contract_message(
+                "invalid_param_value",
+                "Param 'expected_package_name' must be a non-empty string literal for step type 'install_apk'.".to_string(),
+                recipe_id,
+                step,
+                "expected_package_name",
+                json!("literal non-empty string"),
+                param_value_to_json(value),
+            ));
+        }
+    }
     errors
 }
 

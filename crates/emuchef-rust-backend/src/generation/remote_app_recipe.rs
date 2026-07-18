@@ -615,6 +615,21 @@ fn build_recipe(
     }
     let mut install_params = OrderedMap::new();
     install_params.insert("app".to_string(), ParamValue::Ref(app_ref));
+    if pinned || latest {
+        match facts.package_name.as_deref() {
+            Some(package_name) if !package_name.trim().is_empty() => {
+                install_params.insert(
+                    "expected_package_name".to_string(),
+                    ParamValue::Literal(Value::String(package_name.to_string())),
+                );
+            }
+            _ => diagnostics.push(error(
+                "apk_expected_package_name_unavailable",
+                "Pinned and latest remote APK generation requires a package name verified by APK inspection.",
+                "recipe.expectedPackageName",
+            )),
+        }
+    }
     install_params.insert(
         "replace_existing".to_string(),
         ParamValue::Literal(Value::Bool(edits.replace_existing)),
@@ -1063,6 +1078,7 @@ mod tests {
     fn pinned_source_generates_remote_artifact_and_resolve_step() {
         let mut app = proposed_app(&facts(), &source());
         app.category = "emulator".to_string();
+        app.package.primary = "com.example.edited".to_string();
         let draft = generate_remote_app_recipe_draft(RemoteAppRecipeDraftRequest {
             facts: facts(),
             source: source(),
@@ -1076,6 +1092,8 @@ mod tests {
         assert!(recipe.contains("type: remote_file"));
         assert!(recipe.contains("type: resolve_artifacts"));
         assert!(recipe.contains("ref: artifacts.remote_example_apk.local_path"));
+        assert!(recipe.contains("expected_package_name: com.example.remote"));
+        assert!(!recipe.contains("expected_package_name: com.example.edited"));
     }
 
     #[test]
@@ -1104,6 +1122,7 @@ mod tests {
         let recipe = draft.recipe_canonical_yaml.unwrap();
         assert!(!recipe.contains("type: remote_file"));
         assert!(recipe.contains("ref: inputs.remote_example_apk"));
+        assert!(!recipe.contains("expected_package_name"));
     }
 
     #[test]
@@ -1115,6 +1134,7 @@ mod tests {
         latest.include_prereleases = true;
         let mut app = proposed_app(&facts(), &latest);
         app.category = "emulator".to_string();
+        app.package.primary = "com.example.edited".to_string();
         let draft = generate_remote_app_recipe_draft(RemoteAppRecipeDraftRequest {
             facts: facts(),
             source: latest,
@@ -1129,6 +1149,41 @@ mod tests {
         assert!(recipe.contains("type: download_remote_file"));
         assert!(recipe.contains("include_prereleases: true"));
         assert!(recipe.contains("ref: steps.download_remote_example.outputs.local_path"));
+        assert!(recipe.contains("expected_package_name: com.example.remote"));
+        assert!(!recipe.contains("expected_package_name: com.example.edited"));
+    }
+
+    #[test]
+    fn pinned_and_latest_sources_block_without_inspected_package_name() {
+        for strategy in ["pinned_remote_asset", "latest_compatible_release"] {
+            let mut source = source();
+            source.strategy = strategy.to_string();
+            if strategy == "latest_compatible_release" {
+                source.mode = "github_repository".to_string();
+                source.asset_pattern = Some("^app\\.apk$".to_string());
+            }
+            let mut app = proposed_app(&facts(), &source);
+            app.category = "emulator".to_string();
+            let mut unavailable_facts = facts();
+            unavailable_facts.package_name =
+                (strategy == "latest_compatible_release").then(|| "   ".to_string());
+
+            let draft = generate_remote_app_recipe_draft(RemoteAppRecipeDraftRequest {
+                facts: unavailable_facts,
+                source,
+                app: Some(app),
+                recipe: None,
+                mappings: None,
+                regenerate_identifiers: false,
+            });
+
+            assert!(draft.blocking);
+            assert!(draft.recipe_canonical_yaml.is_none());
+            assert!(draft.diagnostics.iter().any(|diagnostic| {
+                diagnostic.code == "apk_expected_package_name_unavailable"
+                    && diagnostic.field == "recipe.expectedPackageName"
+            }));
+        }
     }
 
     #[test]

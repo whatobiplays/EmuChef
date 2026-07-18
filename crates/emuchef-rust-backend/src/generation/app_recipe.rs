@@ -746,6 +746,7 @@ mod tests {
         let recipe = draft.recipe_canonical_yaml.unwrap();
         assert!(recipe.contains("ref: inputs.example_player_apk"));
         assert!(recipe.contains("package_name: com.example.player"));
+        assert!(!recipe.contains("expected_package_name"));
         assert!(!recipe.contains("launch_app"));
     }
 

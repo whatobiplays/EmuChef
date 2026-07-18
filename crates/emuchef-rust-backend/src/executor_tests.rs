@@ -334,6 +334,20 @@ fn install_apk_step(id: &str, apk_path: &Path, replace_existing: bool) -> Execut
     }
 }
 
+fn install_apk_step_with_expected_package(
+    id: &str,
+    apk_path: &Path,
+    replace_existing: bool,
+    expected_package_name: &str,
+) -> ExecutionStep {
+    let mut step = install_apk_step(id, apk_path, replace_existing);
+    step.params.insert(
+        "expected_package_name".to_string(),
+        literal(json!(expected_package_name)),
+    );
+    step
+}
+
 fn launch_app_step(id: &str, package_name: &str, activity: Option<&str>) -> ExecutionStep {
     let mut params = OrderedMap::new();
     params.insert("package_name".to_string(), literal(json!(package_name)));
@@ -703,6 +717,106 @@ fn install_apk_dry_run_matches_compatibility_outputs_and_keeps_replace_existing_
     );
     assert!(!actual.to_string().contains("install_apk"));
     assert!(!actual.to_string().contains("replace_existing"));
+}
+
+#[test]
+fn install_apk_with_matching_expected_package_installs_once() {
+    let workspace = tempfile::tempdir().expect("temp root should be created");
+    let apk = crate::apk_manifest::tests::write_valid_test_apk(&workspace);
+    let execution_plan = plan(vec![install_apk_step_with_expected_package(
+        "example.recipe/install",
+        &apk,
+        true,
+        "com.example.qualified",
+    )]);
+
+    let (actual, runner) = run_value(&execution_plan, DryRunExecutorAdapters::default());
+
+    assert_eq!(actual["success"], true);
+    assert_eq!(actual["steps"][0]["status"], "executed");
+    assert_eq!(
+        runner.adapters().device().commands(),
+        &[vec![
+            "install_apk".to_string(),
+            apk.to_string_lossy().to_string(),
+            "True".to_string(),
+        ]]
+    );
+}
+
+#[test]
+fn install_apk_with_mismatched_expected_package_fails_before_install() {
+    let workspace = tempfile::tempdir().expect("temp root should be created");
+    let apk = crate::apk_manifest::tests::write_valid_test_apk(&workspace);
+    let execution_plan = plan(vec![install_apk_step_with_expected_package(
+        "example.recipe/install",
+        &apk,
+        false,
+        "Com.example.qualified",
+    )]);
+
+    let (actual, runner) = run_value(&execution_plan, DryRunExecutorAdapters::default());
+    let message = actual["steps"][0]["message"]
+        .as_str()
+        .expect("failure should include a message");
+
+    assert_eq!(actual["success"], false);
+    assert_eq!(actual["steps"][0]["status"], "failed");
+    assert_eq!(
+        message,
+        "apk_package_mismatch: expected package 'Com.example.qualified', actual package 'com.example.qualified'."
+    );
+    assert!(!message.contains(&apk.to_string_lossy().to_string()));
+    assert!(runner.adapters().device().commands().is_empty());
+}
+
+#[test]
+fn install_apk_with_expected_package_redacts_inspection_failure_and_does_not_install() {
+    let workspace = tempfile::tempdir().expect("temp root should be created");
+    let apk = workspace.path().join("malformed.apk");
+    fs::write(&apk, "not a zip").expect("malformed APK fixture should be writable");
+    let execution_plan = plan(vec![install_apk_step_with_expected_package(
+        "example.recipe/install",
+        &apk,
+        false,
+        "com.example.expected",
+    )]);
+
+    let (actual, runner) = run_value(&execution_plan, DryRunExecutorAdapters::default());
+    let message = actual["steps"][0]["message"]
+        .as_str()
+        .expect("failure should include a message");
+
+    assert_eq!(actual["success"], false);
+    assert_eq!(actual["steps"][0]["status"], "failed");
+    assert_eq!(
+        message,
+        "apk_package_inspection_failed: manifest inspection failed with reason 'apk_zip_invalid'."
+    );
+    assert!(!message.contains(&apk.to_string_lossy().to_string()));
+    for internal in ["ZIP", "AXML", "rusty_axml", "not a zip"] {
+        assert!(!message.contains(internal));
+    }
+    assert!(runner.adapters().device().commands().is_empty());
+}
+
+#[test]
+fn install_apk_rejects_invalid_expected_package_value_before_inspection_or_install() {
+    let workspace = tempfile::tempdir().expect("temp root should be created");
+    let apk = workspace.path().join("malformed.apk");
+    fs::write(&apk, "not a zip").expect("malformed APK fixture should be writable");
+    let mut step = install_apk_step("example.recipe/install", &apk, false);
+    step.params
+        .insert("expected_package_name".to_string(), literal(json!(false)));
+
+    let (actual, runner) = run_value(&plan(vec![step]), DryRunExecutorAdapters::default());
+
+    assert_eq!(actual["success"], false);
+    assert_eq!(
+        actual["steps"][0]["message"],
+        "install_apk expected_package_name must be a non-empty string literal."
+    );
+    assert!(runner.adapters().device().commands().is_empty());
 }
 
 #[test]

@@ -1,0 +1,57 @@
+schema_version: 1
+kind: recipe
+id: phase5b6.invalid_expected_package_names
+name: Phase 5B6 Invalid Expected Package Names
+recipe_dependencies: []
+provides:
+  features: []
+inputs: {}
+artifacts:
+  app_apk:
+    type: remote_file
+    url: https://example.invalid/app.apk
+    cache: default
+artifact_groups: {}
+steps:
+  - id: non_string
+    type: install_apk
+    name: Non-string Expected Package
+    user_toggleable: false
+    dependencies: []
+    constraints:
+      capabilities: []
+      conflicts_with: []
+    skip_if: []
+    params:
+      app:
+        ref: artifacts.app_apk.local_path
+      expected_package_name: false
+    verify: []
+  - id: empty
+    type: install_apk
+    name: Empty Expected Package
+    user_toggleable: false
+    dependencies: []
+    constraints:
+      capabilities: []
+      conflicts_with: []
+    skip_if: []
+    params:
+      app:
+        ref: artifacts.app_apk.local_path
+      expected_package_name: ""
+    verify: []
+  - id: whitespace
+    type: install_apk
+    name: Whitespace Expected Package
+    user_toggleable: false
+    dependencies: []
+    constraints:
+      capabilities: []
+      conflicts_with: []
+    skip_if: []
+    params:
+      app:
+        ref: artifacts.app_apk.local_path
+      expected_package_name: "   "
+    verify: []

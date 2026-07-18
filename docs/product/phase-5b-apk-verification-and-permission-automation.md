@@ -1,6 +1,6 @@
 # Phase 5B — APK Manifest Inspection and Permission Automation
 
-Status: in progress (Phases 5B1 through 5B5 complete)
+Status: in progress (Phases 5B1 through 5B6 complete)
 
 ## Purpose
 
@@ -340,13 +340,36 @@ selection.
 
 ## Phase 5B6 — Package-name enforcement
 
-Extend `install_apk` with one optional backward-compatible parameter:
+Status: complete
+
+`install_apk` accepts one optional backward-compatible parameter:
 
 ```yaml
 expected_package_name: com.example.app
 ```
 
-Generated remote pinned/latest recipes set this field from authoring-time manifest inspection. Immediately before installation, the executor reinspects the resolved APK and rejects a mismatch before ADB install.
+The parameter accepts only a non-empty, non-whitespace string literal. It has no
+default, and recipes that omit it retain the legacy installation path without
+manifest inspection.
+
+Generated pinned-remote-asset and latest-compatible-release recipes set this
+field from the immutable package name in authoring-time APK inspection facts.
+The editable app package field is not an enforcement source. Local APK and
+remote user-provided-APK recipes omit the parameter because their runtime APK
+may differ from the authoring sample. Missing or whitespace-only inspection
+facts block pinned/latest recipe generation with
+`apk_expected_package_name_unavailable`; the generator does not substitute the
+editable app package.
+
+After validating the resolved host file value, `.apk` extension, and file
+existence, the executor uses the production bounded manifest parser to inspect
+the resolved APK immediately before installation. Package names use exact,
+case-sensitive equality without normalization, alias matching, or prefix
+matching. A mismatch fails with `apk_package_mismatch`. A stable manifest
+inspection failure fails with `apk_package_inspection_failed` and includes only
+the corresponding stable manifest error code. Both failures occur before any
+ADB install call and expose no APK path, parser diagnostic, or ZIP/AXML
+implementation detail.
 
 Do not add certificate, signer, or signature-verification parameters.
 

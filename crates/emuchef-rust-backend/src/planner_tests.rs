@@ -2188,6 +2188,10 @@ fn param_contract_accepts_valid_enum_and_bool_values() {
                     "app",
                     ParamValue::Ref("artifacts.app_apk.local_path".to_string()),
                 ),
+                (
+                    "expected_package_name",
+                    ParamValue::Literal(json!("com.example.app")),
+                ),
                 ("replace_existing", ParamValue::Literal(json!(true))),
             ]),
         ),
@@ -2205,6 +2209,10 @@ fn param_contract_accepts_valid_enum_and_bool_values() {
     assert_eq!(
         *param_contract_step_param(&actual, "copy", "copy_policy"),
         json!({"value": "sync"})
+    );
+    assert_eq!(
+        *param_contract_step_param(&actual, "install", "expected_package_name"),
+        json!({"value": "com.example.app"})
     );
     assert_eq!(
         *param_contract_step_param(&actual, "install", "replace_existing"),
@@ -2387,6 +2395,85 @@ fn param_contract_reports_required_source_enum_bool_and_integer_violations() {
             "invalid_param_value",
             json!("literal bool"),
             json!("false"),
+        ),
+        (
+            param_contract_step(
+                "install",
+                "install_apk",
+                vec![],
+                ref_params(vec![
+                    (
+                        "app",
+                        ParamValue::Ref("artifacts.app_apk.local_path".to_string()),
+                    ),
+                    ("expected_package_name", ParamValue::Literal(json!(false))),
+                ]),
+            ),
+            "install",
+            "expected_package_name",
+            "invalid_param_value",
+            json!("literal non-empty string"),
+            json!(false),
+        ),
+        (
+            param_contract_step(
+                "install",
+                "install_apk",
+                vec![],
+                ref_params(vec![
+                    (
+                        "app",
+                        ParamValue::Ref("artifacts.app_apk.local_path".to_string()),
+                    ),
+                    (
+                        "expected_package_name",
+                        ParamValue::Ref("inputs.package_name".to_string()),
+                    ),
+                ]),
+            ),
+            "install",
+            "expected_package_name",
+            "invalid_param_source",
+            json!(["literal"]),
+            json!({"ref": "inputs.package_name"}),
+        ),
+        (
+            param_contract_step(
+                "install",
+                "install_apk",
+                vec![],
+                ref_params(vec![
+                    (
+                        "app",
+                        ParamValue::Ref("artifacts.app_apk.local_path".to_string()),
+                    ),
+                    ("expected_package_name", ParamValue::Literal(json!(""))),
+                ]),
+            ),
+            "install",
+            "expected_package_name",
+            "invalid_param_value",
+            json!("literal non-empty string"),
+            json!(""),
+        ),
+        (
+            param_contract_step(
+                "install",
+                "install_apk",
+                vec![],
+                ref_params(vec![
+                    (
+                        "app",
+                        ParamValue::Ref("artifacts.app_apk.local_path".to_string()),
+                    ),
+                    ("expected_package_name", ParamValue::Literal(json!("   "))),
+                ]),
+            ),
+            "install",
+            "expected_package_name",
+            "invalid_param_value",
+            json!("literal non-empty string"),
+            json!("   "),
         ),
         (
             param_contract_step("install", "install_apk", vec![], OrderedMap::new()),

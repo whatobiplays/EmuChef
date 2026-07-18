@@ -306,6 +306,37 @@ fn stepspec_required_param_diagnostics_match_compatibility_fields() {
 }
 
 #[test]
+fn install_apk_expected_package_name_requires_non_empty_string_literal() {
+    let fixture = "phase5b6_invalid_expected_package_names.yaml";
+    let path_diagnostics = diagnostics_for_validate_path(fixture);
+    let (open_diagnostics, session_diagnostics) = diagnostics_for_open_and_validate(fixture);
+
+    for diagnostics in [&path_diagnostics, &open_diagnostics, &session_diagnostics] {
+        assert_limited_context_warning(
+            diagnostics,
+            Some("phase5b6.invalid_expected_package_names"),
+        );
+        let errors = diagnostics
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter(|diagnostic| diagnostic["code"] == "param_contract_violation")
+            .collect::<Vec<_>>();
+        assert_eq!(errors.len(), 3, "{diagnostics:#?}");
+        for (index, error) in errors.into_iter().enumerate() {
+            assert_diagnostic_shape(error);
+            assert_eq!(error["severity"], "error");
+            assert_eq!(error["objectKind"], "recipe");
+            assert_eq!(error["objectId"], "phase5b6.invalid_expected_package_names");
+            assert_eq!(
+                error["field"],
+                format!("steps[{index}].params.expected_package_name")
+            );
+        }
+    }
+}
+
+#[test]
 fn top_level_param_refs_validate_only_authored_param_refs() {
     assert_editor_local_fixture_diagnostics(
         "phase6k_unknown_input_ref.yaml",

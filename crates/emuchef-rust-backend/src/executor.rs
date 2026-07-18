@@ -15,6 +15,7 @@ use std::path::{Component, Path, PathBuf};
 use serde::Serialize;
 use serde_json::{json, Value};
 
+use crate::apk_manifest::inspect_apk_manifest;
 use crate::artifact_resolver::{ArtifactResolveRequest, ArtifactResolver};
 use crate::model::OrderedMap;
 use crate::planner::{
@@ -1026,6 +1027,29 @@ impl<D: ExecutorDevice> ExecutorRunner<D> {
                 "APK file not found: {}",
                 apk_path.display()
             )));
+        }
+        if let Some(expected_package_name) = resolved_params.get("expected_package_name") {
+            let expected_package_name = expected_package_name
+                .as_str()
+                .filter(|value| !value.trim().is_empty())
+                .ok_or_else(|| {
+                    StepFailure::new(
+                        "install_apk expected_package_name must be a non-empty string literal."
+                            .to_string(),
+                    )
+                })?;
+            let manifest = inspect_apk_manifest(&apk_path).map_err(|error| {
+                StepFailure::new(format!(
+                    "apk_package_inspection_failed: manifest inspection failed with reason '{}'.",
+                    error.code()
+                ))
+            })?;
+            if manifest.package_name != expected_package_name {
+                return Err(StepFailure::new(format!(
+                    "apk_package_mismatch: expected package '{}', actual package '{}'.",
+                    expected_package_name, manifest.package_name
+                )));
+            }
         }
         let replace_existing = resolved_params
             .get("replace_existing")
