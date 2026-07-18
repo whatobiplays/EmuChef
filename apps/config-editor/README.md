@@ -20,9 +20,11 @@ script builds the Rust binary and writes the target-triple-suffixed Tauri
 ```bash
 npm run typecheck
 npm run test:logic
+npm run lint
 npm run build
 npm run check:rust-runtime
-cargo test --manifest-path src-tauri/Cargo.toml
+cargo test --locked --manifest-path src-tauri/Cargo.toml
+cargo clippy --locked --manifest-path src-tauri/Cargo.toml --all-targets --all-features -- -D warnings
 ```
 
 `check:rust-runtime` validates sidecar packaging metadata, rejects Python
@@ -32,6 +34,12 @@ retirement guard, typechecks the frontend, and runs frontend logic tests.
 ```bash
 npm run check:python-runtime-retirement
 ```
+
+The maintained release-script tests are fixture-based checks of packaging,
+Apple environment, signing, manifest, and verification logic; they do not sign,
+notarize, package, or validate a release artifact. See the
+[Phase 5B product contract](../../docs/product/phase-5b-apk-verification-and-permission-automation.md)
+for native APK inspection and permission-automation semantics.
 
 ## Packaging
 

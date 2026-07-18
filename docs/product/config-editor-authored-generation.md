@@ -25,7 +25,10 @@ Generation operations are side-effect free until an explicit save. Network analy
 
 App definitions describe catalog and tracking metadata. They are not execution authority. The generated recipe remains the executable provisioning authority.
 
-This scope does not generate device plans, infer configuration-copy behavior from README prose, or automatically add root, permission, force-stop, app-data, or configuration steps.
+This scope does not generate device plans, infer configuration-copy behavior
+from README prose, or automatically add unreviewed root, force-stop, app-data,
+or configuration steps. Permission actions are generated only from explicit,
+reviewed candidates described below.
 
 ## App and recipe generator
 
@@ -45,24 +48,33 @@ Source analysis collects bounded repository metadata, stable release metadata, a
 
 ### APK inspection
 
-APK inspection is authoritative for Android-specific facts:
+The Rust backend opens the selected APK as a bounded ZIP input and inspects its
+binary `AndroidManifest.xml`. It extracts the package name, version code,
+version name, minimum SDK, target SDK, and deterministic permission
+declarations, including declaration kind and `maxSdkVersion`. Inspection
+failures use stable reason codes and redact paths, filenames, parser details,
+and other unsafe diagnostics.
 
-- package name;
-- application label;
-- version code and version name;
-- minimum and target SDK;
-- supported ABIs;
-- launcher activities;
-- requested permissions;
-- debuggable status;
-- split/base APK status; and
-- signing-certificate SHA-256 fingerprint.
+The native inspection does not extract the application label, launcher
+activities, supported ABIs, or debuggable state. The current product admits one
+standalone APK and therefore passes `split: false` and `base: true` to draft
+generation as admission assumptions, not manifest-derived proof. Split APK,
+APKS, and AAB workflows are unsupported.
 
-GitHub names, topics, descriptions, filenames, and release metadata may suggest values but may not substitute for manifest evidence.
+This workflow does not invoke or require Java, Android SDK Build Tools,
+`apkanalyzer`, `aapt2`, or an installed Android SDK. Inspection never installs
+the package.
 
-The first implementation uses a separately configured user-supplied Android APK analysis tool. Preferred order is `apkanalyzer`, then `aapt2`. Neither tool is part of Android Platform-Tools, so this configuration is independent from ADB setup. EmuChef does not bundle Android SDK build tools.
+The inspection result includes an uppercase `calculatedSha256`, which is a
+locally calculated digest of the selected APK file. It remains separate from
+publisher or author trust: `checksumStatus` is `not_compared` and
+`signatureVerification` is `not_performed`. EmuChef performs no APK v1, v2,
+v3, or v4 signature verification, signer-certificate extraction, certificate
+pinning, proof-of-rotation processing, or signer identity validation.
 
-APK analyzers run with direct argv, bounded output, and a timeout. APK inspection never installs the package. Split APKs are rejected for the starter single-APK recipe until an explicit split-install contract exists.
+GitHub names, topics, descriptions, filenames, release metadata, and the local
+digest may inform review but may not substitute for manifest package evidence
+or an explicitly trusted publisher checksum.
 
 ### Installation strategies
 
@@ -70,17 +82,32 @@ The wizard exposes three source-neutral recipe strategies when the selected sour
 
 #### Pinned release
 
-This is the default for a selected GitHub release asset or direct HTTPS APK. The recipe declares a `remote_file` artifact with the exact asset URL, resolves it, and installs it. This mode is reproducible because the concrete artifact is fixed at authoring time.
+This is the default for a selected release asset or direct HTTPS APK. The
+recipe declares a `remote_file` artifact with the exact asset URL, resolves it,
+and installs it. The generated install step enforces the package name extracted
+during inspection. When the author supplies an explicitly trusted publisher
+SHA-256, the generator also emits it as `expected_sha256`; the locally
+calculated inspection digest never supplies that field automatically.
 
 #### Latest compatible release
 
 This is available for public GitHub, GitLab, and Forgejo-compatible repository sources. The author selects one APK from the current release and EmuChef derives an editable filename regular expression by generalizing version-like segments while preserving variant, platform, and architecture text. The rule is previewed against the selected release and review is blocked unless it matches exactly one APK.
 
-The generated recipe uses explicit `resolve_remote_release` and `download_remote_file` steps. Runtime resolution dispatches by provider, excludes drafts or unpublished releases, excludes prereleases unless the author enables them, orders releases deterministically, and fails safely when the saved rule matches zero or multiple assets. Future releases may differ from the APK inspected during authoring.
+The generated recipe uses explicit `resolve_remote_release` and
+`download_remote_file` steps. Runtime resolution dispatches by provider,
+excludes drafts or unpublished releases, excludes prereleases unless the author
+enables them, orders releases deterministically, and fails safely when the saved
+rule matches zero or multiple assets. The install step enforces the inspected
+package name against the resolved APK. Latest-compatible generation does not
+persist the authoring-time calculated digest as a trusted expected checksum.
 
 #### User-provided APK
 
-This is the default for a local APK and is available for any source. The recipe declares a required `file` input with role `apk` and installs that input. It never persists the developer's local absolute APK path.
+This is the default for a local APK and is available for any source. The recipe
+declares a required `file` input with role `apk` and installs that input. It
+never persists the developer's local absolute APK path. Because the runtime APK
+may differ from the authoring sample, this strategy omits package/checksum
+enforcement and permission selections derived from that sample.
 
 ### Generated recipe
 
@@ -89,12 +116,57 @@ The starter recipe is intentionally minimal:
 - optional `resolve_artifacts` for a pinned remote source;
 - optional `resolve_remote_release` followed by `download_remote_file` for latest-compatible provider sources;
 - `install_apk` constrained by `apk_install`;
-- `package_installed` skip condition using the verified package name; and
-- optional `launch_app` only when a launcher component was verified and the author explicitly enables launch-once generation.
+- `package_installed` skip condition using the reviewed package name;
+- optional package and checksum enforcement as described above; and
+- an optional `grant_permissions` step for reviewed eligible selections.
 
 The generator uses the existing recipe model and step specifications. It does not maintain a second recipe representation.
 
-Current limitation: the runtime resolver and downloader are implemented, but executor-side APK package and signing-certificate reinspection is not yet available. Latest recipes therefore retain authoring-time identity evidence but do not yet enforce package or certificate identity immediately before install. That enforcement must be added before latest mode is considered supply-chain complete.
+Immediately before installation, `expected_package_name` causes the executor to
+reinspect the resolved APK with the bounded Rust manifest parser and compare the
+package exactly and case-sensitively. `expected_sha256`, when present, causes a
+streamed file digest comparison. A mismatch or redacted inspection/read failure
+prevents the ADB install call. Both parameters are optional so legacy and
+user-provided recipes retain their previous behavior when the fields are
+absent. These checks are integrity controls, not APK signature verification.
+
+The current native inspection supplies no launcher activity, so the normal
+Config Editor flow does not derive a launch step from the inspected APK.
+
+### Permission automation
+
+With connected-device API context, the backend classifies exact reviewed
+permission names as runtime-grantable, runtime-restricted, app-op-grantable,
+manual special access, install-time, signature-or-privileged, or unknown. It
+filters candidates using declaration kind, `maxSdkVersion`, permission
+introduction/replacement bounds, application target SDK, and device API.
+Missing or non-numeric context fails closed rather than producing speculative
+automation.
+
+Only explicit selections matched back to the trusted native inspection may
+produce automation, and only package-enforced pinned or latest-compatible
+recipes are eligible. Runtime actions use `pm grant`; the initial supported
+app-op maps `MANAGE_EXTERNAL_STORAGE` to mode `allow`. Generated actions use
+the inspected expected package, set `required: false`, and use:
+
+```yaml
+policy:
+  on_failure: warn
+  require_all: false
+```
+
+The step requires `shell_command`, never blanket `root_shell`. Root and Android
+API applicability are action-scoped through supported `when.rooted`,
+`when.android_api_min`, and `when.android_api_max` conditions. Current
+generation emits `rooted: true` only for a selected action whose reviewed
+catalog entry requires root; the executor marks an unmet condition
+`not_applicable` without suppressing eligible non-root actions.
+
+The small exact-name catalog does not imply general Android permission
+automation. Runtime-restricted, signature/privileged, unknown, role-based,
+accessibility, VPN, notification-listener, device-admin, Settings-mediated, and
+other manual special-access cases remain warning-only, unsupported, or manual
+as applicable.
 
 ### Generated app definition
 
@@ -110,6 +182,14 @@ The app definition preserves schema version 1 and the existing authored shape un
 - extensible metadata.
 
 `install_source` and `tracking_source` describe source and tracking intent. They do not dynamically resolve recipe artifacts.
+
+Every generated app definition owns the reserved
+`metadata.apk_inspection` record. Generation removes any editable value under
+that key, writes the trusted inspection metadata, and preserves unrelated
+author metadata. Local and user-provided flows store empty selected-action
+arrays. See
+[Phase 5B](phase-5b-apk-verification-and-permission-automation.md) for the exact
+field shape and validation rules.
 
 ### Evidence
 
@@ -132,9 +212,18 @@ Before saving, Rust scans the selected authored root for:
 - duplicate destination path;
 - existing repository metadata;
 - existing pinned asset URL; and
-- an identical latest-release policy fingerprint composed of provider, base URL, repository, asset pattern, and prerelease policy.
+- an identical latest-release policy fingerprint composed of provider, base URL, repository, asset pattern, and prerelease policy; and
+- overlapping package/checksum enforcement or an identical APK
+  security-and-permission fingerprint under another recipe ID.
 
-ID, path, and identical latest-policy conflicts are blocking. Matching package or repository data under a different ID is otherwise a warning requiring review. A pinned source and latest source for the same repository therefore warn through repository overlap without being treated as the same immutable artifact.
+ID, path, identical latest-policy, and identical APK security-automation
+fingerprint conflicts are blocking. Other package, checksum, or repository
+overlap is a warning requiring review. Rust derives the security fingerprint
+from the complete generated recipe returned by the trusted generation request;
+React cannot supply the recipe or a fingerprint. Legacy collision requests
+without a complete recipe retain their earlier checks. See
+[Phase 5B](phase-5b-apk-verification-and-permission-automation.md) for exact
+comparability and fingerprint semantics.
 
 ## Device profile generator
 
@@ -247,7 +336,7 @@ extension mappings retain their authored order.
 
 ## Sidecar protocol
 
-Add negotiated capabilities for:
+Negotiated capabilities include:
 
 - `analyzeAppSource`;
 - `inspectApk`;
@@ -257,14 +346,17 @@ Add negotiated capabilities for:
 
 Existing `listAdbDevices` and `probeDevice` capabilities are reused.
 
-Analysis and draft generation return structured data and perform no authored-data writes. Backend responses use stable error codes and redact credentials, exact serials, absolute paths, raw analyzer output, and unsafe network details from product-facing errors.
+Analysis and draft generation return structured data and perform no
+authored-data writes. Backend responses use stable error codes and redact
+credentials, exact serials, absolute paths, parser diagnostics, and unsafe
+network details from product-facing errors.
 
 ## Tauri and save ownership
 
 Tauri owns:
 
 - native local-APK selection;
-- configured APK-analyzer paths;
+- session-scoped native APK handles and file identities;
 - exact ADB serials and device handles;
 - native save destinations;
 - final collision revalidation; and
@@ -320,8 +412,9 @@ Generator state is separate from `RecipeDocumentDto`. A sidecar restart invalida
 - Repository content and downloaded scripts are never executed.
 - README HTML is not rendered or interpreted as execution instructions.
 - GitHub credentials, when added later, remain in trusted OS-backed storage and never cross into React.
-- APK filenames, labels, repository fields, and analyzer output are untrusted input.
-- External tools use direct argv and never a shell.
+- APK filenames, manifest strings, repository fields, and parser input are
+  untrusted.
+- APK inspection stays inside the bounded native Rust parser boundary.
 - Standard device capture performs no writes.
 - Any future extended checks require explicit user action and cleanup of temporary material.
 
@@ -347,7 +440,7 @@ Generator state is separate from `RecipeDocumentDto`. A sidecar restart invalida
 
 ### Phase 3: local APK generator
 
-- configured APK analyzer;
+- native bounded APK manifest inspection;
 - native APK picker;
 - APK inspection;
 - app-definition draft;
@@ -358,15 +451,14 @@ Generator state is separate from `RecipeDocumentDto`. A sidecar restart invalida
 The implemented local workflow uses explicit BYO metadata:
 `install_source.type` is `user_provided_apk`, its resolver is `none`,
 `tracking_source.type` is `local_apk`, direct APK support is not required, and
-BYO APK support is required. Verified APK facts are review evidence rather than
-automatically persisted metadata.
+BYO APK support is required. Native APK facts are review evidence and are
+persisted under the generator-owned `metadata.apk_inspection` key; local flows
+persist no selected permission actions.
 
-Native selection accepts regular APK files up to 2 GiB and regular executable
-files whose basename matches the explicitly selected `apkanalyzer` or `aapt2`
-adapter. Analyzer processes use direct argument vectors, a 30-second timeout,
-and a 4 MiB bound per output stream. Both adapters report certificate SHA-256
-as missing because neither supported command surface exposes signing identity;
-the missing fact is a deterministic warning rather than invented data.
+Native selection accepts regular APK files up to 2 GiB. The backend reads one
+root `AndroidManifest.xml` through its bounded ZIP and binary-XML parser and
+streams the APK file to calculate the local SHA-256. It does not execute an
+analyzer process or expose certificate or signer facts.
 
 The Config Editor enforces one active generator wizard. App-generator paths and
 file identities remain behind session-scoped Tauri handles. Final dual-file
@@ -391,7 +483,7 @@ eligible assets are non-empty `.apk` files no larger than 2 GiB. Direct URLs
 must use public HTTPS without credentials, fragments, or query parameters.
 Metadata bodies are bounded to 2 MiB, redirects to five safe HTTPS hops,
 connections to 10 seconds, and requests to 30 seconds. Downloads stream into a
-session-owned temporary workspace and reuse the configured APK analyzer.
+session-owned temporary workspace and use the same native Rust inspection.
 
 Pinned generation stores normalized source identity and emits a `remote_file`
 artifact plus resolve/install steps. Authors may instead choose the existing
@@ -406,7 +498,11 @@ Potential later work includes OS-keychain GitHub credentials, dedicated app/prof
 
 ## Verification
 
-Rust tests cover typed parsing/emission, identifier normalization, regex escaping, Android ranges, evidence assignment, collision classification, generated recipe validity, URL parsing, release filtering, analyzer parsing, timeouts, and redaction.
+Rust tests cover typed parsing/emission, identifier normalization, regex
+escaping, Android ranges, evidence assignment, collision classification,
+generated recipe validity, native manifest parsing, permission classification,
+install-time package/checksum enforcement, URL parsing, release filtering,
+timeouts, and redaction.
 
 Protocol tests cover capability negotiation, malformed requests, side-effect-free generation, stable errors, and absence of unsafe paths or serials.
 

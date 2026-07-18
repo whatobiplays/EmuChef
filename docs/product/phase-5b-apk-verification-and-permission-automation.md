@@ -1,6 +1,6 @@
 # Phase 5B — APK Manifest Inspection and Permission Automation
 
-Status: in progress (Phases 5B1 through 5B8 complete)
+Status: complete
 
 ## Purpose
 
@@ -593,9 +593,22 @@ Cover:
 
 ## Phase 5B11 — Documentation and release gates
 
-Document manifest inspection, package-name enforcement, checksum semantics, absence of APK signature verification, permission classification, runtime grants, app-op behavior, root-scoped conditions, and unsupported/manual special access.
+Status: complete
 
-Run the normal backend, Tauri, frontend, lint, snapshot, and `git diff --check` gates before release.
+Current-state documentation must cover native bounded manifest inspection,
+package-name enforcement, trusted-checksum semantics, the absence of APK
+signature verification, permission classification, reviewed runtime grants and
+app-ops, action-scoped root/API conditions, and unsupported or manual special
+access. It must keep the locally calculated APK digest separate from trusted
+publisher checksum evidence and must not imply signer-certificate inspection.
+
+Complete the normal backend, Tauri, frontend, lint, release-script-test, and
+repository-integrity gates and retain a commit-specific evidence record before
+marking this phase complete. Automated script tests do not constitute packaged,
+signed, notarized, real-device, clean-Mac, or public-release evidence.
+
+Completion evidence: [Phase 5B APK verification and permission-automation
+evidence](../release/evidence/phase-5b-apk-verification-2026-07-18.md).
 
 # Delivery order
 
@@ -616,4 +629,5 @@ Run the normal backend, Tauri, frontend, lint, snapshot, and `git diff --check` 
 - Bundled Java runtime or Android Build Tools.
 - Installed Android SDK dependency.
 - Split APK/APKS/AAB support.
-- Automatic approval of role-, accessibility-, VPN-, or Settings-mediated access.
+- Automatic approval of role-, accessibility-, VPN-, notification-listener-,
+  device-admin-, or Settings-mediated access.

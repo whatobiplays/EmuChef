@@ -47,6 +47,17 @@ fresh reviewed plan; execution rollback and undo do not exist. The stable DTOs
 and matching rules are documented in
 [`docs/product/phase-0-runtime-contracts.md`](../../docs/product/phase-0-runtime-contracts.md).
 
+## APK Inspection and Install Enforcement
+
+The backend inspects bounded `AndroidManifest.xml` input natively in Rust for
+Config Editor authoring and optional install-time package enforcement. It does
+not require Java, Android SDK Build Tools, `apkanalyzer`, `aapt2`, or an
+installed Android SDK. Optional trusted SHA-256 enforcement is separate from
+the locally calculated authoring digest, and APK signatures and signer
+certificates are not verified. See the
+[Phase 5B product contract](../../docs/product/phase-5b-apk-verification-and-permission-automation.md)
+for the complete trust and permission-automation boundaries.
+
 ## Artifact Boundary
 
 Absolute `file://`, HTTP, and HTTPS URLs resolve during the existing
@@ -68,8 +79,8 @@ system proxy discovery without EmuChef-specific proxy settings.
 ```bash
 cargo fmt --manifest-path crates/emuchef-rust-backend/Cargo.toml --all -- --check
 cargo check --manifest-path crates/emuchef-rust-backend/Cargo.toml
-cargo test --manifest-path crates/emuchef-rust-backend/Cargo.toml
-cargo clippy --manifest-path crates/emuchef-rust-backend/Cargo.toml --all-targets -- -D warnings
+cargo test --locked --manifest-path crates/emuchef-rust-backend/Cargo.toml
+cargo clippy --locked --manifest-path crates/emuchef-rust-backend/Cargo.toml --all-targets --all-features -- -D warnings
 node scripts/check-python-runtime-retirement.mjs
 ```
 

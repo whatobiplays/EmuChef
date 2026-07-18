@@ -12,6 +12,12 @@
 - A simulated packaged sidecar smoke exercises protocol behavior.
 - Local HTTP/TLS tests and process-level CLI tests cover network artifact
   downloading, strict TLS, bounded redirects/timeouts, cache reuse, and cleanup.
+- [Phase 5B APK verification and permission-automation evidence](evidence/phase-5b-apk-verification-2026-07-18.md)
+  records the backend, Tauri, frontend, release-script-test, and repository
+  integrity gates for commit
+  `eb1f0d7c0a5d0c1f7c6e1ff9bbd4cde0ca2fa2d1`. It is automated
+  documentation-release evidence only; it does not establish packaged,
+  real-device, signed, notarized, clean-Mac, or public-release readiness.
 - [Real-device RetroArch evidence](evidence/real-device-retroarch-2026-07-11.md)
   records the local baseline, HTTP(S) cold cache, warm cache, offline warm
   cache, matching cache manifests, and successful device provisioning on
@@ -30,6 +36,8 @@
   [macOS packaged Config Editor checklist](../manual/macos-packaged-gui-validation.md)
   and the corresponding checklist for every other supported target.
 - Validate the signed and notarized application on a separate clean Mac.
+- Validate Phase 5B package enforcement and selected permission actions against
+  representative rooted and unrooted disposable Android devices.
 - Execute the maintained
   [macOS signing and notarization runbook](../manual/macos-signing-notarization.md)
   and retain external Apple submission evidence for each release.
@@ -39,8 +47,10 @@
   [Phase 4B contract](../product/phase-4b-secure-end-user-update-delivery.md).
 - Add cross-platform release automation and artifact inspection.
 
-Completed local signing and notarization do not establish clean-Mac packaged-GUI
-or public-release readiness.
+Completed local signing and notarization for an older recorded commit do not
+establish current-commit signing, clean-Mac packaged-GUI, or public-release
+readiness. Signing, notarization, and artifact verification must be repeated for
+each release.
 
 Phase 4B signed discovery and manual browser handoff are implemented but
 fail-closed in production because trust remains unconfigured. This is not an
