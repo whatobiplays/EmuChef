@@ -1,9 +1,14 @@
-//! Test-only qualification boundary for hostile APK manifest inspection.
+//! Production-compiled internal boundary for hostile APK manifest inspection.
 //!
-//! Phase 5B1 intentionally keeps this module out of production builds. The
-//! qualification proves the behavior required around `rusty-axml` before a
-//! later phase promotes backend-owned manifest facts into a stable runtime
-//! surface.
+//! `rusty-axml` has known panic paths and permissive behavior for some malformed
+//! binary XML, so every parser and traversal call must remain behind the
+//! structural validation, integer normalization, size limits, redacted error
+//! mapping, and panic boundary implemented here. Parser-owned types must not
+//! escape this module.
+//!
+//! Phase 5B2 defines a stable crate-internal model but deliberately has no
+//! production caller. Later phases may integrate the inspector without
+//! weakening this mandatory defensive wrapper.
 
 use rusty_axml::parser::{Axml, XmlElement};
 use std::fmt;
@@ -20,35 +25,35 @@ const MAX_MANIFEST_BYTES: usize = 4 * 1024 * 1024;
 const ZIP_EOCD_MIN_BYTES: usize = 22;
 const ZIP_MAX_COMMENT_BYTES: usize = u16::MAX as usize;
 
-/// Manifest facts owned by the backend qualification boundary.
+/// Stable manifest facts owned by the backend inspection boundary.
 #[derive(Debug, PartialEq, Eq)]
-struct ApkManifestFacts {
-    package_name: String,
-    version_code: Option<String>,
-    version_name: Option<String>,
-    min_sdk_version: Option<String>,
-    target_sdk_version: Option<String>,
-    permissions: Vec<ApkPermissionDeclaration>,
+pub(crate) struct ApkManifestFacts {
+    pub(crate) package_name: String,
+    pub(crate) version_code: Option<String>,
+    pub(crate) version_name: Option<String>,
+    pub(crate) min_sdk_version: Option<String>,
+    pub(crate) target_sdk_version: Option<String>,
+    pub(crate) permissions: Vec<ApkPermissionDeclaration>,
 }
 
 /// A requested permission declared directly below the manifest root.
 #[derive(Debug, Ord, PartialOrd, PartialEq, Eq)]
-struct ApkPermissionDeclaration {
-    name: String,
-    kind: ApkPermissionDeclarationKind,
-    max_sdk_version: Option<String>,
+pub(crate) struct ApkPermissionDeclaration {
+    pub(crate) name: String,
+    pub(crate) kind: ApkPermissionDeclarationKind,
+    pub(crate) max_sdk_version: Option<String>,
 }
 
 /// The two Android manifest elements that request permissions.
 #[derive(Clone, Copy, Debug, Ord, PartialOrd, PartialEq, Eq)]
-enum ApkPermissionDeclarationKind {
+pub(crate) enum ApkPermissionDeclarationKind {
     UsesPermission,
     UsesPermissionSdk23,
 }
 
-/// Stable, redacted failures exposed by the qualification boundary.
+/// Stable, redacted failures exposed by the backend inspection boundary.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-enum ApkManifestError {
+pub(crate) enum ApkManifestError {
     ZipInvalid,
     ManifestMissing,
     ManifestTooLarge,
@@ -59,7 +64,7 @@ enum ApkManifestError {
 
 impl ApkManifestError {
     /// Return the stable application error code for this failure.
-    fn code(self) -> &'static str {
+    pub(crate) fn code(self) -> &'static str {
         match self {
             Self::ZipInvalid => "apk_zip_invalid",
             Self::ManifestMissing => "apk_manifest_missing",
@@ -88,7 +93,7 @@ impl std::error::Error for ApkManifestError {}
 
 /// Inspect the single root manifest entry in an APK without reading the whole
 /// archive into memory.
-fn inspect_apk_manifest(path: &Path) -> Result<ApkManifestFacts, ApkManifestError> {
+pub(crate) fn inspect_apk_manifest(path: &Path) -> Result<ApkManifestFacts, ApkManifestError> {
     let mut file = File::open(path).map_err(|_| ApkManifestError::InspectionFailed)?;
     let declared_entry_count = declared_zip_entry_count(&mut file)?;
     file.seek(SeekFrom::Start(0))
@@ -218,11 +223,16 @@ fn extract_manifest_facts(parsed: &Axml) -> Result<ApkManifestFacts, ApkManifest
 
     let mut min_sdk_version = None;
     let mut target_sdk_version = None;
+    let mut uses_sdk_seen = false;
     let mut permissions = Vec::new();
     for child in root.children() {
         let child = child.borrow();
         match child.element_type() {
-            "uses-sdk" if min_sdk_version.is_none() && target_sdk_version.is_none() => {
+            "uses-sdk" => {
+                if uses_sdk_seen {
+                    return Err(ApkManifestError::ManifestInvalid);
+                }
+                uses_sdk_seen = true;
                 min_sdk_version = integer_attribute(&child, "android:minSdkVersion", true)?;
                 target_sdk_version = integer_attribute(&child, "android:targetSdkVersion", true)?;
             }
@@ -471,11 +481,22 @@ mod tests {
         let manifest = element(
             "manifest",
             vec![raw("package", "com.example.preview")],
-            vec![element(
-                "uses-sdk",
-                vec![raw("targetSdkVersion", "VanillaIceCream")],
-                vec![],
-            )],
+            vec![
+                element(
+                    "uses-sdk",
+                    vec![raw("targetSdkVersion", "VanillaIceCream")],
+                    vec![],
+                ),
+                element(
+                    "application",
+                    vec![],
+                    vec![element(
+                        "uses-sdk",
+                        vec![raw("targetSdkVersion", "999")],
+                        vec![],
+                    )],
+                ),
+            ],
         );
         let apk = write_apk(
             &workspace,
@@ -489,6 +510,42 @@ mod tests {
         assert_eq!(facts.min_sdk_version, None);
         assert_eq!(facts.target_sdk_version.as_deref(), Some("VanillaIceCream"));
         assert!(facts.permissions.is_empty());
+    }
+
+    #[test]
+    fn apk_manifest_rejects_duplicate_direct_child_uses_sdk_declarations() {
+        let workspace = TempDir::new().expect("temporary workspace should be created");
+        let cases = [
+            vec![
+                element("uses-sdk", vec![], vec![]),
+                element("uses-sdk", vec![], vec![]),
+            ],
+            vec![
+                element("uses-sdk", vec![], vec![]),
+                element("uses-sdk", vec![raw("minSdkVersion", "23")], vec![]),
+            ],
+            vec![
+                element("uses-sdk", vec![raw("targetSdkVersion", "35")], vec![]),
+                element("uses-sdk", vec![], vec![]),
+            ],
+            vec![
+                element("uses-sdk", vec![raw("minSdkVersion", "23")], vec![]),
+                element("uses-sdk", vec![raw("targetSdkVersion", "35")], vec![]),
+            ],
+        ];
+
+        for children in cases {
+            let manifest = element(
+                "manifest",
+                vec![raw("package", "com.example.duplicate-sdk")],
+                children,
+            );
+            let apk = write_apk(
+                &workspace,
+                &[(ANDROID_MANIFEST_ENTRY, build_axml(&manifest))],
+            );
+            assert_error(&apk, ApkManifestError::ManifestInvalid);
+        }
     }
 
     #[test]

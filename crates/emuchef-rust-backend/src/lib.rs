@@ -4,8 +4,10 @@
 //! protocol surfaces used by the Tauri configuration editor and the additive
 //! Phase 0 contract for a future end-user application.
 
-#[cfg(test)]
-mod apk_manifest;
+/// Production-compiled APK manifest inspection boundary prepared for later
+/// backend integration. Phase 5B2 intentionally has no production caller yet.
+#[cfg_attr(not(test), allow(dead_code))]
+pub(crate) mod apk_manifest;
 mod artifact_resolver;
 mod artifact_store;
 mod artifact_transport;

@@ -1,6 +1,6 @@
 # Phase 5B — APK Manifest Inspection and Permission Automation
 
-Status: planned
+Status: in progress (Phases 5B1 and 5B2 complete)
 
 ## Purpose
 
@@ -41,6 +41,8 @@ Package matching and checksums are useful integrity controls, but they are not e
 
 ## Phase 5B1 — Manifest parser qualification
 
+Status: complete
+
 Qualify a lightweight Rust Android binary XML parser for hostile APK input without adding signature-verification dependencies.
 
 The qualification module must:
@@ -55,10 +57,11 @@ The qualification module must:
 - preserve `android:maxSdkVersion`;
 - sort and deduplicate permission declarations deterministically.
 
-The qualified parser is the exact, test-only development dependency
-`rusty-axml = { version = "=0.2.1", default-features = false }`. The
-qualification module is compiled only for tests and is not a production
-runtime surface. No `apksig` dependency is permitted.
+During qualification, the parser was the exact, test-only development
+dependency `rusty-axml = { version = "=0.2.1", default-features = false }`.
+The qualification module was compiled only for tests until Phase 5B2 promoted
+the same wrapper and dependency into production backend compilation. No
+`apksig` dependency is permitted.
 
 Exit criteria:
 
@@ -95,7 +98,36 @@ promotion.
 
 ## Phase 5B2 — Stable APK manifest model
 
-Create backend-owned types for package, version, SDK, and permission facts. Parser-specific types must not cross backend, protocol, or executor boundaries.
+Status: complete
+
+The qualified wrapper is now a production-compiled, crate-internal backend
+module. `rusty-axml = { version = "=0.2.1", default-features = false }` is an
+exact-pinned normal dependency. The module, inspection function, errors, facts,
+permission declarations, and declaration-kind enum use `pub(crate)` visibility;
+they are not public crate API, protocol DTOs, executor inputs, or frontend
+types. No production caller is integrated in Phase 5B2.
+
+The stable internal facts are:
+
+- a required package name;
+- optional version code and version name;
+- optional minimum and target SDK versions;
+- requested permissions with declaration kind and optional `maxSdkVersion`.
+
+Known numeric metadata is represented as canonical decimal strings. SDK
+codenames remain strings where Android permits them. `rusty-axml` types and
+diagnostics remain private to the module.
+
+The Phase 5B1 wrapper remains mandatory because the parser has known panic
+paths, permissive handling of some malformed binary XML, and string-rendered
+typed values. Production compilation preserves exact-one root
+`AndroidManifest.xml` handling, ZIP entry-count consistency checks, the 4 MiB
+declared and streamed decompression limits, AXML container validation,
+parser/traversal panic containment, direct-child-only extraction, tested
+integer normalization, deterministic permission sorting, exact deduplication,
+and stable redacted failures. A second direct-child `uses-sdk` declaration is
+invalid regardless of whether either declaration is empty or partial. Nested
+`uses-sdk` elements are ignored.
 
 Stable errors should include:
 
@@ -105,9 +137,15 @@ apk_manifest_missing
 apk_manifest_too_large
 apk_manifest_invalid
 apk_package_missing
-apk_package_mismatch
 apk_manifest_inspection_failed
 ```
+
+Package-name enforcement and `apk_package_mismatch` belong to Phase 5B6. The
+permission catalog and classification, checksums, install/executor integration,
+protocol and UI surfaces, and authored-recipe behavior remain deferred. APK
+signature verification remains an explicit non-goal; EmuChef does not add
+signer inspection, certificates, Java, `apksigner`, Android Build Tools, or an
+Android SDK dependency.
 
 ## Phase 5B3 — Android permission catalog and classifier
 
