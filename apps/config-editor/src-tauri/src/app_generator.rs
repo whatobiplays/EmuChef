@@ -13,8 +13,11 @@ use std::sync::Mutex;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use reqwest::blocking::{Client, Response};
-use reqwest::header::{CONTENT_DISPOSITION, CONTENT_LENGTH, CONTENT_TYPE, USER_AGENT};
+use reqwest::header::{
+    HeaderMap, ACCEPT, CONTENT_DISPOSITION, CONTENT_LENGTH, CONTENT_TYPE, RETRY_AFTER, USER_AGENT,
+};
 use reqwest::redirect::Policy;
+use reqwest::StatusCode;
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Map, Value};
 use tauri::{AppHandle, Manager, State};
@@ -34,6 +37,10 @@ const NETWORK_TIMEOUT: Duration = Duration::from_secs(30);
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
 const MAX_REDIRECTS: usize = 5;
 const HTTP_USER_AGENT: &str = "EmuChef-Config-Editor/0.1";
+const GITHUB_API_ROOT: &str = "https://api.github.com";
+const GITHUB_API_VERSION: &str = "2022-11-28";
+/// Reject retry hints beyond one day so untrusted headers cannot produce absurd guidance.
+const MAX_RATE_LIMIT_ADVISORY_SECONDS: u64 = 24 * 60 * 60;
 
 #[derive(Clone, Debug, Default, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -885,23 +892,49 @@ fn analyze_github_source(
     source: &NormalizedRemoteSource,
     include_prereleases: bool,
 ) -> Result<GitHubAnalysis, Value> {
+    analyze_github_source_with_api_root(
+        client,
+        mode,
+        source,
+        include_prereleases,
+        GITHUB_API_ROOT,
+        current_unix_epoch_seconds(),
+    )
+}
+
+/// Analyze a GitHub source through an injected private API root.
+///
+/// Production callers always use [`GITHUB_API_ROOT`]. The injection point keeps
+/// deterministic HTTP tests offline without exposing a runtime endpoint override.
+fn analyze_github_source_with_api_root(
+    client: &Client,
+    mode: &str,
+    source: &NormalizedRemoteSource,
+    include_prereleases: bool,
+    api_root: &str,
+    now_epoch_seconds: u64,
+) -> Result<GitHubAnalysis, Value> {
     let repository = source.repository.as_deref().ok_or_else(|| {
         remote_source_error("github_url_invalid", "The GitHub repository is missing.")
     })?;
-    let repository_value = get_json_bounded(
+    let api_root = api_root.trim_end_matches('/');
+    let repository_value = get_github_json_bounded(
         client,
-        &format!("https://api.github.com/repos/{repository}"),
+        &format!("{api_root}/repos/{repository}"),
+        now_epoch_seconds,
     )?;
     let releases_value = if mode == "github_release" {
         let tag = source.release_tag.as_deref().unwrap_or_default();
-        Value::Array(vec![get_json_bounded(
+        Value::Array(vec![get_github_json_bounded(
             client,
-            &format!("https://api.github.com/repos/{repository}/releases/tags/{tag}"),
+            &format!("{api_root}/repos/{repository}/releases/tags/{tag}"),
+            now_epoch_seconds,
         )?])
     } else {
-        get_json_bounded(
+        get_github_json_bounded(
             client,
-            &format!("https://api.github.com/repos/{repository}/releases?per_page=30"),
+            &format!("{api_root}/repos/{repository}/releases?per_page=30"),
+            now_epoch_seconds,
         )?
     };
     let mut releases = Vec::new();
@@ -1233,22 +1266,28 @@ fn provider_response_error(provider: &str) -> Value {
     )
 }
 
-fn get_json_bounded(client: &Client, url: &str) -> Result<Value, Value> {
+fn get_github_json_bounded(
+    client: &Client,
+    url: &str,
+    now_epoch_seconds: u64,
+) -> Result<Value, Value> {
     let mut response = client
         .get(url)
         .header(USER_AGENT, HTTP_USER_AGENT)
-        .header("Accept", "application/vnd.github+json")
+        .header(ACCEPT, "application/vnd.github+json")
+        .header("X-GitHub-Api-Version", GITHUB_API_VERSION)
         .send()
         .map_err(|_| {
             remote_source_error(
-                "github_request_failed",
-                "GitHub information could not be retrieved.",
+                "github_transport_failed",
+                "GitHub could not be reached. Check the network connection and try again.",
             )
         })?;
     if !response.status().is_success() {
-        return Err(remote_source_error(
-            "github_request_failed",
-            "GitHub information could not be retrieved.",
+        return Err(github_status_error(
+            response.status(),
+            response.headers(),
+            now_epoch_seconds,
         ));
     }
     if response
@@ -1283,6 +1322,78 @@ fn get_json_bounded(client: &Client, url: &str) -> Result<Value, Value> {
             "GitHub returned information in an unexpected format.",
         )
     })
+}
+
+/// Convert a non-success GitHub response into a stable, redacted product error.
+///
+/// Classification uses only the HTTP status and validated numeric rate-limit
+/// headers. GitHub response bodies and raw header maps never cross this boundary.
+fn github_status_error(status: StatusCode, headers: &HeaderMap, now_epoch_seconds: u64) -> Value {
+    let rate_limit_status = matches!(
+        status,
+        StatusCode::FORBIDDEN | StatusCode::TOO_MANY_REQUESTS
+    );
+    let remaining = parse_unsigned_header(headers, "x-ratelimit-remaining");
+    let retry_after = parse_unsigned_header(headers, RETRY_AFTER.as_str())
+        .filter(|seconds| *seconds <= MAX_RATE_LIMIT_ADVISORY_SECONDS);
+    let primary_rate_limit = rate_limit_status && remaining == Some(0);
+    let secondary_rate_limit = rate_limit_status && retry_after.is_some();
+
+    if status == StatusCode::TOO_MANY_REQUESTS || primary_rate_limit || secondary_rate_limit {
+        let reset_wait = primary_rate_limit
+            .then(|| parse_unsigned_header(headers, "x-ratelimit-reset"))
+            .flatten()
+            .and_then(|reset| reset.checked_sub(now_epoch_seconds))
+            .filter(|seconds| *seconds > 0 && *seconds <= MAX_RATE_LIMIT_ADVISORY_SECONDS);
+        return remote_source_error(
+            "github_rate_limited",
+            &github_rate_limit_message(retry_after, reset_wait),
+        );
+    }
+
+    if status == StatusCode::NOT_FOUND {
+        return remote_source_error(
+            "github_repository_unavailable",
+            "The GitHub repository was not found or is not publicly accessible.",
+        );
+    }
+
+    remote_source_error(
+        "github_service_failed",
+        "GitHub could not complete the request. Try again later.",
+    )
+}
+
+/// Parse one decimal response header without accepting signs, units, or overflow.
+fn parse_unsigned_header(headers: &HeaderMap, name: &str) -> Option<u64> {
+    let value = headers.get(name)?.to_str().ok()?.trim();
+    if value.is_empty() || !value.bytes().all(|byte| byte.is_ascii_digit()) {
+        return None;
+    }
+    value.parse().ok()
+}
+
+fn github_rate_limit_message(retry_after: Option<u64>, reset_wait: Option<u64>) -> String {
+    if let Some(seconds) = retry_after.filter(|seconds| *seconds > 0) {
+        return format!(
+            "GitHub API requests are rate-limited. You may be able to try again in about {seconds} seconds."
+        );
+    }
+    if let Some(seconds) = reset_wait {
+        let minutes = seconds.div_ceil(60);
+        let unit = if minutes == 1 { "minute" } else { "minutes" };
+        return format!(
+            "GitHub API requests are rate-limited. You may be able to try again in about {minutes} {unit}."
+        );
+    }
+    "GitHub API requests are rate-limited. Try again later.".to_string()
+}
+
+fn current_unix_epoch_seconds() -> u64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs()
 }
 
 fn stream_apk_response(mut response: Response, path: &Path) -> Result<(), Value> {
@@ -2686,6 +2797,155 @@ fn generator_protocol_error() -> Value {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::net::TcpListener;
+    use std::sync::Arc;
+    use std::thread;
+
+    #[derive(Debug, PartialEq, Eq)]
+    struct CapturedGitHubRequest {
+        path: String,
+        user_agent: Option<String>,
+        accept: Option<String>,
+        api_version: Option<String>,
+    }
+
+    enum FakeResponseFraming {
+        ContentLength,
+        Chunked,
+        DeclaredLength(usize),
+    }
+
+    struct FakeGitHubResponse {
+        status: u16,
+        headers: Vec<(String, String)>,
+        body: Vec<u8>,
+        framing: FakeResponseFraming,
+    }
+
+    impl FakeGitHubResponse {
+        fn json(status: u16, body: Value) -> Self {
+            Self {
+                status,
+                headers: vec![("Content-Type".to_string(), "application/json".to_string())],
+                body: serde_json::to_vec(&body).unwrap(),
+                framing: FakeResponseFraming::ContentLength,
+            }
+        }
+
+        fn with_header(mut self, name: &str, value: &str) -> Self {
+            self.headers.push((name.to_string(), value.to_string()));
+            self
+        }
+    }
+
+    fn spawn_fake_github(
+        responses: Vec<FakeGitHubResponse>,
+    ) -> (String, Arc<Mutex<Vec<CapturedGitHubRequest>>>) {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let api_root = format!("http://{}", listener.local_addr().unwrap());
+        let captured = Arc::new(Mutex::new(Vec::new()));
+        let captured_for_thread = Arc::clone(&captured);
+        thread::spawn(move || {
+            for response in responses {
+                let (mut stream, _) = listener.accept().unwrap();
+                stream
+                    .set_read_timeout(Some(Duration::from_secs(2)))
+                    .unwrap();
+                let request = capture_github_request(&mut stream);
+                captured_for_thread.lock().unwrap().push(request);
+                write_fake_response(&mut stream, response);
+            }
+        });
+        (api_root, captured)
+    }
+
+    fn capture_github_request(stream: &mut std::net::TcpStream) -> CapturedGitHubRequest {
+        let mut bytes = Vec::new();
+        let mut buffer = [0_u8; 1024];
+        while bytes.len() < 16 * 1024 && !bytes.windows(4).any(|part| part == b"\r\n\r\n") {
+            let count = stream.read(&mut buffer).unwrap();
+            if count == 0 {
+                break;
+            }
+            bytes.extend_from_slice(&buffer[..count]);
+        }
+        let request = String::from_utf8(bytes).unwrap();
+        let mut lines = request.split("\r\n");
+        let path = lines
+            .next()
+            .and_then(|line| line.split_ascii_whitespace().nth(1))
+            .unwrap_or_default()
+            .to_string();
+        let mut captured = CapturedGitHubRequest {
+            path,
+            user_agent: None,
+            accept: None,
+            api_version: None,
+        };
+        for line in lines {
+            let Some((name, value)) = line.split_once(':') else {
+                continue;
+            };
+            let target = if name.eq_ignore_ascii_case("user-agent") {
+                &mut captured.user_agent
+            } else if name.eq_ignore_ascii_case("accept") {
+                &mut captured.accept
+            } else if name.eq_ignore_ascii_case("x-github-api-version") {
+                &mut captured.api_version
+            } else {
+                continue;
+            };
+            *target = Some(value.trim().to_string());
+        }
+        captured
+    }
+
+    fn write_fake_response(stream: &mut std::net::TcpStream, response: FakeGitHubResponse) {
+        let mut head = format!("HTTP/1.1 {} Test\r\nConnection: close\r\n", response.status);
+        for (name, value) in response.headers {
+            head.push_str(&format!("{name}: {value}\r\n"));
+        }
+        match response.framing {
+            FakeResponseFraming::ContentLength => {
+                head.push_str(&format!("Content-Length: {}\r\n\r\n", response.body.len()));
+                stream.write_all(head.as_bytes()).unwrap();
+                stream.write_all(&response.body).unwrap();
+            }
+            FakeResponseFraming::Chunked => {
+                head.push_str("Transfer-Encoding: chunked\r\n\r\n");
+                stream.write_all(head.as_bytes()).unwrap();
+                stream
+                    .write_all(format!("{:X}\r\n", response.body.len()).as_bytes())
+                    .unwrap();
+                stream.write_all(&response.body).unwrap();
+                stream.write_all(b"\r\n0\r\n\r\n").unwrap();
+            }
+            FakeResponseFraming::DeclaredLength(length) => {
+                head.push_str(&format!("Content-Length: {length}\r\n\r\n"));
+                stream.write_all(head.as_bytes()).unwrap();
+                stream.write_all(&response.body).unwrap();
+            }
+        }
+    }
+
+    fn fake_github_client() -> Client {
+        Client::builder()
+            .no_proxy()
+            .connect_timeout(Duration::from_secs(2))
+            .timeout(Duration::from_secs(2))
+            .build()
+            .unwrap()
+    }
+
+    fn fake_github_error(response: FakeGitHubResponse, now_epoch_seconds: u64) -> Value {
+        let (api_root, _) = spawn_fake_github(vec![response]);
+        get_github_json_bounded(
+            &fake_github_client(),
+            &format!("{api_root}/metadata"),
+            now_epoch_seconds,
+        )
+        .unwrap_err()
+    }
 
     fn temp_path(label: &str) -> PathBuf {
         std::env::temp_dir().join(format!(
@@ -2750,6 +3010,14 @@ mod tests {
             .get("error")
             .and_then(Value::as_object)
             .and_then(|error| error.get("code"))
+            .and_then(Value::as_str)
+    }
+
+    fn api_error_message(value: &Value) -> Option<&str> {
+        value
+            .get("error")
+            .and_then(Value::as_object)
+            .and_then(|error| error.get("message"))
             .and_then(Value::as_str)
     }
 
@@ -3216,6 +3484,313 @@ mod tests {
         fs::write(&path, b"second-longer").unwrap();
         assert_ne!(current_file_identity(&path), Some(identity));
         fs::remove_file(path).unwrap();
+    }
+
+    #[test]
+    fn github_repository_analysis_uses_expected_paths_headers_and_assets() {
+        let responses = vec![
+            FakeGitHubResponse::json(
+                200,
+                json!({
+                    "full_name": "azahar-emu/azahar",
+                    "name": "azahar",
+                    "description": "A public emulator repository"
+                }),
+            ),
+            FakeGitHubResponse::json(
+                200,
+                json!([{
+                    "draft": false,
+                    "prerelease": false,
+                    "tag_name": "2120.1",
+                    "name": "Azahar 2120.1",
+                    "published_at": "2026-07-01T00:00:00Z",
+                    "assets": [{
+                        "name": "azahar-2120.1-android.apk",
+                        "size": 42,
+                        "content_type": "application/vnd.android.package-archive",
+                        "browser_download_url": "https://github.com/azahar-emu/azahar/releases/download/2120.1/azahar.apk"
+                    }]
+                }]),
+            ),
+        ];
+        let (api_root, captured) = spawn_fake_github(responses);
+        let source =
+            normalize_remote_source("github_repository", "https://github.com/azahar-emu/azahar")
+                .unwrap();
+        let analysis = analyze_github_source_with_api_root(
+            &fake_github_client(),
+            "github_repository",
+            &source,
+            false,
+            &api_root,
+            1_000,
+        )
+        .unwrap();
+
+        assert_eq!(analysis.repository["fullName"], "azahar-emu/azahar");
+        assert_eq!(analysis.releases.len(), 1);
+        assert_eq!(analysis.releases[0].assets.len(), 1);
+        assert_eq!(
+            analysis.releases[0].assets[0].file_name,
+            "azahar-2120.1-android.apk"
+        );
+        let requests = captured.lock().unwrap();
+        assert_eq!(
+            requests.as_slice(),
+            &[
+                CapturedGitHubRequest {
+                    path: "/repos/azahar-emu/azahar".to_string(),
+                    user_agent: Some(HTTP_USER_AGENT.to_string()),
+                    accept: Some("application/vnd.github+json".to_string()),
+                    api_version: Some(GITHUB_API_VERSION.to_string()),
+                },
+                CapturedGitHubRequest {
+                    path: "/repos/azahar-emu/azahar/releases?per_page=30".to_string(),
+                    user_agent: Some(HTTP_USER_AGENT.to_string()),
+                    accept: Some("application/vnd.github+json".to_string()),
+                    api_version: Some(GITHUB_API_VERSION.to_string()),
+                },
+            ]
+        );
+    }
+
+    #[test]
+    fn github_exact_release_analysis_uses_expected_path_and_headers() {
+        let responses = vec![
+            FakeGitHubResponse::json(
+                200,
+                json!({ "full_name": "azahar-emu/azahar", "name": "azahar" }),
+            ),
+            FakeGitHubResponse::json(
+                200,
+                json!({
+                    "draft": false,
+                    "prerelease": false,
+                    "tag_name": "2120.1",
+                    "assets": []
+                }),
+            ),
+        ];
+        let (api_root, captured) = spawn_fake_github(responses);
+        let source = normalize_remote_source(
+            "github_release",
+            "https://github.com/azahar-emu/azahar/releases/tag/2120.1",
+        )
+        .unwrap();
+        analyze_github_source_with_api_root(
+            &fake_github_client(),
+            "github_release",
+            &source,
+            false,
+            &api_root,
+            1_000,
+        )
+        .unwrap();
+
+        let requests = captured.lock().unwrap();
+        assert_eq!(requests.len(), 2);
+        assert_eq!(requests[0].path, "/repos/azahar-emu/azahar");
+        assert_eq!(
+            requests[1].path,
+            "/repos/azahar-emu/azahar/releases/tags/2120.1"
+        );
+        for request in requests.iter() {
+            assert_eq!(request.user_agent.as_deref(), Some(HTTP_USER_AGENT));
+            assert_eq!(
+                request.accept.as_deref(),
+                Some("application/vnd.github+json")
+            );
+            assert_eq!(request.api_version.as_deref(), Some(GITHUB_API_VERSION));
+        }
+    }
+
+    #[test]
+    fn github_primary_rate_limit_uses_bounded_reset_advisory() {
+        let error = fake_github_error(
+            FakeGitHubResponse::json(403, json!({ "secret": "must-not-cross" }))
+                .with_header("x-ratelimit-remaining", "0")
+                .with_header("x-ratelimit-reset", "1061"),
+            1_000,
+        );
+        assert_eq!(api_error_code(&error), Some("github_rate_limited"));
+        assert_eq!(
+            api_error_message(&error),
+            Some(
+                "GitHub API requests are rate-limited. You may be able to try again in about 2 minutes."
+            )
+        );
+        assert!(!error.to_string().contains("must-not-cross"));
+    }
+
+    #[test]
+    fn github_secondary_and_429_limits_prefer_retry_after() {
+        for status in [403, 429] {
+            let error = fake_github_error(
+                FakeGitHubResponse::json(status, json!({ "secret": "must-not-cross" }))
+                    .with_header("Retry-After", "120")
+                    .with_header("x-ratelimit-remaining", "17")
+                    .with_header("x-ratelimit-reset", "1001"),
+                1_000,
+            );
+            assert_eq!(api_error_code(&error), Some("github_rate_limited"));
+            assert_eq!(
+                api_error_message(&error),
+                Some(
+                    "GitHub API requests are rate-limited. You may be able to try again in about 120 seconds."
+                )
+            );
+            assert!(!error.to_string().contains("must-not-cross"));
+        }
+    }
+
+    #[test]
+    fn github_429_without_valid_metadata_remains_rate_limited() {
+        for response in [
+            FakeGitHubResponse::json(429, json!({ "secret": "must-not-cross" })),
+            FakeGitHubResponse::json(429, json!({ "secret": "must-not-cross" }))
+                .with_header("Retry-After", "86401")
+                .with_header("x-ratelimit-remaining", "not-a-number"),
+        ] {
+            let error = fake_github_error(response, 1_000);
+            assert_eq!(api_error_code(&error), Some("github_rate_limited"));
+            assert_eq!(
+                api_error_message(&error),
+                Some("GitHub API requests are rate-limited. Try again later.")
+            );
+            assert!(!error.to_string().contains("must-not-cross"));
+        }
+    }
+
+    #[test]
+    fn github_invalid_rate_limit_metadata_is_ignored() {
+        let cases = [
+            (
+                FakeGitHubResponse::json(403, json!({ "secret": "must-not-cross" }))
+                    .with_header("x-ratelimit-remaining", "-1")
+                    .with_header("Retry-After", "seconds"),
+                "github_service_failed",
+            ),
+            (
+                FakeGitHubResponse::json(403, json!({ "secret": "must-not-cross" }))
+                    .with_header("Retry-After", "18446744073709551616"),
+                "github_service_failed",
+            ),
+            (
+                FakeGitHubResponse::json(403, json!({ "secret": "must-not-cross" }))
+                    .with_header("Retry-After", "86401"),
+                "github_service_failed",
+            ),
+        ];
+        for (response, expected_code) in cases {
+            let error = fake_github_error(response, 1_000);
+            assert_eq!(api_error_code(&error), Some(expected_code));
+            assert!(!error.to_string().contains("must-not-cross"));
+        }
+
+        for reset in ["999", "87401", "18446744073709551616", "not-a-number"] {
+            let error = fake_github_error(
+                FakeGitHubResponse::json(403, json!({ "secret": "must-not-cross" }))
+                    .with_header("x-ratelimit-remaining", "0")
+                    .with_header("x-ratelimit-reset", reset),
+                1_000,
+            );
+            assert_eq!(api_error_code(&error), Some("github_rate_limited"));
+            assert_eq!(
+                api_error_message(&error),
+                Some("GitHub API requests are rate-limited. Try again later.")
+            );
+            assert!(!error.to_string().contains("must-not-cross"));
+        }
+    }
+
+    #[test]
+    fn github_non_rate_limited_http_statuses_are_distinct_and_redacted() {
+        for (status, expected_code) in [
+            (403, "github_service_failed"),
+            (404, "github_repository_unavailable"),
+            (500, "github_service_failed"),
+        ] {
+            let error = fake_github_error(
+                FakeGitHubResponse::json(status, json!({ "secret": "must-not-cross" })),
+                1_000,
+            );
+            assert_eq!(api_error_code(&error), Some(expected_code));
+            assert!(!error.to_string().contains("must-not-cross"));
+            assert_eq!(error["error"]["details"], json!({}));
+        }
+    }
+
+    #[test]
+    fn github_malformed_and_oversized_responses_remain_bounded() {
+        let malformed = fake_github_error(
+            FakeGitHubResponse {
+                status: 200,
+                headers: vec![("Content-Type".to_string(), "application/json".to_string())],
+                body: b"secret-malformed-body".to_vec(),
+                framing: FakeResponseFraming::ContentLength,
+            },
+            1_000,
+        );
+        assert_eq!(api_error_code(&malformed), Some("github_response_invalid"));
+        assert!(!malformed.to_string().contains("secret-malformed-body"));
+
+        let declared = fake_github_error(
+            FakeGitHubResponse {
+                status: 200,
+                headers: vec![],
+                body: Vec::new(),
+                framing: FakeResponseFraming::DeclaredLength(
+                    usize::try_from(MAX_METADATA_BYTES).unwrap() + 1,
+                ),
+            },
+            1_000,
+        );
+        assert_eq!(api_error_code(&declared), Some("github_response_too_large"));
+
+        let streamed = fake_github_error(
+            FakeGitHubResponse {
+                status: 200,
+                headers: vec![],
+                body: vec![b'x'; usize::try_from(MAX_METADATA_BYTES).unwrap() + 1],
+                framing: FakeResponseFraming::Chunked,
+            },
+            1_000,
+        );
+        assert_eq!(api_error_code(&streamed), Some("github_response_too_large"));
+    }
+
+    #[test]
+    fn github_transport_and_response_read_failures_are_distinct_and_redacted() {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let address = listener.local_addr().unwrap();
+        thread::spawn(move || {
+            let (stream, _) = listener.accept().unwrap();
+            drop(stream);
+        });
+        let transport = get_github_json_bounded(
+            &fake_github_client(),
+            &format!("http://{address}/secret-transport-path"),
+            1_000,
+        )
+        .unwrap_err();
+        assert_eq!(api_error_code(&transport), Some("github_transport_failed"));
+        assert!(!transport.to_string().contains("secret-transport-path"));
+
+        let read_failure = fake_github_error(
+            FakeGitHubResponse {
+                status: 200,
+                headers: vec![],
+                body: b"secret-truncated-body".to_vec(),
+                framing: FakeResponseFraming::DeclaredLength(1_000),
+            },
+            1_000,
+        );
+        assert_eq!(
+            api_error_code(&read_failure),
+            Some("github_response_failed")
+        );
+        assert!(!read_failure.to_string().contains("secret-truncated-body"));
     }
 
     #[test]

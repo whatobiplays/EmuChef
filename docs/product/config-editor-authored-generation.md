@@ -489,6 +489,12 @@ Metadata bodies are bounded to 2 MiB, redirects to five safe HTTPS hops,
 connections to 10 seconds, and requests to 30 seconds. Downloads stream into a
 session-owned temporary workspace and use the same native Rust inspection.
 
+GitHub public API access is unauthenticated. GitHub's unauthenticated rate
+limits can temporarily block repository or release analysis. The Config Editor
+reports a bounded advisory retry indication when GitHub supplies valid numeric
+retry or reset metadata; the indication does not guarantee that a later request
+will succeed. GitHub authentication remains future refinement work.
+
 Pinned generation stores normalized source identity and emits a `remote_file`
 artifact plus resolve/install steps. Authors may instead choose the existing
 user-provided APK strategy, which preserves the Phase 3 `user_provided_apk`
