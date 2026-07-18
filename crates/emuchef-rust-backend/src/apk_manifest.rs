@@ -37,7 +37,7 @@ pub(crate) struct ApkManifestFacts {
 }
 
 /// A requested permission declared directly below the manifest root.
-#[derive(Debug, Ord, PartialOrd, PartialEq, Eq)]
+#[derive(Clone, Debug, Ord, PartialOrd, PartialEq, Eq)]
 pub(crate) struct ApkPermissionDeclaration {
     pub(crate) name: String,
     pub(crate) kind: ApkPermissionDeclarationKind,

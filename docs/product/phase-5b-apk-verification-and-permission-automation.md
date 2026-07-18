@@ -1,6 +1,6 @@
 # Phase 5B — APK Manifest Inspection and Permission Automation
 
-Status: in progress (Phases 5B1 and 5B2 complete)
+Status: in progress (Phases 5B1 through 5B3 complete)
 
 ## Purpose
 
@@ -149,6 +149,8 @@ Android SDK dependency.
 
 ## Phase 5B3 — Android permission catalog and classifier
 
+Status: complete
+
 Classify requested permissions as:
 
 - `RuntimeGrantable`;
@@ -172,6 +174,46 @@ android.permission.MANAGE_EXTERNAL_STORAGE
   -> API 30+
   -> root required for the action
 ```
+
+The production backend now owns a crate-internal exact-name catalog and pure
+classifier. The stable internal result preserves the original manifest
+declaration and records classification separately from applicability. An
+applicable result may carry reviewed future automation metadata; non-applicable
+or indeterminate results never carry actionable metadata. No ADB command,
+executor, recipe-generation, protocol, Tauri, or frontend integration exists in
+Phase 5B3.
+
+The intentionally small initial catalog contains `CAMERA`,
+`BODY_SENSORS_BACKGROUND`, `MANAGE_EXTERNAL_STORAGE`, `SYSTEM_ALERT_WINDOW`,
+`INTERNET`, `WRITE_SECURE_SETTINGS`, `READ_EXTERNAL_STORAGE`, and
+`READ_MEDIA_IMAGES`. These entries prove the seven classification categories,
+runtime-permission target-SDK handling, introduction boundaries, compound
+replacement conditions, and the sole initial app-op mapping. Every other exact
+permission name classifies as `Unknown` and has no automation metadata; the
+classifier never infers behavior from a prefix or substring.
+
+Applicability evaluates the declaration kind, `maxSdkVersion`, connected-device
+API, cataloged introduction data, application target SDK, and cataloged
+replacement data. `uses-permission-sdk-23` is inapplicable below API 23, and a
+declaration expires only when its numeric `maxSdkVersion` is lower than the
+device API. Missing, codename, or otherwise non-numeric target SDK data fails
+closed whenever a rule requires a numeric target: the result becomes
+indeterminate, exposes no automation metadata, and does not assert an
+unsupported replacement decision.
+
+The Android 13 storage transition is modeled as a compound catalog rule.
+`READ_EXTERNAL_STORAGE` is replaced by granular media permissions only when the
+connected device is API 33 or newer and the numeric application target SDK is
+33 or newer. Either threshold below 33 leaves its ordinary catalog
+classification applicable. On API 33 or newer, unavailable numeric target SDK
+data is indeterminate rather than being treated as proof of replacement.
+`READ_MEDIA_IMAGES` is runtime-grantable only when both the connected device and
+numeric application target SDK are API 33 or newer.
+
+`MANAGE_EXTERNAL_STORAGE` remains the only Phase 5B3 app-op entry. It maps
+exactly to app-op `MANAGE_EXTERNAL_STORAGE`, mode `allow`, with root required
+for the future action, and is non-applicable below API 30. Phase 5B3 does not
+construct or execute that future action.
 
 ## Phase 5B4 — Authoring inspection result
 
