@@ -20,6 +20,9 @@ use crate::model::{
 use crate::validation::normalize_expected_sha256;
 
 use super::apk::ApkInspectionFacts;
+use super::app_recipe::{
+    build_permission_step, PermissionAutomationIssue, PermissionAutomationSelection,
+};
 use super::identifiers::{normalize_identifier_component, recipe_local_token};
 
 #[derive(Clone, Debug, Deserialize)]
@@ -27,6 +30,8 @@ use super::identifiers::{normalize_identifier_component, recipe_local_token};
 pub(crate) struct RemoteAppRecipeDraftRequest {
     pub facts: ApkInspectionFacts,
     pub source: RemoteSource,
+    #[serde(default)]
+    pub permission_automation: Option<PermissionAutomationSelection>,
     #[serde(default)]
     pub app: Option<AppDefinitionV1>,
     #[serde(default)]
@@ -68,6 +73,7 @@ struct GeneratedRecipeIds {
     input_id: String,
     feature_id: String,
     install_step_id: String,
+    permission_step_id: String,
     launch_step_id: String,
     artifact_id: String,
     resolve_step_id: String,
@@ -162,6 +168,11 @@ pub(crate) fn generate_remote_app_recipe_draft(
     let proposed = proposed_app(&request.facts, &request.source);
     let mut app = request.app.unwrap_or_else(|| proposed.clone());
     let mut diagnostics = validate_source(&request.source);
+    diagnostics.extend(permission_automation_diagnostics(
+        request.permission_automation.as_ref(),
+        &request.facts,
+        &request.source,
+    ));
     if let Some(mappings) = request.mappings {
         apply_mapping_edits(&mut app, mappings, &mut diagnostics);
     }
@@ -179,6 +190,7 @@ pub(crate) fn generate_remote_app_recipe_draft(
         &request.facts,
         &request.source,
         &recipe_edits,
+        request.permission_automation.as_ref(),
         &mut diagnostics,
     );
     diagnostics.extend(recipe_diagnostics(&recipe));
@@ -302,6 +314,45 @@ fn validate_source(source: &RemoteSource) -> Vec<DraftDiagnostic> {
         ));
     }
     diagnostics
+}
+
+fn permission_automation_diagnostics(
+    selection: Option<&PermissionAutomationSelection>,
+    facts: &ApkInspectionFacts,
+    source: &RemoteSource,
+) -> Vec<DraftDiagnostic> {
+    let Some(selection) = selection else {
+        return Vec::new();
+    };
+    let mut diagnostics = selection
+        .validation_issues()
+        .into_iter()
+        .map(permission_automation_issue)
+        .collect::<Vec<_>>();
+    if !selection.is_empty() {
+        if !matches!(
+            source.strategy.as_str(),
+            "pinned_remote_asset" | "latest_compatible_release"
+        ) {
+            diagnostics.push(error(
+                "apk_permission_automation_strategy_unsupported",
+                "Permission automation is supported only for package-enforced remote APK recipes.",
+                "recipe.permissionAutomation",
+            ));
+        }
+        if facts.package_name.as_deref() != Some(selection.package_name.as_str()) {
+            diagnostics.push(error(
+                "apk_permission_automation_package_mismatch",
+                "Permission automation must use the package name from the inspected APK manifest.",
+                "recipe.permissionAutomation.packageName",
+            ));
+        }
+    }
+    diagnostics
+}
+
+fn permission_automation_issue(issue: PermissionAutomationIssue) -> DraftDiagnostic {
+    error(issue.code, issue.message, &issue.field)
 }
 
 fn proposed_app(facts: &ApkInspectionFacts, source: &RemoteSource) -> AppDefinitionV1 {
@@ -434,6 +485,7 @@ fn generated_ids(app_id: &str) -> GeneratedRecipeIds {
         input_id: format!("{local}_apk"),
         feature_id: format!("{local}_install"),
         install_step_id: format!("install_{local}"),
+        permission_step_id: format!("grant_permissions_{local}"),
         launch_step_id: format!("launch_{local}"),
         artifact_id: format!("{local}_apk"),
         resolve_step_id: "resolve_artifacts".to_string(),
@@ -494,6 +546,7 @@ fn build_recipe(
     facts: &ApkInspectionFacts,
     source: &RemoteSource,
     edits: &RemoteRecipeEdits,
+    permission_automation: Option<&PermissionAutomationSelection>,
     diagnostics: &mut Vec<DraftDiagnostic>,
 ) -> Recipe {
     let ids = edits.ids.clone().unwrap_or_else(|| generated_ids(&app.id));
@@ -692,6 +745,24 @@ fn build_recipe(
         params: install_params,
         verify: Vec::new(),
     });
+    let permission_step_id = permission_automation
+        .filter(|selection| {
+            !selection.is_empty()
+                && matches!(
+                    source.strategy.as_str(),
+                    "pinned_remote_asset" | "latest_compatible_release"
+                )
+        })
+        .map(|selection| {
+            let step_id = ids.permission_step_id.clone();
+            steps.push(build_permission_step(
+                selection,
+                step_id.clone(),
+                ids.install_step_id.clone(),
+                &app.name,
+            ));
+            step_id
+        });
     if edits.launch_enabled {
         let launcher = edits
             .launcher_activity
@@ -726,7 +797,9 @@ fn build_recipe(
                 description: Some("Launch the app once after installation.".to_string()),
                 progress_note: Some(format!("Launching {} once", app.name)),
                 user_toggleable: false,
-                dependencies: vec![ids.install_step_id.clone()],
+                dependencies: vec![permission_step_id
+                    .clone()
+                    .unwrap_or_else(|| ids.install_step_id.clone())],
                 constraints: StepConstraints {
                     capabilities: vec!["app_launch".to_string()],
                     conflicts_with: Vec::new(),
@@ -1080,6 +1153,7 @@ impl<'de> Deserialize<'de> for StrictJsonValue {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::generation::app_recipe::{AppOpPermissionSelection, RuntimePermissionSelection};
 
     fn facts() -> ApkInspectionFacts {
         ApkInspectionFacts {
@@ -1109,6 +1183,276 @@ mod tests {
         }
     }
 
+    fn permission_automation(
+        runtime_permissions: Vec<RuntimePermissionSelection>,
+        app_ops: Vec<AppOpPermissionSelection>,
+    ) -> PermissionAutomationSelection {
+        PermissionAutomationSelection {
+            package_name: "com.example.remote".to_string(),
+            runtime_permissions,
+            app_ops,
+        }
+    }
+
+    fn runtime_permission(name: &str, requires_root: bool) -> RuntimePermissionSelection {
+        RuntimePermissionSelection {
+            permission_name: name.to_string(),
+            requires_root,
+        }
+    }
+
+    fn app_op(permission: &str, operation: &str, requires_root: bool) -> AppOpPermissionSelection {
+        AppOpPermissionSelection {
+            permission_name: permission.to_string(),
+            operation_name: operation.to_string(),
+            mode: "allow".to_string(),
+            requires_root,
+        }
+    }
+
+    #[test]
+    fn mixed_permission_automation_uses_inspected_package_and_launch_dependency() {
+        let source = source();
+        let mut app = proposed_app(&facts(), &source);
+        app.category = "emulator".to_string();
+        app.package.primary = "com.example.edited".to_string();
+        let mut edits = proposed_recipe_edits(&app, &source);
+        edits.launch_enabled = true;
+        edits.launcher_activity = Some("com.example.remote/.MainActivity".to_string());
+        let selection = permission_automation(
+            vec![
+                runtime_permission("android.permission.RECORD_AUDIO", false),
+                runtime_permission("android.permission.CAMERA", true),
+            ],
+            vec![
+                app_op("android.permission.ZETA", "ZETA_OP", false),
+                app_op(
+                    "android.permission.MANAGE_EXTERNAL_STORAGE",
+                    "MANAGE_EXTERNAL_STORAGE",
+                    true,
+                ),
+            ],
+        );
+        let draft = generate_remote_app_recipe_draft(RemoteAppRecipeDraftRequest {
+            facts: facts(),
+            source,
+            app: Some(app),
+            recipe: Some(edits),
+            mappings: None,
+            permission_automation: Some(selection),
+            regenerate_identifiers: false,
+        });
+
+        assert!(!draft.blocking, "{:#?}", draft.diagnostics);
+        let steps = draft.recipe["steps"].as_array().unwrap();
+        assert_eq!(
+            steps
+                .iter()
+                .map(|step| step["type"].as_str().unwrap())
+                .collect::<Vec<_>>(),
+            vec![
+                "resolve_artifacts",
+                "install_apk",
+                "grant_permissions",
+                "launch_app"
+            ]
+        );
+        let permission_step = &steps[2];
+        assert_eq!(permission_step["id"], "grant_permissions_remote_example");
+        assert_eq!(
+            permission_step["dependencies"],
+            serde_json::json!(["install_remote_example"])
+        );
+        assert_eq!(
+            permission_step["constraints"]["capabilities"],
+            serde_json::json!(["shell_command"])
+        );
+        assert_eq!(
+            permission_step["params"]["policy"],
+            serde_json::json!({ "on_failure": "warn", "require_all": false })
+        );
+        assert_eq!(
+            permission_step["params"]["runtime"],
+            serde_json::json!([
+                {
+                    "package_name": "com.example.remote",
+                    "name": "android.permission.CAMERA",
+                    "required": false,
+                    "when": { "rooted": true }
+                },
+                {
+                    "package_name": "com.example.remote",
+                    "name": "android.permission.RECORD_AUDIO",
+                    "required": false
+                }
+            ])
+        );
+        assert_eq!(
+            permission_step["params"]["appops"],
+            serde_json::json!([
+                {
+                    "package_name": "com.example.remote",
+                    "op": "MANAGE_EXTERNAL_STORAGE",
+                    "mode": "allow",
+                    "required": false,
+                    "when": { "rooted": true }
+                },
+                {
+                    "package_name": "com.example.remote",
+                    "op": "ZETA_OP",
+                    "mode": "allow",
+                    "required": false
+                }
+            ])
+        );
+        assert_eq!(
+            steps[3]["dependencies"],
+            serde_json::json!(["grant_permissions_remote_example"])
+        );
+        assert!(!permission_step.to_string().contains("com.example.edited"));
+        assert!(!permission_step.to_string().contains("root_shell"));
+    }
+
+    #[test]
+    fn runtime_only_and_app_op_only_each_generate_one_permission_step() {
+        for selection in [
+            permission_automation(
+                vec![runtime_permission("android.permission.CAMERA", false)],
+                Vec::new(),
+            ),
+            permission_automation(
+                Vec::new(),
+                vec![app_op(
+                    "android.permission.MANAGE_EXTERNAL_STORAGE",
+                    "MANAGE_EXTERNAL_STORAGE",
+                    true,
+                )],
+            ),
+        ] {
+            let source = source();
+            let mut app = proposed_app(&facts(), &source);
+            app.category = "emulator".to_string();
+            let draft = generate_remote_app_recipe_draft(RemoteAppRecipeDraftRequest {
+                facts: facts(),
+                source,
+                app: Some(app),
+                recipe: None,
+                mappings: None,
+                permission_automation: Some(selection),
+                regenerate_identifiers: false,
+            });
+            assert!(!draft.blocking, "{:#?}", draft.diagnostics);
+            assert_eq!(
+                draft.recipe["steps"]
+                    .as_array()
+                    .unwrap()
+                    .iter()
+                    .filter(|step| step["type"] == "grant_permissions")
+                    .count(),
+                1
+            );
+        }
+    }
+
+    #[test]
+    fn latest_compatible_release_generates_permission_step_after_install() {
+        let mut source = source();
+        source.mode = "github_repository".to_string();
+        source.strategy = "latest_compatible_release".to_string();
+        source.asset_pattern = Some("^app\\.apk$".to_string());
+        let mut app = proposed_app(&facts(), &source);
+        app.category = "emulator".to_string();
+        let draft = generate_remote_app_recipe_draft(RemoteAppRecipeDraftRequest {
+            facts: facts(),
+            source,
+            app: Some(app),
+            recipe: None,
+            mappings: None,
+            permission_automation: Some(permission_automation(
+                vec![runtime_permission("android.permission.CAMERA", false)],
+                Vec::new(),
+            )),
+            regenerate_identifiers: false,
+        });
+        assert!(!draft.blocking, "{:#?}", draft.diagnostics);
+        assert_eq!(
+            draft.recipe["steps"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .map(|step| step["type"].as_str().unwrap())
+                .collect::<Vec<_>>(),
+            vec![
+                "resolve_remote_release",
+                "download_remote_file",
+                "install_apk",
+                "grant_permissions"
+            ]
+        );
+    }
+
+    #[test]
+    fn empty_permission_automation_preserves_existing_recipe_shape() {
+        let source = source();
+        let mut app = proposed_app(&facts(), &source);
+        app.category = "emulator".to_string();
+        let draft = generate_remote_app_recipe_draft(RemoteAppRecipeDraftRequest {
+            facts: facts(),
+            source,
+            app: Some(app),
+            recipe: None,
+            mappings: None,
+            permission_automation: Some(permission_automation(Vec::new(), Vec::new())),
+            regenerate_identifiers: false,
+        });
+        assert!(!draft.blocking, "{:#?}", draft.diagnostics);
+        assert!(!draft
+            .recipe_canonical_yaml
+            .unwrap()
+            .contains("grant_permissions"));
+    }
+
+    #[test]
+    fn invalid_duplicate_and_noneligible_permission_automation_blocks_generation() {
+        let duplicate = permission_automation(
+            vec![
+                runtime_permission("android.permission.CAMERA", false),
+                runtime_permission("android.permission.CAMERA", false),
+            ],
+            Vec::new(),
+        );
+        let mut user_provided = source();
+        user_provided.strategy = "user_provided_apk".to_string();
+        for (source, selection, expected_code) in [
+            (source(), duplicate, "apk_permission_automation_duplicate"),
+            (
+                user_provided,
+                permission_automation(
+                    vec![runtime_permission("android.permission.CAMERA", false)],
+                    Vec::new(),
+                ),
+                "apk_permission_automation_strategy_unsupported",
+            ),
+        ] {
+            let mut app = proposed_app(&facts(), &source);
+            app.category = "emulator".to_string();
+            let draft = generate_remote_app_recipe_draft(RemoteAppRecipeDraftRequest {
+                facts: facts(),
+                source,
+                app: Some(app),
+                recipe: None,
+                mappings: None,
+                permission_automation: Some(selection),
+                regenerate_identifiers: false,
+            });
+            assert!(draft.blocking);
+            assert!(draft
+                .diagnostics
+                .iter()
+                .any(|diagnostic| diagnostic.code == expected_code));
+        }
+    }
+
     #[test]
     fn pinned_source_generates_remote_artifact_and_resolve_step() {
         let mut app = proposed_app(&facts(), &source());
@@ -1120,6 +1464,7 @@ mod tests {
             app: Some(app),
             recipe: None,
             mappings: None,
+            permission_automation: None,
             regenerate_identifiers: false,
         });
         assert!(!draft.blocking);
@@ -1147,6 +1492,7 @@ mod tests {
             app: Some(app),
             recipe: None,
             mappings: None,
+            permission_automation: None,
             regenerate_identifiers: false,
         });
 
@@ -1166,6 +1512,7 @@ mod tests {
             app: None,
             recipe: None,
             mappings: None,
+            permission_automation: None,
             regenerate_identifiers: false,
         });
 
@@ -1197,6 +1544,7 @@ mod tests {
                 app: None,
                 recipe: None,
                 mappings: None,
+                permission_automation: None,
                 regenerate_identifiers: false,
             });
 
@@ -1235,6 +1583,7 @@ mod tests {
                 app: Some(app),
                 recipe: None,
                 mappings: None,
+                permission_automation: None,
                 regenerate_identifiers: false,
             });
 
@@ -1267,6 +1616,7 @@ mod tests {
             app: Some(app),
             recipe: None,
             mappings: None,
+            permission_automation: None,
             regenerate_identifiers: false,
         });
         let recipe = draft.recipe_canonical_yaml.unwrap();
@@ -1292,6 +1642,7 @@ mod tests {
             app: Some(app),
             recipe: None,
             mappings: None,
+            permission_automation: None,
             regenerate_identifiers: false,
         });
         assert!(!draft.blocking);
@@ -1326,6 +1677,7 @@ mod tests {
                 app: Some(app),
                 recipe: None,
                 mappings: None,
+                permission_automation: None,
                 regenerate_identifiers: false,
             });
 
@@ -1356,6 +1708,7 @@ mod tests {
             app: Some(app),
             recipe: None,
             mappings: None,
+            permission_automation: None,
             regenerate_identifiers: false,
         });
         assert!(!draft.blocking);
@@ -1388,6 +1741,7 @@ mod tests {
             app: Some(app),
             recipe: None,
             mappings: None,
+            permission_automation: None,
             regenerate_identifiers: false,
         });
         assert!(!draft.blocking);
@@ -1410,6 +1764,7 @@ mod tests {
             app: None,
             recipe: None,
             mappings: None,
+            permission_automation: None,
             regenerate_identifiers: false,
         });
         assert!(draft.blocking);

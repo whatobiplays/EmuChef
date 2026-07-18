@@ -17,6 +17,8 @@ import {
   otherRequestedPermissions,
   parseConnectedDeviceApi,
   parseTrustedSha256,
+  permissionAutomationEligible,
+  permissionSelectionForInspection,
   readableNameFromPackage,
   reduceAppGenerator,
   suggestAssetPattern,
@@ -34,6 +36,7 @@ function inspection(): ApkInspectionResult {
     targetSdkState: null,
   };
   return {
+    inspectionHandle: "apk-inspection-1",
     manifest: {
       packageName: "com.example.app",
       versionCode: "42",
@@ -118,6 +121,7 @@ function draft(): AppRecipeDraftResult {
         inputId: "example_apk",
         featureId: "example_install",
         installStepId: "install_example",
+        permissionStepId: "grant_permissions_example",
         launchStepId: "launch_example",
       },
       name: "Install Example",
@@ -303,7 +307,7 @@ test("permission review keeps candidates separate from all other declarations", 
   assert.equal(otherRequestedPermissions(withoutContext).length, withoutContext.permissions.length);
 });
 
-test("candidate review state resets on inspection and never invalidates generated work", () => {
+test("candidate selections invalidate reviewed work without clearing editable form state", () => {
   const generated = draft();
   const collisions = { collisions: [], blocking: false };
   let state = reduceAppGenerator(initialAppGeneratorState, { type: "drafted", draft: generated });
@@ -311,18 +315,57 @@ test("candidate review state resets on inspection and never invalidates generate
   state = reduceAppGenerator(state, { type: "inspected", inspection: inspection() });
   const form = state.form;
   state = reduceAppGenerator(state, { type: "runtime-candidate-selected", index: 0, selected: true });
+  assert.equal(state.form, form);
+  assert.equal(state.draft, null);
+  assert.equal(state.collisions, null);
   state = reduceAppGenerator(state, { type: "app-op-candidate-selected", index: 0, selected: true });
   assert.equal(state.inspection?.runtimeGrantCandidates[0]?.selected, true);
   assert.equal(state.inspection?.appOpCandidates[0]?.selected, true);
-  assert.equal(state.draft, generated);
   assert.equal(state.form, form);
-  assert.equal(state.collisions, collisions);
+  assert.equal(state.draft, null);
+  assert.equal(state.collisions, null);
 
   state = reduceAppGenerator(state, { type: "inspected", inspection: inspection() });
   assert.equal(state.inspection?.runtimeGrantCandidates[0]?.selected, false);
   assert.equal(state.inspection?.appOpCandidates[0]?.selected, false);
   state = reduceAppGenerator(state, { type: "apk-selected", apkHandle: "new-apk", label: "New APK" });
   assert.equal(state.inspection, null);
+});
+
+test("permission selection serialization includes identities only", () => {
+  const reviewed = inspection();
+  reviewed.runtimeGrantCandidates[0]!.selected = true;
+  reviewed.appOpCandidates[0]!.selected = true;
+  assert.deepEqual(permissionSelectionForInspection(reviewed), {
+    inspectionHandle: "apk-inspection-1",
+    runtimePermissions: [{ permissionName: "android.permission.CAMERA" }],
+    appOps: [{
+      permissionName: "android.permission.MANAGE_EXTERNAL_STORAGE",
+      operationName: "MANAGE_EXTERNAL_STORAGE",
+      mode: "allow",
+    }],
+  });
+  assert.equal(permissionSelectionForInspection(inspection()), null);
+  assert.equal(permissionSelectionForInspection(null), null);
+});
+
+test("permission automation eligibility is limited to package-enforced remote strategies", () => {
+  assert.equal(permissionAutomationEligible("github_release", "pinned_remote_asset"), true);
+  assert.equal(permissionAutomationEligible("github_repository", "latest_compatible_release"), true);
+  assert.equal(permissionAutomationEligible("github_release", "user_provided_apk"), false);
+  assert.equal(permissionAutomationEligible("local_apk", "pinned_remote_asset"), false);
+});
+
+test("install strategy transitions reset selected permission candidates", () => {
+  const reviewed = inspection();
+  reviewed.runtimeGrantCandidates[0]!.selected = true;
+  reviewed.appOpCandidates[0]!.selected = true;
+  const next = reduceAppGenerator(
+    { ...initialAppGeneratorState, inspection: reviewed },
+    { type: "install-strategy", strategy: "user_provided_apk" },
+  );
+  assert.equal(next.inspection?.runtimeGrantCandidates[0]?.selected, false);
+  assert.equal(next.inspection?.appOpCandidates[0]?.selected, false);
 });
 
 test("reducer clears stale review when the form changes", () => {

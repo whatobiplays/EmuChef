@@ -592,6 +592,7 @@ export interface AppGeneratorDiagnosticDto {
 }
 
 export interface ApkInspectionResult {
+  inspectionHandle: string;
   manifest: ApkManifestMetadataDto;
   permissions: ApkPermissionReviewDto[];
   runtimeGrantCandidates: ApkRuntimeGrantCandidateDto[];
@@ -633,7 +634,19 @@ export interface GeneratedRecipeIdsDto {
   inputId: string;
   featureId: string;
   installStepId: string;
+  permissionStepId: string;
   launchStepId: string;
+}
+
+/** Identity-only permission choices submitted to the trusted native boundary. */
+export interface PermissionSelectionRequestDto {
+  inspectionHandle: string;
+  runtimePermissions: Array<{ permissionName: string }>;
+  appOps: Array<{
+    permissionName: string;
+    operationName: string;
+    mode: "allow";
+  }>;
 }
 
 export interface AppRecipeEditsDto {

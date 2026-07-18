@@ -40,6 +40,8 @@ import {
   otherRequestedPermissions,
   parseConnectedDeviceApi,
   parseTrustedSha256,
+  permissionAutomationEligible,
+  permissionSelectionForInspection,
   reduceAppGenerator,
   visibleDraftDiagnostics,
   type AppGeneratorFormState,
@@ -201,10 +203,12 @@ export function AppGenerator({ initialAuthoredRoot, onAuthoredRootSelected, onCl
           null,
           null,
           null,
+          null,
         )
       : await generateAppRecipeDraft(
           state.sessionHandle,
           apkHandle,
+          null,
           null,
           null,
           null,
@@ -241,6 +245,7 @@ export function AppGenerator({ initialAuthoredRoot, onAuthoredRootSelected, onCl
       dispatch({ type: "failure", message: request.message });
       return;
     }
+    const permissionSelection = permissionSelectionForInspection(state.inspection);
     const drafted = state.sourceMode === "local_apk"
       ? await generateAppRecipeDraft(
           state.sessionHandle,
@@ -248,6 +253,7 @@ export function AppGenerator({ initialAuthoredRoot, onAuthoredRootSelected, onCl
           request.app,
           request.recipe,
           request.mappings,
+          permissionSelection,
           regenerateIdentifiers,
         )
       : state.selectedAssetHandle
@@ -262,6 +268,7 @@ export function AppGenerator({ initialAuthoredRoot, onAuthoredRootSelected, onCl
             request.app,
             request.recipe,
             request.mappings,
+            permissionSelection,
             regenerateIdentifiers,
           )
         : null;
@@ -306,6 +313,7 @@ export function AppGenerator({ initialAuthoredRoot, onAuthoredRootSelected, onCl
       dispatch({ type: "failure", message: request.message });
       return;
     }
+    const permissionSelection = permissionSelectionForInspection(state.inspection);
     dispatch({ type: "saving" });
     const response = state.sourceMode === "local_apk"
       ? await saveGeneratedAppRecipe(
@@ -315,6 +323,7 @@ export function AppGenerator({ initialAuthoredRoot, onAuthoredRootSelected, onCl
           request.app,
           request.recipe,
           request.mappings,
+          permissionSelection,
         )
       : state.selectedAssetHandle
         ? await saveGeneratedRemoteAppRecipe(
@@ -329,6 +338,7 @@ export function AppGenerator({ initialAuthoredRoot, onAuthoredRootSelected, onCl
             request.app,
             request.recipe,
             request.mappings,
+            permissionSelection,
           )
         : null;
     if (!response) {
@@ -395,6 +405,10 @@ export function AppGenerator({ initialAuthoredRoot, onAuthoredRootSelected, onCl
   const connectedDeviceApiError = connectedDeviceApi.ok ? null : connectedDeviceApi.message;
   const trustedSha256 = parseTrustedSha256(state.trustedSha256);
   const trustedSha256Error = trustedSha256.ok ? null : trustedSha256.message;
+  const permissionAutomationAvailable = permissionAutomationEligible(
+    state.sourceMode,
+    state.installStrategy,
+  );
 
   const busy =
     state.phase === "starting" ||
@@ -552,7 +566,8 @@ export function AppGenerator({ initialAuthoredRoot, onAuthoredRootSelected, onCl
           {state.inspection ? (
             <InspectionReview
               inspection={state.inspection}
-              disabled={busy}
+              disabled={busy || !permissionAutomationAvailable}
+              automationAvailable={permissionAutomationAvailable}
               onRuntimeCandidateChange={(index, selected) => dispatch({ type: "runtime-candidate-selected", index, selected })}
               onAppOpCandidateChange={(index, selected) => dispatch({ type: "app-op-candidate-selected", index, selected })}
             />
@@ -625,9 +640,10 @@ function Picker({ label, value, button, disabled, onClick }: { label: string; va
   );
 }
 
-function InspectionReview({ inspection, disabled, onRuntimeCandidateChange, onAppOpCandidateChange }: {
+function InspectionReview({ inspection, disabled, automationAvailable, onRuntimeCandidateChange, onAppOpCandidateChange }: {
   inspection: ApkInspectionResult;
   disabled: boolean;
+  automationAvailable: boolean;
   onRuntimeCandidateChange: (index: number, selected: boolean) => void;
   onAppOpCandidateChange: (index: number, selected: boolean) => void;
 }) {
@@ -654,7 +670,11 @@ function InspectionReview({ inspection, disabled, onRuntimeCandidateChange, onAp
 
       <section className="rounded border border-slate-200 p-4">
         <h2 className="font-semibold">Permission review</h2>
-        <p className="mt-1 text-sm text-slate-600">Selections are review-only in this phase and do not change generated or saved files.</p>
+        <p className="mt-1 text-sm text-slate-600">
+          {automationAvailable
+            ? "Selected applicable candidates will be written to the generated recipe and attempted after installation."
+            : "Permission automation requires a pinned or latest-compatible remote APK recipe whose inspected package is enforced at installation."}
+        </p>
         <PermissionWarnings inspection={inspection} />
 
         <section className="mt-4 rounded border border-slate-200 bg-slate-50 p-3">

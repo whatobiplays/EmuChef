@@ -1,6 +1,6 @@
 # Phase 5B — APK Manifest Inspection and Permission Automation
 
-Status: in progress (Phases 5B1 through 5B6 complete)
+Status: in progress (Phases 5B1 through 5B8 complete)
 
 ## Purpose
 
@@ -433,11 +433,38 @@ Android Build Tools, Android SDK dependency, or authored-catalog changes.
 
 ## Phase 5B8 — Generated permission step
 
-Generate one optional `grant_permissions` step after installation and before first launch.
+Status: complete
+
+Selected applicable permission candidates generate one optional
+`grant_permissions` step after installation and before first launch. Permission
+automation is limited to `pinned_remote_asset` and
+`latest_compatible_release` recipes because those strategies enforce the
+package identity extracted from the inspected APK. Local APK and remote
+`user_provided_apk` recipes accept no selection and reject a non-empty
+selection instead of discarding it.
+
+React submits only selected candidate identities and an opaque inspection
+handle. Tauri reloads the native inspection stored for the session and APK,
+requires the handle to match the currently stored inspection session, and
+matches every submitted identity exactly. A non-empty selection is also
+rejected when the currently trusted APK file identity no longer matches the
+identity captured for that inspection. Package names, root requirements, and
+commands are not accepted from React. Tauri forwards canonical literal-only
+automation using `manifest.packageName` and the root requirement stored on each
+matched candidate.
+
+No selection preserves the existing generated recipe shape. A verified
+selection produces one deterministic step immediately after `install_apk`.
+When `launch_app` is present, it depends on the permission step; otherwise its
+existing install dependency is unchanged.
 
 The step requires `shell_command`, not blanket `root_shell`.
 
-Runtime actions use `pm grant`. App-op actions use explicit allowlisted mappings and may include `when.rooted: true`.
+Runtime actions use `pm grant`. App-op actions use explicit allowlisted
+mappings. Every action is emitted with `required: false`; only actions whose
+stored candidate requires root include `when.rooted: true`. Runtime actions are
+sorted by permission name. App-op actions are sorted by operation, mode, and
+permission identity.
 
 Default policy:
 
@@ -448,6 +475,13 @@ policy:
 ```
 
 An unrooted device may execute ordinary runtime grants while root-dependent app-op actions become `not_applicable`.
+
+Candidate selections default to false. Reinspection or a source, APK,
+installation-strategy, or device-API context transition clears them. Editing a
+candidate invalidates draft, collision, and saved-review output without
+clearing unrelated app or recipe form state. Initial automatic draft generation
+passes no selections; explicit review and save requests submit only the current
+selected identities.
 
 ## Phase 5B9 — Metadata and collision semantics
 

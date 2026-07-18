@@ -4,7 +4,7 @@
 //! session-scoped handles. Only safe inspection metadata, labels, authored drafts,
 //! diagnostics, canonical previews, and relative destination metadata cross into React.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::fs::{self, File, OpenOptions};
 use std::io::{self, Read, Write};
 use std::net::IpAddr;
@@ -60,7 +60,56 @@ struct TrustedApk {
     path: PathBuf,
     identity: FileIdentity,
     inspection: Option<Value>,
+    inspection_handle: Option<String>,
     facts: Option<Value>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields, rename_all = "camelCase")]
+struct PermissionSelectionRequest {
+    inspection_handle: String,
+    #[serde(default)]
+    runtime_permissions: Vec<RuntimePermissionIdentity>,
+    #[serde(default)]
+    app_ops: Vec<AppOpPermissionIdentity>,
+}
+
+#[derive(Debug, Deserialize, Hash, PartialEq, Eq)]
+#[serde(deny_unknown_fields, rename_all = "camelCase")]
+struct RuntimePermissionIdentity {
+    permission_name: String,
+}
+
+#[derive(Debug, Deserialize, Hash, PartialEq, Eq)]
+#[serde(deny_unknown_fields, rename_all = "camelCase")]
+struct AppOpPermissionIdentity {
+    permission_name: String,
+    operation_name: String,
+    mode: String,
+}
+
+#[derive(Debug, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+struct CanonicalPermissionAutomation {
+    package_name: String,
+    runtime_permissions: Vec<CanonicalRuntimePermission>,
+    app_ops: Vec<CanonicalAppOpPermission>,
+}
+
+#[derive(Debug, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+struct CanonicalRuntimePermission {
+    permission_name: String,
+    requires_root: bool,
+}
+
+#[derive(Debug, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+struct CanonicalAppOpPermission {
+    permission_name: String,
+    operation_name: String,
+    mode: String,
+    requires_root: bool,
 }
 
 #[derive(Clone)]
@@ -233,6 +282,7 @@ pub async fn choose_app_generator_apk(
             path,
             identity,
             inspection: None,
+            inspection_handle: None,
             facts: None,
         },
     );
@@ -578,6 +628,7 @@ pub async fn download_app_generator_remote_apk(
             path,
             identity,
             inspection: None,
+            inspection_handle: None,
             facts: None,
         },
     );
@@ -1340,6 +1391,7 @@ pub fn inspect_app_generator_apk(
         return Ok(apk_changed_error());
     }
     let mut registry = lock_registry(&state)?;
+    let inspection_handle = registry.allocate("apk-inspection");
     let session = match registry.session_mut(&session_handle) {
         Ok(session) => session,
         Err(error) => return Ok(error),
@@ -1347,12 +1399,20 @@ pub fn inspect_app_generator_apk(
     let Some(apk) = session.apks.get_mut(&apk_handle) else {
         return Ok(invalid_handle_error());
     };
-    apk.inspection = Some(inspection);
+    apk.inspection = Some(inspection.clone());
+    apk.inspection_handle = Some(inspection_handle.clone());
     apk.facts = Some(facts);
-    let Some(stored_inspection) = apk.inspection.clone() else {
+    let Some(mut public_inspection) = apk.inspection.clone() else {
         return Ok(generator_protocol_error());
     };
-    Ok(success(stored_inspection))
+    let Some(public_inspection) = public_inspection.as_object_mut() else {
+        return Ok(generator_protocol_error());
+    };
+    public_inspection.insert(
+        "inspectionHandle".to_string(),
+        Value::String(inspection_handle),
+    );
+    Ok(success(Value::Object(public_inspection.clone())))
 }
 
 fn native_inspection_payload(apk_path: &Path, connected_device_api: Option<u32>) -> Value {
@@ -1372,10 +1432,21 @@ pub fn generate_app_recipe_draft(
     app: Option<Value>,
     recipe: Option<Value>,
     mappings: Option<Value>,
+    permission_selection: Option<Value>,
     regenerate_identifiers: bool,
 ) -> Result<Value, String> {
     let facts = match stored_facts(&state, &session_handle, &apk_handle)? {
         Ok(facts) => facts,
+        Err(error) => return Ok(error),
+    };
+    let permission_automation = match stored_permission_automation(
+        &state,
+        &session_handle,
+        &apk_handle,
+        permission_selection,
+        false,
+    )? {
+        Ok(value) => value,
         Err(error) => return Ok(error),
     };
     let mut payload = Map::new();
@@ -1392,6 +1463,9 @@ pub fn generate_app_recipe_draft(
     }
     if let Some(mappings) = mappings {
         payload.insert("mappings".to_string(), mappings);
+    }
+    if let Some(permission_automation) = permission_automation {
+        payload.insert("permissionAutomation".to_string(), permission_automation);
     }
     request_sidecar(
         &sidecar,
@@ -1415,6 +1489,7 @@ pub fn generate_remote_app_recipe_draft(
     app: Option<Value>,
     recipe: Option<Value>,
     mappings: Option<Value>,
+    permission_selection: Option<Value>,
     regenerate_identifiers: bool,
 ) -> Result<Value, String> {
     let facts = match stored_facts(&state, &session_handle, &apk_handle)? {
@@ -1433,6 +1508,26 @@ pub fn generate_remote_app_recipe_draft(
         Ok(source) => source,
         Err(error) => return Ok(error),
     };
+    let eligible_strategy =
+        source
+            .get("strategy")
+            .and_then(Value::as_str)
+            .is_some_and(|strategy| {
+                matches!(
+                    strategy,
+                    "pinned_remote_asset" | "latest_compatible_release"
+                )
+            });
+    let permission_automation = match stored_permission_automation(
+        &state,
+        &session_handle,
+        &apk_handle,
+        permission_selection,
+        eligible_strategy,
+    )? {
+        Ok(value) => value,
+        Err(error) => return Ok(error),
+    };
     let mut payload = Map::new();
     payload.insert("facts".to_string(), facts);
     payload.insert("source".to_string(), source);
@@ -1448,6 +1543,9 @@ pub fn generate_remote_app_recipe_draft(
     }
     if let Some(mappings) = mappings {
         payload.insert("mappings".to_string(), mappings);
+    }
+    if let Some(permission_automation) = permission_automation {
+        payload.insert("permissionAutomation".to_string(), permission_automation);
     }
     request_sidecar(
         &sidecar,
@@ -1472,6 +1570,7 @@ pub fn save_generated_remote_app_recipe(
     app: Value,
     recipe: Value,
     mappings: Value,
+    permission_selection: Option<Value>,
 ) -> Result<Value, String> {
     let (facts, apk_path, identity, root) = {
         let registry = lock_registry(&state)?;
@@ -1505,17 +1604,44 @@ pub fn save_generated_remote_app_recipe(
         Ok(source) => source,
         Err(error) => return Ok(error),
     };
+    let eligible_strategy =
+        source
+            .get("strategy")
+            .and_then(Value::as_str)
+            .is_some_and(|strategy| {
+                matches!(
+                    strategy,
+                    "pinned_remote_asset" | "latest_compatible_release"
+                )
+            });
+    let permission_automation = match stored_permission_automation(
+        &state,
+        &session_handle,
+        &apk_handle,
+        permission_selection,
+        eligible_strategy,
+    )? {
+        Ok(value) => value,
+        Err(error) => return Ok(error),
+    };
+    let mut validation_payload = json!({
+        "facts": facts,
+        "source": source,
+        "app": app,
+        "recipe": recipe,
+        "mappings": mappings,
+        "regenerateIdentifiers": false,
+    });
+    if let Some(permission_automation) = permission_automation {
+        validation_payload
+            .as_object_mut()
+            .expect("validation payload is an object")
+            .insert("permissionAutomation".to_string(), permission_automation);
+    }
     let validation = request_sidecar(
         &sidecar,
         "generateRemoteAppRecipeDraft",
-        Some(json!({
-            "facts": facts,
-            "source": source,
-            "app": app,
-            "recipe": recipe,
-            "mappings": mappings,
-            "regenerateIdentifiers": false,
-        })),
+        Some(validation_payload),
     )?;
     let Some(draft) = success_result(&validation) else {
         return Ok(validation);
@@ -1709,6 +1835,7 @@ pub fn save_generated_app_recipe(
     app: Value,
     recipe: Value,
     mappings: Value,
+    permission_selection: Option<Value>,
 ) -> Result<Value, String> {
     let (facts, apk_path, identity, root) = {
         let registry = lock_registry(&state)?;
@@ -1731,17 +1858,31 @@ pub fn save_generated_app_recipe(
         return Ok(apk_changed_error());
     }
 
-    let validation = request_sidecar(
-        &sidecar,
-        "generateAppRecipeDraft",
-        Some(json!({
-            "facts": facts,
-            "app": app,
-            "recipe": recipe,
-            "mappings": mappings,
-            "regenerateIdentifiers": false,
-        })),
-    )?;
+    let permission_automation = match stored_permission_automation(
+        &state,
+        &session_handle,
+        &apk_handle,
+        permission_selection,
+        false,
+    )? {
+        Ok(value) => value,
+        Err(error) => return Ok(error),
+    };
+
+    let mut validation_payload = json!({
+        "facts": facts,
+        "app": app,
+        "recipe": recipe,
+        "mappings": mappings,
+        "regenerateIdentifiers": false,
+    });
+    if let Some(permission_automation) = permission_automation {
+        validation_payload
+            .as_object_mut()
+            .expect("validation payload is an object")
+            .insert("permissionAutomation".to_string(), permission_automation);
+    }
+    let validation = request_sidecar(&sidecar, "generateAppRecipeDraft", Some(validation_payload))?;
     let Some(draft) = success_result(&validation) else {
         return Ok(validation);
     };
@@ -2099,6 +2240,176 @@ fn stored_facts(
     Ok(apk.facts.clone().ok_or_else(inspection_required_error))
 }
 
+fn stored_permission_automation(
+    state: &AppGeneratorState,
+    session_handle: &str,
+    apk_handle: &str,
+    selection: Option<Value>,
+    eligible_strategy: bool,
+) -> Result<Result<Option<Value>, Value>, String> {
+    let registry = lock_registry(state)?;
+    let session = match registry.session(session_handle) {
+        Ok(value) => value,
+        Err(error) => return Ok(Err(error)),
+    };
+    let Some(apk) = session.apks.get(apk_handle) else {
+        return Ok(Err(invalid_handle_error()));
+    };
+    Ok(canonical_permission_automation(
+        apk,
+        selection,
+        eligible_strategy,
+    ))
+}
+
+fn canonical_permission_automation(
+    apk: &TrustedApk,
+    selection: Option<Value>,
+    eligible_strategy: bool,
+) -> Result<Option<Value>, Value> {
+    let Some(selection) = selection else {
+        return Ok(None);
+    };
+    let selection = serde_json::from_value::<PermissionSelectionRequest>(selection)
+        .map_err(|_| permission_selection_error("altered"))?;
+    if selection.runtime_permissions.is_empty() && selection.app_ops.is_empty() {
+        return Ok(None);
+    }
+    if !eligible_strategy {
+        return Err(permission_strategy_error());
+    }
+    if apk.inspection_handle.as_deref() != Some(selection.inspection_handle.as_str()) {
+        return Err(permission_selection_error("stale"));
+    }
+    if current_file_identity(&apk.path).as_ref() != Some(&apk.identity) {
+        return Err(apk_changed_error());
+    }
+    let inspection = apk
+        .inspection
+        .as_ref()
+        .and_then(Value::as_object)
+        .ok_or_else(inspection_required_error)?;
+    let package_name = inspection
+        .get("manifest")
+        .and_then(Value::as_object)
+        .and_then(|manifest| manifest.get("packageName"))
+        .and_then(Value::as_str)
+        .filter(|value| !value.trim().is_empty())
+        .ok_or_else(|| permission_selection_error("altered"))?
+        .to_string();
+
+    let runtime_candidates = inspection
+        .get("runtimeGrantCandidates")
+        .and_then(Value::as_array)
+        .ok_or_else(|| permission_selection_error("altered"))?;
+    let app_op_candidates = inspection
+        .get("appOpCandidates")
+        .and_then(Value::as_array)
+        .ok_or_else(|| permission_selection_error("altered"))?;
+
+    let mut runtime_identities = HashSet::new();
+    let mut runtime_permissions = Vec::new();
+    for identity in selection.runtime_permissions {
+        if identity.permission_name.trim().is_empty() {
+            return Err(permission_selection_error("altered"));
+        }
+        if !runtime_identities.insert(identity.permission_name.clone()) {
+            return Err(permission_selection_error("duplicate"));
+        }
+        let matches = runtime_candidates
+            .iter()
+            .filter_map(Value::as_object)
+            .filter(|candidate| {
+                candidate.get("permissionName").and_then(Value::as_str)
+                    == Some(identity.permission_name.as_str())
+            })
+            .collect::<Vec<_>>();
+        match matches.as_slice() {
+            [] => return Err(permission_selection_error("unknown")),
+            [candidate] => {
+                let requires_root = candidate
+                    .get("requiresRoot")
+                    .and_then(Value::as_bool)
+                    .ok_or_else(|| permission_selection_error("altered"))?;
+                runtime_permissions.push(CanonicalRuntimePermission {
+                    permission_name: identity.permission_name,
+                    requires_root,
+                });
+            }
+            _ => return Err(permission_selection_error("ambiguous")),
+        }
+    }
+
+    let mut app_op_identities = HashSet::new();
+    let mut app_ops = Vec::new();
+    for identity in selection.app_ops {
+        if identity.permission_name.trim().is_empty()
+            || identity.operation_name.trim().is_empty()
+            || identity.mode != "allow"
+        {
+            return Err(permission_selection_error("altered"));
+        }
+        if !app_op_identities.insert((
+            identity.permission_name.clone(),
+            identity.operation_name.clone(),
+            identity.mode.clone(),
+        )) {
+            return Err(permission_selection_error("duplicate"));
+        }
+        let permission_matches = app_op_candidates
+            .iter()
+            .filter_map(Value::as_object)
+            .filter(|candidate| {
+                candidate.get("permissionName").and_then(Value::as_str)
+                    == Some(identity.permission_name.as_str())
+            })
+            .collect::<Vec<_>>();
+        let matches = permission_matches
+            .iter()
+            .copied()
+            .filter(|candidate| {
+                candidate.get("operationName").and_then(Value::as_str)
+                    == Some(identity.operation_name.as_str())
+                    && candidate.get("mode").and_then(Value::as_str) == Some(identity.mode.as_str())
+            })
+            .collect::<Vec<_>>();
+        match matches.as_slice() {
+            [] if permission_matches.is_empty() => {
+                return Err(permission_selection_error("unknown"));
+            }
+            [] => return Err(permission_selection_error("altered")),
+            [candidate] => {
+                let requires_root = candidate
+                    .get("requiresRoot")
+                    .and_then(Value::as_bool)
+                    .ok_or_else(|| permission_selection_error("altered"))?;
+                app_ops.push(CanonicalAppOpPermission {
+                    permission_name: identity.permission_name,
+                    operation_name: identity.operation_name,
+                    mode: identity.mode,
+                    requires_root,
+                });
+            }
+            _ => return Err(permission_selection_error("ambiguous")),
+        }
+    }
+
+    runtime_permissions.sort_by(|left, right| left.permission_name.cmp(&right.permission_name));
+    app_ops.sort_by(|left, right| {
+        left.operation_name
+            .cmp(&right.operation_name)
+            .then_with(|| left.mode.cmp(&right.mode))
+            .then_with(|| left.permission_name.cmp(&right.permission_name))
+    });
+    serde_json::to_value(CanonicalPermissionAutomation {
+        package_name,
+        runtime_permissions,
+        app_ops,
+    })
+    .map(Some)
+    .map_err(|_| generator_protocol_error())
+}
+
 /// Convert native manifest metadata into the deliberately smaller facts model
 /// consumed by the existing draft generators. Fields that native inspection
 /// does not prove remain unavailable. This product accepts one standalone APK,
@@ -2273,6 +2584,20 @@ fn inspection_required_error() -> Value {
         json!({}),
     )
 }
+fn permission_selection_error(reason: &str) -> Value {
+    api_error(
+        "app_generator_permission_selection_invalid",
+        "The selected permissions no longer match the current APK inspection. Inspect the APK again and review permissions.",
+        json!({ "reason": reason }),
+    )
+}
+fn permission_strategy_error() -> Value {
+    api_error(
+        "apk_permission_automation_strategy_unsupported",
+        "Permission automation is supported only for pinned or latest-compatible remote APK recipes.",
+        json!({}),
+    )
+}
 fn generator_protocol_error() -> Value {
     api_error(
         "app_generator_protocol_error",
@@ -2293,6 +2618,199 @@ mod tests {
                 .unwrap()
                 .as_nanos()
         ))
+    }
+
+    fn permission_test_apk(label: &str) -> TrustedApk {
+        let path = temp_path(label).with_extension("apk");
+        fs::write(&path, b"trusted-apk").unwrap();
+        let (_, identity) = validate_apk(&path).unwrap();
+        TrustedApk {
+            path,
+            identity,
+            inspection: Some(json!({
+                "manifest": { "packageName": "com.example.inspected" },
+                "runtimeGrantCandidates": [
+                    {
+                        "permissionName": "android.permission.CAMERA",
+                        "requiresRoot": false,
+                        "selected": false
+                    }
+                ],
+                "appOpCandidates": [
+                    {
+                        "permissionName": "android.permission.MANAGE_EXTERNAL_STORAGE",
+                        "operationName": "MANAGE_EXTERNAL_STORAGE",
+                        "mode": "allow",
+                        "requiresRoot": true,
+                        "selected": false
+                    }
+                ]
+            })),
+            inspection_handle: Some("apk-inspection-current".to_string()),
+            facts: Some(json!({ "packageName": "com.example.inspected" })),
+        }
+    }
+
+    fn permission_selection() -> Value {
+        json!({
+            "inspectionHandle": "apk-inspection-current",
+            "runtimePermissions": [{ "permissionName": "android.permission.CAMERA" }],
+            "appOps": [{
+                "permissionName": "android.permission.MANAGE_EXTERNAL_STORAGE",
+                "operationName": "MANAGE_EXTERNAL_STORAGE",
+                "mode": "allow"
+            }]
+        })
+    }
+
+    fn api_error_code(value: &Value) -> Option<&str> {
+        value
+            .get("error")
+            .and_then(Value::as_object)
+            .and_then(|error| error.get("code"))
+            .and_then(Value::as_str)
+    }
+
+    #[test]
+    fn permission_selection_is_canonicalized_from_stored_inspection_only() {
+        let apk = permission_test_apk("permission-canonical");
+        let canonical = canonical_permission_automation(&apk, Some(permission_selection()), true)
+            .unwrap()
+            .unwrap();
+        assert_eq!(canonical["packageName"], "com.example.inspected");
+        assert_eq!(
+            canonical["runtimePermissions"],
+            json!([{
+                "permissionName": "android.permission.CAMERA",
+                "requiresRoot": false
+            }])
+        );
+        assert_eq!(
+            canonical["appOps"],
+            json!([{
+                "permissionName": "android.permission.MANAGE_EXTERNAL_STORAGE",
+                "operationName": "MANAGE_EXTERNAL_STORAGE",
+                "mode": "allow",
+                "requiresRoot": true
+            }])
+        );
+        assert!(!canonical.to_string().contains("selected"));
+        fs::remove_file(apk.path).unwrap();
+    }
+
+    #[test]
+    fn permission_selection_rejects_unknown_duplicate_altered_and_ambiguous_identities() {
+        let mut apk = permission_test_apk("permission-invalid-identities");
+        let cases = [
+            (
+                json!({
+                    "inspectionHandle": "apk-inspection-current",
+                    "runtimePermissions": [{ "permissionName": "android.permission.UNKNOWN" }],
+                    "appOps": []
+                }),
+                "unknown",
+            ),
+            (
+                json!({
+                    "inspectionHandle": "apk-inspection-current",
+                    "runtimePermissions": [
+                        { "permissionName": "android.permission.CAMERA" },
+                        { "permissionName": "android.permission.CAMERA" }
+                    ],
+                    "appOps": []
+                }),
+                "duplicate",
+            ),
+            (
+                json!({
+                    "inspectionHandle": "apk-inspection-current",
+                    "runtimePermissions": [],
+                    "appOps": [{
+                        "permissionName": "android.permission.MANAGE_EXTERNAL_STORAGE",
+                        "operationName": "MANAGE_EXTERNAL_STORAGE",
+                        "mode": "deny"
+                    }]
+                }),
+                "altered",
+            ),
+        ];
+        for (selection, reason) in cases {
+            let error = canonical_permission_automation(&apk, Some(selection), true).unwrap_err();
+            assert_eq!(
+                api_error_code(&error),
+                Some("app_generator_permission_selection_invalid")
+            );
+            assert_eq!(error["error"]["details"]["reason"], reason);
+        }
+
+        apk.inspection.as_mut().unwrap()["runtimeGrantCandidates"] = json!([
+            {
+                "permissionName": "android.permission.CAMERA",
+                "requiresRoot": false,
+                "selected": false
+            },
+            {
+                "permissionName": "android.permission.CAMERA",
+                "requiresRoot": false,
+                "selected": false
+            }
+        ]);
+        let error = canonical_permission_automation(
+            &apk,
+            Some(json!({
+                "inspectionHandle": "apk-inspection-current",
+                "runtimePermissions": [{ "permissionName": "android.permission.CAMERA" }],
+                "appOps": []
+            })),
+            true,
+        )
+        .unwrap_err();
+        assert_eq!(error["error"]["details"]["reason"], "ambiguous");
+        fs::remove_file(apk.path).unwrap();
+    }
+
+    #[test]
+    fn stale_inspection_handle_and_replaced_apk_identity_are_distinct_failures() {
+        let apk = permission_test_apk("permission-stale");
+        let mut stale = permission_selection();
+        stale["inspectionHandle"] = json!("apk-inspection-previous");
+        let stale_error = canonical_permission_automation(&apk, Some(stale), true).unwrap_err();
+        assert_eq!(
+            api_error_code(&stale_error),
+            Some("app_generator_permission_selection_invalid")
+        );
+        assert_eq!(stale_error["error"]["details"]["reason"], "stale");
+
+        fs::write(&apk.path, b"replacement-apk-with-new-identity").unwrap();
+        let changed_error =
+            canonical_permission_automation(&apk, Some(permission_selection()), true).unwrap_err();
+        assert_eq!(api_error_code(&changed_error), Some("apk_changed"));
+        fs::remove_file(apk.path).unwrap();
+    }
+
+    #[test]
+    fn empty_and_noneligible_permission_selections_have_stable_behavior() {
+        let apk = permission_test_apk("permission-eligibility");
+        assert_eq!(
+            canonical_permission_automation(
+                &apk,
+                Some(json!({
+                    "inspectionHandle": "stale-is-irrelevant-when-empty",
+                    "runtimePermissions": [],
+                    "appOps": []
+                })),
+                false,
+            )
+            .unwrap(),
+            None
+        );
+        let error =
+            canonical_permission_automation(&apk, Some(permission_selection()), false).unwrap_err();
+        assert_eq!(
+            api_error_code(&error),
+            Some("apk_permission_automation_strategy_unsupported")
+        );
+        fs::remove_file(apk.path).unwrap();
     }
 
     #[test]
@@ -2402,6 +2920,7 @@ mod tests {
             path: path.clone(),
             identity,
             inspection: Some(inspection.clone()),
+            inspection_handle: Some("apk-inspection-test".to_string()),
             facts: Some(facts.clone()),
         };
         assert_eq!(trusted.inspection, Some(inspection));
@@ -2488,6 +3007,7 @@ mod tests {
                 path: path.clone(),
                 identity: identity.clone(),
                 inspection: None,
+                inspection_handle: None,
                 facts: None,
             },
         );

@@ -6,7 +6,7 @@ use std::path::Path;
 
 use serde::de::{MapAccess, SeqAccess, Visitor};
 use serde::{Deserialize, Deserializer, Serialize};
-use serde_json::{Map, Value};
+use serde_json::{json, Map, Value};
 
 use crate::authored_models::{
     emit_app_definition_yaml, validate_app_definition, AppArtifactSupport, AppDefinitionV1,
@@ -26,6 +26,8 @@ use super::identifiers::{normalize_identifier_component, recipe_local_token};
 pub(crate) struct AppRecipeDraftRequest {
     pub facts: ApkInspectionFacts,
     #[serde(default)]
+    pub permission_automation: Option<PermissionAutomationSelection>,
+    #[serde(default)]
     pub app: Option<AppDefinitionV1>,
     #[serde(default)]
     pub recipe: Option<RecipeDraftEdits>,
@@ -42,7 +44,210 @@ pub(crate) struct GeneratedRecipeIds {
     input_id: String,
     feature_id: String,
     install_step_id: String,
+    permission_step_id: String,
     launch_step_id: String,
+}
+
+/// Canonical permission automation resolved by the trusted Tauri boundary.
+///
+/// This model deliberately contains only literal values. React cannot supply
+/// package names, command fragments, policy, or execution conditions directly.
+#[derive(Clone, Debug, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields, rename_all = "camelCase")]
+pub(crate) struct PermissionAutomationSelection {
+    pub(crate) package_name: String,
+    #[serde(default)]
+    pub(crate) runtime_permissions: Vec<RuntimePermissionSelection>,
+    #[serde(default)]
+    pub(crate) app_ops: Vec<AppOpPermissionSelection>,
+}
+
+#[derive(Clone, Debug, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields, rename_all = "camelCase")]
+pub(crate) struct RuntimePermissionSelection {
+    pub(crate) permission_name: String,
+    pub(crate) requires_root: bool,
+}
+
+#[derive(Clone, Debug, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields, rename_all = "camelCase")]
+pub(crate) struct AppOpPermissionSelection {
+    pub(crate) permission_name: String,
+    pub(crate) operation_name: String,
+    pub(crate) mode: String,
+    pub(crate) requires_root: bool,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct PermissionAutomationIssue {
+    pub(crate) code: &'static str,
+    pub(crate) message: &'static str,
+    pub(crate) field: String,
+}
+
+impl PermissionAutomationSelection {
+    pub(crate) fn is_empty(&self) -> bool {
+        self.runtime_permissions.is_empty() && self.app_ops.is_empty()
+    }
+
+    pub(crate) fn validation_issues(&self) -> Vec<PermissionAutomationIssue> {
+        let mut issues = Vec::new();
+        if self.package_name.trim().is_empty() {
+            issues.push(PermissionAutomationIssue {
+                code: "apk_permission_automation_invalid",
+                message: "Permission automation requires a non-empty inspected package name.",
+                field: "recipe.permissionAutomation.packageName".to_string(),
+            });
+        }
+
+        let mut runtime_permissions = HashSet::new();
+        for (index, action) in self.runtime_permissions.iter().enumerate() {
+            let field = format!("recipe.permissionAutomation.runtimePermissions[{index}]");
+            if action.permission_name.trim().is_empty() {
+                issues.push(PermissionAutomationIssue {
+                    code: "apk_permission_automation_invalid",
+                    message: "Runtime permission automation requires a non-empty permission name.",
+                    field: format!("{field}.permissionName"),
+                });
+            } else if !runtime_permissions.insert(action.permission_name.as_str()) {
+                issues.push(PermissionAutomationIssue {
+                    code: "apk_permission_automation_duplicate",
+                    message: "Runtime permission automation contains a duplicate permission.",
+                    field,
+                });
+            }
+        }
+
+        let mut app_ops = HashSet::new();
+        for (index, action) in self.app_ops.iter().enumerate() {
+            let field = format!("recipe.permissionAutomation.appOps[{index}]");
+            if action.permission_name.trim().is_empty() {
+                issues.push(PermissionAutomationIssue {
+                    code: "apk_permission_automation_invalid",
+                    message: "App-op automation requires a non-empty permission identity.",
+                    field: format!("{field}.permissionName"),
+                });
+            }
+            if action.operation_name.trim().is_empty() {
+                issues.push(PermissionAutomationIssue {
+                    code: "apk_permission_automation_invalid",
+                    message: "App-op automation requires a non-empty operation name.",
+                    field: format!("{field}.operationName"),
+                });
+            }
+            if action.mode != "allow" {
+                issues.push(PermissionAutomationIssue {
+                    code: "apk_permission_automation_invalid",
+                    message: "App-op automation supports only the reviewed allow mode.",
+                    field: format!("{field}.mode"),
+                });
+            }
+            if !app_ops.insert((
+                action.permission_name.as_str(),
+                action.operation_name.as_str(),
+                action.mode.as_str(),
+            )) {
+                issues.push(PermissionAutomationIssue {
+                    code: "apk_permission_automation_duplicate",
+                    message: "App-op automation contains a duplicate reviewed action.",
+                    field,
+                });
+            }
+        }
+        issues
+    }
+}
+
+/// Build the one generated permission step consumed by the existing executor.
+pub(crate) fn build_permission_step(
+    selection: &PermissionAutomationSelection,
+    step_id: String,
+    install_step_id: String,
+    app_name: &str,
+) -> Step {
+    let mut runtime = selection.runtime_permissions.clone();
+    runtime.sort_by(|left, right| left.permission_name.cmp(&right.permission_name));
+    runtime.dedup_by(|left, right| left.permission_name == right.permission_name);
+
+    let mut app_ops = selection.app_ops.clone();
+    app_ops.sort_by(|left, right| {
+        left.operation_name
+            .cmp(&right.operation_name)
+            .then_with(|| left.mode.cmp(&right.mode))
+            .then_with(|| left.permission_name.cmp(&right.permission_name))
+    });
+    app_ops.dedup_by(|left, right| {
+        left.permission_name == right.permission_name
+            && left.operation_name == right.operation_name
+            && left.mode == right.mode
+    });
+
+    let runtime = runtime
+        .into_iter()
+        .map(|action| {
+            let mut value = Map::new();
+            value.insert(
+                "package_name".to_string(),
+                Value::String(selection.package_name.clone()),
+            );
+            value.insert("name".to_string(), Value::String(action.permission_name));
+            value.insert("required".to_string(), Value::Bool(false));
+            if action.requires_root {
+                value.insert("when".to_string(), json!({ "rooted": true }));
+            }
+            Value::Object(value)
+        })
+        .collect();
+    let app_ops = app_ops
+        .into_iter()
+        .map(|action| {
+            let mut value = Map::new();
+            value.insert(
+                "package_name".to_string(),
+                Value::String(selection.package_name.clone()),
+            );
+            value.insert("op".to_string(), Value::String(action.operation_name));
+            value.insert("mode".to_string(), Value::String(action.mode));
+            value.insert("required".to_string(), Value::Bool(false));
+            if action.requires_root {
+                value.insert("when".to_string(), json!({ "rooted": true }));
+            }
+            Value::Object(value)
+        })
+        .collect();
+
+    let mut params = OrderedMap::new();
+    params.insert(
+        "runtime".to_string(),
+        ParamValue::Literal(Value::Array(runtime)),
+    );
+    params.insert(
+        "appops".to_string(),
+        ParamValue::Literal(Value::Array(app_ops)),
+    );
+    params.insert(
+        "policy".to_string(),
+        ParamValue::Literal(json!({ "on_failure": "warn", "require_all": false })),
+    );
+    Step {
+        id: step_id,
+        type_name: "grant_permissions".to_string(),
+        name: format!("Apply optional permissions for {app_name}"),
+        description: Some(
+            "Attempt selected runtime permission and app-op actions after installation."
+                .to_string(),
+        ),
+        progress_note: Some(format!("Applying selected permissions for {app_name}")),
+        user_toggleable: false,
+        dependencies: vec![install_step_id],
+        constraints: StepConstraints {
+            capabilities: vec!["shell_command".to_string()],
+            conflicts_with: Vec::new(),
+        },
+        skip_if: Vec::new(),
+        params,
+        verify: Vec::new(),
+    }
 }
 
 #[derive(Clone, Debug, Default, Deserialize, Serialize)]
@@ -131,7 +336,24 @@ pub(crate) struct AppRecipeDraft {
 pub(crate) fn generate_app_recipe_draft(request: AppRecipeDraftRequest) -> AppRecipeDraft {
     let proposed_app = proposed_app(&request.facts);
     let mut app = request.app.unwrap_or_else(|| proposed_app.clone());
-    let mut diagnostics = Vec::new();
+    let mut diagnostics = request
+        .permission_automation
+        .as_ref()
+        .into_iter()
+        .flat_map(PermissionAutomationSelection::validation_issues)
+        .map(|issue| error(issue.code, issue.message, &issue.field))
+        .collect::<Vec<_>>();
+    if request
+        .permission_automation
+        .as_ref()
+        .is_some_and(|selection| !selection.is_empty())
+    {
+        diagnostics.push(error(
+            "apk_permission_automation_strategy_unsupported",
+            "Permission automation is supported only for package-enforced remote APK recipes.",
+            "recipe.permissionAutomation",
+        ));
+    }
     if let Some(mappings) = request.mappings {
         apply_mapping_edits(&mut app, mappings, &mut diagnostics);
     }
@@ -237,6 +459,7 @@ fn generated_ids(app_id: &str) -> GeneratedRecipeIds {
         input_id: format!("{token}_apk"),
         feature_id: format!("{token}_install"),
         install_step_id: format!("install_{token}"),
+        permission_step_id: format!("grant_permissions_{token}"),
         launch_step_id: format!("launch_{token}"),
     }
 }
@@ -736,6 +959,7 @@ mod tests {
             app: Some(app),
             recipe: None,
             mappings: None,
+            permission_automation: None,
             regenerate_identifiers: false,
         });
         assert!(!draft.blocking);
@@ -762,12 +986,85 @@ mod tests {
             app: Some(app),
             recipe: Some(edits),
             mappings: None,
+            permission_automation: None,
             regenerate_identifiers: false,
         });
         assert!(draft
             .recipe_canonical_yaml
             .unwrap()
             .contains("type: launch_app"));
+    }
+
+    #[test]
+    fn local_permission_automation_is_rejected_without_emitting_a_step() {
+        let mut app = proposed_app(&facts());
+        app.category = "utility".to_string();
+        let draft = generate_app_recipe_draft(AppRecipeDraftRequest {
+            facts: facts(),
+            app: Some(app),
+            recipe: None,
+            mappings: None,
+            permission_automation: Some(PermissionAutomationSelection {
+                package_name: "com.example.player".to_string(),
+                runtime_permissions: vec![RuntimePermissionSelection {
+                    permission_name: "android.permission.CAMERA".to_string(),
+                    requires_root: false,
+                }],
+                app_ops: Vec::new(),
+            }),
+            regenerate_identifiers: false,
+        });
+        assert!(draft.blocking);
+        assert!(draft.diagnostics.iter().any(|diagnostic| {
+            diagnostic.code == "apk_permission_automation_strategy_unsupported"
+        }));
+        assert!(!draft.recipe.to_string().contains("grant_permissions"));
+    }
+
+    #[test]
+    fn permission_automation_contract_rejects_authored_commands_and_invalid_literals() {
+        assert!(
+            serde_json::from_value::<PermissionAutomationSelection>(serde_json::json!({
+                "packageName": "com.example.player",
+                "runtimePermissions": [{
+                    "permissionName": "android.permission.CAMERA",
+                    "requiresRoot": false,
+                    "command": "pm grant anything"
+                }],
+                "appOps": []
+            }))
+            .is_err()
+        );
+        assert!(
+            serde_json::from_value::<PermissionAutomationSelection>(serde_json::json!({
+                "packageName": { "ref": "inputs.package" },
+                "runtimePermissions": [],
+                "appOps": []
+            }))
+            .is_err()
+        );
+
+        let selection = PermissionAutomationSelection {
+            package_name: " ".to_string(),
+            runtime_permissions: vec![RuntimePermissionSelection {
+                permission_name: String::new(),
+                requires_root: false,
+            }],
+            app_ops: vec![AppOpPermissionSelection {
+                permission_name: "android.permission.MANAGE_EXTERNAL_STORAGE".to_string(),
+                operation_name: String::new(),
+                mode: "deny".to_string(),
+                requires_root: true,
+            }],
+        };
+        let issues = selection.validation_issues();
+        assert_eq!(
+            issues
+                .iter()
+                .filter(|issue| issue.code == "apk_permission_automation_invalid")
+                .count(),
+            4
+        );
     }
 
     #[test]

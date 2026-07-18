@@ -10,6 +10,7 @@ import type {
   AppGeneratorDiagnosticDto,
   AppGeneratorInstallStrategy,
   AppGeneratorSourceMode,
+  PermissionSelectionRequestDto,
   RemoteSourceAnalysisResult,
   RemoteSourceDescriptorDto,
 } from "../api/types.js";
@@ -74,6 +75,56 @@ export function otherRequestedPermissions(inspection: ApkInspectionResult): ApkP
     return permission.classification !== "runtime_grantable"
       && permission.classification !== "app_op_grantable";
   });
+}
+
+/** Return whether the inspected APK is the package-enforced artifact used at runtime. */
+export function permissionAutomationEligible(
+  sourceMode: AppGeneratorSourceMode,
+  installStrategy: AppGeneratorInstallStrategy,
+): boolean {
+  return sourceMode !== "local_apk"
+    && (installStrategy === "pinned_remote_asset"
+      || installStrategy === "latest_compatible_release");
+}
+
+/** Serialize only selected candidate identities and the opaque inspection binding. */
+export function permissionSelectionForInspection(
+  inspection: ApkInspectionResult | null,
+): PermissionSelectionRequestDto | null {
+  if (!inspection) return null;
+  const runtimePermissions = inspection.runtimeGrantCandidates
+    .filter((candidate) => candidate.selected)
+    .map((candidate) => ({ permissionName: candidate.permissionName }));
+  const appOps = inspection.appOpCandidates
+    .filter((candidate) => candidate.selected)
+    .map((candidate) => ({
+      permissionName: candidate.permissionName,
+      operationName: candidate.operationName,
+      mode: candidate.mode,
+    }));
+  if (runtimePermissions.length === 0 && appOps.length === 0) return null;
+  return {
+    inspectionHandle: inspection.inspectionHandle,
+    runtimePermissions,
+    appOps,
+  };
+}
+
+function clearPermissionSelections(
+  inspection: ApkInspectionResult | null,
+): ApkInspectionResult | null {
+  if (!inspection) return null;
+  return {
+    ...inspection,
+    runtimeGrantCandidates: inspection.runtimeGrantCandidates.map((candidate) => ({
+      ...candidate,
+      selected: false,
+    })),
+    appOpCandidates: inspection.appOpCandidates.map((candidate) => ({
+      ...candidate,
+      selected: false,
+    })),
+  };
 }
 
 export type AppGeneratorPhase =
@@ -302,6 +353,7 @@ export function reduceAppGenerator(
         ...state,
         installStrategy: action.strategy,
         trustedSha256: "",
+        inspection: clearPermissionSelections(state.inspection),
         draft: null,
         form: null,
         collisions: null,
@@ -358,23 +410,33 @@ export function reduceAppGenerator(
       if (!state.inspection) return state;
       return {
         ...state,
+        phase: "editing",
         inspection: {
           ...state.inspection,
           runtimeGrantCandidates: state.inspection.runtimeGrantCandidates.map((candidate, index) =>
             index === action.index ? { ...candidate, selected: action.selected } : candidate,
           ),
         },
+        draft: null,
+        collisions: null,
+        saved: null,
+        error: null,
       };
     case "app-op-candidate-selected":
       if (!state.inspection) return state;
       return {
         ...state,
+        phase: "editing",
         inspection: {
           ...state.inspection,
           appOpCandidates: state.inspection.appOpCandidates.map((candidate, index) =>
             index === action.index ? { ...candidate, selected: action.selected } : candidate,
           ),
         },
+        draft: null,
+        collisions: null,
+        saved: null,
+        error: null,
       };
     case "drafted":
       return {

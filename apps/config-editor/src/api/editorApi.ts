@@ -44,6 +44,7 @@ import type {
   AppRecipeSaveResult,
   AppGeneratorSourceMode,
   AppGeneratorInstallStrategy,
+  PermissionSelectionRequestDto,
   RemoteApkDownloadResult,
   RemoteSourceAnalysisResult,
   RemoteSourceDescriptorDto,
@@ -430,6 +431,7 @@ export async function generateAppRecipeDraft(
   app: AppDefinitionV1Dto | null,
   recipe: AppRecipeEditsDto | null,
   mappings: AppMappingEditsDto | null,
+  permissionSelection: PermissionSelectionRequestDto | null,
   regenerateIdentifiers = false,
 ): Promise<EditorApiResult<AppRecipeDraftResult>> {
   return callApi("generate_app_recipe_draft", {
@@ -438,6 +440,7 @@ export async function generateAppRecipeDraft(
     app,
     recipe,
     mappings,
+    permissionSelection,
     regenerateIdentifiers,
   });
 }
@@ -453,6 +456,7 @@ export async function generateRemoteAppRecipeDraft(
   app: AppDefinitionV1Dto | null,
   recipe: AppRecipeEditsDto | null,
   mappings: AppMappingEditsDto | null,
+  permissionSelection: PermissionSelectionRequestDto | null,
   regenerateIdentifiers = false,
 ): Promise<EditorApiResult<AppRecipeDraftResult>> {
   return callApi("generate_remote_app_recipe_draft", {
@@ -466,6 +470,7 @@ export async function generateRemoteAppRecipeDraft(
     app,
     recipe,
     mappings,
+    permissionSelection,
     regenerateIdentifiers,
   });
 }
@@ -491,6 +496,7 @@ export async function saveGeneratedAppRecipe(
   app: AppDefinitionV1Dto,
   recipe: AppRecipeEditsDto,
   mappings: AppMappingEditsDto,
+  permissionSelection: PermissionSelectionRequestDto | null,
 ): Promise<EditorApiResult<AppRecipeSaveResult>> {
   return callApi("save_generated_app_recipe", {
     sessionHandle,
@@ -499,6 +505,7 @@ export async function saveGeneratedAppRecipe(
     app,
     recipe,
     mappings,
+    permissionSelection,
   });
 }
 
@@ -514,6 +521,7 @@ export async function saveGeneratedRemoteAppRecipe(
   app: AppDefinitionV1Dto,
   recipe: AppRecipeEditsDto,
   mappings: AppMappingEditsDto,
+  permissionSelection: PermissionSelectionRequestDto | null,
 ): Promise<EditorApiResult<AppRecipeSaveResult>> {
   return callApi("save_generated_remote_app_recipe", {
     sessionHandle,
@@ -527,6 +535,7 @@ export async function saveGeneratedRemoteAppRecipe(
     app,
     recipe,
     mappings,
+    permissionSelection,
   });
 }
 
