@@ -5,10 +5,13 @@ import type {
   ApkInspectionResult,
   AppRecipeDraftResult,
   AppRecipeSaveResult,
+  RemoteSourceAnalysisResult,
 } from "../src/api/types.js";
 import type { AppGeneratorState } from "../src/components/appGenerator.logic.js";
 import {
+  analysisForPrereleasePolicy,
   assetPatternError,
+  buildReleasePatternPreview,
   diagnosticDisplayTitle,
   draftToForm,
   formToRequest,
@@ -25,6 +28,54 @@ import {
   suggestAssetPattern,
   visibleDraftDiagnostics,
 } from "../src/components/appGenerator.logic.js";
+
+function remoteAnalysis(): RemoteSourceAnalysisResult {
+  const asset = (
+    assetHandle: string,
+    fileName: string,
+    releaseTag: string,
+    prerelease: boolean,
+  ) => ({
+    assetHandle,
+    fileName,
+    size: 10,
+    contentType: "application/vnd.android.package-archive",
+    releaseTag,
+    releaseName: null,
+    prerelease,
+    publishedAt: null,
+  });
+  const current = asset("current", "app-v3-arm64.apk", "v3", false);
+  const olderOther = asset("older-other", "other.apk", "v2", false);
+  const olderOne = asset("older-one", "app-v1-arm64.apk", "v1", false);
+  const olderTwo = asset("older-two", "app-v2-arm64.apk", "v1", false);
+  const prerelease = asset("prerelease", "app-v4-arm64.apk", "v4-beta", true);
+  return {
+    sourceHandle: "source",
+    mode: "github_repository",
+    normalizedUrl: "https://github.com/example/project",
+    capabilities: {
+      pinnedArtifact: true,
+      latestRelease: true,
+      prereleaseFiltering: true,
+      deterministicAssetFiltering: true,
+    },
+    repository: {
+      fullName: "example/project",
+      name: "project",
+      description: null,
+      htmlUrl: "https://github.com/example/project",
+    },
+    releases: [
+      { tag: "v4-beta", name: null, prerelease: true, publishedAt: null, assets: [prerelease] },
+      { tag: "v3", name: null, prerelease: false, publishedAt: null, assets: [current] },
+      { tag: "v2", name: null, prerelease: false, publishedAt: null, assets: [olderOther] },
+      { tag: "v1", name: null, prerelease: false, publishedAt: null, assets: [olderTwo, olderOne] },
+    ],
+    assets: [prerelease, current, olderOther, olderTwo, olderOne],
+    preselectedAssetHandle: null,
+  };
+}
 
 function inspection(): ApkInspectionResult {
   const applicable = {
@@ -201,6 +252,139 @@ test("asset pattern validation rejects invalid zero-match and ambiguous rules", 
   assert.match(assetPatternError("[", files) ?? "", /valid regular expression/u);
   assert.match(assetPatternError("^missing", files) ?? "", /does not match/u);
   assert.match(assetPatternError("^app-.*\\.apk$", files) ?? "", /multiple APKs/u);
+});
+
+test("release pattern preview counts every eligible release and keeps historical mismatches non-blocking", () => {
+  const preview = buildReleasePatternPreview(
+    remoteAnalysis(),
+    String.raw`^app-v\d+-arm64\.apk$`,
+    false,
+  );
+  assert.equal(preview.blocking, false);
+  assert.equal(preview.eligibleReleaseCount, 3);
+  assert.equal(preview.uniqueMatchCount, 1);
+  assert.equal(preview.noMatchCount, 1);
+  assert.equal(preview.multipleMatchesCount, 1);
+  assert.deepEqual(preview.releases[2]?.matchingAssetNames, [
+    "app-v1-arm64.apk",
+    "app-v2-arm64.apk",
+  ]);
+});
+
+test("release pattern preview blocks invalid empty newest zero and newest multiple outcomes", () => {
+  const invalid = buildReleasePatternPreview(remoteAnalysis(), "[", false);
+  assert.equal(invalid.blocking, true);
+  assert.match(invalid.patternError ?? "", /valid regular expression/u);
+
+  const empty = buildReleasePatternPreview(
+    { ...remoteAnalysis(), releases: [], assets: [] },
+    String.raw`\.apk$`,
+    false,
+  );
+  assert.equal(empty.blocking, true);
+  assert.match(empty.blockingMessage ?? "", /No analyzed releases/u);
+
+  const zero = buildReleasePatternPreview(remoteAnalysis(), String.raw`^missing\.apk$`, false);
+  assert.equal(zero.blocking, true);
+  assert.match(zero.blockingMessage ?? "", /v3.*no matching APK/u);
+
+  const multipleAnalysis = remoteAnalysis();
+  multipleAnalysis.releases[1]!.assets.push({
+    ...multipleAnalysis.releases[1]!.assets[0]!,
+    assetHandle: "current-two",
+    fileName: "app-v3-x86.apk",
+  });
+  const multiple = buildReleasePatternPreview(
+    multipleAnalysis,
+    String.raw`^app-v3-.*\.apk$`,
+    false,
+  );
+  assert.equal(multiple.blocking, true);
+  assert.equal(multiple.releases[0]?.outcome, "multiple_matches");
+});
+
+test("release pattern preview applies prerelease filtering without reordering provider results", () => {
+  const stableOnly = buildReleasePatternPreview(
+    remoteAnalysis(),
+    String.raw`^app-v\d+-arm64\.apk$`,
+    false,
+  );
+  assert.equal(stableOnly.releases[0]?.releaseTag, "v3");
+  const withPrereleases = buildReleasePatternPreview(
+    remoteAnalysis(),
+    String.raw`^app-v\d+-arm64\.apk$`,
+    true,
+  );
+  assert.equal(withPrereleases.releases[0]?.releaseTag, "v4-beta");
+  assert.equal(withPrereleases.eligibleReleaseCount, 4);
+});
+
+test("browser preview is advisory when JavaScript accepts Rust-incompatible lookahead", () => {
+  const preview = buildReleasePatternPreview(
+    remoteAnalysis(),
+    String.raw`^(?=app-v3).*\.apk$`,
+    false,
+  );
+  assert.equal(preview.patternError, null);
+  assert.equal(preview.releases[0]?.outcome, "unique_match");
+});
+
+test("GitHub prerelease policy filters the picker while retaining full analysis", () => {
+  const analysis = remoteAnalysis();
+  const filtered = analysisForPrereleasePolicy(analysis, false);
+  assert.equal(analysis.releases.length, 4);
+  assert.equal(filtered.releases.length, 3);
+  assert.equal(filtered.assets.some((asset) => asset.prerelease), false);
+});
+
+test("GitHub prerelease changes retain analysis and invalidate stale review state", () => {
+  const analysis = remoteAnalysis();
+  let state: AppGeneratorState = {
+    ...initialAppGeneratorState,
+    sourceMode: "github_repository",
+    sourceAnalysis: analysis,
+    selectedAssetHandle: "current",
+    assetPattern: "pattern",
+    apkHandle: "apk",
+    apkLabel: "app.apk",
+    inspection: inspection(),
+    draft: draft(),
+    form: draftToForm(draft()),
+    collisions: { collisions: [], blocking: false },
+  };
+  state = reduceAppGenerator(state, { type: "include-prereleases", value: true });
+  assert.equal(state.sourceAnalysis, analysis);
+  assert.equal(state.selectedAssetHandle, "current");
+  assert.equal(state.form !== null, true);
+  assert.equal(state.draft, null);
+  assert.equal(state.collisions, null);
+
+  state = { ...state, selectedAssetHandle: "prerelease" };
+  state = reduceAppGenerator(state, { type: "include-prereleases", value: false });
+  assert.equal(state.sourceAnalysis, analysis);
+  assert.equal(state.selectedAssetHandle, null);
+  assert.equal(state.apkHandle, null);
+  assert.equal(state.form, null);
+});
+
+test("pattern edits retain analyzed releases and editable form while invalidating review", () => {
+  const analysis = remoteAnalysis();
+  const generated = draft();
+  const form = draftToForm(generated);
+  const state = reduceAppGenerator(
+    {
+      ...initialAppGeneratorState,
+      sourceAnalysis: analysis,
+      draft: generated,
+      form,
+      collisions: { collisions: [], blocking: false },
+    },
+    { type: "asset-pattern", value: "new-pattern" },
+  );
+  assert.equal(state.sourceAnalysis, analysis);
+  assert.equal(state.form, form);
+  assert.equal(state.draft, null);
+  assert.equal(state.collisions, null);
 });
 
 test("remote download has a distinct busy phase before inspection", () => {

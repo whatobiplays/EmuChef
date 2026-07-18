@@ -32,6 +32,8 @@ pub(crate) struct RemoteAppRecipeDraftRequest {
     pub facts: ApkInspectionFacts,
     pub source: RemoteSource,
     #[serde(default)]
+    release_analysis: Option<TrustedReleaseAnalysis>,
+    #[serde(default)]
     pub permission_automation: Option<PermissionAutomationSelection>,
     #[serde(default)]
     pub app: Option<AppDefinitionV1>,
@@ -65,6 +67,20 @@ pub(crate) struct RemoteSource {
     pub include_prereleases: bool,
     #[serde(default)]
     pub trusted_sha256: Option<String>,
+}
+
+#[derive(Clone, Debug, Deserialize)]
+#[serde(deny_unknown_fields, rename_all = "camelCase")]
+struct TrustedReleaseAnalysis {
+    releases: Vec<TrustedRelease>,
+}
+
+#[derive(Clone, Debug, Deserialize)]
+#[serde(deny_unknown_fields, rename_all = "camelCase")]
+struct TrustedRelease {
+    release_tag: String,
+    prerelease: bool,
+    asset_file_names: Vec<String>,
 }
 
 #[derive(Clone, Debug, Default, Deserialize, Serialize)]
@@ -168,7 +184,7 @@ pub(crate) fn generate_remote_app_recipe_draft(
 ) -> RemoteAppRecipeDraft {
     let proposed = proposed_app(&request.facts, &request.source);
     let mut app = request.app.unwrap_or_else(|| proposed.clone());
-    let mut diagnostics = validate_source(&request.source);
+    let mut diagnostics = validate_source(&request.source, request.release_analysis.as_ref());
     diagnostics.extend(permission_automation_diagnostics(
         request.permission_automation.as_ref(),
         &request.facts,
@@ -250,7 +266,10 @@ pub(crate) fn generate_remote_app_recipe_draft(
     }
 }
 
-fn validate_source(source: &RemoteSource) -> Vec<DraftDiagnostic> {
+fn validate_source(
+    source: &RemoteSource,
+    release_analysis: Option<&TrustedReleaseAnalysis>,
+) -> Vec<DraftDiagnostic> {
     let mut diagnostics = Vec::new();
     if !matches!(
         source.mode.as_str(),
@@ -290,13 +309,18 @@ fn validate_source(source: &RemoteSource) -> Vec<DraftDiagnostic> {
                 "source.strategy",
             ));
         }
-        match source.asset_pattern.as_deref() {
-            Some(pattern) if regex::Regex::new(pattern).is_ok() => {}
-            _ => diagnostics.push(error(
+        if source.mode == "github_repository" {
+            diagnostics.extend(release_pattern_diagnostics(source, release_analysis));
+        } else if source
+            .asset_pattern
+            .as_deref()
+            .is_none_or(|pattern| regex::Regex::new(pattern).is_err())
+        {
+            diagnostics.push(error(
                 "latest_release_asset_pattern_invalid",
                 "Latest compatible release requires a valid APK filename pattern.",
                 "source.assetPattern",
-            )),
+            ));
         }
     }
     if let Some(trusted_sha256) = source.trusted_sha256.as_deref().filter(|value| {
@@ -334,6 +358,130 @@ fn validate_source(source: &RemoteSource) -> Vec<DraftDiagnostic> {
         ));
     }
     diagnostics
+}
+
+fn release_pattern_diagnostics(
+    source: &RemoteSource,
+    release_analysis: Option<&TrustedReleaseAnalysis>,
+) -> Vec<DraftDiagnostic> {
+    let Some(pattern) = source
+        .asset_pattern
+        .as_deref()
+        .filter(|pattern| !pattern.trim().is_empty())
+    else {
+        return vec![error(
+            "latest_release_asset_pattern_invalid",
+            "Latest compatible release requires a valid APK filename pattern.",
+            "source.assetPattern",
+        )];
+    };
+    let expression = match regex::Regex::new(pattern) {
+        Ok(expression) => expression,
+        Err(_) => {
+            return vec![error(
+                "latest_release_asset_pattern_invalid",
+                "Rust rejected the APK filename pattern. Use syntax supported by the runtime regex engine.",
+                "source.assetPattern",
+            )]
+        }
+    };
+    let Some(analysis) = release_analysis else {
+        return vec![error(
+            "latest_release_analysis_missing",
+            "Trusted GitHub release analysis is required before latest-compatible generation.",
+            "source.assetPattern",
+        )];
+    };
+    if analysis.releases.is_empty() {
+        return vec![error(
+            "latest_release_analysis_empty",
+            "The trusted GitHub analysis contains no releases.",
+            "source.assetPattern",
+        )];
+    }
+    if !trusted_release_analysis_is_valid(analysis) {
+        return vec![error(
+            "latest_release_analysis_invalid",
+            "The trusted GitHub release analysis is malformed or ambiguous.",
+            "source.assetPattern",
+        )];
+    }
+    let eligible_releases = analysis
+        .releases
+        .iter()
+        .filter(|release| source.include_prereleases || !release.prerelease)
+        .collect::<Vec<_>>();
+    if eligible_releases.is_empty() {
+        return vec![error(
+            "latest_release_no_eligible_releases",
+            "No trusted GitHub releases remain after applying the prerelease policy.",
+            "source.assetPattern",
+        )];
+    }
+
+    let mut diagnostics = Vec::new();
+    for (index, release) in eligible_releases.into_iter().enumerate() {
+        let mut matching_names = release
+            .asset_file_names
+            .iter()
+            .filter(|file_name| expression.is_match(file_name))
+            .cloned()
+            .collect::<Vec<_>>();
+        matching_names.sort();
+        match (index, matching_names.len()) {
+            (0, 0) => diagnostics.push(error(
+                "latest_release_current_no_match",
+                &format!(
+                    "The current release '{}' has no APK filename matching the pattern.",
+                    release.release_tag
+                ),
+                "source.assetPattern",
+            )),
+            (0, 1) => {}
+            (0, count) => diagnostics.push(error(
+                "latest_release_current_multiple_matches",
+                &format!(
+                    "The current release '{}' has {count} APK filenames matching the pattern: {}.",
+                    release.release_tag,
+                    matching_names.join(", ")
+                ),
+                "source.assetPattern",
+            )),
+            (_, 0) => diagnostics.push(warning(
+                "latest_release_historical_no_match",
+                &format!(
+                    "Older release '{}' has no APK filename matching the pattern.",
+                    release.release_tag
+                ),
+                "source.assetPattern",
+            )),
+            (_, 1) => {}
+            (_, count) => diagnostics.push(warning(
+                "latest_release_historical_multiple_matches",
+                &format!(
+                    "Older release '{}' has {count} APK filenames matching the pattern: {}.",
+                    release.release_tag,
+                    matching_names.join(", ")
+                ),
+                "source.assetPattern",
+            )),
+        }
+    }
+    diagnostics
+}
+
+fn trusted_release_analysis_is_valid(analysis: &TrustedReleaseAnalysis) -> bool {
+    let mut release_tags = HashSet::new();
+    analysis.releases.iter().all(|release| {
+        let mut asset_names = HashSet::new();
+        !release.release_tag.trim().is_empty()
+            && release_tags.insert(release.release_tag.as_str())
+            && release.asset_file_names.iter().all(|asset_name| {
+                !asset_name.trim().is_empty()
+                    && asset_name.to_ascii_lowercase().ends_with(".apk")
+                    && asset_names.insert(asset_name.as_str())
+            })
+    })
 }
 
 fn permission_automation_diagnostics(
@@ -1073,6 +1221,15 @@ fn error(code: &str, message: &str, field: &str) -> DraftDiagnostic {
     }
 }
 
+fn warning(code: &str, message: &str, field: &str) -> DraftDiagnostic {
+    DraftDiagnostic {
+        severity: DraftSeverity::Warning,
+        code: code.to_string(),
+        message: message.to_string(),
+        field: field.to_string(),
+    }
+}
+
 #[derive(Clone, Debug)]
 enum StrictJsonValue {
     Null,
@@ -1206,6 +1363,53 @@ mod tests {
         }
     }
 
+    fn trusted_release(
+        release_tag: &str,
+        prerelease: bool,
+        asset_file_names: &[&str],
+    ) -> TrustedRelease {
+        TrustedRelease {
+            release_tag: release_tag.to_string(),
+            prerelease,
+            asset_file_names: asset_file_names
+                .iter()
+                .map(|name| (*name).to_string())
+                .collect(),
+        }
+    }
+
+    fn release_analysis(releases: Vec<TrustedRelease>) -> TrustedReleaseAnalysis {
+        TrustedReleaseAnalysis { releases }
+    }
+
+    fn unique_release_analysis() -> TrustedReleaseAnalysis {
+        release_analysis(vec![trusted_release("v1", false, &["app-v1-arm64.apk"])])
+    }
+
+    fn latest_draft(
+        pattern: &str,
+        include_prereleases: bool,
+        release_analysis: Option<TrustedReleaseAnalysis>,
+    ) -> RemoteAppRecipeDraft {
+        let mut latest = source();
+        latest.mode = "github_repository".to_string();
+        latest.strategy = "latest_compatible_release".to_string();
+        latest.asset_pattern = Some(pattern.to_string());
+        latest.include_prereleases = include_prereleases;
+        let mut app = proposed_app(&facts(), &latest);
+        app.category = "emulator".to_string();
+        generate_remote_app_recipe_draft(RemoteAppRecipeDraftRequest {
+            facts: facts(),
+            source: latest,
+            release_analysis,
+            app: Some(app),
+            recipe: None,
+            mappings: None,
+            permission_automation: None,
+            regenerate_identifiers: false,
+        })
+    }
+
     fn permission_automation(
         runtime_permissions: Vec<RuntimePermissionSelection>,
         app_ops: Vec<AppOpPermissionSelection>,
@@ -1263,6 +1467,7 @@ mod tests {
         let draft = generate_remote_app_recipe_draft(RemoteAppRecipeDraftRequest {
             facts: facts(),
             source,
+            release_analysis: None,
             app: Some(app),
             recipe: Some(edits),
             mappings: None,
@@ -1408,6 +1613,7 @@ mod tests {
             let draft = generate_remote_app_recipe_draft(RemoteAppRecipeDraftRequest {
                 facts: facts(),
                 source,
+                release_analysis: None,
                 app: Some(app),
                 recipe: None,
                 mappings: None,
@@ -1444,12 +1650,13 @@ mod tests {
         let mut source = source();
         source.mode = "github_repository".to_string();
         source.strategy = "latest_compatible_release".to_string();
-        source.asset_pattern = Some("^app\\.apk$".to_string());
+        source.asset_pattern = Some("^app-v.*-arm64\\.apk$".to_string());
         let mut app = proposed_app(&facts(), &source);
         app.category = "emulator".to_string();
         let draft = generate_remote_app_recipe_draft(RemoteAppRecipeDraftRequest {
             facts: facts(),
             source,
+            release_analysis: Some(unique_release_analysis()),
             app: Some(app),
             recipe: None,
             mappings: None,
@@ -1484,6 +1691,7 @@ mod tests {
         let draft = generate_remote_app_recipe_draft(RemoteAppRecipeDraftRequest {
             facts: facts(),
             source,
+            release_analysis: None,
             app: Some(app),
             recipe: None,
             mappings: None,
@@ -1524,6 +1732,7 @@ mod tests {
             let draft = generate_remote_app_recipe_draft(RemoteAppRecipeDraftRequest {
                 facts: facts(),
                 source,
+                release_analysis: None,
                 app: Some(app),
                 recipe: None,
                 mappings: None,
@@ -1546,6 +1755,7 @@ mod tests {
         let draft = generate_remote_app_recipe_draft(RemoteAppRecipeDraftRequest {
             facts: facts(),
             source: source(),
+            release_analysis: None,
             app: Some(app),
             recipe: None,
             mappings: None,
@@ -1574,6 +1784,7 @@ mod tests {
         let draft = generate_remote_app_recipe_draft(RemoteAppRecipeDraftRequest {
             facts: facts(),
             source,
+            release_analysis: None,
             app: Some(app),
             recipe: None,
             mappings: None,
@@ -1602,6 +1813,7 @@ mod tests {
         let draft = generate_remote_app_recipe_draft(RemoteAppRecipeDraftRequest {
             facts: facts(),
             source,
+            release_analysis: None,
             app: None,
             recipe: None,
             mappings: None,
@@ -1629,11 +1841,13 @@ mod tests {
             source.trusted_sha256 = Some("A".repeat(64));
             if strategy == "latest_compatible_release" {
                 source.mode = "github_repository".to_string();
-                source.asset_pattern = Some("^app\\.apk$".to_string());
+                source.asset_pattern = Some("^app-v.*-arm64\\.apk$".to_string());
             }
             let draft = generate_remote_app_recipe_draft(RemoteAppRecipeDraftRequest {
                 facts: facts(),
                 source,
+                release_analysis: (strategy == "latest_compatible_release")
+                    .then(unique_release_analysis),
                 app: None,
                 recipe: None,
                 mappings: None,
@@ -1666,13 +1880,15 @@ mod tests {
             source.trusted_sha256 = Some(" \t\r\n".to_string());
             if strategy == "latest_compatible_release" {
                 source.mode = "github_repository".to_string();
-                source.asset_pattern = Some("^app\\.apk$".to_string());
+                source.asset_pattern = Some("^app-v.*-arm64\\.apk$".to_string());
             }
             let mut app = proposed_app(&facts(), &source);
             app.category = "emulator".to_string();
             let draft = generate_remote_app_recipe_draft(RemoteAppRecipeDraftRequest {
                 facts: facts(),
                 source,
+                release_analysis: (strategy == "latest_compatible_release")
+                    .then(unique_release_analysis),
                 app: Some(app),
                 recipe: None,
                 mappings: None,
@@ -1706,6 +1922,7 @@ mod tests {
         let draft = generate_remote_app_recipe_draft(RemoteAppRecipeDraftRequest {
             facts: facts(),
             source,
+            release_analysis: None,
             app: Some(app),
             recipe: None,
             mappings: None,
@@ -1732,6 +1949,7 @@ mod tests {
         let draft = generate_remote_app_recipe_draft(RemoteAppRecipeDraftRequest {
             facts: facts(),
             source: latest,
+            release_analysis: Some(unique_release_analysis()),
             app: Some(app),
             recipe: None,
             mappings: None,
@@ -1767,6 +1985,8 @@ mod tests {
             let draft = generate_remote_app_recipe_draft(RemoteAppRecipeDraftRequest {
                 facts: unavailable_facts,
                 source,
+                release_analysis: (strategy == "latest_compatible_release")
+                    .then(unique_release_analysis),
                 app: Some(app),
                 recipe: None,
                 mappings: None,
@@ -1798,6 +2018,7 @@ mod tests {
         let draft = generate_remote_app_recipe_draft(RemoteAppRecipeDraftRequest {
             facts: facts(),
             source: latest,
+            release_analysis: None,
             app: Some(app),
             recipe: None,
             mappings: None,
@@ -1831,6 +2052,7 @@ mod tests {
         let draft = generate_remote_app_recipe_draft(RemoteAppRecipeDraftRequest {
             facts: facts(),
             source: latest,
+            release_analysis: None,
             app: Some(app),
             recipe: None,
             mappings: None,
@@ -1848,12 +2070,142 @@ mod tests {
     }
 
     #[test]
+    fn latest_pattern_rejects_javascript_valid_rust_invalid_lookahead() {
+        let draft = latest_draft(r"^(?=app).*\.apk$", false, Some(unique_release_analysis()));
+        assert!(draft.blocking);
+        assert!(draft.diagnostics.iter().any(|diagnostic| {
+            diagnostic.code == "latest_release_asset_pattern_invalid"
+                && diagnostic.message.contains("Rust rejected")
+        }));
+    }
+
+    #[test]
+    fn latest_pattern_distinguishes_missing_empty_and_filtered_release_analysis() {
+        let cases = [
+            (None, "latest_release_analysis_missing"),
+            (
+                Some(release_analysis(Vec::new())),
+                "latest_release_analysis_empty",
+            ),
+            (
+                Some(release_analysis(vec![trusted_release(
+                    "v2-beta",
+                    true,
+                    &["app-v2-arm64.apk"],
+                )])),
+                "latest_release_no_eligible_releases",
+            ),
+        ];
+        for (analysis, expected_code) in cases {
+            let draft = latest_draft(r"^app-v.*-arm64\.apk$", false, analysis);
+            assert!(draft.blocking, "{expected_code}");
+            assert!(draft
+                .diagnostics
+                .iter()
+                .any(|diagnostic| diagnostic.code == expected_code));
+        }
+    }
+
+    #[test]
+    fn latest_pattern_blocks_newest_zero_and_multiple_matches() {
+        let no_match = latest_draft(r"^other\.apk$", false, Some(unique_release_analysis()));
+        assert!(no_match.blocking);
+        assert!(no_match
+            .diagnostics
+            .iter()
+            .any(|diagnostic| diagnostic.code == "latest_release_current_no_match"));
+
+        let multiple = latest_draft(
+            r"\.apk$",
+            false,
+            Some(release_analysis(vec![trusted_release(
+                "v2",
+                false,
+                &["z.apk", "a.apk"],
+            )])),
+        );
+        assert!(multiple.blocking);
+        let diagnostic = multiple
+            .diagnostics
+            .iter()
+            .find(|diagnostic| diagnostic.code == "latest_release_current_multiple_matches")
+            .unwrap();
+        assert!(diagnostic.message.contains("a.apk, z.apk"));
+    }
+
+    #[test]
+    fn latest_pattern_keeps_historical_mismatches_as_warnings() {
+        let draft = latest_draft(
+            r"^app-v\d+-arm64\.apk$",
+            false,
+            Some(release_analysis(vec![
+                trusted_release("current", false, &["app-v3-arm64.apk"]),
+                trusted_release("older-zero", false, &["other.apk"]),
+                trusted_release(
+                    "older-multiple",
+                    false,
+                    &["app-v1-arm64.apk", "app-v2-arm64.apk"],
+                ),
+            ])),
+        );
+        assert!(!draft.blocking, "{:#?}", draft.diagnostics);
+        assert!(draft.diagnostics.iter().any(|diagnostic| {
+            diagnostic.code == "latest_release_historical_no_match"
+                && diagnostic.severity == DraftSeverity::Warning
+        }));
+        assert!(draft.diagnostics.iter().any(|diagnostic| {
+            diagnostic.code == "latest_release_historical_multiple_matches"
+                && diagnostic.severity == DraftSeverity::Warning
+        }));
+    }
+
+    #[test]
+    fn latest_pattern_uses_trusted_provider_response_order_for_current_release() {
+        let draft = latest_draft(
+            r"^app-v2-arm64\.apk$",
+            false,
+            Some(release_analysis(vec![
+                trusted_release("first-response", false, &["app-v1-arm64.apk"]),
+                trusted_release("second-response", false, &["app-v2-arm64.apk"]),
+            ])),
+        );
+        assert!(draft.blocking);
+        assert!(draft.diagnostics.iter().any(|diagnostic| {
+            diagnostic.code == "latest_release_current_no_match"
+                && diagnostic.message.contains("first-response")
+        }));
+    }
+
+    #[test]
+    fn latest_pattern_rejects_ambiguous_trusted_release_identity() {
+        for analysis in [
+            release_analysis(vec![
+                trusted_release("duplicate", false, &["one.apk"]),
+                trusted_release("duplicate", false, &["two.apk"]),
+            ]),
+            release_analysis(vec![trusted_release(
+                "v1",
+                false,
+                &["same.apk", "same.apk"],
+            )]),
+        ] {
+            let draft = latest_draft(r"\.apk$", false, Some(analysis));
+            assert!(draft.blocking);
+            assert!(draft
+                .diagnostics
+                .iter()
+                .any(|diagnostic| diagnostic.code == "latest_release_analysis_invalid"));
+        }
+    }
+
+    #[test]
     fn unsafe_download_url_is_blocking() {
         let mut source = source();
         source.download_url = "http://example.com/app.apk".to_string();
         let draft = generate_remote_app_recipe_draft(RemoteAppRecipeDraftRequest {
             facts: facts(),
             source,
+            release_analysis: None,
             app: None,
             recipe: None,
             mappings: None,

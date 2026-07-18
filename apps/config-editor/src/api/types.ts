@@ -450,6 +450,30 @@ export interface RemoteReleaseDto {
   assets: RemoteAssetDto[];
 }
 
+export type ReleasePatternOutcome =
+  | "unique_match"
+  | "no_match"
+  | "multiple_matches";
+
+export interface ReleasePatternReleaseResult {
+  releaseTag: string;
+  prerelease: boolean;
+  matchingAssetNames: string[];
+  outcome: ReleasePatternOutcome;
+}
+
+/** Immediate browser preview derived from already analyzed GitHub releases. */
+export interface ReleasePatternPreviewResult {
+  releases: ReleasePatternReleaseResult[];
+  eligibleReleaseCount: number;
+  uniqueMatchCount: number;
+  noMatchCount: number;
+  multipleMatchesCount: number;
+  patternError: string | null;
+  blockingMessage: string | null;
+  blocking: boolean;
+}
+
 export interface RemoteSourceAnalysisResult {
   sourceHandle: string;
   mode: AppGeneratorSourceMode;

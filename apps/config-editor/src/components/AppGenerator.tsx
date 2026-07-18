@@ -29,7 +29,9 @@ import type {
   RemoteSourceDescriptorDto,
 } from "../api/types";
 import {
+  analysisForPrereleasePolicy,
   assetPatternError,
+  buildReleasePatternPreview,
   diagnosticDisplayTitle,
   eligibleApkAssets,
   formToRequest,
@@ -221,6 +223,13 @@ export function AppGenerator({ initialAuthoredRoot, onAuthoredRootSelected, onCl
 
   async function buildReview(regenerateIdentifiers = false) {
     if (!state.sessionHandle || !state.apkHandle || !state.rootHandle || !state.form) return;
+    if (releasePatternPreview?.blocking) {
+      dispatch({
+        type: "failure",
+        message: releasePatternPreview.blockingMessage ?? "Resolve the release-pattern preview before reviewing.",
+      });
+      return;
+    }
     const trustedSha256 = parseTrustedSha256(state.trustedSha256);
     if (!trustedSha256.ok) {
       dispatch({ type: "failure", message: trustedSha256.message });
@@ -285,6 +294,13 @@ export function AppGenerator({ initialAuthoredRoot, onAuthoredRootSelected, onCl
 
   async function save() {
     if (!state.sessionHandle || !state.apkHandle || !state.rootHandle || !state.form) return;
+    if (releasePatternPreview?.blocking) {
+      dispatch({
+        type: "failure",
+        message: releasePatternPreview.blockingMessage ?? "Resolve the release-pattern preview before saving.",
+      });
+      return;
+    }
     const trustedSha256 = parseTrustedSha256(state.trustedSha256);
     if (!trustedSha256.ok) {
       dispatch({ type: "failure", message: trustedSha256.message });
@@ -383,6 +399,19 @@ export function AppGenerator({ initialAuthoredRoot, onAuthoredRootSelected, onCl
     state.assetPattern,
     selectedReleaseFileNames,
   );
+  const filteredSourceAnalysis = state.sourceAnalysis
+    ? analysisForPrereleasePolicy(state.sourceAnalysis, state.includePrereleases)
+    : null;
+  const releasePatternPreview =
+    state.sourceMode === "github_repository"
+    && state.installStrategy === "latest_compatible_release"
+    && state.sourceAnalysis
+      ? buildReleasePatternPreview(
+          state.sourceAnalysis,
+          state.assetPattern,
+          state.includePrereleases,
+        )
+      : null;
   const trustedSha256 = parseTrustedSha256(state.trustedSha256);
   const trustedSha256Error = trustedSha256.ok ? null : trustedSha256.message;
   const permissionAutomationAvailable = permissionAutomationEligible(
@@ -399,6 +428,7 @@ export function AppGenerator({ initialAuthoredRoot, onAuthoredRootSelected, onCl
     busy ||
     !state.draft ||
     state.draft.blocking ||
+    releasePatternPreview?.blocking === true ||
     trustedSha256Error !== null ||
     !state.collisions ||
     state.collisions.blocking;
@@ -460,9 +490,16 @@ export function AppGenerator({ initialAuthoredRoot, onAuthoredRootSelected, onCl
                   </button>
                 </div>
                 {state.sourceMode.endsWith("_repository") ? <Check label="Include prereleases" checked={state.includePrereleases} disabled={busy} onChange={(value) => dispatch({ type: "include-prereleases", value })} /> : null}
-                {state.sourceAnalysis ? <RemoteAssetPicker analysis={state.sourceAnalysis} selectedAssetHandle={state.selectedAssetHandle} disabled={busy} onSelect={(assetHandle) => dispatch({ type: "asset-selected", assetHandle })} /> : null}
+                {filteredSourceAnalysis ? <RemoteAssetPicker analysis={filteredSourceAnalysis} selectedAssetHandle={state.selectedAssetHandle} disabled={busy} onSelect={(assetHandle) => dispatch({ type: "asset-selected", assetHandle })} /> : null}
                 <div className="grid gap-4 md:grid-cols-3">
-                  {state.installStrategy === "latest_compatible_release" ? (
+                  {releasePatternPreview ? (
+                    <ReleasePatternPreview
+                      busy={busy}
+                      pattern={state.assetPattern}
+                      preview={releasePatternPreview}
+                      onPatternChange={(value) => dispatch({ type: "asset-pattern", value })}
+                    />
+                  ) : state.installStrategy === "latest_compatible_release" ? (
                     <section className="rounded border border-slate-200 bg-slate-50 p-3 text-sm md:col-span-3">
                       <label>
                         <HelpLabel label="APK filename pattern" help="This regular expression is derived from the selected APK and used to identify exactly one APK in future releases." />
@@ -558,7 +595,7 @@ export function AppGenerator({ initialAuthoredRoot, onAuthoredRootSelected, onCl
                 <Picker label="Authored root" value={state.rootHandle ? "Selected and ready" : null} button={state.rootHandle ? "Change authored root..." : "Choose authored root..."} disabled={busy} onClick={() => void chooseRoot()} />
                 <button
                   className="self-end rounded bg-indigo-700 px-4 py-2 text-sm font-medium text-white disabled:bg-slate-300"
-                  disabled={busy || !state.rootHandle || latestPatternError !== null}
+                  disabled={busy || !state.rootHandle || releasePatternPreview?.blocking === true || (releasePatternPreview === null && latestPatternError !== null)}
                   onClick={() => void buildReview()}
                 >
                   Validate and review
@@ -583,6 +620,92 @@ export function AppGenerator({ initialAuthoredRoot, onAuthoredRootSelected, onCl
       </section>
     </div>
   );
+}
+
+function ReleasePatternPreview({ busy, pattern, preview, onPatternChange }: {
+  busy: boolean;
+  pattern: string;
+  preview: import("../api/types").ReleasePatternPreviewResult;
+  onPatternChange: (value: string) => void;
+}) {
+  const visibleReleases = preview.releases.slice(0, 10);
+  return (
+    <section className="rounded border border-slate-200 bg-slate-50 p-3 text-sm md:col-span-3">
+      <label>
+        <HelpLabel label="APK filename pattern" help="This raw regular expression is previewed against analyzed releases. Rust performs authoritative validation before generation." />
+        <input
+          className="mt-1 w-full rounded border border-slate-300 px-3 py-2 font-mono text-xs"
+          disabled={busy}
+          value={pattern}
+          onChange={(event) => onPatternChange(event.target.value)}
+        />
+      </label>
+      <p className="mt-2 text-xs text-slate-500">
+        Immediate browser preview from already analyzed releases; no network request is made. Rust performs final validation.
+      </p>
+      {preview.patternError ? (
+        <p className="mt-2 text-red-700">{preview.patternError}</p>
+      ) : (
+        <>
+          <p className={`mt-2 ${preview.blocking ? "text-red-700" : "text-slate-700"}`}>
+            {preview.blockingMessage ?? "The newest eligible analyzed release has exactly one matching APK."}
+          </p>
+          <p className="mt-2 text-xs text-slate-600">
+            {preview.eligibleReleaseCount} eligible release{preview.eligibleReleaseCount === 1 ? "" : "s"}: {preview.uniqueMatchCount} unique, {preview.noMatchCount} no match, {preview.multipleMatchesCount} multiple matches.
+          </p>
+          <div className="mt-3 overflow-x-auto">
+            <table className="w-full border-collapse text-left text-xs">
+              <thead>
+                <tr className="border-b border-slate-300 text-slate-600">
+                  <th className="p-2 font-semibold">Release</th>
+                  <th className="p-2 font-semibold">Outcome</th>
+                  <th className="p-2 font-semibold">Matching APK assets</th>
+                </tr>
+              </thead>
+              <tbody>
+                {visibleReleases.map((release, index) => {
+                  const newestBlocking = index === 0 && release.outcome !== "unique_match";
+                  const historicalWarning = index > 0 && release.outcome !== "unique_match";
+                  return (
+                    <tr
+                      className={`border-b border-slate-200 ${newestBlocking ? "bg-red-50 text-red-800" : historicalWarning ? "bg-amber-50 text-amber-800" : ""}`}
+                      key={`${release.releaseTag}-${index}`}
+                    >
+                      <td className="p-2 align-top">
+                        <span className="font-medium">{release.releaseTag}</span>
+                        {release.prerelease ? <span className="ml-1 text-slate-500">(prerelease)</span> : null}
+                        {index === 0 ? <span className="ml-1 font-semibold">— current by provider response order</span> : null}
+                      </td>
+                      <td className="p-2 align-top">{releasePatternOutcomeLabel(release.outcome)}</td>
+                      <td className="p-2 align-top">
+                        {release.matchingAssetNames.length > 0
+                          ? release.matchingAssetNames.join(", ")
+                          : "None"}
+                      </td>
+                    </tr>
+                  );
+                })}
+              </tbody>
+            </table>
+          </div>
+          {preview.releases.length > visibleReleases.length ? (
+            <p className="mt-2 text-xs text-slate-500">Showing the first 10 releases in provider response order.</p>
+          ) : null}
+        </>
+      )}
+      <p className="mt-2 text-xs text-amber-700">Future releases are resolved when provisioning runs. Resolution fails safely if the rule matches zero or multiple APKs.</p>
+    </section>
+  );
+}
+
+function releasePatternOutcomeLabel(
+  outcome: import("../api/types").ReleasePatternOutcome,
+): string {
+  switch (outcome) {
+    case "unique_match": return "Unique match";
+    case "no_match": return "No match";
+    case "multiple_matches": return "Multiple matches";
+  }
 }
 
 function RemoteAssetPicker({ analysis, selectedAssetHandle, disabled, onSelect }: { analysis: import("../api/types").RemoteSourceAnalysisResult; selectedAssetHandle: string | null; disabled: boolean; onSelect: (assetHandle: string) => void }) {

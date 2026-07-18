@@ -131,6 +131,14 @@ struct TrustedRemoteSource {
     repository: Option<String>,
     release_tag: Option<String>,
     direct_url: Option<String>,
+    release_analysis: Option<Vec<TrustedRemoteRelease>>,
+}
+
+#[derive(Clone)]
+struct TrustedRemoteRelease {
+    tag: String,
+    prerelease: bool,
+    asset_file_names: Vec<String>,
 }
 
 #[derive(Clone)]
@@ -391,6 +399,7 @@ pub fn analyze_app_generator_source(
     session.apks.clear();
     session.temp_directory = None;
     let mut trusted_assets = Vec::new();
+    let mut trusted_release_analysis = None;
     let result = if mode == "direct_apk" {
         let file_name = normalized
             .url
@@ -448,10 +457,14 @@ pub fn analyze_app_generator_source(
         registry = lock_registry(&state)?;
         let mut releases = Vec::new();
         let mut flat_assets = Vec::new();
+        let retain_release_analysis = mode == "github_repository";
+        let mut trusted_releases = Vec::new();
         for release in analyzed.releases {
             let mut release_assets = Vec::new();
+            let mut trusted_asset_file_names = Vec::new();
             for asset in release.assets {
                 let asset_handle = registry.allocate("remote-asset");
+                trusted_asset_file_names.push(asset.file_name.clone());
                 let safe = json!({
                     "assetHandle": asset_handle,
                     "fileName": asset.file_name,
@@ -475,7 +488,14 @@ pub fn analyze_app_generator_source(
                     },
                 ));
             }
-            if !release_assets.is_empty() {
+            if retain_release_analysis {
+                trusted_releases.push(TrustedRemoteRelease {
+                    tag: release.tag.clone(),
+                    prerelease: release.prerelease,
+                    asset_file_names: trusted_asset_file_names,
+                });
+            }
+            if retain_release_analysis || !release_assets.is_empty() {
                 releases.push(json!({
                     "tag": release.tag,
                     "name": release.name,
@@ -485,8 +505,18 @@ pub fn analyze_app_generator_source(
                 }));
             }
         }
-        let preselected = (flat_assets.len() == 1)
-            .then(|| flat_assets[0].get("assetHandle").cloned())
+        if retain_release_analysis {
+            trusted_release_analysis = Some(trusted_releases);
+        }
+        let eligible_assets = flat_assets
+            .iter()
+            .filter(|asset| {
+                include_prereleases
+                    || asset.get("prerelease").and_then(Value::as_bool) != Some(true)
+            })
+            .collect::<Vec<_>>();
+        let preselected = (eligible_assets.len() == 1)
+            .then(|| eligible_assets[0].get("assetHandle").cloned())
             .flatten();
         json!({
             "sourceHandle": source_handle,
@@ -512,6 +542,7 @@ pub fn analyze_app_generator_source(
             repository: normalized.repository.clone(),
             release_tag: normalized.release_tag.clone(),
             direct_url: (mode == "direct_apk").then(|| normalized.url.to_string()),
+            release_analysis: trusted_release_analysis,
         },
     );
     session.remote_assets.extend(trusted_assets);
@@ -910,7 +941,7 @@ fn analyze_github_source_with_api_root(
     client: &Client,
     mode: &str,
     source: &NormalizedRemoteSource,
-    include_prereleases: bool,
+    _include_prereleases: bool,
     api_root: &str,
     now_epoch_seconds: u64,
 ) -> Result<GitHubAnalysis, Value> {
@@ -946,9 +977,6 @@ fn analyze_github_source_with_api_root(
             .get("prerelease")
             .and_then(Value::as_bool)
             .unwrap_or(false);
-        if mode == "github_repository" && prerelease && !include_prereleases {
-            continue;
-        }
         let Some(tag) = release.get("tag_name").and_then(Value::as_str) else {
             continue;
         };
@@ -1617,7 +1645,7 @@ pub fn generate_remote_app_recipe_draft(
         Ok(facts) => facts,
         Err(error) => return Ok(error),
     };
-    let source = match trusted_remote_source_payload(
+    let trusted_remote = match trusted_remote_source_payload(
         &state,
         &session_handle,
         &asset_handle,
@@ -1629,16 +1657,16 @@ pub fn generate_remote_app_recipe_draft(
         Ok(source) => source,
         Err(error) => return Ok(error),
     };
-    let eligible_strategy =
-        source
-            .get("strategy")
-            .and_then(Value::as_str)
-            .is_some_and(|strategy| {
-                matches!(
-                    strategy,
-                    "pinned_remote_asset" | "latest_compatible_release"
-                )
-            });
+    let eligible_strategy = trusted_remote
+        .source
+        .get("strategy")
+        .and_then(Value::as_str)
+        .is_some_and(|strategy| {
+            matches!(
+                strategy,
+                "pinned_remote_asset" | "latest_compatible_release"
+            )
+        });
     let permission_automation = match stored_permission_automation(
         &state,
         &session_handle,
@@ -1651,7 +1679,10 @@ pub fn generate_remote_app_recipe_draft(
     };
     let mut payload = Map::new();
     payload.insert("facts".to_string(), facts);
-    payload.insert("source".to_string(), source);
+    payload.insert("source".to_string(), trusted_remote.source);
+    if let Some(release_analysis) = trusted_remote.release_analysis {
+        payload.insert("releaseAnalysis".to_string(), release_analysis);
+    }
     payload.insert(
         "regenerateIdentifiers".to_string(),
         Value::Bool(regenerate_identifiers),
@@ -1721,7 +1752,7 @@ pub fn save_generated_remote_app_recipe(
     if current_file_identity(&apk_path).as_ref() != Some(&identity) {
         return Ok(apk_changed_error());
     }
-    let source = match trusted_remote_source_payload(
+    let trusted_remote = match trusted_remote_source_payload(
         &state,
         &session_handle,
         &asset_handle,
@@ -1733,16 +1764,16 @@ pub fn save_generated_remote_app_recipe(
         Ok(source) => source,
         Err(error) => return Ok(error),
     };
-    let eligible_strategy =
-        source
-            .get("strategy")
-            .and_then(Value::as_str)
-            .is_some_and(|strategy| {
-                matches!(
-                    strategy,
-                    "pinned_remote_asset" | "latest_compatible_release"
-                )
-            });
+    let eligible_strategy = trusted_remote
+        .source
+        .get("strategy")
+        .and_then(Value::as_str)
+        .is_some_and(|strategy| {
+            matches!(
+                strategy,
+                "pinned_remote_asset" | "latest_compatible_release"
+            )
+        });
     let permission_automation = match stored_permission_automation(
         &state,
         &session_handle,
@@ -1755,12 +1786,18 @@ pub fn save_generated_remote_app_recipe(
     };
     let mut validation_payload = json!({
         "facts": facts,
-        "source": source,
+        "source": trusted_remote.source,
         "app": app,
         "recipe": recipe,
         "mappings": mappings,
         "regenerateIdentifiers": false,
     });
+    if let Some(release_analysis) = trusted_remote.release_analysis {
+        validation_payload
+            .as_object_mut()
+            .expect("validation payload is an object")
+            .insert("releaseAnalysis".to_string(), release_analysis);
+    }
     if let Some(permission_automation) = permission_automation {
         validation_payload
             .as_object_mut()
@@ -1846,6 +1883,12 @@ pub fn save_generated_remote_app_recipe(
     })))
 }
 
+#[derive(Debug)]
+struct TrustedRemoteDraftContext {
+    source: Value,
+    release_analysis: Option<Value>,
+}
+
 fn trusted_remote_source_payload(
     state: &AppGeneratorState,
     session_handle: &str,
@@ -1854,7 +1897,7 @@ fn trusted_remote_source_payload(
     asset_pattern: Option<&str>,
     include_prereleases: bool,
     trusted_sha256: Option<&str>,
-) -> Result<Result<Value, Value>, String> {
+) -> Result<Result<TrustedRemoteDraftContext, Value>, String> {
     if !matches!(
         strategy,
         "pinned_remote_asset" | "latest_compatible_release" | "user_provided_apk"
@@ -1879,7 +1922,7 @@ fn trusted_remote_source_payload(
     let Some(source) = session.remote_sources.get(&asset.source_handle) else {
         return Ok(Err(invalid_handle_error()));
     };
-    if strategy == "latest_compatible_release" {
+    let release_analysis = if strategy == "latest_compatible_release" {
         if source.mode != "github_repository" || source.repository.is_none() {
             return Ok(Err(remote_source_error(
                 "latest_release_source_unsupported",
@@ -1892,7 +1935,19 @@ fn trusted_remote_source_payload(
                 "Enter an APK filename pattern for latest-release resolution.",
             )));
         };
-    }
+        let Some(releases) = source.release_analysis.as_ref() else {
+            return Ok(Err(remote_source_error(
+                "latest_release_analysis_missing",
+                "Analyze the GitHub repository again before generating a latest-compatible recipe.",
+            )));
+        };
+        match trusted_release_analysis_value(releases) {
+            Ok(value) => Some(value),
+            Err(error) => return Ok(Err(error)),
+        }
+    } else {
+        None
+    };
     let mut payload = json!({
         "mode": source.mode,
         "strategy": strategy,
@@ -1908,7 +1963,41 @@ fn trusted_remote_source_payload(
     if let Some(trusted_sha256) = trusted_sha256 {
         payload["trustedSha256"] = Value::String(trusted_sha256.to_string());
     }
-    Ok(Ok(payload))
+    Ok(Ok(TrustedRemoteDraftContext {
+        source: payload,
+        release_analysis,
+    }))
+}
+
+fn trusted_release_analysis_value(releases: &[TrustedRemoteRelease]) -> Result<Value, Value> {
+    let mut release_tags = HashSet::new();
+    let mut serialized = Vec::with_capacity(releases.len());
+    for release in releases {
+        if release.tag.trim().is_empty() || !release_tags.insert(release.tag.as_str()) {
+            return Err(remote_source_error(
+                "latest_release_analysis_invalid",
+                "The analyzed GitHub release information is ambiguous. Check the source again.",
+            ));
+        }
+        let mut asset_names = HashSet::new();
+        for asset_name in &release.asset_file_names {
+            if asset_name.trim().is_empty()
+                || !asset_name.to_ascii_lowercase().ends_with(".apk")
+                || !asset_names.insert(asset_name.as_str())
+            {
+                return Err(remote_source_error(
+                    "latest_release_analysis_invalid",
+                    "The analyzed GitHub release information is ambiguous. Check the source again.",
+                ));
+            }
+        }
+        serialized.push(json!({
+            "releaseTag": release.tag,
+            "prerelease": release.prerelease,
+            "assetFileNames": release.asset_file_names,
+        }));
+    }
+    Ok(json!({ "releases": serialized }))
 }
 
 fn trusted_sha256_request_value<'a>(
@@ -3021,6 +3110,186 @@ mod tests {
             .and_then(Value::as_str)
     }
 
+    fn trusted_remote_test_state(
+        release_analysis: Option<Vec<TrustedRemoteRelease>>,
+    ) -> (AppGeneratorState, String, String) {
+        let state = AppGeneratorState::default();
+        let mut registry = lock_registry(&state).unwrap();
+        let session_handle = registry.begin();
+        let source_handle = registry.allocate("remote-source");
+        let asset_handle = registry.allocate("remote-asset");
+        let session = registry.session_mut(&session_handle).unwrap();
+        session.remote_sources.insert(
+            source_handle.clone(),
+            TrustedRemoteSource {
+                mode: "github_repository".to_string(),
+                provider: Some("github".to_string()),
+                base_url: Some("https://github.com".to_string()),
+                repository: Some("example/project".to_string()),
+                release_tag: None,
+                direct_url: None,
+                release_analysis,
+            },
+        );
+        session.remote_assets.insert(
+            asset_handle.clone(),
+            TrustedRemoteAsset {
+                source_handle,
+                download_url: "https://github.com/example/project/releases/download/v2/app.apk"
+                    .to_string(),
+                file_name: "app-v2.apk".to_string(),
+                size: 10,
+                release_tag: Some("v2".to_string()),
+            },
+        );
+        drop(registry);
+        (state, session_handle, asset_handle)
+    }
+
+    #[test]
+    fn trusted_release_snapshot_preserves_session_order_and_minimal_shape() {
+        let releases = vec![
+            TrustedRemoteRelease {
+                tag: "second-by-name-first-by-provider".to_string(),
+                prerelease: true,
+                asset_file_names: vec!["z.apk".to_string(), "a.apk".to_string()],
+            },
+            TrustedRemoteRelease {
+                tag: "first-by-name-second-by-provider".to_string(),
+                prerelease: false,
+                asset_file_names: Vec::new(),
+            },
+        ];
+        let (state, session_handle, asset_handle) = trusted_remote_test_state(Some(releases));
+        let trusted = trusted_remote_source_payload(
+            &state,
+            &session_handle,
+            &asset_handle,
+            "latest_compatible_release",
+            Some(r"\.apk$"),
+            false,
+            None,
+        )
+        .unwrap()
+        .unwrap();
+        assert_eq!(
+            trusted.release_analysis,
+            Some(json!({
+                "releases": [
+                    {
+                        "releaseTag": "second-by-name-first-by-provider",
+                        "prerelease": true,
+                        "assetFileNames": ["z.apk", "a.apk"]
+                    },
+                    {
+                        "releaseTag": "first-by-name-second-by-provider",
+                        "prerelease": false,
+                        "assetFileNames": []
+                    }
+                ]
+            }))
+        );
+        let serialized = trusted.release_analysis.unwrap().to_string();
+        assert!(!serialized.contains("download"));
+        assert!(!serialized.contains("description"));
+        assert!(!serialized.contains("path"));
+    }
+
+    #[test]
+    fn trusted_release_snapshot_rejects_missing_ambiguous_and_stale_state() {
+        let (missing_state, missing_session, missing_asset) = trusted_remote_test_state(None);
+        let missing = trusted_remote_source_payload(
+            &missing_state,
+            &missing_session,
+            &missing_asset,
+            "latest_compatible_release",
+            Some(r"\.apk$"),
+            false,
+            None,
+        )
+        .unwrap()
+        .unwrap_err();
+        assert_eq!(
+            api_error_code(&missing),
+            Some("latest_release_analysis_missing")
+        );
+
+        for releases in [
+            vec![TrustedRemoteRelease {
+                tag: " ".to_string(),
+                prerelease: false,
+                asset_file_names: vec!["app.apk".to_string()],
+            }],
+            vec![
+                TrustedRemoteRelease {
+                    tag: "v1".to_string(),
+                    prerelease: false,
+                    asset_file_names: vec!["app.apk".to_string()],
+                },
+                TrustedRemoteRelease {
+                    tag: "v1".to_string(),
+                    prerelease: true,
+                    asset_file_names: vec!["other.apk".to_string()],
+                },
+            ],
+            vec![TrustedRemoteRelease {
+                tag: "v1".to_string(),
+                prerelease: false,
+                asset_file_names: vec!["app.apk".to_string(), "app.apk".to_string()],
+            }],
+            vec![TrustedRemoteRelease {
+                tag: "v1".to_string(),
+                prerelease: false,
+                asset_file_names: vec!["not-an-apk.zip".to_string()],
+            }],
+        ] {
+            let (state, session, asset) = trusted_remote_test_state(Some(releases));
+            let error = trusted_remote_source_payload(
+                &state,
+                &session,
+                &asset,
+                "latest_compatible_release",
+                Some(r"\.apk$"),
+                false,
+                None,
+            )
+            .unwrap()
+            .unwrap_err();
+            assert_eq!(
+                api_error_code(&error),
+                Some("latest_release_analysis_invalid")
+            );
+        }
+
+        let (state, session, _) = trusted_remote_test_state(Some(Vec::new()));
+        let stale = trusted_remote_source_payload(
+            &state,
+            &session,
+            "frontend-invented-asset",
+            "latest_compatible_release",
+            Some(r"\.apk$"),
+            false,
+            None,
+        )
+        .unwrap()
+        .unwrap_err();
+        assert_eq!(api_error_code(&stale), Some("app_generator_handle_invalid"));
+    }
+
+    #[test]
+    fn pinned_and_user_provided_payloads_do_not_require_release_analysis() {
+        for strategy in ["pinned_remote_asset", "user_provided_apk"] {
+            let (state, session, asset) = trusted_remote_test_state(None);
+            let trusted = trusted_remote_source_payload(
+                &state, &session, &asset, strategy, None, false, None,
+            )
+            .unwrap()
+            .unwrap();
+            assert!(trusted.release_analysis.is_none());
+            assert_eq!(trusted.source["strategy"], strategy);
+        }
+    }
+
     #[test]
     fn permission_selection_is_canonicalized_from_stored_inspection_only() {
         let apk = permission_test_apk("permission-canonical");
@@ -3499,19 +3768,29 @@ mod tests {
             ),
             FakeGitHubResponse::json(
                 200,
-                json!([{
-                    "draft": false,
-                    "prerelease": false,
-                    "tag_name": "2120.1",
-                    "name": "Azahar 2120.1",
-                    "published_at": "2026-07-01T00:00:00Z",
-                    "assets": [{
-                        "name": "azahar-2120.1-android.apk",
-                        "size": 42,
-                        "content_type": "application/vnd.android.package-archive",
-                        "browser_download_url": "https://github.com/azahar-emu/azahar/releases/download/2120.1/azahar.apk"
-                    }]
-                }]),
+                json!([
+                    {
+                        "draft": false,
+                        "prerelease": true,
+                        "tag_name": "2121-beta",
+                        "name": "Azahar 2121 beta",
+                        "published_at": "2026-07-02T00:00:00Z",
+                        "assets": []
+                    },
+                    {
+                        "draft": false,
+                        "prerelease": false,
+                        "tag_name": "2120.1",
+                        "name": "Azahar 2120.1",
+                        "published_at": "2026-07-01T00:00:00Z",
+                        "assets": [{
+                            "name": "azahar-2120.1-android.apk",
+                            "size": 42,
+                            "content_type": "application/vnd.android.package-archive",
+                            "browser_download_url": "https://github.com/azahar-emu/azahar/releases/download/2120.1/azahar.apk"
+                        }]
+                    }
+                ]),
             ),
         ];
         let (api_root, captured) = spawn_fake_github(responses);
@@ -3529,10 +3808,13 @@ mod tests {
         .unwrap();
 
         assert_eq!(analysis.repository["fullName"], "azahar-emu/azahar");
-        assert_eq!(analysis.releases.len(), 1);
-        assert_eq!(analysis.releases[0].assets.len(), 1);
+        assert_eq!(analysis.releases.len(), 2);
+        assert_eq!(analysis.releases[0].tag, "2121-beta");
+        assert!(analysis.releases[0].prerelease);
+        assert!(analysis.releases[0].assets.is_empty());
+        assert_eq!(analysis.releases[1].assets.len(), 1);
         assert_eq!(
-            analysis.releases[0].assets[0].file_name,
+            analysis.releases[1].assets[0].file_name,
             "azahar-2120.1-android.apk"
         );
         let requests = captured.lock().unwrap();

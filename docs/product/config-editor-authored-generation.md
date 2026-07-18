@@ -518,9 +518,48 @@ and `local_apk` source shape without remote tracking fields. Authentication,
 private repositories, arbitrary-site scraping, background refresh, and
 split-package formats remain excluded.
 
-### Phase 5: refinement
+### Phase 5: GitHub release-pattern testing
 
-Potential later work includes OS-keychain GitHub credentials, dedicated app/profile editors, release-pattern testing, Obtainium import, source-update checks, aliases, and device-plan assistance.
+GitHub repository sources using the latest-compatible strategy expose an
+immediate filename-pattern preview after source analysis. GitHub analysis
+requests at most 30 releases. The trusted session retains every non-draft
+release in provider response order, including prereleases and releases with no
+eligible APK assets. The Include prereleases selection filters this retained
+set locally and does not make another network request.
+
+The preview applies the unmodified author-entered regular expression to each
+release's eligible APK filenames using substring-search semantics unless the
+expression itself supplies anchors. It reports `unique_match`, `no_match`, or
+`multiple_matches` for each eligible analyzed release and sorts displayed
+matching filenames deterministically. Summary counts cover the complete
+eligible retained set. The UI displays at most the first 10 rows in provider
+response order.
+
+For this check, the current release is the first retained release after draft
+exclusion and prerelease filtering. This is provider response order; the
+workflow does not claim that GitHub guarantees chronological ordering and does
+not reorder releases by tag, semantic version, filename, or parsed timestamp.
+The current release must contain exactly one match. No trusted analysis, an
+empty analysis, no releases after prerelease filtering, zero current-release
+matches, multiple current-release matches, and invalid Rust regex syntax are
+blocking. Older zero-match and multiple-match results remain visible warnings
+when the current release has one match.
+
+The browser preview uses JavaScript regular-expression behavior for immediate
+feedback and is not final validation. Tauri ignores browser-computed ordering,
+counts, outcomes, and release contents. It constructs a minimal ordered
+snapshot from session-owned analysis containing only release tags, prerelease
+flags, and eligible APK filenames. Rust evaluates the raw pattern again with
+the production `regex` engine before draft generation and saving. A pattern
+accepted by JavaScript but rejected by Rust is blocking. Pinned remote assets,
+direct APK sources, and user-provided APK strategies do not require or consume
+release-pattern results and retain their existing generated recipe shapes.
+
+### Later refinement
+
+Potential later work includes OS-keychain GitHub credentials, dedicated
+app/profile editors, Obtainium import, source-update checks, aliases, and
+device-plan assistance.
 
 ## Verification
 

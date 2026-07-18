@@ -13,6 +13,8 @@ import type {
   AppGeneratorInstallStrategy,
   AppGeneratorSourceMode,
   PermissionSelectionRequestDto,
+  ReleasePatternPreviewResult,
+  RemoteAssetDto,
   RemoteSourceAnalysisResult,
   RemoteSourceDescriptorDto,
 } from "../api/types.js";
@@ -313,6 +315,7 @@ export function reduceAppGenerator(
         draft: null,
         form: null,
         collisions: null,
+        saved: null,
         error: null,
       };
     case "source-url":
@@ -329,9 +332,39 @@ export function reduceAppGenerator(
         draft: null,
         form: null,
         collisions: null,
+        saved: null,
         error: null,
       };
-    case "include-prereleases":
+    case "include-prereleases": {
+      if (
+        state.sourceMode === "github_repository"
+        && state.sourceAnalysis?.mode === "github_repository"
+      ) {
+        const selectedAsset = state.sourceAnalysis.assets.find(
+          (asset) => asset.assetHandle === state.selectedAssetHandle,
+        );
+        const selectedAssetRemainsEligible =
+          selectedAsset !== undefined
+          && (action.value || !selectedAsset.prerelease);
+        return {
+          ...state,
+          includePrereleases: action.value,
+          selectedAssetHandle: selectedAssetRemainsEligible
+            ? state.selectedAssetHandle
+            : null,
+          assetPattern: selectedAssetRemainsEligible ? state.assetPattern : "",
+          trustedSha256: "",
+          remoteSource: selectedAssetRemainsEligible ? state.remoteSource : null,
+          apkHandle: selectedAssetRemainsEligible ? state.apkHandle : null,
+          apkLabel: selectedAssetRemainsEligible ? state.apkLabel : null,
+          inspection: selectedAssetRemainsEligible ? state.inspection : null,
+          draft: null,
+          form: selectedAssetRemainsEligible ? state.form : null,
+          collisions: null,
+          saved: null,
+          error: null,
+        };
+      }
       return {
         ...state,
         includePrereleases: action.value,
@@ -345,8 +378,10 @@ export function reduceAppGenerator(
         draft: null,
         form: null,
         collisions: null,
+        saved: null,
         error: null,
       };
+    }
     case "source-analyzing":
       return { ...state, phase: "inspecting", trustedSha256: "", error: null };
     case "source-analyzed":
@@ -367,6 +402,7 @@ export function reduceAppGenerator(
         draft: null,
         form: null,
         collisions: null,
+        saved: null,
         error: null,
       };
     case "asset-selected":
@@ -382,6 +418,7 @@ export function reduceAppGenerator(
         draft: null,
         form: null,
         collisions: null,
+        saved: null,
         error: null,
       };
     case "asset-pattern":
@@ -389,8 +426,8 @@ export function reduceAppGenerator(
         ...state,
         assetPattern: action.value,
         draft: null,
-        form: null,
         collisions: null,
+        saved: null,
         error: null,
       };
     case "trusted-sha256":
@@ -411,6 +448,7 @@ export function reduceAppGenerator(
         draft: null,
         form: null,
         collisions: null,
+        saved: null,
         error: null,
       };
     case "downloading":
@@ -638,6 +676,119 @@ export function matchingAssetNames(pattern: string, fileNames: string[]): string
   } catch {
     return [];
   }
+}
+
+function compareFileNames(left: string, right: string): number {
+  return left < right ? -1 : left > right ? 1 : 0;
+}
+
+/**
+ * Build an immediate browser preview from the retained GitHub analysis.
+ *
+ * This preview deliberately uses JavaScript regular expressions. Rust repeats
+ * validation with its own regex engine and trusted session-owned release data
+ * before generation or saving.
+ */
+export function buildReleasePatternPreview(
+  analysis: RemoteSourceAnalysisResult,
+  pattern: string,
+  includePrereleases: boolean,
+): ReleasePatternPreviewResult {
+  const eligibleReleases = analysis.releases.filter(
+    (release) => includePrereleases || !release.prerelease,
+  );
+  if (!pattern.trim()) {
+    return blockingPatternPreview(
+      eligibleReleases.length,
+      "Enter an APK filename pattern.",
+    );
+  }
+  let expression: RegExp;
+  try {
+    expression = new RegExp(pattern, "u");
+  } catch {
+    return blockingPatternPreview(
+      eligibleReleases.length,
+      "Enter a valid regular expression. Rust performs final validation before generation.",
+    );
+  }
+  if (eligibleReleases.length === 0) {
+    return blockingPatternPreview(
+      0,
+      "No analyzed releases are eligible for this prerelease policy.",
+    );
+  }
+  const releases = eligibleReleases.map((release) => {
+    const matchingNames = release.assets
+      .map((asset) => asset.fileName)
+      .filter((fileName) => expression.test(fileName))
+      .sort(compareFileNames);
+    return {
+      releaseTag: release.tag,
+      prerelease: release.prerelease,
+      matchingAssetNames: matchingNames,
+      outcome: matchingNames.length === 1
+        ? "unique_match" as const
+        : matchingNames.length === 0
+          ? "no_match" as const
+          : "multiple_matches" as const,
+    };
+  });
+  const uniqueMatchCount = releases.filter((release) => release.outcome === "unique_match").length;
+  const noMatchCount = releases.filter((release) => release.outcome === "no_match").length;
+  const multipleMatchesCount = releases.length - uniqueMatchCount - noMatchCount;
+  const newest = releases[0];
+  const blockingMessage = newest?.outcome === "no_match"
+    ? `The newest eligible analyzed release (${newest.releaseTag}) has no matching APK.`
+    : newest?.outcome === "multiple_matches"
+      ? `The newest eligible analyzed release (${newest.releaseTag}) has multiple matching APKs.`
+      : null;
+  return {
+    releases,
+    eligibleReleaseCount: releases.length,
+    uniqueMatchCount,
+    noMatchCount,
+    multipleMatchesCount,
+    patternError: null,
+    blockingMessage,
+    blocking: blockingMessage !== null,
+  };
+}
+
+function blockingPatternPreview(
+  eligibleReleaseCount: number,
+  message: string,
+): ReleasePatternPreviewResult {
+  return {
+    releases: [],
+    eligibleReleaseCount,
+    uniqueMatchCount: 0,
+    noMatchCount: 0,
+    multipleMatchesCount: 0,
+    patternError: message,
+    blockingMessage: message,
+    blocking: true,
+  };
+}
+
+/** Filter the asset picker without discarding the retained release snapshot. */
+export function analysisForPrereleasePolicy(
+  analysis: RemoteSourceAnalysisResult,
+  includePrereleases: boolean,
+): RemoteSourceAnalysisResult {
+  if (analysis.mode !== "github_repository" || includePrereleases) return analysis;
+  const releases = analysis.releases.filter((release) => !release.prerelease);
+  const assets = analysis.assets.filter((asset) => !asset.prerelease);
+  return {
+    ...analysis,
+    releases,
+    assets,
+    preselectedAssetHandle: eligiblePreselectedAssetHandle(assets),
+  };
+}
+
+function eligiblePreselectedAssetHandle(assets: RemoteAssetDto[]): string | null {
+  return assets.length === 1 ? assets[0]?.assetHandle ?? null : null;
 }
 
 export function assetPatternError(pattern: string, fileNames: string[]): string | null {
