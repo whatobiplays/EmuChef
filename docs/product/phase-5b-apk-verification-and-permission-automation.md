@@ -573,6 +573,8 @@ shared non-empty expected checksum under different expected packages emits
 
 ## Phase 5B10 — Tests
 
+Status: complete
+
 Cover:
 
 - package/version/SDK extraction;

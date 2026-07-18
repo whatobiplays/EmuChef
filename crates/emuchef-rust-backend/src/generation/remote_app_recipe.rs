@@ -1363,18 +1363,36 @@ mod tests {
 
     #[test]
     fn runtime_only_and_app_op_only_each_generate_one_permission_step() {
-        for selection in [
-            permission_automation(
-                vec![runtime_permission("android.permission.CAMERA", false)],
-                Vec::new(),
+        for (selection, expected_runtime, expected_app_ops) in [
+            (
+                permission_automation(
+                    vec![runtime_permission("android.permission.CAMERA", false)],
+                    Vec::new(),
+                ),
+                serde_json::json!([{
+                    "package_name": "com.example.remote",
+                    "name": "android.permission.CAMERA",
+                    "required": false
+                }]),
+                serde_json::json!([]),
             ),
-            permission_automation(
-                Vec::new(),
-                vec![app_op(
-                    "android.permission.MANAGE_EXTERNAL_STORAGE",
-                    "MANAGE_EXTERNAL_STORAGE",
-                    true,
-                )],
+            (
+                permission_automation(
+                    Vec::new(),
+                    vec![app_op(
+                        "android.permission.MANAGE_EXTERNAL_STORAGE",
+                        "MANAGE_EXTERNAL_STORAGE",
+                        true,
+                    )],
+                ),
+                serde_json::json!([]),
+                serde_json::json!([{
+                    "package_name": "com.example.remote",
+                    "op": "MANAGE_EXTERNAL_STORAGE",
+                    "mode": "allow",
+                    "required": false,
+                    "when": { "rooted": true }
+                }]),
             ),
         ] {
             let source = source();
@@ -1390,15 +1408,27 @@ mod tests {
                 regenerate_identifiers: false,
             });
             assert!(!draft.blocking, "{:#?}", draft.diagnostics);
+            let permission_steps = draft.recipe["steps"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .filter(|step| step["type"] == "grant_permissions")
+                .collect::<Vec<_>>();
+            assert_eq!(permission_steps.len(), 1);
+            let permission_step = permission_steps[0];
+            assert_eq!(permission_step["params"]["runtime"], expected_runtime);
+            assert_eq!(permission_step["params"]["appops"], expected_app_ops);
             assert_eq!(
-                draft.recipe["steps"]
-                    .as_array()
-                    .unwrap()
-                    .iter()
-                    .filter(|step| step["type"] == "grant_permissions")
-                    .count(),
-                1
+                permission_step["constraints"]["capabilities"],
+                serde_json::json!(["shell_command"])
             );
+            assert!(!permission_step.to_string().contains("root_shell"));
+            assert!(!draft.recipe.to_string().contains("root_shell"));
+            assert!(!draft
+                .recipe_canonical_yaml
+                .as_deref()
+                .unwrap()
+                .contains("root_shell"));
         }
     }
 

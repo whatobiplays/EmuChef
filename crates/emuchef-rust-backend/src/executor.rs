@@ -2924,3 +2924,181 @@ fn stable_repr(value: &Value) -> String {
         other => other.to_string(),
     }
 }
+
+#[cfg(test)]
+mod phase_5b10_tests {
+    use super::*;
+    use crate::planner::{
+        DeviceContext, ExecutionPlanSource, ExecutionStepConstraints, RuntimeCapabilities,
+    };
+
+    #[test]
+    fn permission_fail_policy_stops_after_deterministic_mixed_outcomes() {
+        let mut params = OrderedMap::new();
+        params.insert(
+            "runtime".to_string(),
+            ExecutionParamValue::Literal {
+                value: json!([
+                    {
+                        "package_name": "com.example.root",
+                        "name": "android.permission.CAMERA",
+                        "required": false,
+                        "when": { "rooted": true }
+                    },
+                    {
+                        "package_name": "com.example.success",
+                        "name": "android.permission.POST_NOTIFICATIONS",
+                        "required": false
+                    }
+                ]),
+            },
+        );
+        params.insert(
+            "appops".to_string(),
+            ExecutionParamValue::Literal {
+                value: json!([
+                    {
+                        "package_name": "com.example.fail",
+                        "op": "RUN_IN_BACKGROUND",
+                        "mode": "ignore",
+                        "required": false
+                    },
+                    {
+                        "package_name": "com.example.after",
+                        "op": "MANAGE_EXTERNAL_STORAGE",
+                        "mode": "allow",
+                        "required": false
+                    }
+                ]),
+            },
+        );
+        params.insert(
+            "policy".to_string(),
+            ExecutionParamValue::Literal {
+                value: json!({ "on_failure": "fail", "require_all": false }),
+            },
+        );
+        let step = ExecutionStep {
+            id: "phase5b10.permissions/mixed".to_string(),
+            recipe_ref: "phase5b10.permissions".to_string(),
+            type_name: "grant_permissions".to_string(),
+            name: "Grant mixed permissions".to_string(),
+            note: "Grant mixed permissions".to_string(),
+            dependencies: Vec::new(),
+            constraints: ExecutionStepConstraints {
+                capabilities: vec!["shell_command".to_string()],
+                conflicts_with: Vec::new(),
+            },
+            params,
+            skip_if: Vec::new(),
+            verify: Vec::new(),
+        };
+        let plan = ExecutionPlan {
+            id: "plan.phase5b10.permissions".to_string(),
+            source: ExecutionPlanSource {
+                device_profile_ref: "example.device_profile".to_string(),
+                device_plan_ref: "example.device_plan".to_string(),
+                selected_recipe_refs: vec!["phase5b10.permissions".to_string()],
+                expanded_recipe_refs: vec!["phase5b10.permissions".to_string()],
+                catalog: None,
+            },
+            recipes: Vec::new(),
+            target_device: None,
+            device_context: DeviceContext {
+                manufacturer: "Example".to_string(),
+                model: "Example".to_string(),
+                android_version: 14,
+                android_api_level: Some(34),
+                device_tags: Vec::new(),
+            },
+            runtime_capabilities: RuntimeCapabilities {
+                adb_available: true,
+                apk_install: true,
+                shared_storage_write: true,
+                app_launch: true,
+                shell_command: true,
+                package_remove_for_user: false,
+                root_shell: false,
+                app_data_write: false,
+            },
+            inputs: Vec::new(),
+            artifacts: Vec::new(),
+            steps: vec![step],
+            schema_version: 1,
+            kind: "execution_plan",
+        };
+        let successful_command = vec![
+            "adb".to_string(),
+            "shell".to_string(),
+            "pm".to_string(),
+            "grant".to_string(),
+            "com.example.success".to_string(),
+            "android.permission.POST_NOTIFICATIONS".to_string(),
+        ];
+        let failing_command = vec![
+            "adb".to_string(),
+            "shell".to_string(),
+            "appops".to_string(),
+            "set".to_string(),
+            "com.example.fail".to_string(),
+            "RUN_IN_BACKGROUND".to_string(),
+            "ignore".to_string(),
+        ];
+        let mut adapters = DryRunExecutorAdapters::default();
+        adapters
+            .device_mut()
+            .fail_run_plan_command(failing_command.clone(), "app-op denied");
+        let mut runner = ExecutorRunner::new(adapters);
+
+        let actual = serde_json::to_value(runner.run(&plan))
+            .expect("execution result should serialize deterministically");
+
+        assert_eq!(actual["success"], false);
+        assert_eq!(actual["steps"][0]["status"], "failed");
+        assert_eq!(actual["steps"][0]["message"], "app-op denied");
+        assert_eq!(
+            actual["steps"][0]["outputs"]["permission_results"]["value"]["actions"],
+            json!([
+                {
+                    "step_id": "phase5b10.permissions/mixed",
+                    "kind": "runtime_permission",
+                    "package_name": "com.example.root",
+                    "source_recipe_id": "phase5b10.permissions",
+                    "source_section": "params.runtime[0]",
+                    "permission": "android.permission.CAMERA",
+                    "reason_code": "requires_root",
+                    "message": "Device is not rooted.",
+                    "status": "not_applicable"
+                },
+                {
+                    "step_id": "phase5b10.permissions/mixed",
+                    "kind": "runtime_permission",
+                    "package_name": "com.example.success",
+                    "source_recipe_id": "phase5b10.permissions",
+                    "source_section": "params.runtime[1]",
+                    "permission": "android.permission.POST_NOTIFICATIONS",
+                    "status": "executed"
+                },
+                {
+                    "step_id": "phase5b10.permissions/mixed",
+                    "kind": "appop",
+                    "package_name": "com.example.fail",
+                    "source_recipe_id": "phase5b10.permissions",
+                    "source_section": "params.appops[0]",
+                    "op": "RUN_IN_BACKGROUND",
+                    "desired_mode": "ignore",
+                    "status": "failed",
+                    "message": "app-op denied"
+                }
+            ])
+        );
+        assert_eq!(
+            runner.adapters().device().commands(),
+            &[
+                [vec!["run_plan_command".to_string()], successful_command].concat(),
+                [vec!["run_plan_command".to_string()], failing_command].concat(),
+            ]
+        );
+        assert!(!actual.to_string().contains("com.example.after"));
+    }
+}
