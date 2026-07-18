@@ -145,6 +145,7 @@ function draft(): AppRecipeDraftResult {
     evidence: [],
     diagnostics: [],
     blocking: false,
+    collisions: null,
   };
 }
 

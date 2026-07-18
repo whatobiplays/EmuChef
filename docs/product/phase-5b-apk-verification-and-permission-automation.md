@@ -485,9 +485,91 @@ selected identities.
 
 ## Phase 5B9 — Metadata and collision semantics
 
-Persist safe manifest and permission metadata, including package name, target SDK, calculated SHA-256, checksum status, and `signature_verification: not_performed`.
+Phase 5B9 is complete. Every generated app definition owns one deterministic
+`metadata.apk_inspection` record. Editable metadata is applied first, any
+author-provided `apk_inspection` entry is removed, and the trusted generated
+entry is appended. Unrelated metadata entries retain their insertion order.
 
-Collision fingerprints should include expected package name, trusted expected checksum when present, selected runtime permissions, selected app-op actions, and API/root conditions.
+The authored shape is:
+
+```yaml
+metadata:
+  apk_inspection:
+    package_name: com.example.app
+    version_code: '42'
+    version_name: 1.2.0
+    min_sdk: 23
+    target_sdk: 35
+    calculated_sha256: 0123456789ABCDEF0123456789ABCDEF0123456789ABCDEF0123456789ABCDEF
+    checksum_status: not_compared
+    signature_verification: not_performed
+    requested_permissions:
+    - name: android.permission.CAMERA
+      declaration_kind: uses_permission
+      max_sdk_version: null
+      classification: runtime_grantable
+      applicability:
+        status: applicable
+        reason: null
+        maximum_sdk_version: null
+        introduction_api: null
+        minimum_device_api: null
+        minimum_target_sdk: null
+        target_sdk_state: null
+    selected_runtime_permissions:
+    - permission_name: android.permission.CAMERA
+      requires_root: false
+    selected_app_ops:
+    - permission_name: android.permission.MANAGE_EXTERNAL_STORAGE
+      operation_name: MANAGE_EXTERNAL_STORAGE
+      mode: allow
+      requires_root: true
+```
+
+All top-level keys and nested permission keys are always present; unavailable
+optional values are `null`, and absent automation uses empty arrays. Requested
+declarations are sorted and exactly deduplicated. Runtime selections sort by
+permission name and root requirement. App-op selections sort by operation,
+mode, permission identity, and root requirement. Local and user-provided APK
+recipes never persist selected automation.
+
+`calculated_sha256` is the locally calculated inspection digest, normalized to
+uppercase. It is not publisher evidence. `checksum_status` remains
+`not_compared`, and APK signatures remain unverified with
+`signature_verification: not_performed`. A publisher-provided trusted SHA-256
+exists only as `install_apk.params.expected_sha256`; it never changes or
+supplies inspection metadata. The generator rejects malformed hashes, states,
+permission enums, applicability combinations, and API bounds before emitting
+authored YAML.
+
+Collision review is performed from the app and complete recipe returned by the
+sidecar during the same trusted Tauri generation request. React supplies only
+an optional retained authored-root handle and cannot supply an app, recipe,
+authored path, or fingerprint for collision analysis. Legacy backend requests
+containing only `app` and `recipeId` retain the earlier ID, destination, source,
+package, repository, release, and latest-policy checks without fingerprint
+comparison.
+
+For a comparable recipe, Rust requires exactly one `install_apk` step with a
+literal non-empty `expected_package_name`, an optional literal valid
+`expected_sha256`, an acyclic dependency graph, and no more than one downstream
+`grant_permissions` step. Permission params must be literal and use the
+expected package. Action identity includes the runtime permission or app-op,
+mode, the executor's effective `required` value, and supported `when` fields:
+`rooted`, `android_api_min`, and `android_api_max`. Permission policy includes
+the effective `on_failure` and `require_all` values when actions exist.
+References, malformed values, unknown condition keys, invalid API ranges,
+conflicting duplicates, dependency ambiguity, or package-unenforced recipes
+produce no comparable fingerprint.
+
+Canonical fingerprints normalize trusted checksums to uppercase and sort
+semantically identical actions, while ignoring names, descriptions, progress
+text, step IDs, source URLs, and input ordering. Exact fingerprints across
+different recipe IDs block with
+`apk_security_automation_fingerprint_conflict`. A shared expected package with
+different security or automation emits `apk_expected_package_overlap`. A
+shared non-empty expected checksum under different expected packages emits
+`apk_expected_sha256_overlap`. Exact matches suppress both warnings.
 
 ## Phase 5B10 — Tests
 

@@ -18,7 +18,10 @@ use crate::model::{
     StepCondition, StepConstraints,
 };
 
-use super::apk::ApkInspectionFacts;
+use super::apk::{
+    build_apk_inspection_metadata, ApkInspectionFacts, ApkMetadataIssue, SelectedAppOpMetadata,
+    SelectedRuntimePermissionMetadata,
+};
 use super::identifiers::{normalize_identifier_component, recipe_local_token};
 
 #[derive(Clone, Debug, Deserialize)]
@@ -165,22 +168,8 @@ pub(crate) fn build_permission_step(
     install_step_id: String,
     app_name: &str,
 ) -> Step {
-    let mut runtime = selection.runtime_permissions.clone();
-    runtime.sort_by(|left, right| left.permission_name.cmp(&right.permission_name));
-    runtime.dedup_by(|left, right| left.permission_name == right.permission_name);
-
-    let mut app_ops = selection.app_ops.clone();
-    app_ops.sort_by(|left, right| {
-        left.operation_name
-            .cmp(&right.operation_name)
-            .then_with(|| left.mode.cmp(&right.mode))
-            .then_with(|| left.permission_name.cmp(&right.permission_name))
-    });
-    app_ops.dedup_by(|left, right| {
-        left.permission_name == right.permission_name
-            && left.operation_name == right.operation_name
-            && left.mode == right.mode
-    });
+    let runtime = canonical_runtime_permissions(selection);
+    let app_ops = canonical_app_ops(selection);
 
     let runtime = runtime
         .into_iter()
@@ -248,6 +237,65 @@ pub(crate) fn build_permission_step(
         params,
         verify: Vec::new(),
     }
+}
+
+fn canonical_runtime_permissions(
+    selection: &PermissionAutomationSelection,
+) -> Vec<RuntimePermissionSelection> {
+    let mut runtime = selection.runtime_permissions.clone();
+    runtime.sort_by(|left, right| {
+        left.permission_name
+            .cmp(&right.permission_name)
+            .then_with(|| left.requires_root.cmp(&right.requires_root))
+    });
+    runtime.dedup_by(|left, right| left.permission_name == right.permission_name);
+    runtime
+}
+
+fn canonical_app_ops(selection: &PermissionAutomationSelection) -> Vec<AppOpPermissionSelection> {
+    let mut app_ops = selection.app_ops.clone();
+    app_ops.sort_by(|left, right| {
+        left.operation_name
+            .cmp(&right.operation_name)
+            .then_with(|| left.mode.cmp(&right.mode))
+            .then_with(|| left.permission_name.cmp(&right.permission_name))
+            .then_with(|| left.requires_root.cmp(&right.requires_root))
+    });
+    app_ops.dedup_by(|left, right| {
+        left.permission_name == right.permission_name
+            && left.operation_name == right.operation_name
+            && left.mode == right.mode
+    });
+    app_ops
+}
+
+pub(crate) fn generated_apk_inspection_metadata(
+    facts: &ApkInspectionFacts,
+    selection: Option<&PermissionAutomationSelection>,
+    automation_eligible: bool,
+) -> Result<Value, Vec<ApkMetadataIssue>> {
+    let selection = selection.filter(|selection| automation_eligible && !selection.is_empty());
+    let runtime_permissions = selection
+        .map(canonical_runtime_permissions)
+        .unwrap_or_default()
+        .into_iter()
+        .map(|permission| SelectedRuntimePermissionMetadata {
+            permission_name: permission.permission_name,
+            requires_root: permission.requires_root,
+        })
+        .collect::<Vec<_>>();
+    let app_ops = selection
+        .map(canonical_app_ops)
+        .unwrap_or_default()
+        .into_iter()
+        .map(|action| SelectedAppOpMetadata {
+            permission_name: action.permission_name,
+            operation_name: action.operation_name,
+            mode: action.mode,
+            requires_root: action.requires_root,
+        })
+        .collect::<Vec<_>>();
+    build_apk_inspection_metadata(facts, &runtime_permissions, &app_ops)
 }
 
 #[derive(Clone, Debug, Default, Deserialize, Serialize)]
@@ -356,6 +404,17 @@ pub(crate) fn generate_app_recipe_draft(request: AppRecipeDraftRequest) -> AppRe
     }
     if let Some(mappings) = request.mappings {
         apply_mapping_edits(&mut app, mappings, &mut diagnostics);
+    }
+    app.metadata.shift_remove("apk_inspection");
+    match generated_apk_inspection_metadata(&request.facts, None, false) {
+        Ok(metadata) => {
+            app.metadata.insert("apk_inspection".to_string(), metadata);
+        }
+        Err(issues) => diagnostics.extend(
+            issues
+                .into_iter()
+                .map(|issue| error(issue.code, issue.message, &issue.field)),
+        ),
     }
 
     let mut recipe_edits = request
@@ -938,15 +997,37 @@ impl<'de> Deserialize<'de> for StrictJsonValue {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::generation::apk::{ApkPermissionApplicabilityFacts, ApkPermissionDeclarationFacts};
 
     fn facts() -> ApkInspectionFacts {
         ApkInspectionFacts {
             package_name: Some("com.example.player".to_string()),
             application_label: Some("Example Player".to_string()),
             launcher_activities: vec!["com.example.player/.MainActivity".to_string()],
+            calculated_sha256: "A".repeat(64),
+            checksum_status: "not_compared".to_string(),
+            signature_verification: "not_performed".to_string(),
             split: Some(false),
             base: Some(true),
             ..ApkInspectionFacts::default()
+        }
+    }
+
+    fn reviewed_permission(name: &str) -> ApkPermissionDeclarationFacts {
+        ApkPermissionDeclarationFacts {
+            name: name.to_string(),
+            declaration_kind: "uses_permission".to_string(),
+            max_sdk_version: None,
+            classification: Some("runtime_grantable".to_string()),
+            applicability: Some(ApkPermissionApplicabilityFacts {
+                status: "applicable".to_string(),
+                reason: None,
+                maximum_sdk_version: None,
+                introduction_api: None,
+                minimum_device_api: None,
+                minimum_target_sdk: None,
+                target_sdk_state: None,
+            }),
         }
     }
 
@@ -1019,6 +1100,10 @@ mod tests {
             diagnostic.code == "apk_permission_automation_strategy_unsupported"
         }));
         assert!(!draft.recipe.to_string().contains("grant_permissions"));
+        assert_eq!(
+            draft.app.metadata["apk_inspection"]["selected_runtime_permissions"],
+            json!([])
+        );
     }
 
     #[test]
@@ -1077,5 +1162,141 @@ mod tests {
         )
         .is_none());
         assert_eq!(diagnostics[0].code, "mapping_json_invalid");
+    }
+
+    #[test]
+    fn generated_metadata_replaces_reserved_input_and_preserves_unrelated_order() {
+        let mut inspection = facts();
+        inspection.calculated_sha256 = "ab".repeat(32);
+        inspection.version_code = Some("42".to_string());
+        inspection.version_name = Some("1.2".to_string());
+        inspection.min_sdk = Some(23);
+        inspection.target_sdk = Some(35);
+        inspection.requested_permissions = vec![
+            reviewed_permission("android.permission.INTERNET"),
+            reviewed_permission("android.permission.CAMERA"),
+            reviewed_permission("android.permission.INTERNET"),
+        ];
+        let mut app = proposed_app(&inspection);
+        app.category = "utility".to_string();
+        let draft = generate_app_recipe_draft(AppRecipeDraftRequest {
+            facts: inspection,
+            app: Some(app),
+            recipe: None,
+            mappings: Some(AppMappingEdits {
+                install_source_options: "{}".to_string(),
+                tracking_source_fields: "{}".to_string(),
+                metadata: r#"{"first":1,"apk_inspection":"frontend","last":2}"#.to_string(),
+                inputs: Vec::new(),
+                config_targets: Vec::new(),
+            }),
+            permission_automation: None,
+            regenerate_identifiers: false,
+        });
+        assert!(!draft.blocking);
+        assert_eq!(
+            draft
+                .app
+                .metadata
+                .keys()
+                .map(String::as_str)
+                .collect::<Vec<_>>(),
+            vec!["first", "last", "apk_inspection"]
+        );
+        let metadata = &draft.app.metadata["apk_inspection"];
+        assert_eq!(metadata["package_name"], "com.example.player");
+        assert_eq!(metadata["calculated_sha256"], "AB".repeat(32));
+        assert_eq!(metadata["checksum_status"], "not_compared");
+        assert_eq!(metadata["signature_verification"], "not_performed");
+        assert_eq!(metadata["selected_runtime_permissions"], json!([]));
+        assert_eq!(metadata["selected_app_ops"], json!([]));
+        assert_eq!(
+            metadata["requested_permissions"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .map(|permission| permission["name"].as_str().unwrap())
+                .collect::<Vec<_>>(),
+            vec!["android.permission.CAMERA", "android.permission.INTERNET"]
+        );
+        let yaml = draft.app_canonical_yaml.unwrap();
+        let round_trip = crate::authored_models::parse_app_definition_yaml(&yaml).unwrap();
+        assert_eq!(round_trip.metadata, draft.app.metadata);
+    }
+
+    #[test]
+    fn malformed_inspection_metadata_blocks_yaml_and_is_not_persisted() {
+        let mut inspection = facts();
+        inspection.calculated_sha256 = "publisher-value".to_string();
+        inspection.checksum_status = "verified".to_string();
+        let mut app = proposed_app(&inspection);
+        app.category = "utility".to_string();
+        let draft = generate_app_recipe_draft(AppRecipeDraftRequest {
+            facts: inspection,
+            app: Some(app),
+            recipe: None,
+            mappings: None,
+            permission_automation: None,
+            regenerate_identifiers: false,
+        });
+        assert!(draft.blocking);
+        assert!(draft.app_canonical_yaml.is_none());
+        assert!(!draft.app.metadata.contains_key("apk_inspection"));
+        assert!(draft
+            .diagnostics
+            .iter()
+            .any(|diagnostic| diagnostic.code == "apk_inspection_metadata_sha256_invalid"));
+        assert!(draft.diagnostics.iter().any(|diagnostic| {
+            diagnostic.code == "apk_inspection_metadata_checksum_status_invalid"
+        }));
+    }
+
+    #[test]
+    fn unsupported_permission_enums_and_api_bounds_block_metadata() {
+        let mut inspection = facts();
+        inspection.min_sdk = Some(36);
+        inspection.target_sdk = Some(35);
+        inspection.requested_permissions = vec![ApkPermissionDeclarationFacts {
+            name: "android.permission.CAMERA".to_string(),
+            declaration_kind: "future_permission".to_string(),
+            max_sdk_version: None,
+            classification: Some("future_classification".to_string()),
+            applicability: Some(ApkPermissionApplicabilityFacts {
+                status: "indeterminate".to_string(),
+                reason: Some("target_sdk_unavailable".to_string()),
+                maximum_sdk_version: None,
+                introduction_api: None,
+                minimum_device_api: None,
+                minimum_target_sdk: Some(-1),
+                target_sdk_state: Some("future_state".to_string()),
+            }),
+        }];
+        let mut app = proposed_app(&inspection);
+        app.category = "utility".to_string();
+        let draft = generate_app_recipe_draft(AppRecipeDraftRequest {
+            facts: inspection,
+            app: Some(app),
+            recipe: None,
+            mappings: None,
+            permission_automation: None,
+            regenerate_identifiers: false,
+        });
+        assert!(draft.blocking);
+        for code in [
+            "apk_inspection_metadata_permission_invalid",
+            "apk_inspection_metadata_permission_classification_invalid",
+            "apk_inspection_metadata_applicability_invalid",
+            "apk_inspection_metadata_api_bounds_invalid",
+            "apk_inspection_metadata_sdk_bounds_invalid",
+        ] {
+            assert!(
+                draft
+                    .diagnostics
+                    .iter()
+                    .any(|diagnostic| diagnostic.code == code),
+                "missing {code}"
+            );
+        }
+        assert!(!draft.app.metadata.contains_key("apk_inspection"));
     }
 }

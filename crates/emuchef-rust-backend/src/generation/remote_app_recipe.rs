@@ -21,7 +21,8 @@ use crate::validation::normalize_expected_sha256;
 
 use super::apk::ApkInspectionFacts;
 use super::app_recipe::{
-    build_permission_step, PermissionAutomationIssue, PermissionAutomationSelection,
+    build_permission_step, generated_apk_inspection_metadata, PermissionAutomationIssue,
+    PermissionAutomationSelection,
 };
 use super::identifiers::{normalize_identifier_component, recipe_local_token};
 
@@ -175,6 +176,25 @@ pub(crate) fn generate_remote_app_recipe_draft(
     ));
     if let Some(mappings) = request.mappings {
         apply_mapping_edits(&mut app, mappings, &mut diagnostics);
+    }
+    app.metadata.shift_remove("apk_inspection");
+    let automation_eligible = matches!(
+        request.source.strategy.as_str(),
+        "pinned_remote_asset" | "latest_compatible_release"
+    );
+    match generated_apk_inspection_metadata(
+        &request.facts,
+        request.permission_automation.as_ref(),
+        automation_eligible,
+    ) {
+        Ok(metadata) => {
+            app.metadata.insert("apk_inspection".to_string(), metadata);
+        }
+        Err(issues) => diagnostics.extend(
+            issues
+                .into_iter()
+                .map(|issue| error(issue.code, issue.message, &issue.field)),
+        ),
     }
     let mut recipe_edits = request
         .recipe
@@ -1160,6 +1180,9 @@ mod tests {
             package_name: Some("com.example.remote".to_string()),
             application_label: Some("Remote Example".to_string()),
             launcher_activities: vec!["com.example.remote/.MainActivity".to_string()],
+            calculated_sha256: "B".repeat(64),
+            checksum_status: "not_compared".to_string(),
+            signature_verification: "not_performed".to_string(),
             split: Some(false),
             base: Some(true),
             ..ApkInspectionFacts::default()
@@ -1311,6 +1334,31 @@ mod tests {
         );
         assert!(!permission_step.to_string().contains("com.example.edited"));
         assert!(!permission_step.to_string().contains("root_shell"));
+        let metadata = &draft.app.metadata["apk_inspection"];
+        assert_eq!(
+            metadata["selected_runtime_permissions"],
+            serde_json::json!([
+                { "permission_name": "android.permission.CAMERA", "requires_root": true },
+                { "permission_name": "android.permission.RECORD_AUDIO", "requires_root": false }
+            ])
+        );
+        assert_eq!(
+            metadata["selected_app_ops"],
+            serde_json::json!([
+                {
+                    "permission_name": "android.permission.MANAGE_EXTERNAL_STORAGE",
+                    "operation_name": "MANAGE_EXTERNAL_STORAGE",
+                    "mode": "allow",
+                    "requires_root": true
+                },
+                {
+                    "permission_name": "android.permission.ZETA",
+                    "operation_name": "ZETA_OP",
+                    "mode": "allow",
+                    "requires_root": false
+                }
+            ])
+        );
     }
 
     #[test]
@@ -1500,6 +1548,14 @@ mod tests {
         assert!(draft.recipe_canonical_yaml.unwrap().contains(
             "expected_sha256: 0123456789ABCDEF0123456789ABCDEF0123456789ABCDEF0123456789ABCDEF"
         ));
+        assert_eq!(
+            draft.app.metadata["apk_inspection"]["calculated_sha256"],
+            "B".repeat(64)
+        );
+        assert_eq!(
+            draft.app.metadata["apk_inspection"]["checksum_status"],
+            "not_compared"
+        );
     }
 
     #[test]

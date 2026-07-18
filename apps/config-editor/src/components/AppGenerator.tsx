@@ -4,7 +4,6 @@ import {
   beginAppGenerator,
   analyzeAppGeneratorSource,
   cancelAppGenerator,
-  checkAppRecipeCollisions,
   chooseAppGeneratorApk,
   chooseAppGeneratorAuthoredRoot,
   downloadAppGeneratorRemoteApk,
@@ -255,6 +254,7 @@ export function AppGenerator({ initialAuthoredRoot, onAuthoredRootSelected, onCl
           request.mappings,
           permissionSelection,
           regenerateIdentifiers,
+          state.rootHandle,
         )
       : state.selectedAssetHandle
         ? await generateRemoteAppRecipeDraft(
@@ -270,6 +270,7 @@ export function AppGenerator({ initialAuthoredRoot, onAuthoredRootSelected, onCl
             request.mappings,
             permissionSelection,
             regenerateIdentifiers,
+            state.rootHandle,
           )
         : null;
     if (!drafted) {
@@ -280,17 +281,11 @@ export function AppGenerator({ initialAuthoredRoot, onAuthoredRootSelected, onCl
       dispatch({ type: "failure", message: apiFailure(drafted) });
       return;
     }
-    const collisions = await checkAppRecipeCollisions(
-      state.sessionHandle,
-      state.rootHandle,
-      drafted.result.app,
-      drafted.result.recipe.id,
-    );
-    if (collisions.kind !== "success") {
-      dispatch({ type: "failure", message: apiFailure(collisions) });
+    if (!drafted.result.collisions) {
+      dispatch({ type: "failure", message: "Generated collision review was unavailable." });
       return;
     }
-    dispatch({ type: "reviewed", draft: drafted.result, collisions: collisions.result });
+    dispatch({ type: "reviewed", draft: drafted.result, collisions: drafted.result.collisions });
   }
 
   async function regenerateIds() {

@@ -1434,6 +1434,7 @@ pub fn generate_app_recipe_draft(
     mappings: Option<Value>,
     permission_selection: Option<Value>,
     regenerate_identifiers: bool,
+    root_handle: Option<String>,
 ) -> Result<Value, String> {
     let facts = match stored_facts(&state, &session_handle, &apk_handle)? {
         Ok(facts) => facts,
@@ -1467,10 +1468,18 @@ pub fn generate_app_recipe_draft(
     if let Some(permission_automation) = permission_automation {
         payload.insert("permissionAutomation".to_string(), permission_automation);
     }
-    request_sidecar(
+    let root = match root_handle {
+        Some(root_handle) => match stored_root(&state, &session_handle, &root_handle)? {
+            Ok(root) => Some(root),
+            Err(error) => return Ok(error),
+        },
+        None => None,
+    };
+    request_generated_draft(
         &sidecar,
         "generateAppRecipeDraft",
-        Some(Value::Object(payload)),
+        Value::Object(payload),
+        root.as_ref(),
     )
 }
 
@@ -1491,6 +1500,7 @@ pub fn generate_remote_app_recipe_draft(
     mappings: Option<Value>,
     permission_selection: Option<Value>,
     regenerate_identifiers: bool,
+    root_handle: Option<String>,
 ) -> Result<Value, String> {
     let facts = match stored_facts(&state, &session_handle, &apk_handle)? {
         Ok(facts) => facts,
@@ -1547,10 +1557,18 @@ pub fn generate_remote_app_recipe_draft(
     if let Some(permission_automation) = permission_automation {
         payload.insert("permissionAutomation".to_string(), permission_automation);
     }
-    request_sidecar(
+    let root = match root_handle {
+        Some(root_handle) => match stored_root(&state, &session_handle, &root_handle)? {
+            Ok(root) => Some(root),
+            Err(error) => return Ok(error),
+        },
+        None => None,
+    };
+    request_generated_draft(
         &sidecar,
         "generateRemoteAppRecipeDraft",
-        Some(Value::Object(payload)),
+        Value::Object(payload),
+        root.as_ref(),
     )
 }
 
@@ -1665,18 +1683,14 @@ pub fn save_generated_remote_app_recipe(
     let Some(recipe_file) = destination_file(draft, "recipeDestination") else {
         return Ok(invalid_destination_error());
     };
-    let Some(final_app) = draft.get("app").cloned() else {
-        return Ok(generator_protocol_error());
+    let collision_payload = match collision_payload_from_generated_draft(&root, draft) {
+        Ok(payload) => payload,
+        Err(_) => return Ok(generator_protocol_error()),
     };
-    let recipe_id = draft
-        .get("recipe")
-        .and_then(|value| value.get("id"))
-        .and_then(Value::as_str)
-        .unwrap_or_default();
     let collisions = request_sidecar(
         &sidecar,
         "checkGeneratedCatalogCollisions",
-        Some(json!({ "authoredRoot": root.root, "app": final_app, "recipeId": recipe_id })),
+        Some(collision_payload),
     )?;
     let Some(collision_result) = success_result(&collisions) else {
         return Ok(collisions);
@@ -1805,23 +1819,12 @@ fn trusted_sha256_request_value<'a>(
 }
 
 #[tauri::command]
-pub fn check_app_recipe_collisions(
-    sidecar: State<'_, SidecarState>,
-    state: State<'_, AppGeneratorState>,
-    session_handle: String,
-    root_handle: String,
-    app: Value,
-    recipe_id: String,
-) -> Result<Value, String> {
-    let root = match stored_root(&state, &session_handle, &root_handle)? {
-        Ok(root) => root,
-        Err(error) => return Ok(error),
-    };
-    request_sidecar(
-        &sidecar,
-        "checkGeneratedCatalogCollisions",
-        Some(json!({ "authoredRoot": root.root, "app": app, "recipeId": recipe_id })),
-    )
+pub fn check_app_recipe_collisions() -> Result<Value, String> {
+    Ok(api_error(
+        "app_recipe_collision_review_requires_generation",
+        "Review collisions by generating a fresh app-and-recipe draft.",
+        json!({}),
+    ))
 }
 
 #[tauri::command]
@@ -1905,18 +1908,14 @@ pub fn save_generated_app_recipe(
     let Some(recipe_file) = destination_file(draft, "recipeDestination") else {
         return Ok(invalid_destination_error());
     };
-    let Some(final_app) = draft.get("app").cloned() else {
-        return Ok(generator_protocol_error());
+    let collision_payload = match collision_payload_from_generated_draft(&root, draft) {
+        Ok(payload) => payload,
+        Err(_) => return Ok(generator_protocol_error()),
     };
-    let recipe_id = draft
-        .get("recipe")
-        .and_then(|value| value.get("id"))
-        .and_then(Value::as_str)
-        .unwrap_or_default();
     let collisions = request_sidecar(
         &sidecar,
         "checkGeneratedCatalogCollisions",
-        Some(json!({ "authoredRoot": root.root, "app": final_app, "recipeId": recipe_id })),
+        Some(collision_payload),
     )?;
     let Some(collision_result) = success_result(&collisions) else {
         return Ok(collisions);
@@ -2427,20 +2426,10 @@ fn facts_from_native_inspection(inspection: &Value) -> Option<Value> {
         nullable_string(manifest, "minSdkVersion")?.and_then(|value| value.parse::<i64>().ok());
     let target_sdk =
         nullable_string(manifest, "targetSdkVersion")?.and_then(|value| value.parse::<i64>().ok());
-    let mut requested_permissions = inspection
-        .get("permissions")?
-        .as_array()?
-        .iter()
-        .map(|permission| {
-            permission
-                .get("name")?
-                .as_str()
-                .filter(|value| !value.trim().is_empty())
-                .map(str::to_string)
-        })
-        .collect::<Option<Vec<_>>>()?;
-    requested_permissions.sort();
-    requested_permissions.dedup();
+    let requested_permissions = inspection.get("permissions")?.as_array()?.clone();
+    let calculated_sha256 = inspection.get("calculatedSha256")?.as_str()?;
+    let checksum_status = inspection.get("checksumStatus")?.as_str()?;
+    let signature_verification = inspection.get("signatureVerification")?.as_str()?;
 
     Some(json!({
         "packageName": package_name,
@@ -2452,6 +2441,9 @@ fn facts_from_native_inspection(inspection: &Value) -> Option<Value> {
         "abis": [],
         "launcherActivities": [],
         "requestedPermissions": requested_permissions,
+        "calculatedSha256": calculated_sha256,
+        "checksumStatus": checksum_status,
+        "signatureVerification": signature_verification,
         "debuggable": Value::Null,
         "split": false,
         "base": true,
@@ -2490,6 +2482,60 @@ fn lock_registry(
         .registry
         .lock()
         .map_err(|_| "App generator state is unavailable.".to_string())
+}
+
+fn request_generated_draft(
+    sidecar: &SidecarState,
+    operation: &str,
+    payload: Value,
+    root: Option<&TrustedRoot>,
+) -> Result<Value, String> {
+    let mut response = request_sidecar(sidecar, operation, Some(payload))?;
+    let Some(draft) = success_result(&response).cloned() else {
+        return Ok(response);
+    };
+    let collisions = match root {
+        Some(root) => {
+            let collision_payload = match collision_payload_from_generated_draft(root, &draft) {
+                Ok(payload) => payload,
+                Err(_) => return Ok(generator_protocol_error()),
+            };
+            let collision_response = request_sidecar(
+                sidecar,
+                "checkGeneratedCatalogCollisions",
+                Some(collision_payload),
+            )?;
+            let Some(collisions) = success_result(&collision_response).cloned() else {
+                return Ok(collision_response);
+            };
+            collisions
+        }
+        None => Value::Null,
+    };
+    let Some(result) = response.get_mut("result").and_then(Value::as_object_mut) else {
+        return Ok(generator_protocol_error());
+    };
+    result.insert("collisions".to_string(), collisions);
+    Ok(response)
+}
+
+fn collision_payload_from_generated_draft(
+    root: &TrustedRoot,
+    draft: &Value,
+) -> Result<Value, String> {
+    let app = draft
+        .get("app")
+        .cloned()
+        .ok_or_else(|| "Generated app-and-recipe draft is missing its app.".to_string())?;
+    let recipe = draft
+        .get("recipe")
+        .cloned()
+        .ok_or_else(|| "Generated app-and-recipe draft is missing its recipe.".to_string())?;
+    Ok(json!({
+        "authoredRoot": root.root,
+        "app": app,
+        "recipe": recipe,
+    }))
 }
 
 fn request_sidecar(
@@ -2824,9 +2870,36 @@ mod tests {
                 "targetSdkVersion": "35",
             },
             "permissions": [
-                { "name": "android.permission.INTERNET" },
-                { "name": "android.permission.CAMERA" },
-                { "name": "android.permission.INTERNET" },
+                {
+                    "name": "android.permission.INTERNET",
+                    "declarationKind": "uses_permission",
+                    "maxSdkVersion": null,
+                    "classification": "install_time",
+                    "applicability": {
+                        "status": "applicable",
+                        "reason": null,
+                        "maximumSdkVersion": null,
+                        "introductionApi": null,
+                        "minimumDeviceApi": null,
+                        "minimumTargetSdk": null,
+                        "targetSdkState": null
+                    }
+                },
+                {
+                    "name": "android.permission.CAMERA",
+                    "declarationKind": "uses_permission_sdk_23",
+                    "maxSdkVersion": "34",
+                    "classification": "runtime_grantable",
+                    "applicability": {
+                        "status": "not_applicable",
+                        "reason": "max_sdk_version_exceeded",
+                        "maximumSdkVersion": 34,
+                        "introductionApi": null,
+                        "minimumDeviceApi": null,
+                        "minimumTargetSdk": null,
+                        "targetSdkState": null
+                    }
+                },
             ],
             "runtimeGrantCandidates": [],
             "appOpCandidates": [],
@@ -2836,7 +2909,7 @@ mod tests {
                 "permissionName": "android.permission.EXAMPLE",
                 "applicabilityReason": null,
             }],
-            "calculatedSha256": "ABCD",
+            "calculatedSha256": "AB".repeat(32),
             "checksumStatus": "not_compared",
             "signatureVerification": "not_performed",
         });
@@ -2845,10 +2918,10 @@ mod tests {
         assert_eq!(facts["versionCode"], "42");
         assert_eq!(facts["minSdk"], 23);
         assert_eq!(facts["targetSdk"], 35);
-        assert_eq!(
-            facts["requestedPermissions"],
-            json!(["android.permission.CAMERA", "android.permission.INTERNET"])
-        );
+        assert_eq!(facts["requestedPermissions"], inspection["permissions"]);
+        assert_eq!(facts["calculatedSha256"], "AB".repeat(32));
+        assert_eq!(facts["checksumStatus"], "not_compared");
+        assert_eq!(facts["signatureVerification"], "not_performed");
         assert_eq!(facts["applicationLabel"], Value::Null);
         assert_eq!(facts["launcherActivities"], json!([]));
         assert_eq!(facts["abis"], json!([]));
@@ -2868,6 +2941,9 @@ mod tests {
                 "targetSdkVersion": null,
             },
             "permissions": [],
+            "calculatedSha256": "A".repeat(64),
+            "checksumStatus": "not_compared",
+            "signatureVerification": "not_performed",
         });
         let facts = facts_from_native_inspection(&inspection).unwrap();
         assert_eq!(facts["minSdk"], Value::Null);
@@ -2911,7 +2987,7 @@ mod tests {
             "runtimeGrantCandidates": [],
             "appOpCandidates": [],
             "warnings": [],
-            "calculatedSha256": "ABCD",
+            "calculatedSha256": "A".repeat(64),
             "checksumStatus": "not_compared",
             "signatureVerification": "not_performed",
         });
@@ -2927,6 +3003,62 @@ mod tests {
         assert_eq!(trusted.facts, Some(facts));
         assert_ne!(trusted.inspection, trusted.facts);
         fs::remove_file(path).unwrap();
+    }
+
+    #[test]
+    fn incomplete_generated_draft_maps_to_protocol_error_envelope() {
+        let trusted_root = TrustedRoot {
+            root: PathBuf::from("/trusted/authored"),
+            apps_directory: PathBuf::from("/trusted/authored/apps"),
+            recipes_directory: PathBuf::from("/trusted/authored/recipes"),
+        };
+        let malformed = json!({ "app": { "id": "generated-app" } });
+        let response = match collision_payload_from_generated_draft(&trusted_root, &malformed) {
+            Ok(_) => panic!("malformed generated draft must fail"),
+            Err(_) => generator_protocol_error(),
+        };
+        assert_eq!(
+            api_error_code(&response),
+            Some("app_generator_protocol_error")
+        );
+    }
+
+    #[test]
+    fn collision_payload_uses_only_generated_draft_and_trusted_root() {
+        let trusted_root = TrustedRoot {
+            root: PathBuf::from("/trusted/authored"),
+            apps_directory: PathBuf::from("/trusted/authored/apps"),
+            recipes_directory: PathBuf::from("/trusted/authored/recipes"),
+        };
+        let generated_app = json!({ "id": "generated-app", "metadata": { "trusted": true } });
+        let generated_recipe = json!({ "id": "app.generated.install", "steps": [] });
+        let payload = collision_payload_from_generated_draft(
+            &trusted_root,
+            &json!({
+                "app": generated_app,
+                "recipe": generated_recipe,
+                "editableApp": { "id": "frontend-app" },
+                "editableRecipe": { "id": "frontend-recipe" },
+                "fingerprint": "frontend-fingerprint"
+            }),
+        )
+        .unwrap();
+        assert_eq!(payload["authoredRoot"], "/trusted/authored");
+        assert_eq!(payload["app"]["id"], "generated-app");
+        assert_eq!(payload["recipe"]["id"], "app.generated.install");
+        assert!(payload.get("recipeId").is_none());
+        assert!(payload.get("fingerprint").is_none());
+        assert!(!payload.to_string().contains("frontend-app"));
+        assert!(!payload.to_string().contains("frontend-recipe"));
+    }
+
+    #[test]
+    fn direct_frontend_collision_review_is_rejected() {
+        let response = check_app_recipe_collisions().unwrap();
+        assert_eq!(
+            api_error_code(&response),
+            Some("app_recipe_collision_review_requires_generation")
+        );
     }
 
     #[test]

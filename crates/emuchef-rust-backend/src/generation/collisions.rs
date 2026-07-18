@@ -1,25 +1,26 @@
 //! Deterministic device-profile collision analysis for authored roots.
 
+use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::fs;
 use std::path::Path;
 
 use regex::Regex;
 use serde::Serialize;
 
-use serde::Deserialize;
 use serde_json::Value;
 
 use crate::authored_models::{
     load_app_definition, load_device_profile, AppDefinitionV1, DeviceProfileV1,
 };
+use crate::model::{ParamValue, Recipe, Step};
+use crate::validation::normalize_expected_sha256;
 
 use super::device_profile::SafeDetectedDeviceFacts;
 
-#[derive(Clone, Debug, Deserialize)]
-#[serde(deny_unknown_fields, rename_all = "camelCase")]
 pub(crate) struct AppRecipeCollisionRequest {
     pub app: AppDefinitionV1,
     pub recipe_id: String,
+    pub recipe: Option<Recipe>,
 }
 
 #[derive(Clone, Debug, Serialize, PartialEq, Eq)]
@@ -236,6 +237,10 @@ fn scan_recipes(
 ) {
     let directory = authored_root.join("recipes");
     let proposed_file = format!("{}.yaml", request.recipe_id);
+    let proposed_fingerprint = request
+        .recipe
+        .as_ref()
+        .and_then(apk_security_automation_fingerprint);
     for path in yaml_paths(
         &directory,
         "recipe_collision_scan_incomplete",
@@ -277,8 +282,359 @@ fn scan_recipes(
                 Some(existing.id),
                 relative_path,
             ));
+        } else if let (Some(proposed), Some(existing_fingerprint)) = (
+            proposed_fingerprint.as_ref(),
+            apk_security_automation_fingerprint(&existing).as_ref(),
+        ) {
+            if proposed == existing_fingerprint {
+                collisions.push(app_collision(
+                    CollisionSeverity::Blocking,
+                    "apk_security_automation_fingerprint_conflict",
+                    "An existing recipe enforces the same APK security and permission-automation behavior.",
+                    Some(existing.id),
+                    relative_path,
+                ));
+            } else if proposed.expected_package_name == existing_fingerprint.expected_package_name {
+                collisions.push(app_collision(
+                    CollisionSeverity::Warning,
+                    "apk_expected_package_overlap",
+                    "An existing recipe enforces the same APK package with different checksum or permission automation.",
+                    Some(existing.id),
+                    relative_path,
+                ));
+            } else if proposed.expected_sha256.is_some()
+                && proposed.expected_sha256 == existing_fingerprint.expected_sha256
+            {
+                collisions.push(app_collision(
+                    CollisionSeverity::Warning,
+                    "apk_expected_sha256_overlap",
+                    "An existing recipe trusts the same APK checksum for a different expected package.",
+                    Some(existing.id),
+                    relative_path,
+                ));
+            }
         }
     }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct ApkSecurityAutomationFingerprint {
+    expected_package_name: String,
+    expected_sha256: Option<String>,
+    runtime_permissions: Vec<RuntimePermissionFingerprint>,
+    app_ops: Vec<AppOpFingerprint>,
+    policy: Option<PermissionPolicyFingerprint>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord)]
+struct RuntimePermissionFingerprint {
+    package_name: String,
+    permission_name: String,
+    required: bool,
+    when: PermissionWhenFingerprint,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord)]
+struct AppOpFingerprint {
+    package_name: String,
+    operation_name: String,
+    mode: String,
+    required: bool,
+    when: PermissionWhenFingerprint,
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Eq, PartialOrd, Ord)]
+struct PermissionWhenFingerprint {
+    rooted: Option<bool>,
+    android_api_min: Option<i64>,
+    android_api_max: Option<i64>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct PermissionPolicyFingerprint {
+    on_failure: String,
+    require_all: bool,
+}
+
+fn apk_security_automation_fingerprint(
+    recipe: &Recipe,
+) -> Option<ApkSecurityAutomationFingerprint> {
+    let install_steps = recipe
+        .steps
+        .iter()
+        .filter(|step| step.type_name == "install_apk")
+        .collect::<Vec<_>>();
+    let [install] = install_steps.as_slice() else {
+        return None;
+    };
+    let expected_package_name =
+        literal_non_empty_string(install.params.get("expected_package_name")?)?.to_string();
+    let expected_sha256 = match install.params.get("expected_sha256") {
+        None => None,
+        Some(ParamValue::Literal(Value::String(value))) => normalize_expected_sha256(value),
+        Some(_) => return None,
+    };
+    if install.params.contains_key("expected_sha256") && expected_sha256.is_none() {
+        return None;
+    }
+
+    let ancestors = dependency_ancestors(recipe)?;
+    let associated_permission_steps = recipe
+        .steps
+        .iter()
+        .filter(|step| {
+            step.type_name == "grant_permissions"
+                && ancestors
+                    .get(step.id.as_str())
+                    .is_some_and(|dependencies| dependencies.contains(install.id.as_str()))
+        })
+        .collect::<Vec<_>>();
+    let permission_step = match associated_permission_steps.as_slice() {
+        [] => None,
+        [step] => Some(*step),
+        _ => return None,
+    };
+    let (runtime_permissions, app_ops, policy) = match permission_step {
+        Some(step) => permission_fingerprint(step, &expected_package_name)?,
+        None => (Vec::new(), Vec::new(), None),
+    };
+    Some(ApkSecurityAutomationFingerprint {
+        expected_package_name,
+        expected_sha256,
+        runtime_permissions,
+        app_ops,
+        policy,
+    })
+}
+
+fn dependency_ancestors(recipe: &Recipe) -> Option<HashMap<&str, BTreeSet<&str>>> {
+    let mut steps = HashMap::new();
+    for step in &recipe.steps {
+        if step.id.trim().is_empty() || steps.insert(step.id.as_str(), step).is_some() {
+            return None;
+        }
+    }
+    let mut state = HashMap::new();
+    let mut ancestors = HashMap::new();
+    for step in &recipe.steps {
+        collect_ancestors(step.id.as_str(), &steps, &mut state, &mut ancestors)?;
+    }
+    Some(ancestors)
+}
+
+fn collect_ancestors<'a>(
+    step_id: &'a str,
+    steps: &HashMap<&'a str, &'a Step>,
+    state: &mut HashMap<&'a str, u8>,
+    ancestors: &mut HashMap<&'a str, BTreeSet<&'a str>>,
+) -> Option<BTreeSet<&'a str>> {
+    match state.get(step_id) {
+        Some(1) => return None,
+        Some(2) => return ancestors.get(step_id).cloned(),
+        _ => {}
+    }
+    state.insert(step_id, 1);
+    let step = steps.get(step_id)?;
+    let mut result = BTreeSet::new();
+    for dependency in &step.dependencies {
+        let dependency = dependency.as_str();
+        if !steps.contains_key(dependency) {
+            return None;
+        }
+        result.insert(dependency);
+        result.extend(collect_ancestors(dependency, steps, state, ancestors)?);
+    }
+    state.insert(step_id, 2);
+    ancestors.insert(step_id, result.clone());
+    Some(result)
+}
+
+type PermissionFingerprintParts = (
+    Vec<RuntimePermissionFingerprint>,
+    Vec<AppOpFingerprint>,
+    Option<PermissionPolicyFingerprint>,
+);
+
+fn permission_fingerprint(
+    step: &Step,
+    expected_package_name: &str,
+) -> Option<PermissionFingerprintParts> {
+    if step
+        .params
+        .keys()
+        .any(|key| !matches!(key.as_str(), "runtime" | "appops" | "policy"))
+    {
+        return None;
+    }
+    let runtime_values = literal_array(step.params.get("runtime"))?;
+    let app_op_values = literal_array(step.params.get("appops"))?;
+    let mut runtime_by_identity = BTreeMap::new();
+    for value in runtime_values {
+        let action = runtime_permission_fingerprint(value, expected_package_name)?;
+        let identity = (action.package_name.clone(), action.permission_name.clone());
+        match runtime_by_identity.get(&identity) {
+            Some(existing) if existing != &action => return None,
+            Some(_) => {}
+            None => {
+                runtime_by_identity.insert(identity, action);
+            }
+        }
+    }
+    let mut app_ops_by_identity = BTreeMap::new();
+    for value in app_op_values {
+        let action = app_op_fingerprint(value, expected_package_name)?;
+        let identity = (
+            action.package_name.clone(),
+            action.operation_name.clone(),
+            action.mode.clone(),
+        );
+        match app_ops_by_identity.get(&identity) {
+            Some(existing) if existing != &action => return None,
+            Some(_) => {}
+            None => {
+                app_ops_by_identity.insert(identity, action);
+            }
+        }
+    }
+    let mut runtime_permissions = runtime_by_identity.into_values().collect::<Vec<_>>();
+    runtime_permissions.sort();
+    let mut app_ops = app_ops_by_identity.into_values().collect::<Vec<_>>();
+    app_ops.sort();
+    let policy = if runtime_permissions.is_empty() && app_ops.is_empty() {
+        None
+    } else {
+        Some(permission_policy_fingerprint(step.params.get("policy"))?)
+    };
+    Some((runtime_permissions, app_ops, policy))
+}
+
+fn runtime_permission_fingerprint(
+    value: &Value,
+    expected_package_name: &str,
+) -> Option<RuntimePermissionFingerprint> {
+    let object = strict_object(value, &["package_name", "name", "required", "when"])?;
+    let package_name = non_empty_string(object.get("package_name")?)?;
+    if package_name != expected_package_name {
+        return None;
+    }
+    Some(RuntimePermissionFingerprint {
+        package_name: package_name.to_string(),
+        permission_name: non_empty_string(object.get("name")?)?.to_string(),
+        required: optional_bool(object.get("required"), true)?,
+        when: permission_when_fingerprint(object.get("when"))?,
+    })
+}
+
+fn app_op_fingerprint(value: &Value, expected_package_name: &str) -> Option<AppOpFingerprint> {
+    let object = strict_object(value, &["package_name", "op", "mode", "required", "when"])?;
+    let package_name = non_empty_string(object.get("package_name")?)?;
+    if package_name != expected_package_name {
+        return None;
+    }
+    let mode = non_empty_string(object.get("mode")?)?;
+    if mode != "allow" {
+        return None;
+    }
+    Some(AppOpFingerprint {
+        package_name: package_name.to_string(),
+        operation_name: non_empty_string(object.get("op")?)?.to_string(),
+        mode: mode.to_string(),
+        required: optional_bool(object.get("required"), true)?,
+        when: permission_when_fingerprint(object.get("when"))?,
+    })
+}
+
+fn permission_when_fingerprint(value: Option<&Value>) -> Option<PermissionWhenFingerprint> {
+    let Some(value) = value else {
+        return Some(PermissionWhenFingerprint::default());
+    };
+    let object = strict_object(value, &["rooted", "android_api_min", "android_api_max"])?;
+    let rooted = optional_bool_value(object.get("rooted"))?;
+    let android_api_min = optional_non_negative_i64(object.get("android_api_min"))?;
+    let android_api_max = optional_non_negative_i64(object.get("android_api_max"))?;
+    if android_api_min
+        .zip(android_api_max)
+        .is_some_and(|(minimum, maximum)| minimum > maximum)
+    {
+        return None;
+    }
+    Some(PermissionWhenFingerprint {
+        rooted,
+        android_api_min,
+        android_api_max,
+    })
+}
+
+fn permission_policy_fingerprint(
+    value: Option<&ParamValue>,
+) -> Option<PermissionPolicyFingerprint> {
+    let Some(value) = value else {
+        return Some(PermissionPolicyFingerprint {
+            on_failure: "warn".to_string(),
+            require_all: false,
+        });
+    };
+    let ParamValue::Literal(value) = value else {
+        return None;
+    };
+    let object = strict_object(value, &["on_failure", "require_all"])?;
+    let on_failure = match object.get("on_failure") {
+        None => "warn",
+        Some(Value::String(value)) if matches!(value.as_str(), "warn" | "fail") => value,
+        Some(_) => return None,
+    };
+    Some(PermissionPolicyFingerprint {
+        on_failure: on_failure.to_string(),
+        require_all: optional_bool(object.get("require_all"), false)?,
+    })
+}
+
+fn literal_array(value: Option<&ParamValue>) -> Option<&[Value]> {
+    match value {
+        None => Some(&[]),
+        Some(ParamValue::Literal(Value::Array(values))) => Some(values),
+        Some(_) => None,
+    }
+}
+
+fn literal_non_empty_string(value: &ParamValue) -> Option<&str> {
+    match value {
+        ParamValue::Literal(value) => non_empty_string(value),
+        ParamValue::Ref(_) => None,
+    }
+}
+
+fn non_empty_string(value: &Value) -> Option<&str> {
+    value.as_str().filter(|value| !value.trim().is_empty())
+}
+
+fn optional_bool(value: Option<&Value>, default: bool) -> Option<bool> {
+    value.map(Value::as_bool).unwrap_or(Some(default))
+}
+
+fn optional_bool_value(value: Option<&Value>) -> Option<Option<bool>> {
+    match value {
+        None => Some(None),
+        Some(value) => value.as_bool().map(Some),
+    }
+}
+
+fn optional_non_negative_i64(value: Option<&Value>) -> Option<Option<i64>> {
+    match value {
+        None => Some(None),
+        Some(value) => value.as_i64().filter(|value| *value >= 0).map(Some),
+    }
+}
+
+fn strict_object<'a>(
+    value: &'a Value,
+    allowed_fields: &[&str],
+) -> Option<&'a serde_json::Map<String, Value>> {
+    let object = value.as_object()?;
+    object
+        .keys()
+        .all(|key| allowed_fields.contains(&key.as_str()))
+        .then_some(object)
 }
 
 fn yaml_paths(
@@ -650,6 +1006,72 @@ metadata: {{}}
         root
     }
 
+    fn fingerprint_recipe(id: &str, package: &str, checksum: &str) -> Recipe {
+        let raw = format!(
+            r#"schema_version: 1
+kind: recipe
+id: {id}
+name: Fingerprint
+provides:
+  features: []
+steps:
+- id: install
+  type: install_apk
+  name: Install
+  user_toggleable: false
+  dependencies: []
+  constraints:
+    capabilities: []
+    conflicts_with: []
+  skip_if: []
+  params:
+    app: {{ref: inputs.apk}}
+    expected_package_name: {package}
+    expected_sha256: {checksum}
+  verify: []
+- id: permissions
+  type: grant_permissions
+  name: Permissions
+  user_toggleable: false
+  dependencies: [install]
+  constraints:
+    capabilities: []
+    conflicts_with: []
+  skip_if: []
+  params:
+    runtime:
+    - package_name: {package}
+      name: android.permission.CAMERA
+      required: false
+      when:
+        android_api_min: 23
+    appops:
+    - package_name: {package}
+      op: MANAGE_EXTERNAL_STORAGE
+      mode: allow
+      required: false
+      when:
+        rooted: true
+    policy:
+      on_failure: warn
+      require_all: false
+  verify: []
+"#
+        );
+        let serde_yaml::Value::Mapping(mapping) = serde_yaml::from_str(&raw).unwrap() else {
+            panic!("recipe fixture must be a mapping");
+        };
+        crate::yaml::parse_recipe_mapping(&mapping, Path::new("fingerprint.yaml")).unwrap()
+    }
+
+    fn permission_step_mut(recipe: &mut Recipe) -> &mut Step {
+        recipe
+            .steps
+            .iter_mut()
+            .find(|step| step.type_name == "grant_permissions")
+            .unwrap()
+    }
+
     fn temp_root(label: &str) -> std::path::PathBuf {
         let nonce = SystemTime::now()
             .duration_since(UNIX_EPOCH)
@@ -758,6 +1180,7 @@ metadata: {{}}
             &AppRecipeCollisionRequest {
                 app: existing.clone(),
                 recipe_id: "app.existing.install".to_string(),
+                recipe: None,
             },
         );
         assert!(exact.blocking);
@@ -775,6 +1198,7 @@ metadata: {{}}
             &AppRecipeCollisionRequest {
                 app: app("different", "com.example.app"),
                 recipe_id: "app.different.install".to_string(),
+                recipe: None,
             },
         );
         assert!(!overlap.blocking);
@@ -818,6 +1242,7 @@ metadata: {{}}
             &AppRecipeCollisionRequest {
                 app: proposed,
                 recipe_id: "app.remote.other.install".to_string(),
+                recipe: None,
             },
         );
         assert!(!result.blocking);
@@ -873,6 +1298,7 @@ metadata: {{}}
             &AppRecipeCollisionRequest {
                 app: proposed,
                 recipe_id: "app.latest.other.install".to_string(),
+                recipe: None,
             },
         );
         assert!(result.blocking);
@@ -927,6 +1353,7 @@ metadata: {{}}
             &AppRecipeCollisionRequest {
                 app: different_provider,
                 recipe_id: "app.latest.forgejo.install".to_string(),
+                recipe: None,
             },
         );
         assert!(!result
@@ -945,10 +1372,264 @@ metadata: {{}}
             &AppRecipeCollisionRequest {
                 app: app("different", "com.example.app"),
                 recipe_id: "app.different.install".to_string(),
+                recipe: None,
             },
         );
         assert!(result.blocking);
         assert_eq!(result.collisions[0].code, "app_collision_scan_incomplete");
         fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn fingerprint_changes_for_every_security_component_and_ignores_action_order() {
+        let checksum = "A".repeat(64);
+        let mut base = fingerprint_recipe("app.base.install", "com.example.app", &checksum);
+        for (section, field, value) in [
+            ("runtime", "name", "android.permission.RECORD_AUDIO"),
+            ("appops", "op", "LEGACY_STORAGE"),
+        ] {
+            let ParamValue::Literal(Value::Array(actions)) = permission_step_mut(&mut base)
+                .params
+                .get_mut(section)
+                .unwrap()
+            else {
+                panic!("permission actions must be literal arrays");
+            };
+            let mut second = actions[0].clone();
+            second[field] = Value::String(value.to_string());
+            actions.push(second);
+        }
+        let base_fingerprint = apk_security_automation_fingerprint(&base).unwrap();
+
+        let mut reordered = base.clone();
+        for key in ["runtime", "appops"] {
+            let ParamValue::Literal(Value::Array(actions)) = permission_step_mut(&mut reordered)
+                .params
+                .get_mut(key)
+                .unwrap()
+            else {
+                panic!("permission actions must be literal arrays");
+            };
+            actions.reverse();
+        }
+        assert_eq!(
+            apk_security_automation_fingerprint(&reordered).unwrap(),
+            base_fingerprint
+        );
+
+        let mut variants = Vec::new();
+        let mut package = base.clone();
+        package.steps[0].params.insert(
+            "expected_package_name".to_string(),
+            ParamValue::Literal(Value::String("com.example.other".to_string())),
+        );
+        for section in ["runtime", "appops"] {
+            let ParamValue::Literal(Value::Array(actions)) = permission_step_mut(&mut package)
+                .params
+                .get_mut(section)
+                .unwrap()
+            else {
+                panic!("permission actions must be literal arrays");
+            };
+            for action in actions {
+                action["package_name"] = Value::String("com.example.other".to_string());
+            }
+        }
+        variants.push(package);
+        let mut checksum_variant = base.clone();
+        checksum_variant.steps[0].params.insert(
+            "expected_sha256".to_string(),
+            ParamValue::Literal(Value::String("B".repeat(64))),
+        );
+        variants.push(checksum_variant);
+        for (section, field, replacement) in [
+            ("runtime", "name", "android.permission.RECORD_AUDIO"),
+            ("appops", "op", "LEGACY_STORAGE"),
+        ] {
+            let mut variant = base.clone();
+            let ParamValue::Literal(Value::Array(actions)) = permission_step_mut(&mut variant)
+                .params
+                .get_mut(section)
+                .unwrap()
+            else {
+                panic!("permission actions must be literal arrays");
+            };
+            actions[0][field] = Value::String(replacement.to_string());
+            variants.push(variant);
+        }
+        let mut rooted = base.clone();
+        let ParamValue::Literal(Value::Array(actions)) = permission_step_mut(&mut rooted)
+            .params
+            .get_mut("appops")
+            .unwrap()
+        else {
+            panic!("app-op actions must be a literal array");
+        };
+        actions[0]["when"]["rooted"] = Value::Bool(false);
+        variants.push(rooted);
+        let mut api = base.clone();
+        let ParamValue::Literal(Value::Array(actions)) = permission_step_mut(&mut api)
+            .params
+            .get_mut("runtime")
+            .unwrap()
+        else {
+            panic!("runtime actions must be a literal array");
+        };
+        actions[0]["when"]["android_api_min"] = Value::from(24);
+        variants.push(api);
+        let mut required = base.clone();
+        let ParamValue::Literal(Value::Array(actions)) = permission_step_mut(&mut required)
+            .params
+            .get_mut("runtime")
+            .unwrap()
+        else {
+            panic!("runtime actions must be a literal array");
+        };
+        actions[0]["required"] = Value::Bool(true);
+        variants.push(required);
+        let mut policy = base.clone();
+        permission_step_mut(&mut policy).params.insert(
+            "policy".to_string(),
+            ParamValue::Literal(serde_json::json!({ "on_failure": "fail", "require_all": false })),
+        );
+        variants.push(policy);
+
+        for variant in variants {
+            assert_ne!(
+                apk_security_automation_fingerprint(&variant).unwrap(),
+                base_fingerprint
+            );
+        }
+    }
+
+    #[test]
+    fn malformed_referenced_or_ambiguous_recipes_are_not_comparable() {
+        let checksum = "C".repeat(64);
+        let base = fingerprint_recipe("app.base.install", "com.example.app", &checksum);
+        let mut variants = Vec::new();
+        let mut referenced = base.clone();
+        referenced.steps[0].params.insert(
+            "expected_package_name".to_string(),
+            ParamValue::Ref("inputs.package".to_string()),
+        );
+        variants.push(referenced);
+        let mut unknown_condition = base.clone();
+        let ParamValue::Literal(Value::Array(actions)) =
+            permission_step_mut(&mut unknown_condition)
+                .params
+                .get_mut("runtime")
+                .unwrap()
+        else {
+            panic!("runtime actions must be a literal array");
+        };
+        actions[0]["when"]["future_api"] = Value::from(1);
+        variants.push(unknown_condition);
+        let mut negative_condition = base.clone();
+        let ParamValue::Literal(Value::Array(actions)) =
+            permission_step_mut(&mut negative_condition)
+                .params
+                .get_mut("runtime")
+                .unwrap()
+        else {
+            panic!("runtime actions must be a literal array");
+        };
+        actions[0]["when"]["android_api_min"] = Value::from(-1);
+        variants.push(negative_condition);
+        let mut package_mismatch = base.clone();
+        let ParamValue::Literal(Value::Array(actions)) = permission_step_mut(&mut package_mismatch)
+            .params
+            .get_mut("runtime")
+            .unwrap()
+        else {
+            panic!("runtime actions must be a literal array");
+        };
+        actions[0]["package_name"] = Value::String("com.example.other".to_string());
+        variants.push(package_mismatch);
+        let mut cycle = base.clone();
+        cycle.steps[0].dependencies = vec!["permissions".to_string()];
+        variants.push(cycle);
+        let mut multiple = base.clone();
+        let mut second_permission_step = multiple.steps[1].clone();
+        second_permission_step.id = "permissions_two".to_string();
+        multiple.steps.push(second_permission_step);
+        variants.push(multiple);
+        let mut local = base.clone();
+        local.steps[0].params.shift_remove("expected_package_name");
+        variants.push(local);
+
+        for variant in variants {
+            assert!(apk_security_automation_fingerprint(&variant).is_none());
+        }
+    }
+
+    #[test]
+    fn unsupported_app_op_mode_is_not_comparable() {
+        let checksum = "F".repeat(64);
+        let mut recipe = fingerprint_recipe("app.mode.install", "com.example.app", &checksum);
+        let ParamValue::Literal(Value::Array(actions)) = permission_step_mut(&mut recipe)
+            .params
+            .get_mut("appops")
+            .unwrap()
+        else {
+            panic!("app-op actions must be a literal array");
+        };
+        actions[0]["mode"] = Value::String("deny".to_string());
+        assert!(apk_security_automation_fingerprint(&recipe).is_none());
+    }
+
+    #[test]
+    fn exact_and_partial_fingerprint_collisions_have_stable_diagnostics() {
+        let checksum = "D".repeat(64);
+        let cases = [
+            (
+                "exact-fingerprint",
+                fingerprint_recipe("app.existing.install", "com.example.app", &checksum),
+                fingerprint_recipe("app.proposed.install", "com.example.app", &checksum),
+                "apk_security_automation_fingerprint_conflict",
+                true,
+            ),
+            (
+                "package-overlap",
+                fingerprint_recipe("app.existing.install", "com.example.app", &checksum),
+                fingerprint_recipe("app.proposed.install", "com.example.app", &"E".repeat(64)),
+                "apk_expected_package_overlap",
+                false,
+            ),
+            (
+                "checksum-overlap",
+                fingerprint_recipe("app.existing.install", "com.example.app", &checksum),
+                fingerprint_recipe("app.proposed.install", "com.example.other", &checksum),
+                "apk_expected_sha256_overlap",
+                false,
+            ),
+        ];
+        for (label, existing, proposed, expected_code, blocking) in cases {
+            let root = app_recipe_root(label);
+            fs::write(
+                root.join("recipes/existing.yaml"),
+                crate::yaml::emit_recipe_yaml(&existing).unwrap(),
+            )
+            .unwrap();
+            let result = check_app_recipe_collisions(
+                &root,
+                &AppRecipeCollisionRequest {
+                    app: app("proposed", "com.example.proposed"),
+                    recipe_id: proposed.id.clone(),
+                    recipe: Some(proposed),
+                },
+            );
+            assert_eq!(result.blocking, blocking, "{label}");
+            assert_eq!(
+                result
+                    .collisions
+                    .iter()
+                    .filter(|collision| collision.code.starts_with("apk_"))
+                    .map(|collision| collision.code.as_str())
+                    .collect::<Vec<_>>(),
+                vec![expected_code],
+                "{label}"
+            );
+            fs::remove_dir_all(root).unwrap();
+        }
     }
 }

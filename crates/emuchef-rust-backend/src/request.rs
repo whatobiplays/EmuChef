@@ -1,5 +1,6 @@
 use std::path::Path;
 
+use serde::Deserialize;
 use serde_json::{json, Map, Value};
 
 use crate::catalog_source::{CatalogIdentity, CatalogSnapshot, CatalogSource, LocalCatalogSource};
@@ -495,18 +496,11 @@ fn handle_check_generated_catalog_collisions(
 ) -> Result<Value, ApiError> {
     let payload = payload_object(object)?;
     let authored_root = required_string(payload, "authoredRoot")?;
-    if payload.contains_key("app") || payload.contains_key("recipeId") {
-        let request =
-            serde_json::from_value::<crate::generation::AppRecipeCollisionRequest>(json!({
-                "app": payload.get("app").cloned().unwrap_or(Value::Null),
-                "recipeId": payload.get("recipeId").cloned().unwrap_or(Value::Null),
-            }))
-            .map_err(|_| {
-                ApiError::invalid_request_with_details(
-                    "App-and-recipe collision input is invalid.",
-                    json!({ "field": "payload" }),
-                )
-            })?;
+    if payload.contains_key("app")
+        || payload.contains_key("recipeId")
+        || payload.contains_key("recipe")
+    {
+        let request = parse_app_recipe_collision_request(payload)?;
         let collisions =
             crate::generation::check_app_recipe_collisions(Path::new(authored_root), &request);
         let result = serde_json::to_value(collisions).map_err(|_| {
@@ -556,6 +550,255 @@ fn handle_check_generated_catalog_collisions(
         )
     })?;
     Ok(envelope::success(result))
+}
+
+fn parse_app_recipe_collision_request(
+    payload: &Map<String, Value>,
+) -> Result<crate::generation::AppRecipeCollisionRequest, ApiError> {
+    let invalid = || {
+        ApiError::invalid_request_with_details(
+            "App-and-recipe collision input is invalid.",
+            json!({ "field": "payload" }),
+        )
+    };
+    if payload
+        .keys()
+        .any(|key| !matches!(key.as_str(), "authoredRoot" | "app" | "recipe" | "recipeId"))
+    {
+        return Err(invalid());
+    }
+    let app = payload
+        .get("app")
+        .cloned()
+        .ok_or_else(&invalid)
+        .and_then(|value| serde_json::from_value(value).map_err(|_| invalid()))?;
+    let legacy_recipe_id = match payload.get("recipeId") {
+        None => None,
+        Some(Value::String(value)) if !value.trim().is_empty() => Some(value.clone()),
+        Some(_) => return Err(invalid()),
+    };
+    let recipe = match payload.get("recipe") {
+        None => None,
+        Some(value) => Some(parse_collision_recipe_dto(value.clone()).ok_or_else(&invalid)?),
+    };
+    let recipe_id = match (&recipe, legacy_recipe_id) {
+        (Some(recipe), Some(recipe_id)) if recipe.id == recipe_id => recipe_id,
+        (Some(_), Some(_)) => return Err(invalid()),
+        (Some(recipe), None) => recipe.id.clone(),
+        (None, Some(recipe_id)) => recipe_id,
+        (None, None) => return Err(invalid()),
+    };
+    Ok(crate::generation::AppRecipeCollisionRequest {
+        app,
+        recipe_id,
+        recipe,
+    })
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields, rename_all = "camelCase")]
+struct CollisionRecipeDto {
+    schema_version: i64,
+    kind: String,
+    id: String,
+    name: String,
+    description: String,
+    recipe_dependencies: Vec<String>,
+    provides: CollisionRecipeProvidesDto,
+    inputs: crate::model::OrderedMap<CollisionInputDto>,
+    artifacts: crate::model::OrderedMap<CollisionArtifactDto>,
+    artifact_groups: crate::model::OrderedMap<Vec<String>>,
+    steps: Vec<CollisionStepDto>,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct CollisionRecipeProvidesDto {
+    features: Vec<String>,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields, rename_all = "camelCase")]
+struct CollisionInputDto {
+    id: String,
+    recipe_id: String,
+    input_id: String,
+    key: String,
+    #[serde(rename = "type")]
+    type_name: String,
+    role: String,
+    label: String,
+    description: String,
+    required: bool,
+    multiple: bool,
+    validation: CollisionInputValidationDto,
+    default: Value,
+    options: Vec<CollisionInputOptionDto>,
+    sensitive: bool,
+    advanced: bool,
+    metadata: Map<String, Value>,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields, rename_all = "camelCase")]
+struct CollisionInputValidationDto {
+    must_exist: bool,
+    allowed_extensions: Vec<String>,
+    path_kind: Option<String>,
+    allowed_prefixes: Vec<String>,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct CollisionInputOptionDto {
+    value: Value,
+    label: String,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct CollisionArtifactDto {
+    id: String,
+    #[serde(rename = "type")]
+    type_name: String,
+    url: String,
+    cache: String,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields, rename_all = "camelCase")]
+struct CollisionStepDto {
+    id: String,
+    #[serde(rename = "type")]
+    type_name: String,
+    name: String,
+    description: String,
+    #[serde(default)]
+    progress_note: Option<String>,
+    user_toggleable: bool,
+    dependencies: Vec<String>,
+    constraints: CollisionStepConstraintsDto,
+    skip_if: Vec<CollisionStepConditionDto>,
+    params: Map<String, Value>,
+    verify: Vec<CollisionStepConditionDto>,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields, rename_all = "camelCase")]
+struct CollisionStepConstraintsDto {
+    capabilities: Vec<String>,
+    conflicts_with: Vec<String>,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct CollisionStepConditionDto {
+    #[serde(rename = "type")]
+    type_name: String,
+    params: Map<String, Value>,
+}
+
+fn parse_collision_recipe_dto(value: Value) -> Option<crate::model::Recipe> {
+    let dto = serde_json::from_value::<CollisionRecipeDto>(value).ok()?;
+    let authored = dto.into_authored_value();
+    let serde_yaml::Value::Mapping(mapping) = serde_yaml::to_value(authored).ok()? else {
+        return None;
+    };
+    crate::yaml::parse_recipe_mapping(&mapping, Path::new("collision-request.yaml")).ok()
+}
+
+impl CollisionRecipeDto {
+    fn into_authored_value(self) -> Value {
+        json!({
+            "schema_version": self.schema_version,
+            "kind": self.kind,
+            "id": self.id,
+            "name": self.name,
+            "description": self.description,
+            "recipe_dependencies": self.recipe_dependencies,
+            "provides": { "features": self.provides.features },
+            "inputs": object_value(self.inputs.into_iter().map(|(id, input)| (id, input.into_authored_value()))),
+            "artifacts": object_value(self.artifacts.into_iter().map(|(id, artifact)| (id, artifact.into_authored_value()))),
+            "artifact_groups": object_value(self.artifact_groups.into_iter().map(|(id, members)| (id, json!(members)))),
+            "steps": self.steps.into_iter().map(CollisionStepDto::into_authored_value).collect::<Vec<_>>(),
+        })
+    }
+}
+
+impl CollisionInputDto {
+    fn into_authored_value(self) -> Value {
+        let _projection_identity = (self.id, self.recipe_id, self.input_id, self.key);
+        json!({
+            "type": self.type_name,
+            "role": self.role,
+            "label": self.label,
+            "description": self.description,
+            "required": self.required,
+            "multiple": self.multiple,
+            "validation": {
+                "must_exist": self.validation.must_exist,
+                "allowed_extensions": self.validation.allowed_extensions,
+                "path_kind": self.validation.path_kind,
+                "allowed_prefixes": self.validation.allowed_prefixes,
+            },
+            "default": self.default,
+            "options": self.options.into_iter().map(|option| json!({
+                "value": option.value,
+                "label": option.label,
+            })).collect::<Vec<_>>(),
+            "sensitive": self.sensitive,
+            "advanced": self.advanced,
+            "metadata": Value::Object(self.metadata),
+        })
+    }
+}
+
+impl CollisionArtifactDto {
+    fn into_authored_value(self) -> Value {
+        let _projection_id = self.id;
+        json!({
+            "type": self.type_name,
+            "url": self.url,
+            "cache": self.cache,
+        })
+    }
+}
+
+impl CollisionStepDto {
+    fn into_authored_value(self) -> Value {
+        let mut value = json!({
+            "id": self.id,
+            "type": self.type_name,
+            "name": self.name,
+            "description": self.description,
+            "user_toggleable": self.user_toggleable,
+            "dependencies": self.dependencies,
+            "constraints": {
+                "capabilities": self.constraints.capabilities,
+                "conflicts_with": self.constraints.conflicts_with,
+            },
+            "skip_if": self.skip_if.into_iter().map(CollisionStepConditionDto::into_authored_value).collect::<Vec<_>>(),
+            "params": Value::Object(self.params),
+            "verify": self.verify.into_iter().map(CollisionStepConditionDto::into_authored_value).collect::<Vec<_>>(),
+        });
+        if let (Some(progress_note), Some(object)) = (self.progress_note, value.as_object_mut()) {
+            object.insert("progress_note".to_string(), Value::String(progress_note));
+        }
+        value
+    }
+}
+
+impl CollisionStepConditionDto {
+    fn into_authored_value(self) -> Value {
+        json!({
+            "type": self.type_name,
+            "params": Value::Object(self.params),
+        })
+    }
+}
+
+fn object_value(values: impl IntoIterator<Item = (String, Value)>) -> Value {
+    Value::Object(values.into_iter().collect())
 }
 
 fn handle_match_device(object: &Map<String, Value>) -> Result<Value, ApiError> {
@@ -1244,4 +1487,128 @@ fn user_configuration_path(payload: &Map<String, Value>) -> Result<std::path::Pa
                 json!({ "userConfiguration": value }),
             )
         })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::model::ParamValue;
+
+    fn collision_app() -> Value {
+        json!({
+            "schema_version": 1,
+            "kind": "app_definition",
+            "id": "example",
+            "name": "Example",
+            "category": "utility",
+            "package": { "primary": "com.example.app", "aliases": [] },
+            "install_source": { "type": "remote_apk", "resolver": "direct_url", "options": {} },
+            "tracking_source": { "type": "remote_apk" },
+            "artifacts": {
+                "apk": { "required": true },
+                "shared_storage_config": { "supported": false },
+                "app_data_config": { "supported": false },
+                "byo_apk": { "required": false }
+            },
+            "provisioning": {
+                "launch_once_recommended": false,
+                "shared_storage_paths": [],
+                "app_data_paths": [],
+                "config_targets": []
+            },
+            "inputs": [],
+            "metadata": {}
+        })
+    }
+
+    fn collision_recipe() -> crate::model::Recipe {
+        let raw = r#"schema_version: 1
+kind: recipe
+id: app.example.install
+name: Install Example
+provides:
+  features: []
+steps:
+- id: install
+  type: install_apk
+  name: Install
+  user_toggleable: false
+  dependencies: []
+  constraints:
+    capabilities: []
+    conflicts_with: []
+  skip_if: []
+  params:
+    app: {ref: inputs.apk}
+    expected_package_name: com.example.app
+    replace_existing: false
+  verify: []
+"#;
+        let serde_yaml::Value::Mapping(mapping) = serde_yaml::from_str(raw).unwrap() else {
+            panic!("recipe fixture must be a mapping");
+        };
+        crate::yaml::parse_recipe_mapping(&mapping, Path::new("request-test.yaml")).unwrap()
+    }
+
+    #[test]
+    fn collision_recipe_dto_preserves_references_and_literals() {
+        let recipe = collision_recipe();
+        let decoded = parse_collision_recipe_dto(crate::dto::recipe_to_dto(&recipe)).unwrap();
+        assert_eq!(
+            decoded.steps[0].params["app"],
+            ParamValue::Ref("inputs.apk".to_string())
+        );
+        assert_eq!(
+            decoded.steps[0].params["expected_package_name"],
+            ParamValue::Literal(Value::String("com.example.app".to_string()))
+        );
+        assert_eq!(
+            decoded.steps[0].params["replace_existing"],
+            ParamValue::Literal(Value::Bool(false))
+        );
+    }
+
+    #[test]
+    fn collision_request_supports_new_and_legacy_forms_strictly() {
+        let recipe = collision_recipe();
+        let recipe_dto = crate::dto::recipe_to_dto(&recipe);
+        let new_payload = json!({
+            "authoredRoot": "/tmp/authored",
+            "app": collision_app(),
+            "recipe": recipe_dto,
+        });
+        let parsed = parse_app_recipe_collision_request(new_payload.as_object().unwrap()).unwrap();
+        assert_eq!(parsed.recipe_id, "app.example.install");
+        assert!(parsed.recipe.is_some());
+
+        let legacy_payload = json!({
+            "authoredRoot": "/tmp/authored",
+            "app": collision_app(),
+            "recipeId": "app.example.install",
+        });
+        let parsed =
+            parse_app_recipe_collision_request(legacy_payload.as_object().unwrap()).unwrap();
+        assert_eq!(parsed.recipe_id, "app.example.install");
+        assert!(parsed.recipe.is_none());
+
+        for invalid_payload in [
+            json!({ "authoredRoot": "/tmp/authored", "app": collision_app() }),
+            json!({
+                "authoredRoot": "/tmp/authored",
+                "app": collision_app(),
+                "recipe": crate::dto::recipe_to_dto(&recipe),
+                "recipeId": "app.other.install"
+            }),
+            json!({
+                "authoredRoot": "/tmp/authored",
+                "app": collision_app(),
+                "recipeId": "app.example.install",
+                "fingerprint": "frontend-authored"
+            }),
+        ] {
+            assert!(
+                parse_app_recipe_collision_request(invalid_payload.as_object().unwrap()).is_err()
+            );
+        }
+    }
 }

@@ -38,7 +38,6 @@ import type {
   AppGeneratorSessionResult,
   ApkInspectionResult,
   AppMappingEditsDto,
-  AppRecipeCollisionResult,
   AppRecipeDraftResult,
   AppRecipeEditsDto,
   AppRecipeSaveResult,
@@ -433,6 +432,7 @@ export async function generateAppRecipeDraft(
   mappings: AppMappingEditsDto | null,
   permissionSelection: PermissionSelectionRequestDto | null,
   regenerateIdentifiers = false,
+  rootHandle: string | null = null,
 ): Promise<EditorApiResult<AppRecipeDraftResult>> {
   return callApi("generate_app_recipe_draft", {
     sessionHandle,
@@ -442,6 +442,7 @@ export async function generateAppRecipeDraft(
     mappings,
     permissionSelection,
     regenerateIdentifiers,
+    rootHandle,
   });
 }
 
@@ -458,6 +459,7 @@ export async function generateRemoteAppRecipeDraft(
   mappings: AppMappingEditsDto | null,
   permissionSelection: PermissionSelectionRequestDto | null,
   regenerateIdentifiers = false,
+  rootHandle: string | null = null,
 ): Promise<EditorApiResult<AppRecipeDraftResult>> {
   return callApi("generate_remote_app_recipe_draft", {
     sessionHandle,
@@ -472,20 +474,7 @@ export async function generateRemoteAppRecipeDraft(
     mappings,
     permissionSelection,
     regenerateIdentifiers,
-  });
-}
-
-export async function checkAppRecipeCollisions(
-  sessionHandle: string,
-  rootHandle: string,
-  app: AppDefinitionV1Dto,
-  recipeId: string,
-): Promise<EditorApiResult<AppRecipeCollisionResult>> {
-  return callApi("check_app_recipe_collisions", {
-    sessionHandle,
     rootHandle,
-    app,
-    recipeId,
   });
 }
 

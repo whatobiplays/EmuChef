@@ -679,6 +679,7 @@ export interface AppRecipeDraftResult {
   evidence: DeviceProfileFieldEvidenceDto[];
   diagnostics: AppGeneratorDiagnosticDto[];
   blocking: boolean;
+  collisions: AppRecipeCollisionResult | null;
 }
 
 export interface AppRecipeCollisionDto {
