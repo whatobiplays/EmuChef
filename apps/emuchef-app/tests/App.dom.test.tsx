@@ -156,6 +156,25 @@ describe("Phase 5B workflow surfaces", () => {
     expect(document.activeElement).toBe(document.body);
   });
 
+  test("shows backend-approved applicable alternatives alongside an exact match", async () => {
+    const user = userEvent.setup();
+    mockApi.pollDevices.mockResolvedValue([availableDevice]);
+    mockApi.matchDevice.mockResolvedValue({
+      ...supportedMatch,
+      candidates: [
+        { ...safePlan, planId: "plan.supported", name: "Supported setup", confidence: "exact" },
+      ],
+      safeGenericPlans: [
+        { ...safePlan, planId: "generic.safe", name: "Conservative generic setup" },
+      ],
+    });
+    await renderReadyApp();
+
+    await user.click(await screen.findByRole("button", { name: /Supported Handheld.*Connected/ }));
+    expect(await screen.findByRole("radio", { name: /Supported setup/ })).toBeTruthy();
+    expect(screen.getByRole("radio", { name: /Conservative generic setup/ })).toBeTruthy();
+  });
+
   test("distinguishes unauthorized devices and deliberately gates backend safe generic plans", async () => {
     const user = userEvent.setup();
     mockApi.pollDevices.mockResolvedValue([
@@ -292,9 +311,18 @@ describe("Phase 5B workflow surfaces", () => {
     mockApi.pollDevices.mockResolvedValue([availableDevice]);
     mockApi.describeConfiguration.mockResolvedValue({
       devicePlan: "plan.supported",
-      selectedRecipes: [],
-      expandedRecipes: [],
-      recipeOptions: [],
+      selectedRecipes: ["recipe.one"],
+      expandedRecipes: ["recipe.one"],
+      recipeOptions: [{
+        id: "recipe.one",
+        name: "Recipe One",
+        description: null,
+        selected: true,
+        recommended: true,
+        dependencyRequired: false,
+        available: true,
+        unavailableCapabilities: [],
+      }],
       inputs: [{
         key: "recipe.one/token",
         recipeId: "recipe.one",
@@ -338,7 +366,9 @@ describe("Phase 5B workflow surfaces", () => {
     await user.click(await screen.findByRole("button", { name: /Supported Handheld.*Connected/ }));
     await screen.findByRole("heading", { name: "Example Handheld" });
     await user.click(screen.getByRole("button", { name: "Continue" }));
-    await screen.findByRole("heading", { name: "Customize your setup" });
+    await screen.findByRole("heading", { name: "Choose what to install" });
+    await user.click(screen.getByRole("button", { name: "Continue" }));
+    await screen.findByRole("heading", { name: "Provide required files and options" });
     await user.type(screen.getByLabelText("Account token (required)"), "do-not-display");
 
     await user.click(screen.getByRole("button", { name: "Restart runtime" }));

@@ -227,11 +227,59 @@ test("back navigation preserves choices while leaving transient device loading",
       },
     },
   );
-  const backToSetup = workflowReducer(described, { type: "back" });
+  assert.equal(described.step, "recipes");
+  const inputs = workflowReducer(described, { type: "continue-to-inputs" });
+  assert.equal(inputs.step, "inputs");
+  const backToRecipes = workflowReducer(inputs, { type: "back" });
+  assert.equal(backToRecipes.step, "recipes");
+  const backToSetup = workflowReducer(backToRecipes, { type: "back" });
   assert.equal(backToSetup.step, "setup");
   assert.equal(backToSetup.devicePlan, "plan.one");
   assert.deepEqual(backToSetup.selectedRecipes, ["recipe.one"]);
   assert.equal(workflowReducer(backToSetup, { type: "back" }).step, "connect");
+});
+
+test("recipes cannot advance while empty or awaiting backend validation", () => {
+  const base = {
+    ...initialWorkflowState,
+    step: "recipes" as const,
+    deviceHandle: facts.deviceHandle,
+    devicePlan: "plan.one",
+    descriptionDirty: false,
+    description: {
+      devicePlan: "plan.one",
+      selectedRecipes: [],
+      expandedRecipes: [],
+      recipeOptions: [],
+      inputs: [],
+      diagnostics: [],
+    },
+  };
+  assert.equal(workflowReducer(base, { type: "continue-to-inputs" }), base);
+  const dirty = {
+    ...base,
+    descriptionDirty: true,
+    description: { ...base.description, selectedRecipes: ["recipe.one"] },
+  };
+  assert.equal(workflowReducer(dirty, { type: "continue-to-inputs" }), dirty);
+});
+
+test("empty recipe selection prevents review", () => {
+  const state = {
+    ...initialWorkflowState,
+    deviceHandle: facts.deviceHandle,
+    devicePlan: "plan.one",
+    descriptionDirty: false,
+    description: {
+      devicePlan: "plan.one",
+      selectedRecipes: [],
+      expandedRecipes: [],
+      recipeOptions: [],
+      diagnostics: [],
+      inputs: [],
+    },
+  };
+  assert.equal(reviewReady(state), false);
 });
 
 test("required unresolved input prevents review", () => {

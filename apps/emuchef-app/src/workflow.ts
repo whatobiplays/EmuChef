@@ -11,7 +11,7 @@ import type {
   ValidationDiagnostic,
 } from "./types";
 
-export type WorkflowStep = "connect" | "device" | "setup" | "inputs" | "review" | "execution";
+export type WorkflowStep = "connect" | "device" | "setup" | "recipes" | "inputs" | "review" | "execution";
 export type ExecutionMode = "simulated" | "real";
 
 export type ExecutionWorkflowState =
@@ -84,6 +84,7 @@ export type WorkflowAction =
   | { type: "select-plan"; devicePlan: string }
   | { type: "description"; description: ConfigurationDescription; generation: number }
   | { type: "set-recipes"; selectedRecipes: string[] }
+  | { type: "continue-to-inputs" }
   | { type: "set-binding"; key: string; value: unknown }
   | { type: "review"; review: ReviewSummary }
   | { type: "execution-starting"; generation: number; mode?: ExecutionMode }
@@ -128,7 +129,8 @@ const previousStep: Record<WorkflowStep, WorkflowStep> = {
   connect: "connect",
   device: "connect",
   setup: "connect",
-  inputs: "setup",
+  recipes: "setup",
+  inputs: "recipes",
   review: "inputs",
   execution: "review",
 };
@@ -204,7 +206,7 @@ export function workflowReducer(state: WorkflowState, action: WorkflowAction): W
       if (action.generation !== state.requestGeneration) return state;
       return {
         ...state,
-        step: action.description.inputs.length > 0 ? "inputs" : "inputs",
+        step: "recipes",
         description: action.description,
         descriptionDirty: false,
         selectedRecipes: action.description.selectedRecipes,
@@ -220,6 +222,11 @@ export function workflowReducer(state: WorkflowState, action: WorkflowAction): W
         portableIntentDirty: true,
         requestGeneration: state.requestGeneration + 1,
       };
+    case "continue-to-inputs":
+      if (!state.description || state.descriptionDirty || state.description.selectedRecipes.length === 0) {
+        return state;
+      }
+      return { ...state, step: "inputs", review: null };
     case "set-binding":
       return {
         ...state,
@@ -487,6 +494,7 @@ export function mergeExecutionEvents(
 
 export function reviewReady(state: WorkflowState): boolean {
   if (!state.deviceHandle || !state.devicePlan || !state.description) return false;
+  if (state.description.selectedRecipes.length === 0) return false;
   if (state.descriptionDirty) return false;
   if (state.requiredReentryBindings.length > 0) return false;
   if (state.description.diagnostics.some((item) => item.severity === "error")) return false;

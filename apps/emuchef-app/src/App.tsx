@@ -1399,6 +1399,45 @@ export function App({ dialogController: suppliedDialogController }: AppProps = {
     }
   };
 
+  const continueToInputs = async () => {
+    if (!workflow.deviceHandle || !workflow.devicePlan || !(workflow.selectedRecipes?.length)) return;
+    setBusy(true);
+    setNotice(null);
+    setOperationError(null);
+    const runtimeGeneration = runtimeGenerationRef.current;
+    try {
+      const generation = workflow.requestGeneration;
+      const description = await api.describeConfiguration({
+        deviceHandle: workflow.deviceHandle,
+        devicePlan: workflow.devicePlan,
+        selectedRecipes: workflow.selectedRecipes,
+        bindings: workflow.bindings,
+      });
+      if (runtimeGenerationRef.current !== runtimeGeneration) return;
+      dispatch({ type: "description", description, generation });
+      if (workflowRef.current.requestGeneration !== generation) {
+        announce("An outdated validation response was ignored.");
+        return;
+      }
+      applyDescriptionValidation(description);
+      if (description.selectedRecipes.length === 0) {
+        announce("Choose at least one recipe before continuing.", true);
+        return;
+      }
+      dispatch({ type: "continue-to-inputs" });
+      announce(description.inputs.length > 0
+        ? "Recipe selection validated. Continue with setup inputs."
+        : "Recipe selection validated. No additional setup inputs are required.");
+    } catch (error) {
+      if (runtimeGenerationRef.current !== runtimeGeneration) return;
+      const message = errorMessage(error);
+      setNotice(message);
+      setOperationError(message);
+    } finally {
+      if (runtimeGenerationRef.current === runtimeGeneration) setBusy(false);
+    }
+  };
+
   useEffect(() => {
     if (
       workflow.step !== "inputs" ||
@@ -1768,7 +1807,11 @@ export function App({ dialogController: suppliedDialogController }: AppProps = {
     if (deviceIsUnsupported(workflow.match)) {
       return workflow.unsupportedAcknowledged ? workflow.match.safeGenericPlans : [];
     }
-    return workflow.match.candidates;
+    const byPlanId = new Map(
+      [...workflow.match.candidates, ...workflow.match.safeGenericPlans]
+        .map((plan) => [plan.planId, plan] as const),
+    );
+    return [...byPlanId.values()];
   }, [workflow.match, workflow.unsupportedAcknowledged]);
   const platformToolsBusy = platformToolsOperation.phase !== "idle";
   const savedPlanUnavailable = Boolean(
@@ -2144,31 +2187,13 @@ export function App({ dialogController: suppliedDialogController }: AppProps = {
               </>
             )}
 
-            {workflow.step === "inputs" && workflow.description && (
+            {workflow.step === "recipes" && workflow.description && (
               <>
-                <p className="eyebrow">CHOOSE SETUP</p>
-                <h2 data-focus-fallback="workflow" data-step-heading tabIndex={-1}>Customize your setup</h2>
-                {validationErrors.length > 0 && (
-                  <section
-                    aria-labelledby="validation-summary-heading"
-                    className="error error-summary"
-                    ref={validationSummaryRef}
-                    role="alert"
-                    tabIndex={-1}
-                  >
-                    <h3 id="validation-summary-heading">Resolve {validationErrors.length} configuration {validationErrors.length === 1 ? "error" : "errors"}</h3>
-                    <ul>
-                      {validationErrors.map((item, index) => (
-                        <li key={`${item.key ?? "global"}-${item.code}-${index}`}>
-                          {item.targetId ? <a href={`#${item.targetId}`}>{item.message}</a> : item.message}
-                          <details><summary>Technical details</summary><code>{item.code}</code></details>
-                        </li>
-                      ))}
-                    </ul>
-                  </section>
-                )}
+                <p className="eyebrow">CHOOSE RECIPES</p>
+                <h2 data-focus-fallback="workflow" data-step-heading tabIndex={-1}>Choose what to install</h2>
+                <p>Select at least one recipe. Required dependencies remain selected automatically.</p>
                 <fieldset className="recipe-list">
-                  <legend>Choose recipes</legend>
+                  <legend>Available recipes</legend>
                   {workflow.description.recipeOptions.map((recipe) => (
                     <label key={recipe.id} className={!recipe.available ? "unavailable" : ""}>
                       <input
@@ -2199,6 +2224,48 @@ export function App({ dialogController: suppliedDialogController }: AppProps = {
                     </label>
                   ))}
                 </fieldset>
+                <div className="button-row">
+                  <button className="secondary" onClick={() => dispatch({ type: "back" })}>Back</button>
+                  <button
+                    aria-describedby={!(workflow.selectedRecipes?.length) || busy ? "recipes-continue-reason" : undefined}
+                    disabled={!(workflow.selectedRecipes?.length) || busy}
+                    onClick={continueToInputs}
+                  >Continue</button>
+                </div>
+                {(!(workflow.selectedRecipes?.length) || busy) && (
+                  <p className="disabled-reason" id="recipes-continue-reason">
+                    {busy ? "Recipe validation is in progress." : "Select at least one recipe to continue."}
+                  </p>
+                )}
+              </>
+            )}
+
+            {workflow.step === "inputs" && workflow.description && (
+              <>
+                <p className="eyebrow">CONFIGURE INPUTS</p>
+                <h2 data-focus-fallback="workflow" data-step-heading tabIndex={-1}>Provide required files and options</h2>
+                {validationErrors.length > 0 && (
+                  <section
+                    aria-labelledby="validation-summary-heading"
+                    className="error error-summary"
+                    ref={validationSummaryRef}
+                    role="alert"
+                    tabIndex={-1}
+                  >
+                    <h3 id="validation-summary-heading">Resolve {validationErrors.length} configuration {validationErrors.length === 1 ? "error" : "errors"}</h3>
+                    <ul>
+                      {validationErrors.map((item, index) => (
+                        <li key={`${item.key ?? "global"}-${item.code}-${index}`}>
+                          {item.targetId ? <a href={`#${item.targetId}`}>{item.message}</a> : item.message}
+                          <details><summary>Technical details</summary><code>{item.code}</code></details>
+                        </li>
+                      ))}
+                    </ul>
+                  </section>
+                )}
+                {workflow.description.inputs.length === 0 && (
+                  <p className="success">The selected recipes do not require additional input.</p>
+                )}
 
                 {workflow.description.inputs.map((input) => {
                   const inputId = stableDomId("input", input.key);
