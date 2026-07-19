@@ -111,30 +111,34 @@ test("Platform-Tools setup exposes only the official page and no React path argu
   );
   assert.match(
     commands,
-    /pub async fn import_platform_tools_zip\(\s*app: AppHandle\s*\)/s,
+    /pub async fn pick_platform_tools_zip\(app: AppHandle\)/,
   );
-  assert.doesNotMatch(api, /importPlatformTools:\s*\([^)]*path/i);
+  assert.match(
+    commands,
+    /pub async fn install_platform_tools_selection\(\s*selection_handle: String,\s*app: AppHandle/s,
+  );
+  assert.doesNotMatch(api, /pickPlatformToolsZip:\s*\([^)]*(path|file)/i);
+  assert.doesNotMatch(api, /installPlatformToolsSelection:\s*\([^)]*(path|file)/i);
   assert.doesNotMatch(commands, /open_platform_tools_download_page\([^)]*(url|uri):/i);
 });
 
-test("Platform-Tools import uses the non-blocking picker before blocking worker work", () => {
+test("Platform-Tools picker and installation split filesystem authority across an opaque handle", () => {
   const commands = read("src-tauri/src/commands.rs");
-  const start = commands.indexOf("pub async fn import_platform_tools_zip");
-  const end = commands.indexOf("#[tauri::command]", start);
-  const importCommand = commands.slice(start, end);
-  assert.notEqual(start, -1);
-  assert.match(importCommand, /picker\.pick_file\(/);
-  assert.doesNotMatch(importCommand, /blocking_pick_file/);
-  assert.match(importCommand, /run_import_task\(move \|\|/);
-  assert.ok(importCommand.indexOf("picker.pick_file") < importCommand.indexOf("run_import_task"));
-  assert.ok(importCommand.indexOf("run_import_task") < importCommand.indexOf("state.adb.lock"));
-  assert.ok(importCommand.indexOf("drop(adb)") < importCommand.indexOf(".handles"));
-  assert.ok(importCommand.indexOf("run_import_task") < importCommand.lastIndexOf(".await?"));
-  assert.ok(importCommand.lastIndexOf(".await?") < importCommand.indexOf(".handles"));
-  assert.match(
-    importCommand,
-    /return run_import_task\(move \|\| get_adb_setup_status\(status_app\.state::<AppState>\(\)\)\)\.await;/,
-  );
+  const pickerStart = commands.indexOf("pub async fn pick_platform_tools_zip");
+  const installStart = commands.indexOf("pub async fn install_platform_tools_selection");
+  const installEnd = commands.indexOf("pub(crate) type PickerCompletion", installStart);
+  const pickerCommand = commands.slice(pickerStart, installStart);
+  const installCommand = commands.slice(installStart, installEnd);
+  assert.notEqual(pickerStart, -1);
+  assert.notEqual(installStart, -1);
+  assert.match(pickerCommand, /picker\.pick_file\(/);
+  assert.doesNotMatch(pickerCommand, /blocking_pick_file|run_import_task/);
+  assert.match(pickerCommand, /\.replace\(path\)/);
+  assert.match(installCommand, /\.take\(&selection_handle\)/);
+  assert.match(installCommand, /run_import_task\(move \|\|/);
+  assert.ok(installCommand.indexOf("run_import_task") < installCommand.indexOf(".await?"));
+  assert.ok(installCommand.indexOf("drop(adb)") < installCommand.indexOf(".handles"));
+  assert.doesNotMatch(installCommand, /picker\.pick_file|blocking_pick_file/);
   assert.match(commands, /tauri::async_runtime::spawn_blocking\(task\)/);
 });
 

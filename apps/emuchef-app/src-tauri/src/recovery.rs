@@ -205,7 +205,7 @@ impl RecoveryStore {
             schema_version: RECOVERY_SCHEMA_VERSION,
             generation: next_generation,
             saved_at_epoch_ms: now_epoch_ms(),
-            dirty: true,
+            dirty: request.dirty,
             display_name,
             source_configuration_id,
             device_plan: request.device_plan,
@@ -224,6 +224,7 @@ impl RecoveryStore {
             "requestGeneration": request.request_generation,
             "draftGeneration": request.draft_generation,
             "recordGeneration": next_generation,
+            "omittedBindings": self.record.as_ref().map(|record| &record.omitted_bindings),
         }))
     }
 
@@ -297,6 +298,7 @@ pub struct StageRecoveryDraftRequest {
     draft_generation: u64,
     display_name: Option<String>,
     source_configuration_handle: Option<String>,
+    dirty: bool,
     device_plan: String,
     selected_recipes: Vec<String>,
     bindings: Map<String, Value>,
@@ -367,6 +369,7 @@ pub fn restore_recovery_draft(
             record_generation: request.record_generation,
         })?;
     let intent = RecoveryPortableIntent {
+        dirty: record.dirty,
         device_plan: record.device_plan.clone(),
         selected_recipes: record.selected_recipes.clone(),
         bindings: record.bindings.clone(),
@@ -405,6 +408,7 @@ pub fn restore_recovery_draft(
         "sourceStatus": if document.is_some() { "available" } else if record.source_configuration_id.is_some() { "missing" } else { "unsaved" },
         "document": document,
         "intent": {
+            "dirty": record.dirty,
             "devicePlan": record.device_plan,
             "selectedRecipes": record.selected_recipes,
             "bindings": record.bindings,
@@ -481,7 +485,7 @@ fn load_record(path: &Path) -> (Option<RecoveryRecord>, Option<&'static str>) {
 
 fn validate_record(record: &RecoveryRecord) -> Result<(), String> {
     if record.schema_version != RECOVERY_SCHEMA_VERSION
-        || !record.dirty
+        || (!record.dirty && record.source_configuration_id.is_none())
         || record.generation == 0
         || record.saved_at_epoch_ms == 0
         || record.selected_recipes.len() > MAX_RECIPES
@@ -673,6 +677,7 @@ mod tests {
             draft_generation: 1,
             display_name: None,
             source_configuration_handle: None,
+            dirty: true,
             device_plan: "plan.one".to_string(),
             selected_recipes: vec!["recipe.one".to_string()],
             bindings,
@@ -699,14 +704,47 @@ mod tests {
         let mut bindings = Map::new();
         bindings.insert("recipe.one/password".to_string(), json!("public-value"));
         bindings.insert("recipe.one/neutral".to_string(), json!("secret-value"));
-        store.stage(request(bindings), None).unwrap();
+        let ack = store.stage(request(bindings), None).unwrap();
         let record = store.record.as_ref().unwrap();
         assert_eq!(record.bindings["recipe.one/password"], "public-value");
         assert!(!record.bindings.contains_key("recipe.one/neutral"));
         assert_eq!(record.omitted_bindings, ["recipe.one/neutral"]);
+        assert_eq!(ack["omittedBindings"], json!(["recipe.one/neutral"]));
         assert!(!fs::read_to_string(&store.path)
             .unwrap()
             .contains("secret-value"));
+    }
+
+    #[test]
+    fn clean_restart_intent_remains_clean_when_every_binding_is_portable() {
+        let (_temp, mut store) = store();
+        store.record_schema(&json!({ "inputs": [
+            { "key": "recipe.one/theme", "sensitive": false }
+        ] }));
+        let mut clean = request(Map::from_iter([(
+            "recipe.one/theme".to_string(),
+            json!("dark"),
+        )]));
+        clean.dirty = false;
+        let ack = store
+            .stage(
+                clean,
+                Some(("configuration-id".to_string(), "Saved setup".to_string())),
+            )
+            .unwrap();
+        let record = store.record.as_ref().unwrap();
+        assert!(!record.dirty);
+        assert_eq!(record.bindings["recipe.one/theme"], "dark");
+        assert!(record.omitted_bindings.is_empty());
+        assert_eq!(ack["omittedBindings"], json!([]));
+    }
+
+    #[test]
+    fn clean_unsaved_recovery_record_is_rejected() {
+        let (_temp, mut store) = store();
+        let mut clean = request(Map::new());
+        clean.dirty = false;
+        assert!(store.stage(clean, None).is_err());
     }
 
     #[test]
@@ -894,6 +932,7 @@ mod tests {
             "draftGeneration": 1,
             "displayName": null,
             "sourceConfigurationHandle": null,
+            "dirty": true,
             "devicePlan": "plan.one",
             "selectedRecipes": [],
             "bindings": {},

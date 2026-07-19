@@ -3,7 +3,7 @@
 ## 1. Status
 
 - Phase: `5A`
-- Status: `In progress`
+- Status: `Completed`
 - Started: `2026-07-14`
 - Product surface: `apps/emuchef-app`
 - Audit authority: observed application behavior is authoritative; code inspection may explain an observation but does not replace running the workflow.
@@ -92,33 +92,33 @@ Status values: `Not run`, `Running`, `Passed`, `Findings`, `Blocked`, `Not appli
 | ID | Scenario | Required states or variants | Status | Finding IDs | Evidence notes |
 |---|---|---|---|---|---|
 | A01 | First launch with no Platform-Tools | Clean app data; no managed Platform-Tools; no debug ADB override | Findings | UX-004 | Runtime badge exposes internal catalog identity. |
-| A02 | Platform-Tools import | Valid current macOS ZIP; cancellation; invalid ZIP; unsupported/older ZIP where available | Not run | — | — |
-| A03 | Platform-Tools replacement and removal | Existing valid managed installation; failed replacement preservation; successful replacement | Not run | — | — |
-| A04 | No device connected | Runtime/catalog available; device list empty; refresh/redetection | Not run | — | — |
-| A05 | Unauthorized device | One ADB device awaiting authorization | Not run | — | — |
-| A06 | Unsupported device | One connected device that matches no supported plan | Not run | — | — |
+| A02 | Platform-Tools import | Valid current macOS ZIP; cancellation; invalid ZIP; unsupported/older ZIP where available | Findings | UX-002, UX-003, UX-025, UX-026, UX-027 | Valid import, cancellation, non-ZIP filtering, unrelated ZIP rejection, persistence, and same-version replacement passed. Setup copy is overly technical; picker-open state prematurely says `Validating...`; replacement lacks in-progress wording. |
+| A03 | Platform-Tools replacement and removal | Existing valid managed installation; failed replacement preservation; successful replacement | Findings | UX-028, UX-029 | Cancellation, failed-replacement preservation, successful same-version replacement, and persistence passed. Successful replacement showed a false disconnect warning; removal had no confirmation and used internal authority terminology. |
+| A04 | No device connected | Runtime/catalog available; device list empty; refresh/redetection | Findings | UX-002, UX-003, UX-030, UX-031 | Empty state is clear, but refresh has no visible progress or completion feedback and the screen does not explain USB debugging or authorization. Relaunch again reproduced the heading focus outline and false unexpected-session warning. |
+| A05 | Unauthorized device | One ADB device awaiting authorization | Findings | UX-032 | Unauthorized devices are omitted from the list and presented as if no device is connected; authorizing and refreshing transitions cleanly to available. |
+| A06 | Unsupported device | One connected device that matches no supported plan | Findings | UX-033 | Unsupported device is shown as available, selecting it skips the Device stage, and Setup exposes `Match confidence: none` instead of a clear unsupported-device explanation. |
 | A07 | Supported device detection and confirmation | Supported target; disconnect/reconnect; identity change where practical | Findings | UX-002 | Initial workflow heading receives unexpected focus on window appearance. |
-| A08 | Setup and recipe selection | Recommended path; manual selection; incompatible/dependent/conflicting recipes | Not run | — | — |
-| A09 | Input collection | Missing, invalid, sensitive, moved, multi-file, and optional values | Not run | — | — |
-| A10 | Plan generation and review | Valid setup; invalidated/stale review; back navigation | Not run | — | — |
-| A11 | Simulated execution | Successful run; progress; cancellation; completion | Not run | — | — |
-| A12 | Partial failure and retry | Retryable and non-retryable outcomes where supported | Not run | — | — |
-| A13 | Completion report | Succeeded, failed, skipped, needs-attention, export/display behavior | Not run | — | — |
+| A08 | Setup and recipe selection | Recommended path; manual selection; incompatible/dependent/conflicting recipes | Findings | UX-014, UX-015, UX-034 | Recipe selection, deselection, multiple selections, Back/forward preservation, and plan generation generally worked. Selecting a recipe with required inputs immediately shows blocking errors with internal binding IDs; the review exposes raw capability labels, an absolute host path, and a plan digest. |
+| A09 | Input collection | Missing, invalid, sensitive, moved, multi-file, and optional values | Findings | UX-014, UX-015, UX-016, UX-035, UX-036, UX-037 | Optional RetroArch config omission, Back/forward persistence, and re-selection value restoration worked. Selected file values cannot be cleared; deleting a selected file produces a generic review failure; device destination editing is blocked and uses an inappropriate host Browse control; deselecting Copy ROM library leaves stale bindings that trigger validation errors. |
+| A10 | Plan generation and review | Valid setup; invalidated/stale review; back navigation | Findings | UX-034, UX-038 | Plan generation and regeneration generally worked, but the normal review surface exposes raw bindings, host paths, capability labels, action kinds, technical IDs, and the plan digest. Disconnecting safely returns to Connect, but reconnecting the same device discards setup and input state. |
+| A11 | Simulated execution | Successful run; progress; cancellation; completion | Findings | UX-019, UX-022, UX-039 | Progress, queued/running/succeeded states, scrolling, cooperative cancellation, and simulation labeling worked. Repeated runs could not reach a successful terminal result because dry-run verification failed on expected simulated output. |
+| A12 | Partial failure and retry | Retryable and non-retryable outcomes where supported | Findings | UX-021, UX-022, UX-040, UX-041 | Failed and blocked work are visually distinct, but raw verifier/dependency codes remain visible and summary messages are generic. `Retry failed work` returns to Inputs for a fresh plan rather than retrying; `Return to Review` exposes the same prior plan without a strong stale-plan warning. Export succeeded and produced a sanitized structured report. |
+| A13 | Completion report | Succeeded, failed, skipped, needs-attention, export/display behavior | Findings | UX-019, UX-020, UX-021, UX-022, UX-039, UX-042 | Failed and cancelled report summaries and exports worked, but raw verifier/dependency terms and timestamps remain visible, failure cards are difficult to scan, the successful-report variant is blocked by UX-039, and `Report saved` persists across a later cancelled or re-executed run. |
 | A14 | Save and Save As | New unsaved setup; overwrite prompts; naming; cancelled native dialogs | Findings | UX-001 | Unsaved-configuration action panel has a visibly broken and difficult-to-scan layout. |
-| A15 | Reopen and recent files | Valid recent file; missing file; malformed file; stale catalog references | Not run | — | — |
-| A16 | Rename and duplicate saved configuration | Where supported; verify identity and dirty-state behavior | Not run | — | — |
-| A17 | Relink moved inputs | Saved configuration with moved or missing file/directory bindings | Not run | — | — |
+| A15 | Reopen and recent files | Valid recent file; missing file; malformed file; stale catalog references | Findings | UX-043, UX-044 | Saving from Inputs unexpectedly returns to Connect. Missing recent files are detected and can be relinked or removed. Malformed/incompatible configurations remain selectable and proceed into the workflow before surfacing raw catalog IDs and internal diagnostics. |
+| A16 | Rename and duplicate saved configuration | Where supported; verify identity and dirty-state behavior | Findings | UX-045 | No first-class rename or duplicate action exists. `Save As...` can create another file, but identity shown in the UI comes from the YAML name rather than the filename, so externally renamed or duplicated files are not automatically distinguishable. |
+| A17 | Relink moved inputs | Saved configuration with moved or missing file/directory bindings | Findings | UX-015, UX-016, UX-036, UX-046 | Both missing inputs were detected and could be resolved independently. Relinking one left the other unresolved as expected. Errors still use internal binding identifiers, the device destination retains an inappropriate Browse control, and successful Save is paired with misleading disabled-state guidance. |
 | A18 | Dirty-intent close and crash recovery | Normal close, forced termination, Restore, Discard, Not now, sensitive re-entry | Findings | UX-003 | Normal Cmd+Q is reported as an unexpected prior shutdown on next launch. |
-| A19 | Support diagnostics | Runtime available/unavailable; export success/cancel/failure; disclosure clarity | Not run | — | — |
+| A19 | Support diagnostics | Runtime available/unavailable; export success/cancel/failure; disclosure clarity | Findings | UX-047 | Diagnostics disclosure was clear and two exported archives were sanitized as promised. Reopening Support & Storage later retained `Success: diagnostics saved.` from a previous export, so the modal presents stale operation state. |
 | A20 | Cache inventory and cleanup | Empty cache; removable entry; in-use entry; cleanup cancellation/failure | Findings | UX-006, UX-007 | Cache refresh leaves stale success notices visible; technical details expose internal result codes. |
-| A21 | Update panel | Production trust unconfigured; repeated check; external-navigation state | Not run | — | — |
-| A22 | Narrow window and high zoom | Minimum window; 200% zoom; long text; wrapping; no page-level horizontal scroll | Not run | — | — |
+| A21 | Update panel | Production trust unconfigured; repeated check; external-navigation state | Not applicable | — | This build correctly reports that update discovery is not configured. `Check for Updates` produces no actionable result and the DMG button is disabled because release packaging, signed metadata, and the validated download address are not yet configured. Full update behavior remains deferred to release engineering. |
+| A22 | Narrow window and high zoom | Minimum window; 200% zoom; long text; wrapping; no page-level horizontal scroll | Passed | — | At the minimum practical window width, navigation reflowed into two columns, System Status moved below the main task, controls remained reachable, and Support & Storage scrolled internally without horizontal page scrolling. A 200% zoom control was not available in the packaged app, so that subtest could not be exercised. |
 | A23 | Keyboard-only workflow | Full primary workflow; dialogs; native-dialog return; visible focus; skip link | Findings | UX-002 | Initial focus appears on the workflow heading without user navigation. |
-| A24 | Screen-reader workflow | Headings, landmarks, fieldsets, summaries, live announcements, dialogs | Not run | — | — |
-| A25 | Reduced motion | OS preference enabled; transitions and progress remain understandable | Not run | — | — |
-| A26 | Forced colors / increased contrast | Supported browser/WebView and macOS contrast settings | Not run | — | — |
-| A27 | Runtime restart and stale async responses | Restart during safe idle state and during pending frontend work where supported | Not run | — | — |
-| A28 | Start Over and backward navigation | Every workflow stage; dirty and clean intent; expected preservation/loss | Not run | — | — |
+| A24 | Screen-reader workflow | Headings, landmarks, fieldsets, summaries, live announcements, dialogs | Not applicable | — | Skipped by product decision; dedicated screen-reader testing is outside the current audit scope. |
+| A25 | Reduced motion | OS preference enabled; transitions and progress remain understandable | Not applicable | — | Skipped by product decision; dedicated accessibility-preference testing is outside the current audit scope. |
+| A26 | Forced colors / increased contrast | Supported browser/WebView and macOS contrast settings | Not applicable | — | Skipped by product decision; dedicated accessibility-preference testing is outside the current audit scope. |
+| A27 | Runtime restart and stale async responses | Restart during safe idle state and during pending frontend work where supported | Findings | UX-048 | Restarting the runtime always returns the app to Connect, clears active device/setup/input/review state, and requires reopening a saved portable configuration. Generated plans are invalidated safely, but unsaved portable intent is lost without a confirmation or preservation path. |
+| A28 | Start Over and backward navigation | Every workflow stage; dirty and clean intent; expected preservation/loss | Passed | — | New/Start Over, Back navigation, stale-plan invalidation, completed/failed simulation return paths, and unsaved-change protection all behaved as expected across the tested states. |
 
 ## 7. Findings
 
@@ -134,7 +134,7 @@ Add one subsection per finding using the template below. Finding IDs are sequent
 - Evidence: `Observed | Observed + code-supported | Code-supported only`
 - Scenario(s): `A00`
 - Proposed phase: `5B | 5C | 5D | 5E | 5F | 5G | 5H`
-- Status: `Open | Needs reproduction | Deferred | Resolved as audit blocker`
+- Status: `Open | Needs reproduction | Deferred | Resolved | Resolved as audit blocker`
 
 **Preconditions**
 
@@ -222,9 +222,9 @@ Treat this as a layout and hierarchy correction, not a workflow-state redesign. 
 - Severity: `S3 — Minor`
 - Frequency: `Unknown`
 - Evidence: `Observed`
-- Scenario(s): `A07`, `A23`
+- Scenario(s): `A02`, `A04`, `A07`, `A23`
 - Proposed phase: `5B`
-- Status: `Open`
+- Status: `Resolved`
 
 **Preconditions**
 
@@ -269,7 +269,7 @@ Confirm whether startup intentionally focuses the workflow heading or whether st
 - Severity: `S2`
 - Frequency: `Unknown`
 - Evidence: `Observed`
-- Scenario(s): `A18`
+- Scenario(s): `A02`, `A04`, `A18`
 - Proposed phase: `5G`
 - Status: `Open`
 
@@ -1366,7 +1366,7 @@ Preserve the existing fresh-plan safety contract. Rename the action to match the
 - Evidence: `Observed`
 - Scenario(s): `A08`, `A09`
 - Proposed phase: `5B`
-- Status: `Open`
+- Status: `Resolved`
 
 **Preconditions**
 
@@ -1451,93 +1451,1283 @@ Users must scan and scroll through the full combined page.
 
 Create a dedicated recipe-selection stage before input collection. The recipe catalog should support a compact scalable presentation with at least search or filtering, categories or meaningful grouping, clear selected-state summaries, compatibility/recommendation indicators, and an explicit Continue action. The following stage should render only inputs required by selected recipes. Preserve dependency auto-inclusion and planner validation, but communicate auto-added dependencies clearly rather than silently expanding a large flat list.
 
+### UX-025 — Platform-Tools setup copy exposes implementation details instead of guiding the user
+
+- Type: `Defect`
+- Severity: `S3 — Minor`
+- Frequency: `Always`
+- Evidence: `Observed`
+- Scenario(s): `A02`
+- Proposed phase: `5H`
+- Status: `Open`
+
+**Preconditions**
+
+1. Launch EmuChef without a managed Platform-Tools installation.
+2. View the one-time Platform-Tools setup panel.
+
+**Reproduction**
+
+1. Read the explanatory text under `Android SDK Platform-Tools is required`.
+2. Read the smaller disclosure text below the import actions.
+
+**Expected**
+
+The setup panel should explain, in plain language, that the user needs to download the macOS Platform-Tools ZIP from Google and select it in EmuChef. Additional technical ownership or storage details should be omitted from the primary workflow unless they help the user make a decision.
+
+**Actual**
+
+The panel says the ZIP is imported `for local validation and managed installation` and adds that the selected ZIP `is never copied into the app bundle or repository`. These phrases describe implementation and repository boundaries rather than the user's task.
+
+**User impact**
+
+The wording increases cognitive load during first-time setup and introduces terms that are not useful to a nontechnical user. It makes a simple download-and-select task feel more complicated and developer-oriented.
+
+**Workaround**
+
+Users can ignore the technical language and use the two setup buttons.
+
+**Evidence**
+
+- Screenshot: User-provided A02.1 screenshot from 2026-07-18 showing the complete one-time setup panel.
+- Exact UI text: `for local validation and managed installation` and `The selected ZIP remains yours and is never copied into the app bundle or repository.`
+
+**Notes for later implementation**
+
+Prefer direct wording such as: `Download the macOS Platform-Tools ZIP from Google, then select it here.` A short privacy/storage note may remain in Help or Support documentation, but repository and app-bundle terminology should not appear in the normal setup path.
+
+### UX-026 — Platform-Tools import reports validation before the user selects a file
+
+- Type: `Defect`
+- Severity: `S3 — Minor`
+- Frequency: `Always`
+- Evidence: `Observed`
+- Scenario(s): `A02`
+- Proposed phase: `5B`
+- Status: `Resolved`
+
+**Preconditions**
+
+1. Launch EmuChef without a managed Platform-Tools installation.
+2. The `Import Platform-Tools ZIP` action is available.
+
+**Reproduction**
+
+1. Click `Import Platform-Tools ZIP`.
+2. Observe the button while the native file picker is open.
+3. Cancel the picker.
+
+**Expected**
+
+Opening the native picker should either leave the button label unchanged or show a neutral file-selection state such as `Choose ZIP...`. Validation should begin only after the user has selected a file.
+
+**Actual**
+
+The button immediately changes to `Validating...` while the native file picker is still open, before any file has been selected. Cancelling the picker returns the button to its original label without an error.
+
+**User impact**
+
+The status is temporally inaccurate and can make users believe EmuChef is already processing a file or has become busy while they are still choosing one.
+
+**Workaround**
+
+Ignore the temporary label and continue using or cancel the native picker.
+
+**Evidence**
+
+- Observation: Owner reproduced the label change during A02.2 and confirmed cancellation otherwise passes without an error or state change.
+- Exact UI state: `Import Platform-Tools ZIP` changes to `Validating...` as soon as the file picker opens.
+
+**Notes for later implementation**
+
+Separate native-dialog-open state from archive-validation state. Disable duplicate invocation while the picker is open, but do not claim validation has started until a path is returned and backend processing begins.
+
+### UX-027 — Platform-Tools replacement has no visible in-progress action wording
+
+- Type: `Defect`
+- Severity: `S3 — Minor`
+- Frequency: `Always`
+- Evidence: `Observed`
+- Scenario(s): `A02`, `A03`
+- Proposed phase: `5B`
+- Status: `Resolved`
+
+**Preconditions**
+
+1. A valid managed Platform-Tools installation is active.
+2. The System Status panel shows `Replace Platform-Tools`.
+
+**Reproduction**
+
+1. Click `Replace Platform-Tools`.
+2. Select a valid Platform-Tools ZIP.
+3. Observe the replacement action while the archive is being processed.
+
+**Expected**
+
+The control should communicate the active operation with wording such as `Replacing...`, `Reinstalling...`, or `Updating...`, and conflicting Platform-Tools actions should remain unavailable until completion.
+
+**Actual**
+
+The available action is correctly labeled `Replace Platform-Tools`, but no replacement/import/reinstall/update wording is shown while processing.
+
+**User impact**
+
+The user receives weak feedback that the requested replacement is underway and may be uncertain whether the click registered or whether the application is still processing.
+
+**Workaround**
+
+Wait for the operation to finish and verify the Platform-Tools version in System Status.
+
+**Evidence**
+
+- Screenshot: User-provided A02.6 screenshot showing Platform-Tools 37.0.0 and the `Replace Platform-Tools` action in System Status.
+- Observation: Owner reports no operation-specific progress wording during replacement.
+
+**Notes for later implementation**
+
+Use a dedicated replacement busy label and retain the existing operation guard. Avoid generic `Validating...` before file selection; after selection, a staged sequence such as `Validating...` followed by `Replacing...` is acceptable if those states reflect actual work.
+
+### UX-028 — Successful Platform-Tools replacement reports a false device disconnect
+
+- Type: `Defect`
+- Severity: `S2 — Major`
+- Frequency: `Unknown`
+- Evidence: `Observed`
+- Scenario(s): `A03`
+- Proposed phase: `5B`
+- Status: `Resolved`
+
+**Preconditions**
+
+1. Platform-Tools 37.0.0 is installed and working.
+2. A supported Pocket S Mini is connected and visible as available.
+
+**Reproduction**
+
+1. Select `Replace Platform-Tools`.
+2. Import the same valid official Platform-Tools ZIP.
+3. Wait for replacement to complete.
+4. Observe the workflow notice and device list.
+
+**Expected**
+
+A successful replacement should briefly refresh device detection and either preserve the selected device when identity remains valid or report a neutral refresh state. A disconnect warning should appear only when the device is actually unavailable.
+
+**Actual**
+
+After successful same-version replacement, EmuChef displays: `Attention: The selected device disconnected. Connect it again to continue.` The Pocket S Mini remains listed as `Status: available`, can still be selected, and the workflow can continue.
+
+**User impact**
+
+The application presents contradictory device state and falsely suggests user action is required. This undermines confidence in device identity and stale-state handling after a runtime dependency changes.
+
+**Workaround**
+
+Ignore the warning and select the still-available device again.
+
+**Evidence**
+
+- Screenshot: User-provided A03.3 screenshots from 2026-07-18 showing the Pocket S Mini as available while the disconnect warning is displayed.
+- Exact UI text: `Attention: The selected device disconnected. Connect it again to continue.` and `Status: available`.
+
+**Notes for later implementation**
+
+Treat Platform-Tools replacement as a controlled device-redetection event. Clear stale selected-device authority while replacement is active, then reconcile by stable device identity after refresh. Do not emit a disconnect warning when the same device is immediately rediscovered and available.
+
+### UX-029 — Removing Platform-Tools has no confirmation and exposes internal authority terminology
+
+- Type: `Defect`
+- Severity: `S2 — Major`
+- Frequency: `Always`
+- Evidence: `Observed`
+- Scenario(s): `A03`
+- Proposed phase: `5B`
+- Status: `Resolved`
+
+**Preconditions**
+
+1. A valid Platform-Tools installation is active.
+2. A supported device may be selected or visible.
+3. `Remove Platform-Tools` is available in System Status.
+
+**Reproduction**
+
+1. Click `Remove Platform-Tools`.
+2. Observe whether confirmation is requested.
+3. Observe the result message and resulting workflow state.
+
+**Expected**
+
+Because removal disables device detection and invalidates current device-dependent work, EmuChef should ask for confirmation and explain the user-visible consequence in plain language. The user should be able to cancel safely.
+
+**Actual**
+
+Removal proceeds immediately without confirmation. The resulting setup panel says: `Platform-Tools removed. Device, review, and execution authority were invalidated.` The app correctly returns to the one-time setup state, but `authority` and `invalidated` are internal implementation terms.
+
+**User impact**
+
+A destructive setup action can be triggered accidentally with no chance to cancel. The completion message does not clearly explain that device selection and any current review must be repeated after reinstalling Platform-Tools.
+
+**Workaround**
+
+Re-import Platform-Tools and repeat device selection. There is no pre-removal cancellation path after clicking the action.
+
+**Evidence**
+
+- Screenshot: User-provided A03.4 screenshot from 2026-07-18 showing the post-removal setup state.
+- Exact UI text: `Platform-Tools removed. Device, review, and execution authority were invalidated.`
+- Observation: no confirmation dialog was presented.
+
+**Notes for later implementation**
+
+Add a confirmation dialog that states the practical impact, for example: `Remove Platform-Tools? Device detection will stop and you will need to select your device and review your setup again after reinstalling.` Use `Remove` and `Cancel` actions. Replace authority terminology in the completion notice with direct user-facing wording.
+
+### UX-030 — Device refresh gives no visible progress or completion feedback
+
+- Type: `Defect`
+- Severity: `S3 — Minor`
+- Frequency: `Always`
+- Evidence: `Observed`
+- Scenario(s): `A04`
+- Proposed phase: `5B`
+- Status: `Resolved`
+
+**Preconditions**
+
+1. Platform-Tools is installed and verified.
+2. No Android device is connected.
+3. The Connect stage shows the empty device list.
+
+**Reproduction**
+
+1. Click `Refresh devices`.
+2. Repeat the action several times.
+3. Observe the action label and empty-state area while and after detection runs.
+
+**Expected**
+
+The refresh action should indicate that detection is in progress, prevent conflicting duplicate actions, and provide a subtle completion result when no devices are found. The user should be able to distinguish an idle empty state from a refresh that has not yet completed.
+
+**Actual**
+
+Clicking `Refresh devices` produces no visible progress state and no completion feedback. The screen looks unchanged before, during, and after the refresh.
+
+**User impact**
+
+Users cannot tell whether the click registered, whether ADB detection is still running, or whether the completed result is genuinely zero devices. Repeated clicking is encouraged because the interface provides no acknowledgement.
+
+**Workaround**
+
+Wait and infer completion from the unchanged device list.
+
+**Evidence**
+
+- Screenshot: User-provided A04 screenshot from 2026-07-18 showing the no-device state.
+- Observation: repeated refreshes produced no visible progress or completion feedback.
+- Exact UI text: `No ADB devices detected yet. Refresh after connecting a device.` and `Refresh devices`.
+
+**Notes for later implementation**
+
+Use an operation-specific state such as `Refreshing...`, disable duplicate refresh invocation while detection is active, and announce a stable result such as `No devices found` without accumulating stale notices.
+
+### UX-031 — No-device state does not explain USB debugging or device authorization
+
+- Type: `Missing MVP feature`
+- Severity: `S2 — Major`
+- Frequency: `Always`
+- Evidence: `Observed`
+- Scenario(s): `A04`
+- Proposed phase: `5B`
+- Status: `Resolved`
+
+**Preconditions**
+
+1. Platform-Tools is installed.
+2. No authorized Android device is detected.
+3. The user is on the Connect stage.
+
+**Reproduction**
+
+1. Read the Connect-stage instructions and empty-state message.
+2. Look for guidance on enabling Developer Options, USB debugging, accepting the device authorization prompt, USB connection mode, or troubleshooting an undetected device.
+
+**Expected**
+
+The first connection screen should provide concise, actionable guidance for the common setup path: connect by USB, enable Developer Options and USB debugging, unlock the device, accept the authorization prompt, then refresh. A compact troubleshooting link or expandable help section should cover common detection failures without overwhelming the primary screen.
+
+**Actual**
+
+The page says `Connect with USB debugging enabled` and `No ADB devices detected yet. Refresh after connecting a device.` It does not explain how to enable USB debugging, that an authorization prompt may appear on the device, or what to check when refresh still finds nothing.
+
+**User impact**
+
+Nontechnical users can become blocked at the first workflow step without knowing which device-side action is required. The omission is particularly significant because authorization and USB-debugging setup are common first-use barriers.
+
+**Workaround**
+
+Consult external Android or device-specific instructions.
+
+**Evidence**
+
+- Screenshot: User-provided A04 screenshots from 2026-07-18 showing the complete no-device state before and after relaunch.
+- Exact UI text: `Connect with USB debugging enabled. EmuChef only reads device information in this phase.`
+- Observation: no inline or linked explanation of USB debugging and authorization is available on this screen.
+
+**Notes for later implementation**
+
+Keep the primary copy concise, but add a visible `How to connect a device` disclosure or help action. Explain the authorization prompt and provide a short checklist. Avoid device-specific instructions in the core flow unless a supported device profile can supply them safely.
+
+### UX-032 — Unauthorized devices are indistinguishable from no device being connected
+
+- Type: `Defect`
+- Severity: `S2 — Major`
+- Frequency: `Always`
+- Evidence: `Observed`
+- Scenario(s): `A05`
+- Proposed phase: `5B`
+- Status: `Resolved`
+
+**Preconditions**
+
+1. Platform-Tools is installed and working.
+2. An Android device is connected by USB with USB debugging enabled.
+3. The device has not authorized the host computer for debugging.
+
+**Reproduction**
+
+1. Revoke USB debugging authorizations or connect the device without accepting the RSA prompt.
+2. Click `Refresh devices`.
+3. Observe the device list.
+4. Accept the authorization prompt on the device and refresh again.
+
+**Expected**
+
+EmuChef should distinguish an unauthorized connected device from an absent device. It should explain that the user must unlock the device and accept the USB debugging authorization prompt, then refresh. After authorization succeeds, the same device should become available without stale warning text.
+
+**Actual**
+
+While the device is connected but unauthorized, EmuChef shows the same empty state used when no device is connected: `No ADB devices detected yet. Refresh after connecting a device.` The device does not appear in the list and there is no authorization-specific guidance. After the prompt is accepted on the device and the list is refreshed, the device appears and works as expected.
+
+**User impact**
+
+The app reports the wrong problem at a common first-use failure point. Users may reconnect cables, reinstall tools, or assume the device is unsupported when the required action is simply accepting the on-device authorization prompt.
+
+**Workaround**
+
+Notice and accept the authorization prompt on the device, then manually refresh the list.
+
+**Evidence**
+
+- Screenshot: User-provided A05 screenshot from 2026-07-18 showing the no-device empty state while an unauthorized device is physically connected.
+- Exact UI text: `No ADB devices detected yet. Refresh after connecting a device.`
+- Observation: authorizing USB debugging on the device and refreshing causes the device to appear normally.
+
+**Notes for later implementation**
+
+Preserve ADB-reported unauthorized devices in the discovery result and render a nonselectable row or dedicated guidance state such as `Authorization required`. Explain that the device should be unlocked and the USB debugging prompt accepted. Do not expose the full serial; retain existing redaction behavior.
+
+### UX-033 — Unsupported devices are presented as available and skip the Device stage
+
+- Type: `Defect`
+- Severity: `S2 — Major`
+- Frequency: `Always`
+- Evidence: `Observed`
+- Scenario(s): `A06`
+- Proposed phase: `5B`
+- Status: `Resolved`
+
+**Preconditions**
+
+1. Platform-Tools is installed and working.
+2. An authorized Android device is connected.
+3. The device does not match any supported device plan.
+
+**Reproduction**
+
+1. Refresh the Connect stage.
+2. Select the unsupported device, shown as `Status: available`.
+3. Observe the workflow transition.
+
+**Expected**
+
+EmuChef should distinguish connection availability from product support. Selecting an unsupported device should lead to a Device-stage explanation that the hardware was detected but no supported device plan matches it. The user should be given a clear next action, such as returning to Connect, choosing another device, or viewing support information.
+
+**Actual**
+
+The unsupported Pocket DMG appears in the Connect list with the same green `Status: available` treatment as a supported device. Selecting it skips the Device stage entirely and jumps directly to Setup. The Setup screen shows `Match confidence: none` while still offering `AYANEO Base Setup` and `Choose a safe setup`, without explicitly stating that the device is unsupported or why no exact plan was selected.
+
+**User impact**
+
+The workflow implies that the device is fully supported and safe to continue with, even though no device plan matched. Skipping the Device stage removes the natural place to explain the mismatch and may lead users to apply a generic setup without understanding the risk or limitation.
+
+**Workaround**
+
+Use Back to return to Connect and choose a known supported device. The current UI provides no direct unsupported-device explanation.
+
+**Evidence**
+
+- Screenshots: User-provided A06 screenshots from 2026-07-18 showing the Pocket DMG as `Status: available`, the workflow jumping to Setup, and `Match confidence: none` with `AYANEO Base Setup` offered.
+- Exact UI text: `Status: available`, `Match confidence: none`, `Choose a safe setup`, and `Starter setup for supported AYANEO devices.`
+- Observation: the Device stage is skipped.
+
+**Notes for later implementation**
+
+Separate transport state from support state. A connected and authorized device may be `Connected` while still being `Unsupported`. Route device selection through the Device stage for all devices, show the match result in user language, and block or clearly gate generic setup selection when no supported plan matches. Do not expose raw match-confidence terminology in the normal workflow.
+
+### UX-034 — Plan review exposes implementation metadata and private host-path details
+
+- Type: `Defect`
+- Severity: `S2 — Major`
+- Frequency: `Always`
+- Evidence: `Observed`
+- Scenario(s): `A08`, `A10`
+- Proposed phase: `5E`
+- Status: `Open`
+
+**Preconditions**
+
+1. Select one or more recipes and provide enough required inputs to generate a plan.
+2. Reach the Review stage.
+
+**Reproduction**
+
+1. Inspect `Selected options` and the generated step list.
+2. Scroll to steps requiring elevated or app-specific capabilities.
+3. Inspect the bottom of the review panel.
+
+**Expected**
+
+The normal review should summarize what EmuChef will do in plain language, identify meaningful device impact, and protect private host-path details. Internal capability names, schema-oriented action labels, and plan integrity hashes should be absent from the primary review. Full paths and hashes may remain in explicitly technical diagnostics or exported reports when necessary.
+
+**Actual**
+
+The review displays implementation-oriented metadata including:
+
+- the binding path `app.retroarch.provision/retroarch_cfg`;
+- the full host path `/Users/.../Downloads/retroarch.cfg`;
+- capability labels such as `Requires: apk install`, `Requires: app data write`, and `Requires: app launch`;
+- `Elevated access` on multiple steps;
+- a raw `Plan digest` SHA-256 value.
+
+The step list also repeats internal action categories such as `Copy files`, `Launch app`, and `Device setup action` alongside user-facing step names.
+
+**User impact**
+
+The review is harder to scan, exposes a private local filesystem path during an ordinary workflow, and reads like a planner/debug representation rather than a decision-focused summary. Users cannot easily distinguish important risk or device impact from internal capability plumbing.
+
+**Workaround**
+
+Ignore the implementation metadata and infer the intended actions from the recipe and step titles.
+
+**Evidence**
+
+- Screenshots: User-provided A08 screenshots from 2026-07-18 showing `Selected options`, the full RetroArch configuration path, capability labels, repeated technical step categories, and the raw plan digest.
+- Exact UI text includes `app.retroarch.provision/retroarch_cfg`, `Requires: app data write`, `Elevated access`, and `Plan digest:` followed by a long hexadecimal hash.
+
+**Notes for later implementation**
+
+Create a user-facing plan-review projection rather than rendering planner metadata directly. Show concise action groups, meaningful warnings, download/copy/install impact, and whether elevated access is needed in plain language. Redact host paths to a filename or user-approved abbreviated path. Keep binding IDs, capability tokens, action-kind names, and the digest in diagnostics or expandable developer details only.
+
+### UX-035 — Selected file inputs cannot be cleared
+
+- Type: `Defect`
+- Severity: `S2 — Major`
+- Frequency: `Always`
+- Evidence: `Observed`
+- Scenario(s): `A09`
+- Proposed phase: `5D`
+- Status: `Open`
+
+**Actual**
+
+After selecting an optional file such as the RetroArch config, the field displays the path but provides no clear/remove action. The user cannot return the input to its unset state through the UI.
+
+**User impact**
+
+Optional inputs become effectively permanent for the current configuration unless the user starts over or edits persisted data elsewhere. This also makes it difficult to intentionally omit an optional file after reconsidering the setup.
+
+**Evidence**
+
+- Screenshot: User-provided A09 screenshot from 2026-07-18 showing the selected RetroArch config path and only a `Browse...` action.
+- Observation: owner could not clear the selected value.
+
+**Notes for later implementation**
+
+Add an explicit `Clear` action for optional file and directory inputs. Clearing must remove the binding, refresh validation, invalidate stale review state, and omit the optional action from the generated plan.
+
+### UX-036 — Deleted input files produce a generic review failure without naming the invalid field
+
+- Type: `Defect`
+- Severity: `S2 — Major`
+- Frequency: `Always`
+- Evidence: `Observed`
+- Scenario(s): `A09`, `A10`
+- Proposed phase: `5D`
+- Status: `Open`
+
+**Actual**
+
+When a previously selected RetroArch config file is deleted from disk, `Review plan` fails with `Action could not be completed` and `Resolve the setup validation errors before reviewing the plan.` The visible message does not identify the RetroArch config field or explain that the selected file no longer exists.
+
+**User impact**
+
+The user knows validation failed but cannot tell which path is stale or what must be reselected. This is especially problematic in configurations with several file inputs.
+
+**Evidence**
+
+- Screenshot: User-provided A09 screenshot from 2026-07-18 showing the generic review failure after deleting the selected config file.
+- Observation: no field-specific missing-file message was presented.
+
+**Notes for later implementation**
+
+Validate selected paths before review and attach the diagnostic to the user-facing field label. Use wording such as `RetroArch config could not be found. Select the file again or clear this optional input.` Provide a direct relink or clear action.
+
+### UX-037 — Deselecting a recipe leaves stale bindings that block validation
+
+- Type: `Defect`
+- Severity: `S2 — Major`
+- Frequency: `Always`
+- Evidence: `Observed`
+- Scenario(s): `A09`
+- Proposed phase: `5D`
+- Status: `Open`
+
+**Actual**
+
+After selecting `Copy ROM library`, entering or retaining its values, and then deselecting the recipe, validation reports that `feature.copy_roms/policy` and `feature.copy_roms/source` are outside the selected recipe dependency set. The recipe is no longer selected, but its bindings remain active enough to produce blocking errors.
+
+**User impact**
+
+Removing a recipe creates new validation failures and prevents plan review. Users must understand internal dependency-set terminology or manually recover state that should have become irrelevant when the recipe was deselected.
+
+**Evidence**
+
+- Screenshots: User-provided A09 screenshots from 2026-07-18 showing both field-level and summary errors after `Copy ROM library` was deselected.
+- Exact UI text: `Binding 'feature.copy_roms/policy' is outside the selected recipe dependency set.` and the corresponding `source` error.
+
+**Notes for later implementation**
+
+On recipe deselection, remove inactive bindings from authoritative validation input or retain them only as dormant remembered values that are excluded from validation and planning. Re-selecting the recipe may restore those remembered values, but they must not block unrelated configurations while inactive.
+
+### UX-038 — Reconnecting the same device after a review-stage disconnect discards setup and input state
+
+- Type: `Defect`
+- Severity: `S2 — Major`
+- Frequency: `Always`
+- Evidence: `Observed`
+- Scenario(s): `A10`
+- Proposed phase: `5B`
+- Status: `Resolved`
+
+**Preconditions**
+
+1. Select a supported device.
+2. Choose a setup and recipes.
+3. Provide valid inputs and generate a plan.
+4. Reach the Review stage.
+
+**Reproduction**
+
+1. Disconnect the selected device while the plan is visible.
+2. Observe that EmuChef returns to Connect and invalidates execution.
+3. Reconnect the same physical device.
+4. Refresh and select it again.
+5. Continue through the workflow.
+
+**Expected**
+
+Disconnecting must invalidate device authority, the generated plan, and execution readiness. When the same device reconnects, EmuChef should restore still-valid user intent such as the selected setup, recipes, and reusable input values, then require fresh device confirmation, validation, planning, and review. If restoration is unsafe, the app should clearly warn before discarding the state.
+
+**Actual**
+
+The disconnect safely returns the user to the Connect stage with `The selected device disconnected. Connect it again to continue.` After reconnecting and selecting the same device, the workflow starts over and the previously selected setup, recipes, and inputs are not restored.
+
+**User impact**
+
+A temporary cable interruption can discard substantial configuration work even though the same device returns. This makes review and execution fragile and discourages users from trusting the workflow with complex setups.
+
+**Workaround**
+
+Recreate the setup, recipe selections, and inputs manually after reconnecting.
+
+**Evidence**
+
+- Screenshot: User-provided A10 screenshot from 2026-07-18 showing the Connect stage and disconnect warning after leaving Review.
+- Observation: reconnecting and selecting the same Pocket S Mini restarted the workflow without restoring prior data.
+
+**Notes for later implementation**
+
+Separate portable intent from ephemeral device authority. Preserve setup, recipe selections, and reusable input bindings across a temporary disconnect; invalidate the device snapshot, plan, review approval, and execution handles. Rebind preserved intent only after confirming the same device identity and rerunning validation. Do not silently restore device-specific or unsafe authority.
+
+### UX-039 — The normal simulated-run baseline cannot reach a successful terminal result
+
+- Type: `Defect`
+- Severity: `S2 — Major`
+- Frequency: `Always`
+- Evidence: `Observed + contract-supported`
+- Scenario(s): `A11`, `A12`, `A13`
+- Proposed phase: `5E`
+- Status: `Open`
+
+**Preconditions**
+
+1. Select the supported Pocket S Mini setup.
+2. Generate and review a valid RetroArch provisioning plan.
+3. Start a simulated dry run without intentionally corrupting inputs or dependencies.
+
+**Reproduction**
+
+1. Allow the simulation to run to completion.
+2. Repeat the run from a fresh valid review.
+3. Inspect the terminal step results.
+
+**Expected**
+
+The standard valid setup should be capable of reaching `succeeded` or `succeeded_with_warnings`. Dry-run verification should simulate the expected post-step filesystem and app state closely enough for valid copy and launch dependencies to pass. Deliberate failure fixtures may remain available for failure-path testing, but ordinary end-user simulations must have a successful baseline.
+
+**Actual**
+
+No tested simulated run reached a fully successful terminal result. Expected RetroArch copy steps failed verification with internal messages such as `verify failed: path_exists, path_exists, path_exists` and `verify failed: file_exists`, after which `Launch RetroArch` was blocked by raw dependency identifiers.
+
+The Phase 2A product contract explicitly supports `succeeded` and `succeeded_with_warnings` reports, so persistent failure is not an intentional requirement of simulation mode.
+
+**User impact**
+
+Users cannot use the advertised dry run to confirm that a valid setup is internally coherent. Every run ends in failure, making the feature appear broken and preventing the success, completion, and repeat-run paths from being meaningfully exercised.
+
+**Workaround**
+
+None within the current UI. The user can inspect the partial report, but cannot obtain successful simulated evidence for the standard setup.
+
+**Evidence**
+
+- Screenshots: User-provided A11 screenshots from 2026-07-18 showing progress, terminal verifier failures, and a blocked launch.
+- Exact UI text includes `verify failed: path_exists, path_exists, path_exists`, `verify failed: file_exists`, and `dependency blocked: app.retroarch.provision/copy_cheats, app.retroarch.provision/copy_core_system_files`.
+- Contract: `docs/product/phase-2a-simulated-execution.md` states that reports handle `succeeded` and `succeeded_with_warnings` in addition to failed and cancelled outcomes.
+
+**Notes for later implementation**
+
+Review the fake-device and dry-run verifier state transitions for extract, copy, and launch steps. Ensure successful simulated actions update the simulated filesystem and dependency state consumed by later verifiers. Add an end-to-end regression test proving that the canonical Pocket S Mini RetroArch setup reaches a successful terminal report, while retaining separate deterministic failure and cancellation fixtures.
+
+### UX-040 — `Retry failed work` is mislabeled and does not retry the failed work
+
+- Type: `Defect`
+- Severity: `S2 — Major`
+- Frequency: `Always`
+- Evidence: `Observed`
+- Scenario(s): `A12`
+- Proposed phase: `5E`
+- Status: `Open`
+
+**Actual**
+
+After a failed simulated run, the primary action is labeled `Retry failed work`. Selecting it does not retry failed steps or preserve the terminal report as an active retry context. Instead, EmuChef returns to the Inputs stage with `Configuration refreshed. Resolve any diagnostics, then create and review a new plan.`
+
+**Expected**
+
+The action label should accurately describe the operation. If failed steps cannot be retried safely from the retained report, the action should say `Repair setup` or `Create a fresh plan`, explain that prior successful simulated steps are only report evidence, and require a new review before another run.
+
+**User impact**
+
+The current label promises a direct retry but performs a full recovery workflow. Users cannot predict whether completed work will be reused, whether the same plan remains authoritative, or why they have been returned to Inputs.
+
+**Evidence**
+
+- User-provided A12 screenshots from 2026-07-18 showing the failed report, the `Retry failed work` button, and the resulting Inputs-stage notice.
+- Exported report confirms each error remediation is `generate_fresh_plan`, not a retry of retained failed steps. fileciteturn2file0
+
+**Notes for later implementation**
+
+Rename the action to match the authoritative remediation. Preserve selected setup and reusable input intent, invalidate the failed review and execution authority, focus the first actionable diagnostic, and clearly state that a fresh plan and review are required.
+
+### UX-041 — Return to Review exposes the failed plan without clearly marking it stale
+
+- Type: `Defect`
+- Severity: `S2 — Major`
+- Frequency: `Always`
+- Evidence: `Observed`
+- Scenario(s): `A12`
+- Proposed phase: `5E`
+- Status: `Open`
+
+**Actual**
+
+Selecting `Return to Review` from the failed report returns to the same prior review screen and plan digest. The screen looks ready to start another simulated run and does not prominently explain that the failed outcome requires repair and generation of a fresh plan.
+
+**Expected**
+
+Returning from a failed terminal report should either present the previous plan as read-only evidence or mark it clearly stale and non-executable. The UI should identify the failed features, direct the user to repair inputs or configuration, and require regeneration and review before another execution.
+
+**User impact**
+
+The user may interpret the old review as still valid and restart an unchanged plan that is known to fail. The distinction between reviewing historical evidence and approving a new authoritative plan is unclear.
+
+**Evidence**
+
+- User-provided A12 screenshot from 2026-07-18 showing the same review and plan digest after selecting `Return to Review`.
+- The exported report classifies the execution as failed and assigns `generate_fresh_plan` remediation to all four reported errors. fileciteturn2file0
+
+**Notes for later implementation**
+
+Introduce an explicit stale/failed-review state. Disable execution from the old review, show a concise failure summary, and provide a single action that returns to the relevant setup/input fields while preserving portable intent.
+
+### UX-042 — Report export success state persists across a different execution report
+
+- Type: `Defect`
+- Severity: `S3 — Minor`
+- Frequency: `Always`
+- Evidence: `Observed`
+- Scenario(s): `A13`
+- Proposed phase: `5E`
+- Status: `Open`
+
+**Preconditions**
+
+1. Complete and export a failed or cancelled simulated execution report.
+2. Start or complete a different simulated execution so the visible report changes.
+
+**Reproduction**
+
+1. Export one execution report successfully.
+2. Observe the export control change to `Report saved`.
+3. Return to Review, re-execute the plan, or cancel a later run.
+4. Inspect the export control on the new report.
+
+**Expected**
+
+Export confirmation should describe only the current report and should reset when a different execution starts or becomes the active terminal report. The control should return to `Export report` until the current report has been saved.
+
+**Actual**
+
+After exporting a report, the control remains labeled `Report saved` after cancelling and re-executing the plan. The label therefore refers to a prior report rather than the currently displayed execution.
+
+**User impact**
+
+The user may incorrectly believe the current cancelled or failed report has already been exported. This creates uncertainty about which execution evidence exists on disk.
+
+**Workaround**
+
+Click the stale `Report saved` control and export again. Existing filenames can be overwritten successfully.
+
+**Evidence**
+
+- Screenshot: User-provided A13 screenshot from 2026-07-18 showing `Report saved` on a later failed execution.
+- Export behavior: cancelling the save dialog was silent; overwriting an existing report succeeded.
+- Exported cancelled report: status `cancelled`, 3 completed steps, and 26 cancelled steps; absolute catalog paths are redacted and the target is omitted.
+- Exported failed report: status `failed`, 25 completed steps, 3 failed steps, and 1 blocked step; absolute catalog paths are redacted and the target is omitted.
+
+**Notes for later implementation**
+
+Scope export state to the active execution handle and terminal report generation. Clear `saved` state whenever execution identity changes, a new run starts, or a newer snapshot replaces the displayed report. Consider showing the saved filename or a transient confirmation rather than permanently replacing the action label.
+
+### UX-043 — Saving portable intent unexpectedly resets the workflow to Connect
+
+- Type: `Defect`
+- Severity: `S2 — Major`
+- Frequency: `Always`
+- Evidence: `Observed`
+- Scenario(s): `A15`
+- Proposed phase: `5F`
+- Status: `Open`
+
+**Preconditions**
+
+1. Select a supported device and setup.
+2. Reach Inputs with valid recipe selections and portable input values.
+3. The configuration has not yet been saved at its current path.
+
+**Reproduction**
+
+1. Select `Save` or `Save As...` from the Inputs stage.
+2. Complete the native save dialog.
+3. Observe the workflow stage after the save completes.
+
+**Expected**
+
+Saving portable intent should preserve the current workflow position and all still-valid session state. Device authority and generated plans may remain transient, but a normal save should not behave like reopening the configuration or starting over.
+
+**Actual**
+
+After saving from Inputs, the application returns to Connect and asks the user to select the current device again. The configuration is saved, but the active workflow context is discarded.
+
+**User impact**
+
+Saving interrupts the primary workflow and forces the user to repeat device selection and setup confirmation. It makes a routine persistence action feel destructive and discourages saving work in progress.
+
+**Workaround**
+
+Reconnect or reselect the same device and proceed through the workflow again.
+
+**Evidence**
+
+- Screenshot: User-provided A15 screenshot from 2026-07-18 showing the saved `Pocket S Mini base` configuration active while the workflow has returned to Connect.
+- Exact UI text: `Opened Pocket S Mini base. Connect and select the current device to validate it.`
+
+**Notes for later implementation**
+
+Separate save completion from open/reload behavior. Preserve device selection, setup choice, recipes, inputs, and current stage when they remain valid; invalidate only generated plan and execution authority when required by the persistence contract.
+
+### UX-044 — Invalid or incompatible saved configurations remain actionable before being blocked
+
+- Type: `Defect`
+- Severity: `S2 — Major`
+- Frequency: `Always`
+- Evidence: `Observed`
+- Scenario(s): `A15`
+- Proposed phase: `5F`
+- Status: `Open`
+
+**Preconditions**
+
+1. Create or edit a configuration so it contains unknown recipe, binding, or device-plan references.
+2. Open the configuration through Recents or `Open...`.
+
+**Reproduction**
+
+1. Open the malformed or catalog-incompatible configuration.
+2. Observe its recent-file status and compatibility warnings.
+3. Select an available device and continue.
+4. Observe the later Setup-stage failure.
+5. Expand diagnostic details.
+
+**Expected**
+
+A configuration that cannot be used with the current catalog should be clearly blocked or placed into a guided repair state before device selection advances. Diagnostics should identify user-facing missing recipes or setup compatibility without exposing raw catalog internals by default.
+
+**Actual**
+
+The configuration is marked `requires Attention`, but device selection remains available and the user can proceed. The next stage then reports that the saved device plan is unavailable or incompatible. Diagnostics expose raw recipe IDs, device-plan IDs, binding IDs, internal result codes such as `unknown_recipe` and `device_plan_not_found`, and the complete list of available device-plan IDs.
+
+**User impact**
+
+The user is allowed to invest effort in a configuration that is already known to be unusable. Recovery is delayed and framed in implementation terminology rather than actionable choices such as replacing a missing recipe or selecting a supported setup.
+
+**Workaround**
+
+Manually edit the YAML or abandon the configuration and recreate it using current catalog entries.
+
+**Evidence**
+
+- Screenshots: User-provided A15 screenshots from 2026-07-18 showing `requires Attention`, raw recipe and device-plan diagnostics, and the later incompatible-device-plan message.
+- Exact UI text includes `Selected recipe ... was not found`, `Unknown device plan`, `references an unknown recipe`, and `The saved device plan reference is unavailable or incompatible with this current device.`
+
+**Notes for later implementation**
+
+Introduce a compatibility gate and repair workflow when opening saved configurations. Keep the document open for inspection, but prevent normal progression until blocking references are repaired or explicitly removed. Present friendly names and concise recovery actions; reserve raw IDs and codes for expandable technical details.
+
+### UX-045 — Saved configurations lack first-class rename and duplicate actions
+
+- Type: `Missing MVP feature`
+- Severity: `S3 — Minor`
+- Frequency: `Always`
+- Evidence: `Observed`
+- Scenario(s): `A16`
+- Proposed phase: `5F`
+- Status: `Open`
+
+**Preconditions**
+
+1. Open a valid saved configuration.
+2. Inspect the configuration panel, Recents list, application menus, and available context actions.
+
+**Reproduction**
+
+1. Attempt to rename the active configuration within EmuChef.
+2. Attempt to duplicate it without replacing the current file.
+3. Use `Save As...` as the only available substitute.
+4. Rename the YAML file externally and reopen it.
+
+**Expected**
+
+A reusable-configuration workflow should provide explicit Rename and Duplicate actions. The resulting configuration identity should be understandable, and multiple files with the same internal title should be distinguishable in Recents.
+
+**Actual**
+
+There is no Rename or Duplicate action. `Save As...` is the only duplication mechanism. The displayed configuration name comes from the YAML name field rather than the filename, so externally renaming the file does not change its visible identity. Copies retain the same visible name unless the YAML title is edited separately.
+
+**User impact**
+
+Users cannot organize reusable setups entirely within the application. Duplicate configurations can appear identical in Recents, and changing a filename outside EmuChef does not clarify which copy is active.
+
+**Workaround**
+
+Use `Save As...`, then edit the YAML name field outside EmuChef before reopening the copy.
+
+**Evidence**
+
+- Screenshots: User-provided A16 screenshots from 2026-07-18 showing only `Save As...` and showing a file whose visible title follows the edited YAML name.
+- Observed behavior: changing only the external filename does not change the title shown in EmuChef.
+
+**Notes for later implementation**
+
+Add explicit Duplicate and Rename actions. Decide and document the identity model: the internal display name may remain authoritative, but Recents should also expose enough filename or location context to distinguish files with duplicate titles. Rename should clearly specify whether it changes the internal title, filename, or both.
+
+### UX-046 — Successful Save is paired with misleading disabled-state guidance
+
+- Type: `Defect`
+- Severity: `S3 — Minor`
+- Frequency: `Always`
+- Evidence: `Observed`
+- Scenario(s): `A17`
+- Proposed phase: `5F`
+- Status: `Open`
+
+**Preconditions**
+
+1. Open a saved configuration with a selected device plan.
+2. Change and relink one or more portable inputs.
+3. Save the updated configuration successfully.
+
+**Reproduction**
+
+1. Resolve missing file or directory inputs.
+2. Select `Save`.
+3. Observe the success notice and the disabled Save guidance shown in the configuration panel.
+
+**Expected**
+
+After a successful save, the interface should clearly confirm completion. Any disabled-state explanation should be neutral and should not imply that the just-completed save failed or remains incomplete.
+
+**Actual**
+
+The configuration saves and a success notice appears, but the panel simultaneously states `Save requires a selected device plan and unsaved portable changes.` The message reads like an unmet requirement or failure even though the save completed correctly.
+
+**User impact**
+
+The user may believe the configuration was not saved, repeat the operation, or distrust the current document state.
+
+**Workaround**
+
+Infer success from the separate `Saved ...` notice and the absence of unsaved-edits status.
+
+**Evidence**
+
+- Screenshot: User-provided A17 screenshot from 2026-07-18 showing the successful save notice alongside the disabled-state guidance.
+- Exact disabled-state text: `Save requires a selected device plan and unsaved portable changes.`
+- Both missing inputs were detected; resolving one left only the other unresolved, and resolving both allowed saving.
+
+**Notes for later implementation**
+
+Change the post-save disabled explanation to a neutral status such as `Configuration saved. Save becomes available after another change.` Keep requirement-oriented copy only for states where the current document has never been eligible to save.
+
+### UX-047 — Support diagnostics retains stale export-success state across modal sessions
+
+- Type: `Defect`
+- Severity: `S3 — Minor`
+- Frequency: `Always after a prior successful export`
+- Evidence: `Observed`
+- Scenario(s): `A19`, `A22`
+- Proposed phase: `5G`
+- Status: `Open`
+
+**Preconditions**
+
+1. Open Support & Storage.
+2. Export support diagnostics successfully.
+3. Close the modal.
+
+**Reproduction**
+
+1. Reopen Support & Storage later without exporting a new archive.
+2. Observe the Support diagnostics section.
+
+**Expected**
+
+Operation feedback should describe only the current modal session or current export attempt. A new modal session should begin without a success message unless a new export completes.
+
+**Actual**
+
+The modal continues to display `Success: diagnostics saved.` from the earlier export. The stale message remains visible while reviewing unrelated cache information and after other application activity.
+
+**User impact**
+
+The user can reasonably interpret the message as confirmation that a new diagnostic archive was just created, even though no export occurred in the current session.
+
+**Workaround**
+
+Ignore the success banner and use the native save dialog or filesystem to verify whether a new archive was actually created.
+
+**Evidence**
+
+- Screenshot: User-provided A22 constrained-window screenshot from 2026-07-18 showing `Success: diagnostics saved.` immediately after reopening Support & Storage.
+- Exact UI text: `Success: diagnostics saved.`
+
+**Notes for later implementation**
+
+Reset export status when the modal opens or closes, and whenever a new export begins or is cancelled. Scope success state to the specific export operation rather than retaining it as persistent support-panel state.
+
+### UX-048 — Runtime restart discards active workflow state and portable intent
+
+- Type: `Defect`
+- Severity: `S2 — Major`
+- Frequency: `Always`
+- Evidence: `Observed`
+- Scenario(s): `A27`
+- Proposed phase: `5B`
+- Status: `Resolved`
+
+**Preconditions**
+
+1. Progress beyond Connect with a selected device, setup, recipes, and inputs, or generate a reviewed plan.
+2. Ensure no unrelated failure is active.
+
+**Reproduction**
+
+1. Select `Restart runtime`.
+2. Observe the workflow after the Rust runtime reports ready again.
+
+**Expected**
+
+Restart should invalidate runtime-owned authority and generated plans, but preserve portable user intent where safe. Before discarding unsaved setup, recipe, or input changes, the app should either preserve them automatically or require explicit confirmation.
+
+**Actual**
+
+Restart always returns the application to Connect and shows `Rust runtime restarted. Reopen a portable configuration before continuing.` Active device selection, setup choice, recipe selections, input values, and review position are cleared. A saved configuration must be reopened, and unsaved portable intent has no recovery path.
+
+**User impact**
+
+A troubleshooting action can erase substantial setup work. The user cannot directly resume or execute a previously reviewed plan after restart, even when only the runtime process needed recovery.
+
+**Workaround**
+
+Save the configuration before restarting, then reopen it and repeat device selection, validation, and plan review. Unsaved changes cannot be recovered.
+
+**Evidence**
+
+- Screenshot: User-provided A27 screenshot from 2026-07-18 showing the post-restart Connect screen and the notice `Rust runtime restarted. Reopen a portable configuration before continuing.`
+- Observed behavior: restart consistently returns to Connect and prevents direct execution of the prior plan.
+
+**Notes for later implementation**
+
+Separate portable frontend intent from runtime-owned authority. Preserve configuration identity, setup, recipes, and input bindings across a runtime restart; clear device authority and generated plans only. Add a confirmation when unsaved portable state cannot be preserved. Continue rejecting stale async responses from the prior runtime generation.
+
+### UX-049 — Exact device matches hide other applicable setup choices
+
+- Type: `Missing MVP feature`
+- Severity: `S2 — Major`
+- Frequency: `Always`
+- Evidence: `Observed`
+- Scenario(s): `Post-5B packaged-app smoke test`
+- Proposed phase: `5C`
+- Status: `Open`
+
+**Actual**
+
+When EmuChef finds an exact device match, the Setup stage presents only the directly matched setup. Other applicable setup plans are not shown.
+
+**Expected**
+
+The exact match should remain recommended and preselected, but the user should still be able to review and choose other backend-approved plans that are applicable to the detected device.
+
+**User impact**
+
+Users cannot intentionally choose a broader, alternate, or differently scoped setup even when the catalog marks it applicable to the device.
+
+**Evidence**
+
+- Screenshot: User-provided packaged-app screenshot from 2026-07-19 showing only `AYANEO Pocket S Mini Base Setup` after an exact Pocket S Mini match.
+
+**Notes for later implementation**
+
+Phase 5C should distinguish `recommended`, `applicable`, and `generic` plans. Keep the exact match prominent and selected by default, but do not suppress other backend-authoritative applicable choices.
+
+### UX-050 — Setup selection lacks a blank configuration-from-scratch option
+
+- Type: `Missing MVP feature`
+- Severity: `S2 — Major`
+- Frequency: `Always`
+- Evidence: `Observed`
+- Scenario(s): `Post-5B packaged-app smoke test`
+- Proposed phase: `5C`
+- Status: `Open`
+
+**Actual**
+
+The Setup stage requires choosing a catalog-defined setup plan. There is no blank setup that lets the user begin with no recipes selected and build a configuration from scratch.
+
+**Expected**
+
+Offer a clearly labeled blank setup, such as `Start from scratch`, that creates an empty recipe selection while retaining the detected device context and normal compatibility validation.
+
+**User impact**
+
+Advanced users and users with narrow goals must begin from a predefined setup and remove unwanted selections instead of starting from a minimal empty configuration.
+
+**Evidence**
+
+- Screenshot: User-provided packaged-app screenshot from 2026-07-19 showing a single predefined setup and no blank option.
+
+**Notes for later implementation**
+
+The blank setup must remain backend-authoritative as an explicit empty-plan starting mode, not a frontend-invented device plan. Empty recipe selection should remain valid during customization, while Review stays unavailable until at least one recipe is selected.
+
+### UX-051 — Runtime restart restoration uses technical and unclear recovery language
+
+- Type: `Defect`
+- Severity: `S3 — Minor`
+- Frequency: `Always after restart with preserved unsaved setup choices`
+- Evidence: `Observed`
+- Scenario(s): `Post-5B packaged-app smoke test`
+- Proposed phase: `5H`
+- Status: `Resolved`
+
+**Actual**
+
+After runtime restart, the UI labeled the state `Recovered configuration` and displayed: `The recovered intent is unsaved and will not overwrite its source until you save. Connect a device and validate again.` The terms `recovered intent`, `source`, and the distinction between restoration and overwrite behavior were technical and unclear.
+
+**Expected**
+
+The UI should plainly explain that EmuChef restored the user's setup choices, that device selection and review must be repeated, and whether those restored changes have been saved.
+
+**User impact**
+
+Users may think a damaged file was recovered, may not understand what was restored, and may be uncertain whether Save will update an existing configuration or create a new one.
+
+**Evidence**
+
+- Screenshot: User-provided packaged-app screenshot from 2026-07-19 showing `Recovered configuration` and the recovery notice after runtime restart.
+
+**Notes for later implementation**
+
+Prefer language such as `Setup restored after restart` and `Your setup choices were restored, but they have not been saved. Select your device and review the setup again before continuing.` When a saved configuration was reopened successfully, identify it by name and state that unsaved changes were restored without using `intent`, `source`, `authority`, or `recovery draft` terminology.
+
+**Resolution evidence**
+
+The restored state now uses `Setup restored after restart` for unsaved setup choices and identifies reopened saved configurations by name. The notice explains that setup choices were restored, whether they have been saved, and that device selection and review must be repeated. DOM coverage rejects the former `recovered intent` and `source` wording.
+
 ## 8. Prioritized backlog
 
-This section is populated after scenario execution. Findings must remain separated by type even when they target the same later phase.
+Phase 5B completed on 2026-07-19. Its foundational workflow-state findings are resolved in the main application and covered by app-local logic, DOM, security, TypeScript, lint, build, Tauri, and backend verification. Phase 5C is next.
 
-### 8.1 Phase 5B — Workflow navigation and state polish
+### 8.1 Phase 5B — Workflow navigation and state polish — `Completed`
 
 #### Defects
 
-- Pending audit evidence.
+- `UX-002`: Workflow heading receives unexpected initial focus.
+- `UX-023`: Step 4 is mislabeled `Inputs` despite combining recipe selection and input collection.
+- `UX-026`: Platform-Tools import reports validation before file selection.
+- `UX-027`: Platform-Tools replacement lacks in-progress wording.
+- `UX-028`: Successful Platform-Tools replacement reports a false device disconnect.
+- `UX-029`: Platform-Tools removal has no confirmation and uses internal authority terminology.
+- `UX-030`: Device refresh gives no progress or completion feedback.
+- `UX-032`: Unauthorized devices are indistinguishable from no device.
+- `UX-033`: Unsupported devices are presented as available and skip the Device stage.
+- `UX-038`: Reconnecting the same device after a disconnect discards setup and input state.
+- `UX-048`: Runtime restart discards active workflow state and portable intent.
 
 #### Missing MVP features
 
-- Pending audit evidence.
+- `UX-031`: The no-device state lacks practical USB-debugging and authorization guidance.
 
 #### Optional enhancements
 
-- Pending audit evidence.
+- None identified by this audit.
+
+#### Implementation evidence
+
+- `UX-002` and `UX-023`: startup presentation no longer moves focus to the workflow heading, and Step 4 is labeled `Customize` without implementing the deferred recipe/input split.
+- `UX-026` through `UX-032`: Platform-Tools picker, processing, replacement, removal, device refresh, connection guidance, and ADB authorization states have distinct UI and operation semantics.
+- `UX-033`: unsupported devices remain in the Device stage until the session-only warning is acknowledged; acknowledgment does not select a plan, and React exposes the backend `safeGenericPlans` list unchanged.
+- `UX-038`: Tauri retains at most 32 process-local serial-to-handle identities, while React preserves only portable setup, recipes, and backend-classified nonsensitive bindings across same-device reconnect. Different-device continuation requires confirmation and starts fresh.
+- `UX-048`: restart stages clean or dirty portable recovery intent, confirms backend-reported omissions using friendly labels or a count, resets every runtime-owned authority surface, and rejects prior-runtime responses.
+- Regression coverage is in `apps/emuchef-app/tests/workflow.test.ts`, `tests/App.dom.test.tsx`, `tests/security-policy.test.mjs`, and the Tauri `commands`, `handles`, and `recovery` unit modules.
+- Required verification passed on 2026-07-19. The full backend suite passed with 548 tests and 7 ignored; the previously observed `tests/editor_sessions.rs` parallel-only baseline failure did not reproduce in the final full-suite run.
+- Manual real-device timing and packaged-GUI focus behavior remain follow-up qualification risks, not blockers to the code-level Phase 5B acceptance criteria.
 
 ### 8.2 Phase 5C — Recipe and setup selection experience
 
 #### Defects
 
-- Pending audit evidence.
+- `UX-013`: Review Plan remains enabled when no recipes are selected.
 
 #### Missing MVP features
 
-- Pending audit evidence.
+- `UX-024`: Recipe discovery and recipe-specific inputs need separate scalable stages.
+- `UX-049`: Exact device matches should still show other backend-approved applicable setup plans.
+- `UX-050`: Setup selection needs a backend-authoritative blank `Start from scratch` option.
 
 #### Optional enhancements
 
-- Pending audit evidence.
+- None identified by this audit.
 
 ### 8.3 Phase 5D — Input collection and file-management polish
 
 #### Defects
 
-- Pending audit evidence.
+- `UX-014`: Selecting a recipe immediately presents a blocking error.
+- `UX-015`: Validation exposes internal binding identifiers and codes.
+- `UX-016`: Device destination paths incorrectly use a host Browse control.
+- `UX-035`: Selected optional file inputs cannot be cleared.
+- `UX-036`: Missing selected files produce generic validation failures.
+- `UX-037`: Deselecting a recipe leaves stale bindings that block validation.
 
 #### Missing MVP features
 
-- Pending audit evidence.
+- None identified by this audit.
 
 #### Optional enhancements
 
-- Pending audit evidence.
+- None identified by this audit.
 
 ### 8.4 Phase 5E — Plan review and execution experience
 
 #### Defects
 
-- Pending audit evidence.
+- `UX-019`: Simulation timestamps use raw ISO values.
+- `UX-021`: Simulation failure summaries are generic and non-actionable.
+- `UX-022`: Execution reports expose raw verifier and dependency identifiers.
+- `UX-034`: Plan review exposes bindings, private host paths, capability tokens, and the plan digest.
+- `UX-039`: The canonical valid simulation cannot reach a successful terminal result.
+- `UX-040`: `Retry failed work` does not retry and is mislabeled.
+- `UX-041`: Return to Review exposes the same failed plan without a strong stale state.
+- `UX-042`: Report-export success persists across a different execution report.
 
 #### Missing MVP features
 
-- Pending audit evidence.
+- None identified by this audit.
 
 #### Optional enhancements
 
-- Pending audit evidence.
+- None identified by this audit.
 
 ### 8.5 Phase 5F — Saved configurations and reusable setups
 
 #### Defects
 
-- Pending audit evidence.
+- `UX-011`: Configuration management is embedded in the primary workflow instead of native menus.
+- `UX-017`: Save terminology does not clearly explain persisted contents.
+- `UX-043`: Saving from Inputs unexpectedly resets the workflow to Connect.
+- `UX-044`: Invalid or incompatible saved configurations remain actionable too long.
+- `UX-046`: Successful Save is paired with misleading disabled-state guidance.
 
 #### Missing MVP features
 
-- Pending audit evidence.
+- `UX-045`: Saved configurations lack first-class Rename and Duplicate actions.
 
 #### Optional enhancements
 
-- Pending audit evidence.
+- None identified by this audit.
 
 ### 8.6 Phase 5G — Support, diagnostics, and recovery polish
 
 #### Defects
 
-- Pending audit evidence.
+- `UX-003`: Normal Cmd+Q termination is reported as an unexpected shutdown.
+- `UX-006`: Cache refresh leaves stale operation notices visible.
+- `UX-007`: Cache notifications expose internal result codes.
+- `UX-008`: Bulk cache-clear actions remain enabled when the cache is empty.
+- `UX-010`: Platform-Tools maintenance actions are persistently exposed in the primary workflow.
+- `UX-012`: Restart Runtime is exposed as a primary workflow action.
+- `UX-047`: Support diagnostics retains stale export-success state across modal sessions.
 
 #### Missing MVP features
 
-- Pending audit evidence.
+- None identified by this audit.
 
 #### Optional enhancements
 
-- Pending audit evidence.
+- None identified by this audit.
 
 ### 8.7 Phase 5H — Visual consistency and final product polish
 
@@ -1545,14 +2735,19 @@ This section is populated after scenario execution. Findings must remain separat
 
 - `UX-001`: Unsaved-configuration panel has a broken horizontal layout.
 - `UX-004`: Runtime status badge exposes an internal catalog identifier.
+- `UX-005`: Application uses the wrong icon.
+- `UX-009`: System Status exposes the implementation language.
+- `UX-018`: Updates dialog uses a non-standard Close control.
+- `UX-020`: Simulation failure cards have insufficient visual separation.
+- `UX-025`: Platform-Tools setup copy is overly technical.
 
 #### Missing MVP features
 
-- Pending audit evidence.
+- None identified by this audit.
 
 #### Optional enhancements
 
-- Pending audit evidence.
+- None identified by this audit.
 
 ## 9. Run log
 
@@ -1562,11 +2757,11 @@ This section is populated after scenario execution. Findings must remain separat
 
 ## 10. Exit criteria
 
-- [ ] Every primary user workflow has been exercised in the running application.
-- [ ] Every scenario in the matrix is marked `Passed`, `Findings`, `Blocked`, or `Not applicable` with a reason.
-- [ ] High-friction points have reproducible steps and impact statements.
-- [ ] Findings include type, severity, frequency, evidence level, and proposed owning phase.
-- [ ] Defects, missing MVP features, and optional enhancements are explicitly separated.
-- [ ] The prioritized Phase 5B–5H backlog is populated.
-- [ ] The next implementation phase is selected from audit evidence.
-- [ ] `docs/product/phase-5-app-quality-roadmap.md` is updated to mark 5A completed and the selected next phase as `Next`.
+- [x] Every primary user workflow has been exercised in the running application.
+- [x] Every scenario in the matrix is marked `Passed`, `Findings`, `Blocked`, or `Not applicable` with a reason.
+- [x] High-friction points have reproducible steps and impact statements.
+- [x] Findings include type, severity, frequency, evidence level, and proposed owning phase.
+- [x] Defects, missing MVP features, and optional enhancements are explicitly separated.
+- [x] The prioritized Phase 5B–5H backlog is populated.
+- [x] The next implementation phase is selected from audit evidence.
+- [x] `docs/product/phase-5-app-quality-roadmap.md` is updated to mark 5A completed and Phase 5B as `Next`.

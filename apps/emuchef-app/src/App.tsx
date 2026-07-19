@@ -29,6 +29,7 @@ import type {
   CacheCleanupMode,
   RecoveryDraftAvailable,
   RecoveryRestoreResult,
+  RecoveryWriteAck,
   UpdateInteractionSession,
 } from "./types";
 import {
@@ -43,9 +44,11 @@ import {
 import {
   initialWorkflowState,
   filterRepairBindings,
+  deviceIsUnsupported,
   inputDiagnosticsForDisplay,
   pageDiagnosticsForDisplay,
   recipeSelectionDisabled,
+  portableBindingsForTransition,
   reviewReady,
   runBusyAction,
   updateRecipeSelection,
@@ -68,7 +71,7 @@ const WORKFLOW_STEPS = [
   { step: "connect", label: "Connect" },
   { step: "device", label: "Device" },
   { step: "setup", label: "Setup" },
-  { step: "inputs", label: "Inputs" },
+  { step: "inputs", label: "Customize" },
   { step: "review", label: "Review" },
   { step: "execution", label: "Simulated Run" },
 ] as const;
@@ -93,6 +96,15 @@ type AppDialogPayload =
   | {
       kind: "recovery";
       draft: RecoveryDraftAvailable;
+    }
+  | { kind: "remove-platform-tools"; invoker: HTMLElement | null }
+  | { kind: "different-device"; invoker: HTMLElement | null }
+  | {
+      kind: "restart-loss";
+      invoker: HTMLElement | null;
+      labels: string[];
+      omittedCount: number;
+      totalLoss: boolean;
     };
 
 type AppDialogResult = UnsavedDecision | string | boolean | null;
@@ -145,6 +157,15 @@ export function App({ dialogController: suppliedDialogController }: AppProps = {
   const [adb, setAdb] = useState<AdbSetupStatus | null>(null);
   const [devices, setDevices] = useState<DeviceSummary[]>([]);
   const [busy, setBusy] = useState(false);
+  const [platformToolsOperation, setPlatformToolsOperation] = useState<{
+    phase: "idle" | "picker" | "processing";
+    kind: "import" | "replace" | "remove";
+  }>({ phase: "idle", kind: "import" });
+  const [deviceRefresh, setDeviceRefresh] = useState<{
+    phase: "idle" | "refreshing" | "complete";
+    generation: number;
+    message: string | null;
+  }>({ phase: "idle", generation: 0, message: null });
   const [notice, setNotice] = useState<string | null>(null);
   const [operationError, setOperationError] = useState<string | null>(null);
   const [realExecutionEnabled, setRealExecutionEnabled] = useState(false);
@@ -171,6 +192,13 @@ export function App({ dialogController: suppliedDialogController }: AppProps = {
   const validationSummaryRef = useRef<HTMLElement>(null);
   const executionAnnouncementKeyRef = useRef<string | null>(null);
   const appLifecycleGenerationRef = useRef(0);
+  const runtimeGenerationRef = useRef(0);
+  const platformToolsGenerationRef = useRef(0);
+  const devicePollGenerationRef = useRef(0);
+  const deviceSelectionGenerationRef = useRef(0);
+  const deviceRefreshTimerRef = useRef<number | null>(null);
+  const manualDeviceRefreshRef = useRef(false);
+  const initialWorkflowPresentationRef = useRef(false);
   const savedConfigurationRef = useRef<SavedConfigurationDocument | null>(null);
   const workflowRef = useRef(workflow);
   const configurationMutationQueue = useRef<Promise<void>>(Promise.resolve());
@@ -299,12 +327,13 @@ export function App({ dialogController: suppliedDialogController }: AppProps = {
     });
   }, [navigationBlocked, updateInteractionRevision]);
 
-  const initialize = useCallback(async () => {
+  const initialize = useCallback(async (runtimeGeneration = runtimeGenerationRef.current) => {
     const [runtimeStatus, adbStatus, realAvailability] = await Promise.all([
       api.runtimeStatus(),
       api.adbStatus(),
       api.realExecutionAvailability().catch(() => ({ enabled: false })),
     ]);
+    if (runtimeGenerationRef.current !== runtimeGeneration) return;
     setRuntime(runtimeStatus);
     setAdb(adbStatus);
     setRealExecutionEnabled(realAvailability.enabled);
@@ -313,6 +342,7 @@ export function App({ dialogController: suppliedDialogController }: AppProps = {
         api.catalog(),
         api.listRecentConfigurations(),
       ]);
+      if (runtimeGenerationRef.current !== runtimeGeneration) return;
       setCatalog(nextCatalog);
       setRecentConfigurations(recents);
     }
@@ -327,6 +357,11 @@ export function App({ dialogController: suppliedDialogController }: AppProps = {
   }, [workflow]);
 
   useEffect(() => {
+    if (!startupReady) return;
+    if (!initialWorkflowPresentationRef.current) {
+      initialWorkflowPresentationRef.current = true;
+      return;
+    }
     const generation = claimFocusTransition();
     queueMicrotask(() => {
       const destination = mainRef.current?.querySelector<HTMLElement>("[data-step-heading]");
@@ -358,16 +393,28 @@ export function App({ dialogController: suppliedDialogController }: AppProps = {
   }, [savedConfiguration?.configurationHandle]);
 
   const refreshRecents = async () => {
-    setRecentConfigurations(await api.listRecentConfigurations());
+    const runtimeGeneration = runtimeGenerationRef.current;
+    const recents = await api.listRecentConfigurations();
+    if (runtimeGenerationRef.current === runtimeGeneration) setRecentConfigurations(recents);
   };
 
-  const persistRecoveryNow = async (force = false): Promise<number | null> => {
+  const persistRecoveryNow = async (
+    force = false,
+    includeClean = false,
+  ): Promise<RecoveryWriteAck | null> => {
     const current = workflowRef.current;
     const sessionGeneration = recoverySessionGenerationRef.current;
-    if (!sessionGeneration || !current.portableIntentDirty || !current.devicePlan) return null;
+    const dirty = current.portableIntentDirty || Boolean(savedConfigurationRef.current?.dirty);
+    if (!sessionGeneration || (!dirty && !includeClean) || !current.devicePlan) return null;
     const signature = portableIntentSignature(current);
     if (!force && signature === lastRecoverySignatureRef.current) {
-      return recoveryRecordGenerationRef.current;
+      const recordGeneration = recoveryRecordGenerationRef.current;
+      return recordGeneration === null ? null : {
+        requestGeneration: recoveryRequestGenerationRef.current,
+        draftGeneration: recoveryDraftGenerationRef.current,
+        recordGeneration,
+        omittedBindings: [],
+      };
     }
     const requestGeneration = ++recoveryRequestGenerationRef.current;
     const draftGeneration = ++recoveryDraftGenerationRef.current;
@@ -377,6 +424,7 @@ export function App({ dialogController: suppliedDialogController }: AppProps = {
       draftGeneration,
       displayName: savedConfigurationRef.current?.name ?? recoveredName,
       sourceConfigurationHandle: savedConfigurationRef.current?.configurationHandle ?? null,
+      dirty,
       devicePlan: current.devicePlan,
       selectedRecipes: current.selectedRecipes ?? [],
       bindings: current.bindings,
@@ -384,7 +432,7 @@ export function App({ dialogController: suppliedDialogController }: AppProps = {
     if (!recoveryResultIsCurrent(result, requestGeneration, draftGeneration)) return null;
     recoveryRecordGenerationRef.current = result.recordGeneration;
     lastRecoverySignatureRef.current = signature;
-    return result.recordGeneration;
+    return result;
   };
 
   const discardCurrentRecovery = async () => {
@@ -426,13 +474,17 @@ export function App({ dialogController: suppliedDialogController }: AppProps = {
     }
     savedConfigurationRef.current = result.document;
     setSavedConfiguration(result.document);
-    setRecoveredName(result.document?.name ?? result.displayName ?? "Recovered configuration");
+    setRecoveredName(result.intent.dirty
+      ? result.document?.name
+        ? `${result.document.name} reopened after restart`
+        : "Setup restored after restart"
+      : null);
     dispatch({
       type: "load-portable-intent",
       devicePlan: result.intent.devicePlan,
       selectedRecipes: result.intent.selectedRecipes,
       bindings: result.intent.bindings,
-      dirty: true,
+      dirty: result.intent.dirty,
       requiredReentryBindings: result.intent.requiredReentryBindings,
     });
     lastRecoverySignatureRef.current = portableIntentSignature({
@@ -442,28 +494,34 @@ export function App({ dialogController: suppliedDialogController }: AppProps = {
     });
     await refreshRecents();
     const reentry = result.intent.requiredReentryBindings.length;
-    const sourceNotice = result.sourceStatus === "missing"
-      ? "The original saved file is missing, so this is an unsaved recovered configuration."
-      : "The recovered intent is unsaved and will not overwrite its source until you save.";
-    setNotice(`${sourceNotice} Connect a device and validate again.${
+    const restoredSetupNotice = !result.intent.dirty && result.document
+      ? `${result.document.name} reopened after restart. Select your device and review the setup again before continuing.`
+      : result.sourceStatus === "missing"
+        ? "Your setup choices were restored, but the original saved file could not be found. Save this setup to choose where it should be stored. Select your device and review the setup again before continuing."
+        : "Your setup choices were restored, but they have not been saved. Select your device and review the setup again before continuing.";
+    setNotice(`${restoredSetupNotice}${
       reentry > 0 ? ` Re-enter ${reentry} sensitive input${reentry === 1 ? "" : "s"}.` : ""
     }`);
   };
 
   const restoreRecovery = async (draftGeneration: number): Promise<boolean> => {
     const requestGeneration = ++recoveryRequestGenerationRef.current;
+    const runtimeGeneration = runtimeGenerationRef.current;
     try {
       const result = await api.restoreRecoveryDraft(
         recoverySessionGenerationRef.current,
         draftGeneration,
         requestGeneration,
       );
-      if (!recoveryResultIsCurrent(result, requestGeneration, draftGeneration)) return false;
+      if (
+        runtimeGenerationRef.current !== runtimeGeneration
+        || !recoveryResultIsCurrent(result, requestGeneration, draftGeneration)
+      ) return false;
       recoveryRecordGenerationRef.current = result.draftGeneration;
       await applyRecoveryResult(result);
       return true;
     } catch (error) {
-      setNotice(errorMessage(error));
+      if (runtimeGenerationRef.current === runtimeGeneration) setNotice(errorMessage(error));
       return false;
     }
   };
@@ -700,8 +758,10 @@ export function App({ dialogController: suppliedDialogController }: AppProps = {
 
   const queueSavedMutation = (mutation: SavedConfigurationMutation) => {
     if (!savedConfigurationRef.current) return;
+    const runtimeGeneration = runtimeGenerationRef.current;
     configurationMutationQueue.current = configurationMutationQueue.current
       .then(async () => {
+        if (runtimeGenerationRef.current !== runtimeGeneration) return;
         const current = savedConfigurationRef.current;
         if (!current) return;
         const updated = await api.updateSavedConfiguration(
@@ -709,11 +769,14 @@ export function App({ dialogController: suppliedDialogController }: AppProps = {
           current.revision,
           mutation,
         );
+        if (runtimeGenerationRef.current !== runtimeGeneration) return;
         if (savedConfigurationRef.current?.configurationHandle !== updated.configurationHandle) return;
         savedConfigurationRef.current = updated;
         setSavedConfiguration(updated);
       })
-      .catch((error) => setNotice(errorMessage(error)));
+      .catch((error) => {
+        if (runtimeGenerationRef.current === runtimeGeneration) setNotice(errorMessage(error));
+      });
   };
 
   const updateDevicePlanIntent = (devicePlan: string) => {
@@ -789,28 +852,79 @@ export function App({ dialogController: suppliedDialogController }: AppProps = {
     }
   };
 
-  const restartRuntime = async () => {
+  const restartRuntime = async (invoker: HTMLElement | null = null) => {
+    const current = workflowRef.current;
+    let recoveryAck: RecoveryWriteAck | null = null;
     try {
-      const dirty = workflowRef.current.portableIntentDirty
-        || Boolean(savedConfigurationRef.current?.dirty);
-      const draftGeneration = dirty ? await persistRecoveryNow(true) : null;
+      recoveryAck = await persistRecoveryNow(true, true);
+    } catch (error) {
+      const confirmed = await requestAppDialog({
+        kind: "restart-loss",
+        invoker,
+        labels: [],
+        omittedCount: 0,
+        totalLoss: true,
+      }, false);
+      if (confirmed !== true) {
+        setNotice(errorMessage(error));
+        return;
+      }
+    }
+    if (recoveryAck?.omittedBindings.length) {
+      const omitted = new Set(recoveryAck.omittedBindings);
+      const labels = (current.description?.inputs ?? [])
+        .filter((input) => omitted.has(input.key))
+        .map((input) => input.label)
+        .filter((label, index, all) => all.indexOf(label) === index)
+        .sort();
+      const confirmed = await requestAppDialog({
+        kind: "restart-loss",
+        invoker,
+        labels,
+        omittedCount: recoveryAck.omittedBindings.length,
+        totalLoss: false,
+      }, false);
+      if (confirmed !== true) return;
+    }
+    const runtimeGeneration = ++runtimeGenerationRef.current;
+    platformToolsGenerationRef.current += 1;
+    devicePollGenerationRef.current += 1;
+    deviceSelectionGenerationRef.current += 1;
+    supportGenerationRef.current += 1;
+    if (deviceRefreshTimerRef.current !== null) {
+      window.clearTimeout(deviceRefreshTimerRef.current);
+      deviceRefreshTimerRef.current = null;
+    }
+    setPlatformToolsOperation({ phase: "idle", kind: "import" });
+    setRepairPreparing(false);
+    setReportState("idle");
+    setLaunchState("idle");
+    setRealConfirmation(emptyRealExecutionConfirmation);
+    manualDeviceRefreshRef.current = false;
+    setDeviceRefresh({ phase: "idle", generation: 0, message: null });
+    setBusy(true);
+    try {
       cancelPendingDialog();
       announce("Restarting the Rust runtime.");
       const status = await api.restartRuntime();
+      if (runtimeGenerationRef.current !== runtimeGeneration) return;
       savedConfigurationRef.current = null;
       setSavedConfiguration(null);
       dispatch({ type: "runtime-invalidated" });
       setRuntime(status);
       supportDispatch({ type: "runtime-restarted" });
-      await initialize();
-      if (draftGeneration) {
-        await restoreRecovery(draftGeneration);
+      await initialize(runtimeGeneration);
+      if (runtimeGenerationRef.current !== runtimeGeneration) return;
+      if (recoveryAck) {
+        await restoreRecovery(recoveryAck.recordGeneration);
       } else {
-        setNotice("Rust runtime restarted. Reopen a portable configuration before continuing.");
+        setNotice("Rust runtime restarted. Select and validate a device before continuing.");
       }
       if (support.open) await refreshSupportInventory();
     } catch (error) {
-      setNotice(errorMessage(error));
+      if (runtimeGenerationRef.current === runtimeGeneration) setNotice(errorMessage(error));
+    } finally {
+      if (runtimeGenerationRef.current === runtimeGeneration) setBusy(false);
     }
   };
 
@@ -981,46 +1095,151 @@ export function App({ dialogController: suppliedDialogController }: AppProps = {
     };
   }, []);
 
-  const pollDevices = useCallback(async () => {
-    if (adb?.status !== "ready" || runtime.status !== "ready") return;
+  const pollDevices = useCallback(async (
+    manual = false,
+    suppressSelectedDeviceLoss = false,
+  ): Promise<DeviceSummary[] | null> => {
+    if (adb?.status !== "ready" || runtime.status !== "ready") return null;
+    if (manualDeviceRefreshRef.current) return null;
+    const generation = ++devicePollGenerationRef.current;
+    const runtimeGeneration = runtimeGenerationRef.current;
+    if (manual) {
+      manualDeviceRefreshRef.current = true;
+      setDeviceRefresh({ phase: "refreshing", generation, message: null });
+      announce("Refreshing connected devices.");
+    }
     try {
       const next = await api.pollDevices();
+      if (
+        devicePollGenerationRef.current !== generation
+        || runtimeGenerationRef.current !== runtimeGeneration
+      ) return null;
       setDevices(next);
-      if (workflow.deviceHandle && !next.some((device) => device.deviceHandle === workflow.deviceHandle)) {
-        dispatch({ type: "device-disappeared" });
-        setNotice("The selected device disconnected. Connect it again to continue.");
+      const current = workflowRef.current;
+      const selected = current.deviceHandle
+        ? next.find((device) => device.deviceHandle === current.deviceHandle)
+        : null;
+      if (current.deviceHandle && !suppressSelectedDeviceLoss && selected?.state !== "available") {
+        const portable = portableBindingsForTransition(current.description, current.bindings);
+        dispatch({
+          type: "device-disappeared",
+          bindings: portable.bindings,
+          requiredReentryBindings: portable.requiredReentryBindings,
+        });
+        setNotice(selected?.state === "unauthorized"
+          ? "The selected device needs authorization. Unlock it, accept the USB debugging prompt, and refresh."
+          : selected?.state === "offline"
+            ? "The selected device is offline. Reconnect it and refresh to continue."
+            : "The selected device disconnected. Connect the same device to restore your setup choices.");
       }
+      if (manual) {
+        const message = next.length === 0
+          ? "Refresh complete. No devices found."
+          : `Refresh complete. ${next.length} device${next.length === 1 ? "" : "s"} found.`;
+        setDeviceRefresh({ phase: "complete", generation, message });
+        announce(message);
+        if (deviceRefreshTimerRef.current !== null) {
+          window.clearTimeout(deviceRefreshTimerRef.current);
+        }
+        deviceRefreshTimerRef.current = window.setTimeout(() => {
+          setDeviceRefresh((state) => state.generation === generation
+            ? { phase: "idle", generation, message: null }
+            : state);
+          deviceRefreshTimerRef.current = null;
+        }, 5000);
+      }
+      return next;
     } catch (error) {
-      setNotice(errorMessage(error));
+      if (
+        devicePollGenerationRef.current === generation
+        && runtimeGenerationRef.current === runtimeGeneration
+      ) {
+        setNotice(errorMessage(error));
+        if (manual) setDeviceRefresh({ phase: "idle", generation, message: null });
+      }
+      return null;
+    } finally {
+      if (
+        manual
+        && devicePollGenerationRef.current === generation
+        && runtimeGenerationRef.current === runtimeGeneration
+      ) manualDeviceRefreshRef.current = false;
     }
-  }, [adb?.status, runtime.status, workflow.deviceHandle]);
+  }, [adb?.status, announce, runtime.status]);
 
   useEffect(() => {
-    pollDevices();
-    const timer = window.setInterval(pollDevices, 2500);
+    void pollDevices();
+    const timer = window.setInterval(() => void pollDevices(), 2500);
     return () => window.clearInterval(timer);
   }, [pollDevices]);
 
   const importPlatformTools = async () => {
+    if (platformToolsOperation.phase !== "idle") return;
+    const kind = adb?.status === "ready" ? "replace" : "import";
+    const generation = ++platformToolsGenerationRef.current;
+    const runtimeGeneration = runtimeGenerationRef.current;
+    const prior = workflowRef.current;
     setNotice(null);
-    await runBusyAction({
-      setBusy,
-      action: () => withNativeDialogFocus(api.importPlatformTools),
-      onSuccess: (status) => {
-        setAdb(status);
-        if (workflowRef.current.deviceHandle || workflowRef.current.review) {
-          setDevices([]);
-          dispatch({ type: "infrastructure-invalidated" });
-          setNotice(savedConfigurationRef.current?.dirty
-            ? "Platform-Tools replaced. Unsaved configuration edits remain open; select and validate a device again."
-            : "Platform-Tools replaced. Device, review, and execution authority were invalidated.");
-        }
-      },
-      onError: async (error) => {
+    setPlatformToolsOperation({ phase: "picker", kind });
+    try {
+      const picked = await withNativeDialogFocus(api.pickPlatformToolsZip);
+      if (
+        platformToolsGenerationRef.current !== generation
+        || runtimeGenerationRef.current !== runtimeGeneration
+      ) return;
+      if (picked.outcome === "cancelled") return;
+      setPlatformToolsOperation({ phase: "processing", kind });
+      const status = await api.installPlatformToolsSelection(picked.selectionHandle);
+      if (
+        platformToolsGenerationRef.current !== generation
+        || runtimeGenerationRef.current !== runtimeGeneration
+      ) return;
+      devicePollGenerationRef.current += 1;
+      deviceSelectionGenerationRef.current += 1;
+      manualDeviceRefreshRef.current = false;
+      setDeviceRefresh({ phase: "idle", generation: 0, message: null });
+      setAdb(status);
+      if (kind === "replace") {
+        const portable = portableBindingsForTransition(prior.description, prior.bindings);
+        setDevices([]);
+        dispatch({
+          type: "device-disappeared",
+          bindings: portable.bindings,
+          requiredReentryBindings: portable.requiredReentryBindings,
+        });
+        const refreshed = await pollDevices(false, true);
+        if (
+          platformToolsGenerationRef.current !== generation
+          || runtimeGenerationRef.current !== runtimeGeneration
+        ) return;
+        const sameAvailable = Boolean(prior.deviceHandle && refreshed?.some((device) => (
+          device.deviceHandle === prior.deviceHandle && device.state === "available"
+        )));
+        setNotice(sameAvailable
+          ? "Platform-Tools replaced. Your device was rediscovered; select it to validate the preserved setup again."
+          : "Platform-Tools replaced. Device detection was refreshed; connect and select the intended device to continue.");
+      } else {
+        setNotice("Platform-Tools installed. Connect a device to continue.");
+      }
+    } catch (error) {
+      if (
+        platformToolsGenerationRef.current === generation
+        && runtimeGenerationRef.current === runtimeGeneration
+      ) {
         setNotice(errorMessage(error));
-        setAdb(await api.adbStatus());
-      },
-    });
+        const status = await api.adbStatus().catch(() => null);
+        if (
+          status
+          && platformToolsGenerationRef.current === generation
+          && runtimeGenerationRef.current === runtimeGeneration
+        ) setAdb(status);
+      }
+    } finally {
+      if (
+        platformToolsGenerationRef.current === generation
+        && runtimeGenerationRef.current === runtimeGeneration
+      ) setPlatformToolsOperation({ phase: "idle", kind });
+    }
   };
 
   const openPlatformToolsPage = async () => {
@@ -1032,32 +1251,75 @@ export function App({ dialogController: suppliedDialogController }: AppProps = {
     }
   };
 
-  const removePlatformTools = async () => {
-    setBusy(true);
+  const removePlatformTools = async (invoker: HTMLElement | null) => {
+    if (platformToolsOperation.phase !== "idle") return;
+    const confirmed = await requestAppDialog({
+      kind: "remove-platform-tools",
+      invoker,
+    }, false);
+    if (confirmed !== true) return;
+    const generation = ++platformToolsGenerationRef.current;
+    const runtimeGeneration = runtimeGenerationRef.current;
+    const current = workflowRef.current;
+    setPlatformToolsOperation({ phase: "processing", kind: "remove" });
     try {
-      setAdb(await api.removePlatformTools());
+      const status = await api.removePlatformTools();
+      if (
+        platformToolsGenerationRef.current !== generation
+        || runtimeGenerationRef.current !== runtimeGeneration
+      ) return;
+      devicePollGenerationRef.current += 1;
+      deviceSelectionGenerationRef.current += 1;
+      manualDeviceRefreshRef.current = false;
+      setDeviceRefresh({ phase: "idle", generation: 0, message: null });
+      setAdb(status);
       setDevices([]);
-      dispatch({ type: "infrastructure-invalidated" });
-      setNotice(savedConfigurationRef.current?.dirty
-        ? "Platform-Tools removed. Unsaved configuration edits remain open; reconnect after reinstalling Platform-Tools."
-        : "Platform-Tools removed. Device, review, and execution authority were invalidated.");
+      const portable = portableBindingsForTransition(current.description, current.bindings);
+      dispatch({
+        type: "device-disappeared",
+        bindings: portable.bindings,
+        requiredReentryBindings: portable.requiredReentryBindings,
+      });
+      setNotice("Platform-Tools removed. Device detection is unavailable until you install it again; then select your device and review a fresh plan.");
     } catch (error) {
-      setNotice(errorMessage(error));
+      if (
+        platformToolsGenerationRef.current === generation
+        && runtimeGenerationRef.current === runtimeGeneration
+      ) setNotice(errorMessage(error));
     } finally {
-      setBusy(false);
+      if (
+        platformToolsGenerationRef.current === generation
+        && runtimeGenerationRef.current === runtimeGeneration
+      ) setPlatformToolsOperation({ phase: "idle", kind: "remove" });
     }
   };
 
-  const selectDevice = async (deviceHandle: string) => {
-    dispatch({ type: "select-device", deviceHandle });
+  const selectDevice = async (deviceHandle: string, invoker: HTMLElement | null = null) => {
+    const before = workflowRef.current;
+    const sameReconnect = before.reconnectDeviceHandle === deviceHandle;
+    if (before.reconnectDeviceHandle && !sameReconnect) {
+      const confirmed = await requestAppDialog({ kind: "different-device", invoker }, false);
+      if (confirmed !== true) return;
+    }
+    const generation = ++deviceSelectionGenerationRef.current;
+    const runtimeGeneration = runtimeGenerationRef.current;
+    dispatch({ type: "select-device", deviceHandle, preserveIntent: sameReconnect });
     setBusy(true);
     setNotice(null);
     announce("Reading the selected device properties.");
     try {
-      const facts = await api.probeDevice(deviceHandle);
-      const match = await api.matchDevice(deviceHandle);
+      const [facts, match] = await Promise.all([
+        api.probeDevice(deviceHandle),
+        api.matchDevice(deviceHandle),
+      ]);
+      if (
+        deviceSelectionGenerationRef.current !== generation
+        || runtimeGenerationRef.current !== runtimeGeneration
+      ) return;
       dispatch({ type: "device-probed", facts, match });
-      announce("Device properties loaded. Confirm the matched setup.");
+      announce(deviceIsUnsupported(match)
+        ? "The connected device is not officially supported. Review the available safe generic options."
+        : "Device properties loaded. Confirm the matched setup.");
       const currentSaved = savedConfigurationRef.current;
       if (currentSaved && !savedDevicePlanAvailable(currentSaved, match)) {
         const updated: SavedConfigurationDocument = {
@@ -1076,10 +1338,23 @@ export function App({ dialogController: suppliedDialogController }: AppProps = {
         setSavedConfiguration(updated);
       }
     } catch (error) {
-      setNotice(errorMessage(error));
-      dispatch({ type: "device-disappeared" });
+      if (
+        deviceSelectionGenerationRef.current === generation
+        && runtimeGenerationRef.current === runtimeGeneration
+      ) {
+        setNotice(errorMessage(error));
+        const portable = portableBindingsForTransition(before.description, before.bindings);
+        dispatch({
+          type: "device-disappeared",
+          bindings: portable.bindings,
+          requiredReentryBindings: portable.requiredReentryBindings,
+        });
+      }
     } finally {
-      setBusy(false);
+      if (
+        deviceSelectionGenerationRef.current === generation
+        && runtimeGenerationRef.current === runtimeGeneration
+      ) setBusy(false);
     }
   };
 
@@ -1088,6 +1363,7 @@ export function App({ dialogController: suppliedDialogController }: AppProps = {
     setBusy(true);
     setNotice(null);
     setOperationError(null);
+    const runtimeGeneration = runtimeGenerationRef.current;
     try {
       const generation = workflow.requestGeneration;
       const description = await api.describeConfiguration({
@@ -1096,6 +1372,7 @@ export function App({ dialogController: suppliedDialogController }: AppProps = {
         selectedRecipes: workflow.selectedRecipes,
         bindings: workflow.bindings,
       });
+      if (runtimeGenerationRef.current !== runtimeGeneration) return;
       dispatch({ type: "description", description, generation });
       if (workflowRef.current.requestGeneration === generation) {
         applyDescriptionValidation(description);
@@ -1111,13 +1388,14 @@ export function App({ dialogController: suppliedDialogController }: AppProps = {
         announce("An outdated validation response was ignored.");
       }
     } catch (error) {
+      if (runtimeGenerationRef.current !== runtimeGeneration) return;
       const message = errorMessage(error);
       setNotice(message);
       setOperationError(message);
       const generation = claimFocusTransition();
       queueMicrotask(() => restoreAccessibleFocus({ preferred: [validationSummaryRef.current], generation }));
     } finally {
-      setBusy(false);
+      if (runtimeGenerationRef.current === runtimeGeneration) setBusy(false);
     }
   };
 
@@ -1129,6 +1407,7 @@ export function App({ dialogController: suppliedDialogController }: AppProps = {
       !workflow.devicePlan
     ) return;
     const generation = workflow.requestGeneration;
+    const runtimeGeneration = runtimeGenerationRef.current;
     const timer = window.setTimeout(() => {
       api.describeConfiguration({
         deviceHandle: workflow.deviceHandle!,
@@ -1136,13 +1415,16 @@ export function App({ dialogController: suppliedDialogController }: AppProps = {
         selectedRecipes: workflow.selectedRecipes,
         bindings: workflow.bindings,
       }).then((description) => {
+        if (runtimeGenerationRef.current !== runtimeGeneration) return;
         dispatch({ type: "description", description, generation });
         if (workflowRef.current.requestGeneration === generation) {
           applyDescriptionValidation(description);
         } else {
           announce("An outdated validation response was ignored.");
         }
-      }).catch((error) => setNotice(errorMessage(error)));
+      }).catch((error) => {
+        if (runtimeGenerationRef.current === runtimeGeneration) setNotice(errorMessage(error));
+      });
     }, 250);
     return () => window.clearTimeout(timer);
   }, [
@@ -1161,6 +1443,8 @@ export function App({ dialogController: suppliedDialogController }: AppProps = {
     setNotice(null);
     setOperationError(null);
     announce("Creating a fresh reviewed plan.");
+    const requestGeneration = workflow.requestGeneration;
+    const runtimeGeneration = runtimeGenerationRef.current;
     try {
       const review = await api.createReview({
         deviceHandle: workflow.deviceHandle,
@@ -1168,9 +1452,14 @@ export function App({ dialogController: suppliedDialogController }: AppProps = {
         selectedRecipes: workflow.selectedRecipes,
         bindings: workflow.bindings,
       });
+      if (
+        runtimeGenerationRef.current !== runtimeGeneration
+        || workflowRef.current.requestGeneration !== requestGeneration
+      ) return;
       dispatch({ type: "review", review });
       announce("The reviewed plan is ready.");
     } catch (error) {
+      if (runtimeGenerationRef.current !== runtimeGeneration) return;
       const message = errorMessage(error);
       setNotice(message);
       setOperationError(message);
@@ -1180,7 +1469,7 @@ export function App({ dialogController: suppliedDialogController }: AppProps = {
         generation,
       }));
     } finally {
-      setBusy(false);
+      if (runtimeGenerationRef.current === runtimeGeneration) setBusy(false);
     }
   };
 
@@ -1311,29 +1600,34 @@ export function App({ dialogController: suppliedDialogController }: AppProps = {
   const cancelExecution = async () => {
     if (workflow.execution.kind !== "active" || workflow.execution.cancellationRequested) return;
     const { generation, snapshot } = workflow.execution;
+    const runtimeGeneration = runtimeGenerationRef.current;
     try {
       const cancellation = workflow.execution.mode === "real"
         ? await api.cancelRealExecution(snapshot.executionHandle)
         : await api.cancelSimulatedExecution(snapshot.executionHandle);
+      if (runtimeGenerationRef.current !== runtimeGeneration) return;
       if (cancellation.accepted) {
         dispatch({ type: "execution-cancellation-requested", generation });
       }
     } catch (error) {
-      setNotice(errorMessage(error));
+      if (runtimeGenerationRef.current === runtimeGeneration) setNotice(errorMessage(error));
     }
   };
 
   const exportExecutionReport = async () => {
     if (workflow.execution.kind !== "terminal") return;
     const executionHandle = workflow.execution.snapshot.executionHandle;
+    const runtimeGeneration = runtimeGenerationRef.current;
     setReportState("exporting");
     setNotice(null);
     try {
       const result = await withNativeDialogFocus(
         () => api.exportExecutionReport(executionHandle),
       );
+      if (runtimeGenerationRef.current !== runtimeGeneration) return;
       setReportState(result.outcome === "saved" ? "saved" : "idle");
     } catch (error) {
+      if (runtimeGenerationRef.current !== runtimeGeneration) return;
       setReportState("failed");
       setNotice(errorMessage(error));
     }
@@ -1349,17 +1643,21 @@ export function App({ dialogController: suppliedDialogController }: AppProps = {
     const launchAction = snapshot.launchAction;
     if (!launchAction) return;
     const consumedHandle = launchAction.handle;
+    const runtimeGeneration = runtimeGenerationRef.current;
     setLaunchState("launching");
     setNotice(null);
     try {
       const result = await api.launchConfiguredApp(consumedHandle);
+      if (runtimeGenerationRef.current !== runtimeGeneration) return;
       setLaunchState("launched");
       setNotice(result.message);
     } catch (error) {
+      if (runtimeGenerationRef.current !== runtimeGeneration) return;
       setLaunchState("failed");
       setNotice(errorMessage(error));
       try {
         const refreshed = await api.getRealExecution(snapshot.executionHandle);
+        if (runtimeGenerationRef.current !== runtimeGeneration) return;
         dispatch({ type: "execution-snapshot", generation, snapshot: refreshed });
       } catch {
         // The original sanitized launch error remains the useful result. A lost
@@ -1371,6 +1669,7 @@ export function App({ dialogController: suppliedDialogController }: AppProps = {
   const prepareRepair = async () => {
     if (repairPreparing) return;
     const prior = workflow;
+    const runtimeGeneration = runtimeGenerationRef.current;
     setRepairPreparing(true);
     setReportState("idle");
     setLaunchState("idle");
@@ -1383,6 +1682,7 @@ export function App({ dialogController: suppliedDialogController }: AppProps = {
         await api.discardReview(prior.review.reviewHandle).catch(() => undefined);
       }
       const [freshCatalog, freshDevices] = await Promise.all([api.catalog(), api.pollDevices()]);
+      if (runtimeGenerationRef.current !== runtimeGeneration) return;
       setCatalog(freshCatalog);
       setDevices(freshDevices);
       if (!prior.deviceHandle || !freshDevices.some((device) => device.deviceHandle === prior.deviceHandle)) {
@@ -1393,8 +1693,14 @@ export function App({ dialogController: suppliedDialogController }: AppProps = {
         api.probeDevice(prior.deviceHandle),
         api.matchDevice(prior.deviceHandle),
       ]);
-      const plans = [...match.candidates, ...match.safeGenericPlans];
-      const devicePlan = prior.devicePlan && plans.some((plan) => plan.planId === prior.devicePlan)
+      if (runtimeGenerationRef.current !== runtimeGeneration) return;
+      if (deviceIsUnsupported(match)) {
+        dispatch({ type: "select-device", deviceHandle: prior.deviceHandle, preserveIntent: true });
+        dispatch({ type: "device-probed", facts, match });
+        setNotice("This device is not officially supported. Acknowledge that any backend-approved generic setup is not device-specific before choosing one.");
+        return;
+      }
+      const devicePlan = prior.devicePlan && match.candidates.some((plan) => plan.planId === prior.devicePlan)
         ? prior.devicePlan
         : match.recommendedPlanId;
       if (!devicePlan) {
@@ -1411,6 +1717,7 @@ export function App({ dialogController: suppliedDialogController }: AppProps = {
         selectedRecipes,
         bindings: {},
       });
+      if (runtimeGenerationRef.current !== runtimeGeneration) return;
       const bindings = filterRepairBindings(prior.description, baseline, prior.bindings);
       const description = await api.describeConfiguration({
         deviceHandle: prior.deviceHandle,
@@ -1418,6 +1725,7 @@ export function App({ dialogController: suppliedDialogController }: AppProps = {
         selectedRecipes,
         bindings,
       });
+      if (runtimeGenerationRef.current !== runtimeGeneration) return;
       dispatch({
         type: "repair-ready",
         facts,
@@ -1430,9 +1738,9 @@ export function App({ dialogController: suppliedDialogController }: AppProps = {
       syncSavedIntent(devicePlan, description.selectedRecipes, bindings);
       setNotice("Configuration refreshed. Resolve any diagnostics, then create and review a new plan.");
     } catch (error) {
-      setNotice(errorMessage(error));
+      if (runtimeGenerationRef.current === runtimeGeneration) setNotice(errorMessage(error));
     } finally {
-      setRepairPreparing(false);
+      if (runtimeGenerationRef.current === runtimeGeneration) setRepairPreparing(false);
     }
   };
 
@@ -1455,10 +1763,14 @@ export function App({ dialogController: suppliedDialogController }: AppProps = {
   };
 
   const stepIndex = WORKFLOW_STEPS.findIndex((item) => item.step === workflow.step);
-  const planOptions = useMemo(
-    () => [...(workflow.match?.candidates ?? []), ...(workflow.match?.safeGenericPlans ?? [])],
-    [workflow.match],
-  );
+  const planOptions = useMemo(() => {
+    if (!workflow.match) return [];
+    if (deviceIsUnsupported(workflow.match)) {
+      return workflow.unsupportedAcknowledged ? workflow.match.safeGenericPlans : [];
+    }
+    return workflow.match.candidates;
+  }, [workflow.match, workflow.unsupportedAcknowledged]);
+  const platformToolsBusy = platformToolsOperation.phase !== "idle";
   const savedPlanUnavailable = Boolean(
     workflow.savedIntentLoaded
       && workflow.match
@@ -1479,9 +1791,12 @@ export function App({ dialogController: suppliedDialogController }: AppProps = {
     : [];
   const configurationActionsLocked = !startupReady
     || busy
+    || repairPreparing
+    || platformToolsBusy
     || workflow.execution.kind === "active"
     || workflow.execution.kind === "starting";
   const saveDisabled = busy
+    || platformToolsBusy
     || !workflow.devicePlan
     || (!workflow.portableIntentDirty && !savedConfiguration?.dirty);
 
@@ -1560,12 +1875,12 @@ export function App({ dialogController: suppliedDialogController }: AppProps = {
             <button aria-describedby={configurationActionsLocked ? "configuration-actions-reason" : undefined} className="secondary" onClick={startNewConfiguration} disabled={configurationActionsLocked}>New</button>
             <button aria-describedby={configurationActionsLocked ? "configuration-actions-reason" : undefined} className="secondary" onClick={openConfiguration} disabled={configurationActionsLocked}>Open…</button>
             <button aria-describedby={saveDisabled ? "save-configuration-reason" : undefined} onClick={saveCurrentConfiguration} disabled={saveDisabled}>Save</button>
-            <button aria-describedby={busy || !workflow.devicePlan ? "save-as-reason" : undefined} className="secondary" onClick={saveConfigurationAs} disabled={busy || !workflow.devicePlan}>Save As…</button>
-            <button aria-describedby={configurationActionsLocked ? "configuration-actions-reason" : undefined} className="text-button" onClick={restartRuntime} disabled={configurationActionsLocked}>Restart runtime</button>
+            <button aria-describedby={busy || platformToolsBusy || !workflow.devicePlan ? "save-as-reason" : undefined} className="secondary" onClick={saveConfigurationAs} disabled={busy || platformToolsBusy || !workflow.devicePlan}>Save As…</button>
+          <button aria-describedby={configurationActionsLocked ? "configuration-actions-reason" : undefined} className="text-button" onClick={(event) => void restartRuntime(event.currentTarget)} disabled={configurationActionsLocked}>Restart runtime</button>
           </div>
           {configurationActionsLocked && <p className="disabled-reason" id="configuration-actions-reason">Configuration replacement and runtime restart are unavailable while another operation or execution is active.</p>}
           {saveDisabled && <p className="disabled-reason" id="save-configuration-reason">Save requires a selected device plan and unsaved portable changes.</p>}
-          {(busy || !workflow.devicePlan) && <p className="disabled-reason" id="save-as-reason">Save As requires a selected device plan and no other active operation.</p>}
+          {(busy || platformToolsBusy || !workflow.devicePlan) && <p className="disabled-reason" id="save-as-reason">Save As requires a selected device plan and no other active operation.</p>}
         </section>
       )}
 
@@ -1580,7 +1895,7 @@ export function App({ dialogController: suppliedDialogController }: AppProps = {
           <p className="eyebrow">RUNTIME UNAVAILABLE</p>
           <h2 data-step-heading tabIndex={-1}>EmuChef could not start its Rust runtime</h2>
           <p>{runtime.error.message}</p>
-          <button onClick={restartRuntime}>Retry runtime startup</button>
+          <button onClick={(event) => void restartRuntime(event.currentTarget)}>Retry runtime startup</button>
         </main>
       ) : adb?.status !== "ready" ? (
         <main className="blocking-card" aria-labelledby="adb-heading" data-focus-fallback="main" id="main-content" ref={mainRef} tabIndex={-1}>
@@ -1598,12 +1913,22 @@ export function App({ dialogController: suppliedDialogController }: AppProps = {
             <button className="secondary" onClick={openPlatformToolsPage}>
               Open Android Platform-Tools Download Page
             </button>
-            <button aria-describedby={busy ? "platform-tools-busy" : undefined} onClick={importPlatformTools} disabled={busy}>
-              {busy ? "Validating…" : "Import Platform-Tools ZIP"}
+            <button aria-describedby={platformToolsBusy ? "platform-tools-busy" : undefined} onClick={importPlatformTools} disabled={platformToolsBusy}>
+              {platformToolsOperation.phase === "picker"
+                ? "Choosing ZIP…"
+                : platformToolsOperation.phase === "processing"
+                  ? "Validating and installing…"
+                  : "Import Platform-Tools ZIP"}
             </button>
-            {adb?.canRemove && <button className="danger" onClick={removePlatformTools}>Remove</button>}
+            {adb?.canRemove && <button className="danger" onClick={(event) => void removePlatformTools(event.currentTarget)} disabled={platformToolsBusy}>Remove</button>}
           </div>
-          {busy && <p className="disabled-reason" id="platform-tools-busy" role="status">Platform-Tools validation is in progress.</p>}
+          {platformToolsBusy && (
+            <p className="disabled-reason" id="platform-tools-busy" role="status">
+              {platformToolsOperation.phase === "picker"
+                ? "Choose a ZIP in the file picker or cancel to return."
+                : "Platform-Tools validation and installation are in progress."}
+            </p>
+          )}
           <p className="fine-print">
             EmuChef keeps only adb, NOTICE.txt, and source.properties in its application data. The
             selected ZIP remains yours and is never copied into the app bundle or repository.
@@ -1627,7 +1952,7 @@ export function App({ dialogController: suppliedDialogController }: AppProps = {
             </ol>
           </nav>
 
-          <section className="workflow-card" aria-busy={busy}>
+          <section className="workflow-card" aria-busy={busy || platformToolsBusy}>
             {notice && !operationError && <p className="warning" role="status">Attention: {notice}</p>}
             {operationError && (
               <section className="error error-summary" ref={validationSummaryRef} role="alert" tabIndex={-1}>
@@ -1642,6 +1967,15 @@ export function App({ dialogController: suppliedDialogController }: AppProps = {
                 <p className="eyebrow">CONNECT DEVICE</p>
                 <h2 data-focus-fallback="workflow" data-step-heading tabIndex={-1}>Choose an Android device</h2>
                 <p>Connect with USB debugging enabled. EmuChef only reads device information in this phase.</p>
+                <details className="connection-help">
+                  <summary>How to connect a device</summary>
+                  <ol>
+                    <li>Enable Developer Options and USB debugging on the Android device.</li>
+                    <li>Connect it with a data-capable USB cable and keep the device unlocked.</li>
+                    <li>Accept the USB debugging authorization prompt on the device.</li>
+                    <li>If it is still missing, check the cable and USB mode, then refresh.</li>
+                  </ol>
+                </details>
                 {recentConfigurations.length > 0 && (
                   <section className="recent-configurations" aria-labelledby="recent-configurations-heading">
                     <h3 id="recent-configurations-heading">Recent configurations</h3>
@@ -1685,7 +2019,7 @@ export function App({ dialogController: suppliedDialogController }: AppProps = {
                   </section>
                 )}
                 <div className="device-list" aria-busy={busy} role="region" aria-label="Detected Android devices">
-                  {devices.length === 0 && <div className="empty-state" role="status">No ADB devices detected yet. Refresh after connecting a device.</div>}
+                  {devices.length === 0 && <div className="empty-state" role="status">No devices found. Connect an unlocked device, enable USB debugging, accept its authorization prompt, then refresh.</div>}
                   <ul>
                   {devices.map((device) => (
                     <li key={device.deviceHandle}>
@@ -1693,32 +2027,87 @@ export function App({ dialogController: suppliedDialogController }: AppProps = {
                         aria-describedby={device.state !== "available" ? stableDomId("device-reason", device.deviceHandle) : undefined}
                         className="device-row"
                         disabled={device.state !== "available" || busy}
-                        onClick={() => selectDevice(device.deviceHandle)}
+                        onClick={(event) => void selectDevice(device.deviceHandle, event.currentTarget)}
                       >
                         <span><strong>{device.displayName}</strong><small>{device.maskedSerial}</small></span>
-                        <span className={`status ${device.state}`}>Status: {device.state}</span>
+                        <span className={`status ${device.state}`}>
+                          {device.state === "available"
+                            ? "Connected"
+                            : device.state === "unauthorized"
+                              ? "Authorization required"
+                              : "Offline"}
+                        </span>
                       </button>
                       {device.state !== "available" && (
                         <small className="disabled-reason" id={stableDomId("device-reason", device.deviceHandle)}>
-                          This device cannot be selected until its status is available.
+                          {device.state === "unauthorized"
+                            ? "Unlock the device, accept the USB debugging prompt, then refresh."
+                            : "Reconnect the device and refresh before selecting it."}
                         </small>
                       )}
                     </li>
                   ))}
                   </ul>
                 </div>
-                <button className="text-button" onClick={pollDevices}>Refresh devices</button>
+                <button className="text-button" disabled={deviceRefresh.phase === "refreshing"} onClick={() => void pollDevices(true)}>
+                  {deviceRefresh.phase === "refreshing" ? "Refreshing…" : "Refresh devices"}
+                </button>
+                {deviceRefresh.message && <p className="disabled-reason" role="status">{deviceRefresh.message}</p>}
               </>
             )}
 
-            {workflow.step === "device" && <div className="empty-state" role="status"><h2 data-focus-fallback="workflow" data-step-heading tabIndex={-1}>Reading device properties</h2><p>Keep the selected device connected.</p></div>}
+            {workflow.step === "device" && (!workflow.facts || !workflow.match) && (
+              <div className="empty-state" role="status"><h2 data-focus-fallback="workflow" data-step-heading tabIndex={-1}>Reading device properties</h2><p>Keep the selected device connected.</p></div>
+            )}
+
+            {workflow.step === "device" && workflow.facts && workflow.match && deviceIsUnsupported(workflow.match) && (
+              <>
+                <p className="eyebrow">UNSUPPORTED DEVICE</p>
+                <h2 data-focus-fallback="workflow" data-step-heading tabIndex={-1}>This device is not officially supported</h2>
+                <p>
+                  EmuChef detected {workflow.facts.manufacturer ?? "an Android"} {workflow.facts.model ?? "device"},
+                  but no supported device-specific setup matches it.
+                </p>
+                {workflow.match.safeGenericPlans.length > 0 ? (
+                  <>
+                    <label className="acknowledgment">
+                      <input
+                        type="checkbox"
+                        checked={workflow.unsupportedAcknowledged}
+                        onChange={(event) => dispatch({
+                          type: "set-unsupported-acknowledgment",
+                          acknowledged: event.currentTarget.checked,
+                        })}
+                      />
+                      I understand this device is not officially supported and any offered generic setup is not device-specific.
+                    </label>
+                    <div className="button-row">
+                      <button className="secondary" onClick={() => dispatch({ type: "back" })}>Back</button>
+                      <button
+                        disabled={!workflow.unsupportedAcknowledged}
+                        onClick={() => dispatch({ type: "continue-unsupported" })}
+                      >Show safe generic setups</button>
+                    </div>
+                  </>
+                ) : (
+                  <>
+                    <p className="error">No backend-approved generic setup is available for this device.</p>
+                    <button className="secondary" onClick={() => dispatch({ type: "back" })}>Choose another device</button>
+                  </>
+                )}
+              </>
+            )}
 
             {workflow.step === "setup" && workflow.facts && workflow.match && (
               <>
                 <p className="eyebrow">CONFIRM DEVICE</p>
                 <h2 data-focus-fallback="workflow" data-step-heading tabIndex={-1}>{workflow.facts.manufacturer ?? "Android"} {workflow.facts.model ?? "device"}</h2>
                 <p>Android {workflow.facts.androidVersion ?? "unknown"} · API {workflow.facts.androidApiLevel ?? "unknown"}</p>
-                <div className="confidence">Match confidence: <strong>{workflow.match.confidence}</strong></div>
+                <p className={deviceIsUnsupported(workflow.match) ? "warning" : "success"}>
+                  {deviceIsUnsupported(workflow.match)
+                    ? "Unsupported device: choose one backend-approved generic setup explicitly."
+                    : "A supported device setup is available."}
+                </p>
                 {savedPlanUnavailable && (
                   <p className="error">
                     The saved device plan reference is unavailable or incompatible with this current device.
@@ -1729,7 +2118,7 @@ export function App({ dialogController: suppliedDialogController }: AppProps = {
                   <p className="error">{workflow.match.blockReason}</p>
                 ) : (
                   <fieldset className="plan-options">
-                    <legend>Choose a safe setup</legend>
+                    <legend>{deviceIsUnsupported(workflow.match) ? "Choose a generic setup" : "Choose a safe setup"}</legend>
                     {planOptions.map((plan) => (
                       <label key={plan.planId}>
                         <input
@@ -2179,13 +2568,99 @@ export function App({ dialogController: suppliedDialogController }: AppProps = {
               <div><dt>Mode</dt><dd>{realExecutionEnabled ? "Simulation and guarded real execution" : "Simulation only"}</dd></div>
             </dl>
             {adb.warning && <p className="warning">{adb.warning}</p>}
-            <button className="text-button" onClick={importPlatformTools} disabled={busy || workflow.step === "execution"}>Replace Platform-Tools</button>
-            <button className="text-button danger-text" onClick={removePlatformTools} disabled={busy || workflow.step === "execution"}>Remove Platform-Tools</button>
-            {(busy || workflow.step === "execution") && (
+            <button className="text-button" onClick={importPlatformTools} disabled={busy || platformToolsBusy || workflow.step === "execution"}>
+              {platformToolsOperation.phase === "picker" && platformToolsOperation.kind === "replace"
+                ? "Choosing ZIP…"
+                : platformToolsOperation.phase === "processing" && platformToolsOperation.kind === "replace"
+                  ? "Replacing…"
+                  : "Replace Platform-Tools"}
+            </button>
+            <button className="text-button danger-text" onClick={(event) => void removePlatformTools(event.currentTarget)} disabled={busy || platformToolsBusy || workflow.step === "execution"}>
+              {platformToolsOperation.phase === "processing" && platformToolsOperation.kind === "remove" ? "Removing…" : "Remove Platform-Tools"}
+            </button>
+            {(busy || platformToolsBusy || workflow.step === "execution") && (
               <p className="disabled-reason">Platform-Tools changes are unavailable during another operation or execution.</p>
             )}
           </aside>
         </main>
+      )}
+
+      {activeDialog?.payload.kind === "remove-platform-tools" && (
+        <AccessibleDialog
+          currentDialogId={() => dialogController.activeId}
+          descriptionId="remove-platform-tools-description"
+          dialogId={activeDialog.id}
+          onDismiss={() => dialogController.settle(activeDialog.id, false)}
+          returnFocus={activeDialog.payload.invoker}
+          role="alertdialog"
+          titleId="remove-platform-tools-title"
+        >
+          <h2 id="remove-platform-tools-title">Remove Platform-Tools?</h2>
+          <p id="remove-platform-tools-description">
+            Device detection will stop. After reinstalling Platform-Tools, you must select your device,
+            validate the setup, and create a fresh review before continuing.
+          </p>
+          <div className="button-row">
+            <button className="secondary" onClick={() => dialogController.settle(activeDialog.id, false)}>Cancel</button>
+            <button className="danger" onClick={() => dialogController.settle(activeDialog.id, true)}>Remove</button>
+          </div>
+        </AccessibleDialog>
+      )}
+
+      {activeDialog?.payload.kind === "different-device" && (
+        <AccessibleDialog
+          currentDialogId={() => dialogController.activeId}
+          descriptionId="different-device-description"
+          dialogId={activeDialog.id}
+          onDismiss={() => dialogController.settle(activeDialog.id, false)}
+          returnFocus={activeDialog.payload.invoker}
+          role="alertdialog"
+          titleId="different-device-title"
+        >
+          <h2 id="different-device-title">Start with a different device?</h2>
+          <p id="different-device-description">
+            The preserved setup belongs to the device you were using. Starting with another device
+            clears those held setup and input choices so they are not applied unsafely.
+          </p>
+          <div className="button-row">
+            <button className="secondary" onClick={() => dialogController.settle(activeDialog.id, false)}>Cancel</button>
+            <button className="danger" onClick={() => dialogController.settle(activeDialog.id, true)}>Start fresh</button>
+          </div>
+        </AccessibleDialog>
+      )}
+
+      {activeDialog?.payload.kind === "restart-loss" && (
+        <AccessibleDialog
+          currentDialogId={() => dialogController.activeId}
+          descriptionId="restart-loss-description"
+          dialogId={activeDialog.id}
+          onDismiss={() => dialogController.settle(activeDialog.id, false)}
+          returnFocus={activeDialog.payload.invoker}
+          role="alertdialog"
+          titleId="restart-loss-title"
+        >
+          <h2 id="restart-loss-title">Restart the runtime?</h2>
+          <div id="restart-loss-description">
+            {activeDialog.payload.totalLoss ? (
+              <p>EmuChef could not preserve the current portable setup safely. Restarting now clears it.</p>
+            ) : (
+              <>
+                <p>
+                  The setup and nonsensitive choices will be restored, but {activeDialog.payload.omittedCount}
+                  {activeDialog.payload.omittedCount === 1 ? " value" : " values"} must be selected or entered again.
+                </p>
+                {activeDialog.payload.labels.length > 0 && (
+                  <p>Affected fields: {activeDialog.payload.labels.join(", ")}.</p>
+                )}
+              </>
+            )}
+            <p>No generated plan or execution can be resumed after restart.</p>
+          </div>
+          <div className="button-row">
+            <button className="secondary" onClick={() => dialogController.settle(activeDialog.id, false)}>Cancel</button>
+            <button className="danger" onClick={() => dialogController.settle(activeDialog.id, true)}>Restart</button>
+          </div>
+        </AccessibleDialog>
       )}
 
       {activeDialog?.payload.kind === "recovery" && (

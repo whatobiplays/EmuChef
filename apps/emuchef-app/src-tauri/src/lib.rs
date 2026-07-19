@@ -49,6 +49,9 @@ pub fn run() {
                 sidecar,
                 catalog,
                 adb: Mutex::new(adb::AdbManager::new(app_data.join("platform-tools"))),
+                platform_tools_selections: Mutex::new(
+                    commands::PlatformToolsSelectionStore::default(),
+                ),
                 handles: Mutex::new(handles::SessionHandles::default()),
                 executions: Mutex::new(execution::ExecutionHandleStore::default()),
                 saved_configurations: Mutex::new(
@@ -78,7 +81,8 @@ pub fn run() {
             commands::get_catalog,
             commands::get_adb_setup_status,
             commands::open_platform_tools_download_page,
-            commands::import_platform_tools_zip,
+            commands::pick_platform_tools_zip,
+            commands::install_platform_tools_selection,
             commands::remove_platform_tools,
             commands::poll_devices,
             commands::probe_device,

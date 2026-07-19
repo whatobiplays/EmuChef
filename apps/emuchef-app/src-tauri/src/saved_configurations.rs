@@ -233,6 +233,7 @@ pub type SavedConfigurationState = Mutex<SavedConfigurationStore>;
 
 /// Portable recovery overlay after Tauri has removed sensitive values.
 pub struct RecoveryPortableIntent {
+    pub dirty: bool,
     pub device_plan: String,
     pub selected_recipes: Vec<String>,
     pub bindings: Map<String, Value>,
@@ -275,6 +276,18 @@ pub(crate) fn restore_recovery_source(
     if actual_id != configuration_id {
         close_sidecar_document(state, document);
         return Ok(None);
+    }
+    if !intent.dirty && intent.omitted_bindings.is_empty() {
+        let mut store = state
+            .saved_configurations
+            .lock()
+            .map_err(|_| state_error())?;
+        let handle = store.insert_document(path, document)?;
+        let record = store.document(&handle)?.clone();
+        let _ = store.touch_recent(&record);
+        let mut projected = project_document(&handle, record.revision, document)?;
+        projected["outcome"] = json!("opened");
+        return Ok(Some(projected));
     }
     let document_id = document_string(document, "documentId")?;
     let current_bindings = document

@@ -52,6 +52,8 @@ export interface WorkflowState {
   portableIntentDirty: boolean;
   savedIntentLoaded: boolean;
   requiredReentryBindings: string[];
+  reconnectDeviceHandle: string | null;
+  unsupportedAcknowledged: boolean;
 }
 
 export const initialWorkflowState: WorkflowState = {
@@ -72,10 +74,12 @@ export const initialWorkflowState: WorkflowState = {
   portableIntentDirty: false,
   savedIntentLoaded: false,
   requiredReentryBindings: [],
+  reconnectDeviceHandle: null,
+  unsupportedAcknowledged: false,
 };
 
 export type WorkflowAction =
-  | { type: "select-device"; deviceHandle: string }
+  | { type: "select-device"; deviceHandle: string; preserveIntent?: boolean }
   | { type: "device-probed"; facts: DeviceFacts; match: DeviceMatch }
   | { type: "select-plan"; devicePlan: string }
   | { type: "description"; description: ConfigurationDescription; generation: number }
@@ -110,7 +114,13 @@ export type WorkflowAction =
     }
   | { type: "return-to-review" }
   | { type: "back" }
-  | { type: "device-disappeared" }
+  | {
+      type: "device-disappeared";
+      bindings?: Record<string, unknown>;
+      requiredReentryBindings?: string[];
+    }
+  | { type: "set-unsupported-acknowledgment"; acknowledged: boolean }
+  | { type: "continue-unsupported" }
   | { type: "infrastructure-invalidated" }
   | { type: "runtime-invalidated" };
 
@@ -126,7 +136,14 @@ const previousStep: Record<WorkflowStep, WorkflowStep> = {
 export function workflowReducer(state: WorkflowState, action: WorkflowAction): WorkflowState {
   switch (action.type) {
     case "select-device":
-      if (state.repairIntent || state.savedIntentLoaded) {
+      if (action.preserveIntent === true || (
+        action.preserveIntent === undefined
+        && (
+          (state.reconnectDeviceHandle !== null && state.reconnectDeviceHandle === action.deviceHandle)
+          || state.repairIntent
+          || state.savedIntentLoaded
+        )
+      )) {
         return {
           ...state,
           step: "device",
@@ -136,6 +153,7 @@ export function workflowReducer(state: WorkflowState, action: WorkflowAction): W
           description: null,
           review: null,
           execution: { kind: "idle" },
+          unsupportedAcknowledged: false,
           requestGeneration: state.requestGeneration + 1,
         };
       }
@@ -149,15 +167,28 @@ export function workflowReducer(state: WorkflowState, action: WorkflowAction): W
       if (state.deviceHandle !== action.facts.deviceHandle) return state;
       return {
         ...state,
-        step: "setup",
+        step: deviceIsUnsupported(action.match) ? "device" : "setup",
         facts: action.facts,
         match: action.match,
-        devicePlan: state.savedIntentLoaded
+        devicePlan: deviceIsUnsupported(action.match)
+          ? null
+          : state.savedIntentLoaded
           ? state.devicePlan
           : state.repairIntent && planStillAvailable(state.devicePlan, action.match)
             ? state.devicePlan
             : action.match.recommendedPlanId,
+        reconnectDeviceHandle: null,
+        unsupportedAcknowledged: false,
       };
+    case "set-unsupported-acknowledgment":
+      if (!state.match || !deviceIsUnsupported(state.match)) return state;
+      return { ...state, unsupportedAcknowledged: action.acknowledged };
+    case "continue-unsupported":
+      if (!state.match || !deviceIsUnsupported(state.match) || state.match.safeGenericPlans.length === 0) {
+        return state;
+      }
+      if (!state.unsupportedAcknowledged) return state;
+      return { ...state, step: "setup", devicePlan: null };
     case "select-plan":
       return {
         ...state,
@@ -338,37 +369,34 @@ export function workflowReducer(state: WorkflowState, action: WorkflowAction): W
       if (!state.review) return state;
       return { ...state, step: "review", execution: { kind: "idle" } };
     case "back":
-      return { ...state, step: previousStep[state.step], review: null };
+      return {
+        ...state,
+        step: state.step === "setup" && state.match && deviceIsUnsupported(state.match)
+          ? "device"
+          : previousStep[state.step],
+        review: null,
+        unsupportedAcknowledged: state.step === "setup" ? false : state.unsupportedAcknowledged,
+      };
     case "device-disappeared":
       if (state.step === "execution" || state.execution.kind === "starting") return state;
-      if (state.repairIntent) {
-        return {
-          ...state,
-          step: "connect",
-          deviceHandle: null,
-          facts: null,
-          match: null,
-          description: null,
-          review: null,
-          execution: { kind: "idle" },
-          requestGeneration: state.requestGeneration + 1,
-        };
-      }
-      if (state.savedIntentLoaded) {
-        return {
-          ...state,
-          step: "connect",
-          deviceHandle: null,
-          facts: null,
-          match: null,
-          description: null,
-          descriptionDirty: true,
-          review: null,
-          execution: { kind: "idle" },
-          requestGeneration: state.requestGeneration + 1,
-        };
-      }
-      return { ...initialWorkflowState, requestGeneration: state.requestGeneration + 1 };
+      return {
+        ...state,
+        step: "connect",
+        reconnectDeviceHandle: state.deviceHandle,
+        deviceHandle: null,
+        facts: null,
+        match: null,
+        description: null,
+        descriptionDirty: true,
+        review: null,
+        executionGeneration: state.executionGeneration + 1,
+        execution: { kind: "idle" },
+        repairIntent: true,
+        bindings: action.bindings ?? state.bindings,
+        requiredReentryBindings: action.requiredReentryBindings ?? state.requiredReentryBindings,
+        unsupportedAcknowledged: false,
+        requestGeneration: state.requestGeneration + 1,
+      };
     case "infrastructure-invalidated":
       return {
         ...state,
@@ -382,6 +410,8 @@ export function workflowReducer(state: WorkflowState, action: WorkflowAction): W
         executionGeneration: state.executionGeneration + 1,
         execution: { kind: "idle" },
         repairIntent: false,
+        reconnectDeviceHandle: state.deviceHandle,
+        unsupportedAcknowledged: false,
         requestGeneration: state.requestGeneration + 1,
       };
     case "runtime-invalidated":
@@ -463,6 +493,42 @@ export function reviewReady(state: WorkflowState): boolean {
   return !state.description.inputs.some(
     (input) => input.required && missingRequiredValue(input.value),
   );
+}
+
+export function deviceIsUnsupported(match: DeviceMatch): boolean {
+  return match.confidence === "none";
+}
+
+/**
+ * Projects portable binding values using only the current backend-authored
+ * input sensitivity contract. Unknown keys and sensitive values fail closed.
+ */
+export function portableBindingsForTransition(
+  description: ConfigurationDescription | null,
+  bindings: Record<string, unknown>,
+): {
+  bindings: Record<string, unknown>;
+  requiredReentryBindings: string[];
+  requiredReentryLabels: string[];
+} {
+  const projected: Record<string, unknown> = {};
+  const requiredReentryBindings: string[] = [];
+  const requiredReentryLabels: string[] = [];
+  const inputs = new Map((description?.inputs ?? []).map((input) => [input.key, input]));
+  for (const [key, value] of Object.entries(bindings)) {
+    const input = inputs.get(key);
+    if (input?.sensitive === false) {
+      projected[key] = value;
+      continue;
+    }
+    requiredReentryBindings.push(key);
+    if (input?.label && !requiredReentryLabels.includes(input.label)) {
+      requiredReentryLabels.push(input.label);
+    }
+  }
+  requiredReentryBindings.sort();
+  requiredReentryLabels.sort();
+  return { bindings: projected, requiredReentryBindings, requiredReentryLabels };
 }
 
 /** Returns whether the server-authoritative recipe option is immutable in the UI. */

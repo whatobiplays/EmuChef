@@ -5,13 +5,16 @@
 //! boundary.
 
 use std::collections::{HashMap, HashSet};
+use std::path::PathBuf;
 use std::sync::Mutex;
 use std::time::Instant;
 
+use serde::Serialize;
 use serde_json::{json, Map, Value};
 use tauri::{AppHandle, Manager, State};
 use tauri_plugin_dialog::{DialogExt, FilePath};
 use tauri_plugin_opener::OpenerExt;
+use uuid::Uuid;
 
 use crate::adb::{AdbManager, AdbSetupStatusDto, PLATFORM_TOOLS_URL};
 use crate::catalog::CatalogDescriptor;
@@ -27,6 +30,7 @@ pub struct AppState {
     pub sidecar: SidecarState,
     pub catalog: Result<CatalogDescriptor, String>,
     pub adb: Mutex<AdbManager>,
+    pub platform_tools_selections: Mutex<PlatformToolsSelectionStore>,
     pub handles: Mutex<SessionHandles>,
     pub executions: Mutex<ExecutionHandleStore>,
     pub saved_configurations: SavedConfigurationState,
@@ -34,6 +38,52 @@ pub struct AppState {
     pub support: Mutex<SupportStore>,
     pub updates: UpdateService,
     pub update_activity: ActivityGate,
+}
+
+/// Holds at most one user-selected archive path behind an opaque, one-shot
+/// handle. Paths never cross the React IPC boundary.
+#[derive(Default)]
+pub struct PlatformToolsSelectionStore {
+    selected: Option<(String, PathBuf)>,
+}
+
+impl PlatformToolsSelectionStore {
+    fn replace(&mut self, path: PathBuf) -> String {
+        let handle = format!("platform_tools_selection_{}", Uuid::new_v4().simple());
+        self.selected = Some((handle.clone(), path));
+        handle
+    }
+
+    fn take(&mut self, handle: &str) -> Result<PathBuf, String> {
+        let Some((expected, _)) = self.selected.as_ref() else {
+            return Err(safe_error(
+                "platform_tools_selection_stale",
+                "Choose the Platform-Tools ZIP again before continuing.",
+            ));
+        };
+        if expected != handle {
+            return Err(safe_error(
+                "platform_tools_selection_stale",
+                "Choose the Platform-Tools ZIP again before continuing.",
+            ));
+        }
+        let (_, path) = self.selected.take().expect("selection was checked above");
+        Ok(path)
+    }
+
+    fn clear(&mut self) {
+        self.selected = None;
+    }
+}
+
+#[derive(Debug, Serialize)]
+#[serde(tag = "outcome", rename_all = "snake_case")]
+pub enum PlatformToolsPickerResult {
+    Cancelled,
+    Selected {
+        #[serde(rename = "selectionHandle")]
+        selection_handle: String,
+    },
 }
 
 #[tauri::command]
@@ -82,6 +132,16 @@ pub fn restart_runtime(state: State<'_, AppState>) -> Result<RuntimeStatusDto, S
 }
 
 fn reset_app_session(state: &AppState, close_documents: bool) -> Result<(), String> {
+    state
+        .platform_tools_selections
+        .lock()
+        .map_err(|_| {
+            safe_error(
+                "selection_state_unavailable",
+                "File selection state is unavailable.",
+            )
+        })?
+        .clear();
     let document_ids = state
         .saved_configurations
         .lock()
@@ -186,7 +246,17 @@ pub fn open_platform_tools_download_page(app: AppHandle) -> Result<(), String> {
 }
 
 #[tauri::command]
-pub async fn import_platform_tools_zip(app: AppHandle) -> Result<AdbSetupStatusDto, String> {
+pub async fn pick_platform_tools_zip(app: AppHandle) -> Result<PlatformToolsPickerResult, String> {
+    app.state::<AppState>()
+        .platform_tools_selections
+        .lock()
+        .map_err(|_| {
+            safe_error(
+                "selection_state_unavailable",
+                "File selection state is unavailable.",
+            )
+        })?
+        .clear();
     let _dialog_activity = app
         .state::<AppState>()
         .update_activity
@@ -202,8 +272,7 @@ pub async fn import_platform_tools_zip(app: AppHandle) -> Result<AdbSetupStatusD
     )
     .await?;
     let Some(selected) = selected else {
-        let status_app = app.clone();
-        return run_import_task(move || get_adb_setup_status(status_app.state::<AppState>())).await;
+        return Ok(PlatformToolsPickerResult::Cancelled);
     };
     let path = selected.into_path().map_err(|_| {
         safe_error(
@@ -211,6 +280,37 @@ pub async fn import_platform_tools_zip(app: AppHandle) -> Result<AdbSetupStatusD
             "The selected ZIP could not be opened by the application.",
         )
     })?;
+
+    let selection_handle = app
+        .state::<AppState>()
+        .platform_tools_selections
+        .lock()
+        .map_err(|_| {
+            safe_error(
+                "selection_state_unavailable",
+                "File selection state is unavailable.",
+            )
+        })?
+        .replace(path);
+    Ok(PlatformToolsPickerResult::Selected { selection_handle })
+}
+
+#[tauri::command]
+pub async fn install_platform_tools_selection(
+    selection_handle: String,
+    app: AppHandle,
+) -> Result<AdbSetupStatusDto, String> {
+    let path = app
+        .state::<AppState>()
+        .platform_tools_selections
+        .lock()
+        .map_err(|_| {
+            safe_error(
+                "selection_state_unavailable",
+                "File selection state is unavailable.",
+            )
+        })?
+        .take(&selection_handle)?;
 
     let import_app = app.clone();
     let result = run_import_task(move || {
@@ -237,7 +337,7 @@ pub async fn import_platform_tools_zip(app: AppHandle) -> Result<AdbSetupStatusD
                 "The device session could not be reset.",
             )
         })?
-        .invalidate_all();
+        .invalidate_runtime_authority_preserving_identities();
     Ok(result)
 }
 
@@ -300,6 +400,16 @@ pub fn remove_platform_tools(state: State<'_, AppState>) -> Result<AdbSetupStatu
             "Platform-Tools cannot be removed while an execution is starting or active.",
         ));
     }
+    state
+        .platform_tools_selections
+        .lock()
+        .map_err(|_| {
+            safe_error(
+                "selection_state_unavailable",
+                "File selection state is unavailable.",
+            )
+        })?
+        .clear();
     let result = state
         .adb
         .lock()
@@ -1239,6 +1349,28 @@ pub(crate) fn redact_absolute_paths(value: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn platform_tools_selections_are_single_use_opaque_and_replace_prior_state() {
+        let mut store = PlatformToolsSelectionStore::default();
+        let first_path = PathBuf::from("/private/first.zip");
+        let first = store.replace(first_path);
+        assert!(first.starts_with("platform_tools_selection_"));
+        assert!(!first.contains("private"));
+
+        let second_path = PathBuf::from("/private/second.zip");
+        let second = store.replace(second_path.clone());
+        assert!(store.take(&first).is_err());
+        assert_eq!(store.take(&second).unwrap(), second_path);
+        assert!(store.take(&second).is_err());
+
+        let serialized = serde_json::to_string(&PlatformToolsPickerResult::Selected {
+            selection_handle: second,
+        })
+        .unwrap();
+        assert!(serialized.contains("selectionHandle"));
+        assert!(!serialized.contains("/private"));
+    }
 
     #[test]
     fn platform_tools_picker_cancellation_is_a_successful_empty_selection() {

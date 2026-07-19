@@ -7,7 +7,9 @@
     "sidecar:dev": "node scripts/prepare-rust-sidecar.mjs --profile debug",
     "sidecar:build": "node scripts/prepare-rust-sidecar.mjs --profile release",
     "dev": "vite",
+    "test": "npm run test:logic && vitest --config tests/vitest.config.ts",
     "typecheck": "tsc --noEmit",
+    "lint": "eslint --config tests/eslint.config.mjs \"src/**/*.{ts,tsx}\" \"tests/**/*.{ts,tsx,mjs}\" --max-warnings=0",
     "test:logic": "node --test --import tsx tests/*.test.ts",
     "test:security": "node --test tests/security-policy.test.mjs && npm run check:python-runtime-retirement",
     "check:python-runtime-retirement": "node --test --experimental-test-coverage --test-coverage-include=../../scripts/check-python-runtime-retirement.mjs --test-coverage-lines=95 --test-coverage-functions=95 --test-coverage-branches=95 ../../scripts/check-python-runtime-retirement.test.mjs && node ../../scripts/check-python-runtime-retirement.mjs",
@@ -34,12 +36,19 @@
   },
   "devDependencies": {
     "@tauri-apps/cli": "^2.11.0",
+    "@testing-library/react": "^16.3.2",
+    "@testing-library/user-event": "^14.6.1",
     "@types/node": "^25.6.0",
     "@types/react": "^19.2.14",
     "@types/react-dom": "^19.2.3",
+    "@typescript-eslint/eslint-plugin": "^8.64.0",
+    "@typescript-eslint/parser": "^8.64.0",
     "@vitejs/plugin-react": "^6.0.1",
+    "eslint": "^10.7.0",
+    "jsdom": "^29.1.1",
     "tsx": "^4.20.6",
     "typescript": "^6.0.3",
-    "vite": "^8.0.10"
+    "vite": "^8.0.10",
+    "vitest": "^4.1.10"
   }
 }

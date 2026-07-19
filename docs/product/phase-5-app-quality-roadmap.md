@@ -31,9 +31,9 @@ The following foundations are already implemented:
 
 | Phase | Name | Status | Primary outcome |
 |---|---|---|---|
-| 5A | End-to-end UX and feature-gap audit | In progress | Evidence-based prioritized app backlog |
-| 5B | Workflow navigation and state polish | Planned | Predictable movement, recovery, and state transitions |
-| 5C | Recipe and setup selection experience | Planned | Nontechnical setup discovery and selection |
+| 5A | End-to-end UX and feature-gap audit | Completed | Evidence-based prioritized app backlog |
+| 5B | Workflow navigation and state polish | Completed | Predictable movement, recovery, and state transitions |
+| 5C | Recipe and setup selection experience | Next | Nontechnical setup discovery and selection |
 | 5D | Input collection and file-management polish | Planned | Early, understandable, recoverable input validation |
 | 5E | Plan review and execution experience | Planned | Confidence before execution and useful failure recovery |
 | 5F | Saved configurations and reusable setups | Planned | Reliable reuse and maintenance of configurations |
@@ -105,6 +105,21 @@ Make workflow location, progression, regression, blocking, cancellation, and res
 
 A user can always determine where they are, what to do next, why an action is unavailable, and what data will be lost by navigating or restarting.
 
+### Completion evidence
+
+Phase 5B completed on 2026-07-19. The main application now:
+
+- leaves startup focus neutral while retaining deliberate transition focus;
+- labels the combined fourth stage `Customize`, with the Phase 5C stage split still deferred;
+- separates Platform-Tools ZIP selection from validation and installation, reconciles replacement redetection, and confirms removal in user-facing terms;
+- reports bounded single-flight device refresh progress and presents unauthorized, offline, unsupported, and supported states distinctly;
+- exposes unmatched devices only through a deliberate unsupported-device acknowledgment followed by explicit selection from the backend-authored `safeGenericPlans` list;
+- retains a bounded Tauri-only serial-to-handle identity map for same-device reconnection without serializing exact serials to React;
+- preserves setup, recipe, and backend-classified nonsensitive binding intent across disconnect and restart while invalidating device facts, reviews, plans, executions, and prior-runtime responses; and
+- uses backend recovery omissions to request restart confirmation with friendly field labels or a count, never sensitive values, paths, or binding identifiers.
+
+Implementation is concentrated in `apps/emuchef-app/src/App.tsx`, `src/workflow.ts`, the Tauri command/handle/recovery modules, and app-local tests and tooling. Verification passed through the app-local Vitest/jsdom and Node suites, correctness-focused ESLint, TypeScript checking, production build, the full Tauri Rust suite, the full Rust backend suite, security gates, and repository diff validation. The remaining risk is manual real-device and packaged-GUI confirmation of hardware timing and native focus behavior; no such evidence is claimed by this code-level phase.
+
 ## 7. Phase 5C — Recipe and Setup Selection Experience
 
 ### Objective
@@ -124,6 +139,8 @@ Allow a nontechnical user to choose an appropriate setup without understanding a
 - Indicators for APK, BIOS, ROM/content, network, root, and experimental requirements.
 - Clear behavior when a selection becomes invalid.
 - User-facing setup presets where justified by audit evidence.
+- Keep the exact device match recommended while also showing other backend-approved applicable setup plans.
+- Provide a backend-authoritative blank `Start from scratch` setup for users who want to select recipes manually.
 
 ### Exit criteria
 
@@ -294,4 +311,4 @@ At completion:
 
 ## 16. Immediate Next Action
 
-Begin Phase 5A with a structured end-to-end UX and feature-gap audit. The first Phase 5A task should produce findings and priorities, not a broad redesign or multi-phase implementation.
+Begin Phase 5C with the dedicated recipe-selection stage and scalable setup-discovery work. Preserve the Phase 5B portable-intent, unsupported-device, stale-response, and backend-authority contracts while restructuring the combined Customize stage.

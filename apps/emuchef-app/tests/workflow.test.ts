@@ -7,6 +7,7 @@ import {
   inputDiagnosticsForDisplay,
   mergeExecutionEvents,
   pageDiagnosticsForDisplay,
+  portableBindingsForTransition,
   recipeSelectionDisabled,
   reviewReady,
   runBusyAction,
@@ -347,6 +348,120 @@ test("safe generic plans are never auto-selected", () => {
   });
   assert.equal(probed.devicePlan, null);
   assert.equal(probed.match?.blocked, false);
+  assert.equal(probed.step, "device");
+  assert.equal(probed.unsupportedAcknowledged, false);
+  assert.equal(workflowReducer(probed, { type: "continue-unsupported" }), probed);
+
+  const acknowledged = workflowReducer(probed, {
+    type: "set-unsupported-acknowledgment",
+    acknowledged: true,
+  });
+  assert.equal(acknowledged.step, "device");
+  assert.equal(acknowledged.devicePlan, null);
+  const continued = workflowReducer(acknowledged, { type: "continue-unsupported" });
+  assert.equal(continued.step, "setup");
+  assert.equal(continued.devicePlan, null);
+  assert.deepEqual(continued.match?.safeGenericPlans, genericOnly.safeGenericPlans);
+});
+
+test("unsupported acknowledgment resets on reprobe, disconnect, and runtime restart", () => {
+  const unsupported = {
+    ...match,
+    confidence: "none" as const,
+    recommendedPlanId: null,
+    safeGenericPlans: [{
+      planId: "generic.safe",
+      name: "Generic",
+      description: null,
+      profileId: "profile.generic",
+      profileName: "Generic",
+      reasons: [],
+    }],
+  };
+  const selected = workflowReducer(initialWorkflowState, {
+    type: "select-device",
+    deviceHandle: facts.deviceHandle,
+  });
+  const probed = workflowReducer(selected, { type: "device-probed", facts, match: unsupported });
+  const acknowledged = workflowReducer(probed, {
+    type: "set-unsupported-acknowledgment",
+    acknowledged: true,
+  });
+  const reprobed = workflowReducer(
+    workflowReducer(acknowledged, {
+      type: "select-device",
+      deviceHandle: facts.deviceHandle,
+      preserveIntent: true,
+    }),
+    { type: "device-probed", facts, match: unsupported },
+  );
+  assert.equal(reprobed.unsupportedAcknowledged, false);
+  assert.equal(workflowReducer(acknowledged, { type: "device-disappeared" }).unsupportedAcknowledged, false);
+  assert.equal(workflowReducer(acknowledged, { type: "runtime-invalidated" }).unsupportedAcknowledged, false);
+});
+
+test("disconnect preserves only backend-classified nonsensitive intent for the same device", () => {
+  const description = {
+    devicePlan: "plan.one",
+    selectedRecipes: ["recipe.one"],
+    expandedRecipes: ["recipe.one"],
+    recipeOptions: [],
+    diagnostics: [],
+    inputs: [
+      { key: "recipe.one/theme", recipeId: "recipe.one", inputId: "theme", type: "string", label: "Theme", description: null, required: false, sensitive: false, value: "dark", valueSource: "explicit" as const, diagnostics: [] },
+      { key: "recipe.one/token", recipeId: "recipe.one", inputId: "token", type: "string", label: "Account token", description: null, required: true, sensitive: true, value: "secret", valueSource: "explicit" as const, diagnostics: [] },
+    ],
+  };
+  const state = {
+    ...initialWorkflowState,
+    step: "review" as const,
+    deviceHandle: facts.deviceHandle,
+    facts,
+    match,
+    devicePlan: "plan.one",
+    selectedRecipes: ["recipe.one"],
+    bindings: {
+      "recipe.one/theme": "dark",
+      "recipe.one/token": "secret",
+      "unknown/value": "unknown",
+    },
+    description,
+    review,
+    portableIntentDirty: true,
+  };
+  const portable = portableBindingsForTransition(state.description, state.bindings);
+  assert.deepEqual(portable.bindings, { "recipe.one/theme": "dark" });
+  assert.deepEqual(portable.requiredReentryBindings, ["recipe.one/token", "unknown/value"]);
+  assert.deepEqual(portable.requiredReentryLabels, ["Account token"]);
+
+  const disconnected = workflowReducer(state, {
+    type: "device-disappeared",
+    bindings: portable.bindings,
+    requiredReentryBindings: portable.requiredReentryBindings,
+  });
+  assert.equal(disconnected.step, "connect");
+  assert.equal(disconnected.reconnectDeviceHandle, facts.deviceHandle);
+  assert.equal(disconnected.devicePlan, "plan.one");
+  assert.deepEqual(disconnected.selectedRecipes, ["recipe.one"]);
+  assert.deepEqual(disconnected.bindings, { "recipe.one/theme": "dark" });
+  assert.equal(disconnected.review, null);
+
+  const sameDevice = workflowReducer(disconnected, {
+    type: "select-device",
+    deviceHandle: facts.deviceHandle,
+    preserveIntent: true,
+  });
+  assert.equal(sameDevice.devicePlan, "plan.one");
+  assert.deepEqual(sameDevice.bindings, { "recipe.one/theme": "dark" });
+
+  const differentDevice = workflowReducer(disconnected, {
+    type: "select-device",
+    deviceHandle: "different-device",
+    preserveIntent: false,
+  });
+  assert.equal(differentDevice.devicePlan, null);
+  assert.deepEqual(differentDevice.bindings, {});
+  assert.equal(differentDevice.portableIntentDirty, false);
 });
 
 test("backend-expanded dependency selection is retained and cannot be deselected", () => {

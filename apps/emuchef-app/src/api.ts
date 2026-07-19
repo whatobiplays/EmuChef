@@ -2,6 +2,7 @@ import { invoke } from "@tauri-apps/api/core";
 
 import type {
   AdbSetupStatus,
+  PlatformToolsPickerResult,
   CatalogSummary,
   ConfigurationDescription,
   DeviceFacts,
@@ -40,6 +41,7 @@ export const api = {
     draftGeneration: number;
     displayName: string | null;
     sourceConfigurationHandle: string | null;
+    dirty: boolean;
     devicePlan: string;
     selectedRecipes: string[];
     bindings: Record<string, unknown>;
@@ -68,7 +70,10 @@ export const api = {
   catalog: () => invoke<CatalogSummary>("get_catalog"),
   adbStatus: () => invoke<AdbSetupStatus>("get_adb_setup_status"),
   openPlatformToolsPage: () => invoke<void>("open_platform_tools_download_page"),
-  importPlatformTools: () => invoke<AdbSetupStatus>("import_platform_tools_zip"),
+  pickPlatformToolsZip: () =>
+    invoke<PlatformToolsPickerResult>("pick_platform_tools_zip"),
+  installPlatformToolsSelection: (selectionHandle: string) =>
+    invoke<AdbSetupStatus>("install_platform_tools_selection", { selectionHandle }),
   removePlatformTools: () => invoke<AdbSetupStatus>("remove_platform_tools"),
   pollDevices: () => invoke<DeviceSummary[]>("poll_devices"),
   probeDevice: (deviceHandle: string) =>

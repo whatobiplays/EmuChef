@@ -19,6 +19,10 @@ export interface AdbSetupStatus {
   canRemove: boolean;
 }
 
+export type PlatformToolsPickerResult =
+  | { outcome: "cancelled" }
+  | { outcome: "selected"; selectionHandle: string };
+
 export interface CatalogIdentity {
   sourceKind: "bundled";
   sourceId: string;
@@ -395,6 +399,7 @@ export interface RecoveryWriteAck {
   requestGeneration: number;
   draftGeneration: number;
   recordGeneration: number;
+  omittedBindings: string[];
 }
 
 export interface RecoveryRestoreResult {
@@ -404,6 +409,7 @@ export interface RecoveryRestoreResult {
   sourceStatus: "available" | "missing" | "unsaved";
   document: SavedConfigurationDocument | null;
   intent: {
+    dirty: boolean;
     devicePlan: string;
     selectedRecipes: string[];
     bindings: Record<string, unknown>;

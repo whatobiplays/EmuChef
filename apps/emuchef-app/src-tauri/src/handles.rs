@@ -11,6 +11,7 @@ use crate::adb::AdbInstallationIdentity;
 
 const MAX_REVIEWS: usize = 16;
 const MAX_TOMBSTONES: usize = 64;
+const MAX_DEVICE_IDENTITIES: usize = 32;
 const REVIEW_IDLE_TTL: Duration = Duration::from_secs(30 * 60);
 const REVIEW_ABSOLUTE_TTL: Duration = Duration::from_secs(2 * 60 * 60);
 
@@ -55,6 +56,7 @@ struct ReviewTombstone {
 pub struct SessionHandles {
     devices_by_handle: HashMap<String, DeviceRecord>,
     handle_by_serial: HashMap<String, String>,
+    identity_order: VecDeque<String>,
     reviews: HashMap<String, ReviewedPlanSnapshot>,
     review_order: VecDeque<String>,
     tombstones: VecDeque<ReviewTombstone>,
@@ -80,11 +82,7 @@ impl SessionHandles {
                 .get("model")
                 .and_then(Value::as_str)
                 .map(str::to_string);
-            let handle = self
-                .handle_by_serial
-                .get(serial)
-                .cloned()
-                .unwrap_or_else(|| format!("device_{}", Uuid::new_v4().simple()));
+            let handle = self.handle_for_serial(serial);
             let facts = self
                 .devices_by_handle
                 .get(&handle)
@@ -99,7 +97,6 @@ impl SessionHandles {
                     facts,
                 },
             );
-            self.handle_by_serial.insert(serial.to_string(), handle);
         }
         let disappeared = self
             .devices_by_handle
@@ -111,8 +108,6 @@ impl SessionHandles {
             self.invalidate_reviews_for_device(&handle, "review_stale");
         }
         self.devices_by_handle = present;
-        self.handle_by_serial
-            .retain(|_, handle| self.devices_by_handle.contains_key(handle));
         let mut result = self
             .devices_by_handle
             .values()
@@ -223,6 +218,14 @@ impl SessionHandles {
     }
 
     pub fn invalidate_all(&mut self) {
+        self.invalidate_runtime_authority_preserving_identities();
+        self.handle_by_serial.clear();
+        self.identity_order.clear();
+    }
+
+    /// Clears live device and review authority while retaining only bounded,
+    /// process-local identity continuity for controlled redetection.
+    pub fn invalidate_runtime_authority_preserving_identities(&mut self) {
         let handles = self.reviews.keys().cloned().collect::<Vec<_>>();
         for handle in handles {
             self.reviews.remove(&handle);
@@ -230,7 +233,6 @@ impl SessionHandles {
         }
         self.review_order.clear();
         self.devices_by_handle.clear();
-        self.handle_by_serial.clear();
     }
 
     pub fn invalidate_catalog(&mut self, current_digest: &str) {
@@ -285,6 +287,25 @@ impl SessionHandles {
         }
         self.tombstones.push_back(ReviewTombstone { handle, code });
     }
+
+    fn handle_for_serial(&mut self, serial: &str) -> String {
+        if let Some(handle) = self.handle_by_serial.get(serial).cloned() {
+            self.identity_order.retain(|candidate| candidate != serial);
+            self.identity_order.push_back(serial.to_string());
+            return handle;
+        }
+        while self.handle_by_serial.len() >= MAX_DEVICE_IDENTITIES {
+            let Some(oldest) = self.identity_order.pop_front() else {
+                break;
+            };
+            self.handle_by_serial.remove(&oldest);
+        }
+        let handle = format!("device_{}", Uuid::new_v4().simple());
+        self.handle_by_serial
+            .insert(serial.to_string(), handle.clone());
+        self.identity_order.push_back(serial.to_string());
+        handle
+    }
 }
 
 fn mask_serial(serial: &str) -> String {
@@ -330,7 +351,7 @@ mod tests {
     }
 
     #[test]
-    fn disappearance_invalidates_handle() {
+    fn disappearance_invalidates_authority_but_retains_session_identity() {
         let mut store = SessionHandles::default();
         let devices = store
             .update_devices(&json!({ "devices": [{ "serial": "one", "state": "available" }] }))
@@ -344,7 +365,70 @@ mod tests {
         let reappeared = store
             .update_devices(&json!({ "devices": [{ "serial": "one", "state": "available" }] }))
             .unwrap();
-        assert_ne!(reappeared[0].device_handle, handle);
+        assert_eq!(reappeared[0].device_handle, handle);
+    }
+
+    #[test]
+    fn authorization_transition_reuses_the_handle_and_becomes_available() {
+        let mut store = SessionHandles::default();
+        let unauthorized = store
+            .update_devices(&json!({ "devices": [{ "serial": "one", "state": "unauthorized" }] }))
+            .unwrap();
+        let authorized = store
+            .update_devices(&json!({ "devices": [{ "serial": "one", "state": "available" }] }))
+            .unwrap();
+        assert_eq!(unauthorized[0].device_handle, authorized[0].device_handle);
+        assert_eq!(unauthorized[0].state, "unauthorized");
+        assert_eq!(authorized[0].state, "available");
+    }
+
+    #[test]
+    fn controlled_invalidation_preserves_identity_but_full_reset_does_not() {
+        let mut store = SessionHandles::default();
+        let original = store
+            .update_devices(&json!({ "devices": [{ "serial": "one", "state": "available" }] }))
+            .unwrap()[0]
+            .device_handle
+            .clone();
+        store.invalidate_runtime_authority_preserving_identities();
+        let redetected = store
+            .update_devices(&json!({ "devices": [{ "serial": "one", "state": "available" }] }))
+            .unwrap()[0]
+            .device_handle
+            .clone();
+        assert_eq!(redetected, original);
+        store.invalidate_all();
+        let after_reset = store
+            .update_devices(&json!({ "devices": [{ "serial": "one", "state": "available" }] }))
+            .unwrap()[0]
+            .device_handle
+            .clone();
+        assert_ne!(after_reset, original);
+    }
+
+    #[test]
+    fn reconnect_identity_cache_is_bounded() {
+        let mut store = SessionHandles::default();
+        let first = store
+            .update_devices(&json!({ "devices": [{ "serial": "serial-0", "state": "available" }] }))
+            .unwrap()[0]
+            .device_handle
+            .clone();
+        for index in 1..=MAX_DEVICE_IDENTITIES {
+            store
+                .update_devices(&json!({ "devices": [{
+                    "serial": format!("serial-{index}"),
+                    "state": "available"
+                }] }))
+                .unwrap();
+        }
+        assert_eq!(store.handle_by_serial.len(), MAX_DEVICE_IDENTITIES);
+        let evicted = store
+            .update_devices(&json!({ "devices": [{ "serial": "serial-0", "state": "available" }] }))
+            .unwrap()[0]
+            .device_handle
+            .clone();
+        assert_ne!(evicted, first);
     }
 
     #[test]
