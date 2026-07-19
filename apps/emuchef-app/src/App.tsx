@@ -1811,6 +1811,32 @@ export function App({ dialogController: suppliedDialogController }: AppProps = {
   };
 
   const stepIndex = WORKFLOW_STEPS.findIndex((item) => item.step === workflow.step);
+  const [recipeSearch, setRecipeSearch] = useState("");
+  const [recipeFilter, setRecipeFilter] = useState<"all" | "available" | "selected" | "unavailable">("all");
+  const selectedRecipeIds = useMemo(
+    () => new Set(workflow.selectedRecipes ?? []),
+    [workflow.selectedRecipes],
+  );
+  const filteredRecipeOptions = useMemo(() => {
+    const query = recipeSearch.trim().toLocaleLowerCase();
+    return (workflow.description?.recipeOptions ?? []).filter((recipe) => {
+      const selected = selectedRecipeIds.has(recipe.id) || recipe.dependencyRequired;
+      const matchesFilter = recipeFilter === "all"
+        || (recipeFilter === "available" && recipe.available)
+        || (recipeFilter === "selected" && selected)
+        || (recipeFilter === "unavailable" && !recipe.available);
+      if (!matchesFilter) return false;
+      if (!query) return true;
+      return [recipe.name, recipe.description ?? "", recipe.id]
+        .some((value) => value.toLocaleLowerCase().includes(query));
+    });
+  }, [recipeFilter, recipeSearch, selectedRecipeIds, workflow.description]);
+  const selectedRecipeOptions = useMemo(
+    () => (workflow.description?.recipeOptions ?? []).filter(
+      (recipe) => selectedRecipeIds.has(recipe.id) || recipe.dependencyRequired,
+    ),
+    [selectedRecipeIds, workflow.description],
+  );
   const planOptions = useMemo(() => {
     if (!workflow.match) return [];
     if (deviceIsUnsupported(workflow.match)) {
@@ -2217,14 +2243,56 @@ export function App({ dialogController: suppliedDialogController }: AppProps = {
                 <p className="eyebrow">CHOOSE RECIPES</p>
                 <h2 data-focus-fallback="workflow" data-step-heading tabIndex={-1}>Choose what to install</h2>
                 <p>Select at least one recipe. Required dependencies remain selected automatically.</p>
+                <div className="recipe-discovery" aria-label="Recipe discovery controls">
+                  <label htmlFor="recipe-search">Search recipes</label>
+                  <input
+                    id="recipe-search"
+                    type="search"
+                    value={recipeSearch}
+                    onChange={(event) => setRecipeSearch(event.target.value)}
+                    placeholder="Search by name, description, or ID"
+                  />
+                  <fieldset className="recipe-filters">
+                    <legend>Filter recipes</legend>
+                    {([
+                      ["all", "All"],
+                      ["available", "Available"],
+                      ["selected", "Selected"],
+                      ["unavailable", "Unavailable"],
+                    ] as const).map(([value, label]) => (
+                      <label key={value}>
+                        <input
+                          type="radio"
+                          name="recipe-filter"
+                          value={value}
+                          checked={recipeFilter === value}
+                          onChange={() => setRecipeFilter(value)}
+                        />
+                        <span>{label}</span>
+                      </label>
+                    ))}
+                  </fieldset>
+                </div>
+                <section className="recipe-selection-summary" aria-labelledby="recipe-selection-summary-heading">
+                  <h3 id="recipe-selection-summary-heading">
+                    {selectedRecipeOptions.length} selected
+                  </h3>
+                  {selectedRecipeOptions.length > 0 ? (
+                    <p>{selectedRecipeOptions.map((recipe) => recipe.name).join(", ")}</p>
+                  ) : (
+                    <p>No recipes selected.</p>
+                  )}
+                </section>
                 <fieldset className="recipe-list">
-                  <legend>Available recipes</legend>
-                  {workflow.description.recipeOptions.map((recipe) => (
+                  <legend>
+                    Recipes · {filteredRecipeOptions.length} of {workflow.description.recipeOptions.length} shown
+                  </legend>
+                  {filteredRecipeOptions.map((recipe) => (
                     <label key={recipe.id} className={!recipe.available ? "unavailable" : ""}>
                       <input
                         type="checkbox"
                         disabled={recipeSelectionDisabled(recipe)}
-                        checked={(workflow.selectedRecipes ?? []).includes(recipe.id) || recipe.dependencyRequired}
+                        checked={selectedRecipeIds.has(recipe.id) || recipe.dependencyRequired}
                         onChange={(event) => {
                           const selected = updateRecipeSelection(
                             workflow.selectedRecipes ?? [],
@@ -2248,6 +2316,9 @@ export function App({ dialogController: suppliedDialogController }: AppProps = {
                       </span>
                     </label>
                   ))}
+                  {filteredRecipeOptions.length === 0 && (
+                    <p className="empty-state">No recipes match the current search and filter.</p>
+                  )}
                 </fieldset>
                 <div className="button-row">
                   <button className="secondary" onClick={() => dispatch({ type: "back" })}>Back</button>

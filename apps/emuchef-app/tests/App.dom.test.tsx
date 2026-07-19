@@ -189,6 +189,77 @@ describe("Phase 5B workflow surfaces", () => {
     }));
   });
 
+  test("searches and filters backend-authored recipes while summarizing selection", async () => {
+    const user = userEvent.setup();
+    mockApi.pollDevices.mockResolvedValue([availableDevice]);
+    mockApi.describeConfiguration.mockResolvedValue({
+      devicePlan: "plan.supported",
+      selectedRecipes: ["recipe.retroarch"],
+      expandedRecipes: ["recipe.retroarch"],
+      recipeOptions: [
+        {
+          id: "recipe.retroarch",
+          name: "RetroArch",
+          description: "Install and configure the frontend.",
+          selected: true,
+          recommended: true,
+          dependencyRequired: false,
+          available: true,
+          unavailableCapabilities: [],
+        },
+        {
+          id: "recipe.copy-bios",
+          name: "Copy BIOS files",
+          description: "Copy user-provided firmware files.",
+          selected: false,
+          recommended: false,
+          dependencyRequired: false,
+          available: true,
+          unavailableCapabilities: [],
+        },
+        {
+          id: "recipe.root-tools",
+          name: "Root tools",
+          description: "Configure features that require root access.",
+          selected: false,
+          recommended: false,
+          dependencyRequired: false,
+          available: false,
+          unavailableCapabilities: ["root"],
+        },
+      ],
+      inputs: [],
+      diagnostics: [],
+    });
+    await renderReadyApp();
+
+    await user.click(await screen.findByRole("button", { name: /Supported Handheld.*Connected/ }));
+    await user.click(await screen.findByRole("button", { name: "Continue" }));
+    await screen.findByRole("heading", { name: "Choose what to install" });
+
+    expect(screen.getByRole("heading", { name: "1 selected" })).toBeTruthy();
+    expect(screen.getByText("RetroArch", { selector: ".recipe-selection-summary p" })).toBeTruthy();
+    expect(screen.getByText("Recipes · 3 of 3 shown")).toBeTruthy();
+
+    const search = screen.getByRole("searchbox", { name: "Search recipes" });
+    await user.type(search, "firmware");
+    expect(screen.getByRole("checkbox", { name: /Copy BIOS files/ })).toBeTruthy();
+    expect(screen.queryByRole("checkbox", { name: /RetroArch/ })).toBeNull();
+    expect(screen.getByText("Recipes · 1 of 3 shown")).toBeTruthy();
+
+    await user.clear(search);
+    await user.click(screen.getByRole("radio", { name: "Unavailable" }));
+    expect(screen.getByRole("checkbox", { name: /Root tools/ })).toBeTruthy();
+    expect(screen.queryByRole("checkbox", { name: /Copy BIOS files/ })).toBeNull();
+
+    await user.click(screen.getByRole("radio", { name: "Selected" }));
+    const selectedRecipe = screen.getByRole("checkbox", { name: /RetroArch/ });
+    await user.click(selectedRecipe);
+    expect(screen.getByRole("heading", { name: "0 selected" })).toBeTruthy();
+    expect(screen.getByText("No recipes selected.")).toBeTruthy();
+    expect(screen.getByText("No recipes match the current search and filter.")).toBeTruthy();
+  });
+
   test("distinguishes unauthorized devices and deliberately gates backend safe generic plans", async () => {
     const user = userEvent.setup();
     mockApi.pollDevices.mockResolvedValue([

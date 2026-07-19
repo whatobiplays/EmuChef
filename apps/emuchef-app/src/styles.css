@@ -70,6 +70,15 @@ h2 { font-size: clamp(1.75rem, 3vw, 2.45rem); max-width: 760px; }
 .status-panel dt { color: #a8a29e; }
 .status-panel dd { margin: 0; text-align: right; }
 .device-list, .recipe-list, .plan-options { display: grid; gap: 0.7rem; margin: 1.5rem 0; }
+.recipe-discovery { display: grid; gap: 0.55rem; margin: 1.25rem 0; }
+.recipe-discovery > label { font-weight: 700; }
+.recipe-discovery > input { width: 100%; min-height: 44px; border: 1px solid #4a4452; border-radius: 9px; padding: 0.7rem; background: #121015; color: #fafafa; }
+.recipe-filters { display: flex; flex-wrap: wrap; gap: 0.5rem; margin-top: 0.35rem; }
+.recipe-filters legend { width: 100%; margin-bottom: 0.15rem; }
+.recipe-filters label { display: inline-flex; align-items: center; gap: 0.4rem; padding: 0.5rem 0.7rem; border: 1px solid #3d3746; border-radius: 999px; background: #24212a; cursor: pointer; }
+.recipe-selection-summary { margin: 1rem 0; padding: 0.9rem 1rem; border: 1px solid #3d3746; border-radius: 11px; background: #1d1a22; }
+.recipe-selection-summary h3 { margin-bottom: 0.35rem; font-size: 1rem; }
+.recipe-selection-summary p { margin-bottom: 0; color: #d6d3d1; }
 .device-list li { min-width: 0; }
 .device-row { width: 100%; display: flex; justify-content: space-between; align-items: center; text-align: left; background: #27242d; color: #fff; border: 1px solid #3f3a47; }
 .device-row span:first-child, .recipe-list label span, .plan-options label span { display: grid; gap: 0.2rem; }
