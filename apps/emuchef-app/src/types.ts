@@ -66,6 +66,7 @@ export interface PlanCandidate {
   confidence?: "exact" | "high" | "low";
   reasons: string[];
   requiresExplicitChoice?: boolean;
+  selectionMode?: "blank";
 }
 
 export interface DeviceMatch {
@@ -74,6 +75,7 @@ export interface DeviceMatch {
   requiresExplicitChoice: boolean;
   candidates: PlanCandidate[];
   safeGenericPlans: PlanCandidate[];
+  blankSetupPlans?: PlanCandidate[];
   blocked: boolean;
   blockReason: string | null;
 }

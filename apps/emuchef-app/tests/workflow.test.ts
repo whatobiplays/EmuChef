@@ -264,6 +264,29 @@ test("recipes cannot advance while empty or awaiting backend validation", () => 
   assert.equal(workflowReducer(dirty, { type: "continue-to-inputs" }), dirty);
 });
 
+test("plan selection distinguishes backend defaults from an explicit blank setup", () => {
+  const state = {
+    ...initialWorkflowState,
+    devicePlan: "plan.old",
+    selectedRecipes: ["recipe.old"],
+  };
+  const defaults = workflowReducer(state, {
+    type: "select-plan",
+    devicePlan: "plan.one",
+    recipeSelection: "defaults",
+  });
+  assert.equal(defaults.devicePlan, "plan.one");
+  assert.equal(defaults.selectedRecipes, null);
+
+  const blank = workflowReducer(state, {
+    type: "select-plan",
+    devicePlan: "plan.one",
+    recipeSelection: "blank",
+  });
+  assert.equal(blank.devicePlan, "plan.one");
+  assert.deepEqual(blank.selectedRecipes, []);
+});
+
 test("empty recipe selection prevents review", () => {
   const state = {
     ...initialWorkflowState,

@@ -81,7 +81,7 @@ export const initialWorkflowState: WorkflowState = {
 export type WorkflowAction =
   | { type: "select-device"; deviceHandle: string; preserveIntent?: boolean }
   | { type: "device-probed"; facts: DeviceFacts; match: DeviceMatch }
-  | { type: "select-plan"; devicePlan: string }
+  | { type: "select-plan"; devicePlan: string; recipeSelection?: "preserve" | "defaults" | "blank" }
   | { type: "description"; description: ConfigurationDescription; generation: number }
   | { type: "set-recipes"; selectedRecipes: string[] }
   | { type: "continue-to-inputs" }
@@ -195,6 +195,11 @@ export function workflowReducer(state: WorkflowState, action: WorkflowAction): W
       return {
         ...state,
         devicePlan: action.devicePlan,
+        selectedRecipes: action.recipeSelection === "defaults"
+          ? null
+          : action.recipeSelection === "blank"
+            ? []
+            : state.selectedRecipes,
         description: null,
         descriptionDirty: true,
         review: null,

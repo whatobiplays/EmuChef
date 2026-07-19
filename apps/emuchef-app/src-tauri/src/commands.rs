@@ -927,6 +927,7 @@ fn public_match(result: &Value, exact_serial: Option<&str>) -> Value {
                     "confidence": candidate.get("confidence"),
                     "reasons": candidate.get("reasons"),
                     "requiresExplicitChoice": candidate.get("requiresExplicitChoice"),
+                    "selectionMode": candidate.get("selectionMode"),
                 })
             })
             .collect::<Vec<_>>()
@@ -937,6 +938,7 @@ fn public_match(result: &Value, exact_serial: Option<&str>) -> Value {
         "requiresExplicitChoice": result.get("requiresExplicitChoice"),
         "candidates": candidates("candidates"),
         "safeGenericPlans": candidates("safeGenericPlans"),
+        "blankSetupPlans": candidates("blankSetupPlans"),
         "blocked": result.get("blocked"),
         "blockReason": result.get("blockReason"),
     });

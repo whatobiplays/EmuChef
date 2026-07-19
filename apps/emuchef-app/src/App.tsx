@@ -779,9 +779,15 @@ export function App({ dialogController: suppliedDialogController }: AppProps = {
       });
   };
 
-  const updateDevicePlanIntent = (devicePlan: string) => {
-    dispatch({ type: "select-plan", devicePlan });
+  const updateDevicePlanIntent = (
+    devicePlan: string,
+    recipeSelection: "defaults" | "blank" = "defaults",
+  ) => {
+    dispatch({ type: "select-plan", devicePlan, recipeSelection });
     queueSavedMutation({ kind: "device_plan", value: devicePlan });
+    if (recipeSelection === "blank") {
+      queueSavedMutation({ kind: "selected_recipes", value: [] });
+    }
   };
 
   const updateRecipeIntent = (selectedRecipes: string[]) => {
@@ -1375,6 +1381,9 @@ export function App({ dialogController: suppliedDialogController }: AppProps = {
       if (runtimeGenerationRef.current !== runtimeGeneration) return;
       dispatch({ type: "description", description, generation });
       if (workflowRef.current.requestGeneration === generation) {
+        if (workflow.selectedRecipes === null) {
+          queueSavedMutation({ kind: "selected_recipes", value: description.selectedRecipes });
+        }
         applyDescriptionValidation(description);
         focusValidationSummary(description);
         const errorCount = [
@@ -1814,6 +1823,11 @@ export function App({ dialogController: suppliedDialogController }: AppProps = {
     return [...byPlanId.values()];
   }, [workflow.match, workflow.unsupportedAcknowledged]);
   const platformToolsBusy = platformToolsOperation.phase !== "idle";
+  const blankPlanOptions = useMemo(() => {
+    if (!workflow.match?.blankSetupPlans?.length) return [];
+    const visiblePlanIds = new Set(planOptions.map((plan) => plan.planId));
+    return workflow.match.blankSetupPlans.filter((plan) => visiblePlanIds.has(plan.planId));
+  }, [planOptions, workflow.match]);
   const savedPlanUnavailable = Boolean(
     workflow.savedIntentLoaded
       && workflow.match
@@ -2163,12 +2177,23 @@ export function App({ dialogController: suppliedDialogController }: AppProps = {
                   <fieldset className="plan-options">
                     <legend>{deviceIsUnsupported(workflow.match) ? "Choose a generic setup" : "Choose a safe setup"}</legend>
                     {planOptions.map((plan) => (
-                      <label key={plan.planId}>
+                      <label key={`${plan.planId}:defaults`}>
                         <input
                           type="radio"
                           name="device-plan"
-                          checked={workflow.devicePlan === plan.planId}
-                          onChange={() => updateDevicePlanIntent(plan.planId)}
+                          checked={workflow.devicePlan === plan.planId && workflow.selectedRecipes?.length !== 0}
+                          onChange={() => updateDevicePlanIntent(plan.planId, "defaults")}
+                        />
+                        <span><strong>{plan.name}</strong><small>{plan.description}</small></span>
+                      </label>
+                    ))}
+                    {blankPlanOptions.map((plan) => (
+                      <label key={`${plan.planId}:blank`}>
+                        <input
+                          type="radio"
+                          name="device-plan"
+                          checked={workflow.devicePlan === plan.planId && workflow.selectedRecipes?.length === 0}
+                          onChange={() => updateDevicePlanIntent(plan.planId, "blank")}
                         />
                         <span><strong>{plan.name}</strong><small>{plan.description}</small></span>
                       </label>

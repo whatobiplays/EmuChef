@@ -167,12 +167,26 @@ describe("Phase 5B workflow surfaces", () => {
       safeGenericPlans: [
         { ...safePlan, planId: "generic.safe", name: "Conservative generic setup" },
       ],
+      blankSetupPlans: [{
+        ...safePlan,
+        planId: "plan.supported",
+        name: "Start from scratch",
+        description: "Choose recipes manually.",
+        selectionMode: "blank",
+      }],
     });
     await renderReadyApp();
 
     await user.click(await screen.findByRole("button", { name: /Supported Handheld.*Connected/ }));
     expect(await screen.findByRole("radio", { name: /Supported setup/ })).toBeTruthy();
     expect(screen.getByRole("radio", { name: /Conservative generic setup/ })).toBeTruthy();
+    const blank = screen.getByRole("radio", { name: /Start from scratch/ });
+    await user.click(blank);
+    await user.click(screen.getByRole("button", { name: "Continue" }));
+    expect(mockApi.describeConfiguration).toHaveBeenCalledWith(expect.objectContaining({
+      devicePlan: "plan.supported",
+      selectedRecipes: [],
+    }));
   });
 
   test("distinguishes unauthorized devices and deliberately gates backend safe generic plans", async () => {

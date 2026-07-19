@@ -254,6 +254,27 @@ pub(crate) fn match_device(
     } else {
         None
     };
+    let blank_setup_plans = candidates
+        .iter()
+        .chain(safe_generic_plans.iter())
+        .map(|plan| {
+            let plan_name = plan
+                .get("name")
+                .and_then(Value::as_str)
+                .unwrap_or("approved setup");
+            json!({
+                "planId": plan.get("planId"),
+                "name": format!("Start from scratch with {plan_name}"),
+                "description": format!("Use the {plan_name} device profile and choose recipes manually."),
+                "profileId": plan.get("profileId"),
+                "profileName": plan.get("profileName"),
+                "confidence": plan.get("confidence"),
+                "reasons": plan.get("reasons"),
+                "requiresExplicitChoice": true,
+                "selectionMode": "blank",
+            })
+        })
+        .collect::<Vec<_>>();
     let blocked = candidates.is_empty() && safe_generic_plans.is_empty();
     Ok(json!({
         "confidence": confidence,
@@ -261,6 +282,7 @@ pub(crate) fn match_device(
         "requiresExplicitChoice": recommended_plan_id.is_none() && !blocked,
         "candidates": candidates,
         "safeGenericPlans": safe_generic_plans,
+        "blankSetupPlans": blank_setup_plans,
         "blocked": blocked,
         "blockReason": blocked.then_some("No backend-approved device plan is safe for the detected device."),
     }))
@@ -563,6 +585,8 @@ mod tests {
         );
         assert_eq!(high["confidence"], "high");
         assert_eq!(high["recommendedPlanId"], "plan.test");
+        assert_eq!(high["blankSetupPlans"][0]["planId"], "plan.test");
+        assert_eq!(high["blankSetupPlans"][0]["selectionMode"], "blank");
 
         let low = match_fixture(
             "manufacturer_contains: [Acme]\nbrand_contains: [Acme]\nmodel_patterns: ['^Model$']",
