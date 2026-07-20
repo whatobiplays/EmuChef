@@ -260,6 +260,106 @@ describe("Phase 5B workflow surfaces", () => {
     expect(screen.getByText("No recipes match the current search and filter.")).toBeTruthy();
   });
 
+  test("selects only available backend-recommended recipes and revalidates them", async () => {
+    const user = userEvent.setup();
+    mockApi.pollDevices.mockResolvedValue([availableDevice]);
+    const initialDescription = {
+      devicePlan: "plan.supported",
+      selectedRecipes: ["recipe.custom"],
+      expandedRecipes: ["recipe.custom"],
+      recipeOptions: [
+        {
+          id: "recipe.frontend",
+          name: "Frontend",
+          description: "Install the recommended frontend.",
+          selected: false,
+          recommended: true,
+          dependencyRequired: false,
+          available: true,
+          unavailableCapabilities: [],
+        },
+        {
+          id: "recipe.shader-pack",
+          name: "Shader pack",
+          description: "Install recommended visual presets.",
+          selected: false,
+          recommended: true,
+          dependencyRequired: false,
+          available: true,
+          unavailableCapabilities: [],
+        },
+        {
+          id: "recipe.custom",
+          name: "Custom tools",
+          description: "Optional custom tools.",
+          selected: true,
+          recommended: false,
+          dependencyRequired: false,
+          available: true,
+          unavailableCapabilities: [],
+        },
+        {
+          id: "recipe.dependency",
+          name: "Shared dependency",
+          description: "Added automatically by the backend.",
+          selected: false,
+          recommended: true,
+          dependencyRequired: true,
+          available: true,
+          unavailableCapabilities: [],
+        },
+        {
+          id: "recipe.root-recommended",
+          name: "Root enhancement",
+          description: "Recommended only when root is available.",
+          selected: false,
+          recommended: true,
+          dependencyRequired: false,
+          available: false,
+          unavailableCapabilities: ["root"],
+        },
+      ],
+      inputs: [],
+      diagnostics: [],
+    };
+    mockApi.describeConfiguration
+      .mockResolvedValueOnce(initialDescription)
+      .mockResolvedValueOnce({
+        ...initialDescription,
+        selectedRecipes: ["recipe.frontend", "recipe.shader-pack", "recipe.dependency"],
+        expandedRecipes: ["recipe.frontend", "recipe.shader-pack", "recipe.dependency"],
+        recipeOptions: initialDescription.recipeOptions.map((recipe) => ({
+          ...recipe,
+          selected: ["recipe.frontend", "recipe.shader-pack", "recipe.dependency"].includes(recipe.id),
+        })),
+      });
+    await renderReadyApp();
+
+    await user.click(await screen.findByRole("button", { name: /Supported Handheld.*Connected/ }));
+    await user.click(await screen.findByRole("button", { name: "Continue" }));
+    await screen.findByRole("heading", { name: "Choose what to install" });
+
+    const recommended = screen.getByRole("button", { name: "Select recommended setup" });
+    expect((recommended as HTMLButtonElement).disabled).toBe(false);
+    await user.click(recommended);
+
+    await vi.waitFor(() => {
+      expect(mockApi.describeConfiguration).toHaveBeenLastCalledWith(expect.objectContaining({
+        devicePlan: "plan.supported",
+        selectedRecipes: ["recipe.frontend", "recipe.shader-pack"],
+      }));
+    });
+
+    await vi.waitFor(() => {
+      expect((screen.getByRole("checkbox", { name: /Frontend/ }) as HTMLInputElement).checked).toBe(true);
+      expect((screen.getByRole("checkbox", { name: /Shader pack/ }) as HTMLInputElement).checked).toBe(true);
+      expect((screen.getByRole("checkbox", { name: /Custom tools/ }) as HTMLInputElement).checked).toBe(false);
+      expect((screen.getByRole("checkbox", { name: /Shared dependency/ }) as HTMLInputElement).checked).toBe(true);
+      expect((screen.getByRole("checkbox", { name: /Root enhancement/ }) as HTMLInputElement).checked).toBe(false);
+      expect((screen.getByRole("button", { name: "Recommended setup selected" }) as HTMLButtonElement).disabled).toBe(true);
+    });
+  });
+
   test("distinguishes unauthorized devices and deliberately gates backend safe generic plans", async () => {
     const user = userEvent.setup();
     mockApi.pollDevices.mockResolvedValue([

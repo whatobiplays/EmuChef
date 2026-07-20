@@ -1449,7 +1449,7 @@ export function App({ dialogController: suppliedDialogController }: AppProps = {
 
   useEffect(() => {
     if (
-      workflow.step !== "inputs" ||
+      (workflow.step !== "recipes" && workflow.step !== "inputs") ||
       !workflow.descriptionDirty ||
       !workflow.deviceHandle ||
       !workflow.devicePlan
@@ -1837,6 +1837,21 @@ export function App({ dialogController: suppliedDialogController }: AppProps = {
     ),
     [selectedRecipeIds, workflow.description],
   );
+  const recommendedRecipeIds = useMemo(
+    () => (workflow.description?.recipeOptions ?? [])
+      .filter((recipe) => recipe.recommended && recipe.available && !recipe.dependencyRequired)
+      .map((recipe) => recipe.id),
+    [workflow.description],
+  );
+  const selectedOptionalRecipeIds = useMemo(
+    () => (workflow.description?.recipeOptions ?? [])
+      .filter((recipe) => !recipe.dependencyRequired && selectedRecipeIds.has(recipe.id))
+      .map((recipe) => recipe.id),
+    [selectedRecipeIds, workflow.description],
+  );
+  const recommendedSelectionActive = recommendedRecipeIds.length > 0
+    && recommendedRecipeIds.length === selectedOptionalRecipeIds.length
+    && recommendedRecipeIds.every((recipeId) => selectedRecipeIds.has(recipeId));
   const planOptions = useMemo(() => {
     if (!workflow.match) return [];
     if (deviceIsUnsupported(workflow.match)) {
@@ -2281,6 +2296,17 @@ export function App({ dialogController: suppliedDialogController }: AppProps = {
                     <p>{selectedRecipeOptions.map((recipe) => recipe.name).join(", ")}</p>
                   ) : (
                     <p>No recipes selected.</p>
+                  )}
+                  <button
+                    className="secondary"
+                    type="button"
+                    disabled={recommendedRecipeIds.length === 0 || recommendedSelectionActive || busy}
+                    onClick={() => updateRecipeIntent(recommendedRecipeIds)}
+                  >
+                    {recommendedSelectionActive ? "Recommended setup selected" : "Select recommended setup"}
+                  </button>
+                  {recommendedRecipeIds.length === 0 && (
+                    <p className="disabled-reason">This device setup does not define a recommended recipe set.</p>
                   )}
                 </section>
                 <fieldset className="recipe-list">
