@@ -2,11 +2,24 @@ import { useCallback, useEffect, useMemo, useReducer, useRef, useState } from "r
 import { getCurrentWindow } from "@tauri-apps/api/window";
 
 import { api } from "./api";
+import {
+  createAppDialogController,
+  type AppDialogController,
+  type AppDialogPayload,
+  type AppDialogResult,
+  type UnsavedDecision,
+} from "./app-dialogs";
+import {
+  diagnosticIsBlocking,
+  errorCode,
+  errorMessage,
+  executionDuration,
+  groupedInputs,
+} from "./app-helpers";
 import { SupportPanel } from "./SupportPanel";
 import { UpdatesPanel } from "./UpdatesPanel";
 import { AccessibleDialog } from "./AccessibleDialog";
 import {
-  DialogController,
   claimFocusTransition,
   describedBy,
   executionAnnouncement,
@@ -76,105 +89,10 @@ const WORKFLOW_STEPS = [
   { step: "execution", label: "Simulated Run" },
 ] as const;
 
-type UnsavedDecision = "save" | "discard" | "cancel";
-
-type AppDialogPayload =
-  | {
-      kind: "unsaved";
-      invoker: HTMLElement | null;
-    }
-  | {
-      kind: "name";
-      title: string;
-      initialValue: string;
-      invoker: HTMLElement | null;
-    }
-  | {
-      kind: "real-execution";
-      invoker: HTMLElement | null;
-    }
-  | {
-      kind: "recovery";
-      draft: RecoveryDraftAvailable;
-    }
-  | { kind: "remove-platform-tools"; invoker: HTMLElement | null }
-  | { kind: "different-device"; invoker: HTMLElement | null }
-  | {
-      kind: "restart-loss";
-      invoker: HTMLElement | null;
-      labels: string[];
-      omittedCount: number;
-      totalLoss: boolean;
-    };
-
-type AppDialogResult = UnsavedDecision | string | boolean | null;
-export type AppDialogController = DialogController<AppDialogPayload, AppDialogResult>;
-
-export function createAppDialogController(): AppDialogController {
-  return new DialogController<AppDialogPayload, AppDialogResult>();
-}
+export { createAppDialogController } from "./app-dialogs";
 
 interface AppProps {
   dialogController?: AppDialogController;
-}
-
-function errorMessage(error: unknown): string {
-  const raw = error instanceof Error ? error.message : String(error);
-  try {
-    const parsed = JSON.parse(raw) as { message?: unknown };
-    return typeof parsed.message === "string" ? parsed.message : raw;
-  } catch {
-    return raw;
-  }
-}
-
-function errorCode(error: unknown): string | null {
-  const raw = error instanceof Error ? error.message : String(error);
-  try {
-    const parsed = JSON.parse(raw) as { code?: unknown };
-    return typeof parsed.code === "string" ? parsed.code : null;
-  } catch {
-    return null;
-  }
-}
-
-function executionDuration(snapshot: AnyExecutionSnapshot): string | null {
-  if (!snapshot.startedAt) return null;
-  const start = Date.parse(snapshot.startedAt);
-  const finish = snapshot.finishedAt ? Date.parse(snapshot.finishedAt) : Date.now();
-  if (!Number.isFinite(start) || !Number.isFinite(finish) || finish < start) return null;
-  return `${Math.max(0, Math.round((finish - start) / 1000))}s`;
-}
-
-function groupedInputs(inputs: InputDescriptor[]): Array<{
-  category: string;
-  inputs: InputDescriptor[];
-}> {
-  const groups = new Map<string, InputDescriptor[]>();
-  for (const input of inputs) {
-    const category = input.presentationCategory ?? "Other";
-    const group = groups.get(category);
-    if (group) {
-      group.push(input);
-    } else {
-      groups.set(category, [input]);
-    }
-  }
-  return Array.from(groups, ([category, grouped]) => ({
-    category,
-    inputs: grouped,
-  }));
-}
-
-function diagnosticIsBlocking(
-  code: string,
-  key: string | null | undefined,
-  validationRequested: boolean,
-  touchedInputKeys: Set<string>,
-): boolean {
-  return code !== "binding_missing"
-    || validationRequested
-    || Boolean(key && touchedInputKeys.has(key));
 }
 
 export function App({ dialogController: suppliedDialogController }: AppProps = {}) {
