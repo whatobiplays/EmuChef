@@ -33,8 +33,8 @@ The following foundations are already implemented:
 |---|---|---|---|
 | 5A | End-to-end UX and feature-gap audit | Completed | Evidence-based prioritized app backlog |
 | 5B | Workflow navigation and state polish | Completed | Predictable movement, recovery, and state transitions |
-| 5C | Recipe and setup selection experience | Next | Nontechnical setup discovery and selection |
-| 5D | Input collection and file-management polish | Planned | Early, understandable, recoverable input validation |
+| 5C | Recipe and setup selection experience | Completed | Nontechnical setup discovery and selection |
+| 5D | Input collection and file-management polish | Next | Early, understandable, recoverable input validation |
 | 5E | Plan review and execution experience | Planned | Confidence before execution and useful failure recovery |
 | 5F | Saved configurations and reusable setups | Planned | Reliable reuse and maintenance of configurations |
 | 5G | Support, diagnostics, and recovery polish | Planned | Troubleshooting without a terminal |
@@ -145,6 +145,23 @@ Allow a nontechnical user to choose an appropriate setup without understanding a
 ### Exit criteria
 
 Users can understand what a setup does, what they must provide, and why recipes are included, blocked, or incompatible.
+
+### Completion evidence
+
+Phase 5C completed on 2026-07-20. The setup and recipe-selection experience now:
+
+- keeps the exact backend match recommended while displaying other backend-approved applicable plans;
+- provides backend-authored blank `Start from scratch` choices that retain an approved device profile while beginning with no selected recipes;
+- supports recipe search and selected, available, and unavailable filters with visible result counts;
+- summarizes the current selection and provides a one-action recommended setup selection that excludes unavailable recipes;
+- exposes friendly device-capability requirements and unavailable reasons without leaking raw capability identifiers;
+- explains recipe dependencies by name and identifies dependencies added automatically by backend expansion;
+- exposes backend-projected APK, BIOS, ROM/content, and network-download requirements before recipe selection; and
+- revalidates selection changes through the Rust runtime while preserving React as presentation-only.
+
+Implementation is concentrated in the Rust device-matching and runtime-configuration projections, `apps/emuchef-app/src/workflow.ts`, `App.tsx`, DTOs, styles, and focused contract/DOM tests. Verification passed through the app-local tests, lint, TypeScript checking, production build, and the full Rust backend suite.
+
+User-facing authored categories, expected download sizes, and experimental labels remain deferred because the current recipe/artifact schema does not provide authoritative fields for them. They should be introduced as an explicit authored-schema extension rather than inferred from recipe IDs, names, URLs, or step types.
 
 ## 8. Phase 5D — Input Collection and File-Management Polish
 
@@ -311,4 +328,4 @@ At completion:
 
 ## 16. Immediate Next Action
 
-Begin Phase 5C with the dedicated recipe-selection stage and scalable setup-discovery work. Preserve the Phase 5B portable-intent, unsupported-device, stale-response, and backend-authority contracts while restructuring the combined Customize stage.
+Begin Phase 5D with focused input-presentation and validation improvements. Start with specific picker labels, accepted extension/format guidance, and immediate backend-authoritative validation while preserving Tauri-owned filesystem authority, nonsensitive intent recovery, and the rule that sensitive values are neither persisted nor recovered.
