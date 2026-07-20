@@ -495,6 +495,48 @@ Cross-platform packaging and release automation must define separate deliverable
 
 ## 24. Immediate next action
 
-**Owner: EmuChef proper**
+### Phase 5D.1 — Input Presentation and Requirement Clarity
 
-Begin Phase 5D with focused input-presentation and validation improvements: specific picker labels, accepted extension and format guidance, and immediate backend-authoritative validation. Preserve Tauri-owned filesystem authority, nonsensitive intent recovery, and the rule that sensitive values are neither persisted nor recovered.
+**Owner: EmuChef proper**  
+**Status: Next**
+
+#### Objective
+
+Improve user understanding before any file or value is selected.
+
+#### Scope
+
+- Give every input a user-friendly title.
+- Add a concise explanation of what the input is used for.
+- Display accepted file extensions and formats.
+- Clearly indicate whether an input is required or optional.
+- Clearly indicate whether an input accepts one file or multiple files.
+- Clearly identify sensitive inputs that are never persisted or recovered.
+- Group inputs using backend-authoritative categories where those categories already exist.
+- Remove remaining backend, schema, and implementation terminology from the normal UI.
+
+#### Out of scope
+
+- New validation logic.
+- Missing-file or moved-file relinking.
+- Drag-and-drop.
+- Filesystem-authority changes.
+- Persistence changes.
+- Backend protocol changes.
+- Heuristic frontend inference of file requirements or categories.
+
+#### Acceptance criteria
+
+- A first-time user can understand every requested input without external documentation.
+- Every visible requirement is derived from backend-authoritative metadata.
+- No raw schema, backend, or implementation terminology appears in the normal input workflow.
+- React remains presentation-only and does not infer accepted formats, cardinality, sensitivity, or requirement status.
+- Existing Tauri filesystem authority, nonsensitive intent recovery, and sensitive-value omission behavior remain unchanged.
+
+#### Planned follow-on slices
+
+- **Phase 5D.2 — Immediate backend-authoritative validation**
+- **Phase 5D.3 — Missing and moved file detection with guided relinking**
+- **Phase 5D.4 — Duplicate and conflicting file handling**
+- **Phase 5D.5 — Multi-file UX polish**
+- **Phase 5D.6 — Optional drag-and-drop while preserving Tauri filesystem authority**
