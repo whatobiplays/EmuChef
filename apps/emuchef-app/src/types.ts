@@ -88,6 +88,7 @@ export interface RecipeOption {
   recommended: boolean;
   dependencyRequired: boolean;
   available: boolean;
+  requiredCapabilities?: string[];
   unavailableCapabilities: string[];
 }
 

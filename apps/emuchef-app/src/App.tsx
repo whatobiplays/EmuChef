@@ -2334,11 +2334,36 @@ export function App({ dialogController: suppliedDialogController }: AppProps = {
                           {recipe.dependencyRequired
                             ? "Required dependency"
                             : !recipe.available
-                              ? `Unavailable: ${recipe.unavailableCapabilities.join(", ")}`
+                              ? `Unavailable on this device${recipe.description ? ` · ${recipe.description}` : ""}`
                               : recipe.recommended
                                 ? `Recommended for this device${recipe.description ? ` · ${recipe.description}` : ""}`
                                 : recipe.description ?? "Optional"}
                         </small>
+                        {(recipe.requiredCapabilities ?? []).length > 0 && (
+                          <span className="recipe-requirements" aria-label="Requirements">
+                            {(recipe.requiredCapabilities ?? []).map((capability) => {
+                              const label = ({
+                                adb_available: "ADB connection",
+                                apk_install: "App installation",
+                                shared_storage_write: "Shared storage access",
+                                app_launch: "App launch",
+                                shell_command: "Device commands",
+                                package_remove_for_user: "App removal",
+                                root_shell: "Root access",
+                                app_data_write: "App data access",
+                              } as Record<string, string>)[capability] ?? capability.split("_").join(" ");
+                              const unavailable = recipe.unavailableCapabilities.includes(capability);
+                              return (
+                                <span
+                                  key={capability}
+                                  className={`recipe-requirement${unavailable ? " unavailable" : ""}`}
+                                >
+                                  {unavailable ? `${label} unavailable` : label}
+                                </span>
+                              );
+                            })}
+                          </span>
+                        )}
                       </span>
                     </label>
                   ))}

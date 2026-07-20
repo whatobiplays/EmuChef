@@ -205,6 +205,7 @@ describe("Phase 5B workflow surfaces", () => {
           recommended: true,
           dependencyRequired: false,
           available: true,
+          requiredCapabilities: ["adb_available", "apk_install"],
           unavailableCapabilities: [],
         },
         {
@@ -225,7 +226,8 @@ describe("Phase 5B workflow surfaces", () => {
           recommended: false,
           dependencyRequired: false,
           available: false,
-          unavailableCapabilities: ["root"],
+          requiredCapabilities: ["root_shell"],
+          unavailableCapabilities: ["root_shell"],
         },
       ],
       inputs: [],
@@ -240,6 +242,8 @@ describe("Phase 5B workflow surfaces", () => {
     expect(screen.getByRole("heading", { name: "1 selected" })).toBeTruthy();
     expect(screen.getByText("RetroArch", { selector: ".recipe-selection-summary p" })).toBeTruthy();
     expect(screen.getByText("Recipes · 3 of 3 shown")).toBeTruthy();
+    expect(screen.getByText("ADB connection")).toBeTruthy();
+    expect(screen.getByText("App installation")).toBeTruthy();
 
     const search = screen.getByRole("searchbox", { name: "Search recipes" });
     await user.type(search, "firmware");
@@ -250,6 +254,8 @@ describe("Phase 5B workflow surfaces", () => {
     await user.clear(search);
     await user.click(screen.getByRole("radio", { name: "Unavailable" }));
     expect(screen.getByRole("checkbox", { name: /Root tools/ })).toBeTruthy();
+    expect(screen.getByText("Root access unavailable")).toBeTruthy();
+    expect(screen.queryByText("root_shell")).toBeNull();
     expect(screen.queryByRole("checkbox", { name: /Copy BIOS files/ })).toBeNull();
 
     await user.click(screen.getByRole("radio", { name: "Selected" }));
