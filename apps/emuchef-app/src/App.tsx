@@ -16,6 +16,7 @@ import {
   executionDuration,
 } from "./app-helpers";
 import { InputsStep } from "./InputsStep";
+import { ReviewStep } from "./ReviewStep";
 import { SupportPanel } from "./SupportPanel";
 import { UpdatesPanel } from "./UpdatesPanel";
 import { AccessibleDialog } from "./AccessibleDialog";
@@ -2412,63 +2413,15 @@ export function App({ dialogController: suppliedDialogController }: AppProps = {
             )}
 
             {workflow.step === "review" && workflow.review && (
-              <>
-                <p className="eyebrow">REVIEW PLAN</p>
-                <h2 data-focus-fallback="workflow" data-step-heading tabIndex={-1}>Ready for a simulated dry run</h2>
-                <p className="simulation-banner">
-                  Simulated / Dry Run only. This does not change or verify the real device.
-                </p>
-                <p>
-                  Target: {workflow.review.target.manufacturer ?? "Android"} {workflow.review.target.model ?? "device"}
-                  · Android {workflow.review.target.androidVersion ?? "unknown"}
-                </p>
-                {workflow.review.selectedInputs.length > 0 && (
-                  <section className="review-inputs" aria-labelledby="selected-options-heading">
-                    <h3 id="selected-options-heading">Selected options</h3>
-                    <dl>
-                      {workflow.review.selectedInputs.map((input) => (
-                        <div key={input.key}><dt>{input.key}</dt><dd>{input.value}</dd></div>
-                      ))}
-                    </dl>
-                  </section>
-                )}
-                {workflow.review.groups.map((group) => (
-                  <article className="review-group" key={group.recipeId}>
-                    <h3>{group.recipeName}</h3>
-                    {group.recipeDescription && <p>{group.recipeDescription}</p>}
-                    <ol>
-                      {group.steps.map((step) => (
-                        <li key={step.technicalId}>
-                          <strong>{step.name}</strong>{step.note && <span>{step.note}</span>}
-                            <span>{step.kindLabel}</span>
-                            {step.elevated && <em>Elevated access</em>}
-                            {step.requirements.length > 0 && (
-                              <small>Requires: {step.requirements.join(", ")}</small>
-                            )}
-                          <details><summary>Technical details</summary><code>{step.technicalId} · {step.technicalType}</code></details>
-                        </li>
-                      ))}
-                    </ol>
-                  </article>
-                ))}
-                <p className="digest">Plan digest: {workflow.review.planDigest}</p>
-                <div className="button-row">
-                  <button className="secondary" onClick={() => dispatch({ type: "back" })}>Back</button>
-                  <button aria-describedby={busy || workflow.execution.kind === "starting" ? "execution-start-reason" : undefined} onClick={startSimulation} disabled={busy || workflow.execution.kind === "starting"}>
-                    {workflow.execution.kind === "starting" ? "Starting simulated run…" : "Start Simulated Dry Run"}
-                  </button>
-                  {realExecutionEnabled && (
-                    <button
-                      className="danger"
-                      onClick={(event) => void requestRealExecution(event.currentTarget)}
-                      disabled={busy || workflow.execution.kind === "starting"}
-                    >
-                      Apply to Device
-                    </button>
-                  )}
-                </div>
-                {(busy || workflow.execution.kind === "starting") && <p className="disabled-reason" id="execution-start-reason">Execution start is already being prepared.</p>}
-              </>
+              <ReviewStep
+                busy={busy}
+                executionKind={workflow.execution.kind}
+                onApplyToDevice={(invoker) => void requestRealExecution(invoker)}
+                onBack={() => dispatch({ type: "back" })}
+                onStartSimulation={startSimulation}
+                realExecutionEnabled={realExecutionEnabled}
+                review={workflow.review}
+              />
             )}
 
             {workflow.step === "execution" &&
