@@ -14,14 +14,13 @@ import {
   errorCode,
   errorMessage,
   executionDuration,
-  groupedInputs,
 } from "./app-helpers";
+import { InputsStep } from "./InputsStep";
 import { SupportPanel } from "./SupportPanel";
 import { UpdatesPanel } from "./UpdatesPanel";
 import { AccessibleDialog } from "./AccessibleDialog";
 import {
   claimFocusTransition,
-  describedBy,
   executionAnnouncement,
   lifecycleBoundResult,
   restoreAccessibleFocus,
@@ -2396,145 +2395,20 @@ export function App({ dialogController: suppliedDialogController }: AppProps = {
             )}
 
             {workflow.step === "inputs" && workflow.description && (
-              <>
-                <p className="eyebrow">CONFIGURE INPUTS</p>
-                <h2 data-focus-fallback="workflow" data-step-heading tabIndex={-1}>Provide required files and options</h2>
-                {validationErrors.length > 0 && (
-                  <section
-                    aria-labelledby="validation-summary-heading"
-                    className="error error-summary"
-                    ref={validationSummaryRef}
-                    role="alert"
-                    tabIndex={-1}
-                  >
-                    <h3 id="validation-summary-heading">Resolve {validationErrors.length} configuration {validationErrors.length === 1 ? "error" : "errors"}</h3>
-                    <ul>
-                      {validationErrors.map((item, index) => (
-                        <li key={`${item.key ?? "global"}-${item.code}-${index}`}>
-                          {item.targetId ? <a href={`#${item.targetId}`}>{item.message}</a> : item.message}
-                          <details><summary>Technical details</summary><code>{item.code}</code></details>
-                        </li>
-                      ))}
-                    </ul>
-                  </section>
-                )}
-                {workflow.description.inputs.length === 0 && (
-                  <p className="success">The selected recipes do not require additional input.</p>
-                )}
-
-                {groupedInputs(workflow.description.inputs).map((group) => (
-                  <section className="input-group" key={group.category} aria-labelledby={stableDomId("input-group", group.category)}>
-                    <h3 id={stableDomId("input-group", group.category)}>{group.category}</h3>
-                    {group.inputs.map((input) => {
-                      const inputId = stableDomId("input", input.key);
-                      const descriptionId = `${inputId}-description`;
-                      const extensionsId = `${inputId}-extensions`;
-                      const sourceId = `${inputId}-source`;
-                      const diagnostics = inputDiagnosticsForDisplay(input).filter((diagnostic) => diagnosticIsBlocking(
-                        diagnostic.code,
-                        diagnostic.key ?? input.key,
-                        validationRequested,
-                        touchedInputKeys,
-                      ));
-                      const diagnosticIds = diagnostics.map((_, index) => `${inputId}-error-${index}`);
-                      return (
-                      <div className="input-field" key={input.key}>
-                        <div className="input-field-heading">
-                          <label htmlFor={inputId}>{input.label}</label>
-                          <span className="input-requirements" aria-label={`${input.label} requirements`}>
-                            <span className={input.required ? "input-requirement required" : "input-requirement"}>
-                              {input.required ? "Required" : "Optional"}
-                            </span>
-                            <span className="input-requirement">{input.presentationKind ?? "Text"}</span>
-                            {input.sensitive && <span className="input-requirement sensitive">Not saved</span>}
-                          </span>
-                        </div>
-                        {input.type === "boolean" ? (
-                          <input
-                            aria-describedby={describedBy(input.description && descriptionId, ...diagnosticIds)}
-                            aria-invalid={diagnostics.some((item) => item.severity === "error") || undefined}
-                            id={inputId}
-                            type="checkbox"
-                            checked={Boolean(workflow.bindings[input.key] ?? input.value)}
-                            onChange={(event) => updateBindingIntent(input.key, event.target.checked)}
-                          />
-                        ) : input.options?.length ? (
-                          <select
-                            aria-describedby={describedBy(input.description && descriptionId, input.valueSource && sourceId, ...diagnosticIds)}
-                            aria-invalid={diagnostics.some((item) => item.severity === "error") || undefined}
-                            id={inputId}
-                            value={String(workflow.bindings[input.key] ?? input.value ?? "")}
-                            onChange={(event) => updateBindingIntent(input.key, event.target.value)}
-                          >
-                            <option value="">Choose…</option>
-                            {input.options.map((option) => <option key={option}>{option}</option>)}
-                          </select>
-                        ) : input.pathKind ? (
-                          <div className="path-picker">
-                            <input
-                              aria-describedby={describedBy(input.description && descriptionId, Boolean(input.acceptedExtensions?.length) && extensionsId, input.valueSource && sourceId, ...diagnosticIds)}
-                              aria-invalid={diagnostics.some((item) => item.severity === "error") || undefined}
-                              id={inputId}
-                              readOnly
-                              value={String(workflow.bindings[input.key] ?? input.value ?? "")}
-                            />
-                            <button
-                              aria-describedby={busy ? `${inputId}-browse-reason` : undefined}
-                              className="secondary"
-                              disabled={busy}
-                              onClick={() => pickInputValue(input)}
-                            >Browse…</button>
-                            {busy && <small className="disabled-reason" id={`${inputId}-browse-reason`}>A file or validation operation is already in progress.</small>}
-                          </div>
-                        ) : (
-                          <input
-                            aria-describedby={describedBy(input.description && descriptionId, input.valueSource && sourceId, ...diagnosticIds)}
-                            aria-invalid={diagnostics.some((item) => item.severity === "error") || undefined}
-                            id={inputId}
-                            value={String(workflow.bindings[input.key] ?? input.value ?? "")}
-                            onChange={(event) => updateBindingIntent(input.key, event.target.value)}
-                          />
-                        )}
-                        {input.description && <small id={descriptionId}>{input.description}</small>}
-                        {input.acceptedExtensions?.length ? (
-                          <small id={extensionsId}>Accepted file types: {input.acceptedExtensions.join(", ")}</small>
-                        ) : null}
-                        {input.valueSource ? (
-                          <small id={sourceId}>Value source: {input.valueSource.replaceAll("_", " ")}</small>
-                        ) : null}
-                        {diagnostics.map((item, index) => (
-                          <small className="error" id={diagnosticIds[index]} key={`${item.key ?? input.key}-${item.code}`}>Error: {item.message}</small>
-                        ))}
-                      </div>
-                      );
-                    })}
-                  </section>
-                ))}
-
-                {pageDiagnosticsForDisplay(workflow.description)
-                  .filter((diagnostic) => diagnosticIsBlocking(
-                    diagnostic.code,
-                    diagnostic.key,
-                    validationRequested,
-                    touchedInputKeys,
-                  ))
-                  .map((item) => (
-                    <p
-                      className={item.severity === "error" ? "error" : "warning"}
-                      key={`${item.key ?? "global"}-${item.code}-${item.message}`}
-                    >{item.severity === "error" ? "Error: " : "Warning: "}{item.message}</p>
-                  ))}
-                <div className="button-row">
-                  <button className="secondary" onClick={() => dispatch({ type: "back" })}>Back</button>
-                  <button className="secondary" onClick={describe} disabled={busy}>Refresh validation</button>
-                  <button aria-describedby={busy ? "review-disabled-reason" : undefined} onClick={generateReview} disabled={busy}>Review plan</button>
-                </div>
-                {busy && (
-                  <p className="disabled-reason" id="review-disabled-reason">
-                    Validation is in progress.
-                  </p>
-                )}
-              </>
+              <InputsStep
+                bindings={workflow.bindings}
+                busy={busy}
+                description={workflow.description}
+                onBack={() => dispatch({ type: "back" })}
+                onBindingChange={updateBindingIntent}
+                onPickInput={pickInputValue}
+                onRefreshValidation={describe}
+                onReview={generateReview}
+                touchedInputKeys={touchedInputKeys}
+                validationErrors={validationErrors}
+                validationRequested={validationRequested}
+                validationSummaryRef={validationSummaryRef}
+              />
             )}
 
             {workflow.step === "review" && workflow.review && (
