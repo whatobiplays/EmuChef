@@ -166,6 +166,17 @@ function groupedInputs(inputs: InputDescriptor[]): Array<{
   }));
 }
 
+function diagnosticIsBlocking(
+  code: string,
+  key: string | null | undefined,
+  validationRequested: boolean,
+  touchedInputKeys: Set<string>,
+): boolean {
+  return code !== "binding_missing"
+    || validationRequested
+    || Boolean(key && touchedInputKeys.has(key));
+}
+
 export function App({ dialogController: suppliedDialogController }: AppProps = {}) {
   const ownedDialogControllerRef = useRef<AppDialogController | null>(null);
   if (!ownedDialogControllerRef.current) {
@@ -198,6 +209,8 @@ export function App({ dialogController: suppliedDialogController }: AppProps = {
   const [savedConfiguration, setSavedConfiguration] = useState<SavedConfigurationDocument | null>(null);
   const [recentConfigurations, setRecentConfigurations] = useState<RecentConfiguration[]>([]);
   const [workflow, dispatch] = useReducer(workflowReducer, initialWorkflowState);
+  const [touchedInputKeys, setTouchedInputKeys] = useState<Set<string>>(() => new Set());
+  const [validationRequested, setValidationRequested] = useState(false);
   const [support, supportDispatch] = useReducer(supportReducer, initialSupportState);
   const [updates, setUpdates] = useState(initialUpdatePanelState);
   const [activeDialog, setActiveDialog] = useState<DialogSnapshot<AppDialogPayload> | null>(
@@ -811,11 +824,19 @@ export function App({ dialogController: suppliedDialogController }: AppProps = {
   };
 
   const updateRecipeIntent = (selectedRecipes: string[]) => {
+    setTouchedInputKeys(new Set());
+    setValidationRequested(false);
     dispatch({ type: "set-recipes", selectedRecipes });
     queueSavedMutation({ kind: "selected_recipes", value: selectedRecipes });
   };
 
   const updateBindingIntent = (key: string, value: unknown) => {
+    setTouchedInputKeys((current) => {
+      if (current.has(key)) return current;
+      const next = new Set(current);
+      next.add(key);
+      return next;
+    });
     dispatch({ type: "set-binding", key, value });
     queueSavedMutation({ kind: "binding", key, value });
   };
@@ -1386,6 +1407,7 @@ export function App({ dialogController: suppliedDialogController }: AppProps = {
 
   const describe = async () => {
     if (!workflow.deviceHandle || !workflow.devicePlan) return;
+    setValidationRequested(true);
     setBusy(true);
     setNotice(null);
     setOperationError(null);
@@ -1507,6 +1529,15 @@ export function App({ dialogController: suppliedDialogController }: AppProps = {
 
   const generateReview = async () => {
     if (!workflow.deviceHandle || !workflow.devicePlan) return;
+    setValidationRequested(true);
+    if (!reviewReady(workflow)) {
+      if (workflow.description) focusValidationSummary(workflow.description);
+      announce(
+        "Resolve required values and validation errors before review.",
+        true,
+      );
+      return;
+    }
     setBusy(true);
     setNotice(null);
     setOperationError(null);
@@ -1897,14 +1928,28 @@ export function App({ dialogController: suppliedDialogController }: AppProps = {
   );
   const validationErrors = workflow.description
     ? [
-        ...workflow.description.inputs.flatMap((input) => inputDiagnosticsForDisplay(input).map((diagnostic) => ({
-          ...diagnostic,
-          targetId: stableDomId("input", input.key),
-        }))),
-        ...pageDiagnosticsForDisplay(workflow.description).map((diagnostic) => ({
-          ...diagnostic,
-          targetId: null,
-        })),
+        ...workflow.description.inputs.flatMap((input) => inputDiagnosticsForDisplay(input)
+          .filter((diagnostic) => diagnosticIsBlocking(
+            diagnostic.code,
+            diagnostic.key ?? input.key,
+            validationRequested,
+            touchedInputKeys,
+          ))
+          .map((diagnostic) => ({
+            ...diagnostic,
+            targetId: stableDomId("input", input.key),
+          }))),
+        ...pageDiagnosticsForDisplay(workflow.description)
+          .filter((diagnostic) => diagnosticIsBlocking(
+            diagnostic.code,
+            diagnostic.key,
+            validationRequested,
+            touchedInputKeys,
+          ))
+          .map((diagnostic) => ({
+            ...diagnostic,
+            targetId: null,
+          })),
       ].filter((diagnostic) => diagnostic.severity === "error")
     : [];
   const configurationActionsLocked = !startupReady
@@ -2467,7 +2512,12 @@ export function App({ dialogController: suppliedDialogController }: AppProps = {
                       const descriptionId = `${inputId}-description`;
                       const extensionsId = `${inputId}-extensions`;
                       const sourceId = `${inputId}-source`;
-                      const diagnostics = inputDiagnosticsForDisplay(input);
+                      const diagnostics = inputDiagnosticsForDisplay(input).filter((diagnostic) => diagnosticIsBlocking(
+                        diagnostic.code,
+                        diagnostic.key ?? input.key,
+                        validationRequested,
+                        touchedInputKeys,
+                      ));
                       const diagnosticIds = diagnostics.map((_, index) => `${inputId}-error-${index}`);
                       return (
                       <div className="input-field" key={input.key}>
@@ -2543,20 +2593,27 @@ export function App({ dialogController: suppliedDialogController }: AppProps = {
                   </section>
                 ))}
 
-                {pageDiagnosticsForDisplay(workflow.description).map((item) => (
-                  <p
-                    className={item.severity === "error" ? "error" : "warning"}
-                    key={`${item.key ?? "global"}-${item.code}-${item.message}`}
-                  >{item.severity === "error" ? "Error: " : "Warning: "}{item.message}</p>
-                ))}
+                {pageDiagnosticsForDisplay(workflow.description)
+                  .filter((diagnostic) => diagnosticIsBlocking(
+                    diagnostic.code,
+                    diagnostic.key,
+                    validationRequested,
+                    touchedInputKeys,
+                  ))
+                  .map((item) => (
+                    <p
+                      className={item.severity === "error" ? "error" : "warning"}
+                      key={`${item.key ?? "global"}-${item.code}-${item.message}`}
+                    >{item.severity === "error" ? "Error: " : "Warning: "}{item.message}</p>
+                  ))}
                 <div className="button-row">
                   <button className="secondary" onClick={() => dispatch({ type: "back" })}>Back</button>
                   <button className="secondary" onClick={describe} disabled={busy}>Refresh validation</button>
-                  <button aria-describedby={!reviewReady(workflow) || busy ? "review-disabled-reason" : undefined} onClick={generateReview} disabled={!reviewReady(workflow) || busy}>Review plan</button>
+                  <button aria-describedby={busy ? "review-disabled-reason" : undefined} onClick={generateReview} disabled={busy}>Review plan</button>
                 </div>
-                {(!reviewReady(workflow) || busy) && (
+                {busy && (
                   <p className="disabled-reason" id="review-disabled-reason">
-                    {busy ? "Validation is in progress." : "Resolve required values and validation errors before review."}
+                    Validation is in progress.
                   </p>
                 )}
               </>
