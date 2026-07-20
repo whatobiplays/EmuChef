@@ -4,6 +4,8 @@ EmuChef is a Rust application for planning and applying reproducible Android
 handheld configurations. The repository contains separate React/Tauri apps for
 the guided end-user workflow and authored recipe editing.
 
+The canonical remaining-work plan is the [product roadmap](docs/product/product-roadmap.md). It explicitly separates **EmuChef proper** (`apps/emuchef-app`), the **Config Editor** (`apps/config-editor`), and genuinely shared Rust/Tauri infrastructure so requirements and release evidence are not conflated.
+
 ## Runtime
 
 Rust is the sole product runtime. It owns the `emuchef` CLI, authored-data

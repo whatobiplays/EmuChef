@@ -557,9 +557,16 @@ release-pattern results and retain their existing generated recipe shapes.
 
 ### Later refinement
 
-Potential later work includes OS-keychain GitHub credentials, dedicated
-app/profile editors, Obtainium import, source-update checks, aliases, and
-device-plan assistance.
+The canonical remaining Config Editor backlog is maintained in
+[`product-roadmap.md`](product-roadmap.md) under **Part II — Config Editor
+Roadmap**. That track currently includes OS-keychain GitHub credentials,
+dedicated app-definition and device-profile editors, Obtainium import,
+source-update checks, alias management, device-plan assistance, and deferred
+extended device capability checks.
+
+These are Config Editor requirements. They do not change EmuChef proper Phase 5
+status unless the canonical roadmap explicitly assigns a shared dependency or
+cross-product acceptance criterion.
 
 ## Verification
 
