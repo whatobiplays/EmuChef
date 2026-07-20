@@ -107,6 +107,8 @@ export interface InputDescriptor {
   options?: string[];
   pathKind?: "file" | "directory";
   acceptedExtensions?: string[];
+  presentationCategory?: string;
+  presentationKind?: string;
   value: unknown;
   valueSource: "explicit" | "user_configuration" | "device_plan" | "recipe_default" | null;
   diagnostics: ValidationDiagnostic[];

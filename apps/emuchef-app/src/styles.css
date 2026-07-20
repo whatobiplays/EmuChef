@@ -95,8 +95,15 @@ fieldset { border: 0; padding: 0; }
 legend { margin-bottom: 0.7rem; font-weight: 800; }
 .plan-options label, .recipe-list label { display: flex; align-items: flex-start; gap: 0.8rem; padding: 0.9rem; border: 1px solid #3d3746; border-radius: 11px; background: #24212a; }
 .unavailable { opacity: 0.55; }
+.input-group { margin: 1.25rem 0; padding: 1rem; border: 1px solid #3a3541; border-radius: 12px; background: #19171d; }
+.input-group > h3 { margin: 0 0 0.75rem; }
 .input-field { display: grid; gap: 0.45rem; margin: 1rem 0; color: #e7e5e4; }
-.input-field > span, .input-field > label { font-weight: 700; }
+.input-field-heading { display: flex; align-items: flex-start; justify-content: space-between; gap: 0.8rem; }
+.input-field-heading > label { font-weight: 700; }
+.input-requirements { display: flex; flex-wrap: wrap; justify-content: flex-end; gap: 0.35rem; }
+.input-requirement { display: inline-flex; align-items: center; min-height: 24px; padding: 0.15rem 0.5rem; border: 1px solid #57505f; border-radius: 999px; color: #d6d3d1; font-size: 0.75rem; font-weight: 700; }
+.input-requirement.required { border-color: #a16207; color: #fde68a; background: #422006; }
+.input-requirement.sensitive { border-color: #6d28d9; color: #ddd6fe; background: #2e1065; }
 .input-field input:not([type="checkbox"]), .input-field select { width: 100%; border: 1px solid #4a4452; border-radius: 9px; padding: 0.7rem; background: #121015; color: #fafafa; }
 .modal-panel input:not([type="checkbox"]), .support-panel input:not([type="checkbox"]) { width: 100%; min-height: 44px; border: 1px solid #4a4452; border-radius: 9px; padding: 0.7rem; background: #121015; color: #fafafa; }
 .path-picker { display: flex; gap: 0.5rem; }

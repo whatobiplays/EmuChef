@@ -948,6 +948,34 @@ fn public_match(result: &Value, exact_serial: Option<&str>) -> Value {
     public
 }
 
+fn input_presentation_category(input: &Value) -> &'static str {
+    match input.get("role").and_then(Value::as_str).unwrap_or_default() {
+        "apk" => "Applications",
+        "bios" => "Firmware",
+        "rom" | "rom_library" | "content" => "Games and content",
+        "rom_destination" => "Destination",
+        "copy_policy" => "Options",
+        _ => "Other",
+    }
+}
+
+fn input_presentation_kind(input: &Value, options: &[Value]) -> &'static str {
+    let validation = input.get("validation").unwrap_or(&Value::Null);
+    match validation.get("pathKind").and_then(Value::as_str) {
+        Some("file") if input.get("multiple").and_then(Value::as_bool).unwrap_or(false) => {
+            "Multiple files"
+        }
+        Some("file") => "Single file",
+        Some("directory") => "Folder",
+        _ => match input.get("type").and_then(Value::as_str).unwrap_or_default() {
+            "boolean" => "On or off",
+            "device_path" => "Device folder",
+            _ if !options.is_empty() => "Choose one",
+            _ => "Text",
+        },
+    }
+}
+
 fn public_configuration_description(result: &Value, exact_serial: &str) -> Value {
     let recipe_options = result
         .get("recipeOptions")
@@ -981,6 +1009,8 @@ fn public_configuration_description(result: &Value, exact_serial: &str) -> Value
                 .flatten()
                 .filter_map(|option| option.get("value").cloned())
                 .collect::<Vec<_>>();
+            let presentation_category = input_presentation_category(input);
+            let presentation_kind = input_presentation_kind(input, &options);
             json!({
                 "key": input.get("key"),
                 "recipeId": input.get("recipeId"),
@@ -994,6 +1024,8 @@ fn public_configuration_description(result: &Value, exact_serial: &str) -> Value
                 "options": options,
                 "pathKind": validation.get("pathKind"),
                 "acceptedExtensions": validation.get("allowedExtensions"),
+                "presentationCategory": presentation_category,
+                "presentationKind": presentation_kind,
                 "value": input.get("value"),
                 "valueSource": input.get("valueSource"),
                 "diagnostics": public_diagnostics(input.get("diagnostics")),
@@ -1701,9 +1733,10 @@ mod tests {
                 }],
                 "inputs": [{
                     "key": "recipe/file", "recipeId": "recipe", "inputId": "file",
-                    "type": "file", "label": "File", "description": null, "required": true,
+                    "type": "file", "role": "bios", "label": "File", "description": null, "required": true,
                     "multiple": false, "options": [{ "value": "one", "label": "One" }],
                     "validation": { "pathKind": "file", "allowedExtensions": ["apk"] },
+                    "sensitive": false,
                     "value": null, "valueSource": null,
                     "diagnostics": [{
                         "key": "recipe/file", "code": "binding_missing",
@@ -1728,6 +1761,8 @@ mod tests {
         );
         assert_eq!(public["inputs"][0]["pathKind"], "file");
         assert_eq!(public["inputs"][0]["acceptedExtensions"], json!(["apk"]));
+        assert_eq!(public["inputs"][0]["presentationCategory"], "Firmware");
+        assert_eq!(public["inputs"][0]["presentationKind"], "Single file");
         assert_eq!(public["inputs"][0]["options"], json!(["one"]));
         assert_eq!(public["inputs"][0]["diagnostics"][0]["key"], "recipe/file");
         assert_eq!(public["diagnostics"][0]["key"], "recipe/file");

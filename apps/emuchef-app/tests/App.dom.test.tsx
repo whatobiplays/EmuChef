@@ -533,6 +533,8 @@ describe("Phase 5B workflow surfaces", () => {
         description: null,
         required: true,
         sensitive: true,
+        presentationCategory: "Other",
+        presentationKind: "Text",
         value: null,
         valueSource: null,
         diagnostics: [],
@@ -570,7 +572,11 @@ describe("Phase 5B workflow surfaces", () => {
     await screen.findByRole("heading", { name: "Choose what to install" });
     await user.click(screen.getByRole("button", { name: "Continue" }));
     await screen.findByRole("heading", { name: "Provide required files and options" });
-    await user.type(screen.getByLabelText("Account token (required)"), "do-not-display");
+    expect(screen.getByRole("heading", { name: "Other" })).toBeTruthy();
+    expect(screen.getByText("Required")).toBeTruthy();
+    expect(screen.getByText("Text")).toBeTruthy();
+    expect(screen.getByText("Not saved")).toBeTruthy();
+    await user.type(screen.getByLabelText("Account token"), "do-not-display");
 
     await user.click(screen.getByRole("button", { name: "Restart runtime" }));
     const dialog = await screen.findByRole("alertdialog", { name: "Restart the runtime?" });
