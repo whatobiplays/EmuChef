@@ -205,6 +205,7 @@ describe("Phase 5B workflow surfaces", () => {
           recommended: true,
           dependencyRequired: false,
           available: true,
+          recipeDependencies: ["recipe.copy-bios"],
           requiredCapabilities: ["adb_available", "apk_install"],
           unavailableCapabilities: [],
         },
@@ -244,6 +245,7 @@ describe("Phase 5B workflow surfaces", () => {
     expect(screen.getByText("Recipes · 3 of 3 shown")).toBeTruthy();
     expect(screen.getByText("ADB connection")).toBeTruthy();
     expect(screen.getByText("App installation")).toBeTruthy();
+    expect(screen.getByText("Also includes: Copy BIOS files")).toBeTruthy();
 
     const search = screen.getByRole("searchbox", { name: "Search recipes" });
     await user.type(search, "firmware");
@@ -361,6 +363,7 @@ describe("Phase 5B workflow surfaces", () => {
       expect((screen.getByRole("checkbox", { name: /Shader pack/ }) as HTMLInputElement).checked).toBe(true);
       expect((screen.getByRole("checkbox", { name: /Custom tools/ }) as HTMLInputElement).checked).toBe(false);
       expect((screen.getByRole("checkbox", { name: /Shared dependency/ }) as HTMLInputElement).checked).toBe(true);
+      expect(screen.getByText("Added automatically because another selected recipe requires it.")).toBeTruthy();
       expect((screen.getByRole("checkbox", { name: /Root enhancement/ }) as HTMLInputElement).checked).toBe(false);
       expect((screen.getByRole("button", { name: "Recommended setup selected" }) as HTMLButtonElement).disabled).toBe(true);
     });

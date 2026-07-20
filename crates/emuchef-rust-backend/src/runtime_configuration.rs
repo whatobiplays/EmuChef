@@ -394,6 +394,7 @@ pub(crate) fn describe_configuration(
                 "recommended": recommended,
                 "dependencyRequired": dependency_required,
                 "available": unavailable_capabilities.is_empty(),
+                "recipeDependencies": recipe.recipe_dependencies,
                 "requiredCapabilities": required_capabilities,
                 "unavailableCapabilities": unavailable_capabilities,
             })

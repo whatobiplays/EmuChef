@@ -82,6 +82,7 @@ h2 { font-size: clamp(1.75rem, 3vw, 2.45rem); max-width: 760px; }
 .device-list li { min-width: 0; }
 .device-row { width: 100%; display: flex; justify-content: space-between; align-items: center; text-align: left; background: #27242d; color: #fff; border: 1px solid #3f3a47; }
 .device-row span:first-child, .recipe-list label > span, .plan-options label span { display: grid; gap: 0.2rem; }
+.recipe-dependencies { color: #c4b5fd; }
 .recipe-requirements { display: flex; flex-wrap: wrap; gap: 0.35rem; margin-top: 0.25rem; }
 .recipe-requirement { display: inline-flex; width: fit-content; padding: 0.22rem 0.45rem; border: 1px solid #4a4654; border-radius: 999px; color: #d6d3d1; background: #302c35; font-size: 0.72rem; line-height: 1.2; text-transform: capitalize; }
 .recipe-requirement.unavailable { border-color: #7f1d1d; color: #fecaca; background: #450a0a; }

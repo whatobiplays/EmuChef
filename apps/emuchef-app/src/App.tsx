@@ -2339,6 +2339,17 @@ export function App({ dialogController: suppliedDialogController }: AppProps = {
                                 ? `Recommended for this device${recipe.description ? ` · ${recipe.description}` : ""}`
                                 : recipe.description ?? "Optional"}
                         </small>
+                        {(recipe.recipeDependencies ?? []).length > 0 && (
+                          <small className="recipe-dependencies">
+                            Also includes: {(recipe.recipeDependencies ?? []).map((dependencyId) => (
+                              workflow.description?.recipeOptions.find((option) => option.id === dependencyId)?.name
+                                ?? dependencyId
+                            )).join(", ")}
+                          </small>
+                        )}
+                        {recipe.dependencyRequired && (
+                          <small className="recipe-dependencies">Added automatically because another selected recipe requires it.</small>
+                        )}
                         {(recipe.requiredCapabilities ?? []).length > 0 && (
                           <span className="recipe-requirements" aria-label="Requirements">
                             {(recipe.requiredCapabilities ?? []).map((capability) => {
