@@ -89,6 +89,7 @@ export interface RecipeOption {
   dependencyRequired: boolean;
   available: boolean;
   recipeDependencies?: string[];
+  contentRequirements?: Array<"apk_file" | "bios_files" | "rom_content" | "network_download">;
   requiredCapabilities?: string[];
   unavailableCapabilities: string[];
 }

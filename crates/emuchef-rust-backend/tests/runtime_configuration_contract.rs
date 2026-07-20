@@ -12,7 +12,7 @@ fn write_authored_root(temp: &TempDir) -> PathBuf {
     }
     fs::write(
         root.join("recipes/feature.dep.yaml"),
-        "schema_version: 1\nkind: recipe\nid: feature.dep\nname: Dependency\nrecipe_dependencies: []\nprovides:\n  features: []\ninputs:\n  dep_value:\n    type: string\n    label: Dependency value\n    required: false\n    default: from-dependency\nartifacts: {}\nartifact_groups: {}\nsteps: []\n",
+        "schema_version: 1\nkind: recipe\nid: feature.dep\nname: Dependency\nrecipe_dependencies: []\nprovides:\n  features: []\ninputs:\n  dep_value:\n    type: string\n    role: bios\n    label: Dependency value\n    required: false\n    default: from-dependency\nartifacts:\n  dependency_asset:\n    type: remote_file\n    url: https://example.invalid/dependency.zip\n    cache: default\nartifact_groups: {}\nsteps: []\n",
     )
     .unwrap();
     fs::write(
@@ -112,6 +112,10 @@ fn describes_defaults_dependencies_metadata_and_missing_values_without_side_effe
         .unwrap();
     assert_eq!(dependency["recommended"], false);
     assert_eq!(dependency["dependencyRequired"], true);
+    assert_eq!(
+        dependency["contentRequirements"],
+        json!(["bios_files", "network_download"])
+    );
     assert_eq!(
         input_by_key(&response, "feature.dep/dep_value")["valueSource"],
         "recipe_default"

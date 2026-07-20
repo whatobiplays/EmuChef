@@ -2350,6 +2350,20 @@ export function App({ dialogController: suppliedDialogController }: AppProps = {
                         {recipe.dependencyRequired && (
                           <small className="recipe-dependencies">Added automatically because another selected recipe requires it.</small>
                         )}
+                        {(recipe.contentRequirements ?? []).length > 0 && (
+                          <span className="recipe-requirements" aria-label="What you'll need">
+                            {(recipe.contentRequirements ?? []).map((requirement) => (
+                              <span key={requirement} className="recipe-requirement">
+                                {{
+                                  apk_file: "APK file required",
+                                  bios_files: "BIOS files required",
+                                  rom_content: "ROM or content folder required",
+                                  network_download: "Downloads files",
+                                }[requirement]}
+                              </span>
+                            ))}
+                          </span>
+                        )}
                         {(recipe.requiredCapabilities ?? []).length > 0 && (
                           <span className="recipe-requirements" aria-label="Requirements">
                             {(recipe.requiredCapabilities ?? []).map((capability) => {

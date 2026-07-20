@@ -206,6 +206,7 @@ describe("Phase 5B workflow surfaces", () => {
           dependencyRequired: false,
           available: true,
           recipeDependencies: ["recipe.copy-bios"],
+          contentRequirements: ["network_download"],
           requiredCapabilities: ["adb_available", "apk_install"],
           unavailableCapabilities: [],
         },
@@ -213,6 +214,7 @@ describe("Phase 5B workflow surfaces", () => {
           id: "recipe.copy-bios",
           name: "Copy BIOS files",
           description: "Copy user-provided firmware files.",
+          contentRequirements: ["bios_files"],
           selected: false,
           recommended: false,
           dependencyRequired: false,
@@ -223,6 +225,7 @@ describe("Phase 5B workflow surfaces", () => {
           id: "recipe.root-tools",
           name: "Root tools",
           description: "Configure features that require root access.",
+          contentRequirements: ["apk_file", "rom_content"],
           selected: false,
           recommended: false,
           dependencyRequired: false,
@@ -246,16 +249,20 @@ describe("Phase 5B workflow surfaces", () => {
     expect(screen.getByText("ADB connection")).toBeTruthy();
     expect(screen.getByText("App installation")).toBeTruthy();
     expect(screen.getByText("Also includes: Copy BIOS files")).toBeTruthy();
+    expect(screen.getByText("Downloads files")).toBeTruthy();
 
     const search = screen.getByRole("searchbox", { name: "Search recipes" });
     await user.type(search, "firmware");
     expect(screen.getByRole("checkbox", { name: /Copy BIOS files/ })).toBeTruthy();
+    expect(screen.getByText("BIOS files required")).toBeTruthy();
     expect(screen.queryByRole("checkbox", { name: /RetroArch/ })).toBeNull();
     expect(screen.getByText("Recipes · 1 of 3 shown")).toBeTruthy();
 
     await user.clear(search);
     await user.click(screen.getByRole("radio", { name: "Unavailable" }));
     expect(screen.getByRole("checkbox", { name: /Root tools/ })).toBeTruthy();
+    expect(screen.getByText("APK file required")).toBeTruthy();
+    expect(screen.getByText("ROM or content folder required")).toBeTruthy();
     expect(screen.getByText("Root access unavailable")).toBeTruthy();
     expect(screen.queryByText("root_shell")).toBeNull();
     expect(screen.queryByRole("checkbox", { name: /Copy BIOS files/ })).toBeNull();

@@ -366,6 +366,24 @@ pub(crate) fn describe_configuration(
                 .flat_map(|step| step.constraints.capabilities.iter())
                 .cloned()
                 .collect::<std::collections::BTreeSet<_>>();
+            let mut content_requirements = std::collections::BTreeSet::new();
+            if !recipe.artifacts.is_empty() {
+                content_requirements.insert("network_download");
+            }
+            for input in recipe.inputs.values() {
+                match input.role.as_str() {
+                    "apk" => {
+                        content_requirements.insert("apk_file");
+                    }
+                    "bios" => {
+                        content_requirements.insert("bios_files");
+                    }
+                    "rom" | "rom_library" | "content" => {
+                        content_requirements.insert("rom_content");
+                    }
+                    _ => {}
+                }
+            }
             let unavailable_capabilities = prepared
                 .device_plan_parts
                 .as_ref()
@@ -395,6 +413,7 @@ pub(crate) fn describe_configuration(
                 "dependencyRequired": dependency_required,
                 "available": unavailable_capabilities.is_empty(),
                 "recipeDependencies": recipe.recipe_dependencies,
+                "contentRequirements": content_requirements,
                 "requiredCapabilities": required_capabilities,
                 "unavailableCapabilities": unavailable_capabilities,
             })
