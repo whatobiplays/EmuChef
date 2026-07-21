@@ -13,8 +13,8 @@ import {
   diagnosticIsBlocking,
   errorCode,
   errorMessage,
-  executionDuration,
 } from "./app-helpers";
+import { ExecutionStep } from "./ExecutionStep";
 import { InputsStep } from "./InputsStep";
 import { ReviewStep } from "./ReviewStep";
 import { SupportPanel } from "./SupportPanel";
@@ -2425,213 +2425,27 @@ export function App({ dialogController: suppliedDialogController }: AppProps = {
             )}
 
             {workflow.step === "execution" &&
-              (workflow.execution.kind === "active" || workflow.execution.kind === "terminal") && (
-                <>
-                  <p className="eyebrow">
-                    {workflow.execution.mode === "real" ? "REAL DEVICE" : "SIMULATED / DRY RUN"}
-                  </p>
-                  <h2 data-focus-fallback="workflow" data-step-heading tabIndex={-1}>
-                    {workflow.execution.kind === "terminal"
-                      ? `${workflow.execution.mode === "real" ? "Real-device execution" : "Simulation"} ${workflow.execution.snapshot.status.replaceAll("_", " ")}`
-                      : workflow.execution.mode === "real"
-                        ? "Applying the reviewed setup"
-                        : "Simulating the reviewed setup"}
-                  </h2>
-                  {workflow.execution.snapshot.completion.counts.total > 0 ? (
-                    <div className="execution-progress">
-                      <label htmlFor="execution-progress">
-                        Execution progress: {Math.round((
-                          (workflow.execution.snapshot.completion.counts.completed
-                            + workflow.execution.snapshot.completion.counts.skipped
-                            + workflow.execution.snapshot.completion.counts.blocked
-                            + workflow.execution.snapshot.completion.counts.failed
-                            + workflow.execution.snapshot.completion.counts.cancelled)
-                          / workflow.execution.snapshot.completion.counts.total
-                        ) * 100)}%
-                      </label>
-                      <progress
-                        id="execution-progress"
-                        max={workflow.execution.snapshot.completion.counts.total}
-                        value={workflow.execution.snapshot.completion.counts.completed
-                          + workflow.execution.snapshot.completion.counts.skipped
-                          + workflow.execution.snapshot.completion.counts.blocked
-                          + workflow.execution.snapshot.completion.counts.failed
-                          + workflow.execution.snapshot.completion.counts.cancelled}
-                      />
-                    </div>
-                  ) : (
-                    <p aria-busy="true" role="status">Execution progress is starting; the total step count is not available yet.</p>
-                  )}
-                  {workflow.execution.mode === "real" ? (
-                    <p className="warning">
-                      Keep the device connected. Failure or cancellation may leave completed changes on the device;
-                      there is no rollback, restore, or automatic recovery.
-                    </p>
-                  ) : (
-                    <p className="simulation-banner">
-                      No real device changes are made. This report is simulated evidence only.
-                    </p>
-                  )}
-                  <dl className="execution-summary">
-                    <div><dt>Status</dt><dd>{workflow.execution.snapshot.status.replaceAll("_", " ")}</dd></div>
-                    <div><dt>Started</dt><dd>{workflow.execution.snapshot.startedAt ?? "Starting"}</dd></div>
-                    {executionDuration(workflow.execution.snapshot) && (
-                      <div><dt>Duration</dt><dd>{executionDuration(workflow.execution.snapshot)}</dd></div>
-                    )}
-                    <div><dt>Completed</dt><dd>{workflow.execution.snapshot.completion.counts.completed}</dd></div>
-                    <div><dt>Skipped</dt><dd>{workflow.execution.snapshot.completion.counts.skipped}</dd></div>
-                    <div><dt>Blocked</dt><dd>{workflow.execution.snapshot.completion.counts.blocked}</dd></div>
-                    <div><dt>Failed</dt><dd>{workflow.execution.snapshot.completion.counts.failed}</dd></div>
-                  </dl>
-                  {workflow.execution.snapshot.completion.partialChangesPossible && (
-                    <p className="warning">
-                      Some device changes completed before this {workflow.execution.snapshot.status} result.
-                      The result remains {workflow.execution.snapshot.status}; EmuChef does not infer partial success or rollback completed work.
-                    </p>
-                  )}
-                  {workflow.execution.snapshot.warnings.map((issue) => (
-                    <div className="warning" key={`warning-${issue.code}-${issue.stepId ?? "run"}`}>
-                      <p>{issue.message}</p><small><strong>{issue.remediation.title}:</strong> {issue.remediation.message}</small>
-                    </div>
-                  ))}
-                  {workflow.execution.snapshot.errors.map((issue) => (
-                    <div className="error" key={`error-${issue.code}-${issue.stepId ?? "run"}`}>
-                      <p>{issue.message}</p><small><strong>{issue.remediation.title}:</strong> {issue.remediation.message}</small>
-                    </div>
-                  ))}
-                  {workflow.execution.snapshot.recipes.map((recipe) => (
-                    <article className={`execution-group status-${recipe.status}`} key={recipe.recipeId}>
-                      <div className="execution-heading">
-                        <div><h3>{recipe.name}</h3>{recipe.description && <p>{recipe.description}</p>}</div>
-                        <span className="execution-status">{recipe.status.replaceAll("_", " ")}</span>
-                      </div>
-                      <ol>
-                        {recipe.steps.map((step) => (
-                          <li key={step.stepId} className={`step-${step.status}`}>
-                            <strong>{step.note ?? step.name}</strong>
-                            <span>{step.status.replaceAll("_", " ")}</span>
-                            {step.note && step.note !== step.name && <small>{step.name}</small>}
-                            {step.message && <small>{step.message}</small>}
-                          </li>
-                        ))}
-                      </ol>
-                    </article>
-                  ))}
-                  {workflow.execution.events.length > 0 && (
-                    <details className="execution-events">
-                      <summary>Incremental {workflow.execution.mode === "real" ? "real-device" : "simulated"} event log</summary>
-                      <ol>
-                        {workflow.execution.events.map((event) => (
-                          <li key={event.sequence}>
-                            <time>{event.timestamp}</time> {event.note ?? event.message ?? event.eventType}
-                            {event.phase && ` · ${event.phase.replaceAll("_", " ")}`}
-                            {event.status && ` · ${event.status.replaceAll("_", " ")}`}
-                          </li>
-                        ))}
-                      </ol>
-                    </details>
-                  )}
-                  {workflow.execution.kind === "active" ? (
-                    <>
-                      {workflow.execution.cancellationRequested && (
-                        <p className="warning">
-                          {workflow.execution.mode === "real"
-                            ? "Cancellation requested. The current atomic operation may finish; completed device changes are not reversed, and no new work starts after cancellation is observed."
-                            : "Cancellation requested. Completed simulated steps remain visible in this report. No new simulated steps start, the current simulated atomic step may finish, and no real device changes or rollback exist."}
-                        </p>
-                      )}
-                      <button
-                        aria-describedby={workflow.execution.cancellationRequested ? "cancellation-requested-reason" : undefined}
-                        className="danger"
-                        onClick={cancelExecution}
-                        disabled={workflow.execution.cancellationRequested}
-                      >
-                        {workflow.execution.cancellationRequested
-                          ? "Cancellation requested"
-                          : workflow.execution.mode === "real"
-                            ? "Request cancellation"
-                            : "Cancel simulated run"}
-                      </button>
-                      {workflow.execution.cancellationRequested && <p className="disabled-reason" id="cancellation-requested-reason">A cancellation request is already pending; the current atomic operation may still finish.</p>}
-                    </>
-                  ) : (
-                    <div className="button-row">
-                      <button
-                        className="secondary"
-                        onClick={exportExecutionReport}
-                        disabled={reportState === "exporting"}
-                      >
-                        {reportState === "exporting" ? "Exporting…" : reportState === "saved" ? "Report saved" : "Export report"}
-                      </button>
-                      {workflow.execution.snapshot.status !== "succeeded" && (
-                        <button onClick={prepareRepair} disabled={repairPreparing}>
-                          {repairPreparing
-                            ? "Preparing fresh plan…"
-                            : workflow.execution.snapshot.status === "succeeded_with_warnings"
-                              ? "Repair configuration"
-                              : "Retry failed work"}
-                        </button>
-                      )}
-                      {!workflow.execution.snapshot.simulated && workflow.execution.snapshot.launchAction && (
-                        <button
-                          onClick={launchConfiguredApp}
-                          disabled={launchState === "launching" || launchState === "launched"}
-                        >
-                          {launchState === "launching"
-                            ? "Launching…"
-                            : launchState === "launched"
-                              ? "App launched"
-                              : workflow.execution.snapshot.launchAction.label}
-                        </button>
-                      )}
-                      <button
-                        className="secondary"
-                        onClick={() => {
-                          if (workflow.execution.kind !== "terminal") return;
-                          dispatch({
-                            type: workflow.execution.mode === "real" ? "runtime-invalidated" : "return-to-review",
-                          });
-                        }}
-                      >
-                        {workflow.execution.mode === "real" ? "Start a fresh workflow" : "Return to Review"}
-                      </button>
-                    </div>
-                  )}
-                </>
-              )}
-
-            {workflow.step === "execution" && workflow.execution.kind === "unavailable" && (
-              <>
-                <p className="eyebrow">
-                  {workflow.execution.mode === "real" ? "REAL-DEVICE OUTCOME UNKNOWN" : "SIMULATED RUN UNAVAILABLE"}
-                </p>
-                <h2 data-focus-fallback="workflow" data-step-heading tabIndex={-1}>
-                  {workflow.execution.mode === "real"
-                    ? "The device may have been partially changed"
-                    : "This in-memory simulation cannot be resumed"}
-                </h2>
-                <p className="warning">{workflow.execution.message}</p>
-                <p>
-                  {workflow.execution.mode === "real"
-                    ? "The outcome cannot be inferred. Reconnect and create a fresh review; this execution cannot be resumed, retried in place, restored, or rolled back."
-                    : "No execution history is persisted across an app or sidecar restart."}
-                </p>
-                <button onClick={prepareRepair} disabled={repairPreparing}>
-                  {repairPreparing ? "Preparing fresh plan…" : "Repair configuration"}
-                </button>
-                <button
-                  className="secondary"
-                  onClick={() => {
-                    if (workflow.execution.kind !== "unavailable") return;
+              (workflow.execution.kind === "active"
+                || workflow.execution.kind === "terminal"
+                || workflow.execution.kind === "unavailable") && (
+                <ExecutionStep
+                  execution={workflow.execution}
+                  launchState={launchState}
+                  onCancel={cancelExecution}
+                  onExportReport={exportExecutionReport}
+                  onLaunchConfiguredApp={launchConfiguredApp}
+                  onPrepareRepair={prepareRepair}
+                  onReturn={() => {
+                    const execution = workflow.execution;
+                    if (execution.kind !== "terminal" && execution.kind !== "unavailable") return;
                     dispatch({
-                      type: workflow.execution.mode === "real" ? "runtime-invalidated" : "return-to-review",
+                      type: execution.mode === "real" ? "runtime-invalidated" : "return-to-review",
                     });
                   }}
-                >
-                  {workflow.execution.mode === "real" ? "Start a fresh workflow" : "Return to Review"}
-                </button>
-              </>
-            )}
+                  repairPreparing={repairPreparing}
+                  reportState={reportState}
+                />
+              )}
           </section>
 
           <aside className="status-panel">

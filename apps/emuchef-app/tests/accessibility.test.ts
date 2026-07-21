@@ -231,12 +231,13 @@ test("sanitized error fallback exposes a heading and safe reload without raw err
 
 test("source contract includes modal containment and resilient visual settings", () => {
   const app = fs.readFileSync(path.join(appDir, "src/App.tsx"), "utf8");
+  const executionStep = fs.readFileSync(path.join(appDir, "src/ExecutionStep.tsx"), "utf8");
   const dialog = fs.readFileSync(path.join(appDir, "src/AccessibleDialog.tsx"), "utf8");
   const styles = fs.readFileSync(path.join(appDir, "src/styles.css"), "utf8");
   assert.match(app, /className="skip-link"/);
   assert.match(app, /aria-live="polite"/);
   assert.match(app, /aria-live="assertive"/);
-  assert.match(app, /<progress/);
+  assert.match(executionStep, /<progress/);
   assert.match(dialog, /aria-modal="true"/);
   assert.match(dialog, /event\.key === "Escape"/);
   assert.match(dialog, /event\.key !== "Tab"/);
