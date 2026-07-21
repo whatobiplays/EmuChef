@@ -207,13 +207,23 @@ export function ExecutionStep({
                 : "Export report"}
           </button>
           {snapshot.status !== "succeeded" && (
-            <button onClick={onPrepareRepair} disabled={repairPreparing}>
-              {repairPreparing
-                ? "Preparing fresh plan…"
-                : snapshot.status === "succeeded_with_warnings"
-                  ? "Repair configuration"
-                  : "Retry failed work"}
-            </button>
+            <div className="execution-repair-action">
+              <button
+                aria-describedby="execution-repair-explanation"
+                onClick={onPrepareRepair}
+                disabled={repairPreparing}
+              >
+                {repairPreparing
+                  ? "Preparing fresh plan…"
+                  : snapshot.status === "succeeded_with_warnings"
+                    ? "Repair configuration"
+                    : "Repair setup"}
+              </button>
+              <p className="disabled-reason" id="execution-repair-explanation">
+                EmuChef will return to setup, preserve reusable choices, and require a fresh plan and review before another run.
+                Completed steps remain report evidence and are not retried in place.
+              </p>
+            </div>
           )}
           {!snapshot.simulated && snapshot.launchAction && (
             <button
