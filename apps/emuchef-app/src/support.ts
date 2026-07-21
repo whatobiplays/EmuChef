@@ -51,9 +51,23 @@ export type SupportAction =
 export function supportReducer(state: SupportState, action: SupportAction): SupportState {
   switch (action.type) {
     case "open":
-      return { ...state, open: true };
+      return {
+        ...state,
+        open: true,
+        exportGeneration: state.exportGeneration + 1,
+        exporting: false,
+        exportOutcome: "idle",
+        error: null,
+      };
     case "close":
-      return { ...state, open: false };
+      return {
+        ...state,
+        open: false,
+        exportGeneration: state.exportGeneration + 1,
+        exporting: false,
+        exportOutcome: "idle",
+        error: null,
+      };
     case "inventory-requested":
       return { ...state, requestGeneration: action.generation, loading: true, error: null };
     case "inventory-loaded":

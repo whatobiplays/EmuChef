@@ -56,6 +56,33 @@ test("diagnostics export states preserve cancellation and failure outcomes", () 
   assert.equal(failed.error, "Sanitized failure");
 });
 
+test("support modal sessions clear diagnostics export feedback and reject stale completions", () => {
+  const opened = supportReducer(initialSupportState, { type: "open" });
+  const started = supportReducer(opened, { type: "export-started", generation: 1 });
+  const saved = supportReducer(started, { type: "export-finished", generation: 1, outcome: "saved" });
+  assert.equal(saved.exportOutcome, "saved");
+
+  const closed = supportReducer(saved, { type: "close" });
+  assert.equal(closed.open, false);
+  assert.equal(closed.exporting, false);
+  assert.equal(closed.exportOutcome, "idle");
+  assert.equal(closed.error, null);
+  assert.equal(closed.exportGeneration, 2);
+
+  const staleCompletion = supportReducer(closed, {
+    type: "export-finished",
+    generation: 1,
+    outcome: "saved",
+  });
+  assert.equal(staleCompletion, closed);
+
+  const reopened = supportReducer(closed, { type: "open" });
+  assert.equal(reopened.open, true);
+  assert.equal(reopened.exportOutcome, "idle");
+  assert.equal(reopened.error, null);
+  assert.equal(reopened.exportGeneration, 3);
+});
+
 test("stale inventory responses cannot overwrite the current generation", () => {
   const requested = supportReducer(initialSupportState, { type: "inventory-requested", generation: 2 });
   const stale = supportReducer(requested, { type: "inventory-loaded", generation: 1, inventory });
