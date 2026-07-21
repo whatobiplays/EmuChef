@@ -264,6 +264,82 @@ test("recipes cannot advance while empty or awaiting backend validation", () => 
   assert.equal(workflowReducer(dirty, { type: "continue-to-inputs" }), dirty);
 });
 
+
+test("deselecting a recipe removes its bindings without removing bindings for active dependencies", () => {
+  const state = {
+    ...initialWorkflowState,
+    step: "recipes" as const,
+    selectedRecipes: ["recipe.parent", "recipe.removed"],
+    bindings: {
+      "recipe.parent/setting": "parent",
+      "recipe.dependency/setting": "dependency",
+      "recipe.removed/source": "/tmp/roms",
+      "unknown/value": "stale",
+    },
+    requiredReentryBindings: ["recipe.dependency/setting", "recipe.removed/source"],
+    description: {
+      devicePlan: "plan.one",
+      selectedRecipes: ["recipe.parent", "recipe.removed"],
+      expandedRecipes: ["recipe.parent", "recipe.dependency", "recipe.removed"],
+      recipeOptions: [
+        {
+          id: "recipe.parent",
+          name: "Parent",
+          description: null,
+          selected: true,
+          recommended: false,
+          dependencyRequired: false,
+          available: true,
+          recipeDependencies: ["recipe.dependency"],
+          unavailableCapabilities: [],
+        },
+        {
+          id: "recipe.dependency",
+          name: "Dependency",
+          description: null,
+          selected: true,
+          recommended: false,
+          dependencyRequired: true,
+          available: true,
+          recipeDependencies: [],
+          unavailableCapabilities: [],
+        },
+        {
+          id: "recipe.removed",
+          name: "Removed",
+          description: null,
+          selected: true,
+          recommended: false,
+          dependencyRequired: false,
+          available: true,
+          recipeDependencies: [],
+          unavailableCapabilities: [],
+        },
+      ],
+      inputs: [
+        { key: "recipe.parent/setting", recipeId: "recipe.parent", inputId: "setting", type: "string", label: "Parent setting", description: null, required: false, sensitive: false, value: "parent", valueSource: "explicit" as const, diagnostics: [] },
+        { key: "recipe.dependency/setting", recipeId: "recipe.dependency", inputId: "setting", type: "string", label: "Dependency setting", description: null, required: false, sensitive: false, value: "dependency", valueSource: "explicit" as const, diagnostics: [] },
+        { key: "recipe.removed/source", recipeId: "recipe.removed", inputId: "source", type: "directory", label: "ROM source", description: null, required: true, sensitive: false, pathKind: "directory" as const, value: "/tmp/roms", valueSource: "explicit" as const, diagnostics: [] },
+      ],
+      diagnostics: [],
+    },
+  };
+
+  const updated = workflowReducer(state, {
+    type: "set-recipes",
+    selectedRecipes: ["recipe.parent"],
+  });
+
+  assert.deepEqual(updated.bindings, {
+    "recipe.parent/setting": "parent",
+    "recipe.dependency/setting": "dependency",
+  });
+  assert.deepEqual(updated.requiredReentryBindings, ["recipe.dependency/setting"]);
+  assert.equal(updated.descriptionDirty, true);
+  assert.equal(updated.review, null);
+  assert.equal(updated.requestGeneration, state.requestGeneration + 1);
+});
+
 test("clearing an input removes its binding and invalidates downstream authority", () => {
   const state = {
     ...initialWorkflowState,

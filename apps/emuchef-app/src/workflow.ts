@@ -136,6 +136,40 @@ const previousStep: Record<WorkflowStep, WorkflowStep> = {
   execution: "review",
 };
 
+function activeRecipeIdsForSelection(
+  description: ConfigurationDescription | null,
+  selectedRecipes: string[],
+): Set<string> {
+  const active = new Set<string>();
+  const dependencies = new Map(
+    (description?.recipeOptions ?? []).map((recipe) => [recipe.id, recipe.recipeDependencies ?? []]),
+  );
+  const pending = [...selectedRecipes];
+  while (pending.length > 0) {
+    const recipeId = pending.pop()!;
+    if (active.has(recipeId)) continue;
+    active.add(recipeId);
+    pending.push(...(dependencies.get(recipeId) ?? []));
+  }
+  return active;
+}
+
+function bindingsForRecipeSelection(
+  description: ConfigurationDescription | null,
+  selectedRecipes: string[],
+  bindings: Record<string, unknown>,
+): Record<string, unknown> {
+  if (!description) return bindings;
+  const activeRecipes = activeRecipeIdsForSelection(description, selectedRecipes);
+  const inputs = new Map(description.inputs.map((input) => [input.key, input]));
+  return Object.fromEntries(
+    Object.entries(bindings).filter(([key]) => {
+      const input = inputs.get(key);
+      return input !== undefined && activeRecipes.has(input.recipeId);
+    }),
+  );
+}
+
 export function workflowReducer(state: WorkflowState, action: WorkflowAction): WorkflowState {
   switch (action.type) {
     case "select-device":
@@ -219,15 +253,24 @@ export function workflowReducer(state: WorkflowState, action: WorkflowAction): W
         review: null,
         repairIntent: false,
       };
-    case "set-recipes":
+    case "set-recipes": {
+      const bindings = bindingsForRecipeSelection(
+        state.description,
+        action.selectedRecipes,
+        state.bindings,
+      );
+      const retainedBindings = new Set(Object.keys(bindings));
       return {
         ...state,
         selectedRecipes: action.selectedRecipes,
+        bindings,
+        requiredReentryBindings: state.requiredReentryBindings.filter((key) => retainedBindings.has(key)),
         descriptionDirty: true,
         review: null,
         portableIntentDirty: true,
         requestGeneration: state.requestGeneration + 1,
       };
+    }
     case "continue-to-inputs":
       if (!state.description || state.descriptionDirty || state.description.selectedRecipes.length === 0) {
         return state;
