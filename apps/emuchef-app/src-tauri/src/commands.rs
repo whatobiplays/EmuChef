@@ -1028,7 +1028,7 @@ fn public_configuration_description(result: &Value, exact_serial: &str) -> Value
                 "presentationKind": presentation_kind,
                 "value": input.get("value"),
                 "valueSource": input.get("valueSource"),
-                "diagnostics": public_diagnostics(input.get("diagnostics")),
+                "diagnostics": public_input_diagnostics(input),
             })
         })
         .collect::<Vec<_>>();
@@ -1086,20 +1086,54 @@ fn add_recovery_reentry_diagnostics(
     }
 }
 
+fn public_input_diagnostics(input: &Value) -> Vec<Value> {
+    let label = input
+        .get("label")
+        .and_then(Value::as_str)
+        .filter(|label| !label.trim().is_empty())
+        .unwrap_or("This input");
+    let required = input
+        .get("required")
+        .and_then(Value::as_bool)
+        .unwrap_or(false);
+
+    input
+        .get("diagnostics")
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+        .map(|diagnostic| {
+            let mut public = public_diagnostic(diagnostic);
+            if diagnostic.get("code").and_then(Value::as_str) == Some("binding_path_missing") {
+                public["message"] = Value::String(if required {
+                    format!("{label} could not be found. Select it again.")
+                } else {
+                    format!(
+                        "{label} could not be found. Select it again or clear this optional input."
+                    )
+                });
+            }
+            public
+        })
+        .collect()
+}
+
 fn public_diagnostics(value: Option<&Value>) -> Vec<Value> {
     value
         .and_then(Value::as_array)
         .into_iter()
         .flatten()
-        .map(|diagnostic| {
-            json!({
-                "key": diagnostic.get("key"),
-                "code": diagnostic.get("code"),
-                "message": diagnostic.get("message"),
-                "severity": diagnostic.get("severity"),
-            })
-        })
+        .map(public_diagnostic)
         .collect()
+}
+
+fn public_diagnostic(diagnostic: &Value) -> Value {
+    json!({
+        "key": diagnostic.get("key"),
+        "code": diagnostic.get("code"),
+        "message": diagnostic.get("message"),
+        "severity": diagnostic.get("severity"),
+    })
 }
 
 fn public_review(review_handle: &str, digest: &str, plan: &Value, result: &Value) -> Value {
@@ -1771,6 +1805,76 @@ mod tests {
         assert!(!serialized.contains("secret-serial"));
         assert!(!serialized.contains("targetDevice"));
         assert!(!serialized.contains("internal"));
+    }
+
+    #[test]
+    fn missing_host_paths_use_input_labels_and_actionable_repair_guidance() {
+        let public = public_configuration_description(
+            &json!({
+                "devicePlan": "plan",
+                "selectedRecipes": ["recipe"],
+                "expandedRecipes": ["recipe"],
+                "recipeOptions": [],
+                "inputs": [
+                    {
+                        "key": "recipe/optional_cfg",
+                        "recipeId": "recipe",
+                        "inputId": "optional_cfg",
+                        "type": "file",
+                        "role": "content",
+                        "label": "RetroArch config",
+                        "description": null,
+                        "required": false,
+                        "multiple": false,
+                        "options": [],
+                        "validation": { "pathKind": "file", "allowedExtensions": ["cfg"] },
+                        "sensitive": false,
+                        "value": "/private/deleted.cfg",
+                        "valueSource": "explicit",
+                        "diagnostics": [{
+                            "key": "recipe/optional_cfg",
+                            "code": "binding_path_missing",
+                            "message": "Input 'optional_cfg' must reference an existing file.",
+                            "severity": "error"
+                        }]
+                    },
+                    {
+                        "key": "recipe/required_dir",
+                        "recipeId": "recipe",
+                        "inputId": "required_dir",
+                        "type": "directory",
+                        "role": "bios",
+                        "label": "BIOS folder",
+                        "description": null,
+                        "required": true,
+                        "multiple": false,
+                        "options": [],
+                        "validation": { "pathKind": "directory", "allowedExtensions": [] },
+                        "sensitive": false,
+                        "value": "/private/deleted",
+                        "valueSource": "explicit",
+                        "diagnostics": [{
+                            "key": "recipe/required_dir",
+                            "code": "binding_path_missing",
+                            "message": "Input 'required_dir' must reference an existing directory.",
+                            "severity": "error"
+                        }]
+                    }
+                ],
+                "diagnostics": []
+            }),
+            "",
+        );
+
+        assert_eq!(
+            public["inputs"][0]["diagnostics"][0]["message"],
+            "RetroArch config could not be found. Select it again or clear this optional input."
+        );
+        assert_eq!(
+            public["inputs"][1]["diagnostics"][0]["message"],
+            "BIOS folder could not be found. Select it again."
+        );
+        assert!(!public.to_string().contains("optional_cfg' must reference"));
     }
 
     #[test]

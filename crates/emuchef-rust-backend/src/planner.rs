@@ -1502,7 +1502,7 @@ fn validate_binding_value(
             };
             if !exists_with_kind {
                 errors.push(PlannerMessage {
-                    code: "binding_validation_failed".to_string(),
+                    code: "binding_path_missing".to_string(),
                     message: format!(
                         "Input '{input_id}' must reference an existing {}.",
                         expected_kind.unwrap_or("host path")

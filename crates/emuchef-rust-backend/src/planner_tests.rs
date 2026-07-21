@@ -3216,7 +3216,7 @@ fn runtime_input_metadata_validates_enum_and_device_path_bindings() {
         .unwrap()
         .iter()
         .any(|error| {
-            error["code"] == "binding_validation_failed"
+            error["code"] == "binding_path_missing"
                 && error["details"]["input_id"] == "feature.copy_roms/source"
                 && error["message"]
                     .as_str()
