@@ -11,7 +11,6 @@ import {
 } from "./app-dialogs";
 import {
   diagnosticIsBlocking,
-  errorCode,
   errorMessage,
 } from "./app-helpers";
 import { ExecutionStep } from "./ExecutionStep";
@@ -19,10 +18,10 @@ import { InputsStep } from "./InputsStep";
 import { ReviewStep } from "./ReviewStep";
 import { SupportPanel } from "./SupportPanel";
 import { UpdatesPanel } from "./UpdatesPanel";
+import { useExecution } from "./useExecution";
 import { AccessibleDialog } from "./AccessibleDialog";
 import {
   claimFocusTransition,
-  executionAnnouncement,
   lifecycleBoundResult,
   restoreAccessibleFocus,
   stableDomId,
@@ -30,7 +29,6 @@ import {
 } from "./accessibility";
 import type {
   AdbSetupStatus,
-  AnyExecutionSnapshot,
   CatalogSummary,
   ConfigurationDescription,
   DeviceSummary,
@@ -119,8 +117,6 @@ export function App({ dialogController: suppliedDialogController }: AppProps = {
   const [operationError, setOperationError] = useState<string | null>(null);
   const [realExecutionEnabled, setRealExecutionEnabled] = useState(false);
   const [realConfirmation, setRealConfirmation] = useState(emptyRealExecutionConfirmation);
-  const [reportState, setReportState] = useState<"idle" | "exporting" | "saved" | "failed">("idle");
-  const [launchState, setLaunchState] = useState<"idle" | "launching" | "launched" | "failed">("idle");
   const [repairPreparing, setRepairPreparing] = useState(false);
   const [startupReady, setStartupReady] = useState(false);
   const [recoveredName, setRecoveredName] = useState<string | null>(null);
@@ -141,7 +137,7 @@ export function App({ dialogController: suppliedDialogController }: AppProps = {
   const supportInvokerRef = useRef<HTMLElement | null>(null);
   const updatesInvokerRef = useRef<HTMLElement | null>(null);
   const validationSummaryRef = useRef<HTMLElement>(null);
-  const executionAnnouncementKeyRef = useRef<string | null>(null);
+  const realConfirmationRef = useRef(realConfirmation);
   const appLifecycleGenerationRef = useRef(0);
   const runtimeGenerationRef = useRef(0);
   const platformToolsGenerationRef = useRef(0);
@@ -219,6 +215,28 @@ export function App({ dialogController: suppliedDialogController }: AppProps = {
       queueMicrotask(() => restoreAccessibleFocus({ invoker, preferred, generation }));
     }
   }, []);
+
+  const {
+    cancelExecution,
+    exportExecutionReport,
+    launchConfiguredApp,
+    launchState,
+    reportState,
+    resetExecutionPresentation,
+    startRealExecution,
+    startSimulation,
+  } = useExecution({
+    announce,
+    dispatch,
+    mainRef,
+    realExecutionEnabled,
+    runtimeGenerationRef,
+    setBusy,
+    setNotice,
+    withNativeDialogFocus,
+    workflow,
+    workflowRef,
+  });
 
   const navigationBlocked = updateNavigationBlocked({
     startupReady,
@@ -306,6 +324,10 @@ export function App({ dialogController: suppliedDialogController }: AppProps = {
   useEffect(() => {
     workflowRef.current = workflow;
   }, [workflow]);
+
+  useEffect(() => {
+    realConfirmationRef.current = realConfirmation;
+  }, [realConfirmation]);
 
   useEffect(() => {
     if (!startupReady) return;
@@ -862,8 +884,7 @@ export function App({ dialogController: suppliedDialogController }: AppProps = {
     }
     setPlatformToolsOperation({ phase: "idle", kind: "import" });
     setRepairPreparing(false);
-    setReportState("idle");
-    setLaunchState("idle");
+    resetExecutionPresentation();
     setRealConfirmation(emptyRealExecutionConfirmation);
     manualDeviceRefreshRef.current = false;
     setDeviceRefresh({ phase: "idle", generation: 0, message: null });
@@ -1490,196 +1511,17 @@ export function App({ dialogController: suppliedDialogController }: AppProps = {
     }
   };
 
-  const startSimulation = async () => {
-    if (!workflow.review || workflow.execution.kind === "starting") return;
-    const generation = workflow.executionGeneration + 1;
-    dispatch({ type: "execution-starting", generation });
-    setBusy(true);
-    setNotice(null);
-    announce("Starting the simulated dry run.");
-    try {
-      const snapshot = await api.startSimulatedExecution(workflow.review.reviewHandle);
-      dispatch({ type: "execution-started", generation, snapshot });
-    } catch (error) {
-      dispatch({ type: "execution-start-failed", generation });
-      setNotice(errorMessage(error));
-    } finally {
-      setBusy(false);
-    }
-  };
-
-  const startRealExecution = async () => {
-    if (!realExecutionEnabled || !workflow.review || workflow.execution.kind === "starting") return;
-    const generation = workflow.executionGeneration + 1;
-    const confirmation = realConfirmation;
-    dispatch({ type: "execution-starting", generation, mode: "real" });
-    setBusy(true);
-    setNotice(null);
-    setRealConfirmation(emptyRealExecutionConfirmation);
-    try {
-      const snapshot = await api.startRealExecution(workflow.review.reviewHandle, confirmation);
-      dispatch({ type: "execution-started", generation, snapshot });
-    } catch (error) {
-      dispatch({ type: "execution-start-failed", generation });
-      setNotice(errorMessage(error));
-    } finally {
-      setBusy(false);
-    }
-  };
-
   const requestRealExecution = async (invoker: HTMLElement) => {
     setRealConfirmation(emptyRealExecutionConfirmation);
     const result = await requestAppDialog({
       kind: "real-execution",
       invoker,
     }, false);
-    if (result === true) await startRealExecution();
-  };
-
-  const activeExecution =
-    workflow.execution.kind === "active" ? workflow.execution : null;
-
-  useEffect(() => {
-    if (workflow.execution.kind !== "active" && workflow.execution.kind !== "terminal") return;
-    const next = executionAnnouncement(
-      workflow.execution.snapshot,
-      executionAnnouncementKeyRef.current,
-    );
-    if (!next) return;
-    executionAnnouncementKeyRef.current = next.key;
-    announce(next.message, next.assertive);
-    if (workflow.execution.kind === "terminal") {
-      const generation = claimFocusTransition();
-      queueMicrotask(() => restoreAccessibleFocus({
-        preferred: [mainRef.current?.querySelector<HTMLElement>("[data-step-heading]")],
-        generation,
-      }));
-    }
-  }, [announce, workflow.execution]);
-
-  useEffect(() => {
-    if (!activeExecution) return;
-    let disposed = false;
-    let timer: number | null = null;
-    const { generation, snapshot, mode } = activeExecution;
-    const executionHandle = snapshot.executionHandle;
-    let eventCursor = activeExecution.eventCursor;
-
-    async function pollExecution() {
-      try {
-        const nextSnapshot = mode === "real"
-          ? await api.getRealExecution(executionHandle)
-          : await api.getSimulatedExecution(executionHandle);
-        if (disposed) return;
-        const currentExecution = workflowRef.current.execution;
-        if (
-          workflowRef.current.executionGeneration !== generation
-          || (currentExecution.kind !== "active" && currentExecution.kind !== "terminal")
-          || currentExecution.snapshot.executionHandle !== executionHandle
-        ) {
-          announce("An outdated execution response was ignored.");
-          return;
-        }
-        dispatch({ type: "execution-snapshot", generation, snapshot: nextSnapshot });
-        eventCursor = Math.max(eventCursor, nextSnapshot.latestSequence);
-        if (nextSnapshot.terminal) return;
-
-        const batch = mode === "real"
-          ? await api.getRealExecutionEvents(executionHandle, eventCursor)
-          : await api.getSimulatedExecutionEvents(executionHandle, eventCursor);
-        if (disposed) return;
-        dispatch({ type: "execution-events", generation, batch });
-        for (const event of batch.events) eventCursor = Math.max(eventCursor, event.sequence);
-        timer = window.setTimeout(pollExecution, 500);
-      } catch (error) {
-        if (disposed) return;
-        if (errorCode(error) === "execution_unavailable") {
-          dispatch({
-            type: "execution-unavailable",
-            generation,
-            executionHandle,
-            message: errorMessage(error),
-          });
-          return;
-        }
-        setNotice(errorMessage(error));
-        timer = window.setTimeout(pollExecution, 1000);
-      }
-    }
-
-    void pollExecution();
-    return () => {
-      disposed = true;
-      if (timer !== null) window.clearTimeout(timer);
-    };
-  }, [activeExecution?.generation, activeExecution?.snapshot.executionHandle, activeExecution?.mode]);
-
-  const cancelExecution = async () => {
-    if (workflow.execution.kind !== "active" || workflow.execution.cancellationRequested) return;
-    const { generation, snapshot } = workflow.execution;
-    const runtimeGeneration = runtimeGenerationRef.current;
-    try {
-      const cancellation = workflow.execution.mode === "real"
-        ? await api.cancelRealExecution(snapshot.executionHandle)
-        : await api.cancelSimulatedExecution(snapshot.executionHandle);
-      if (runtimeGenerationRef.current !== runtimeGeneration) return;
-      if (cancellation.accepted) {
-        dispatch({ type: "execution-cancellation-requested", generation });
-      }
-    } catch (error) {
-      if (runtimeGenerationRef.current === runtimeGeneration) setNotice(errorMessage(error));
-    }
-  };
-
-  const exportExecutionReport = async () => {
-    if (workflow.execution.kind !== "terminal") return;
-    const executionHandle = workflow.execution.snapshot.executionHandle;
-    const runtimeGeneration = runtimeGenerationRef.current;
-    setReportState("exporting");
-    setNotice(null);
-    try {
-      const result = await withNativeDialogFocus(
-        () => api.exportExecutionReport(executionHandle),
-      );
-      if (runtimeGenerationRef.current !== runtimeGeneration) return;
-      setReportState(result.outcome === "saved" ? "saved" : "idle");
-    } catch (error) {
-      if (runtimeGenerationRef.current !== runtimeGeneration) return;
-      setReportState("failed");
-      setNotice(errorMessage(error));
-    }
-  };
-
-  const launchConfiguredApp = async () => {
-    if (
-      workflow.execution.kind !== "terminal"
-      || workflow.execution.snapshot.simulated
-      || !workflow.execution.snapshot.launchAction
-    ) return;
-    const { generation, snapshot } = workflow.execution;
-    const launchAction = snapshot.launchAction;
-    if (!launchAction) return;
-    const consumedHandle = launchAction.handle;
-    const runtimeGeneration = runtimeGenerationRef.current;
-    setLaunchState("launching");
-    setNotice(null);
-    try {
-      const result = await api.launchConfiguredApp(consumedHandle);
-      if (runtimeGenerationRef.current !== runtimeGeneration) return;
-      setLaunchState("launched");
-      setNotice(result.message);
-    } catch (error) {
-      if (runtimeGenerationRef.current !== runtimeGeneration) return;
-      setLaunchState("failed");
-      setNotice(errorMessage(error));
-      try {
-        const refreshed = await api.getRealExecution(snapshot.executionHandle);
-        if (runtimeGenerationRef.current !== runtimeGeneration) return;
-        dispatch({ type: "execution-snapshot", generation, snapshot: refreshed });
-      } catch {
-        // The original sanitized launch error remains the useful result. A lost
-        // execution cannot mint another action and is handled by normal polling.
-      }
+    if (result === true) {
+      const confirmation = realConfirmationRef.current;
+      realConfirmationRef.current = emptyRealExecutionConfirmation;
+      setRealConfirmation(emptyRealExecutionConfirmation);
+      await startRealExecution(confirmation);
     }
   };
 
@@ -1688,8 +1530,7 @@ export function App({ dialogController: suppliedDialogController }: AppProps = {
     const prior = workflow;
     const runtimeGeneration = runtimeGenerationRef.current;
     setRepairPreparing(true);
-    setReportState("idle");
-    setLaunchState("idle");
+    resetExecutionPresentation();
     cancelPendingDialog();
     setRealConfirmation(emptyRealExecutionConfirmation);
     dispatch({ type: "prepare-repair" });
