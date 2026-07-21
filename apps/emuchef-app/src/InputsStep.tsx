@@ -21,6 +21,7 @@ interface InputsStepProps {
   validationSummaryRef: RefObject<HTMLElement | null>;
   onBack: () => void;
   onBindingChange: (key: string, value: unknown) => void;
+  onClearInput: (input: InputDescriptor) => void;
   onPickInput: (input: InputDescriptor) => void | Promise<void>;
   onRefreshValidation: () => void | Promise<void>;
   onReview: () => void | Promise<void>;
@@ -36,6 +37,7 @@ export function InputsStep({
   validationSummaryRef,
   onBack,
   onBindingChange,
+  onClearInput,
   onPickInput,
   onRefreshValidation,
   onReview,
@@ -98,6 +100,11 @@ export function InputsStep({
               ),
             );
             const diagnosticIds = diagnostics.map((_, index) => `${inputId}-error-${index}`);
+            const currentValue = bindings[input.key] ?? input.value;
+            const hasValue = currentValue !== null
+              && currentValue !== undefined
+              && currentValue !== ""
+              && (!Array.isArray(currentValue) || currentValue.length > 0);
 
             return (
               <div className="input-field" key={input.key}>
@@ -160,6 +167,17 @@ export function InputsStep({
                     >
                       Browse…
                     </button>
+                    {!input.required && hasValue && (
+                      <button
+                        aria-label={`Clear ${input.label}`}
+                        className="secondary"
+                        disabled={busy}
+                        onClick={() => onClearInput(input)}
+                        type="button"
+                      >
+                        Clear
+                      </button>
+                    )}
                     {busy && (
                       <small className="disabled-reason" id={`${inputId}-browse-reason`}>
                         A file or validation operation is already in progress.

@@ -264,6 +264,56 @@ test("recipes cannot advance while empty or awaiting backend validation", () => 
   assert.equal(workflowReducer(dirty, { type: "continue-to-inputs" }), dirty);
 });
 
+test("clearing an input removes its binding and invalidates downstream authority", () => {
+  const state = {
+    ...initialWorkflowState,
+    step: "inputs" as const,
+    bindings: {
+      "recipe.one/optional_file": "/tmp/optional.cfg",
+      "recipe.one/other": "preserved",
+    },
+    descriptionDirty: false,
+    portableIntentDirty: false,
+    review,
+    description: {
+      devicePlan: "plan.one",
+      selectedRecipes: ["recipe.one"],
+      expandedRecipes: ["recipe.one"],
+      recipeOptions: [],
+      diagnostics: [],
+      inputs: [
+        {
+          key: "recipe.one/optional_file",
+          recipeId: "recipe.one",
+          inputId: "optional_file",
+          type: "string",
+          label: "Optional configuration",
+          description: null,
+          required: false,
+          sensitive: false,
+          pathKind: "file" as const,
+          value: "/tmp/optional.cfg",
+          valueSource: "explicit" as const,
+          diagnostics: [],
+        },
+      ],
+    },
+  };
+
+  const cleared = workflowReducer(state, {
+    type: "remove-binding",
+    key: "recipe.one/optional_file",
+  });
+
+  assert.equal("recipe.one/optional_file" in cleared.bindings, false);
+  assert.equal(cleared.bindings["recipe.one/other"], "preserved");
+  assert.equal(cleared.description?.inputs[0]?.value, null);
+  assert.equal(cleared.descriptionDirty, true);
+  assert.equal(cleared.portableIntentDirty, true);
+  assert.equal(cleared.review, null);
+  assert.equal(cleared.requestGeneration, state.requestGeneration + 1);
+});
+
 test("plan selection distinguishes backend defaults from an explicit blank setup", () => {
   const state = {
     ...initialWorkflowState,

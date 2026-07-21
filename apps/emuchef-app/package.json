@@ -7,7 +7,7 @@
     "sidecar:dev": "node scripts/prepare-rust-sidecar.mjs --profile debug",
     "sidecar:build": "node scripts/prepare-rust-sidecar.mjs --profile release",
     "dev": "vite",
-    "test": "npm run test:logic && vitest --config tests/vitest.config.ts",
+    "test": "npm run test:logic && vitest run --config tests/vitest.config.ts",
     "typecheck": "tsc --noEmit",
     "lint": "eslint --config tests/eslint.config.mjs \"src/**/*.{ts,tsx}\" \"tests/**/*.{ts,tsx,mjs}\" --max-warnings=0",
     "test:logic": "node --test --import tsx tests/*.test.ts",

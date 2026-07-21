@@ -781,6 +781,17 @@ export function App({ dialogController: suppliedDialogController }: AppProps = {
     queueSavedMutation({ kind: "binding", key, value });
   };
 
+  const clearBindingIntent = (key: string) => {
+    setTouchedInputKeys((current) => {
+      if (current.has(key)) return current;
+      const next = new Set(current);
+      next.add(key);
+      return next;
+    });
+    dispatch({ type: "remove-binding", key });
+    queueSavedMutation({ kind: "remove_binding", key });
+  };
+
   const applyDescriptionValidation = (description: ConfigurationDescription) => {
     const current = savedConfigurationRef.current;
     if (!current) return;
@@ -2243,6 +2254,7 @@ export function App({ dialogController: suppliedDialogController }: AppProps = {
                 description={workflow.description}
                 onBack={() => dispatch({ type: "back" })}
                 onBindingChange={updateBindingIntent}
+                onClearInput={(input) => clearBindingIntent(input.key)}
                 onPickInput={pickInputValue}
                 onRefreshValidation={describe}
                 onReview={generateReview}

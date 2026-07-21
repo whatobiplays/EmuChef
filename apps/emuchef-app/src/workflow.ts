@@ -86,6 +86,7 @@ export type WorkflowAction =
   | { type: "set-recipes"; selectedRecipes: string[] }
   | { type: "continue-to-inputs" }
   | { type: "set-binding"; key: string; value: unknown }
+  | { type: "remove-binding"; key: string }
   | { type: "review"; review: ReviewSummary }
   | { type: "execution-starting"; generation: number; mode?: ExecutionMode }
   | { type: "execution-started"; generation: number; snapshot: AnyExecutionSnapshot }
@@ -250,6 +251,27 @@ export function workflowReducer(state: WorkflowState, action: WorkflowAction): W
         requiredReentryBindings: state.requiredReentryBindings.filter((key) => key !== action.key),
         requestGeneration: state.requestGeneration + 1,
       };
+    case "remove-binding": {
+      const bindings = { ...state.bindings };
+      delete bindings[action.key];
+      return {
+        ...state,
+        bindings,
+        description: state.description
+          ? {
+              ...state.description,
+              inputs: state.description.inputs.map((input) =>
+                input.key === action.key ? { ...input, value: null } : input,
+              ),
+            }
+          : null,
+        descriptionDirty: true,
+        review: null,
+        portableIntentDirty: true,
+        requiredReentryBindings: state.requiredReentryBindings.filter((key) => key !== action.key),
+        requestGeneration: state.requestGeneration + 1,
+      };
+    }
     case "review":
       return { ...state, step: "review", review: action.review };
     case "execution-starting":
