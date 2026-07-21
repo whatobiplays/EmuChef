@@ -585,8 +585,11 @@ export function App({ dialogController: suppliedDialogController }: AppProps = {
           bindings: current.bindings,
         }));
       if (result.outcome === "cancelled") return false;
-      await applySavedDocument(result);
+      savedConfigurationRef.current = result;
+      setSavedConfiguration(result);
       dispatch({ type: "portable-intent-saved" });
+      await refreshRecents();
+      setNotice(`Saved ${result.name}.`);
       recoveryRecordGenerationRef.current = null;
       lastRecoverySignatureRef.current = null;
       setRecoveredName(null);
