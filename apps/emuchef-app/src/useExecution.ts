@@ -13,6 +13,11 @@ import type { WorkflowAction, WorkflowState } from "./workflow";
 export type ExecutionReportState = "idle" | "exporting" | "saved" | "failed";
 export type ExecutionLaunchState = "idle" | "launching" | "launched" | "failed";
 
+function executionReportIdentity(execution: WorkflowState["execution"]): string | null {
+  if (execution.kind !== "active" && execution.kind !== "terminal") return null;
+  return `${execution.generation}:${execution.snapshot.executionHandle}:${execution.snapshot.latestSequence}`;
+}
+
 interface MutableValueRef<Value> {
   current: Value;
 }
@@ -48,12 +53,21 @@ export function useExecution({
   const [reportState, setReportState] = useState<ExecutionReportState>("idle");
   const [launchState, setLaunchState] = useState<ExecutionLaunchState>("idle");
   const announcementKeyRef = useRef<string | null>(null);
+  const reportIdentityRef = useRef<string | null>(executionReportIdentity(workflow.execution));
+  const reportIdentity = executionReportIdentity(workflow.execution);
+
+  useEffect(() => {
+    if (reportIdentityRef.current === reportIdentity) return;
+    reportIdentityRef.current = reportIdentity;
+    setReportState("idle");
+  }, [reportIdentity]);
 
   const resetExecutionPresentation = useCallback(() => {
+    reportIdentityRef.current = executionReportIdentity(workflowRef.current.execution);
     setReportState("idle");
     setLaunchState("idle");
     announcementKeyRef.current = null;
-  }, []);
+  }, [workflowRef]);
 
   const startSimulation = useCallback(async () => {
     const current = workflowRef.current;
@@ -195,16 +209,28 @@ export function useExecution({
   const exportExecutionReport = useCallback(async () => {
     const current = workflowRef.current;
     if (current.execution.kind !== "terminal") return;
+    const exportIdentity = executionReportIdentity(current.execution);
+    if (!exportIdentity) return;
     const executionHandle = current.execution.snapshot.executionHandle;
     const runtimeGeneration = runtimeGenerationRef.current;
     setReportState("exporting");
     setNotice(null);
     try {
       const result = await withNativeDialogFocus(() => api.exportExecutionReport(executionHandle));
-      if (runtimeGenerationRef.current !== runtimeGeneration) return;
+      if (
+        runtimeGenerationRef.current !== runtimeGeneration
+        || executionReportIdentity(workflowRef.current.execution) !== exportIdentity
+      ) {
+        return;
+      }
       setReportState(result.outcome === "saved" ? "saved" : "idle");
     } catch (error) {
-      if (runtimeGenerationRef.current !== runtimeGeneration) return;
+      if (
+        runtimeGenerationRef.current !== runtimeGeneration
+        || executionReportIdentity(workflowRef.current.execution) !== exportIdentity
+      ) {
+        return;
+      }
       setReportState("failed");
       setNotice(errorMessage(error));
     }
