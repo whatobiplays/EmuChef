@@ -1912,6 +1912,8 @@ fn artifact_filename_algorithm_matches_compatibility_reference() {
 
 #[test]
 fn resolve_extract_and_copy_flow_matches_compatibility_and_stays_in_sandbox() {
+    // Regression for UX-039: verification must observe files materialized in the
+    // simulated-device sandbox, not only the fake adapter's in-memory path sets.
     let tmp = tempfile::tempdir().expect("temp root should be created");
     let fixture_root = tmp.path().join("fixtures");
     let runtime_root = tmp.path().join(".emuchef_runtime");
@@ -1971,7 +1973,16 @@ fn resolve_extract_and_copy_flow_matches_compatibility_and_stays_in_sandbox() {
         constraints: constraints(),
         params: copy_params,
         skip_if: Vec::new(),
-        verify: Vec::new(),
+        verify: vec![
+            condition(
+                "file_exists",
+                json!({ "path": "/sdcard/RetroArch/cores/core_a.so" }),
+            ),
+            condition(
+                "file_exists",
+                json!({ "path": "/sdcard/RetroArch/cores/core_b.so" }),
+            ),
+        ],
     };
     extract.dependencies = vec!["example.recipe/resolve".to_string()];
     copy.dependencies = vec!["example.recipe/extract".to_string()];

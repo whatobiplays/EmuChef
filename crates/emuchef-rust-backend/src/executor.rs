@@ -1129,12 +1129,32 @@ impl<D: ExecutorDevice> ExecutorRunner<D> {
             }
             "path_exists" => {
                 let path = required_string_param(condition, "path")?;
-                self.adapters.device.path_exists(&path)
+                let device_exists = self.adapters.device.path_exists(&path)?;
+                if !self.adapters.device.uses_fake_device_filesystem() {
+                    return Ok(device_exists);
+                }
+                let sandbox_exists = self
+                    .adapters
+                    .sandbox()
+                    .and_then(|sandbox| sandbox.fake_device_path(&path))
+                    .map(|path| path.exists())
+                    .unwrap_or(false);
+                Ok(device_exists || sandbox_exists)
             }
             "file_exists" => {
                 let path = required_string_param(condition, "path")?;
-                Ok(self.adapters.device.path_exists(&path)?
-                    && !self.adapters.device.path_is_dir(&path)?)
+                let device_exists = self.adapters.device.path_exists(&path)?;
+                let device_is_dir = self.adapters.device.path_is_dir(&path)?;
+                if !self.adapters.device.uses_fake_device_filesystem() {
+                    return Ok(device_exists && !device_is_dir);
+                }
+                let sandbox_is_file = self
+                    .adapters
+                    .sandbox()
+                    .and_then(|sandbox| sandbox.fake_device_path(&path))
+                    .map(|path| path.is_file())
+                    .unwrap_or(false);
+                Ok((device_exists && !device_is_dir) || sandbox_is_file)
             }
             other => Err(format!("Unsupported condition type: {other}")),
         }
