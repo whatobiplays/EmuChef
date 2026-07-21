@@ -4,6 +4,9 @@ import test from "node:test";
 import {
   formatLastOpened,
   resolveUnsavedDecision,
+  savedConfigurationBlocksProgress,
+  savedConfigurationDiagnosticSummary,
+  savedConfigurationValidationLabel,
   savedDevicePlanAvailable,
 } from "../src/savedConfigurations";
 import { initialWorkflowState, workflowReducer } from "../src/workflow";
@@ -54,6 +57,25 @@ test("saved device plan references are never silently substituted", () => {
     false,
   );
   assert.equal(savedDevicePlanAvailable(document, { ...match, blocked: true }), false);
+});
+
+test("blocking saved configurations are gated with user-facing validation copy", () => {
+  assert.equal(savedConfigurationBlocksProgress(document), true);
+  assert.equal(savedConfigurationBlocksProgress({
+    ...document,
+    validation: { state: "valid_with_warnings", diagnostics: [] },
+  }), false);
+  assert.equal(savedConfigurationValidationLabel(document), "Needs repair before continuing");
+  assert.equal(savedConfigurationValidationLabel({
+    ...document,
+    validation: { state: "cannot_use", diagnostics: [] },
+  }), "Cannot be used with the current catalog");
+  assert.equal(savedConfigurationDiagnosticSummary({
+    code: "unknown_recipe",
+    message: "Selected recipe recipe.removed was not found",
+    severity: "error",
+    key: "recipe.removed",
+  }), "A recipe used by this configuration is no longer available.");
 });
 
 test("opening portable intent preserves stale references but resets all runtime authority", () => {

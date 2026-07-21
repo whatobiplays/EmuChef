@@ -1,4 +1,8 @@
-import type { DeviceMatch, SavedConfigurationDocument } from "./types";
+import type {
+  DeviceMatch,
+  SavedConfigurationDocument,
+  ValidationDiagnostic,
+} from "./types";
 
 export type UnsavedDecision = "save" | "discard" | "cancel";
 
@@ -21,6 +25,46 @@ export function savedDevicePlanAvailable(
   if (!document || !match || match.blocked) return false;
   return [...match.candidates, ...match.safeGenericPlans]
     .some((candidate) => candidate.planId === document.devicePlan);
+}
+
+export function savedConfigurationBlocksProgress(
+  document: SavedConfigurationDocument | null,
+): boolean {
+  return document?.validation.state === "requires_attention"
+    || document?.validation.state === "cannot_use";
+}
+
+export function savedConfigurationValidationLabel(
+  document: SavedConfigurationDocument,
+): string {
+  switch (document.validation.state) {
+    case "valid":
+      return "Ready to use";
+    case "valid_with_warnings":
+      return "Ready with warnings";
+    case "requires_attention":
+      return "Needs repair before continuing";
+    case "cannot_use":
+      return "Cannot be used with the current catalog";
+  }
+}
+
+export function savedConfigurationDiagnosticSummary(
+  diagnostic: ValidationDiagnostic,
+): string {
+  switch (diagnostic.code) {
+    case "unknown_recipe":
+      return "A recipe used by this configuration is no longer available.";
+    case "device_plan_not_found":
+    case "unknown_device_plan":
+      return "The saved device setup is no longer available.";
+    case "unknown_binding":
+      return "A saved input no longer matches the current recipe definition.";
+    default:
+      return diagnostic.severity === "error"
+        ? "This configuration contains an item that must be repaired."
+        : "This configuration contains a compatibility warning.";
+  }
 }
 
 export function formatLastOpened(epochMs: number): string {

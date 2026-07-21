@@ -46,6 +46,9 @@ import type {
 import {
   formatLastOpened,
   resolveUnsavedDecision,
+  savedConfigurationBlocksProgress,
+  savedConfigurationDiagnosticSummary,
+  savedConfigurationValidationLabel,
   savedDevicePlanAvailable,
 } from "./savedConfigurations";
 import {
@@ -1295,6 +1298,11 @@ export function App({ dialogController: suppliedDialogController }: AppProps = {
   };
 
   const selectDevice = async (deviceHandle: string, invoker: HTMLElement | null = null) => {
+    if (savedConfigurationBlocksProgress(savedConfigurationRef.current)) {
+      setNotice("Repair or replace the incompatible saved configuration before selecting a device.");
+      announce("This saved configuration must be repaired before continuing.", true);
+      return;
+    }
     const before = workflowRef.current;
     const sameReconnect = before.reconnectDeviceHandle === deviceHandle;
     if (before.reconnectDeviceHandle && !sameReconnect) {
@@ -1735,6 +1743,7 @@ export function App({ dialogController: suppliedDialogController }: AppProps = {
     || platformToolsBusy
     || !workflow.devicePlan
     || (!workflow.portableIntentDirty && !savedConfiguration?.dirty);
+  const savedConfigurationBlocked = savedConfigurationBlocksProgress(savedConfiguration);
 
   return (
     <div className="app-shell">
@@ -1801,7 +1810,7 @@ export function App({ dialogController: suppliedDialogController }: AppProps = {
             <strong>{savedConfiguration?.name ?? recoveredName ?? "Unsaved configuration"}</strong>
             <small>
               {savedConfiguration
-                ? `${savedConfiguration.validation.state.replaceAll("_", " ")}${savedConfiguration.dirty ? " · unsaved edits" : ""}`
+                ? `${savedConfigurationValidationLabel(savedConfiguration)}${savedConfiguration.dirty ? " · unsaved edits" : ""}`
                 : recoveredName
                   ? "Recovered unsaved intent; reconnect and validate before creating a fresh review"
                   : "Portable intent only; generated plans and device authority are never saved"}
@@ -1945,12 +1954,19 @@ export function App({ dialogController: suppliedDialogController }: AppProps = {
                 {savedConfiguration && (
                   <section className={`configuration-validation ${savedConfiguration.validation.state}`}>
                     <strong>{savedConfiguration.name}</strong>
-                    <span>{savedConfiguration.validation.state.replaceAll("_", " ")}</span>
+                    <span>{savedConfigurationValidationLabel(savedConfiguration)}</span>
+                    {savedConfigurationBlocked && (
+                      <p>Open another configuration or update this file before continuing.</p>
+                    )}
                     {savedConfiguration.validation.diagnostics.map((diagnostic) => (
-                      <details key={`${diagnostic.key ?? "configuration"}-${diagnostic.code}`}>
-                        <summary>{diagnostic.message}</summary>
-                        <code>{diagnostic.code}{diagnostic.key ? ` · ${diagnostic.key}` : ""}</code>
-                      </details>
+                      <div key={`${diagnostic.key ?? "configuration"}-${diagnostic.code}`}>
+                        <p>{savedConfigurationDiagnosticSummary(diagnostic)}</p>
+                        <details>
+                          <summary>Technical details</summary>
+                          <p>{diagnostic.message}</p>
+                          <code>{diagnostic.code}{diagnostic.key ? ` · ${diagnostic.key}` : ""}</code>
+                        </details>
+                      </div>
                     ))}
                   </section>
                 )}
@@ -1960,9 +1976,11 @@ export function App({ dialogController: suppliedDialogController }: AppProps = {
                   {devices.map((device) => (
                     <li key={device.deviceHandle}>
                       <button
-                        aria-describedby={device.state !== "available" ? stableDomId("device-reason", device.deviceHandle) : undefined}
+                        aria-describedby={device.state !== "available" || savedConfigurationBlocked
+                          ? stableDomId("device-reason", device.deviceHandle)
+                          : undefined}
                         className="device-row"
-                        disabled={device.state !== "available" || busy}
+                        disabled={device.state !== "available" || busy || savedConfigurationBlocked}
                         onClick={(event) => void selectDevice(device.deviceHandle, event.currentTarget)}
                       >
                         <span><strong>{device.displayName}</strong><small>{device.maskedSerial}</small></span>
@@ -1974,11 +1992,13 @@ export function App({ dialogController: suppliedDialogController }: AppProps = {
                               : "Offline"}
                         </span>
                       </button>
-                      {device.state !== "available" && (
+                      {(device.state !== "available" || savedConfigurationBlocked) && (
                         <small className="disabled-reason" id={stableDomId("device-reason", device.deviceHandle)}>
-                          {device.state === "unauthorized"
-                            ? "Unlock the device, accept the USB debugging prompt, then refresh."
-                            : "Reconnect the device and refresh before selecting it."}
+                          {savedConfigurationBlocked
+                            ? "Repair or replace the incompatible saved configuration before selecting a device."
+                            : device.state === "unauthorized"
+                              ? "Unlock the device, accept the USB debugging prompt, then refresh."
+                              : "Reconnect the device and refresh before selecting it."}
                         </small>
                       )}
                     </li>
