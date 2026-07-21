@@ -1,4 +1,4 @@
-import { act, fireEvent, render, screen, within } from "@testing-library/react";
+import { act, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { beforeEach, describe, expect, test, vi } from "vitest";
 
@@ -90,6 +90,42 @@ const supportedMatch = {
   blockReason: null,
 };
 
+function descriptionWithTextInput(input: {
+  key: string;
+  inputId: string;
+  label: string;
+  required: boolean;
+  sensitive: boolean;
+}) {
+  return {
+    devicePlan: "plan.supported",
+    selectedRecipes: ["recipe.one"],
+    expandedRecipes: ["recipe.one"],
+    recipeOptions: [{
+      id: "recipe.one",
+      name: "Recipe One",
+      description: null,
+      selected: true,
+      recommended: true,
+      dependencyRequired: false,
+      available: true,
+      unavailableCapabilities: [],
+    }],
+    inputs: [{
+      ...input,
+      recipeId: "recipe.one",
+      type: "string",
+      description: null,
+      presentationCategory: "Other",
+      presentationKind: "Text",
+      value: null,
+      valueSource: null,
+      diagnostics: [],
+    }],
+    diagnostics: [],
+  };
+}
+
 function resetApi(): void {
   vi.clearAllMocks();
   mockApi.beginUpdateInteractionSession.mockResolvedValue({ sessionId: "update-session", generation: 0 });
@@ -140,6 +176,17 @@ function resetApi(): void {
 async function renderReadyApp(): Promise<void> {
   render(<App />);
   await screen.findByRole("heading", { name: "Choose an Android device" });
+}
+
+async function advanceToInputs(user: ReturnType<typeof userEvent.setup>): Promise<void> {
+  mockApi.pollDevices.mockResolvedValue([availableDevice]);
+  await renderReadyApp();
+  await user.click(await screen.findByRole("button", { name: /Supported Handheld.*Connected/ }));
+  await screen.findByRole("heading", { name: "Example Handheld" });
+  await user.click(screen.getByRole("button", { name: "Continue" }));
+  await screen.findByRole("heading", { name: "Choose what to install" });
+  await user.click(screen.getByRole("button", { name: "Continue" }));
+  await screen.findByRole("heading", { name: "Provide required files and options" });
 }
 
 function deferred<T>(): { promise: Promise<T>; resolve: (value: T) => void } {
@@ -489,6 +536,18 @@ describe("Phase 5B workflow surfaces", () => {
     expect(screen.queryByText(/selected device disconnected/i)).toBeNull();
   });
 
+  test("clean idle restart proceeds without a recovery prompt", async () => {
+    const user = userEvent.setup();
+    await renderReadyApp();
+
+    await user.click(screen.getByRole("button", { name: "Restart runtime" }));
+
+    await waitFor(() => expect(mockApi.restartRuntime).toHaveBeenCalledTimes(1));
+    expect(mockApi.stageRecoveryDraft).not.toHaveBeenCalled();
+    expect(screen.queryByRole("alertdialog", { name: "Restart the runtime?" })).toBeNull();
+    expect(screen.getByRole("heading", { name: "Choose an Android device" })).toBeTruthy();
+  });
+
   test("rejects a device refresh response from before a runtime restart", async () => {
     const user = userEvent.setup();
     const staleRefresh = deferred<Array<typeof availableDevice>>();
@@ -509,38 +568,13 @@ describe("Phase 5B workflow surfaces", () => {
 
   test("restart confirmation exposes only friendly labels for backend-omitted values", async () => {
     const user = userEvent.setup();
-    mockApi.pollDevices.mockResolvedValue([availableDevice]);
-    mockApi.describeConfiguration.mockResolvedValue({
-      devicePlan: "plan.supported",
-      selectedRecipes: ["recipe.one"],
-      expandedRecipes: ["recipe.one"],
-      recipeOptions: [{
-        id: "recipe.one",
-        name: "Recipe One",
-        description: null,
-        selected: true,
-        recommended: true,
-        dependencyRequired: false,
-        available: true,
-        unavailableCapabilities: [],
-      }],
-      inputs: [{
-        key: "recipe.one/token",
-        recipeId: "recipe.one",
-        inputId: "token",
-        type: "string",
-        label: "Account token",
-        description: null,
-        required: true,
-        sensitive: true,
-        presentationCategory: "Other",
-        presentationKind: "Text",
-        value: null,
-        valueSource: null,
-        diagnostics: [],
-      }],
-      diagnostics: [],
-    });
+    mockApi.describeConfiguration.mockResolvedValue(descriptionWithTextInput({
+      key: "recipe.one/token",
+      inputId: "token",
+      label: "Account token",
+      required: true,
+      sensitive: true,
+    }));
     mockApi.stageRecoveryDraft.mockImplementation(async (request: { requestGeneration: number; draftGeneration: number }) => ({
       requestGeneration: request.requestGeneration,
       draftGeneration: request.draftGeneration,
@@ -560,25 +594,20 @@ describe("Phase 5B workflow surfaces", () => {
       intent: {
         dirty: true,
         devicePlan: "plan.supported",
-        selectedRecipes: [],
+        selectedRecipes: ["recipe.one"],
         bindings: {},
         requiredReentryBindings: ["recipe.one/token"],
       },
     }));
-    await renderReadyApp();
-    await user.click(await screen.findByRole("button", { name: /Supported Handheld.*Connected/ }));
-    await screen.findByRole("heading", { name: "Example Handheld" });
-    await user.click(screen.getByRole("button", { name: "Continue" }));
-    await screen.findByRole("heading", { name: "Choose what to install" });
-    await user.click(screen.getByRole("button", { name: "Continue" }));
-    await screen.findByRole("heading", { name: "Provide required files and options" });
+    await advanceToInputs(user);
     expect(screen.getByRole("heading", { name: "Other" })).toBeTruthy();
     expect(screen.getByText("Required")).toBeTruthy();
     expect(screen.getByText("Text")).toBeTruthy();
     expect(screen.getByText("Not saved")).toBeTruthy();
     await user.type(screen.getByLabelText("Account token"), "do-not-display");
 
-    await user.click(screen.getByRole("button", { name: "Restart runtime" }));
+    const restartButton = screen.getByRole("button", { name: "Restart runtime" });
+    await user.click(restartButton);
     const dialog = await screen.findByRole("alertdialog", { name: "Restart the runtime?" });
     expect(dialog.textContent).toMatch(/Affected fields: Account token/);
     expect(dialog.textContent).not.toMatch(/do-not-display|recipe\.one\/token/);
@@ -590,5 +619,114 @@ describe("Phase 5B workflow surfaces", () => {
     expect(await screen.findAllByText(/Your setup choices were restored, but they have not been saved/i)).toHaveLength(2);
     expect(screen.queryByText(/recovered intent|source until you save/i)).toBeNull();
     expect(await screen.findAllByText(/Re-enter 1 sensitive input/)).toHaveLength(2);
+    expect(mockApi.stageRecoveryDraft).toHaveBeenCalledWith(expect.objectContaining({
+      devicePlan: "plan.supported",
+      selectedRecipes: ["recipe.one"],
+      bindings: { "recipe.one/token": "do-not-display" },
+      dirty: true,
+    }));
+  });
+
+  test("cancelling a restart with omitted values preserves dirty workflow state and focus", async () => {
+    const user = userEvent.setup();
+    mockApi.describeConfiguration.mockResolvedValue(descriptionWithTextInput({
+      key: "recipe.one/token",
+      inputId: "token",
+      label: "Account token",
+      required: true,
+      sensitive: true,
+    }));
+    mockApi.stageRecoveryDraft.mockImplementation(async (request: { requestGeneration: number; draftGeneration: number }) => ({
+      requestGeneration: request.requestGeneration,
+      draftGeneration: request.draftGeneration,
+      recordGeneration: request.draftGeneration,
+      omittedBindings: ["recipe.one/token"],
+    }));
+    await advanceToInputs(user);
+    const input = screen.getByLabelText("Account token") as HTMLInputElement;
+    await user.type(input, "keep-current-value");
+    const restartButton = screen.getByRole("button", { name: "Restart runtime" });
+    vi.spyOn(restartButton, "getClientRects").mockReturnValue([{}] as unknown as DOMRectList);
+
+    await user.click(restartButton);
+    const dialog = await screen.findByRole("alertdialog", { name: "Restart the runtime?" });
+    expect(dialog.textContent).not.toMatch(/keep-current-value|recipe\.one\/token/);
+    await user.click(within(dialog).getByRole("button", { name: "Cancel" }));
+
+    expect(mockApi.restartRuntime).not.toHaveBeenCalled();
+    expect(input.value).toBe("keep-current-value");
+    expect(screen.getByRole("heading", { name: "Provide required files and options" })).toBeTruthy();
+    await waitFor(() => expect(document.activeElement).toBe(restartButton));
+  });
+
+  test("successful restart restores nonsensitive portable intent without prompting", async () => {
+    const user = userEvent.setup();
+    mockApi.describeConfiguration.mockResolvedValue(descriptionWithTextInput({
+      key: "recipe.one/theme",
+      inputId: "theme",
+      label: "Theme",
+      required: false,
+      sensitive: false,
+    }));
+    mockApi.restoreRecoveryDraft.mockImplementation(async (
+      _sessionGeneration: number,
+      draftGeneration: number,
+      requestGeneration: number,
+    ) => ({
+      requestGeneration,
+      draftGeneration,
+      displayName: null,
+      sourceStatus: "unsaved",
+      document: null,
+      intent: {
+        dirty: true,
+        devicePlan: "plan.supported",
+        selectedRecipes: ["recipe.one"],
+        bindings: { "recipe.one/theme": "dark" },
+        requiredReentryBindings: [],
+      },
+    }));
+    await advanceToInputs(user);
+    await user.type(screen.getByLabelText("Theme"), "dark");
+
+    await user.click(screen.getByRole("button", { name: "Restart runtime" }));
+
+    expect(screen.queryByRole("alertdialog", { name: "Restart the runtime?" })).toBeNull();
+    expect(await screen.findByText("Setup restored after restart")).toBeTruthy();
+    expect(mockApi.stageRecoveryDraft).toHaveBeenCalledWith(expect.objectContaining({
+      devicePlan: "plan.supported",
+      selectedRecipes: ["recipe.one"],
+      bindings: { "recipe.one/theme": "dark" },
+      dirty: true,
+    }));
+    expect(mockApi.restoreRecoveryDraft).toHaveBeenCalledTimes(1);
+  });
+
+  test("restart failure preserves the active portable workflow and settles its guard", async () => {
+    const user = userEvent.setup();
+    mockApi.describeConfiguration.mockResolvedValue(descriptionWithTextInput({
+      key: "recipe.one/theme",
+      inputId: "theme",
+      label: "Theme",
+      required: false,
+      sensitive: false,
+    }));
+    mockApi.restartRuntime.mockRejectedValue(JSON.stringify({
+      code: "runtime_restart_failed",
+      message: "The Rust runtime could not restart. Try again.",
+    }));
+    await advanceToInputs(user);
+    const input = screen.getByLabelText("Theme") as HTMLInputElement;
+    await user.type(input, "dark");
+
+    await user.click(screen.getByRole("button", { name: "Restart runtime" }));
+
+    expect(await screen.findAllByText("The Rust runtime could not restart. Try again.")).not.toHaveLength(0);
+    expect(input.value).toBe("dark");
+    expect(screen.getByRole("heading", { name: "Provide required files and options" })).toBeTruthy();
+    await waitFor(() => expect(
+      (screen.getByRole("button", { name: "Restart runtime" }) as HTMLButtonElement).disabled,
+    ).toBe(false));
+    expect(document.body.textContent).not.toMatch(/runtime_restart_failed/);
   });
 });

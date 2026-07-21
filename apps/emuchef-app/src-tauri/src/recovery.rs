@@ -716,6 +716,71 @@ mod tests {
     }
 
     #[test]
+    fn persisted_record_has_only_portable_recovery_fields() {
+        let (_temp, mut store) = store();
+        store.record_schema(&json!({ "inputs": [
+            { "key": "recipe.one/theme", "sensitive": false },
+            { "key": "recipe.one/token", "sensitive": true }
+        ] }));
+        let mut draft = request(Map::from_iter([
+            ("recipe.one/theme".to_string(), json!("dark")),
+            ("recipe.one/token".to_string(), json!("never-persist-this")),
+        ]));
+        draft.display_name = Some("Ignored caller name".to_string());
+        store
+            .stage(
+                draft,
+                Some(("configuration-id".to_string(), "Saved setup".to_string())),
+            )
+            .unwrap();
+
+        let persisted: Value = serde_json::from_slice(&fs::read(&store.path).unwrap()).unwrap();
+        let keys = persisted
+            .as_object()
+            .unwrap()
+            .keys()
+            .map(String::as_str)
+            .collect::<HashSet<_>>();
+        assert_eq!(
+            keys,
+            HashSet::from([
+                "schemaVersion",
+                "generation",
+                "savedAtEpochMs",
+                "dirty",
+                "displayName",
+                "sourceConfigurationId",
+                "devicePlan",
+                "selectedRecipes",
+                "bindings",
+                "omittedBindings",
+            ])
+        );
+        assert_eq!(persisted["displayName"], "Saved setup");
+        assert_eq!(persisted["sourceConfigurationId"], "configuration-id");
+        assert_eq!(persisted["bindings"], json!({ "recipe.one/theme": "dark" }));
+        assert_eq!(persisted["omittedBindings"], json!(["recipe.one/token"]));
+        let serialized = serde_json::to_string(&persisted).unwrap();
+        assert!(!serialized.contains("never-persist-this"));
+        for forbidden in [
+            "deviceHandle",
+            "deviceSerial",
+            "deviceFacts",
+            "reviewHandle",
+            "executionHandle",
+            "launchActionHandle",
+            "planDigest",
+            "generatedPlan",
+            "catalogRoot",
+            "adbPath",
+            "privatePath",
+            "rawError",
+        ] {
+            assert!(!persisted.as_object().unwrap().contains_key(forbidden));
+        }
+    }
+
+    #[test]
     fn clean_restart_intent_remains_clean_when_every_binding_is_portable() {
         let (_temp, mut store) = store();
         store.record_schema(&json!({ "inputs": [

@@ -135,6 +135,63 @@ test("repair keeps authoritative failed and cancelled labels while preserving sa
   }
 });
 
+test("runtime restart invalidates authority before restoring portable intent", () => {
+  const terminal = {
+    ...initialWorkflowState,
+    step: "execution" as const,
+    deviceHandle: facts.deviceHandle,
+    facts,
+    match,
+    devicePlan: "plan.one",
+    selectedRecipes: ["recipe.one"],
+    bindings: {
+      "recipe.one/theme": "dark",
+      "recipe.one/token": "secret",
+    },
+    review,
+    requestGeneration: 5,
+    executionGeneration: 7,
+    execution: {
+      kind: "terminal" as const,
+      generation: 7,
+      mode: "simulated" as const,
+      snapshot: executionSnapshot(3, "succeeded"),
+      events: [],
+      eventCursor: 3,
+      cancellationRequested: false,
+    },
+    portableIntentDirty: true,
+  };
+
+  const invalidated = workflowReducer(terminal, { type: "runtime-invalidated" });
+  assert.equal(invalidated.step, "connect");
+  assert.equal(invalidated.deviceHandle, null);
+  assert.equal(invalidated.facts, null);
+  assert.equal(invalidated.match, null);
+  assert.equal(invalidated.devicePlan, null);
+  assert.deepEqual(invalidated.bindings, {});
+  assert.equal(invalidated.review, null);
+  assert.deepEqual(invalidated.execution, { kind: "idle" });
+  assert.equal(invalidated.requestGeneration, 6);
+
+  const restored = workflowReducer(invalidated, {
+    type: "load-portable-intent",
+    devicePlan: "plan.one",
+    selectedRecipes: ["recipe.one"],
+    bindings: { "recipe.one/theme": "dark" },
+    dirty: true,
+    requiredReentryBindings: ["recipe.one/token"],
+  });
+  assert.equal(restored.step, "connect");
+  assert.equal(restored.deviceHandle, null);
+  assert.equal(restored.facts, null);
+  assert.equal(restored.review, null);
+  assert.deepEqual(restored.execution, { kind: "idle" });
+  assert.deepEqual(restored.bindings, { "recipe.one/theme": "dark" });
+  assert.deepEqual(restored.requiredReentryBindings, ["recipe.one/token"]);
+  assert.equal(restored.portableIntentDirty, true);
+});
+
 test("repair bindings survive only unchanged input contracts", () => {
   const oldDescription = {
     devicePlan: "plan.one",

@@ -278,6 +278,7 @@ test("runtime startup is independent from ADB and simulation remains review-hand
 
 test("real execution is default-disabled with compile-time-only enablement", () => {
   const app = read("src/App.tsx");
+  const reviewStep = read("src/ReviewStep.tsx");
   const cargo = read("src-tauri/Cargo.toml");
   const execution = read("src-tauri/src/execution.rs");
   const packageJson = read("package.json");
@@ -303,7 +304,7 @@ test("real execution is default-disabled with compile-time-only enablement", () 
   );
   assert.match(app, /\[realExecutionEnabled, setRealExecutionEnabled\] = useState\(false\)/);
   assert.match(app, /realExecutionAvailability\(\)\.catch\(\(\) => \(\{ enabled: false \}\)\)/);
-  assert.match(app, /\{realExecutionEnabled && \(\s*<button[\s\S]{0,400}>\s*Apply to Device\s*<\/button>/);
+  assert.match(reviewStep, /\{realExecutionEnabled && \(\s*<button[\s\S]{0,400}>\s*Apply to Device\s*<\/button>/);
   assert.match(app, /activeDialog\?\.payload\.kind === "real-execution" && workflow\.review/);
 });
 
@@ -314,7 +315,7 @@ test("accessible fallbacks and technical details cannot expose protected data", 
   const fallbackView = sourceSlice(fallback, "export function FrontendErrorFallback", "\n\n/** Top-level boundary");
   assert.doesNotMatch(fallbackView, /error\.(?:message|stack)|String\(error\)|console\.|serial|handle|path|raw/i);
   assert.match(fallbackView, /Reload EmuChef safely/);
-  assert.match(app, /<summary>Technical details<\/summary><code>\{item\.code\}<\/code>/);
+  assert.match(app, /<summary>Technical details<\/summary>[\s\S]{0,200}<code>\{diagnostic\.code\}/);
   assert.match(supportPanel, /<summary>Technical details<\/summary><code>\{outcome\.code\}<\/code>/);
   assert.doesNotMatch(supportPanel, /<code>\{(?:entry\.cacheEntryHandle|outcome\.entryHandle)\}<\/code>|>\{(?:entry\.cacheEntryHandle|outcome\.entryHandle)\}</);
 });

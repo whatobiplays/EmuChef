@@ -2502,6 +2502,12 @@ Save the configuration before restarting, then reopen it and repeat device selec
 
 Separate portable frontend intent from runtime-owned authority. Preserve configuration identity, setup, recipes, and input bindings across a runtime restart; clear device authority and generated plans only. Add a confirmation when unsaved portable state cannot be preserved. Continue rejecting stale async responses from the prior runtime generation.
 
+**Resolution evidence**
+
+- Commit `8f274ae4faeb80d7c34df1e6cf7f3445ceb8db29` introduced the committed UX-048 restart baseline: recovery staging, omission confirmation, portable-intent restoration, runtime-authority invalidation, and runtime-generation guards.
+- DOM regression coverage exercises clean restart, cancellation with dirty omitted values, confirmed nonsensitive restoration, sanitized sensitive re-entry messaging, stale pre-restart device responses, and restart failure settlement.
+- Logic and Tauri recovery tests prove that generated review/execution authority is cleared, restored intent contains only portable fields, and persisted recovery records omit sensitive values and transient authority fields.
+
 ### UX-049 — Exact device matches hide other applicable setup choices
 
 - Type: `Missing MVP feature`
@@ -2633,6 +2639,7 @@ Phase 5B completed on 2026-07-19. Its foundational workflow-state findings are r
 - `UX-048`: restart stages clean or dirty portable recovery intent, confirms backend-reported omissions using friendly labels or a count, resets every runtime-owned authority surface, and rejects prior-runtime responses.
 - Regression coverage is in `apps/emuchef-app/tests/workflow.test.ts`, `tests/App.dom.test.tsx`, `tests/security-policy.test.mjs`, and the Tauri `commands`, `handles`, and `recovery` unit modules.
 - Required verification passed on 2026-07-19. The full backend suite passed with 548 tests and 7 ignored; the previously observed `tests/editor_sessions.rs` parallel-only baseline failure did not reproduce in the final full-suite run.
+- UX-048 was revalidated on 2026-07-21 with explicit clean, cancel, continue, omission, stale-response, and failure regressions; the EmuChef proper frontend, security, Tauri, and shared Rust backend suites passed.
 - Manual real-device timing and packaged-GUI focus behavior remain follow-up qualification risks, not blockers to the code-level Phase 5B acceptance criteria.
 
 ### 8.2 Phase 5C — Recipe and setup selection experience
