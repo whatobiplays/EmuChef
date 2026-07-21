@@ -47,6 +47,7 @@ import {
   formatLastOpened,
   resolveUnsavedDecision,
   savedConfigurationBlocksProgress,
+  saveConfigurationDisabledReason,
   savedConfigurationDiagnosticSummary,
   savedConfigurationValidationLabel,
   savedDevicePlanAvailable,
@@ -1744,6 +1745,11 @@ export function App({ dialogController: suppliedDialogController }: AppProps = {
     || !workflow.devicePlan
     || (!workflow.portableIntentDirty && !savedConfiguration?.dirty);
   const savedConfigurationBlocked = savedConfigurationBlocksProgress(savedConfiguration);
+  const saveDisabledReason = saveConfigurationDisabledReason(
+    savedConfiguration,
+    Boolean(workflow.devicePlan),
+    workflow.portableIntentDirty || Boolean(savedConfiguration?.dirty),
+  );
 
   return (
     <div className="app-shell">
@@ -1824,7 +1830,7 @@ export function App({ dialogController: suppliedDialogController }: AppProps = {
           <button aria-describedby={configurationActionsLocked ? "configuration-actions-reason" : undefined} className="text-button" onClick={(event) => void restartRuntime(event.currentTarget)} disabled={configurationActionsLocked}>Restart runtime</button>
           </div>
           {configurationActionsLocked && <p className="disabled-reason" id="configuration-actions-reason">Configuration replacement and runtime restart are unavailable while another operation or execution is active.</p>}
-          {saveDisabled && <p className="disabled-reason" id="save-configuration-reason">Save requires a selected device plan and unsaved portable changes.</p>}
+          {saveDisabled && <p className="disabled-reason" id="save-configuration-reason">{saveDisabledReason}</p>}
           {(busy || platformToolsBusy || !workflow.devicePlan) && <p className="disabled-reason" id="save-as-reason">Save As requires a selected device plan and no other active operation.</p>}
         </section>
       )}

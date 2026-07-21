@@ -4,6 +4,7 @@ import test from "node:test";
 import {
   formatLastOpened,
   resolveUnsavedDecision,
+  saveConfigurationDisabledReason,
   savedConfigurationBlocksProgress,
   savedConfigurationDiagnosticSummary,
   savedConfigurationValidationLabel,
@@ -76,6 +77,21 @@ test("blocking saved configurations are gated with user-facing validation copy",
     severity: "error",
     key: "recipe.removed",
   }), "A recipe used by this configuration is no longer available.");
+});
+
+test("saved configurations use neutral Save guidance after successful persistence", () => {
+  assert.equal(
+    saveConfigurationDisabledReason(document, true, false),
+    "Configuration saved. Save becomes available after another change.",
+  );
+  assert.equal(
+    saveConfigurationDisabledReason(null, false, false),
+    "Save requires a selected device plan and unsaved portable changes.",
+  );
+  assert.equal(
+    saveConfigurationDisabledReason(document, false, false),
+    "Save requires a selected device plan and unsaved portable changes.",
+  );
 });
 
 test("opening portable intent preserves stale references but resets all runtime authority", () => {

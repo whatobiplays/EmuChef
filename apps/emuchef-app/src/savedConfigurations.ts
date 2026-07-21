@@ -67,6 +67,17 @@ export function savedConfigurationDiagnosticSummary(
   }
 }
 
+export function saveConfigurationDisabledReason(
+  document: SavedConfigurationDocument | null,
+  hasDevicePlan: boolean,
+  hasPortableChanges: boolean,
+): string {
+  if (document && hasDevicePlan && !hasPortableChanges) {
+    return "Configuration saved. Save becomes available after another change.";
+  }
+  return "Save requires a selected device plan and unsaved portable changes.";
+}
+
 export function formatLastOpened(epochMs: number): string {
   if (!Number.isFinite(epochMs) || epochMs <= 0) return "Last opened time unavailable";
   return `Last opened ${new Date(epochMs).toLocaleString()}`;
