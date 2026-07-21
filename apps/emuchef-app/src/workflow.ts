@@ -45,6 +45,7 @@ export interface WorkflowState {
   description: ConfigurationDescription | null;
   descriptionDirty: boolean;
   review: ReviewSummary | null;
+  reviewStale: boolean;
   requestGeneration: number;
   executionGeneration: number;
   execution: ExecutionWorkflowState;
@@ -67,6 +68,7 @@ export const initialWorkflowState: WorkflowState = {
   description: null,
   descriptionDirty: false,
   review: null,
+  reviewStale: false,
   requestGeneration: 0,
   executionGeneration: 0,
   execution: { kind: "idle" },
@@ -316,9 +318,9 @@ export function workflowReducer(state: WorkflowState, action: WorkflowAction): W
       };
     }
     case "review":
-      return { ...state, step: "review", review: action.review };
+      return { ...state, step: "review", review: action.review, reviewStale: false };
     case "execution-starting":
-      if (!state.review || action.generation <= state.executionGeneration) return state;
+      if (!state.review || state.reviewStale || action.generation <= state.executionGeneration) return state;
       return {
         ...state,
         executionGeneration: action.generation,
@@ -442,9 +444,19 @@ export function workflowReducer(state: WorkflowState, action: WorkflowAction): W
         repairIntent: false,
         portableIntentDirty: true,
       };
-    case "return-to-review":
+    case "return-to-review": {
       if (!state.review) return state;
-      return { ...state, step: "review", execution: { kind: "idle" } };
+      const reviewStale = state.execution.kind === "unavailable"
+        || (state.execution.kind === "terminal"
+          && state.execution.snapshot.status !== "succeeded"
+          && state.execution.snapshot.status !== "succeeded_with_warnings");
+      return {
+        ...state,
+        step: "review",
+        execution: { kind: "idle" },
+        reviewStale: state.reviewStale || reviewStale,
+      };
+    }
     case "back":
       return {
         ...state,

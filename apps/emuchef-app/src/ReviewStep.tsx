@@ -5,6 +5,7 @@ interface ReviewStepProps {
   executionKind: WorkflowState["execution"]["kind"];
   realExecutionEnabled: boolean;
   review: NonNullable<WorkflowState["review"]>;
+  reviewStale: boolean;
   onApplyToDevice: (invoker: HTMLElement) => void;
   onBack: () => void;
   onStartSimulation: () => void;
@@ -15,12 +16,13 @@ export function ReviewStep({
   executionKind,
   realExecutionEnabled,
   review,
+  reviewStale,
   onApplyToDevice,
   onBack,
   onStartSimulation,
 }: ReviewStepProps) {
   const executionStarting = executionKind === "starting";
-  const startDisabled = busy || executionStarting;
+  const startDisabled = busy || executionStarting || reviewStale;
 
   return (
     <>
@@ -31,6 +33,14 @@ export function ReviewStep({
       <p className="simulation-banner">
         Simulated / Dry Run only. This does not change or verify the real device.
       </p>
+      {reviewStale && (
+        <section className="simulation-banner" role="alert" aria-labelledby="stale-review-heading">
+          <h3 id="stale-review-heading">Review is out of date</h3>
+          <p>
+            This plan belongs to an earlier execution attempt and cannot be run again. Return to setup and repair the configuration to generate a fresh plan and review.
+          </p>
+        </section>
+      )}
       <p>
         Target: {review.target.manufacturer ?? "Android"} {review.target.model ?? "device"}
         · Android {review.target.androidVersion ?? "unknown"}
@@ -93,7 +103,9 @@ export function ReviewStep({
       </div>
       {startDisabled && (
         <p className="disabled-reason" id="execution-start-reason">
-          Execution start is already being prepared.
+          {reviewStale
+            ? "This reviewed plan is stale. Repair the configuration and generate a fresh review before running again."
+            : "Execution start is already being prepared."}
         </p>
       )}
     </>

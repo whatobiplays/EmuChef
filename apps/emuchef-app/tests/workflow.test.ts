@@ -1050,3 +1050,34 @@ test("real execution state retains mode and invalidates the review on session lo
   assert.equal(unavailable.execution.kind, "unavailable");
   assert.equal(unavailable.review, null);
 });
+
+
+test("failed execution makes the retained review stale and blocks another start", () => {
+  const failed = {
+    ...initialWorkflowState,
+    step: "execution" as const,
+    review,
+    executionGeneration: 1,
+    execution: {
+      kind: "terminal" as const,
+      generation: 1,
+      mode: "simulated" as const,
+      snapshot: executionSnapshot(1, "failed"),
+      events: [],
+      eventCursor: 0,
+      cancellationRequested: false,
+    },
+  };
+
+  const returned = workflowReducer(failed, { type: "return-to-review" });
+  assert.equal(returned.step, "review");
+  assert.equal(returned.reviewStale, true);
+
+  const restarted = workflowReducer(returned, {
+    type: "execution-starting",
+    generation: 2,
+    mode: "simulated",
+  });
+  assert.equal(restarted.execution.kind, "idle");
+  assert.equal(restarted.executionGeneration, 1);
+});

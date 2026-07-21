@@ -2274,6 +2274,7 @@ export function App({ dialogController: suppliedDialogController }: AppProps = {
                 onStartSimulation={startSimulation}
                 realExecutionEnabled={realExecutionEnabled}
                 review={workflow.review}
+                reviewStale={workflow.reviewStale}
               />
             )}
 
