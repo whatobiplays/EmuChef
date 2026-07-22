@@ -1,4 +1,4 @@
-import { render, screen } from "@testing-library/react";
+import { render, screen, within } from "@testing-library/react";
 import { describe, expect, test, vi } from "vitest";
 
 import { ExecutionStep } from "../src/ExecutionStep";
@@ -109,5 +109,80 @@ describe("execution recovery actions", () => {
     expect(screen.getByText(/Copy core files/)).toBeTruthy();
     expect(screen.getByText(/current simulated atomic step may finish/i)).toBeTruthy();
     expect((screen.getByRole("button", { name: "Cancellation requested" }) as HTMLButtonElement).disabled).toBe(true);
+  });
+
+  test("separates failed and blocked results without exposing raw result names or changing order", () => {
+    const snapshot: ExecutionSnapshot = {
+      ...failedSnapshot(),
+      recipes: [
+        {
+          name: "First feature",
+          description: "The first result remains first.",
+          status: "failed",
+          steps: [{ name: "Install first feature", note: null, status: "failed", message: "Completed work could not be verified." }],
+        },
+        {
+          name: "Second feature",
+          description: "The blocked result remains second.",
+          status: "blocked",
+          steps: [{ name: "Install second feature", note: null, status: "blocked", message: "Required work was blocked." }],
+        },
+      ],
+      warnings: [{
+        message: "Review the connection before trying again.",
+        remediation: { kind: "reconnect_device", title: "Reconnect", message: "Reconnect the intended device." },
+      }],
+      errors: [
+        {
+          message: "The first problem is separate.",
+          remediation: { kind: "view_report", title: "Review", message: "Review the report." },
+        },
+        {
+          message: "The second problem is separate.",
+          remediation: { kind: "review_inputs", title: "Review inputs", message: "Review the selected inputs." },
+        },
+      ],
+    };
+    const { container } = render(
+      <ExecutionStep
+        execution={{
+          kind: "terminal",
+          generation: 1,
+          mode: "simulated",
+          snapshot,
+          events: [
+            { sequence: 1, timestamp: "2026-07-20T12:00:00Z", label: "Feature updated", status: "succeeded_with_warnings", issue: null },
+            { sequence: 2, timestamp: "2026-07-20T12:00:01Z", label: "Internal status handled", status: "internal_result_name", issue: null },
+          ],
+          eventCursor: 2,
+          cancellationRequested: false,
+        }}
+        launchState="idle"
+        repairPreparing={false}
+        reportState="idle"
+        onCancel={vi.fn()}
+        onExportReport={vi.fn()}
+        onLaunchConfiguredApp={vi.fn()}
+        onPrepareRepair={vi.fn()}
+        onReturn={vi.fn()}
+      />,
+    );
+
+    expect(screen.getByRole("heading", { name: "Warning 1" })).toBeTruthy();
+    expect(screen.getByRole("heading", { name: "Problem 1" })).toBeTruthy();
+    expect(screen.getByRole("heading", { name: "Problem 2" })).toBeTruthy();
+    expect(container.querySelectorAll(".result-card")).toHaveLength(3);
+
+    const groups = Array.from(container.querySelectorAll<HTMLElement>(".execution-group"));
+    expect(groups).toHaveLength(2);
+    expect(groups[0].classList.contains("status-failed")).toBe(true);
+    expect(groups[1].classList.contains("status-blocked")).toBe(true);
+    expect(within(groups[0]).getByText("Failed", { selector: ".execution-status" })).toBeTruthy();
+    expect(within(groups[1]).getByText("Blocked", { selector: ".execution-status" })).toBeTruthy();
+    expect(groups[0].textContent).toContain("First feature");
+    expect(groups[1].textContent).toContain("Second feature");
+    expect(container.textContent).toContain("Completed with warnings");
+    expect(container.textContent).toContain("Updated");
+    expect(container.textContent).not.toMatch(/succeeded_with_warnings|internal_result_name/);
   });
 });

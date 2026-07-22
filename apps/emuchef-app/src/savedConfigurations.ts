@@ -45,7 +45,7 @@ export function savedConfigurationValidationLabel(
     case "requires_attention":
       return "Needs repair before continuing";
     case "cannot_use":
-      return "Cannot be used with the current catalog";
+      return "Cannot be used with the current setup catalog";
   }
 }
 
@@ -54,7 +54,7 @@ export function savedConfigurationDiagnosticSummary(
 ): string {
   switch (diagnostic.code) {
     case "unknown_recipe":
-      return "A recipe used by this configuration is no longer available.";
+      return "A feature used by this saved setup is no longer available.";
     case "device_plan_not_found":
     case "unknown_device_plan":
       return "The saved device setup is no longer available.";
@@ -62,8 +62,8 @@ export function savedConfigurationDiagnosticSummary(
       return "A saved input no longer matches the current recipe definition.";
     default:
       return diagnostic.severity === "error"
-        ? "This configuration contains an item that must be repaired."
-        : "This configuration contains a compatibility warning.";
+        ? "This saved setup contains an item that must be repaired."
+        : "This saved setup contains a compatibility warning.";
   }
 }
 
@@ -73,9 +73,9 @@ export function saveConfigurationDisabledReason(
   hasPortableChanges: boolean,
 ): string {
   if (document && hasDevicePlan && !hasPortableChanges) {
-    return "Configuration saved. Save becomes available after another change.";
+    return "Setup saved. Save becomes available after another change.";
   }
-  return "Save requires a selected device plan and unsaved portable changes.";
+  return "Save requires a selected device setup and unsaved setup changes.";
 }
 
 export function formatLastOpened(epochMs: number): string {

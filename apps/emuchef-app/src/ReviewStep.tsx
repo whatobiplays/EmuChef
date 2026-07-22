@@ -31,20 +31,20 @@ export function ReviewStep({
 
   return (
     <>
-      <p className="eyebrow">REVIEW PLAN</p>
+      <p className="eyebrow">Review</p>
       <h2 data-focus-fallback="workflow" data-step-heading tabIndex={-1}>
         Review this setup
       </h2>
       {!realExecutionEnabled && (
         <p className="simulation-banner">
-          Simulated / Dry Run only. This does not change or verify the real device.
+          Simulation only. This does not change or verify the real device.
         </p>
       )}
       {reviewStale && (
         <section className="simulation-banner" role="alert" aria-labelledby="stale-review-heading">
           <h3 id="stale-review-heading">Review is out of date</h3>
           <p>
-            This plan belongs to an earlier execution attempt and cannot be run again. Return to setup and repair the configuration to generate a fresh plan and review.
+            This plan belongs to an earlier attempt and cannot be run again. Return to setup and repair the saved choices to generate a fresh plan and review.
           </p>
         </section>
       )}
@@ -114,7 +114,7 @@ export function ReviewStep({
           disabled={startDisabled}
           onClick={onStartSimulation}
         >
-          {executionStarting ? "Starting simulated run…" : "Start Simulated Dry Run"}
+          {executionStarting ? "Starting simulation…" : "Start simulation"}
         </button>
         {realExecutionEnabled && (
           <button
@@ -129,10 +129,10 @@ export function ReviewStep({
       {startDisabled && (
         <p className="disabled-reason" id="execution-start-reason">
           {reviewStale
-            ? "This reviewed plan is stale. Repair the configuration and generate a fresh review before running again."
+            ? "This reviewed plan is out of date. Repair the setup and generate a fresh review before running again."
             : !review.canExecute
               ? "This plan contains work EmuChef cannot review safely. Update EmuChef or the setup catalog before continuing."
-            : "Execution start is already being prepared."}
+            : "The installation is already being prepared."}
         </p>
       )}
     </>

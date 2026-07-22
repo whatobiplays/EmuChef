@@ -248,6 +248,18 @@ export interface ExecutionAnnouncement {
   assertive: boolean;
 }
 
+/** Presents execution states without announcing protocol enum spelling. */
+function executionStatusLabel(status: string): string {
+  return ({
+    queued: "Queued",
+    running: "In progress",
+    succeeded: "Completed",
+    succeeded_with_warnings: "Completed with warnings",
+    failed: "Failed",
+    cancelled: "Cancelled",
+  } as Record<string, string>)[status] ?? "Updated";
+}
+
 /** Coalesces high-frequency snapshots into phase, ten-percent, and terminal announcements. */
 export function executionAnnouncement(
   snapshot: ExecutionProgressLike,
@@ -260,7 +272,7 @@ export function executionAnnouncement(
   const activeStep = snapshot.recipes
     .flatMap((recipe) => recipe.steps.map((step) => ({ recipe: recipe.name, ...step })))
     .find((step) => step.status === "running");
-  const phase = activeStep ? `${activeStep.recipe}: ${activeStep.name}` : snapshot.status.replaceAll("_", " ");
+  const phase = activeStep ? `${activeStep.recipe}: ${activeStep.name}` : executionStatusLabel(snapshot.status);
   const key = snapshot.terminal
     ? `terminal:${snapshot.status}`
     : `progress:${bucket}:${phase}`;
@@ -268,13 +280,13 @@ export function executionAnnouncement(
   if (snapshot.terminal) {
     return {
       key,
-      message: `Execution ${snapshot.status.replaceAll("_", " ")}. ${settled} of ${counts.total} steps settled.`,
+      message: `Run ${executionStatusLabel(snapshot.status).toLowerCase()}. ${settled} of ${counts.total} steps settled.`,
       assertive: snapshot.status === "failed" || snapshot.status === "cancelled",
     };
   }
   return {
     key,
-    message: counts.total > 0 ? `Execution ${bucket}% complete. ${phase}.` : `Execution in progress. ${phase}.`,
+    message: counts.total > 0 ? `Run ${bucket}% complete. ${phase}.` : `Run in progress. ${phase}.`,
     assertive: false,
   };
 }

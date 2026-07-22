@@ -71,7 +71,7 @@ describe("review presentation", () => {
       />,
     );
 
-    expect((screen.getByRole("button", { name: "Start Simulated Dry Run" }) as HTMLButtonElement).disabled).toBe(true);
+    expect((screen.getByRole("button", { name: "Start simulation" }) as HTMLButtonElement).disabled).toBe(true);
     expect((screen.getByRole("button", { name: "Apply to Device" }) as HTMLButtonElement).disabled).toBe(true);
     expect(screen.getByText(/cannot review safely/i)).toBeTruthy();
   });
@@ -94,7 +94,7 @@ describe("stale execution review", () => {
 
     expect(screen.getByRole("heading", { name: "Review is out of date" })).toBeTruthy();
     expect(screen.getByText(/cannot be run again/i)).toBeTruthy();
-    expect((screen.getByRole("button", { name: "Start Simulated Dry Run" }) as HTMLButtonElement).disabled).toBe(true);
+    expect((screen.getByRole("button", { name: "Start simulation" }) as HTMLButtonElement).disabled).toBe(true);
     expect((screen.getByRole("button", { name: "Apply to Device" }) as HTMLButtonElement).disabled).toBe(true);
     expect(screen.getByText(/generate a fresh review before running again/i)).toBeTruthy();
   });

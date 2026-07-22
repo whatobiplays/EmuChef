@@ -35,6 +35,7 @@ export function UpdatesPanel({
   const status = state.status;
   const available = status?.state === "update_available";
   const openDisabled = !available || !status.canOpenDownload || navigationBlocked || state.opening;
+  const closeBlocked = state.checking || state.opening;
 
   return (
     <AccessibleDialog
@@ -42,24 +43,32 @@ export function UpdatesPanel({
       descriptionId="updates-description"
       initialFocusRef={closeRef}
       returnFocus={returnFocus}
+      dismissible={!closeBlocked}
       onDismiss={onClose}
+      onDismissBlocked={() => onAnnounce("Updates cannot close until the current update action finishes.", true)}
     >
-      <header className="modal-header">
+      <header className="dialog-heading">
         <div>
-          <p className="eyebrow">MANUAL UPDATE</p>
-          <h2 id="updates-title">EmuChef Updates</h2>
+          <p className="eyebrow">Update status</p>
+          <h2 id="updates-title">EmuChef updates</h2>
         </div>
-        <button className="text-button" onClick={onClose} ref={closeRef}>Close</button>
+        <button
+          aria-describedby={closeBlocked ? "updates-close-reason" : undefined}
+          className="secondary"
+          disabled={closeBlocked}
+          onClick={onClose}
+          ref={closeRef}
+        >Close</button>
       </header>
       <p id="updates-description">
-        EmuChef checks signed release metadata only when you ask. It never downloads, installs,
-        replaces, or restarts the application.
+        EmuChef checks verified release information only when you ask. It never downloads, installs,
+        replaces, or restarts the app.
       </p>
+      {closeBlocked && <p className="disabled-reason" id="updates-close-reason" role="status">Close is unavailable while the current update action finishes.</p>}
       <dl className="update-summary">
         <div><dt>Current version</dt><dd>{status?.currentVersion ?? "Loading…"}</dd></div>
         {status?.latestVersion && <div><dt>Latest version</dt><dd>{status.latestVersion}</dd></div>}
-        {status?.dmgSizeBytes && <div><dt>DMG size</dt><dd>{formatUpdateBytes(status.dmgSizeBytes)}</dd></div>}
-        {status?.dmgSha256 && <div><dt>Release SHA-256</dt><dd><code>{status.dmgSha256}</code></dd></div>}
+        {status?.dmgSizeBytes && <div><dt>Download size</dt><dd>{formatUpdateBytes(status.dmgSizeBytes)}</dd></div>}
       </dl>
       {status?.notes && <section aria-labelledby="update-notes-title"><h3 id="update-notes-title">Release notes</h3><p className="release-notes">{status.notes}</p></section>}
       {status?.minimumMacosVersion && (
@@ -67,24 +76,23 @@ export function UpdatesPanel({
       )}
       {status?.message && <p className={status.state === "failed" ? "error" : "fine-print"} role={status.state === "failed" ? "alert" : "status"}>{status.message}</p>}
       <section aria-labelledby="manual-install-title">
-        <h3 id="manual-install-title">Manual replacement</h3>
+        <h3 id="manual-install-title">Install the update manually</h3>
         <ol>
-          <li>Open the validated DMG address in your default browser.</li>
-          <li>After the browser downloads it, open the DMG and drag EmuChef.app to Applications.</li>
+          <li>Open the verified download page in your default browser.</li>
+          <li>After the browser downloads the disk image, open it and drag EmuChef to Applications.</li>
           <li>Replace the existing copy, then relaunch EmuChef manually.</li>
         </ol>
         <p className="warning">
-          EmuChef verified the signed release metadata. The browser performs the download, and
-          EmuChef does not inspect or verify the local DMG. Developer ID signing, notarization,
-          stapling, and Gatekeeper remain the executable trust controls when you open it.
+          EmuChef verifies the release information before opening the download page. Your browser
+          downloads the installer, and macOS checks the app when you open it.
         </p>
       </section>
-      <div className="button-row">
+      <div className="button-row dialog-actions">
         <button className="secondary" disabled={state.checking || state.opening} onClick={onCheck}>
-          {state.checking ? "Checking…" : "Check for Updates"}
+          {state.checking ? "Checking…" : "Check for updates"}
         </button>
         <button disabled={openDisabled} onClick={onOpenDownload}>
-          {state.opening ? "Opening…" : "Open DMG Download in Browser"}
+          {state.opening ? "Opening…" : "Open download page"}
         </button>
       </div>
       {openDisabled && available && <p className="disabled-reason">Close other dialogs and wait for current work to finish before opening the browser.</p>}

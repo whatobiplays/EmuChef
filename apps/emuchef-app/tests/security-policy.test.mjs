@@ -83,9 +83,12 @@ test("Updates UI is accessible, manual, and explicit about browser download trus
   const panel = read("src/UpdatesPanel.tsx");
   assert.match(panel, /<AccessibleDialog/);
   assert.match(panel, /initialFocusRef=\{closeRef\}/);
-  assert.match(panel, /Manual replacement/);
-  assert.match(panel, /EmuChef does not inspect or verify the local DMG/);
-  assert.match(panel, /Developer ID signing, notarization,[\s\S]*stapling, and Gatekeeper/);
+  assert.match(panel, /dismissible=\{!closeBlocked\}/);
+  assert.match(panel, /onDismissBlocked=/);
+  assert.match(panel, /Install the update manually/);
+  assert.match(panel, /EmuChef verifies the release information/);
+  assert.match(panel, /Your browser[\s\S]*downloads the installer,[\s\S]*macOS checks the app/);
+  assert.doesNotMatch(panel, /status\?\.dmgSha256|Release SHA-256|Developer ID|notarization|stapling|Gatekeeper/);
   assert.match(panel, /role=\{status\.state === "failed" \? "alert" : "status"\}/);
 });
 

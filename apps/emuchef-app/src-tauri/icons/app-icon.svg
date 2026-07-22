@@ -1,6 +1,0 @@
-<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512" role="img" aria-label="EmuChef">
-  <rect width="512" height="512" rx="112" fill="#17231f"/>
-  <path d="M134 190h244v152c0 35-29 64-64 64H198c-35 0-64-29-64-64V190Z" fill="#f4b942"/>
-  <path d="M168 190c0-49 39-88 88-88s88 39 88 88" fill="none" stroke="#f7f1df" stroke-width="34" stroke-linecap="round"/>
-  <path d="M205 268h102M205 319h102" stroke="#17231f" stroke-width="24" stroke-linecap="round"/>
-</svg>

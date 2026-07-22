@@ -213,6 +213,9 @@ test("execution announcements are coalesced by phase and ten-percent buckets", (
   const terminal = executionAnnouncement({ ...snapshot, status: "failed", terminal: true }, first!.key);
   assert.equal(terminal!.assertive, true);
   assert.match(terminal!.message, /failed/);
+  const unknown = executionAnnouncement({ ...snapshot, status: "future_protocol_state", terminal: true }, null);
+  assert.match(unknown!.message, /Run updated/);
+  assert.doesNotMatch(unknown!.message, /future_protocol_state/);
 });
 
 test("stable IDs and composed descriptions remain deterministic", () => {

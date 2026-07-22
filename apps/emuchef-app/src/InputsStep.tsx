@@ -11,6 +11,19 @@ type ValidationError = ValidationDiagnostic & {
   targetId: string | null;
 };
 
+function valueSourceLabel(source: NonNullable<InputDescriptor["valueSource"]>): string {
+  switch (source) {
+    case "explicit":
+      return "Entered for this setup";
+    case "user_configuration":
+      return "Saved setup";
+    case "device_plan":
+      return "Device setup";
+    case "recipe_default":
+      return "Recommended default";
+  }
+}
+
 interface InputsStepProps {
   description: ConfigurationDescription;
   bindings: Record<string, unknown>;
@@ -50,7 +63,7 @@ export function InputsStep({
 }: InputsStepProps) {
   return (
     <>
-      <p className="eyebrow">CONFIGURE INPUTS</p>
+      <p className="eyebrow">Required files and choices</p>
       <h2 data-focus-fallback="workflow" data-step-heading tabIndex={-1}>
         Provide required files and options
       </h2>
@@ -269,7 +282,7 @@ export function InputsStep({
                   </small>
                 ) : null}
                 {input.valueSource ? (
-                  <small id={sourceId}>Value source: {input.valueSource.replaceAll("_", " ")}</small>
+                  <small id={sourceId}>Provided by: {valueSourceLabel(input.valueSource)}</small>
                 ) : null}
                 {fieldDiagnostics.map((item, index) => (
                   <small

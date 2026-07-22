@@ -325,7 +325,7 @@ execution is starting or active, and revalidates root confinement, symlink
 status, logical association, and both component fingerprints immediately before
 deletion. Cleanup returns stable sanitized outcomes and a fresh inventory.
 
-The Support & Storage panel exports a deterministic schema-v1 ZIP through a
+The Troubleshooting panel exports a deterministic schema-v1 ZIP through a
 native save dialog. Tauri owns the destination and bundle bytes. The 2 MiB
 bundle includes only app/runtime status, OS class, feature gates, public catalog
 identity, aggregate saved-configuration and retained-execution state, and
@@ -473,25 +473,45 @@ onboarding, rollback, resume, or parallel-device work, and its result is not
 real-device evidence.
 
 The React frontend is keyboard and screen-reader operable across the workflow,
-saved configurations, execution results, and Support & Storage. It provides a
+saved setups, execution results, and Troubleshooting. It provides a
 skip link, stable landmarks and headings, semantic collections, associated
 input diagnostics, focusable error summaries, bounded polite/assertive live
 regions, and native determinate execution progress. Status and availability
-always have text in addition to color. Reduced-motion, forced-colors, 200% zoom,
-and narrow desktop windows are supported without changing the workflow
-architecture.
+always have text and structural differences in addition to color. The visual
+system uses semantic color, spacing, radius, focus, and status tokens with
+system fonts and a dark-only application appearance. Controls, panels, dialogs,
+empty states, disabled explanations, long-text wrapping, and result groups use
+shared styles. Responsive source and DOM regressions target approximately
+380-pixel reflow at 200% zoom, reduced motion, forced colors, focus visibility,
+and screen-reader structure without changing the workflow architecture. Those
+automated targets do not constitute manual macOS visual or assistive-technology
+qualification.
+
+Normal workflow terminology describes the app service, Platform-Tools, setup
+catalog, saved setups, installation progress, recovery drafts, and app-owned
+cache without exposing implementation language, schema versions, digests,
+catalog identifiers, or raw enum values. The header readiness indicator says
+only `Ready`; technical identity remains available only through bounded
+troubleshooting and diagnostic projections.
 
 Custom prompts and confirmations use exactly-once controllers. Each pending
 request has one safe cancellation result, teardown never implies a destructive
 or execution-confirming choice, and an overlapping request cannot replace the
 live resolver. Runtime restart, configuration replacement, app reset, unmount,
 and the top-level frontend error boundary safely cancel pending prompts.
-Support & Storage owns and cancels its nested cleanup confirmation before the
+Troubleshooting owns and cancels its nested cleanup confirmation before the
 parent closes.
+
+All React modal surfaces use `AccessibleDialog` for focus containment,
+deterministic restoration, Escape handling, and the shared dialog-heading and
+footer-action placement convention. The Updates dialog disables and explains
+its Close action while an update check or browser handoff is active, announces
+blocked dismissal attempts, and becomes dismissible again when the unsafe
+operation ends.
 
 Modal and native-dialog focus restoration first validates the recorded invoker,
 then uses a transition-specific workflow or error destination, the current
-workflow fallback, main content, and finally the header Support & Storage
+workflow fallback, main content, and finally the header Troubleshooting
 action. Disconnected, hidden, disabled, or inert invokers are skipped. Focus
 never silently falls to the document body, and generation checks prevent stale
 restoration from stealing focus from a newer modal or workflow transition.
@@ -595,6 +615,14 @@ release Rust sidecar, authored catalog snapshot, and checked-in qualification
 policy through Tauri resources. Intel and universal end-user bundles are not
 qualified. Platform-Tools and user content remain external.
 
+The checked-in `app-icon.png` is the byte-preserved approved branding master.
+Tauri packages a generated 512-by-512 `icon.png` and a multi-resolution
+`icon.icns` derived from that master without cropping, stretching, padding,
+background insertion, or redesign. The native About menu uses the package name
+and version from the running Tauri application's package metadata and includes
+the product description and GNU GPL v3.0 credit; frontend and menu source do
+not duplicate the configured version.
+
 Local macOS qualification is ad-hoc, requires no private Apple credentials,
 removes the fixed Apple credential allowlist from its child environment, and
 explicitly sets the ad-hoc signing identity. It statically verifies product
@@ -693,7 +721,7 @@ Remove Platform-Tools are offered only for the app-managed installation and
 never delete a user-selected, PATH-resolved, system, or external installation.
 
 Support and diagnostics outcomes are scoped to their modal and operation
-generations. Opening or closing Support & Storage, refreshing inventory, or
+generations. Opening or closing Troubleshooting, refreshing inventory, or
 starting a retry clears superseded presentation notices, and stale completions
 cannot replace current state. Diagnostics export creates a local ZIP no larger
 than 2 MiB and never uploads it. Schema version 2 contains only the fixed

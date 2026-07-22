@@ -70,27 +70,27 @@ test("blocking saved configurations are gated with user-facing validation copy",
   assert.equal(savedConfigurationValidationLabel({
     ...document,
     validation: { state: "cannot_use", diagnostics: [] },
-  }), "Cannot be used with the current catalog");
+  }), "Cannot be used with the current setup catalog");
   assert.equal(savedConfigurationDiagnosticSummary({
     code: "unknown_recipe",
     message: "Selected recipe recipe.removed was not found",
     severity: "error",
     key: "recipe.removed",
-  }), "A recipe used by this configuration is no longer available.");
+  }), "A feature used by this saved setup is no longer available.");
 });
 
 test("saved configurations use neutral Save guidance after successful persistence", () => {
   assert.equal(
     saveConfigurationDisabledReason(document, true, false),
-    "Configuration saved. Save becomes available after another change.",
+    "Setup saved. Save becomes available after another change.",
   );
   assert.equal(
     saveConfigurationDisabledReason(null, false, false),
-    "Save requires a selected device plan and unsaved portable changes.",
+    "Save requires a selected device setup and unsaved setup changes.",
   );
   assert.equal(
     saveConfigurationDisabledReason(document, false, false),
-    "Save requires a selected device plan and unsaved portable changes.",
+    "Save requires a selected device setup and unsaved setup changes.",
   );
 });
 

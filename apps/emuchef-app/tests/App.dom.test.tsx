@@ -314,11 +314,11 @@ async function openSupportAction(
   snapshot: SupportSnapshot,
 ): Promise<HTMLButtonElement> {
   mockApi.supportSnapshot.mockResolvedValue(snapshot);
-  await user.click(screen.getByRole("button", { name: "Support & Storage" }));
-  const dialog = await screen.findByRole("dialog", { name: "Diagnostics and artifact cache" });
+  await user.click(screen.getByRole("button", { name: "Troubleshooting" }));
+  const dialog = await screen.findByRole("dialog", { name: "Troubleshooting and app storage" });
   const action = within(dialog).queryByRole("button", { name });
   if (action) return action as HTMLButtonElement;
-  await user.click(within(dialog).getByText("View all system status and maintenance actions"));
+  await user.click(within(dialog).getByText("View all troubleshooting status and maintenance actions"));
   return within(dialog).getByRole("button", { name }) as HTMLButtonElement;
 }
 
@@ -329,6 +329,67 @@ function deferred<T>(): { promise: Promise<T>; resolve: (value: T) => void } {
 }
 
 beforeEach(() => resetApi());
+
+describe("Phase 5H product polish", () => {
+  test("shows readiness without exposing catalog identity or implementation terminology", async () => {
+    mockApi.runtimeStatus.mockResolvedValue({
+      status: "ready",
+      protocolVersion: 99,
+      catalogVersion: "phase-internal-catalog",
+    });
+    mockApi.catalog.mockResolvedValue({
+      catalog: {
+        sourceKind: "bundled",
+        sourceId: "internal-source-id",
+        version: "phase-internal-catalog",
+        contentDigest: { algorithm: "sha256", value: "internal-digest" },
+      },
+      recipes: [],
+    });
+
+    await renderReadyApp();
+
+    expect(document.querySelector(".runtime-chip")?.textContent).toBe("Ready");
+    const status = document.querySelector(".status-panel");
+    expect(status?.textContent).toContain("App serviceReady");
+    expect(status?.textContent).toContain("Platform-ToolsReady");
+    expect(status?.textContent).toContain("Setup catalogReady");
+    expect(document.querySelector(".configuration-bar")?.textContent).toContain("Unsaved setup");
+    expect(document.body.textContent).not.toMatch(/phase-internal-catalog|internal-source-id|internal-digest|Rust runtime|protocol/i);
+  });
+
+  test("explains Platform-Tools setup without developer-oriented implementation details", async () => {
+    mockApi.adbStatus.mockResolvedValue(missingAdb);
+    render(<App />);
+
+    expect(await screen.findByRole("heading", { name: "Set up Android Platform-Tools" })).toBeTruthy();
+    expect(screen.getByText(/lets EmuChef find and communicate with your Android device/)).toBeTruthy();
+    expect(screen.getByText(/Setup is normally needed only once/)).toBeTruthy();
+    expect(screen.getByRole("button", { name: "Open Google download page" })).toBeTruthy();
+    expect(screen.getByRole("button", { name: "Select Platform-Tools ZIP…" })).toBeTruthy();
+    expect(document.body.textContent).not.toMatch(/\bADB\b|local validation|app bundle|repository|checksum|architecture/i);
+  });
+
+  test("keeps unsaved setup actions in an explicit safe-to-destructive order", async () => {
+    const user = userEvent.setup();
+    mockApi.describeConfiguration.mockResolvedValue(descriptionWithTextInput({
+      key: "recipe.one/option",
+      inputId: "option",
+      label: "Optional setting",
+      required: false,
+      sensitive: false,
+    }));
+    await advanceToInputs(user);
+    await user.type(screen.getByLabelText("Optional setting"), "chosen");
+    await user.click(screen.getByRole("button", { name: "Manage saved setups…" }));
+    await user.click(screen.getByRole("button", { name: "New" }));
+
+    const dialog = await screen.findByRole("alertdialog", { name: "Save edits before continuing?" });
+    const actions = within(dialog).getAllByRole("button");
+    expect(actions.map((button) => button.textContent)).toEqual(["Cancel", "Save", "Discard edits"]);
+    expect(actions[0].parentElement?.classList.contains("dialog-actions")).toBe(true);
+  });
+});
 
 describe("Phase 5B workflow surfaces", () => {
   test("startup does not force focus into the workflow", async () => {
@@ -426,7 +487,7 @@ describe("Phase 5B workflow surfaces", () => {
     expect(screen.getByRole("heading", { name: "1 selected" })).toBeTruthy();
     expect(screen.getByText("RetroArch", { selector: ".recipe-selection-summary p" })).toBeTruthy();
     expect(screen.getByText("Recipes · 3 of 3 shown")).toBeTruthy();
-    expect(screen.getByText("ADB connection")).toBeTruthy();
+    expect(screen.getByText("Device connection")).toBeTruthy();
     expect(screen.getByText("App installation")).toBeTruthy();
     expect(screen.getByText("Also includes: Copy BIOS files")).toBeTruthy();
     expect(screen.getByText("Downloads files")).toBeTruthy();
@@ -605,15 +666,15 @@ describe("Phase 5B workflow surfaces", () => {
     mockApi.pickPlatformToolsZip.mockReturnValue(picker.promise);
     mockApi.installPlatformToolsSelection.mockReturnValue(installation.promise);
     render(<App />);
-    await screen.findByRole("heading", { name: "Android SDK Platform-Tools is required" });
+    await screen.findByRole("heading", { name: "Set up Android Platform-Tools" });
 
-    const importButton = screen.getByRole("button", { name: "Import Platform-Tools ZIP" });
+    const importButton = screen.getByRole("button", { name: "Select Platform-Tools ZIP…" });
     await user.click(importButton);
     expect(screen.getByRole("button", { name: "Choosing ZIP…" })).toBeTruthy();
     expect((screen.getByRole("button", { name: "Choosing ZIP…" }) as HTMLButtonElement).disabled).toBe(true);
 
     await act(async () => picker.resolve({ outcome: "selected", selectionHandle: "selection-opaque" }));
-    expect(await screen.findByRole("button", { name: "Validating and installing…" })).toBeTruthy();
+    expect(await screen.findByRole("button", { name: "Checking and installing…" })).toBeTruthy();
     expect(mockApi.installPlatformToolsSelection).toHaveBeenCalledWith("selection-opaque", undefined);
 
     await act(async () => installation.resolve(readyAdb));
@@ -634,7 +695,7 @@ describe("Phase 5B workflow surfaces", () => {
     expect(secondDialog.textContent).not.toMatch(/authority|handle/i);
     await user.click(within(secondDialog).getByRole("button", { name: "Remove" }));
     expect(mockApi.removePlatformTools).toHaveBeenCalledWith(7);
-    await screen.findByRole("heading", { name: "Android SDK Platform-Tools is required" });
+    await screen.findByRole("heading", { name: "Set up Android Platform-Tools" });
   });
 
   test("refresh is single-flight and completion feedback expires after five seconds", async () => {
@@ -677,7 +738,7 @@ describe("Phase 5B workflow surfaces", () => {
 
     await waitFor(() => expect(mockApi.restartRuntime).toHaveBeenCalledTimes(1));
     expect(mockApi.stageRecoveryDraft).not.toHaveBeenCalled();
-    expect(screen.queryByRole("alertdialog", { name: "Restart the runtime?" })).toBeNull();
+    expect(screen.queryByRole("alertdialog", { name: "Restart the app service?" })).toBeNull();
     expect(screen.getByRole("heading", { name: "Choose an Android device" })).toBeTruthy();
   });
 
@@ -741,10 +802,10 @@ describe("Phase 5B workflow surfaces", () => {
 
     const restartButton = await openSupportAction(user, "Restart app service", supportSnapshot({ serviceFailure: true }));
     await user.click(restartButton);
-    const dialog = await screen.findByRole("alertdialog", { name: "Restart the runtime?" });
+    const dialog = await screen.findByRole("alertdialog", { name: "Restart the app service?" });
     expect(dialog.textContent).toMatch(/Affected fields: Account token/);
     expect(dialog.textContent).not.toMatch(/do-not-display|recipe\.one\/token/);
-    await user.click(within(dialog).getByRole("button", { name: "Restart" }));
+    await user.click(within(dialog).getByRole("button", { name: "Restart app service" }));
 
     expect(mockApi.restartRuntime).toHaveBeenCalledTimes(1);
     await screen.findByRole("heading", { name: "Choose an Android device" });
@@ -778,12 +839,12 @@ describe("Phase 5B workflow surfaces", () => {
     await advanceToInputs(user);
     const input = screen.getByLabelText("Account token") as HTMLInputElement;
     await user.type(input, "keep-current-value");
-    const supportButton = screen.getByRole("button", { name: "Support & Storage" });
+    const supportButton = screen.getByRole("button", { name: "Troubleshooting" });
     vi.spyOn(supportButton, "getClientRects").mockReturnValue([{}] as unknown as DOMRectList);
     const restartButton = await openSupportAction(user, "Restart app service", supportSnapshot({ serviceFailure: true }));
 
     await user.click(restartButton);
-    const dialog = await screen.findByRole("alertdialog", { name: "Restart the runtime?" });
+    const dialog = await screen.findByRole("alertdialog", { name: "Restart the app service?" });
     expect(dialog.textContent).not.toMatch(/keep-current-value|recipe\.one\/token/);
     await user.click(within(dialog).getByRole("button", { name: "Cancel" }));
 
@@ -825,7 +886,7 @@ describe("Phase 5B workflow surfaces", () => {
 
     await user.click(await openSupportAction(user, "Restart app service", supportSnapshot({ serviceFailure: true })));
 
-    expect(screen.queryByRole("alertdialog", { name: "Restart the runtime?" })).toBeNull();
+    expect(screen.queryByRole("alertdialog", { name: "Restart the app service?" })).toBeNull();
     expect(await screen.findByText("Setup restored after restart")).toBeTruthy();
     expect(mockApi.stageRecoveryDraft).toHaveBeenCalledWith(expect.objectContaining({
       devicePlan: "plan.supported",
@@ -859,7 +920,7 @@ describe("Phase 5B workflow surfaces", () => {
     expect(input.value).toBe("dark");
     expect(screen.getByRole("heading", { name: "Provide required files and options" })).toBeTruthy();
     await waitFor(() => expect(
-      (screen.getByRole("button", { name: "Support & Storage" }) as HTMLButtonElement).disabled,
+      (screen.getByRole("button", { name: "Troubleshooting" }) as HTMLButtonElement).disabled,
     ).toBe(false));
     expect(document.body.textContent).not.toMatch(/runtime_restart_failed/);
   });
@@ -1084,18 +1145,18 @@ describe("Phase 5G troubleshooting and local-state maintenance", () => {
     expect(screen.queryByRole("button", { name: "Restart app service" })).toBeNull();
     expect(screen.queryByRole("button", { name: "Replace managed Platform-Tools" })).toBeNull();
     expect(screen.queryByRole("button", { name: "Remove managed Platform-Tools" })).toBeNull();
-    expect(screen.getByRole("button", { name: "Support & Storage" })).toBeTruthy();
+    expect(screen.getByRole("button", { name: "Troubleshooting" })).toBeTruthy();
   });
 
   test("renders a concise healthy summary and keeps subsystem detail collapsed", async () => {
     const user = userEvent.setup();
     await renderReadyApp();
 
-    await user.click(screen.getByRole("button", { name: "Support & Storage" }));
-    const dialog = await screen.findByRole("dialog", { name: "Diagnostics and artifact cache" });
+    await user.click(screen.getByRole("button", { name: "Troubleshooting" }));
+    const dialog = await screen.findByRole("dialog", { name: "Troubleshooting and app storage" });
     expect(within(dialog).getByText("EmuChef is ready. No troubleshooting issues were found.")).toBeTruthy();
     expect(dialog.querySelectorAll("#troubleshooting-heading ~ article")).toHaveLength(0);
-    const details = within(dialog).getByText("View all system status and maintenance actions").closest("details");
+    const details = within(dialog).getByText("View all troubleshooting status and maintenance actions").closest("details");
     expect(details?.open).toBe(false);
   });
 
@@ -1106,8 +1167,8 @@ describe("Phase 5G troubleshooting and local-state maintenance", () => {
     mockApi.supportSnapshot.mockResolvedValue(supportSnapshot({ serviceFailure: true }));
     await renderReadyApp();
 
-    await user.click(screen.getByRole("button", { name: "Support & Storage" }));
-    const dialog = await screen.findByRole("dialog", { name: "Diagnostics and artifact cache" });
+    await user.click(screen.getByRole("button", { name: "Troubleshooting" }));
+    const dialog = await screen.findByRole("dialog", { name: "Troubleshooting and app storage" });
     expect(within(dialog).getAllByText("The local app service could not start.").length).toBeGreaterThan(0);
     expect(dialog.textContent).not.toMatch(/sidecar|runtime handle|internal_/i);
     await user.click(within(dialog).getByRole("button", { name: "Copy support code" }));
@@ -1120,11 +1181,11 @@ describe("Phase 5G troubleshooting and local-state maintenance", () => {
     const user = userEvent.setup();
     await renderReadyApp();
 
-    await user.click(screen.getByRole("button", { name: "Support & Storage" }));
-    const dialog = await screen.findByRole("dialog", { name: "Diagnostics and artifact cache" });
+    await user.click(screen.getByRole("button", { name: "Troubleshooting" }));
+    const dialog = await screen.findByRole("dialog", { name: "Troubleshooting and app storage" });
     expect(within(dialog).getByText(/stays on this Mac until you choose to share it/i)).toBeTruthy();
     expect(within(dialog).getByText(/exporting never uploads anything/i)).toBeTruthy();
-    expect(within(dialog).getByText("The app-owned artifact cache is empty.")).toBeTruthy();
+    expect(within(dialog).getByText(/The app-owned cache is empty/)).toBeTruthy();
     expect(within(dialog).getByText("There are no unused removable cache entries.")).toBeTruthy();
     expect((within(dialog).getByRole("button", { name: "Clear unused" }) as HTMLButtonElement).disabled).toBe(true);
     expect((within(dialog).getByRole("button", { name: "Clear all removable" }) as HTMLButtonElement).disabled).toBe(true);
@@ -1154,7 +1215,7 @@ describe("Phase 5G troubleshooting and local-state maintenance", () => {
     });
     await renderReadyApp();
 
-    await user.click(screen.getByRole("button", { name: "Support & Storage" }));
+    await user.click(screen.getByRole("button", { name: "Troubleshooting" }));
     await user.click(await screen.findByRole("button", { name: "Clear Recents" }));
     const confirmation = screen.getByRole("alertdialog", { name: "Clear Recents?" });
     expect(confirmation.textContent).toContain("Saved setup files, the active setup, and portable intent remain unchanged.");
@@ -1172,7 +1233,7 @@ describe("Phase 5G troubleshooting and local-state maintenance", () => {
     mockApi.supportSnapshot.mockResolvedValue(snapshot);
     await renderReadyApp();
 
-    await user.click(screen.getByRole("button", { name: "Support & Storage" }));
+    await user.click(screen.getByRole("button", { name: "Troubleshooting" }));
     await user.click(await screen.findByRole("button", { name: "Restart app service" }));
 
     expect(await screen.findByText("This troubleshooting action is not supported by this version of EmuChef.")).toBeTruthy();
@@ -1217,8 +1278,9 @@ describe("Phase 5F saved setup management", () => {
     await user.click(screen.getByRole("button", { name: "Open…" }));
     expect(await screen.findByRole("heading", { name: "Review Travel setup" })).toBeTruthy();
     expect(screen.getByText("Supported setup")).toBeTruthy();
-    expect(screen.getByText(/historical compatibility cannot be established/)).toBeTruthy();
-    expect(screen.getByText("There are no current setup choices to compare.")).toBeTruthy();
+    expect(screen.getByText(/next explicit save will record current compatibility information/)).toBeTruthy();
+    expect(screen.getByText("No setup is currently in progress.")).toBeTruthy();
+    expect(document.body.textContent).not.toMatch(/Schema 1|current catalog|pending_first_v2_save/);
     expect(document.body.textContent).not.toContain("/Users/");
     expect(mockApi.confirmSavedConfigurationPreview).not.toHaveBeenCalled();
   });

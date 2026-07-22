@@ -1,4 +1,9 @@
 import { executionDuration } from "./app-helpers";
+import type {
+  ExecutionStatus,
+  RecipeExecutionStatus,
+  StepExecutionStatus,
+} from "./types";
 import type { ExecutionWorkflowState } from "./workflow";
 
 type PresentedExecution = Extract<
@@ -8,6 +13,41 @@ type PresentedExecution = Extract<
 
 type ReportState = "idle" | "exporting" | "saved" | "failed";
 type LaunchState = "idle" | "launching" | "launched" | "failed";
+
+const EXECUTION_STATUS_LABELS: Record<ExecutionStatus, string> = {
+  queued: "Queued",
+  running: "In progress",
+  succeeded: "Completed",
+  succeeded_with_warnings: "Completed with warnings",
+  failed: "Failed",
+  cancelled: "Cancelled",
+};
+
+const RECIPE_STATUS_LABELS: Record<RecipeExecutionStatus, string> = {
+  pending: "Waiting",
+  running: "In progress",
+  succeeded: "Completed",
+  succeeded_with_warnings: "Completed with warnings",
+  failed: "Failed",
+  blocked: "Blocked",
+  cancelled: "Cancelled",
+};
+
+const STEP_STATUS_LABELS: Record<StepExecutionStatus, string> = {
+  pending: "Waiting",
+  running: "In progress",
+  succeeded: "Completed",
+  skipped: "Skipped",
+  failed: "Failed",
+  blocked: "Blocked",
+  cancelled: "Cancelled",
+};
+
+function eventStatusLabel(status: string | null): string | null {
+  if (!status) return null;
+  return ({ ...EXECUTION_STATUS_LABELS, ...RECIPE_STATUS_LABELS, ...STEP_STATUS_LABELS } as Record<string, string>)[status]
+    ?? "Updated";
+}
 
 function localTimestamp(value: string | null): string {
   if (!value) return "Starting";
@@ -46,7 +86,7 @@ export function ExecutionStep({
     return (
       <>
         <p className="eyebrow">
-          {execution.mode === "real" ? "REAL-DEVICE OUTCOME UNKNOWN" : "SIMULATED RUN UNAVAILABLE"}
+          {execution.mode === "real" ? "Real-device result unavailable" : "Simulation unavailable"}
         </p>
         <h2 data-focus-fallback="workflow" data-step-heading tabIndex={-1}>
           {execution.mode === "real"
@@ -56,11 +96,11 @@ export function ExecutionStep({
         <p className="warning">{execution.message}</p>
         <p>
           {execution.mode === "real"
-            ? "The outcome cannot be inferred. Reconnect and create a fresh review; this execution cannot be resumed, retried in place, restored, or rolled back."
-            : "No execution history is persisted across an app or sidecar restart."}
+            ? "The outcome cannot be inferred. Reconnect and create a fresh review; this installation cannot be resumed, retried in place, restored, or rolled back."
+            : "Simulation history is not kept after the app service restarts."}
         </p>
         <button onClick={onPrepareRepair} disabled={repairPreparing}>
-          {repairPreparing ? "Preparing fresh plan…" : "Repair configuration"}
+          {repairPreparing ? "Preparing fresh plan…" : "Repair setup"}
         </button>
         <button className="secondary" onClick={onReturn}>
           {execution.mode === "real" ? "Start a fresh workflow" : "View previous review"}
@@ -81,11 +121,11 @@ export function ExecutionStep({
   return (
     <>
       <p className="eyebrow">
-        {execution.mode === "real" ? "REAL DEVICE" : "SIMULATED / DRY RUN"}
+        {execution.mode === "real" ? "Real device" : "Simulation"}
       </p>
       <h2 data-focus-fallback="workflow" data-step-heading tabIndex={-1}>
         {execution.kind === "terminal"
-          ? `${execution.mode === "real" ? "Real-device execution" : "Simulation"} ${snapshot.status.replaceAll("_", " ")}`
+          ? `${execution.mode === "real" ? "Real-device installation" : "Simulation"} ${EXECUTION_STATUS_LABELS[snapshot.status].toLowerCase()}`
           : execution.mode === "real"
             ? "Applying the reviewed setup"
             : "Simulating the reviewed setup"}
@@ -93,13 +133,13 @@ export function ExecutionStep({
       {counts.total > 0 ? (
         <div className="execution-progress">
           <label htmlFor="execution-progress">
-            Execution progress: {Math.round((completedCount / counts.total) * 100)}%
+            {execution.mode === "real" ? "Installation" : "Simulation"} progress: {Math.round((completedCount / counts.total) * 100)}%
           </label>
           <progress id="execution-progress" max={counts.total} value={completedCount} />
         </div>
       ) : (
         <p aria-busy="true" role="status">
-          Execution progress is starting; the total step count is not available yet.
+          {execution.mode === "real" ? "Installation" : "Simulation"} progress is starting; the total step count is not available yet.
         </p>
       )}
       {snapshot.progress.currentAction && (
@@ -119,7 +159,7 @@ export function ExecutionStep({
         </p>
       )}
       <dl className="execution-summary">
-        <div><dt>Status</dt><dd>{snapshot.status.replaceAll("_", " ")}</dd></div>
+        <div><dt>Status</dt><dd>{EXECUTION_STATUS_LABELS[snapshot.status]}</dd></div>
         <div><dt>Started</dt><dd>{localTimestamp(snapshot.startedAt)}</dd></div>
         {duration && <div><dt>Duration</dt><dd>{duration}</dd></div>}
         <div><dt>Completed</dt><dd>{counts.completed}</dd></div>
@@ -129,22 +169,28 @@ export function ExecutionStep({
       </dl>
       {snapshot.completion.partialChangesPossible && (
         <p className="warning">
-          Some device changes completed before this {snapshot.status} result.
-          The result remains {snapshot.status}; EmuChef does not infer partial success or rollback completed work.
+          Some device changes completed before this {EXECUTION_STATUS_LABELS[snapshot.status].toLowerCase()} result.
+          The result remains {EXECUTION_STATUS_LABELS[snapshot.status].toLowerCase()}; EmuChef does not infer partial success or rollback completed work.
         </p>
       )}
-      {snapshot.warnings.map((issue, index) => (
-        <div className="warning" key={`warning-${index}`}>
-          <p>{issue.message}</p>
-          <small><strong>{issue.remediation.title}:</strong> {issue.remediation.message}</small>
-        </div>
-      ))}
-      {snapshot.errors.map((issue, index) => (
-        <div className="error" key={`error-${index}`}>
-          <p>{issue.message}</p>
-          <small><strong>{issue.remediation.title}:</strong> {issue.remediation.message}</small>
-        </div>
-      ))}
+      {(snapshot.warnings.length > 0 || snapshot.errors.length > 0) && (
+        <section aria-label="Run notices" className="result-card-list">
+          {snapshot.warnings.map((issue, index) => (
+            <article className="result-card result-warning" key={`warning-${index}`}>
+              <h3>Warning {index + 1}</h3>
+              <p>{issue.message}</p>
+              <small><strong>{issue.remediation.title}:</strong> {issue.remediation.message}</small>
+            </article>
+          ))}
+          {snapshot.errors.map((issue, index) => (
+            <article className="result-card result-failed" key={`error-${index}`}>
+              <h3>Problem {index + 1}</h3>
+              <p>{issue.message}</p>
+              <small><strong>{issue.remediation.title}:</strong> {issue.remediation.message}</small>
+            </article>
+          ))}
+        </section>
+      )}
       {snapshot.recipes.map((recipe, recipeIndex) => (
         <article className={`execution-group status-${recipe.status}`} key={`${recipe.name}-${recipeIndex}`}>
           <div className="execution-heading">
@@ -152,13 +198,13 @@ export function ExecutionStep({
               <h3>{recipe.name}</h3>
               {recipe.description && <p>{recipe.description}</p>}
             </div>
-            <span className="execution-status">{recipe.status.replaceAll("_", " ")}</span>
+            <span className="execution-status">{RECIPE_STATUS_LABELS[recipe.status]}</span>
           </div>
           <ol>
             {recipe.steps.map((step, stepIndex) => (
               <li key={`${step.name}-${stepIndex}`} className={`step-${step.status}`}>
                 <strong>{step.note ?? step.name}</strong>
-                <span>{step.status.replaceAll("_", " ")}</span>
+                <span>{STEP_STATUS_LABELS[step.status]}</span>
                 {step.note && step.note !== step.name && <small>{step.name}</small>}
                 {step.message && <small>{step.message}</small>}
               </li>
@@ -175,7 +221,7 @@ export function ExecutionStep({
             {execution.events.map((event) => (
               <li key={event.sequence}>
                 <time>{localTimestamp(event.timestamp)}</time> {event.label}
-                {event.status && ` · ${event.status.replaceAll("_", " ")}`}
+                {event.status && ` · ${eventStatusLabel(event.status)}`}
               </li>
             ))}
           </ol>
@@ -231,7 +277,7 @@ export function ExecutionStep({
                 {repairPreparing
                   ? "Preparing fresh plan…"
                   : snapshot.status === "succeeded_with_warnings"
-                    ? "Repair configuration"
+                    ? "Repair setup"
                     : "Repair setup"}
               </button>
               <p className="disabled-reason" id="execution-repair-explanation">

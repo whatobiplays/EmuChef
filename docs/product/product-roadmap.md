@@ -27,7 +27,7 @@ Detailed evidence remains in the relevant product and release documents. In part
 
 | Product or track | Current state | Next priority |
 |---|---|---|
-| EmuChef proper | Phase 5A through 5G completed | Phase 5H visual consistency and final product polish |
+| EmuChef proper | Phase 5A through 5H completed | Manual Phase 5H macOS visual and accessibility qualification |
 | Config Editor | Authored generation implemented through GitHub release-pattern testing | Later refinements remain unsequenced unless explicitly promoted |
 | Shared Runtime | Rust is the sole runtime and retains device, filesystem, planning, execution, validation, and protocol authority | Add shared capabilities only when required by a bounded product slice |
 | Release engineering | Deliberately deferred from normal Phase 5 product work | Resume only when the owner declares the relevant application release-comfortable |
@@ -231,8 +231,8 @@ fresh-review recovery, backend-authorized launch, and report export state scoped
 to one execution identity. Snapshot and event polling reject stale generations
 and handles, retain an independent event cursor, and prevent terminal-state
 downgrade. The Phase 5E audit findings UX-019, UX-021, UX-022, UX-034, and
-UX-039 through UX-042 are resolved with linked regressions; UX-020 remains open
-under Phase 5H. Frontend, security, backend workspace, Tauri workspace, format,
+UX-039 through UX-042 are resolved with linked regressions; UX-020 is resolved
+by the Phase 5H result-card presentation. Frontend, security, backend workspace, Tauri workspace, format,
 build, and diff gates passed. This is automated source/fixture evidence only;
 it does not claim real-device, packaged-GUI, signing, packaging, or release
 qualification.
@@ -304,7 +304,7 @@ actions out of React. Corrective actions use subsystem revisions, cache and
 granular-reset mutations use opaque scoped authorization with immediate
 revalidation, and only app-managed Platform-Tools can be replaced or removed.
 
-Support & Storage emphasizes affected subsystems, keeps healthy detail
+Troubleshooting emphasizes affected subsystems, keeps healthy detail
 collapsed, exposes copyable public codes and consequences, scopes notices to
 modal/operation generations, disables empty cache operations from authoritative
 counts, and provides local-only diagnostics disclosure. Diagnostics schema 2
@@ -326,7 +326,7 @@ release qualification.
 ## 13. Phase 5H — Visual Consistency and Final Product Polish
 
 **Owner: EmuChef proper**  
-**Status: Next**
+**Status: Completed**
 
 ### Objective
 
@@ -347,6 +347,23 @@ Create a cohesive, comfortable end-user experience after workflow behavior stabi
 ### Exit criteria
 
 The full EmuChef proper application feels visually and linguistically coherent, and no major end-user surface appears unfinished or developer-oriented.
+
+### Completion evidence
+
+The seven Phase 5H audit findings UX-001, UX-004, UX-005, UX-009, UX-018,
+UX-020, and UX-025 are resolved with linked source and DOM regressions. The
+application uses semantic visual tokens and shared surface styles, plain
+end-user terminology, the approved icon master and generated Tauri assets, a
+package-metadata-authoritative native About surface, shared accessible dialog
+placement, and structurally distinct failed and blocked results.
+
+Automated evidence targets approximately 380-pixel reflow, 200% zoom behavior,
+forced colors, reduced motion, focus visibility, disabled explanations,
+screen-reader semantics, icon asset structure, and dynamic About version
+authority. It does not claim manual macOS qualification. Dock and Finder icon
+rendering, packaged application and DMG icon presentation, 200% zoom in the
+packaged WebView, forced colors or increased contrast, reduced motion, and a
+screen-reader workflow remain explicitly unperformed.
 
 # Part II — Config Editor Roadmap
 
@@ -568,14 +585,16 @@ Cross-platform packaging and release automation must define separate deliverable
 
 ## 24. Immediate next action
 
-### Phase 5H — Visual Consistency and Final Product Polish
+### Manual Phase 5H macOS visual and accessibility qualification
 
 **Owner: EmuChef proper**  
 **Status: Next**
 
-Begin from the objective, candidate scope, and exit criteria in Section 13 and
-the open Phase 5H findings in the Phase 5A end-to-end UX audit. Preserve the
-completed troubleshooting, saved-setup, review, execution, recovery, and
-Rust/Tauri authority contracts. Keep broad visual consistency work separate
-from release engineering and do not reopen completed Phase 5A-5G behavior
-without concrete regression evidence.
+Run the bounded manual checks that automated Phase 5H evidence cannot complete:
+approximately 380-pixel reflow and packaged-WebView 200% zoom, forced colors or
+increased contrast, reduced motion, VoiceOver workflow and dialog behavior,
+and macOS Dock, Finder, application-bundle, and DMG icon rendering. Record
+observations without expanding into release engineering. Preserve the completed
+troubleshooting, saved-setup, review, execution, recovery, visual-system, and
+Rust/Tauri authority contracts, and do not reopen Phase 5A-5H behavior without
+concrete regression evidence.

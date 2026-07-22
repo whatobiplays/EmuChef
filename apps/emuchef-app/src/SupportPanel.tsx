@@ -174,7 +174,7 @@ export function SupportPanel({
     >
       {cleanupDialog ? (
         <div className="confirmation-content">
-          <p className="eyebrow">CONFIRM LOCAL DATA CHANGE</p>
+          <p className="eyebrow">Confirm local data change</p>
           <h2 id="cache-cleanup-title">
             {cleanupDialog.payload.kind === "cache" ? "Remove app-owned cache entries?" : `${cleanupDialog.payload.category.label}?`}
           </h2>
@@ -189,7 +189,7 @@ export function SupportPanel({
               <p><strong>Affected scope:</strong> {cleanupDialog.payload.category.affectedScope}</p>
             </div>
           )}
-          <div className="button-row">
+          <div className="button-row dialog-actions">
             <button
               className="secondary"
               onClick={() => cleanupController.settle(cleanupDialog.id, false)}
@@ -203,11 +203,11 @@ export function SupportPanel({
         </div>
       ) : (
         <>
-          <div className="support-heading">
+          <div className="dialog-heading">
             <div>
-              <p className="eyebrow">SUPPORT & STORAGE</p>
-              <h2 id="support-title">Diagnostics and artifact cache</h2>
-              <p id="support-description">Export sanitized support information and manage only app-owned cache entries.</p>
+              <p className="eyebrow">Troubleshooting</p>
+              <h2 id="support-title">Troubleshooting and app storage</h2>
+              <p id="support-description">Review current issues, export safe support information, and manage app-owned cache entries.</p>
             </div>
             <button
               aria-describedby={closeBlocked ? "support-close-reason" : undefined}
@@ -262,7 +262,7 @@ export function SupportPanel({
                     </article>
                   ))}
                 <details>
-                  <summary>View all system status and maintenance actions</summary>
+                  <summary>View all troubleshooting status and maintenance actions</summary>
                   <ul className="outcome-list">
                     {state.snapshot.subsystems.map((subsystem) => (
                       <li key={`all-${subsystem.id}`}>
@@ -308,7 +308,7 @@ export function SupportPanel({
                 </details>
               </>
             ) : (
-              <p>Export a sanitized local ZIP. It excludes paths, serials, credentials, raw logs, and configuration contents.</p>
+              <p>Export a sanitized local ZIP. It excludes paths, serials, credentials, raw logs, and saved-setup contents.</p>
             )}
             <button
               aria-describedby={state.exporting ? "diagnostics-export-reason" : undefined}
@@ -325,8 +325,8 @@ export function SupportPanel({
           <section className="support-section" aria-labelledby="artifact-cache-heading">
             <div className="support-heading">
               <div>
-                <h3 id="artifact-cache-heading">Artifact cache</h3>
-                <p className="fine-print">Only app-owned logical cache entries can be removed.</p>
+                <h3 id="artifact-cache-heading">App-owned cache</h3>
+                <p className="fine-print">Only entries managed by EmuChef can be removed here.</p>
               </div>
               <button
                 aria-describedby={state.loading || state.cleaning ? "cache-refresh-reason" : undefined}
@@ -359,7 +359,7 @@ export function SupportPanel({
                 </details>
               </>
             )}
-            <div className="cache-list" role="region" aria-label="App-owned artifact cache entries" tabIndex={0}>
+            <div className="cache-list" role="region" aria-label="App-owned cache entries" tabIndex={0}>
               <ul>
                 {inventory?.entries.map((entry, index) => {
                   const inputId = stableDomId("cache-entry", entry.artifactLabel, index);
@@ -391,7 +391,7 @@ export function SupportPanel({
                   );
                 })}
               </ul>
-              {inventory && inventory.entries.length === 0 && <p className="empty-state">The app-owned artifact cache is empty.</p>}
+              {inventory && inventory.entries.length === 0 && <p className="empty-state">The app-owned cache is empty. Downloaded setup files will appear here when EmuChef needs them.</p>}
               {!inventory && !state.loading && <p className="empty-state">Cache inventory is unavailable. Refresh to try again.</p>}
             </div>
             <div className="button-row">
@@ -434,7 +434,7 @@ export function SupportPanel({
             )}
           </section>
           <section className="support-section" aria-labelledby="reset-local-state-heading">
-            <h3 id="reset-local-state-heading">Reset Local App State</h3>
+            <h3 id="reset-local-state-heading">Reset local app data</h3>
             <p>Reset one visible app-owned category at a time. Saved setup files, external content, Platform-Tools, and exported files are not included.</p>
             {state.snapshot?.resetCategories.map((category) => (
               <article className="cache-entry" key={category.id}>

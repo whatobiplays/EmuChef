@@ -178,7 +178,7 @@ Add one subsection per finding using the template below. Finding IDs are sequent
 - Evidence: `Observed`
 - Scenario(s): `A14`
 - Proposed phase: `5H`
-- Status: `Open`
+- Status: `Resolved 2026-07-22`
 
 **Preconditions**
 
@@ -215,6 +215,14 @@ The controls remain usable, but the user must infer the relationship between eac
 **Notes for later implementation**
 
 Treat this as a layout and hierarchy correction, not a workflow-state redesign. Likely remedies include grouping each action with its disabled reason, reducing excessive horizontal distribution, and visually separating configuration actions from runtime recovery actions.
+
+**Resolution evidence (2026-07-22)**
+
+The saved-setup bar now uses a compact grid with the setup state, grouped file
+actions, and associated disabled-state explanations. At narrow widths it
+reflows without changing the DOM action order. `App.dom.test.tsx` verifies the
+state label, action grouping, explanations, and safe Cancel, Save, Discard
+order; `product-polish.test.ts` verifies the responsive layout source.
 
 ### UX-002 — Workflow heading receives unexpected initial focus when the window appears
 
@@ -329,7 +337,7 @@ the marker while an unclean process leaves it for next-launch detection.
 - Evidence: `Observed`
 - Scenario(s): `A01`
 - Proposed phase: `5H`
-- Status: `Open`
+- Status: `Resolved 2026-07-22`
 
 **Preconditions**
 
@@ -367,6 +375,13 @@ Ignore the identifier.
 
 Keep the readiness signal but replace the badge with user-facing text such as `Ready`, or remove it entirely if readiness is already clear from the workflow. Preserve the catalog identity only in Support & Storage, diagnostics, or another explicitly technical details surface when it is useful for troubleshooting.
 
+**Resolution evidence (2026-07-22)**
+
+The header now displays only `Ready`; the ordinary status surface labels the
+subsystem `App service` and does not project the catalog identifier.
+`App.dom.test.tsx` verifies that readiness remains visible while the catalog ID
+and implementation terminology are absent.
+
 ### UX-005 — Application uses the wrong icon
 
 - Type: `Defect`
@@ -375,7 +390,7 @@ Keep the readiness signal but replace the badge with user-facing text such as `R
 - Evidence: `Observed`
 - Scenario(s): `A01`
 - Proposed phase: `5H`
-- Status: `Open`
+- Status: `Resolved 2026-07-22`
 
 **Preconditions**
 
@@ -411,6 +426,16 @@ None for end users.
 **Notes for later implementation**
 
 Replace the packaged icon source with the approved master asset, regenerate all required macOS/Tauri icon sizes without altering the artwork, and verify Finder, Dock, application bundle, DMG, and window presentation after clearing macOS icon caches where necessary.
+
+**Resolution evidence (2026-07-22)**
+
+The owner-approved PNG is checked in byte-for-byte as `app-icon.png` with
+SHA-256 `c0075df717c1adcc9351d889bbb6412f3855b3d14f9cc12e19291c73f8203587`.
+The 512-by-512 Tauri PNG and the multi-resolution ICNS were generated from that
+square master without content reinterpretation. `product-polish.test.ts`
+verifies master identity and dimensions, generated PNG metadata, ICNS decoded
+representations, Tauri references, and removal of the superseded SVG. Manual
+Dock, Finder, bundle, DMG, and icon-cache qualification remains unperformed.
 
 #### UX-006 — Refresh leaves stale cache-operation notifications visible
 
@@ -586,7 +611,7 @@ disabled bulk actions, and both explanations.
 - Evidence: `Observed`
 - Scenario(s): `A01`
 - Proposed phase: `5H`
-- Status: `Open`
+- Status: `Resolved 2026-07-22`
 
 **Preconditions**
 
@@ -622,6 +647,13 @@ None required; the status remains understandable, but the label exposes implemen
 **Notes for later implementation**
 
 Rename the user-facing label without changing runtime authority or diagnostics. Detailed implementation information may remain available in exported diagnostics or developer-only surfaces.
+
+**Resolution evidence (2026-07-22)**
+
+The ordinary status panel now uses the user-facing label `App service`, while
+native authority and diagnostics remain unchanged. `App.dom.test.tsx` and
+`product-polish.test.ts` verify that implementation-language labels are absent
+from ordinary application source and rendered status content.
 
 #### UX-010 — Platform-Tools maintenance actions are exposed in the primary workflow
 
@@ -1043,7 +1075,7 @@ The save dialog is titled `Name this setup`, labels the value `Setup name`, and 
 - Evidence: `Observed`
 - Scenario(s): `A21`
 - Proposed phase: `5H`
-- Status: `Open`
+- Status: `Resolved 2026-07-22`
 
 **Preconditions**
 
@@ -1080,6 +1112,15 @@ Select the text-style `Close` control or use Escape if supported.
 **Notes for later implementation**
 
 Use one consistent modal dismissal pattern across Updates, Support & Storage, recovery prompts, and other dialogs. Preserve focus containment, deterministic focus restoration, Escape handling, and safe-dismissal rules.
+
+**Resolution evidence (2026-07-22)**
+
+Updates now uses the shared dialog heading and footer-action placement with a
+secondary Close button. It remains an `AccessibleDialog`, supports Escape,
+traps and restores focus, and blocks dismissal with an announced visible
+explanation while an update check or browser handoff is active.
+`UpdatesPanel.dom.test.tsx` verifies the shared placement and each preserved
+interaction contract.
 
 ### UX-019 — Simulation start timestamp is shown as a raw machine-formatted value
 
@@ -1138,7 +1179,7 @@ The execution UI formats retained RFC 3339 timestamps with the user's locale and
 - Evidence: `Observed`
 - Scenario(s): `A12`, `A13`
 - Proposed phase: `5H`
-- Status: `Open`
+- Status: `Resolved 2026-07-22`
 
 **Preconditions**
 
@@ -1173,6 +1214,14 @@ Read each repeated text block carefully and infer card boundaries from subtle ed
 **Notes for later implementation**
 
 Add consistent card spacing and stronger per-item hierarchy. Consider grouping each failure with the affected recipe or step name rather than presenting detached generic cards.
+
+**Resolution evidence (2026-07-22)**
+
+Failed and blocked results now render as separate semantic cards in a spaced
+result list. Failed work uses a solid boundary, blocked work uses a dashed
+boundary, and each card includes its affected work heading, so status is not
+communicated by color alone. `ExecutionStep.dom.test.tsx` verifies item order,
+distinct status classes, headings, and the absence of raw status values.
 
 ### UX-021 — Simulation failure messages are generic, repetitive, and do not identify the affected work
 
@@ -1328,9 +1377,11 @@ This duplicate entry is resolved by the same localized-timestamp implementation 
 - Evidence: `Observed`
 - Scenario(s): `A12`, `A13`
 - Proposed phase: `5H`
-- Status: `Open`
+- Status: `Resolved 2026-07-22`
 
-This is a duplicate description of the canonical UX-020 entry above. UX-020 remains assigned only to Phase 5H; Phase 5E does not claim failure-card spacing or broad visual separation work.
+This is a duplicate description of the canonical UX-020 entry above. It is
+resolved by the Phase 5H result-card implementation and regression documented
+in the canonical entry; Phase 5E does not claim that work.
 
 **Preconditions**
 
@@ -1561,7 +1612,7 @@ Create a dedicated recipe-selection stage before input collection. The recipe ca
 - Evidence: `Observed`
 - Scenario(s): `A02`
 - Proposed phase: `5H`
-- Status: `Open`
+- Status: `Resolved 2026-07-22`
 
 **Preconditions**
 
@@ -1597,6 +1648,14 @@ Users can ignore the technical language and use the two setup buttons.
 **Notes for later implementation**
 
 Prefer direct wording such as: `Download the macOS Platform-Tools ZIP from Google, then select it here.` A short privacy/storage note may remain in Help or Support documentation, but repository and app-bundle terminology should not appear in the normal setup path.
+
+**Resolution evidence (2026-07-22)**
+
+The setup surface now tells the user to download the macOS Platform-Tools ZIP
+from Google and select it in EmuChef. Its actions read `Open Google download
+page` and `Select Platform-Tools ZIP…`, and progress is described as checking
+and installing. `App.dom.test.tsx` verifies the user-facing instructions and
+that repository, bundle, validation, and managed-installation wording is absent.
 
 ### UX-026 — Platform-Tools import reports validation before the user selects a file
 
@@ -2899,13 +2958,13 @@ Phase 5B completed on 2026-07-19. Its foundational workflow-state findings are r
 
 #### Defects
 
-- `UX-001`: Unsaved-configuration panel has a broken horizontal layout.
-- `UX-004`: Runtime status badge exposes an internal catalog identifier.
-- `UX-005`: Application uses the wrong icon.
-- `UX-009`: System Status exposes the implementation language.
-- `UX-018`: Updates dialog uses a non-standard Close control.
-- `UX-020`: Simulation failure cards have insufficient visual separation.
-- `UX-025`: Platform-Tools setup copy is overly technical.
+- `UX-001` (resolved 2026-07-22): Unsaved-configuration panel layout and hierarchy.
+- `UX-004` (resolved 2026-07-22): Header readiness without internal catalog identity.
+- `UX-005` (resolved 2026-07-22): Approved application icon source and generated assets.
+- `UX-009` (resolved 2026-07-22): User-facing app-service status terminology.
+- `UX-018` (resolved 2026-07-22): Shared, safely dismissible Updates dialog controls.
+- `UX-020` (resolved 2026-07-22): Semantically and visually separated result cards.
+- `UX-025` (resolved 2026-07-22): Plain-language Platform-Tools setup guidance.
 
 #### Missing MVP features
 

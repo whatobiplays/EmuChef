@@ -22,7 +22,7 @@ export function FrontendErrorFallback() {
 
   return (
     <main className="blocking-card" id="main-content" tabIndex={-1} data-focus-fallback="main">
-      <p className="eyebrow">APP DISPLAY ERROR</p>
+      <p className="eyebrow">Display problem</p>
       <h1 ref={headingRef} tabIndex={-1}>EmuChef could not display this screen</h1>
       <p>The frontend encountered an unexpected problem. No device action was started by this fallback.</p>
       <button data-focus-fallback="header" onClick={() => window.location.reload()}>Reload EmuChef safely</button>

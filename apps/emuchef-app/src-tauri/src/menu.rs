@@ -112,6 +112,10 @@ fn build_app_menu<R: Runtime>(app: &AppHandle<R>) -> tauri::Result<Submenu<R>> {
                 Some(AboutMetadata {
                     name: Some(package.name.clone()),
                     version: Some(package.version.to_string()),
+                    credits: Some(
+                        "EmuChef helps prepare supported Android handhelds.\n\nLicensed under the GNU General Public License v3.0."
+                            .to_string(),
+                    ),
                     ..Default::default()
                 }),
             )?,

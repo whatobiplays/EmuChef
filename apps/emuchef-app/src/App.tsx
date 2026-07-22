@@ -111,7 +111,7 @@ export function App({ dialogController: suppliedDialogController }: AppProps = {
   }
   const dialogController = ownedDialogControllerRef.current;
   const [runtime, setRuntime] = useState<RuntimeStatus>({ status: "starting" });
-  const [catalog, setCatalog] = useState<CatalogSummary | null>(null);
+  const [, setCatalog] = useState<CatalogSummary | null>(null);
   const [adb, setAdb] = useState<AdbSetupStatus | null>(null);
   const [devices, setDevices] = useState<DeviceSummary[]>([]);
   const [busy, setBusy] = useState(false);
@@ -554,7 +554,7 @@ export function App({ dialogController: suppliedDialogController }: AppProps = {
             setNotice((current) => `${current ? `${current} ` : ""}The previous session ended unexpectedly. Execution was not resumed.`);
           }
         } else if (session.recovery.state === "invalid_removed") {
-          setNotice("An invalid recovery draft was removed. Start a new configuration or open a saved one.");
+          setNotice("An invalid recovery draft was removed. Start a new setup or open a saved one.");
         } else if (session.interruptedSession) {
           setNotice("The previous session ended unexpectedly. Execution was not resumed.");
         }
@@ -1562,8 +1562,8 @@ export function App({ dialogController: suppliedDialogController }: AppProps = {
 
   const selectDevice = async (deviceHandle: string, invoker: HTMLElement | null = null) => {
     if (savedConfigurationBlocksProgress(savedConfigurationRef.current)) {
-      setNotice("Repair or replace the incompatible saved configuration before selecting a device.");
-      announce("This saved configuration must be repaired before continuing.", true);
+      setNotice("Repair or replace the incompatible saved setup before selecting a device.");
+      announce("This saved setup must be repaired before continuing.", true);
       return;
     }
     const before = workflowRef.current;
@@ -1659,7 +1659,7 @@ export function App({ dialogController: suppliedDialogController }: AppProps = {
         ].filter((item) => item.severity === "error").length;
         announce(errorCount > 0
           ? `Validation needs attention. ${errorCount} ${errorCount === 1 ? "error" : "errors"} found.`
-          : "Validation complete. The configuration is ready for review.", errorCount > 0);
+          : "Validation complete. The setup is ready for review.", errorCount > 0);
       } else {
         announce("An outdated validation response was ignored.");
       }
@@ -1845,7 +1845,7 @@ export function App({ dialogController: suppliedDialogController }: AppProps = {
       if (deviceIsUnsupported(match)) {
         dispatch({ type: "select-device", deviceHandle: prior.deviceHandle, preserveIntent: true });
         dispatch({ type: "device-probed", facts, match });
-        setNotice("This device is not officially supported. Acknowledge that any backend-approved generic setup is not device-specific before choosing one.");
+        setNotice("This device is not officially supported. Acknowledge that any offered generic setup is not device-specific before choosing one.");
         return;
       }
       const devicePlan = prior.devicePlan && match.candidates.some((plan) => plan.planId === prior.devicePlan)
@@ -1854,7 +1854,7 @@ export function App({ dialogController: suppliedDialogController }: AppProps = {
       if (!devicePlan) {
         dispatch({ type: "select-device", deviceHandle: prior.deviceHandle });
         dispatch({ type: "device-probed", facts, match });
-        setNotice("Choose a current device plan before regenerating this configuration.");
+        setNotice("Choose a current device setup before preparing this setup again.");
         return;
       }
       const catalogRecipes = new Set(freshCatalog.recipes.map((recipe) => recipe.id));
@@ -1886,7 +1886,7 @@ export function App({ dialogController: suppliedDialogController }: AppProps = {
         bindings,
       });
       syncSavedIntent(devicePlan, description.selectedRecipes, bindings);
-      setNotice("Configuration refreshed. Resolve any diagnostics, then create and review a new plan.");
+      setNotice("Setup refreshed. Resolve any remaining issues, then create and review a new plan.");
     } catch (error) {
       if (runtimeGenerationRef.current === runtimeGeneration) setNotice(errorMessage(error));
     } finally {
@@ -2122,7 +2122,11 @@ export function App({ dialogController: suppliedDialogController }: AppProps = {
           <h1>Prepare your Android handheld</h1>
         </div>
         <div className="runtime-chip" aria-live="polite">
-          {runtime.status === "ready" ? `Runtime ready · ${catalog?.catalog.version ?? "catalog"}` : runtime.status}
+          {runtime.status === "ready"
+            ? "Ready"
+            : runtime.status === "starting"
+              ? "Starting"
+              : "App service unavailable"}
         </div>
         <div className="button-row header-actions">
           <button
@@ -2133,7 +2137,7 @@ export function App({ dialogController: suppliedDialogController }: AppProps = {
           <button
             className="secondary"
             onClick={(event) => openSupport(event.currentTarget)}
-          >Support & Storage</button>
+          >Troubleshooting</button>
         </div>
       </header>
 
@@ -2206,9 +2210,9 @@ export function App({ dialogController: suppliedDialogController }: AppProps = {
       )}
 
       {runtime.status === "ready" && (
-        <section className="configuration-bar" aria-label="Saved configurations">
-          <div>
-            <strong>{savedConfiguration?.name ?? recoveredName ?? "Unsaved configuration"}</strong>
+        <section className="configuration-bar" aria-label="Saved setups">
+          <div className="configuration-summary-text">
+            <strong>{savedConfiguration?.name ?? recoveredName ?? "Unsaved setup"}</strong>
             <small>
               {savedConfiguration
                 ? `${savedConfigurationValidationLabel(savedConfiguration)}${savedConfiguration.dirty ? " · unsaved edits" : ""}`
@@ -2231,24 +2235,25 @@ export function App({ dialogController: suppliedDialogController }: AppProps = {
 
       {!startupReady ? (
         <main className="blocking-card" data-focus-fallback="main" id="main-content" ref={mainRef} tabIndex={-1}>
-          <p className="eyebrow">RECOVERY CHECK</p>
+          <p className="eyebrow">Recovery check</p>
           <h2 data-step-heading tabIndex={-1}>Checking for recoverable work</h2>
-          <p>EmuChef is validating its app-owned recovery record before the normal workflow starts.</p>
+          <p>EmuChef is checking for a safe recovery draft before setup begins.</p>
         </main>
       ) : runtime.status === "unsupported" || runtime.status === "failed" ? (
         <main className="blocking-card" data-focus-fallback="main" id="main-content" role="alert" ref={mainRef} tabIndex={-1}>
-          <p className="eyebrow">RUNTIME UNAVAILABLE</p>
-          <h2 data-step-heading tabIndex={-1}>EmuChef could not start its Rust runtime</h2>
+          <p className="eyebrow">App service unavailable</p>
+          <h2 data-step-heading tabIndex={-1}>EmuChef could not start its app service</h2>
           <p>{runtime.error.message}</p>
-          <button onClick={(event) => void restartRuntime(event.currentTarget)}>Retry runtime startup</button>
+          <button onClick={(event) => void restartRuntime(event.currentTarget)}>Try starting the app service again</button>
         </main>
       ) : adb?.status !== "ready" ? (
         <main className="blocking-card" aria-labelledby="adb-heading" data-focus-fallback="main" id="main-content" ref={mainRef} tabIndex={-1}>
-          <p className="eyebrow">ONE-TIME SETUP</p>
-          <h2 data-step-heading id="adb-heading" tabIndex={-1}>Android SDK Platform-Tools is required</h2>
+          <p className="eyebrow">One-time setup</p>
+          <h2 data-step-heading id="adb-heading" tabIndex={-1}>Set up Android Platform-Tools</h2>
           <p>
-            EmuChef does not include or download ADB. Download the macOS Platform-Tools ZIP directly
-            from Google, then import it here for local validation and managed installation.
+            Platform-Tools lets EmuChef find and communicate with your Android device. Download the
+            macOS Platform-Tools ZIP from Google, then select it here. EmuChef installs and manages
+            the files it needs.
           </p>
           {adb?.warning && <p className="warning">{adb.warning}</p>}
           {(adb?.error || notice) && (
@@ -2256,14 +2261,14 @@ export function App({ dialogController: suppliedDialogController }: AppProps = {
           )}
           <div className="button-row">
             <button className="secondary" onClick={openPlatformToolsPage}>
-              Open Android Platform-Tools Download Page
+              Open Google download page
             </button>
             <button aria-describedby={platformToolsBusy ? "platform-tools-busy" : undefined} onClick={() => void importPlatformTools()} disabled={platformToolsBusy}>
               {platformToolsOperation.phase === "picker"
                 ? "Choosing ZIP…"
                 : platformToolsOperation.phase === "processing"
-                  ? "Validating and installing…"
-                  : "Import Platform-Tools ZIP"}
+                  ? "Checking and installing…"
+                  : "Select Platform-Tools ZIP…"}
             </button>
             {adb?.canRemove && <button className="danger" onClick={(event) => void removePlatformTools(event.currentTarget)} disabled={platformToolsBusy}>Remove</button>}
           </div>
@@ -2271,12 +2276,11 @@ export function App({ dialogController: suppliedDialogController }: AppProps = {
             <p className="disabled-reason" id="platform-tools-busy" role="status">
               {platformToolsOperation.phase === "picker"
                 ? "Choose a ZIP in the file picker or cancel to return."
-                : "Platform-Tools validation and installation are in progress."}
+                : "Platform-Tools setup is in progress."}
             </p>
           )}
           <p className="fine-print">
-            EmuChef keeps only adb, NOTICE.txt, and source.properties in its application data. The
-            selected ZIP remains yours and is never copied into the app bundle or repository.
+            Setup is normally needed only once. You can replace or remove Platform-Tools later from Troubleshooting.
           </p>
         </main>
       ) : (
@@ -2309,7 +2313,7 @@ export function App({ dialogController: suppliedDialogController }: AppProps = {
 
             {workflow.step === "connect" && (
               <>
-                <p className="eyebrow">CONNECT DEVICE</p>
+                <p className="eyebrow">Connect device</p>
                 <h2 data-focus-fallback="workflow" data-step-heading tabIndex={-1}>Choose an Android device</h2>
                 <p>Connect with USB debugging enabled. EmuChef only reads device information in this phase.</p>
                 <details className="connection-help">
@@ -2326,7 +2330,7 @@ export function App({ dialogController: suppliedDialogController }: AppProps = {
                     <strong>{savedConfiguration.name}</strong>
                     <span>{savedConfigurationValidationLabel(savedConfiguration)}</span>
                     {savedConfigurationBlocked && (
-                      <p>Open another configuration or update this file before continuing.</p>
+                      <p>Open another saved setup or repair this file before continuing.</p>
                     )}
                     {savedConfiguration.validation.diagnostics.map((diagnostic, index) => (
                       <div key={`configuration-diagnostic-${index}`}>
@@ -2361,7 +2365,7 @@ export function App({ dialogController: suppliedDialogController }: AppProps = {
                       {(device.state !== "available" || savedConfigurationBlocked) && (
                         <small className="disabled-reason" id={stableDomId("device-reason", device.deviceHandle)}>
                           {savedConfigurationBlocked
-                            ? "Repair or replace the incompatible saved configuration before selecting a device."
+                            ? "Repair or replace the incompatible saved setup before selecting a device."
                             : device.state === "unauthorized"
                               ? "Unlock the device, accept the USB debugging prompt, then refresh."
                               : "Reconnect the device and refresh before selecting it."}
@@ -2384,7 +2388,7 @@ export function App({ dialogController: suppliedDialogController }: AppProps = {
 
             {workflow.step === "device" && workflow.facts && workflow.match && deviceIsUnsupported(workflow.match) && (
               <>
-                <p className="eyebrow">UNSUPPORTED DEVICE</p>
+                <p className="eyebrow">Unsupported device</p>
                 <h2 data-focus-fallback="workflow" data-step-heading tabIndex={-1}>This device is not officially supported</h2>
                 <p>
                   EmuChef detected {workflow.facts.manufacturer ?? "an Android"} {workflow.facts.model ?? "device"},
@@ -2413,7 +2417,7 @@ export function App({ dialogController: suppliedDialogController }: AppProps = {
                   </>
                 ) : (
                   <>
-                    <p className="error">No backend-approved generic setup is available for this device.</p>
+                    <p className="error">No safe generic setup is available for this device.</p>
                     <button className="secondary" onClick={() => dispatch({ type: "back" })}>Choose another device</button>
                   </>
                 )}
@@ -2422,12 +2426,12 @@ export function App({ dialogController: suppliedDialogController }: AppProps = {
 
             {workflow.step === "setup" && workflow.facts && workflow.match && (
               <>
-                <p className="eyebrow">CONFIRM DEVICE</p>
+                <p className="eyebrow">Confirm device</p>
                 <h2 data-focus-fallback="workflow" data-step-heading tabIndex={-1}>{workflow.facts.manufacturer ?? "Android"} {workflow.facts.model ?? "device"}</h2>
                 <p>Android {workflow.facts.androidVersion ?? "unknown"} · API {workflow.facts.androidApiLevel ?? "unknown"}</p>
                 <p className={deviceIsUnsupported(workflow.match) ? "warning" : "success"}>
                   {deviceIsUnsupported(workflow.match)
-                    ? "Unsupported device: choose one backend-approved generic setup explicitly."
+                    ? "Unsupported device: choose one offered generic setup explicitly."
                     : "A supported device setup is available."}
                 </p>
                 {savedPlanUnavailable && (
@@ -2479,7 +2483,7 @@ export function App({ dialogController: suppliedDialogController }: AppProps = {
 
             {workflow.step === "recipes" && workflow.description && (
               <>
-                <p className="eyebrow">CHOOSE RECIPES</p>
+                <p className="eyebrow">Choose features</p>
                 <h2 data-focus-fallback="workflow" data-step-heading tabIndex={-1}>Choose what to install</h2>
                 <p>Select at least one recipe. Required dependencies remain selected automatically.</p>
                 <div className="recipe-discovery" aria-label="Recipe discovery controls">
@@ -2489,7 +2493,7 @@ export function App({ dialogController: suppliedDialogController }: AppProps = {
                     type="search"
                     value={recipeSearch}
                     onChange={(event) => setRecipeSearch(event.target.value)}
-                    placeholder="Search by name, description, or ID"
+                    placeholder="Search by name or description"
                   />
                   <fieldset className="recipe-filters">
                     <legend>Filter recipes</legend>
@@ -2592,7 +2596,7 @@ export function App({ dialogController: suppliedDialogController }: AppProps = {
                           <span className="recipe-requirements" aria-label="Requirements">
                             {(recipe.requiredCapabilities ?? []).map((capability) => {
                               const label = ({
-                                adb_available: "ADB connection",
+                                adb_available: "Device connection",
                                 apk_install: "App installation",
                                 shared_storage_write: "Shared storage access",
                                 app_launch: "App launch",
@@ -2600,7 +2604,7 @@ export function App({ dialogController: suppliedDialogController }: AppProps = {
                                 package_remove_for_user: "App removal",
                                 root_shell: "Root access",
                                 app_data_write: "App data access",
-                              } as Record<string, string>)[capability] ?? capability.split("_").join(" ");
+                              } as Record<string, string>)[capability] ?? "Additional device requirement";
                               const unavailable = recipe.unavailableCapabilities.includes(capability);
                               return (
                                 <span
@@ -2693,15 +2697,15 @@ export function App({ dialogController: suppliedDialogController }: AppProps = {
           </section>
 
           <aside className="status-panel">
-            <p className="eyebrow">SYSTEM STATUS</p>
+            <p className="eyebrow">Current status</p>
             <dl>
               <div><dt>App service</dt><dd>Ready</dd></div>
-              <div><dt>Platform-Tools</dt><dd>{adb.version}</dd></div>
-              <div><dt>Catalog</dt><dd>{catalog?.catalog.version ?? "Ready"}</dd></div>
+              <div><dt>Platform-Tools</dt><dd>Ready</dd></div>
+              <div><dt>Setup catalog</dt><dd>Ready</dd></div>
               <div><dt>Mode</dt><dd>{realExecutionEnabled ? "Simulation and guarded real execution" : "Simulation only"}</dd></div>
             </dl>
             {adb.warning && <p className="warning">{adb.warning}</p>}
-            {adb.warning && <p className="fine-print">Open Support & Storage for Platform-Tools maintenance and troubleshooting.</p>}
+            {adb.warning && <p className="fine-print">Open Troubleshooting for Platform-Tools maintenance and device-connection help.</p>}
           </aside>
         </main>
       )}
@@ -2721,7 +2725,7 @@ export function App({ dialogController: suppliedDialogController }: AppProps = {
             Device detection will stop. After reinstalling Platform-Tools, you must select your device,
             validate the setup, and create a fresh review before continuing.
           </p>
-          <div className="button-row">
+          <div className="button-row dialog-actions">
             <button className="secondary" onClick={() => dialogController.settle(activeDialog.id, false)}>Cancel</button>
             <button className="danger" onClick={() => dialogController.settle(activeDialog.id, true)}>Remove</button>
           </div>
@@ -2743,7 +2747,7 @@ export function App({ dialogController: suppliedDialogController }: AppProps = {
             The preserved setup belongs to the device you were using. Starting with another device
             clears those held setup and input choices so they are not applied unsafely.
           </p>
-          <div className="button-row">
+          <div className="button-row dialog-actions">
             <button className="secondary" onClick={() => dialogController.settle(activeDialog.id, false)}>Cancel</button>
             <button className="danger" onClick={() => dialogController.settle(activeDialog.id, true)}>Start fresh</button>
           </div>
@@ -2760,10 +2764,10 @@ export function App({ dialogController: suppliedDialogController }: AppProps = {
           role="alertdialog"
           titleId="restart-loss-title"
         >
-          <h2 id="restart-loss-title">Restart the runtime?</h2>
+          <h2 id="restart-loss-title">Restart the app service?</h2>
           <div id="restart-loss-description">
             {activeDialog.payload.totalLoss ? (
-              <p>EmuChef could not preserve the current portable setup safely. Restarting now clears it.</p>
+              <p>EmuChef could not preserve the current setup choices safely. Restarting now clears them.</p>
             ) : (
               <>
                 <p>
@@ -2777,9 +2781,9 @@ export function App({ dialogController: suppliedDialogController }: AppProps = {
             )}
             <p>No generated plan or execution can be resumed after restart.</p>
           </div>
-          <div className="button-row">
+          <div className="button-row dialog-actions">
             <button className="secondary" onClick={() => dialogController.settle(activeDialog.id, false)}>Cancel</button>
-            <button className="danger" onClick={() => dialogController.settle(activeDialog.id, true)}>Restart</button>
+            <button className="danger" onClick={() => dialogController.settle(activeDialog.id, true)}>Restart app service</button>
           </div>
         </AccessibleDialog>
       )}
@@ -2795,8 +2799,8 @@ export function App({ dialogController: suppliedDialogController }: AppProps = {
           role="alertdialog"
           titleId="recovery-dialog-title"
         >
-          <p className="eyebrow">RECOVERABLE WORK</p>
-          <h2 id="recovery-dialog-title">Restore the unsaved configuration?</h2>
+          <p className="eyebrow">Recovery draft</p>
+          <h2 id="recovery-dialog-title">Restore the unsaved setup?</h2>
           <div id="recovery-dialog-description">
             <p>
               {activeDialog.payload.draft.reason}
@@ -2808,7 +2812,7 @@ export function App({ dialogController: suppliedDialogController }: AppProps = {
             <p><strong>Discard:</strong> {activeDialog.payload.draft.discardConsequence}</p>
             <p>Not now keeps this draft for the next launch unless newer edits supersede it.</p>
           </div>
-          <div className="button-row">
+          <div className="button-row dialog-actions">
             <button onClick={() => dialogController.settle(activeDialog.id, "restore")}>Restore</button>
             <button className="danger" onClick={() => dialogController.settle(activeDialog.id, "discard-recovery")}>Discard</button>
             <button
@@ -2830,12 +2834,12 @@ export function App({ dialogController: suppliedDialogController }: AppProps = {
           role="alertdialog"
           titleId="unsaved-dialog-title"
         >
-          <p className="eyebrow">UNSAVED CONFIGURATION</p>
+          <p className="eyebrow">Unsaved setup</p>
           <h2 id="unsaved-dialog-title">Save edits before continuing?</h2>
           <p id="unsaved-dialog-description">
             Save preserves the current setup choices. Discard permanently abandons the unsaved edits. Cancel keeps the current setup open.
           </p>
-          <div className="button-row">
+          <div className="button-row dialog-actions">
             <button className="secondary" onClick={() => dialogController.settle(activeDialog.id, "cancel")}>Cancel</button>
             <button onClick={() => dialogController.settle(activeDialog.id, "save")}>Save</button>
             <button className="danger" onClick={() => dialogController.settle(activeDialog.id, "discard")}>Discard edits</button>
@@ -2867,11 +2871,11 @@ export function App({ dialogController: suppliedDialogController }: AppProps = {
               required
               value={namePromptValue}
             />
-            <div className="button-row">
+            <div className="button-row dialog-actions">
               <button className="secondary" onClick={() => dialogController.settle(activeDialog.id, null)} type="button">Cancel</button>
               <button disabled={!namePromptValue.trim()} type="submit">Continue</button>
             </div>
-            {!namePromptValue.trim() && <p className="disabled-reason">Enter a configuration name to continue.</p>}
+            {!namePromptValue.trim() && <p className="disabled-reason">Enter a setup name to continue.</p>}
           </form>
         </AccessibleDialog>
       )}
@@ -2886,7 +2890,7 @@ export function App({ dialogController: suppliedDialogController }: AppProps = {
           role="alertdialog"
           titleId="real-confirmation-heading"
         >
-          <p className="eyebrow">REAL DEVICE</p>
+          <p className="eyebrow">Real device</p>
           <h2 id="real-confirmation-heading">Confirm irreversible device changes</h2>
           <div id="real-confirmation-description">
             <p>
@@ -2906,7 +2910,7 @@ export function App({ dialogController: suppliedDialogController }: AppProps = {
           <label><input type="checkbox" checked={realConfirmation.irreversibleChangesAcknowledged} onChange={(event) => setRealConfirmation({ ...realConfirmation, irreversibleChangesAcknowledged: event.target.checked })} /> I understand this can irreversibly change the device.</label>
           <label><input type="checkbox" checked={realConfirmation.noRollbackAcknowledged} onChange={(event) => setRealConfirmation({ ...realConfirmation, noRollbackAcknowledged: event.target.checked })} /> I understand there is no rollback, restore, or backup recovery.</label>
           <label><input type="checkbox" checked={realConfirmation.keepDeviceConnectedAcknowledged} onChange={(event) => setRealConfirmation({ ...realConfirmation, keepDeviceConnectedAcknowledged: event.target.checked })} /> I will keep the intended device connected and stable.</label>
-          <div className="button-row">
+          <div className="button-row dialog-actions">
             <button className="secondary" onClick={() => dialogController.settle(activeDialog.id, false)}>Cancel</button>
             <button
               aria-describedby={!realExecutionConfirmationComplete(realConfirmation) ? "real-confirmation-reason" : undefined}
