@@ -52,6 +52,7 @@ pub fn run() {
                 platform_tools_selections: Mutex::new(
                     commands::PlatformToolsSelectionStore::default(),
                 ),
+                input_contracts: Mutex::new(commands::InputContractSnapshot::default()),
                 handles: Mutex::new(handles::SessionHandles::default()),
                 executions: Mutex::new(execution::ExecutionHandleStore::default()),
                 saved_configurations: Mutex::new(

@@ -1,6 +1,7 @@
 import { act, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { beforeEach, describe, expect, test, vi } from "vitest";
+import type { ConfigurationDescription } from "../src/types";
 
 const mockApi = vi.hoisted(() => ({
   adbStatus: vi.fn(),
@@ -13,6 +14,9 @@ const mockApi = vi.hoisted(() => ({
   installPlatformToolsSelection: vi.fn(),
   listRecentConfigurations: vi.fn(),
   matchDevice: vi.fn(),
+  createReview: vi.fn(),
+  discardReview: vi.fn(),
+  pickInputPath: vi.fn(),
   pickPlatformToolsZip: vi.fn(),
   pollDevices: vi.fn(),
   probeDevice: vi.fn(),
@@ -96,7 +100,7 @@ function descriptionWithTextInput(input: {
   label: string;
   required: boolean;
   sensitive: boolean;
-}) {
+}): ConfigurationDescription {
   return {
     devicePlan: "plan.supported",
     selectedRecipes: ["recipe.one"],
@@ -152,6 +156,7 @@ function resetApi(): void {
   mockApi.pollDevices.mockResolvedValue([]);
   mockApi.probeDevice.mockResolvedValue(facts);
   mockApi.matchDevice.mockResolvedValue(supportedMatch);
+  mockApi.pickInputPath.mockResolvedValue(null);
   mockApi.describeConfiguration.mockResolvedValue({
     devicePlan: "plan.supported",
     selectedRecipes: [],
@@ -728,5 +733,217 @@ describe("Phase 5B workflow surfaces", () => {
       (screen.getByRole("button", { name: "Restart runtime" }) as HTMLButtonElement).disabled,
     ).toBe(false));
     expect(document.body.textContent).not.toMatch(/runtime_restart_failed/);
+  });
+});
+
+describe("Phase 5D input collection and repair", () => {
+  test("new required inputs stay neutral until validation is requested", async () => {
+    const user = userEvent.setup();
+    const description = descriptionWithTextInput({
+      key: "recipe.one/account",
+      inputId: "account",
+      label: "Account name",
+      required: true,
+      sensitive: false,
+    });
+    description.inputs[0].description = "Enter the account name used by this setup.";
+    description.inputs[0].diagnostics = [{
+      key: "recipe.one/account",
+      code: "binding_missing",
+      message: "Account name is required.",
+      severity: "error",
+    }];
+    mockApi.describeConfiguration.mockResolvedValue(description);
+    await advanceToInputs(user);
+
+    expect(screen.queryByRole("heading", { name: /Resolve .* configuration error/ })).toBeNull();
+    expect(screen.getByText("Enter the account name used by this setup.")).toBeTruthy();
+    expect(screen.getByLabelText("Account name requirements").textContent).toContain("Required");
+
+    await user.click(screen.getByRole("button", { name: "Review plan" }));
+    const summaryHeading = await screen.findByRole("heading", {
+      name: "Resolve 1 configuration error",
+    });
+    expect(summaryHeading.parentElement?.textContent).toContain("Account name is required.");
+    expect(document.body.textContent).not.toContain("binding_missing");
+  });
+
+  test("ordinary validation renders label-based guidance without binding keys or codes", async () => {
+    const user = userEvent.setup();
+    const review = deferred<unknown>();
+    const bindingKey = "app.xaniteog.install/xaniteog_apk";
+    const diagnosticCode = "binding_path_missing";
+    const message = "XaniteOG APK could not be found. Select it again.";
+    const diagnostic = {
+      key: bindingKey,
+      code: diagnosticCode,
+      message,
+      severity: "error" as const,
+      entryIndex: 0,
+    };
+    mockApi.describeConfiguration.mockResolvedValue({
+      devicePlan: "plan.supported",
+      selectedRecipes: ["recipe.one"],
+      expandedRecipes: ["recipe.one"],
+      recipeOptions: [{
+        id: "recipe.one", name: "Recipe One", description: null, selected: true,
+        recommended: true, dependencyRequired: false, available: true,
+        unavailableCapabilities: [],
+      }],
+      inputs: [{
+        key: bindingKey,
+        recipeId: "app.xaniteog.install",
+        inputId: "xaniteog_apk",
+        type: "file",
+        label: "XaniteOG APK",
+        description: "Choose the XaniteOG Android application package.",
+        required: true,
+        multiple: false,
+        sensitive: false,
+        pathKind: "file",
+        acceptedExtensions: ["apk"],
+        presentationCategory: "Applications",
+        presentationKind: "Single file",
+        value: "/selected/missing-xaniteog.apk",
+        valueSource: "explicit",
+        entries: [{
+          index: 0,
+          displayName: "missing-xaniteog.apk",
+          displayPath: "/selected/missing-xaniteog.apk",
+          state: "error",
+          diagnostics: [diagnostic],
+        }],
+        diagnostics: [diagnostic],
+      }],
+      diagnostics: [],
+    });
+    mockApi.createReview.mockReturnValue(review.promise);
+    await advanceToInputs(user);
+    await user.click(screen.getByRole("button", { name: "Review plan" }));
+
+    const field = screen.getByRole("group", { name: "XaniteOG APK" });
+    const summaryHeading = await screen.findByRole("heading", {
+      name: "Resolve 1 configuration error",
+    });
+    const summary = summaryHeading.parentElement;
+    expect(within(field).getByText(`Error: ${message}`)).toBeTruthy();
+    expect(within(summary!).getByText(message)).toBeTruthy();
+    for (const ordinarySurface of [field, summary]) {
+      expect(ordinarySurface?.textContent).not.toContain(bindingKey);
+      expect(ordinarySurface?.textContent).not.toContain(diagnosticCode);
+    }
+  });
+
+  test("renders multi-file entries with per-entry repair and sanitized diagnostics", async () => {
+    const user = userEvent.setup();
+    const description = {
+      devicePlan: "plan.supported",
+      selectedRecipes: ["recipe.one"],
+      expandedRecipes: ["recipe.one"],
+      recipeOptions: [{
+        id: "recipe.one", name: "Recipe One", description: null, selected: true,
+        recommended: true, dependencyRequired: false, available: true,
+        contentRequirements: ["rom_content"], unavailableCapabilities: [],
+      }],
+      inputs: [{
+        key: "recipe.one/files", recipeId: "recipe.one", inputId: "files", type: "file",
+        label: "Game files", description: "Choose game files to copy.", required: true,
+        multiple: true, sensitive: false, pathKind: "file", acceptedExtensions: ["rom"],
+        presentationCategory: "Games and content", presentationKind: "Multiple files",
+        value: ["/selected/one.rom", "/moved/two.rom"], valueSource: "explicit",
+        entries: [
+          { index: 0, displayName: "one.rom", displayPath: "/selected/one.rom", state: "valid", diagnostics: [] },
+          {
+            index: 1, displayName: "two.rom", displayPath: "/moved/two.rom", state: "error",
+            diagnostics: [{
+              key: "recipe.one/files", code: "binding_path_missing",
+              message: "Game files could not be found. Select it again.", severity: "error", entryIndex: 1,
+            }],
+          },
+        ],
+        diagnostics: [{
+          key: "recipe.one/files", code: "binding_path_missing",
+          message: "Game files could not be found. Select it again.", severity: "error", entryIndex: 1,
+        }],
+      }],
+      diagnostics: [],
+    };
+    mockApi.describeConfiguration.mockResolvedValue(description);
+    mockApi.pickInputPath.mockResolvedValue([
+      "/selected/one.rom", "/moved/two.rom", "/selected/three.rom",
+    ]);
+    await advanceToInputs(user);
+
+    expect(screen.getByText("Accepted file types: rom")).toBeTruthy();
+    expect(screen.getByRole("button", { name: "Relink…" })).toBeTruthy();
+    expect(screen.getByRole("button", { name: "Add files…" })).toBeTruthy();
+    expect(screen.getByRole("button", { name: "Remove one.rom from Game files" })).toBeTruthy();
+    expect(document.body.textContent).not.toContain("binding_path_missing");
+
+    await user.click(screen.getByRole("button", { name: "Add files…" }));
+    expect(mockApi.pickInputPath).toHaveBeenCalledWith(expect.objectContaining({
+      inputKey: "recipe.one/files",
+      mode: "append",
+      entryIndex: null,
+    }));
+    expect((await screen.findAllByText("/selected/three.rom")).length).toBeGreaterThan(0);
+  });
+
+  test("picker cancellation settles and a response after leaving Inputs is ignored", async () => {
+    const user = userEvent.setup();
+    const picker = deferred<unknown | null>();
+    mockApi.describeConfiguration.mockResolvedValue({
+      devicePlan: "plan.supported", selectedRecipes: ["recipe.one"], expandedRecipes: ["recipe.one"],
+      recipeOptions: [{
+        id: "recipe.one", name: "Recipe One", description: null, selected: true,
+        recommended: true, dependencyRequired: false, available: true, unavailableCapabilities: [],
+      }],
+      inputs: [{
+        key: "recipe.one/file", recipeId: "recipe.one", inputId: "file", type: "file",
+        label: "Setup file", description: "Choose a setup file.", required: false, multiple: false,
+        sensitive: false, pathKind: "file", acceptedExtensions: ["cfg"],
+        presentationCategory: "Other", presentationKind: "Single file", value: null,
+        valueSource: null, entries: [], diagnostics: [],
+      }], diagnostics: [],
+    });
+    mockApi.pickInputPath.mockReturnValue(picker.promise);
+    await advanceToInputs(user);
+    await user.click(screen.getByRole("button", { name: "Choose file…" }));
+    expect((screen.getByRole("button", { name: "Choose file…" }) as HTMLButtonElement).disabled).toBe(true);
+    await user.click(screen.getByRole("button", { name: "Back" }));
+    await screen.findByRole("heading", { name: "Choose what to install" });
+    await act(async () => picker.resolve("/selected/stale.cfg"));
+    expect(screen.queryByText("/selected/stale.cfg")).toBeNull();
+    expect(await screen.findAllByText("An outdated file selection was ignored.")).not.toHaveLength(0);
+  });
+
+  test("device destinations stay textual and sensitive values use concealed controls", async () => {
+    const user = userEvent.setup();
+    mockApi.describeConfiguration.mockResolvedValue({
+      devicePlan: "plan.supported", selectedRecipes: ["recipe.one"], expandedRecipes: ["recipe.one"],
+      recipeOptions: [{
+        id: "recipe.one", name: "Recipe One", description: null, selected: true,
+        recommended: true, dependencyRequired: false, available: true, unavailableCapabilities: [],
+      }],
+      inputs: [
+        {
+          key: "recipe.one/destination", recipeId: "recipe.one", inputId: "destination",
+          type: "device_path", label: "Device folder", description: "Folder on the Android device.",
+          required: true, multiple: false, sensitive: false, presentationCategory: "Destination",
+          presentationKind: "Device folder", value: "/sdcard/Games", valueSource: "recipe_default", diagnostics: [],
+        },
+        {
+          key: "recipe.one/token", recipeId: "recipe.one", inputId: "token", type: "string",
+          label: "Account token", description: "Token used for this setup.", required: true,
+          multiple: false, sensitive: true, presentationCategory: "Other", presentationKind: "Text",
+          value: null, valueSource: null, diagnostics: [],
+        },
+      ], diagnostics: [],
+    });
+    await advanceToInputs(user);
+    expect((screen.getByLabelText("Device folder") as HTMLInputElement).value).toBe("/sdcard/Games");
+    expect(screen.queryByRole("button", { name: /Choose folder|Browse/i })).toBeNull();
+    expect((screen.getByLabelText("Account token") as HTMLInputElement).type).toBe("password");
+    expect(screen.getByText("Not saved")).toBeTruthy();
   });
 });

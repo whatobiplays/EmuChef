@@ -27,7 +27,7 @@ Detailed evidence remains in the relevant product and release documents. In part
 
 | Product or track | Current state | Next priority |
 |---|---|---|
-| EmuChef proper | Phase 5A, 5B, and 5C completed | Phase 5D input collection and file-management polish |
+| EmuChef proper | Phase 5A, 5B, 5C, and 5D completed | Phase 5E plan review and execution experience |
 | Config Editor | Authored generation implemented through GitHub release-pattern testing | Later refinements remain unsequenced unless explicitly promoted |
 | Shared Runtime | Rust is the sole runtime and retains device, filesystem, planning, execution, validation, and protocol authority | Add shared capabilities only when required by a bounded product slice |
 | Release engineering | Deliberately deferred from normal Phase 5 product work | Resume only when the owner declares the relevant application release-comfortable |
@@ -63,8 +63,8 @@ EmuChef proper Phase 5 focuses on end-user feature completeness, usability, work
 | 5A | End-to-end UX and feature-gap audit | Completed | Evidence-based prioritized end-user backlog |
 | 5B | Workflow navigation and state polish | Completed | Predictable movement, recovery, and state transitions |
 | 5C | Recipe and setup selection experience | Completed | Nontechnical setup discovery and selection |
-| 5D | Input collection and file-management polish | Next | Early, understandable, recoverable input validation |
-| 5E | Plan review and execution experience | Planned | Confidence before execution and useful failure recovery |
+| 5D | Input collection and file-management polish | Completed | Early, understandable, recoverable input validation |
+| 5E | Plan review and execution experience | Next | Confidence before execution and useful failure recovery |
 | 5F | Saved configurations and reusable setups | Planned | Reliable reuse and maintenance of configurations |
 | 5G | Support, diagnostics, and recovery polish | Planned | Troubleshooting without a terminal |
 | 5H | Visual consistency and final product polish | Planned | Cohesive, release-comfortable end-user experience |
@@ -149,7 +149,7 @@ They must not be inferred heuristically from recipe IDs, names, URLs, or step ty
 ## 9. Phase 5D — Input Collection and File-Management Polish
 
 **Owner: EmuChef proper**  
-**Status: Next**
+**Status: Completed**
 
 ### Objective
 
@@ -173,10 +173,25 @@ Catch input problems early, explain requirements in user language, and repair mo
 
 Users understand what each input requires, errors are found before execution, and moved files can be repaired without rebuilding the setup.
 
+### Completion evidence
+
+Completed on 2026-07-21. EmuChef proper now:
+
+- projects authored labels, descriptions, required/optional state, multiplicity, accepted extensions, and existing Phase 5C APK, BIOS, ROM/content, and network requirements through the authoritative `describeConfiguration` contract;
+- retains accepted input contracts in the current runtime generation so Tauri, rather than React, selects picker kind, multiplicity, extension filters, and validation rules;
+- validates missing, inaccessible, wrong-kind, unsupported-extension, and canonically duplicate entries before review, with per-entry sanitized diagnostics and stale-response rejection;
+- reports reuse of one canonical file across active inputs as a non-blocking warning naming the user-facing fields;
+- supports single and multi-file choose, add, replace, relink, remove, and clear actions without rebuilding setup or recipe selection;
+- keeps device destinations as device-path text values and sensitive text in concealed, non-persisted controls;
+- projects only active, explicitly nonsensitive saved bindings, retains omitted values only in backend-owned state until explicit save, and filters them from Save and Save As; and
+- leaves the source configuration unchanged when sanitation is pending and the document is closed without saving.
+
+Drag-and-drop remains deferred because the completed picker and repair workflow satisfies the phase exit criteria without expanding filesystem authority.
+
 ## 10. Phase 5E — Plan Review and Execution Experience
 
 **Owner: EmuChef proper**  
-**Status: Planned**
+**Status: Next**
 
 ### Objective
 
@@ -495,48 +510,12 @@ Cross-platform packaging and release automation must define separate deliverable
 
 ## 24. Immediate next action
 
-### Phase 5D.1 — Input Presentation and Requirement Clarity
+### Phase 5E — Plan Review and Execution Experience
 
 **Owner: EmuChef proper**  
 **Status: Next**
 
-#### Objective
-
-Improve user understanding before any file or value is selected.
-
-#### Scope
-
-- Give every input a user-friendly title.
-- Add a concise explanation of what the input is used for.
-- Display accepted file extensions and formats.
-- Clearly indicate whether an input is required or optional.
-- Clearly indicate whether an input accepts one file or multiple files.
-- Clearly identify sensitive inputs that are never persisted or recovered.
-- Group inputs using backend-authoritative categories where those categories already exist.
-- Remove remaining backend, schema, and implementation terminology from the normal UI.
-
-#### Out of scope
-
-- New validation logic.
-- Missing-file or moved-file relinking.
-- Drag-and-drop.
-- Filesystem-authority changes.
-- Persistence changes.
-- Backend protocol changes.
-- Heuristic frontend inference of file requirements or categories.
-
-#### Acceptance criteria
-
-- A first-time user can understand every requested input without external documentation.
-- Every visible requirement is derived from backend-authoritative metadata.
-- No raw schema, backend, or implementation terminology appears in the normal input workflow.
-- React remains presentation-only and does not infer accepted formats, cardinality, sensitivity, or requirement status.
-- Existing Tauri filesystem authority, nonsensitive intent recovery, and sensitive-value omission behavior remain unchanged.
-
-#### Planned follow-on slices
-
-- **Phase 5D.2 — Immediate backend-authoritative validation**
-- **Phase 5D.3 — Missing and moved file detection with guided relinking**
-- **Phase 5D.4 — Duplicate and conflicting file handling**
-- **Phase 5D.5 — Multi-file UX polish**
-- **Phase 5D.6 — Optional drag-and-drop while preserving Tauri filesystem authority**
+Begin from the objective, candidate scope, and exit criteria in Section 10 and
+the open Phase 5E findings in the Phase 5A end-to-end UX audit. Keep plan-review
+projection and execution recovery bounded from release engineering, packaging,
+and the completed Phase 5D input-authority workflow.

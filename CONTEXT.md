@@ -505,6 +505,16 @@ sanitized diagnostics. Missing recent files can be removed or relinked only to
 a file with the same embedded configuration identity. Save As creates a new
 name and generated identity while leaving the original file unchanged.
 
+Opening a saved configuration classifies its bindings through the existing
+authoritative `describeConfiguration` operation. React receives only bindings
+that are active and explicitly marked nonsensitive. Sensitive, inactive, and
+unclassified bindings remain backend-owned and are represented only by a
+sanitized pending-sanitation count or label-based re-entry requirement. Opening
+and closing without saving never rewrites the source file. Save and Save As
+remove every omitted binding from the backend document immediately before the
+explicit write, so only currently active, explicitly nonsensitive bindings are
+persisted.
+
 Phase 2B guarded real-device execution is implemented behind the
 default-disabled Cargo feature `real-execution`. The compile-time feature is the
 only product gate, and a policy-only Tauri query reports its boolean state.
@@ -630,6 +640,31 @@ to camelCase `deviceContext` and `targetDevice` objects for the sidecar.
 array selects no recipes. Missing required input values remain successful
 description results with `binding_missing` diagnostics instead of transport
 failures.
+
+Each accepted configuration description replaces the runtime session's current
+native input-contract snapshot. A request sequence rejects out-of-order
+descriptions without creating a separate authority generation. Tauri derives
+picker kind, multiplicity, extension filters, and immediate filesystem checks
+from that snapshot; React supplies only the input key and portable edit intent.
+Device paths never receive host-picker authority.
+
+The Inputs stage presents authored labels and descriptions, required or
+optional state, single or multiple value state, accepted extensions, and safe
+authoritative constraints. Untouched missing requirements remain neutral until
+the user edits the field or explicitly requests validation or review. Host path
+validation detects missing, inaccessible, wrong-kind, unsupported-extension,
+and canonically duplicate entries before review. Canonical duplication inside
+one input is blocking; reuse across active inputs is a non-blocking warning that
+names both labels. Errors, logs, omission notices, diagnostics, and support
+surfaces do not include host paths, while portable user-selected paths remain
+visible in the ordinary input UI as selected intent.
+
+Multi-file inputs expose per-entry validation and support add, replace, relink,
+remove, and clear. Relinking replaces only the selected entry and retains the
+device plan, recipe selection, and unrelated bindings. Missing or inaccessible
+retained paths are repaired by explicit user selection; EmuChef never searches
+the filesystem heuristically. Drag-and-drop is not part of the current input
+workflow.
 
 The trusted configuration-description response retains the exact target device
 binding and verified catalog identity/digest. The React projection omits the

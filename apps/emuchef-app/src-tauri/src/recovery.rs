@@ -117,6 +117,7 @@ impl RecoveryStore {
     }
 
     pub fn record_schema(&mut self, description: &Value) {
+        self.sensitivity.clear();
         for input in description
             .get("inputs")
             .and_then(Value::as_array)
@@ -130,6 +131,12 @@ impl RecoveryStore {
                 self.sensitivity.insert(key.to_string(), sensitive);
             }
         }
+    }
+
+    /// Mark backend-classified sensitive values from a saved document for
+    /// label-based re-entry without retaining or projecting their values.
+    pub fn note_required_reentry(&mut self, keys: impl IntoIterator<Item = String>) {
+        self.required_reentry.extend(keys);
     }
 
     pub fn required_reentry(&self) -> Vec<String> {

@@ -160,6 +160,7 @@ export function App({ dialogController: suppliedDialogController }: AppProps = {
   const recoverySessionGenerationRef = useRef(0);
   const recoveryRecordGenerationRef = useRef<number | null>(null);
   const recoveryRequestGenerationRef = useRef(0);
+  const inputOperationGenerationRef = useRef(0);
   const recoveryDraftGenerationRef = useRef(0);
   const lastRecoverySignatureRef = useRef<string | null>(null);
   const updateInteractionSessionRef = useRef<UpdateInteractionSession | null>(null);
@@ -441,7 +442,10 @@ export function App({ dialogController: suppliedDialogController }: AppProps = {
       requiredReentryBindings: [],
     });
     await refreshRecents();
-    setNotice(`Opened ${document.name}. Connect and select the current device to validate it.`);
+    const omitted = document.pendingSanitationCount ?? 0;
+    setNotice(omitted > 0
+      ? `Opened ${document.name}. ${omitted} stored input ${omitted === 1 ? "value was" : "values were"} not loaded because ${omitted === 1 ? "it is" : "they are"} sensitive or no longer active. Save to remove ${omitted === 1 ? "it" : "them"} from this file.`
+      : `Opened ${document.name}. Connect and select the current device to validate it.`);
   };
 
   const applyRecoveryResult = async (result: RecoveryRestoreResult) => {
@@ -1381,6 +1385,7 @@ export function App({ dialogController: suppliedDialogController }: AppProps = {
         devicePlan: workflow.devicePlan,
         selectedRecipes: workflow.selectedRecipes,
         bindings: workflow.bindings,
+        requestGeneration: generation,
       });
       if (runtimeGenerationRef.current !== runtimeGeneration) return;
       dispatch({ type: "description", description, generation });
@@ -1414,6 +1419,7 @@ export function App({ dialogController: suppliedDialogController }: AppProps = {
 
   const continueToInputs = async () => {
     if (!workflow.deviceHandle || !workflow.devicePlan || !(workflow.selectedRecipes?.length)) return;
+    setValidationRequested(false);
     setBusy(true);
     setNotice(null);
     setOperationError(null);
@@ -1425,6 +1431,7 @@ export function App({ dialogController: suppliedDialogController }: AppProps = {
         devicePlan: workflow.devicePlan,
         selectedRecipes: workflow.selectedRecipes,
         bindings: workflow.bindings,
+        requestGeneration: generation,
       });
       if (runtimeGenerationRef.current !== runtimeGeneration) return;
       dispatch({ type: "description", description, generation });
@@ -1466,6 +1473,7 @@ export function App({ dialogController: suppliedDialogController }: AppProps = {
         devicePlan: workflow.devicePlan!,
         selectedRecipes: workflow.selectedRecipes,
         bindings: workflow.bindings,
+        requestGeneration: generation,
       }).then((description) => {
         if (runtimeGenerationRef.current !== runtimeGeneration) return;
         dispatch({ type: "description", description, generation });
@@ -1512,6 +1520,7 @@ export function App({ dialogController: suppliedDialogController }: AppProps = {
         devicePlan: workflow.devicePlan,
         selectedRecipes: workflow.selectedRecipes,
         bindings: workflow.bindings,
+        requestGeneration,
       });
       if (
         runtimeGenerationRef.current !== runtimeGeneration
@@ -1597,6 +1606,7 @@ export function App({ dialogController: suppliedDialogController }: AppProps = {
         devicePlan,
         selectedRecipes,
         bindings: {},
+        requestGeneration: prior.requestGeneration,
       });
       if (runtimeGenerationRef.current !== runtimeGeneration) return;
       const bindings = filterRepairBindings(prior.description, baseline, prior.bindings);
@@ -1605,6 +1615,7 @@ export function App({ dialogController: suppliedDialogController }: AppProps = {
         devicePlan,
         selectedRecipes,
         bindings,
+        requestGeneration: prior.requestGeneration,
       });
       if (runtimeGenerationRef.current !== runtimeGeneration) return;
       dispatch({
@@ -1625,22 +1636,58 @@ export function App({ dialogController: suppliedDialogController }: AppProps = {
     }
   };
 
-  const pickInputValue = async (input: InputDescriptor) => {
+  const pickInputValue = async (
+    input: InputDescriptor,
+    mode: "replace_all" | "append" | "replace_entry" = "replace_all",
+    entryIndex: number | null = null,
+  ) => {
     if (!input.pathKind) return;
     setNotice(null);
-    await runBusyAction({
-      setBusy,
-      action: () => withNativeDialogFocus(
-        () => api.pickInputPath(input.pathKind!, Boolean(input.multiple)),
+    setBusy(true);
+    const operationGeneration = ++inputOperationGenerationRef.current;
+    const requestGeneration = workflowRef.current.requestGeneration;
+    const runtimeGeneration = runtimeGenerationRef.current;
+    try {
+      const value = await withNativeDialogFocus(
+        () => api.pickInputPath({
+          inputKey: input.key,
+          requestGeneration,
+          mode,
+          currentValue: workflowRef.current.bindings[input.key] ?? input.value ?? null,
+          entryIndex,
+        }),
         [document.getElementById(stableDomId("input", input.key))],
-      ),
-      onSuccess: (values) => {
-        if (values) {
-          updateBindingIntent(input.key, input.multiple ? values : values[0]);
-        }
-      },
-      onError: (error) => setNotice(errorMessage(error)),
-    });
+      );
+      const current = workflowRef.current;
+      if (
+        runtimeGenerationRef.current !== runtimeGeneration
+        || current.requestGeneration !== requestGeneration
+        || current.step !== "inputs"
+        || !current.description?.inputs.some((candidate) => candidate.key === input.key)
+      ) {
+        announce("An outdated file selection was ignored.");
+        return;
+      }
+      if (value !== null) updateBindingIntent(input.key, value);
+    } catch (error) {
+      if (
+        runtimeGenerationRef.current === runtimeGeneration
+        && workflowRef.current.requestGeneration === requestGeneration
+      ) setNotice(errorMessage(error));
+    } finally {
+      if (inputOperationGenerationRef.current === operationGeneration) setBusy(false);
+    }
+  };
+
+  const removeInputEntry = (input: InputDescriptor, entryIndex: number) => {
+    const value = workflowRef.current.bindings[input.key] ?? input.value;
+    if (!Array.isArray(value)) {
+      clearBindingIntent(input.key);
+      return;
+    }
+    const next = value.filter((_, index) => index !== entryIndex);
+    if (next.length === 0) clearBindingIntent(input.key);
+    else updateBindingIntent(input.key, next);
   };
 
   const stepIndex = WORKFLOW_STEPS.findIndex((item) => item.step === workflow.step);
@@ -1743,12 +1790,16 @@ export function App({ dialogController: suppliedDialogController }: AppProps = {
   const saveDisabled = busy
     || platformToolsBusy
     || !workflow.devicePlan
-    || (!workflow.portableIntentDirty && !savedConfiguration?.dirty);
+    || (!workflow.portableIntentDirty
+      && !savedConfiguration?.dirty
+      && !(savedConfiguration?.pendingSanitationCount));
   const savedConfigurationBlocked = savedConfigurationBlocksProgress(savedConfiguration);
   const saveDisabledReason = saveConfigurationDisabledReason(
     savedConfiguration,
     Boolean(workflow.devicePlan),
-    workflow.portableIntentDirty || Boolean(savedConfiguration?.dirty),
+    workflow.portableIntentDirty
+      || Boolean(savedConfiguration?.dirty)
+      || Boolean(savedConfiguration?.pendingSanitationCount),
   );
 
   return (
@@ -2279,12 +2330,13 @@ export function App({ dialogController: suppliedDialogController }: AppProps = {
             {workflow.step === "inputs" && workflow.description && (
               <InputsStep
                 bindings={workflow.bindings}
-                busy={busy}
+                busy={busy || workflow.descriptionDirty}
                 description={workflow.description}
                 onBack={() => dispatch({ type: "back" })}
                 onBindingChange={updateBindingIntent}
                 onClearInput={(input) => clearBindingIntent(input.key)}
                 onPickInput={pickInputValue}
+                onRemoveInputEntry={removeInputEntry}
                 onRefreshValidation={describe}
                 onReview={generateReview}
                 touchedInputKeys={touchedInputKeys}

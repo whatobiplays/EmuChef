@@ -142,8 +142,9 @@ test("Platform-Tools picker and installation split filesystem authority across a
   assert.match(commands, /tauri::async_runtime::spawn_blocking\(task\)/);
 });
 
-test("recipe input path dialogs use only non-blocking picker callbacks", () => {
+test("recipe input path dialogs keep picking and immediate validation in Tauri", () => {
   const commands = read("src-tauri/src/commands.rs");
+  const api = read("src/api.ts");
   const start = commands.indexOf("pub async fn pick_input_path");
   const end = commands.indexOf("\npub(crate) fn catalog", start);
   const pickerCommand = commands.slice(start, end);
@@ -154,7 +155,10 @@ test("recipe input path dialogs use only non-blocking picker callbacks", () => {
   assert.match(pickerCommand, /picker\.pick_files\(/);
   assert.match(pickerCommand, /picker\.pick_folder\(/);
   assert.doesNotMatch(pickerCommand, /blocking_pick_/);
-  assert.doesNotMatch(pickerCommand, /std::fs|\.metadata\(|\.exists\(/);
+  assert.match(pickerCommand, /input_contracts[\s\S]*\.require\(request_generation, &input_key\)/);
+  assert.match(pickerCommand, /std::fs::File::open|std::fs::read_dir/);
+  const frontendPicker = sourceSlice(api, "pickInputPath:", "\n  listRecentConfigurations:");
+  assert.doesNotMatch(frontendPicker, /pathKind|allowedExtensions|multiple/);
 });
 
 test("release ADB resolution cannot depend on PATH", () => {
@@ -224,8 +228,11 @@ test("saved configuration file authority remains behind opaque Tauri handles", (
   assert.match(saved, /picker\.save_file\(/);
   assert.match(saved, /picker\.pick_file\(/);
   assert.match(saved, /configurationHandle/);
-  const projection = sourceSlice(saved, "fn project_document", "\nfn public_diagnostics");
+  const projection = sourceSlice(saved, "fn project_document", "\nfn classify_document_bindings");
   assert.doesNotMatch(projection, /"(?:path|documentId|configurationId|yaml|planDigest|reviewHandle|executionHandle|serial)"/);
+  assert.match(saved, /describeConfiguration/);
+  assert.match(saved, /Some\(false\)[\s\S]*safe\.insert/);
+  assert.match(saved, /None => omitted\.push/);
 });
 
 test("portable saved state excludes generated plan and device authority", () => {

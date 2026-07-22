@@ -15,6 +15,7 @@ use crate::planner::{
     build_permission_intent, normalized_plan_step_note, plan_execution, resolve_runtime_bindings,
     BindingSource, DeviceContext, PlannerInput, RuntimeCapabilities,
 };
+use crate::runtime_configuration::input_reuse_diagnostics;
 
 #[test]
 fn progress_note_fallback_order_is_deterministic() {
@@ -3222,6 +3223,111 @@ fn runtime_input_metadata_validates_enum_and_device_path_bindings() {
                     .as_str()
                     .is_some_and(|message| message.contains("existing directory"))
         }));
+}
+
+#[test]
+fn host_input_validation_reports_entry_specific_format_kind_and_duplicate_failures() {
+    let temp = TempDir::new().expect("input validation root should be created");
+    let config = temp.path().join("retroarch.cfg");
+    let unsupported = temp.path().join("retroarch.txt");
+    fs::write(&config, "config").unwrap();
+    fs::write(&unsupported, "config").unwrap();
+
+    let mut input = authored_corpus_planner_input(&["app.retroarch.provision"]);
+    input
+        .recipes
+        .iter_mut()
+        .find(|recipe| recipe.id == "app.retroarch.provision")
+        .unwrap()
+        .inputs
+        .get_mut("retroarch_cfg")
+        .unwrap()
+        .multiple = true;
+    input.explicit_input_bindings.insert(
+        "app.retroarch.provision/retroarch_cfg".to_string(),
+        json!([config, config]),
+    );
+    let duplicate = planning_result_value(input);
+    assert!(duplicate["errors"].as_array().unwrap().iter().any(|error| {
+        error["code"] == "binding_duplicate_path"
+            && error["details"]["entry_index"] == 1
+            && error["details"]["first_entry_index"] == 0
+    }));
+
+    let unsupported_result = planning_result_value(authored_corpus_planner_input_with_bindings(
+        &["app.retroarch.provision"],
+        &[("app.retroarch.provision/retroarch_cfg", json!(unsupported))],
+    ));
+    assert!(unsupported_result["errors"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|error| {
+            error["code"] == "binding_extension_unsupported" && error["details"]["entry_index"] == 0
+        }));
+
+    let mut kind_input = authored_corpus_planner_input(&["app.retroarch.provision"]);
+    kind_input.explicit_input_bindings.insert(
+        "app.retroarch.provision/retroarch_cfg".to_string(),
+        json!(temp.path()),
+    );
+    let kind_result = planning_result_value(kind_input);
+    assert!(kind_result["errors"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|error| {
+            error["code"] == "binding_path_kind_mismatch" && error["details"]["entry_index"] == 0
+        }));
+}
+
+#[test]
+fn canonical_file_reuse_is_a_non_blocking_label_based_warning() {
+    let temp = TempDir::new().expect("reuse validation root should be created");
+    let shared = temp.path().join("shared.bin");
+    fs::write(&shared, "shared").unwrap();
+    let mut input =
+        authored_corpus_planner_input(&["app.retroarch.provision", "app.xaniteog.install"]);
+    for recipe in &mut input.recipes {
+        for declaration in recipe.inputs.values_mut() {
+            if declaration.type_name == "file" {
+                declaration.validation.allowed_extensions.clear();
+            }
+        }
+    }
+    input.explicit_input_bindings.insert(
+        "app.retroarch.provision/retroarch_cfg".to_string(),
+        json!(shared),
+    );
+    input.explicit_input_bindings.insert(
+        "app.xaniteog.install/xaniteog_apk".to_string(),
+        json!(shared),
+    );
+    let recipes = input
+        .recipes
+        .into_iter()
+        .map(|recipe| (recipe.id.clone(), recipe))
+        .collect::<HashMap<_, _>>();
+    let selected = vec![
+        "app.retroarch.provision".to_string(),
+        "app.xaniteog.install".to_string(),
+    ];
+    let resolution = resolve_runtime_bindings(
+        &recipes,
+        &selected,
+        &input.explicit_input_bindings,
+        &OrderedMap::new(),
+        &OrderedMap::new(),
+    );
+    let warnings = input_reuse_diagnostics(&recipes, &resolution.resolved_inputs);
+    assert_eq!(warnings.len(), 1, "{warnings:#?}");
+    assert_eq!(warnings[0].severity, "warning");
+    assert_eq!(warnings[0].code, "binding_path_reused");
+    assert!(warnings[0].message.contains("RetroArch config"));
+    assert!(warnings[0].message.contains("XaniteOG APK"));
+    assert!(!warnings[0]
+        .message
+        .contains(temp.path().to_string_lossy().as_ref()));
 }
 
 #[test]

@@ -16,7 +16,9 @@ use tauri::{AppHandle, Manager, State};
 use tauri_plugin_dialog::{DialogExt, FilePath};
 use uuid::Uuid;
 
-use crate::commands::{await_picker_selection, catalog, safe_error, AppState};
+use crate::commands::{
+    await_picker_selection, catalog, public_configuration_description, safe_error, AppState,
+};
 use crate::recovery::clear_recovery_after_save;
 
 const RECENT_SCHEMA_VERSION: u64 = 1;
@@ -29,6 +31,13 @@ struct OpenDocument {
     configuration_id: String,
     name: String,
     revision: u64,
+}
+
+struct BindingProjection {
+    safe: Map<String, Value>,
+    omitted: Vec<String>,
+    sensitive_omitted: Vec<String>,
+    diagnostics: Vec<Value>,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
@@ -285,7 +294,7 @@ pub(crate) fn restore_recovery_source(
         let handle = store.insert_document(path, document)?;
         let record = store.document(&handle)?.clone();
         let _ = store.touch_recent(&record);
-        let mut projected = project_document(&handle, record.revision, document)?;
+        let mut projected = project_document(state, &handle, record.revision, document)?;
         projected["outcome"] = json!("opened");
         return Ok(Some(projected));
     }
@@ -342,7 +351,7 @@ pub(crate) fn restore_recovery_source(
     let handle = store.insert_document(path, final_document)?;
     let record = store.document(&handle)?.clone();
     let _ = store.touch_recent(&record);
-    let mut projected = project_document(&handle, record.revision, final_document)?;
+    let mut projected = project_document(state, &handle, record.revision, final_document)?;
     projected["outcome"] = json!("opened");
     Ok(Some(projected))
 }
@@ -441,6 +450,17 @@ pub async fn create_saved_configuration(
     let path = selected_path(selected)?;
     let configuration_id = generated_configuration_id();
     let state = app.state::<AppState>();
+    let proposed_bindings = ordered_bindings(request.bindings);
+    let proposed_bindings = proposed_bindings
+        .as_object()
+        .cloned()
+        .expect("ordered bindings are an object");
+    let projection = classify_bindings(
+        &state,
+        &request.device_plan,
+        &request.selected_recipes,
+        &proposed_bindings,
+    )?;
     let result = state
         .sidecar
         .request(
@@ -451,7 +471,7 @@ pub async fn create_saved_configuration(
                 "name": name,
                 "devicePlan": request.device_plan,
                 "selectedRecipes": request.selected_recipes,
-                "bindings": ordered_bindings(request.bindings),
+                "bindings": projection.safe,
                 "authoredRoot": authored_root(&state)?,
             }),
         )
@@ -608,10 +628,34 @@ pub fn update_saved_configuration(
             "setUserConfigurationSelectedRecipes",
             json!({ "documentId": document_id, "selectedRecipes": value }),
         ),
-        ConfigurationMutation::Binding { key, value } => (
-            "setUserConfigurationBinding",
-            json!({ "documentId": document_id, "key": key, "value": value }),
-        ),
+        ConfigurationMutation::Binding { key, value } => {
+            let current = current_document(&state, &document_id)?;
+            let configuration = current.get("configuration").ok_or_else(invalid_document)?;
+            let mut bindings = configuration
+                .get("bindings")
+                .and_then(Value::as_object)
+                .cloned()
+                .ok_or_else(invalid_document)?;
+            bindings.insert(key.clone(), value.clone());
+            let projection = classify_bindings(
+                &state,
+                document_string(configuration, "devicePlan")?.as_str(),
+                &document_string_array(configuration, "selectedRecipes")?,
+                &bindings,
+            )?;
+            if !projection.safe.contains_key(&key) {
+                return project_document(
+                    &state,
+                    &request.configuration_handle,
+                    current_revision,
+                    &current,
+                );
+            }
+            (
+                "setUserConfigurationBinding",
+                json!({ "documentId": document_id, "key": key, "value": value }),
+            )
+        }
         ConfigurationMutation::RemoveBinding { key } => (
             "removeUserConfigurationBinding",
             json!({ "documentId": document_id, "key": key }),
@@ -633,7 +677,12 @@ pub fn update_saved_configuration(
         .get_mut(&request.configuration_handle)
         .ok_or_else(state_error)?;
     record.revision += 1;
-    project_document(&request.configuration_handle, record.revision, document)
+    project_document(
+        &state,
+        &request.configuration_handle,
+        record.revision,
+        document,
+    )
 }
 
 #[tauri::command]
@@ -651,6 +700,7 @@ pub fn save_saved_configuration(
             .sidecar_document_id
             .clone()
     };
+    sanitize_before_save(&state, &document_id)?;
     let result = state
         .sidecar
         .request(
@@ -674,7 +724,12 @@ pub fn save_saved_configuration(
         .cloned()
         .ok_or_else(state_error)?;
     let _ = store.touch_recent(&record);
-    let projected = project_document(&request.configuration_handle, record.revision, document)?;
+    let projected = project_document(
+        &state,
+        &request.configuration_handle,
+        record.revision,
+        document,
+    )?;
     drop(store);
     clear_recovery_after_save(&state)?;
     Ok(projected)
@@ -717,6 +772,7 @@ pub async fn save_saved_configuration_as(
             .clone()
     };
     let configuration_id = generated_configuration_id();
+    sanitize_before_save(&state, &document_id)?;
     let result = state
         .sidecar
         .request(
@@ -749,7 +805,12 @@ pub async fn save_saved_configuration_as(
     record.revision += 1;
     let record = record.clone();
     let _ = store.touch_recent(&record);
-    let mut projected = project_document(&request.configuration_handle, record.revision, document)?;
+    let mut projected = project_document(
+        &state,
+        &request.configuration_handle,
+        record.revision,
+        document,
+    )?;
     projected["outcome"] = json!("saved");
     drop(store);
     clear_recovery_after_save(&state)?;
@@ -813,14 +874,41 @@ fn open_result(state: &AppState, path: PathBuf, result: &Value) -> Result<Value,
     let handle = store.insert_document(path, document)?;
     let record = store.document(&handle)?.clone();
     let _ = store.touch_recent(&record);
-    let mut projected = project_document(&handle, record.revision, document)?;
+    let mut projected = project_document(state, &handle, record.revision, document)?;
     projected["outcome"] = json!("opened");
     Ok(projected)
 }
 
-fn project_document(handle: &str, revision: u64, document: &Value) -> Result<Value, String> {
+fn project_document(
+    state: &AppState,
+    handle: &str,
+    revision: u64,
+    document: &Value,
+) -> Result<Value, String> {
+    let projection = classify_document_bindings(state, document)?;
+    if !projection.sensitive_omitted.is_empty() {
+        let mut recovery = state.recovery.lock().map_err(|_| {
+            safe_error(
+                "recovery_state_unavailable",
+                "Recovery state is temporarily unavailable.",
+            )
+        })?;
+        recovery.note_required_reentry(projection.sensitive_omitted.clone());
+    }
+    project_classified_document(handle, revision, document, projection)
+}
+
+/// Build the only React-facing saved-document projection from an authoritative
+/// binding classification. Keeping this transformation separate makes the
+/// close-without-save contract testable without replacing the real sidecar.
+fn project_classified_document(
+    handle: &str,
+    revision: u64,
+    document: &Value,
+    projection: BindingProjection,
+) -> Result<Value, String> {
     let configuration = document.get("configuration").ok_or_else(invalid_document)?;
-    let diagnostics = public_diagnostics(document.get("diagnostics"));
+    let diagnostics = projection.diagnostics;
     let status = status_from_diagnostics(&diagnostics);
     Ok(json!({
         "configurationHandle": handle,
@@ -829,23 +917,177 @@ fn project_document(handle: &str, revision: u64, document: &Value) -> Result<Val
         "revision": revision,
         "devicePlan": document_string(configuration, "devicePlan")?,
         "selectedRecipes": configuration.get("selectedRecipes").cloned().ok_or_else(invalid_document)?,
-        "bindings": configuration.get("bindings").cloned().ok_or_else(invalid_document)?,
+        "bindings": projection.safe,
+        "pendingSanitationCount": projection.omitted.len(),
         "validation": { "state": status, "diagnostics": diagnostics },
     }))
 }
 
-fn public_diagnostics(value: Option<&Value>) -> Vec<Value> {
-    value
+fn classify_document_bindings(
+    state: &AppState,
+    document: &Value,
+) -> Result<BindingProjection, String> {
+    let configuration = document.get("configuration").ok_or_else(invalid_document)?;
+    classify_bindings(
+        state,
+        document_string(configuration, "devicePlan")?.as_str(),
+        &document_string_array(configuration, "selectedRecipes")?,
+        configuration
+            .get("bindings")
+            .and_then(Value::as_object)
+            .ok_or_else(invalid_document)?,
+    )
+}
+
+fn classify_bindings(
+    state: &AppState,
+    device_plan: &str,
+    selected_recipes: &[String],
+    bindings: &Map<String, Value>,
+) -> Result<BindingProjection, String> {
+    let description = state
+        .sidecar
+        .request(
+            "describeConfiguration",
+            json!({
+                "catalog": catalog(state)?.internal_payload(),
+                "devicePlan": device_plan,
+                "selectedRecipes": selected_recipes,
+                "bindings": bindings,
+            }),
+        )
+        .map_err(|_| {
+            configuration_error(
+                "configuration_classification_failed",
+                "Saved input values could not be classified safely.",
+            )
+        })?;
+    Ok(binding_projection_from_description(bindings, &description))
+}
+
+/// Apply the backend description's active sensitivity contracts to saved
+/// bindings, then reuse the normal public diagnostic projection.
+fn binding_projection_from_description(
+    bindings: &Map<String, Value>,
+    description: &Value,
+) -> BindingProjection {
+    let (safe, omitted, sensitive_omitted) = filter_binding_values(bindings, description);
+    let public_description = public_configuration_description(&description, "");
+    let diagnostics = public_description
+        .get("inputs")
         .and_then(Value::as_array)
         .into_iter()
         .flatten()
-        .map(|diagnostic| {
-            json!({
-                "key": diagnostic.get("key"),
-                "code": diagnostic.get("code"),
-                "message": diagnostic.get("message"),
-                "severity": diagnostic.get("severity"),
-            })
+        .flat_map(|input| {
+            input
+                .get("diagnostics")
+                .and_then(Value::as_array)
+                .into_iter()
+                .flatten()
+                .cloned()
+        })
+        .chain(
+            public_description
+                .get("diagnostics")
+                .and_then(Value::as_array)
+                .into_iter()
+                .flatten()
+                .cloned(),
+        )
+        .collect();
+    BindingProjection {
+        safe,
+        omitted,
+        sensitive_omitted,
+        diagnostics,
+    }
+}
+
+fn filter_binding_values(
+    bindings: &Map<String, Value>,
+    description: &Value,
+) -> (Map<String, Value>, Vec<String>, Vec<String>) {
+    let contracts = description
+        .get("inputs")
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+        .filter_map(|input| {
+            Some((
+                input.get("key")?.as_str()?.to_string(),
+                input.get("sensitive")?.as_bool()?,
+            ))
+        })
+        .collect::<HashMap<_, _>>();
+    let mut safe = Map::new();
+    let mut omitted = Vec::new();
+    let mut sensitive_omitted = Vec::new();
+    for (key, value) in bindings {
+        match contracts.get(key) {
+            Some(false) => {
+                safe.insert(key.clone(), value.clone());
+            }
+            Some(true) => {
+                omitted.push(key.clone());
+                sensitive_omitted.push(key.clone());
+            }
+            None => omitted.push(key.clone()),
+        }
+    }
+    omitted.sort();
+    sensitive_omitted.sort();
+    (safe, omitted, sensitive_omitted)
+}
+
+fn sanitize_before_save(state: &AppState, document_id: &str) -> Result<(), String> {
+    let current = current_document(state, document_id)?;
+    let projection = classify_document_bindings(state, &current)?;
+    for key in projection.omitted {
+        state
+            .sidecar
+            .request(
+                "removeUserConfigurationBinding",
+                json!({ "documentId": document_id, "key": key }),
+            )
+            .map_err(|_| {
+                configuration_error(
+                    "configuration_sanitation_failed",
+                    "Saved input values could not be filtered safely.",
+                )
+            })?;
+    }
+    Ok(())
+}
+
+fn current_document(state: &AppState, document_id: &str) -> Result<Value, String> {
+    state
+        .sidecar
+        .request(
+            "getUserConfigurationDocument",
+            json!({ "documentId": document_id }),
+        )
+        .map_err(|_| {
+            configuration_error(
+                "configuration_state_unavailable",
+                "The saved configuration could not be refreshed safely.",
+            )
+        })?
+        .get("document")
+        .cloned()
+        .ok_or_else(invalid_document)
+}
+
+fn document_string_array(document: &Value, field: &str) -> Result<Vec<String>, String> {
+    document
+        .get(field)
+        .and_then(Value::as_array)
+        .ok_or_else(invalid_document)?
+        .iter()
+        .map(|value| {
+            value
+                .as_str()
+                .map(str::to_string)
+                .ok_or_else(invalid_document)
         })
         .collect()
 }
@@ -1118,5 +1360,88 @@ mod tests {
             last_opened_epoch_ms: 1,
         });
         assert_eq!(store.recovery_source_path("saved.source"), None);
+    }
+
+    #[test]
+    fn saved_binding_projection_keeps_only_active_explicitly_nonsensitive_values() {
+        let bindings = Map::from_iter([
+            ("recipe/safe".to_string(), json!("portable")),
+            ("recipe/secret".to_string(), json!("DO_NOT_PROJECT")),
+            ("recipe/inactive".to_string(), json!("DO_NOT_PROJECT")),
+        ]);
+        let description = json!({
+            "inputs": [
+                { "key": "recipe/safe", "sensitive": false },
+                { "key": "recipe/secret", "sensitive": true }
+            ]
+        });
+        let (safe, omitted, sensitive) = filter_binding_values(&bindings, &description);
+        assert_eq!(
+            safe,
+            Map::from_iter([("recipe/safe".to_string(), json!("portable"))])
+        );
+        assert_eq!(omitted, vec!["recipe/inactive", "recipe/secret"]);
+        assert_eq!(sensitive, vec!["recipe/secret"]);
+        let serialized = serde_json::to_string(&safe).unwrap();
+        assert!(!serialized.contains("DO_NOT_PROJECT"));
+    }
+
+    #[test]
+    fn projected_pending_sanitation_can_close_without_rewriting_the_source_file() {
+        let temp = tempfile::tempdir().unwrap();
+        let path = temp.path().join("saved.yaml");
+        let original = b"bindings:\n  recipe/safe: portable\n  recipe/secret: legacy-value\n  recipe/inactive: retired-value\n";
+        fs::write(&path, original).unwrap();
+        let mut store = SavedConfigurationStore::load(temp.path().join("recents.json"));
+        let document = json!({
+            "documentId": "document-one",
+            "dirty": false,
+            "configuration": {
+                "id": "saved.one",
+                "name": "Saved",
+                "devicePlan": "plan.one",
+                "selectedRecipes": ["recipe"],
+                "bindings": {
+                    "recipe/safe": "portable",
+                    "recipe/secret": "DO_NOT_PROJECT",
+                    "recipe/inactive": "DO_NOT_PROJECT"
+                }
+            }
+        });
+        let description = json!({
+            "devicePlan": "plan.one",
+            "selectedRecipes": ["recipe"],
+            "expandedRecipes": ["recipe"],
+            "recipeOptions": [],
+            "inputs": [
+                {
+                    "key": "recipe/safe", "recipeId": "recipe", "inputId": "safe",
+                    "type": "string", "role": "option", "label": "Portable option",
+                    "description": "A portable option.", "required": false, "multiple": false,
+                    "options": [], "validation": {}, "sensitive": false,
+                    "value": "portable", "valueSource": "user_configuration", "diagnostics": []
+                },
+                {
+                    "key": "recipe/secret", "recipeId": "recipe", "inputId": "secret",
+                    "type": "string", "role": "credential", "label": "Private token",
+                    "description": "Enter the private token.", "required": false, "multiple": false,
+                    "options": [], "validation": {}, "sensitive": true,
+                    "value": "DO_NOT_PROJECT", "valueSource": "user_configuration", "diagnostics": []
+                }
+            ],
+            "diagnostics": []
+        });
+        let handle = store.insert_document(path.clone(), &document).unwrap();
+        let bindings = document["configuration"]["bindings"].as_object().unwrap();
+        let projection = binding_projection_from_description(bindings, &description);
+        let public = project_classified_document(&handle, 0, &document, projection).unwrap();
+
+        assert_eq!(public["bindings"], json!({ "recipe/safe": "portable" }));
+        assert_eq!(public["pendingSanitationCount"], 2);
+        assert!(!public.to_string().contains("DO_NOT_PROJECT"));
+
+        let removed = store.remove_document(&handle).unwrap();
+        assert_eq!(removed.path, path);
+        assert_eq!(fs::read(&removed.path).unwrap(), original);
     }
 }

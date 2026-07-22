@@ -85,12 +85,14 @@ export const api = {
     devicePlan: string;
     selectedRecipes: string[] | null;
     bindings: Record<string, unknown>;
+    requestGeneration: number;
   }) => invoke<ConfigurationDescription>("describe_configuration", request),
   createReview: (request: {
     deviceHandle: string;
     devicePlan: string;
     selectedRecipes: string[] | null;
     bindings: Record<string, unknown>;
+    requestGeneration: number;
   }) => invoke<ReviewSummary>("create_review", request),
   discardReview: (reviewHandle: string) => invoke<void>("discard_review", { reviewHandle }),
   startSimulatedExecution: (reviewHandle: string) =>
@@ -123,8 +125,13 @@ export const api = {
     invoke<ReportExportResult>("export_execution_report", { executionHandle }),
   launchConfiguredApp: (launchActionHandle: string) =>
     invoke<LaunchResult>("launch_configured_app", { launchActionHandle }),
-  pickInputPath: (pathKind: "file" | "directory", multiple: boolean) =>
-    invoke<string[] | null>("pick_input_path", { pathKind, multiple }),
+  pickInputPath: (request: {
+    inputKey: string;
+    requestGeneration: number;
+    mode: "replace_all" | "append" | "replace_entry";
+    currentValue: unknown;
+    entryIndex: number | null;
+  }) => invoke<unknown | null>("pick_input_path", request),
   listRecentConfigurations: () =>
     invoke<RecentConfiguration[]>("list_recent_configurations"),
   createSavedConfiguration: (request: {

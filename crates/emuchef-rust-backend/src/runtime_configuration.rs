@@ -5,7 +5,7 @@
 //! download, extraction, copy, device-write, or persistence operations.
 
 use std::collections::HashMap;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
@@ -238,6 +238,10 @@ pub(crate) fn prepare_configuration(
             .iter()
             .map(binding_diagnostic),
     );
+    diagnostics.extend(input_reuse_diagnostics(
+        &recipe_map,
+        &binding_resolution.resolved_inputs,
+    ));
 
     Ok(PreparedConfiguration {
         catalog: request.catalog,
@@ -299,7 +303,11 @@ pub(crate) fn plan_configuration(
 ) -> Result<PlanConfigurationResult, ConfigurationContextError> {
     let prepared = prepare_configuration(request)?;
     let resolved_inputs = prepared.binding_resolution.resolved_inputs.clone();
-    if !prepared.diagnostics.is_empty() {
+    if prepared
+        .diagnostics
+        .iter()
+        .any(|diagnostic| diagnostic.severity == "error")
+    {
         return Ok(PlanConfigurationResult {
             plan: None,
             plan_digest: None,
@@ -317,11 +325,14 @@ pub(crate) fn plan_configuration(
         });
     };
     let result = crate::planner::plan_execution(input);
-    let mut diagnostics = result
-        .warnings
-        .into_iter()
-        .map(|message| planner_result_diagnostic("warning", message))
-        .collect::<Vec<_>>();
+    let mut diagnostics = prepared.diagnostics;
+    diagnostics.extend(
+        result
+            .warnings
+            .into_iter()
+            .map(|message| planner_result_diagnostic("warning", message))
+            .collect::<Vec<_>>(),
+    );
     diagnostics.extend(
         result
             .errors
@@ -345,6 +356,64 @@ pub(crate) fn plan_configuration(
         resolved_inputs,
         diagnostics,
     })
+}
+
+/// Warn when two active, user-supplied file inputs resolve to one filesystem
+/// object. Canonical identity is used only for comparison and is never copied
+/// into the diagnostic, serialized response, or logs.
+pub(crate) fn input_reuse_diagnostics(
+    recipes: &HashMap<String, Recipe>,
+    resolved_inputs: &[crate::planner::ResolvedInputBinding],
+) -> Vec<RuntimeConfigurationDiagnostic> {
+    let mut identities = HashMap::<PathBuf, (String, String)>::new();
+    let mut diagnostics = Vec::new();
+    for input in resolved_inputs {
+        if input.type_name != "file"
+            || !matches!(
+                input.source,
+                Some(BindingSource::Explicit | BindingSource::UserConfiguration)
+            )
+        {
+            continue;
+        }
+        let Some(recipe) = recipes.get(&input.recipe_id) else {
+            continue;
+        };
+        let Some(declaration) = recipe.inputs.get(&input.input_id) else {
+            continue;
+        };
+        let values = input
+            .value
+            .as_ref()
+            .and_then(|value| declaration.binding_items(value))
+            .unwrap_or_default();
+        for value in values {
+            let Some(path) = value.as_str() else {
+                continue;
+            };
+            let Ok(identity) = std::fs::canonicalize(Path::new(path)) else {
+                continue;
+            };
+            if let Some((related_key, related_label)) = identities.get(&identity) {
+                if related_key != &input.key {
+                    diagnostics.push(RuntimeConfigurationDiagnostic {
+                        severity: "warning",
+                        code: "binding_path_reused".to_string(),
+                        message: format!(
+                            "{} uses the same file as {}. Confirm that this reuse is intentional.",
+                            declaration.label, related_label
+                        ),
+                        key: Some(input.key.clone()),
+                        provenance: input.source,
+                        details: json!({ "related_key": related_key }),
+                    });
+                }
+            } else {
+                identities.insert(identity, (input.key.clone(), declaration.label.clone()));
+            }
+        }
+    }
+    diagnostics
 }
 
 pub(crate) fn describe_configuration(

@@ -12,7 +12,9 @@ use std::time::Instant;
 use serde::Serialize;
 use serde_json::{json, Map, Value};
 use tauri::{AppHandle, Manager, State};
-use tauri_plugin_dialog::{DialogExt, FilePath};
+use tauri_plugin_dialog::DialogExt;
+#[cfg(test)]
+use tauri_plugin_dialog::FilePath;
 use tauri_plugin_opener::OpenerExt;
 use uuid::Uuid;
 
@@ -31,6 +33,7 @@ pub struct AppState {
     pub catalog: Result<CatalogDescriptor, String>,
     pub adb: Mutex<AdbManager>,
     pub platform_tools_selections: Mutex<PlatformToolsSelectionStore>,
+    pub input_contracts: Mutex<InputContractSnapshot>,
     pub handles: Mutex<SessionHandles>,
     pub executions: Mutex<ExecutionHandleStore>,
     pub saved_configurations: SavedConfigurationState,
@@ -38,6 +41,99 @@ pub struct AppState {
     pub support: Mutex<SupportStore>,
     pub updates: UpdateService,
     pub update_activity: ActivityGate,
+}
+
+/// Latest backend-authored input contract set accepted for the current runtime
+/// session. The frontend request sequence rejects out-of-order descriptions;
+/// this snapshot gives native pickers the same contract without trusting React
+/// to restate path kind, multiplicity, or accepted extensions.
+#[derive(Clone, Debug, Default)]
+pub struct InputContractSnapshot {
+    request_generation: u64,
+    contracts: HashMap<String, InputContract>,
+}
+
+#[derive(Clone, Debug)]
+struct InputContract {
+    type_name: String,
+    path_kind: String,
+    multiple: bool,
+    allowed_extensions: Vec<String>,
+}
+
+impl InputContractSnapshot {
+    fn replace(&mut self, request_generation: u64, description: &Value) -> bool {
+        if request_generation < self.request_generation {
+            return false;
+        }
+        let contracts = description
+            .get("inputs")
+            .and_then(Value::as_array)
+            .into_iter()
+            .flatten()
+            .filter_map(|input| {
+                let key = input.get("key")?.as_str()?.to_string();
+                let type_name = input.get("type")?.as_str()?.to_string();
+                if !matches!(
+                    type_name.as_str(),
+                    "file" | "directory" | "path" | "path_list"
+                ) {
+                    return None;
+                }
+                let validation = input.get("validation")?;
+                let path_kind = validation.get("pathKind")?.as_str()?.to_string();
+                let allowed_extensions = validation
+                    .get("allowedExtensions")
+                    .and_then(Value::as_array)
+                    .into_iter()
+                    .flatten()
+                    .filter_map(Value::as_str)
+                    .map(str::to_string)
+                    .collect();
+                Some((
+                    key,
+                    InputContract {
+                        type_name,
+                        path_kind,
+                        multiple: input
+                            .get("multiple")
+                            .and_then(Value::as_bool)
+                            .unwrap_or(false),
+                        allowed_extensions,
+                    },
+                ))
+            })
+            .collect();
+        self.request_generation = request_generation;
+        self.contracts = contracts;
+        true
+    }
+
+    fn require(&self, request_generation: u64, key: &str) -> Result<InputContract, String> {
+        self.require_generation(request_generation)?;
+        self.contracts.get(key).cloned().ok_or_else(|| {
+            safe_error(
+                "input_contract_unavailable",
+                "This input is no longer part of the selected setup.",
+            )
+        })
+    }
+
+    fn require_generation(&self, request_generation: u64) -> Result<(), String> {
+        if request_generation == self.request_generation {
+            Ok(())
+        } else {
+            Err(safe_error(
+                "input_request_stale",
+                "The input requirements changed. Wait for validation, then try again.",
+            ))
+        }
+    }
+
+    fn clear(&mut self) {
+        self.request_generation = 0;
+        self.contracts.clear();
+    }
 }
 
 /// Holds at most one user-selected archive path behind an opaque, one-shot
@@ -139,6 +235,16 @@ fn reset_app_session(state: &AppState, close_documents: bool) -> Result<(), Stri
             safe_error(
                 "selection_state_unavailable",
                 "File selection state is unavailable.",
+            )
+        })?
+        .clear();
+    state
+        .input_contracts
+        .lock()
+        .map_err(|_| {
+            safe_error(
+                "input_state_unavailable",
+                "Input requirements are unavailable.",
             )
         })?
         .clear();
@@ -552,6 +658,7 @@ pub fn describe_configuration(
     device_plan: String,
     selected_recipes: Option<Vec<String>>,
     bindings: HashMap<String, Value>,
+    request_generation: u64,
     state: State<'_, AppState>,
 ) -> Result<Value, String> {
     let binding_keys = bindings.keys().cloned().collect::<HashSet<_>>();
@@ -577,6 +684,16 @@ pub fn describe_configuration(
         .sidecar
         .request("describeConfiguration", payload)
         .map_err(|error| configuration_sidecar_error(&error, &exact_serial))?;
+    let accepted = state
+        .input_contracts
+        .lock()
+        .map_err(|_| {
+            safe_error(
+                "input_state_unavailable",
+                "Input requirements are unavailable.",
+            )
+        })?
+        .replace(request_generation, &result);
     let required_reentry = {
         let mut recovery = state.recovery.lock().map_err(|_| {
             safe_error(
@@ -584,8 +701,10 @@ pub fn describe_configuration(
                 "Recovery state is temporarily unavailable.",
             )
         })?;
-        recovery.record_schema(&result);
-        recovery.note_current_binding_keys(&binding_keys);
+        if accepted {
+            recovery.record_schema(&result);
+            recovery.note_current_binding_keys(&binding_keys);
+        }
         recovery.required_reentry()
     };
     let mut public = public_configuration_description(&result, &exact_serial);
@@ -599,8 +718,19 @@ pub fn create_review(
     device_plan: String,
     selected_recipes: Option<Vec<String>>,
     bindings: HashMap<String, Value>,
+    request_generation: u64,
     state: State<'_, AppState>,
 ) -> Result<Value, String> {
+    state
+        .input_contracts
+        .lock()
+        .map_err(|_| {
+            safe_error(
+                "input_state_unavailable",
+                "Input requirements are unavailable.",
+            )
+        })?
+        .require_generation(request_generation)?;
     let missing_reentry = state
         .recovery
         .lock()
@@ -753,19 +883,49 @@ pub fn get_review_status(
 #[tauri::command]
 /// Opens the requested native input dialog without blocking the Tauri IPC executor.
 ///
-/// Cancellation is represented as `Ok(None)`. The selected paths remain within
-/// the existing trusted path-input DTO and are not inspected on the async task.
+/// Cancellation is represented as `Ok(None)`. Picker policy comes only from the
+/// latest backend-authored input contract; React supplies portable intent and an
+/// edit operation but cannot choose path kind, multiplicity, or file filters.
 pub async fn pick_input_path(
     app: AppHandle,
-    path_kind: String,
-    multiple: bool,
-) -> Result<Option<Vec<String>>, String> {
+    input_key: String,
+    request_generation: u64,
+    mode: String,
+    current_value: Value,
+    entry_index: Option<usize>,
+) -> Result<Option<Value>, String> {
+    let contract = app
+        .state::<AppState>()
+        .input_contracts
+        .lock()
+        .map_err(|_| {
+            safe_error(
+                "input_state_unavailable",
+                "Input requirements are unavailable.",
+            )
+        })?
+        .require(request_generation, &input_key)?;
+    if !matches!(mode.as_str(), "replace_all" | "append" | "replace_entry") {
+        return Err(safe_error(
+            "input_selection_mode_invalid",
+            "The requested input edit is unsupported.",
+        ));
+    }
     let _dialog_activity = app
         .state::<AppState>()
         .update_activity
         .reserve_native_dialog()?;
-    let picker = app.dialog().file();
-    let selected = match (path_kind.as_str(), multiple) {
+    let mut picker = app.dialog().file();
+    if contract.path_kind == "file" && !contract.allowed_extensions.is_empty() {
+        let extensions = contract
+            .allowed_extensions
+            .iter()
+            .map(String::as_str)
+            .collect::<Vec<_>>();
+        picker = picker.add_filter("Supported files", &extensions);
+    }
+    let choose_many = contract.multiple && mode != "replace_entry";
+    let selected = match (contract.path_kind.as_str(), choose_many) {
         ("file", true) => {
             await_picker_selection(
                 |complete| picker.pick_files(complete),
@@ -795,13 +955,148 @@ pub async fn pick_input_path(
             ))
         }
     };
-    Ok(selected.map(|paths: Vec<FilePath>| {
-        paths
+    let Some(selected) = selected else {
+        return Ok(None);
+    };
+    let paths = selected
+        .into_iter()
+        .map(|path| {
+            path.into_path().map_err(|_| {
+                safe_error(
+                    "input_path_unavailable",
+                    "The selected item could not be opened by the application.",
+                )
+            })
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+    let value = compose_input_selection(&contract, &mode, current_value, entry_index, paths)?;
+    validate_input_selection(&contract, &value)?;
+    Ok(Some(value))
+}
+
+fn compose_input_selection(
+    contract: &InputContract,
+    mode: &str,
+    current_value: Value,
+    entry_index: Option<usize>,
+    selected: Vec<PathBuf>,
+) -> Result<Value, String> {
+    let selected = selected
+        .into_iter()
+        .map(|path| Value::String(path.to_string_lossy().into_owned()))
+        .collect::<Vec<_>>();
+    if !contract.multiple {
+        if mode != "replace_all" || selected.len() != 1 {
+            return Err(safe_error(
+                "input_selection_invalid",
+                "Choose one item for this input.",
+            ));
+        }
+        return Ok(selected
             .into_iter()
-            .filter_map(|path| path.into_path().ok())
-            .map(|path| path.to_string_lossy().into_owned())
-            .collect()
-    }))
+            .next()
+            .expect("one selection was required"));
+    }
+    let mut values = match mode {
+        "replace_all" => Vec::new(),
+        "append" | "replace_entry" => current_value.as_array().cloned().unwrap_or_default(),
+        _ => unreachable!("selection mode was checked above"),
+    };
+    match mode {
+        "replace_all" | "append" => values.extend(selected),
+        "replace_entry" => {
+            let index = entry_index
+                .filter(|index| *index < values.len())
+                .ok_or_else(|| {
+                    safe_error(
+                        "input_entry_stale",
+                        "That selected entry changed. Wait for validation, then try again.",
+                    )
+                })?;
+            if selected.len() != 1 {
+                return Err(safe_error(
+                    "input_selection_invalid",
+                    "Choose one replacement item.",
+                ));
+            }
+            values[index] = selected
+                .into_iter()
+                .next()
+                .expect("one selection was required");
+        }
+        _ => unreachable!("selection mode was checked above"),
+    }
+    Ok(Value::Array(values))
+}
+
+fn validate_input_selection(contract: &InputContract, value: &Value) -> Result<(), String> {
+    let values = if contract.multiple {
+        value.as_array().cloned().ok_or_else(|| {
+            safe_error(
+                "input_selection_invalid",
+                "Choose files again for this input.",
+            )
+        })?
+    } else {
+        vec![value.clone()]
+    };
+    if values.is_empty() {
+        return Err(safe_error(
+            "input_selection_invalid",
+            "Choose at least one item for this input.",
+        ));
+    }
+    let mut identities = HashSet::new();
+    for value in values {
+        let path = value.as_str().map(PathBuf::from).ok_or_else(|| {
+            safe_error(
+                "input_selection_invalid",
+                "Choose files again for this input.",
+            )
+        })?;
+        let readable = match contract.path_kind.as_str() {
+            "file" => path.is_file() && std::fs::File::open(&path).is_ok(),
+            "directory" => path.is_dir() && std::fs::read_dir(&path).is_ok(),
+            _ => false,
+        };
+        if !readable {
+            return Err(safe_error(
+                "input_path_inaccessible",
+                "The selected item is missing or cannot be read. Choose it again.",
+            ));
+        }
+        if contract.path_kind == "file"
+            && !contract.allowed_extensions.is_empty()
+            && path
+                .extension()
+                .and_then(|extension| extension.to_str())
+                .is_none_or(|extension| {
+                    !contract
+                        .allowed_extensions
+                        .iter()
+                        .any(|allowed| allowed.eq_ignore_ascii_case(extension))
+                })
+        {
+            return Err(safe_error(
+                "input_extension_unsupported",
+                "The selected file type is unsupported for this input.",
+            ));
+        }
+        let identity = std::fs::canonicalize(&path).map_err(|_| {
+            safe_error(
+                "input_path_inaccessible",
+                "The selected item is missing or cannot be read. Choose it again.",
+            )
+        })?;
+        if !identities.insert(identity) {
+            return Err(safe_error(
+                "input_duplicate_path",
+                "The same item was selected more than once. Remove the duplicate and try again.",
+            ));
+        }
+    }
+    let _ = &contract.type_name;
+    Ok(())
 }
 
 pub(crate) fn catalog(state: &AppState) -> Result<&CatalogDescriptor, String> {
@@ -949,7 +1244,11 @@ fn public_match(result: &Value, exact_serial: Option<&str>) -> Value {
 }
 
 fn input_presentation_category(input: &Value) -> &'static str {
-    match input.get("role").and_then(Value::as_str).unwrap_or_default() {
+    match input
+        .get("role")
+        .and_then(Value::as_str)
+        .unwrap_or_default()
+    {
         "apk" => "Applications",
         "bios" => "Firmware",
         "rom" | "rom_library" | "content" => "Games and content",
@@ -960,23 +1259,115 @@ fn input_presentation_category(input: &Value) -> &'static str {
 }
 
 fn input_presentation_kind(input: &Value, options: &[Value]) -> &'static str {
+    if input.get("type").and_then(Value::as_str) == Some("device_path") {
+        return "Device folder";
+    }
     let validation = input.get("validation").unwrap_or(&Value::Null);
     match validation.get("pathKind").and_then(Value::as_str) {
-        Some("file") if input.get("multiple").and_then(Value::as_bool).unwrap_or(false) => {
+        Some("file")
+            if input
+                .get("multiple")
+                .and_then(Value::as_bool)
+                .unwrap_or(false) =>
+        {
             "Multiple files"
         }
         Some("file") => "Single file",
         Some("directory") => "Folder",
-        _ => match input.get("type").and_then(Value::as_str).unwrap_or_default() {
+        _ => match input
+            .get("type")
+            .and_then(Value::as_str)
+            .unwrap_or_default()
+        {
             "boolean" => "On or off",
-            "device_path" => "Device folder",
             _ if !options.is_empty() => "Choose one",
             _ => "Text",
         },
     }
 }
 
-fn public_configuration_description(result: &Value, exact_serial: &str) -> Value {
+fn input_expected_description(input: &Value) -> String {
+    if let Some(description) = input
+        .get("description")
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|description| !description.is_empty())
+    {
+        return description.to_string();
+    }
+    let role = input
+        .get("role")
+        .and_then(Value::as_str)
+        .unwrap_or_default();
+    let type_name = input
+        .get("type")
+        .and_then(Value::as_str)
+        .unwrap_or_default();
+    let path_kind = input
+        .pointer("/validation/pathKind")
+        .and_then(Value::as_str);
+    let multiple = input
+        .get("multiple")
+        .and_then(Value::as_bool)
+        .unwrap_or(false);
+    let host_shape = match path_kind {
+        Some("file") => Some(if multiple {
+            "multiple_files"
+        } else {
+            "single_file"
+        }),
+        Some("directory") => Some("directory"),
+        _ => match type_name {
+            "file" => Some(if multiple {
+                "multiple_files"
+            } else {
+                "single_file"
+            }),
+            "directory" => Some("directory"),
+            _ => None,
+        },
+    };
+
+    match (role, host_shape) {
+        ("apk", Some("single_file")) => {
+            "Choose the Android application package required by this setup.".to_string()
+        }
+        ("apk", Some("multiple_files")) => {
+            "Choose the Android application package files required by this setup.".to_string()
+        }
+        ("bios", Some("single_file")) => "Choose the BIOS file required by this setup.".to_string(),
+        ("bios", Some("multiple_files")) => {
+            "Choose the BIOS files required by this setup.".to_string()
+        }
+        ("bios", Some("directory")) => {
+            "Choose the folder containing the BIOS files required by this setup.".to_string()
+        }
+        ("rom" | "rom_library" | "content", Some("single_file")) => {
+            "Choose the game or content file required by this setup.".to_string()
+        }
+        ("rom" | "rom_library" | "content", Some("multiple_files")) => {
+            "Choose the game or content files required by this setup.".to_string()
+        }
+        ("rom" | "rom_library" | "content", Some("directory")) => {
+            "Choose the folder containing the game or content files required by this setup."
+                .to_string()
+        }
+        ("rom_destination", _) => {
+            "Enter the folder on the Android device where the content will be stored.".to_string()
+        }
+        ("copy_policy", _) => "Choose how files should be combined at the destination.".to_string(),
+        (_, Some("single_file")) => "Choose the file used by this setup.".to_string(),
+        (_, Some("multiple_files")) => "Choose the files used by this setup.".to_string(),
+        (_, Some("directory")) => "Choose the folder used by this setup.".to_string(),
+        _ => match type_name {
+            "device_path" => "Enter a folder path on the connected Android device.".to_string(),
+            "boolean" => "Choose whether this option should be enabled.".to_string(),
+            _ => "Provide the value requested by this setup.".to_string(),
+        },
+    }
+}
+
+pub(crate) fn public_configuration_description(result: &Value, exact_serial: &str) -> Value {
     let recipe_options = result
         .get("recipeOptions")
         .and_then(Value::as_array)
@@ -991,6 +1382,9 @@ fn public_configuration_description(result: &Value, exact_serial: &str) -> Value
                 "recommended": recipe.get("recommended"),
                 "dependencyRequired": recipe.get("dependencyRequired"),
                 "available": recipe.get("available"),
+                "recipeDependencies": recipe.get("recipeDependencies"),
+                "contentRequirements": recipe.get("contentRequirements"),
+                "requiredCapabilities": recipe.get("requiredCapabilities"),
                 "unavailableCapabilities": recipe.get("unavailableCapabilities"),
             })
         })
@@ -1011,24 +1405,34 @@ fn public_configuration_description(result: &Value, exact_serial: &str) -> Value
                 .collect::<Vec<_>>();
             let presentation_category = input_presentation_category(input);
             let presentation_kind = input_presentation_kind(input, &options);
+            let type_name = input
+                .get("type")
+                .and_then(Value::as_str)
+                .unwrap_or_default();
+            let path_kind = matches!(type_name, "file" | "directory" | "path" | "path_list")
+                .then(|| validation.get("pathKind").cloned().unwrap_or(Value::Null))
+                .unwrap_or(Value::Null);
+            let diagnostics = public_input_diagnostics(input);
+            let entries = public_input_entries(input, &diagnostics);
             json!({
                 "key": input.get("key"),
                 "recipeId": input.get("recipeId"),
                 "inputId": input.get("inputId"),
                 "type": input.get("type"),
                 "label": input.get("label"),
-                "description": input.get("description"),
+                "description": input_expected_description(input),
                 "required": input.get("required"),
                 "multiple": input.get("multiple"),
                 "sensitive": input.get("sensitive"),
                 "options": options,
-                "pathKind": validation.get("pathKind"),
+                "pathKind": path_kind,
                 "acceptedExtensions": validation.get("allowedExtensions"),
                 "presentationCategory": presentation_category,
                 "presentationKind": presentation_kind,
                 "value": input.get("value"),
                 "valueSource": input.get("valueSource"),
-                "diagnostics": public_input_diagnostics(input),
+                "entries": entries,
+                "diagnostics": diagnostics,
             })
         })
         .collect::<Vec<_>>();
@@ -1104,16 +1508,81 @@ fn public_input_diagnostics(input: &Value) -> Vec<Value> {
         .flatten()
         .map(|diagnostic| {
             let mut public = public_diagnostic(diagnostic);
-            if diagnostic.get("code").and_then(Value::as_str) == Some("binding_path_missing") {
-                public["message"] = Value::String(if required {
+            public["message"] = Value::String(match diagnostic
+                .get("code")
+                .and_then(Value::as_str)
+                .unwrap_or_default()
+            {
+                "binding_missing" => format!("Select {label} before continuing."),
+                "binding_path_missing" => if required {
                     format!("{label} could not be found. Select it again.")
                 } else {
-                    format!(
-                        "{label} could not be found. Select it again or clear this optional input."
-                    )
-                });
-            }
+                    format!("{label} could not be found. Select it again or clear this optional input.")
+                },
+                "binding_path_kind_mismatch" => format!(
+                    "{label} is not the expected file or folder type. Select it again."
+                ),
+                "binding_path_inaccessible" => format!(
+                    "{label} cannot be read. Check access or select it again."
+                ),
+                "binding_extension_unsupported" => format!(
+                    "{label} uses an unsupported file type. Choose one of the accepted file types."
+                ),
+                "binding_duplicate_path" => format!(
+                    "{label} contains the same item more than once. Remove the duplicate."
+                ),
+                "binding_path_reused" => diagnostic
+                    .get("message")
+                    .and_then(Value::as_str)
+                    .unwrap_or("The same file is used by another input. Confirm that this is intentional.")
+                    .to_string(),
+                "recovery_sensitive_input_required" => format!(
+                    "Re-enter {label}. This value was not stored."
+                ),
+                _ => format!("{label} does not meet its current requirements. Review and correct it."),
+            });
             public
+        })
+        .collect()
+}
+
+fn public_input_entries(input: &Value, diagnostics: &[Value]) -> Vec<Value> {
+    let values = match input.get("value") {
+        Some(Value::String(value)) => vec![value.as_str()],
+        Some(Value::Array(values)) => values.iter().filter_map(Value::as_str).collect(),
+        _ => Vec::new(),
+    };
+    values
+        .into_iter()
+        .enumerate()
+        .map(|(index, path)| {
+            let entry_diagnostics = diagnostics
+                .iter()
+                .filter(|diagnostic| {
+                    diagnostic.get("entryIndex").and_then(Value::as_u64) == Some(index as u64)
+                })
+                .cloned()
+                .collect::<Vec<_>>();
+            let state = if entry_diagnostics.iter().any(|diagnostic| {
+                diagnostic.get("severity").and_then(Value::as_str) == Some("error")
+            }) {
+                "error"
+            } else if entry_diagnostics.is_empty() {
+                "valid"
+            } else {
+                "warning"
+            };
+            json!({
+                "index": index,
+                "displayName": PathBuf::from(path)
+                    .file_name()
+                    .and_then(|name| name.to_str())
+                    .filter(|name| !name.is_empty())
+                    .unwrap_or("Selected item"),
+                "displayPath": path,
+                "state": state,
+                "diagnostics": entry_diagnostics,
+            })
         })
         .collect()
 }
@@ -1128,11 +1597,16 @@ fn public_diagnostics(value: Option<&Value>) -> Vec<Value> {
 }
 
 fn public_diagnostic(diagnostic: &Value) -> Value {
+    let message = diagnostic
+        .get("message")
+        .and_then(Value::as_str)
+        .map(redact_absolute_paths);
     json!({
         "key": diagnostic.get("key"),
         "code": diagnostic.get("code"),
-        "message": diagnostic.get("message"),
+        "message": message,
         "severity": diagnostic.get("severity"),
+        "entryIndex": diagnostic.pointer("/details/entry_index"),
     })
 }
 
@@ -1417,6 +1891,71 @@ pub(crate) fn redact_absolute_paths(value: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn file_contract(multiple: bool) -> InputContract {
+        InputContract {
+            type_name: "file".to_string(),
+            path_kind: "file".to_string(),
+            multiple,
+            allowed_extensions: vec!["txt".to_string()],
+        }
+    }
+
+    #[test]
+    fn input_contract_snapshot_replaces_current_generation_and_rejects_stale_requests() {
+        let mut snapshot = InputContractSnapshot::default();
+        snapshot.replace(
+            4,
+            &json!({
+                "inputs": [{
+                    "key": "recipe/files", "type": "file", "multiple": true,
+                    "validation": { "pathKind": "file", "allowedExtensions": ["txt"] }
+                }]
+            }),
+        );
+        assert!(snapshot.require(4, "recipe/files").unwrap().multiple);
+        snapshot.replace(3, &json!({ "inputs": [] }));
+        assert!(snapshot.require(4, "recipe/files").is_ok());
+        assert!(snapshot
+            .require(3, "recipe/files")
+            .unwrap_err()
+            .contains("input_request_stale"));
+    }
+
+    #[test]
+    fn multi_file_selection_composes_replacements_and_rejects_canonical_duplicates() {
+        let temp = tempfile::tempdir().unwrap();
+        let first = temp.path().join("first.txt");
+        let second = temp.path().join("second.txt");
+        std::fs::write(&first, "first").unwrap();
+        std::fs::write(&second, "second").unwrap();
+        let contract = file_contract(true);
+        let current = json!([first.to_string_lossy()]);
+        let appended =
+            compose_input_selection(&contract, "append", current, None, vec![second.clone()])
+                .unwrap();
+        validate_input_selection(&contract, &appended).unwrap();
+        assert_eq!(appended.as_array().unwrap().len(), 2);
+
+        let duplicate = compose_input_selection(
+            &contract,
+            "replace_all",
+            Value::Null,
+            None,
+            vec![first.clone(), first],
+        )
+        .unwrap();
+        assert!(validate_input_selection(&contract, &duplicate)
+            .unwrap_err()
+            .contains("input_duplicate_path"));
+
+        let replaced =
+            compose_input_selection(&contract, "replace_entry", appended, Some(0), vec![second])
+                .unwrap();
+        assert!(validate_input_selection(&contract, &replaced)
+            .unwrap_err()
+            .contains("input_duplicate_path"));
+    }
 
     #[test]
     fn platform_tools_selections_are_single_use_opaque_and_replace_prior_state() {
@@ -1763,6 +2302,9 @@ mod tests {
                 "recipeOptions": [{
                     "id": "recipe", "name": "Recipe", "description": null,
                     "selected": true, "recommended": true, "dependencyRequired": false,
+                    "recipeDependencies": ["dependency"],
+                    "contentRequirements": ["bios_files"],
+                    "requiredCapabilities": ["shared_storage_write"],
                     "available": true, "unavailableCapabilities": [], "internal": "secret-serial"
                 }],
                 "inputs": [{
@@ -1798,6 +2340,14 @@ mod tests {
         assert_eq!(public["inputs"][0]["presentationCategory"], "Firmware");
         assert_eq!(public["inputs"][0]["presentationKind"], "Single file");
         assert_eq!(public["inputs"][0]["options"], json!(["one"]));
+        assert_eq!(
+            public["recipeOptions"][0]["contentRequirements"],
+            json!(["bios_files"])
+        );
+        assert_eq!(
+            public["recipeOptions"][0]["recipeDependencies"],
+            json!(["dependency"])
+        );
         assert_eq!(public["inputs"][0]["diagnostics"][0]["key"], "recipe/file");
         assert_eq!(public["diagnostics"][0]["key"], "recipe/file");
         let serialized = public.to_string();
@@ -1835,7 +2385,8 @@ mod tests {
                             "key": "recipe/optional_cfg",
                             "code": "binding_path_missing",
                             "message": "Input 'optional_cfg' must reference an existing file.",
-                            "severity": "error"
+                            "severity": "error",
+                            "details": { "entry_index": 0 }
                         }]
                     },
                     {
@@ -1857,11 +2408,17 @@ mod tests {
                             "key": "recipe/required_dir",
                             "code": "binding_path_missing",
                             "message": "Input 'required_dir' must reference an existing directory.",
-                            "severity": "error"
+                            "severity": "error",
+                            "details": { "entry_index": 0 }
                         }]
                     }
                 ],
-                "diagnostics": []
+                "diagnostics": [{
+                    "key": null,
+                    "code": "configuration_warning",
+                    "message": "Could not inspect /private/deleted.cfg",
+                    "severity": "warning"
+                }]
             }),
             "",
         );
@@ -1875,6 +2432,141 @@ mod tests {
             "BIOS folder could not be found. Select it again."
         );
         assert!(!public.to_string().contains("optional_cfg' must reference"));
+        assert_eq!(public["inputs"][0]["entries"][0]["state"], "error");
+        assert_eq!(
+            public["inputs"][0]["entries"][0]["displayName"],
+            "deleted.cfg"
+        );
+        assert_eq!(public["inputs"][0]["diagnostics"][0]["entryIndex"], 0);
+        assert_eq!(
+            public["diagnostics"][0]["message"],
+            "Could not inspect [path]"
+        );
+    }
+
+    #[test]
+    fn fallback_input_descriptions_follow_authoritative_role_and_host_shape() {
+        let cases = [
+            ("bios-file", "bios", "file", false, "file"),
+            ("bios-files", "bios", "file", true, "file"),
+            ("bios-directory", "bios", "directory", false, "directory"),
+            ("content-file", "content", "file", false, "file"),
+            ("content-files", "content", "file", true, "file"),
+            (
+                "content-directory",
+                "content",
+                "directory",
+                false,
+                "directory",
+            ),
+            ("apk-directory", "apk", "directory", false, "directory"),
+        ];
+        let inputs = cases
+            .into_iter()
+            .map(|(key, role, type_name, multiple, path_kind)| {
+                json!({
+                    "key": key,
+                    "recipeId": "recipe",
+                    "inputId": key,
+                    "type": type_name,
+                    "role": role,
+                    "label": "Authoritative label",
+                    "description": null,
+                    "required": true,
+                    "multiple": multiple,
+                    "options": [],
+                    "validation": { "pathKind": path_kind, "allowedExtensions": [] },
+                    "sensitive": false,
+                    "value": null,
+                    "valueSource": null,
+                    "diagnostics": []
+                })
+            })
+            .collect::<Vec<_>>();
+        let public = public_configuration_description(
+            &json!({
+                "devicePlan": "plan",
+                "selectedRecipes": ["recipe"],
+                "expandedRecipes": ["recipe"],
+                "recipeOptions": [],
+                "inputs": inputs,
+                "diagnostics": []
+            }),
+            "",
+        );
+        let descriptions = public["inputs"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|input| input["description"].as_str().unwrap())
+            .collect::<Vec<_>>();
+        assert_eq!(
+            descriptions,
+            vec![
+                "Choose the BIOS file required by this setup.",
+                "Choose the BIOS files required by this setup.",
+                "Choose the folder containing the BIOS files required by this setup.",
+                "Choose the game or content file required by this setup.",
+                "Choose the game or content files required by this setup.",
+                "Choose the folder containing the game or content files required by this setup.",
+                "Choose the folder used by this setup.",
+            ]
+        );
+    }
+
+    #[test]
+    fn authored_input_description_takes_precedence_over_shape_fallback() {
+        let public = public_configuration_description(
+            &json!({
+                "devicePlan": "plan",
+                "selectedRecipes": ["recipe"],
+                "expandedRecipes": ["recipe"],
+                "recipeOptions": [],
+                "inputs": [{
+                    "key": "recipe/content", "recipeId": "recipe", "inputId": "content",
+                    "type": "file", "role": "content", "label": "Content",
+                    "description": "  Choose the verified content bundle supplied by the publisher.  ",
+                    "required": true, "multiple": true, "options": [],
+                    "validation": { "pathKind": "file", "allowedExtensions": [] },
+                    "sensitive": false, "value": null, "valueSource": null,
+                    "diagnostics": []
+                }],
+                "diagnostics": []
+            }),
+            "",
+        );
+        assert_eq!(
+            public["inputs"][0]["description"],
+            "Choose the verified content bundle supplied by the publisher."
+        );
+    }
+
+    #[test]
+    fn device_paths_never_project_host_picker_authority() {
+        let public = public_configuration_description(
+            &json!({
+                "devicePlan": "plan",
+                "selectedRecipes": ["recipe"],
+                "expandedRecipes": ["recipe"],
+                "recipeOptions": [],
+                "inputs": [{
+                    "key": "recipe/destination", "recipeId": "recipe", "inputId": "destination",
+                    "type": "device_path", "role": "rom_destination", "label": "Device ROM folder",
+                    "description": null, "required": true, "multiple": false, "options": [],
+                    "validation": { "pathKind": "directory", "allowedExtensions": [] },
+                    "sensitive": false, "value": "/sdcard/ROMs", "valueSource": "recipe_default",
+                    "diagnostics": []
+                }],
+                "diagnostics": []
+            }),
+            "",
+        );
+        assert!(public["inputs"][0]["pathKind"].is_null());
+        assert_eq!(public["inputs"][0]["presentationKind"], "Device folder");
+        assert!(public["inputs"][0]["description"]
+            .as_str()
+            .unwrap()
+            .contains("Android device"));
     }
 
     #[test]

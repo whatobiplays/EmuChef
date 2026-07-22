@@ -1466,7 +1466,8 @@ fn validate_binding_value(
         return errors;
     }
 
-    for raw_value in values {
+    let mut canonical_paths = HashMap::<std::path::PathBuf, usize>::new();
+    for (entry_index, raw_value) in values.into_iter().enumerate() {
         if declaration.type_name == "enum"
             && !declaration
                 .options
@@ -1495,12 +1496,8 @@ fn validate_binding_value(
                     _ => None,
                 },
             );
-            let exists_with_kind = match expected_kind {
-                Some("file") => path.is_file(),
-                Some("directory") => path.is_dir(),
-                _ => path.exists(),
-            };
-            if !exists_with_kind {
+            let metadata = fs::metadata(path);
+            if metadata.is_err() {
                 errors.push(PlannerMessage {
                     code: "binding_path_missing".to_string(),
                     message: format!(
@@ -1510,8 +1507,47 @@ fn validate_binding_value(
                     details: json!({
                         "input_id": input_id,
                         "expected_path_kind": expected_kind,
+                        "entry_index": entry_index,
                     }),
                 });
+            } else {
+                let metadata = metadata.expect("metadata was checked above");
+                let kind_matches = match expected_kind {
+                    Some("file") => metadata.is_file(),
+                    Some("directory") => metadata.is_dir(),
+                    _ => true,
+                };
+                if !kind_matches {
+                    errors.push(PlannerMessage {
+                        code: "binding_path_kind_mismatch".to_string(),
+                        message: format!(
+                            "Input '{input_id}' must reference an existing {}.",
+                            expected_kind.unwrap_or("host path")
+                        ),
+                        details: json!({
+                            "input_id": input_id,
+                            "expected_path_kind": expected_kind,
+                            "entry_index": entry_index,
+                        }),
+                    });
+                } else {
+                    let readable = match expected_kind {
+                        Some("file") => fs::File::open(path).is_ok(),
+                        Some("directory") => fs::read_dir(path).is_ok(),
+                        _ => fs::File::open(path).is_ok() || fs::read_dir(path).is_ok(),
+                    };
+                    if !readable {
+                        errors.push(PlannerMessage {
+                            code: "binding_path_inaccessible".to_string(),
+                            message: format!("Input '{input_id}' cannot be read."),
+                            details: json!({
+                                "input_id": input_id,
+                                "expected_path_kind": expected_kind,
+                                "entry_index": entry_index,
+                            }),
+                        });
+                    }
+                }
             }
         }
         if !declaration.validation.allowed_prefixes.is_empty()
@@ -1527,6 +1563,7 @@ fn validate_binding_value(
                 details: json!({
                     "input_id": input_id,
                     "allowed_prefixes": declaration.validation.allowed_prefixes,
+                    "entry_index": entry_index,
                 }),
             });
         }
@@ -1534,13 +1571,29 @@ fn validate_binding_value(
             && extension_is_disallowed(raw_path, &declaration.validation.allowed_extensions)
         {
             errors.push(PlannerMessage {
-                code: "binding_validation_failed".to_string(),
+                code: "binding_extension_unsupported".to_string(),
                 message: format!("Input '{input_id}' has an unsupported path extension."),
                 details: json!({
                     "input_id": input_id,
                     "allowed_extensions": declaration.validation.allowed_extensions,
+                    "entry_index": entry_index,
                 }),
             });
+        }
+        if input_uses_host_path(&declaration.type_name) {
+            let identity = fs::canonicalize(raw_path)
+                .unwrap_or_else(|_| std::path::PathBuf::from(normalize_path_string(raw_path)));
+            if let Some(first_entry_index) = canonical_paths.insert(identity, entry_index) {
+                errors.push(PlannerMessage {
+                    code: "binding_duplicate_path".to_string(),
+                    message: format!("Input '{input_id}' contains the same path more than once."),
+                    details: json!({
+                        "input_id": input_id,
+                        "entry_index": entry_index,
+                        "first_entry_index": first_entry_index,
+                    }),
+                });
+            }
         }
     }
     errors

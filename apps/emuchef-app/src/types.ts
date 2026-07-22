@@ -109,6 +109,7 @@ export interface InputDescriptor {
   acceptedExtensions?: string[];
   presentationCategory?: string;
   presentationKind?: string;
+  entries?: InputEntryDescriptor[];
   value: unknown;
   valueSource: "explicit" | "user_configuration" | "device_plan" | "recipe_default" | null;
   diagnostics: ValidationDiagnostic[];
@@ -119,6 +120,15 @@ export interface ValidationDiagnostic {
   code: string;
   message: string;
   severity: string;
+  entryIndex?: number | null;
+}
+
+export interface InputEntryDescriptor {
+  index: number;
+  displayName: string;
+  displayPath: string;
+  state: "valid" | "warning" | "error";
+  diagnostics: ValidationDiagnostic[];
 }
 
 export interface ConfigurationDescription {
@@ -360,6 +370,7 @@ export interface SavedConfigurationDocument {
   devicePlan: string;
   selectedRecipes: string[];
   bindings: Record<string, unknown>;
+  pendingSanitationCount?: number;
   validation: {
     state: SavedConfigurationValidationState;
     diagnostics: ValidationDiagnostic[];

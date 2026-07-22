@@ -248,7 +248,7 @@ export function workflowReducer(state: WorkflowState, action: WorkflowAction): W
       if (action.generation !== state.requestGeneration) return state;
       return {
         ...state,
-        step: "recipes",
+        step: state.step === "inputs" ? "inputs" : "recipes",
         description: action.description,
         descriptionDirty: false,
         selectedRecipes: action.description.selectedRecipes,

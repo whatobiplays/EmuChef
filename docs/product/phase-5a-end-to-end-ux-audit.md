@@ -778,7 +778,7 @@ Derive the action state from the authoritative current selection and validation 
 - Evidence: `Observed`
 - Scenario(s): `A08`, `A09`
 - Proposed phase: `5D`
-- Status: `Open`
+- Status: `Resolved 2026-07-21`
 
 **Preconditions**
 
@@ -816,6 +816,10 @@ Ignore the error panel, scroll to the newly revealed XaniteOG APK input, and pro
 
 Keep the requirement visible immediately, but present it as neutral required-input guidance. Promote it to a blocking error only when the user attempts to advance, reviews the plan, invokes validation, or leaves a touched required input unresolved.
 
+**Resolution evidence (2026-07-21)**
+
+The Inputs stage renders an untouched `binding_missing` requirement as neutral authored guidance. Explicit validation, review, or editing the affected field promotes the sanitized diagnostic to the field and summary. The DOM regression `new required inputs stay neutral until validation is requested` covers the documented reproduction and promotion behavior.
+
 ### UX-015 — Validation UI exposes internal binding identifiers and error codes
 
 - Type: `Defect`
@@ -824,7 +828,7 @@ Keep the requirement visible immediately, but present it as neutral required-inp
 - Evidence: `Observed`
 - Scenario(s): `A09`
 - Proposed phase: `5D`
-- Status: `Open`
+- Status: `Resolved 2026-07-21`
 
 **Preconditions**
 
@@ -861,6 +865,10 @@ Infer from the recipe and surrounding fields that the XaniteOG APK must be selec
 
 Map diagnostics to authored user-facing labels and actionable instructions. Retain stable sanitized codes in exported diagnostics or an intentionally support-oriented surface, not as routine expandable details for ordinary validation.
 
+**Resolution evidence (2026-07-21)**
+
+Tauri maps input diagnostics to label-based actionable messages and removes routine technical-code presentation from the Inputs stage. DOM and security-policy regressions assert that internal codes and binding identifiers are absent from ordinary validation UI while support-oriented diagnostics remain separately controlled.
+
 #### UX-016 — Device destination path incorrectly uses a host filesystem Browse control
 
 - Type: `Defect`
@@ -869,7 +877,7 @@ Map diagnostics to authored user-facing labels and actionable instructions. Reta
 - Evidence: `Observed`
 - Scenario(s): `A09`
 - Proposed phase: `5D`
-- Status: `Open`
+- Status: `Resolved 2026-07-21`
 
 **Preconditions**
 
@@ -906,6 +914,10 @@ Manually type or retain the device path in the text field and ignore the Browse 
 **Notes for later implementation**
 
 Differentiate input rendering by path authority and semantic role. Host file/directory inputs may use native Browse actions. Device destination paths should use validated text or curated destination choices unless a separately designed, backend-owned device browser is added.
+
+**Resolution evidence (2026-07-21)**
+
+The Tauri projection no longer assigns host-picker authority to `device_path` inputs, and the Inputs stage renders them as text values. The DOM regression `device destinations stay textual and sensitive values use concealed controls` covers the documented device-destination reproduction.
 
 ### UX-017 — Save dialog uses confusing internal terminology and does not clearly explain saved contents
 
@@ -1937,7 +1949,7 @@ Create a user-facing plan-review projection rather than rendering planner metada
 - Evidence: `Observed`
 - Scenario(s): `A09`
 - Proposed phase: `5D`
-- Status: `Open`
+- Status: `Resolved 2026-07-21`
 
 **Actual**
 
@@ -1956,6 +1968,10 @@ Optional inputs become effectively permanent for the current configuration unles
 
 Add an explicit `Clear` action for optional file and directory inputs. Clearing must remove the binding, refresh validation, invalidate stale review state, and omit the optional action from the generated plan.
 
+**Resolution evidence (2026-07-21)**
+
+Selected single-value and multi-value path inputs expose an explicit Clear action. The reducer regression `clearing an input removes its binding and invalidates downstream authority` proves that clearing removes portable intent and invalidates the prior description and review authority.
+
 ### UX-036 — Deleted input files produce a generic review failure without naming the invalid field
 
 - Type: `Defect`
@@ -1964,7 +1980,7 @@ Add an explicit `Clear` action for optional file and directory inputs. Clearing 
 - Evidence: `Observed`
 - Scenario(s): `A09`, `A10`
 - Proposed phase: `5D`
-- Status: `Open`
+- Status: `Resolved 2026-07-21`
 
 **Actual**
 
@@ -1983,6 +1999,10 @@ The user knows validation failed but cannot tell which path is stale or what mus
 
 Validate selected paths before review and attach the diagnostic to the user-facing field label. Use wording such as `RetroArch config could not be found. Select the file again or clear this optional input.` Provide a direct relink or clear action.
 
+**Resolution evidence (2026-07-21)**
+
+Rust validates retained paths for existence, readability, kind, and format before review. Tauri projects the affected entry index and a label-based message, and the Inputs stage offers Relink and Clear without exposing the path in errors. Rust projection tests and the multi-file DOM regression cover missing-entry detection and direct repair.
+
 ### UX-037 — Deselecting a recipe leaves stale bindings that block validation
 
 - Type: `Defect`
@@ -1991,7 +2011,7 @@ Validate selected paths before review and attach the diagnostic to the user-faci
 - Evidence: `Observed`
 - Scenario(s): `A09`
 - Proposed phase: `5D`
-- Status: `Open`
+- Status: `Resolved 2026-07-21`
 
 **Actual**
 
@@ -2009,6 +2029,10 @@ Removing a recipe creates new validation failures and prevents plan review. User
 **Notes for later implementation**
 
 On recipe deselection, remove inactive bindings from authoritative validation input or retain them only as dormant remembered values that are excluded from validation and planning. Re-selecting the recipe may restore those remembered values, but they must not block unrelated configurations while inactive.
+
+**Resolution evidence (2026-07-21)**
+
+Recipe selection reconciliation removes bindings that no longer belong to the dependency-expanded active set while retaining bindings shared with active dependencies. The logic regression `deselecting a recipe removes its bindings without removing bindings for active dependencies` covers the documented stale-binding failure.
 
 ### UX-038 — Reconnecting the same device after a review-stage disconnect discards setup and input state
 
@@ -2662,12 +2686,12 @@ Phase 5B completed on 2026-07-19. Its foundational workflow-state findings are r
 
 #### Defects
 
-- `UX-014`: Selecting a recipe immediately presents a blocking error.
-- `UX-015`: Validation exposes internal binding identifiers and codes.
-- `UX-016`: Device destination paths incorrectly use a host Browse control.
-- `UX-035`: Selected optional file inputs cannot be cleared.
-- `UX-036`: Missing selected files produce generic validation failures.
-- `UX-037`: Deselecting a recipe leaves stale bindings that block validation.
+- `UX-014` (resolved 2026-07-21): Selecting a recipe immediately presents a blocking error.
+- `UX-015` (resolved 2026-07-21): Validation exposes internal binding identifiers and codes.
+- `UX-016` (resolved 2026-07-21): Device destination paths incorrectly use a host Browse control.
+- `UX-035` (resolved 2026-07-21): Selected optional file inputs cannot be cleared.
+- `UX-036` (resolved 2026-07-21): Missing selected files produce generic validation failures.
+- `UX-037` (resolved 2026-07-21): Deselecting a recipe leaves stale bindings that block validation.
 
 #### Missing MVP features
 
