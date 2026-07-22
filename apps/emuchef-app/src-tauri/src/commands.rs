@@ -183,8 +183,8 @@ pub enum PlatformToolsPickerResult {
 }
 
 #[tauri::command]
-pub fn get_runtime_status(state: State<'_, AppState>) -> RuntimeStatusDto {
-    state.sidecar.status()
+pub fn get_runtime_status(state: State<'_, AppState>) -> Value {
+    public_runtime_status(state.sidecar.status())
 }
 
 /// Begin a new frontend session without retaining process-local authority.
@@ -205,7 +205,16 @@ pub fn begin_app_session(state: State<'_, AppState>) -> Result<Value, String> {
 
 /// Restart the Rust sidecar after proving no execution is in flight.
 #[tauri::command]
-pub fn restart_runtime(state: State<'_, AppState>) -> Result<RuntimeStatusDto, String> {
+pub fn restart_runtime(
+    expected_generation: Option<u64>,
+    state: State<'_, AppState>,
+) -> Result<Value, String> {
+    if expected_generation.is_some_and(|expected| expected != state.sidecar.generation()) {
+        return Err(safe_error(
+            "runtime_generation_stale",
+            "App service status changed. Review troubleshooting status before retrying.",
+        ));
+    }
     if state
         .executions
         .lock()
@@ -219,12 +228,34 @@ pub fn restart_runtime(state: State<'_, AppState>) -> Result<RuntimeStatusDto, S
     {
         return Err(safe_error(
             "execution_active",
-            "The Rust runtime cannot restart while an execution is starting or active.",
+            "The app service cannot restart while an execution is starting or active.",
         ));
     }
     state.sidecar.initialize();
     reset_app_session(&state, false)?;
-    Ok(state.sidecar.status())
+    Ok(public_runtime_status(state.sidecar.status()))
+}
+
+fn public_runtime_status(status: RuntimeStatusDto) -> Value {
+    match status {
+        RuntimeStatusDto::Starting => json!({ "status": "starting" }),
+        RuntimeStatusDto::Ready {
+            protocol_version,
+            catalog_version,
+        } => json!({
+            "status": "ready",
+            "protocolVersion": protocol_version,
+            "catalogVersion": catalog_version,
+        }),
+        RuntimeStatusDto::Unsupported { .. } => json!({
+            "status": "unsupported",
+            "error": { "message": "This EmuChef build cannot run its local app service on this system." },
+        }),
+        RuntimeStatusDto::Failed { .. } => json!({
+            "status": "failed",
+            "error": { "message": "The local app service could not start. Open Troubleshooting for safe recovery options." },
+        }),
+    }
 }
 
 fn reset_app_session(state: &AppState, close_documents: bool) -> Result<(), String> {
@@ -326,8 +357,8 @@ pub fn get_catalog(state: State<'_, AppState>) -> Result<Value, String> {
 }
 
 #[tauri::command]
-pub fn get_adb_setup_status(state: State<'_, AppState>) -> Result<AdbSetupStatusDto, String> {
-    Ok(state
+pub fn get_adb_setup_status(state: State<'_, AppState>) -> Result<Value, String> {
+    let status = state
         .adb
         .lock()
         .map_err(|_| {
@@ -336,7 +367,22 @@ pub fn get_adb_setup_status(state: State<'_, AppState>) -> Result<AdbSetupStatus
                 "Platform-Tools setup state is unavailable.",
             )
         })?
-        .status())
+        .status();
+    Ok(public_adb_status(&status))
+}
+
+fn public_adb_status(status: &AdbSetupStatusDto) -> Value {
+    json!({
+        "status": status.status,
+        "version": status.version,
+        "warning": status.warning,
+        "error": (status.status == "invalid").then(|| json!({
+            "message": "The managed Platform-Tools installation did not pass validation. Open Troubleshooting to repair it."
+        })),
+        "canImport": status.can_import,
+        "canReplace": status.can_replace,
+        "canRemove": status.can_remove,
+    })
 }
 
 #[tauri::command]
@@ -404,8 +450,9 @@ pub async fn pick_platform_tools_zip(app: AppHandle) -> Result<PlatformToolsPick
 #[tauri::command]
 pub async fn install_platform_tools_selection(
     selection_handle: String,
+    expected_revision: Option<u64>,
     app: AppHandle,
-) -> Result<AdbSetupStatusDto, String> {
+) -> Result<Value, String> {
     let path = app
         .state::<AppState>()
         .platform_tools_selections
@@ -427,6 +474,12 @@ pub async fn install_platform_tools_selection(
                 "Platform-Tools setup state is unavailable.",
             )
         })?;
+        if expected_revision.is_some_and(|expected| expected != adb.revision()) {
+            return Err(safe_error(
+                "platform_tools_revision_stale",
+                "Platform-Tools status changed. Review troubleshooting status before retrying.",
+            ));
+        }
         let result = adb.import_zip(&path);
         drop(adb);
         result
@@ -444,7 +497,7 @@ pub async fn install_platform_tools_selection(
             )
         })?
         .invalidate_runtime_authority_preserving_identities();
-    Ok(result)
+    Ok(public_adb_status(&result))
 }
 
 pub(crate) type PickerCompletion<T> = Box<dyn FnOnce(Option<T>) + Send>;
@@ -489,7 +542,10 @@ where
 }
 
 #[tauri::command]
-pub fn remove_platform_tools(state: State<'_, AppState>) -> Result<AdbSetupStatusDto, String> {
+pub fn remove_platform_tools(
+    expected_revision: Option<u64>,
+    state: State<'_, AppState>,
+) -> Result<Value, String> {
     if state
         .executions
         .lock()
@@ -516,16 +572,26 @@ pub fn remove_platform_tools(state: State<'_, AppState>) -> Result<AdbSetupStatu
             )
         })?
         .clear();
-    let result = state
-        .adb
-        .lock()
-        .map_err(|_| {
-            safe_error(
-                "adb_state_unavailable",
-                "Platform-Tools setup state is unavailable.",
-            )
-        })?
-        .remove()?;
+    let mut adb = state.adb.lock().map_err(|_| {
+        safe_error(
+            "adb_state_unavailable",
+            "Platform-Tools setup state is unavailable.",
+        )
+    })?;
+    if expected_revision.is_some_and(|expected| expected != adb.revision()) {
+        return Err(safe_error(
+            "platform_tools_revision_stale",
+            "Platform-Tools status changed. Review troubleshooting status before retrying.",
+        ));
+    }
+    if !adb.is_app_managed() {
+        return Err(safe_error(
+            "platform_tools_not_managed",
+            "Only an app-managed Platform-Tools installation can be removed here.",
+        ));
+    }
+    let result = adb.remove()?;
+    drop(adb);
     state
         .handles
         .lock()
@@ -546,11 +612,26 @@ pub fn remove_platform_tools(state: State<'_, AppState>) -> Result<AdbSetupStatu
             )
         })?
         .reset();
-    Ok(result)
+    Ok(public_adb_status(&result))
 }
 
 #[tauri::command]
-pub fn poll_devices(state: State<'_, AppState>) -> Result<Value, String> {
+pub fn poll_devices(
+    expected_generation: Option<u64>,
+    state: State<'_, AppState>,
+) -> Result<Value, String> {
+    if expected_generation.is_some_and(|expected| {
+        state
+            .handles
+            .lock()
+            .map(|handles| handles.device_generation() != expected)
+            .unwrap_or(true)
+    }) {
+        return Err(safe_error(
+            "device_generation_stale",
+            "Device status changed. Refresh troubleshooting status before retrying.",
+        ));
+    }
     let adb_path = current_adb_path(&state)?;
     let inventory = state
         .sidecar

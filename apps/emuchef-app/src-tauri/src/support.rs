@@ -4,13 +4,13 @@
 //! logical-entry handles. Paths, filenames, metadata identities, raw bundle
 //! bytes, and deletion authority remain inside this module.
 
-use std::collections::{HashMap, HashSet};
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::fs;
 use std::io::{Cursor, Write};
 use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use tauri::{AppHandle, Manager, State};
 use tauri_plugin_dialog::{DialogExt, FilePath};
@@ -18,11 +18,22 @@ use uuid::Uuid;
 use zip::write::SimpleFileOptions;
 
 use crate::commands::AppState;
+use crate::support_codes::SupportCode;
 
 const MAX_CACHE_ENTRIES: usize = 4_096;
 const MAX_METADATA_BYTES: u64 = 16 * 1_024;
 const MAX_DIAGNOSTICS_BYTES: usize = 2 * 1_024 * 1_024;
 const METADATA_SUFFIX: &str = ".emuchef-cache.json";
+const MAX_RESET_AUTHORIZATIONS: usize = 64;
+const DIAGNOSTICS_MEMBER_NAMES: [&str; 7] = [
+    "manifest.json",
+    "runtime.json",
+    "catalog.json",
+    "configuration-summary.json",
+    "execution-summaries.json",
+    "cache-summary.json",
+    "support-status.json",
+];
 
 #[derive(Clone, Debug, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
@@ -63,7 +74,10 @@ struct CacheEntryRecord {
 pub struct SupportStore {
     cache_root: PathBuf,
     generation: u64,
+    presentation_revision: u64,
     entries: HashMap<String, CacheEntryRecord>,
+    reset_authorizations: HashMap<String, ResetAuthorization>,
+    reset_order: VecDeque<String>,
 }
 
 impl SupportStore {
@@ -71,13 +85,39 @@ impl SupportStore {
         Self {
             cache_root,
             generation: 0,
+            presentation_revision: 0,
             entries: HashMap::new(),
+            reset_authorizations: HashMap::new(),
+            reset_order: VecDeque::new(),
         }
     }
 
     pub fn invalidate(&mut self) {
         self.generation = self.generation.wrapping_add(1);
         self.entries.clear();
+    }
+
+    fn issue_reset_authorization(&mut self, authorization: ResetAuthorization) -> String {
+        let handle = format!("reset_{}", Uuid::new_v4().simple());
+        self.reset_authorizations
+            .insert(handle.clone(), authorization);
+        self.reset_order.push_back(handle.clone());
+        while self.reset_order.len() > MAX_RESET_AUTHORIZATIONS {
+            if let Some(expired) = self.reset_order.pop_front() {
+                self.reset_authorizations.remove(&expired);
+            }
+        }
+        handle
+    }
+
+    fn take_reset_authorization(&mut self, handle: &str) -> Result<ResetAuthorization, String> {
+        self.reset_order.retain(|candidate| candidate != handle);
+        self.reset_authorizations.remove(handle).ok_or_else(|| {
+            support_error(
+                "reset_category_stale",
+                "This reset option is outdated. Review the current local-state categories.",
+            )
+        })
     }
 
     fn refresh(&mut self, execution_in_flight: bool) -> Result<Value, String> {
@@ -221,6 +261,14 @@ impl SupportStore {
         let total_size = entries
             .iter()
             .fold(0_u64, |total, entry| total.saturating_add(entry.size_bytes));
+        let removable = self
+            .entries
+            .values()
+            .filter(|entry| entry.removable && !entry.in_use)
+            .collect::<Vec<_>>();
+        let removable_size = removable
+            .iter()
+            .fold(0_u64, |total, entry| total.saturating_add(entry.size_bytes));
         json!({
             "generation": self.generation.to_string(),
             "entries": entries.into_iter().map(project_entry).collect::<Vec<_>>(),
@@ -228,11 +276,140 @@ impl SupportStore {
                 "entryCount": self.entries.len(),
                 "totalSizeBytes": total_size,
                 "inUseCount": self.entries.values().filter(|entry| entry.in_use).count(),
+                "removableCount": removable.len(),
+                "removableSizeBytes": removable_size,
+                "unusedRemovableCount": removable.len(),
+                "unusedRemovableSizeBytes": removable_size,
                 "unmanagedCount": unmanaged_count,
                 "unmanagedSizeBytes": unmanaged_size,
             },
+            "categories": [
+                {
+                    "id": "artifact",
+                    "label": "Reusable setup downloads",
+                    "description": "App-owned copies of files used to prepare a setup.",
+                    "deletionConsequence": "Removed files are downloaded or copied again when a later setup needs them. Saved setups and original user files are preserved."
+                },
+                {
+                    "id": "partial",
+                    "label": "Incomplete downloads",
+                    "description": "App-owned temporary files left by an incomplete transfer.",
+                    "deletionConsequence": "A later setup starts the download again. Saved setups and original user files are preserved."
+                }
+            ],
         })
     }
+}
+
+#[derive(Clone, Debug)]
+enum ResetAuthorization {
+    Recents {
+        revision: u64,
+        item_count: usize,
+    },
+    Cache {
+        revision: u64,
+        item_count: usize,
+        total_size_bytes: u64,
+    },
+    Recovery {
+        revision: u64,
+    },
+}
+
+#[derive(Clone, Debug, Serialize)]
+#[serde(rename_all = "snake_case")]
+enum SupportSeverity {
+    Healthy,
+    Neutral,
+    Warning,
+    Failure,
+}
+
+#[derive(Clone, Debug, Serialize)]
+#[serde(
+    tag = "kind",
+    rename_all = "snake_case",
+    rename_all_fields = "camelCase"
+)]
+enum CorrectiveActionDto {
+    RestartService { service_generation: u64 },
+    ImportManagedPlatformTools { platform_tools_revision: u64 },
+    ReplaceManagedPlatformTools { platform_tools_revision: u64 },
+    RemoveManagedPlatformTools { platform_tools_revision: u64 },
+    RefreshDevices { device_generation: u64 },
+    RefreshCache { cache_generation: String },
+    OpenUpdates,
+    OpenSavedSetupRepair,
+}
+
+#[derive(Clone, Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct SupportActionDto {
+    label: &'static str,
+    consequence: &'static str,
+    available: bool,
+    unavailable_reason: Option<&'static str>,
+    destructive: bool,
+    action: CorrectiveActionDto,
+}
+
+#[derive(Clone, Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct SubsystemStatusDto {
+    id: &'static str,
+    label: &'static str,
+    severity: SupportSeverity,
+    summary: String,
+    consequence: String,
+    support_code: Option<&'static str>,
+    actions: Vec<SupportActionDto>,
+}
+
+#[derive(Clone, Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct DiagnosticsDisclosureDto {
+    included_categories: Vec<&'static str>,
+    excluded_categories: Vec<&'static str>,
+    local_until_shared: bool,
+    uploads_automatically: bool,
+    maximum_size_bytes: usize,
+}
+
+#[derive(Clone, Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct ResetCategoryDto {
+    reset_handle: Option<String>,
+    id: &'static str,
+    label: &'static str,
+    description: &'static str,
+    consequence: &'static str,
+    affected_scope: &'static str,
+    available: bool,
+    unavailable_reason: Option<&'static str>,
+    confirmation_required: bool,
+    restart_required: bool,
+    item_count: usize,
+    total_size_bytes: Option<u64>,
+}
+
+#[derive(Clone, Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct SupportSnapshotDto {
+    presentation_revision: u64,
+    overall_severity: SupportSeverity,
+    overall_summary: String,
+    subsystems: Vec<SubsystemStatusDto>,
+    cache_inventory: Option<Value>,
+    diagnostics_disclosure: DiagnosticsDisclosureDto,
+    reset_categories: Vec<ResetCategoryDto>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct ResetLocalAppStateRequest {
+    reset_handle: String,
+    confirmed: bool,
 }
 
 #[derive(Debug, Deserialize)]
@@ -278,6 +455,717 @@ pub fn get_cache_inventory(state: State<'_, AppState>) -> Result<Value, String> 
         .lock()
         .map_err(|_| support_error("support_state_unavailable", "Support state is unavailable."))?
         .refresh(in_flight)
+}
+
+#[tauri::command]
+pub fn get_support_snapshot(state: State<'_, AppState>) -> Result<Value, String> {
+    serde_json::to_value(build_support_snapshot(&state)?).map_err(|_| {
+        support_error(
+            "support_snapshot_failed",
+            "Troubleshooting status could not be prepared.",
+        )
+    })
+}
+
+fn build_support_snapshot(state: &AppState) -> Result<SupportSnapshotDto, String> {
+    let in_flight = state
+        .executions
+        .lock()
+        .map(|executions| executions.has_in_flight())
+        .unwrap_or(true);
+    let execution_summary = state
+        .executions
+        .lock()
+        .map(|executions| executions.support_summary(&state.sidecar))
+        .unwrap_or_else(|_| json!({ "unavailable": true }));
+    let runtime_value = serde_json::to_value(state.sidecar.status())
+        .unwrap_or_else(|_| json!({ "status": "failed" }));
+    let runtime_status = runtime_value
+        .get("status")
+        .and_then(Value::as_str)
+        .unwrap_or("failed");
+    let service_generation = state.sidecar.generation();
+
+    let (adb_status, platform_tools_revision, app_managed) = state
+        .adb
+        .lock()
+        .map(|adb| (adb.status(), adb.revision(), adb.is_app_managed()))
+        .unwrap_or_else(|_| {
+            (
+                crate::adb::AdbSetupStatusDto {
+                    status: "invalid",
+                    version: None,
+                    warning: None,
+                    error: None,
+                    can_import: false,
+                    can_replace: false,
+                    can_remove: false,
+                },
+                0,
+                false,
+            )
+        });
+    let device_summary = state
+        .handles
+        .lock()
+        .map(|handles| handles.support_summary())
+        .unwrap_or_else(|_| json!({ "generation": 0, "deviceCount": 0 }));
+    let device_generation = device_summary
+        .get("generation")
+        .and_then(Value::as_u64)
+        .unwrap_or_default();
+    let device_count = device_summary
+        .get("deviceCount")
+        .and_then(Value::as_u64)
+        .unwrap_or_default();
+    let available_devices = device_summary
+        .get("availableCount")
+        .and_then(Value::as_u64)
+        .unwrap_or_default();
+
+    let saved_summary = state
+        .saved_configurations
+        .lock()
+        .map(|saved| saved.support_summary())
+        .unwrap_or_else(|_| json!({ "recentCount": 0, "recentsRevision": 0 }));
+    let recents_revision = saved_summary
+        .get("recentsRevision")
+        .and_then(Value::as_u64)
+        .unwrap_or_default();
+    let recent_count = saved_summary
+        .get("recentCount")
+        .and_then(Value::as_u64)
+        .unwrap_or_default() as usize;
+    let recovery_summary = state
+        .recovery
+        .lock()
+        .map(|recovery| recovery.support_summary())
+        .unwrap_or_else(|_| json!({ "draftAvailable": false, "loadIssue": true }));
+    let recovery_generation = recovery_summary
+        .get("draftGeneration")
+        .and_then(Value::as_u64);
+
+    let update_value = state
+        .updates
+        .status()
+        .ok()
+        .and_then(|status| serde_json::to_value(status).ok())
+        .unwrap_or_else(|| json!({ "state": "failed" }));
+    let update_status = update_value
+        .get("state")
+        .and_then(Value::as_str)
+        .unwrap_or("failed");
+
+    let mut support_store = state.support.lock().map_err(|_| {
+        support_error(
+            "support_state_unavailable",
+            SupportCode::SupportUnavailable.entry().message,
+        )
+    })?;
+    let cache_inventory = support_store.refresh(in_flight).ok();
+    support_store.presentation_revision =
+        support_store.presentation_revision.saturating_add(1).max(1);
+    let presentation_revision = support_store.presentation_revision;
+    let cache_generation = cache_inventory
+        .as_ref()
+        .and_then(|inventory| inventory.get("generation"))
+        .and_then(Value::as_str)
+        .unwrap_or_default()
+        .to_string();
+    let cache_removable_count = cache_inventory
+        .as_ref()
+        .and_then(|inventory| inventory.pointer("/summary/removableCount"))
+        .and_then(Value::as_u64)
+        .unwrap_or_default() as usize;
+    let cache_removable_size = cache_inventory
+        .as_ref()
+        .and_then(|inventory| inventory.pointer("/summary/removableSizeBytes"))
+        .and_then(Value::as_u64)
+        .unwrap_or_default();
+
+    let mut subsystems = Vec::new();
+    let mut attention = false;
+
+    let service = match runtime_status {
+        "ready" => SubsystemStatusDto {
+            id: "service",
+            label: "App service",
+            severity: SupportSeverity::Healthy,
+            summary: "The local app service is ready.".to_string(),
+            consequence: "Setup validation and planning are available.".to_string(),
+            support_code: None,
+            actions: Vec::new(),
+        },
+        "unsupported" => {
+            attention = true;
+            SubsystemStatusDto {
+                id: "service",
+                label: "App service",
+                severity: SupportSeverity::Failure,
+                summary: SupportCode::ServiceUnsupported.entry().message.to_string(),
+                consequence: "Device setup cannot continue in this build.".to_string(),
+                support_code: Some(SupportCode::ServiceUnsupported.code()),
+                actions: Vec::new(),
+            }
+        }
+        _ => {
+            attention = true;
+            SubsystemStatusDto {
+                id: "service",
+                label: "App service",
+                severity: SupportSeverity::Failure,
+                summary: SupportCode::ServiceStartFailed.entry().message.to_string(),
+                consequence: "Catalog access, planning, and execution are unavailable.".to_string(),
+                support_code: Some(SupportCode::ServiceStartFailed.code()),
+                actions: vec![SupportActionDto {
+                    label: "Restart app service",
+                    consequence: "Portable setup intent is preserved, but device, review, and execution authority must be refreshed.",
+                    available: !in_flight,
+                    unavailable_reason: in_flight.then_some("An execution must finish before the service can restart."),
+                    destructive: false,
+                    action: CorrectiveActionDto::RestartService { service_generation },
+                }],
+            }
+        }
+    };
+    subsystems.push(service);
+
+    let platform = match adb_status.status {
+        "ready" => {
+            let platform_warning = adb_status.warning.is_some();
+            if platform_warning {
+                attention = true;
+            }
+            let mut actions = Vec::new();
+            if app_managed {
+                actions.push(SupportActionDto {
+                    label: "Replace managed Platform-Tools",
+                    consequence: "Device and review authority will be refreshed after the replacement is validated.",
+                    available: !in_flight,
+                    unavailable_reason: in_flight.then_some("An execution must finish before Platform-Tools can change."),
+                    destructive: false,
+                    action: CorrectiveActionDto::ReplaceManagedPlatformTools { platform_tools_revision },
+                });
+                actions.push(SupportActionDto {
+                    label: "Remove managed Platform-Tools",
+                    consequence: "Device detection stops until Platform-Tools are installed again. External installations are never deleted.",
+                    available: !in_flight,
+                    unavailable_reason: in_flight.then_some("An execution must finish before Platform-Tools can change."),
+                    destructive: true,
+                    action: CorrectiveActionDto::RemoveManagedPlatformTools { platform_tools_revision },
+                });
+            }
+            SubsystemStatusDto {
+                id: "platform_tools",
+                label: "Android Platform-Tools",
+                severity: if platform_warning {
+                    SupportSeverity::Warning
+                } else {
+                    SupportSeverity::Healthy
+                },
+                summary: adb_status
+                    .warning
+                    .clone()
+                    .unwrap_or_else(|| "Platform-Tools are ready.".to_string()),
+                consequence: "Connected Android devices can be detected.".to_string(),
+                support_code: platform_warning.then_some(SupportCode::PlatformToolsLimited.code()),
+                actions,
+            }
+        }
+        "missing" => {
+            attention = true;
+            SubsystemStatusDto {
+                id: "platform_tools",
+                label: "Android Platform-Tools",
+                severity: SupportSeverity::Warning,
+                summary: SupportCode::PlatformToolsMissing
+                    .entry()
+                    .message
+                    .to_string(),
+                consequence:
+                    "Device detection is unavailable; offline setup work remains available."
+                        .to_string(),
+                support_code: Some(SupportCode::PlatformToolsMissing.code()),
+                actions: vec![SupportActionDto {
+                    label: "Install managed Platform-Tools",
+                    consequence:
+                        "EmuChef imports a validated ZIP into its private managed location.",
+                    available: adb_status.can_import,
+                    unavailable_reason: (!adb_status.can_import)
+                        .then_some("Installation is temporarily unavailable."),
+                    destructive: false,
+                    action: CorrectiveActionDto::ImportManagedPlatformTools {
+                        platform_tools_revision,
+                    },
+                }],
+            }
+        }
+        _ => {
+            attention = true;
+            SubsystemStatusDto {
+                id: "platform_tools",
+                label: "Android Platform-Tools",
+                severity: SupportSeverity::Failure,
+                summary: SupportCode::PlatformToolsInvalid
+                    .entry()
+                    .message
+                    .to_string(),
+                consequence:
+                    "Device detection is unavailable until a validated installation is selected."
+                        .to_string(),
+                support_code: Some(SupportCode::PlatformToolsInvalid.code()),
+                actions: vec![SupportActionDto {
+                    label: "Install managed Platform-Tools",
+                    consequence:
+                        "EmuChef imports a validated ZIP into its private managed location.",
+                    available: adb_status.can_import,
+                    unavailable_reason: (!adb_status.can_import)
+                        .then_some("Installation is temporarily unavailable."),
+                    destructive: false,
+                    action: CorrectiveActionDto::ImportManagedPlatformTools {
+                        platform_tools_revision,
+                    },
+                }],
+            }
+        }
+    };
+    subsystems.push(platform);
+
+    let device_needs_attention = device_count > 0 && available_devices == 0;
+    if device_needs_attention {
+        attention = true;
+    }
+    subsystems.push(SubsystemStatusDto {
+        id: "device",
+        label: "Connected device",
+        severity: if available_devices > 0 {
+            SupportSeverity::Healthy
+        } else if device_needs_attention {
+            SupportSeverity::Warning
+        } else {
+            SupportSeverity::Neutral
+        },
+        summary: if available_devices > 0 {
+            format!("{available_devices} available device{} detected.", if available_devices == 1 { "" } else { "s" })
+        } else if device_count > 0 {
+            "A connected device needs attention before use.".to_string()
+        } else {
+            "No Android device is currently detected.".to_string()
+        },
+        consequence: "Refreshing device status may invalidate a review if the selected device changed.".to_string(),
+        support_code: device_needs_attention.then_some(SupportCode::DeviceUnavailable.code()),
+        actions: vec![SupportActionDto {
+            label: "Refresh connected devices",
+            consequence: "Current device facts are re-read and stale review authority is invalidated when necessary.",
+            available: adb_status.status == "ready" && !in_flight,
+            unavailable_reason: (adb_status.status != "ready").then_some("Platform-Tools must be ready first."),
+            destructive: false,
+            action: CorrectiveActionDto::RefreshDevices { device_generation },
+        }],
+    });
+
+    if state.catalog.is_ok() {
+        subsystems.push(SubsystemStatusDto {
+            id: "catalog",
+            label: "Setup catalog",
+            severity: SupportSeverity::Healthy,
+            summary: "The bundled setup catalog is available.".to_string(),
+            consequence: "Supported setups can be described and reviewed.".to_string(),
+            support_code: None,
+            actions: Vec::new(),
+        });
+    } else {
+        attention = true;
+        subsystems.push(SubsystemStatusDto {
+            id: "catalog",
+            label: "Setup catalog",
+            severity: SupportSeverity::Failure,
+            summary: SupportCode::CatalogUnavailable.entry().message.to_string(),
+            consequence: "Setups cannot be described until the application resources are repaired."
+                .to_string(),
+            support_code: Some(SupportCode::CatalogUnavailable.code()),
+            actions: Vec::new(),
+        });
+    }
+
+    if cache_inventory.is_some() {
+        subsystems.push(SubsystemStatusDto {
+            id: "cache",
+            label: "App-owned storage",
+            severity: SupportSeverity::Healthy,
+            summary: "App-owned cache inventory is available.".to_string(),
+            consequence: "Only validated removable entries can be cleared.".to_string(),
+            support_code: None,
+            actions: vec![SupportActionDto {
+                label: "Refresh storage inventory",
+                consequence: "Current app-owned cache entries are inspected again.",
+                available: !in_flight,
+                unavailable_reason: in_flight
+                    .then_some("Storage inventory is protected while execution is active."),
+                destructive: false,
+                action: CorrectiveActionDto::RefreshCache {
+                    cache_generation: cache_generation.clone(),
+                },
+            }],
+        });
+    } else {
+        attention = true;
+        subsystems.push(SubsystemStatusDto {
+            id: "cache",
+            label: "App-owned storage",
+            severity: SupportSeverity::Failure,
+            summary: SupportCode::CacheInspectionFailed
+                .entry()
+                .message
+                .to_string(),
+            consequence: "Cache cleanup remains unavailable until a safe inventory can be built."
+                .to_string(),
+            support_code: Some(SupportCode::CacheInspectionFailed.code()),
+            actions: Vec::new(),
+        });
+    }
+
+    subsystems.push(match update_status {
+        "failed" => {
+            attention = true;
+            SubsystemStatusDto {
+                id: "updates",
+                label: "Updates",
+                severity: SupportSeverity::Warning,
+                summary: SupportCode::UpdateCheckFailed.entry().message.to_string(),
+                consequence: "Local use is unaffected; update availability is unknown.".to_string(),
+                support_code: Some(SupportCode::UpdateCheckFailed.code()),
+                actions: vec![SupportActionDto {
+                    label: "Open Updates",
+                    consequence: "Review current update status and retry when available.",
+                    available: true,
+                    unavailable_reason: None,
+                    destructive: false,
+                    action: CorrectiveActionDto::OpenUpdates,
+                }],
+            }
+        }
+        "unconfigured" => SubsystemStatusDto {
+            id: "updates",
+            label: "Updates",
+            severity: SupportSeverity::Neutral,
+            summary: "Update checking is not configured for this build.".to_string(),
+            consequence: "Local use is unaffected.".to_string(),
+            support_code: None,
+            actions: Vec::new(),
+        },
+        _ => SubsystemStatusDto {
+            id: "updates",
+            label: "Updates",
+            severity: SupportSeverity::Healthy,
+            summary: "Update status is available.".to_string(),
+            consequence: "Validated update information can be reviewed in Updates.".to_string(),
+            support_code: None,
+            actions: Vec::new(),
+        },
+    });
+
+    let recovery_available = recovery_generation.is_some();
+    let recovery_load_issue = recovery_summary
+        .get("loadIssue")
+        .and_then(Value::as_bool)
+        .unwrap_or(false);
+    if recovery_load_issue {
+        attention = true;
+    }
+    subsystems.push(SubsystemStatusDto {
+        id: "recovery",
+        label: "Recovery data",
+        severity: if recovery_load_issue { SupportSeverity::Warning } else { SupportSeverity::Neutral },
+        summary: if recovery_load_issue {
+            SupportCode::RecoveryDataInvalid.entry().message.to_string()
+        } else if recovery_available {
+            "A recovery draft is available for workflow review.".to_string()
+        } else {
+            "No recovery draft is waiting.".to_string()
+        },
+        consequence: if recovery_available {
+            "A draft may restore portable setup choices, but never device identity, review plans, execution progress, or secrets.".to_string()
+        } else {
+            "Saved setup files and current workflow state are unaffected.".to_string()
+        },
+        support_code: recovery_load_issue.then_some(SupportCode::RecoveryDataInvalid.code()),
+        actions: Vec::new(),
+    });
+
+    let missing_recents = saved_summary
+        .get("missingRecentCount")
+        .and_then(Value::as_u64)
+        .unwrap_or_default();
+    if missing_recents > 0 {
+        attention = true;
+    }
+    subsystems.push(SubsystemStatusDto {
+        id: "saved_configuration",
+        label: "Saved setups",
+        severity: if missing_recents > 0 {
+            SupportSeverity::Warning
+        } else {
+            SupportSeverity::Healthy
+        },
+        summary: if missing_recents > 0 {
+            format!(
+                "{missing_recents} Recent entr{} need relinking or removal.",
+                if missing_recents == 1 { "y" } else { "ies" }
+            )
+        } else {
+            "Saved setup references are available.".to_string()
+        },
+        consequence: "Resetting Recents never deletes saved setup files.".to_string(),
+        support_code: (missing_recents > 0)
+            .then_some(SupportCode::SavedConfigurationReferenceMissing.code()),
+        actions: (missing_recents > 0)
+            .then(|| {
+                vec![SupportActionDto {
+                    label: "Open saved setup repair",
+                    consequence:
+                        "Review missing Recent entries without changing saved files automatically.",
+                    available: true,
+                    unavailable_reason: None,
+                    destructive: false,
+                    action: CorrectiveActionDto::OpenSavedSetupRepair,
+                }]
+            })
+            .unwrap_or_default(),
+    });
+
+    let execution_unavailable = execution_summary.get("unavailable").is_some();
+    if execution_unavailable {
+        attention = true;
+    }
+    subsystems.push(SubsystemStatusDto {
+        id: "execution",
+        label: "Execution retention",
+        severity: if execution_unavailable {
+            SupportSeverity::Warning
+        } else {
+            SupportSeverity::Neutral
+        },
+        summary: if in_flight {
+            "An execution is starting or active."
+        } else {
+            "No execution is currently active."
+        }
+        .to_string(),
+        consequence: if execution_unavailable {
+            "Retained execution status could not be inspected.".to_string()
+        } else {
+            "Support inspection does not change retained execution state.".to_string()
+        },
+        support_code: execution_unavailable
+            .then_some(SupportCode::ExecutionStateUnavailable.code()),
+        actions: Vec::new(),
+    });
+
+    let recents_handle = (recent_count > 0).then(|| {
+        support_store.issue_reset_authorization(ResetAuthorization::Recents {
+            revision: recents_revision,
+            item_count: recent_count,
+        })
+    });
+    let cache_revision = support_store.generation;
+    let cache_handle = (cache_removable_count > 0).then(|| {
+        support_store.issue_reset_authorization(ResetAuthorization::Cache {
+            revision: cache_revision,
+            item_count: cache_removable_count,
+            total_size_bytes: cache_removable_size,
+        })
+    });
+    let recovery_handle = recovery_generation.map(|revision| {
+        support_store.issue_reset_authorization(ResetAuthorization::Recovery { revision })
+    });
+
+    Ok(SupportSnapshotDto {
+        presentation_revision,
+        overall_severity: if attention { SupportSeverity::Warning } else { SupportSeverity::Healthy },
+        overall_summary: if attention {
+            "One or more systems need attention.".to_string()
+        } else {
+            "EmuChef is ready. No troubleshooting issues were found.".to_string()
+        },
+        subsystems,
+        cache_inventory,
+        diagnostics_disclosure: DiagnosticsDisclosureDto {
+            included_categories: vec![
+                "App and local-service readiness",
+                "Operating-system class and feature gates",
+                "Public catalog identity",
+                "Aggregate saved-setup and execution state",
+                "Aggregate cache counts and current public support codes",
+            ],
+            excluded_categories: vec![
+                "Paths, serials, credentials, and environment values",
+                "Raw logs, process output, and internal errors",
+                "Configuration contents, input values, plans, and authority handles",
+            ],
+            local_until_shared: true,
+            uploads_automatically: false,
+            maximum_size_bytes: MAX_DIAGNOSTICS_BYTES,
+        },
+        reset_categories: vec![
+            ResetCategoryDto {
+                reset_handle: recents_handle,
+                id: "recents",
+                label: "Clear Recents",
+                description: "Remove the app-owned list of recently opened setup files.",
+                consequence: "Saved setup files, the active setup, and portable intent remain unchanged.",
+                affected_scope: "Recent setup index only",
+                available: recent_count > 0,
+                unavailable_reason: (recent_count == 0).then_some("There are no Recent entries to clear."),
+                confirmation_required: true,
+                restart_required: false,
+                item_count: recent_count,
+                total_size_bytes: None,
+            },
+            ResetCategoryDto {
+                reset_handle: cache_handle,
+                id: "cache",
+                label: "Clear app-owned cache",
+                description: "Remove currently approved app-owned cache entries that are not in use.",
+                consequence: "Later setup runs may download or rebuild files. Saved setups and original user files remain unchanged.",
+                affected_scope: "Canonical app-owned cache root only",
+                available: cache_removable_count > 0,
+                unavailable_reason: (cache_removable_count == 0).then_some("There are no removable cache entries."),
+                confirmation_required: true,
+                restart_required: false,
+                item_count: cache_removable_count,
+                total_size_bytes: Some(cache_removable_size),
+            },
+            ResetCategoryDto {
+                reset_handle: recovery_handle,
+                id: "recovery",
+                label: "Reset recovery data",
+                description: "Remove the app-owned recovery draft as a maintenance action.",
+                consequence: "The active process marker, current workflow, saved files, portable intent, and review authority remain unchanged.",
+                affected_scope: "Recovery draft only",
+                available: recovery_available,
+                unavailable_reason: (!recovery_available).then_some("There is no recovery draft to reset."),
+                confirmation_required: true,
+                restart_required: false,
+                item_count: usize::from(recovery_available),
+                total_size_bytes: None,
+            },
+        ],
+    })
+}
+
+#[tauri::command]
+pub fn reset_local_app_state(
+    request: ResetLocalAppStateRequest,
+    state: State<'_, AppState>,
+) -> Result<Value, String> {
+    if !request.confirmed {
+        return Err(support_error(
+            "reset_confirmation_required",
+            "Confirm this reset category before continuing.",
+        ));
+    }
+    let authorization = state
+        .support
+        .lock()
+        .map_err(|_| support_error("support_state_unavailable", "Support state is unavailable."))?
+        .take_reset_authorization(&request.reset_handle)?;
+    let summary = match authorization {
+        ResetAuthorization::Recents {
+            revision,
+            item_count,
+        } => {
+            let mut saved = state.saved_configurations.lock().map_err(|_| {
+                support_error(
+                    "configuration_state_unavailable",
+                    "Saved-setup state is unavailable.",
+                )
+            })?;
+            if saved.recent_count() != item_count {
+                return Err(support_error(
+                    "reset_category_stale",
+                    "Recent setups changed. Review the reset category again.",
+                ));
+            }
+            saved.reset_recents(revision)?;
+            "Recent setup history was cleared. Saved setup files were preserved."
+        }
+        ResetAuthorization::Recovery { revision } => {
+            state
+                .recovery
+                .lock()
+                .map_err(|_| {
+                    support_error(
+                        "recovery_state_unavailable",
+                        "Recovery state is unavailable.",
+                    )
+                })?
+                .reset_recovery_data(revision)?;
+            "Recovery data was reset. The active application session and current workflow were preserved."
+        }
+        ResetAuthorization::Cache {
+            revision,
+            item_count,
+            total_size_bytes,
+        } => {
+            if state
+                .executions
+                .lock()
+                .map_err(|_| {
+                    support_error(
+                        "execution_state_unavailable",
+                        "Execution state is unavailable.",
+                    )
+                })?
+                .has_in_flight()
+            {
+                return Err(support_error(
+                    "cache_cleanup_execution_active",
+                    "App-owned storage cannot be cleared while an execution is active.",
+                ));
+            }
+            let mut support = state.support.lock().map_err(|_| {
+                support_error("support_state_unavailable", "Support state is unavailable.")
+            })?;
+            if support.generation != revision {
+                return Err(support_error(
+                    "reset_category_stale",
+                    "App-owned storage changed. Review the reset category again.",
+                ));
+            }
+            let selected = support
+                .entries
+                .values()
+                .filter(|entry| entry.removable && !entry.in_use)
+                .cloned()
+                .collect::<Vec<_>>();
+            let selected_size = selected
+                .iter()
+                .fold(0_u64, |total, entry| total.saturating_add(entry.size_bytes));
+            if selected.len() != item_count || selected_size != total_size_bytes {
+                return Err(support_error(
+                    "reset_category_stale",
+                    "App-owned storage changed. Review the reset category again.",
+                ));
+            }
+            let root = canonical_cache_root(&support.cache_root)?;
+            let outcomes = selected
+                .iter()
+                .map(|record| delete_logical_entry(&root, record))
+                .collect::<Vec<_>>();
+            support.refresh(false)?;
+            if outcomes
+                .iter()
+                .any(|outcome| outcome["outcome"] == "failed")
+            {
+                "Cache cleanup completed with a partial failure. Review the current inventory before retrying."
+            } else {
+                "Approved app-owned cache entries were cleared. Saved setups and external files were preserved."
+            }
+        }
+    };
+    let snapshot = build_support_snapshot(&state)?;
+    Ok(json!({ "outcome": { "summary": summary }, "snapshot": snapshot }))
 }
 
 #[tauri::command]
@@ -339,21 +1227,11 @@ pub fn cleanup_cache(
 #[tauri::command]
 pub async fn export_support_diagnostics(app: AppHandle) -> Result<Value, String> {
     let state = app.state::<AppState>();
-    let in_flight = state
-        .executions
-        .lock()
-        .map_err(|_| {
-            support_error(
-                "execution_state_unavailable",
-                "Execution state is unavailable.",
-            )
-        })?
-        .has_in_flight();
-    let cache_inventory = state
-        .support
-        .lock()
-        .map_err(|_| support_error("support_state_unavailable", "Support state is unavailable."))?
-        .refresh(in_flight)?;
+    let snapshot = build_support_snapshot(&state)?;
+    let cache_inventory = snapshot
+        .cache_inventory
+        .clone()
+        .unwrap_or_else(|| json!({}));
     let configuration_summary = state
         .saved_configurations
         .lock()
@@ -374,7 +1252,22 @@ pub async fn export_support_diagnostics(app: AppHandle) -> Result<Value, String>
             )
         })?
         .support_summary(&state.sidecar);
-    let runtime = state.sidecar.diagnostics();
+    let support_status = snapshot
+        .subsystems
+        .iter()
+        .map(|subsystem| {
+            json!({
+                "subsystem": subsystem.id,
+                "status": subsystem.severity,
+                "supportCode": subsystem.support_code,
+            })
+        })
+        .collect::<Vec<_>>();
+    let service_status = support_status
+        .iter()
+        .find(|status| status["subsystem"] == "service")
+        .cloned()
+        .unwrap_or_else(|| json!({ "subsystem": "service", "status": "failure" }));
     let catalog = state
         .catalog
         .as_ref()
@@ -387,22 +1280,26 @@ pub async fn export_support_diagnostics(app: AppHandle) -> Result<Value, String>
         .unwrap_or_else(|| json!({}));
     let members = vec![
         (
-            "manifest.json",
-            json!({ "schema": "emuchef.support-diagnostics", "schemaVersion": 1 }),
+            DIAGNOSTICS_MEMBER_NAMES[0],
+            json!({ "schema": "emuchef.support-diagnostics", "schemaVersion": 2 }),
         ),
         (
-            "runtime.json",
+            DIAGNOSTICS_MEMBER_NAMES[1],
             json!({
                 "appVersion": env!("CARGO_PKG_VERSION"),
-                "runtime": runtime,
+                "service": service_status,
                 "platform": platform_class(),
                 "featureGates": { "realExecution": cfg!(feature = "real-execution") },
             }),
         ),
-        ("catalog.json", catalog),
-        ("configuration-summary.json", configuration_summary),
-        ("execution-summaries.json", execution_summary),
-        ("cache-summary.json", cache_summary),
+        (DIAGNOSTICS_MEMBER_NAMES[2], catalog),
+        (DIAGNOSTICS_MEMBER_NAMES[3], configuration_summary),
+        (DIAGNOSTICS_MEMBER_NAMES[4], execution_summary),
+        (DIAGNOSTICS_MEMBER_NAMES[5], cache_summary),
+        (
+            DIAGNOSTICS_MEMBER_NAMES[6],
+            json!({ "subsystems": support_status }),
+        ),
     ];
     let bytes = build_diagnostics_zip(members)?;
     let _dialog_activity = app
@@ -511,6 +1408,14 @@ where
             "This cache entry is currently in use.",
         );
     }
+    if !record.removable || !matches!(record.category, "artifact" | "partial") {
+        return cleanup_outcome(
+            record,
+            "invalidated",
+            "cache_entry_invalidated",
+            "This cache entry is no longer approved for removal.",
+        );
+    }
     if !direct_child(root, &record.payload) {
         return cleanup_outcome(
             record,
@@ -576,13 +1481,40 @@ where
 }
 
 fn cleanup_outcome(record: &CacheEntryRecord, outcome: &str, code: &str, message: &str) -> Value {
-    json!({ "entryHandle": record.handle, "outcome": outcome, "code": code, "message": message })
+    let support_code = match code {
+        "cache_entry_partial_failure" => Some(SupportCode::CacheCleanupPartial.code()),
+        "cache_entry_delete_failed" | "cache_entry_invalidated" => {
+            Some(SupportCode::CacheCleanupFailed.code())
+        }
+        _ => None,
+    };
+    json!({
+        "outcome": outcome,
+        "message": message,
+        "supportCode": support_code,
+        "entryCategory": record.category,
+    })
 }
 
 fn project_entry(entry: &CacheEntryRecord) -> Value {
+    let (category_label, description, deletion_consequence) = match entry.category {
+        "partial" => (
+            "Incomplete download",
+            "A temporary app-owned file from an incomplete transfer.",
+            "Removing it makes a later setup restart the download.",
+        ),
+        _ => (
+            "Reusable setup download",
+            "An app-owned copy retained so later setup runs can reuse it.",
+            "Removing it makes a later setup download or copy the file again.",
+        ),
+    };
     json!({
         "cacheEntryHandle": entry.handle,
         "category": entry.category,
+        "categoryLabel": category_label,
+        "description": description,
+        "deletionConsequence": deletion_consequence,
         "artifactLabel": entry.label,
         "sourceKind": entry.source_kind,
         "integrityState": entry.integrity,
@@ -819,6 +1751,8 @@ fn support_error(code: &str, message: &str) -> String {
 
 #[cfg(test)]
 mod tests {
+    use std::io::Read as _;
+
     use super::*;
 
     fn store(root: &Path) -> SupportStore {
@@ -932,7 +1866,11 @@ mod tests {
                 }
             });
         assert_eq!(outcome["outcome"], "failed");
-        assert_eq!(outcome["code"], "cache_entry_partial_failure");
+        assert_eq!(
+            outcome["supportCode"],
+            SupportCode::CacheCleanupPartial.code()
+        );
+        assert!(!outcome.to_string().contains("cache_entry_partial_failure"));
         assert!(payload.exists());
         assert!(!sidecar.exists());
 
@@ -964,7 +1902,11 @@ mod tests {
                 }
             });
         assert_eq!(outcome["outcome"], "failed");
-        assert_eq!(outcome["code"], "cache_entry_delete_failed");
+        assert_eq!(
+            outcome["supportCode"],
+            SupportCode::CacheCleanupFailed.code()
+        );
+        assert!(!outcome.to_string().contains("cache_entry_delete_failed"));
         assert!(payload.exists());
         assert!(sidecar.exists());
     }
@@ -985,6 +1927,25 @@ mod tests {
             std::os::unix::fs::symlink("outside", &payload).unwrap();
             assert!(fingerprint(&payload).is_err());
         }
+    }
+
+    #[test]
+    fn cleanup_revalidates_removable_status_and_category_before_deletion() {
+        let temp = tempfile::tempdir().unwrap();
+        let payload = create_payload(temp.path(), "artifact.bin", b"payload");
+        let mut support = store(temp.path());
+        support.refresh(false).unwrap();
+        let mut record = support.entries.values().next().unwrap().clone();
+        record.removable = false;
+        let protected = delete_logical_entry(&temp.path().canonicalize().unwrap(), &record);
+        assert_eq!(protected["outcome"], "invalidated");
+        assert!(payload.exists());
+
+        record.removable = true;
+        record.category = "unexpected";
+        let wrong_category = delete_logical_entry(&temp.path().canonicalize().unwrap(), &record);
+        assert_eq!(wrong_category["outcome"], "invalidated");
+        assert!(payload.exists());
     }
 
     #[test]
@@ -1048,15 +2009,70 @@ mod tests {
 
     #[test]
     fn diagnostics_zip_is_bounded_and_contains_only_fixed_members() {
-        let bytes = build_diagnostics_zip(vec![
-            ("manifest.json", json!({ "schemaVersion": 1 })),
-            ("runtime.json", json!({ "status": "ready" })),
-        ])
+        let bytes = build_diagnostics_zip(
+            DIAGNOSTICS_MEMBER_NAMES
+                .iter()
+                .map(|name| (*name, json!({ "status": "ready" })))
+                .collect(),
+        )
         .unwrap();
         let mut archive = zip::ZipArchive::new(Cursor::new(bytes)).unwrap();
-        assert_eq!(archive.len(), 2);
-        assert_eq!(archive.by_index(0).unwrap().name(), "manifest.json");
-        assert_eq!(archive.by_index(1).unwrap().name(), "runtime.json");
+        assert_eq!(archive.len(), DIAGNOSTICS_MEMBER_NAMES.len());
+        for (index, expected) in DIAGNOSTICS_MEMBER_NAMES.iter().enumerate() {
+            assert_eq!(archive.by_index(index).unwrap().name(), *expected);
+        }
+    }
+
+    #[test]
+    fn diagnostics_archive_redacts_hostile_values_and_excludes_ui_authority() {
+        let hostile = "/Users/alice/private R58M12345AB token=secret";
+        let bytes = build_diagnostics_zip(vec![(
+            DIAGNOSTICS_MEMBER_NAMES[6],
+            json!({
+                "subsystems": [{ "subsystem": "service", "status": "failure", "supportCode": SupportCode::ServiceStartFailed.code() }],
+                "summary": hostile,
+            }),
+        )])
+        .unwrap();
+        let mut archive = zip::ZipArchive::new(Cursor::new(bytes)).unwrap();
+        let mut contents = String::new();
+        archive
+            .by_index(0)
+            .unwrap()
+            .read_to_string(&mut contents)
+            .unwrap();
+        assert!(!contents.contains(hostile));
+        assert!(!contents.contains("R58M12345AB"));
+        assert!(!contents.contains("token=secret"));
+        assert!(contents.contains(SupportCode::ServiceStartFailed.code()));
+        for forbidden in [
+            "actionHandle",
+            "resetHandle",
+            "presentationRevision",
+            "modalOutcome",
+            "exportOutcome",
+            "rawError",
+        ] {
+            assert!(!contents.contains(forbidden));
+        }
+    }
+
+    #[test]
+    fn healthy_and_neutral_statuses_serialize_without_failure_codes() {
+        for severity in [SupportSeverity::Healthy, SupportSeverity::Neutral] {
+            let status = SubsystemStatusDto {
+                id: "optional",
+                label: "Optional service",
+                severity,
+                summary: "This optional service is not configured.".to_string(),
+                consequence: "Local use is unaffected.".to_string(),
+                support_code: None,
+                actions: Vec::new(),
+            };
+            let projected = serde_json::to_value(status).unwrap();
+            assert!(projected["supportCode"].is_null());
+            assert!(!projected.to_string().contains("EMUCHEF-"));
+        }
     }
 
     #[test]

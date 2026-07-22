@@ -659,6 +659,71 @@ are omitted without hashes, masks, or length leakage and produce a sanitized
 required-re-entry diagnostic after restore. Key names and value shapes never
 classify secrecy.
 
+## End-User Troubleshooting and Local State
+
+EmuChef proper exposes one Rust/Tauri-authored troubleshooting projection for
+the app service, Platform-Tools, connected devices, the bundled catalog,
+app-owned cache, updates, saved-setup and recovery state, and retained
+execution status. The projection contains only the subsystem label, bounded
+severity, plain-language summary and consequence, optional stable public
+support code, and closed corrective-action variants needed by the support
+surface. Healthy state is summarized once, affected subsystems receive primary
+emphasis, and neutral optional or unconfigured capabilities do not receive a
+failure code. The projection is not an independent application state machine.
+
+Public support codes are fixed uppercase ASCII constants in a closed Rust
+registry. Each code has one subsystem and bounded meaning; dynamic internal
+error text, internal result names, paths, serials, command lines, logs, stack
+traces, credentials, configuration contents, input values, plans, and runtime
+authority never enter the code or normal troubleshooting DTO. Unknown internal
+failures map to a deterministic bounded fallback without projecting their
+text. React exhaustively routes known corrective-action variants and fails
+closed for unknown variants.
+
+Corrective actions use the narrow authority revision owned by the affected
+subsystem. App-service restart uses the service generation, managed
+Platform-Tools changes use the Platform-Tools revision, device refresh uses the
+device generation, and cache deletion uses its inventory generation and opaque
+entry handles. Destructive work is revalidated immediately before mutation.
+Cache cleanup is restricted to fingerprint-matching direct children of the
+canonical app-owned cache root that remain managed, removable, in an approved
+category, and not in use. Missing approved entries are idempotent; changed,
+external, unmanaged, protected, or in-use entries are not deleted. Replace and
+Remove Platform-Tools are offered only for the app-managed installation and
+never delete a user-selected, PATH-resolved, system, or external installation.
+
+Support and diagnostics outcomes are scoped to their modal and operation
+generations. Opening or closing Support & Storage, refreshing inventory, or
+starting a retry clears superseded presentation notices, and stale completions
+cannot replace current state. Diagnostics export creates a local ZIP no larger
+than 2 MiB and never uploads it. Schema version 2 contains only the fixed
+members `manifest.json`, `runtime.json`, `catalog.json`,
+`configuration-summary.json`, `execution-summaries.json`,
+`cache-summary.json`, and `support-status.json`; the archive contains bounded
+aggregate state and active public support codes, not support UI state, action
+or reset handles, presentation generations, historical notices, raw errors,
+logs, paths, serials, credentials, configuration bodies, input values, or
+plans.
+
+Reset Local App State presents only categories that have current app-owned
+state and issues one-shot opaque reset handles bound to that category's
+revision. Current categories clear the Recent setup index, approved app-owned
+cache entries, or the recovery draft. Each has separate description, scope,
+consequence, availability, and explicit confirmation. Clearing Recents does
+not close an active document or delete saved setup files. Cache reset does not
+delete configurations or external content. Recovery reset is distinct from
+Restore and Discard workflow decisions and does not clear the live-process
+marker, active workflow, saved files, portable intent, review authority, or
+external content.
+
+The recovery active-session marker represents process lifetime, not window
+lifetime. Closing one window or the final macOS window, cancelling a close, or
+restarting the local app service leaves the marker active while the process is
+alive. Only an accepted application exit, including Cmd+Q, or an
+application-controlled exit/relaunch finalizes it synchronously before process
+termination. A crash or other unclean termination leaves the marker for the
+next launch, preserving genuine interruption detection.
+
 Packaged catalog data is materialized under the application resource directory.
 The trusted backend requires the four product directories, ignores only regular
 `.gitkeep` placeholders, rejects symlinks and every other unsupported entry,

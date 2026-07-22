@@ -1,7 +1,7 @@
 import { act, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { beforeEach, describe, expect, test, vi } from "vitest";
-import type { ConfigurationDescription } from "../src/types";
+import type { ConfigurationDescription, SupportSnapshot } from "../src/types";
 
 const mockApi = vi.hoisted(() => ({
   adbStatus: vi.fn(),
@@ -10,7 +10,6 @@ const mockApi = vi.hoisted(() => ({
   catalog: vi.fn(),
   describeConfiguration: vi.fn(),
   endUpdateInteractionSession: vi.fn(),
-  finishAppSession: vi.fn(),
   installPlatformToolsSelection: vi.fn(),
   listRecentConfigurations: vi.fn(),
   matchDevice: vi.fn(),
@@ -23,6 +22,11 @@ const mockApi = vi.hoisted(() => ({
   realExecutionAvailability: vi.fn(),
   removePlatformTools: vi.fn(),
   restartRuntime: vi.fn(),
+  supportSnapshot: vi.fn(),
+  resetLocalAppState: vi.fn(),
+  cleanupCache: vi.fn(),
+  exportSupportDiagnostics: vi.fn(),
+  getUpdateStatus: vi.fn(),
   runtimeStatus: vi.fn(),
   setUpdateInteractionState: vi.fn(),
   stageRecoveryDraft: vi.fn(),
@@ -114,6 +118,87 @@ const supportedMatch = {
   blockReason: null,
 };
 
+function supportSnapshot(options: {
+  serviceFailure?: boolean;
+  platformActions?: boolean;
+} = {}): SupportSnapshot {
+  return {
+    presentationRevision: 1,
+    overallSeverity: options.serviceFailure ? "warning" : "healthy",
+    overallSummary: options.serviceFailure
+      ? "One or more systems need attention."
+      : "EmuChef is ready. No troubleshooting issues were found.",
+    subsystems: [
+      {
+        id: "service",
+        label: "App service",
+        severity: options.serviceFailure ? "failure" : "healthy",
+        summary: options.serviceFailure ? "The local app service could not start." : "The local app service is ready.",
+        consequence: options.serviceFailure ? "Planning is unavailable." : "Planning is available.",
+        supportCode: options.serviceFailure ? "EMUCHEF-SERVICE-START-FAILED" : null,
+        actions: options.serviceFailure ? [{
+          label: "Restart app service",
+          consequence: "Portable setup intent is preserved; transient authority is refreshed.",
+          available: true,
+          unavailableReason: null,
+          destructive: false,
+          action: { kind: "restart_service", serviceGeneration: 3 },
+        }] : [],
+      },
+      {
+        id: "platform_tools",
+        label: "Android Platform-Tools",
+        severity: "healthy",
+        summary: "Platform-Tools are ready.",
+        consequence: "Device detection is available.",
+        supportCode: null,
+        actions: options.platformActions ? [
+          {
+            label: "Replace managed Platform-Tools",
+            consequence: "Device authority will be refreshed.",
+            available: true,
+            unavailableReason: null,
+            destructive: false,
+            action: { kind: "replace_managed_platform_tools", platformToolsRevision: 7 },
+          },
+          {
+            label: "Remove managed Platform-Tools",
+            consequence: "Device detection will stop.",
+            available: true,
+            unavailableReason: null,
+            destructive: true,
+            action: { kind: "remove_managed_platform_tools", platformToolsRevision: 7 },
+          },
+        ] : [],
+      },
+    ],
+    cacheInventory: {
+      generation: "1",
+      entries: [],
+      summary: {
+        entryCount: 0,
+        totalSizeBytes: 0,
+        inUseCount: 0,
+        removableCount: 0,
+        removableSizeBytes: 0,
+        unusedRemovableCount: 0,
+        unusedRemovableSizeBytes: 0,
+        unmanagedCount: 0,
+        unmanagedSizeBytes: 0,
+      },
+      categories: [],
+    },
+    diagnosticsDisclosure: {
+      includedCategories: ["Aggregate app status"],
+      excludedCategories: ["Paths and serials"],
+      localUntilShared: true,
+      uploadsAutomatically: false,
+      maximumSizeBytes: 2 * 1024 * 1024,
+    },
+    resetCategories: [],
+  };
+}
+
 function descriptionWithTextInput(input: {
   key: string;
   inputId: string;
@@ -189,7 +274,9 @@ function resetApi(): void {
   mockApi.installPlatformToolsSelection.mockResolvedValue(readyAdb);
   mockApi.removePlatformTools.mockResolvedValue(missingAdb);
   mockApi.restartRuntime.mockResolvedValue({ status: "ready", protocolVersion: 1, catalogVersion: "test" });
-  mockApi.finishAppSession.mockResolvedValue(undefined);
+  mockApi.supportSnapshot.mockResolvedValue(supportSnapshot());
+  mockApi.exportSupportDiagnostics.mockResolvedValue({ outcome: "saved" });
+  mockApi.getUpdateStatus.mockResolvedValue({ state: "unconfigured" });
   mockApi.updateSavedConfigurationMenu.mockResolvedValue(undefined);
   mockApi.cancelSavedConfigurationPreview.mockResolvedValue(undefined);
   mockApi.compareSavedConfigurationPreview.mockResolvedValue({
@@ -219,6 +306,20 @@ async function advanceToInputs(user: ReturnType<typeof userEvent.setup>): Promis
   await screen.findByRole("heading", { name: "Choose what to install" });
   await user.click(screen.getByRole("button", { name: "Continue" }));
   await screen.findByRole("heading", { name: "Provide required files and options" });
+}
+
+async function openSupportAction(
+  user: ReturnType<typeof userEvent.setup>,
+  name: string,
+  snapshot: SupportSnapshot,
+): Promise<HTMLButtonElement> {
+  mockApi.supportSnapshot.mockResolvedValue(snapshot);
+  await user.click(screen.getByRole("button", { name: "Support & Storage" }));
+  const dialog = await screen.findByRole("dialog", { name: "Diagnostics and artifact cache" });
+  const action = within(dialog).queryByRole("button", { name });
+  if (action) return action as HTMLButtonElement;
+  await user.click(within(dialog).getByText("View all system status and maintenance actions"));
+  return within(dialog).getByRole("button", { name }) as HTMLButtonElement;
 }
 
 function deferred<T>(): { promise: Promise<T>; resolve: (value: T) => void } {
@@ -513,7 +614,7 @@ describe("Phase 5B workflow surfaces", () => {
 
     await act(async () => picker.resolve({ outcome: "selected", selectionHandle: "selection-opaque" }));
     expect(await screen.findByRole("button", { name: "Validating and installing…" })).toBeTruthy();
-    expect(mockApi.installPlatformToolsSelection).toHaveBeenCalledWith("selection-opaque");
+    expect(mockApi.installPlatformToolsSelection).toHaveBeenCalledWith("selection-opaque", undefined);
 
     await act(async () => installation.resolve(readyAdb));
     await screen.findByRole("heading", { name: "Choose an Android device" });
@@ -523,16 +624,16 @@ describe("Phase 5B workflow surfaces", () => {
     const user = userEvent.setup();
     await renderReadyApp();
 
-    await user.click(screen.getByRole("button", { name: "Remove Platform-Tools" }));
+    await user.click(await openSupportAction(user, "Remove managed Platform-Tools", supportSnapshot({ platformActions: true })));
     const firstDialog = screen.getByRole("alertdialog", { name: "Remove Platform-Tools?" });
     await user.click(within(firstDialog).getByRole("button", { name: "Cancel" }));
     expect(mockApi.removePlatformTools).not.toHaveBeenCalled();
 
-    await user.click(screen.getByRole("button", { name: "Remove Platform-Tools" }));
+    await user.click(await openSupportAction(user, "Remove managed Platform-Tools", supportSnapshot({ platformActions: true })));
     const secondDialog = screen.getByRole("alertdialog", { name: "Remove Platform-Tools?" });
     expect(secondDialog.textContent).not.toMatch(/authority|handle/i);
     await user.click(within(secondDialog).getByRole("button", { name: "Remove" }));
-    expect(mockApi.removePlatformTools).toHaveBeenCalledTimes(1);
+    expect(mockApi.removePlatformTools).toHaveBeenCalledWith(7);
     await screen.findByRole("heading", { name: "Android SDK Platform-Tools is required" });
   });
 
@@ -563,7 +664,7 @@ describe("Phase 5B workflow surfaces", () => {
     await user.click(await screen.findByRole("button", { name: /Supported Handheld.*Connected/ }));
     await screen.findByRole("heading", { name: "Example Handheld" });
 
-    await user.click(screen.getByRole("button", { name: "Replace Platform-Tools" }));
+    await user.click(await openSupportAction(user, "Replace managed Platform-Tools", supportSnapshot({ platformActions: true })));
     expect(await screen.findByText(/Your device was rediscovered/)).toBeTruthy();
     expect(screen.queryByText(/selected device disconnected/i)).toBeNull();
   });
@@ -572,7 +673,7 @@ describe("Phase 5B workflow surfaces", () => {
     const user = userEvent.setup();
     await renderReadyApp();
 
-    await user.click(screen.getByRole("button", { name: "Restart runtime" }));
+    await user.click(await openSupportAction(user, "Restart app service", supportSnapshot({ serviceFailure: true })));
 
     await waitFor(() => expect(mockApi.restartRuntime).toHaveBeenCalledTimes(1));
     expect(mockApi.stageRecoveryDraft).not.toHaveBeenCalled();
@@ -590,7 +691,7 @@ describe("Phase 5B workflow surfaces", () => {
     await renderReadyApp();
 
     await user.click(screen.getByRole("button", { name: "Refresh devices" }));
-    await user.click(screen.getByRole("button", { name: "Restart runtime" }));
+    await user.click(await openSupportAction(user, "Restart app service", supportSnapshot({ serviceFailure: true })));
     await screen.findByRole("heading", { name: "Choose an Android device" });
     await act(async () => staleRefresh.resolve([availableDevice]));
 
@@ -638,7 +739,7 @@ describe("Phase 5B workflow surfaces", () => {
     expect(screen.getByText("Not saved")).toBeTruthy();
     await user.type(screen.getByLabelText("Account token"), "do-not-display");
 
-    const restartButton = screen.getByRole("button", { name: "Restart runtime" });
+    const restartButton = await openSupportAction(user, "Restart app service", supportSnapshot({ serviceFailure: true }));
     await user.click(restartButton);
     const dialog = await screen.findByRole("alertdialog", { name: "Restart the runtime?" });
     expect(dialog.textContent).toMatch(/Affected fields: Account token/);
@@ -677,8 +778,9 @@ describe("Phase 5B workflow surfaces", () => {
     await advanceToInputs(user);
     const input = screen.getByLabelText("Account token") as HTMLInputElement;
     await user.type(input, "keep-current-value");
-    const restartButton = screen.getByRole("button", { name: "Restart runtime" });
-    vi.spyOn(restartButton, "getClientRects").mockReturnValue([{}] as unknown as DOMRectList);
+    const supportButton = screen.getByRole("button", { name: "Support & Storage" });
+    vi.spyOn(supportButton, "getClientRects").mockReturnValue([{}] as unknown as DOMRectList);
+    const restartButton = await openSupportAction(user, "Restart app service", supportSnapshot({ serviceFailure: true }));
 
     await user.click(restartButton);
     const dialog = await screen.findByRole("alertdialog", { name: "Restart the runtime?" });
@@ -688,7 +790,7 @@ describe("Phase 5B workflow surfaces", () => {
     expect(mockApi.restartRuntime).not.toHaveBeenCalled();
     expect(input.value).toBe("keep-current-value");
     expect(screen.getByRole("heading", { name: "Provide required files and options" })).toBeTruthy();
-    await waitFor(() => expect(document.activeElement).toBe(restartButton));
+    await waitFor(() => expect(document.activeElement).toBe(supportButton));
   });
 
   test("successful restart restores nonsensitive portable intent without prompting", async () => {
@@ -721,7 +823,7 @@ describe("Phase 5B workflow surfaces", () => {
     await advanceToInputs(user);
     await user.type(screen.getByLabelText("Theme"), "dark");
 
-    await user.click(screen.getByRole("button", { name: "Restart runtime" }));
+    await user.click(await openSupportAction(user, "Restart app service", supportSnapshot({ serviceFailure: true })));
 
     expect(screen.queryByRole("alertdialog", { name: "Restart the runtime?" })).toBeNull();
     expect(await screen.findByText("Setup restored after restart")).toBeTruthy();
@@ -745,19 +847,19 @@ describe("Phase 5B workflow surfaces", () => {
     }));
     mockApi.restartRuntime.mockRejectedValue(JSON.stringify({
       code: "runtime_restart_failed",
-      message: "The Rust runtime could not restart. Try again.",
+      message: "The app service could not restart. Try again.",
     }));
     await advanceToInputs(user);
     const input = screen.getByLabelText("Theme") as HTMLInputElement;
     await user.type(input, "dark");
 
-    await user.click(screen.getByRole("button", { name: "Restart runtime" }));
+    await user.click(await openSupportAction(user, "Restart app service", supportSnapshot({ serviceFailure: true })));
 
-    expect(await screen.findAllByText("The Rust runtime could not restart. Try again.")).not.toHaveLength(0);
+    expect(await screen.findAllByText("The app service could not restart. Try again.")).not.toHaveLength(0);
     expect(input.value).toBe("dark");
     expect(screen.getByRole("heading", { name: "Provide required files and options" })).toBeTruthy();
     await waitFor(() => expect(
-      (screen.getByRole("button", { name: "Restart runtime" }) as HTMLButtonElement).disabled,
+      (screen.getByRole("button", { name: "Support & Storage" }) as HTMLButtonElement).disabled,
     ).toBe(false));
     expect(document.body.textContent).not.toMatch(/runtime_restart_failed/);
   });
@@ -972,6 +1074,109 @@ describe("Phase 5D input collection and repair", () => {
     expect(screen.queryByRole("button", { name: /Choose folder|Browse/i })).toBeNull();
     expect((screen.getByLabelText("Account token") as HTMLInputElement).type).toBe("password");
     expect(screen.getByText("Not saved")).toBeTruthy();
+  });
+});
+
+describe("Phase 5G troubleshooting and local-state maintenance", () => {
+  test("keeps persistent maintenance controls out of the primary workflow", async () => {
+    await renderReadyApp();
+
+    expect(screen.queryByRole("button", { name: "Restart app service" })).toBeNull();
+    expect(screen.queryByRole("button", { name: "Replace managed Platform-Tools" })).toBeNull();
+    expect(screen.queryByRole("button", { name: "Remove managed Platform-Tools" })).toBeNull();
+    expect(screen.getByRole("button", { name: "Support & Storage" })).toBeTruthy();
+  });
+
+  test("renders a concise healthy summary and keeps subsystem detail collapsed", async () => {
+    const user = userEvent.setup();
+    await renderReadyApp();
+
+    await user.click(screen.getByRole("button", { name: "Support & Storage" }));
+    const dialog = await screen.findByRole("dialog", { name: "Diagnostics and artifact cache" });
+    expect(within(dialog).getByText("EmuChef is ready. No troubleshooting issues were found.")).toBeTruthy();
+    expect(dialog.querySelectorAll("#troubleshooting-heading ~ article")).toHaveLength(0);
+    const details = within(dialog).getByText("View all system status and maintenance actions").closest("details");
+    expect(details?.open).toBe(false);
+  });
+
+  test("copies only the stable public support code for an affected subsystem", async () => {
+    const user = userEvent.setup();
+    const writeText = vi.fn().mockResolvedValue(undefined);
+    Object.defineProperty(navigator, "clipboard", { configurable: true, value: { writeText } });
+    mockApi.supportSnapshot.mockResolvedValue(supportSnapshot({ serviceFailure: true }));
+    await renderReadyApp();
+
+    await user.click(screen.getByRole("button", { name: "Support & Storage" }));
+    const dialog = await screen.findByRole("dialog", { name: "Diagnostics and artifact cache" });
+    expect(within(dialog).getAllByText("The local app service could not start.").length).toBeGreaterThan(0);
+    expect(dialog.textContent).not.toMatch(/sidecar|runtime handle|internal_/i);
+    await user.click(within(dialog).getByRole("button", { name: "Copy support code" }));
+
+    expect(writeText).toHaveBeenCalledWith("EMUCHEF-SERVICE-START-FAILED");
+    expect(await screen.findByText("Support code EMUCHEF-SERVICE-START-FAILED copied.")).toBeTruthy();
+  });
+
+  test("discloses local-only diagnostics and disables empty cache cleanup", async () => {
+    const user = userEvent.setup();
+    await renderReadyApp();
+
+    await user.click(screen.getByRole("button", { name: "Support & Storage" }));
+    const dialog = await screen.findByRole("dialog", { name: "Diagnostics and artifact cache" });
+    expect(within(dialog).getByText(/stays on this Mac until you choose to share it/i)).toBeTruthy();
+    expect(within(dialog).getByText(/exporting never uploads anything/i)).toBeTruthy();
+    expect(within(dialog).getByText("The app-owned artifact cache is empty.")).toBeTruthy();
+    expect(within(dialog).getByText("There are no unused removable cache entries.")).toBeTruthy();
+    expect((within(dialog).getByRole("button", { name: "Clear unused" }) as HTMLButtonElement).disabled).toBe(true);
+    expect((within(dialog).getByRole("button", { name: "Clear all removable" }) as HTMLButtonElement).disabled).toBe(true);
+  });
+
+  test("requires category-specific confirmation before resetting Recents", async () => {
+    const user = userEvent.setup();
+    const snapshot = supportSnapshot();
+    snapshot.resetCategories = [{
+      resetHandle: "reset-recents-opaque",
+      id: "recents",
+      label: "Clear Recents",
+      description: "Remove the app-owned list of recently opened setup files.",
+      consequence: "Saved setup files, the active setup, and portable intent remain unchanged.",
+      affectedScope: "Recent setup index only",
+      available: true,
+      unavailableReason: null,
+      confirmationRequired: true,
+      restartRequired: false,
+      itemCount: 2,
+      totalSizeBytes: null,
+    }];
+    mockApi.supportSnapshot.mockResolvedValue(snapshot);
+    mockApi.resetLocalAppState.mockResolvedValue({
+      outcome: { summary: "Recent setup history was cleared. Saved setup files were preserved." },
+      snapshot: { ...snapshot, resetCategories: [] },
+    });
+    await renderReadyApp();
+
+    await user.click(screen.getByRole("button", { name: "Support & Storage" }));
+    await user.click(await screen.findByRole("button", { name: "Clear Recents" }));
+    const confirmation = screen.getByRole("alertdialog", { name: "Clear Recents?" });
+    expect(confirmation.textContent).toContain("Saved setup files, the active setup, and portable intent remain unchanged.");
+    expect(confirmation.textContent).toContain("Recent setup index only");
+    expect(mockApi.resetLocalAppState).not.toHaveBeenCalled();
+    await user.click(within(confirmation).getByRole("button", { name: "Confirm reset" }));
+
+    await waitFor(() => expect(mockApi.resetLocalAppState).toHaveBeenCalledWith("reset-recents-opaque"));
+  });
+
+  test("fails closed when an unknown corrective-action variant reaches dispatch", async () => {
+    const user = userEvent.setup();
+    const snapshot = supportSnapshot({ serviceFailure: true });
+    snapshot.subsystems[0].actions[0].action = { kind: "future_untrusted_action" } as never;
+    mockApi.supportSnapshot.mockResolvedValue(snapshot);
+    await renderReadyApp();
+
+    await user.click(screen.getByRole("button", { name: "Support & Storage" }));
+    await user.click(await screen.findByRole("button", { name: "Restart app service" }));
+
+    expect(await screen.findByText("This troubleshooting action is not supported by this version of EmuChef.")).toBeTruthy();
+    expect(mockApi.restartRuntime).not.toHaveBeenCalled();
   });
 });
 

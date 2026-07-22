@@ -6,6 +6,7 @@ import {
   entriesForCleanup,
   initialSupportState,
   supportReducer,
+  type SupportState,
 } from "../src/support";
 import type { CacheEntry, CacheInventory } from "../src/types";
 
@@ -13,6 +14,9 @@ const entries: CacheEntry[] = [
   {
     cacheEntryHandle: "cache-one",
     category: "artifact",
+    categoryLabel: "Reusable setup download",
+    description: "App-owned copy.",
+    deletionConsequence: "Downloaded again when needed.",
     artifactLabel: "recipe/one",
     sourceKind: "https",
     integrityState: "complete",
@@ -24,6 +28,9 @@ const entries: CacheEntry[] = [
   {
     cacheEntryHandle: "cache-two",
     category: "artifact",
+    categoryLabel: "Reusable setup download",
+    description: "App-owned copy.",
+    deletionConsequence: "Downloaded again when needed.",
     artifactLabel: "recipe/two",
     sourceKind: "file",
     integrityState: "unindexed",
@@ -41,9 +48,19 @@ const inventory: CacheInventory = {
     entryCount: 2,
     totalSizeBytes: 150,
     inUseCount: 1,
+    removableCount: 1,
+    removableSizeBytes: 100,
+    unusedRemovableCount: 1,
+    unusedRemovableSizeBytes: 100,
     unmanagedCount: 0,
     unmanagedSizeBytes: 0,
   },
+  categories: [{
+    id: "artifact",
+    label: "Reusable setup downloads",
+    description: "App-owned copies.",
+    deletionConsequence: "Downloaded again when needed.",
+  }],
 };
 
 test("diagnostics export states preserve cancellation and failure outcomes", () => {
@@ -91,6 +108,30 @@ test("stale inventory responses cannot overwrite the current generation", () => 
   assert.equal(loaded.inventory?.generation, "7");
 });
 
+test("cache retry clears superseded notices and ignores stale failures", () => {
+  const previous: SupportState = {
+    ...initialSupportState,
+    requestGeneration: 4,
+    inventory,
+    outcomes: [{
+      outcome: "failed" as const,
+      message: "Previous failure",
+      supportCode: "EMUCHEF-CACHE-CLEANUP-FAILED",
+      entryCategory: "artifact",
+    }],
+    error: "Previous failure",
+  };
+  const retrying = supportReducer(previous, { type: "cleanup-started", generation: 5 });
+  assert.deepEqual(retrying.outcomes, []);
+  assert.equal(retrying.error, null);
+  const stale = supportReducer(retrying, {
+    type: "cleanup-failed",
+    generation: 4,
+    message: "Stale failure",
+  });
+  assert.equal(stale, retrying);
+});
+
 test("selective, unused, and all-removable cleanup sets are explicit", () => {
   assert.deepEqual(
     entriesForCleanup(inventory, "selected", ["cache-two"]).map((entry) => entry.cacheEntryHandle),
@@ -121,14 +162,14 @@ test("cleanup refresh replaces handles and renders sanitized outcomes", () => {
     generation: 2,
     inventory: refreshed,
     outcomes: [{
-      entryHandle: "cache-one",
       outcome: "removed",
-      code: "cache_entry_removed",
       message: "The cache entry was removed.",
+      supportCode: null,
+      entryCategory: "artifact",
     }],
   });
   assert.equal(finished.inventory?.generation, "8");
-  assert.equal(finished.outcomes[0].code, "cache_entry_removed");
+  assert.equal(finished.outcomes[0].supportCode, null);
   assert.deepEqual(finished.selectedHandles, []);
 });
 

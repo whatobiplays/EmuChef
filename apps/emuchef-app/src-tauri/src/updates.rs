@@ -151,6 +151,7 @@ struct RuntimeState {
     candidate: Option<ValidatedCandidate>,
     message: Option<String>,
     check_in_progress: bool,
+    revision: u64,
 }
 
 impl Default for RuntimeState {
@@ -160,6 +161,7 @@ impl Default for RuntimeState {
             candidate: None,
             message: None,
             check_in_progress: false,
+            revision: 0,
         }
     }
 }
@@ -237,6 +239,13 @@ impl UpdateService {
         Ok(status_from_state(&state))
     }
 
+    pub fn revision(&self) -> u64 {
+        self.state
+            .lock()
+            .map(|state| state.revision)
+            .unwrap_or_default()
+    }
+
     async fn check(&self) -> Result<UpdateStatusDto, String> {
         let Some(trust) = self.trust.clone() else {
             return Ok(unconfigured_status());
@@ -250,6 +259,7 @@ impl UpdateService {
                 ));
             }
             state.check_in_progress = true;
+            state.revision = state.revision.saturating_add(1).max(1);
             state.phase = "checking";
             state.candidate = None;
             state.message = None;
@@ -262,6 +272,7 @@ impl UpdateService {
         let result = fetch_and_validate(&trust, OffsetDateTime::now_utc()).await;
         let mut state = self.lock()?;
         state.check_in_progress = false;
+        state.revision = state.revision.saturating_add(1).max(1);
         match result {
             Ok(Some(candidate)) => {
                 state.phase = "update_available";
@@ -1086,6 +1097,7 @@ mod tests {
                 candidate: None,
                 message: None,
                 check_in_progress: true,
+                revision: 1,
             }),
         };
         drop(CheckLease {
@@ -1247,6 +1259,7 @@ mod tests {
                 candidate: Some(candidate),
                 message: None,
                 check_in_progress: false,
+                revision: 1,
             }),
         };
         assert!(service

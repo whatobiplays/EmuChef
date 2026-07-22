@@ -271,7 +271,7 @@ Confirm whether startup intentionally focuses the workflow heading or whether st
 - Evidence: `Observed`
 - Scenario(s): `A02`, `A04`, `A18`
 - Proposed phase: `5G`
-- Status: `Open`
+- Status: `Resolved`
 
 **Preconditions**
 
@@ -309,6 +309,17 @@ Dismiss or ignore the warning. No reliable clean-quit workaround has been establ
 **Notes for later implementation**
 
 Inspect the Tauri/macOS application-exit lifecycle and interrupted-session marker cleanup. The fix should distinguish normal Quit, window close followed by app termination, controlled runtime restart, and actual process interruption without weakening crash detection.
+
+**Resolution evidence (2026-07-22)**
+
+The Tauri run loop now finalizes the active-session marker only after an
+accepted process-exit event. Window close and cancelled-close handling no
+longer call a frontend session-finalization command, and local app-service
+restart does not touch the process marker. Native regressions separately cover
+accepted Quit, application relaunch, one-window close, last-window close while
+the process remains alive, cancelled close, service restart, and process crash;
+the marker/draft boundary test proves clean process termination removes only
+the marker while an unclean process leaves it for next-launch detection.
 
 #### UX-004 — Runtime status badge exposes an internal catalog identifier
 
@@ -409,7 +420,7 @@ Replace the packaged icon source with the approved master asset, regenerate all 
 - Evidence: `Observed`
 - Scenario(s): `A20`
 - Proposed phase: `5G`
-- Status: `Open`
+- Status: `Resolved`
 
 **Preconditions**
 
@@ -449,6 +460,15 @@ Close and reopen the Support & Storage dialog or ignore the stale messages.
 
 Treat cache refresh as a state-reconciliation boundary. Clear obsolete operation results on successful refresh, and consider retaining only a single bounded latest result when needed for confirmation or accessibility announcements.
 
+**Resolution evidence (2026-07-22)**
+
+Support modal open/close, cache refresh, and cleanup retry now clear superseded
+outcomes, while request and export generations reject stale completions. The
+logic regressions `support modal sessions clear diagnostics export feedback and
+reject stale completions`, `stale inventory responses cannot overwrite the
+current generation`, and `cache retry clears superseded notices and ignores
+stale failures` cover the lifecycle boundaries.
+
 #### UX-007 — Cache notifications expose internal technical result codes
 
 - Type: `Defect`
@@ -457,7 +477,7 @@ Treat cache refresh as a state-reconciliation boundary. Clear obsolete operation
 - Evidence: `Observed`
 - Scenario(s): `A20`
 - Proposed phase: `5G`
-- Status: `Open`
+- Status: `Resolved`
 
 **Preconditions**
 
@@ -495,6 +515,16 @@ Leave `Technical details` collapsed.
 
 Remove technical-detail disclosure from routine success messages. For actual failures, expose only stable, sanitized, copyable support codes when they enable a concrete troubleshooting workflow; keep raw internal event names out of the normal interface.
 
+**Resolution evidence (2026-07-22)**
+
+Cache outcomes now contain plain-language result text, an aggregate category,
+and an optional stable public support code only for failures. The UI no longer
+renders `cache_entry_removed` or any other internal cache result code. Rust
+tests cover successful removal without a code, bounded failure/partial-failure
+mapping, and absence of the original internal identifiers; the security policy
+asserts that support technical details cannot reintroduce raw result codes or
+opaque entry handles.
+
 #### UX-008 — Bulk cache-clear actions remain enabled when the cache is empty
 
 - Type: `Defect`
@@ -503,7 +533,7 @@ Remove technical-detail disclosure from routine success messages. For actual fai
 - Evidence: `Observed`
 - Scenario(s): `A20`
 - Proposed phase: `5G`
-- Status: `Open`
+- Status: `Resolved`
 
 **Preconditions**
 
@@ -539,6 +569,14 @@ Ignore the enabled actions when the cache count is zero.
 **Notes for later implementation**
 
 Derive each bulk action's enabled state from the refreshed cache inventory and operation lock. `Clear unused` requires at least one unused removable entry; `Clear all removable` requires at least one removable entry. Preserve the existing in-progress lock behavior.
+
+**Resolution evidence (2026-07-22)**
+
+Rust now projects authoritative removable and unused-removable counts and
+sizes. `Clear unused` and `Clear all removable` use those counts, remain locked
+during cleanup, and expose visible accessible reasons when no eligible entries
+exist. The Phase 5G DOM regression verifies the empty inventory message, both
+disabled bulk actions, and both explanations.
 
 #### UX-009 — System-status panel exposes the implementation language
 
@@ -593,7 +631,7 @@ Rename the user-facing label without changing runtime authority or diagnostics. 
 - Evidence: `Observed`
 - Scenario(s): `A03`, `A07`
 - Proposed phase: `5G`
-- Status: `Open`
+- Status: `Resolved`
 
 **Preconditions**
 
@@ -630,6 +668,18 @@ Ignore the actions during normal use.
 **Notes for later implementation**
 
 Move maintenance actions to a Settings or Support & Storage subview. Keep status visibility in the main workflow only when it affects the current task. When Platform-Tools are missing or invalid, present the required setup/recovery action contextually. Preserve a confirmation step for removal and keep all native picker and validation ownership in Tauri.
+
+**Resolution evidence (2026-07-22)**
+
+Persistent Replace and Remove controls are absent from the primary workflow.
+The troubleshooting projection offers them in Support & Storage only when the
+trusted installation is app-managed and the operation is currently safe;
+external, system, PATH-resolved, and user-selected installations cannot be
+removed. Actions carry the Platform-Tools revision, commands reject stale
+requests, removal retains explicit confirmation, and existing native picker,
+validation, workflow-invalidation, and focus-restoration behavior remains in
+place. DOM regressions cover primary-surface absence, replacement, removal
+cancellation, confirmation, and revision forwarding.
 
 ### UX-011 — Configuration management is embedded in the primary workflow instead of the platform-native application menu
 
@@ -689,7 +739,7 @@ The native File menu now provides New, Open, Open Recent, Save, Save As, Import,
 - Evidence: `Observed`
 - Scenario(s): `A27`
 - Proposed phase: `5G`
-- Status: `Open`
+- Status: `Resolved`
 
 **Preconditions**
 
@@ -725,6 +775,18 @@ Ignore the action unless runtime recovery is needed.
 **Notes for later implementation**
 
 Move the command to a native `Utilities` menu. Disable it with an accessible reason while an operation cannot be safely interrupted. Surface a contextual restart action in runtime-failure states so recovery remains obvious when actually needed.
+
+**Resolution evidence (2026-07-22)**
+
+The persistent primary-workflow restart control was removed. Support & Storage
+projects `Restart app service` only as a backend-authored corrective action for
+an affected service and disables it while execution is active, with a stated
+consequence. The action carries the service generation; Tauri rejects stale
+requests, preserves portable intent, and uses the established runtime-restart
+path to invalidate device, review, execution, confirmation, and launch
+authority. DOM regressions cover primary-surface absence, clean restart,
+dirty/sensitive recovery, confirmation cancellation, focus restoration, and
+rejection of stale pre-restart device responses.
 
 #### UX-013 — Review plan remains enabled when no recipes are selected
 
@@ -2507,7 +2569,7 @@ Successful persistence clears the portable dirty flag and uses the neutral disab
 - Evidence: `Observed`
 - Scenario(s): `A19`, `A22`
 - Proposed phase: `5G`
-- Status: `Open`
+- Status: `Resolved`
 
 **Preconditions**
 
@@ -2544,6 +2606,15 @@ Ignore the success banner and use the native save dialog or filesystem to verify
 **Notes for later implementation**
 
 Reset export status when the modal opens or closes, and whenever a new export begins or is cancelled. Scope success state to the specific export operation rather than retaining it as persistent support-panel state.
+
+**Resolution evidence (2026-07-22)**
+
+Opening or closing Support & Storage increments the export presentation
+generation and resets saved, cancelled, failed, and in-progress state. Starting
+a new export clears the previous outcome, and only a completion for the current
+generation is accepted. The logic regression `support modal sessions clear
+diagnostics export feedback and reject stale completions` covers successful
+export, close, stale completion, and clean reopen.
 
 ### UX-048 — Runtime restart discards active workflow state and portable intent
 
@@ -2808,13 +2879,13 @@ Phase 5B completed on 2026-07-19. Its foundational workflow-state findings are r
 
 #### Defects
 
-- `UX-003`: Normal Cmd+Q termination is reported as an unexpected shutdown.
-- `UX-006`: Cache refresh leaves stale operation notices visible.
-- `UX-007`: Cache notifications expose internal result codes.
-- `UX-008`: Bulk cache-clear actions remain enabled when the cache is empty.
-- `UX-010`: Platform-Tools maintenance actions are persistently exposed in the primary workflow.
-- `UX-012`: Restart Runtime is exposed as a primary workflow action.
-- `UX-047`: Support diagnostics retains stale export-success state across modal sessions.
+- `UX-003` (resolved 2026-07-22): Accepted process exit now finalizes the session marker without treating window close or service restart as application termination.
+- `UX-006` (resolved 2026-07-22): Cache refresh and retry clear superseded operation notices and reject stale completions.
+- `UX-007` (resolved 2026-07-22): Cache notifications use plain-language outcomes and optional stable public support codes instead of internal result codes.
+- `UX-008` (resolved 2026-07-22): Bulk cache actions derive availability and explanations from authoritative inventory counts.
+- `UX-010` (resolved 2026-07-22): Managed Platform-Tools maintenance is contextual in Support & Storage and absent from the primary workflow.
+- `UX-012` (resolved 2026-07-22): App-service restart is a scoped troubleshooting action and absent from the primary workflow.
+- `UX-047` (resolved 2026-07-22): Diagnostics export feedback is scoped to the current support modal and export generation.
 
 #### Missing MVP features
 

@@ -77,7 +77,15 @@ impl SidecarState {
 
     pub fn initialize(&self) {
         let mut client = self.inner.lock().expect("sidecar mutex poisoned");
+        client.generation = client.generation.saturating_add(1).max(1);
         client.initialize();
+    }
+
+    pub fn generation(&self) -> u64 {
+        self.inner
+            .lock()
+            .expect("sidecar mutex poisoned")
+            .generation
     }
 
     pub fn status(&self) -> RuntimeStatusDto {
@@ -128,6 +136,7 @@ struct SidecarClient {
     status: RuntimeStatusDto,
     next_request_id: u64,
     cache_root: PathBuf,
+    generation: u64,
 }
 
 impl SidecarClient {
@@ -137,6 +146,7 @@ impl SidecarClient {
             status: RuntimeStatusDto::Starting,
             next_request_id: 1,
             cache_root,
+            generation: 0,
         }
     }
 
@@ -496,6 +506,7 @@ mod tests {
                 },
                 next_request_id: 1,
                 cache_root: PathBuf::from("/trusted/app/cache"),
+                generation: 1,
             }),
         };
         let diagnostics = state.diagnostics();

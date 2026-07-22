@@ -115,7 +115,7 @@ test("Platform-Tools setup exposes only the official page and no React path argu
   );
   assert.match(
     commands,
-    /pub async fn install_platform_tools_selection\(\s*selection_handle: String,\s*app: AppHandle/s,
+    /pub async fn install_platform_tools_selection\(\s*selection_handle: String,\s*expected_revision: Option<u64>,\s*app: AppHandle/s,
   );
   assert.doesNotMatch(api, /pickPlatformToolsZip:\s*\([^)]*(path|file)/i);
   assert.doesNotMatch(api, /installPlatformToolsSelection:\s*\([^)]*(path|file)/i);
@@ -323,7 +323,8 @@ test("accessible fallbacks and technical details cannot expose protected data", 
   assert.doesNotMatch(fallbackView, /error\.(?:message|stack)|String\(error\)|console\.|serial|handle|path|raw/i);
   assert.match(fallbackView, /Reload EmuChef safely/);
   assert.match(app, /<summary>Technical details<\/summary>[\s\S]{0,200}<code>\{diagnostic\.code\}/);
-  assert.match(supportPanel, /<summary>Technical details<\/summary><code>\{outcome\.code\}<\/code>/);
+  assert.match(supportPanel, /\{outcome\.supportCode && \([\s\S]{0,300}<code>\{outcome\.supportCode\}<\/code>/);
+  assert.doesNotMatch(supportPanel, /outcome\.code|Technical details/);
   assert.doesNotMatch(supportPanel, /<code>\{(?:entry\.cacheEntryHandle|outcome\.entryHandle)\}<\/code>|>\{(?:entry\.cacheEntryHandle|outcome\.entryHandle)\}</);
 });
 

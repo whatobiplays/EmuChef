@@ -60,6 +60,7 @@ pub struct SessionHandles {
     reviews: HashMap<String, ReviewedPlanSnapshot>,
     review_order: VecDeque<String>,
     tombstones: VecDeque<ReviewTombstone>,
+    device_generation: u64,
 }
 
 impl SessionHandles {
@@ -108,6 +109,7 @@ impl SessionHandles {
             self.invalidate_reviews_for_device(&handle, "review_stale");
         }
         self.devices_by_handle = present;
+        self.device_generation = self.device_generation.saturating_add(1).max(1);
         let mut result = self
             .devices_by_handle
             .values()
@@ -124,6 +126,36 @@ impl SessionHandles {
             .collect::<Vec<_>>();
         result.sort_by(|left, right| left.device_handle.cmp(&right.device_handle));
         Ok(result)
+    }
+
+    /// Aggregate, serial-free device facts for troubleshooting projection.
+    pub fn support_summary(&self) -> Value {
+        let available = self
+            .devices_by_handle
+            .values()
+            .filter(|device| device.state == "available")
+            .count();
+        let unauthorized = self
+            .devices_by_handle
+            .values()
+            .filter(|device| device.state == "unauthorized")
+            .count();
+        let offline = self
+            .devices_by_handle
+            .values()
+            .filter(|device| device.state == "offline")
+            .count();
+        json!({
+            "generation": self.device_generation,
+            "deviceCount": self.devices_by_handle.len(),
+            "availableCount": available,
+            "unauthorizedCount": unauthorized,
+            "offlineCount": offline,
+        })
+    }
+
+    pub fn device_generation(&self) -> u64 {
+        self.device_generation
     }
 
     pub fn device(&self, handle: &str) -> Result<&DeviceRecord, String> {

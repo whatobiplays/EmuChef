@@ -108,6 +108,7 @@ pub struct AdbManager {
     root: PathBuf,
     current: Option<ResolvedAdb>,
     last_error: Option<ActionableErrorDto>,
+    revision: u64,
 }
 
 impl AdbManager {
@@ -116,11 +117,22 @@ impl AdbManager {
             root,
             current: None,
             last_error: None,
+            revision: 0,
         };
         if let Err(error) = manager.initialize() {
             manager.last_error = Some(error);
         }
         manager
+    }
+
+    pub fn revision(&self) -> u64 {
+        self.revision
+    }
+
+    pub fn is_app_managed(&self) -> bool {
+        self.current
+            .as_ref()
+            .is_some_and(|current| current.managed_relative_path.is_some())
     }
 
     pub fn status(&self) -> AdbSetupStatusDto {
@@ -245,6 +257,7 @@ impl AdbManager {
             Ok(current) => {
                 self.current = Some(current);
                 self.last_error = None;
+                self.revision = self.revision.saturating_add(1).max(1);
                 Ok(self.status())
             }
             Err(error) => {
@@ -267,6 +280,7 @@ impl AdbManager {
         remove_settings_file(&self.settings_path())?;
         self.current = None;
         self.last_error = None;
+        self.revision = self.revision.saturating_add(1).max(1);
         if let Some(relative) = managed_relative {
             let path = checked_install_path(&self.root, &relative)?;
             if path.exists() {
@@ -1835,6 +1849,7 @@ mod tests {
             root: root.clone(),
             current: None,
             last_error: None,
+            revision: 0,
         };
         let installed = manager
             .import_zip_inner_with_executor(&zip, &FakeExecutor::default())
@@ -1883,6 +1898,7 @@ mod tests {
             root,
             current: None,
             last_error: None,
+            revision: 0,
         };
         let installed = manager
             .import_zip_inner_with_executor(&zip, &FakeExecutor::default())
@@ -2005,6 +2021,7 @@ mod tests {
                 managed_relative_path: Some("installs/active".to_string()),
             }),
             last_error: None,
+            revision: 0,
         };
         manager.cleanup_staging();
         manager.cleanup_orphans();
@@ -2029,6 +2046,7 @@ mod tests {
                 managed_relative_path: Some("installs/secret".to_string()),
             }),
             last_error: None,
+            revision: 0,
         };
         let status = serde_json::to_string(&manager.status()).unwrap();
         assert!(!status.contains("private"));

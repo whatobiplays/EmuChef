@@ -86,6 +86,7 @@ pub struct SavedConfigurationStore {
     recents: Vec<RecentEntry>,
     runtime_revision: u64,
     preview_revision: u64,
+    recents_revision: u64,
 }
 
 impl SavedConfigurationStore {
@@ -103,6 +104,7 @@ impl SavedConfigurationStore {
             recents,
             runtime_revision: 1,
             preview_revision: 0,
+            recents_revision: 1,
         }
     }
 
@@ -275,7 +277,29 @@ impl SavedConfigurationStore {
             "recentCount": self.recents.len(),
             "availableRecentCount": available,
             "missingRecentCount": self.recents.len().saturating_sub(available),
+            "recentsRevision": self.recents_revision,
         })
+    }
+
+    pub fn recents_revision(&self) -> u64 {
+        self.recents_revision
+    }
+
+    pub fn recent_count(&self) -> usize {
+        self.recents.len()
+    }
+
+    /// Clear only the MRU index. Open documents and their files remain intact.
+    pub fn reset_recents(&mut self, expected_revision: u64) -> Result<(), String> {
+        if self.recents_revision != expected_revision {
+            return Err(safe_error(
+                "recent_index_stale",
+                "Recent setups changed. Review the reset category again.",
+            ));
+        }
+        self.recents.clear();
+        self.recents_revision = self.recents_revision.saturating_add(1).max(1);
+        self.persist_recents()
     }
 
     fn touch_recent(&mut self, document: &OpenDocument) -> Result<(), String> {
@@ -293,6 +317,7 @@ impl SavedConfigurationStore {
             },
         );
         self.recents.truncate(MAX_RECENTS);
+        self.recents_revision = self.recents_revision.saturating_add(1).max(1);
         self.persist_recents()
     }
 
@@ -317,6 +342,7 @@ impl SavedConfigurationStore {
                 "This recent configuration entry is no longer available.",
             ));
         }
+        self.recents_revision = self.recents_revision.saturating_add(1).max(1);
         self.persist_recents()
     }
 
@@ -1057,6 +1083,7 @@ pub async fn relink_recent_configuration(
         "availability": "available",
         "identityConflict": false,
     });
+    store.recents_revision = store.recents_revision.saturating_add(1).max(1);
     store.persist_recents()?;
     Ok(updated)
 }
@@ -2343,6 +2370,39 @@ mod tests {
         assert!(sanitized
             .iter()
             .all(|entry| entry.configuration_id == "saved.shared"));
+    }
+
+    #[test]
+    fn resetting_recents_preserves_open_documents_and_saved_files() {
+        let temp = tempfile::tempdir().unwrap();
+        let saved_path = temp.path().join("saved.yaml");
+        fs::write(&saved_path, b"schemaVersion: 2\n").unwrap();
+        let mut store = SavedConfigurationStore::load(temp.path().join("recents.json"));
+        store.documents.insert(
+            "configuration_open".to_string(),
+            OpenDocument {
+                sidecar_document_id: "document-one".to_string(),
+                path: saved_path.clone(),
+                configuration_id: "saved.one".to_string(),
+                name: "Saved One".to_string(),
+                revision: 0,
+            },
+        );
+        store.recents.push(RecentEntry {
+            recent_handle: "recent_one".to_string(),
+            configuration_id: "saved.one".to_string(),
+            name: "Saved One".to_string(),
+            path: saved_path.clone(),
+            last_opened_epoch_ms: 1,
+        });
+        let revision = store.recents_revision();
+
+        store.reset_recents(revision).unwrap();
+
+        assert_eq!(store.recent_count(), 0);
+        assert!(store.documents.contains_key("configuration_open"));
+        assert_eq!(fs::read(&saved_path).unwrap(), b"schemaVersion: 2\n");
+        assert!(store.reset_recents(revision).is_err());
     }
 
     #[test]

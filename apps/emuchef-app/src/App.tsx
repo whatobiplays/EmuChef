@@ -48,6 +48,8 @@ import type {
   RecoveryRestoreResult,
   RecoveryWriteAck,
   UpdateInteractionSession,
+  CorrectiveAction,
+  ResetLocalStateCategory,
 } from "./types";
 import {
   resolveUnsavedDecision,
@@ -1057,7 +1059,10 @@ export function App({ dialogController: suppliedDialogController }: AppProps = {
     }
   };
 
-  const restartRuntime = async (invoker: HTMLElement | null = null) => {
+  const restartRuntime = async (
+    invoker: HTMLElement | null = null,
+    expectedGeneration?: number,
+  ) => {
     const current = workflowRef.current;
     let recoveryAck: RecoveryWriteAck | null = null;
     try {
@@ -1109,8 +1114,8 @@ export function App({ dialogController: suppliedDialogController }: AppProps = {
     setBusy(true);
     try {
       cancelPendingDialog();
-      announce("Restarting the Rust runtime.");
-      const status = await api.restartRuntime();
+      announce("Restarting the local app service.");
+      const status = await api.restartRuntime(expectedGeneration);
       if (runtimeGenerationRef.current !== runtimeGeneration) return;
       savedConfigurationRef.current = null;
       setSavedConfiguration(null);
@@ -1122,7 +1127,7 @@ export function App({ dialogController: suppliedDialogController }: AppProps = {
       if (recoveryAck) {
         await restoreRecovery(recoveryAck.recordGeneration);
       } else {
-        setNotice("Rust runtime restarted. Select and validate a device before continuing.");
+        setNotice("App service restarted. Select and validate a device before continuing.");
       }
       if (support.open) await refreshSupportInventory();
     } catch (error) {
@@ -1135,11 +1140,11 @@ export function App({ dialogController: suppliedDialogController }: AppProps = {
   const refreshSupportInventory = async () => {
     const generation = ++supportGenerationRef.current;
     supportDispatch({ type: "inventory-requested", generation });
-    announce("Refreshing the app-owned artifact cache inventory.");
+    announce("Refreshing troubleshooting and app-owned storage status.");
     try {
-      const inventory = await api.cacheInventory();
-      supportDispatch({ type: "inventory-loaded", generation, inventory });
-      announce(`Cache inventory refreshed. ${inventory.summary.entryCount} entries available.`);
+      const snapshot = await api.supportSnapshot();
+      supportDispatch({ type: "snapshot-loaded", generation, snapshot });
+      announce(snapshot.overallSummary);
     } catch (error) {
       supportDispatch({ type: "inventory-failed", generation, message: errorMessage(error) });
     }
@@ -1193,6 +1198,67 @@ export function App({ dialogController: suppliedDialogController }: AppProps = {
     }
   };
 
+  const runSupportCorrectiveAction = async (
+    action: CorrectiveAction,
+    _invoker: HTMLElement,
+  ) => {
+    switch (action.kind) {
+      case "restart_service":
+        supportDispatch({ type: "close" });
+        await restartRuntime(supportInvokerRef.current, action.serviceGeneration);
+        return;
+      case "import_managed_platform_tools":
+      case "replace_managed_platform_tools":
+        supportDispatch({ type: "close" });
+        await importPlatformTools(action.platformToolsRevision);
+        return;
+      case "remove_managed_platform_tools":
+        supportDispatch({ type: "close" });
+        await removePlatformTools(supportInvokerRef.current, action.platformToolsRevision);
+        return;
+      case "refresh_devices":
+        await pollDevices(true, false, action.deviceGeneration);
+        await refreshSupportInventory();
+        return;
+      case "refresh_cache":
+        await refreshSupportInventory();
+        return;
+      case "open_updates":
+        supportDispatch({ type: "close" });
+        updatesInvokerRef.current = supportInvokerRef.current;
+        setUpdates((current) => ({ ...current, open: true }));
+        try {
+          const status = await api.getUpdateStatus();
+          setUpdates((current) => ({ ...current, status }));
+        } catch (error) {
+          announce(errorMessage(error), true);
+        }
+        return;
+      case "open_saved_setup_repair":
+        supportDispatch({ type: "close" });
+        openConfigurationManager(supportInvokerRef.current);
+        return;
+      default:
+        announce("This troubleshooting action is not supported by this version of EmuChef.", true);
+    }
+  };
+
+  const resetLocalAppState = async (category: ResetLocalStateCategory) => {
+    if (!category.resetHandle) return;
+    const generation = ++supportGenerationRef.current;
+    supportDispatch({ type: "cleanup-started", generation });
+    announce(`${category.label} started.`);
+    try {
+      const result = await api.resetLocalAppState(category.resetHandle);
+      supportDispatch({ type: "snapshot-loaded", generation, snapshot: result.snapshot });
+      if (category.id === "recents") await refreshRecents();
+      announce(result.outcome.summary);
+    } catch (error) {
+      supportDispatch({ type: "cleanup-failed", generation, message: errorMessage(error) });
+      announce(errorMessage(error), true);
+    }
+  };
+
   const prepareSupportCleanup = (mode: CacheCleanupMode) => {
     if (!support.inventory) return null;
     const entries = entriesForCleanup(support.inventory, mode, support.selectedHandles);
@@ -1200,6 +1266,7 @@ export function App({ dialogController: suppliedDialogController }: AppProps = {
     if (confirmation.entryCount === 0) {
       supportDispatch({
         type: "cleanup-failed",
+        generation: support.requestGeneration,
         message: "No removable cache entries match this action.",
       });
       announce("No removable cache entries match this action.", true);
@@ -1231,7 +1298,7 @@ export function App({ dialogController: suppliedDialogController }: AppProps = {
       });
       announce(`Cache cleanup finished. ${result.outcomes.length} outcomes are available.`);
     } catch (error) {
-      supportDispatch({ type: "cleanup-failed", message: errorMessage(error) });
+      supportDispatch({ type: "cleanup-failed", generation, message: errorMessage(error) });
     }
   };
 
@@ -1279,14 +1346,6 @@ export function App({ dialogController: suppliedDialogController }: AppProps = {
           }
         }
       }
-      try {
-        if (recoverySessionGenerationRef.current) {
-          await api.finishAppSession(recoverySessionGenerationRef.current, false);
-        }
-      } catch (error) {
-        setNotice(errorMessage(error));
-        return;
-      }
       allowWindowCloseRef.current = true;
       await windowHandle.close();
     }).then((unlisten) => {
@@ -1302,6 +1361,7 @@ export function App({ dialogController: suppliedDialogController }: AppProps = {
   const pollDevices = useCallback(async (
     manual = false,
     suppressSelectedDeviceLoss = false,
+    expectedSupportGeneration?: number,
   ): Promise<DeviceSummary[] | null> => {
     if (adb?.status !== "ready" || runtime.status !== "ready") return null;
     if (manualDeviceRefreshRef.current) return null;
@@ -1313,7 +1373,7 @@ export function App({ dialogController: suppliedDialogController }: AppProps = {
       announce("Refreshing connected devices.");
     }
     try {
-      const next = await api.pollDevices();
+      const next = await api.pollDevices(expectedSupportGeneration);
       if (
         devicePollGenerationRef.current !== generation
         || runtimeGenerationRef.current !== runtimeGeneration
@@ -1377,7 +1437,7 @@ export function App({ dialogController: suppliedDialogController }: AppProps = {
     return () => window.clearInterval(timer);
   }, [pollDevices]);
 
-  const importPlatformTools = async () => {
+  const importPlatformTools = async (expectedRevision?: number) => {
     if (platformToolsOperation.phase !== "idle") return;
     const kind = adb?.status === "ready" ? "replace" : "import";
     const generation = ++platformToolsGenerationRef.current;
@@ -1393,7 +1453,7 @@ export function App({ dialogController: suppliedDialogController }: AppProps = {
       ) return;
       if (picked.outcome === "cancelled") return;
       setPlatformToolsOperation({ phase: "processing", kind });
-      const status = await api.installPlatformToolsSelection(picked.selectionHandle);
+      const status = await api.installPlatformToolsSelection(picked.selectionHandle, expectedRevision);
       if (
         platformToolsGenerationRef.current !== generation
         || runtimeGenerationRef.current !== runtimeGeneration
@@ -1425,6 +1485,7 @@ export function App({ dialogController: suppliedDialogController }: AppProps = {
       } else {
         setNotice("Platform-Tools installed. Connect a device to continue.");
       }
+      if (support.open) await refreshSupportInventory();
     } catch (error) {
       if (
         platformToolsGenerationRef.current === generation
@@ -1455,7 +1516,7 @@ export function App({ dialogController: suppliedDialogController }: AppProps = {
     }
   };
 
-  const removePlatformTools = async (invoker: HTMLElement | null) => {
+  const removePlatformTools = async (invoker: HTMLElement | null, expectedRevision?: number) => {
     if (platformToolsOperation.phase !== "idle") return;
     const confirmed = await requestAppDialog({
       kind: "remove-platform-tools",
@@ -1467,7 +1528,7 @@ export function App({ dialogController: suppliedDialogController }: AppProps = {
     const current = workflowRef.current;
     setPlatformToolsOperation({ phase: "processing", kind: "remove" });
     try {
-      const status = await api.removePlatformTools();
+      const status = await api.removePlatformTools(expectedRevision);
       if (
         platformToolsGenerationRef.current !== generation
         || runtimeGenerationRef.current !== runtimeGeneration
@@ -1485,6 +1546,7 @@ export function App({ dialogController: suppliedDialogController }: AppProps = {
         requiredReentryBindings: portable.requiredReentryBindings,
       });
       setNotice("Platform-Tools removed. Device detection is unavailable until you install it again; then select your device and review a fresh plan.");
+      if (support.open) await refreshSupportInventory();
     } catch (error) {
       if (
         platformToolsGenerationRef.current === generation
@@ -2098,6 +2160,8 @@ export function App({ dialogController: suppliedDialogController }: AppProps = {
         onPrepareCleanup={prepareSupportCleanup}
         onCleanup={(mode) => void cleanupSupportCache(mode)}
         onExport={() => void exportSupportDiagnostics()}
+        onCorrectiveAction={(action, invoker) => void runSupportCorrectiveAction(action, invoker)}
+        onReset={(category) => void resetLocalAppState(category)}
         onAnnounce={announce}
       />
 
@@ -2159,9 +2223,8 @@ export function App({ dialogController: suppliedDialogController }: AppProps = {
               disabled={configurationActionsLocked}
               onClick={(event) => openConfigurationManager(event.currentTarget)}
             >Manage saved setups…</button>
-            <button className="text-button" onClick={(event) => void restartRuntime(event.currentTarget)} disabled={configurationActionsLocked}>Restart runtime</button>
           </div>
-          {configurationActionsLocked && <p className="disabled-reason">Saved-setup management and runtime restart are unavailable while another operation or execution is active.</p>}
+          {configurationActionsLocked && <p className="disabled-reason">Saved-setup management is unavailable while another operation or execution is active.</p>}
           {savedConfiguration && saveDisabled && <p className="disabled-reason">{saveDisabledReason}</p>}
         </section>
       )}
@@ -2195,7 +2258,7 @@ export function App({ dialogController: suppliedDialogController }: AppProps = {
             <button className="secondary" onClick={openPlatformToolsPage}>
               Open Android Platform-Tools Download Page
             </button>
-            <button aria-describedby={platformToolsBusy ? "platform-tools-busy" : undefined} onClick={importPlatformTools} disabled={platformToolsBusy}>
+            <button aria-describedby={platformToolsBusy ? "platform-tools-busy" : undefined} onClick={() => void importPlatformTools()} disabled={platformToolsBusy}>
               {platformToolsOperation.phase === "picker"
                 ? "Choosing ZIP…"
                 : platformToolsOperation.phase === "processing"
@@ -2632,25 +2695,13 @@ export function App({ dialogController: suppliedDialogController }: AppProps = {
           <aside className="status-panel">
             <p className="eyebrow">SYSTEM STATUS</p>
             <dl>
-              <div><dt>Rust runtime</dt><dd>Ready</dd></div>
+              <div><dt>App service</dt><dd>Ready</dd></div>
               <div><dt>Platform-Tools</dt><dd>{adb.version}</dd></div>
               <div><dt>Catalog</dt><dd>{catalog?.catalog.version ?? "Ready"}</dd></div>
               <div><dt>Mode</dt><dd>{realExecutionEnabled ? "Simulation and guarded real execution" : "Simulation only"}</dd></div>
             </dl>
             {adb.warning && <p className="warning">{adb.warning}</p>}
-            <button className="text-button" onClick={importPlatformTools} disabled={busy || platformToolsBusy || workflow.step === "execution"}>
-              {platformToolsOperation.phase === "picker" && platformToolsOperation.kind === "replace"
-                ? "Choosing ZIP…"
-                : platformToolsOperation.phase === "processing" && platformToolsOperation.kind === "replace"
-                  ? "Replacing…"
-                  : "Replace Platform-Tools"}
-            </button>
-            <button className="text-button danger-text" onClick={(event) => void removePlatformTools(event.currentTarget)} disabled={busy || platformToolsBusy || workflow.step === "execution"}>
-              {platformToolsOperation.phase === "processing" && platformToolsOperation.kind === "remove" ? "Removing…" : "Remove Platform-Tools"}
-            </button>
-            {(busy || platformToolsBusy || workflow.step === "execution") && (
-              <p className="disabled-reason">Platform-Tools changes are unavailable during another operation or execution.</p>
-            )}
+            {adb.warning && <p className="fine-print">Open Support & Storage for Platform-Tools maintenance and troubleshooting.</p>}
           </aside>
         </main>
       )}
@@ -2748,15 +2799,13 @@ export function App({ dialogController: suppliedDialogController }: AppProps = {
           <h2 id="recovery-dialog-title">Restore the unsaved configuration?</h2>
           <div id="recovery-dialog-description">
             <p>
-              EmuChef found unsaved portable intent
-              {activeDialog.payload.draft.displayName
-                ? ` for ${activeDialog.payload.draft.displayName}`
-                : " from an earlier session"}.
+              {activeDialog.payload.draft.reason}
+              {activeDialog.payload.draft.displayName ? ` Draft: ${activeDialog.payload.draft.displayName}.` : ""}
             </p>
-            <p>
-              Restore requires a fresh device connection, validation, plan, and review. Sensitive
-              input values were not retained and must be entered again.
-            </p>
+            <p><strong>May restore:</strong> {activeDialog.payload.draft.restores}</p>
+            <p><strong>Cannot restore:</strong> {activeDialog.payload.draft.doesNotRestore}</p>
+            <p><strong>Restore:</strong> {activeDialog.payload.draft.restoreConsequence}</p>
+            <p><strong>Discard:</strong> {activeDialog.payload.draft.discardConsequence}</p>
             <p>Not now keeps this draft for the next launch unless newer edits supersede it.</p>
           </div>
           <div className="button-row">

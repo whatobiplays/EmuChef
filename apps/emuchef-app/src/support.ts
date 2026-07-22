@@ -3,6 +3,7 @@ import type {
   CacheCleanupOutcome,
   CacheEntry,
   CacheInventory,
+  SupportSnapshot,
 } from "./types";
 
 export interface SupportState {
@@ -14,6 +15,7 @@ export interface SupportState {
   exporting: boolean;
   exportOutcome: "idle" | "saved" | "cancelled" | "failed";
   inventory: CacheInventory | null;
+  snapshot: SupportSnapshot | null;
   selectedHandles: string[];
   outcomes: CacheCleanupOutcome[];
   error: string | null;
@@ -28,6 +30,7 @@ export const initialSupportState: SupportState = {
   exporting: false,
   exportOutcome: "idle",
   inventory: null,
+  snapshot: null,
   selectedHandles: [],
   outcomes: [],
   error: null,
@@ -38,11 +41,12 @@ export type SupportAction =
   | { type: "close" }
   | { type: "inventory-requested"; generation: number }
   | { type: "inventory-loaded"; generation: number; inventory: CacheInventory }
+  | { type: "snapshot-loaded"; generation: number; snapshot: SupportSnapshot }
   | { type: "inventory-failed"; generation: number; message: string }
   | { type: "toggle-selection"; handle: string }
   | { type: "cleanup-started"; generation: number }
   | { type: "cleanup-finished"; generation: number; inventory: CacheInventory; outcomes: CacheCleanupOutcome[] }
-  | { type: "cleanup-failed"; message: string }
+  | { type: "cleanup-failed"; generation: number; message: string }
   | { type: "export-started"; generation: number }
   | { type: "export-finished"; generation: number; outcome: "saved" | "cancelled" }
   | { type: "export-failed"; generation: number; message: string }
@@ -58,6 +62,7 @@ export function supportReducer(state: SupportState, action: SupportAction): Supp
         exporting: false,
         exportOutcome: "idle",
         error: null,
+        outcomes: [],
       };
     case "close":
       return {
@@ -67,12 +72,25 @@ export function supportReducer(state: SupportState, action: SupportAction): Supp
         exporting: false,
         exportOutcome: "idle",
         error: null,
+        outcomes: [],
       };
     case "inventory-requested":
-      return { ...state, requestGeneration: action.generation, loading: true, error: null };
+      return { ...state, requestGeneration: action.generation, loading: true, error: null, outcomes: [] };
     case "inventory-loaded":
       if (state.requestGeneration !== action.generation) return state;
-      return { ...state, loading: false, inventory: action.inventory, selectedHandles: [], error: null };
+      return { ...state, loading: false, inventory: action.inventory, selectedHandles: [], outcomes: [], error: null };
+    case "snapshot-loaded":
+      if (state.requestGeneration !== action.generation) return state;
+      return {
+        ...state,
+        loading: false,
+        cleaning: false,
+        snapshot: action.snapshot,
+        inventory: action.snapshot.cacheInventory,
+        selectedHandles: [],
+        outcomes: [],
+        error: null,
+      };
     case "inventory-failed":
       if (state.requestGeneration !== action.generation) return state;
       return { ...state, loading: false, error: action.message };
@@ -96,6 +114,7 @@ export function supportReducer(state: SupportState, action: SupportAction): Supp
         outcomes: action.outcomes,
       };
     case "cleanup-failed":
+      if (state.requestGeneration !== action.generation) return state;
       return { ...state, cleaning: false, error: action.message };
     case "export-started":
       return { ...state, exportGeneration: action.generation, exporting: true, exportOutcome: "idle", error: null };

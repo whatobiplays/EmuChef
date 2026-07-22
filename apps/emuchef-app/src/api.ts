@@ -28,6 +28,8 @@ import type {
   CacheCleanupResult,
   CacheInventory,
   SupportDiagnosticsExportResult,
+  SupportSnapshot,
+  ResetLocalStateResult,
   AppSessionStart,
   RecoveryRestoreResult,
   RecoveryWriteAck,
@@ -63,21 +65,20 @@ export const api = {
     invoke<void>("discard_recovery_draft", {
       request: { sessionGeneration, recordGeneration },
     }),
-  finishAppSession: (sessionGeneration: number, currentSessionDirty: boolean) =>
-    invoke<void>("finish_app_session", {
-      request: { sessionGeneration, currentSessionDirty },
-    }),
   runtimeStatus: () => invoke<RuntimeStatus>("get_runtime_status"),
-  restartRuntime: () => invoke<RuntimeStatus>("restart_runtime"),
+  restartRuntime: (expectedGeneration?: number) =>
+    invoke<RuntimeStatus>("restart_runtime", { expectedGeneration }),
   catalog: () => invoke<CatalogSummary>("get_catalog"),
   adbStatus: () => invoke<AdbSetupStatus>("get_adb_setup_status"),
   openPlatformToolsPage: () => invoke<void>("open_platform_tools_download_page"),
   pickPlatformToolsZip: () =>
     invoke<PlatformToolsPickerResult>("pick_platform_tools_zip"),
-  installPlatformToolsSelection: (selectionHandle: string) =>
-    invoke<AdbSetupStatus>("install_platform_tools_selection", { selectionHandle }),
-  removePlatformTools: () => invoke<AdbSetupStatus>("remove_platform_tools"),
-  pollDevices: () => invoke<DeviceSummary[]>("poll_devices"),
+  installPlatformToolsSelection: (selectionHandle: string, expectedRevision?: number) =>
+    invoke<AdbSetupStatus>("install_platform_tools_selection", { selectionHandle, expectedRevision }),
+  removePlatformTools: (expectedRevision?: number) =>
+    invoke<AdbSetupStatus>("remove_platform_tools", { expectedRevision }),
+  pollDevices: (expectedGeneration?: number) =>
+    invoke<DeviceSummary[]>("poll_devices", { expectedGeneration }),
   probeDevice: (deviceHandle: string) =>
     invoke<DeviceFacts>("probe_device", { deviceHandle }),
   matchDevice: (deviceHandle: string) =>
@@ -220,6 +221,7 @@ export const api = {
   closeSavedConfiguration: (configurationHandle: string) =>
     invoke<void>("close_saved_configuration", { request: { configurationHandle } }),
   cacheInventory: () => invoke<CacheInventory>("get_cache_inventory"),
+  supportSnapshot: () => invoke<SupportSnapshot>("get_support_snapshot"),
   cleanupCache: (request: {
     mode: CacheCleanupMode;
     inventoryGeneration: string;
@@ -228,6 +230,10 @@ export const api = {
   }) => invoke<CacheCleanupResult>("cleanup_cache", { request }),
   exportSupportDiagnostics: () =>
     invoke<SupportDiagnosticsExportResult>("export_support_diagnostics"),
+  resetLocalAppState: (resetHandle: string) =>
+    invoke<ResetLocalStateResult>("reset_local_app_state", {
+      request: { resetHandle, confirmed: true },
+    }),
   getUpdateStatus: () => invoke<UpdateStatus>("get_update_status"),
   checkForUpdates: () => invoke<UpdateStatus>("check_for_updates"),
   beginUpdateInteractionSession: () =>

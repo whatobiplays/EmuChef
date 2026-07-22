@@ -27,7 +27,7 @@ Detailed evidence remains in the relevant product and release documents. In part
 
 | Product or track | Current state | Next priority |
 |---|---|---|
-| EmuChef proper | Phase 5A through 5F completed | Phase 5G support, diagnostics, and recovery polish |
+| EmuChef proper | Phase 5A through 5G completed | Phase 5H visual consistency and final product polish |
 | Config Editor | Authored generation implemented through GitHub release-pattern testing | Later refinements remain unsequenced unless explicitly promoted |
 | Shared Runtime | Rust is the sole runtime and retains device, filesystem, planning, execution, validation, and protocol authority | Add shared capabilities only when required by a bounded product slice |
 | Release engineering | Deliberately deferred from normal Phase 5 product work | Resume only when the owner declares the relevant application release-comfortable |
@@ -273,7 +273,7 @@ The canonical findings UX-011, UX-017, UX-043, UX-044, UX-045, and UX-046 are re
 ## 12. Phase 5G — Support, Diagnostics, and Recovery Polish
 
 **Owner: EmuChef proper**  
-**Status: Next**
+**Status: Completed**
 
 ### Objective
 
@@ -294,10 +294,39 @@ Allow common end-user problems to be diagnosed and corrected without a terminal.
 
 A user can identify the failing subsystem, understand the consequence, and take a safe corrective action within EmuChef proper.
 
+### Completion evidence
+
+Completed on 2026-07-22. Rust/Tauri now authors one bounded troubleshooting
+projection for service, Platform-Tools, device, catalog, cache, update,
+saved/recovery, and execution-retention status. A closed public support-code
+registry and typed corrective-action DTO keep internal errors and arbitrary
+actions out of React. Corrective actions use subsystem revisions, cache and
+granular-reset mutations use opaque scoped authorization with immediate
+revalidation, and only app-managed Platform-Tools can be replaced or removed.
+
+Support & Storage emphasizes affected subsystems, keeps healthy detail
+collapsed, exposes copyable public codes and consequences, scopes notices to
+modal/operation generations, disables empty cache operations from authoritative
+counts, and provides local-only diagnostics disclosure. Diagnostics schema 2
+has seven exact allowlisted members with bounded aggregate state and no UI
+authority. Reset Local App State separately covers Recents, approved app-owned
+cache, and recovery data while preserving saved setups, active intent,
+external content, and the live-process marker. Recovery lifecycle handling now
+distinguishes accepted process exit and relaunch from window close, cancelled
+close, service restart, and process crash.
+
+UX-003, UX-006, UX-007, UX-008, UX-010, UX-012, and UX-047 are resolved with
+native, frontend-logic, DOM, and security regressions. Frontend tests,
+typecheck, lint, production build, security and Python-retirement checks, both
+Rust workspace suites, both Rust format checks, and the diff whitespace gate
+passed. This is automated source, fixture, DOM, and build evidence only; it
+does not claim real-device, packaged-GUI, signing, packaging, notarization, or
+release qualification.
+
 ## 13. Phase 5H — Visual Consistency and Final Product Polish
 
 **Owner: EmuChef proper**  
-**Status: Planned**
+**Status: Next**
 
 ### Objective
 
@@ -539,12 +568,14 @@ Cross-platform packaging and release automation must define separate deliverable
 
 ## 24. Immediate next action
 
-### Phase 5G — Support, Diagnostics, and Recovery Polish
+### Phase 5H — Visual Consistency and Final Product Polish
 
 **Owner: EmuChef proper**  
 **Status: Next**
 
-Begin from the objective, candidate scope, and exit criteria in Section 12 and
-the open Phase 5G findings in the Phase 5A end-to-end UX audit. Preserve the
-completed saved-setup, review, execution, recovery, and Rust/Tauri authority
-contracts while keeping troubleshooting guidance sanitized and actionable.
+Begin from the objective, candidate scope, and exit criteria in Section 13 and
+the open Phase 5H findings in the Phase 5A end-to-end UX audit. Preserve the
+completed troubleshooting, saved-setup, review, execution, recovery, and
+Rust/Tauri authority contracts. Keep broad visual consistency work separate
+from release engineering and do not reopen completed Phase 5A-5G behavior
+without concrete regression evidence.

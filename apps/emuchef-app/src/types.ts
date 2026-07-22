@@ -463,6 +463,11 @@ export interface RecoveryDraftAvailable {
   displayName: string | null;
   savedAtEpochMs: number;
   sourceSavedConfiguration: boolean;
+  reason: string;
+  restores: string;
+  doesNotRestore: string;
+  restoreConsequence: string;
+  discardConsequence: string;
 }
 
 export type RecoveryDraftStatus =
@@ -501,6 +506,9 @@ export interface RecoveryRestoreResult {
 export interface CacheEntry {
   cacheEntryHandle: string;
   category: "artifact" | "partial";
+  categoryLabel: string;
+  description: string;
+  deletionConsequence: string;
   artifactLabel: string;
   sourceKind: "file" | "http" | "https" | "unknown";
   integrityState: "complete" | "incomplete" | "unindexed" | "metadata_mismatch";
@@ -517,18 +525,28 @@ export interface CacheInventory {
     entryCount: number;
     totalSizeBytes: number;
     inUseCount: number;
+    removableCount: number;
+    removableSizeBytes: number;
+    unusedRemovableCount: number;
+    unusedRemovableSizeBytes: number;
     unmanagedCount: number;
     unmanagedSizeBytes: number;
   };
+  categories: Array<{
+    id: "artifact" | "partial";
+    label: string;
+    description: string;
+    deletionConsequence: string;
+  }>;
 }
 
 export type CacheCleanupMode = "selected" | "unused" | "all_removable";
 
 export interface CacheCleanupOutcome {
-  entryHandle: string;
   outcome: "removed" | "skipped_in_use" | "already_missing" | "invalidated" | "failed";
-  code: string;
   message: string;
+  supportCode: string | null;
+  entryCategory: "artifact" | "partial";
 }
 
 export interface CacheCleanupResult {
@@ -538,6 +556,71 @@ export interface CacheCleanupResult {
 
 export interface SupportDiagnosticsExportResult {
   outcome: "saved" | "cancelled";
+}
+
+export type CorrectiveAction =
+  | { kind: "restart_service"; serviceGeneration: number }
+  | { kind: "import_managed_platform_tools"; platformToolsRevision: number }
+  | { kind: "replace_managed_platform_tools"; platformToolsRevision: number }
+  | { kind: "remove_managed_platform_tools"; platformToolsRevision: number }
+  | { kind: "refresh_devices"; deviceGeneration: number }
+  | { kind: "refresh_cache"; cacheGeneration: string }
+  | { kind: "open_updates" }
+  | { kind: "open_saved_setup_repair" };
+
+export interface SupportAction {
+  label: string;
+  consequence: string;
+  available: boolean;
+  unavailableReason: string | null;
+  destructive: boolean;
+  action: CorrectiveAction;
+}
+
+export interface SupportSubsystemStatus {
+  id: "service" | "platform_tools" | "device" | "catalog" | "cache" | "updates" | "recovery" | "saved_configuration" | "execution";
+  label: string;
+  severity: "healthy" | "neutral" | "warning" | "failure";
+  summary: string;
+  consequence: string;
+  supportCode: string | null;
+  actions: SupportAction[];
+}
+
+export interface ResetLocalStateCategory {
+  resetHandle: string | null;
+  id: "recents" | "cache" | "recovery";
+  label: string;
+  description: string;
+  consequence: string;
+  affectedScope: string;
+  available: boolean;
+  unavailableReason: string | null;
+  confirmationRequired: true;
+  restartRequired: boolean;
+  itemCount: number;
+  totalSizeBytes: number | null;
+}
+
+export interface SupportSnapshot {
+  presentationRevision: number;
+  overallSeverity: "healthy" | "neutral" | "warning" | "failure";
+  overallSummary: string;
+  subsystems: SupportSubsystemStatus[];
+  cacheInventory: CacheInventory | null;
+  diagnosticsDisclosure: {
+    includedCategories: string[];
+    excludedCategories: string[];
+    localUntilShared: boolean;
+    uploadsAutomatically: boolean;
+    maximumSizeBytes: number;
+  };
+  resetCategories: ResetLocalStateCategory[];
+}
+
+export interface ResetLocalStateResult {
+  outcome: { summary: string };
+  snapshot: SupportSnapshot;
 }
 
 /** Display-only update state. URL, signature, key, path, and opener authority stay in Rust. */

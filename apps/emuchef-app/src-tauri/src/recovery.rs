@@ -103,6 +103,15 @@ impl RecoveryStore {
                 "displayName": record.display_name,
                 "savedAtEpochMs": record.saved_at_epoch_ms,
                 "sourceSavedConfiguration": record.source_configuration_id.is_some(),
+                "reason": if interrupted_session {
+                    "EmuChef found portable setup work from a session that did not finish normally."
+                } else {
+                    "EmuChef found portable setup work that was kept for a later launch."
+                },
+                "restores": "Setup identity, selected features, and approved non-sensitive portable input references.",
+                "doesNotRestore": "Device identity, generated plans, review authority, execution progress, secrets, or omitted sensitive values.",
+                "restoreConsequence": "The setup returns as portable intent and requires a fresh device connection, validation, plan, and review.",
+                "discardConsequence": "Only this recovery draft is removed. Saved setup files and external content remain unchanged.",
             })
         } else if let Some(reason) = self.load_notice.take() {
             json!({ "state": "invalid_removed", "reason": reason })
@@ -143,6 +152,23 @@ impl RecoveryStore {
         let mut keys = self.required_reentry.iter().cloned().collect::<Vec<_>>();
         keys.sort();
         keys
+    }
+
+    /// Aggregate, payload-free facts for troubleshooting and reset options.
+    pub fn support_summary(&self) -> Value {
+        json!({
+            "draftAvailable": self.record.is_some(),
+            "draftGeneration": self.record.as_ref().map(|record| record.generation),
+            "activeSession": self.marker_path.is_file(),
+            "loadIssue": self.load_notice.is_some(),
+        })
+    }
+
+    /// Maintenance-only recovery reset. This deliberately leaves the active
+    /// process marker and every in-memory workflow authority untouched.
+    pub fn reset_recovery_data(&mut self, expected_generation: u64) -> Result<(), String> {
+        self.require_record_generation(expected_generation)?;
+        self.clear_unchecked()
     }
 
     pub fn note_current_binding_keys(&mut self, bindings: &HashSet<String>) {
@@ -293,6 +319,35 @@ impl RecoveryStore {
         // explicit discard/save or a newer valid dirty draft supersedes them.
         remove_if_present(&self.marker_path, "recovery_session_marker_failed")
     }
+
+    /// Finalize only the process-lifetime marker for an accepted application
+    /// termination. Recovery drafts intentionally survive so they can be
+    /// offered on the next launch.
+    pub fn finish_process_termination(&mut self) -> Result<(), String> {
+        remove_if_present(&self.marker_path, "recovery_session_marker_failed")
+    }
+}
+
+/// Native lifecycle events that may be confused with process termination.
+///
+/// Window closure and service restart do not end the macOS application
+/// process, so neither may mark the session clean. Only an accepted process
+/// exit or application-controlled relaunch finalizes the marker.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum ApplicationLifecycleEvent {
+    AcceptedProcessExit,
+    ApplicationRelaunch,
+    WindowClosed,
+    LastWindowClosed,
+    WindowCloseCancelled,
+    ServiceRestart,
+    ProcessCrashed,
+}
+
+impl ApplicationLifecycleEvent {
+    pub fn finalizes_process_session(self) -> bool {
+        matches!(self, Self::AcceptedProcessExit | Self::ApplicationRelaunch)
+    }
 }
 
 pub type RecoveryState = Mutex<RecoveryStore>;
@@ -434,18 +489,6 @@ pub fn discard_recovery_draft(
         .lock()
         .map_err(|_| recovery_state_error())?
         .clear(request)
-}
-
-#[tauri::command]
-pub fn finish_app_session(
-    request: FinishAppSessionRequest,
-    state: State<'_, AppState>,
-) -> Result<(), String> {
-    state
-        .recovery
-        .lock()
-        .map_err(|_| recovery_state_error())?
-        .finish(request)
 }
 
 pub fn clear_recovery_after_save(state: &AppState) -> Result<(), String> {
@@ -895,6 +938,69 @@ mod tests {
         let status = reloaded.begin_session().unwrap();
         assert_eq!(status["interruptedSession"], true);
         assert_eq!(status["recovery"]["state"], "available");
+    }
+
+    #[test]
+    fn accepted_quit_finalizes_the_session() {
+        assert!(ApplicationLifecycleEvent::AcceptedProcessExit.finalizes_process_session());
+    }
+
+    #[test]
+    fn application_relaunch_finalizes_the_session() {
+        assert!(ApplicationLifecycleEvent::ApplicationRelaunch.finalizes_process_session());
+    }
+
+    #[test]
+    fn closing_one_window_does_not_finalize_the_session() {
+        assert!(!ApplicationLifecycleEvent::WindowClosed.finalizes_process_session());
+    }
+
+    #[test]
+    fn closing_the_last_window_does_not_finalize_the_live_process_session() {
+        assert!(!ApplicationLifecycleEvent::LastWindowClosed.finalizes_process_session());
+    }
+
+    #[test]
+    fn a_cancelled_close_does_not_finalize_the_session() {
+        assert!(!ApplicationLifecycleEvent::WindowCloseCancelled.finalizes_process_session());
+    }
+
+    #[test]
+    fn service_restart_does_not_finalize_the_application_session() {
+        assert!(!ApplicationLifecycleEvent::ServiceRestart.finalizes_process_session());
+    }
+
+    #[test]
+    fn process_crash_preserves_the_marker_for_next_launch_detection() {
+        assert!(!ApplicationLifecycleEvent::ProcessCrashed.finalizes_process_session());
+    }
+
+    #[test]
+    fn process_termination_clears_only_the_active_marker() {
+        let (temp, mut store) = store();
+        store.stage(request(Map::new()), None).unwrap();
+        assert!(temp.path().join("active").is_file());
+        assert!(temp.path().join("recovery.json").is_file());
+
+        store.finish_process_termination().unwrap();
+
+        assert!(!temp.path().join("active").exists());
+        assert!(temp.path().join("recovery.json").is_file());
+        assert!(store.record.is_some());
+    }
+
+    #[test]
+    fn maintenance_reset_clears_only_the_recovery_draft() {
+        let (temp, mut store) = store();
+        store.stage(request(Map::new()), None).unwrap();
+        let generation = store.record.as_ref().unwrap().generation;
+
+        store.reset_recovery_data(generation).unwrap();
+
+        assert!(temp.path().join("active").is_file());
+        assert!(!temp.path().join("recovery.json").exists());
+        assert!(store.record.is_none());
+        assert!(store.reset_recovery_data(generation).is_err());
     }
 
     #[test]

@@ -9,6 +9,7 @@ mod recovery;
 mod saved_configurations;
 mod sidecar;
 mod support;
+mod support_codes;
 mod updates;
 
 use std::sync::Mutex;
@@ -18,7 +19,7 @@ use tauri::Manager;
 pub fn run() {
     let arguments = std::env::args().skip(1).collect::<Vec<_>>();
     let qualification_probe = qualification::requested(&arguments);
-    tauri::Builder::default()
+    let app = tauri::Builder::default()
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_opener::init())
         .menu(|app| menu::build_menu(app, menu::SavedMenuState::default()))
@@ -80,7 +81,6 @@ pub fn run() {
             recovery::defer_recovery_draft,
             recovery::restore_recovery_draft,
             recovery::discard_recovery_draft,
-            recovery::finish_app_session,
             commands::restart_runtime,
             commands::get_catalog,
             commands::get_adb_setup_status,
@@ -128,7 +128,9 @@ pub fn run() {
             execution::export_execution_report,
             execution::launch_configured_app,
             support::get_cache_inventory,
+            support::get_support_snapshot,
             support::cleanup_cache,
+            support::reset_local_app_state,
             support::export_support_diagnostics,
             updates::get_update_status,
             updates::check_for_updates,
@@ -138,6 +140,23 @@ pub fn run() {
             updates::open_update_download,
             menu::update_saved_configuration_menu,
         ])
-        .run(tauri::generate_context!())
-        .expect("error while running EmuChef");
+        .build(tauri::generate_context!())
+        .expect("error while building EmuChef");
+
+    app.run(|app_handle, event| {
+        if matches!(event, tauri::RunEvent::ExitRequested { .. }) {
+            let state = app_handle.state::<commands::AppState>();
+            let finalized = state
+                .recovery
+                .lock()
+                .map_err(|_| ())
+                .and_then(|mut recovery| recovery.finish_process_termination().map_err(|_| ()))
+                .is_ok();
+            if !finalized {
+                if let tauri::RunEvent::ExitRequested { api, .. } = event {
+                    api.prevent_exit();
+                }
+            }
+        }
+    });
 }
