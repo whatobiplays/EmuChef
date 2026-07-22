@@ -26,6 +26,7 @@ function terminalSnapshot(executionHandle: string, latestSequence = 1): Executio
     recipes: [],
     warnings: [],
     errors: [],
+    progress: { currentFeature: null, currentAction: null },
     completion: {
       classification: "failed",
       counts: {

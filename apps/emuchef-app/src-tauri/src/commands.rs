@@ -793,6 +793,16 @@ pub fn create_review(
             )
         })?
         .to_string();
+    let review = result
+        .get("review")
+        .filter(|value| value.is_object())
+        .cloned()
+        .ok_or_else(|| {
+            safe_error(
+                "review_projection_missing",
+                "The reviewed plan omitted its safe presentation.",
+            )
+        })?;
     let catalog_digest = catalog(&state)?.digest().to_string();
     let platform_tools_identity = state
         .adb
@@ -823,7 +833,10 @@ pub fn create_review(
     })?;
     handles.invalidate_catalog(catalog(&state)?.digest());
     let review_handle = handles.insert_review(snapshot);
-    Ok(public_review(&review_handle, &digest, &plan, &result))
+    let exact_serial = plan
+        .pointer("/target_device/serial")
+        .and_then(Value::as_str);
+    Ok(public_review(&review_handle, &review, exact_serial))
 }
 
 #[tauri::command]
@@ -1610,143 +1623,20 @@ fn public_diagnostic(diagnostic: &Value) -> Value {
     })
 }
 
-fn public_review(review_handle: &str, digest: &str, plan: &Value, result: &Value) -> Value {
-    let exact_serial = plan
-        .get("target_device")
-        .and_then(|target| target.get("serial"))
-        .and_then(Value::as_str);
-    let recipes = plan
-        .get("recipes")
-        .and_then(Value::as_array)
-        .cloned()
-        .unwrap_or_default();
-    let steps = plan
-        .get("steps")
-        .and_then(Value::as_array)
-        .cloned()
-        .unwrap_or_default();
-    let groups = recipes
-        .iter()
-        .map(|recipe| {
-            let recipe_id = recipe
-                .get("id")
-                .and_then(Value::as_str)
-                .unwrap_or("unknown");
-            let steps = steps
-                .iter()
-                .filter(|step| step.get("recipe_ref").and_then(Value::as_str) == Some(recipe_id))
-                .map(|step| {
-                    let capabilities = step
-                        .get("constraints")
-                        .and_then(|value| value.get("capabilities"))
-                        .and_then(Value::as_array)
-                        .cloned()
-                        .unwrap_or_default();
-                    let elevated = capabilities.iter().any(|capability| {
-                        matches!(
-                            capability.as_str(),
-                            Some("root_shell" | "app_data_write" | "package_remove_for_user")
-                        )
-                    });
-                    json!({
-                        "name": step.get("name"),
-                        "note": step.get("note"),
-                        "elevated": elevated,
-                        "kindLabel": public_step_kind(
-                            step.get("type").and_then(Value::as_str).unwrap_or("unknown")
-                        ),
-                        "requirements": capabilities.iter().filter_map(Value::as_str).map(public_capability).collect::<Vec<_>>(),
-                        "technicalId": step.get("id"),
-                        "technicalType": step.get("type"),
-                    })
-                })
-                .collect::<Vec<_>>();
-            json!({
-                "recipeId": recipe_id,
-                "recipeName": recipe.get("name"),
-                "recipeDescription": recipe.get("description"),
-                "steps": steps,
-            })
-        })
-        .collect::<Vec<_>>();
-    let target = plan.get("target_device").cloned().unwrap_or(Value::Null);
-    let context = plan.get("device_context").cloned().unwrap_or(Value::Null);
-    let warnings = result
-        .get("diagnostics")
-        .and_then(Value::as_array)
-        .into_iter()
-        .flatten()
-        .filter(|diagnostic| diagnostic.get("severity").and_then(Value::as_str) == Some("warning"))
-        .map(|diagnostic| json!({ "code": diagnostic.get("code"), "message": diagnostic.get("message") }))
-        .collect::<Vec<_>>();
-    let selected_inputs = result
-        .get("resolvedInputs")
-        .and_then(Value::as_array)
-        .into_iter()
-        .flatten()
-        .filter(|input| {
-            !input
-                .get("inputId")
-                .and_then(Value::as_str)
-                .is_some_and(|id| id.to_ascii_lowercase().contains("serial"))
-        })
-        .filter_map(|input| {
-            let value = input.get("value").filter(|value| !value.is_null())?;
-            Some(json!({
-                "key": input.get("key"),
-                "value": public_input_value(value),
-                "source": input.get("source"),
-            }))
-        })
-        .collect::<Vec<_>>();
-    let mut public = json!({
-        "reviewHandle": review_handle,
-        "planDigest": digest,
-        "target": {
-            "manufacturer": target.get("manufacturer").or_else(|| context.get("manufacturer")),
-            "model": target.get("model").or_else(|| context.get("model")),
-            "androidVersion": context.get("android_version"),
-            "androidApiLevel": target.get("android_api_level").or_else(|| context.get("android_api_level")),
-        },
-        "groups": groups,
-        "selectedInputs": selected_inputs,
-        "warnings": warnings,
-    });
+/// Attaches only the opaque handle to the backend-authored review projection.
+/// Tauri deliberately does not recreate action meaning from retained plan data.
+fn public_review(review_handle: &str, review: &Value, exact_serial: Option<&str>) -> Value {
+    let mut public = review.clone();
+    if let Some(object) = public.as_object_mut() {
+        object.insert(
+            "reviewHandle".to_string(),
+            Value::String(review_handle.to_string()),
+        );
+    }
     if let Some(serial) = exact_serial.filter(|serial| !serial.is_empty()) {
         redact_exact_serial(&mut public, serial);
     }
     public
-}
-
-fn public_step_kind(step_type: &str) -> &'static str {
-    match step_type {
-        "install_apk" => "Install app",
-        "launch_app" => "Launch app",
-        "copy_files" => "Copy files",
-        "resolve_artifacts" => "Prepare required files",
-        "shell" | "shell_command" => "Run device action",
-        "uninstall_package" => "Remove app for user",
-        "wait" => "Wait",
-        _ => "Device setup action",
-    }
-}
-
-fn public_capability(capability: &str) -> String {
-    capability.replace('_', " ")
-}
-
-fn public_input_value(value: &Value) -> String {
-    match value {
-        Value::String(value) => value.clone(),
-        Value::Bool(value) => if *value { "Yes" } else { "No" }.to_string(),
-        Value::Array(values) => values
-            .iter()
-            .map(public_input_value)
-            .collect::<Vec<_>>()
-            .join(", "),
-        Value::Number(value) => value.to_string(),
-        _ => "Configured".to_string(),
-    }
 }
 
 pub(crate) fn redact_exact_serial(value: &mut Value, exact_serial: &str) {
@@ -2264,31 +2154,25 @@ mod tests {
 
     #[test]
     fn review_projection_omits_exact_target_serial_and_full_plan() {
-        let plan = json!({
-            "target_device": { "serial": "secret", "manufacturer": "AYANEO", "model": "Pocket", "android_api_level": 33 },
-            "device_context": { "android_version": 13 },
-            "recipes": [{ "id": "recipe.one", "name": "Recipe", "description": null }],
-            "steps": [{ "id": "step.one", "recipe_ref": "recipe.one", "type": "wait", "name": "Wait", "note": "Pause", "constraints": { "capabilities": [] } }],
-            "inputs": [{ "value": "private-input" }]
-        });
         let public = public_review(
             "review_opaque",
-            "digest",
-            &plan,
             &json!({
-                "diagnostics": [{ "severity": "warning", "code": "warning", "message": "Do not show secret" }],
-                "resolvedInputs": [
-                    { "key": "recipe/path", "inputId": "path", "value": "/tmp/secret/file", "source": "explicit" },
-                    { "key": "recipe/serial", "inputId": "serial", "value": "secret", "source": "explicit" }
-                ]
+                "setup": { "name": "Setup" },
+                "target": { "label": "Connected device", "model": "secret" },
+                "features": [],
+                "inputs": [{ "label": "Credential", "summary": "Provided", "required": true }],
+                "notices": [],
+                "work": { "actionCount": 1 },
+                "canExecute": true
             }),
+            Some("secret"),
         );
         let serialized = public.to_string();
         assert!(!serialized.contains("secret"));
-        assert!(!serialized.contains("private-input"));
         assert!(serialized.contains("review_opaque"));
         assert!(serialized.contains("[device]"));
-        assert!(!serialized.contains("recipe/serial"));
+        assert!(!serialized.contains("planDigest"));
+        assert!(!serialized.contains("recipeId"));
     }
 
     #[test]

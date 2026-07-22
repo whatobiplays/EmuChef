@@ -41,11 +41,13 @@ const match = {
 
 const review = {
   reviewHandle: "review-opaque",
-  planDigest: "digest",
-  target: { manufacturer: "AYANEO", model: "Pocket S Mini", androidVersion: 13, androidApiLevel: 33 },
-  groups: [],
-  selectedInputs: [],
-  warnings: [],
+  setup: { name: "Pocket S Mini setup" },
+  target: { label: "Connected Android device", manufacturer: "AYANEO", model: "Pocket S Mini", androidVersion: 13, androidApiLevel: 33 },
+  features: [],
+  inputs: [],
+  notices: [],
+  work: { actionCount: 0 },
+  canExecute: true,
 };
 
 function executionSnapshot(
@@ -72,12 +74,10 @@ function executionSnapshot(
     latestSequence,
     terminal: status !== "running" && status !== "queued",
     recipes: [{
-      recipeId: "recipe.one",
       name: "Recipe One",
       description: null,
       status: recipeStatus,
       steps: [{
-        stepId: "step.one",
         name: "Step One",
         note: "Simulate step one",
         status: stepStatus,
@@ -86,6 +86,10 @@ function executionSnapshot(
     }],
     warnings: [],
     errors: [],
+    progress: {
+      currentFeature: status === "running" ? "Recipe One" : null,
+      currentAction: status === "running" ? "Simulate step one" : null,
+    },
     completion: {
       classification: status === "failed" ? "failed" : status === "cancelled" ? "cancelled" : status === "succeeded_with_warnings" ? "success_with_warnings" : status === "succeeded" ? "success" : "in_progress",
       counts: {
@@ -221,13 +225,8 @@ function executionEvent(sequence: number): ExecutionEvent {
   return {
     sequence,
     timestamp: `2026-07-13T00:00:0${sequence}Z`,
-    eventType: "step_progress",
-    recipeId: "recipe.one",
-    stepId: "step.one",
-    phase: "action",
+    label: `Event ${sequence}`,
     status: "running",
-    note: `Event ${sequence}`,
-    message: null,
     issue: null,
   };
 }
@@ -914,7 +913,7 @@ test("simulation start preserves the retained review until start succeeds", () =
   assert.equal(active.step, "execution");
   assert.equal(active.review, review);
   assert.equal(active.execution.kind, "active");
-  assert.equal(active.execution.kind === "active" && active.execution.eventCursor, 2);
+  assert.equal(active.execution.kind === "active" && active.execution.eventCursor, 0);
 });
 
 test("authoritative snapshots replace progress and reject older responses", () => {
@@ -942,7 +941,15 @@ test("authoritative snapshots replace progress and reject older responses", () =
   });
   assert.equal(terminal.execution.kind, "terminal");
   assert.equal(terminal.execution.kind === "terminal" && terminal.execution.snapshot.recipes[0].status, "blocked");
-  assert.equal(terminal.execution.kind === "terminal" && terminal.execution.eventCursor, 6);
+  assert.equal(terminal.execution.kind === "terminal" && terminal.execution.eventCursor, 0);
+  assert.equal(
+    workflowReducer(terminal, {
+      type: "execution-snapshot",
+      generation: 1,
+      snapshot: executionSnapshot(6, "running"),
+    }),
+    terminal,
+  );
 });
 
 test("every Phase 0 terminal status produces a terminal simulated result", () => {
@@ -961,7 +968,7 @@ test("every Phase 0 terminal status produces a terminal simulated result", () =>
   }
 });
 
-test("events are presentation-only, monotonic, and deduplicated after the snapshot cursor", () => {
+test("events are presentation-only, monotonic, and deduplicated after the event cursor", () => {
   const merged = mergeExecutionEvents(
     [executionEvent(3)],
     [executionEvent(7), executionEvent(5), executionEvent(7), executionEvent(4)],

@@ -337,7 +337,7 @@ export function workflowReducer(state: WorkflowState, action: WorkflowAction): W
           generation: action.generation,
           snapshot: action.snapshot,
           events: [],
-          eventCursor: action.snapshot.latestSequence,
+          eventCursor: 0,
           cancellationRequested: false,
         },
       };
@@ -349,13 +349,13 @@ export function workflowReducer(state: WorkflowState, action: WorkflowAction): W
       const current = state.execution;
       if (current.kind !== "active" && current.kind !== "terminal") return state;
       if (action.snapshot.latestSequence < current.snapshot.latestSequence) return state;
+      if (current.kind === "terminal" && !action.snapshot.terminal) return state;
       return {
         ...state,
         execution: {
           ...current,
           kind: action.snapshot.terminal ? "terminal" : "active",
           snapshot: action.snapshot,
-          eventCursor: Math.max(current.eventCursor, action.snapshot.latestSequence),
         },
       };
     }

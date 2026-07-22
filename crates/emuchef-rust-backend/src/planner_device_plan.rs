@@ -48,6 +48,8 @@ pub(crate) struct DevicePlanInventoryEntry {
 #[derive(Clone, Debug, PartialEq)]
 pub(crate) struct PlannerInputParts {
     pub device_plan_ref: String,
+    pub device_plan_name: Option<String>,
+    pub device_plan_description: Option<String>,
     pub device_profile_ref: String,
     pub recipe_refs: Vec<String>,
     pub selected_recipe_refs: Vec<String>,
@@ -121,6 +123,10 @@ struct RuntimeCapabilitiesYaml {
 #[derive(Clone, Debug, Deserialize)]
 struct DevicePlanYaml {
     id: String,
+    #[serde(default)]
+    name: Option<String>,
+    #[serde(default)]
+    description: Option<String>,
     device_profile_ref: String,
     #[serde(default)]
     recipes: Vec<DevicePlanRecipeYaml>,
@@ -323,6 +329,20 @@ pub(crate) fn load_planner_input_parts(
 
     Ok(PlannerInputParts {
         device_plan_ref: plan.plan.id.clone(),
+        device_plan_name: plan
+            .plan
+            .name
+            .as_deref()
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .map(str::to_string),
+        device_plan_description: plan
+            .plan
+            .description
+            .as_deref()
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .map(str::to_string),
         device_profile_ref: profile.profile.id.clone(),
         recipe_refs: plan
             .plan

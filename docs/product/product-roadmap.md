@@ -27,7 +27,7 @@ Detailed evidence remains in the relevant product and release documents. In part
 
 | Product or track | Current state | Next priority |
 |---|---|---|
-| EmuChef proper | Phase 5A, 5B, 5C, and 5D completed | Phase 5E plan review and execution experience |
+| EmuChef proper | Phase 5A through 5E completed | Phase 5F saved configurations and reusable setups |
 | Config Editor | Authored generation implemented through GitHub release-pattern testing | Later refinements remain unsequenced unless explicitly promoted |
 | Shared Runtime | Rust is the sole runtime and retains device, filesystem, planning, execution, validation, and protocol authority | Add shared capabilities only when required by a bounded product slice |
 | Release engineering | Deliberately deferred from normal Phase 5 product work | Resume only when the owner declares the relevant application release-comfortable |
@@ -191,7 +191,7 @@ Drag-and-drop remains deferred because the completed picker and repair workflow 
 ## 10. Phase 5E — Plan Review and Execution Experience
 
 **Owner: EmuChef proper**  
-**Status: Next**
+**Status: Completed**
 
 ### Objective
 
@@ -214,10 +214,33 @@ Make users confident about what EmuChef proper will do and provide useful recove
 
 Users can understand impact before execution and determine what happened, what failed, and what action is safe afterward.
 
+### Completion evidence
+
+Rust emits the exact-plan-bound, feature-first review projection with authored
+setup/feature/action/input presentation, deterministic populated sections,
+authoritative counts and known waits, neutral sensitive-input summaries, and
+fail-closed blocker state for work that cannot be projected safely. Tauri only
+retains and verifies the plan/digest/generation, attaches the opaque review
+handle, and sanitizes execution state; React renders those DTOs without raw
+planner/runtime identity or authority data.
+
+Execution presents localized timestamps, current authored feature/action,
+authoritative completion counts, sanitized recent activity, truthful
+safe-boundary cancellation copy, action-specific classified failure guidance,
+fresh-review recovery, backend-authorized launch, and report export state scoped
+to one execution identity. Snapshot and event polling reject stale generations
+and handles, retain an independent event cursor, and prevent terminal-state
+downgrade. The Phase 5E audit findings UX-019, UX-021, UX-022, UX-034, and
+UX-039 through UX-042 are resolved with linked regressions; UX-020 remains open
+under Phase 5H. Frontend, security, backend workspace, Tauri workspace, format,
+build, and diff gates passed. This is automated source/fixture evidence only;
+it does not claim real-device, packaged-GUI, signing, packaging, or release
+qualification.
+
 ## 11. Phase 5F — Saved Configurations and Reusable Setups
 
 **Owner: EmuChef proper**  
-**Status: Planned**
+**Status: Next**
 
 ### Objective
 
@@ -510,12 +533,13 @@ Cross-platform packaging and release automation must define separate deliverable
 
 ## 24. Immediate next action
 
-### Phase 5E — Plan Review and Execution Experience
+### Phase 5F — Saved Configurations and Reusable Setups
 
 **Owner: EmuChef proper**  
 **Status: Next**
 
-Begin from the objective, candidate scope, and exit criteria in Section 10 and
-the open Phase 5E findings in the Phase 5A end-to-end UX audit. Keep plan-review
-projection and execution recovery bounded from release engineering, packaging,
-and the completed Phase 5D input-authority workflow.
+Begin from the objective, candidate scope, and exit criteria in Section 11 and
+the open Phase 5F findings in the Phase 5A end-to-end UX audit. Preserve the
+completed review/execution authority model and keep saved configurations free
+of generated plans, runtime handles, exact target identity, and execution
+authority.

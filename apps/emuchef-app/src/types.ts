@@ -140,39 +140,56 @@ export interface ConfigurationDescription {
   diagnostics: ValidationDiagnostic[];
 }
 
-export interface ReviewGroup {
-  recipeId: string;
-  recipeName: string;
-  recipeDescription: string | null;
-  steps: Array<{
-    name: string;
-    note: string | null;
-    elevated: boolean;
-    kindLabel: string;
-    requirements: string[];
-    technicalId: string;
-    technicalType: string;
-  }>;
-}
-
-export interface ReviewInput {
-  key: string;
-  value: string;
-  source: "explicit" | "user_configuration" | "device_plan" | "recipe_default" | null;
-}
-
 export interface ReviewSummary {
   reviewHandle: string;
-  planDigest: string;
-  target: {
-    manufacturer: string | null;
-    model: string | null;
-    androidVersion: number | null;
-    androidApiLevel: number | null;
+  setup: {
+    name: string;
+    description?: string;
   };
-  groups: ReviewGroup[];
-  selectedInputs: ReviewInput[];
-  warnings: Array<{ code: string; message: string }>;
+  target: {
+    label: string;
+    manufacturer?: string;
+    model?: string;
+    androidVersion?: number;
+    androidApiLevel?: number;
+  };
+  features: Array<{
+    name: string;
+    description?: string;
+    automaticallyAdded: boolean;
+    sections: Array<{
+      kind:
+        | "preparation"
+        | "downloads"
+        | "installs"
+        | "copies"
+        | "permissions"
+        | "launches"
+        | "device_changes";
+      label: string;
+      actions: Array<{
+        title: string;
+        description?: string;
+        requirement: "required" | "conditional";
+        deviceLocation?: string;
+      }>;
+    }>;
+  }>;
+  inputs: Array<{
+    label: string;
+    summary: string;
+    required: boolean;
+  }>;
+  notices: Array<{
+    severity: "warning" | "blocker";
+    title: string;
+    message: string;
+  }>;
+  work: {
+    actionCount: number;
+    knownWaitSeconds?: number;
+  };
+  canExecute: boolean;
 }
 
 export type ExecutionStatus =
@@ -202,10 +219,7 @@ export type StepExecutionStatus =
   | "cancelled";
 
 export interface ExecutionIssue {
-  code: string;
   message: string;
-  recipeId: string | null;
-  stepId: string | null;
   remediation: RemediationGuidance;
 }
 
@@ -236,7 +250,6 @@ export interface ExecutionCompletionSummary {
   warningCount: number;
   partialChangesPossible: boolean;
   features: Array<{
-    recipeId: string;
     name: string;
     status: RecipeExecutionStatus;
     counts: Partial<Record<"completed" | "skipped" | "blocked" | "failed" | "cancelled" | "pending", number>>;
@@ -249,7 +262,6 @@ export interface LaunchAction {
 }
 
 export interface ExecutionStep {
-  stepId: string;
   name: string;
   note: string | null;
   status: StepExecutionStatus;
@@ -257,7 +269,6 @@ export interface ExecutionStep {
 }
 
 export interface ExecutionRecipe {
-  recipeId: string;
   name: string;
   description: string | null;
   status: RecipeExecutionStatus;
@@ -278,6 +289,10 @@ export interface ExecutionSnapshot {
   warnings: ExecutionIssue[];
   errors: ExecutionIssue[];
   completion: ExecutionCompletionSummary;
+  progress: {
+    currentFeature: string | null;
+    currentAction: string | null;
+  };
 }
 
 export interface RealExecutionTarget {
@@ -303,6 +318,10 @@ export interface RealExecutionSnapshot {
   warnings: ExecutionIssue[];
   errors: ExecutionIssue[];
   completion: ExecutionCompletionSummary;
+  progress: {
+    currentFeature: string | null;
+    currentAction: string | null;
+  };
   launchAction: LaunchAction | null;
 }
 
@@ -322,13 +341,8 @@ export interface RealExecutionConfirmation {
 export interface ExecutionEvent {
   sequence: number;
   timestamp: string;
-  eventType: string;
-  recipeId: string | null;
-  stepId: string | null;
-  phase: string | null;
+  label: string;
   status: string | null;
-  note: string | null;
-  message: string | null;
   issue: ExecutionIssue | null;
 }
 

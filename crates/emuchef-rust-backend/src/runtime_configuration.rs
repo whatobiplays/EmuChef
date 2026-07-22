@@ -19,6 +19,7 @@ use crate::planner::{
     TargetDeviceBinding,
 };
 use crate::planner_device_plan::{self, PlannerInputParts};
+use crate::review_projection::{project_review, ReviewProjection};
 use crate::user_configuration::{self, UserConfiguration, UserConfigurationLoadError};
 
 /// A persisted configuration reference or an already parsed inline document.
@@ -126,6 +127,8 @@ pub struct PlanConfigurationResult {
     pub plan: Option<ExecutionPlan>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub plan_digest: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) review: Option<ReviewProjection>,
     pub resolved_inputs: Vec<crate::planner::ResolvedInputBinding>,
     pub diagnostics: Vec<RuntimeConfigurationDiagnostic>,
 }
@@ -311,6 +314,7 @@ pub(crate) fn plan_configuration(
         return Ok(PlanConfigurationResult {
             plan: None,
             plan_digest: None,
+            review: None,
             resolved_inputs,
             diagnostics: prepared.diagnostics,
         });
@@ -320,12 +324,13 @@ pub(crate) fn plan_configuration(
         return Ok(PlanConfigurationResult {
             plan: None,
             plan_digest: None,
+            review: None,
             resolved_inputs,
             diagnostics: prepared.diagnostics,
         });
     };
     let result = crate::planner::plan_execution(input);
-    let mut diagnostics = prepared.diagnostics;
+    let mut diagnostics = prepared.diagnostics.clone();
     diagnostics.extend(
         result
             .warnings
@@ -350,9 +355,14 @@ pub(crate) fn plan_configuration(
                 error.to_string(),
             ))
         })?;
+    let review = result
+        .execution_plan
+        .as_ref()
+        .map(|plan| project_review(&prepared, plan, &resolved_inputs, &diagnostics));
     Ok(PlanConfigurationResult {
         plan: result.execution_plan,
         plan_digest,
+        review,
         resolved_inputs,
         diagnostics,
     })

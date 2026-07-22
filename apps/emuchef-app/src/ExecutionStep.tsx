@@ -9,6 +9,16 @@ type PresentedExecution = Extract<
 type ReportState = "idle" | "exporting" | "saved" | "failed";
 type LaunchState = "idle" | "launching" | "launched" | "failed";
 
+function localTimestamp(value: string | null): string {
+  if (!value) return "Starting";
+  const timestamp = new Date(value);
+  if (Number.isNaN(timestamp.getTime())) return "Unavailable";
+  return new Intl.DateTimeFormat(undefined, {
+    dateStyle: "medium",
+    timeStyle: "medium",
+  }).format(timestamp);
+}
+
 interface ExecutionStepProps {
   execution: PresentedExecution;
   launchState: LaunchState;
@@ -53,7 +63,7 @@ export function ExecutionStep({
           {repairPreparing ? "Preparing fresh plan…" : "Repair configuration"}
         </button>
         <button className="secondary" onClick={onReturn}>
-          {execution.mode === "real" ? "Start a fresh workflow" : "Return to Review"}
+          {execution.mode === "real" ? "Start a fresh workflow" : "View previous review"}
         </button>
       </>
     );
@@ -92,6 +102,12 @@ export function ExecutionStep({
           Execution progress is starting; the total step count is not available yet.
         </p>
       )}
+      {snapshot.progress.currentAction && (
+        <p aria-live="polite" role="status">
+          <strong>Current action:</strong> {snapshot.progress.currentAction}
+          {snapshot.progress.currentFeature && ` · ${snapshot.progress.currentFeature}`}
+        </p>
+      )}
       {execution.mode === "real" ? (
         <p className="warning">
           Keep the device connected. Failure or cancellation may leave completed changes on the device;
@@ -104,7 +120,7 @@ export function ExecutionStep({
       )}
       <dl className="execution-summary">
         <div><dt>Status</dt><dd>{snapshot.status.replaceAll("_", " ")}</dd></div>
-        <div><dt>Started</dt><dd>{snapshot.startedAt ?? "Starting"}</dd></div>
+        <div><dt>Started</dt><dd>{localTimestamp(snapshot.startedAt)}</dd></div>
         {duration && <div><dt>Duration</dt><dd>{duration}</dd></div>}
         <div><dt>Completed</dt><dd>{counts.completed}</dd></div>
         <div><dt>Skipped</dt><dd>{counts.skipped}</dd></div>
@@ -117,20 +133,20 @@ export function ExecutionStep({
           The result remains {snapshot.status}; EmuChef does not infer partial success or rollback completed work.
         </p>
       )}
-      {snapshot.warnings.map((issue) => (
-        <div className="warning" key={`warning-${issue.code}-${issue.stepId ?? "run"}`}>
+      {snapshot.warnings.map((issue, index) => (
+        <div className="warning" key={`warning-${index}`}>
           <p>{issue.message}</p>
           <small><strong>{issue.remediation.title}:</strong> {issue.remediation.message}</small>
         </div>
       ))}
-      {snapshot.errors.map((issue) => (
-        <div className="error" key={`error-${issue.code}-${issue.stepId ?? "run"}`}>
+      {snapshot.errors.map((issue, index) => (
+        <div className="error" key={`error-${index}`}>
           <p>{issue.message}</p>
           <small><strong>{issue.remediation.title}:</strong> {issue.remediation.message}</small>
         </div>
       ))}
-      {snapshot.recipes.map((recipe) => (
-        <article className={`execution-group status-${recipe.status}`} key={recipe.recipeId}>
+      {snapshot.recipes.map((recipe, recipeIndex) => (
+        <article className={`execution-group status-${recipe.status}`} key={`${recipe.name}-${recipeIndex}`}>
           <div className="execution-heading">
             <div>
               <h3>{recipe.name}</h3>
@@ -139,8 +155,8 @@ export function ExecutionStep({
             <span className="execution-status">{recipe.status.replaceAll("_", " ")}</span>
           </div>
           <ol>
-            {recipe.steps.map((step) => (
-              <li key={step.stepId} className={`step-${step.status}`}>
+            {recipe.steps.map((step, stepIndex) => (
+              <li key={`${step.name}-${stepIndex}`} className={`step-${step.status}`}>
                 <strong>{step.note ?? step.name}</strong>
                 <span>{step.status.replaceAll("_", " ")}</span>
                 {step.note && step.note !== step.name && <small>{step.name}</small>}
@@ -158,8 +174,7 @@ export function ExecutionStep({
           <ol>
             {execution.events.map((event) => (
               <li key={event.sequence}>
-                <time>{event.timestamp}</time> {event.note ?? event.message ?? event.eventType}
-                {event.phase && ` · ${event.phase.replaceAll("_", " ")}`}
+                <time>{localTimestamp(event.timestamp)}</time> {event.label}
                 {event.status && ` · ${event.status.replaceAll("_", " ")}`}
               </li>
             ))}
@@ -238,10 +253,18 @@ export function ExecutionStep({
             </button>
           )}
           <button className="secondary" onClick={onReturn}>
-            {execution.mode === "real" ? "Start a fresh workflow" : "Return to Review"}
+            {execution.mode === "real"
+              ? "Start a fresh workflow"
+              : matchesFreshReviewRequirement(snapshot.status)
+                ? "View previous review"
+                : "Return to Review"}
           </button>
         </div>
       )}
     </>
   );
+}
+
+function matchesFreshReviewRequirement(status: string): boolean {
+  return status === "failed" || status === "cancelled";
 }

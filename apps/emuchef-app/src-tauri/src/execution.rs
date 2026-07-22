@@ -327,6 +327,7 @@ fn start_simulated_execution_inner(
         .review(review_handle)?
         .clone();
 
+    validate_review_executable(&review)?;
     validate_catalog(&review, state)?;
     let adb_path = current_adb_path(state)?;
     let inventory = runtime_request(
@@ -654,6 +655,7 @@ fn start_real_execution_inner(
         .map_err(|_| session_error())?
         .review(review_handle)?
         .clone();
+    validate_review_executable(&review)?;
     validate_catalog(&review, state)?;
 
     let expected_adb = review.platform_tools_identity.as_ref().ok_or_else(|| {
@@ -1307,6 +1309,18 @@ fn real_execution_state_error() -> String {
     )
 }
 
+/// Rejects retained plans whose backend-authored review cannot faithfully
+/// describe every action. The UI cannot override this trusted decision.
+fn validate_review_executable(review: &ReviewedPlanSnapshot) -> Result<(), String> {
+    if review.response.pointer("/review/canExecute") == Some(&Value::Bool(true)) {
+        return Ok(());
+    }
+    Err(safe_error(
+        "review_not_executable",
+        "This plan cannot be executed safely. Generate a new review after updating EmuChef or the setup catalog.",
+    ))
+}
+
 fn validate_catalog(review: &ReviewedPlanSnapshot, state: &AppState) -> Result<(), String> {
     let current = catalog(state)?;
     let identity = serde_json::to_value(current.public_identity()).map_err(|_| {
@@ -1422,8 +1436,8 @@ fn project_real_snapshot(mapping: &ExecutionMapping, report: &Value) -> Value {
     );
     public["status"] = Value::String(status.to_string());
     public["terminal"] = Value::Bool(is_terminal_status(Some(status)));
-    public["warnings"] = Value::Array(project_real_issues(report.get("warnings")));
-    public["errors"] = Value::Array(project_real_issues(report.get("errors")));
+    public["warnings"] = Value::Array(project_real_issues(mapping, report.get("warnings")));
+    public["errors"] = Value::Array(project_real_issues(mapping, report.get("errors")));
 
     if let Some(recipes) = public.get_mut("recipes").and_then(Value::as_array_mut) {
         for recipe in recipes {
@@ -1591,16 +1605,16 @@ fn project_real_target(mapping: &ExecutionMapping, exact_serial: &str) -> Value 
     Value::Object(projected)
 }
 
-fn project_real_issues(value: Option<&Value>) -> Vec<Value> {
+fn project_real_issues(mapping: &ExecutionMapping, value: Option<&Value>) -> Vec<Value> {
     value
         .and_then(Value::as_array)
         .into_iter()
         .flatten()
-        .map(project_real_issue)
+        .map(|issue| project_real_issue(mapping, issue))
         .collect()
 }
 
-fn project_real_issue(issue: &Value) -> Value {
+fn project_real_issue(mapping: &ExecutionMapping, issue: &Value) -> Value {
     let internal = issue
         .get("code")
         .and_then(Value::as_str)
@@ -1629,13 +1643,57 @@ fn project_real_issue(issue: &Value) -> Value {
         "execution_worker_panicked" => (internal, "The execution worker stopped unexpectedly."),
         _ => ("execution_issue", "Execution reported an issue."),
     };
+    let message = issue_action_context(mapping, issue).map_or_else(
+        || message.to_string(),
+        |(feature, action)| format!("{action} in {feature} did not complete. {message}"),
+    );
     json!({
-        "code": code,
         "message": message,
-        "recipeId": issue.get("recipeId"),
-        "stepId": issue.get("stepId"),
         "remediation": remediation_for_code(code),
     })
+}
+
+/// Resolves opaque executor identity only inside trusted code and returns
+/// authored presentation text. Technical identifiers never enter the DTO.
+fn issue_action_context(mapping: &ExecutionMapping, issue: &Value) -> Option<(String, String)> {
+    let step_id = issue.get("stepId").and_then(Value::as_str)?;
+    action_context_for_step_id(mapping, step_id)
+}
+
+fn action_context_for_step_id(
+    mapping: &ExecutionMapping,
+    step_id: &str,
+) -> Option<(String, String)> {
+    let plan = mapping.review.response.get("plan")?;
+    let step = plan
+        .get("steps")
+        .and_then(Value::as_array)?
+        .iter()
+        .find(|step| step.get("id").and_then(Value::as_str) == Some(step_id))?;
+    let recipe_id = step.get("recipe_ref").and_then(Value::as_str)?;
+    let feature = plan
+        .get("recipes")
+        .and_then(Value::as_array)?
+        .iter()
+        .find(|recipe| recipe.get("id").and_then(Value::as_str) == Some(recipe_id))?
+        .get("name")
+        .and_then(Value::as_str)
+        .filter(|value| !value.trim().is_empty())?;
+    let action = step
+        .get("note")
+        .or_else(|| step.get("name"))
+        .and_then(Value::as_str)
+        .filter(|value| !value.trim().is_empty())?;
+    let exact_serial = mapping
+        .review
+        .target
+        .get("serial")
+        .and_then(Value::as_str)
+        .unwrap_or_default();
+    Some((
+        sanitize_text(feature, exact_serial),
+        sanitize_text(action, exact_serial),
+    ))
 }
 
 fn remediation_for_code(code: &str) -> Value {
@@ -1680,57 +1738,6 @@ fn project_real_event_batch(mapping: &ExecutionMapping, response: &Value) -> Val
         .get("serial")
         .and_then(Value::as_str)
         .unwrap_or_default();
-    if let Some(events) = public.get_mut("events").and_then(Value::as_array_mut) {
-        for event in events {
-            event["eventType"] = Value::String(
-                allowlisted_real_string(
-                    event.get("eventType"),
-                    &[
-                        "execution_started",
-                        "step_progress",
-                        "cancel_requested",
-                        "execution_completed",
-                        "execution_worker_panicked",
-                    ],
-                    "execution_progress",
-                )
-                .to_string(),
-            );
-            event["phase"] = allowlisted_real_optional_string(
-                event.get("phase"),
-                &[
-                    "checking_skip_conditions",
-                    "executing",
-                    "verifying",
-                    "finished",
-                ],
-            );
-            event["status"] = allowlisted_real_optional_string(
-                event.get("status"),
-                &["skipped", "blocked", "succeeded", "failed", "cancelled"],
-            );
-            sanitize_real_field(event, "note", exact_serial, "");
-            event["message"] = match event.get("eventType").and_then(Value::as_str) {
-                Some("execution_started") => {
-                    Value::String("Real-device execution started.".to_string())
-                }
-                Some("execution_completed") => {
-                    Value::String("Real-device execution completed.".to_string())
-                }
-                Some("cancel_requested") => Value::String(
-                    "Cancellation was requested and will be observed between atomic operations."
-                        .to_string(),
-                ),
-                Some("execution_worker_panicked") => {
-                    Value::String("The execution worker stopped unexpectedly.".to_string())
-                }
-                _ => Value::Null,
-            };
-            if let Some(issue) = event.get("issue").filter(|value| !value.is_null()).cloned() {
-                event["issue"] = project_real_issue(&issue);
-            }
-        }
-    }
     sanitize_real_projection(&mut public, exact_serial);
     public
 }
@@ -1900,8 +1907,8 @@ fn project_snapshot(mapping: &ExecutionMapping, report: &Value) -> Value {
             recipes.push(project_recipe(report_recipe, None, exact_serial));
         }
     }
-    let warnings = project_issues(report.get("warnings"), exact_serial);
-    let errors = project_issues(report.get("errors"), exact_serial);
+    let warnings = project_issues(mapping, report.get("warnings"), exact_serial);
+    let errors = project_issues(mapping, report.get("errors"), exact_serial);
     let status = report
         .get("status")
         .and_then(Value::as_str)
@@ -1921,6 +1928,7 @@ fn project_snapshot(mapping: &ExecutionMapping, report: &Value) -> Value {
         "errors": errors,
     });
     public["completion"] = completion_summary(&public, false);
+    public["progress"] = execution_progress(&public);
     if !exact_serial.is_empty() {
         redact_exact_serial(&mut public, exact_serial);
     }
@@ -1928,10 +1936,6 @@ fn project_snapshot(mapping: &ExecutionMapping, report: &Value) -> Value {
 }
 
 fn project_recipe(recipe: &Value, retained: Option<&Value>, exact_serial: &str) -> Value {
-    let recipe_id = recipe
-        .get("recipeId")
-        .and_then(Value::as_str)
-        .unwrap_or("unknown_recipe");
     let name = recipe
         .get("name")
         .and_then(Value::as_str)
@@ -1942,7 +1946,7 @@ fn project_recipe(recipe: &Value, retained: Option<&Value>, exact_serial: &str) 
         })
         .filter(|value| !value.trim().is_empty())
         .map(str::to_string)
-        .unwrap_or_else(|| humanize_identifier(recipe_id));
+        .unwrap_or_else(|| "Setup feature".to_string());
     let steps = recipe
         .get("steps")
         .and_then(Value::as_array)
@@ -1951,7 +1955,6 @@ fn project_recipe(recipe: &Value, retained: Option<&Value>, exact_serial: &str) 
         .map(|step| project_step(step, exact_serial))
         .collect::<Vec<_>>();
     json!({
-        "recipeId": recipe_id,
         "name": sanitize_text(&name, exact_serial),
         "description": retained
             .and_then(|value| value.get("description"))
@@ -1963,31 +1966,40 @@ fn project_recipe(recipe: &Value, retained: Option<&Value>, exact_serial: &str) 
 }
 
 fn project_step(step: &Value, exact_serial: &str) -> Value {
-    let step_id = step
-        .get("stepId")
-        .and_then(Value::as_str)
-        .unwrap_or("unknown_step");
     let name = step
         .get("name")
         .and_then(Value::as_str)
         .filter(|value| !value.trim().is_empty())
         .map(str::to_string)
-        .unwrap_or_else(|| humanize_identifier(step_id));
+        .unwrap_or_else(|| "Setup action".to_string());
+    let status = step
+        .get("status")
+        .and_then(Value::as_str)
+        .unwrap_or("pending");
+    let message = match status {
+        "failed" => Some("This action did not complete."),
+        "blocked" => Some("This action was blocked by required earlier work."),
+        "cancelled" => Some("This action was cancelled at a safe boundary."),
+        _ => None,
+    };
     json!({
-        "stepId": step_id,
         "name": sanitize_text(&name, exact_serial),
         "note": step.get("note").and_then(Value::as_str).map(|value| sanitize_text(value, exact_serial)),
-        "status": step.get("status").and_then(Value::as_str).unwrap_or("pending"),
-        "message": step.get("message").and_then(Value::as_str).map(|value| sanitize_text(value, exact_serial)),
+        "status": status,
+        "message": message,
     })
 }
 
-fn project_issues(value: Option<&Value>, exact_serial: &str) -> Vec<Value> {
+fn project_issues(
+    mapping: &ExecutionMapping,
+    value: Option<&Value>,
+    exact_serial: &str,
+) -> Vec<Value> {
     value
         .and_then(Value::as_array)
         .into_iter()
         .flatten()
-        .map(project_real_issue)
+        .map(|issue| project_real_issue(mapping, issue))
         .map(|mut issue| {
             redact_exact_serial(&mut issue, exact_serial);
             issue
@@ -2036,7 +2048,6 @@ fn completion_summary(snapshot: &Value, real: bool) -> Value {
             *feature_counts.entry(key).or_default() += 1;
         }
         features.push(json!({
-            "recipeId": recipe.get("recipeId"),
             "name": recipe.get("name"),
             "status": recipe.get("status"),
             "counts": feature_counts,
@@ -2060,6 +2071,29 @@ fn completion_summary(snapshot: &Value, real: bool) -> Value {
     })
 }
 
+fn execution_progress(snapshot: &Value) -> Value {
+    for recipe in snapshot
+        .get("recipes")
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+    {
+        let current = recipe
+            .get("steps")
+            .and_then(Value::as_array)
+            .into_iter()
+            .flatten()
+            .find(|step| step.get("status").and_then(Value::as_str) == Some("running"));
+        if let Some(step) = current {
+            return json!({
+                "currentFeature": recipe.get("name"),
+                "currentAction": step.get("note").or_else(|| step.get("name")),
+            });
+        }
+    }
+    json!({ "currentFeature": null, "currentAction": null })
+}
+
 fn project_event_batch(mapping: &ExecutionMapping, response: &Value) -> Value {
     let exact_serial = mapping
         .review
@@ -2078,17 +2112,16 @@ fn project_event_batch(mapping: &ExecutionMapping, response: &Value) -> Value {
             if !seen.insert(sequence) {
                 return None;
             }
+            let label = event_presentation_label(mapping, event, exact_serial);
             Some(json!({
                 "sequence": sequence,
                 "timestamp": event.get("timestamp"),
-                "eventType": event.get("eventType"),
-                "recipeId": event.get("recipeId"),
-                "stepId": event.get("stepId"),
-                "phase": event.get("phase"),
-                "status": event.get("status"),
-                "note": event.get("note").and_then(Value::as_str).map(|value| sanitize_text(value, exact_serial)),
-                "message": event.get("message").and_then(Value::as_str).map(|value| sanitize_text(value, exact_serial)),
-                "issue": event.get("issue").map(|issue| project_issues(Some(&Value::Array(vec![issue.clone()])), exact_serial).into_iter().next().unwrap_or(Value::Null)),
+                "label": label,
+                "status": allowlisted_real_optional_string(
+                    event.get("status"),
+                    &["pending", "running", "skipped", "blocked", "succeeded", "failed", "cancelled"],
+                ),
+                "issue": event.get("issue").map(|issue| project_issues(mapping, Some(&Value::Array(vec![issue.clone()])), exact_serial).into_iter().next().unwrap_or(Value::Null)),
             }))
         })
         .collect::<Vec<_>>();
@@ -2105,6 +2138,50 @@ fn project_event_batch(mapping: &ExecutionMapping, response: &Value) -> Value {
     public
 }
 
+fn event_presentation_label(
+    mapping: &ExecutionMapping,
+    event: &Value,
+    exact_serial: &str,
+) -> String {
+    if let Some(note) = event
+        .get("note")
+        .and_then(Value::as_str)
+        .filter(|value| !value.trim().is_empty())
+    {
+        return sanitize_text(note, exact_serial);
+    }
+    if let Some((feature, action)) = event
+        .get("stepId")
+        .and_then(Value::as_str)
+        .and_then(|step_id| action_context_for_step_id(mapping, step_id))
+    {
+        return sanitize_text(&format!("{action} in {feature}"), exact_serial);
+    }
+    let real = mapping.kind == ExecutionKind::Real;
+    match event.get("eventType").and_then(Value::as_str) {
+        Some("execution_started") => {
+            if real {
+                "Real-device execution started"
+            } else {
+                "Simulation started"
+            }
+        }
+        Some("cancel_requested") => {
+            "Cancellation requested; the current atomic operation may finish"
+        }
+        Some("execution_completed") => {
+            if real {
+                "Real-device execution completed"
+            } else {
+                "Simulation completed"
+            }
+        }
+        Some("execution_worker_panicked") => "Execution stopped unexpectedly",
+        _ => "Execution updated",
+    }
+    .to_string()
+}
+
 fn sanitize_text(value: &str, exact_serial: &str) -> String {
     let without_serial = if exact_serial.is_empty() {
         value.to_string()
@@ -2112,21 +2189,6 @@ fn sanitize_text(value: &str, exact_serial: &str) -> String {
         value.replace(exact_serial, "[device]")
     };
     redact_absolute_paths(&without_serial)
-}
-
-fn humanize_identifier(value: &str) -> String {
-    value
-        .split(['.', '_', '-', '/'])
-        .filter(|part| !part.is_empty())
-        .map(|part| {
-            let mut characters = part.chars();
-            characters
-                .next()
-                .map(|first| first.to_uppercase().collect::<String>() + characters.as_str())
-                .unwrap_or_default()
-        })
-        .collect::<Vec<_>>()
-        .join(" ")
 }
 
 fn is_terminal_status(status: Option<&str>) -> bool {
@@ -2202,7 +2264,7 @@ mod tests {
             "target_device": { "serial": "sensitive-serial", "manufacturer": "AYANEO", "model": "Pocket S", "android_api_level": 33 },
         });
         ReviewedPlanSnapshot {
-            response: json!({ "plan": plan }),
+            response: json!({ "plan": plan, "review": { "canExecute": true } }),
             target: json!({ "serial": "sensitive-serial", "manufacturer": "AYANEO", "model": "Pocket S", "androidApiLevel": 33 }),
             catalog_identity: json!({
                 "sourceKind": "bundled", "sourceId": "catalog", "version": "1",
@@ -2485,7 +2547,7 @@ mod tests {
         let public = project_snapshot(&mapping, &report);
         let serialized = public.to_string();
         assert_eq!(public["recipes"][0]["name"], "Recipe One");
-        assert_eq!(public["recipes"][0]["steps"][0]["name"], "Step One");
+        assert_eq!(public["recipes"][0]["steps"][0]["name"], "Setup action");
         assert!(!serialized.contains("execution-private"));
         assert!(!serialized.contains("reviewedPlan"));
         assert!(!serialized.contains("targetDevice"));
@@ -2493,6 +2555,65 @@ mod tests {
         assert!(!serialized.contains("sensitive-serial"));
         assert!(!serialized.contains("/Users/private"));
         assert!(!serialized.contains("/private/path"));
+    }
+
+    #[test]
+    fn failures_and_events_use_authored_action_context_without_exposing_identity() {
+        let mapping = ExecutionMapping {
+            kind: ExecutionKind::Simulated,
+            public_handle: "execution_public".into(),
+            sidecar_id: "execution-private".into(),
+            review_handle: "review_public".into(),
+            review: launch_review(),
+        };
+        let issue = json!({
+            "code": "verification_failed",
+            "recipeId": "recipe.one",
+            "stepId": "recipe.one/launch",
+            "message": "raw verifier text",
+        });
+        let projected = project_real_issue(&mapping, &issue);
+        assert_eq!(
+            projected["message"],
+            "Launch configured app in Recipe One did not complete. Completed work could not be verified."
+        );
+        let event = project_event_batch(
+            &mapping,
+            &json!({
+                "events": [{
+                    "sequence": 1,
+                    "timestamp": "2026-01-01T00:00:00Z",
+                    "eventType": "step_progress",
+                    "stepId": "recipe.one/launch",
+                    "status": "running",
+                }],
+                "latestSequence": 1,
+                "terminal": false,
+            }),
+        );
+        assert_eq!(
+            event["events"][0]["label"],
+            "Launch configured app in Recipe One"
+        );
+        let serialized = json!({ "issue": projected, "event": event }).to_string();
+        for forbidden in [
+            "recipe.one",
+            "stepId",
+            "recipeId",
+            "verification_failed",
+            "raw verifier",
+        ] {
+            assert!(!serialized.contains(forbidden), "leaked {forbidden}");
+        }
+    }
+
+    #[test]
+    fn unsafe_backend_review_cannot_start() {
+        let mut retained = review();
+        retained.response["review"]["canExecute"] = Value::Bool(false);
+        assert!(validate_review_executable(&retained)
+            .unwrap_err()
+            .contains("review_not_executable"));
     }
 
     struct FakeRuntime {
@@ -2900,7 +3021,7 @@ mod tests {
         assert_eq!(public["target"]["model"], "Pocket S");
         assert_eq!(public["target"]["androidApiLevel"], 33);
         assert!(public["target"].get("androidVersion").is_none());
-        assert_eq!(public["errors"][0]["code"], "execution_issue");
+        assert!(public["errors"][0].get("code").is_none());
         for forbidden in [
             "execution-private",
             "sensitive-serial",
@@ -2941,8 +3062,10 @@ mod tests {
         });
 
         let public = project_real_event_batch(&mapping, &response);
-        assert_eq!(public["events"][0]["eventType"], "execution_progress");
-        assert!(public["events"][0]["phase"].is_null());
+        assert_eq!(public["events"][0]["label"], "[redacted]");
+        assert!(public["events"][0].get("eventType").is_none());
+        assert!(public["events"][0].get("phase").is_none());
+        assert!(public["events"][0].get("stepId").is_none());
         assert!(public["events"][0]["status"].is_null());
         let serialized = public.to_string();
         for forbidden in [

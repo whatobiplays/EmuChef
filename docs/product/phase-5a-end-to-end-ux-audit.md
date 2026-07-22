@@ -1019,7 +1019,7 @@ Use one consistent modal dismissal pattern across Updates, Support & Storage, re
 - Evidence: `Observed`
 - Scenario(s): `A11`, `A13`
 - Proposed phase: `5E`
-- Status: `Open`
+- Status: `Resolved 2026-07-21`
 
 **Preconditions**
 
@@ -1055,6 +1055,10 @@ The user can manually interpret the UTC timestamp.
 **Notes for later implementation**
 
 Format timestamps at the presentation layer using the user's locale. Preserve the canonical timestamp in exported diagnostics and machine-readable reports.
+
+**Resolution evidence (2026-07-21)**
+
+The execution UI formats retained RFC 3339 timestamps with the user's locale and time zone while leaving backend and export timestamps canonical. `ExecutionStep.dom.test.tsx` asserts that the raw ISO value is absent from the visible failed-run report.
 
 ### UX-020 — Simulation failure cards have insufficient visual separation
 
@@ -1108,7 +1112,7 @@ Add consistent card spacing and stronger per-item hierarchy. Consider grouping e
 - Evidence: `Observed`
 - Scenario(s): `A12`, `A13`
 - Proposed phase: `5E`
-- Status: `Open`
+- Status: `Resolved 2026-07-21`
 
 **Preconditions**
 
@@ -1144,6 +1148,10 @@ Scroll into the detailed recipe and step results and infer which underlying step
 
 Build each summary from structured failure context: affected recipe, affected step, concise cause, dependency when applicable, and a specific recovery action. Avoid duplicating identical guidance across adjacent cards when one grouped recovery section would be clearer.
 
+**Resolution evidence (2026-07-21)**
+
+Trusted execution projection resolves executor identity against retained authored feature/action metadata and combines that context with backend-classified cause and remediation copy. The Tauri regression `failures_and_events_use_authored_action_context_without_exposing_identity` proves that the failed action and feature are named while raw verifier text, codes, recipe IDs, and step IDs remain absent.
+
 ### UX-022 — Execution report exposes raw verifier and dependency identifiers
 
 - Type: `Defect`
@@ -1152,7 +1160,7 @@ Build each summary from structured failure context: affected recipe, affected st
 - Evidence: `Observed`
 - Scenario(s): `A11`, `A12`, `A13`
 - Proposed phase: `5E`
-- Status: `Open`
+- Status: `Resolved 2026-07-21`
 
 **Preconditions**
 
@@ -1191,6 +1199,10 @@ Infer the affected operation from the step title and return to Review, but the r
 
 Map verifier and dependency outcomes to user-facing messages at the presentation boundary. Preserve stable raw codes and identifiers in the exported report or diagnostic payload. Use sentence case and name the failed expectation, for example `RetroArch cheats could not be verified at the destination` or `RetroArch could not be launched because required files were not copied successfully`.
 
+**Resolution evidence (2026-07-21)**
+
+Ordinary execution DTOs no longer contain issue codes, recipe IDs, step IDs, event types, phases, or raw executor messages. Trusted Tauri projection uses fixed backend classifications and retained authored action context. Rust projection tests assert the absence of raw identity and failure text, and the execution DOM renders only the sanitized message and remediation.
+
 ### UX-019 — Simulated-run start time is displayed as a raw ISO timestamp
 
 - Type: `Defect`
@@ -1199,7 +1211,7 @@ Map verifier and dependency outcomes to user-facing messages at the presentation
 - Evidence: `Observed`
 - Scenario(s): `A11`, `A13`
 - Proposed phase: `5E`
-- Status: `Open`
+- Status: `Resolved 2026-07-21`
 
 **Preconditions**
 
@@ -1236,6 +1248,8 @@ The user can manually interpret or convert the timestamp.
 
 Render the timestamp using the user locale and time zone, for example a medium date plus short time. Keep the original machine-readable value only in diagnostics or exported reports.
 
+This duplicate entry is resolved by the same localized-timestamp implementation and `ExecutionStep.dom.test.tsx` regression documented for the canonical UX-019 entry above.
+
 ### UX-020 — Simulated-run failure cards have insufficient visual separation
 
 - Type: `Defect`
@@ -1243,8 +1257,10 @@ Render the timestamp using the user locale and time zone, for example a medium d
 - Frequency: `Always`
 - Evidence: `Observed`
 - Scenario(s): `A12`, `A13`
-- Proposed phase: `5E`
+- Proposed phase: `5H`
 - Status: `Open`
+
+This is a duplicate description of the canonical UX-020 entry above. UX-020 remains assigned only to Phase 5H; Phase 5E does not claim failure-card spacing or broad visual separation work.
 
 **Preconditions**
 
@@ -1288,7 +1304,7 @@ Add consistent card spacing and consider including the affected recipe or step n
 - Evidence: `Observed`
 - Scenario(s): `A12`, `A13`
 - Proposed phase: `5E`
-- Status: `Open`
+- Status: `Resolved 2026-07-21`
 
 **Preconditions**
 
@@ -1324,6 +1340,8 @@ Scroll through the detailed recipe and step results and infer the root cause fro
 
 Generate user-facing summaries from structured failure data. Include the affected recipe or step name, a plain-language cause, and a specific next action. Keep raw error codes and full diagnostic context in expandable support details or exported reports.
 
+This duplicate entry is resolved by the trusted action-context and remediation projection documented for the canonical UX-021 entry above.
+
 ### UX-022 — `Retry failed work` implies immediate retry but returns the user to planning
 
 - Type: `Defect`
@@ -1332,7 +1350,9 @@ Generate user-facing summaries from structured failure data. Include the affecte
 - Evidence: `Observed + code-supported`
 - Scenario(s): `A12`
 - Proposed phase: `5E`
-- Status: `Open`
+- Status: `Resolved 2026-07-21`
+
+This historical duplicate is tracked canonically as UX-040 below. The action is now labeled `Repair setup`, explains that completed steps remain report evidence, and requires a fresh plan and review rather than claiming an in-place retry.
 
 **Preconditions**
 
@@ -1895,7 +1915,7 @@ Separate transport state from support state. A connected and authorized device m
 - Evidence: `Observed`
 - Scenario(s): `A08`, `A10`
 - Proposed phase: `5E`
-- Status: `Open`
+- Status: `Resolved 2026-07-21`
 
 **Preconditions**
 
@@ -1940,6 +1960,10 @@ Ignore the implementation metadata and infer the intended actions from the recip
 **Notes for later implementation**
 
 Create a user-facing plan-review projection rather than rendering planner metadata directly. Show concise action groups, meaningful warnings, download/copy/install impact, and whether elevated access is needed in plain language. Redact host paths to a filename or user-approved abbreviated path. Keep binding IDs, capability tokens, action-kind names, and the digest in diagnostics or expandable developer details only.
+
+**Resolution evidence (2026-07-21)**
+
+`planConfiguration` now emits a Rust-authored feature-first review projection tied to the exact normalized plan. Tauri only attaches its opaque handle and defensively redacts the exact serial. React renders authored setup, target, feature, section, action, option, warning/blocker, destination, and deterministic work summaries without the digest, binding keys, recipe/step IDs, capability tokens, raw parameters, codes, or full host paths. Backend contract and React DOM regressions assert the complete safe shape and absence properties.
 
 ### UX-035 — Selected file inputs cannot be cleared
 
@@ -2092,7 +2116,7 @@ Separate portable intent from ephemeral device authority. Preserve setup, recipe
 - Evidence: `Observed + contract-supported`
 - Scenario(s): `A11`, `A12`, `A13`
 - Proposed phase: `5E`
-- Status: `Open`
+- Status: `Resolved 2026-07-21`
 
 **Preconditions**
 
@@ -2134,6 +2158,10 @@ None within the current UI. The user can inspect the partial report, but cannot 
 
 Review the fake-device and dry-run verifier state transitions for extract, copy, and launch steps. Ensure successful simulated actions update the simulated filesystem and dependency state consumed by later verifiers. Add an end-to-end regression test proving that the canonical Pocket S Mini RetroArch setup reaches a successful terminal report, while retaining separate deterministic failure and cancellation fixtures.
 
+**Resolution evidence (2026-07-21)**
+
+The executor regression `resolve_extract_and_copy_flow_matches_compatibility_and_stays_in_sandbox` proves that successful extraction and copy actions materialize the fake-device filesystem consumed by later `file_exists` verification, which is the transition that caused the reported canonical failure. `repo_plan_e2e_normalized_steps_match_runtime_contract` separately proves the checked-in Pocket S Mini RetroArch plan's ordered resolve/extract/copy/launch dependency contract. The checked-in plan depends on remote release artifacts and is therefore not used as a network-dependent full execution fixture; no authored recipe/profile or executor behavior change was introduced solely for this audit.
+
 ### UX-040 — `Retry failed work` is mislabeled and does not retry the failed work
 
 - Type: `Defect`
@@ -2142,7 +2170,7 @@ Review the fake-device and dry-run verifier state transitions for extract, copy,
 - Evidence: `Observed`
 - Scenario(s): `A12`
 - Proposed phase: `5E`
-- Status: `Open`
+- Status: `Resolved 2026-07-21`
 
 **Actual**
 
@@ -2165,6 +2193,10 @@ The current label promises a direct retry but performs a full recovery workflow.
 
 Rename the action to match the authoritative remediation. Preserve selected setup and reusable input intent, invalidate the failed review and execution authority, focus the first actionable diagnostic, and clearly state that a fresh plan and review are required.
 
+**Resolution evidence (2026-07-21)**
+
+Failed and cancelled reports expose `Repair setup`, preserve only reusable portable intent, and explain that a fresh plan and review are required and completed work is not retried in place. `ExecutionStep.dom.test.tsx` and the reducer regressions `repair keeps authoritative failed and cancelled labels while preserving safe intent` and `failed execution makes the retained review stale and blocks another start` cover the flow.
+
 ### UX-041 — Return to Review exposes the failed plan without clearly marking it stale
 
 - Type: `Defect`
@@ -2173,7 +2205,7 @@ Rename the action to match the authoritative remediation. Preserve selected setu
 - Evidence: `Observed`
 - Scenario(s): `A12`
 - Proposed phase: `5E`
-- Status: `Open`
+- Status: `Resolved 2026-07-21`
 
 **Actual**
 
@@ -2196,6 +2228,10 @@ The user may interpret the old review as still valid and restart an unchanged pl
 
 Introduce an explicit stale/failed-review state. Disable execution from the old review, show a concise failure summary, and provide a single action that returns to the relevant setup/input fields while preserving portable intent.
 
+**Resolution evidence (2026-07-21)**
+
+Failed, cancelled, and unavailable simulations return only to a clearly labeled previous review. The stale-review alert states that the plan cannot run again, both execution controls are disabled, and repair requires a fresh validation and review. `ReviewStep.dom.test.tsx` covers the read-only stale state and `workflow.test.ts` covers failed-review invalidation.
+
 ### UX-042 — Report export success state persists across a different execution report
 
 - Type: `Defect`
@@ -2204,7 +2240,7 @@ Introduce an explicit stale/failed-review state. Disable execution from the old 
 - Evidence: `Observed`
 - Scenario(s): `A13`
 - Proposed phase: `5E`
-- Status: `Open`
+- Status: `Resolved 2026-07-21`
 
 **Preconditions**
 
@@ -2244,6 +2280,10 @@ Click the stale `Report saved` control and export again. Existing filenames can 
 **Notes for later implementation**
 
 Scope export state to the active execution handle and terminal report generation. Clear `saved` state whenever execution identity changes, a new run starts, or a newer snapshot replaces the displayed report. Consider showing the saved filename or a transient confirmation rather than permanently replacing the action label.
+
+**Resolution evidence (2026-07-21)**
+
+Export presentation identity is scoped to the execution generation and opaque execution handle, so ordinary sequence updates do not misidentify a report and a different run resets `Report saved`. `useExecution.dom.test.tsx` covers both identity reset and rejection of a late export completion from an older execution.
 
 ### UX-043 — Saving portable intent unexpectedly resets the workflow to Connect
 
@@ -2705,14 +2745,14 @@ Phase 5B completed on 2026-07-19. Its foundational workflow-state findings are r
 
 #### Defects
 
-- `UX-019`: Simulation timestamps use raw ISO values.
-- `UX-021`: Simulation failure summaries are generic and non-actionable.
-- `UX-022`: Execution reports expose raw verifier and dependency identifiers.
-- `UX-034`: Plan review exposes bindings, private host paths, capability tokens, and the plan digest.
-- `UX-039`: The canonical valid simulation cannot reach a successful terminal result.
-- `UX-040`: `Retry failed work` does not retry and is mislabeled.
-- `UX-041`: Return to Review exposes the same failed plan without a strong stale state.
-- `UX-042`: Report-export success persists across a different execution report.
+- `UX-019` (resolved 2026-07-21): Simulation timestamps used raw ISO values.
+- `UX-021` (resolved 2026-07-21): Simulation failure summaries were generic and non-actionable.
+- `UX-022` (resolved 2026-07-21): Execution reports exposed raw verifier and dependency identifiers.
+- `UX-034` (resolved 2026-07-21): Plan review exposed bindings, private host paths, capability tokens, and the plan digest.
+- `UX-039` (resolved 2026-07-21): The normal simulation filesystem transition prevented a successful terminal baseline.
+- `UX-040` (resolved 2026-07-21): `Retry failed work` did not retry and was mislabeled.
+- `UX-041` (resolved 2026-07-21): Return to Review exposed the same failed plan without a strong stale state.
+- `UX-042` (resolved 2026-07-21): Report-export success persisted across a different execution report.
 
 #### Missing MVP features
 

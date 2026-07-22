@@ -100,11 +100,13 @@ test("opening portable intent preserves stale references but resets all runtime 
       ...initialWorkflowState,
       review: {
         reviewHandle: "old-review",
-        planDigest: "old-digest",
-        target: { manufacturer: null, model: null, androidVersion: null, androidApiLevel: null },
-        groups: [],
-        selectedInputs: [],
-        warnings: [],
+        setup: { name: "Saved setup" },
+        target: { label: "Connected Android device" },
+        features: [],
+        inputs: [],
+        notices: [],
+        work: { actionCount: 0 },
+        canExecute: true,
       },
     },
     {

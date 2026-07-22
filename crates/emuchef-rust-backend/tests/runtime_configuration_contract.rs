@@ -387,6 +387,60 @@ fn plan_configuration_returns_a_structured_plan_without_writing_a_plan_file() {
             .len(),
         1
     );
+    assert_eq!(
+        response["result"]["review"],
+        json!({
+            "setup": { "name": "Test plan" },
+            "target": {
+                "label": "Connected Android device",
+                "manufacturer": "Explicit",
+                "model": "Planning Device",
+                "androidVersion": 14,
+                "androidApiLevel": 34,
+            },
+            "features": [
+                {
+                    "name": "Dependency",
+                    "automaticallyAdded": true,
+                    "sections": [],
+                },
+                {
+                    "name": "Feature test",
+                    "automaticallyAdded": false,
+                    "sections": [{
+                        "kind": "preparation",
+                        "label": "Prerequisites and preparation",
+                        "actions": [{
+                            "title": "Wait",
+                            "requirement": "required",
+                        }],
+                    }],
+                },
+            ],
+            "inputs": [
+                { "label": "Dependency value", "summary": "Configured", "required": false },
+                { "label": "Runtime value", "summary": "Provided", "required": true },
+                { "label": "Missing value", "summary": "Configured", "required": true },
+                { "label": "Destination", "summary": "/sdcard/Default", "required": true },
+                { "label": "Advanced toggle", "summary": "No", "required": false },
+            ],
+            "notices": [],
+            "work": { "actionCount": 1, "knownWaitSeconds": 1 },
+            "canExecute": true,
+        })
+    );
+    let public_review = serde_json::to_string(&response["result"]["review"]).unwrap();
+    for forbidden in [
+        "feature.test/value",
+        "feature.test/required_missing",
+        "plan.test.plan.001",
+        "explicit",
+    ] {
+        assert!(
+            !public_review.contains(forbidden),
+            "review leaked {forbidden}"
+        );
+    }
     let value = response["result"]["resolvedInputs"]
         .as_array()
         .unwrap()

@@ -15,7 +15,7 @@ export type ExecutionLaunchState = "idle" | "launching" | "launched" | "failed";
 
 function executionReportIdentity(execution: WorkflowState["execution"]): string | null {
   if (execution.kind !== "active" && execution.kind !== "terminal") return null;
-  return `${execution.generation}:${execution.snapshot.executionHandle}:${execution.snapshot.latestSequence}`;
+  return `${execution.generation}:${execution.snapshot.executionHandle}`;
 }
 
 interface MutableValueRef<Value> {
@@ -133,9 +133,14 @@ export function useExecution({
 
     async function pollExecution() {
       try {
-        const nextSnapshot = mode === "real"
-          ? await api.getRealExecution(executionHandle)
-          : await api.getSimulatedExecution(executionHandle);
+        const [nextSnapshot, batch] = await Promise.all([
+          mode === "real"
+            ? api.getRealExecution(executionHandle)
+            : api.getSimulatedExecution(executionHandle),
+          mode === "real"
+            ? api.getRealExecutionEvents(executionHandle, eventCursor)
+            : api.getSimulatedExecutionEvents(executionHandle, eventCursor),
+        ]);
         if (disposed) return;
         const currentExecution = workflowRef.current.execution;
         if (
@@ -146,16 +151,10 @@ export function useExecution({
           announce("An outdated execution response was ignored.");
           return;
         }
-        dispatch({ type: "execution-snapshot", generation, snapshot: nextSnapshot });
-        eventCursor = Math.max(eventCursor, nextSnapshot.latestSequence);
-        if (nextSnapshot.terminal) return;
-
-        const batch = mode === "real"
-          ? await api.getRealExecutionEvents(executionHandle, eventCursor)
-          : await api.getSimulatedExecutionEvents(executionHandle, eventCursor);
-        if (disposed) return;
         dispatch({ type: "execution-events", generation, batch });
         for (const event of batch.events) eventCursor = Math.max(eventCursor, event.sequence);
+        dispatch({ type: "execution-snapshot", generation, snapshot: nextSnapshot });
+        if (nextSnapshot.terminal) return;
         timer = window.setTimeout(pollExecution, 500);
       } catch (error) {
         if (disposed) return;

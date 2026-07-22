@@ -256,7 +256,13 @@ configuration-file lookup.
 The `planConfiguration` JSON operation accepts the same context and performs
 complete catalog, dependency, winning-binding, ref, constraint, and required
 value validation before returning an in-memory normalized execution plan,
-resolved inputs, and diagnostics. It performs no ADB commands, downloads,
+resolved inputs, diagnostics, and a backend-authored user-facing review
+projection. The projection uses authored setup, feature, action, and input
+labels; groups populated preparation, download, install, copy, permission,
+launch, and device-change sections in deterministic order; and includes only
+authoritative action counts, known waits, device destinations, warnings, and
+blockers. Sensitive inputs appear only as `Provided`; approved portable host
+inputs appear as filenames or counts rather than host paths. It performs no ADB commands, downloads,
 extraction, host or device copies, writes, or plan-file persistence. A
 request-level `devicePlan` replaces the saved required `device_plan`; the saved
 document itself remains unchanged and self-contained. The desktop editor can
@@ -676,7 +682,13 @@ do not expose raw internal errors.
 
 Tauri retains the complete immutable reviewed-plan result, exact target binding,
 catalog identity and digest, and canonical plan digest behind an opaque review
-handle. React receives only a serial-free human review. At most 16 live reviews
+handle. Rust owns the review meaning and classification. Tauri only retains the
+exact plan, verifies trusted identity and digest state, attaches the opaque
+handle to the backend-authored projection, and defensively redacts the exact
+serial. React renders the projection without receiving the plan digest, recipe
+or step IDs, input keys, capability tokens, raw parameters, hashes, host paths,
+or diagnostic codes. A review marked unsafe by the backend cannot start either
+simulation or real execution. At most 16 live reviews
 are kept in memory, with a 30-minute idle lifetime, two-hour absolute lifetime,
 and 64 bounded tombstones. Device disappearance, changed facts, catalog change,
 Platform-Tools replacement/removal, discard, or capacity eviction returns
@@ -702,16 +714,27 @@ review, and reports an unknown outcome without inferring terminal status.
 Reviews otherwise retain their independent stale, expiry, discard, and capacity
 lifecycle.
 
-`getExecution` snapshots are authoritative for recipe-grouped progress and
-terminal state. Incremental events are presentation data only; after accepting
-a snapshot the UI resumes event polling after its `latestSequence`. Polling
-stops on a terminal snapshot and ignores stale handles or generations.
+`getExecution` snapshots are authoritative for feature-grouped progress,
+current user-facing action, completion counts, and terminal state. Incremental
+events are presentation data only and use their own accepted-event cursor;
+snapshot sequence values do not skip unseen events. Snapshot and event polling
+share generation and opaque-handle guards, and a terminal state cannot be
+downgraded by a late active snapshot. Polling stops after the terminal snapshot
+and its concurrently retrieved event batch are accepted. Visible timestamps
+are localized by React while canonical timestamps remain in retained and
+exported reports. Export-success presentation is scoped to the execution
+generation and handle, not to changing sequence values.
 Cancellation is cooperative: completed steps remain visible, no new work starts
 after cancellation is observed, and the current atomic operation may finish.
 Real execution provides no rollback or restoration. New real projections are
 serial-free and allowlist messages, target facts, and report fields; Android
 version is omitted unless an existing trusted string supplies it and is never
-derived from API level. React projections omit the sidecar execution id, full
+derived from API level. User-facing issues resolve opaque executor identity
+inside trusted code to authored feature and action text, pair it with
+backend-classified recovery guidance, and omit raw verifier/dependency codes.
+Failed, cancelled, unavailable, stale, and repaired runs require a fresh plan
+and review before execution; a prior review may remain visible only as
+non-executable history. React projections omit the sidecar execution id, full
 plan, target binding, catalog root, step outputs, arbitrary paths, and raw
 sidecar errors.
 

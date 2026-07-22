@@ -47,6 +47,7 @@ mod raw_request;
 pub mod ref_index;
 mod remote_release_resolver;
 pub mod request;
+mod review_projection;
 pub mod runtime_configuration;
 pub(crate) mod runtime_refs;
 pub mod session;
