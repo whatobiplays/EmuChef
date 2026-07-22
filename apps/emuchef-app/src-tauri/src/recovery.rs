@@ -308,6 +308,7 @@ impl RecoveryStore {
         Ok(())
     }
 
+    #[cfg(test)]
     fn finish(&mut self, request: FinishAppSessionRequest) -> Result<(), String> {
         self.require_session(request.session_generation)?;
         if !request.current_session_dirty
@@ -333,6 +334,7 @@ impl RecoveryStore {
 /// Window closure and service restart do not end the macOS application
 /// process, so neither may mark the session clean. Only an accepted process
 /// exit or application-controlled relaunch finalizes the marker.
+#[cfg(test)]
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum ApplicationLifecycleEvent {
     AcceptedProcessExit,
@@ -344,6 +346,7 @@ pub enum ApplicationLifecycleEvent {
     ProcessCrashed,
 }
 
+#[cfg(test)]
 impl ApplicationLifecycleEvent {
     pub fn finalizes_process_session(self) -> bool {
         matches!(self, Self::AcceptedProcessExit | Self::ApplicationRelaunch)
@@ -381,6 +384,7 @@ pub struct RestoreRecoveryDraftRequest {
     request_generation: u64,
 }
 
+#[cfg(test)]
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct FinishAppSessionRequest {

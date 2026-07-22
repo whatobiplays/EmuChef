@@ -239,13 +239,6 @@ impl UpdateService {
         Ok(status_from_state(&state))
     }
 
-    pub fn revision(&self) -> u64 {
-        self.state
-            .lock()
-            .map(|state| state.revision)
-            .unwrap_or_default()
-    }
-
     async fn check(&self) -> Result<UpdateStatusDto, String> {
         let Some(trust) = self.trust.clone() else {
             return Ok(unconfigured_status());

@@ -27,6 +27,7 @@ pub enum SupportCode {
 
 /// The bounded subsystem classes accepted by the fallback mapper. Dynamic
 /// internal error names and messages are deliberately not part of this enum.
+#[cfg(test)]
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum SupportSubsystem {
     Service,
@@ -42,11 +43,13 @@ pub enum SupportSubsystem {
 
 pub struct SupportCodeEntry {
     pub code: &'static str,
+    #[allow(dead_code)]
     pub subsystem: &'static str,
     pub message: &'static str,
 }
 
 impl SupportCode {
+    #[cfg(test)]
     pub const ALL: [Self; 15] = [
         Self::ServiceStartFailed,
         Self::ServiceUnsupported,
@@ -152,6 +155,7 @@ impl SupportCode {
     /// Map an unknown internal failure to a stable public failure class. The
     /// internal value is accepted only to make accidental serialization easy
     /// to regression-test; it never influences or enters the public result.
+    #[cfg(test)]
     pub fn fallback_for(subsystem: SupportSubsystem, _internal: &str) -> Self {
         match subsystem {
             SupportSubsystem::Service => Self::ServiceStartFailed,

@@ -281,6 +281,7 @@ impl SavedConfigurationStore {
         })
     }
 
+    #[cfg(test)]
     pub fn recents_revision(&self) -> u64 {
         self.recents_revision
     }
