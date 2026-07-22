@@ -3,6 +3,7 @@ mod catalog;
 mod commands;
 mod execution;
 mod handles;
+mod menu;
 mod qualification;
 mod recovery;
 mod saved_configurations;
@@ -20,6 +21,8 @@ pub fn run() {
     tauri::Builder::default()
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_opener::init())
+        .menu(|app| menu::build_menu(app, menu::SavedMenuState::default()))
+        .on_menu_event(|app, event| menu::handle_menu_event(app, event.id().as_ref()))
         .setup(move |app| {
             let app_data = app
                 .path()
@@ -96,12 +99,22 @@ pub fn run() {
             saved_configurations::list_recent_configurations,
             saved_configurations::create_saved_configuration,
             saved_configurations::open_saved_configuration,
+            saved_configurations::preview_saved_configuration,
+            saved_configurations::preview_recent_configuration,
+            saved_configurations::confirm_saved_configuration_preview,
+            saved_configurations::cancel_saved_configuration_preview,
+            saved_configurations::compare_saved_configuration_preview,
+            saved_configurations::apply_saved_configuration_preview_repair,
             saved_configurations::open_recent_configuration,
             saved_configurations::relink_recent_configuration,
             saved_configurations::remove_recent_configuration,
             saved_configurations::update_saved_configuration,
             saved_configurations::save_saved_configuration,
             saved_configurations::save_saved_configuration_as,
+            saved_configurations::rename_saved_configuration,
+            saved_configurations::duplicate_saved_configuration,
+            saved_configurations::import_saved_configuration,
+            saved_configurations::export_saved_configuration,
             saved_configurations::close_saved_configuration,
             execution::start_simulated_execution,
             execution::get_simulated_execution,
@@ -123,6 +136,7 @@ pub fn run() {
             updates::set_update_interaction_state,
             updates::end_update_interaction_session,
             updates::open_update_download,
+            menu::update_saved_configuration_menu,
         ])
         .run(tauri::generate_context!())
         .expect("error while running EmuChef");

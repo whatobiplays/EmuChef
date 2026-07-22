@@ -639,7 +639,7 @@ Move maintenance actions to a Settings or Support & Storage subview. Keep status
 - Evidence: `Observed`
 - Scenario(s): `A14`, `A15`, `A16`
 - Proposed phase: `5F`
-- Status: `Open`
+- Status: `Resolved`
 
 **Preconditions**
 
@@ -676,6 +676,10 @@ Use the in-window controls.
 **Notes for later implementation**
 
 Add standard native menu commands, preferably under `File`: New, Open, Open Recent, Save, Save As, Close, and any supported duplicate or rename actions. Use standard shortcuts such as Cmd+N, Cmd+O, Cmd+S, and Cmd+Shift+S. Keep a compact document title and dirty indicator in the window rather than the current full-width action panel.
+
+**Resolution evidence (2026-07-22)**
+
+The native File menu now provides New, Open, Open Recent, Save, Save As, Import, and Export with standard accelerators. A focused Saved setups manager provides Rename, Duplicate, relink, and Remove from Recent, while the workflow retains compact active-setup status. `menu.rs` owns dynamic menu state; `App.dom.test.tsx` covers the accessible management equivalent and summary-before-open flow. This is automated source and DOM evidence, not packaged-macOS menu qualification.
 
 ### UX-012 — Restart runtime is exposed as a primary workflow action instead of a utility command
 
@@ -927,7 +931,7 @@ The Tauri projection no longer assigns host-picker authority to `device_path` in
 - Evidence: `Observed`
 - Scenario(s): `A14`
 - Proposed phase: `5F`
-- Status: `Open`
+- Status: `Resolved`
 
 **Preconditions**
 
@@ -964,6 +968,10 @@ Infer the intended behavior from prior product knowledge or save the file and in
 **Notes for later implementation**
 
 Use plain language such as `Name this setup`. Explain concretely that the file saves the selected setup, recipes, and reusable input references, while device identity, generated plans, execution progress, and results are not saved. Avoid `portable`, `runtime authority`, `document`, `binding`, and similar schema or architecture terms in the normal save flow. Keep the explanation concise, with optional secondary disclosure if more detail is needed.
+
+**Resolution evidence (2026-07-22)**
+
+The save dialog is titled `Name this setup`, labels the value `Setup name`, and states that selected setup, features, and reusable input references are saved while the connected device, generated plan, execution progress, and results are not. The DOM regression `uses concrete save disclosure and preserves the Inputs stage after Save` asserts the disclosure.
 
 ### UX-018 — Updates dialog uses a non-standard Close control
 
@@ -2293,7 +2301,7 @@ Export presentation identity is scoped to the execution generation and opaque ex
 - Evidence: `Observed`
 - Scenario(s): `A15`
 - Proposed phase: `5F`
-- Status: `Open`
+- Status: `Resolved`
 
 **Preconditions**
 
@@ -2332,6 +2340,10 @@ Reconnect or reselect the same device and proceed through the workflow again.
 
 Separate save completion from open/reload behavior. Preserve device selection, setup choice, recipes, inputs, and current stage when they remain valid; invalidate only generated plan and execution authority when required by the persistence contract.
 
+**Resolution evidence (2026-07-22)**
+
+Save and Save As dispatch only `portable-intent-saved`; they do not reload the file or reset workflow authority. Rename changes only persistence identity and presentation name, while Duplicate and Export do not mutate the active workflow. The DOM regression `uses concrete save disclosure and preserves the Inputs stage after Save` covers the documented Inputs-stage reproduction, and reducer regressions retain Phase 5E invalidation for actual intent changes.
+
 ### UX-044 — Invalid or incompatible saved configurations remain actionable before being blocked
 
 - Type: `Defect`
@@ -2340,7 +2352,7 @@ Separate save completion from open/reload behavior. Preserve device selection, s
 - Evidence: `Observed`
 - Scenario(s): `A15`
 - Proposed phase: `5F`
-- Status: `Open`
+- Status: `Resolved`
 
 **Preconditions**
 
@@ -2380,6 +2392,10 @@ Manually edit the YAML or abandon the configuration and recreate it using curren
 
 Introduce a compatibility gate and repair workflow when opening saved configurations. Keep the document open for inspection, but prevent normal progression until blocking references are repaired or explicitly removed. Present friendly names and concise recovery actions; reserve raw IDs and codes for expandable technical details.
 
+**Resolution evidence (2026-07-22)**
+
+Open, Open Recent, and Import now produce a backend-authored sanitized preview before replacing active intent. Schema, authored-contract fingerprints, current validation, saved/current comparison, and bounded repair actions determine whether confirmation is enabled. Removed recipes, retired bindings, removed options, missing portable inputs, material contract changes, V1 baseline-pending state, and unsupported schemas are classified without heuristic rename matching. The current authored recipe schema has no rename-alias field, so no alias migration is claimed. `user_configuration_contract.rs` covers migration, future rejection, strict fields, extension policy, and fingerprint boundaries; Tauri preview tests cover stale bytes, catalog, runtime, and revision rejection; `App.dom.test.tsx` covers summary-before-open and stale preview cancellation.
+
 ### UX-045 — Saved configurations lack first-class rename and duplicate actions
 
 - Type: `Missing MVP feature`
@@ -2388,7 +2404,7 @@ Introduce a compatibility gate and repair workflow when opening saved configurat
 - Evidence: `Observed`
 - Scenario(s): `A16`
 - Proposed phase: `5F`
-- Status: `Open`
+- Status: `Resolved`
 
 **Preconditions**
 
@@ -2427,6 +2443,10 @@ Use `Save As...`, then edit the YAML name field outside EmuChef before reopening
 
 Add explicit Duplicate and Rename actions. Decide and document the identity model: the internal display name may remain authoritative, but Recents should also expose enough filename or location context to distinguish files with duplicate titles. Rename should clearly specify whether it changes the internal title, filename, or both.
 
+**Resolution evidence (2026-07-22)**
+
+The Saved setups manager provides explicit Rename and Duplicate actions. Rename preserves the configuration ID while changing the internal name and sibling filename. Duplicate creates a no-clobber new-ID copy, adds it to Recents, and leaves the active setup unchanged. Recents show filename-only context and retain different paths that share an ID as explicit identity conflicts. Backend and Tauri tests cover persistence-identity-independent fingerprints, collision preservation, canonical-path deduplication, and same-ID distinct paths.
+
 ### UX-046 — Successful Save is paired with misleading disabled-state guidance
 
 - Type: `Defect`
@@ -2435,7 +2455,7 @@ Add explicit Duplicate and Rename actions. Decide and document the identity mode
 - Evidence: `Observed`
 - Scenario(s): `A17`
 - Proposed phase: `5F`
-- Status: `Open`
+- Status: `Resolved`
 
 **Preconditions**
 
@@ -2474,6 +2494,10 @@ Infer success from the separate `Saved ...` notice and the absence of unsaved-ed
 **Notes for later implementation**
 
 Change the post-save disabled explanation to a neutral status such as `Configuration saved. Save becomes available after another change.` Keep requirement-oriented copy only for states where the current document has never been eligible to save.
+
+**Resolution evidence (2026-07-22)**
+
+Successful persistence clears the portable dirty flag and uses the neutral disabled explanation `Configuration saved. Save becomes available after another change.` The logic regression `saved configurations use neutral Save guidance after successful persistence` covers saved, unsaved, and unavailable-plan states.
 
 ### UX-047 — Support diagnostics retains stale export-success state across modal sessions
 
@@ -2766,15 +2790,15 @@ Phase 5B completed on 2026-07-19. Its foundational workflow-state findings are r
 
 #### Defects
 
-- `UX-011`: Configuration management is embedded in the primary workflow instead of native menus.
-- `UX-017`: Save terminology does not clearly explain persisted contents.
-- `UX-043`: Saving from Inputs unexpectedly resets the workflow to Connect.
-- `UX-044`: Invalid or incompatible saved configurations remain actionable too long.
-- `UX-046`: Successful Save is paired with misleading disabled-state guidance.
+- `UX-011` (resolved 2026-07-22): Configuration management was embedded in the primary workflow instead of native menus.
+- `UX-017` (resolved 2026-07-22): Save terminology did not clearly explain persisted contents.
+- `UX-043` (resolved 2026-07-22): Saving from Inputs unexpectedly reset the workflow to Connect.
+- `UX-044` (resolved 2026-07-22): Invalid or incompatible saved configurations remained actionable too long.
+- `UX-046` (resolved 2026-07-22): Successful Save was paired with misleading disabled-state guidance.
 
 #### Missing MVP features
 
-- `UX-045`: Saved configurations lack first-class Rename and Duplicate actions.
+- `UX-045` (resolved 2026-07-22): Saved configurations lacked first-class Rename and Duplicate actions.
 
 #### Optional enhancements
 

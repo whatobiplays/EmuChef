@@ -27,7 +27,7 @@ Detailed evidence remains in the relevant product and release documents. In part
 
 | Product or track | Current state | Next priority |
 |---|---|---|
-| EmuChef proper | Phase 5A through 5E completed | Phase 5F saved configurations and reusable setups |
+| EmuChef proper | Phase 5A through 5F completed | Phase 5G support, diagnostics, and recovery polish |
 | Config Editor | Authored generation implemented through GitHub release-pattern testing | Later refinements remain unsequenced unless explicitly promoted |
 | Shared Runtime | Rust is the sole runtime and retains device, filesystem, planning, execution, validation, and protocol authority | Add shared capabilities only when required by a bounded product slice |
 | Release engineering | Deliberately deferred from normal Phase 5 product work | Resume only when the owner declares the relevant application release-comfortable |
@@ -240,7 +240,7 @@ qualification.
 ## 11. Phase 5F — Saved Configurations and Reusable Setups
 
 **Owner: EmuChef proper**  
-**Status: Next**
+**Status: Completed**
 
 ### Objective
 
@@ -264,10 +264,16 @@ Make saved end-user configurations dependable without persisting generated plans
 
 Users can maintain and reuse multiple configurations and understand when saved intent needs repair or no longer matches the current catalog.
 
+### Completion evidence
+
+Schema V2 stores durable portable intent plus authored-contract fingerprints and rejects runtime authority, generated plans, device identity, and sensitive values. V1 inspection is non-mutating and establishes no historical baseline until the first explicit V2 save. Rust/Tauri owns previews, comparison, bounded repair, native dialogs and menus, collision handling, atomic writes, rename/duplicate/import/export identity, and canonical-path Recents. The frontend provides sanitized pre-open summaries, concrete save disclosure, a focused management surface, and intent-based review invalidation while preserving the Inputs stage for ordinary Save and pure Save As.
+
+The canonical findings UX-011, UX-017, UX-043, UX-044, UX-045, and UX-046 are resolved with backend, Tauri, logic, and DOM regressions. Frontend tests, typecheck, lint, production build, security and Python-retirement checks, both Rust workspace suites, both Rust format checks, and the diff whitespace gate passed. This is automated source, fixture, DOM, and build evidence only; it does not claim real-device, packaged-GUI, signing, packaging, notarization, or release qualification.
+
 ## 12. Phase 5G — Support, Diagnostics, and Recovery Polish
 
 **Owner: EmuChef proper**  
-**Status: Planned**
+**Status: Next**
 
 ### Objective
 
@@ -533,13 +539,12 @@ Cross-platform packaging and release automation must define separate deliverable
 
 ## 24. Immediate next action
 
-### Phase 5F — Saved Configurations and Reusable Setups
+### Phase 5G — Support, Diagnostics, and Recovery Polish
 
 **Owner: EmuChef proper**  
 **Status: Next**
 
-Begin from the objective, candidate scope, and exit criteria in Section 11 and
-the open Phase 5F findings in the Phase 5A end-to-end UX audit. Preserve the
-completed review/execution authority model and keep saved configurations free
-of generated plans, runtime handles, exact target identity, and execution
-authority.
+Begin from the objective, candidate scope, and exit criteria in Section 12 and
+the open Phase 5G findings in the Phase 5A end-to-end UX audit. Preserve the
+completed saved-setup, review, execution, recovery, and Rust/Tauri authority
+contracts while keeping troubleshooting guidance sanitized and actionable.

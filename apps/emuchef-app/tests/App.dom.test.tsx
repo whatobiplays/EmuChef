@@ -27,6 +27,23 @@ const mockApi = vi.hoisted(() => ({
   setUpdateInteractionState: vi.fn(),
   stageRecoveryDraft: vi.fn(),
   restoreRecoveryDraft: vi.fn(),
+  updateSavedConfigurationMenu: vi.fn(),
+  previewSavedConfiguration: vi.fn(),
+  previewRecentConfiguration: vi.fn(),
+  confirmSavedConfigurationPreview: vi.fn(),
+  cancelSavedConfigurationPreview: vi.fn(),
+  compareSavedConfigurationPreview: vi.fn(),
+  applySavedConfigurationPreviewRepair: vi.fn(),
+  createSavedConfiguration: vi.fn(),
+  saveSavedConfiguration: vi.fn(),
+  saveSavedConfigurationAs: vi.fn(),
+  closeSavedConfiguration: vi.fn(),
+  relinkRecentConfiguration: vi.fn(),
+  removeRecentConfiguration: vi.fn(),
+  renameSavedConfiguration: vi.fn(),
+  duplicateSavedConfiguration: vi.fn(),
+  importSavedConfiguration: vi.fn(),
+  exportSavedConfiguration: vi.fn(),
 }));
 
 vi.mock("../src/api", () => ({ api: mockApi }));
@@ -35,6 +52,9 @@ vi.mock("@tauri-apps/api/window", () => ({
     close: vi.fn(),
     onCloseRequested: vi.fn(async () => () => undefined),
   }),
+}));
+vi.mock("@tauri-apps/api/event", () => ({
+  listen: vi.fn(async () => () => undefined),
 }));
 
 import { App } from "../src/App";
@@ -170,6 +190,13 @@ function resetApi(): void {
   mockApi.removePlatformTools.mockResolvedValue(missingAdb);
   mockApi.restartRuntime.mockResolvedValue({ status: "ready", protocolVersion: 1, catalogVersion: "test" });
   mockApi.finishAppSession.mockResolvedValue(undefined);
+  mockApi.updateSavedConfigurationMenu.mockResolvedValue(undefined);
+  mockApi.cancelSavedConfigurationPreview.mockResolvedValue(undefined);
+  mockApi.compareSavedConfigurationPreview.mockResolvedValue({
+    state: "no_current_intent",
+    message: "There are no current setup choices to compare.",
+  });
+  mockApi.removeRecentConfiguration.mockResolvedValue(undefined);
   mockApi.stageRecoveryDraft.mockImplementation(async (request: { requestGeneration: number; draftGeneration: number }) => ({
     requestGeneration: request.requestGeneration,
     draftGeneration: request.draftGeneration,
@@ -945,5 +972,145 @@ describe("Phase 5D input collection and repair", () => {
     expect(screen.queryByRole("button", { name: /Choose folder|Browse/i })).toBeNull();
     expect((screen.getByLabelText("Account token") as HTMLInputElement).type).toBe("password");
     expect(screen.getByText("Not saved")).toBeTruthy();
+  });
+});
+
+describe("Phase 5F saved setup management", () => {
+  test("reviews a sanitized V1 compatibility summary before opening", async () => {
+    const user = userEvent.setup();
+    mockApi.previewSavedConfiguration.mockResolvedValue({
+      outcome: "previewed",
+      previewHandle: "preview-opaque",
+      name: "Travel setup",
+      fileLabel: "travel.yaml",
+      schemaVersion: 1,
+      lastModifiedEpochMs: null,
+      setupLabel: "Supported setup",
+      featureLabels: ["Recipe One"],
+      savedInputCount: 1,
+      omittedInputCount: 1,
+      compatibility: {
+        state: "migrated_baseline_pending",
+        baselineState: "pending_first_v2_save",
+        requiresRepair: false,
+        message: "This older setup is valid against the current catalog.",
+      },
+      repairActions: [],
+    });
+    mockApi.compareSavedConfigurationPreview.mockResolvedValue({
+      state: "no_current_intent",
+      message: "There are no current setup choices to compare.",
+    });
+    await renderReadyApp();
+
+    await user.click(screen.getByRole("button", { name: "Manage saved setups…" }));
+    expect(screen.getByRole("heading", { name: "Saved setups" })).toBeTruthy();
+    expect(screen.getByRole("button", { name: "New" })).toBeTruthy();
+    expect(screen.getByRole("button", { name: "Save As…" })).toBeTruthy();
+    expect(screen.getByRole("button", { name: "Import…" })).toBeTruthy();
+
+    await user.click(screen.getByRole("button", { name: "Open…" }));
+    expect(await screen.findByRole("heading", { name: "Review Travel setup" })).toBeTruthy();
+    expect(screen.getByText("Supported setup")).toBeTruthy();
+    expect(screen.getByText(/historical compatibility cannot be established/)).toBeTruthy();
+    expect(screen.getByText("There are no current setup choices to compare.")).toBeTruthy();
+    expect(document.body.textContent).not.toContain("/Users/");
+    expect(mockApi.confirmSavedConfigurationPreview).not.toHaveBeenCalled();
+  });
+
+  test("uses concrete save disclosure and preserves the Inputs stage after Save", async () => {
+    const user = userEvent.setup();
+    mockApi.describeConfiguration.mockResolvedValue(descriptionWithTextInput({
+      key: "recipe.one/option",
+      inputId: "option",
+      label: "Optional setting",
+      required: false,
+      sensitive: false,
+    }));
+    await advanceToInputs(user);
+    await user.type(screen.getByLabelText("Optional setting"), "chosen");
+    mockApi.createSavedConfiguration.mockResolvedValue({
+      outcome: "saved",
+      configurationHandle: "configuration-opaque",
+      name: "My EmuChef setup",
+      schemaVersion: 2,
+      dirty: false,
+      revision: 0,
+      devicePlan: "plan.supported",
+      selectedRecipes: [],
+      bindings: { "recipe.one/option": "chosen" },
+      pendingSanitationCount: 0,
+      compatibility: { baselineState: "unchanged" },
+      validation: { state: "valid", diagnostics: [] },
+    });
+
+    await user.click(screen.getByRole("button", { name: "Manage saved setups…" }));
+    await user.click(screen.getByRole("button", { name: "Save" }));
+    expect(await screen.findByRole("heading", { name: "Name this setup" })).toBeTruthy();
+    expect(screen.getByText(/selected setup, features, and reusable input references/)).toBeTruthy();
+    expect(screen.getByText(/does not save the connected device, generated plan, execution progress, or results/)).toBeTruthy();
+    await user.click(screen.getByRole("button", { name: "Continue" }));
+
+    expect(await screen.findByRole("heading", { name: "Provide required files and options" })).toBeTruthy();
+    expect(mockApi.createSavedConfiguration).toHaveBeenCalledWith(expect.objectContaining({
+      devicePlan: "plan.supported",
+    }));
+
+    mockApi.duplicateSavedConfiguration.mockResolvedValue({
+      outcome: "saved",
+      name: "My EmuChef setup copy",
+      fileLabel: "My-EmuChef-setup-copy.yaml",
+    });
+    await user.click(screen.getByRole("button", { name: "Manage saved setups…" }));
+    await user.click(screen.getByRole("button", { name: "Duplicate…" }));
+    expect(await screen.findByRole("heading", { name: "Name the duplicate setup" })).toBeTruthy();
+    await user.click(screen.getByRole("button", { name: "Continue" }));
+    await waitFor(() => expect(mockApi.duplicateSavedConfiguration).toHaveBeenCalled());
+    expect(screen.getByRole("heading", { name: "Provide required files and options" })).toBeTruthy();
+
+    mockApi.exportSavedConfiguration.mockResolvedValue({
+      outcome: "saved",
+      name: "My EmuChef setup export",
+      fileLabel: "My-EmuChef-setup-export.yaml",
+    });
+    await user.click(screen.getByRole("button", { name: "Export…" }));
+    expect(await screen.findByRole("heading", { name: "Name the exported setup" })).toBeTruthy();
+    await user.click(screen.getByRole("button", { name: "Continue" }));
+    await waitFor(() => expect(mockApi.exportSavedConfiguration).toHaveBeenCalled());
+    expect(screen.getByRole("heading", { name: "Provide required files and options" })).toBeTruthy();
+  });
+
+  test("ignores a preview response after the management surface is cancelled", async () => {
+    const user = userEvent.setup();
+    const preview = deferred<unknown>();
+    mockApi.previewSavedConfiguration.mockReturnValue(preview.promise);
+    await renderReadyApp();
+
+    await user.click(screen.getByRole("button", { name: "Manage saved setups…" }));
+    await user.click(screen.getByRole("button", { name: "Open…" }));
+    await user.click(screen.getByRole("button", { name: "Close" }));
+    preview.resolve({
+      outcome: "previewed",
+      previewHandle: "stale-preview",
+      name: "Stale setup",
+      fileLabel: "stale.yaml",
+      schemaVersion: 2,
+      lastModifiedEpochMs: null,
+      setupLabel: "Stale setup",
+      featureLabels: [],
+      savedInputCount: 0,
+      omittedInputCount: 0,
+      compatibility: {
+        state: "compatible",
+        baselineState: "unchanged",
+        requiresRepair: false,
+        message: "Compatible.",
+      },
+      repairActions: [],
+    });
+    await act(async () => { await preview.promise; });
+
+    expect(screen.queryByRole("heading", { name: "Review Stale setup" })).toBeNull();
+    expect(mockApi.compareSavedConfigurationPreview).not.toHaveBeenCalled();
   });
 });

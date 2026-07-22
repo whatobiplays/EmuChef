@@ -2,15 +2,17 @@
 
 use std::collections::BTreeMap;
 use std::fs;
+use std::io::Write;
 use std::path::{Path, PathBuf};
 
 use indexmap::IndexMap;
 use serde_json::{json, Value};
 
 use crate::user_configuration::{
-    emit_user_configuration_yaml, load_user_configuration, validate_binding_key,
-    validate_configuration_identifier, validate_user_configuration_with_catalog, UserConfiguration,
-    UserConfigurationLoadError,
+    build_compatibility_baseline, compatibility_baseline_state, emit_user_configuration_yaml,
+    load_user_configuration, prepare_configuration_for_v2_write, validate_binding_key,
+    validate_configuration_identifier, validate_user_configuration_with_catalog,
+    CompatibilityBaselineState, UserConfiguration, UserConfigurationLoadError,
 };
 use crate::yaml;
 
@@ -70,7 +72,7 @@ impl UserConfigurationDocument {
             validate_binding_key(key)?;
         }
         let path = path.as_ref().to_path_buf();
-        let configuration = UserConfiguration {
+        let mut configuration = UserConfiguration {
             schema_version: 1,
             kind: "user_configuration".to_string(),
             id: id.to_string(),
@@ -78,17 +80,15 @@ impl UserConfigurationDocument {
             device_plan: device_plan.to_string(),
             selected_recipes,
             bindings,
+            compatibility: None,
             extensions: BTreeMap::new(),
+            unsupported_extensions: Vec::new(),
         };
+        if let Some(root) = authored_root.map(Path::new) {
+            prepare_configuration_for_v2_write(&mut configuration, &path, root)?;
+        }
         let current_yaml = emit_user_configuration_yaml(&configuration)?;
-        fs::write(&path, &current_yaml).map_err(|error| UserConfigurationLoadError {
-            kind: crate::user_configuration::UserConfigurationLoadErrorKind::Io,
-            code: "user_configuration_io",
-            message: format!(
-                "Failed to create user configuration {}: {error}",
-                path.display()
-            ),
-        })?;
+        atomic_write_new(&path, current_yaml.as_bytes())?;
         Self::open(path, authored_root)
     }
 
@@ -150,15 +150,16 @@ impl UserConfigurationDocument {
     }
 
     pub fn save(&mut self) -> Result<(), UserConfigurationLoadError> {
-        fs::write(&self.path, &self.current_yaml).map_err(|error| UserConfigurationLoadError {
-            kind: crate::user_configuration::UserConfigurationLoadErrorKind::Io,
-            code: "user_configuration_io",
-            message: format!(
-                "Failed to save user configuration {}: {error}",
-                self.path.display()
-            ),
-        })?;
-        self.saved_yaml = self.current_yaml.clone();
+        let mut proposed = self.configuration.clone();
+        if let Some(root) = self.authored_root.as_deref() {
+            prepare_configuration_for_v2_write(&mut proposed, &self.path, root)?;
+        }
+        let yaml = emit_user_configuration_yaml(&proposed)?;
+        atomic_write_replace(&self.path, yaml.as_bytes())?;
+        self.configuration = proposed;
+        self.current_yaml = yaml.clone();
+        self.saved_yaml = yaml;
+        self.validate();
         Ok(())
     }
 
@@ -190,15 +191,11 @@ impl UserConfigurationDocument {
             }
             configuration.name = name.to_string();
         }
+        if let Some(root) = self.authored_root.as_deref() {
+            prepare_configuration_for_v2_write(&mut configuration, &path, root)?;
+        }
         let yaml = emit_user_configuration_yaml(&configuration)?;
-        fs::write(&path, &yaml).map_err(|error| UserConfigurationLoadError {
-            kind: crate::user_configuration::UserConfigurationLoadErrorKind::Io,
-            code: "user_configuration_io",
-            message: format!(
-                "Failed to save user configuration {}: {error}",
-                path.display()
-            ),
-        })?;
+        atomic_write_new(&path, yaml.as_bytes())?;
         self.path = path;
         self.configuration = configuration;
         self.current_yaml = yaml.clone();
@@ -240,6 +237,7 @@ impl UserConfigurationDocument {
 
 pub fn document_to_dto(document: &UserConfigurationDocument, document_id: &str) -> Value {
     let configuration = document.configuration();
+    let baseline_state = document.compatibility_baseline_state();
     json!({
         "documentId": document_id,
         "path": document.path().to_string_lossy(),
@@ -254,10 +252,132 @@ pub fn document_to_dto(document: &UserConfigurationDocument, document_id: &str) 
             "selectedRecipes": configuration.selected_recipes,
             "bindings": configuration.bindings,
             "extensions": configuration.extensions,
+            "compatibility": configuration.compatibility.as_ref().map(compatibility_to_dto),
+        },
+        "compatibilityStatus": {
+            "baselineState": baseline_state,
+            "sourceSchemaVersion": configuration.schema_version,
+            "pendingSanitationCount": configuration.unsupported_extensions.len(),
         },
         "yaml": document.yaml(),
         "diagnostics": document.diagnostics(),
     })
+}
+
+impl UserConfigurationDocument {
+    fn compatibility_baseline_state(&self) -> &'static str {
+        if self.configuration.compatibility.is_none() {
+            return "pending_first_v2_save";
+        }
+        let Some(root) = self.authored_root.as_deref() else {
+            return "unavailable";
+        };
+        let Ok(current) = build_compatibility_baseline(&self.configuration, &self.path, root)
+        else {
+            return "repair_required";
+        };
+        match compatibility_baseline_state(&self.configuration, &current) {
+            CompatibilityBaselineState::PendingFirstV2Save => "pending_first_v2_save",
+            CompatibilityBaselineState::Unchanged => "unchanged",
+            CompatibilityBaselineState::MateriallyChanged => "materially_changed",
+        }
+    }
+}
+
+fn compatibility_to_dto(
+    compatibility: &crate::user_configuration::SavedCompatibilityBaseline,
+) -> Value {
+    json!({
+        "devicePlan": {
+            "id": compatibility.device_plan.id,
+            "label": compatibility.device_plan.label,
+            "fingerprint": compatibility.device_plan.fingerprint,
+        },
+        "recipes": compatibility.recipes.iter().map(|recipe| json!({
+            "id": recipe.id,
+            "label": recipe.label,
+            "selected": recipe.selected,
+            "fingerprint": recipe.fingerprint,
+            "inputs": recipe.inputs.iter().map(|input| json!({
+                "key": input.key,
+                "label": input.label,
+                "fingerprint": input.fingerprint,
+            })).collect::<Vec<_>>(),
+        })).collect::<Vec<_>>(),
+    })
+}
+
+fn atomic_write_new(path: &Path, bytes: &[u8]) -> Result<(), UserConfigurationLoadError> {
+    let parent = path
+        .parent()
+        .ok_or_else(|| io_error("Destination directory is unavailable."))?;
+    let mut temporary = tempfile::NamedTempFile::new_in(parent).map_err(|error| {
+        io_error(format!(
+            "Temporary configuration file could not be created: {error}"
+        ))
+    })?;
+    write_and_sync(&mut temporary, bytes)?;
+    temporary.persist_noclobber(path).map_err(|error| {
+        io_error(format!(
+            "Destination already exists or could not be activated safely: {}",
+            error.error
+        ))
+    })?;
+    sync_parent(parent)?;
+    Ok(())
+}
+
+fn atomic_write_replace(path: &Path, bytes: &[u8]) -> Result<(), UserConfigurationLoadError> {
+    let parent = path
+        .parent()
+        .ok_or_else(|| io_error("Destination directory is unavailable."))?;
+    let mut temporary = tempfile::NamedTempFile::new_in(parent).map_err(|error| {
+        io_error(format!(
+            "Temporary configuration file could not be created: {error}"
+        ))
+    })?;
+    write_and_sync(&mut temporary, bytes)?;
+    temporary.persist(path).map_err(|error| {
+        io_error(format!(
+            "Configuration file could not be replaced safely: {}",
+            error.error
+        ))
+    })?;
+    sync_parent(parent)?;
+    Ok(())
+}
+
+fn write_and_sync(
+    temporary: &mut tempfile::NamedTempFile,
+    bytes: &[u8],
+) -> Result<(), UserConfigurationLoadError> {
+    temporary
+        .write_all(bytes)
+        .and_then(|_| temporary.flush())
+        .and_then(|_| temporary.as_file().sync_all())
+        .map_err(|error| {
+            io_error(format!(
+                "Configuration data could not be synchronized: {error}"
+            ))
+        })
+}
+
+fn sync_parent(parent: &Path) -> Result<(), UserConfigurationLoadError> {
+    fs::File::open(parent)
+        .and_then(|directory| directory.sync_all())
+        .map_err(|error| {
+            io_error(format!(
+                "Configuration directory could not be synchronized: {error}"
+            ))
+        })
+}
+
+fn io_error(message: impl Into<String>) -> UserConfigurationLoadError {
+    UserConfigurationLoadError {
+        kind: crate::user_configuration::UserConfigurationLoadErrorKind::Io,
+        code: "user_configuration_io",
+        message: message.into(),
+    }
 }
 
 fn diagnostics_for(

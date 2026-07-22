@@ -21,7 +21,9 @@ import type {
   RecentConfiguration,
   SavedConfigurationDialogResult,
   SavedConfigurationDocument,
+  SavedConfigurationFileOperationResult,
   SavedConfigurationMutation,
+  SavedConfigurationPreviewResult,
   CacheCleanupMode,
   CacheCleanupResult,
   CacheInventory,
@@ -142,12 +144,37 @@ export const api = {
   }) => invoke<SavedConfigurationDialogResult>("create_saved_configuration", { request }),
   openSavedConfiguration: () =>
     invoke<SavedConfigurationDialogResult>("open_saved_configuration"),
+  previewSavedConfiguration: () =>
+    invoke<SavedConfigurationPreviewResult>("preview_saved_configuration"),
+  previewRecentConfiguration: (recentHandle: string) =>
+    invoke<SavedConfigurationPreviewResult>("preview_recent_configuration", {
+      request: { recentHandle },
+    }),
+  confirmSavedConfigurationPreview: (previewHandle: string) =>
+    invoke<SavedConfigurationDocument>("confirm_saved_configuration_preview", {
+      request: { previewHandle },
+    }),
+  cancelSavedConfigurationPreview: (previewHandle: string) =>
+    invoke<void>("cancel_saved_configuration_preview", { request: { previewHandle } }),
+  compareSavedConfigurationPreview: (request: {
+    previewHandle: string;
+    devicePlan: string | null;
+    selectedRecipes: string[];
+    bindings: Record<string, unknown>;
+  }) => invoke<{ state: "matches" | "differs" | "requires_repair" | "no_current_intent"; message: string }>(
+    "compare_saved_configuration_preview",
+    { request },
+  ),
+  applySavedConfigurationPreviewRepair: (previewHandle: string, repairHandle: string) =>
+    invoke<SavedConfigurationPreviewResult>("apply_saved_configuration_preview_repair", {
+      request: { previewHandle, repairHandle },
+    }),
   openRecentConfiguration: (recentHandle: string) =>
     invoke<SavedConfigurationDocument>("open_recent_configuration", {
       request: { recentHandle },
     }),
   relinkRecentConfiguration: (recentHandle: string) =>
-    invoke<SavedConfigurationDialogResult>("relink_recent_configuration", {
+    invoke<RecentConfiguration>("relink_recent_configuration", {
       request: { recentHandle },
     }),
   removeRecentConfiguration: (recentHandle: string) =>
@@ -167,6 +194,29 @@ export const api = {
     invoke<SavedConfigurationDialogResult>("save_saved_configuration_as", {
       request: { configurationHandle, name },
     }),
+  renameSavedConfiguration: (configurationHandle: string, name: string) =>
+    invoke<SavedConfigurationDocument>("rename_saved_configuration", {
+      request: { configurationHandle, name },
+    }),
+  duplicateSavedConfiguration: (configurationHandle: string, name: string) =>
+    invoke<SavedConfigurationFileOperationResult>("duplicate_saved_configuration", {
+      request: { configurationHandle, name },
+    }),
+  importSavedConfiguration: (previewHandle: string, name: string) =>
+    invoke<SavedConfigurationDialogResult>("import_saved_configuration", {
+      request: { previewHandle, name },
+    }),
+  exportSavedConfiguration: (configurationHandle: string, name: string) =>
+    invoke<SavedConfigurationFileOperationResult>("export_saved_configuration", {
+      request: { configurationHandle, name },
+    }),
+  updateSavedConfigurationMenu: (state: {
+    runtimeReady: boolean;
+    commandBlocked: boolean;
+    hasDocument: boolean;
+    dirty: boolean;
+    hasPortableIntent: boolean;
+  }) => invoke<void>("update_saved_configuration_menu", { state }),
   closeSavedConfiguration: (configurationHandle: string) =>
     invoke<void>("close_saved_configuration", { request: { configurationHandle } }),
   cacheInventory: () => invoke<CacheInventory>("get_cache_inventory"),

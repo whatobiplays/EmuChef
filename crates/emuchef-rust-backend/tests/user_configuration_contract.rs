@@ -4,10 +4,13 @@ use std::path::{Path, PathBuf};
 use emuchef_rust_backend::{
     jsonl,
     user_configuration::{
-        classify_user_configuration_reference, emit_user_configuration_yaml,
-        load_user_configuration, parse_user_configuration, resolve_user_configuration_path,
-        validate_user_configuration_with_catalog, UserConfigurationReferenceKind,
+        build_compatibility_baseline, classify_user_configuration_reference,
+        compatibility_baseline_state, emit_user_configuration_yaml, load_user_configuration,
+        parse_user_configuration, resolve_user_configuration_path,
+        validate_user_configuration_with_catalog, CompatibilityBaselineState,
+        UserConfigurationReferenceKind,
     },
+    user_configuration_document::{document_to_dto, UserConfigurationDocument},
 };
 use serde_json::{json, Value};
 use tempfile::TempDir;
@@ -342,6 +345,11 @@ fn create_with_bindings_and_save_as_identity_preserve_portable_intent() {
         responses[1]["result"]["document"]["configuration"]["name"],
         "Copy"
     );
+    assert_eq!(
+        responses[1]["result"]["document"]["configuration"]["compatibility"],
+        responses[0]["result"]["document"]["configuration"]["compatibility"],
+        "persistence identity changes must not alter semantic fingerprints"
+    );
     assert!(fs::read_to_string(&original)
         .unwrap()
         .contains("id: saved.original"));
@@ -403,4 +411,124 @@ fn failed_save_as_keeps_the_current_document_identity_and_path() {
         responses[2]["result"]["document"]["path"],
         responses[0]["result"]["document"]["path"]
     );
+}
+
+#[test]
+fn save_as_collision_preserves_source_destination_and_live_identity() {
+    let temp = TempDir::new().expect("temp root should be created");
+    let source = write_configuration(&temp, valid_yaml());
+    let source_before = fs::read(&source).unwrap();
+    let destination = temp.path().join("existing.yaml");
+    fs::write(&destination, b"existing destination\n").unwrap();
+    let mut document = UserConfigurationDocument::open(&source, None).unwrap();
+
+    document
+        .save_as_with_identity(&destination, Some("saved.copy"), Some("Copy"))
+        .expect_err("an existing destination must not be overwritten");
+
+    assert_eq!(fs::read(&source).unwrap(), source_before);
+    assert_eq!(fs::read(&destination).unwrap(), b"existing destination\n");
+    assert_eq!(document.path(), source.canonicalize().unwrap());
+    assert_eq!(document.configuration().id, "test.default");
+    assert_eq!(document.configuration().name, "Test Default");
+}
+
+#[test]
+fn v1_open_has_no_historical_baseline_and_first_explicit_save_establishes_v2() {
+    let temp = TempDir::new().expect("temp root should be created");
+    let authored_root = write_authored_root(&temp, false);
+    let path = write_configuration(&temp, valid_yaml());
+    let original = fs::read(&path).unwrap();
+    let mut document =
+        UserConfigurationDocument::open(&path, Some(authored_root.to_string_lossy().as_ref()))
+            .unwrap();
+    let opened = document_to_dto(&document, "doc-1");
+    assert_eq!(
+        opened["compatibilityStatus"]["baselineState"],
+        "pending_first_v2_save"
+    );
+    assert_eq!(
+        fs::read(&path).unwrap(),
+        original,
+        "inspection must not rewrite V1"
+    );
+
+    document.save().unwrap();
+    let saved = document_to_dto(&document, "doc-1");
+    assert_eq!(saved["compatibilityStatus"]["baselineState"], "unchanged");
+    let text = fs::read_to_string(&path).unwrap();
+    assert!(text.starts_with("schema_version: 2\n"));
+    assert!(text.contains("compatibility:"));
+    for prohibited in [
+        "plan_digest",
+        "review_handle",
+        "execution_handle",
+        "device_serial",
+    ] {
+        assert!(!text.contains(prohibited));
+    }
+}
+
+#[test]
+fn authored_contract_fingerprints_ignore_labels_and_resolved_values() {
+    let temp = TempDir::new().expect("temp root should be created");
+    let authored_root = write_authored_root(&temp, false);
+    let path = write_configuration(&temp, valid_yaml());
+    let mut first_configuration = load_user_configuration(&path).unwrap();
+    let first = build_compatibility_baseline(&first_configuration, &path, &authored_root).unwrap();
+
+    first_configuration
+        .bindings
+        .insert("feature.test/value".to_string(), json!("explicit"));
+    fs::write(
+        authored_root.join("recipes/feature.test.yaml"),
+        fs::read_to_string(authored_root.join("recipes/feature.test.yaml"))
+            .unwrap()
+            .replace("name: Feature test", "name: Renamed presentation only"),
+    )
+    .unwrap();
+    fs::write(
+        authored_root.join("device_plans/test.plan.yaml"),
+        fs::read_to_string(authored_root.join("device_plans/test.plan.yaml"))
+            .unwrap()
+            .replace("name: Test plan", "name: New display label"),
+    )
+    .unwrap();
+    let second = build_compatibility_baseline(&first_configuration, &path, &authored_root).unwrap();
+
+    assert_eq!(
+        first.device_plan.fingerprint,
+        second.device_plan.fingerprint
+    );
+    assert_eq!(first.recipes[0].fingerprint, second.recipes[0].fingerprint);
+    assert_eq!(
+        first.recipes[0].inputs[0].fingerprint,
+        second.recipes[0].inputs[0].fingerprint
+    );
+    first_configuration.compatibility = Some(first);
+    assert_eq!(
+        compatibility_baseline_state(&first_configuration, &second),
+        CompatibilityBaselineState::Unchanged
+    );
+}
+
+#[test]
+fn v2_additive_extension_policy_preserves_namespaced_fields_and_reports_unsupported_fields() {
+    let fingerprint = "a".repeat(64);
+    let text = format!(
+        "schema_version: 2\nkind: user_configuration\nid: test.default\nname: Test\ndevice_plan: test.plan\nselected_recipes: []\nbindings: {{}}\ncompatibility:\n  device_plan:\n    id: test.plan\n    label: Test plan\n    fingerprint: {fingerprint}\n  recipes: []\nx-vendor-note: safe additive metadata\nlegacy_extra: pending sanitation\n"
+    );
+    let parsed = parse_user_configuration(&text).unwrap();
+    assert_eq!(parsed.extensions["x-vendor-note"], "safe additive metadata");
+    assert_eq!(parsed.extensions["legacy_extra"], "pending sanitation");
+    assert_eq!(parsed.unsupported_extensions, vec!["legacy_extra"]);
+
+    let prohibited = text.replace(
+        "legacy_extra: pending sanitation",
+        "execution_handle: forbidden",
+    );
+    assert!(parse_user_configuration(&prohibited)
+        .unwrap_err()
+        .message
+        .contains("prohibited authority field"));
 }

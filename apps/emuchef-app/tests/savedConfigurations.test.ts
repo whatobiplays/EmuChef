@@ -127,6 +127,32 @@ test("opening portable intent preserves stale references but resets all runtime 
   assert.deepEqual(loaded.bindings, document.bindings);
 });
 
+test("Save and pure Save As preserve the current stage and review authority", () => {
+  const review = {
+    reviewHandle: "review-opaque",
+    setup: { name: "Current setup" },
+    target: { label: "Connected Android device" },
+    features: [],
+    inputs: [],
+    notices: [],
+    work: { actionCount: 0 },
+    canExecute: true,
+  };
+  const current = {
+    ...initialWorkflowState,
+    step: "review" as const,
+    devicePlan: "plan.saved",
+    portableIntentDirty: true,
+    review,
+  };
+
+  const saved = workflowReducer(current, { type: "portable-intent-saved" });
+  assert.equal(saved.step, "review");
+  assert.equal(saved.review, review);
+  assert.equal(saved.portableIntentDirty, false);
+  assert.equal(saved.execution, current.execution);
+});
+
 test("Platform-Tools invalidation preserves dirty portable edits only", () => {
   const loaded = workflowReducer(initialWorkflowState, {
     type: "load-portable-intent",

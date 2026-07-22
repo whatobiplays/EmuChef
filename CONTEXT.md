@@ -496,30 +496,79 @@ action. Disconnected, hidden, disabled, or inert invokers are skipped. Focus
 never silently falls to the document body, and generation checks prevent stale
 restoration from stealing focus from a newer modal or workflow transition.
 
-The app creates, opens, edits, saves, saves under a new identity, and reuses
-named schema-v1 portable configurations. A saved document contains its
-generated configuration identity and name, one authored device-plan reference,
-selected recipe IDs, user bindings, and safe schema extensions. It never
-contains a generated execution plan, plan digest, review or execution handle,
-real-execution confirmation, launch action, target serial, probed device facts,
-catalog root, ADB path, or runtime session state.
+The app creates, previews, opens, edits, saves, renames, duplicates, imports,
+exports, and reuses named portable setup files. Schema V2 contains a generated
+configuration identity, presentation name, one authored device-plan reference,
+selected recipe IDs, explicitly nonsensitive user bindings, safe additive
+extensions, and authored-contract compatibility fingerprints. Fingerprints use
+canonical device-plan, recipe dependency/capability/artifact/step/constraint,
+input-contract, authored override, and profile-capability semantics. They do
+not use presentation labels or prose, resolved values or artifacts, generated
+plans, catalog load order, host paths, device facts, runtime state, review, or
+execution state. Configuration identity changes do not change fingerprints.
 
-Tauri owns native configuration dialogs, absolute configuration paths, sidecar
-document identifiers, opaque configuration handles, and a private ten-entry
-recent-file index. React receives safe names, portable intent, dirty state, and
-sanitized diagnostics. Missing recent files can be removed or relinked only to
-a file with the same embedded configuration identity. Save As creates a new
-name and generated identity while leaving the original file unchanged.
+Schema V1 remains readable through an in-memory migration. Because V1 has no
+historical contract fingerprints, inspection can establish only whether the
+intent validates against the current catalog; it never claims historical
+compatibility. The V1 source is not rewritten during inspection or preview.
+Its first explicit V2 save establishes the durable compatibility baseline.
+Unsupported future schemas and malformed or authority-bearing fields fail
+closed without changing the source. Additive V2 `x-*` extensions are preserved.
+Other structurally safe unknown fields remain visible as pending sanitation
+until an explicit save removes them and reports that consequence.
 
-Opening a saved configuration classifies its bindings through the existing
-authoritative `describeConfiguration` operation. React receives only bindings
-that are active and explicitly marked nonsensitive. Sensitive, inactive, and
-unclassified bindings remain backend-owned and are represented only by a
-sanitized pending-sanitation count or label-based re-entry requirement. Opening
-and closing without saving never rewrites the source file. Save and Save As
-remove every omitted binding from the backend document immediately before the
-explicit write, so only currently active, explicitly nonsensitive bindings are
-persisted.
+Tauri owns native setup dialogs, absolute paths, sidecar document identifiers,
+opaque document and preview handles, compatibility and comparison decisions,
+repair revisions, file writes, and the private ten-entry Recent index. Preview
+confirmation rechecks source bytes, source digest, catalog digest, runtime
+revision, and preview revision. React receives filename-only context, sanitized
+summaries, portable intent, dirty and compatibility states, and friendly repair
+actions. It never receives saved-file paths, source document IDs, fingerprint
+internals, raw catalog IDs in diagnostics, credentials, or runtime authority.
+
+The native File menu provides New, Open, Open Recent, Save, Save As, Import,
+and Export, plus access to the focused Saved setups manager. The manager owns
+Rename, Duplicate, missing-file relink, and Remove from Recent equivalents.
+Recents use canonical path identity, deterministic last-opened ordering, and a
+private path tie-breaker. Distinct paths with the same configuration ID remain
+separate and are marked as an identity conflict. Missing entries remain visible
+with filename-only context; relinking changes only the private Recent path and
+never edits or deletes either file.
+
+Save writes the active identity. Save As writes a new identity and makes that
+copy active. Rename rewrites the internal display name and sibling filename
+while retaining the configuration ID. Duplicate writes a new identity and adds
+it to Recents without changing the active workflow. Import validates a preview,
+writes a new-identity copy to an explicit destination, and opens it. Export
+writes a sanitized new-identity copy without changing the active workflow or
+Recents. Every destination operation is no-clobber. Ordinary writes use a
+flushed and synced temporary file followed by an atomic replacement. Rename
+with an internal-name change safely creates and syncs the destination before
+removing the source; if source removal fails, both valid files remain and the
+app reports that state rather than claiming pairwise atomicity.
+
+Opening or importing replaces portable intent and invalidates review and
+execution authority. Repair and portable-input relink change intent and also
+require fresh validation, planning, and review. Ordinary Save, pure Save As,
+and Rename preserve the current workflow stage and review because persistence
+identity and presentation name are not plan inputs. Duplicate and Export leave
+the active workflow and authority untouched. Repair is explicit and bounded to
+exact authored aliases, removal of unavailable optional recipes or retired
+bindings, selection of a current valid option, one portable-input relink, and
+re-entry of omitted sensitive input. Repair-required setups cannot replace the
+active workflow until authoritative validation succeeds. The current authored
+recipe schema has no rename-alias contract, so removed recipe IDs are never
+matched heuristically; a future exact alias can be applied only after that
+authority is defined in the catalog schema.
+
+Opening a setup classifies bindings through the authoritative
+`describeConfiguration` operation. React receives only active bindings marked
+explicitly nonsensitive. Sensitive, inactive, and unclassified bindings stay
+backend-owned and appear only as a pending-sanitation count or label-based
+re-entry requirement. Opening, previewing, cancelling, or closing never
+rewrites the source. Explicit Save and Save As remove omitted bindings before
+writing, so credentials and resolved sensitive values are never persisted or
+exported.
 
 Phase 2B guarded real-device execution is implemented behind the
 default-disabled Cargo feature `real-execution`. The compile-time feature is the

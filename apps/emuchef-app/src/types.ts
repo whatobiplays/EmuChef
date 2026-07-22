@@ -385,6 +385,10 @@ export interface SavedConfigurationDocument {
   selectedRecipes: string[];
   bindings: Record<string, unknown>;
   pendingSanitationCount?: number;
+  schemaVersion?: number;
+  compatibility?: {
+    baselineState: "pending_first_v2_save" | "unchanged" | "materially_changed" | "repair_required" | "unavailable";
+  };
   validation: {
     state: SavedConfigurationValidationState;
     diagnostics: ValidationDiagnostic[];
@@ -394,8 +398,53 @@ export interface SavedConfigurationDocument {
 export interface RecentConfiguration {
   recentHandle: string;
   name: string;
+  fileLabel: string;
   lastOpenedEpochMs: number;
   availability: "available" | "missing";
+  identityConflict: boolean;
+}
+
+export interface SavedConfigurationPreview {
+  outcome: "previewed";
+  previewHandle: string;
+  name: string;
+  fileLabel: string;
+  schemaVersion: number;
+  lastModifiedEpochMs: number | null;
+  setupLabel: string;
+  featureLabels: string[];
+  savedInputCount: number;
+  omittedInputCount: number;
+  compatibility: {
+    state:
+      | "compatible"
+      | "compatible_with_warnings"
+      | "migrated_baseline_pending"
+      | "materially_changed"
+      | "repair_required";
+    baselineState: string;
+    requiresRepair: boolean;
+    message: string;
+  };
+  comparison?: {
+    state: "matches" | "differs" | "requires_repair" | "no_current_intent";
+    message: string;
+  };
+  repairActions: Array<{
+    repairHandle: string;
+    kind: "remove_recipe" | "remove_binding" | "select_option" | "relink_input";
+    label: string;
+  }>;
+}
+
+export type SavedConfigurationPreviewResult =
+  | { outcome: "cancelled" }
+  | SavedConfigurationPreview;
+
+export interface SavedConfigurationFileOperationResult {
+  outcome: "saved" | "cancelled";
+  name?: string;
+  fileLabel?: string;
 }
 
 export type SavedConfigurationDialogResult =

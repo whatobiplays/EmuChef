@@ -18,6 +18,11 @@ import { InputsStep } from "./InputsStep";
 import { ReviewStep } from "./ReviewStep";
 import { SupportPanel } from "./SupportPanel";
 import { UpdatesPanel } from "./UpdatesPanel";
+import { SavedConfigurationManager } from "./SavedConfigurationManager";
+import {
+  SavedConfigurationMenuBridge,
+  type SavedConfigurationMenuAction,
+} from "./SavedConfigurationMenuBridge";
 import { useExecution } from "./useExecution";
 import { AccessibleDialog } from "./AccessibleDialog";
 import {
@@ -37,6 +42,7 @@ import type {
   RuntimeStatus,
   SavedConfigurationDocument,
   SavedConfigurationMutation,
+  SavedConfigurationPreview,
   CacheCleanupMode,
   RecoveryDraftAvailable,
   RecoveryRestoreResult,
@@ -44,7 +50,6 @@ import type {
   UpdateInteractionSession,
 } from "./types";
 import {
-  formatLastOpened,
   resolveUnsavedDecision,
   savedConfigurationBlocksProgress,
   saveConfigurationDisabledReason,
@@ -126,6 +131,10 @@ export function App({ dialogController: suppliedDialogController }: AppProps = {
   const [recoveredName, setRecoveredName] = useState<string | null>(null);
   const [savedConfiguration, setSavedConfiguration] = useState<SavedConfigurationDocument | null>(null);
   const [recentConfigurations, setRecentConfigurations] = useState<RecentConfiguration[]>([]);
+  const [configurationManagerOpen, setConfigurationManagerOpen] = useState(false);
+  const [configurationManagerBusy, setConfigurationManagerBusy] = useState(false);
+  const [configurationPreview, setConfigurationPreview] = useState<SavedConfigurationPreview | null>(null);
+  const [configurationPreviewMode, setConfigurationPreviewMode] = useState<"open" | "import">("open");
   const [workflow, dispatch] = useReducer(workflowReducer, initialWorkflowState);
   const [touchedInputKeys, setTouchedInputKeys] = useState<Set<string>>(() => new Set());
   const [validationRequested, setValidationRequested] = useState(false);
@@ -140,6 +149,8 @@ export function App({ dialogController: suppliedDialogController }: AppProps = {
   const mainRef = useRef<HTMLElement>(null);
   const supportInvokerRef = useRef<HTMLElement | null>(null);
   const updatesInvokerRef = useRef<HTMLElement | null>(null);
+  const configurationManagerInvokerRef = useRef<HTMLElement | null>(null);
+  const configurationPreviewGenerationRef = useRef(0);
   const validationSummaryRef = useRef<HTMLElement>(null);
   const realConfirmationRef = useRef(realConfirmation);
   const appLifecycleGenerationRef = useRef(0);
@@ -573,12 +584,12 @@ export function App({ dialogController: suppliedDialogController }: AppProps = {
   const createFromCurrentIntent = async (): Promise<boolean> => {
     const current = workflowRef.current;
     if (!current.devicePlan) {
-      setNotice("Choose a device plan reference before saving this portable configuration.");
+      setNotice("Choose a setup before saving.");
       return false;
     }
     const nameResult = await requestAppDialog({
       kind: "name",
-      title: "Name this portable configuration",
+      title: "Name this setup",
       initialValue: "My EmuChef setup",
       invoker: document.activeElement instanceof HTMLElement ? document.activeElement : null,
     }, null);
@@ -641,22 +652,23 @@ export function App({ dialogController: suppliedDialogController }: AppProps = {
     return resolveUnsavedDecision(dirty, result === "save", result === "discard");
   };
 
-  const runProtectedTransition = async (transition: () => Promise<void>) => {
+  const runProtectedTransition = async (transition: () => Promise<void>): Promise<boolean> => {
     const hadDirtyIntent = workflowRef.current.portableIntentDirty
       || Boolean(savedConfigurationRef.current?.dirty);
     const decision = await dirtyDecision();
-    if (decision === "cancel") return;
-    if (decision === "save" && !(await saveCurrentConfiguration())) return;
+    if (decision === "cancel") return false;
+    if (decision === "save" && !(await saveCurrentConfiguration())) return false;
     if (decision === "discard" && hadDirtyIntent) {
       try {
         await discardCurrentRecovery();
       } catch (error) {
         setNotice(errorMessage(error));
-        return;
+        return false;
       }
     }
     await configurationMutationQueue.current;
     await transition();
+    return true;
   };
 
   const startNewConfiguration = async () => {
@@ -667,43 +679,57 @@ export function App({ dialogController: suppliedDialogController }: AppProps = {
       savedConfigurationRef.current = null;
       setSavedConfiguration(null);
       dispatch({ type: "runtime-invalidated" });
-      setNotice("Started a new portable configuration.");
+      setNotice("Started a new setup.");
     });
   };
 
-  const openConfiguration = async () => {
-    await runProtectedTransition(async () => {
-      try {
-        const result = await withNativeDialogFocus(api.openSavedConfiguration);
-        if (result.outcome !== "cancelled") await applySavedDocument(result);
-      } catch (error) {
-        setNotice(errorMessage(error));
-      }
-    });
+  const beginConfigurationPreview = async (
+    mode: "open" | "import",
+    recentHandle?: string,
+  ) => {
+    const generation = ++configurationPreviewGenerationRef.current;
+    setConfigurationManagerOpen(true);
+    setConfigurationManagerBusy(true);
+    try {
+      const result = await withNativeDialogFocus(() => recentHandle
+        ? api.previewRecentConfiguration(recentHandle)
+        : api.previewSavedConfiguration());
+      if (configurationPreviewGenerationRef.current !== generation) return;
+      if (result.outcome === "cancelled") return;
+      const current = workflowRef.current;
+      const comparison = await api.compareSavedConfigurationPreview({
+        previewHandle: result.previewHandle,
+        devicePlan: current.devicePlan,
+        selectedRecipes: current.selectedRecipes ?? [],
+        bindings: current.bindings,
+      });
+      if (configurationPreviewGenerationRef.current !== generation) return;
+      setConfigurationPreviewMode(mode);
+      setConfigurationPreview({ ...result, comparison });
+    } catch (error) {
+      if (configurationPreviewGenerationRef.current === generation) setNotice(errorMessage(error));
+    } finally {
+      if (configurationPreviewGenerationRef.current === generation) setConfigurationManagerBusy(false);
+    }
   };
+
+  const openConfiguration = async () => beginConfigurationPreview("open");
 
   const openRecentConfiguration = async (recentHandle: string) => {
-    await runProtectedTransition(async () => {
-      try {
-        await applySavedDocument(await api.openRecentConfiguration(recentHandle));
-      } catch (error) {
-        setNotice(errorMessage(error));
-        await refreshRecents();
-      }
-    });
+    await beginConfigurationPreview("open", recentHandle);
   };
 
   const relinkRecentConfiguration = async (recentHandle: string) => {
-    await runProtectedTransition(async () => {
-      try {
-        const result = await withNativeDialogFocus(() => api.relinkRecentConfiguration(recentHandle));
-        if (result.outcome !== "cancelled") await applySavedDocument(result);
-      } catch (error) {
-        setNotice(errorMessage(error));
-      } finally {
-        await refreshRecents();
-      }
-    });
+    setConfigurationManagerBusy(true);
+    try {
+      await withNativeDialogFocus(() => api.relinkRecentConfiguration(recentHandle));
+      setNotice("The Recent entry now points to the selected setup file.");
+    } catch (error) {
+      setNotice(errorMessage(error));
+    } finally {
+      await refreshRecents();
+      setConfigurationManagerBusy(false);
+    }
   };
 
   const saveConfigurationAs = async () => {
@@ -715,7 +741,7 @@ export function App({ dialogController: suppliedDialogController }: AppProps = {
     }
     const nameResult = await requestAppDialog({
       kind: "name",
-      title: "Name the new portable configuration",
+      title: "Name the new setup",
       initialValue: current.name,
       invoker: document.activeElement instanceof HTMLElement ? document.activeElement : null,
     }, null);
@@ -734,9 +760,179 @@ export function App({ dialogController: suppliedDialogController }: AppProps = {
       lastRecoverySignatureRef.current = null;
       setRecoveredName(null);
       await refreshRecents();
-      setNotice(`Saved the new portable configuration ${result.name}.`);
+      setNotice(`Saved the new setup ${result.name}.`);
     } catch (error) {
       setNotice(errorMessage(error));
+    }
+  };
+
+  const requestSetupName = async (title: string, initialValue: string): Promise<string | null> => {
+    const result = await requestAppDialog({
+      kind: "name",
+      title,
+      initialValue,
+      invoker: document.activeElement instanceof HTMLElement ? document.activeElement : null,
+    }, null);
+    const name = typeof result === "string" ? result.trim() : "";
+    return name || null;
+  };
+
+  const cancelConfigurationPreview = async () => {
+    const preview = configurationPreview;
+    configurationPreviewGenerationRef.current += 1;
+    setConfigurationPreview(null);
+    if (preview) await api.cancelSavedConfigurationPreview(preview.previewHandle).catch(() => undefined);
+  };
+
+  const applyConfigurationPreviewRepair = async (repairHandle: string) => {
+    const preview = configurationPreview;
+    if (!preview) return;
+    const generation = ++configurationPreviewGenerationRef.current;
+    setConfigurationManagerBusy(true);
+    try {
+      const result = await withNativeDialogFocus(
+        () => api.applySavedConfigurationPreviewRepair(preview.previewHandle, repairHandle),
+      );
+      if (configurationPreviewGenerationRef.current !== generation || result.outcome === "cancelled") return;
+      const current = workflowRef.current;
+      const comparison = await api.compareSavedConfigurationPreview({
+        previewHandle: result.previewHandle,
+        devicePlan: current.devicePlan,
+        selectedRecipes: current.selectedRecipes ?? [],
+        bindings: current.bindings,
+      });
+      if (configurationPreviewGenerationRef.current !== generation) return;
+      setConfigurationPreview({ ...result, comparison });
+      setNotice("The repair was applied in memory. Save explicitly after opening to update the file.");
+    } catch (error) {
+      if (configurationPreviewGenerationRef.current === generation) setNotice(errorMessage(error));
+    } finally {
+      if (configurationPreviewGenerationRef.current === generation) setConfigurationManagerBusy(false);
+    }
+  };
+
+  const confirmConfigurationPreview = async () => {
+    const preview = configurationPreview;
+    if (!preview || preview.compatibility.requiresRepair) return;
+    setConfigurationManagerOpen(false);
+    let importName: string | null = null;
+    if (configurationPreviewMode === "import") {
+      importName = await requestSetupName("Name the imported setup", preview.name);
+      if (!importName) {
+        setConfigurationManagerOpen(true);
+        return;
+      }
+    }
+    setConfigurationManagerBusy(true);
+    const completed = await runProtectedTransition(async () => {
+      if (configurationPreviewMode === "import") {
+        const result = await withNativeDialogFocus(
+          () => api.importSavedConfiguration(preview.previewHandle, importName!),
+        );
+        if (result.outcome !== "cancelled") await applySavedDocument(result);
+      } else {
+        await applySavedDocument(
+          await api.confirmSavedConfigurationPreview(preview.previewHandle),
+        );
+      }
+    }).catch((error) => {
+      setNotice(errorMessage(error));
+      return false;
+    });
+    setConfigurationManagerBusy(false);
+    if (completed) {
+      setConfigurationPreview(null);
+    } else {
+      setConfigurationManagerOpen(true);
+    }
+  };
+
+  const renameCurrentConfiguration = async () => {
+    const current = savedConfigurationRef.current;
+    if (!current) return;
+    setConfigurationManagerOpen(false);
+    const name = await requestSetupName("Rename this setup", current.name);
+    if (!name) {
+      setConfigurationManagerOpen(true);
+      return;
+    }
+    setConfigurationManagerBusy(true);
+    try {
+      await configurationMutationQueue.current;
+      const renamed = await api.renameSavedConfiguration(current.configurationHandle, name);
+      savedConfigurationRef.current = renamed;
+      setSavedConfiguration(renamed);
+      await refreshRecents();
+      setNotice(`Renamed the setup to ${renamed.name}.`);
+    } catch (error) {
+      setNotice(errorMessage(error));
+    } finally {
+      setConfigurationManagerBusy(false);
+      setConfigurationManagerOpen(true);
+    }
+  };
+
+  const duplicateCurrentConfiguration = async () => {
+    const current = savedConfigurationRef.current;
+    if (!current) return;
+    setConfigurationManagerOpen(false);
+    const name = await requestSetupName("Name the duplicate setup", `${current.name} copy`);
+    if (!name) {
+      setConfigurationManagerOpen(true);
+      return;
+    }
+    setConfigurationManagerBusy(true);
+    try {
+      await configurationMutationQueue.current;
+      const result = await withNativeDialogFocus(
+        () => api.duplicateSavedConfiguration(current.configurationHandle, name),
+      );
+      if (result.outcome === "saved") {
+        await refreshRecents();
+        setNotice(`Duplicated ${current.name} as ${result.name}.`);
+      }
+    } catch (error) {
+      setNotice(errorMessage(error));
+    } finally {
+      setConfigurationManagerBusy(false);
+      setConfigurationManagerOpen(true);
+    }
+  };
+
+  const exportCurrentConfiguration = async () => {
+    const current = savedConfigurationRef.current;
+    if (!current) return;
+    setConfigurationManagerOpen(false);
+    const name = await requestSetupName("Name the exported setup", `${current.name} export`);
+    if (!name) {
+      setConfigurationManagerOpen(true);
+      return;
+    }
+    setConfigurationManagerBusy(true);
+    try {
+      await configurationMutationQueue.current;
+      const result = await withNativeDialogFocus(
+        () => api.exportSavedConfiguration(current.configurationHandle, name),
+      );
+      if (result.outcome === "saved") setNotice(`Exported ${result.name}.`);
+    } catch (error) {
+      setNotice(errorMessage(error));
+    } finally {
+      setConfigurationManagerBusy(false);
+      setConfigurationManagerOpen(true);
+    }
+  };
+
+  const removeRecentConfiguration = async (recentHandle: string) => {
+    setConfigurationManagerBusy(true);
+    try {
+      await api.removeRecentConfiguration(recentHandle);
+      await refreshRecents();
+      setNotice("Removed the setup from Recents. The setup file was not deleted.");
+    } catch (error) {
+      setNotice(errorMessage(error));
+    } finally {
+      setConfigurationManagerBusy(false);
     }
   };
 
@@ -1802,8 +1998,52 @@ export function App({ dialogController: suppliedDialogController }: AppProps = {
       || Boolean(savedConfiguration?.pendingSanitationCount),
   );
 
+  useEffect(() => {
+    void api.updateSavedConfigurationMenu({
+      runtimeReady: startupReady && runtime.status === "ready",
+      commandBlocked: configurationActionsLocked || configurationManagerBusy,
+      hasDocument: savedConfiguration !== null,
+      dirty: workflow.portableIntentDirty
+        || Boolean(savedConfiguration?.dirty)
+        || Boolean(savedConfiguration?.pendingSanitationCount),
+      hasPortableIntent: Boolean(workflow.devicePlan),
+    }).catch(() => undefined);
+  }, [
+    configurationActionsLocked,
+    configurationManagerBusy,
+    recentConfigurations,
+    runtime.status,
+    savedConfiguration,
+    startupReady,
+    workflow.devicePlan,
+    workflow.portableIntentDirty,
+  ]);
+
+  const openConfigurationManager = (invoker?: HTMLElement | null) => {
+    configurationManagerInvokerRef.current = invoker
+      ?? (document.activeElement instanceof HTMLElement ? document.activeElement : null);
+    setConfigurationManagerOpen(true);
+  };
+
+  const menuHandlers: Record<
+    SavedConfigurationMenuAction,
+    (recentHandle: string | null) => void
+  > = {
+    newConfiguration: () => void startNewConfiguration(),
+    openConfiguration: () => void openConfiguration(),
+    openRecentConfiguration: (recentHandle) => {
+      if (recentHandle) void openRecentConfiguration(recentHandle);
+    },
+    saveConfiguration: () => void saveCurrentConfiguration(),
+    saveConfigurationAs: () => void saveConfigurationAs(),
+    importConfiguration: () => void beginConfigurationPreview("import"),
+    exportConfiguration: () => void exportCurrentConfiguration(),
+    manageConfigurations: () => openConfigurationManager(),
+  };
+
   return (
     <div className="app-shell">
+      <SavedConfigurationMenuBridge handlers={menuHandlers} />
       <a className="skip-link" href="#main-content">Skip to main content</a>
       <div className="live-regions" aria-label="Application notifications">
         <p aria-atomic="true" aria-live="polite" className="visually-hidden" key={`polite-${politeAnnouncement.id}`} role="status">
@@ -1861,6 +2101,46 @@ export function App({ dialogController: suppliedDialogController }: AppProps = {
         onAnnounce={announce}
       />
 
+      {configurationManagerOpen && (
+        <SavedConfigurationManager
+          active={savedConfiguration}
+          busy={configurationManagerBusy || configurationActionsLocked}
+          canSave={!saveDisabled}
+          canSaveAs={Boolean(workflow.devicePlan)}
+          preview={configurationPreview}
+          previewMode={configurationPreviewMode}
+          recents={recentConfigurations}
+          returnFocus={configurationManagerInvokerRef.current}
+          onClose={() => {
+            void cancelConfigurationPreview();
+            setConfigurationManagerOpen(false);
+          }}
+          onNew={() => {
+            setConfigurationManagerOpen(false);
+            void startNewConfiguration();
+          }}
+          onSave={() => {
+            setConfigurationManagerOpen(false);
+            void saveCurrentConfiguration();
+          }}
+          onSaveAs={() => {
+            setConfigurationManagerOpen(false);
+            void saveConfigurationAs();
+          }}
+          onOpenPicker={() => void beginConfigurationPreview("open")}
+          onImportPicker={() => void beginConfigurationPreview("import")}
+          onConfirmPreview={() => void confirmConfigurationPreview()}
+          onRepairPreview={(handle) => void applyConfigurationPreviewRepair(handle)}
+          onCancelPreview={() => void cancelConfigurationPreview()}
+          onOpenRecent={(handle) => void openRecentConfiguration(handle)}
+          onRelinkRecent={(handle) => void relinkRecentConfiguration(handle)}
+          onRemoveRecent={(handle) => void removeRecentConfiguration(handle)}
+          onRename={() => void renameCurrentConfiguration()}
+          onDuplicate={() => void duplicateCurrentConfiguration()}
+          onExport={() => void exportCurrentConfiguration()}
+        />
+      )}
+
       {runtime.status === "ready" && (
         <section className="configuration-bar" aria-label="Saved configurations">
           <div>
@@ -1870,19 +2150,19 @@ export function App({ dialogController: suppliedDialogController }: AppProps = {
                 ? `${savedConfigurationValidationLabel(savedConfiguration)}${savedConfiguration.dirty ? " · unsaved edits" : ""}`
                 : recoveredName
                   ? "Recovered unsaved intent; reconnect and validate before creating a fresh review"
-                  : "Portable intent only; generated plans and device authority are never saved"}
+                  : "Selected setup, features, and reusable input references can be saved"}
             </small>
           </div>
           <div className="button-row">
-            <button aria-describedby={configurationActionsLocked ? "configuration-actions-reason" : undefined} className="secondary" onClick={startNewConfiguration} disabled={configurationActionsLocked}>New</button>
-            <button aria-describedby={configurationActionsLocked ? "configuration-actions-reason" : undefined} className="secondary" onClick={openConfiguration} disabled={configurationActionsLocked}>Open…</button>
-            <button aria-describedby={saveDisabled ? "save-configuration-reason" : undefined} onClick={saveCurrentConfiguration} disabled={saveDisabled}>Save</button>
-            <button aria-describedby={busy || platformToolsBusy || !workflow.devicePlan ? "save-as-reason" : undefined} className="secondary" onClick={saveConfigurationAs} disabled={busy || platformToolsBusy || !workflow.devicePlan}>Save As…</button>
-          <button aria-describedby={configurationActionsLocked ? "configuration-actions-reason" : undefined} className="text-button" onClick={(event) => void restartRuntime(event.currentTarget)} disabled={configurationActionsLocked}>Restart runtime</button>
+            <button
+              className="secondary"
+              disabled={configurationActionsLocked}
+              onClick={(event) => openConfigurationManager(event.currentTarget)}
+            >Manage saved setups…</button>
+            <button className="text-button" onClick={(event) => void restartRuntime(event.currentTarget)} disabled={configurationActionsLocked}>Restart runtime</button>
           </div>
-          {configurationActionsLocked && <p className="disabled-reason" id="configuration-actions-reason">Configuration replacement and runtime restart are unavailable while another operation or execution is active.</p>}
-          {saveDisabled && <p className="disabled-reason" id="save-configuration-reason">{saveDisabledReason}</p>}
-          {(busy || platformToolsBusy || !workflow.devicePlan) && <p className="disabled-reason" id="save-as-reason">Save As requires a selected device plan and no other active operation.</p>}
+          {configurationActionsLocked && <p className="disabled-reason">Saved-setup management and runtime restart are unavailable while another operation or execution is active.</p>}
+          {savedConfiguration && saveDisabled && <p className="disabled-reason">{saveDisabledReason}</p>}
         </section>
       )}
 
@@ -1978,36 +2258,6 @@ export function App({ dialogController: suppliedDialogController }: AppProps = {
                     <li>If it is still missing, check the cable and USB mode, then refresh.</li>
                   </ol>
                 </details>
-                {recentConfigurations.length > 0 && (
-                  <section className="recent-configurations" aria-labelledby="recent-configurations-heading">
-                    <h3 id="recent-configurations-heading">Recent configurations</h3>
-                    <ul>
-                    {recentConfigurations.map((recent) => (
-                      <li key={recent.recentHandle}>
-                        <div>
-                          <strong>{recent.name}</strong>
-                          <small>{formatLastOpened(recent.lastOpenedEpochMs)}</small>
-                        </div>
-                        {recent.availability === "available" ? (
-                          <button className="secondary" onClick={() => openRecentConfiguration(recent.recentHandle)}>Open</button>
-                        ) : (
-                          <>
-                            <span className="error">Unavailable: file missing</span>
-                            <button className="secondary" onClick={() => relinkRecentConfiguration(recent.recentHandle)}>Relink…</button>
-                            <button
-                              className="text-button danger-text"
-                              onClick={async () => {
-                                await api.removeRecentConfiguration(recent.recentHandle);
-                                await refreshRecents();
-                              }}
-                            >Remove</button>
-                          </>
-                        )}
-                      </li>
-                    ))}
-                    </ul>
-                  </section>
-                )}
                 {savedConfiguration && (
                   <section className={`configuration-validation ${savedConfiguration.validation.state}`}>
                     <strong>{savedConfiguration.name}</strong>
@@ -2015,14 +2265,10 @@ export function App({ dialogController: suppliedDialogController }: AppProps = {
                     {savedConfigurationBlocked && (
                       <p>Open another configuration or update this file before continuing.</p>
                     )}
-                    {savedConfiguration.validation.diagnostics.map((diagnostic) => (
-                      <div key={`${diagnostic.key ?? "configuration"}-${diagnostic.code}`}>
+                    {savedConfiguration.validation.diagnostics.map((diagnostic, index) => (
+                      <div key={`configuration-diagnostic-${index}`}>
                         <p>{savedConfigurationDiagnosticSummary(diagnostic)}</p>
-                        <details>
-                          <summary>Technical details</summary>
-                          <p>{diagnostic.message}</p>
-                          <code>{diagnostic.code}{diagnostic.key ? ` · ${diagnostic.key}` : ""}</code>
-                        </details>
+                        <details><summary>Technical details</summary><code>{diagnostic.code}</code></details>
                       </div>
                     ))}
                   </section>
@@ -2538,7 +2784,7 @@ export function App({ dialogController: suppliedDialogController }: AppProps = {
           <p className="eyebrow">UNSAVED CONFIGURATION</p>
           <h2 id="unsaved-dialog-title">Save edits before continuing?</h2>
           <p id="unsaved-dialog-description">
-            Save preserves the portable configuration edits. Discard permanently abandons the unsaved edits. Cancel keeps the current configuration open.
+            Save preserves the current setup choices. Discard permanently abandons the unsaved edits. Cancel keeps the current setup open.
           </p>
           <div className="button-row">
             <button className="secondary" onClick={() => dialogController.settle(activeDialog.id, "cancel")}>Cancel</button>
@@ -2563,8 +2809,8 @@ export function App({ dialogController: suppliedDialogController }: AppProps = {
             if (value) dialogController.settle(activeDialog.id, value);
           }}>
             <h2 id="name-dialog-title">{activeDialog.payload.title}</h2>
-            <p id="name-dialog-description">The name identifies this portable configuration. Runtime authority and device details are not saved.</p>
-            <label className="input-field" htmlFor="configuration-name">Configuration name</label>
+              <p id="name-dialog-description">The file saves the selected setup, features, and reusable input references. It does not save the connected device, generated plan, execution progress, or results.</p>
+            <label className="input-field" htmlFor="configuration-name">Setup name</label>
             <input
               autoComplete="off"
               id="configuration-name"

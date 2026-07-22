@@ -12,6 +12,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Map, Value};
+use sha2::{Digest, Sha256};
 use tauri::{AppHandle, Manager, State};
 use tauri_plugin_dialog::{DialogExt, FilePath};
 use uuid::Uuid;
@@ -33,11 +34,31 @@ struct OpenDocument {
     revision: u64,
 }
 
+#[derive(Clone, Debug)]
+struct PreviewDocument {
+    path: PathBuf,
+    source_digest: String,
+    catalog_digest: String,
+    runtime_revision: u64,
+    preview_revision: u64,
+    document: Value,
+    repairs: HashMap<String, PreviewRepair>,
+}
+
+#[derive(Clone, Debug)]
+enum PreviewRepair {
+    RemoveRecipe { recipe_id: String },
+    RemoveBinding { key: String },
+    SelectOption { key: String, value: Value },
+    RelinkInput { key: String, directory: bool },
+}
+
 struct BindingProjection {
     safe: Map<String, Value>,
     omitted: Vec<String>,
     sensitive_omitted: Vec<String>,
     diagnostics: Vec<Value>,
+    description: Value,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
@@ -60,8 +81,11 @@ struct RecentIndex {
 /// Process-local document authority plus a private, restart-stable MRU index.
 pub struct SavedConfigurationStore {
     documents: HashMap<String, OpenDocument>,
+    previews: HashMap<String, PreviewDocument>,
     recent_index_path: PathBuf,
     recents: Vec<RecentEntry>,
+    runtime_revision: u64,
+    preview_revision: u64,
 }
 
 impl SavedConfigurationStore {
@@ -74,8 +98,11 @@ impl SavedConfigurationStore {
             .unwrap_or_default();
         Self {
             documents: HashMap::new(),
+            previews: HashMap::new(),
             recent_index_path,
             recents,
+            runtime_revision: 1,
+            preview_revision: 0,
         }
     }
 
@@ -124,11 +151,116 @@ impl SavedConfigurationStore {
         self.documents.remove(handle)
     }
 
-    pub fn drain_document_ids(&mut self) -> Vec<String> {
-        self.documents
+    fn replace_preview(
+        &mut self,
+        path: PathBuf,
+        source_digest: String,
+        catalog_digest: String,
+        document: Value,
+        repairs: HashMap<String, PreviewRepair>,
+    ) -> (String, Vec<String>) {
+        let stale_ids = self
+            .previews
             .drain()
-            .map(|(_, document)| document.sidecar_document_id)
-            .collect()
+            .filter_map(|(_, preview)| document_string(&preview.document, "documentId").ok())
+            .collect::<Vec<_>>();
+        self.preview_revision = self.preview_revision.saturating_add(1);
+        let preview_handle = format!("configuration_preview_{}", Uuid::new_v4().simple());
+        self.previews.insert(
+            preview_handle.clone(),
+            PreviewDocument {
+                path,
+                source_digest,
+                catalog_digest,
+                runtime_revision: self.runtime_revision,
+                preview_revision: self.preview_revision,
+                document,
+                repairs,
+            },
+        );
+        (preview_handle, stale_ids)
+    }
+
+    fn take_current_preview(&mut self, handle: &str) -> Result<PreviewDocument, String> {
+        let preview = self.previews.remove(handle).ok_or_else(|| {
+            safe_error(
+                "configuration_preview_unavailable",
+                "This setup preview is no longer available. Choose the file again.",
+            )
+        })?;
+        if preview.runtime_revision != self.runtime_revision
+            || preview.preview_revision != self.preview_revision
+        {
+            return Err(safe_error(
+                "configuration_preview_stale",
+                "This setup preview is outdated. Choose the file again.",
+            ));
+        }
+        Ok(preview)
+    }
+
+    fn current_preview(&self, handle: &str) -> Result<PreviewDocument, String> {
+        let preview = self.previews.get(handle).cloned().ok_or_else(|| {
+            safe_error(
+                "configuration_preview_unavailable",
+                "This setup preview is no longer available. Choose the file again.",
+            )
+        })?;
+        if preview.runtime_revision != self.runtime_revision
+            || preview.preview_revision != self.preview_revision
+        {
+            return Err(safe_error(
+                "configuration_preview_stale",
+                "This setup preview is outdated. Choose the file again.",
+            ));
+        }
+        Ok(preview)
+    }
+
+    fn update_preview(
+        &mut self,
+        handle: &str,
+        expected_revision: u64,
+        document: Value,
+        repairs: HashMap<String, PreviewRepair>,
+    ) -> Result<PreviewDocument, String> {
+        if expected_revision != self.preview_revision {
+            return Err(safe_error(
+                "configuration_preview_stale",
+                "This setup preview changed before the repair completed. Review it again.",
+            ));
+        }
+        self.preview_revision = self.preview_revision.saturating_add(1);
+        let preview = self.previews.get_mut(handle).ok_or_else(|| {
+            safe_error(
+                "configuration_preview_unavailable",
+                "This setup preview is no longer available. Choose the file again.",
+            )
+        })?;
+        preview.preview_revision = self.preview_revision;
+        preview.document = document;
+        preview.repairs = repairs;
+        Ok(preview.clone())
+    }
+
+    fn remove_preview(&mut self, handle: &str) -> Option<PreviewDocument> {
+        self.previews.remove(handle)
+    }
+
+    pub fn drain_document_ids(&mut self) -> Vec<String> {
+        let mut ids = self
+            .previews
+            .drain()
+            .filter_map(|(_, preview)| document_string(&preview.document, "documentId").ok())
+            .collect::<Vec<_>>();
+        ids.extend(
+            self.documents
+                .drain()
+                .map(|(_, document)| document.sidecar_document_id),
+        );
+        self.runtime_revision = self.runtime_revision.saturating_add(1);
+        self.preview_revision = self.preview_revision.saturating_add(1);
+        ids
     }
 
     /// Return aggregate-only support data without names, identifiers, or paths.
@@ -147,16 +279,16 @@ impl SavedConfigurationStore {
     }
 
     fn touch_recent(&mut self, document: &OpenDocument) -> Result<(), String> {
-        self.recents.retain(|entry| {
-            entry.path != document.path && entry.configuration_id != document.configuration_id
-        });
+        let path = canonical_recent_path(&document.path);
+        self.recents
+            .retain(|entry| canonical_recent_path(&entry.path) != path);
         self.recents.insert(
             0,
             RecentEntry {
                 recent_handle: format!("recent_{}", Uuid::new_v4().simple()),
                 configuration_id: document.configuration_id.clone(),
                 name: safe_name(&document.name),
-                path: document.path.clone(),
+                path,
                 last_opened_epoch_ms: now_epoch_ms(),
             },
         );
@@ -239,6 +371,32 @@ impl SavedConfigurationStore {
 }
 
 pub type SavedConfigurationState = Mutex<SavedConfigurationStore>;
+
+pub(crate) struct RecentMenuEntry {
+    pub recent_handle: String,
+    pub label: String,
+    pub available: bool,
+}
+
+pub(crate) fn recent_menu_entries(state: &AppState) -> Result<Vec<RecentMenuEntry>, String> {
+    let store = state
+        .saved_configurations
+        .lock()
+        .map_err(|_| state_error())?;
+    Ok(store
+        .recents
+        .iter()
+        .map(|entry| RecentMenuEntry {
+            recent_handle: entry.recent_handle.clone(),
+            label: format!(
+                "{} — {}",
+                safe_name(&entry.name),
+                safe_file_label(&entry.path)
+            ),
+            available: entry.path.is_file() && fs::File::open(&entry.path).is_ok(),
+        })
+        .collect())
+}
 
 /// Portable recovery overlay after Tauri has removed sensitive values.
 pub struct RecoveryPortableIntent {
@@ -379,9 +537,45 @@ pub struct RecentHandleRequest {
 
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct PreviewHandleRequest {
+    preview_handle: String,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct SaveAsRequest {
     configuration_handle: String,
     name: String,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct NamedConfigurationRequest {
+    configuration_handle: String,
+    name: String,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct NamedPreviewRequest {
+    preview_handle: String,
+    name: String,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct PreviewComparisonRequest {
+    preview_handle: String,
+    device_plan: Option<String>,
+    selected_recipes: Vec<String>,
+    bindings: HashMap<String, Value>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct PreviewRepairRequest {
+    preview_handle: String,
+    repair_handle: String,
 }
 
 #[derive(Debug, Deserialize)]
@@ -407,6 +601,10 @@ pub fn list_recent_configurations(state: State<'_, AppState>) -> Result<Value, S
         .saved_configurations
         .lock()
         .map_err(|_| state_error())?;
+    let mut identity_counts = HashMap::<&str, usize>::new();
+    for entry in &store.recents {
+        *identity_counts.entry(&entry.configuration_id).or_default() += 1;
+    }
     Ok(Value::Array(
         store
             .recents
@@ -415,8 +613,10 @@ pub fn list_recent_configurations(state: State<'_, AppState>) -> Result<Value, S
                 json!({
                     "recentHandle": entry.recent_handle,
                     "name": safe_name(&entry.name),
+                    "fileLabel": safe_file_label(&entry.path),
                     "lastOpenedEpochMs": entry.last_opened_epoch_ms,
                     "availability": if entry.path.is_file() && fs::File::open(&entry.path).is_ok() { "available" } else { "missing" },
+                    "identityConflict": identity_counts.get(entry.configuration_id.as_str()).copied().unwrap_or_default() > 1,
                 })
             })
             .collect(),
@@ -511,6 +711,244 @@ pub async fn open_saved_configuration(app: AppHandle) -> Result<Value, String> {
 }
 
 #[tauri::command]
+pub async fn preview_saved_configuration(app: AppHandle) -> Result<Value, String> {
+    let _dialog_activity = app
+        .state::<AppState>()
+        .update_activity
+        .reserve_native_dialog()?;
+    let picker = app
+        .dialog()
+        .file()
+        .add_filter("EmuChef setup", &["yaml", "yml"]);
+    let selected = await_picker_selection(
+        |complete| picker.pick_file(complete),
+        "configuration_picker_failed",
+        "The setup open dialog could not be opened.",
+    )
+    .await?;
+    let Some(selected) = selected else {
+        return Ok(json!({ "outcome": "cancelled" }));
+    };
+    let path = selected_path(selected)?;
+    begin_preview(&app.state::<AppState>(), path)
+}
+
+#[tauri::command]
+pub fn preview_recent_configuration(
+    request: RecentHandleRequest,
+    state: State<'_, AppState>,
+) -> Result<Value, String> {
+    let path = {
+        let store = state
+            .saved_configurations
+            .lock()
+            .map_err(|_| state_error())?;
+        store.recent(&request.recent_handle)?.path.clone()
+    };
+    if !path.is_file() {
+        return Err(safe_error(
+            "recent_configuration_missing",
+            "This setup file is missing or inaccessible. Relink it or remove it from Recents.",
+        ));
+    }
+    begin_preview(&state, path)
+}
+
+#[tauri::command]
+pub fn confirm_saved_configuration_preview(
+    request: PreviewHandleRequest,
+    state: State<'_, AppState>,
+) -> Result<Value, String> {
+    let preview = state
+        .saved_configurations
+        .lock()
+        .map_err(|_| state_error())?
+        .take_current_preview(&request.preview_handle)?;
+    verify_preview(&state, &preview)?;
+    open_result(
+        &state,
+        preview.path,
+        &json!({ "document": preview.document }),
+    )
+}
+
+#[tauri::command]
+pub fn cancel_saved_configuration_preview(
+    request: PreviewHandleRequest,
+    state: State<'_, AppState>,
+) -> Result<(), String> {
+    let preview = state
+        .saved_configurations
+        .lock()
+        .map_err(|_| state_error())?
+        .remove_preview(&request.preview_handle);
+    if let Some(preview) = preview {
+        close_sidecar_document(&state, &preview.document);
+    }
+    Ok(())
+}
+
+#[tauri::command]
+pub fn compare_saved_configuration_preview(
+    request: PreviewComparisonRequest,
+    state: State<'_, AppState>,
+) -> Result<Value, String> {
+    let preview = state
+        .saved_configurations
+        .lock()
+        .map_err(|_| state_error())?
+        .current_preview(&request.preview_handle)?;
+    verify_preview(&state, &preview)?;
+    let projection = classify_document_bindings(&state, &preview.document)?;
+    if status_from_diagnostics(&projection.diagnostics) == "requires_attention" {
+        return Ok(json!({
+            "state": "requires_repair",
+            "message": "The saved setup needs repair before it can be compared with current choices.",
+        }));
+    }
+    let Some(device_plan) = request.device_plan else {
+        return Ok(json!({
+            "state": "no_current_intent",
+            "message": "There are no current setup choices to compare.",
+        }));
+    };
+    let configuration = preview
+        .document
+        .get("configuration")
+        .ok_or_else(invalid_document)?;
+    let mut saved_recipes = document_string_array(configuration, "selectedRecipes")?;
+    saved_recipes.sort();
+    let mut current_recipes = request.selected_recipes;
+    current_recipes.sort();
+    let current_bindings = ordered_bindings(request.bindings)
+        .as_object()
+        .cloned()
+        .expect("ordered bindings are an object");
+    let current_projection =
+        classify_bindings(&state, &device_plan, &current_recipes, &current_bindings)?;
+    let matches = document_string(configuration, "devicePlan")? == device_plan
+        && saved_recipes == current_recipes
+        && projection.safe == current_projection.safe;
+    Ok(json!({
+        "state": if matches { "matches" } else { "differs" },
+        "message": if matches {
+            "This saved setup matches the current portable choices."
+        } else {
+            "This saved setup differs from the current portable choices."
+        },
+    }))
+}
+
+#[tauri::command]
+pub async fn apply_saved_configuration_preview_repair(
+    app: AppHandle,
+    request: PreviewRepairRequest,
+) -> Result<Value, String> {
+    let state = app.state::<AppState>();
+    let preview = state
+        .saved_configurations
+        .lock()
+        .map_err(|_| state_error())?
+        .current_preview(&request.preview_handle)?;
+    verify_preview(&state, &preview)?;
+    let repair = preview
+        .repairs
+        .get(&request.repair_handle)
+        .cloned()
+        .ok_or_else(|| {
+            safe_error(
+                "configuration_repair_unavailable",
+                "This repair choice is no longer available. Review the setup again.",
+            )
+        })?;
+    let document_id = document_string(&preview.document, "documentId")?;
+    let result = match repair {
+        PreviewRepair::RemoveRecipe { recipe_id } => {
+            let mut recipes = document_string_array(
+                preview
+                    .document
+                    .get("configuration")
+                    .ok_or_else(invalid_document)?,
+                "selectedRecipes",
+            )?;
+            recipes.retain(|candidate| candidate != &recipe_id);
+            state.sidecar.request(
+                "setUserConfigurationSelectedRecipes",
+                json!({ "documentId": document_id, "selectedRecipes": recipes }),
+            )
+        }
+        PreviewRepair::RemoveBinding { key } => state.sidecar.request(
+            "removeUserConfigurationBinding",
+            json!({ "documentId": document_id, "key": key }),
+        ),
+        PreviewRepair::SelectOption { key, value } => state.sidecar.request(
+            "setUserConfigurationBinding",
+            json!({ "documentId": document_id, "key": key, "value": value }),
+        ),
+        PreviewRepair::RelinkInput { key, directory } => {
+            let _dialog_activity = state.update_activity.reserve_native_dialog()?;
+            let picker = app.dialog().file();
+            let selected = if directory {
+                await_picker_selection(
+                    |complete| picker.pick_folder(complete),
+                    "configuration_repair_picker_failed",
+                    "The replacement folder dialog could not be opened.",
+                )
+                .await?
+            } else {
+                await_picker_selection(
+                    |complete| picker.pick_file(complete),
+                    "configuration_repair_picker_failed",
+                    "The replacement file dialog could not be opened.",
+                )
+                .await?
+            };
+            let Some(selected) = selected else {
+                return project_preview(
+                    &state,
+                    &request.preview_handle,
+                    &preview.path,
+                    &preview.document,
+                );
+            };
+            let path = selected_path(selected)?;
+            state.sidecar.request(
+                "setUserConfigurationBinding",
+                json!({ "documentId": document_id, "key": key, "value": path }),
+            )
+        }
+    }
+    .map_err(|_| {
+        configuration_error(
+            "configuration_repair_failed",
+            "The selected repair could not be applied safely.",
+        )
+    })?;
+    let document = result
+        .get("document")
+        .cloned()
+        .ok_or_else(invalid_document)?;
+    let projection = classify_document_bindings(&state, &document)?;
+    let repairs = preview_repairs(&document, &projection.description);
+    let updated = state
+        .saved_configurations
+        .lock()
+        .map_err(|_| state_error())?
+        .update_preview(
+            &request.preview_handle,
+            preview.preview_revision,
+            document,
+            repairs,
+        )?;
+    project_preview(
+        &state,
+        &request.preview_handle,
+        &updated.path,
+        &updated.document,
+    )
+}
+
+#[tauri::command]
 pub fn open_recent_configuration(
     request: RecentHandleRequest,
     state: State<'_, AppState>,
@@ -578,14 +1016,49 @@ pub async fn relink_recent_configuration(
             "The selected file is a different portable configuration and cannot relink this entry.",
         ));
     }
-    {
-        let mut store = state
-            .saved_configurations
-            .lock()
-            .map_err(|_| state_error())?;
-        store.remove_recent(&request.recent_handle)?;
+    let name = document
+        .pointer("/configuration/name")
+        .and_then(Value::as_str)
+        .map(safe_name)
+        .ok_or_else(invalid_document)?;
+    close_sidecar_document(&state, document);
+    let mut store = state
+        .saved_configurations
+        .lock()
+        .map_err(|_| state_error())?;
+    let canonical_path = canonical_recent_path(&path);
+    if store.recents.iter().any(|entry| {
+        entry.recent_handle != request.recent_handle
+            && canonical_recent_path(&entry.path) == canonical_path
+    }) {
+        return Err(safe_error(
+            "recent_configuration_path_conflict",
+            "That setup file already has a Recent entry.",
+        ));
     }
-    open_result(&state, path, &result)
+    let entry = store
+        .recents
+        .iter_mut()
+        .find(|entry| entry.recent_handle == request.recent_handle)
+        .ok_or_else(|| {
+            safe_error(
+                "recent_configuration_unknown",
+                "This recent setup entry is no longer available.",
+            )
+        })?;
+    entry.path = canonical_path;
+    entry.name = name;
+    entry.last_opened_epoch_ms = now_epoch_ms();
+    let updated = json!({
+        "recentHandle": entry.recent_handle,
+        "name": entry.name,
+        "fileLabel": safe_file_label(&entry.path),
+        "lastOpenedEpochMs": entry.last_opened_epoch_ms,
+        "availability": "available",
+        "identityConflict": false,
+    });
+    store.persist_recents()?;
+    Ok(updated)
 }
 
 #[tauri::command]
@@ -818,6 +1291,242 @@ pub async fn save_saved_configuration_as(
 }
 
 #[tauri::command]
+pub async fn duplicate_saved_configuration(
+    app: AppHandle,
+    request: NamedConfigurationRequest,
+) -> Result<Value, String> {
+    copy_saved_configuration(app, request, true).await
+}
+
+#[tauri::command]
+pub async fn export_saved_configuration(
+    app: AppHandle,
+    request: NamedConfigurationRequest,
+) -> Result<Value, String> {
+    copy_saved_configuration(app, request, false).await
+}
+
+async fn copy_saved_configuration(
+    app: AppHandle,
+    request: NamedConfigurationRequest,
+    add_to_recents: bool,
+) -> Result<Value, String> {
+    let name = validated_name(&request.name)?;
+    let _dialog_activity = app
+        .state::<AppState>()
+        .update_activity
+        .reserve_native_dialog()?;
+    let picker = app
+        .dialog()
+        .file()
+        .set_file_name(format!("{}.yaml", safe_file_stem(&name)))
+        .add_filter("EmuChef setup", &["yaml", "yml"]);
+    let selected = await_picker_selection(
+        |complete| picker.save_file(complete),
+        "configuration_picker_failed",
+        "The setup destination dialog could not be opened.",
+    )
+    .await?;
+    let Some(selected) = selected else {
+        return Ok(json!({ "outcome": "cancelled" }));
+    };
+    let path = selected_path(selected)?;
+    let state = app.state::<AppState>();
+    let document_id = {
+        let store = state
+            .saved_configurations
+            .lock()
+            .map_err(|_| state_error())?;
+        store
+            .document(&request.configuration_handle)?
+            .sidecar_document_id
+            .clone()
+    };
+    let current = current_document(&state, &document_id)?;
+    let configuration = current.get("configuration").ok_or_else(invalid_document)?;
+    let projection = classify_document_bindings(&state, &current)?;
+    let configuration_id = generated_configuration_id();
+    let result = state
+        .sidecar
+        .request(
+            "createUserConfiguration",
+            json!({
+                "path": path,
+                "configurationId": configuration_id,
+                "name": name,
+                "devicePlan": document_string(configuration, "devicePlan")?,
+                "selectedRecipes": configuration.get("selectedRecipes").cloned().ok_or_else(invalid_document)?,
+                "bindings": projection.safe,
+                "authoredRoot": authored_root(&state)?,
+            }),
+        )
+        .map_err(|_| {
+            configuration_error(
+                if add_to_recents { "configuration_duplicate_failed" } else { "configuration_export_failed" },
+                if add_to_recents {
+                    "The setup could not be duplicated. The destination may already exist."
+                } else {
+                    "The setup could not be exported. The destination may already exist."
+                },
+            )
+        })?;
+    let document = result.get("document").ok_or_else(invalid_document)?;
+    if add_to_recents {
+        let record = OpenDocument {
+            sidecar_document_id: document_string(document, "documentId")?,
+            path: path.clone(),
+            configuration_id,
+            name: name.clone(),
+            revision: 0,
+        };
+        state
+            .saved_configurations
+            .lock()
+            .map_err(|_| state_error())?
+            .touch_recent(&record)?;
+    }
+    close_sidecar_document(&state, document);
+    Ok(json!({
+        "outcome": "saved",
+        "name": name,
+        "fileLabel": safe_file_label(&path),
+    }))
+}
+
+#[tauri::command]
+pub async fn import_saved_configuration(
+    app: AppHandle,
+    request: NamedPreviewRequest,
+) -> Result<Value, String> {
+    let name = validated_name(&request.name)?;
+    let _dialog_activity = app
+        .state::<AppState>()
+        .update_activity
+        .reserve_native_dialog()?;
+    let picker = app
+        .dialog()
+        .file()
+        .set_file_name(format!("{}.yaml", safe_file_stem(&name)))
+        .add_filter("EmuChef setup", &["yaml", "yml"]);
+    let selected = await_picker_selection(
+        |complete| picker.save_file(complete),
+        "configuration_picker_failed",
+        "The imported setup destination dialog could not be opened.",
+    )
+    .await?;
+    let Some(selected) = selected else {
+        return Ok(json!({ "outcome": "cancelled" }));
+    };
+    let destination = selected_path(selected)?;
+    let state = app.state::<AppState>();
+    let preview = state
+        .saved_configurations
+        .lock()
+        .map_err(|_| state_error())?
+        .take_current_preview(&request.preview_handle)?;
+    verify_preview(&state, &preview)?;
+    let document_id = document_string(&preview.document, "documentId")?;
+    sanitize_before_save(&state, &document_id)?;
+    let configuration_id = generated_configuration_id();
+    let result = state
+        .sidecar
+        .request(
+            "saveUserConfigurationAs",
+            json!({
+                "documentId": document_id,
+                "path": destination,
+                "configurationId": configuration_id,
+                "name": name,
+            }),
+        )
+        .map_err(|_| {
+            configuration_error(
+                "configuration_import_failed",
+                "The setup could not be imported. The destination may already exist.",
+            )
+        })?;
+    open_result(&state, destination, &result)
+}
+
+#[tauri::command]
+pub fn rename_saved_configuration(
+    request: NamedConfigurationRequest,
+    state: State<'_, AppState>,
+) -> Result<Value, String> {
+    let name = validated_name(&request.name)?;
+    let record = state
+        .saved_configurations
+        .lock()
+        .map_err(|_| state_error())?
+        .document(&request.configuration_handle)?
+        .clone();
+    let extension = record
+        .path
+        .extension()
+        .and_then(|value| value.to_str())
+        .unwrap_or("yaml");
+    let destination =
+        record
+            .path
+            .with_file_name(format!("{}.{}", safe_file_stem(&name), extension));
+    if canonical_recent_path(&destination) == canonical_recent_path(&record.path) {
+        return Err(safe_error(
+            "configuration_rename_same_path",
+            "Choose a name that produces a different setup filename.",
+        ));
+    }
+    sanitize_before_save(&state, &record.sidecar_document_id)?;
+    let result = state
+        .sidecar
+        .request(
+            "saveUserConfigurationAs",
+            json!({
+                "documentId": record.sidecar_document_id,
+                "path": destination,
+                "configurationId": record.configuration_id,
+                "name": name,
+            }),
+        )
+        .map_err(|_| {
+            configuration_error(
+                "configuration_rename_failed",
+                "The setup could not be renamed. The destination may already exist.",
+            )
+        })?;
+    let document = result.get("document").ok_or_else(invalid_document)?;
+    let remove_result = fs::remove_file(&record.path);
+    let mut store = state
+        .saved_configurations
+        .lock()
+        .map_err(|_| state_error())?;
+    let updated = store
+        .documents
+        .get_mut(&request.configuration_handle)
+        .ok_or_else(state_error)?;
+    updated.path = destination.clone();
+    updated.name = name;
+    updated.revision = updated.revision.saturating_add(1);
+    let updated = updated.clone();
+    store
+        .recents
+        .retain(|entry| canonical_recent_path(&entry.path) != canonical_recent_path(&record.path));
+    store.touch_recent(&updated)?;
+    let projected = project_document(
+        &state,
+        &request.configuration_handle,
+        updated.revision,
+        document,
+    )?;
+    if remove_result.is_err() {
+        return Err(safe_error(
+            "configuration_rename_source_remains",
+            "The renamed setup is valid, but the original file could not be removed. Both files remain so no setup data was lost.",
+        ));
+    }
+    Ok(projected)
+}
+
+#[tauri::command]
 pub fn close_saved_configuration(
     request: ConfigurationHandleRequest,
     state: State<'_, AppState>,
@@ -848,6 +1557,313 @@ pub fn close_saved_configuration(
 fn open_path(state: &AppState, path: PathBuf) -> Result<Value, String> {
     let result = request_open(state, &path)?;
     open_result(state, path, &result)
+}
+
+fn begin_preview(state: &AppState, path: PathBuf) -> Result<Value, String> {
+    let initial_source_digest = source_digest(&path)?;
+    let result = request_open(state, &path)?;
+    if source_digest(&path)? != initial_source_digest {
+        if let Some(document) = result.get("document") {
+            close_sidecar_document(state, document);
+        }
+        return Err(safe_error(
+            "configuration_preview_changed",
+            "The setup changed while it was being inspected. Choose it again.",
+        ));
+    }
+    let document = result
+        .get("document")
+        .cloned()
+        .ok_or_else(invalid_document)?;
+    let catalog_digest = catalog(state)?.digest().to_string();
+    let preview_projection = classify_document_bindings(state, &document)?;
+    let repairs = preview_repairs(&document, &preview_projection.description);
+    let (preview_handle, stale_document_ids) = state
+        .saved_configurations
+        .lock()
+        .map_err(|_| state_error())?
+        .replace_preview(
+            canonical_recent_path(&path),
+            initial_source_digest,
+            catalog_digest,
+            document.clone(),
+            repairs,
+        );
+    for document_id in stale_document_ids {
+        let _ = state.sidecar.request(
+            "closeUserConfiguration",
+            json!({ "documentId": document_id }),
+        );
+    }
+    project_preview(state, &preview_handle, &path, &document)
+}
+
+fn verify_preview(state: &AppState, preview: &PreviewDocument) -> Result<(), String> {
+    let current_source_digest = source_digest(&preview.path)?;
+    let current_catalog_digest = catalog(state)?.digest().to_string();
+    if let Err(error) =
+        verify_preview_snapshot(preview, &current_source_digest, &current_catalog_digest)
+    {
+        close_sidecar_document(state, &preview.document);
+        return Err(error);
+    }
+    Ok(())
+}
+
+fn verify_preview_snapshot(
+    preview: &PreviewDocument,
+    current_source_digest: &str,
+    current_catalog_digest: &str,
+) -> Result<(), String> {
+    if current_source_digest != preview.source_digest {
+        return Err(safe_error(
+            "configuration_preview_changed",
+            "The setup changed after it was inspected. Choose it again.",
+        ));
+    }
+    if current_catalog_digest != preview.catalog_digest {
+        return Err(safe_error(
+            "configuration_preview_stale_catalog",
+            "The setup catalog changed after this preview. Inspect the setup again.",
+        ));
+    }
+    Ok(())
+}
+
+fn project_preview(
+    state: &AppState,
+    preview_handle: &str,
+    path: &Path,
+    document: &Value,
+) -> Result<Value, String> {
+    let configuration = document.get("configuration").ok_or_else(invalid_document)?;
+    let projection = classify_document_bindings(state, document)?;
+    let validation_state = status_from_diagnostics(&projection.diagnostics);
+    let baseline_state = document
+        .pointer("/compatibilityStatus/baselineState")
+        .and_then(Value::as_str)
+        .unwrap_or("unavailable");
+    let schema_version = configuration
+        .get("schemaVersion")
+        .and_then(Value::as_i64)
+        .ok_or_else(invalid_document)?;
+    let setup_label = configuration
+        .pointer("/compatibility/devicePlan/label")
+        .and_then(Value::as_str)
+        .unwrap_or("Saved setup");
+    let feature_labels = configuration
+        .pointer("/compatibility/recipes")
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+        .filter(|recipe| recipe.get("selected").and_then(Value::as_bool) == Some(true))
+        .filter_map(|recipe| recipe.get("label").and_then(Value::as_str))
+        .map(safe_name)
+        .collect::<Vec<_>>();
+    let modified: Option<u64> = fs::metadata(path)
+        .and_then(|metadata| metadata.modified())
+        .ok()
+        .and_then(|modified| modified.duration_since(UNIX_EPOCH).ok())
+        .and_then(|duration| duration.as_millis().try_into().ok());
+    let compatibility_state = if validation_state == "requires_attention" {
+        "repair_required"
+    } else if baseline_state == "materially_changed" {
+        "materially_changed"
+    } else if baseline_state == "pending_first_v2_save" {
+        "migrated_baseline_pending"
+    } else if validation_state == "valid_with_warnings" {
+        "compatible_with_warnings"
+    } else {
+        "compatible"
+    };
+    let mut repair_actions = state
+        .saved_configurations
+        .lock()
+        .map_err(|_| state_error())?
+        .previews
+        .get(preview_handle)
+        .map(|preview| {
+            preview
+                .repairs
+                .iter()
+                .map(|(handle, repair)| {
+                    let (kind, label) = match repair {
+                        PreviewRepair::RemoveRecipe { .. } => (
+                            "remove_recipe",
+                            "Remove unavailable optional feature".to_string(),
+                        ),
+                        PreviewRepair::RemoveBinding { .. } => {
+                            ("remove_binding", "Remove retired saved input".to_string())
+                        }
+                        PreviewRepair::SelectOption { value, .. } => {
+                            ("select_option", format!("Use {}", safe_value_label(value)))
+                        }
+                        PreviewRepair::RelinkInput { directory, .. } => (
+                            "relink_input",
+                            if *directory {
+                                "Choose replacement folder…"
+                            } else {
+                                "Choose replacement file…"
+                            }
+                            .to_string(),
+                        ),
+                    };
+                    json!({ "repairHandle": handle, "kind": kind, "label": label })
+                })
+                .collect::<Vec<_>>()
+        })
+        .unwrap_or_default();
+    repair_actions.sort_by(|left, right| {
+        left.get("label")
+            .and_then(Value::as_str)
+            .cmp(&right.get("label").and_then(Value::as_str))
+    });
+    Ok(json!({
+        "outcome": "previewed",
+        "previewHandle": preview_handle,
+        "name": safe_name(&document_string(configuration, "name")?),
+        "fileLabel": safe_file_label(path),
+        "schemaVersion": schema_version,
+        "lastModifiedEpochMs": modified,
+        "setupLabel": safe_name(setup_label),
+        "featureLabels": feature_labels,
+        "savedInputCount": projection.safe.len(),
+        "omittedInputCount": projection.omitted.len(),
+        "compatibility": {
+            "state": compatibility_state,
+            "baselineState": baseline_state,
+            "requiresRepair": validation_state == "requires_attention",
+            "message": preview_compatibility_message(compatibility_state),
+        },
+        "repairActions": repair_actions,
+    }))
+}
+
+fn preview_repairs(document: &Value, description: &Value) -> HashMap<String, PreviewRepair> {
+    let mut repairs = HashMap::new();
+    let known_recipes = description
+        .get("recipeOptions")
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+        .filter_map(|recipe| recipe.get("id").and_then(Value::as_str))
+        .collect::<HashSet<_>>();
+    for recipe_id in document
+        .pointer("/configuration/selectedRecipes")
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+        .filter_map(Value::as_str)
+    {
+        if !known_recipes.contains(recipe_id) {
+            repairs.insert(
+                format!("preview_repair_{}", Uuid::new_v4().simple()),
+                PreviewRepair::RemoveRecipe {
+                    recipe_id: recipe_id.to_string(),
+                },
+            );
+        }
+    }
+    for input in description
+        .get("inputs")
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+    {
+        let Some(key) = input.get("key").and_then(Value::as_str) else {
+            continue;
+        };
+        let codes = input
+            .get("diagnostics")
+            .and_then(Value::as_array)
+            .into_iter()
+            .flatten()
+            .filter_map(|diagnostic| diagnostic.get("code").and_then(Value::as_str))
+            .collect::<HashSet<_>>();
+        if codes.contains("invalid_enum_value") {
+            for value in input
+                .get("options")
+                .and_then(Value::as_array)
+                .into_iter()
+                .flatten()
+            {
+                repairs.insert(
+                    format!("preview_repair_{}", Uuid::new_v4().simple()),
+                    PreviewRepair::SelectOption {
+                        key: key.to_string(),
+                        value: value.clone(),
+                    },
+                );
+            }
+        }
+        if codes.contains("binding_path_missing") {
+            repairs.insert(
+                format!("preview_repair_{}", Uuid::new_v4().simple()),
+                PreviewRepair::RelinkInput {
+                    key: key.to_string(),
+                    directory: input.get("pathKind").and_then(Value::as_str) == Some("directory"),
+                },
+            );
+        }
+    }
+    for diagnostic in description
+        .get("diagnostics")
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+    {
+        let code = diagnostic
+            .get("code")
+            .and_then(Value::as_str)
+            .unwrap_or_default();
+        let key = diagnostic.get("key").and_then(Value::as_str);
+        if matches!(
+            code,
+            "unknown_input"
+                | "binding_recipe_not_selected"
+                | "incompatible_binding_type"
+                | "invalid_path_prefix"
+        ) {
+            if let Some(key) = key {
+                repairs.insert(
+                    format!("preview_repair_{}", Uuid::new_v4().simple()),
+                    PreviewRepair::RemoveBinding {
+                        key: key.to_string(),
+                    },
+                );
+            }
+        }
+    }
+    repairs
+}
+
+fn safe_value_label(value: &Value) -> String {
+    match value {
+        Value::String(value) => value.chars().take(80).collect(),
+        Value::Bool(value) => value.to_string(),
+        Value::Number(value) => value.to_string(),
+        _ => "available option".to_string(),
+    }
+}
+
+fn preview_compatibility_message(state: &str) -> &'static str {
+    match state {
+        "repair_required" => "This setup needs repair before it can be used.",
+        "materially_changed" => "The authored setup contract changed since this file was saved. Review and repair it before use.",
+        "migrated_baseline_pending" => "This older setup is valid against the current catalog. Its first explicit save will establish a compatibility baseline.",
+        "compatible_with_warnings" => "This setup can be opened, but some saved choices need attention.",
+        _ => "This setup is compatible with the current catalog.",
+    }
+}
+
+fn source_digest(path: &Path) -> Result<String, String> {
+    let bytes = fs::read(path).map_err(|_| {
+        safe_error(
+            "configuration_source_unavailable",
+            "The selected setup file is missing or inaccessible.",
+        )
+    })?;
+    Ok(hex::encode(Sha256::digest(bytes)))
 }
 
 fn request_open(state: &AppState, path: &Path) -> Result<Value, String> {
@@ -913,12 +1929,16 @@ fn project_classified_document(
     Ok(json!({
         "configurationHandle": handle,
         "name": document_string(configuration, "name")?,
+        "schemaVersion": configuration.get("schemaVersion").cloned().ok_or_else(invalid_document)?,
         "dirty": document.get("dirty").and_then(Value::as_bool).ok_or_else(invalid_document)?,
         "revision": revision,
         "devicePlan": document_string(configuration, "devicePlan")?,
         "selectedRecipes": configuration.get("selectedRecipes").cloned().ok_or_else(invalid_document)?,
         "bindings": projection.safe,
         "pendingSanitationCount": projection.omitted.len(),
+        "compatibility": {
+            "baselineState": document.pointer("/compatibilityStatus/baselineState").and_then(Value::as_str).unwrap_or("unavailable"),
+        },
         "validation": { "state": status, "diagnostics": diagnostics },
     }))
 }
@@ -1000,6 +2020,7 @@ fn binding_projection_from_description(
         omitted,
         sensitive_omitted,
         diagnostics,
+        description: public_description,
     }
 }
 
@@ -1181,24 +2202,43 @@ fn safe_file_stem(name: &str) -> String {
     }
 }
 
+fn safe_file_label(path: &Path) -> String {
+    path.file_name()
+        .and_then(|value| value.to_str())
+        .map(|value| value.chars().take(160).collect())
+        .unwrap_or_else(|| "Setup file".to_string())
+}
+
 fn sanitize_recents(entries: Vec<RecentEntry>) -> Vec<RecentEntry> {
     let mut handles = HashSet::new();
-    let mut identities = HashSet::new();
-    entries
+    let mut paths = HashSet::new();
+    let mut entries = entries
         .into_iter()
-        .filter(|entry| {
-            entry.recent_handle.starts_with("recent_")
+        .filter_map(|mut entry| {
+            entry.path = canonical_recent_path(&entry.path);
+            (entry.recent_handle.starts_with("recent_")
                 && valid_configuration_id(&entry.configuration_id)
                 && !safe_name(&entry.name).is_empty()
                 && handles.insert(entry.recent_handle.clone())
-                && identities.insert(entry.configuration_id.clone())
+                && paths.insert(entry.path.clone()))
+            .then(|| {
+                entry.name = safe_name(&entry.name);
+                entry
+            })
         })
-        .map(|mut entry| {
-            entry.name = safe_name(&entry.name);
-            entry
-        })
-        .take(MAX_RECENTS)
-        .collect()
+        .collect::<Vec<_>>();
+    entries.sort_by(|left, right| {
+        right
+            .last_opened_epoch_ms
+            .cmp(&left.last_opened_epoch_ms)
+            .then_with(|| left.path.cmp(&right.path))
+    });
+    entries.truncate(MAX_RECENTS);
+    entries
+}
+
+fn canonical_recent_path(path: &Path) -> PathBuf {
+    path.canonicalize().unwrap_or_else(|_| path.to_path_buf())
 }
 
 fn document_string(value: &Value, field: &str) -> Result<String, String> {
@@ -1256,7 +2296,7 @@ mod tests {
             recent_handle: handle.to_string(),
             configuration_id: id.to_string(),
             name: name.to_string(),
-            path: PathBuf::from("/private/config.yaml"),
+            path: PathBuf::from(format!("/private/{handle}.yaml")),
             last_opened_epoch_ms: 1,
         }
     }
@@ -1276,9 +2316,10 @@ mod tests {
                 "Valid",
             ));
         }
+        entries[2].last_opened_epoch_ms = 2;
         let sanitized = sanitize_recents(entries);
         assert_eq!(sanitized.len(), MAX_RECENTS);
-        assert_eq!(sanitized[0].name, "Two");
+        assert!(sanitized.iter().any(|entry| entry.name == "Two"));
         assert_eq!(
             sanitized
                 .iter()
@@ -1286,6 +2327,52 @@ mod tests {
                 .count(),
             1
         );
+    }
+
+    #[test]
+    fn recent_sanitization_deduplicates_paths_but_retains_identity_conflicts() {
+        let mut same_path = recent("recent_same_path", "saved.other", "Other");
+        same_path.path = PathBuf::from("/private/recent_one.yaml");
+        let sanitized = sanitize_recents(vec![
+            recent("recent_one", "saved.shared", "First"),
+            recent("recent_two", "saved.shared", "Second"),
+            same_path,
+        ]);
+
+        assert_eq!(sanitized.len(), 2);
+        assert!(sanitized
+            .iter()
+            .all(|entry| entry.configuration_id == "saved.shared"));
+    }
+
+    #[test]
+    fn previews_reject_changed_bytes_catalogs_runtime_restarts_and_supersession() {
+        let temp = tempfile::tempdir().unwrap();
+        let mut store = SavedConfigurationStore::load(temp.path().join("recents.json"));
+        let document = json!({ "documentId": "preview-document" });
+        let (first, _) = store.replace_preview(
+            temp.path().join("saved.yaml"),
+            "source-one".to_string(),
+            "catalog-one".to_string(),
+            document.clone(),
+            HashMap::new(),
+        );
+        let (second, _) = store.replace_preview(
+            temp.path().join("saved.yaml"),
+            "source-two".to_string(),
+            "catalog-two".to_string(),
+            document,
+            HashMap::new(),
+        );
+
+        assert!(store.current_preview(&first).is_err());
+        let current = store.current_preview(&second).unwrap();
+        assert!(verify_preview_snapshot(&current, "changed-source", "catalog-two").is_err());
+        assert!(verify_preview_snapshot(&current, "source-two", "changed-catalog").is_err());
+        assert!(verify_preview_snapshot(&current, "source-two", "catalog-two").is_ok());
+
+        store.runtime_revision = store.runtime_revision.saturating_add(1);
+        assert!(store.current_preview(&second).is_err());
     }
 
     #[test]
@@ -1399,6 +2486,7 @@ mod tests {
             "configuration": {
                 "id": "saved.one",
                 "name": "Saved",
+                "schemaVersion": 2,
                 "devicePlan": "plan.one",
                 "selectedRecipes": ["recipe"],
                 "bindings": {
@@ -1406,7 +2494,8 @@ mod tests {
                     "recipe/secret": "DO_NOT_PROJECT",
                     "recipe/inactive": "DO_NOT_PROJECT"
                 }
-            }
+            },
+            "compatibilityStatus": { "baselineState": "unchanged" }
         });
         let description = json!({
             "devicePlan": "plan.one",

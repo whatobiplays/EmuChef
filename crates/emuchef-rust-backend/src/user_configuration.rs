@@ -15,9 +15,11 @@ use indexmap::IndexMap;
 use regex::Regex;
 use serde_json::{json, Map as JsonMap, Value as JsonValue};
 use serde_yaml::{Mapping, Value as YamlValue};
+use sha2::{Digest, Sha256};
 
 use crate::catalog;
 use crate::model::{InputDeclaration, Recipe};
+use crate::model::{ParamValue, StepCondition};
 use crate::planner;
 use crate::planner_device_plan;
 
@@ -29,8 +31,67 @@ const KNOWN_FIELDS: &[&str] = &[
     "device_plan",
     "selected_recipes",
     "bindings",
+    "compatibility",
 ];
 const VALUE_SOURCE_FIELDS: &[&str] = &["value", "local", "secret"];
+
+const PROHIBITED_AUTHORITY_FIELDS: &[&str] = &[
+    "plan",
+    "generated_plan",
+    "plan_digest",
+    "review",
+    "review_handle",
+    "execution",
+    "execution_handle",
+    "runtime_generation",
+    "session_generation",
+    "device_serial",
+    "device_identity",
+    "diagnostics",
+    "launch_authorization",
+    "report_identity",
+    "credentials",
+    "secrets",
+];
+
+#[derive(Clone, Debug, PartialEq)]
+pub struct SavedContractSnapshot {
+    pub id: String,
+    pub label: String,
+    pub fingerprint: String,
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub struct SavedInputContractSnapshot {
+    pub key: String,
+    pub label: String,
+    pub fingerprint: String,
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub struct SavedRecipeContractSnapshot {
+    pub id: String,
+    pub label: String,
+    pub selected: bool,
+    pub fingerprint: String,
+    pub inputs: Vec<SavedInputContractSnapshot>,
+}
+
+/// Durable authored-contract baseline. It contains no generated plan, resolved
+/// value, host path, device fact, runtime generation, or execution authority.
+#[derive(Clone, Debug, PartialEq)]
+pub struct SavedCompatibilityBaseline {
+    pub device_plan: SavedContractSnapshot,
+    pub recipes: Vec<SavedRecipeContractSnapshot>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum CompatibilityBaselineState {
+    /// V1 can be validated now but has no historical authored-contract record.
+    PendingFirstV2Save,
+    Unchanged,
+    MateriallyChanged,
+}
 
 #[derive(Clone, Debug, PartialEq)]
 pub struct UserConfiguration {
@@ -41,7 +102,11 @@ pub struct UserConfiguration {
     pub device_plan: String,
     pub selected_recipes: Vec<String>,
     pub bindings: IndexMap<String, JsonValue>,
+    pub compatibility: Option<SavedCompatibilityBaseline>,
     pub extensions: BTreeMap<String, JsonValue>,
+    /// Unknown fields are retained in memory during inspection. An explicit V2
+    /// write may sanitize these fields only after reporting them to the caller.
+    pub unsupported_extensions: Vec<String>,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -234,7 +299,7 @@ fn parse_user_configuration_mapping(
     mapping: &Mapping,
 ) -> Result<UserConfiguration, UserConfigurationLoadError> {
     let schema_version = required_i64(mapping, "schema_version")?;
-    if schema_version != 1 {
+    if !matches!(schema_version, 1 | 2) {
         return Err(UserConfigurationLoadError::structural(format!(
             "Unsupported user-configuration schema_version {schema_version}."
         )));
@@ -251,16 +316,33 @@ fn parse_user_configuration_mapping(
     let device_plan = required_non_empty_string(mapping, "device_plan")?;
     let selected_recipes = required_identifier_list(mapping, "selected_recipes")?;
     let bindings = parse_bindings(required_mapping(mapping, "bindings")?)?;
+    let compatibility = if schema_version == 2 {
+        Some(parse_compatibility(required_mapping(
+            mapping,
+            "compatibility",
+        )?)?)
+    } else {
+        None
+    };
 
     let mut extensions = BTreeMap::new();
+    let mut unsupported_extensions = Vec::new();
     for (key, value) in mapping {
         let Some(key) = key.as_str() else {
             return Err(UserConfigurationLoadError::structural(
                 "User-configuration top-level keys must be strings.",
             ));
         };
+        if prohibited_authority_field(key) {
+            return Err(UserConfigurationLoadError::structural(format!(
+                "User configuration contains prohibited authority field '{key}'."
+            )));
+        }
         if !KNOWN_FIELDS.contains(&key) {
             extensions.insert(key.to_string(), yaml_to_json(value)?);
+            if schema_version == 1 || !key.starts_with("x-") {
+                unsupported_extensions.push(key.to_string());
+            }
         }
     }
 
@@ -272,8 +354,143 @@ fn parse_user_configuration_mapping(
         device_plan,
         selected_recipes,
         bindings,
+        compatibility,
         extensions,
+        unsupported_extensions,
     })
+}
+
+fn parse_compatibility(
+    mapping: &Mapping,
+) -> Result<SavedCompatibilityBaseline, UserConfigurationLoadError> {
+    reject_unknown_mapping_fields(mapping, &["device_plan", "recipes"], "compatibility")?;
+    let device_plan = parse_contract_snapshot(
+        required_mapping(mapping, "device_plan")?,
+        "compatibility.device_plan",
+    )?;
+    let recipes_value = mapping
+        .get(YamlValue::String("recipes".to_string()))
+        .ok_or_else(|| UserConfigurationLoadError::structural("Missing compatibility recipes."))?;
+    let YamlValue::Sequence(recipe_values) = recipes_value else {
+        return Err(UserConfigurationLoadError::structural(
+            "Compatibility recipes must be a list.",
+        ));
+    };
+    let mut recipes = Vec::new();
+    for (index, value) in recipe_values.iter().enumerate() {
+        let YamlValue::Mapping(recipe) = value else {
+            return Err(UserConfigurationLoadError::structural(format!(
+                "Compatibility recipe {index} must be a mapping."
+            )));
+        };
+        reject_unknown_mapping_fields(
+            recipe,
+            &["id", "label", "selected", "fingerprint", "inputs"],
+            "compatibility recipe",
+        )?;
+        let snapshot = parse_contract_snapshot(recipe, "compatibility recipe")?;
+        let selected = recipe
+            .get(YamlValue::String("selected".to_string()))
+            .and_then(YamlValue::as_bool)
+            .ok_or_else(|| {
+                UserConfigurationLoadError::structural(
+                    "Compatibility recipe selected must be a boolean.",
+                )
+            })?;
+        let inputs_value = recipe
+            .get(YamlValue::String("inputs".to_string()))
+            .ok_or_else(|| {
+                UserConfigurationLoadError::structural("Missing compatibility inputs.")
+            })?;
+        let YamlValue::Sequence(input_values) = inputs_value else {
+            return Err(UserConfigurationLoadError::structural(
+                "Compatibility inputs must be a list.",
+            ));
+        };
+        let mut inputs = Vec::new();
+        for input in input_values {
+            let YamlValue::Mapping(input) = input else {
+                return Err(UserConfigurationLoadError::structural(
+                    "Compatibility input must be a mapping.",
+                ));
+            };
+            reject_unknown_mapping_fields(
+                input,
+                &["key", "label", "fingerprint"],
+                "compatibility input",
+            )?;
+            inputs.push(SavedInputContractSnapshot {
+                key: required_non_empty_string(input, "key")?,
+                label: required_non_empty_string(input, "label")?,
+                fingerprint: required_fingerprint(input)?,
+            });
+        }
+        recipes.push(SavedRecipeContractSnapshot {
+            id: snapshot.id,
+            label: snapshot.label,
+            selected,
+            fingerprint: snapshot.fingerprint,
+            inputs,
+        });
+    }
+    Ok(SavedCompatibilityBaseline {
+        device_plan,
+        recipes,
+    })
+}
+
+fn parse_contract_snapshot(
+    mapping: &Mapping,
+    label: &str,
+) -> Result<SavedContractSnapshot, UserConfigurationLoadError> {
+    let id = required_non_empty_string(mapping, "id")?;
+    validate_identifier(&id, label)?;
+    Ok(SavedContractSnapshot {
+        id,
+        label: required_non_empty_string(mapping, "label")?,
+        fingerprint: required_fingerprint(mapping)?,
+    })
+}
+
+fn required_fingerprint(mapping: &Mapping) -> Result<String, UserConfigurationLoadError> {
+    let fingerprint = required_non_empty_string(mapping, "fingerprint")?;
+    if fingerprint.len() != 64
+        || !fingerprint
+            .chars()
+            .all(|character| character.is_ascii_hexdigit())
+    {
+        return Err(UserConfigurationLoadError::structural(
+            "Compatibility fingerprints must be 64 hexadecimal characters.",
+        ));
+    }
+    Ok(fingerprint.to_ascii_lowercase())
+}
+
+fn reject_unknown_mapping_fields(
+    mapping: &Mapping,
+    allowed: &[&str],
+    label: &str,
+) -> Result<(), UserConfigurationLoadError> {
+    for key in mapping.keys() {
+        let Some(key) = key.as_str() else {
+            return Err(UserConfigurationLoadError::structural(format!(
+                "{label} keys must be strings."
+            )));
+        };
+        if !allowed.contains(&key) {
+            return Err(UserConfigurationLoadError::structural(format!(
+                "{label} contains unknown field '{key}'."
+            )));
+        }
+    }
+    Ok(())
+}
+
+fn prohibited_authority_field(key: &str) -> bool {
+    let normalized = key.replace('-', "_").to_ascii_lowercase();
+    PROHIBITED_AUTHORITY_FIELDS.contains(&normalized.as_str())
+        || normalized.ends_with("_handle")
+        || normalized.ends_with("_generation")
 }
 
 fn parse_bindings(
@@ -414,6 +631,14 @@ pub fn emit_user_configuration_yaml(
     }
     insert_yaml(&mut mapping, "bindings", YamlValue::Mapping(bindings));
 
+    if let Some(compatibility) = &configuration.compatibility {
+        insert_yaml(
+            &mut mapping,
+            "compatibility",
+            emit_compatibility(compatibility),
+        );
+    }
+
     for (key, value) in &configuration.extensions {
         if !KNOWN_FIELDS.contains(&key.as_str()) {
             insert_yaml(&mut mapping, key, json_to_yaml(value));
@@ -423,6 +648,74 @@ pub fn emit_user_configuration_yaml(
     let output = serde_yaml::to_string(&YamlValue::Mapping(mapping))
         .map_err(|error| UserConfigurationLoadError::yaml(error.to_string()))?;
     Ok(output.strip_prefix("---\n").unwrap_or(&output).to_string())
+}
+
+fn emit_compatibility(compatibility: &SavedCompatibilityBaseline) -> YamlValue {
+    let mut mapping = Mapping::new();
+    insert_yaml(
+        &mut mapping,
+        "device_plan",
+        emit_contract_snapshot(&compatibility.device_plan),
+    );
+    let recipes = compatibility
+        .recipes
+        .iter()
+        .map(|recipe| {
+            let mut mapping = match emit_contract_snapshot(&SavedContractSnapshot {
+                id: recipe.id.clone(),
+                label: recipe.label.clone(),
+                fingerprint: recipe.fingerprint.clone(),
+            }) {
+                YamlValue::Mapping(mapping) => mapping,
+                _ => unreachable!("contract snapshots are mappings"),
+            };
+            insert_yaml(&mut mapping, "selected", YamlValue::Bool(recipe.selected));
+            insert_yaml(
+                &mut mapping,
+                "inputs",
+                YamlValue::Sequence(
+                    recipe
+                        .inputs
+                        .iter()
+                        .map(|input| {
+                            let mut mapping = Mapping::new();
+                            insert_yaml(&mut mapping, "key", YamlValue::String(input.key.clone()));
+                            insert_yaml(
+                                &mut mapping,
+                                "label",
+                                YamlValue::String(input.label.clone()),
+                            );
+                            insert_yaml(
+                                &mut mapping,
+                                "fingerprint",
+                                YamlValue::String(input.fingerprint.clone()),
+                            );
+                            YamlValue::Mapping(mapping)
+                        })
+                        .collect(),
+                ),
+            );
+            YamlValue::Mapping(mapping)
+        })
+        .collect();
+    insert_yaml(&mut mapping, "recipes", YamlValue::Sequence(recipes));
+    YamlValue::Mapping(mapping)
+}
+
+fn emit_contract_snapshot(snapshot: &SavedContractSnapshot) -> YamlValue {
+    let mut mapping = Mapping::new();
+    insert_yaml(&mut mapping, "id", YamlValue::String(snapshot.id.clone()));
+    insert_yaml(
+        &mut mapping,
+        "label",
+        YamlValue::String(snapshot.label.clone()),
+    );
+    insert_yaml(
+        &mut mapping,
+        "fingerprint",
+        YamlValue::String(snapshot.fingerprint.clone()),
+    );
+    YamlValue::Mapping(mapping)
 }
 
 pub fn validate_user_configuration_with_catalog(
@@ -448,6 +741,303 @@ pub fn validate_user_configuration_with_catalog(
         }
     };
     validate_with_recipes(configuration, &normalized_root, &recipes)
+}
+
+/// Build the durable authored-contract baseline for the current catalog.
+///
+/// This deliberately hashes authored semantics rather than planner output.
+/// Resolved values, paths, device facts, generated plans, and presentation
+/// prose never participate in the fingerprint.
+pub fn build_compatibility_baseline(
+    configuration: &UserConfiguration,
+    configuration_path: &Path,
+    authored_root: &Path,
+) -> Result<SavedCompatibilityBaseline, UserConfigurationLoadError> {
+    let normalized_root = catalog::normalize_authored_root(
+        Some(&authored_root.to_string_lossy()),
+        configuration_path,
+    )
+    .unwrap_or_else(|| authored_root.to_path_buf());
+    let recipes = planner::load_top_level_recipes(&normalized_root).map_err(|error| {
+        UserConfigurationLoadError::structural(format!(
+            "The authored catalog cannot establish a compatibility baseline: {error}"
+        ))
+    })?;
+    let parts = planner_device_plan::load_planner_input_parts(
+        &normalized_root,
+        &configuration.device_plan,
+        &recipes,
+    )
+    .map_err(|error| {
+        UserConfigurationLoadError::structural(format!(
+            "The selected device setup cannot establish a compatibility baseline: {error}"
+        ))
+    })?;
+
+    let device_plan_value = json!({
+        "id": parts.device_plan_ref,
+        "profile": parts.device_profile_ref,
+        "recipes": sorted_strings(parts.recipe_refs.clone()),
+        "selectedRecipes": sorted_strings(parts.selected_recipe_refs.clone()),
+        "overrides": parts.device_plan_input_bindings,
+        "profileCapabilities": parts.runtime_capabilities,
+    });
+    let device_plan = SavedContractSnapshot {
+        id: configuration.device_plan.clone(),
+        label: parts
+            .device_plan_name
+            .clone()
+            .unwrap_or_else(|| "Saved setup".to_string()),
+        fingerprint: fingerprint_value(&device_plan_value),
+    };
+
+    let recipe_by_id = recipes
+        .iter()
+        .map(|recipe| (recipe.id.as_str(), recipe))
+        .collect::<HashMap<_, _>>();
+    let expanded = expanded_recipe_contracts(&configuration.selected_recipes, &recipe_by_id)?;
+    let selected = configuration
+        .selected_recipes
+        .iter()
+        .map(String::as_str)
+        .collect::<HashSet<_>>();
+    let mut recipe_snapshots = Vec::new();
+    for recipe_id in expanded {
+        let recipe = recipe_by_id.get(recipe_id.as_str()).ok_or_else(|| {
+            UserConfigurationLoadError::structural(format!(
+                "Recipe '{recipe_id}' is unavailable for compatibility baseline creation."
+            ))
+        })?;
+        let mut inputs = recipe
+            .inputs
+            .iter()
+            .map(|(input_id, input)| SavedInputContractSnapshot {
+                key: format!("{}/{input_id}", recipe.id),
+                label: input.label.clone(),
+                fingerprint: fingerprint_value(&input_contract_value(input_id, input)),
+            })
+            .collect::<Vec<_>>();
+        inputs.sort_by(|left, right| left.key.cmp(&right.key));
+        recipe_snapshots.push(SavedRecipeContractSnapshot {
+            id: recipe.id.clone(),
+            label: recipe.name.clone(),
+            selected: selected.contains(recipe.id.as_str()),
+            fingerprint: fingerprint_value(&recipe_contract_value(recipe)),
+            inputs,
+        });
+    }
+    recipe_snapshots.sort_by(|left, right| left.id.cmp(&right.id));
+    Ok(SavedCompatibilityBaseline {
+        device_plan,
+        recipes: recipe_snapshots,
+    })
+}
+
+pub fn compatibility_baseline_state(
+    configuration: &UserConfiguration,
+    current: &SavedCompatibilityBaseline,
+) -> CompatibilityBaselineState {
+    match &configuration.compatibility {
+        None => CompatibilityBaselineState::PendingFirstV2Save,
+        Some(saved) if baseline_semantics_equal(saved, current) => {
+            CompatibilityBaselineState::Unchanged
+        }
+        Some(_) => CompatibilityBaselineState::MateriallyChanged,
+    }
+}
+
+/// Convert a validated document to V2 and establish the first durable baseline.
+/// Unsupported extensions are returned so callers can disclose sanitation.
+pub fn prepare_configuration_for_v2_write(
+    configuration: &mut UserConfiguration,
+    configuration_path: &Path,
+    authored_root: &Path,
+) -> Result<Vec<String>, UserConfigurationLoadError> {
+    let baseline = build_compatibility_baseline(configuration, configuration_path, authored_root)?;
+    let sanitized = configuration.unsupported_extensions.clone();
+    for key in &sanitized {
+        configuration.extensions.remove(key);
+    }
+    configuration.unsupported_extensions.clear();
+    configuration.schema_version = 2;
+    configuration.compatibility = Some(baseline);
+    Ok(sanitized)
+}
+
+fn baseline_semantics_equal(
+    left: &SavedCompatibilityBaseline,
+    right: &SavedCompatibilityBaseline,
+) -> bool {
+    left.device_plan.id == right.device_plan.id
+        && left.device_plan.fingerprint == right.device_plan.fingerprint
+        && left.recipes.len() == right.recipes.len()
+        && left
+            .recipes
+            .iter()
+            .zip(&right.recipes)
+            .all(|(left, right)| {
+                left.id == right.id
+                    && left.selected == right.selected
+                    && left.fingerprint == right.fingerprint
+                    && left.inputs.len() == right.inputs.len()
+                    && left.inputs.iter().zip(&right.inputs).all(|(left, right)| {
+                        left.key == right.key && left.fingerprint == right.fingerprint
+                    })
+            })
+}
+
+fn expanded_recipe_contracts(
+    selected: &[String],
+    recipes: &HashMap<&str, &Recipe>,
+) -> Result<Vec<String>, UserConfigurationLoadError> {
+    fn visit(
+        id: &str,
+        recipes: &HashMap<&str, &Recipe>,
+        visiting: &mut HashSet<String>,
+        expanded: &mut HashSet<String>,
+    ) -> Result<(), UserConfigurationLoadError> {
+        if expanded.contains(id) {
+            return Ok(());
+        }
+        let recipe = recipes.get(id).ok_or_else(|| {
+            UserConfigurationLoadError::structural(format!(
+                "Recipe '{id}' is unavailable for compatibility baseline creation."
+            ))
+        })?;
+        if !visiting.insert(id.to_string()) {
+            return Err(UserConfigurationLoadError::structural(format!(
+                "Recipe dependency cycle reaches '{id}'."
+            )));
+        }
+        for dependency in &recipe.recipe_dependencies {
+            visit(dependency, recipes, visiting, expanded)?;
+        }
+        visiting.remove(id);
+        expanded.insert(id.to_string());
+        Ok(())
+    }
+
+    let mut expanded = HashSet::new();
+    let mut visiting = HashSet::new();
+    for id in selected {
+        visit(id, recipes, &mut visiting, &mut expanded)?;
+    }
+    let mut expanded = expanded.into_iter().collect::<Vec<_>>();
+    expanded.sort();
+    Ok(expanded)
+}
+
+fn recipe_contract_value(recipe: &Recipe) -> JsonValue {
+    let inputs = recipe
+        .inputs
+        .iter()
+        .map(|(id, input)| (id.clone(), input_contract_value(id, input)))
+        .collect::<JsonMap<_, _>>();
+    let artifacts = recipe
+        .artifacts
+        .iter()
+        .map(|(id, artifact)| {
+            (
+                id.clone(),
+                json!({
+                    "type": artifact.type_name,
+                    "url": artifact.url,
+                    "cache": artifact.cache,
+                }),
+            )
+        })
+        .collect::<JsonMap<_, _>>();
+    let artifact_groups = recipe
+        .artifact_groups
+        .iter()
+        .map(|(id, members)| (id.clone(), json!(sorted_strings(members.clone()))))
+        .collect::<JsonMap<_, _>>();
+    json!({
+        "id": recipe.id,
+        "dependencies": sorted_strings(recipe.recipe_dependencies.clone()),
+        "provides": sorted_strings(recipe.provides.features.clone()),
+        "inputs": inputs,
+        "artifacts": artifacts,
+        "artifactGroups": artifact_groups,
+        "steps": recipe.steps.iter().map(step_contract_value).collect::<Vec<_>>(),
+    })
+}
+
+fn input_contract_value(id: &str, input: &InputDeclaration) -> JsonValue {
+    json!({
+        "id": id,
+        "type": input.type_name,
+        "role": input.role,
+        "required": input.required,
+        "multiple": input.multiple,
+        "validation": {
+            "mustExist": input.validation.must_exist,
+            "allowedExtensions": sorted_strings(input.validation.allowed_extensions.clone()),
+            "pathKind": input.validation.path_kind,
+            "allowedPrefixes": sorted_strings(input.validation.allowed_prefixes.clone()),
+        },
+        "default": input.default,
+        "options": input.options.iter().map(|option| option.value.clone()).collect::<Vec<_>>(),
+        "sensitive": input.sensitive,
+        "metadata": input.metadata,
+    })
+}
+
+fn step_contract_value(step: &crate::model::Step) -> JsonValue {
+    json!({
+        "id": step.id,
+        "type": step.type_name,
+        "userToggleable": step.user_toggleable,
+        "dependencies": sorted_strings(step.dependencies.clone()),
+        "constraints": {
+            "capabilities": sorted_strings(step.constraints.capabilities.clone()),
+            "conflictsWith": sorted_strings(step.constraints.conflicts_with.clone()),
+        },
+        "skipIf": step.skip_if.iter().map(condition_contract_value).collect::<Vec<_>>(),
+        "params": step.params.iter().map(|(key, value)| {
+            let value = match value {
+                ParamValue::Ref(reference) => json!({ "ref": reference }),
+                ParamValue::Literal(value) => json!({ "literal": value }),
+            };
+            (key.clone(), value)
+        }).collect::<JsonMap<_, _>>(),
+        "verify": step.verify.iter().map(condition_contract_value).collect::<Vec<_>>(),
+    })
+}
+
+fn condition_contract_value(condition: &StepCondition) -> JsonValue {
+    json!({ "type": condition.type_name, "params": condition.params })
+}
+
+fn sorted_strings(mut values: Vec<String>) -> Vec<String> {
+    values.sort();
+    values
+}
+
+fn fingerprint_value(value: &JsonValue) -> String {
+    let canonical = canonical_json(value);
+    let bytes = serde_json::to_vec(&canonical).expect("JSON contract values must serialize");
+    Sha256::digest(bytes)
+        .iter()
+        .map(|byte| format!("{byte:02x}"))
+        .collect()
+}
+
+fn canonical_json(value: &JsonValue) -> JsonValue {
+    match value {
+        JsonValue::Object(mapping) => {
+            let mut entries = mapping.iter().collect::<Vec<_>>();
+            entries.sort_by(|left, right| left.0.cmp(right.0));
+            JsonValue::Object(
+                entries
+                    .into_iter()
+                    .map(|(key, value)| (key.clone(), canonical_json(value)))
+                    .collect(),
+            )
+        }
+        JsonValue::Array(values) => JsonValue::Array(values.iter().map(canonical_json).collect()),
+        value => value.clone(),
+    }
 }
 
 fn validate_with_recipes(
