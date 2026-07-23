@@ -475,6 +475,36 @@ test("CI continuously verifies both execution feature configurations", () => {
   );
 });
 
+test("device qualification is backend-authored, sanitized, and non-authorizing", () => {
+  const app = read("src-tauri/src/lib.rs");
+  const api = read("src/api.ts");
+  const types = read("src/types.ts");
+  const qualification = read("src-tauri/src/device_qualification.rs");
+  const execution = read("src-tauri/src/execution.rs");
+  const qualificationApi = sourceSlice(
+    api,
+    "deviceQualification:",
+    "\n  startRealExecution:",
+  );
+
+  assert.match(app, /mod device_qualification;/);
+  assert.match(app, /device_qualification::get_device_qualification,/);
+  assert.match(
+    qualificationApi,
+    /invoke<DeviceQualificationSnapshot>\("get_device_qualification"\)/,
+  );
+  assert.doesNotMatch(
+    qualificationApi,
+    /\b(?:serial|adbPath|deviceHandle|command|root|plan|reviewHandle|executionHandle)\b/,
+  );
+  assert.match(types, /readonly root: "notChecked";/);
+  assert.doesNotMatch(types, /interface DeviceQualificationSnapshot[\s\S]{0,900}\bserial\b/i);
+  assert.match(qualification, /RootQualificationState::NotChecked/);
+  assert.match(qualification, /devices\.len\(\) != 1/);
+  assert.doesNotMatch(qualification, /Command::new|std::process|listAdbDevices|probeDevice|startExecution/);
+  assert.doesNotMatch(execution, /DeviceQualificationSnapshotDto|qualification_revision/);
+});
+
 test("React cannot supply trusted real-execution or launch data", () => {
   const api = read("src/api.ts");
   const execution = read("src-tauri/src/execution.rs");

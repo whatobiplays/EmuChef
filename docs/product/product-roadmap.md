@@ -442,7 +442,11 @@ work.
 ### 6B — Device Discovery and Qualification
 
 **Owner: EmuChef proper / Shared Runtime**  
-**Status: Planned**
+**Status: In progress**
+
+Slice 1 establishes the backend-owned, sanitized qualification contract and
+deterministic fixture classifier. It does not perform live ADB inspection,
+probe root, select a device, persist authority, or authorize execution.
 
 #### Objective
 

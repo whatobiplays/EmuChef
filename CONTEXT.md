@@ -995,3 +995,15 @@ tickets independently, and generates a path-safe SHA-256 manifest. The
 maintained macOS release verification command supports exact Tauri artifact
 discovery or explicit artifact paths, runs the existing bundle and packaged
 runtime smokes, and never submits, staples, uploads, or publishes artifacts.
+
+## Phase 6B device qualification contract
+
+Phase 6B Slice 1 adds a separate Rust-owned, read-only device qualification
+projection. The classifier distinguishes feature-disabled, absent,
+unauthorized, offline, ambiguous, unsupported, incompletely qualified, and
+initially supported states using sanitized normalized facts. Root remains
+explicitly `notChecked`; multiple devices never produce an implicitly selected
+target. Snapshots carry runtime-generation and qualification-revision fields so
+later live discovery can invalidate stale authority. This slice does not run
+ADB qualification commands, persist qualification, change execution
+eligibility, or authorize real execution.

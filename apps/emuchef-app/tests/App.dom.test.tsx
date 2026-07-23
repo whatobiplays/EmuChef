@@ -15,6 +15,7 @@ const mockApi = vi.hoisted(() => ({
   describeConfiguration: vi.fn(),
   endUpdateInteractionSession: vi.fn(),
   executionCapabilities: vi.fn(),
+  deviceQualification: vi.fn(),
   installPlatformToolsSelection: vi.fn(),
   listRecentConfigurations: vi.fn(),
   matchDevice: vi.fn(),
@@ -257,6 +258,18 @@ function resetApi(): void {
     platformToolsStatus: "notApplicable",
     executorReadiness: "notCompiled",
   } satisfies ExecutionCapabilities);
+  mockApi.deviceQualification.mockResolvedValue({
+    state: "notApplicable",
+    summary: "Real-device qualification is not compiled in this build.",
+    limitations: ["Simulation remains available."],
+    androidMajor: null,
+    androidApiLevel: null,
+    abiClass: null,
+    root: "notChecked",
+    runtimeGeneration: 0,
+    qualificationRevision: 0,
+    deviceIdentity: null,
+  });
   mockApi.catalog.mockResolvedValue({
     catalog: {
       sourceKind: "bundled",
@@ -356,6 +369,16 @@ describe("Phase 6A execution capability reporting", () => {
     expect(status?.textContent).toContain("Platform ToolsNot applicable");
     expect(status?.textContent).toContain("Executor readinessNot compiled");
     expect(status?.textContent).not.toContain("Mode");
+  });
+
+  test("shows the backend-authored device qualification summary", async () => {
+    await renderReadyApp();
+
+    const status = document.querySelector(".status-panel");
+    expect(status?.textContent).toContain(
+      "Device qualificationReal-device qualification is not compiled in this build.",
+    );
+    expect(mockApi.deviceQualification).toHaveBeenCalledTimes(1);
   });
 
   test("shows the backend-provided feature-enabled capability without starting execution", async () => {

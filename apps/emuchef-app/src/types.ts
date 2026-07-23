@@ -349,6 +349,29 @@ export interface ExecutionCapabilities {
   readonly executorReadiness: ExecutorReadiness;
 }
 
+export type DeviceQualificationState =
+  | "notApplicable"
+  | "noDevice"
+  | "unauthorized"
+  | "offline"
+  | "insufficientlyQualified"
+  | "unsupported"
+  | "supported";
+
+/** Read-only, sanitized qualification authored by Rust. */
+export interface DeviceQualificationSnapshot {
+  readonly state: DeviceQualificationState;
+  readonly summary: string;
+  readonly limitations: string[];
+  readonly androidMajor: number | null;
+  readonly androidApiLevel: number | null;
+  readonly abiClass: "arm64" | "arm32" | "x86_64" | null;
+  readonly root: "notChecked";
+  readonly runtimeGeneration: number;
+  readonly qualificationRevision: number;
+  readonly deviceIdentity: string | null;
+}
+
 export interface RealExecutionConfirmation {
   phrase: string;
   irreversibleChangesAcknowledged: boolean;

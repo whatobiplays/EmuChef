@@ -1,6 +1,7 @@
 mod adb;
 mod catalog;
 mod commands;
+mod device_qualification;
 mod execution;
 mod handles;
 mod menu;
@@ -126,6 +127,7 @@ pub fn run() {
             execution::get_real_execution_events,
             execution::cancel_real_execution,
             execution::export_execution_report,
+            device_qualification::get_device_qualification,
             execution::launch_configured_app,
             support::get_cache_inventory,
             support::get_support_snapshot,

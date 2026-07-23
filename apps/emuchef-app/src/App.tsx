@@ -38,6 +38,7 @@ import type {
   ConfigurationDescription,
   DeviceSummary,
   ExecutionCapabilities,
+  DeviceQualificationSnapshot,
   InputDescriptor,
   RecentConfiguration,
   RuntimeStatus,
@@ -143,6 +144,7 @@ export function App({ dialogController: suppliedDialogController }: AppProps = {
   const [notice, setNotice] = useState<string | null>(null);
   const [operationError, setOperationError] = useState<string | null>(null);
   const [executionCapabilities, setExecutionCapabilities] = useState<ExecutionCapabilities | null>(null);
+  const [deviceQualification, setDeviceQualification] = useState<DeviceQualificationSnapshot | null>(null);
   const [executionCapabilitiesRefresh, setExecutionCapabilitiesRefresh] = useState<
     "idle" | "refreshing" | "failed"
   >("idle");
@@ -358,14 +360,16 @@ export function App({ dialogController: suppliedDialogController }: AppProps = {
   }, [navigationBlocked, updateInteractionRevision]);
 
   const initialize = useCallback(async (runtimeGeneration = runtimeGenerationRef.current) => {
-    const [runtimeStatus, adbStatus] = await Promise.all([
+    const [runtimeStatus, adbStatus, , qualification] = await Promise.all([
       api.runtimeStatus(),
       api.adbStatus(),
       refreshExecutionCapabilities(true),
+      api.deviceQualification(),
     ]);
     if (runtimeGenerationRef.current !== runtimeGeneration) return;
     setRuntime(runtimeStatus);
     setAdb(adbStatus);
+    setDeviceQualification(qualification);
     if (runtimeStatus.status === "ready") {
       const [nextCatalog, recents] = await Promise.all([
         api.catalog(),
@@ -2766,6 +2770,10 @@ export function App({ dialogController: suppliedDialogController }: AppProps = {
                 </dd>
               </div>
               <div><dt>Setup catalog</dt><dd>Ready</dd></div>
+              <div>
+                <dt>Device qualification</dt>
+                <dd>{deviceQualification?.summary ?? "Status unavailable"}</dd>
+              </div>
               <div>
                 <dt>Real-device execution</dt>
                 <dd>{realExecutionCompiled ? "Compiled in" : "Not compiled"}</dd>
