@@ -209,6 +209,7 @@ fn capabilities_include_additive_product_runtime_surface() {
             "describeCatalog",
             "listAdbDevices",
             "probeDevice",
+            "qualifyConnectedDevice",
             "inspectApk",
             "generateAppRecipeDraft",
             "generateRemoteAppRecipeDraft",

@@ -1420,12 +1420,16 @@ export function App({ dialogController: suppliedDialogController }: AppProps = {
       announce("Refreshing connected devices.");
     }
     try {
-      const next = await api.pollDevices(expectedSupportGeneration);
+      const [next, qualification] = await Promise.all([
+        api.pollDevices(expectedSupportGeneration),
+        api.deviceQualification(),
+      ]);
       if (
         devicePollGenerationRef.current !== generation
         || runtimeGenerationRef.current !== runtimeGeneration
       ) return null;
       setDevices(next);
+      setDeviceQualification(qualification);
       const current = workflowRef.current;
       const selected = current.deviceHandle
         ? next.find((device) => device.deviceHandle === current.deviceHandle)

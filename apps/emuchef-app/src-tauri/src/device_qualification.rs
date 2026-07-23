@@ -5,6 +5,10 @@
 //! bounded live inspection is added by a later slice.
 
 use serde::Serialize;
+use serde_json::{json, Value};
+use tauri::State;
+
+use crate::commands::{current_adb_path, safe_error, AppState};
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -239,8 +243,99 @@ fn snapshot(
 }
 
 #[tauri::command]
-pub fn get_device_qualification() -> DeviceQualificationSnapshotDto {
-    classify(cfg!(feature = "real-execution"), 0, 0, &[])
+pub fn get_device_qualification(
+    state: State<'_, AppState>,
+) -> Result<DeviceQualificationSnapshotDto, String> {
+    let runtime_generation = state.sidecar.try_generation().map_err(|_| {
+        safe_error(
+            "runtime_generation_unavailable",
+            "Device qualification state is temporarily unavailable.",
+        )
+    })?;
+    let qualification_revision = state
+        .adb
+        .lock()
+        .map_err(|_| {
+            safe_error(
+                "adb_state_unavailable",
+                "Platform-Tools setup state is unavailable.",
+            )
+        })?
+        .revision();
+
+    if !cfg!(feature = "real-execution") {
+        return Ok(classify(
+            false,
+            runtime_generation,
+            qualification_revision,
+            &[],
+        ));
+    }
+
+    let adb_path = current_adb_path(&state)?;
+    let observed = state
+        .sidecar
+        .request("qualifyConnectedDevice", json!({ "adbPath": adb_path }))
+        .map_err(|_| {
+            safe_error(
+                "device_qualification_failed",
+                "Connected-device qualification could not be completed.",
+            )
+        })?;
+    Ok(classify_observed(
+        runtime_generation,
+        qualification_revision,
+        &observed,
+    ))
+}
+
+fn classify_observed(
+    runtime_generation: u64,
+    qualification_revision: u64,
+    observed: &Value,
+) -> DeviceQualificationSnapshotDto {
+    let state = observed.get("state").and_then(Value::as_str);
+    let devices = match state {
+        Some("no_device") => Vec::new(),
+        Some("multiple_devices") => vec![online_placeholder("first"), online_placeholder("second")],
+        Some("unauthorized") => vec![observed_device(observed, ObservedDeviceState::Unauthorized)],
+        Some("offline") => vec![observed_device(observed, ObservedDeviceState::Offline)],
+        Some("online") => vec![observed_device(observed, ObservedDeviceState::Online)],
+        _ => vec![ObservedDevice {
+            opaque_identity: "qualification-device",
+            state: ObservedDeviceState::Online,
+            android_major: None,
+            android_api_level: None,
+            abi: None,
+        }],
+    };
+    classify(true, runtime_generation, qualification_revision, &devices)
+}
+
+fn observed_device<'a>(observed: &'a Value, state: ObservedDeviceState) -> ObservedDevice<'a> {
+    ObservedDevice {
+        opaque_identity: "qualification-device",
+        state,
+        android_major: observed
+            .get("androidMajor")
+            .and_then(Value::as_u64)
+            .map(|value| value as u32),
+        android_api_level: observed
+            .get("androidApiLevel")
+            .and_then(Value::as_u64)
+            .map(|value| value as u32),
+        abi: observed.get("abi").and_then(Value::as_str),
+    }
+}
+
+fn online_placeholder(identity: &str) -> ObservedDevice<'_> {
+    ObservedDevice {
+        opaque_identity: identity,
+        state: ObservedDeviceState::Online,
+        android_major: None,
+        android_api_level: None,
+        abi: None,
+    }
 }
 
 #[cfg(test)]
@@ -385,5 +480,38 @@ mod tests {
             first.qualification_revision,
             restarted.qualification_revision
         );
+    }
+
+    #[test]
+    fn trusted_observation_is_classified_without_projecting_the_serial() {
+        let result = classify_observed(
+            9,
+            11,
+            &json!({
+                "state": "online",
+                "serial": "exact-sensitive-serial",
+                "androidMajor": 14,
+                "androidApiLevel": 34,
+                "abi": "arm64-v8a",
+            }),
+        );
+        assert_eq!(result.state, DeviceQualificationState::Supported);
+        assert_eq!(
+            result.device_identity.as_deref(),
+            Some("qualification-device")
+        );
+        assert!(!serde_json::to_string(&result)
+            .unwrap()
+            .contains("exact-sensitive-serial"));
+    }
+
+    #[test]
+    fn trusted_multiple_device_observation_never_selects_a_target() {
+        let result = classify_observed(2, 3, &json!({ "state": "multiple_devices" }));
+        assert_eq!(
+            result.state,
+            DeviceQualificationState::InsufficientlyQualified
+        );
+        assert_eq!(result.device_identity, None);
     }
 }

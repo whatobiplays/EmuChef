@@ -378,7 +378,7 @@ describe("Phase 6A execution capability reporting", () => {
     expect(status?.textContent).toContain(
       "Device qualificationReal-device qualification is not compiled in this build.",
     );
-    expect(mockApi.deviceQualification).toHaveBeenCalledTimes(1);
+    expect(mockApi.deviceQualification).toHaveBeenCalledTimes(2);
   });
 
   test("shows the backend-provided feature-enabled capability without starting execution", async () => {

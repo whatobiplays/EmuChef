@@ -118,6 +118,77 @@ pub(crate) fn probe_device(adb_path: &str, serial: &str) -> Result<Value, ApiErr
     })
 }
 
+/// Perform one bounded, read-only qualification pass. Exact serials remain in
+/// the trusted sidecar response and are replaced at the Tauri IPC boundary.
+pub(crate) fn qualify_connected_device(adb_path: &str) -> Result<Value, ApiError> {
+    qualify_connected_device_with_runner(adb_path, &ProcessCommandRunner)
+}
+
+fn qualify_connected_device_with_runner(
+    adb_path: &str,
+    runner: &impl CommandRunner,
+) -> Result<Value, ApiError> {
+    let inventory = list_adb_devices_with_runner(adb_path, runner)?;
+    let devices = inventory
+        .get("devices")
+        .and_then(Value::as_array)
+        .cloned()
+        .unwrap_or_default();
+    if devices.is_empty() {
+        return Ok(json!({ "state": "no_device" }));
+    }
+    if devices.len() != 1 {
+        return Ok(json!({ "state": "multiple_devices" }));
+    }
+
+    let device = &devices[0];
+    let serial = device
+        .get("serial")
+        .and_then(Value::as_str)
+        .ok_or_else(|| {
+            ApiError::command_failed(
+                "ADB device inventory was incomplete.",
+                json!({ "reason": "adb_inventory_invalid" }),
+            )
+        })?;
+    match device.get("state").and_then(Value::as_str) {
+        Some("unauthorized") => Ok(json!({
+            "state": "unauthorized",
+            "serial": serial,
+        })),
+        Some("offline") => Ok(json!({
+            "state": "offline",
+            "serial": serial,
+        })),
+        Some("available") => {
+            let probe = AdbDeviceProbe {
+                config: AdbProbeConfig {
+                    adb_path: adb_path.to_string(),
+                    serial: Some(serial.to_string()),
+                },
+                runner,
+            };
+            let facts = probe.detect().map_err(|_| {
+                ApiError::command_failed(
+                    "Connected device qualification facts could not be read.",
+                    json!({ "reason": "adb_qualification_probe_failed" }),
+                )
+            })?;
+            Ok(json!({
+                "state": "online",
+                "serial": serial,
+                "androidMajor": facts.android_version,
+                "androidApiLevel": facts.android_api_level,
+                "abi": facts.abis.first(),
+            }))
+        }
+        _ => Err(ApiError::command_failed(
+            "ADB device inventory contained an unsupported state.",
+            json!({ "reason": "adb_inventory_invalid" }),
+        )),
+    }
+}
+
 #[derive(Clone, Debug, Default, Deserialize)]
 struct ProfileMatchYaml {
     #[serde(default)]
@@ -546,6 +617,100 @@ mod tests {
             .unwrap()
             .iter()
             .all(|device| device["state"] == "available"));
+    }
+
+    #[test]
+    fn qualification_returns_inventory_states_without_probing() {
+        for (inventory, expected) in [
+            ("List of devices attached\n\n", "no_device"),
+            (
+                "List of devices attached\none unauthorized\n",
+                "unauthorized",
+            ),
+            ("List of devices attached\none offline\n", "offline"),
+            (
+                "List of devices attached\none device\ntwo device\n",
+                "multiple_devices",
+            ),
+        ] {
+            let runner = FakeRunner {
+                calls: RefCell::new(Vec::new()),
+                output: Ok(CommandOutput {
+                    status_code: Some(0),
+                    stdout: inventory.to_string(),
+                    stderr: String::new(),
+                }),
+            };
+            let result = qualify_connected_device_with_runner("/managed/adb", &runner).unwrap();
+            assert_eq!(result["state"], expected);
+            assert_eq!(runner.calls.borrow().len(), 1);
+        }
+    }
+
+    struct SequenceRunner {
+        calls: RefCell<Vec<Vec<String>>>,
+        outputs: RefCell<Vec<CommandOutput>>,
+    }
+
+    impl CommandRunner for SequenceRunner {
+        fn run(&self, argv: &[String]) -> Result<CommandOutput, DeviceProbeError> {
+            self.calls.borrow_mut().push(argv.to_vec());
+            Ok(self.outputs.borrow_mut().remove(0))
+        }
+    }
+
+    #[test]
+    fn qualification_probes_only_one_online_device() {
+        let runner = SequenceRunner {
+            calls: RefCell::new(Vec::new()),
+            outputs: RefCell::new(vec![
+                CommandOutput {
+                    status_code: Some(0),
+                    stdout: "List of devices attached\nsecret-serial device model:Pocket\n"
+                        .to_string(),
+                    stderr: String::new(),
+                },
+                CommandOutput {
+                    status_code: Some(0),
+                    stdout: "[ro.build.version.release]: [14]\n[ro.build.version.sdk]: [34]\n[ro.product.cpu.abilist]: [arm64-v8a,armeabi-v7a]\n".to_string(),
+                    stderr: String::new(),
+                },
+            ]),
+        };
+        let result = qualify_connected_device_with_runner("/managed/adb", &runner).unwrap();
+        assert_eq!(result["state"], "online");
+        assert_eq!(result["serial"], "secret-serial");
+        assert_eq!(result["androidMajor"], 14);
+        assert_eq!(result["androidApiLevel"], 34);
+        assert_eq!(result["abi"], "arm64-v8a");
+        assert_eq!(runner.calls.borrow().len(), 2);
+        assert_eq!(
+            runner.calls.borrow()[1],
+            vec!["/managed/adb", "-s", "secret-serial", "shell", "getprop"]
+        );
+    }
+
+    #[test]
+    fn qualification_probe_failure_is_stable_and_redacted() {
+        let runner = SequenceRunner {
+            calls: RefCell::new(Vec::new()),
+            outputs: RefCell::new(vec![
+                CommandOutput {
+                    status_code: Some(0),
+                    stdout: "List of devices attached\nprivate-serial device\n".to_string(),
+                    stderr: String::new(),
+                },
+                CommandOutput {
+                    status_code: Some(1),
+                    stdout: String::new(),
+                    stderr: "private device failure".to_string(),
+                },
+            ]),
+        };
+        let error = qualify_connected_device_with_runner("/private/adb", &runner).unwrap_err();
+        assert_eq!(error.details["reason"], "adb_qualification_probe_failed");
+        assert!(!error.message.contains("private-serial"));
+        assert!(!error.message.contains("/private"));
     }
 
     #[test]

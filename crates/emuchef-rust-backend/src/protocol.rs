@@ -19,6 +19,7 @@ pub const CAPABILITIES: &[&str] = &[
     "describeCatalog",
     "listAdbDevices",
     "probeDevice",
+    "qualifyConnectedDevice",
     "inspectApk",
     "generateAppRecipeDraft",
     "generateRemoteAppRecipeDraft",

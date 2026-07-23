@@ -209,6 +209,7 @@ fn preserves_one_shot_json_and_sidecar_dispatch() {
             "describeCatalog",
             "listAdbDevices",
             "probeDevice",
+            "qualifyConnectedDevice",
             "inspectApk",
             "generateAppRecipeDraft",
             "generateRemoteAppRecipeDraft",
