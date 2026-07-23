@@ -592,21 +592,40 @@ exported.
 
 Phase 2B guarded real-device execution is implemented behind the
 default-disabled Cargo feature `real-execution`. Rust projects the immutable
-`ExecutionCapabilities` contract with `realExecutionCompiled` derived only from
-that compile-time feature. Ordinary development and production commands report
-`Real-device execution: Not compiled` and remain simulation-only. The
-development-only `tauri:dev:real` npm command intentionally passes
-`--features real-execution` through the Tauri CLI and reports
-`Real-device execution: Compiled in`; it does not alter Cargo defaults or any
-build, bundle, release, or packaging command. Compiled in does not mean ready,
-connected, qualified, authorized, available, or enabled for execution.
-Platform-Tools and executor-readiness diagnostics remain separate Phase 6A
-work. Trusted Tauri code owns confirmation, mode selection, exact target
-identity, reviewed plans and digests, Platform-Tools revalidation, unambiguous
-retained BYO file/directory checks, and sidecar identifiers. Platform-specific
-packaged-device evidence, privacy and security approval, an operator runbook,
-and a separate release decision are required before a release build opts into
-the feature.
+`ExecutionCapabilities` contract containing `realExecutionCompiled`,
+`platformToolsStatus`, and `executorReadiness`. Ordinary development and
+production commands report real execution as not compiled, Platform-Tools as
+not applicable, and the executor as not compiled; they remain simulation-only
+and do not perform readiness validation. The development-only
+`tauri:dev:real` npm command intentionally passes `--features real-execution`
+through the Tauri CLI and reports real execution as compiled; it does not alter
+Cargo defaults or any build, bundle, release, or packaging command.
+
+Feature-enabled capability refresh clones the resolved managed or development
+ADB state and its revision while holding the trusted mutex, releases the mutex,
+then performs bounded local signature, retained-file, and `adb version`
+validation without device enumeration, server startup, or device commands. A
+result is published only if both the ADB revision and runtime generation still
+match. Platform-Tools reports ready, not found, invalid, or check failed, while
+executor readiness reports ready, blocked, or unknown. Infrastructure failures
+surface only the sanitized command error
+`execution_capabilities_unavailable`; tooling outcomes remain typed capability
+states.
+
+Capability refresh runs at startup, after app-service restart, and after
+managed Platform-Tools install, replacement, or removal. While a lifecycle
+refresh is active, React retains the prior valid capability value and marks the
+diagnostic rows as refreshing. A failed refresh retains that value and reports
+status unavailable rather than manufacturing a new diagnostic. Capability
+readiness is informational: it does not change real-execution visibility,
+eligibility, confirmation, mode selection, or start authority. Guarded real
+execution independently revalidates Platform-Tools immediately before listing
+devices or starting execution. Trusted Tauri code owns confirmation, mode
+selection, exact target identity, reviewed plans and digests, Platform-Tools
+revalidation, unambiguous retained BYO file/directory checks, and sidecar
+identifiers. Platform-specific packaged-device evidence, privacy and security
+approval, an operator runbook, and a separate release decision are required
+before a release build opts into the feature.
 
 Tauri launches the sidecar and negotiates the `phase0_end_user_runtime`
 extension plus `describeCatalog`, `listAdbDevices`, `probeDevice`,

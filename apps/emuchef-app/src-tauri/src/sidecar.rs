@@ -82,10 +82,16 @@ impl SidecarState {
     }
 
     pub fn generation(&self) -> u64 {
+        self.try_generation().expect("sidecar mutex poisoned")
+    }
+
+    /// Return the runtime generation without panicking when process
+    /// infrastructure is unavailable.
+    pub fn try_generation(&self) -> Result<u64, ()> {
         self.inner
             .lock()
-            .expect("sidecar mutex poisoned")
-            .generation
+            .map(|client| client.generation)
+            .map_err(|_| ())
     }
 
     pub fn status(&self) -> RuntimeStatusDto {

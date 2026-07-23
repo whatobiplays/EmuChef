@@ -324,11 +324,32 @@ test("real execution is default-disabled with compile-time-only enablement", () 
   assert.match(featuresSection, /^real-execution\s*=\s*\[\s*\]\s*$/m);
   assert.match(
     execution,
-    /pub struct ExecutionCapabilities \{\s*pub real_execution_compiled: bool,\s*\}/,
+    /pub struct ExecutionCapabilities \{\s*pub real_execution_compiled: bool,\s*pub platform_tools_status: PlatformToolsStatus,\s*pub executor_readiness: ExecutorReadiness,\s*\}/,
   );
   assert.match(
     execution,
-    /pub fn get_execution_capabilities\(\) -> ExecutionCapabilities \{\s*ExecutionCapabilities \{\s*real_execution_compiled: cfg!\(feature = "real-execution"\),\s*\}\s*\}/,
+    /pub async fn get_execution_capabilities\(\s*state: State<'_, AppState>,\s*\) -> Result<ExecutionCapabilities, String>/,
+  );
+  const capabilityCommand = sourceSlice(
+    execution,
+    "pub async fn get_execution_capabilities",
+    "\nfn execution_capabilities_unavailable",
+  );
+  assert.match(capabilityCommand, /if !cfg!\(feature = "real-execution"\)/);
+  assert.match(capabilityCommand, /\.readiness_snapshot\(\)/);
+  assert.match(capabilityCommand, /tauri::async_runtime::spawn_blocking/);
+  assert.match(capabilityCommand, /generations\.matches\(current_adb_revision, current_runtime_generation\)/);
+  assert.doesNotMatch(
+    capabilityCommand,
+    /listAdbDevices|probeDevice|startExecution|adb\s+devices|start-server|reconnect|std::env/,
+  );
+  assert.match(
+    execution,
+    /fn execution_capabilities_unavailable\(\) -> String \{\s*safe_error\(\s*"execution_capabilities_unavailable"/,
+  );
+  assert.doesNotMatch(
+    capabilityCommand,
+    /safe_error\(\s*"(?!execution_capabilities_unavailable)/,
   );
   assert.match(appBackend, /execution::get_execution_capabilities,/);
   assert.doesNotMatch(`${execution}\n${appBackend}\n${api}`, /get_real_execution_availability/);
@@ -338,8 +359,10 @@ test("real execution is default-disabled with compile-time-only enablement", () 
   );
   assert.match(
     types,
-    /export interface ExecutionCapabilities \{\s*readonly realExecutionCompiled: boolean;\s*\}/,
+    /export interface ExecutionCapabilities \{\s*readonly realExecutionCompiled: boolean;\s*readonly platformToolsStatus: PlatformToolsStatus;\s*readonly executorReadiness: ExecutorReadiness;\s*\}/,
   );
+  assert.match(types, /export type PlatformToolsStatus =\s*\| "notApplicable"\s*\| "ready"\s*\| "notFound"\s*\| "invalid"\s*\| "checkFailed";/);
+  assert.match(types, /export type ExecutorReadiness =\s*\| "notCompiled"\s*\| "ready"\s*\| "blocked"\s*\| "unknown";/);
 
   const startCommand = sourceSlice(
     execution,
@@ -385,6 +408,26 @@ test("real execution is default-disabled with compile-time-only enablement", () 
   );
   assert.match(reviewStep, /\{realExecutionCompiled && \(\s*<button[\s\S]{0,400}>\s*Apply to Device\s*<\/button>/);
   assert.match(app, /activeDialog\?\.payload\.kind === "real-execution" && workflow\.review/);
+
+  const readinessProbe = sourceSlice(
+    read("src-tauri/src/adb.rs"),
+    "impl AdbReadinessSnapshot",
+    "\nfn secure_open_zip",
+  );
+  assert.match(readinessProbe, /validate_current_install/);
+  assert.doesNotMatch(
+    readinessProbe,
+    /"devices"|"start-server"|"reconnect"|listAdbDevices|probeDevice|startExecution/,
+  );
+
+  const realStart = sourceSlice(
+    execution,
+    "fn start_real_execution_inner",
+    "\nfn request_real_start",
+  );
+  assert.match(realStart, /\.revalidate_for_execution\(expected_adb\)/);
+  assert.ok(realStart.indexOf("revalidate_for_execution") < realStart.indexOf('"listAdbDevices"'));
+  assert.doesNotMatch(realStart, /ExecutionCapabilities|platform_tools_status|executor_readiness/);
 });
 
 test("accessible fallbacks and technical details cannot expose protected data", () => {

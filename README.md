@@ -131,6 +131,18 @@ data. See the [Phase 1 review contract](docs/product/phase-1-read-only-app.md),
 the [Phase 2A simulated execution contract](docs/product/phase-2a-simulated-execution.md),
 and [Platform-Tools import policy](docs/product/platform-tools-import.md).
 
+Rust authors the end-user app's execution-capability projection. Ordinary
+builds report real execution as not compiled, Platform-Tools as not applicable,
+and the executor as not compiled. The intentional `tauri:dev:real` command
+reports real execution as compiled and performs a fresh, bounded local
+validation of the resolved managed or development Platform-Tools installation
+before reporting typed Platform-Tools and executor readiness. This diagnostic
+does not list devices, start the ADB server, authorize execution, or replace
+the independent validation performed when guarded real execution starts.
+Readiness refreshes after app-service restart and managed Platform-Tools
+install, replacement, or removal without exposing executable paths or command
+output to React.
+
 ## Config Editor
 
 ```bash

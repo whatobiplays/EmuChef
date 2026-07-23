@@ -99,6 +99,21 @@ const WORKFLOW_STEPS = [
   { step: "execution", label: "Simulated Run" },
 ] as const;
 
+const platformToolsStatusLabels: Record<ExecutionCapabilities["platformToolsStatus"], string> = {
+  notApplicable: "Not applicable",
+  ready: "Ready",
+  notFound: "Not found",
+  invalid: "Invalid",
+  checkFailed: "Check failed",
+};
+
+const executorReadinessLabels: Record<ExecutionCapabilities["executorReadiness"], string> = {
+  notCompiled: "Not compiled",
+  ready: "Ready",
+  blocked: "Blocked",
+  unknown: "Unknown",
+};
+
 export { createAppDialogController } from "./app-dialogs";
 
 interface AppProps {
@@ -128,6 +143,9 @@ export function App({ dialogController: suppliedDialogController }: AppProps = {
   const [notice, setNotice] = useState<string | null>(null);
   const [operationError, setOperationError] = useState<string | null>(null);
   const [executionCapabilities, setExecutionCapabilities] = useState<ExecutionCapabilities | null>(null);
+  const [executionCapabilitiesRefresh, setExecutionCapabilitiesRefresh] = useState<
+    "idle" | "refreshing" | "failed"
+  >("idle");
   const [realConfirmation, setRealConfirmation] = useState(emptyRealExecutionConfirmation);
   const [repairPreparing, setRepairPreparing] = useState(false);
   const [startupReady, setStartupReady] = useState(false);
@@ -159,6 +177,8 @@ export function App({ dialogController: suppliedDialogController }: AppProps = {
   const appLifecycleGenerationRef = useRef(0);
   const runtimeGenerationRef = useRef(0);
   const platformToolsGenerationRef = useRef(0);
+  const executionCapabilitiesGenerationRef = useRef(0);
+  const executionCapabilitiesRef = useRef<ExecutionCapabilities | null>(null);
   const devicePollGenerationRef = useRef(0);
   const deviceSelectionGenerationRef = useRef(0);
   const deviceRefreshTimerRef = useRef<number | null>(null);
@@ -185,6 +205,26 @@ export function App({ dialogController: suppliedDialogController }: AppProps = {
     const update = (previous: { id: number; text: string }) => ({ id: previous.id + 1, text });
     if (assertive) setAssertiveAnnouncement(update);
     else setPoliteAnnouncement(update);
+  }, []);
+
+  const refreshExecutionCapabilities = useCallback(async (required = false) => {
+    const generation = ++executionCapabilitiesGenerationRef.current;
+    if (executionCapabilitiesRef.current) {
+      setExecutionCapabilitiesRefresh("refreshing");
+    }
+    try {
+      const capabilities = await api.executionCapabilities();
+      if (executionCapabilitiesGenerationRef.current !== generation) return null;
+      executionCapabilitiesRef.current = capabilities;
+      setExecutionCapabilities(capabilities);
+      setExecutionCapabilitiesRefresh("idle");
+      return capabilities;
+    } catch (error) {
+      if (executionCapabilitiesGenerationRef.current !== generation) return null;
+      setExecutionCapabilitiesRefresh("failed");
+      if (required) throw error;
+      return null;
+    }
   }, []);
 
   useEffect(() => {
@@ -318,15 +358,14 @@ export function App({ dialogController: suppliedDialogController }: AppProps = {
   }, [navigationBlocked, updateInteractionRevision]);
 
   const initialize = useCallback(async (runtimeGeneration = runtimeGenerationRef.current) => {
-    const [runtimeStatus, adbStatus, capabilities] = await Promise.all([
+    const [runtimeStatus, adbStatus] = await Promise.all([
       api.runtimeStatus(),
       api.adbStatus(),
-      api.executionCapabilities(),
+      refreshExecutionCapabilities(true),
     ]);
     if (runtimeGenerationRef.current !== runtimeGeneration) return;
     setRuntime(runtimeStatus);
     setAdb(adbStatus);
-    setExecutionCapabilities(capabilities);
     if (runtimeStatus.status === "ready") {
       const [nextCatalog, recents] = await Promise.all([
         api.catalog(),
@@ -336,7 +375,7 @@ export function App({ dialogController: suppliedDialogController }: AppProps = {
       setCatalog(nextCatalog);
       setRecentConfigurations(recents);
     }
-  }, []);
+  }, [refreshExecutionCapabilities]);
 
   useEffect(() => {
     savedConfigurationRef.current = savedConfiguration;
@@ -1101,6 +1140,7 @@ export function App({ dialogController: suppliedDialogController }: AppProps = {
     }
     const runtimeGeneration = ++runtimeGenerationRef.current;
     platformToolsGenerationRef.current += 1;
+    executionCapabilitiesGenerationRef.current += 1;
     devicePollGenerationRef.current += 1;
     deviceSelectionGenerationRef.current += 1;
     supportGenerationRef.current += 1;
@@ -1466,6 +1506,11 @@ export function App({ dialogController: suppliedDialogController }: AppProps = {
       manualDeviceRefreshRef.current = false;
       setDeviceRefresh({ phase: "idle", generation: 0, message: null });
       setAdb(status);
+      await refreshExecutionCapabilities();
+      if (
+        platformToolsGenerationRef.current !== generation
+        || runtimeGenerationRef.current !== runtimeGeneration
+      ) return;
       if (kind === "replace") {
         const portable = portableBindingsForTransition(prior.description, prior.bindings);
         setDevices([]);
@@ -1541,6 +1586,11 @@ export function App({ dialogController: suppliedDialogController }: AppProps = {
       manualDeviceRefreshRef.current = false;
       setDeviceRefresh({ phase: "idle", generation: 0, message: null });
       setAdb(status);
+      await refreshExecutionCapabilities();
+      if (
+        platformToolsGenerationRef.current !== generation
+        || runtimeGenerationRef.current !== runtimeGeneration
+      ) return;
       setDevices([]);
       const portable = portableBindingsForTransition(current.description, current.bindings);
       dispatch({
@@ -2703,11 +2753,34 @@ export function App({ dialogController: suppliedDialogController }: AppProps = {
             <p className="eyebrow">Current status</p>
             <dl>
               <div><dt>App service</dt><dd>Ready</dd></div>
-              <div><dt>Platform-Tools</dt><dd>Ready</dd></div>
+              <div>
+                <dt>Platform Tools</dt>
+                <dd>
+                  {executionCapabilitiesRefresh === "refreshing"
+                    ? "Refreshing…"
+                    : executionCapabilitiesRefresh === "failed"
+                      ? "Status unavailable"
+                      : executionCapabilities
+                        ? platformToolsStatusLabels[executionCapabilities.platformToolsStatus]
+                        : "Status unavailable"}
+                </dd>
+              </div>
               <div><dt>Setup catalog</dt><dd>Ready</dd></div>
               <div>
                 <dt>Real-device execution</dt>
                 <dd>{realExecutionCompiled ? "Compiled in" : "Not compiled"}</dd>
+              </div>
+              <div>
+                <dt>Executor readiness</dt>
+                <dd>
+                  {executionCapabilitiesRefresh === "refreshing"
+                    ? "Refreshing…"
+                    : executionCapabilitiesRefresh === "failed"
+                      ? "Status unavailable"
+                      : executionCapabilities
+                        ? executorReadinessLabels[executionCapabilities.executorReadiness]
+                        : "Status unavailable"}
+                </dd>
               </div>
             </dl>
             {adb.warning && <p className="warning">{adb.warning}</p>}

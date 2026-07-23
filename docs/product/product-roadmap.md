@@ -407,7 +407,8 @@ Make real-device execution straightforward to build, identify, and diagnose duri
 - Forward the feature through Tauri and packaging entry points used for development qualification.
 - Keep default and ordinary production builds simulation-only.
 - Project authoritative runtime capability state so the UI can clearly identify whether real execution is compiled.
-- Surface Platform-Tools path/version and executor readiness through existing sanitized troubleshooting contracts.
+- Surface sanitized Platform-Tools and executor readiness without projecting
+  paths, versions, command output, or execution authority to React.
 - Add build and regression checks proving both feature-disabled and feature-enabled configurations compile.
 
 #### Exit criteria
@@ -424,9 +425,16 @@ Phase 6A Slice 1 provides the documented `tauri:dev:real` command, which passes
 and all production commands remain simulation-only. Slice 2 adds the immutable
 Rust-authored `realExecutionCompiled` capability and reports `Compiled in` or
 `Not compiled` without treating compilation as readiness or authorization.
-Platform-Tools and executor-readiness diagnostics are the next bounded Phase 6A
-slice. Device qualification and production enablement remain later work. Phase
-6A is not complete.
+Slice 3 adds Rust-authored Platform-Tools and executor-readiness states derived
+from a fresh, bounded local validation. The validation snapshots the ADB
+revision and runtime generation, runs without holding the live ADB mutex, and
+discards stale results. It performs no device enumeration, ADB server startup,
+or device commands. Lifecycle refresh retains the previous valid diagnostic
+while refreshing or after a failed refresh, and readiness does not affect
+guarded-action visibility, eligibility, or start authority. Automated
+dual-feature build-matrix coverage is the next bounded Phase 6A slice. Device
+qualification and production enablement remain later work. Phase 6A is not
+complete.
 
 ### 6B — Device Discovery and Qualification
 
@@ -811,11 +819,11 @@ Cross-platform packaging and release automation must define separate deliverable
 **Owner: EmuChef proper / Shared Runtime**  
 **Status: In progress**
 
-Continue Phase 6A with backend-authored Platform-Tools and executor-readiness
-diagnostics. The intentional real-execution development command and
-authoritative compile-capability reporting exist, while default and ordinary
-production builds remain simulation-only. Do not begin physical recipe
-qualification until readiness, the feature boundary, and stale-authority
-protections are demonstrably intact.
+Continue Phase 6A with automated dual-feature build-matrix coverage. The
+intentional real-execution development command and authoritative compile,
+Platform-Tools, and executor-readiness reporting exist, while default and
+ordinary production builds remain simulation-only. Do not begin physical
+recipe qualification until both feature configurations are continuously
+verified and the remaining qualification boundary is explicitly approved.
 
 Manual Phase 5H macOS visual and accessibility qualification remains an outstanding bounded qualification follow-up and may be performed independently, but it is not the active implementation slice.

@@ -327,9 +327,26 @@ export interface RealExecutionSnapshot {
 
 export type AnyExecutionSnapshot = ExecutionSnapshot | RealExecutionSnapshot;
 
-/** Immutable compile capabilities authored by the current Rust application build. */
+/** Sanitized Platform-Tools readiness authored by the current Rust process. */
+export type PlatformToolsStatus =
+  | "notApplicable"
+  | "ready"
+  | "notFound"
+  | "invalid"
+  | "checkFailed";
+
+/** Informational host-side readiness for attempting guarded real execution. */
+export type ExecutorReadiness =
+  | "notCompiled"
+  | "ready"
+  | "blocked"
+  | "unknown";
+
+/** Immutable, session-local execution capabilities authored by Rust. */
 export interface ExecutionCapabilities {
   readonly realExecutionCompiled: boolean;
+  readonly platformToolsStatus: PlatformToolsStatus;
+  readonly executorReadiness: ExecutorReadiness;
 }
 
 export interface RealExecutionConfirmation {

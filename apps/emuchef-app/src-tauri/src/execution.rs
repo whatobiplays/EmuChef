@@ -15,7 +15,7 @@ use tauri::{AppHandle, Manager, State};
 use tauri_plugin_dialog::{DialogExt, FilePath};
 use uuid::Uuid;
 
-use crate::adb::AdbRevalidationError;
+use crate::adb::{AdbRevalidationError, PlatformToolsReadiness};
 use crate::commands::{
     catalog, current_adb_path, redact_absolute_paths, redact_exact_serial, safe_error, AppState,
 };
@@ -588,21 +588,123 @@ struct RealExecutionConfirmation {
     keep_device_connected_acknowledged: bool,
 }
 
-/// Immutable application-build capabilities authored by the trusted backend.
-///
-/// This contract reports compile inclusion only. It does not represent
-/// execution readiness, authorization, device state, or Platform-Tools state.
+/// Sanitized Platform-Tools readiness authored by the trusted backend.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub enum PlatformToolsStatus {
+    NotApplicable,
+    Ready,
+    NotFound,
+    Invalid,
+    CheckFailed,
+}
+
+/// Informational host-side readiness for attempting guarded real execution.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub enum ExecutorReadiness {
+    NotCompiled,
+    Ready,
+    Blocked,
+    Unknown,
+}
+
+/// Immutable, session-local execution capabilities authored by Rust.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ExecutionCapabilities {
     pub real_execution_compiled: bool,
+    pub platform_tools_status: PlatformToolsStatus,
+    pub executor_readiness: ExecutorReadiness,
+}
+
+impl ExecutionCapabilities {
+    fn from_readiness(real_execution_compiled: bool, readiness: PlatformToolsReadiness) -> Self {
+        if !real_execution_compiled {
+            return Self {
+                real_execution_compiled: false,
+                platform_tools_status: PlatformToolsStatus::NotApplicable,
+                executor_readiness: ExecutorReadiness::NotCompiled,
+            };
+        }
+        let (platform_tools_status, executor_readiness) = match readiness {
+            PlatformToolsReadiness::Ready => (PlatformToolsStatus::Ready, ExecutorReadiness::Ready),
+            PlatformToolsReadiness::NotFound => {
+                (PlatformToolsStatus::NotFound, ExecutorReadiness::Blocked)
+            }
+            PlatformToolsReadiness::Invalid => {
+                (PlatformToolsStatus::Invalid, ExecutorReadiness::Blocked)
+            }
+            PlatformToolsReadiness::CheckFailed => {
+                (PlatformToolsStatus::CheckFailed, ExecutorReadiness::Unknown)
+            }
+        };
+        Self {
+            real_execution_compiled: true,
+            platform_tools_status,
+            executor_readiness,
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+struct ReadinessGenerations {
+    adb_revision: u64,
+    runtime_generation: u64,
+}
+
+impl ReadinessGenerations {
+    fn matches(self, adb_revision: u64, runtime_generation: u64) -> bool {
+        self.adb_revision == adb_revision && self.runtime_generation == runtime_generation
+    }
 }
 
 #[tauri::command]
-pub fn get_execution_capabilities() -> ExecutionCapabilities {
-    ExecutionCapabilities {
-        real_execution_compiled: cfg!(feature = "real-execution"),
+pub async fn get_execution_capabilities(
+    state: State<'_, AppState>,
+) -> Result<ExecutionCapabilities, String> {
+    if !cfg!(feature = "real-execution") {
+        return Ok(ExecutionCapabilities::from_readiness(
+            false,
+            PlatformToolsReadiness::NotFound,
+        ));
     }
+    let runtime_generation = state
+        .sidecar
+        .try_generation()
+        .map_err(|_| execution_capabilities_unavailable())?;
+    let snapshot = state
+        .adb
+        .lock()
+        .map_err(|_| execution_capabilities_unavailable())?
+        .readiness_snapshot();
+    let generations = ReadinessGenerations {
+        adb_revision: snapshot.adb_revision(),
+        runtime_generation,
+    };
+    let readiness = tauri::async_runtime::spawn_blocking(move || snapshot.evaluate())
+        .await
+        .map_err(|_| execution_capabilities_unavailable())?;
+    let current_runtime_generation = state
+        .sidecar
+        .try_generation()
+        .map_err(|_| execution_capabilities_unavailable())?;
+    let current_adb_revision = state
+        .adb
+        .lock()
+        .map_err(|_| execution_capabilities_unavailable())?
+        .revision();
+    if !generations.matches(current_adb_revision, current_runtime_generation) {
+        return Err(execution_capabilities_unavailable());
+    }
+    Ok(ExecutionCapabilities::from_readiness(true, readiness))
+}
+
+fn execution_capabilities_unavailable() -> String {
+    safe_error(
+        "execution_capabilities_unavailable",
+        "Execution capability status is temporarily unavailable.",
+    )
 }
 
 #[tauri::command]
@@ -2262,31 +2364,89 @@ mod tests {
     #[cfg(not(feature = "real-execution"))]
     #[test]
     fn execution_capabilities_report_real_execution_not_compiled_without_feature() {
-        let capabilities = get_execution_capabilities();
+        let capabilities =
+            ExecutionCapabilities::from_readiness(false, PlatformToolsReadiness::Ready);
 
-        assert!(!capabilities.real_execution_compiled);
+        assert_eq!(
+            serde_json::to_value(capabilities).unwrap(),
+            json!({
+                "realExecutionCompiled": false,
+                "platformToolsStatus": "notApplicable",
+                "executorReadiness": "notCompiled",
+            })
+        );
     }
 
     #[cfg(feature = "real-execution")]
     #[test]
     fn execution_capabilities_report_real_execution_compiled_with_feature() {
-        let capabilities = get_execution_capabilities();
+        let capabilities =
+            ExecutionCapabilities::from_readiness(true, PlatformToolsReadiness::Ready);
 
-        assert!(capabilities.real_execution_compiled);
+        assert_eq!(
+            serde_json::to_value(capabilities).unwrap(),
+            json!({
+                "realExecutionCompiled": true,
+                "platformToolsStatus": "ready",
+                "executorReadiness": "ready",
+            })
+        );
     }
 
     #[test]
     fn execution_capabilities_serialize_as_the_exact_frontend_contract() {
-        let capabilities = get_execution_capabilities();
+        let capabilities =
+            ExecutionCapabilities::from_readiness(true, PlatformToolsReadiness::Ready);
         let serialized = serde_json::to_value(capabilities).unwrap();
 
         assert_eq!(
             serialized,
             json!({
-                "realExecutionCompiled": capabilities.real_execution_compiled,
+                "realExecutionCompiled": true,
+                "platformToolsStatus": "ready",
+                "executorReadiness": "ready",
             })
         );
         assert!(serialized.get("enabled").is_none());
+        let serialized = serialized.to_string();
+        for protected in [
+            "/Users/fixture/platform-tools/adb",
+            "sensitive fixture process details",
+            "Android Debug Bridge version",
+        ] {
+            assert!(!serialized.contains(protected));
+        }
+    }
+
+    #[test]
+    fn execution_capabilities_derive_blocked_and_unknown_only_from_rust_readiness() {
+        assert_eq!(
+            ExecutionCapabilities::from_readiness(true, PlatformToolsReadiness::NotFound)
+                .executor_readiness,
+            ExecutorReadiness::Blocked
+        );
+        assert_eq!(
+            ExecutionCapabilities::from_readiness(true, PlatformToolsReadiness::Invalid)
+                .executor_readiness,
+            ExecutorReadiness::Blocked
+        );
+        assert_eq!(
+            ExecutionCapabilities::from_readiness(true, PlatformToolsReadiness::CheckFailed)
+                .executor_readiness,
+            ExecutorReadiness::Unknown
+        );
+    }
+
+    #[test]
+    fn readiness_snapshot_requires_matching_adb_and_runtime_generations() {
+        let generations = ReadinessGenerations {
+            adb_revision: 12,
+            runtime_generation: 8,
+        };
+
+        assert!(generations.matches(12, 8));
+        assert!(!generations.matches(13, 8));
+        assert!(!generations.matches(12, 9));
     }
 
     fn review() -> ReviewedPlanSnapshot {

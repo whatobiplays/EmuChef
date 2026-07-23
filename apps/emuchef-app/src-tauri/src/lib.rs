@@ -143,18 +143,16 @@ pub fn run() {
         .build(tauri::generate_context!())
         .expect("error while building EmuChef");
 
-    app.run(|app_handle, event| {
-        match event {
-            tauri::RunEvent::ExitRequested { api, .. } => {
-                if !finish_recovery_process_session(app_handle) {
-                    api.prevent_exit();
-                }
+    app.run(|app_handle, event| match event {
+        tauri::RunEvent::ExitRequested { api, .. } => {
+            if !finish_recovery_process_session(app_handle) {
+                api.prevent_exit();
             }
-            tauri::RunEvent::Exit => {
-                let _ = finish_recovery_process_session(app_handle);
-            }
-            _ => {}
         }
+        tauri::RunEvent::Exit => {
+            let _ = finish_recovery_process_session(app_handle);
+        }
+        _ => {}
     });
 }
 

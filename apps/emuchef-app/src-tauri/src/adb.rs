@@ -94,6 +94,26 @@ pub enum AdbRevalidationError {
     Changed,
 }
 
+/// Sanitized result of checking whether retained Platform-Tools can satisfy
+/// the host-side prerequisites for a real-execution attempt.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum PlatformToolsReadiness {
+    Ready,
+    NotFound,
+    Invalid,
+    CheckFailed,
+}
+
+/// Immutable trusted state used for a bounded readiness check after the live
+/// manager mutex has been released.
+#[derive(Clone, Debug)]
+pub(crate) struct AdbReadinessSnapshot {
+    adb_revision: u64,
+    root: PathBuf,
+    current: Option<ResolvedAdb>,
+    last_error: Option<ActionableErrorDto>,
+}
+
 impl ResolvedAdb {
     fn identity(&self) -> AdbInstallationIdentity {
         AdbInstallationIdentity {
@@ -104,6 +124,7 @@ impl ResolvedAdb {
     }
 }
 
+#[derive(Clone)]
 pub struct AdbManager {
     root: PathBuf,
     current: Option<ResolvedAdb>,
@@ -191,6 +212,17 @@ impl AdbManager {
             })
     }
 
+    /// Clone only process-local trusted state needed for an informational
+    /// readiness check. Filesystem paths remain inside Rust.
+    pub(crate) fn readiness_snapshot(&self) -> AdbReadinessSnapshot {
+        AdbReadinessSnapshot {
+            adb_revision: self.revision,
+            root: self.root.clone(),
+            current: self.current.clone(),
+            last_error: self.last_error.clone(),
+        }
+    }
+
     /// Revalidates the exact installation retained by a review and returns its
     /// trusted executable path. Validation repeats the existing managed or
     /// development checks instead of trusting cached startup state.
@@ -214,41 +246,10 @@ impl AdbManager {
             return Err(AdbRevalidationError::Changed);
         }
 
-        let validated = if let Some(relative) = &current.managed_relative_path {
-            let settings = read_settings(&self.settings_path())
-                .map_err(|_| AdbRevalidationError::Unavailable)?;
-            if settings.install_relative_path != *relative {
-                return Err(AdbRevalidationError::Changed);
-            }
-            let install = checked_install_path(&self.root, relative)
-                .map_err(|_| AdbRevalidationError::Unavailable)?;
-            validate_managed_install(&install, &settings, executor)
-                .map_err(|_| AdbRevalidationError::Unavailable)?
-        } else {
-            #[cfg(debug_assertions)]
-            {
-                validate_development_adb(&current.path, executor)
-                    .map_err(|_| AdbRevalidationError::Unavailable)?
-            }
-            #[cfg(not(debug_assertions))]
-            {
-                return Err(AdbRevalidationError::Unavailable);
-            }
-        };
-        let validated_identity = validated.identity();
-        let same_path = validated_identity
-            .path
-            .canonicalize()
-            .ok()
-            .zip(expected.path.canonicalize().ok())
-            .is_some_and(|(validated, retained)| validated == retained);
-        if validated_identity.version != expected.version
-            || validated_identity.managed_relative_path != expected.managed_relative_path
-            || !same_path
-        {
-            return Err(AdbRevalidationError::Changed);
-        }
-        Ok(validated.path)
+        validate_current_install(&self.root, current, executor).map_err(|error| match error {
+            CurrentInstallValidationError::Changed => AdbRevalidationError::Changed,
+            CurrentInstallValidationError::Unavailable(_) => AdbRevalidationError::Unavailable,
+        })
     }
 
     pub fn import_zip(&mut self, source: &Path) -> Result<AdbSetupStatusDto, String> {
@@ -479,6 +480,125 @@ impl AdbManager {
                 }
             }
         }
+    }
+}
+
+impl AdbReadinessSnapshot {
+    pub(crate) fn adb_revision(&self) -> u64 {
+        self.adb_revision
+    }
+
+    pub(crate) fn evaluate(&self) -> PlatformToolsReadiness {
+        self.evaluate_with_executor(&RealProcessExecutor)
+    }
+
+    fn evaluate_with_executor(&self, executor: &impl ProcessExecutor) -> PlatformToolsReadiness {
+        let Some(current) = self.current.as_ref() else {
+            return self
+                .last_error
+                .as_ref()
+                .map(classify_readiness_error)
+                .unwrap_or(PlatformToolsReadiness::NotFound);
+        };
+        match validate_current_install(&self.root, current, executor) {
+            Ok(_) => PlatformToolsReadiness::Ready,
+            Err(CurrentInstallValidationError::Changed) => PlatformToolsReadiness::Invalid,
+            Err(CurrentInstallValidationError::Unavailable(error)) => {
+                classify_readiness_error(&error)
+            }
+        }
+    }
+}
+
+#[derive(Debug)]
+enum CurrentInstallValidationError {
+    Changed,
+    Unavailable(ActionableErrorDto),
+}
+
+/// Shared orchestration over the existing managed and development validators.
+/// Execution maps detailed failures to its established fail-closed contract;
+/// readiness maps the same failures to sanitized informational states.
+fn validate_current_install(
+    root: &Path,
+    current: &ResolvedAdb,
+    executor: &impl ProcessExecutor,
+) -> Result<PathBuf, CurrentInstallValidationError> {
+    let expected = current.identity();
+    let validated = if let Some(relative) = &current.managed_relative_path {
+        let settings = read_settings(&root.join("settings.json")).map_err(|_| {
+            CurrentInstallValidationError::Unavailable(setup_error(
+                "managed_adb_settings_invalid",
+                "The managed Platform-Tools settings are invalid.",
+                vec!["replace", "remove"],
+            ))
+        })?;
+        if settings.install_relative_path != *relative {
+            return Err(CurrentInstallValidationError::Changed);
+        }
+        let install = checked_install_path(root, relative).map_err(|_| {
+            CurrentInstallValidationError::Unavailable(setup_error(
+                "managed_adb_containment_invalid",
+                "The managed Platform-Tools location is invalid.",
+                vec!["replace", "remove"],
+            ))
+        })?;
+        validate_managed_install(&install, &settings, executor)
+            .map_err(CurrentInstallValidationError::Unavailable)?
+    } else {
+        #[cfg(debug_assertions)]
+        {
+            validate_development_adb(&current.path, executor)
+                .map_err(CurrentInstallValidationError::Unavailable)?
+        }
+        #[cfg(not(debug_assertions))]
+        {
+            return Err(CurrentInstallValidationError::Unavailable(setup_error(
+                "development_adb_invalid",
+                "Development Platform-Tools are unavailable in this build.",
+                vec!["retry"],
+            )));
+        }
+    };
+    let validated_identity = validated.identity();
+    let same_path = validated_identity
+        .path
+        .canonicalize()
+        .ok()
+        .zip(expected.path.canonicalize().ok())
+        .is_some_and(|(validated, retained)| validated == retained);
+    if validated_identity.version != expected.version
+        || validated_identity.managed_relative_path != expected.managed_relative_path
+        || !same_path
+    {
+        return Err(CurrentInstallValidationError::Changed);
+    }
+    Ok(validated.path)
+}
+
+fn classify_readiness_error(error: &ActionableErrorDto) -> PlatformToolsReadiness {
+    match error.code.as_str() {
+        "managed_adb_file_missing" | "development_adb_unavailable" => {
+            PlatformToolsReadiness::NotFound
+        }
+        "managed_adb_settings_invalid"
+        | "managed_adb_containment_invalid"
+        | "managed_adb_file_invalid"
+        | "managed_adb_hash_failed"
+        | "managed_adb_hash_mismatch"
+        | "managed_adb_metadata_mismatch"
+        | "architecture_unreadable"
+        | "architecture_invalid"
+        | "architecture_incompatible"
+        | "signature_invalid"
+        | "signer_not_google"
+        | "source_properties_invalid"
+        | "platform_tools_too_old"
+        | "adb_version_failed"
+        | "adb_version_invalid"
+        | "adb_version_mismatch"
+        | "development_adb_invalid" => PlatformToolsReadiness::Invalid,
+        _ => PlatformToolsReadiness::CheckFailed,
     }
 }
 
@@ -884,6 +1004,13 @@ fn validate_development_adb(
     }
     let cwd = path.parent().unwrap_or_else(|| Path::new("/"));
     let output = executor.run(path, &["version"], cwd, PROCESS_TIMEOUT)?;
+    if !output.success {
+        return Err(setup_error(
+            "adb_version_failed",
+            "The development ADB did not complete 'adb version' successfully.",
+            vec!["retry"],
+        ));
+    }
     let version = parse_adb_version(&output.stdout).ok_or_else(|| {
         setup_error(
             "adb_version_invalid",
@@ -1393,6 +1520,7 @@ mod tests {
         wrong_signer: bool,
         invalid_signature: bool,
         fail_version: bool,
+        process_error_code: Option<&'static str>,
         version_stdout: Option<&'static str>,
         calls: Mutex<Vec<(String, Vec<String>)>>,
     }
@@ -1409,6 +1537,13 @@ mod tests {
                 program.to_string_lossy().into_owned(),
                 args.iter().map(|value| value.to_string()).collect(),
             ));
+            if let Some(code) = self.process_error_code {
+                return Err(setup_error(
+                    code,
+                    "sensitive fixture process details",
+                    vec!["retry"],
+                ));
+            }
             if program == Path::new("/usr/bin/codesign") && args.first() == Some(&"-d") {
                 let team = if self.wrong_signer {
                     "WRONGTEAM"
@@ -1905,6 +2040,12 @@ mod tests {
             .unwrap();
         let identity = installed.identity();
         manager.current = Some(installed);
+        assert_eq!(
+            manager
+                .readiness_snapshot()
+                .evaluate_with_executor(&FakeExecutor::default()),
+            PlatformToolsReadiness::Ready
+        );
 
         assert_eq!(
             manager
@@ -1924,8 +2065,190 @@ mod tests {
 
         fs::remove_file(&identity.path).unwrap();
         assert_eq!(
+            manager
+                .readiness_snapshot()
+                .evaluate_with_executor(&FakeExecutor::default()),
+            PlatformToolsReadiness::NotFound
+        );
+        assert_eq!(
             manager.revalidate_for_execution_with_executor(&identity, &FakeExecutor::default()),
             Err(AdbRevalidationError::Unavailable)
+        );
+    }
+
+    #[test]
+    fn readiness_snapshot_classifies_trusted_platform_tools_without_device_commands() {
+        let temp = tempfile::tempdir().unwrap();
+        let zip = temp.path().join("platform-tools.zip");
+        write_platform_tools_zip(&zip, &[]);
+        let root = temp.path().join("managed");
+        fs::create_dir_all(root.join("installs")).unwrap();
+        fs::create_dir_all(root.join("staging")).unwrap();
+        let mut manager = AdbManager {
+            root,
+            current: None,
+            last_error: None,
+            revision: 7,
+        };
+
+        let missing = manager.readiness_snapshot();
+        let missing_executor = FakeExecutor::default();
+        assert_eq!(
+            missing.evaluate_with_executor(&missing_executor),
+            PlatformToolsReadiness::NotFound
+        );
+        assert!(missing_executor.calls.lock().unwrap().is_empty());
+
+        let installed = manager
+            .import_zip_inner_with_executor(&zip, &FakeExecutor::default())
+            .unwrap();
+        let adb_path = installed.path.canonicalize().unwrap();
+        manager.current = Some(installed);
+        let snapshot = manager.readiness_snapshot();
+        assert_eq!(snapshot.adb_revision(), 7);
+        let executor = FakeExecutor::default();
+        assert_eq!(
+            snapshot.evaluate_with_executor(&executor),
+            PlatformToolsReadiness::Ready
+        );
+        assert_eq!(
+            *executor.calls.lock().unwrap(),
+            vec![
+                (
+                    "/usr/bin/codesign".to_string(),
+                    vec![
+                        "--verify".to_string(),
+                        "--strict".to_string(),
+                        "--verbose=2".to_string(),
+                        adb_path.to_string_lossy().into_owned(),
+                    ],
+                ),
+                (
+                    "/usr/bin/codesign".to_string(),
+                    vec![
+                        "-d".to_string(),
+                        "--verbose=4".to_string(),
+                        adb_path.to_string_lossy().into_owned(),
+                    ],
+                ),
+                (
+                    adb_path.to_string_lossy().into_owned(),
+                    vec!["version".to_string()],
+                ),
+            ]
+        );
+    }
+
+    #[test]
+    fn readiness_snapshot_distinguishes_invalid_tooling_from_check_failures() {
+        let (temp, hashes) = candidate_fixture();
+        let manager = AdbManager {
+            root: temp.path().to_path_buf(),
+            current: Some(ResolvedAdb {
+                path: temp.path().join("adb"),
+                version: "37.0.0".to_string(),
+                warning: None,
+                managed_relative_path: None,
+            }),
+            last_error: None,
+            revision: 3,
+        };
+        let snapshot = manager.readiness_snapshot();
+
+        assert_eq!(
+            snapshot.evaluate_with_executor(&FakeExecutor {
+                fail_version: true,
+                ..FakeExecutor::default()
+            }),
+            PlatformToolsReadiness::Invalid
+        );
+        assert_eq!(
+            snapshot.evaluate_with_executor(&FakeExecutor {
+                process_error_code: Some("validation_process_timeout"),
+                ..FakeExecutor::default()
+            }),
+            PlatformToolsReadiness::CheckFailed
+        );
+
+        let mut managed = manager.clone();
+        managed.current.as_mut().unwrap().managed_relative_path =
+            Some("installs/fixture".to_string());
+        managed.root = temp.path().to_path_buf();
+        let install = temp.path().join("installs/fixture");
+        fs::create_dir_all(&install).unwrap();
+        for name in RETAINED_FILES {
+            fs::copy(temp.path().join(name), install.join(name)).unwrap();
+        }
+        let settings = ManagedSettings {
+            schema_version: 1,
+            install_relative_path: "installs/fixture".to_string(),
+            version: "37.0.0".to_string(),
+            architecture: std::env::consts::ARCH.to_string(),
+            signer_team_identifier: GOOGLE_TEAM_IDENTIFIER.to_string(),
+            files: hashes,
+        };
+        write_settings_atomic(&temp.path().join("settings.json"), &settings).unwrap();
+        managed.current.as_mut().unwrap().path = install.join("adb");
+        fs::write(
+            &managed.current.as_ref().unwrap().path,
+            b"not a Mach-O executable",
+        )
+        .unwrap();
+        assert_eq!(
+            managed
+                .readiness_snapshot()
+                .evaluate_with_executor(&FakeExecutor::default()),
+            PlatformToolsReadiness::Invalid
+        );
+    }
+
+    #[test]
+    fn readiness_process_runs_after_the_live_manager_lock_is_released() {
+        use std::sync::Arc;
+
+        struct LockCheckingExecutor {
+            manager: Arc<Mutex<AdbManager>>,
+            delegate: FakeExecutor,
+        }
+
+        impl ProcessExecutor for LockCheckingExecutor {
+            fn run(
+                &self,
+                program: &Path,
+                args: &[&str],
+                cwd: &Path,
+                timeout: Duration,
+            ) -> Result<ControlledOutput, ActionableErrorDto> {
+                assert!(
+                    self.manager.try_lock().is_ok(),
+                    "live AdbManager mutex must not be held during process execution"
+                );
+                self.delegate.run(program, args, cwd, timeout)
+            }
+        }
+
+        let temp = tempfile::tempdir().unwrap();
+        let manager = Arc::new(Mutex::new(AdbManager {
+            root: temp.path().to_path_buf(),
+            current: Some(ResolvedAdb {
+                path: temp.path().join("adb"),
+                version: "37.0.0".to_string(),
+                warning: None,
+                managed_relative_path: None,
+            }),
+            last_error: None,
+            revision: 4,
+        }));
+        fs::write(temp.path().join("adb"), fake_adb_bytes()).unwrap();
+        let snapshot = manager.lock().unwrap().readiness_snapshot();
+        let executor = LockCheckingExecutor {
+            manager,
+            delegate: FakeExecutor::default(),
+        };
+
+        assert_eq!(
+            snapshot.evaluate_with_executor(&executor),
+            PlatformToolsReadiness::Ready
         );
     }
 

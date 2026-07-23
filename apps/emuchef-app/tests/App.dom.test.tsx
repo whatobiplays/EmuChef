@@ -254,6 +254,8 @@ function resetApi(): void {
   mockApi.adbStatus.mockResolvedValue(readyAdb);
   mockApi.executionCapabilities.mockResolvedValue({
     realExecutionCompiled: false,
+    platformToolsStatus: "notApplicable",
+    executorReadiness: "notCompiled",
   } satisfies ExecutionCapabilities);
   mockApi.catalog.mockResolvedValue({
     catalog: {
@@ -329,10 +331,18 @@ async function openSupportAction(
   return within(dialog).getByRole("button", { name }) as HTMLButtonElement;
 }
 
-function deferred<T>(): { promise: Promise<T>; resolve: (value: T) => void } {
+function deferred<T>(): {
+  promise: Promise<T>;
+  reject: (reason?: unknown) => void;
+  resolve: (value: T) => void;
+} {
   let resolve!: (value: T) => void;
-  const promise = new Promise<T>((resolver) => { resolve = resolver; });
-  return { promise, resolve };
+  let reject!: (reason?: unknown) => void;
+  const promise = new Promise<T>((resolver, rejecter) => {
+    resolve = resolver;
+    reject = rejecter;
+  });
+  return { promise, reject, resolve };
 }
 
 beforeEach(() => resetApi());
@@ -343,18 +353,90 @@ describe("Phase 6A execution capability reporting", () => {
 
     const status = document.querySelector(".status-panel");
     expect(status?.textContent).toContain("Real-device executionNot compiled");
+    expect(status?.textContent).toContain("Platform ToolsNot applicable");
+    expect(status?.textContent).toContain("Executor readinessNot compiled");
     expect(status?.textContent).not.toContain("Mode");
   });
 
   test("shows the backend-provided feature-enabled capability without starting execution", async () => {
     mockApi.executionCapabilities.mockResolvedValue({
       realExecutionCompiled: true,
+      platformToolsStatus: "ready",
+      executorReadiness: "ready",
     } satisfies ExecutionCapabilities);
 
     await renderReadyApp();
 
     const status = document.querySelector(".status-panel");
     expect(status?.textContent).toContain("Real-device executionCompiled in");
+    expect(status?.textContent).toContain("Platform ToolsReady");
+    expect(status?.textContent).toContain("Executor readinessReady");
+    expect(mockApi.startRealExecution).not.toHaveBeenCalled();
+  });
+
+  test.each([
+    ["notApplicable", "Not applicable"],
+    ["ready", "Ready"],
+    ["notFound", "Not found"],
+    ["invalid", "Invalid"],
+    ["checkFailed", "Check failed"],
+  ] as const)("renders the Rust-authored Platform Tools state %s", async (platformToolsStatus, label) => {
+    mockApi.executionCapabilities.mockResolvedValue({
+      realExecutionCompiled: true,
+      platformToolsStatus,
+      executorReadiness: "ready",
+    } satisfies ExecutionCapabilities);
+
+    await renderReadyApp();
+
+    expect(document.querySelector(".status-panel")?.textContent).toContain(`Platform Tools${label}`);
+  });
+
+  test.each([
+    ["notCompiled", "Not compiled"],
+    ["ready", "Ready"],
+    ["blocked", "Blocked"],
+    ["unknown", "Unknown"],
+  ] as const)("renders the Rust-authored executor-readiness state %s", async (executorReadiness, label) => {
+    mockApi.executionCapabilities.mockResolvedValue({
+      realExecutionCompiled: true,
+      platformToolsStatus: "ready",
+      executorReadiness,
+    } satisfies ExecutionCapabilities);
+
+    await renderReadyApp();
+
+    expect(document.querySelector(".status-panel")?.textContent).toContain(`Executor readiness${label}`);
+  });
+
+  test("retains the previous valid result while refresh is pending and marks refresh failure separately", async () => {
+    const user = userEvent.setup();
+    const refresh = deferred<ExecutionCapabilities>();
+    mockApi.adbStatus.mockResolvedValue(missingAdb);
+    mockApi.executionCapabilities
+      .mockResolvedValueOnce({
+        realExecutionCompiled: false,
+        platformToolsStatus: "notApplicable",
+        executorReadiness: "notCompiled",
+      } satisfies ExecutionCapabilities)
+      .mockReturnValueOnce(refresh.promise);
+
+    render(<App />);
+    await screen.findByRole("heading", { name: "Set up Android Platform-Tools" });
+    await user.click(screen.getByRole("button", { name: "Select Platform-Tools ZIP…" }));
+    const status = await waitFor(() => {
+      const panel = document.querySelector(".status-panel");
+      expect(panel?.textContent).toContain("Platform ToolsRefreshing…");
+      expect(panel?.textContent).toContain("Real-device executionNot compiled");
+      return panel as HTMLElement;
+    });
+    expect(mockApi.startRealExecution).not.toHaveBeenCalled();
+
+    await act(async () => refresh.reject(new Error("capability IPC unavailable")));
+
+    await waitFor(() => expect(status.textContent).toContain("Platform ToolsStatus unavailable"));
+    expect(status.textContent).toContain("Executor readinessStatus unavailable");
+    expect(status.textContent).toContain("Real-device executionNot compiled");
     expect(mockApi.startRealExecution).not.toHaveBeenCalled();
   });
 
@@ -391,7 +473,7 @@ describe("Phase 5H product polish", () => {
     expect(document.querySelector(".runtime-chip")?.textContent).toBe("Ready");
     const status = document.querySelector(".status-panel");
     expect(status?.textContent).toContain("App serviceReady");
-    expect(status?.textContent).toContain("Platform-ToolsReady");
+    expect(status?.textContent).toContain("Platform ToolsNot applicable");
     expect(status?.textContent).toContain("Setup catalogReady");
     expect(document.querySelector(".configuration-bar")?.textContent).toContain("Unsaved setup");
     expect(document.body.textContent).not.toMatch(/phase-internal-catalog|internal-source-id|internal-digest|Rust runtime|protocol/i);
@@ -718,6 +800,7 @@ describe("Phase 5B workflow surfaces", () => {
 
     await act(async () => installation.resolve(readyAdb));
     await screen.findByRole("heading", { name: "Choose an Android device" });
+    expect(mockApi.executionCapabilities).toHaveBeenCalledTimes(2);
   });
 
   test("requires removal confirmation and cancellation has no side effect", async () => {
@@ -735,6 +818,7 @@ describe("Phase 5B workflow surfaces", () => {
     await user.click(within(secondDialog).getByRole("button", { name: "Remove" }));
     expect(mockApi.removePlatformTools).toHaveBeenCalledWith(7);
     await screen.findByRole("heading", { name: "Set up Android Platform-Tools" });
+    expect(mockApi.executionCapabilities).toHaveBeenCalledTimes(2);
   });
 
   test("refresh is single-flight and completion feedback expires after five seconds", async () => {
@@ -766,6 +850,7 @@ describe("Phase 5B workflow surfaces", () => {
 
     await user.click(await openSupportAction(user, "Replace managed Platform-Tools", supportSnapshot({ platformActions: true })));
     expect(await screen.findByText(/Your device was rediscovered/)).toBeTruthy();
+    expect(mockApi.executionCapabilities).toHaveBeenCalledTimes(2);
     expect(screen.queryByText(/selected device disconnected/i)).toBeNull();
   });
 
@@ -776,6 +861,7 @@ describe("Phase 5B workflow surfaces", () => {
     await user.click(await openSupportAction(user, "Restart app service", supportSnapshot({ serviceFailure: true })));
 
     await waitFor(() => expect(mockApi.restartRuntime).toHaveBeenCalledTimes(1));
+    expect(mockApi.executionCapabilities).toHaveBeenCalledTimes(2);
     expect(mockApi.stageRecoveryDraft).not.toHaveBeenCalled();
     expect(screen.queryByRole("alertdialog", { name: "Restart the app service?" })).toBeNull();
     expect(screen.getByRole("heading", { name: "Choose an Android device" })).toBeTruthy();
