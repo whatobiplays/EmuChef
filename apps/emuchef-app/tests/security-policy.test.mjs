@@ -18,6 +18,28 @@ function read(relativePath) {
   return fs.readFileSync(path.join(appDir, relativePath), "utf8");
 }
 
+function commandTokens(command) {
+  return command.trim().split(/\s+/);
+}
+
+function commandFeatures(command) {
+  const tokens = commandTokens(command);
+  const features = new Set();
+  for (let index = 0; index < tokens.length; index += 1) {
+    const token = tokens[index];
+    if (token.startsWith("--features=")) {
+      for (const feature of token.slice("--features=".length).split(",")) {
+        if (feature) features.add(feature);
+      }
+    } else if (token === "--features" || token === "-f") {
+      for (const feature of (tokens[index + 1] ?? "").split(",")) {
+        if (feature) features.add(feature);
+      }
+    }
+  }
+  return features;
+}
+
 function sourceSlice(source, startMarker, endMarker) {
   const start = source.indexOf(startMarker);
   const end = source.indexOf(endMarker, start + startMarker.length);
@@ -288,15 +310,35 @@ test("runtime startup is independent from ADB and simulation remains review-hand
 
 test("real execution is default-disabled with compile-time-only enablement", () => {
   const app = read("src/App.tsx");
+  const api = read("src/api.ts");
+  const appBackend = read("src-tauri/src/lib.rs");
   const reviewStep = read("src/ReviewStep.tsx");
   const cargo = read("src-tauri/Cargo.toml");
   const execution = read("src-tauri/src/execution.rs");
-  const packageJson = read("package.json");
+  const packageJsonSource = read("package.json");
+  const scripts = JSON.parse(packageJsonSource).scripts;
+  const types = read("src/types.ts");
+  const featuresSection = sourceSlice(cargo, "[features]", "\n[build-dependencies]");
 
-  assert.match(cargo, /\[features\]\s+default = \[\]\s+real-execution = \[\]/);
+  assert.match(featuresSection, /^default\s*=\s*\[\s*\]\s*$/m);
+  assert.match(featuresSection, /^real-execution\s*=\s*\[\s*\]\s*$/m);
   assert.match(
     execution,
-    /pub fn get_real_execution_availability\(\) -> Value \{\s*json!\(\{ "enabled": cfg!\(feature = "real-execution"\) \}\)\s*\}/,
+    /pub struct ExecutionCapabilities \{\s*pub real_execution_compiled: bool,\s*\}/,
+  );
+  assert.match(
+    execution,
+    /pub fn get_execution_capabilities\(\) -> ExecutionCapabilities \{\s*ExecutionCapabilities \{\s*real_execution_compiled: cfg!\(feature = "real-execution"\),\s*\}\s*\}/,
+  );
+  assert.match(appBackend, /execution::get_execution_capabilities,/);
+  assert.doesNotMatch(`${execution}\n${appBackend}\n${api}`, /get_real_execution_availability/);
+  assert.match(
+    api,
+    /executionCapabilities: \(\) =>\s*invoke<ExecutionCapabilities>\("get_execution_capabilities"\)/,
+  );
+  assert.match(
+    types,
+    /export interface ExecutionCapabilities \{\s*readonly realExecutionCompiled: boolean;\s*\}/,
   );
 
   const startCommand = sourceSlice(
@@ -309,12 +351,39 @@ test("real execution is default-disabled with compile-time-only enablement", () 
   assert.ok(startCommand.indexOf("if !cfg!") < startCommand.indexOf("reserve_start"));
 
   assert.doesNotMatch(
-    `${execution}\n${packageJson}`,
+    `${execution}\n${packageJsonSource}`,
     /EMUCHEF_(?:ENABLE|ALLOW)_REAL_EXECUTION|--(?:enable-)?real-execution|std::env::args(?:_os)?\(/,
   );
-  assert.match(app, /\[realExecutionEnabled, setRealExecutionEnabled\] = useState\(false\)/);
-  assert.match(app, /realExecutionAvailability\(\)\.catch\(\(\) => \(\{ enabled: false \}\)\)/);
-  assert.match(reviewStep, /\{realExecutionEnabled && \(\s*<button[\s\S]{0,400}>\s*Apply to Device\s*<\/button>/);
+
+  assert.deepEqual(commandTokens(scripts["tauri:dev:real"]).slice(0, 2), ["tauri", "dev"]);
+  assert.ok(commandFeatures(scripts["tauri:dev:real"]).has("real-execution"));
+  assert.equal(commandFeatures(scripts.tauri).has("real-execution"), false);
+  assert.equal(commandFeatures(scripts["tauri:dev"]).has("real-execution"), false);
+
+  const productionScriptNames = Object.keys(scripts).filter((name) =>
+    name.split(":").some((segment) => ["build", "bundle", "release"].includes(segment)),
+  );
+  assert.ok(productionScriptNames.length > 0);
+  for (const name of productionScriptNames) {
+    assert.equal(commandFeatures(scripts[name]).has("real-execution"), false, `${name} must remain simulation-only`);
+  }
+
+  const realExecutionScriptNames = Object.entries(scripts)
+    .filter(([, command]) => command.includes("real-execution"))
+    .map(([name]) => name);
+  assert.deepEqual(new Set(realExecutionScriptNames), new Set(["tauri:dev:real"]));
+
+  assert.match(
+    app,
+    /\[executionCapabilities, setExecutionCapabilities\] = useState<ExecutionCapabilities \| null>\(null\)/,
+  );
+  assert.match(app, /api\.executionCapabilities\(\)/);
+  assert.doesNotMatch(app, /executionCapabilities\(\)\.catch|realExecutionCompiled:\s*false/);
+  assert.doesNotMatch(
+    `${app}\n${api}`,
+    /localStorage|sessionStorage|URLSearchParams|import\.meta\.env|process\.env/,
+  );
+  assert.match(reviewStep, /\{realExecutionCompiled && \(\s*<button[\s\S]{0,400}>\s*Apply to Device\s*<\/button>/);
   assert.match(app, /activeDialog\?\.payload\.kind === "real-execution" && workflow\.review/);
 });
 

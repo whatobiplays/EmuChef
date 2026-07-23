@@ -40,7 +40,7 @@ describe("review presentation", () => {
       <ReviewStep
         busy={false}
         executionKind="idle"
-        realExecutionEnabled
+        realExecutionCompiled
         review={review}
         reviewStale={false}
         onApplyToDevice={vi.fn()}
@@ -62,7 +62,7 @@ describe("review presentation", () => {
       <ReviewStep
         busy={false}
         executionKind="idle"
-        realExecutionEnabled
+        realExecutionCompiled
         review={{ ...review, canExecute: false }}
         reviewStale={false}
         onApplyToDevice={vi.fn()}
@@ -83,7 +83,7 @@ describe("stale execution review", () => {
       <ReviewStep
         busy={false}
         executionKind="idle"
-        realExecutionEnabled
+        realExecutionCompiled
         review={review}
         reviewStale
         onApplyToDevice={vi.fn()}

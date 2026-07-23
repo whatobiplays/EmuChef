@@ -327,8 +327,9 @@ export interface RealExecutionSnapshot {
 
 export type AnyExecutionSnapshot = ExecutionSnapshot | RealExecutionSnapshot;
 
-export interface RealExecutionAvailability {
-  enabled: boolean;
+/** Immutable compile capabilities authored by the current Rust application build. */
+export interface ExecutionCapabilities {
+  readonly realExecutionCompiled: boolean;
 }
 
 export interface RealExecutionConfirmation {

@@ -3,7 +3,7 @@ import type { WorkflowState } from "./workflow";
 interface ReviewStepProps {
   busy: boolean;
   executionKind: WorkflowState["execution"]["kind"];
-  realExecutionEnabled: boolean;
+  realExecutionCompiled: boolean;
   review: NonNullable<WorkflowState["review"]>;
   reviewStale: boolean;
   onApplyToDevice: (invoker: HTMLElement) => void;
@@ -14,7 +14,7 @@ interface ReviewStepProps {
 export function ReviewStep({
   busy,
   executionKind,
-  realExecutionEnabled,
+  realExecutionCompiled,
   review,
   reviewStale,
   onApplyToDevice,
@@ -35,7 +35,7 @@ export function ReviewStep({
       <h2 data-focus-fallback="workflow" data-step-heading tabIndex={-1}>
         Review this setup
       </h2>
-      {!realExecutionEnabled && (
+      {!realExecutionCompiled && (
         <p className="simulation-banner">
           Simulation only. This does not change or verify the real device.
         </p>
@@ -116,7 +116,7 @@ export function ReviewStep({
         >
           {executionStarting ? "Starting simulation…" : "Start simulation"}
         </button>
-        {realExecutionEnabled && (
+        {realExecutionCompiled && (
           <button
             className="danger"
             disabled={startDisabled}

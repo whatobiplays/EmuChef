@@ -26,7 +26,7 @@ interface UseExecutionOptions {
   announce: (text: string, assertive?: boolean) => void;
   dispatch: Dispatch<WorkflowAction>;
   mainRef: MutableValueRef<HTMLElement | null>;
-  realExecutionEnabled: boolean;
+  realExecutionCompiled: boolean;
   runtimeGenerationRef: MutableValueRef<number>;
   setBusy: (busy: boolean) => void;
   setNotice: (notice: string | null) => void;
@@ -42,7 +42,7 @@ export function useExecution({
   announce,
   dispatch,
   mainRef,
-  realExecutionEnabled,
+  realExecutionCompiled,
   runtimeGenerationRef,
   setBusy,
   setNotice,
@@ -90,7 +90,7 @@ export function useExecution({
 
   const startRealExecution = useCallback(async (confirmation: RealExecutionConfirmation) => {
     const current = workflowRef.current;
-    if (!realExecutionEnabled || !current.review || current.execution.kind === "starting") return;
+    if (!realExecutionCompiled || !current.review || current.execution.kind === "starting") return;
     const generation = current.executionGeneration + 1;
     dispatch({ type: "execution-starting", generation, mode: "real" });
     setBusy(true);
@@ -104,7 +104,7 @@ export function useExecution({
     } finally {
       setBusy(false);
     }
-  }, [dispatch, realExecutionEnabled, setBusy, setNotice, workflowRef]);
+  }, [dispatch, realExecutionCompiled, setBusy, setNotice, workflowRef]);
 
   useEffect(() => {
     if (workflow.execution.kind !== "active" && workflow.execution.kind !== "terminal") return;

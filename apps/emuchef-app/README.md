@@ -136,10 +136,30 @@ npm --prefix apps/emuchef-app install
 npm --prefix apps/emuchef-app run tauri:dev
 ```
 
-The development command builds a debug `emuchef` sidecar, copies it to the
-Tauri external-binary location, starts Vite on port 5174, and launches Tauri
-with the development-only config. Production builds use the local-only CSP and
-package the release Rust sidecar, catalog snapshot, and qualification policy.
+The ordinary development command is simulation-only. It builds a debug
+`emuchef` sidecar, copies it to the Tauri external-binary location, starts Vite
+on port 5174, and launches Tauri with the development-only config.
+
+Use the explicit real-execution development command only when work requires the
+default-disabled Rust feature:
+
+```bash
+npm --prefix apps/emuchef-app run tauri:dev:real
+```
+
+This command passes `--features real-execution` to Tauri. Real execution remains
+development-only; ordinary development, production build, bundle, release, and
+packaging commands remain simulation-only.
+
+Rust authors the immutable execution compile-capability reported in the Current
+status panel. Ordinary builds report `Real-device execution: Not compiled`;
+`tauri:dev:real` reports `Real-device execution: Compiled in`. Compiled in does
+not mean ready, connected, qualified, authorized, available, or enabled for
+execution. Platform-Tools and executor-readiness diagnostics remain separate
+Phase 6A work.
+
+Production builds use the local-only CSP and package the release Rust sidecar,
+catalog snapshot, and qualification policy.
 The maintained local qualification is Apple Silicon-only and creates both an
 app and DMG:
 

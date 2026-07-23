@@ -591,14 +591,22 @@ writing, so credentials and resolved sensitive values are never persisted or
 exported.
 
 Phase 2B guarded real-device execution is implemented behind the
-default-disabled Cargo feature `real-execution`. The compile-time feature is the
-only product gate, and a policy-only Tauri query reports its boolean state.
-Ordinary builds remain simulation-only. Trusted Tauri code owns confirmation,
-mode selection, exact target identity, reviewed plans and digests,
-Platform-Tools revalidation, unambiguous retained BYO file/directory checks,
-and sidecar identifiers. Platform-specific packaged-device evidence, privacy
-and security approval, an operator runbook, and a separate release decision are
-required before a release build opts into the feature.
+default-disabled Cargo feature `real-execution`. Rust projects the immutable
+`ExecutionCapabilities` contract with `realExecutionCompiled` derived only from
+that compile-time feature. Ordinary development and production commands report
+`Real-device execution: Not compiled` and remain simulation-only. The
+development-only `tauri:dev:real` npm command intentionally passes
+`--features real-execution` through the Tauri CLI and reports
+`Real-device execution: Compiled in`; it does not alter Cargo defaults or any
+build, bundle, release, or packaging command. Compiled in does not mean ready,
+connected, qualified, authorized, available, or enabled for execution.
+Platform-Tools and executor-readiness diagnostics remain separate Phase 6A
+work. Trusted Tauri code owns confirmation, mode selection, exact target
+identity, reviewed plans and digests, Platform-Tools revalidation, unambiguous
+retained BYO file/directory checks, and sidecar identifiers. Platform-specific
+packaged-device evidence, privacy and security approval, an operator runbook,
+and a separate release decision are required before a release build opts into
+the feature.
 
 Tauri launches the sidecar and negotiates the `phase0_end_user_runtime`
 extension plus `describeCatalog`, `listAdbDevices`, `probeDevice`,

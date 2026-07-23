@@ -120,7 +120,7 @@ pub fn run() {
             execution::get_simulated_execution,
             execution::get_simulated_execution_events,
             execution::cancel_simulated_execution,
-            execution::get_real_execution_availability,
+            execution::get_execution_capabilities,
             execution::start_real_execution,
             execution::get_real_execution,
             execution::get_real_execution_events,

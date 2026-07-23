@@ -37,6 +37,7 @@ import type {
   CatalogSummary,
   ConfigurationDescription,
   DeviceSummary,
+  ExecutionCapabilities,
   InputDescriptor,
   RecentConfiguration,
   RuntimeStatus,
@@ -126,7 +127,7 @@ export function App({ dialogController: suppliedDialogController }: AppProps = {
   }>({ phase: "idle", generation: 0, message: null });
   const [notice, setNotice] = useState<string | null>(null);
   const [operationError, setOperationError] = useState<string | null>(null);
-  const [realExecutionEnabled, setRealExecutionEnabled] = useState(false);
+  const [executionCapabilities, setExecutionCapabilities] = useState<ExecutionCapabilities | null>(null);
   const [realConfirmation, setRealConfirmation] = useState(emptyRealExecutionConfirmation);
   const [repairPreparing, setRepairPreparing] = useState(false);
   const [startupReady, setStartupReady] = useState(false);
@@ -234,6 +235,8 @@ export function App({ dialogController: suppliedDialogController }: AppProps = {
     }
   }, []);
 
+  const realExecutionCompiled = executionCapabilities?.realExecutionCompiled === true;
+
   const {
     cancelExecution,
     exportExecutionReport,
@@ -247,7 +250,7 @@ export function App({ dialogController: suppliedDialogController }: AppProps = {
     announce,
     dispatch,
     mainRef,
-    realExecutionEnabled,
+    realExecutionCompiled,
     runtimeGenerationRef,
     setBusy,
     setNotice,
@@ -315,15 +318,15 @@ export function App({ dialogController: suppliedDialogController }: AppProps = {
   }, [navigationBlocked, updateInteractionRevision]);
 
   const initialize = useCallback(async (runtimeGeneration = runtimeGenerationRef.current) => {
-    const [runtimeStatus, adbStatus, realAvailability] = await Promise.all([
+    const [runtimeStatus, adbStatus, capabilities] = await Promise.all([
       api.runtimeStatus(),
       api.adbStatus(),
-      api.realExecutionAvailability().catch(() => ({ enabled: false })),
+      api.executionCapabilities(),
     ]);
     if (runtimeGenerationRef.current !== runtimeGeneration) return;
     setRuntime(runtimeStatus);
     setAdb(adbStatus);
-    setRealExecutionEnabled(realAvailability.enabled);
+    setExecutionCapabilities(capabilities);
     if (runtimeStatus.status === "ready") {
       const [nextCatalog, recents] = await Promise.all([
         api.catalog(),
@@ -2666,7 +2669,7 @@ export function App({ dialogController: suppliedDialogController }: AppProps = {
                 onApplyToDevice={(invoker) => void requestRealExecution(invoker)}
                 onBack={() => dispatch({ type: "back" })}
                 onStartSimulation={startSimulation}
-                realExecutionEnabled={realExecutionEnabled}
+                realExecutionCompiled={realExecutionCompiled}
                 review={workflow.review}
                 reviewStale={workflow.reviewStale}
               />
@@ -2702,7 +2705,10 @@ export function App({ dialogController: suppliedDialogController }: AppProps = {
               <div><dt>App service</dt><dd>Ready</dd></div>
               <div><dt>Platform-Tools</dt><dd>Ready</dd></div>
               <div><dt>Setup catalog</dt><dd>Ready</dd></div>
-              <div><dt>Mode</dt><dd>{realExecutionEnabled ? "Simulation and guarded real execution" : "Simulation only"}</dd></div>
+              <div>
+                <dt>Real-device execution</dt>
+                <dd>{realExecutionCompiled ? "Compiled in" : "Not compiled"}</dd>
+              </div>
             </dl>
             {adb.warning && <p className="warning">{adb.warning}</p>}
             {adb.warning && <p className="fine-print">Open Troubleshooting for Platform-Tools maintenance and device-connection help.</p>}

@@ -103,7 +103,7 @@ function Harness({ workflow }: { workflow: WorkflowState }) {
     announce: vi.fn(),
     dispatch: vi.fn() as unknown as Dispatch<WorkflowAction>,
     mainRef,
-    realExecutionEnabled: false,
+    realExecutionCompiled: false,
     runtimeGenerationRef,
     setBusy: vi.fn(),
     setNotice: vi.fn(),

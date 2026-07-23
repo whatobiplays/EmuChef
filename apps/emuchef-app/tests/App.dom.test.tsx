@@ -1,7 +1,11 @@
 import { act, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { beforeEach, describe, expect, test, vi } from "vitest";
-import type { ConfigurationDescription, SupportSnapshot } from "../src/types";
+import type {
+  ConfigurationDescription,
+  ExecutionCapabilities,
+  SupportSnapshot,
+} from "../src/types";
 
 const mockApi = vi.hoisted(() => ({
   adbStatus: vi.fn(),
@@ -10,6 +14,7 @@ const mockApi = vi.hoisted(() => ({
   catalog: vi.fn(),
   describeConfiguration: vi.fn(),
   endUpdateInteractionSession: vi.fn(),
+  executionCapabilities: vi.fn(),
   installPlatformToolsSelection: vi.fn(),
   listRecentConfigurations: vi.fn(),
   matchDevice: vi.fn(),
@@ -19,7 +24,6 @@ const mockApi = vi.hoisted(() => ({
   pickPlatformToolsZip: vi.fn(),
   pollDevices: vi.fn(),
   probeDevice: vi.fn(),
-  realExecutionAvailability: vi.fn(),
   removePlatformTools: vi.fn(),
   restartRuntime: vi.fn(),
   supportSnapshot: vi.fn(),
@@ -29,6 +33,7 @@ const mockApi = vi.hoisted(() => ({
   getUpdateStatus: vi.fn(),
   runtimeStatus: vi.fn(),
   setUpdateInteractionState: vi.fn(),
+  startRealExecution: vi.fn(),
   stageRecoveryDraft: vi.fn(),
   restoreRecoveryDraft: vi.fn(),
   updateSavedConfigurationMenu: vi.fn(),
@@ -247,7 +252,9 @@ function resetApi(): void {
   });
   mockApi.runtimeStatus.mockResolvedValue({ status: "ready", protocolVersion: 1, catalogVersion: "test" });
   mockApi.adbStatus.mockResolvedValue(readyAdb);
-  mockApi.realExecutionAvailability.mockResolvedValue({ enabled: false });
+  mockApi.executionCapabilities.mockResolvedValue({
+    realExecutionCompiled: false,
+  } satisfies ExecutionCapabilities);
   mockApi.catalog.mockResolvedValue({
     catalog: {
       sourceKind: "bundled",
@@ -329,6 +336,38 @@ function deferred<T>(): { promise: Promise<T>; resolve: (value: T) => void } {
 }
 
 beforeEach(() => resetApi());
+
+describe("Phase 6A execution capability reporting", () => {
+  test("shows the backend-provided feature-disabled capability", async () => {
+    await renderReadyApp();
+
+    const status = document.querySelector(".status-panel");
+    expect(status?.textContent).toContain("Real-device executionNot compiled");
+    expect(status?.textContent).not.toContain("Mode");
+  });
+
+  test("shows the backend-provided feature-enabled capability without starting execution", async () => {
+    mockApi.executionCapabilities.mockResolvedValue({
+      realExecutionCompiled: true,
+    } satisfies ExecutionCapabilities);
+
+    await renderReadyApp();
+
+    const status = document.querySelector(".status-panel");
+    expect(status?.textContent).toContain("Real-device executionCompiled in");
+    expect(mockApi.startRealExecution).not.toHaveBeenCalled();
+  });
+
+  test("does not report not compiled when capability IPC fails", async () => {
+    mockApi.executionCapabilities.mockRejectedValue(new Error("capability IPC unavailable"));
+
+    render(<App />);
+    await waitFor(() => expect(mockApi.executionCapabilities).toHaveBeenCalledTimes(1));
+
+    expect(document.body.textContent).not.toContain("Not compiled");
+    expect(document.querySelector(".status-panel")).toBeNull();
+  });
+});
 
 describe("Phase 5H product polish", () => {
   test("shows readiness without exposing catalog identity or implementation terminology", async () => {

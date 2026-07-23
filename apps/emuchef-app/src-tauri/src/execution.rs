@@ -8,7 +8,7 @@ use std::collections::{BTreeMap, HashMap, HashSet};
 use std::fs::{self, File};
 use std::path::Path;
 
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use serde_json::{json, Map, Value};
 use sha2::{Digest, Sha256};
 use tauri::{AppHandle, Manager, State};
@@ -588,9 +588,21 @@ struct RealExecutionConfirmation {
     keep_device_connected_acknowledged: bool,
 }
 
+/// Immutable application-build capabilities authored by the trusted backend.
+///
+/// This contract reports compile inclusion only. It does not represent
+/// execution readiness, authorization, device state, or Platform-Tools state.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ExecutionCapabilities {
+    pub real_execution_compiled: bool,
+}
+
 #[tauri::command]
-pub fn get_real_execution_availability() -> Value {
-    json!({ "enabled": cfg!(feature = "real-execution") })
+pub fn get_execution_capabilities() -> ExecutionCapabilities {
+    ExecutionCapabilities {
+        real_execution_compiled: cfg!(feature = "real-execution"),
+    }
 }
 
 #[tauri::command]
@@ -2247,12 +2259,34 @@ mod tests {
 
     use super::*;
 
+    #[cfg(not(feature = "real-execution"))]
     #[test]
-    fn real_execution_availability_reflects_only_the_cargo_feature() {
+    fn execution_capabilities_report_real_execution_not_compiled_without_feature() {
+        let capabilities = get_execution_capabilities();
+
+        assert!(!capabilities.real_execution_compiled);
+    }
+
+    #[cfg(feature = "real-execution")]
+    #[test]
+    fn execution_capabilities_report_real_execution_compiled_with_feature() {
+        let capabilities = get_execution_capabilities();
+
+        assert!(capabilities.real_execution_compiled);
+    }
+
+    #[test]
+    fn execution_capabilities_serialize_as_the_exact_frontend_contract() {
+        let capabilities = get_execution_capabilities();
+        let serialized = serde_json::to_value(capabilities).unwrap();
+
         assert_eq!(
-            get_real_execution_availability(),
-            json!({ "enabled": cfg!(feature = "real-execution") })
+            serialized,
+            json!({
+                "realExecutionCompiled": capabilities.real_execution_compiled,
+            })
         );
+        assert!(serialized.get("enabled").is_none());
     }
 
     fn review() -> ReviewedPlanSnapshot {

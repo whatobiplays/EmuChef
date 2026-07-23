@@ -27,7 +27,7 @@ Detailed evidence remains in the relevant product and release documents. In part
 
 | Product or track | Current state | Next priority |
 |---|---|---|
-| EmuChef proper | Phase 5A through 5H completed; Phase 6 planned | Phase 6A development builds and feature gating |
+| EmuChef proper | Phase 5A through 5H completed; Phase 6A in progress | Continue Phase 6A development builds and feature gating |
 | Config Editor | Authored generation implemented through GitHub release-pattern testing | Later refinements remain unsequenced unless explicitly promoted |
 | Shared Runtime | Rust is the sole runtime and retains device, filesystem, planning, execution, validation, and protocol authority | Add shared capabilities only when required by a bounded product slice |
 | Release engineering | Deliberately deferred from normal Phase 5 product work | Resume only when the owner declares the relevant application release-comfortable |
@@ -68,7 +68,7 @@ EmuChef proper Phase 5 established end-user feature completeness, usability, wor
 | 5F | Saved configurations and reusable setups | Completed | Reliable reuse and maintenance of configurations |
 | 5G | Support, diagnostics, and recovery polish | Completed | Troubleshooting without a terminal |
 | 5H | Visual consistency and final product polish | Completed | Cohesive, release-comfortable end-user experience |
-| 6A | Development builds and feature gating | Next | Intentional real-execution development builds without accidental production enablement |
+| 6A | Development builds and feature gating | In progress | Intentional real-execution development builds without accidental production enablement |
 | 6B | Device discovery and qualification | Planned | Deterministic device capability and compatibility profiles |
 | 6C | Core executor qualification | Planned | Hardware-proven execution of supported step types |
 | 6D | Execution safety and recovery | Planned | Predictable cancellation, failure, disconnect, and cleanup behavior |
@@ -375,7 +375,7 @@ screen-reader workflow remain explicitly unperformed.
 ## 14. Phase 6 — Real Device Execution
 
 **Owner: EmuChef proper**, with bounded **Shared Runtime** work where required  
-**Status: Planned**
+**Status: In progress**
 
 ### Objective
 
@@ -395,7 +395,7 @@ Phase 6 is a promotion and qualification track, not a rewrite of the executor. E
 ### 6A — Development Builds and Feature Gating
 
 **Owner: EmuChef proper / Shared Runtime**  
-**Status: Next**
+**Status: In progress**
 
 #### Objective
 
@@ -406,7 +406,7 @@ Make real-device execution straightforward to build, identify, and diagnose duri
 - Add explicit development commands that build EmuChef proper with `--features real-execution`.
 - Forward the feature through Tauri and packaging entry points used for development qualification.
 - Keep default and ordinary production builds simulation-only.
-- Project authoritative runtime capability state so the UI can clearly identify whether real execution is compiled and available.
+- Project authoritative runtime capability state so the UI can clearly identify whether real execution is compiled.
 - Surface Platform-Tools path/version and executor readiness through existing sanitized troubleshooting contracts.
 - Add build and regression checks proving both feature-disabled and feature-enabled configurations compile.
 
@@ -416,6 +416,17 @@ Make real-device execution straightforward to build, identify, and diagnose duri
 - Default builds remain simulation-only.
 - EmuChef proper clearly reports its execution capability without exposing internal paths or authority data to React.
 - Automated checks cover both feature configurations.
+
+#### Current progress
+
+Phase 6A Slice 1 provides the documented `tauri:dev:real` command, which passes
+`--features real-execution` through the Tauri CLI while ordinary development
+and all production commands remain simulation-only. Slice 2 adds the immutable
+Rust-authored `realExecutionCompiled` capability and reports `Compiled in` or
+`Not compiled` without treating compilation as readiness or authorization.
+Platform-Tools and executor-readiness diagnostics are the next bounded Phase 6A
+slice. Device qualification and production enablement remain later work. Phase
+6A is not complete.
 
 ### 6B — Device Discovery and Qualification
 
@@ -798,8 +809,13 @@ Cross-platform packaging and release automation must define separate deliverable
 ### Phase 6A — Development Builds and Feature Gating
 
 **Owner: EmuChef proper / Shared Runtime**  
-**Status: Next**
+**Status: In progress**
 
-Create the intentional real-execution development build path while keeping default and ordinary production builds simulation-only. Add authoritative capability reporting, Platform-Tools/executor readiness diagnostics, and automated compile coverage for both feature-disabled and feature-enabled configurations. Do not begin physical recipe qualification until the feature boundary and stale-authority protections are demonstrably intact.
+Continue Phase 6A with backend-authored Platform-Tools and executor-readiness
+diagnostics. The intentional real-execution development command and
+authoritative compile-capability reporting exist, while default and ordinary
+production builds remain simulation-only. Do not begin physical recipe
+qualification until readiness, the feature boundary, and stale-authority
+protections are demonstrably intact.
 
 Manual Phase 5H macOS visual and accessibility qualification remains an outstanding bounded qualification follow-up and may be performed independently, but it is not the active implementation slice.

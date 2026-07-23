@@ -16,6 +16,7 @@
     "build": "tsc && vite build",
     "check:packaged-resources": "node scripts/check-packaged-resources.mjs",
     "tauri:dev": "tauri dev --config src-tauri/tauri.dev.conf.json",
+    "tauri:dev:real": "tauri dev --config src-tauri/tauri.dev.conf.json --features real-execution",
     "package:macos:preflight": "node scripts/macos-package.mjs preflight",
     "package:macos:build": "node scripts/macos-package.mjs build",
     "package:macos:verify": "node scripts/macos-package.mjs verify",

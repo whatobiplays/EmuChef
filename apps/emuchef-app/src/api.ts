@@ -9,9 +9,9 @@ import type {
   DeviceMatch,
   DeviceSummary,
   ExecutionCancellation,
+  ExecutionCapabilities,
   ExecutionEventBatch,
   ExecutionSnapshot,
-  RealExecutionAvailability,
   RealExecutionConfirmation,
   RealExecutionSnapshot,
   ReportExportResult,
@@ -109,8 +109,8 @@ export const api = {
     }),
   cancelSimulatedExecution: (executionHandle: string) =>
     invoke<ExecutionCancellation>("cancel_simulated_execution", { executionHandle }),
-  realExecutionAvailability: () =>
-    invoke<RealExecutionAvailability>("get_real_execution_availability"),
+  executionCapabilities: () =>
+    invoke<ExecutionCapabilities>("get_execution_capabilities"),
   startRealExecution: (reviewHandle: string, confirmation: RealExecutionConfirmation) =>
     invoke<RealExecutionSnapshot>("start_real_execution", {
       request: { reviewHandle, confirmation },
