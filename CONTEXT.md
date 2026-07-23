@@ -601,6 +601,16 @@ and do not perform readiness validation. The development-only
 through the Tauri CLI and reports real execution as compiled; it does not alter
 Cargo defaults or any build, bundle, release, or packaging command.
 
+The checked-in `EmuChef execution feature matrix` GitHub Actions workflow is the
+continuous compile-policy authority for Phase 6A. It runs `cargo check` and
+`cargo test` for the Tauri crate with `--no-default-features` and with
+`--no-default-features --features real-execution`, using the committed lockfile.
+A separate workflow job runs the source-level security policy suite, which
+proves that Cargo defaults and ordinary development, packaging, and release
+scripts remain feature-disabled and that only `tauri:dev:real` enables the
+feature. The workflow does not build or publish a production artifact with real
+execution enabled.
+
 Feature-enabled capability refresh clones the resolved managed or development
 ADB state and its revision while holding the trusted mutex, releases the mutex,
 then performs bounded local signature, retained-file, and `adb version`

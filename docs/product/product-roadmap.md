@@ -27,7 +27,7 @@ Detailed evidence remains in the relevant product and release documents. In part
 
 | Product or track | Current state | Next priority |
 |---|---|---|
-| EmuChef proper | Phase 5A through 5H completed; Phase 6A in progress | Continue Phase 6A development builds and feature gating |
+| EmuChef proper | Phase 5A through 5H and Phase 6A completed | Begin Phase 6B device discovery and qualification |
 | Config Editor | Authored generation implemented through GitHub release-pattern testing | Later refinements remain unsequenced unless explicitly promoted |
 | Shared Runtime | Rust is the sole runtime and retains device, filesystem, planning, execution, validation, and protocol authority | Add shared capabilities only when required by a bounded product slice |
 | Release engineering | Deliberately deferred from normal Phase 5 product work | Resume only when the owner declares the relevant application release-comfortable |
@@ -68,7 +68,7 @@ EmuChef proper Phase 5 established end-user feature completeness, usability, wor
 | 5F | Saved configurations and reusable setups | Completed | Reliable reuse and maintenance of configurations |
 | 5G | Support, diagnostics, and recovery polish | Completed | Troubleshooting without a terminal |
 | 5H | Visual consistency and final product polish | Completed | Cohesive, release-comfortable end-user experience |
-| 6A | Development builds and feature gating | In progress | Intentional real-execution development builds without accidental production enablement |
+| 6A | Development builds and feature gating | Completed | Intentional real-execution development builds without accidental production enablement |
 | 6B | Device discovery and qualification | Planned | Deterministic device capability and compatibility profiles |
 | 6C | Core executor qualification | Planned | Hardware-proven execution of supported step types |
 | 6D | Execution safety and recovery | Planned | Predictable cancellation, failure, disconnect, and cleanup behavior |
@@ -395,7 +395,7 @@ Phase 6 is a promotion and qualification track, not a rewrite of the executor. E
 ### 6A — Development Builds and Feature Gating
 
 **Owner: EmuChef proper / Shared Runtime**  
-**Status: In progress**
+**Status: Completed**
 
 #### Objective
 
@@ -431,10 +431,13 @@ revision and runtime generation, runs without holding the live ADB mutex, and
 discards stale results. It performs no device enumeration, ADB server startup,
 or device commands. Lifecycle refresh retains the previous valid diagnostic
 while refreshing or after a failed refresh, and readiness does not affect
-guarded-action visibility, eligibility, or start authority. Automated
-dual-feature build-matrix coverage is the next bounded Phase 6A slice. Device
-qualification and production enablement remain later work. Phase 6A is not
-complete.
+guarded-action visibility, eligibility, or start authority. Slice 4 adds the
+`EmuChef execution feature matrix` workflow, which runs the Tauri Rust check and
+test suites with no default features and again with `real-execution`, while a
+separate policy job continuously proves that ordinary development, packaging,
+and release paths remain feature-disabled. These four slices satisfy the Phase
+6A exit criteria. Device qualification and production enablement remain later
+work.
 
 ### 6B — Device Discovery and Qualification
 
@@ -814,16 +817,16 @@ Cross-platform packaging and release automation must define separate deliverable
 
 ## 25. Immediate next action
 
-### Phase 6A — Development Builds and Feature Gating
+### Phase 6B — Device Discovery and Qualification
 
 **Owner: EmuChef proper / Shared Runtime**  
-**Status: In progress**
+**Status: Next**
 
-Continue Phase 6A with automated dual-feature build-matrix coverage. The
-intentional real-execution development command and authoritative compile,
-Platform-Tools, and executor-readiness reporting exist, while default and
-ordinary production builds remain simulation-only. Do not begin physical
-recipe qualification until both feature configurations are continuously
-verified and the remaining qualification boundary is explicitly approved.
+Begin Phase 6B with a bounded device-qualification contract and evidence plan.
+Define the backend-authored supported, unsupported, and insufficiently
+qualified states; the exact read-only ADB facts required; generation and device
+identity invalidation; and the policy for safe generic plans. Do not begin
+recipe execution qualification or enable real execution in ordinary production
+builds as part of this slice.
 
 Manual Phase 5H macOS visual and accessibility qualification remains an outstanding bounded qualification follow-up and may be performed independently, but it is not the active implementation slice.

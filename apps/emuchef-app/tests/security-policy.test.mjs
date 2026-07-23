@@ -443,6 +443,38 @@ test("accessible fallbacks and technical details cannot expose protected data", 
   assert.doesNotMatch(supportPanel, /<code>\{(?:entry\.cacheEntryHandle|outcome\.entryHandle)\}<\/code>|>\{(?:entry\.cacheEntryHandle|outcome\.entryHandle)\}</);
 });
 
+test("CI continuously verifies both execution feature configurations", () => {
+  const workflow = read("../../.github/workflows/emuchef-execution-feature-matrix.yml");
+
+  assert.match(workflow, /^name: EmuChef execution feature matrix$/m);
+  assert.match(workflow, /^permissions:\s*\n\s*contents: read$/m);
+  assert.match(workflow, /^\s*security-policy:\s*$/m);
+  assert.match(workflow, /npm --prefix apps\/emuchef-app run test:security/);
+  assert.match(workflow, /^\s*rust-feature-matrix:\s*$/m);
+  assert.match(workflow, /^\s*fail-fast: false$/m);
+  assert.match(workflow, /configuration: simulation-only\s*\n\s*cargo_arguments: --no-default-features/);
+  assert.match(
+    workflow,
+    /configuration: real-execution\s*\n\s*cargo_arguments: --no-default-features --features real-execution/,
+  );
+  assert.match(
+    workflow,
+    /cargo check --locked --manifest-path apps\/emuchef-app\/src-tauri\/Cargo\.toml \$\{\{ matrix\.cargo_arguments \}\}/,
+  );
+  assert.match(
+    workflow,
+    /cargo test --locked --manifest-path apps\/emuchef-app\/src-tauri\/Cargo\.toml \$\{\{ matrix\.cargo_arguments \}\}/,
+  );
+  assert.match(
+    workflow,
+    /cargo fmt --manifest-path apps\/emuchef-app\/src-tauri\/Cargo\.toml -- --check/,
+  );
+  assert.doesNotMatch(
+    workflow,
+    /tauri build[^\n]*real-execution|package:macos[^\n]*real-execution|release[^\n]*--features real-execution/,
+  );
+});
+
 test("React cannot supply trusted real-execution or launch data", () => {
   const api = read("src/api.ts");
   const execution = read("src-tauri/src/execution.rs");

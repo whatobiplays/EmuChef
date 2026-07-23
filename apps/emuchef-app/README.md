@@ -151,12 +151,21 @@ This command passes `--features real-execution` to Tauri. Real execution remains
 development-only; ordinary development, production build, bundle, release, and
 packaging commands remain simulation-only.
 
-Rust authors the immutable execution compile-capability reported in the Current
-status panel. Ordinary builds report `Real-device execution: Not compiled`;
-`tauri:dev:real` reports `Real-device execution: Compiled in`. Compiled in does
-not mean ready, connected, qualified, authorized, available, or enabled for
-execution. Platform-Tools and executor-readiness diagnostics remain separate
-Phase 6A work.
+Rust authors the immutable execution capability reported in the Current status
+panel. Ordinary builds report real execution as not compiled, Platform Tools as
+not applicable, and executor readiness as not compiled. `tauri:dev:real`
+reports real execution as compiled and performs a bounded, sanitized local
+Platform-Tools readiness check without probing devices. Compiled or ready does
+not mean connected, qualified, authorized, available, or enabled for execution;
+`start_real_execution` independently revalidates every prerequisite immediately
+before device access.
+
+The `EmuChef execution feature matrix` GitHub Actions workflow continuously
+checks and tests the Tauri Rust crate in both supported compile configurations:
+`--no-default-features` and `--no-default-features --features real-execution`.
+Its policy job also verifies that Cargo defaults, ordinary development,
+production packaging, and release scripts remain simulation-only and that only
+`tauri:dev:real` opts into the feature.
 
 Production builds use the local-only CSP and package the release Rust sidecar,
 catalog snapshot, and qualification policy.
