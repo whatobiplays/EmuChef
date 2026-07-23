@@ -27,7 +27,7 @@ Detailed evidence remains in the relevant product and release documents. In part
 
 | Product or track | Current state | Next priority |
 |---|---|---|
-| EmuChef proper | Phase 5A through 5H completed | Manual Phase 5H macOS visual and accessibility qualification |
+| EmuChef proper | Phase 5A through 5H completed; Phase 6 planned | Phase 6A development builds and feature gating |
 | Config Editor | Authored generation implemented through GitHub release-pattern testing | Later refinements remain unsequenced unless explicitly promoted |
 | Shared Runtime | Rust is the sole runtime and retains device, filesystem, planning, execution, validation, and protocol authority | Add shared capabilities only when required by a bounded product slice |
 | Release engineering | Deliberately deferred from normal Phase 5 product work | Resume only when the owner declares the relevant application release-comfortable |
@@ -54,7 +54,7 @@ Allowed roadmap status values are `Planned`, `Next`, `In progress`, `Blocked`, `
 
 This section applies only to `apps/emuchef-app` and the backend/Tauri capabilities required by its end-user workflow. It does not define Config Editor authoring features.
 
-EmuChef proper Phase 5 focuses on end-user feature completeness, usability, workflow clarity, resilience, accessibility, and visual polish. Formal public-release qualification remains deferred.
+EmuChef proper Phase 5 established end-user feature completeness, usability, workflow clarity, resilience, accessibility, and visual polish. Phase 6 promotes the existing feature-gated real-device executor through bounded development, qualification, safety, recipe, and production-readiness slices. Formal public-release qualification remains deferred.
 
 ## 5. EmuChef Proper Phase Status
 
@@ -64,10 +64,17 @@ EmuChef proper Phase 5 focuses on end-user feature completeness, usability, work
 | 5B | Workflow navigation and state polish | Completed | Predictable movement, recovery, and state transitions |
 | 5C | Recipe and setup selection experience | Completed | Nontechnical setup discovery and selection |
 | 5D | Input collection and file-management polish | Completed | Early, understandable, recoverable input validation |
-| 5E | Plan review and execution experience | Next | Confidence before execution and useful failure recovery |
-| 5F | Saved configurations and reusable setups | Planned | Reliable reuse and maintenance of configurations |
-| 5G | Support, diagnostics, and recovery polish | Planned | Troubleshooting without a terminal |
-| 5H | Visual consistency and final product polish | Planned | Cohesive, release-comfortable end-user experience |
+| 5E | Plan review and execution experience | Completed | Confidence before execution and useful failure recovery |
+| 5F | Saved configurations and reusable setups | Completed | Reliable reuse and maintenance of configurations |
+| 5G | Support, diagnostics, and recovery polish | Completed | Troubleshooting without a terminal |
+| 5H | Visual consistency and final product polish | Completed | Cohesive, release-comfortable end-user experience |
+| 6A | Development builds and feature gating | Next | Intentional real-execution development builds without accidental production enablement |
+| 6B | Device discovery and qualification | Planned | Deterministic device capability and compatibility profiles |
+| 6C | Core executor qualification | Planned | Hardware-proven execution of supported step types |
+| 6D | Execution safety and recovery | Planned | Predictable cancellation, failure, disconnect, and cleanup behavior |
+| 6E | Recipe qualification | Planned | End-to-end success for core EmuChef workflows |
+| 6F | Physical-device test matrix | Planned | Representative coverage across supported Android device classes |
+| 6G | Production readiness | Planned | Evidence-backed promotion of real execution into production builds |
 
 ## 6. Phase 5A — End-to-End UX and Feature-Gap Audit
 
@@ -365,9 +372,212 @@ rendering, packaged application and DMG icon presentation, 200% zoom in the
 packaged WebView, forced colors or increased contrast, reduced motion, and a
 screen-reader workflow remain explicitly unperformed.
 
+## 14. Phase 6 — Real Device Execution
+
+**Owner: EmuChef proper**, with bounded **Shared Runtime** work where required  
+**Status: Planned**
+
+### Objective
+
+Promote the existing Rust real-device executor from a compile-time-gated implementation into a qualified EmuChef proper capability without enabling it in ordinary production builds before its safety, workflow, and hardware evidence is complete.
+
+Phase 6 is a promotion and qualification track, not a rewrite of the executor. Existing executor abstractions, runtime-reference resolution, artifact staging, APK installation, file copy, permission grants, launch behavior, verification, progress reporting, and error projection should be preserved unless concrete device evidence requires a bounded correction.
+
+### Phase-wide rules
+
+- Keep `real-execution` disabled in ordinary production builds until Phase 6G exit criteria are met.
+- Preserve Rust and trusted Tauri authority; React must not gain direct ADB, filesystem, process, or execution authority.
+- Bind execution to the reviewed plan, current runtime generation, and currently qualified device identity.
+- Use disposable test inputs and deliberately selected devices during qualification.
+- Record device, Android version, root state, Platform-Tools version, recipe, result, and known limitations for every physical qualification run.
+- Do not treat successful simulation, fixture, unit, or packaged-GUI tests as real-device evidence.
+
+### 6A — Development Builds and Feature Gating
+
+**Owner: EmuChef proper / Shared Runtime**  
+**Status: Next**
+
+#### Objective
+
+Make real-device execution straightforward to build, identify, and diagnose during development while remaining impossible to enable accidentally in ordinary production artifacts.
+
+#### Candidate scope
+
+- Add explicit development commands that build EmuChef proper with `--features real-execution`.
+- Forward the feature through Tauri and packaging entry points used for development qualification.
+- Keep default and ordinary production builds simulation-only.
+- Project authoritative runtime capability state so the UI can clearly identify whether real execution is compiled and available.
+- Surface Platform-Tools path/version and executor readiness through existing sanitized troubleshooting contracts.
+- Add build and regression checks proving both feature-disabled and feature-enabled configurations compile.
+
+#### Exit criteria
+
+- A documented, intentional command produces a development build with real execution enabled.
+- Default builds remain simulation-only.
+- EmuChef proper clearly reports its execution capability without exposing internal paths or authority data to React.
+- Automated checks cover both feature configurations.
+
+### 6B — Device Discovery and Qualification
+
+**Owner: EmuChef proper / Shared Runtime**  
+**Status: Planned**
+
+#### Objective
+
+Produce a deterministic, backend-authored compatibility profile for the connected Android device before real execution is offered.
+
+#### Candidate scope
+
+- Confirm ADB identity, authorization, online state, Android version, ABI, storage behavior, and relevant package/activity-manager capabilities.
+- Detect root availability only through an explicit, bounded qualification path; never probe root automatically during ordinary discovery.
+- Distinguish supported, unsupported, and insufficiently qualified devices.
+- Bind qualification results to device identity and runtime generation so reconnects and device swaps invalidate stale authority.
+- Present user-facing compatibility and limitation summaries without raw capability identifiers.
+
+#### Exit criteria
+
+- Every connected device produces a deterministic, sanitized qualification result.
+- Stale qualification cannot authorize execution after disconnect, reconnect, device replacement, or runtime restart.
+- Unsupported or incompletely qualified devices cannot begin real execution without an explicitly approved bounded policy.
+
+### 6C — Core Executor Qualification
+
+**Owner: EmuChef proper / Shared Runtime**  
+**Status: Planned**
+
+#### Objective
+
+Prove each supported execution operation against physical Android hardware through the EmuChef proper workflow.
+
+#### Qualification scope
+
+- Artifact acquisition and trusted staging.
+- APK installation and package verification.
+- Single-file and directory copy behavior.
+- Archive extraction where represented by supported authored steps.
+- Permission grants.
+- Application launch and stop behavior where supported.
+- Step verification, skip behavior, progress events, and sanitized result projection.
+- Cleanup of temporary host and device staging material.
+
+#### Exit criteria
+
+- Every production-supported step type has at least one successful physical-device qualification case.
+- Expected failures produce stable classified errors and user-safe guidance.
+- Temporary staging is removed or reported explicitly when cleanup cannot complete.
+- Simulation and real execution remain behaviorally distinguishable in review, progress, results, and reports.
+
+### 6D — Execution Safety and Recovery
+
+**Owner: EmuChef proper / Shared Runtime**  
+**Status: Planned**
+
+#### Objective
+
+Make interruption and failure behavior deterministic, understandable, and bounded.
+
+#### Candidate scope
+
+- Revalidate device identity, qualification, reviewed-plan digest, runtime generation, and required inputs immediately before execution.
+- Exercise cancellation at safe boundaries.
+- Define timeouts for ADB, install, copy, launch, and verification operations.
+- Handle unauthorized, offline, disconnected, replaced-device, low-storage, and host-sleep transitions.
+- Preserve truthful partial-result reporting without implying rollback.
+- Prevent automatic replay of partially completed work.
+- Require fresh review before retrying failed or retryable work.
+- Verify sanitization of events, diagnostics, exported reports, and support codes under failure.
+
+#### Exit criteria
+
+- Cancellation and common disconnect/failure modes have repeatable physical-device evidence.
+- Interrupted runs leave no hidden active executor and no stale authority capable of resuming automatically.
+- Users can identify completed, skipped, failed, and unattempted work and know the safe next action.
+- No Phase 6 behavior claims device rollback or execution resume after application restart.
+
+### 6E — Recipe Qualification
+
+**Owner: EmuChef proper**  
+**Status: Planned**
+
+#### Objective
+
+Qualify complete end-user workflows rather than isolated executor operations.
+
+#### Initial qualification set
+
+- Install RetroArch.
+- Install Obtainium.
+- Copy BIOS files.
+- Copy ROM or content files.
+- Complete RetroArch first-launch initialization where required.
+- Execute the canonical RetroArch provisioning recipe.
+- Add Daijisho and ES-DE provisioning only when their authored recipes and required assets are present and production-intended.
+
+#### Exit criteria
+
+- Core production-intended recipes complete on a clean or deliberately reset physical device.
+- Dependency expansion, input binding, review projection, execution ordering, verification, and final reporting are proven end to end.
+- Recipe-specific limitations and cleanup requirements are documented.
+- Failed recipe qualification blocks promotion of that recipe without blocking unrelated qualified workflows.
+
+### 6F — Physical-Device Test Matrix
+
+**Owner: EmuChef proper**  
+**Status: Planned**
+
+#### Objective
+
+Build representative confidence across deliberately supported Android handheld classes without claiming unrestricted device support.
+
+#### Coverage dimensions
+
+- Supported Android versions.
+- Multiple OEMs and handheld families.
+- Snapdragon and MediaTek devices where available and intended.
+- Rooted and non-rooted qualification paths.
+- Scoped-storage variants and shared-storage behavior.
+- USB 2 and USB 3 host/device paths where materially different.
+- Clean-device, already-installed, upgrade, and partially provisioned states.
+
+#### Required evidence
+
+Maintain a qualification matrix containing device model, Android version, ABI/SoC class, root state, connection type, Platform-Tools version, EmuChef build identity, recipe or operation, result, date, and known limitations.
+
+#### Exit criteria
+
+- Every deliberately supported device class has representative physical evidence.
+- Known OEM- or Android-specific limitations are surfaced before execution where possible.
+- The supported-device policy is explicit and does not imply broad compatibility beyond tested classes.
+
+### 6G — Production Readiness
+
+**Owner: EmuChef proper**, coordinated with release engineering  
+**Status: Planned**
+
+#### Objective
+
+Decide whether real-device execution is qualified to become an ordinary production capability.
+
+#### Candidate scope
+
+- Consolidate Phase 6 qualification evidence and unresolved limitations.
+- Complete user documentation, troubleshooting guidance, safety disclosure, and support-code coverage.
+- Verify production packaging forwards the required feature intentionally.
+- Run packaged-GUI real-device qualification on the release candidate.
+- Define release checklist gates for executor capability, Platform-Tools, device qualification, recipes, reports, signing, notarization, and clean-machine behavior.
+- Decide whether telemetry remains excluded or requires a separately approved privacy design.
+- Remove the experimental designation only after explicit approval.
+
+#### Exit criteria
+
+- All required Phase 6A through 6F evidence is complete or explicitly accepted with documented limitations.
+- Production artifacts intentionally include real execution and still fail closed when prerequisites are absent.
+- Packaged, signed, notarized, clean-machine, and physical-device evidence is archived for EmuChef proper.
+- Real execution is enabled by default only through an explicit roadmap and release decision.
+
 # Part II — Config Editor Roadmap
 
-## 14. Scope and current state
+## 15. Scope and current state
 
 **Owner: Config Editor**
 
@@ -387,11 +597,11 @@ Implemented authored-generation work includes:
 
 The authoritative current-state design is `docs/product/config-editor-authored-generation.md`.
 
-## 15. Remaining Config Editor refinements
+## 16. Remaining Config Editor refinements
 
 These items are not part of EmuChef proper Phase 5. They remain unsequenced until explicitly promoted to `Next`.
 
-### 15.1 OS-keychain GitHub credentials
+### 16.1 OS-keychain GitHub credentials
 
 **Owner: Config Editor**  
 **Status: Planned**
@@ -401,7 +611,7 @@ These items are not part of EmuChef proper Phase 5. They remain unsequenced unti
 - Keep credentials out of authored documents, React state, logs, and diagnostics.
 - Treat private-repository support as a separate security decision.
 
-### 15.2 Dedicated app-definition editor
+### 16.2 Dedicated app-definition editor
 
 **Owner: Config Editor**  
 **Status: Planned**
@@ -410,7 +620,7 @@ These items are not part of EmuChef proper Phase 5. They remain unsequenced unti
 - Validate identifiers and authored fields through Rust.
 - Preserve dirty-state, collision, canonical-YAML, and trusted-save behavior.
 
-### 15.3 Dedicated device-profile editor
+### 16.3 Dedicated device-profile editor
 
 **Owner: Config Editor**  
 **Status: Planned**
@@ -419,7 +629,7 @@ These items are not part of EmuChef proper Phase 5. They remain unsequenced unti
 - Explain match scope, inheritance, and capability consequences.
 - Preserve backend ownership of validation and persistence.
 
-### 15.4 Obtainium import
+### 16.4 Obtainium import
 
 **Owner: Config Editor**  
 **Status: Planned**
@@ -428,7 +638,7 @@ These items are not part of EmuChef proper Phase 5. They remain unsequenced unti
 - Normalize imported data into EmuChef-authored contracts.
 - Clearly report unsupported, lossy, or ambiguous fields.
 
-### 15.5 Source-update checks
+### 16.5 Source-update checks
 
 **Owner: Config Editor**  
 **Status: Planned**
@@ -437,7 +647,7 @@ These items are not part of EmuChef proper Phase 5. They remain unsequenced unti
 - Avoid background polling unless separately designed.
 - Preserve fail-closed behavior for ambiguous source changes.
 
-### 15.6 Alias management
+### 16.6 Alias management
 
 **Owner: Config Editor**  
 **Status: Planned**
@@ -446,7 +656,7 @@ These items are not part of EmuChef proper Phase 5. They remain unsequenced unti
 - Surface collisions and stale aliases.
 - Never silently change authored identity.
 
-### 15.7 Device-plan assistance
+### 16.7 Device-plan assistance
 
 **Owner: Config Editor**  
 **Status: Planned**
@@ -455,7 +665,7 @@ These items are not part of EmuChef proper Phase 5. They remain unsequenced unti
 - Explain plan compatibility and required capabilities.
 - Keep planner and runtime authority out of React.
 
-### 15.8 Extended device capability checks
+### 16.8 Extended device capability checks
 
 **Owner: Config Editor**  
 **Status: Deferred**
@@ -464,7 +674,7 @@ A future explicit authoring action may test bounded shared-storage access, packa
 
 # Part III — Shared Runtime and Cross-Product Work
 
-## 16. Shared Runtime
+## 17. Shared Runtime
 
 **Owner: Shared Runtime**
 
@@ -489,7 +699,7 @@ Shared-runtime tasks must identify:
 
 No roadmap item should be placed here merely because its implementation file lives under `crates/emuchef-rust-backend`.
 
-## 17. Authored-schema candidates carried forward
+## 18. Authored-schema candidates carried forward
 
 **Owner: Shared Runtime**, with **EmuChef proper** as the initial consumer unless reprioritized.
 
@@ -503,11 +713,11 @@ These should be designed as explicit schema extensions with Rust validation and 
 
 # Part IV — Release Engineering
 
-## 18. Application-specific release boundaries
+## 19. Application-specific release boundaries
 
 Release readiness must always name the application being qualified.
 
-### 18.1 EmuChef proper release engineering
+### 19.1 EmuChef proper release engineering
 
 **Owner: EmuChef proper**  
 **Status: Deferred**
@@ -520,13 +730,13 @@ Release readiness must always name the application being qualified.
 - Formal real-device release approval.
 - Public launch checklist and release evidence archive.
 
-### 18.2 Config Editor release engineering
+### 19.2 Config Editor release engineering
 
 **Owner: Config Editor**
 
 Config Editor already has recorded macOS signing and notarization evidence for its qualified artifacts. Any future release work must continue to identify Config Editor explicitly and must not be used as evidence that EmuChef proper is signed, notarized, or release-qualified.
 
-### 18.3 Cross-platform release automation
+### 19.3 Cross-platform release automation
 
 **Owner: Shared Runtime / release infrastructure**  
 **Status: Deferred**
@@ -535,7 +745,7 @@ Cross-platform packaging and release automation must define separate deliverable
 
 # Part V — Explicitly Post-MVP Unless Reprioritized
 
-## 19. EmuChef proper post-MVP
+## 20. EmuChef proper post-MVP
 
 **Owner: EmuChef proper**
 
@@ -549,7 +759,7 @@ Cross-platform packaging and release automation must define separate deliverable
 - Automatic Platform-Tools updates.
 - Broad multi-device support beyond deliberately supported plans.
 
-## 20. Config Editor post-MVP
+## 21. Config Editor post-MVP
 
 **Owner: Config Editor**
 
@@ -557,7 +767,7 @@ Cross-platform packaging and release automation must define separate deliverable
 - Private-repository support unless its credential and trust model is separately approved.
 - Broad arbitrary-site scraping or generic crawler behavior.
 
-## 21. Shared-runtime post-MVP
+## 22. Shared-runtime post-MVP
 
 **Owner: Shared Runtime**
 
@@ -566,7 +776,7 @@ Cross-platform packaging and release automation must define separate deliverable
 
 # Part VI — Tracking Procedure
 
-## 22. Starting a product session
+## 23. Starting a product session
 
 1. Read this roadmap.
 2. State the target owner: EmuChef proper, Config Editor, or Shared Runtime.
@@ -575,7 +785,7 @@ Cross-platform packaging and release automation must define separate deliverable
 5. Create a bounded task that names the owning application and allowed files.
 6. Do not begin a later phase or unrelated product track while unresolved blockers remain unless this roadmap is explicitly updated.
 
-## 23. Completing a product session
+## 24. Completing a product session
 
 1. Record implementation or audit evidence in the owner-specific document or result.
 2. Update status and completion evidence here.
@@ -583,18 +793,13 @@ Cross-platform packaging and release automation must define separate deliverable
 4. Verify that requirements were not accidentally transferred between EmuChef proper and Config Editor.
 5. Keep release engineering deferred unless explicitly reprioritized.
 
-## 24. Immediate next action
+## 25. Immediate next action
 
-### Manual Phase 5H macOS visual and accessibility qualification
+### Phase 6A — Development Builds and Feature Gating
 
-**Owner: EmuChef proper**  
+**Owner: EmuChef proper / Shared Runtime**  
 **Status: Next**
 
-Run the bounded manual checks that automated Phase 5H evidence cannot complete:
-approximately 380-pixel reflow and packaged-WebView 200% zoom, forced colors or
-increased contrast, reduced motion, VoiceOver workflow and dialog behavior,
-and macOS Dock, Finder, application-bundle, and DMG icon rendering. Record
-observations without expanding into release engineering. Preserve the completed
-troubleshooting, saved-setup, review, execution, recovery, visual-system, and
-Rust/Tauri authority contracts, and do not reopen Phase 5A-5H behavior without
-concrete regression evidence.
+Create the intentional real-execution development build path while keeping default and ordinary production builds simulation-only. Add authoritative capability reporting, Platform-Tools/executor readiness diagnostics, and automated compile coverage for both feature-disabled and feature-enabled configurations. Do not begin physical recipe qualification until the feature boundary and stale-authority protections are demonstrably intact.
+
+Manual Phase 5H macOS visual and accessibility qualification remains an outstanding bounded qualification follow-up and may be performed independently, but it is not the active implementation slice.
