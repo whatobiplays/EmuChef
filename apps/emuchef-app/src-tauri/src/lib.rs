@@ -144,19 +144,30 @@ pub fn run() {
         .expect("error while building EmuChef");
 
     app.run(|app_handle, event| {
-        if matches!(event, tauri::RunEvent::ExitRequested { .. }) {
-            let state = app_handle.state::<commands::AppState>();
-            let finalized = state
-                .recovery
-                .lock()
-                .map_err(|_| ())
-                .and_then(|mut recovery| recovery.finish_process_termination().map_err(|_| ()))
-                .is_ok();
-            if !finalized {
-                if let tauri::RunEvent::ExitRequested { api, .. } = event {
+        match event {
+            tauri::RunEvent::ExitRequested { api, .. } => {
+                if !finish_recovery_process_session(app_handle) {
                     api.prevent_exit();
                 }
             }
+            tauri::RunEvent::Exit => {
+                let _ = finish_recovery_process_session(app_handle);
+            }
+            _ => {}
         }
     });
+}
+
+// A clean process shutdown may arrive through different Tauri lifecycle
+// paths depending on platform and quit mechanism. Perform recovery cleanup
+// from both ExitRequested and the final Exit event. The operation is
+// idempotent, so repeated calls are safe.
+fn finish_recovery_process_session(app_handle: &tauri::AppHandle) -> bool {
+    let state = app_handle.state::<commands::AppState>();
+    state
+        .recovery
+        .lock()
+        .map_err(|_| ())
+        .and_then(|mut recovery| recovery.finish_process_termination().map_err(|_| ()))
+        .is_ok()
 }

@@ -88,8 +88,12 @@ impl RecoveryStore {
     }
 
     pub fn begin_session(&mut self) -> Result<Value, String> {
-        let interrupted_session = self.marker_path.is_file();
-        atomic_write(&self.marker_path, b"1", "recovery_session_marker_failed")?;
+        let first_process_session = self.session_generation == 0;
+        let interrupted_session = first_process_session && self.marker_path.is_file();
+        if first_process_session {
+            atomic_write(&self.marker_path, b"1", "recovery_session_marker_failed")?;
+        }
+
         self.session_generation = self.session_generation.saturating_add(1).max(1);
         self.latest_request_generation = 0;
         self.latest_draft_generation = 0;
@@ -942,6 +946,17 @@ mod tests {
         let status = reloaded.begin_session().unwrap();
         assert_eq!(status["interruptedSession"], true);
         assert_eq!(status["recovery"]["state"], "available");
+    }
+
+    #[test]
+    fn repeated_frontend_session_in_same_process_is_not_reported_as_interrupted() {
+        let (_temp, mut store) = store();
+
+        let status = store.begin_session().unwrap();
+
+        assert_eq!(status["sessionGeneration"], 2);
+        assert_eq!(status["interruptedSession"], false);
+        assert_eq!(status["recovery"]["state"], "none");
     }
 
     #[test]
