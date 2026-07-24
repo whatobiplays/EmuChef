@@ -824,13 +824,42 @@ Cross-platform packaging and release automation must define separate deliverable
 ### Phase 6B — Device Discovery and Qualification
 
 **Owner: EmuChef proper / Shared Runtime**  
-**Status: Next**
+**Status: In progress**
 
-Begin Phase 6B with a bounded device-qualification contract and evidence plan.
-Define the backend-authored supported, unsupported, and insufficiently
-qualified states; the exact read-only ADB facts required; generation and device
-identity invalidation; and the policy for safe generic plans. Do not begin
-recipe execution qualification or enable real execution in ordinary production
-builds as part of this slice.
+The bounded device-qualification contract and live read-only qualification path
+are implemented. The backend authors supported, unsupported, unauthorized,
+offline, no-device, and insufficiently-qualified states from bounded ADB facts;
+Tauri owns runtime generation and qualification revision invalidation; and the
+UI rejects stale qualification responses. Root probing and ordinary production
+real execution remain out of scope.
+
+#### Completed validation evidence
+
+Manual macOS validation with physical Android handhelds confirmed:
+
+- no-device detection after disconnect or disabling USB debugging;
+- supported qualification for one authorized Android 11+ ARM64 device;
+- unauthorized qualification when a newly connected device had not accepted
+  the host debugging authorization prompt;
+- insufficiently-qualified handling when two devices were connected;
+- correct disconnect, reconnect, and authorization transitions; and
+- no unmasked device serial projection in the application UI.
+
+The offline state remains covered by deterministic automated tests because it
+was not practical to reproduce reliably during the physical-device pass.
+
+#### Non-blocking Phase 6B UX follow-up
+
+- Surface the backend-authored Android version, API level, normalized ABI, root
+  status, and qualification limitations in the main Device step.
+- Reduce the narrow Current Status sidebar to concise state labels so long
+  qualification summaries do not wrap into unreadable columns.
+- Improve the multiple-device presentation so it is explicit that no single
+  device is eligible while more than one device is attached, rather than
+  showing each entry only as connected.
+
+Proceed with the next bounded Phase 6B slice without expanding into recipe
+execution qualification or enabling real execution in ordinary production
+builds.
 
 Manual Phase 5H macOS visual and accessibility qualification remains an outstanding bounded qualification follow-up and may be performed independently, but it is not the active implementation slice.
