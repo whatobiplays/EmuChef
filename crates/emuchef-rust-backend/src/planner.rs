@@ -1497,21 +1497,7 @@ fn validate_binding_value(
                 },
             );
             let metadata = fs::metadata(path);
-            if metadata.is_err() {
-                errors.push(PlannerMessage {
-                    code: "binding_path_missing".to_string(),
-                    message: format!(
-                        "Input '{input_id}' must reference an existing {}.",
-                        expected_kind.unwrap_or("host path")
-                    ),
-                    details: json!({
-                        "input_id": input_id,
-                        "expected_path_kind": expected_kind,
-                        "entry_index": entry_index,
-                    }),
-                });
-            } else {
-                let metadata = metadata.expect("metadata was checked above");
+            if let Ok(metadata) = metadata {
                 let kind_matches = match expected_kind {
                     Some("file") => metadata.is_file(),
                     Some("directory") => metadata.is_dir(),
@@ -1531,22 +1517,18 @@ fn validate_binding_value(
                         }),
                     });
                 } else {
-                    let readable = match expected_kind {
-                        Some("file") => fs::File::open(path).is_ok(),
-                        Some("directory") => fs::read_dir(path).is_ok(),
-                        _ => fs::File::open(path).is_ok() || fs::read_dir(path).is_ok(),
-                    };
-                    if !readable {
-                        errors.push(PlannerMessage {
-                            code: "binding_path_inaccessible".to_string(),
-                            message: format!("Input '{input_id}' cannot be read."),
-                            details: json!({
-                                "input_id": input_id,
-                                "expected_path_kind": expected_kind,
-                                "entry_index": entry_index,
-                            }),
-                        });
-                    }
+                    errors.push(PlannerMessage {
+                        code: "binding_path_missing".to_string(),
+                        message: format!(
+                            "Input '{input_id}' must reference an existing {}.",
+                            expected_kind.unwrap_or("host path")
+                        ),
+                        details: json!({
+                            "input_id": input_id,
+                            "expected_path_kind": expected_kind,
+                            "entry_index": entry_index,
+                        }),
+                    });
                 }
             }
         }

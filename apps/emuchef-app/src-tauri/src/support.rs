@@ -919,19 +919,19 @@ fn build_support_snapshot(state: &AppState) -> Result<SupportSnapshotDto, String
         consequence: "Resetting Recents never deletes saved setup files.".to_string(),
         support_code: (missing_recents > 0)
             .then_some(SupportCode::SavedConfigurationReferenceMissing.code()),
-        actions: (missing_recents > 0)
-            .then(|| {
-                vec![SupportActionDto {
-                    label: "Open saved setup repair",
-                    consequence:
-                        "Review missing Recent entries without changing saved files automatically.",
-                    available: true,
-                    unavailable_reason: None,
-                    destructive: false,
-                    action: CorrectiveActionDto::OpenSavedSetupRepair,
-                }]
-            })
-            .unwrap_or_default(),
+        actions: if missing_recents > 0 {
+            vec![SupportActionDto {
+                label: "Open saved setup repair",
+                consequence:
+                    "Review missing Recent entries without changing saved files automatically.",
+                available: true,
+                unavailable_reason: None,
+                destructive: false,
+                action: CorrectiveActionDto::OpenSavedSetupRepair,
+            }]
+        } else {
+            Vec::new()
+        },
     });
 
     let execution_unavailable = execution_summary.get("unavailable").is_some();

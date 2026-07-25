@@ -2020,7 +2020,7 @@ fn binding_projection_from_description(
     description: &Value,
 ) -> BindingProjection {
     let (safe, omitted, sensitive_omitted) = filter_binding_values(bindings, description);
-    let public_description = public_configuration_description(&description, "");
+    let public_description = public_configuration_description(description, "");
     let diagnostics = public_description
         .get("inputs")
         .and_then(Value::as_array)

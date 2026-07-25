@@ -26,7 +26,7 @@ use crate::user_configuration::{self, UserConfiguration, UserConfigurationLoadEr
 #[derive(Clone, Debug)]
 pub(crate) enum UserConfigurationSource {
     Reference(String),
-    Inline(UserConfiguration),
+    Inline(Box<UserConfiguration>),
 }
 
 #[derive(Clone, Debug)]
@@ -174,7 +174,7 @@ pub(crate) fn prepare_configuration(
             .map(|(_, configuration)| configuration)
             .map_err(ConfigurationContextError::UserConfiguration)?,
         ),
-        Some(UserConfigurationSource::Inline(configuration)) => Some(configuration),
+        Some(UserConfigurationSource::Inline(configuration)) => Some(*configuration),
         None => None,
     };
     let effective_device_plan = request

@@ -1432,6 +1432,7 @@ fn optional_user_configuration_source(
         }
         Some(value @ Value::Object(_)) => {
             user_configuration::parse_inline_user_configuration(value)
+                .map(Box::new)
                 .map(UserConfigurationSource::Inline)
                 .map(Some)
                 .map_err(|error| {

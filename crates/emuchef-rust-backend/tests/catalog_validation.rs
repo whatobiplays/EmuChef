@@ -191,7 +191,7 @@ fn capabilities_include_catalog_context_session_update() {
             "describeCatalog",
             "listAdbDevices",
             "probeDevice",
-            "qualifyConnectedDevice",
+            "qualifyDevice",
             "inspectApk",
             "generateAppRecipeDraft",
             "generateRemoteAppRecipeDraft",

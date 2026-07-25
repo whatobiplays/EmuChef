@@ -244,6 +244,7 @@ fn snapshot(
 
 #[tauri::command]
 pub fn get_device_qualification(
+    device_handle: String,
     state: State<'_, AppState>,
 ) -> Result<DeviceQualificationSnapshotDto, String> {
     let runtime_generation = state.sidecar.try_generation().map_err(|_| {
@@ -275,7 +276,10 @@ pub fn get_device_qualification(
     let adb_path = current_adb_path(&state)?;
     let observed = state
         .sidecar
-        .request("qualifyConnectedDevice", json!({ "adbPath": adb_path }))
+        .request(
+            "qualifyDevice",
+            json!({ "adbPath": adb_path, "serial": device_handle }),
+        )
         .map_err(|_| {
             safe_error(
                 "device_qualification_failed",
