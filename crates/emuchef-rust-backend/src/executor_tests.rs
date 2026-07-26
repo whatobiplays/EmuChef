@@ -347,6 +347,18 @@ fn write_zip(path: &Path, members: &[(&str, &str)]) {
     zip.finish().expect("zip fixture should finish");
 }
 
+fn write_zip_symlink(path: &Path, name: &str, target: &str) {
+    let file = fs::File::create(path).expect("zip fixture should be writable");
+    let mut zip = zip::ZipWriter::new(file);
+    zip.add_symlink(
+        name,
+        target,
+        zip::write::SimpleFileOptions::default().unix_permissions(0o777),
+    )
+    .expect("zip symlink member should be writable");
+    zip.finish().expect("zip fixture should finish");
+}
+
 fn extract_archive_step(id: &str, archive_path: &Path) -> ExecutionStep {
     let mut params = OrderedMap::new();
     params.insert(
@@ -947,6 +959,66 @@ fn install_apk_checksum_mismatch_is_redacted_and_does_not_install() {
     )));
     assert!(!message.contains(&apk.to_string_lossy().to_string()));
     assert!(runner.adapters().device().commands().is_empty());
+}
+
+#[test]
+fn phase_6c_fixture_bad_checksum_blocks_dependents_without_installing() {
+    let repository_root = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .parent()
+        .and_then(Path::parent)
+        .expect("backend crate should live beneath the repository root");
+    let fixture_root = repository_root.join("tests/fixtures/phase-6c/non-root/android-fixture");
+    let host_staging = tempfile::tempdir().expect("host staging should be created");
+    let staged_apk = host_staging.path().join("fixture.apk");
+    fs::copy(fixture_root.join("fixture.apk"), &staged_apk)
+        .expect("fixture APK should stage for the host-only test");
+    let mut dependent = wait_step("fixture.recipe/downstream", "Downstream", 1);
+    dependent.dependencies = vec!["fixture.recipe/install".to_string()];
+    let execution_plan = plan(vec![
+        install_apk_step_with_expected_sha256(
+            "fixture.recipe/install",
+            &staged_apk,
+            json!("0".repeat(64)),
+        ),
+        dependent,
+    ]);
+    let mut runner = ExecutorRunner::new(DryRunExecutorAdapters::default());
+    let mut events = Vec::new();
+    let result = runner.run_with_progress(&execution_plan, |event| events.push(event));
+    let projected = serde_json::to_string(&result).expect("result should serialize");
+    let staged_path = staged_apk.to_string_lossy().to_string();
+    let device_commands = runner.adapters().device().commands().to_vec();
+    drop(runner);
+    host_staging
+        .close()
+        .expect("host test staging should be removed");
+
+    assert!(!result.success);
+    assert_eq!(result.total_steps, 2);
+    assert_eq!(
+        result.steps[0].status,
+        crate::executor::StepRunStatus::Failed
+    );
+    assert_eq!(
+        result.steps[1].status,
+        crate::executor::StepRunStatus::Blocked
+    );
+    assert!(device_commands.is_empty());
+    assert!(!projected.contains(&staged_path));
+    assert!(!projected.contains("device-"));
+    assert!(!Path::new(&staged_path).exists());
+    assert!(events.iter().any(|event| {
+        event.step_id == "fixture.recipe/install"
+            && event.status == Some(crate::executor::ProgressStatus::Failed)
+    }));
+    assert!(events.iter().any(|event| {
+        event.step_id == "fixture.recipe/downstream"
+            && event.status == Some(crate::executor::ProgressStatus::Blocked)
+    }));
+    assert_eq!(
+        events.last().and_then(|event| event.status.clone()),
+        Some(crate::executor::ProgressStatus::Blocked)
+    );
 }
 
 #[test]
@@ -1924,6 +1996,8 @@ fn device_archive_extraction_happens_on_host_then_pushes_without_unzip_command()
         "dest".to_string(),
         literal(json!("/sdcard/EmuChef/extracted")),
     );
+    step.params
+        .insert("cleanup".to_string(), literal(json!(false)));
 
     let (actual, runner) = run_value(
         &plan(vec![step]),
@@ -1944,6 +2018,131 @@ fn device_archive_extraction_happens_on_host_then_pushes_without_unzip_command()
     assert!(commands.iter().any(|command| command[0] == "mkdir_p"));
     assert!(commands.iter().any(|command| command[0] == "push"));
     assert!(!commands.iter().flatten().any(|token| token == "unzip"));
+    assert!(!runtime_root
+        .join("extract/example.recipe_extract-device")
+        .exists());
+}
+
+#[test]
+fn archive_extraction_removes_partial_staging_after_member_read_failure() {
+    let tmp = tempfile::tempdir().expect("temp root should be created");
+    let runtime_root = tmp.path().join("runtime");
+    let cache_root = tmp.path().join("cache");
+    let fake_device_root = tmp.path().join("fake-device");
+    let archive = tmp.path().join("archive.zip");
+    let corrupt_contents = "SECOND_MEMBER_CONTENT_TO_CORRUPT";
+    let file = fs::File::create(&archive).expect("zip fixture should be writable");
+    let mut zip = zip::ZipWriter::new(file);
+    let options =
+        zip::write::SimpleFileOptions::default().compression_method(zip::CompressionMethod::Stored);
+    for (name, contents) in [
+        ("first.txt", "first member"),
+        ("second.txt", corrupt_contents),
+    ] {
+        zip.start_file(name, options)
+            .expect("zip member should start");
+        zip.write_all(contents.as_bytes())
+            .expect("zip member should be writable");
+    }
+    zip.finish().expect("zip fixture should finish");
+    let mut archive_bytes = fs::read(&archive).expect("archive should be readable");
+    let corrupt_offset = archive_bytes
+        .windows(corrupt_contents.len())
+        .position(|window| window == corrupt_contents.as_bytes())
+        .expect("stored member bytes should be present");
+    archive_bytes[corrupt_offset] ^= 0xff;
+    fs::write(&archive, archive_bytes).expect("corrupt archive should be writable");
+
+    let (actual, _) = run_value(
+        &plan(vec![extract_archive_step(
+            "example.recipe/extract-partial",
+            &archive,
+        )]),
+        sandbox_adapters(
+            &runtime_root,
+            &cache_root,
+            &fake_device_root,
+            vec![tmp.path().to_path_buf()],
+        ),
+    );
+
+    assert_eq!(actual["steps"][0]["status"], "failed");
+    assert!(!runtime_root
+        .join("extract/example.recipe_extract-partial")
+        .exists());
+}
+
+#[test]
+fn device_archive_extraction_cleans_host_staging_after_push_failure() {
+    let tmp = tempfile::tempdir().expect("temp root should be created");
+    let runtime_root = tmp.path().join("runtime");
+    let cache_root = tmp.path().join("cache");
+    let fake_device_root = tmp.path().join("fake-device");
+    let archive = tmp.path().join("archive.zip");
+    write_zip(&archive, &[("nested/file.txt", "hello")]);
+    let mut step = extract_archive_step("example.recipe/extract-device", &archive);
+    step.params
+        .insert("extract_on".to_string(), literal(json!("device")));
+    step.params.insert(
+        "dest".to_string(),
+        literal(json!("/sdcard/EmuChef/extracted")),
+    );
+    let mut executor = FakeAdbCommandExecutor::default();
+    executor.push_completed(0, "", "");
+    executor.push_completed(1, "", "controlled push failure");
+    let device = RealAdbDevice::with_executor("adb", Some("device-123"), executor);
+    let adapters = ExecutorAdapters::with_device_and_sandbox_roots(
+        device,
+        runtime_root.clone(),
+        cache_root,
+        fake_device_root,
+        vec![tmp.path().to_path_buf()],
+        false,
+    );
+    let mut runner = ExecutorRunner::new(adapters);
+    let actual = serde_json::to_value(runner.run(&plan(vec![step])))
+        .expect("execution result should serialize");
+
+    assert_eq!(actual["steps"][0]["status"], "failed");
+    assert!(!runtime_root
+        .join("extract/example.recipe_extract-device")
+        .exists());
+}
+
+#[test]
+fn device_archive_extraction_cleans_host_staging_before_verification_failure() {
+    let tmp = tempfile::tempdir().expect("temp root should be created");
+    let runtime_root = tmp.path().join("runtime");
+    let cache_root = tmp.path().join("cache");
+    let fake_device_root = tmp.path().join("fake-device");
+    let archive = tmp.path().join("archive.zip");
+    write_zip(&archive, &[("nested/file.txt", "hello")]);
+    let mut step = extract_archive_step("example.recipe/extract-device", &archive);
+    step.params
+        .insert("extract_on".to_string(), literal(json!("device")));
+    step.params.insert(
+        "dest".to_string(),
+        literal(json!("/sdcard/EmuChef/extracted")),
+    );
+    step.verify = vec![condition(
+        "path_exists",
+        json!({ "path": "/sdcard/EmuChef/missing" }),
+    )];
+
+    let (actual, _) = run_value(
+        &plan(vec![step]),
+        sandbox_adapters(
+            &runtime_root,
+            &cache_root,
+            &fake_device_root,
+            vec![tmp.path().to_path_buf()],
+        ),
+    );
+
+    assert_eq!(actual["steps"][0]["status"], "failed");
+    assert!(!runtime_root
+        .join("extract/example.recipe_extract-device")
+        .exists());
 }
 
 #[test]
@@ -2375,6 +2574,43 @@ fn extract_archive_rejects_absolute_entries_before_writing() {
 }
 
 #[test]
+fn extract_archive_rejects_windows_rooted_and_backslash_traversal_entries() {
+    let tmp = tempfile::tempdir().expect("temp root should be created");
+    let fixture_root = tmp.path().join("fixtures");
+    let runtime_root = tmp.path().join(".emuchef_runtime");
+    let cache_root = tmp.path().join(".emuchef_cache").join("artifacts");
+    let fake_device_root = tmp.path().join("fake_device");
+    fs::create_dir_all(&fixture_root).expect("fixture root should be created");
+
+    for (archive_name, entry) in [
+        ("drive.zip", r"C:\escape.txt"),
+        ("backslash-traversal.zip", r"..\escape.txt"),
+    ] {
+        let archive = fixture_root.join(archive_name);
+        write_zip(&archive, &[(entry, "owned")]);
+        let (actual, _) = run_value(
+            &plan(vec![extract_archive_step(
+                "example.recipe/extract_archive",
+                &archive,
+            )]),
+            sandbox_adapters(
+                &runtime_root,
+                &cache_root,
+                &fake_device_root,
+                vec![fixture_root.clone()],
+            ),
+        );
+
+        assert_eq!(actual["steps"][0]["status"], "failed");
+        assert!(actual["steps"][0]["message"]
+            .as_str()
+            .unwrap()
+            .contains("unsafe archive entry"));
+    }
+    assert!(!tmp.path().join("escape.txt").exists());
+}
+
+#[test]
 fn extract_archive_prescans_entries_before_writing_any_member() {
     let tmp = tempfile::tempdir().expect("temp root should be created");
     let fixture_root = tmp.path().join("fixtures");
@@ -2408,6 +2644,115 @@ fn extract_archive_prescans_entries_before_writing_any_member() {
         .join("extract/example.recipe_extract_archive/safe.txt")
         .exists());
     assert!(!tmp.path().join("escape.txt").exists());
+}
+
+#[test]
+fn extract_archive_rejects_duplicate_normalized_entries_before_writing() {
+    let tmp = tempfile::tempdir().expect("temp root should be created");
+    let fixture_root = tmp.path().join("fixtures");
+    let runtime_root = tmp.path().join(".emuchef_runtime");
+    let cache_root = tmp.path().join(".emuchef_cache").join("artifacts");
+    let fake_device_root = tmp.path().join("fake_device");
+    fs::create_dir_all(&fixture_root).expect("fixture root should be created");
+    let archive = fixture_root.join("duplicate.zip");
+    write_zip(
+        &archive,
+        &[
+            ("nested/./file.txt", "first"),
+            ("nested/file.txt", "second"),
+        ],
+    );
+
+    let (actual, _) = run_value(
+        &plan(vec![extract_archive_step(
+            "example.recipe/extract_archive",
+            &archive,
+        )]),
+        sandbox_adapters(
+            &runtime_root,
+            &cache_root,
+            &fake_device_root,
+            vec![fixture_root],
+        ),
+    );
+
+    assert_eq!(actual["steps"][0]["status"], "failed");
+    assert!(actual["steps"][0]["message"]
+        .as_str()
+        .unwrap()
+        .contains("duplicate archive entry"));
+    assert!(!runtime_root
+        .join("extract/example.recipe_extract_archive")
+        .exists());
+}
+
+#[test]
+fn extract_archive_rejects_file_directory_conflicts_without_partial_output() {
+    let tmp = tempfile::tempdir().expect("temp root should be created");
+    let fixture_root = tmp.path().join("fixtures");
+    let runtime_root = tmp.path().join(".emuchef_runtime");
+    let cache_root = tmp.path().join(".emuchef_cache").join("artifacts");
+    let fake_device_root = tmp.path().join("fake_device");
+    fs::create_dir_all(&fixture_root).expect("fixture root should be created");
+    let archive = fixture_root.join("conflict.zip");
+    write_zip(&archive, &[("node", "file"), ("node/child.txt", "child")]);
+
+    let (actual, _) = run_value(
+        &plan(vec![extract_archive_step(
+            "example.recipe/extract_archive",
+            &archive,
+        )]),
+        sandbox_adapters(
+            &runtime_root,
+            &cache_root,
+            &fake_device_root,
+            vec![fixture_root],
+        ),
+    );
+
+    assert_eq!(actual["steps"][0]["status"], "failed");
+    assert!(actual["steps"][0]["message"]
+        .as_str()
+        .unwrap()
+        .contains("archive path conflict"));
+    assert!(!runtime_root
+        .join("extract/example.recipe_extract_archive")
+        .exists());
+}
+
+#[cfg(unix)]
+#[test]
+fn extract_archive_rejects_unix_symlink_entries_before_writing() {
+    let tmp = tempfile::tempdir().expect("temp root should be created");
+    let fixture_root = tmp.path().join("fixtures");
+    let runtime_root = tmp.path().join(".emuchef_runtime");
+    let cache_root = tmp.path().join(".emuchef_cache").join("artifacts");
+    let fake_device_root = tmp.path().join("fake_device");
+    fs::create_dir_all(&fixture_root).expect("fixture root should be created");
+    let archive = fixture_root.join("symlink.zip");
+    write_zip_symlink(&archive, "link", "../outside");
+
+    let (actual, _) = run_value(
+        &plan(vec![extract_archive_step(
+            "example.recipe/extract_archive",
+            &archive,
+        )]),
+        sandbox_adapters(
+            &runtime_root,
+            &cache_root,
+            &fake_device_root,
+            vec![fixture_root],
+        ),
+    );
+
+    assert_eq!(actual["steps"][0]["status"], "failed");
+    assert!(actual["steps"][0]["message"]
+        .as_str()
+        .unwrap()
+        .contains("symlink archive entry"));
+    assert!(!runtime_root
+        .join("extract/example.recipe_extract_archive")
+        .exists());
 }
 
 #[cfg(unix)]

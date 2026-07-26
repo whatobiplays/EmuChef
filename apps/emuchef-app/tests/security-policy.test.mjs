@@ -430,6 +430,25 @@ test("real execution is default-disabled with compile-time-only enablement", () 
   assert.doesNotMatch(realStart, /ExecutionCapabilities|platform_tools_status|executor_readiness/);
 });
 
+test("the Phase 6C qualification catalog is fixed, debug-only, and fully gated", () => {
+  const catalog = read("src-tauri/src/catalog.rs");
+  const packageJson = read("package.json");
+  const gatedResolution = sourceSlice(
+    catalog,
+    '#[cfg(all(debug_assertions, feature = "real-execution"))]',
+    "\n        let (root, source_id, version) = resolved;",
+  );
+
+  assert.match(gatedResolution, /EMUCHEF_RUN_REAL_ADB_TESTS/);
+  assert.match(gatedResolution, /EMUCHEF_PHASE_6C_QUALIFICATION_CATALOG/);
+  assert.match(gatedResolution, /tests\/fixtures\/phase-6c\/non-root\/recipe/);
+  assert.match(gatedResolution, /\.app_cache_dir\(\)/);
+  assert.match(gatedResolution, /"emuchef\.phase6c\.qualification"/);
+  assert.match(gatedResolution, /"phase6c-qualification-1"/);
+  assert.doesNotMatch(gatedResolution, /std::env::args|URLSearchParams|localStorage|sessionStorage/);
+  assert.doesNotMatch(packageJson, /EMUCHEF_PHASE_6C_QUALIFICATION_CATALOG/);
+});
+
 test("accessible fallbacks and technical details cannot expose protected data", () => {
   const fallback = read("src/ErrorBoundary.tsx");
   const app = read("src/App.tsx");
@@ -473,6 +492,18 @@ test("CI continuously verifies both execution feature configurations", () => {
     workflow,
     /tauri build[^\n]*real-execution|package:macos[^\n]*real-execution|release[^\n]*--features real-execution/,
   );
+  for (const path of [
+    "crates/emuchef-rust-backend/**",
+    "apps/emuchef-app/**",
+    "docs/manual/phase-6c-1-non-root-executor-qualification.md",
+    "scripts/build-phase-6c-android-fixture.sh",
+    "tools/phase-6c-fixture.mjs",
+    "tools/phase-6c-fixture.test.mjs",
+    "tests/fixtures/phase-6c/non-root/**",
+    ".github/workflows/emuchef-execution-feature-matrix.yml",
+  ]) {
+    assert.match(workflow, new RegExp(path.replaceAll(".", "\\.").replaceAll("**", "\\*\\*")));
+  }
 });
 
 test("device qualification is backend-authored, sanitized, and non-authorizing", () => {

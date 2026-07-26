@@ -1,0 +1,16 @@
+schema_version: 1
+kind: device_plan
+id: phase6c.qualification.plan.non_root
+name: Phase 6C Non-root Executor Qualification
+description: Development-only plan for exercising supported non-root executor operations with committed fixtures.
+device_profile_ref: phase6c.qualification.device.non_root
+recipes:
+  - recipe_ref: phase6c.qualification.non_root
+    selected_by_default: true
+defaults:
+  show_advanced_steps: true
+overrides: {}
+metadata:
+  tags:
+    - qualification
+    - non_root

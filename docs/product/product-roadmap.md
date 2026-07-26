@@ -510,6 +510,17 @@ Phase 6C is split into non-root qualification first and root-only qualification 
 
 #### 6C.1 — Non-root Executor Qualification
 
+**Status: Implementation ready; manual qualification in progress.**
+
+Automated evidence covers the committed and rebuilt Android fixture contracts,
+archive and destination safety, host-only executor outcomes, sanitized
+backend/Tauri/React projections, stale qualification authority, the guarded
+ignored production-path harness, and the gated qualification catalog and
+recipe. The complete backend, frontend, Tauri feature-matrix, fixture, format,
+and diff verification commands pass. Physical-device qualification and the
+combined UI smoke remain unrun and are required before this phase can be marked
+complete.
+
 ##### Objective
 
 Qualify the complete production-supported non-root executor surface against physical Android hardware before adding rooted-device complexity.

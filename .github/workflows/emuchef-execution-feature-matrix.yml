@@ -4,17 +4,25 @@ on:
   pull_request:
     paths:
       - ".github/workflows/emuchef-execution-feature-matrix.yml"
-      - "apps/emuchef-app/package.json"
-      - "apps/emuchef-app/src-tauri/**"
-      - "apps/emuchef-app/tests/security-policy.test.mjs"
+      - "apps/emuchef-app/**"
+      - "crates/emuchef-rust-backend/**"
+      - "docs/manual/phase-6c-1-non-root-executor-qualification.md"
+      - "tests/fixtures/phase-6c/non-root/**"
+      - "tools/phase-6c-fixture.mjs"
+      - "tools/phase-6c-fixture.test.mjs"
+      - "scripts/build-phase-6c-android-fixture.sh"
   push:
     branches:
       - main
     paths:
       - ".github/workflows/emuchef-execution-feature-matrix.yml"
-      - "apps/emuchef-app/package.json"
-      - "apps/emuchef-app/src-tauri/**"
-      - "apps/emuchef-app/tests/security-policy.test.mjs"
+      - "apps/emuchef-app/**"
+      - "crates/emuchef-rust-backend/**"
+      - "docs/manual/phase-6c-1-non-root-executor-qualification.md"
+      - "tests/fixtures/phase-6c/non-root/**"
+      - "tools/phase-6c-fixture.mjs"
+      - "tools/phase-6c-fixture.test.mjs"
+      - "scripts/build-phase-6c-android-fixture.sh"
   workflow_dispatch:
 
 permissions:
@@ -25,6 +33,42 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
+  android-qualification-fixture:
+    name: Phase 6C.1 Android fixture contract
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "17"
+      - uses: android-actions/setup-android@v3
+      - name: Install locked Android SDK tools
+        run: sdkmanager --install "platforms;android-35" "build-tools;35.0.0"
+      - name: Test fixture contract tooling
+        run: node --test tools/phase-6c-fixture.test.mjs
+      - name: Verify committed fixture APK contract
+        run: >-
+          node tools/phase-6c-fixture.mjs
+          --apk tests/fixtures/phase-6c/non-root/android-fixture/fixture.apk
+          --metadata tests/fixtures/phase-6c/non-root/android-fixture/fixture-metadata.json
+          --checksum tests/fixtures/phase-6c/non-root/android-fixture/fixture.apk.sha256
+          --aapt2 "$ANDROID_SDK_ROOT/build-tools/35.0.0/aapt2"
+          --apksigner "$ANDROID_SDK_ROOT/build-tools/35.0.0/apksigner"
+      - name: Rebuild and verify fixture semantics
+        run: >-
+          bash scripts/build-phase-6c-android-fixture.sh --output "$RUNNER_TEMP/fixture.apk"
+          && node tools/phase-6c-fixture.mjs --semantic-only
+          --apk "$RUNNER_TEMP/fixture.apk"
+          --metadata tests/fixtures/phase-6c/non-root/android-fixture/fixture-metadata.json
+          --checksum tests/fixtures/phase-6c/non-root/android-fixture/fixture.apk.sha256
+          --aapt2 "$ANDROID_SDK_ROOT/build-tools/35.0.0/aapt2"
+          --apksigner "$ANDROID_SDK_ROOT/build-tools/35.0.0/apksigner"
+
   security-policy:
     name: Execution feature policy
     runs-on: ubuntu-latest

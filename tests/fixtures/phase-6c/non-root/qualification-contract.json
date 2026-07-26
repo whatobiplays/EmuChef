@@ -1,0 +1,9 @@
+{
+  "schemaVersion": 1,
+  "packageName": "com.emuchef.fixture",
+  "sharedStorageRoot": "/sdcard/EmuChefQualification/com.emuchef.fixture/",
+  "appSpecificExternalStorageRoot": "/sdcard/Android/data/com.emuchef.fixture/files/",
+  "stagingRoot": "/sdcard/EmuChefQualification/com.emuchef.fixture/staging/",
+  "destinationRoot": "/sdcard/EmuChefQualification/com.emuchef.fixture/output/",
+  "appSpecificExternalStorageRequiresCapability": true
+}

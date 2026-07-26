@@ -1,0 +1,224 @@
+schema_version: 1
+kind: recipe
+id: phase6c.qualification.non_root
+name: Phase 6C Non-root Executor Qualification
+description: Exercise fixture installation, shared-storage copy and extraction, permission handling, launch, and force-stop through the production executor.
+recipe_dependencies: []
+provides:
+  features:
+    - phase6c_non_root_executor_qualification
+inputs:
+  fixture_apk:
+    type: file
+    role: apk
+    label: Qualification fixture APK
+    description: Select the committed Phase 6C fixture APK.
+    required: true
+    multiple: false
+    validation:
+      must_exist: true
+      allowed_extensions:
+        - apk
+      path_kind: file
+    default: null
+    metadata:
+      tags:
+        - qualification
+  single_file:
+    type: file
+    role: config
+    label: Qualification single file
+    description: Select the committed single-file corpus fixture.
+    required: true
+    multiple: false
+    validation:
+      must_exist: true
+      allowed_extensions:
+        - txt
+      path_kind: file
+    default: null
+    metadata:
+      tags:
+        - qualification
+  nested_directory:
+    type: directory
+    role: config
+    label: Qualification nested directory
+    description: Select the committed nested-directory corpus fixture.
+    required: true
+    multiple: false
+    validation:
+      must_exist: true
+      allowed_extensions: []
+      path_kind: directory
+    default: null
+    metadata:
+      tags:
+        - qualification
+  fixture_archive:
+    type: file
+    role: archive
+    label: Qualification ZIP archive
+    description: Select the committed Phase 6C corpus archive.
+    required: true
+    multiple: false
+    validation:
+      must_exist: true
+      allowed_extensions:
+        - zip
+      path_kind: file
+    default: null
+    metadata:
+      tags:
+        - qualification
+steps:
+  - id: install_fixture
+    type: install_apk
+    name: Install qualification fixture
+    progress_note: Installing the qualification fixture
+    user_toggleable: false
+    dependencies: []
+    constraints:
+      capabilities:
+        - apk_install
+      conflicts_with: []
+    skip_if:
+      - type: package_installed
+        params:
+          package_name: com.emuchef.fixture
+    params:
+      app:
+        ref: inputs.fixture_apk
+      replace_existing: false
+      expected_package_name: com.emuchef.fixture
+      expected_sha256: 8495b56d5a191904fec5162d21a61561c4782e1d00a46748fb7ee5d3c5bb5179
+    verify:
+      - type: package_installed
+        params:
+          package_name: com.emuchef.fixture
+  - id: copy_single_file
+    type: copy_files
+    name: Copy qualification file
+    progress_note: Copying the qualification file to shared storage
+    user_toggleable: false
+    dependencies:
+      - install_fixture
+    constraints:
+      capabilities:
+        - shared_storage_write
+      conflicts_with: []
+    skip_if: []
+    params:
+      source:
+        ref: inputs.single_file
+      dest: /sdcard/EmuChefQualification/com.emuchef.fixture/output/single.txt
+      copy_policy: replace
+    verify:
+      - type: path_exists
+        params:
+          path: /sdcard/EmuChefQualification/com.emuchef.fixture/output/single.txt
+  - id: copy_nested_directory
+    type: copy_files
+    name: Copy qualification directory
+    progress_note: Copying the qualification directory to shared storage
+    user_toggleable: false
+    dependencies:
+      - install_fixture
+    constraints:
+      capabilities:
+        - shared_storage_write
+      conflicts_with: []
+    skip_if: []
+    params:
+      source:
+        ref: inputs.nested_directory
+      dest: /sdcard/EmuChefQualification/com.emuchef.fixture/output/nested
+      copy_policy: sync
+    verify:
+      - type: path_exists
+        params:
+          path: /sdcard/EmuChefQualification/com.emuchef.fixture/output/nested
+  - id: extract_fixture_archive
+    type: extract_archive
+    name: Extract qualification archive
+    progress_note: Extracting the qualification archive on the device
+    user_toggleable: false
+    dependencies:
+      - install_fixture
+    constraints:
+      capabilities:
+        - shared_storage_write
+      conflicts_with: []
+    skip_if: []
+    params:
+      archive:
+        ref: inputs.fixture_archive
+      extract_on: device
+      dest: /sdcard/EmuChefQualification/com.emuchef.fixture/output/archive
+    verify:
+      - type: path_exists
+        params:
+          path: /sdcard/EmuChefQualification/com.emuchef.fixture/output/archive
+  - id: grant_fixture_permissions
+    type: grant_permissions
+    name: Apply qualification permission state
+    progress_note: Applying the fixture permission and app-op state
+    user_toggleable: false
+    dependencies:
+      - install_fixture
+    constraints:
+      capabilities:
+        - shell_command
+      conflicts_with: []
+    skip_if: []
+    params:
+      runtime:
+        - package_name: com.emuchef.fixture
+          name: android.permission.CAMERA
+          required: false
+      appops:
+        - package_name: com.emuchef.fixture
+          op: CAMERA
+          mode: allow
+          required: false
+      policy:
+        on_failure: fail
+        require_all: false
+    verify: []
+  - id: launch_fixture
+    type: launch_app
+    name: Launch qualification fixture
+    progress_note: Launching the qualification fixture
+    user_toggleable: false
+    dependencies:
+      - grant_fixture_permissions
+      - copy_single_file
+      - copy_nested_directory
+      - extract_fixture_archive
+    constraints:
+      capabilities:
+        - app_launch
+      conflicts_with: []
+    skip_if: []
+    params:
+      package_name: com.emuchef.fixture
+      activity: .MainActivity
+    verify: []
+  - id: force_stop_fixture
+    type: force_stop_app
+    name: Stop qualification fixture
+    progress_note: Stopping the qualification fixture
+    user_toggleable: false
+    dependencies:
+      - launch_fixture
+    constraints:
+      capabilities:
+        - shell_command
+      conflicts_with: []
+    skip_if: []
+    params:
+      package_name: com.emuchef.fixture
+    verify:
+      - type: package_installed
+        params:
+          package_name: com.emuchef.fixture

@@ -1,0 +1,19 @@
+{
+  "schemaVersion": 1,
+  "packageName": "com.emuchef.fixture",
+  "versionCode": 1,
+  "versionName": "1.0.0",
+  "minSdkVersion": 30,
+  "targetSdkVersion": 35,
+  "launcherActivity": "com.emuchef.fixture.MainActivity",
+  "declaredPermissions": [
+    "android.permission.CAMERA"
+  ],
+  "signingCertificateSha256": "021b974cb2ba0ded456982e809e2209101beb759dbd84dbebe2b2ad6d597d170",
+  "signingKeystore": {
+    "file": "test-only-emuchef-fixture-signing.jks",
+    "alias": "emuchef-fixture-test",
+    "password": "fixture-only-not-a-secret",
+    "subject": "CN=EmuChef Phase 6C Fixture Test Only, OU=Test Fixtures, O=EmuChef, L=Test, ST=Test, C=US"
+  }
+}

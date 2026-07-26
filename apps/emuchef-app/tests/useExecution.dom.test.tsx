@@ -4,12 +4,13 @@ import { beforeEach, describe, expect, test, vi } from "vitest";
 
 const mockApi = vi.hoisted(() => ({
   exportExecutionReport: vi.fn(),
+  startRealExecution: vi.fn(),
 }));
 
 vi.mock("../src/api", () => ({ api: mockApi }));
 
 import { useExecution } from "../src/useExecution";
-import type { ExecutionSnapshot } from "../src/types";
+import type { DeviceQualificationSnapshot, ExecutionSnapshot } from "../src/types";
 import type { WorkflowAction, WorkflowState } from "../src/workflow";
 
 function terminalSnapshot(executionHandle: string, latestSequence = 1): ExecutionSnapshot {
@@ -82,6 +83,24 @@ function terminalWorkflow(
   };
 }
 
+function reviewWorkflow(): WorkflowState {
+  return {
+    ...terminalWorkflow("unused", 0),
+    step: "review",
+    review: {
+      reviewHandle: "review-opaque",
+      setup: { name: "Qualification setup" },
+      target: { label: "Connected Android device" },
+      features: [],
+      inputs: [],
+      notices: [],
+      work: { actionCount: 1 },
+      canExecute: true,
+    },
+    execution: { kind: "idle" },
+  };
+}
+
 function deferred<Result>(): {
   promise: Promise<Result>;
   resolve: (result: Result) => void;
@@ -93,7 +112,13 @@ function deferred<Result>(): {
   return { promise, resolve };
 }
 
-function Harness({ workflow }: { workflow: WorkflowState }) {
+function Harness({
+  workflow,
+  qualification,
+}: {
+  workflow: WorkflowState;
+  qualification?: DeviceQualificationSnapshot;
+}) {
   const workflowRef = useRef(workflow);
   const runtimeGenerationRef = useRef(1);
   const mainRef = useRef<HTMLElement | null>(null);
@@ -103,7 +128,8 @@ function Harness({ workflow }: { workflow: WorkflowState }) {
     announce: vi.fn(),
     dispatch: vi.fn() as unknown as Dispatch<WorkflowAction>,
     mainRef,
-    realExecutionCompiled: false,
+    realExecutionCompiled: qualification !== undefined,
+    qualification,
     runtimeGenerationRef,
     setBusy: vi.fn(),
     setNotice: vi.fn(),
@@ -112,11 +138,24 @@ function Harness({ workflow }: { workflow: WorkflowState }) {
     workflowRef,
   });
 
-  return (
-    <button onClick={() => void execution.exportExecutionReport()}>
-      {execution.reportState}
-    </button>
-  );
+  return qualification === undefined
+    ? (
+        <button onClick={() => void execution.exportExecutionReport()}>
+          {execution.reportState}
+        </button>
+      )
+    : (
+        <button
+          onClick={() => void execution.startRealExecution({
+            phrase: "RUN",
+            irreversibleChangesAcknowledged: true,
+            noRollbackAcknowledged: true,
+            keepDeviceConnectedAcknowledged: true,
+          })}
+        >
+          start real execution
+        </button>
+      );
 }
 
 beforeEach(() => {
@@ -153,4 +192,27 @@ describe("execution report export identity", () => {
 
     expect(screen.getByRole("button", { name: "idle" })).toBeTruthy();
   });
+});
+
+test("unsupported qualification remains blocking in the React execution boundary", () => {
+  const qualification: DeviceQualificationSnapshot = {
+    state: "unsupported",
+    summary: "This device is unsupported.",
+    limitations: ["Android API level 30 or newer is required."],
+    androidMajor: 10,
+    androidApiLevel: 29,
+    abiClass: "arm64",
+    storage: "available",
+    packageManager: "available",
+    activityManager: "available",
+    root: null,
+    runtimeGeneration: 7,
+    qualificationRevision: 9,
+    deviceIdentity: "opaque-authority",
+  };
+  render(<Harness workflow={reviewWorkflow()} qualification={qualification} />);
+
+  fireEvent.click(screen.getByRole("button", { name: "start real execution" }));
+
+  expect(mockApi.startRealExecution).not.toHaveBeenCalled();
 });

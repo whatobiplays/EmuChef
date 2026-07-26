@@ -427,6 +427,37 @@ describe("Phase 6A execution capability reporting", () => {
     expect(section?.textContent).toContain("Root accessGranted");
   });
 
+  test("keeps unsupported qualification distinct and omits its opaque authority identity", async () => {
+    mockApi.executionCapabilities.mockResolvedValue({
+      realExecutionCompiled: true,
+      platformToolsStatus: "ready",
+      executorReadiness: "ready",
+    } satisfies ExecutionCapabilities);
+    mockApi.deviceQualification.mockResolvedValue({
+      state: "unsupported",
+      summary: "This device is outside the supported qualification boundary.",
+      limitations: ["Android API level 30 or newer is required."],
+      androidMajor: 10,
+      androidApiLevel: 29,
+      abiClass: "arm64",
+      storage: "available",
+      packageManager: "available",
+      activityManager: "available",
+      root: null,
+      runtimeGeneration: 7,
+      qualificationRevision: 9,
+      deviceIdentity: "device-authority-must-remain-opaque",
+    });
+
+    await renderReadyApp();
+
+    const status = document.querySelector(".status-panel");
+    expect(status?.textContent).toContain("Device qualificationUnsupported");
+    expect(document.body.textContent).not.toContain("device-authority-must-remain-opaque");
+    expect(document.body.textContent).not.toContain("qualificationRevision");
+    expect(mockApi.startRealExecution).not.toHaveBeenCalled();
+  });
+
   test("blocks every device and explains eligibility when multiple devices are connected", async () => {
     mockApi.pollDevices.mockResolvedValue([
       availableDevice,

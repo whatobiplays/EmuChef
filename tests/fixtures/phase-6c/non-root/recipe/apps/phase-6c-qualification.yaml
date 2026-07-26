@@ -1,0 +1,36 @@
+schema_version: 1
+kind: app_definition
+id: phase6c.qualification.fixture
+name: Phase 6C Qualification Fixture
+description: Local non-root executor qualification fixture for development-only testing.
+category: utility
+package:
+  primary: com.emuchef.fixture
+  aliases: []
+install_source:
+  type: local_placeholder
+  resolver: none
+  options:
+    path: tests/fixtures/phase-6c/non-root/android-fixture/fixture.apk
+tracking_source:
+  type: local
+artifacts:
+  apk:
+    required: true
+  shared_storage_config:
+    supported: true
+  app_data_config:
+    supported: false
+  byo_apk:
+    required: true
+provisioning:
+  launch_once_recommended: false
+  shared_storage_paths:
+    - /sdcard/EmuChefQualification/com.emuchef.fixture/
+  app_data_paths: []
+  config_targets: []
+inputs: []
+metadata:
+  tags:
+    - qualification
+    - non_root

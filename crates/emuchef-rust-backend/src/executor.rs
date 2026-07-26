@@ -959,43 +959,41 @@ impl<D: ExecutorDevice> ExecutorRunner<D> {
             .join(sanitize_step_id(&step.id));
         let members = sandbox.extract_zip_to_directory(&archive_path, &extract_root)?;
         if extract_on == "device" {
-            let dest = resolved_params
-                .get("dest")
-                .and_then(Value::as_str)
-                .ok_or_else(|| {
-                    StepFailure::new(
-                        "extract_archive targeting a device requires a string dest".to_string(),
-                    )
-                })?;
-            self.adapters.device.mkdir_p(dest)?;
-            for member in &members {
-                let name = member.file_name().ok_or_else(|| {
-                    StepFailure::new(format!(
-                        "extracted path has no basename: {}",
-                        member.display()
-                    ))
-                })?;
-                let target = join_device_path(dest, &name.to_string_lossy());
-                self.adapters.device.push(member, &target, false)?;
-            }
-            if resolved_params
-                .get("cleanup")
-                .map(value_is_truthy)
-                .unwrap_or(true)
-            {
-                fs::remove_dir_all(&extract_root)
-                    .map_err(|error| StepFailure::new(error.to_string()))?;
-            }
-            let mut outputs = OrderedMap::new();
-            outputs.insert(
-                "extracted_path".to_string(),
-                RuntimeValue {
-                    type_name: "directory_path".to_string(),
-                    value: json!(dest),
-                    location: Some("device".to_string()),
-                },
-            );
-            return Ok(outputs);
+            let operation = (|| {
+                let dest = resolved_params
+                    .get("dest")
+                    .and_then(Value::as_str)
+                    .ok_or_else(|| {
+                        StepFailure::new(
+                            "extract_archive targeting a device requires a string dest".to_string(),
+                        )
+                    })?;
+                self.adapters.device.mkdir_p(dest)?;
+                for member in &members {
+                    let name = member.file_name().ok_or_else(|| {
+                        StepFailure::new(format!(
+                            "extracted path has no basename: {}",
+                            member.display()
+                        ))
+                    })?;
+                    let target = join_device_path(dest, &name.to_string_lossy());
+                    self.adapters.device.push(member, &target, false)?;
+                }
+                let mut outputs = OrderedMap::new();
+                outputs.insert(
+                    "extracted_path".to_string(),
+                    RuntimeValue {
+                        type_name: "directory_path".to_string(),
+                        value: json!(dest),
+                        location: Some("device".to_string()),
+                    },
+                );
+                Ok(outputs)
+            })();
+            // Device-targeted extraction never exposes host staging as an output,
+            // so callers cannot opt out of removing it.
+            let cleanup = remove_host_staging(&extract_root);
+            return combine_operation_and_cleanup(operation, cleanup);
         }
         let (type_name, value) = if members.len() == 1 {
             let member = &members[0];
@@ -2095,18 +2093,42 @@ impl SandboxRoots {
         archive_path: &Path,
         dest_dir: &Path,
     ) -> Result<Vec<PathBuf>, StepFailure> {
+        let operation = self.extract_zip_to_directory_inner(archive_path, dest_dir);
+        if operation.is_err() {
+            return combine_operation_and_cleanup(operation, remove_host_staging(dest_dir));
+        }
+        operation
+    }
+
+    fn extract_zip_to_directory_inner(
+        &self,
+        archive_path: &Path,
+        dest_dir: &Path,
+    ) -> Result<Vec<PathBuf>, StepFailure> {
         self.ensure_runtime_or_cache_write(dest_dir)?;
         let file =
             fs::File::open(archive_path).map_err(|error| StepFailure::new(error.to_string()))?;
         let mut archive = zip::ZipArchive::new(file)
             .map_err(|_| StepFailure::new("File is not a zip file".to_string()))?;
         let mut entries = Vec::new();
+        let mut declared_paths = HashMap::new();
         for index in 0..archive.len() {
             let file = archive
                 .by_index(index)
                 .map_err(|error| StepFailure::new(error.to_string()))?;
             let entry_name = file.name().to_string();
+            if file.is_symlink() {
+                return Err(StepFailure::new(format!(
+                    "symlink archive entry rejected: {entry_name}"
+                )));
+            }
             let relative = archive_relative_components(Path::new(&entry_name))?;
+            let is_dir = file.is_dir() || entry_name.ends_with('/');
+            if declared_paths.insert(relative.clone(), is_dir).is_some() {
+                return Err(StepFailure::new(format!(
+                    "duplicate archive entry rejected: {entry_name}"
+                )));
+            }
             let target = normalize_path(&dest_dir.join(relative));
             if !target.starts_with(normalize_path(dest_dir)) {
                 return Err(StepFailure::new(format!(
@@ -2114,10 +2136,23 @@ impl SandboxRoots {
                 )));
             }
             self.ensure_runtime_or_cache_write(&target)?;
-            entries.push((entry_name, target, file.is_dir()));
+            entries.push((index, entry_name, target, is_dir));
+        }
+        for (path, _) in &declared_paths {
+            for ancestor in path.ancestors().skip(1) {
+                if ancestor.as_os_str().is_empty() {
+                    break;
+                }
+                if declared_paths.get(ancestor) == Some(&false) {
+                    return Err(StepFailure::new(format!(
+                        "archive path conflict rejected: {}",
+                        path.display()
+                    )));
+                }
+            }
         }
         fs::create_dir_all(dest_dir).map_err(|error| StepFailure::new(error.to_string()))?;
-        for (index, (entry_name, target, is_dir)) in entries.into_iter().enumerate() {
+        for (index, entry_name, target, is_dir) in entries {
             let mut file = archive
                 .by_index(index)
                 .map_err(|error| StepFailure::new(error.to_string()))?;
@@ -2397,6 +2432,90 @@ struct ArtifactRuntimeState {
 pub(crate) struct StepFailure {
     pub(crate) message: String,
     outputs: OrderedMap<RuntimeValue>,
+}
+
+fn host_staging_cleanup_failure() -> StepFailure {
+    let mut outputs = OrderedMap::new();
+    outputs.insert(
+        "cleanup_report".to_string(),
+        RuntimeValue {
+            type_name: "object".to_string(),
+            value: json!({
+                "classification": "host_staging_cleanup_failed",
+                "status": "failed",
+            }),
+            location: None,
+        },
+    );
+    StepFailure {
+        message: "host_staging_cleanup_failed: temporary extraction staging could not be removed."
+            .to_string(),
+        outputs,
+    }
+}
+
+fn remove_host_staging(path: &Path) -> Result<(), StepFailure> {
+    match fs::remove_dir_all(path) {
+        Ok(()) => Ok(()),
+        Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(()),
+        Err(_) => Err(host_staging_cleanup_failure()),
+    }
+}
+
+fn combine_operation_and_cleanup<T>(
+    operation: Result<T, StepFailure>,
+    cleanup: Result<(), StepFailure>,
+) -> Result<T, StepFailure> {
+    match (operation, cleanup) {
+        (Ok(value), Ok(())) => Ok(value),
+        (Ok(_), Err(cleanup_failure)) => Err(cleanup_failure),
+        (Err(operation_failure), Ok(())) => Err(operation_failure),
+        (Err(mut operation_failure), Err(cleanup_failure)) => {
+            operation_failure.outputs.extend(cleanup_failure.outputs);
+            Err(operation_failure)
+        }
+    }
+}
+
+#[cfg(test)]
+mod cleanup_combination_tests {
+    use super::*;
+
+    #[test]
+    fn cleanup_failure_is_separate_and_preserves_the_original_operation_failure() {
+        let operation = Err::<(), _>(StepFailure::new(
+            "verification_failed: controlled original failure".to_string(),
+        ));
+        let failure = combine_operation_and_cleanup(operation, Err(host_staging_cleanup_failure()))
+            .unwrap_err();
+
+        assert_eq!(
+            failure.message,
+            "verification_failed: controlled original failure"
+        );
+        assert_eq!(
+            failure.outputs["cleanup_report"].value,
+            json!({
+                "classification": "host_staging_cleanup_failed",
+                "status": "failed",
+            })
+        );
+    }
+
+    #[test]
+    fn cleanup_failure_after_success_has_its_own_fixed_classification() {
+        let failure = combine_operation_and_cleanup(
+            Ok::<(), StepFailure>(()),
+            Err(host_staging_cleanup_failure()),
+        )
+        .unwrap_err();
+
+        assert_eq!(
+            failure.outputs["cleanup_report"].value["classification"],
+            "host_staging_cleanup_failed"
+        );
+        assert!(!failure.message.contains('/'));
+    }
 }
 
 #[derive(Clone, Debug)]
@@ -2716,8 +2835,25 @@ fn fake_device_relative_components(path: &Path) -> Result<PathBuf, StepFailure> 
 }
 
 fn archive_relative_components(path: &Path) -> Result<PathBuf, StepFailure> {
+    let raw = path.to_string_lossy();
+    let portable = raw.replace('\\', "/");
+    let rooted_or_drive = portable.starts_with('/')
+        || portable
+            .as_bytes()
+            .get(1)
+            .is_some_and(|separator| *separator == b':')
+            && portable
+                .as_bytes()
+                .first()
+                .is_some_and(u8::is_ascii_alphabetic);
+    if rooted_or_drive {
+        return Err(StepFailure::new(format!(
+            "unsafe archive entry rejected: {}",
+            path.display()
+        )));
+    }
     let mut relative = PathBuf::new();
-    for component in path.components() {
+    for component in Path::new(&portable).components() {
         match component {
             Component::Normal(part) => relative.push(part),
             Component::CurDir => {}
