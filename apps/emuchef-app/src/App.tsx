@@ -115,6 +115,55 @@ const executorReadinessLabels: Record<ExecutionCapabilities["executorReadiness"]
   unknown: "Unknown",
 };
 
+const deviceQualificationStateLabels: Record<DeviceQualificationSnapshot["state"], string> = {
+  notApplicable: "Not applicable",
+  noDevice: "No device",
+  unauthorized: "Authorization required",
+  offline: "Offline",
+  insufficientlyQualified: "Qualification incomplete",
+  unsupported: "Unsupported",
+  supported: "Supported",
+};
+
+const deviceAbiLabels: Record<NonNullable<DeviceQualificationSnapshot["abiClass"]>, string> = {
+  arm64: "64-bit ARM",
+  arm32: "32-bit ARM",
+  x86_64: "64-bit x86",
+};
+
+function DeviceQualificationDetails({ qualification }: { qualification: DeviceQualificationSnapshot | null }) {
+  if (!qualification) return null;
+
+  return (
+    <section className="device-qualification" aria-labelledby="device-qualification-heading">
+      <div className="device-qualification-heading">
+        <div>
+          <p className="eyebrow">Compatibility check</p>
+          <h3 id="device-qualification-heading">Device qualification</h3>
+        </div>
+        <span className={`status qualification-${qualification.state}`}>
+          {deviceQualificationStateLabels[qualification.state]}
+        </span>
+      </div>
+      <p>{qualification.summary}</p>
+      <dl className="device-qualification-facts">
+        <div><dt>Android version</dt><dd>{qualification.androidMajor ?? "Unknown"}</dd></div>
+        <div><dt>API level</dt><dd>{qualification.androidApiLevel ?? "Unknown"}</dd></div>
+        <div><dt>Processor architecture</dt><dd>{qualification.abiClass ? deviceAbiLabels[qualification.abiClass] : "Unknown"}</dd></div>
+        <div><dt>Root access</dt><dd>{qualification.root === "notChecked" ? "Not checked" : "Unknown"}</dd></div>
+      </dl>
+      {qualification.limitations.length > 0 && (
+        <div className="device-qualification-limitations">
+          <h4>Limitations and next steps</h4>
+          <ul>
+            {qualification.limitations.map((limitation) => <li key={limitation}>{limitation}</li>)}
+          </ul>
+        </div>
+      )}
+    </section>
+  );
+}
+
 export { createAppDialogController } from "./app-dialogs";
 
 interface AppProps {
@@ -2010,6 +2059,7 @@ export function App({ dialogController: suppliedDialogController }: AppProps = {
   };
 
   const stepIndex = WORKFLOW_STEPS.findIndex((item) => item.step === workflow.step);
+  const multipleDevicesConnected = devices.length > 1;
   const [recipeSearch, setRecipeSearch] = useState("");
   const [recipeFilter, setRecipeFilter] = useState<"all" | "available" | "selected" | "unavailable">("all");
   const selectedRecipeIds = useMemo(
@@ -2403,33 +2453,41 @@ export function App({ dialogController: suppliedDialogController }: AppProps = {
                 )}
                 <div className="device-list" aria-busy={busy} role="region" aria-label="Detected Android devices">
                   {devices.length === 0 && <div className="empty-state" role="status">No devices found. Connect an unlocked device, enable USB debugging, accept its authorization prompt, then refresh.</div>}
+                  {multipleDevicesConnected && (
+                    <div className="warning multiple-device-warning" role="status">
+                      <strong>No device can be selected while multiple Android devices are connected.</strong>
+                      <span>Disconnect all but one device, then refresh discovery.</span>
+                    </div>
+                  )}
                   <ul>
                   {devices.map((device) => (
                     <li key={device.deviceHandle}>
                       <button
-                        aria-describedby={device.state !== "available" || savedConfigurationBlocked
+                        aria-describedby={device.state !== "available" || savedConfigurationBlocked || multipleDevicesConnected
                           ? stableDomId("device-reason", device.deviceHandle)
                           : undefined}
                         className="device-row"
-                        disabled={device.state !== "available" || busy || savedConfigurationBlocked}
+                        disabled={device.state !== "available" || busy || savedConfigurationBlocked || multipleDevicesConnected}
                         onClick={(event) => void selectDevice(device.deviceHandle, event.currentTarget)}
                       >
                         <span><strong>{device.displayName}</strong><small>{device.maskedSerial}</small></span>
                         <span className={`status ${device.state}`}>
                           {device.state === "available"
-                            ? "Connected"
-                            : device.state === "unauthorized"
-                              ? "Authorization required"
-                              : "Offline"}
+                              ? "Connected"
+                              : device.state === "unauthorized"
+                                ? "Authorization required"
+                                : "Offline"}
                         </span>
                       </button>
-                      {(device.state !== "available" || savedConfigurationBlocked) && (
+                      {(device.state !== "available" || savedConfigurationBlocked || multipleDevicesConnected) && (
                         <small className="disabled-reason" id={stableDomId("device-reason", device.deviceHandle)}>
                           {savedConfigurationBlocked
                             ? "Repair or replace the incompatible saved setup before selecting a device."
                             : device.state === "unauthorized"
                               ? "Unlock the device, accept the USB debugging prompt, then refresh."
-                              : "Reconnect the device and refresh before selecting it."}
+                              : device.state === "offline"
+                                ? "Reconnect the device and refresh before selecting it."
+                                : "Disconnect the other Android devices and refresh before selecting this device."}
                         </small>
                       )}
                     </li>
@@ -2455,6 +2513,7 @@ export function App({ dialogController: suppliedDialogController }: AppProps = {
                   EmuChef detected {workflow.facts.manufacturer ?? "an Android"} {workflow.facts.model ?? "device"},
                   but no supported device-specific setup matches it.
                 </p>
+                <DeviceQualificationDetails qualification={deviceQualification} />
                 {workflow.match.safeGenericPlans.length > 0 ? (
                   <>
                     <label className="acknowledgment">
@@ -2495,6 +2554,7 @@ export function App({ dialogController: suppliedDialogController }: AppProps = {
                     ? "Unsupported device: choose one offered generic setup explicitly."
                     : "A supported device setup is available."}
                 </p>
+                <DeviceQualificationDetails qualification={deviceQualification} />
                 {savedPlanUnavailable && (
                   <p className="error">
                     The saved device plan reference is unavailable or incompatible with this current device.
@@ -2776,7 +2836,7 @@ export function App({ dialogController: suppliedDialogController }: AppProps = {
               <div><dt>Setup catalog</dt><dd>Ready</dd></div>
               <div>
                 <dt>Device qualification</dt>
-                <dd>{deviceQualification?.summary ?? "Status unavailable"}</dd>
+                <dd>{deviceQualification ? deviceQualificationStateLabels[deviceQualification.state] : "Status unavailable"}</dd>
               </div>
               <div>
                 <dt>Real-device execution</dt>

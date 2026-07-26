@@ -129,6 +129,26 @@ h4 { margin-bottom: var(--space-2); font-size: 1rem; line-height: 1.35; }
 .status.unauthorized { color: var(--color-warning); background: var(--color-warning-surface); border-color: var(--color-warning-border); }
 .status.offline { color: var(--color-danger); background: var(--color-danger-surface); border-color: var(--color-danger-border); }
 
+.multiple-device-warning { display: grid; gap: var(--space-1); margin-bottom: var(--space-3); }
+.device-qualification { margin: var(--space-5) 0; padding: var(--space-4); border: 1px solid var(--color-border); border-radius: var(--radius-panel); background: var(--color-surface-muted); }
+.device-qualification-heading { display: flex; align-items: flex-start; justify-content: space-between; gap: var(--space-4); }
+.device-qualification-heading h3, .device-qualification-limitations h4 { margin: 0; }
+.device-qualification-facts { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: var(--space-3); margin: var(--space-4) 0; }
+.device-qualification-facts div { display: grid; gap: var(--space-1); min-width: 0; }
+.device-qualification-facts dt { color: var(--color-text-muted); }
+.device-qualification-facts dd { margin: 0; font-weight: 600; }
+.device-qualification-limitations ul { margin-bottom: 0; }
+.status.qualification-unsupported,
+.status.qualification-insufficientlyQualified,
+.status.qualification-unauthorized { color: var(--color-warning); background: var(--color-warning-surface); border-color: var(--color-warning-border); }
+.status.qualification-offline { color: var(--color-danger); background: var(--color-danger-surface); border-color: var(--color-danger-border); }
+
+@media (max-width: 620px) {
+  .device-qualification-facts { grid-template-columns: 1fr; }
+  .device-qualification-heading { align-items: stretch; flex-direction: column; }
+  .device-qualification-heading .status { align-self: flex-start; }
+}
+
 .recipe-discovery { display: grid; gap: var(--space-2); margin: var(--space-5) 0; }
 .recipe-discovery > label { font-weight: 700; }
 .recipe-discovery > input, .input-field input:not([type="checkbox"]), .input-field select, .modal-panel input:not([type="checkbox"]), .support-panel input:not([type="checkbox"]) { width: 100%; min-height: var(--control-min-height); border: 1px solid var(--color-border-strong); border-radius: var(--radius-sm); padding: var(--space-3); background: var(--color-control); color: var(--color-text); }

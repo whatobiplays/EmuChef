@@ -371,14 +371,75 @@ describe("Phase 6A execution capability reporting", () => {
     expect(status?.textContent).not.toContain("Mode");
   });
 
-  test("shows the backend-authored device qualification summary", async () => {
+  test("shows a concise backend-authored device qualification state in the sidebar", async () => {
     await renderReadyApp();
 
     const status = document.querySelector(".status-panel");
-    expect(status?.textContent).toContain(
-      "Device qualificationReal-device qualification is not compiled in this build.",
-    );
+    expect(status?.textContent).toContain("Device qualificationNot applicable");
+    expect(status?.textContent).not.toContain("Real-device qualification is not compiled in this build.");
     expect(mockApi.deviceQualification).toHaveBeenCalledTimes(2);
+  });
+
+  test("renders backend-authored qualification facts and limitations in the main device surface", async () => {
+    const user = userEvent.setup();
+    mockApi.pollDevices.mockResolvedValue([availableDevice]);
+    mockApi.deviceQualification.mockResolvedValue({
+      state: "supported",
+      summary: "This device meets the current qualification requirements.",
+      limitations: ["Root access was not checked."],
+      androidMajor: 14,
+      androidApiLevel: 34,
+      abiClass: "arm64",
+      root: "notChecked",
+      runtimeGeneration: 0,
+      qualificationRevision: 2,
+      deviceIdentity: "device-identity-opaque",
+    });
+
+    await renderReadyApp();
+    await user.click(await screen.findByRole("button", { name: /Supported Handheld.*Connected/ }));
+
+    const qualification = await screen.findByRole("heading", { name: "Device qualification" });
+    const section = qualification.closest("section");
+    expect(section).not.toBeNull();
+    expect(section?.textContent).toContain("Supported");
+    expect(section?.textContent).toContain("Android version14");
+    expect(section?.textContent).toContain("API level34");
+    expect(section?.textContent).toContain("Processor architecture64-bit ARM");
+    expect(section?.textContent).toContain("Root accessNot checked");
+    expect(section?.textContent).toContain("Root access was not checked.");
+    expect(section?.textContent).not.toContain("device-identity-opaque");
+  });
+
+  test("blocks every device and explains eligibility when multiple devices are connected", async () => {
+    mockApi.pollDevices.mockResolvedValue([
+      availableDevice,
+      { ...availableDevice, deviceHandle: "device-opaque-two", displayName: "Second Handheld", maskedSerial: "••••5678" },
+    ]);
+    mockApi.deviceQualification.mockResolvedValue({
+      state: "insufficientlyQualified",
+      summary: "More than one Android device is connected.",
+      limitations: ["Disconnect additional devices before qualification."],
+      androidMajor: null,
+      androidApiLevel: null,
+      abiClass: null,
+      root: "notChecked",
+      runtimeGeneration: 0,
+      qualificationRevision: 3,
+      deviceIdentity: null,
+    });
+
+    await renderReadyApp();
+
+    expect(screen.getByText("No device can be selected while multiple Android devices are connected.")).toBeTruthy();
+    expect(screen.getByText("Disconnect all but one device, then refresh discovery.")).toBeTruthy();
+    const deviceButtons = [
+      screen.getByRole("button", { name: /Supported Handheld.*Connected/ }),
+      screen.getByRole("button", { name: /Second Handheld.*Connected/ }),
+    ];
+    expect(deviceButtons).toHaveLength(2);
+    expect(deviceButtons.every((button) => button.hasAttribute("disabled"))).toBe(true);
+    expect(document.querySelector(".status-panel")?.textContent).toContain("Device qualificationQualification incomplete");
   });
 
   test("shows the backend-provided feature-enabled capability without starting execution", async () => {
@@ -787,6 +848,9 @@ describe("Phase 5B workflow surfaces", () => {
     expect((unauthorized as HTMLButtonElement).disabled).toBe(true);
     expect(screen.getByText(/accept the USB debugging prompt/i)).toBeTruthy();
     expect(screen.getByText("Customize")).toBeTruthy();
+
+    mockApi.pollDevices.mockResolvedValue([availableDevice]);
+    await user.click(screen.getByRole("button", { name: "Refresh devices" }));
 
     await user.click(await screen.findByRole("button", { name: /Supported Handheld.*Connected/ }));
     await screen.findByRole("heading", { name: "This device is not officially supported" });
