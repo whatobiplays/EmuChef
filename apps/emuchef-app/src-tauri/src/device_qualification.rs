@@ -6,10 +6,12 @@
 
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
+use sha2::{Digest, Sha256};
 use std::sync::Mutex;
 use tauri::State;
 
-use crate::commands::{current_adb_path, safe_error, AppState};
+use crate::commands::{current_adb_path, list_and_reconcile_inventory, safe_error, AppState};
+use crate::handles::{DeviceDto, SessionHandles};
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -21,6 +23,110 @@ pub enum DeviceQualificationState {
     InsufficientlyQualified,
     Unsupported,
     Supported,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum CapabilityOutcome {
+    Available,
+    Unsupported,
+    Unknown,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub enum CapabilityAvailabilityDto {
+    Available,
+    Unavailable,
+    Unknown,
+}
+
+impl CapabilityOutcome {
+    fn dto(self) -> CapabilityAvailabilityDto {
+        match self {
+            Self::Available => CapabilityAvailabilityDto::Available,
+            Self::Unsupported => CapabilityAvailabilityDto::Unavailable,
+            Self::Unknown => CapabilityAvailabilityDto::Unknown,
+        }
+    }
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(crate) struct QualificationContextKey {
+    pub(crate) device_handle: String,
+    pub(crate) session_epoch: u64,
+    pub(crate) runtime_generation: u64,
+    pub(crate) platform_tools_revision: u64,
+    pub(crate) qualification_revision: u64,
+    pub(crate) capability_fingerprint: String,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(crate) struct CurrentQualification {
+    pub(crate) snapshot: DeviceQualificationSnapshotDto,
+    pub(crate) context: Option<QualificationContextKey>,
+}
+
+/// Apply one inventory to native session and root authority using explicit
+/// generation inputs. The execution seam uses this same function with a
+/// deterministic runtime requester.
+pub(crate) fn reconcile_inventory_with_context(
+    handles: &Mutex<SessionHandles>,
+    root_qualification: &Mutex<RootQualificationStore>,
+    inventory: &Value,
+    runtime_generation: u64,
+    platform_tools_revision: u64,
+) -> Result<Vec<DeviceDto>, String> {
+    let (devices, current_key) = {
+        let mut handles = handles.lock().map_err(|_| {
+            safe_error("session_state_unavailable", "Session state is unavailable.")
+        })?;
+        let devices = handles.update_devices(inventory)?;
+        let current_key = handles
+            .single_available_device_handle()
+            .and_then(|handle| handles.qualification_context(&handle))
+            .filter(|context| {
+                context.runtime_generation == runtime_generation
+                    && context.platform_tools_revision == platform_tools_revision
+            })
+            .map(|context| RootQualificationKey::from_context(&context));
+        (devices, current_key)
+    };
+    let invalidation = root_qualification
+        .lock()
+        .map_err(|_| {
+            safe_error(
+                "qualification_state_unavailable",
+                "Device qualification state is unavailable.",
+            )
+        })?
+        .invalidate_if_not_key(current_key.as_ref());
+    if let Some(device_handle) = invalidation.device_handle.as_deref() {
+        handles
+            .lock()
+            .map_err(|_| safe_error("session_state_unavailable", "Session state is unavailable."))?
+            .invalidate_reviews_for_device(device_handle, "root_qualification_changed");
+    }
+    Ok(devices)
+}
+
+impl QualificationContextKey {
+    pub(crate) fn new(
+        device_handle: impl Into<String>,
+        session_epoch: u64,
+        runtime_generation: u64,
+        platform_tools_revision: u64,
+        qualification_revision: u64,
+        capability_fingerprint: impl Into<String>,
+    ) -> Self {
+        Self {
+            device_handle: device_handle.into(),
+            session_epoch,
+            runtime_generation,
+            platform_tools_revision,
+            qualification_revision,
+            capability_fingerprint: capability_fingerprint.into(),
+        }
+    }
 }
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
@@ -48,6 +154,8 @@ pub(crate) struct RootQualificationKey {
     pub(crate) device_handle: String,
     pub(crate) runtime_generation: u64,
     pub(crate) qualification_revision: u64,
+    pub(crate) session_epoch: u64,
+    pub(crate) capability_fingerprint: String,
 }
 
 impl RootQualificationKey {
@@ -60,6 +168,18 @@ impl RootQualificationKey {
             device_handle: device_handle.into(),
             runtime_generation,
             qualification_revision,
+            session_epoch: 0,
+            capability_fingerprint: String::new(),
+        }
+    }
+
+    pub(crate) fn from_context(context: &QualificationContextKey) -> Self {
+        Self {
+            device_handle: context.device_handle.clone(),
+            runtime_generation: context.runtime_generation,
+            qualification_revision: context.qualification_revision,
+            session_epoch: context.session_epoch,
+            capability_fingerprint: context.capability_fingerprint.clone(),
         }
     }
 }
@@ -214,6 +334,9 @@ pub struct DeviceQualificationSnapshotDto {
     pub android_major: Option<u32>,
     pub android_api_level: Option<u32>,
     pub abi_class: Option<&'static str>,
+    pub storage: CapabilityAvailabilityDto,
+    pub package_manager: CapabilityAvailabilityDto,
+    pub activity_manager: CapabilityAvailabilityDto,
     pub root: Option<RootQualificationState>,
     pub runtime_generation: u64,
     pub qualification_revision: u64,
@@ -243,6 +366,18 @@ pub struct ObservedDevice<'a> {
     pub android_major: Option<u32>,
     pub android_api_level: Option<u32>,
     pub abi: Option<&'a str>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(crate) struct ObservedQualification<'a> {
+    pub opaque_identity: &'a str,
+    pub state: ObservedDeviceState,
+    pub android_major: Option<u32>,
+    pub android_api_level: Option<u32>,
+    pub abi: Option<&'a str>,
+    pub storage: CapabilityOutcome,
+    pub package_manager: CapabilityOutcome,
+    pub activity_manager: CapabilityOutcome,
 }
 
 pub fn classify(
@@ -319,6 +454,195 @@ pub fn classify(
         ),
         ObservedDeviceState::Online => {
             classify_online(runtime_generation, qualification_revision, device)
+        }
+    }
+}
+
+/// Classify the complete passive qualification profile. Explicit negative
+/// capabilities are unsupported; unknown or incomplete probes remain
+/// insufficiently qualified and can never authorize execution.
+pub(crate) fn classify_complete(
+    compiled: bool,
+    runtime_generation: u64,
+    qualification_revision: u64,
+    observed: &[ObservedQualification<'_>],
+) -> DeviceQualificationSnapshotDto {
+    if !compiled {
+        return snapshot(
+            DeviceQualificationState::NotApplicable,
+            "Real-device qualification is not compiled in this build.",
+            vec!["Simulation remains available."],
+            runtime_generation,
+            qualification_revision,
+            None,
+            None,
+            None,
+            None,
+        );
+    }
+    if observed.is_empty() {
+        return snapshot(
+            DeviceQualificationState::NoDevice,
+            "No Android device is available for qualification.",
+            vec!["Connect one device and refresh discovery."],
+            runtime_generation,
+            qualification_revision,
+            None,
+            None,
+            None,
+            None,
+        );
+    }
+    if observed.len() != 1 {
+        return snapshot(
+            DeviceQualificationState::InsufficientlyQualified,
+            "More than one Android device is connected.",
+            vec!["Disconnect additional devices before qualification."],
+            runtime_generation,
+            qualification_revision,
+            None,
+            None,
+            None,
+            None,
+        );
+    }
+    let device = &observed[0];
+    match device.state {
+        ObservedDeviceState::Unauthorized => snapshot(
+            DeviceQualificationState::Unauthorized,
+            "The connected device has not authorized this Mac.",
+            vec!["Approve the USB debugging prompt on the device."],
+            runtime_generation,
+            qualification_revision,
+            Some(device.opaque_identity),
+            None,
+            None,
+            None,
+        ),
+        ObservedDeviceState::Offline => snapshot(
+            DeviceQualificationState::Offline,
+            "The connected device is offline.",
+            vec!["Reconnect the device and refresh discovery."],
+            runtime_generation,
+            qualification_revision,
+            Some(device.opaque_identity),
+            None,
+            None,
+            None,
+        ),
+        ObservedDeviceState::Online => {
+            let Some(android_major) = device.android_major else {
+                return with_capabilities(
+                    snapshot(
+                        DeviceQualificationState::InsufficientlyQualified,
+                        "The connected device could not be fully qualified.",
+                        vec!["Refresh discovery before attempting real execution."],
+                        runtime_generation,
+                        qualification_revision,
+                        Some(device.opaque_identity),
+                        None,
+                        device.android_api_level,
+                        normalize_abi(device.abi),
+                    ),
+                    device,
+                );
+            };
+            let Some(api_level) = device.android_api_level else {
+                return with_capabilities(
+                    snapshot(
+                        DeviceQualificationState::InsufficientlyQualified,
+                        "The connected device could not be fully qualified.",
+                        vec!["Refresh discovery before attempting real execution."],
+                        runtime_generation,
+                        qualification_revision,
+                        Some(device.opaque_identity),
+                        Some(android_major),
+                        None,
+                        normalize_abi(device.abi),
+                    ),
+                    device,
+                );
+            };
+            let Some(abi_class) = normalize_abi(device.abi) else {
+                return with_capabilities(
+                    snapshot(
+                        DeviceQualificationState::Unsupported,
+                        "The connected device uses an unsupported processor architecture.",
+                        vec!["This device cannot begin real execution."],
+                        runtime_generation,
+                        qualification_revision,
+                        Some(device.opaque_identity),
+                        Some(android_major),
+                        Some(api_level),
+                        None,
+                    ),
+                    device,
+                );
+            };
+            if android_major < 11 || api_level < 30 {
+                return with_capabilities(
+                    snapshot(
+                        DeviceQualificationState::Unsupported,
+                        "The connected device uses an unsupported Android version.",
+                        vec!["EmuChef requires Android 11 or newer."],
+                        runtime_generation,
+                        qualification_revision,
+                        Some(device.opaque_identity),
+                        Some(android_major),
+                        Some(api_level),
+                        Some(abi_class),
+                    ),
+                    device,
+                );
+            }
+            let capabilities = [
+                device.storage,
+                device.package_manager,
+                device.activity_manager,
+            ];
+            let state = if capabilities
+                .iter()
+                .any(|capability| *capability == CapabilityOutcome::Unsupported)
+            {
+                DeviceQualificationState::Unsupported
+            } else if capabilities
+                .iter()
+                .any(|capability| *capability == CapabilityOutcome::Unknown)
+            {
+                DeviceQualificationState::InsufficientlyQualified
+            } else {
+                DeviceQualificationState::Supported
+            };
+            let limitations = match state {
+                DeviceQualificationState::Supported => vec!["Root access has not been checked."],
+                DeviceQualificationState::Unsupported => {
+                    vec!["A required device capability is unavailable."]
+                }
+                _ => vec!["Refresh discovery before attempting real execution."],
+            };
+            let mut result = snapshot(
+                state,
+                match state {
+                    DeviceQualificationState::Supported => {
+                        "The connected device meets the current qualification requirements."
+                    }
+                    DeviceQualificationState::Unsupported => {
+                        "The connected device does not provide every required capability."
+                    }
+                    _ => "The connected device could not be fully qualified.",
+                },
+                limitations,
+                runtime_generation,
+                qualification_revision,
+                Some(device.opaque_identity),
+                Some(android_major),
+                Some(api_level),
+                Some(abi_class),
+            );
+            result.storage = device.storage.dto();
+            result.package_manager = device.package_manager.dto();
+            result.activity_manager = device.activity_manager.dto();
+            result
         }
     }
 }
@@ -421,6 +745,9 @@ fn snapshot(
         android_major,
         android_api_level,
         abi_class,
+        storage: CapabilityAvailabilityDto::Unknown,
+        package_manager: CapabilityAvailabilityDto::Unknown,
+        activity_manager: CapabilityAvailabilityDto::Unknown,
         root: None,
         runtime_generation,
         qualification_revision,
@@ -428,11 +755,47 @@ fn snapshot(
     }
 }
 
+fn with_capabilities(
+    mut snapshot: DeviceQualificationSnapshotDto,
+    device: &ObservedQualification<'_>,
+) -> DeviceQualificationSnapshotDto {
+    snapshot.storage = device.storage.dto();
+    snapshot.package_manager = device.package_manager.dto();
+    snapshot.activity_manager = device.activity_manager.dto();
+    snapshot
+}
+
 #[tauri::command]
 pub fn get_device_qualification(
     device_handle: Option<String>,
     state: State<'_, AppState>,
 ) -> Result<DeviceQualificationSnapshotDto, String> {
+    refresh_current_qualification(&state, device_handle.as_deref()).map(|result| result.snapshot)
+}
+
+/// Re-run the complete passive qualification against the current native
+/// session. This is shared by the UI projection, explicit root checks, and the
+/// final real-execution preflight so those paths cannot drift apart.
+pub(crate) fn refresh_current_qualification(
+    state: &AppState,
+    requested_handle: Option<&str>,
+) -> Result<CurrentQualification, String> {
+    let mut request =
+        |request_type: &str, payload: Value| state.sidecar.request(request_type, payload);
+    refresh_current_qualification_with_runtime(state, requested_handle, &mut request)
+}
+
+/// Refresh qualification after reconciling one authoritative inventory. The
+/// request function is injectable so the execution preflight can share the
+/// exact sidecar request boundary with deterministic tests.
+pub(crate) fn refresh_current_qualification_with_runtime<F>(
+    state: &AppState,
+    requested_handle: Option<&str>,
+    request: &mut F,
+) -> Result<CurrentQualification, String>
+where
+    F: FnMut(&str, Value) -> Result<Value, String>,
+{
     let runtime_generation = state.sidecar.try_generation().map_err(|_| {
         safe_error(
             "runtime_generation_unavailable",
@@ -451,48 +814,138 @@ pub fn get_device_qualification(
         .revision();
 
     if !cfg!(feature = "real-execution") {
-        return Ok(classify(
-            false,
-            runtime_generation,
-            qualification_revision,
-            &[],
-        ));
+        let mut handles = state.handles.lock().map_err(|_| {
+            safe_error("session_state_unavailable", "Session state is unavailable.")
+        })?;
+        for device in handles.qualification_devices() {
+            handles.clear_qualification_context(&device.handle);
+            handles.invalidate_reviews_for_device(&device.handle, "device_qualification_changed");
+        }
+        drop(handles);
+        state
+            .root_qualification
+            .lock()
+            .map_err(|_| {
+                safe_error(
+                    "qualification_state_unavailable",
+                    "Device qualification state is unavailable.",
+                )
+            })?
+            .invalidate();
+        return Ok(CurrentQualification {
+            snapshot: classify(false, runtime_generation, qualification_revision, &[]),
+            context: None,
+        });
     }
 
-    let devices = state
-        .handles
+    // The inventory used to resolve the reviewed opaque handle must be fresh
+    // and native-authoritative. A targeted qualifyDevice call is deliberately
+    // separate; its internal listing is not a continuity authority.
+    list_and_reconcile_inventory(state, request)?;
+
+    let adb_path = current_adb_path(&state)?;
+    qualify_reconciled_current_with_runtime(
+        &state.handles,
+        &state.root_qualification,
+        &adb_path,
+        runtime_generation,
+        qualification_revision,
+        requested_handle,
+        request,
+    )
+}
+
+/// Qualify the single target from an already reconciled native inventory.
+/// Keeping this separate from inventory listing makes the final execution
+/// gate prove continuity before it performs the targeted capability probe.
+pub(crate) fn qualify_reconciled_current_with_runtime<F>(
+    handles: &Mutex<SessionHandles>,
+    root_qualification: &Mutex<RootQualificationStore>,
+    adb_path: &str,
+    runtime_generation: u64,
+    qualification_revision: u64,
+    requested_handle: Option<&str>,
+    request: &mut F,
+) -> Result<CurrentQualification, String>
+where
+    F: FnMut(&str, Value) -> Result<Value, String>,
+{
+    let devices = handles
         .lock()
         .map_err(|_| safe_error("session_state_unavailable", "Session state is unavailable."))?
         .qualification_devices();
     if devices.is_empty() {
-        return Ok(classify(
-            true,
-            runtime_generation,
-            qualification_revision,
-            &[],
-        ));
+        let invalidation = root_qualification
+            .lock()
+            .map_err(|_| {
+                safe_error(
+                    "qualification_state_unavailable",
+                    "Device qualification state is unavailable.",
+                )
+            })?
+            .invalidate_if_not_key(None);
+        if let Some(device_handle) = invalidation.device_handle.as_deref() {
+            handles
+                .lock()
+                .map_err(|_| {
+                    safe_error("session_state_unavailable", "Session state is unavailable.")
+                })?
+                .invalidate_reviews_for_device(device_handle, "root_qualification_changed");
+        }
+        return Ok(CurrentQualification {
+            snapshot: classify_complete(true, runtime_generation, qualification_revision, &[]),
+            context: None,
+        });
     }
     if devices.len() != 1 {
-        let placeholders = [online_placeholder("first"), online_placeholder("second")];
-        return Ok(classify(
-            true,
-            runtime_generation,
-            qualification_revision,
-            &placeholders,
-        ));
+        let first = ObservedQualification {
+            opaque_identity: "qualification-device-1",
+            state: ObservedDeviceState::Online,
+            android_major: None,
+            android_api_level: None,
+            abi: None,
+            storage: CapabilityOutcome::Unknown,
+            package_manager: CapabilityOutcome::Unknown,
+            activity_manager: CapabilityOutcome::Unknown,
+        };
+        let second = ObservedQualification {
+            opaque_identity: "qualification-device-2",
+            ..first.clone()
+        };
+        let invalidation = root_qualification
+            .lock()
+            .map_err(|_| {
+                safe_error(
+                    "qualification_state_unavailable",
+                    "Device qualification state is unavailable.",
+                )
+            })?
+            .invalidate_if_not_key(None);
+        if let Some(device_handle) = invalidation.device_handle.as_deref() {
+            handles
+                .lock()
+                .map_err(|_| {
+                    safe_error("session_state_unavailable", "Session state is unavailable.")
+                })?
+                .invalidate_reviews_for_device(device_handle, "root_qualification_changed");
+        }
+        return Ok(CurrentQualification {
+            snapshot: classify_complete(
+                true,
+                runtime_generation,
+                qualification_revision,
+                &[first, second],
+            ),
+            context: None,
+        });
     }
 
     let target = devices.into_iter().next().expect("one device exists");
-    if device_handle
-        .as_deref()
-        .is_some_and(|requested| requested != target.handle)
-    {
-        return Ok(classify(
-            true,
-            runtime_generation,
-            qualification_revision,
-            &[],
-        ));
+    if requested_handle.is_some_and(|requested| requested != target.handle) {
+        return Ok(CurrentQualification {
+            snapshot: classify_complete(true, runtime_generation, qualification_revision, &[]),
+            context: None,
+        });
     }
 
     let identity = target.handle.clone();
@@ -502,66 +955,63 @@ pub fn get_device_qualification(
         } else {
             ObservedDeviceState::Offline
         };
-        let observed = [ObservedDevice {
+        let observed = [ObservedQualification {
             opaque_identity: &identity,
             state,
             android_major: None,
             android_api_level: None,
             abi: None,
+            storage: CapabilityOutcome::Unknown,
+            package_manager: CapabilityOutcome::Unknown,
+            activity_manager: CapabilityOutcome::Unknown,
         }];
-        return Ok(classify(
-            true,
-            runtime_generation,
-            qualification_revision,
-            &observed,
-        ));
+        return Ok(CurrentQualification {
+            snapshot: classify_complete(
+                true,
+                runtime_generation,
+                qualification_revision,
+                &observed,
+            ),
+            context: None,
+        });
     }
     if target.state != "available" {
-        return Ok(classify(
-            true,
-            runtime_generation,
-            qualification_revision,
-            &[],
-        ));
+        return Ok(CurrentQualification {
+            snapshot: classify_complete(true, runtime_generation, qualification_revision, &[]),
+            context: None,
+        });
     }
 
-    let adb_path = current_adb_path(&state)?;
-    let observed = state
-        .sidecar
-        .request(
-            "qualifyDevice",
-            json!({ "adbPath": adb_path, "serial": target.serial }),
+    let observed = request(
+        "qualifyDevice",
+        json!({ "adbPath": adb_path, "serial": target.serial }),
+    )
+    .map_err(|_| {
+        safe_error(
+            "device_qualification_failed",
+            "Connected-device qualification could not be completed.",
         )
-        .map_err(|_| {
-            safe_error(
-                "device_qualification_failed",
-                "Connected-device qualification could not be completed.",
-            )
-        })?;
-    let snapshot = classify_observed(
+    })?;
+    let (mut snapshot, observed_qualification) = classify_observed_complete(
         runtime_generation,
         qualification_revision,
         &observed,
         Some(&identity),
     );
-    attach_cached_root(snapshot, &state, &identity)
-}
-
-fn attach_cached_root(
-    mut snapshot: DeviceQualificationSnapshotDto,
-    state: &AppState,
-    identity: &str,
-) -> Result<DeviceQualificationSnapshotDto, String> {
-    if snapshot.state != DeviceQualificationState::Supported {
-        return Ok(snapshot);
-    }
-    let key = RootQualificationKey::new(
-        identity,
-        snapshot.runtime_generation,
-        snapshot.qualification_revision,
+    let context = QualificationContextKey::new(
+        &identity,
+        target.session_epoch,
+        runtime_generation,
+        qualification_revision,
+        qualification_revision,
+        qualification_fingerprint(&observed_qualification),
     );
-    snapshot.root = state
-        .root_qualification
+    let root_key = RootQualificationKey::from_context(&context);
+    handles
+        .lock()
+        .map_err(|_| safe_error("session_state_unavailable", "Session state is unavailable."))?
+        .set_qualification_context(context.clone());
+    let root_invalidation = root_qualification
         .lock()
         .map_err(|_| {
             safe_error(
@@ -569,8 +1019,26 @@ fn attach_cached_root(
                 "Device qualification state is unavailable.",
             )
         })?
-        .get(&key);
-    Ok(snapshot)
+        .invalidate_if_not_key(Some(&root_key));
+    if root_invalidation.device_handle.is_some() {
+        handles
+            .lock()
+            .map_err(|_| safe_error("session_state_unavailable", "Session state is unavailable."))?
+            .invalidate_reviews_for_device(&identity, "root_qualification_changed");
+    }
+    snapshot.root = root_qualification
+        .lock()
+        .map_err(|_| {
+            safe_error(
+                "qualification_state_unavailable",
+                "Device qualification state is unavailable.",
+            )
+        })?
+        .get(&root_key);
+    Ok(CurrentQualification {
+        snapshot,
+        context: Some(context),
+    })
 }
 
 #[tauri::command]
@@ -584,12 +1052,20 @@ pub fn check_device_root(
             "Root access checks are unavailable in this development build.",
         ));
     }
-    let runtime_generation = state.sidecar.try_generation().map_err(|_| {
+    let current = refresh_current_qualification(&state, Some(&device_handle))?;
+    if current.snapshot.state != DeviceQualificationState::Supported {
+        return Err(safe_error(
+            "device_qualification_incomplete",
+            "Complete supported device qualification before checking root access.",
+        ));
+    }
+    let context = current.context.as_ref().ok_or_else(|| {
         safe_error(
-            "runtime_generation_unavailable",
-            "Device qualification state is temporarily unavailable.",
+            "device_qualification_incomplete",
+            "Complete supported device qualification before checking root access.",
         )
     })?;
+    let runtime_generation = context.runtime_generation;
     let (target, device_count) = {
         let handles = state.handles.lock().map_err(|_| {
             safe_error(
@@ -624,17 +1100,7 @@ pub fn check_device_root(
             "The selected device is not ready for a root access check.",
         ));
     }
-    let qualification_revision = state
-        .adb
-        .lock()
-        .map_err(|_| {
-            safe_error(
-                "adb_state_unavailable",
-                "Platform-Tools setup state is unavailable.",
-            )
-        })?
-        .revision();
-    let key = RootQualificationKey::new(&device_handle, runtime_generation, qualification_revision);
+    let key = RootQualificationKey::from_context(context);
     let adb_path = current_adb_path(&state)?;
     let previous = state
         .root_qualification
@@ -691,11 +1157,68 @@ pub fn check_device_root(
     Ok(RootQualificationCheckDto {
         qualification,
         runtime_generation,
-        qualification_revision,
+        qualification_revision: context.qualification_revision,
         device_identity: device_handle,
     })
 }
 
+fn classify_observed_complete<'a>(
+    runtime_generation: u64,
+    qualification_revision: u64,
+    observed: &'a Value,
+    identity: Option<&'a str>,
+) -> (DeviceQualificationSnapshotDto, ObservedQualification<'a>) {
+    let state = observed.get("state").and_then(Value::as_str);
+    let identity = identity.unwrap_or("qualification-device");
+    let make = |state| ObservedQualification {
+        opaque_identity: identity,
+        state,
+        android_major: observed
+            .get("androidMajor")
+            .and_then(Value::as_u64)
+            .map(|value| value as u32),
+        android_api_level: observed
+            .get("androidApiLevel")
+            .and_then(Value::as_u64)
+            .map(|value| value as u32),
+        abi: observed.get("abi").and_then(Value::as_str),
+        storage: capability_outcome(observed.get("storage")),
+        package_manager: capability_outcome(observed.get("packageManager")),
+        activity_manager: capability_outcome(observed.get("activityManager")),
+    };
+    let profile = make(match state {
+        Some("unauthorized") => ObservedDeviceState::Unauthorized,
+        Some("offline") => ObservedDeviceState::Offline,
+        _ => ObservedDeviceState::Online,
+    });
+    let snapshot = match state {
+        Some("no_device") => {
+            classify_complete(true, runtime_generation, qualification_revision, &[])
+        }
+        Some("multiple_devices") => {
+            let second = ObservedQualification {
+                opaque_identity: "qualification-device-2",
+                ..profile.clone()
+            };
+            classify_complete(
+                true,
+                runtime_generation,
+                qualification_revision,
+                &[profile.clone(), second],
+            )
+        }
+        _ => classify_complete(
+            true,
+            runtime_generation,
+            qualification_revision,
+            std::slice::from_ref(&profile),
+        ),
+    };
+    (snapshot, profile)
+}
+
+/// Compatibility projection used by legacy unit fixtures. Production paths use
+/// `classify_observed_complete`, which includes all required capability probes.
 fn classify_observed(
     runtime_generation: u64,
     qualification_revision: u64,
@@ -716,20 +1239,35 @@ fn classify_observed(
             ObservedDeviceState::Offline,
             identity.unwrap_or("qualification-device"),
         )],
-        Some("online") => vec![observed_device(
+        _ => vec![observed_device(
             observed,
             ObservedDeviceState::Online,
             identity.unwrap_or("qualification-device"),
         )],
-        _ => vec![ObservedDevice {
-            opaque_identity: identity.unwrap_or("qualification-device"),
-            state: ObservedDeviceState::Online,
-            android_major: None,
-            android_api_level: None,
-            abi: None,
-        }],
     };
     classify(true, runtime_generation, qualification_revision, &devices)
+}
+
+fn capability_outcome(value: Option<&Value>) -> CapabilityOutcome {
+    match value.and_then(Value::as_str) {
+        Some("available") => CapabilityOutcome::Available,
+        Some("unsupported") => CapabilityOutcome::Unsupported,
+        _ => CapabilityOutcome::Unknown,
+    }
+}
+
+fn qualification_fingerprint(observed: &ObservedQualification<'_>) -> String {
+    let payload = json!({
+        "androidMajor": observed.android_major,
+        "androidApiLevel": observed.android_api_level,
+        "abi": observed.abi,
+        "storage": format!("{:?}", observed.storage),
+        "packageManager": format!("{:?}", observed.package_manager),
+        "activityManager": format!("{:?}", observed.activity_manager),
+    });
+    hex::encode(Sha256::digest(
+        serde_json::to_vec(&payload).expect("qualification fingerprint is serializable"),
+    ))
 }
 
 fn observed_device<'a>(
@@ -759,6 +1297,31 @@ fn online_placeholder(identity: &str) -> ObservedDevice<'_> {
         android_major: None,
         android_api_level: None,
         abi: None,
+    }
+}
+
+#[cfg(test)]
+pub(crate) fn test_current_qualification(
+    state: DeviceQualificationState,
+    context: Option<QualificationContextKey>,
+) -> CurrentQualification {
+    CurrentQualification {
+        snapshot: DeviceQualificationSnapshotDto {
+            state,
+            summary: "test",
+            limitations: Vec::new(),
+            android_major: Some(14),
+            android_api_level: Some(34),
+            abi_class: Some("arm64"),
+            storage: CapabilityAvailabilityDto::Available,
+            package_manager: CapabilityAvailabilityDto::Available,
+            activity_manager: CapabilityAvailabilityDto::Available,
+            root: None,
+            runtime_generation: 1,
+            qualification_revision: 2,
+            device_identity: Some("device_one".to_string()),
+        },
+        context,
     }
 }
 
@@ -897,6 +1460,53 @@ mod tests {
     }
 
     #[test]
+    fn complete_supported_profile_requires_all_passive_capabilities() {
+        let supported = ObservedQualification {
+            opaque_identity: "opaque",
+            state: ObservedDeviceState::Online,
+            android_major: Some(14),
+            android_api_level: Some(34),
+            abi: Some("arm64-v8a"),
+            storage: CapabilityOutcome::Available,
+            package_manager: CapabilityOutcome::Available,
+            activity_manager: CapabilityOutcome::Available,
+        };
+        let result = classify_complete(true, 8, 13, &[supported.clone()]);
+        assert_eq!(result.state, DeviceQualificationState::Supported);
+        assert_eq!(result.storage, CapabilityAvailabilityDto::Available);
+        assert_eq!(result.package_manager, CapabilityAvailabilityDto::Available);
+        assert_eq!(
+            result.activity_manager,
+            CapabilityAvailabilityDto::Available
+        );
+
+        for (field, capability) in [
+            ("storage", CapabilityOutcome::Unsupported),
+            ("package_manager", CapabilityOutcome::Unsupported),
+            ("activity_manager", CapabilityOutcome::Unsupported),
+        ] {
+            let mut candidate = supported.clone();
+            match field {
+                "storage" => candidate.storage = capability,
+                "package_manager" => candidate.package_manager = capability,
+                _ => candidate.activity_manager = capability,
+            }
+            assert_eq!(
+                classify_complete(true, 8, 13, &[candidate]).state,
+                DeviceQualificationState::Unsupported,
+                "{field} negative result must be unsupported"
+            );
+        }
+
+        let mut unknown = supported;
+        unknown.package_manager = CapabilityOutcome::Unknown;
+        assert_eq!(
+            classify_complete(true, 8, 13, &[unknown]).state,
+            DeviceQualificationState::InsufficientlyQualified
+        );
+    }
+
+    #[test]
     fn root_qualification_serializes_the_approved_compact_shape() {
         let granted = serde_json::to_value(RootQualificationState::Granted).unwrap();
         assert_eq!(granted, json!({ "status": "granted" }));
@@ -927,6 +1537,23 @@ mod tests {
 
         store.invalidate();
         assert_eq!(store.get(&key), None);
+    }
+
+    #[test]
+    fn root_key_rejects_a_multiple_device_session_context() {
+        let old_context = QualificationContextKey::new("opaque-device", 4, 8, 9, 9, "old");
+        let new_context = QualificationContextKey::new("opaque-device", 5, 8, 9, 9, "new");
+        let old_key = RootQualificationKey::from_context(&old_context);
+        let new_key = RootQualificationKey::from_context(&new_context);
+        let mut store = RootQualificationStore::default();
+        let attempt = store.begin(old_key.clone()).unwrap();
+        assert!(store.complete(attempt, RootQualificationState::Granted));
+
+        let invalidation = store.invalidate_if_not_key(Some(&new_key));
+
+        assert_eq!(invalidation.device_handle.as_deref(), Some("opaque-device"));
+        assert_eq!(store.get(&old_key), None);
+        assert_eq!(store.get(&new_key), None);
     }
 
     #[test]

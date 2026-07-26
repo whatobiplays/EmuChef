@@ -20,12 +20,12 @@ use uuid::Uuid;
 
 use crate::adb::{AdbManager, AdbSetupStatusDto, PLATFORM_TOOLS_URL};
 use crate::catalog::CatalogDescriptor;
-use crate::device_qualification::RootQualificationStore;
+use crate::device_qualification::{reconcile_inventory_with_context, RootQualificationStore};
 use crate::device_qualification::{
     RootQualificationInvalidation, RootQualificationKey, RootQualificationState,
 };
 use crate::execution::ExecutionHandleStore;
-use crate::handles::{ReviewedPlanSnapshot, SessionHandles};
+use crate::handles::{DeviceDto, ReviewedPlanSnapshot, SessionHandles};
 use crate::recovery::RecoveryState;
 use crate::saved_configurations::SavedConfigurationState;
 use crate::sidecar::{RuntimeStatusDto, SidecarState};
@@ -46,6 +46,70 @@ pub struct AppState {
     pub support: Mutex<SupportStore>,
     pub updates: UpdateService,
     pub update_activity: ActivityGate,
+}
+
+/// Request one fresh ADB inventory and pass it through the shared native
+/// continuity reconciliation before any caller resolves a device target.
+pub(crate) fn list_and_reconcile_inventory<F>(
+    state: &AppState,
+    request: &mut F,
+) -> Result<Vec<DeviceDto>, String>
+where
+    F: FnMut(&str, Value) -> Result<Value, String>,
+{
+    let adb_path = current_adb_path(state)?;
+    let runtime_generation = state.sidecar.try_generation().map_err(|_| {
+        safe_error(
+            "runtime_generation_unavailable",
+            "Device qualification state is temporarily unavailable.",
+        )
+    })?;
+    let platform_tools_revision = state
+        .adb
+        .lock()
+        .map_err(|_| {
+            safe_error(
+                "adb_state_unavailable",
+                "Platform-Tools setup state is unavailable.",
+            )
+        })?
+        .revision();
+    list_and_reconcile_inventory_with_authority(
+        &state.handles,
+        &state.root_qualification,
+        &adb_path,
+        runtime_generation,
+        platform_tools_revision,
+        request,
+    )
+}
+
+/// Request and reconcile one inventory using explicit native authority inputs.
+/// Polling, qualification, and final execution all use this same path.
+pub(crate) fn list_and_reconcile_inventory_with_authority<F>(
+    handles: &Mutex<SessionHandles>,
+    root_qualification: &Mutex<RootQualificationStore>,
+    adb_path: &str,
+    runtime_generation: u64,
+    platform_tools_revision: u64,
+    request: &mut F,
+) -> Result<Vec<DeviceDto>, String>
+where
+    F: FnMut(&str, Value) -> Result<Value, String>,
+{
+    let inventory = request("listAdbDevices", json!({ "adbPath": adb_path })).map_err(|_| {
+        safe_error(
+            "adb_inventory_failed",
+            "Connected Android devices could not be listed.",
+        )
+    })?;
+    reconcile_inventory_with_context(
+        handles,
+        root_qualification,
+        &inventory,
+        runtime_generation,
+        platform_tools_revision,
+    )
 }
 
 /// Latest backend-authored input contract set accepted for the current runtime
@@ -679,71 +743,9 @@ pub fn poll_devices(
             "Device status changed. Refresh troubleshooting status before retrying.",
         ));
     }
-    let adb_path = current_adb_path(&state)?;
-    let inventory = state
-        .sidecar
-        .request("listAdbDevices", json!({ "adbPath": adb_path }))
-        .map_err(|_| {
-            safe_error(
-                "adb_inventory_failed",
-                "Connected Android devices could not be listed.",
-            )
-        })?;
-    let devices = state
-        .handles
-        .lock()
-        .map_err(|_| {
-            safe_error(
-                "session_state_unavailable",
-                "Device session state is unavailable.",
-            )
-        })?
-        .update_devices(&inventory)?;
-    let single_handle = state
-        .handles
-        .lock()
-        .map_err(|_| {
-            safe_error(
-                "session_state_unavailable",
-                "Device session state is unavailable.",
-            )
-        })?
-        .single_available_device_handle();
-    let runtime_generation = state.sidecar.try_generation().map_err(|_| {
-        safe_error(
-            "runtime_generation_unavailable",
-            "Device qualification state is temporarily unavailable.",
-        )
-    })?;
-    let qualification_revision = state
-        .adb
-        .lock()
-        .map_err(|_| {
-            safe_error(
-                "adb_state_unavailable",
-                "Platform-Tools setup state is unavailable.",
-            )
-        })?
-        .revision();
-    let key = single_handle.as_deref().map(|handle| {
-        RootQualificationKey::new(handle, runtime_generation, qualification_revision)
-    });
-    let invalidation = state
-        .root_qualification
-        .lock()
-        .map_err(|_| {
-            safe_error(
-                "qualification_state_unavailable",
-                "Device qualification state is unavailable.",
-            )
-        })?
-        .invalidate_if_not_key(key.as_ref());
-    if invalidation.device_handle.is_some() {
-        let mut handles = state.handles.lock().map_err(|_| {
-            safe_error("session_state_unavailable", "Session state is unavailable.")
-        })?;
-        invalidate_reviews_for_root_invalidation(&mut handles, &invalidation);
-    }
+    let mut request =
+        |request_type: &str, payload: Value| state.sidecar.request(request_type, payload);
+    let devices = list_and_reconcile_inventory(&state, &mut request)?;
     serde_json::to_value(devices).map_err(|_| {
         safe_error(
             "device_projection_failed",
@@ -993,7 +995,17 @@ pub fn create_review(
         catalog_identity,
         catalog_digest,
         plan_digest: digest.clone(),
-        device_handle,
+        device_handle: device_handle.clone(),
+        qualification_context: state
+            .handles
+            .lock()
+            .map_err(|_| {
+                safe_error(
+                    "session_state_unavailable",
+                    "Review session state is unavailable.",
+                )
+            })?
+            .qualification_context(&device_handle),
         platform_tools_identity: Some(platform_tools_identity),
         created: Instant::now(),
         last_access: Instant::now(),
@@ -1334,22 +1346,16 @@ fn configuration_payload(
         &serial,
         &facts,
     );
-    let runtime_generation = state.sidecar.try_generation().map_err(|_| {
-        safe_error(
-            "runtime_generation_unavailable",
-            "Device qualification state is temporarily unavailable.",
-        )
-    })?;
-    let qualification_revision = state
-        .adb
+    let qualification_context = state
+        .handles
         .lock()
         .map_err(|_| {
             safe_error(
-                "adb_state_unavailable",
-                "Platform-Tools setup state is unavailable.",
+                "session_state_unavailable",
+                "Device session state is unavailable.",
             )
         })?
-        .revision();
+        .qualification_context(device_handle);
     let root_granted = state
         .root_qualification
         .lock()
@@ -1359,11 +1365,12 @@ fn configuration_payload(
                 "Device qualification state is unavailable.",
             )
         })?
-        .get(&RootQualificationKey::new(
-            device_handle,
-            runtime_generation,
-            qualification_revision,
-        ))
+        .get(
+            &qualification_context
+                .as_ref()
+                .map(RootQualificationKey::from_context)
+                .unwrap_or_else(|| RootQualificationKey::new(device_handle, 0, 0)),
+        )
         .is_some_and(|result| result == RootQualificationState::Granted);
     payload["runtimeCapabilityAvailability"] = json!({
         "rootShell": root_granted,
@@ -2001,6 +2008,7 @@ mod tests {
             catalog_digest: "sha256:catalog".to_string(),
             plan_digest: "sha256:plan".to_string(),
             device_handle: device_handle.to_string(),
+            qualification_context: None,
             platform_tools_identity: None,
             created: Instant::now(),
             last_access: Instant::now(),

@@ -358,6 +358,8 @@ export type DeviceQualificationState =
   | "unsupported"
   | "supported";
 
+export type CapabilityAvailability = "available" | "unavailable" | "unknown";
+
 export type RootQualification =
   | { readonly status: "granted" }
   | { readonly status: "denied" }
@@ -376,6 +378,9 @@ export interface DeviceQualificationSnapshot {
   readonly androidMajor: number | null;
   readonly androidApiLevel: number | null;
   readonly abiClass: "arm64" | "arm32" | "x86_64" | null;
+  readonly storage: CapabilityAvailability;
+  readonly packageManager: CapabilityAvailability;
+  readonly activityManager: CapabilityAvailability;
   readonly root: RootQualification | null;
   readonly runtimeGeneration: number;
   readonly qualificationRevision: number;

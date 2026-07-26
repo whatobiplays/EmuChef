@@ -7,7 +7,7 @@ import {
   executionAnnouncement,
   restoreAccessibleFocus,
 } from "./accessibility";
-import type { RealExecutionConfirmation } from "./types";
+import type { DeviceQualificationSnapshot, RealExecutionConfirmation } from "./types";
 import type { WorkflowAction, WorkflowState } from "./workflow";
 
 export type ExecutionReportState = "idle" | "exporting" | "saved" | "failed";
@@ -27,6 +27,7 @@ interface UseExecutionOptions {
   dispatch: Dispatch<WorkflowAction>;
   mainRef: MutableValueRef<HTMLElement | null>;
   realExecutionCompiled: boolean;
+  qualification?: DeviceQualificationSnapshot | null;
   runtimeGenerationRef: MutableValueRef<number>;
   setBusy: (busy: boolean) => void;
   setNotice: (notice: string | null) => void;
@@ -43,6 +44,7 @@ export function useExecution({
   dispatch,
   mainRef,
   realExecutionCompiled,
+  qualification,
   runtimeGenerationRef,
   setBusy,
   setNotice,
@@ -90,7 +92,12 @@ export function useExecution({
 
   const startRealExecution = useCallback(async (confirmation: RealExecutionConfirmation) => {
     const current = workflowRef.current;
-    if (!realExecutionCompiled || !current.review || current.execution.kind === "starting") return;
+    if (
+      !realExecutionCompiled
+      || (qualification !== undefined && qualification?.state !== "supported")
+      || !current.review
+      || current.execution.kind === "starting"
+    ) return;
     const generation = current.executionGeneration + 1;
     dispatch({ type: "execution-starting", generation, mode: "real" });
     setBusy(true);
@@ -104,7 +111,7 @@ export function useExecution({
     } finally {
       setBusy(false);
     }
-  }, [dispatch, realExecutionCompiled, setBusy, setNotice, workflowRef]);
+  }, [dispatch, qualification?.state, qualification !== undefined, realExecutionCompiled, setBusy, setNotice, workflowRef]);
 
   useEffect(() => {
     if (workflow.execution.kind !== "active" && workflow.execution.kind !== "terminal") return;

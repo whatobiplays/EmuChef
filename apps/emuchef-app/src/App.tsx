@@ -132,6 +132,12 @@ const deviceAbiLabels: Record<NonNullable<DeviceQualificationSnapshot["abiClass"
   x86_64: "64-bit x86",
 };
 
+const capabilityAvailabilityLabels: Record<DeviceQualificationSnapshot["storage"], string> = {
+  available: "Available",
+  unavailable: "Unavailable",
+  unknown: "Unknown",
+};
+
 function DeviceQualificationDetails({
   qualification,
   rootCheckPhase,
@@ -167,6 +173,9 @@ function DeviceQualificationDetails({
         <div><dt>Android version</dt><dd>{qualification.androidMajor ?? "Unknown"}</dd></div>
         <div><dt>API level</dt><dd>{qualification.androidApiLevel ?? "Unknown"}</dd></div>
         <div><dt>Processor architecture</dt><dd>{qualification.abiClass ? deviceAbiLabels[qualification.abiClass] : "Unknown"}</dd></div>
+        <div><dt>Shared storage</dt><dd>{capabilityAvailabilityLabels[qualification.storage]}</dd></div>
+        <div><dt>Package management</dt><dd>{capabilityAvailabilityLabels[qualification.packageManager]}</dd></div>
+        <div><dt>Activity management</dt><dd>{capabilityAvailabilityLabels[qualification.activityManager]}</dd></div>
         <div><dt>Root access</dt><dd>{rootLabel(qualification.root)}</dd></div>
       </dl>
       {qualification.state === "supported" && (
@@ -374,6 +383,7 @@ export function App({ dialogController: suppliedDialogController }: AppProps = {
     announce,
     dispatch,
     mainRef,
+    qualification: deviceQualification,
     realExecutionCompiled,
     runtimeGenerationRef,
     setBusy,
@@ -2870,6 +2880,7 @@ export function App({ dialogController: suppliedDialogController }: AppProps = {
                 onBack={() => dispatch({ type: "back" })}
                 onStartSimulation={startSimulation}
                 realExecutionCompiled={realExecutionCompiled}
+                qualification={deviceQualification}
                 review={workflow.review}
                 reviewStale={workflow.reviewStale}
               />

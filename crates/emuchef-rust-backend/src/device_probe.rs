@@ -5,7 +5,12 @@
 //! adapter when `--adb` or `--serial` requests live probing.
 
 use std::collections::HashSet;
+use std::process::Child;
 use std::process::Command;
+use std::process::Stdio;
+use std::time::Duration;
+
+use wait_timeout::ChildExt;
 
 use serde::{Deserialize, Serialize};
 
@@ -44,6 +49,7 @@ pub(crate) struct DetectedDeviceFacts {
 pub(crate) enum DeviceProbeError {
     Unavailable { message: String },
     Failed { message: String },
+    TimedOut,
 }
 
 /// Output captured from a structured host command invocation.
@@ -64,11 +70,28 @@ pub(crate) struct CommandOutput {
 /// device or an installed `adb` binary.
 pub(crate) trait CommandRunner {
     fn run(&self, argv: &[String]) -> Result<CommandOutput, DeviceProbeError>;
+
+    fn run_bounded(
+        &self,
+        argv: &[String],
+        timeout: Duration,
+    ) -> Result<CommandOutput, DeviceProbeError> {
+        let _ = timeout;
+        self.run(argv)
+    }
 }
 
 impl<T: CommandRunner + ?Sized> CommandRunner for &T {
     fn run(&self, argv: &[String]) -> Result<CommandOutput, DeviceProbeError> {
         (*self).run(argv)
+    }
+
+    fn run_bounded(
+        &self,
+        argv: &[String],
+        timeout: Duration,
+    ) -> Result<CommandOutput, DeviceProbeError> {
+        (*self).run_bounded(argv, timeout)
     }
 }
 
@@ -81,19 +104,59 @@ pub(crate) struct ProcessCommandRunner;
 
 impl CommandRunner for ProcessCommandRunner {
     fn run(&self, argv: &[String]) -> Result<CommandOutput, DeviceProbeError> {
-        let Some((executable, args)) = argv.split_first() else {
-            return Err(adb_probe_start_error());
-        };
-        let output = Command::new(executable)
-            .args(args)
-            .output()
-            .map_err(|_| adb_probe_start_error())?;
+        let child = spawn_command(argv)?;
+        let output = child
+            .wait_with_output()
+            .map_err(|_| DeviceProbeError::Unavailable {
+                message: "ADB probe output could not be read.".to_string(),
+            })?;
         Ok(CommandOutput {
             status_code: output.status.code(),
             stdout: String::from_utf8_lossy(&output.stdout).into_owned(),
             stderr: String::from_utf8_lossy(&output.stderr).into_owned(),
         })
     }
+
+    fn run_bounded(
+        &self,
+        argv: &[String],
+        timeout: Duration,
+    ) -> Result<CommandOutput, DeviceProbeError> {
+        let mut child = spawn_command(argv)?;
+        if child
+            .wait_timeout(timeout)
+            .map_err(|_| DeviceProbeError::Unavailable {
+                message: "ADB probe process could not be monitored.".to_string(),
+            })?
+            .is_none()
+        {
+            let _ = child.kill();
+            let _ = child.wait();
+            return Err(DeviceProbeError::TimedOut);
+        }
+        let output = child
+            .wait_with_output()
+            .map_err(|_| DeviceProbeError::Unavailable {
+                message: "ADB probe output could not be read.".to_string(),
+            })?;
+        Ok(CommandOutput {
+            status_code: output.status.code(),
+            stdout: String::from_utf8_lossy(&output.stdout).into_owned(),
+            stderr: String::from_utf8_lossy(&output.stderr).into_owned(),
+        })
+    }
+}
+
+fn spawn_command(argv: &[String]) -> Result<Child, DeviceProbeError> {
+    let Some((executable, args)) = argv.split_first() else {
+        return Err(adb_probe_start_error());
+    };
+    Command::new(executable)
+        .args(args)
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .map_err(|_| adb_probe_start_error())
 }
 
 /// Configuration for modeling a future ADB-backed getprop probe command.
@@ -258,6 +321,23 @@ impl<R: CommandRunner> DeviceProbe for AdbDeviceProbe<R> {
     fn detect(&self) -> Result<DetectedDeviceFacts, DeviceProbeError> {
         let command = build_adb_getprop_command(&self.config);
         let output = self.runner.run(&command)?;
+        if output.status_code != Some(0) {
+            return Err(adb_getprop_failed_error());
+        }
+        Ok(detected_facts_from_getprop_output(
+            &output.stdout,
+            self.config.serial.clone(),
+        ))
+    }
+}
+
+impl<R: CommandRunner> AdbDeviceProbe<R> {
+    pub(crate) fn detect_bounded(
+        &self,
+        timeout: Duration,
+    ) -> Result<DetectedDeviceFacts, DeviceProbeError> {
+        let command = build_adb_getprop_command(&self.config);
+        let output = self.runner.run_bounded(&command, timeout)?;
         if output.status_code != Some(0) {
             return Err(adb_getprop_failed_error());
         }
@@ -1025,6 +1105,7 @@ not a getprop line
             DeviceProbeError::Unavailable { message } | DeviceProbeError::Failed { message } => {
                 message
             }
+            DeviceProbeError::TimedOut => "probe timed out",
         };
         for needle in needles {
             assert!(

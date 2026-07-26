@@ -146,6 +146,7 @@ fn adb_probe_error_output(error: DeviceProbeError) -> ProcessOutput {
     let code = match error {
         DeviceProbeError::Unavailable { .. } => "adb_probe_unavailable",
         DeviceProbeError::Failed { .. } => "adb_probe_failed",
+        DeviceProbeError::TimedOut => "adb_probe_timeout",
     };
     ProcessOutput {
         exit_code: 1,

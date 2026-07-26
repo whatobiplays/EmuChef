@@ -1,9 +1,11 @@
+import type { DeviceQualificationSnapshot } from "./types";
 import type { WorkflowState } from "./workflow";
 
 interface ReviewStepProps {
   busy: boolean;
   executionKind: WorkflowState["execution"]["kind"];
   realExecutionCompiled: boolean;
+  qualification?: DeviceQualificationSnapshot | null;
   review: NonNullable<WorkflowState["review"]>;
   reviewStale: boolean;
   onApplyToDevice: (invoker: HTMLElement) => void;
@@ -15,6 +17,7 @@ export function ReviewStep({
   busy,
   executionKind,
   realExecutionCompiled,
+  qualification,
   review,
   reviewStale,
   onApplyToDevice,
@@ -23,6 +26,8 @@ export function ReviewStep({
 }: ReviewStepProps) {
   const executionStarting = executionKind === "starting";
   const startDisabled = busy || executionStarting || reviewStale || !review.canExecute;
+  const realStartDisabled = startDisabled
+    || (qualification !== undefined && qualification?.state !== "supported");
   const targetIdentity = [review.target.manufacturer, review.target.model].filter(Boolean).join(" ");
   const androidDetails = [
     review.target.androidVersion === undefined ? null : `Android ${review.target.androidVersion}`,
@@ -119,7 +124,7 @@ export function ReviewStep({
         {realExecutionCompiled && (
           <button
             className="danger"
-            disabled={startDisabled}
+            disabled={realStartDisabled}
             onClick={(event) => onApplyToDevice(event.currentTarget)}
           >
             Apply to Device
@@ -133,6 +138,11 @@ export function ReviewStep({
             : !review.canExecute
               ? "This plan contains work EmuChef cannot review safely. Update EmuChef or the setup catalog before continuing."
             : "The installation is already being prepared."}
+        </p>
+      )}
+      {!startDisabled && realStartDisabled && realExecutionCompiled && qualification !== undefined && (
+        <p className="disabled-reason" id="execution-start-reason">
+          Complete the current device qualification before applying this setup.
         </p>
       )}
     </>

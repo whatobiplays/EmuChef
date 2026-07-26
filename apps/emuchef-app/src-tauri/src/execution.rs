@@ -7,6 +7,7 @@
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::fs::{self, File};
 use std::path::Path;
+use std::sync::Mutex;
 
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Map, Value};
@@ -17,9 +18,14 @@ use uuid::Uuid;
 
 use crate::adb::{AdbRevalidationError, PlatformToolsReadiness};
 use crate::commands::{
-    catalog, current_adb_path, redact_absolute_paths, redact_exact_serial, safe_error, AppState,
+    catalog, current_adb_path, list_and_reconcile_inventory_with_authority, redact_absolute_paths,
+    redact_exact_serial, safe_error, AppState,
 };
-use crate::handles::ReviewedPlanSnapshot;
+use crate::device_qualification::{
+    qualify_reconciled_current_with_runtime, CurrentQualification, DeviceQualificationState,
+    RootQualificationKey, RootQualificationState, RootQualificationStore,
+};
+use crate::handles::{ReviewedPlanSnapshot, SessionHandles};
 use crate::sidecar::SidecarState;
 
 /// One opaque app handle mapped to the sidecar execution that implements it.
@@ -795,20 +801,77 @@ fn start_real_execution_inner(
             AdbRevalidationError::Changed => {
                 stale_review("The Platform-Tools installation changed after review.")
             }
-        })?;
+    })?;
     let adb_path = adb_path.to_string_lossy().into_owned();
 
-    let inventory = runtime_request(
+    // The shared final helper requests "listAdbDevices" only after this
+    // reviewed Platform-Tools identity has been revalidated.
+    let runtime_generation = state.sidecar.try_generation().map_err(|_| {
+        safe_error(
+            "runtime_generation_unavailable",
+            "Device qualification state is temporarily unavailable.",
+        )
+    })?;
+    let platform_tools_revision = state
+        .adb
+        .lock()
+        .map_err(|_| {
+            safe_error(
+                "adb_state_unavailable",
+                "Platform-Tools setup state is unavailable.",
+            )
+        })?
+        .revision();
+    start_real_execution_inner_with_runtime(
+        review_handle,
+        &state.handles,
+        &state.root_qualification,
+        executions,
         &state.sidecar,
-        "listAdbDevices",
-        json!({ "adbPath": &adb_path }),
+        &adb_path,
+        runtime_generation,
+        platform_tools_revision,
+    )
+}
+
+/// Integrated final execution seam. Inventory reconciliation, target probes,
+/// qualification, root evidence, and the one start request all share one
+/// runtime requester so request-count tests exercise the actual authority
+/// boundary instead of testing the validator in isolation.
+fn start_real_execution_inner_with_runtime<R: RuntimeRequester>(
+    review_handle: &str,
+    handles: &Mutex<SessionHandles>,
+    root_qualification: &Mutex<RootQualificationStore>,
+    executions: &mut ExecutionHandleStore,
+    runtime: &R,
+    adb_path: &str,
+    runtime_generation: u64,
+    platform_tools_revision: u64,
+) -> Result<Value, String> {
+    let review = handles
+        .lock()
+        .map_err(|_| session_error())?
+        .review(review_handle)?
+        .clone();
+    validate_review_executable(&review)?;
+
+    let mut inventory_request =
+        |request_type: &str, payload: Value| runtime_request(runtime, request_type, payload);
+    list_and_reconcile_inventory_with_authority(
+        handles,
+        root_qualification,
+        adb_path,
+        runtime_generation,
+        platform_tools_revision,
+        &mut inventory_request,
     )
     .map_err(|_| device_disconnected())?;
+
+    // Resolve the retained handle only after fresh reconciliation. A changed
+    // transport, cardinality transition, or disappeared record therefore
+    // produces a stable stale/disconnected error before any start request.
     let (serial, refreshed_review) = {
-        let mut handles = state.handles.lock().map_err(|_| session_error())?;
-        handles
-            .update_devices(&inventory)
-            .map_err(|_| device_disconnected())?;
+        let mut handles = handles.lock().map_err(|_| session_error())?;
         let refreshed = handles.review(review_handle)?.clone();
         let device = handles
             .device(&refreshed.device_handle)
@@ -819,7 +882,7 @@ fn start_real_execution_inner(
         (device.serial.clone(), refreshed)
     };
     let facts = runtime_request(
-        &state.sidecar,
+        runtime,
         "probeDevice",
         json!({ "adbPath": adb_path, "serial": &serial }),
     )
@@ -828,7 +891,41 @@ fn start_real_execution_inner(
     validate_plan_digest(&refreshed_review)?;
     validate_retained_byo_inputs(&refreshed_review, &SystemInputReadability)?;
 
-    let start_result = request_real_start(&state.sidecar, &refreshed_review)?;
+    let mut qualification_request =
+        |request_type: &str, payload: Value| runtime_request(runtime, request_type, payload);
+    let current = qualify_reconciled_current_with_runtime(
+        handles,
+        root_qualification,
+        adb_path,
+        runtime_generation,
+        platform_tools_revision,
+        Some(&refreshed_review.device_handle),
+        &mut qualification_request,
+    )?;
+    let root_granted = if review_requires_root(&refreshed_review) {
+        let current_context = current.context.as_ref().ok_or_else(|| {
+            safe_error(
+                "device_qualification_incomplete",
+                "The current device qualification context is incomplete.",
+            )
+        })?;
+        let root_key = RootQualificationKey::from_context(current_context);
+        root_qualification
+            .lock()
+            .map_err(|_| {
+                safe_error(
+                    "qualification_state_unavailable",
+                    "Device qualification state is unavailable.",
+                )
+            })?
+            .get(&root_key)
+            .is_some_and(|result| result == RootQualificationState::Granted)
+    } else {
+        false
+    };
+    validate_final_qualification(&refreshed_review, &current, root_granted)?;
+
+    let start_result = request_real_start(runtime, &refreshed_review)?;
     bind_real_start_result(executions, review_handle, refreshed_review, &start_result)
 }
 
@@ -1499,6 +1596,66 @@ fn validate_plan_digest(review: &ReviewedPlanSnapshot) -> Result<(), String> {
         .map_err(|_| stale_review("The retained reviewed plan could not be verified."))?;
     if actual != review.plan_digest.to_lowercase() {
         return Err(stale_review("The reviewed plan changed after review."));
+    }
+    Ok(())
+}
+
+fn review_requires_root(review: &ReviewedPlanSnapshot) -> bool {
+    [
+        review
+            .response
+            .pointer("/plan/runtime_capabilities/root_shell"),
+        review
+            .response
+            .pointer("/plan/runtime_capabilities/app_data_write"),
+        review
+            .response
+            .pointer("/plan/runtimeCapabilities/rootShell"),
+        review
+            .response
+            .pointer("/plan/runtimeCapabilities/appDataWrite"),
+    ]
+    .into_iter()
+    .flatten()
+    .any(|value| value == &Value::Bool(true))
+}
+
+fn validate_final_qualification(
+    review: &ReviewedPlanSnapshot,
+    current: &CurrentQualification,
+    root_granted: bool,
+) -> Result<(), String> {
+    match current.snapshot.state {
+        DeviceQualificationState::Supported => {}
+        DeviceQualificationState::Unsupported => {
+            return Err(safe_error(
+                "device_qualification_unsupported",
+                "The current device does not meet the supported qualification requirements.",
+            ));
+        }
+        _ => {
+            return Err(safe_error(
+                "device_qualification_incomplete",
+                "The current device could not be fully qualified for real execution.",
+            ));
+        }
+    }
+    let current_context = current.context.as_ref().ok_or_else(|| {
+        safe_error(
+            "device_qualification_incomplete",
+            "The current device qualification context is incomplete.",
+        )
+    })?;
+    if review.qualification_context.as_ref() != Some(current_context) {
+        return Err(stale_review(
+            "The device qualification changed after review. Generate a fresh review.",
+        ));
+    }
+    if review_requires_root(review) && !root_granted {
+        return Err(safe_error(
+            "root_qualification_required",
+            "Check root access again for this current device session before applying the plan.",
+        ));
     }
     Ok(())
 }
@@ -2449,6 +2606,17 @@ mod tests {
         assert!(!generations.matches(12, 9));
     }
 
+    #[test]
+    fn root_dependent_reviews_are_detected_from_authoritative_plan_capabilities() {
+        let mut review = review();
+        assert!(!review_requires_root(&review));
+        review.response["plan"]["runtime_capabilities"] = json!({
+            "root_shell": true,
+            "app_data_write": false,
+        });
+        assert!(review_requires_root(&review));
+    }
+
     fn review() -> ReviewedPlanSnapshot {
         let plan = json!({
             "kind": "execution_plan",
@@ -2467,10 +2635,54 @@ mod tests {
             catalog_digest: "catalog".to_string(),
             plan_digest: canonical_json_digest(&plan).unwrap(),
             device_handle: "device_one".to_string(),
+            qualification_context: None,
             platform_tools_identity: None,
             created: Instant::now(),
             last_access: Instant::now(),
         }
+    }
+
+    #[test]
+    fn final_qualification_gate_rejects_unsupported_and_incomplete_profiles() {
+        let review = review();
+        let unsupported = crate::device_qualification::test_current_qualification(
+            DeviceQualificationState::Unsupported,
+            None,
+        );
+        assert!(validate_final_qualification(&review, &unsupported, false)
+            .unwrap_err()
+            .contains("device_qualification_unsupported"));
+        let incomplete = crate::device_qualification::test_current_qualification(
+            DeviceQualificationState::InsufficientlyQualified,
+            None,
+        );
+        assert!(validate_final_qualification(&review, &incomplete, false)
+            .unwrap_err()
+            .contains("device_qualification_incomplete"));
+    }
+
+    #[test]
+    fn final_qualification_gate_allows_only_matching_supported_context() {
+        let context = crate::device_qualification::QualificationContextKey::new(
+            "device_one",
+            1,
+            1,
+            2,
+            2,
+            "fingerprint",
+        );
+        let mut review = review();
+        review.qualification_context = Some(context.clone());
+        let current = crate::device_qualification::test_current_qualification(
+            DeviceQualificationState::Supported,
+            Some(context),
+        );
+        assert!(validate_final_qualification(&review, &current, false).is_ok());
+
+        review.response["plan"]["runtime_capabilities"] = json!({ "root_shell": true });
+        assert!(validate_final_qualification(&review, &current, false)
+            .unwrap_err()
+            .contains("root_qualification_required"));
     }
 
     #[test]
@@ -2823,6 +3035,334 @@ mod tests {
                 .push((request_type.into(), payload));
             self.result.clone()
         }
+    }
+
+    struct ScriptedRuntime {
+        requests: Mutex<Vec<(String, Value)>>,
+        responses: Mutex<Vec<Result<Value, String>>>,
+    }
+
+    impl RuntimeRequester for ScriptedRuntime {
+        fn request(&self, request_type: &str, payload: Value) -> Result<Value, String> {
+            self.requests
+                .lock()
+                .unwrap()
+                .push((request_type.to_string(), payload));
+            self.responses.lock().unwrap().remove(0)
+        }
+    }
+
+    fn supported_inventory(transport_id: &str) -> Value {
+        json!({
+            "devices": [{
+                "serial": "sensitive-serial",
+                "state": "available",
+                "model": "Pocket S",
+                "transportId": transport_id,
+            }]
+        })
+    }
+
+    fn supported_qualification() -> Value {
+        json!({
+            "state": "online",
+            "androidMajor": 14,
+            "androidApiLevel": 33,
+            "abi": "arm64-v8a",
+            "storage": "available",
+            "packageManager": "available",
+            "activityManager": "available",
+        })
+    }
+
+    fn target_facts() -> Value {
+        json!({
+            "manufacturer": "AYANEO",
+            "model": "Pocket S",
+            "android_api_level": 33,
+        })
+    }
+
+    fn prepared_real_review(
+        root_required: bool,
+    ) -> (Mutex<SessionHandles>, Mutex<RootQualificationStore>, String) {
+        prepared_real_review_with_epoch(root_required, None)
+    }
+
+    fn prepared_real_review_with_epoch(
+        root_required: bool,
+        session_epoch: Option<u64>,
+    ) -> (Mutex<SessionHandles>, Mutex<RootQualificationStore>, String) {
+        let handles = Mutex::new(SessionHandles::default());
+        let root = Mutex::new(RootQualificationStore::default());
+        let handle = {
+            let mut handles = handles.lock().unwrap();
+            handles
+                .update_devices(&supported_inventory("transport-1"))
+                .unwrap();
+            handles.single_available_device_handle().unwrap()
+        };
+        let setup_runtime = FakeRuntime {
+            requests: Mutex::new(Vec::new()),
+            result: Ok(supported_qualification()),
+        };
+        let mut setup_request =
+            |request_type: &str, payload: Value| setup_runtime.request(request_type, payload);
+        let context = crate::device_qualification::qualify_reconciled_current_with_runtime(
+            &handles,
+            &root,
+            "/trusted/adb",
+            1,
+            2,
+            Some(&handle),
+            &mut setup_request,
+        )
+        .unwrap()
+        .context
+        .unwrap();
+        let mut retained = review();
+        retained.device_handle = handle;
+        let mut context = context;
+        if let Some(session_epoch) = session_epoch {
+            context.session_epoch = session_epoch;
+        }
+        retained.qualification_context = Some(context);
+        if root_required {
+            retained.response["plan"]["runtime_capabilities"] = json!({ "root_shell": true });
+            retained.plan_digest = canonical_json_digest(&retained.response["plan"]).unwrap();
+        }
+        let review_handle = handles.lock().unwrap().insert_review(retained);
+        (handles, root, review_handle)
+    }
+
+    fn run_integrated_case(
+        review_handle: &str,
+        handles: &Mutex<SessionHandles>,
+        root: &Mutex<RootQualificationStore>,
+        inventory: Value,
+        qualification: Option<Value>,
+        runtime_generation: u64,
+        platform_tools_revision: u64,
+    ) -> (Result<Value, String>, usize) {
+        let mut responses = vec![Ok(inventory)];
+        if let Some(qualification) = qualification {
+            responses.push(Ok(target_facts()));
+            responses.push(Ok(qualification));
+            responses.push(Ok(
+                json!({ "execution": { "executionId": "sidecar-real" } }),
+            ));
+        }
+        let runtime = ScriptedRuntime {
+            requests: Mutex::new(Vec::new()),
+            responses: Mutex::new(responses),
+        };
+        let mut executions = ExecutionHandleStore::default();
+        executions
+            .reserve_start(ExecutionKind::Real)
+            .expect("integrated preflight owns the real start reservation");
+        let result = start_real_execution_inner_with_runtime(
+            review_handle,
+            handles,
+            root,
+            &mut executions,
+            &runtime,
+            "/trusted/adb",
+            runtime_generation,
+            platform_tools_revision,
+        );
+        let starts = runtime
+            .requests
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|(request_type, _)| request_type == "startExecution")
+            .count();
+        (result, starts)
+    }
+
+    #[test]
+    fn integrated_real_preflight_rejects_every_listed_qualification_failure_without_start() {
+        let cases = [
+            (
+                "unsupported",
+                supported_inventory("transport-1"),
+                json!({
+                    "state": "online", "androidMajor": 10, "androidApiLevel": 29,
+                    "abi": "arm64-v8a", "storage": "available", "packageManager": "available", "activityManager": "available"
+                }),
+                1,
+                2,
+            ),
+            (
+                "insufficient",
+                supported_inventory("transport-1"),
+                json!({
+                    "state": "online", "androidMajor": 14, "androidApiLevel": 33,
+                    "abi": "arm64-v8a", "storage": "available", "packageManager": "unknown", "activityManager": "available"
+                }),
+                1,
+                2,
+            ),
+            (
+                "unauthorized",
+                json!({ "devices": [{ "serial": "sensitive-serial", "state": "unauthorized", "model": "Pocket S", "transportId": "transport-1" }] }),
+                supported_qualification(),
+                1,
+                2,
+            ),
+            (
+                "offline",
+                json!({ "devices": [{ "serial": "sensitive-serial", "state": "offline", "model": "Pocket S", "transportId": "transport-1" }] }),
+                supported_qualification(),
+                1,
+                2,
+            ),
+            (
+                "no-device",
+                json!({ "devices": [] }),
+                supported_qualification(),
+                1,
+                2,
+            ),
+            (
+                "multiple-device",
+                json!({ "devices": [
+                { "serial": "sensitive-serial", "state": "available", "model": "Pocket S", "transportId": "transport-1" },
+                { "serial": "second-serial", "state": "available", "model": "Other", "transportId": "transport-2" }
+            ] }),
+                supported_qualification(),
+                1,
+                2,
+            ),
+            (
+                "changed-transport",
+                supported_inventory("transport-2"),
+                supported_qualification(),
+                1,
+                2,
+            ),
+            (
+                "runtime-mismatch",
+                supported_inventory("transport-1"),
+                supported_qualification(),
+                9,
+                2,
+            ),
+            (
+                "revision-mismatch",
+                supported_inventory("transport-1"),
+                supported_qualification(),
+                1,
+                9,
+            ),
+            (
+                "changed-fingerprint",
+                supported_inventory("transport-1"),
+                json!({
+                    "state": "online", "androidMajor": 15, "androidApiLevel": 35,
+                    "abi": "arm64-v8a", "storage": "available", "packageManager": "available", "activityManager": "available"
+                }),
+                1,
+                2,
+            ),
+        ];
+        for (name, inventory, qualification, runtime_generation, platform_tools_revision) in cases {
+            let (handles, root, review_handle) = prepared_real_review(false);
+            let (result, starts) = run_integrated_case(
+                &review_handle,
+                &handles,
+                &root,
+                inventory,
+                Some(qualification),
+                runtime_generation,
+                platform_tools_revision,
+            );
+            assert_eq!(starts, 0, "{name} sent startExecution: {result:?}");
+            assert!(result.is_err(), "{name} unexpectedly started");
+        }
+    }
+
+    #[test]
+    fn integrated_real_preflight_rejects_stale_handle_and_root_without_start() {
+        let (handles, root, _review_handle) = prepared_real_review(false);
+        let (result, starts) = run_integrated_case(
+            "review_unknown",
+            &handles,
+            &root,
+            supported_inventory("transport-1"),
+            Some(supported_qualification()),
+            1,
+            2,
+        );
+        assert!(result.is_err());
+        assert_eq!(starts, 0);
+
+        let (handles, root, review_handle) = prepared_real_review(true);
+        let (result, starts) = run_integrated_case(
+            &review_handle,
+            &handles,
+            &root,
+            supported_inventory("transport-1"),
+            Some(supported_qualification()),
+            1,
+            2,
+        );
+        let error = result.unwrap_err();
+        assert!(error.contains("root_qualification_required"), "{error}");
+        assert_eq!(starts, 0);
+
+        let (handles, root, review_handle) = prepared_real_review(true);
+        {
+            let mut root = root.lock().unwrap();
+            let stale_attempt = root
+                .begin(RootQualificationKey::new("stale-device", 7, 8))
+                .unwrap();
+            assert!(root.complete(stale_attempt, RootQualificationState::Granted));
+        }
+        let (result, starts) = run_integrated_case(
+            &review_handle,
+            &handles,
+            &root,
+            supported_inventory("transport-1"),
+            Some(supported_qualification()),
+            1,
+            2,
+        );
+        let error = result.unwrap_err();
+        assert!(error.contains("root_qualification_required"), "{error}");
+        assert_eq!(starts, 0);
+
+        let (handles, root, review_handle) = prepared_real_review_with_epoch(false, Some(0));
+        let (result, starts) = run_integrated_case(
+            &review_handle,
+            &handles,
+            &root,
+            supported_inventory("transport-1"),
+            Some(supported_qualification()),
+            1,
+            2,
+        );
+        assert!(result.unwrap_err().contains("review_stale"));
+        assert_eq!(starts, 0);
+    }
+
+    #[test]
+    fn integrated_real_preflight_starts_once_for_current_supported_non_root_context() {
+        let (handles, root, review_handle) = prepared_real_review(false);
+        let (result, starts) = run_integrated_case(
+            &review_handle,
+            &handles,
+            &root,
+            supported_inventory("transport-1"),
+            Some(supported_qualification()),
+            1,
+            2,
+        );
+        assert!(
+            result.is_ok(),
+            "current supported context rejected: {result:?}"
+        );
+        assert_eq!(starts, 1);
     }
 
     #[test]

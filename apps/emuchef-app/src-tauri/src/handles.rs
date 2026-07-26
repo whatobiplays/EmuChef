@@ -1,6 +1,6 @@
 //! Session-scoped opaque handles for devices and immutable reviewed plans.
 
-use std::collections::{HashMap, VecDeque};
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::time::{Duration, Instant};
 
 use serde::Serialize;
@@ -8,6 +8,7 @@ use serde_json::{json, Value};
 use uuid::Uuid;
 
 use crate::adb::AdbInstallationIdentity;
+use crate::device_qualification::QualificationContextKey;
 
 const MAX_REVIEWS: usize = 16;
 const MAX_TOMBSTONES: usize = 64;
@@ -21,6 +22,8 @@ pub struct DeviceRecord {
     pub serial: String,
     pub state: String,
     pub model: Option<String>,
+    pub transport_id: Option<String>,
+    pub session_epoch: u64,
     pub facts: Option<Value>,
 }
 
@@ -41,6 +44,10 @@ pub struct ReviewedPlanSnapshot {
     pub catalog_digest: String,
     pub plan_digest: String,
     pub device_handle: String,
+    /// Complete native qualification context captured when the review was built.
+    /// A stable UI handle is not sufficient authority after reconnects or
+    /// capability changes, so real execution compares this opaque context.
+    pub qualification_context: Option<QualificationContextKey>,
     pub platform_tools_identity: Option<AdbInstallationIdentity>,
     pub created: Instant,
     pub last_access: Instant,
@@ -61,6 +68,9 @@ pub struct SessionHandles {
     review_order: VecDeque<String>,
     tombstones: VecDeque<ReviewTombstone>,
     device_generation: u64,
+    session_epoch_by_handle: HashMap<String, u64>,
+    qualification_context_by_handle: HashMap<String, QualificationContextKey>,
+    last_inventory_count: Option<usize>,
 }
 
 impl SessionHandles {
@@ -69,6 +79,24 @@ impl SessionHandles {
             .get("devices")
             .and_then(Value::as_array)
             .ok_or_else(|| "ADB inventory response was invalid.".to_string())?;
+        let inventory_count = raw.len();
+        let cardinality_transition = self
+            .last_inventory_count
+            .is_some_and(|previous| previous > 1 || inventory_count > 1);
+        let mut forced_epoch_handles = HashSet::new();
+        if cardinality_transition {
+            forced_epoch_handles.extend(self.session_epoch_by_handle.keys().cloned());
+            forced_epoch_handles.extend(self.devices_by_handle.keys().cloned());
+            for handle in &forced_epoch_handles {
+                let epoch = self
+                    .session_epoch_by_handle
+                    .entry(handle.clone())
+                    .or_insert(1);
+                *epoch = epoch.saturating_add(1).max(1);
+                self.qualification_context_by_handle.remove(handle);
+                self.invalidate_reviews_for_device(handle, "device_qualification_changed");
+            }
+        }
         let mut present = HashMap::new();
         for device in raw {
             let serial = device
@@ -83,11 +111,34 @@ impl SessionHandles {
                 .get("model")
                 .and_then(Value::as_str)
                 .map(str::to_string);
+            let transport_id = device
+                .get("transportId")
+                .and_then(Value::as_str)
+                .map(str::to_string);
             let handle = self.handle_for_serial(serial);
-            let facts = self
-                .devices_by_handle
-                .get(&handle)
-                .and_then(|record| record.facts.clone());
+            let previous = self.devices_by_handle.get(&handle);
+            let previous_facts = previous.and_then(|record| record.facts.clone());
+            let continuity_lost = previous.is_some_and(|previous| {
+                !(previous.state == "available"
+                    && state == "available"
+                    && previous.model == model
+                    && previous.transport_id.is_some()
+                    && previous.transport_id == transport_id)
+            });
+            let epoch = {
+                let entry = self
+                    .session_epoch_by_handle
+                    .entry(handle.clone())
+                    .or_insert(1);
+                if continuity_lost && !forced_epoch_handles.contains(&handle) {
+                    *entry = entry.saturating_add(1).max(1);
+                }
+                *entry
+            };
+            if continuity_lost && !forced_epoch_handles.contains(&handle) {
+                self.qualification_context_by_handle.remove(&handle);
+                self.invalidate_reviews_for_device(&handle, "device_qualification_changed");
+            }
             present.insert(
                 handle.clone(),
                 DeviceRecord {
@@ -95,7 +146,9 @@ impl SessionHandles {
                     serial: serial.to_string(),
                     state: state.to_string(),
                     model,
-                    facts,
+                    transport_id,
+                    session_epoch: epoch,
+                    facts: previous_facts,
                 },
             );
         }
@@ -106,9 +159,18 @@ impl SessionHandles {
             .cloned()
             .collect::<Vec<_>>();
         for handle in disappeared {
-            self.invalidate_reviews_for_device(&handle, "review_stale");
+            if !forced_epoch_handles.contains(&handle) {
+                let epoch = self
+                    .session_epoch_by_handle
+                    .entry(handle.clone())
+                    .or_insert(1);
+                *epoch = epoch.saturating_add(1).max(1);
+                self.qualification_context_by_handle.remove(&handle);
+                self.invalidate_reviews_for_device(&handle, "review_stale");
+            }
         }
         self.devices_by_handle = present;
+        self.last_inventory_count = Some(inventory_count);
         self.device_generation = self.device_generation.saturating_add(1).max(1);
         let mut result = self
             .devices_by_handle
@@ -203,6 +265,41 @@ impl SessionHandles {
         Ok(())
     }
 
+    /// Store the latest complete native qualification context and stale any
+    /// review that depends on a materially different context. The comparison
+    /// intentionally includes the capability fingerprint even when the new
+    /// state remains Supported.
+    pub fn set_qualification_context(&mut self, context: QualificationContextKey) -> bool {
+        let changed = self
+            .qualification_context_by_handle
+            .get(&context.device_handle)
+            .is_some_and(|previous| previous != &context);
+        if changed {
+            self.invalidate_reviews_for_device(
+                &context.device_handle,
+                "device_qualification_changed",
+            );
+        }
+        self.qualification_context_by_handle
+            .insert(context.device_handle.clone(), context);
+        changed
+    }
+
+    pub fn qualification_context(&self, handle: &str) -> Option<QualificationContextKey> {
+        self.qualification_context_by_handle.get(handle).cloned()
+    }
+
+    pub fn clear_qualification_context(&mut self, handle: &str) -> bool {
+        let removed = self
+            .qualification_context_by_handle
+            .remove(handle)
+            .is_some();
+        if removed {
+            self.invalidate_reviews_for_device(handle, "device_qualification_changed");
+        }
+        removed
+    }
+
     pub fn facts(&self, handle: &str) -> Result<&Value, String> {
         self.device(handle)?.facts.as_ref().ok_or_else(|| {
             stable_handle_error("device_not_probed", "Read the device information again.")
@@ -284,6 +381,11 @@ impl SessionHandles {
         }
         self.review_order.clear();
         self.devices_by_handle.clear();
+        self.qualification_context_by_handle.clear();
+        self.last_inventory_count = None;
+        for epoch in self.session_epoch_by_handle.values_mut() {
+            *epoch = epoch.saturating_add(1).max(1);
+        }
     }
 
     pub fn invalidate_catalog(&mut self, current_digest: &str) {
@@ -383,6 +485,7 @@ mod tests {
             catalog_digest: "sha256:catalog".to_string(),
             plan_digest: "sha256:plan".to_string(),
             device_handle: device_handle.to_string(),
+            qualification_context: None,
             platform_tools_identity: None,
             created: Instant::now(),
             last_access: Instant::now(),
@@ -451,6 +554,223 @@ mod tests {
         assert_eq!(unauthorized[0].device_handle, authorized[0].device_handle);
         assert_eq!(unauthorized[0].state, "unauthorized");
         assert_eq!(authorized[0].state, "available");
+    }
+
+    #[test]
+    fn reconnect_advances_session_epoch_even_when_opaque_handle_is_reused() {
+        let mut store = SessionHandles::default();
+        let first = store
+            .update_devices(&json!({
+                "devices": [{
+                    "serial": "one",
+                    "state": "available",
+                    "transportId": "transport-1"
+                }]
+            }))
+            .unwrap();
+        let handle = first[0].device_handle.clone();
+        let first_epoch = store.device(&handle).unwrap().session_epoch;
+
+        store.update_devices(&json!({ "devices": [] })).unwrap();
+        let reappeared = store
+            .update_devices(&json!({
+                "devices": [{
+                    "serial": "one",
+                    "state": "available",
+                    "transportId": "transport-2"
+                }]
+            }))
+            .unwrap();
+
+        assert_eq!(reappeared[0].device_handle, handle);
+        assert!(store.device(&handle).unwrap().session_epoch > first_epoch);
+    }
+
+    #[test]
+    fn supported_capability_fingerprint_change_stales_existing_review() {
+        let mut store = SessionHandles::default();
+        let handle = store
+            .update_devices(&json!({
+                "devices": [{
+                    "serial": "one",
+                    "state": "available",
+                    "model": "Pocket",
+                    "transportId": "transport-1"
+                }]
+            }))
+            .unwrap()[0]
+            .device_handle
+            .clone();
+        let context =
+            |fingerprint: &str| QualificationContextKey::new(&handle, 1, 2, 3, 4, fingerprint);
+        store.set_qualification_context(context("first"));
+        let review = store.insert_review(review_snapshot(&handle));
+        store.set_qualification_context(context("second"));
+        assert!(store
+            .review(&review)
+            .unwrap_err()
+            .contains("device_qualification_changed"));
+    }
+
+    fn qualification_context_for(handle: &str, epoch: u64) -> QualificationContextKey {
+        QualificationContextKey::new(handle, epoch, 2, 3, 3, format!("fingerprint-{epoch}"))
+    }
+
+    #[test]
+    fn one_to_many_invalidates_the_existing_device_authority() {
+        let mut store = SessionHandles::default();
+        let first = store
+            .update_devices(&json!({
+                "devices": [{ "serial": "one", "state": "available", "model": "Pocket", "transportId": "t1" }]
+            }))
+            .unwrap()[0]
+            .device_handle
+            .clone();
+        let first_epoch = store.device(&first).unwrap().session_epoch;
+        store.set_qualification_context(qualification_context_for(&first, first_epoch));
+        let review = store.insert_review(review_snapshot(&first));
+
+        store
+            .update_devices(&json!({
+                "devices": [
+                    { "serial": "one", "state": "available", "model": "Pocket", "transportId": "t1" },
+                    { "serial": "two", "state": "available", "model": "Pocket", "transportId": "t2" }
+                ]
+            }))
+            .unwrap();
+
+        assert!(store.device(&first).unwrap().session_epoch > first_epoch);
+        assert!(store.qualification_context(&first).is_none());
+        assert!(store
+            .review(&review)
+            .unwrap_err()
+            .contains("device_qualification_changed"));
+    }
+
+    #[test]
+    fn many_to_one_invalidates_authority_for_both_the_retained_and_removed_devices() {
+        let mut store = SessionHandles::default();
+        store
+            .update_devices(&json!({
+                "devices": [
+                    { "serial": "one", "state": "available", "model": "Pocket", "transportId": "t1" },
+                    { "serial": "two", "state": "available", "model": "Pocket", "transportId": "t2" }
+                ]
+            }))
+            .unwrap();
+        let first = store
+            .qualification_devices()
+            .into_iter()
+            .find(|device| device.serial == "one")
+            .unwrap()
+            .handle;
+        let second = store
+            .qualification_devices()
+            .into_iter()
+            .find(|device| device.serial == "two")
+            .unwrap()
+            .handle;
+        let first_epoch = store.device(&first).unwrap().session_epoch;
+        let second_epoch = store.device(&second).unwrap().session_epoch;
+        store.set_qualification_context(qualification_context_for(&first, first_epoch));
+        store.set_qualification_context(qualification_context_for(&second, second_epoch));
+        let first_review = store.insert_review(review_snapshot(&first));
+        let second_review = store.insert_review(review_snapshot(&second));
+
+        store
+            .update_devices(&json!({
+                "devices": [{ "serial": "one", "state": "available", "model": "Pocket", "transportId": "t1" }]
+            }))
+            .unwrap();
+
+        assert!(store.device(&first).unwrap().session_epoch > first_epoch);
+        assert!(store.qualification_context(&first).is_none());
+        assert!(store
+            .review(&first_review)
+            .unwrap_err()
+            .contains("device_qualification_changed"));
+        assert!(store
+            .review(&second_review)
+            .unwrap_err()
+            .contains("device_qualification_changed"));
+        assert!(store.device(&second).is_err());
+        assert!(store.session_epoch_by_handle[&second] > second_epoch);
+    }
+
+    #[test]
+    fn repeated_multiple_inventory_invalidates_every_current_authority() {
+        let mut store = SessionHandles::default();
+        let devices = store
+            .update_devices(&json!({
+                "devices": [
+                    { "serial": "one", "state": "available", "model": "Pocket", "transportId": "t1" },
+                    { "serial": "two", "state": "available", "model": "Pocket", "transportId": "t2" }
+                ]
+            }))
+            .unwrap();
+        let first = devices[0].device_handle.clone();
+        let second = devices[1].device_handle.clone();
+        let first_epoch = store.device(&first).unwrap().session_epoch;
+        let second_epoch = store.device(&second).unwrap().session_epoch;
+        store.set_qualification_context(qualification_context_for(&first, first_epoch));
+        store.set_qualification_context(qualification_context_for(&second, second_epoch));
+        let first_review = store.insert_review(review_snapshot(&first));
+        let second_review = store.insert_review(review_snapshot(&second));
+
+        store
+            .update_devices(&json!({
+                "devices": [
+                    { "serial": "one", "state": "available", "model": "Pocket", "transportId": "t1" },
+                    { "serial": "two", "state": "available", "model": "Pocket", "transportId": "t2" }
+                ]
+            }))
+            .unwrap();
+
+        assert!(store.device(&first).unwrap().session_epoch > first_epoch);
+        assert!(store.device(&second).unwrap().session_epoch > second_epoch);
+        assert!(store.qualification_context(&first).is_none());
+        assert!(store.qualification_context(&second).is_none());
+        assert!(store
+            .review(&first_review)
+            .unwrap_err()
+            .contains("device_qualification_changed"));
+        assert!(store
+            .review(&second_review)
+            .unwrap_err()
+            .contains("device_qualification_changed"));
+    }
+
+    #[test]
+    fn many_to_different_one_does_not_retain_the_old_device_authority() {
+        let mut store = SessionHandles::default();
+        let devices = store
+            .update_devices(&json!({
+                "devices": [
+                    { "serial": "one", "state": "available", "model": "Pocket", "transportId": "t1" },
+                    { "serial": "two", "state": "available", "model": "Pocket", "transportId": "t2" }
+                ]
+            }))
+            .unwrap();
+        let old = devices[0].device_handle.clone();
+        let old_epoch = store.device(&old).unwrap().session_epoch;
+        store.set_qualification_context(qualification_context_for(&old, old_epoch));
+        let review = store.insert_review(review_snapshot(&old));
+
+        let replacement = store
+            .update_devices(&json!({
+                "devices": [{ "serial": "replacement", "state": "available", "model": "Pocket", "transportId": "t3" }]
+            }))
+            .unwrap()[0]
+            .device_handle
+            .clone();
+
+        assert_ne!(replacement, old);
+        assert!(store.device(&old).is_err());
+        assert!(store.qualification_context(&old).is_none());
+        assert!(store
+            .review(&review)
+            .unwrap_err()
+            .contains("device_qualification_changed"));
     }
 
     #[test]

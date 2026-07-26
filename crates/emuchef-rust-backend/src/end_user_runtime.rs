@@ -14,8 +14,8 @@ use serde_json::{json, Value};
 
 use crate::catalog_source::CatalogSnapshot;
 use crate::device_probe::{
-    AdbDeviceProbe, AdbProbeConfig, CommandRunner, DetectedDeviceFacts, DeviceProbe,
-    ProcessCommandRunner,
+    AdbDeviceProbe, AdbProbeConfig, CommandOutput, CommandRunner, DetectedDeviceFacts, DeviceProbe,
+    DeviceProbeError, ProcessCommandRunner,
 };
 use crate::errors::ApiError;
 use crate::executor::adb::{probe_root, ProcessAdbCommandExecutor};
@@ -25,7 +25,10 @@ struct AdbInventoryEntry {
     serial: String,
     state: &'static str,
     model: Option<String>,
+    transport_id: Option<String>,
 }
+
+const PASSIVE_PROBE_TIMEOUT: Duration = Duration::from_secs(5);
 
 pub(crate) fn list_adb_devices(adb_path: &str) -> Result<Value, ApiError> {
     list_adb_devices_with_runner(adb_path, &ProcessCommandRunner)
@@ -40,12 +43,14 @@ fn list_adb_devices_with_runner(
         "devices".to_string(),
         "-l".to_string(),
     ];
-    let output = runner.run(&argv).map_err(|_| {
-        ApiError::command_failed(
-            "ADB device inventory could not be started.",
-            json!({ "reason": "adb_inventory_unavailable" }),
-        )
-    })?;
+    let output = runner
+        .run_bounded(&argv, PASSIVE_PROBE_TIMEOUT)
+        .map_err(|_| {
+            ApiError::command_failed(
+                "ADB device inventory could not be started.",
+                json!({ "reason": "adb_inventory_unavailable" }),
+            )
+        })?;
     if output.status_code != Some(0) {
         return Err(ApiError::command_failed(
             "ADB device inventory failed.",
@@ -59,6 +64,7 @@ fn list_adb_devices_with_runner(
             "serial": entry.serial,
             "state": entry.state,
             "model": entry.model,
+            "transportId": entry.transport_id,
         })).collect::<Vec<_>>(),
     }))
 }
@@ -86,13 +92,19 @@ fn parse_adb_devices(stdout: &str) -> Vec<AdbInventoryEntry> {
                 _ => return None,
             };
             let model = fields
+                .clone()
                 .find_map(|field| field.strip_prefix("model:"))
                 .filter(|value| !value.is_empty())
                 .map(|value| value.replace('_', " "));
+            let transport_id = fields
+                .find_map(|field| field.strip_prefix("transport_id:"))
+                .filter(|value| !value.is_empty())
+                .map(str::to_string);
             Some(AdbInventoryEntry {
                 serial: serial.to_string(),
                 state,
                 model,
+                transport_id,
             })
         })
         .collect()
@@ -182,18 +194,38 @@ fn qualify_device_with_runner(
                 },
                 runner,
             };
-            let facts = probe.detect().map_err(|_| {
+            let facts = probe.detect_bounded(PASSIVE_PROBE_TIMEOUT).map_err(|_| {
                 ApiError::command_failed(
                     "Connected device qualification facts could not be read.",
                     json!({ "reason": "adb_qualification_probe_failed" }),
                 )
             })?;
+            let storage = probe_storage(adb_path, serial, runner);
+            let package_manager = probe_manager(
+                adb_path,
+                serial,
+                runner,
+                &["cmd", "package", "path", "android"],
+                &["pm", "path", "android"],
+                manager_kind::PACKAGE,
+            );
+            let activity_manager = probe_manager(
+                adb_path,
+                serial,
+                runner,
+                &["cmd", "activity", "get-config"],
+                &["am", "get-config"],
+                manager_kind::ACTIVITY,
+            );
             Ok(json!({
                 "state": "online",
                 "serial": serial,
                 "androidMajor": facts.android_version,
                 "androidApiLevel": facts.android_api_level,
                 "abi": facts.abis.first(),
+                "storage": storage,
+                "packageManager": package_manager,
+                "activityManager": activity_manager,
             }))
         }
         _ => Err(ApiError::command_failed(
@@ -201,6 +233,118 @@ fn qualify_device_with_runner(
             json!({ "reason": "adb_inventory_invalid" }),
         )),
     }
+}
+
+fn serial_shell_command(adb_path: &str, serial: &str, command: &[&str]) -> Vec<String> {
+    let mut argv = vec![
+        adb_path.to_string(),
+        "-s".to_string(),
+        serial.to_string(),
+        "shell".to_string(),
+    ];
+    argv.extend(command.iter().map(|part| (*part).to_string()));
+    argv
+}
+
+fn probe_storage(adb_path: &str, serial: &str, runner: &impl CommandRunner) -> &'static str {
+    let argv = serial_shell_command(
+        adb_path,
+        serial,
+        &[
+            "sh",
+            "-c",
+            "test -d /sdcard && test -w /sdcard && df -k /sdcard",
+        ],
+    );
+    match runner.run_bounded(&argv, PASSIVE_PROBE_TIMEOUT) {
+        Ok(output) if output.status_code == Some(0) && storage_output_is_valid(&output.stdout) => {
+            "available"
+        }
+        Ok(output)
+            if output.status_code != Some(0)
+                && output.stdout.trim().is_empty()
+                && output.stderr.trim().is_empty() =>
+        {
+            "unsupported"
+        }
+        _ => "unknown",
+    }
+}
+
+mod manager_kind {
+    pub(super) const PACKAGE: u8 = 1;
+    pub(super) const ACTIVITY: u8 = 2;
+}
+
+fn probe_manager(
+    adb_path: &str,
+    serial: &str,
+    runner: &impl CommandRunner,
+    primary: &[&str],
+    fallback: &[&str],
+    kind: u8,
+) -> &'static str {
+    let primary_argv = serial_shell_command(adb_path, serial, primary);
+    let primary_result = runner.run_bounded(&primary_argv, PASSIVE_PROBE_TIMEOUT);
+    if primary_result
+        .as_ref()
+        .is_ok_and(|output| cmd_interface_is_unavailable(output))
+    {
+        let fallback_argv = serial_shell_command(adb_path, serial, fallback);
+        return primary_result_to_manager(
+            runner.run_bounded(&fallback_argv, PASSIVE_PROBE_TIMEOUT),
+            kind,
+        );
+    }
+    primary_result_to_manager(primary_result, kind)
+}
+
+fn primary_result_to_manager(
+    result: Result<CommandOutput, DeviceProbeError>,
+    kind: u8,
+) -> &'static str {
+    let Ok(output) = result else {
+        return "unknown";
+    };
+    if output.status_code == Some(0) {
+        let valid = match kind {
+            manager_kind::PACKAGE => output
+                .stdout
+                .lines()
+                .any(|line| line.trim_start().starts_with("package:")),
+            manager_kind::ACTIVITY => output
+                .stdout
+                .lines()
+                .any(|line| line.trim_start().starts_with("config")),
+            _ => false,
+        };
+        return if valid { "available" } else { "unknown" };
+    }
+    if output.stdout.trim().is_empty() && output.stderr.trim().is_empty() {
+        "unsupported"
+    } else {
+        "unknown"
+    }
+}
+
+fn cmd_interface_is_unavailable(output: &CommandOutput) -> bool {
+    if output.status_code == Some(127) {
+        return true;
+    }
+    let stderr = output.stderr.to_ascii_lowercase();
+    stderr.contains("cmd: not found")
+        || stderr.contains("cmd: inaccessible or not found")
+        || stderr.contains("not found")
+        || stderr.contains("unknown command")
+        || stderr.contains("unsupported command")
+        || stderr.contains("unrecognized option")
+}
+
+fn storage_output_is_valid(stdout: &str) -> bool {
+    stdout.lines().any(|line| {
+        let fields = line.split_whitespace().collect::<Vec<_>>();
+        fields.len() >= 6 && fields.last() == Some(&"/sdcard")
+    })
 }
 
 #[derive(Clone, Debug, Default, Deserialize)]
@@ -673,6 +817,27 @@ mod tests {
         }
     }
 
+    struct ScriptedRunner {
+        calls: RefCell<Vec<Vec<String>>>,
+        outputs: RefCell<Vec<Result<CommandOutput, DeviceProbeError>>>,
+    }
+
+    impl ScriptedRunner {
+        fn new(outputs: Vec<Result<CommandOutput, DeviceProbeError>>) -> Self {
+            Self {
+                calls: RefCell::new(Vec::new()),
+                outputs: RefCell::new(outputs),
+            }
+        }
+    }
+
+    impl CommandRunner for ScriptedRunner {
+        fn run(&self, argv: &[String]) -> Result<CommandOutput, DeviceProbeError> {
+            self.calls.borrow_mut().push(argv.to_vec());
+            self.outputs.borrow_mut().remove(0)
+        }
+    }
+
     #[test]
     fn qualification_probes_only_one_online_device() {
         let runner = SequenceRunner {
@@ -689,6 +854,21 @@ mod tests {
                     stdout: "[ro.build.version.release]: [14]\n[ro.build.version.sdk]: [34]\n[ro.product.cpu.abilist]: [arm64-v8a,armeabi-v7a]\n".to_string(),
                     stderr: String::new(),
                 },
+                CommandOutput {
+                    status_code: Some(0),
+                    stdout: "Filesystem 1K-blocks Used Available Use% Mounted on\n/dev/block/vold 100 10 90 10% /sdcard\n".to_string(),
+                    stderr: String::new(),
+                },
+                CommandOutput {
+                    status_code: Some(0),
+                    stdout: "package:/system/framework/framework-res.apk\n".to_string(),
+                    stderr: String::new(),
+                },
+                CommandOutput {
+                    status_code: Some(0),
+                    stdout: "config\n".to_string(),
+                    stderr: String::new(),
+                },
             ]),
         };
         let result = qualify_device_with_runner("/managed/adb", "secret-serial", &runner).unwrap();
@@ -697,11 +877,186 @@ mod tests {
         assert_eq!(result["androidMajor"], 14);
         assert_eq!(result["androidApiLevel"], 34);
         assert_eq!(result["abi"], "arm64-v8a");
-        assert_eq!(runner.calls.borrow().len(), 2);
+        assert_eq!(runner.calls.borrow().len(), 5);
         assert_eq!(
             runner.calls.borrow()[1],
             vec!["/managed/adb", "-s", "secret-serial", "shell", "getprop"]
         );
+    }
+
+    #[test]
+    fn qualification_reports_required_capabilities_without_privileged_commands() {
+        let runner = ScriptedRunner::new(vec![
+            Ok(CommandOutput {
+                status_code: Some(0),
+                stdout: "List of devices attached\nsecret-serial device model:Pocket\n"
+                    .to_string(),
+                stderr: String::new(),
+            }),
+            Ok(CommandOutput {
+                status_code: Some(0),
+                stdout: "[ro.build.version.release]: [14]\n[ro.build.version.sdk]: [34]\n[ro.product.cpu.abilist]: [arm64-v8a,armeabi-v7a]\n"
+                    .to_string(),
+                stderr: String::new(),
+            }),
+            Ok(CommandOutput {
+                status_code: Some(0),
+                stdout: "Filesystem 1K-blocks Used Available Use% Mounted on\n/dev/block/vold 100 10 90 10% /sdcard\n"
+                    .to_string(),
+                stderr: String::new(),
+            }),
+            Ok(CommandOutput {
+                status_code: Some(0),
+                stdout: "package:/system/framework/framework-res.apk\n".to_string(),
+                stderr: String::new(),
+            }),
+            Ok(CommandOutput {
+                status_code: Some(0),
+                stdout: "config\n  mcc 310\n".to_string(),
+                stderr: String::new(),
+            }),
+        ]);
+
+        let result = qualify_device_with_runner("/managed/adb", "secret-serial", &runner).unwrap();
+
+        assert_eq!(result["storage"], "available");
+        assert_eq!(result["packageManager"], "available");
+        assert_eq!(result["activityManager"], "available");
+        assert_eq!(runner.calls.borrow().len(), 5);
+        assert!(runner
+            .calls
+            .borrow()
+            .iter()
+            .all(|argv| !argv.iter().any(|part| part == "su")));
+        assert_eq!(
+            runner.calls.borrow()[2],
+            vec![
+                "/managed/adb",
+                "-s",
+                "secret-serial",
+                "shell",
+                "sh",
+                "-c",
+                "test -d /sdcard && test -w /sdcard && df -k /sdcard",
+            ]
+        );
+        assert_eq!(
+            runner.calls.borrow()[3],
+            vec![
+                "/managed/adb",
+                "-s",
+                "secret-serial",
+                "shell",
+                "cmd",
+                "package",
+                "path",
+                "android",
+            ]
+        );
+        assert_eq!(
+            runner.calls.borrow()[4],
+            vec![
+                "/managed/adb",
+                "-s",
+                "secret-serial",
+                "shell",
+                "cmd",
+                "activity",
+                "get-config",
+            ]
+        );
+    }
+
+    #[test]
+    fn qualification_falls_back_only_for_confirmed_unavailable_cmd_interfaces() {
+        let runner = ScriptedRunner::new(vec![
+            Ok(CommandOutput {
+                status_code: Some(0),
+                stdout: "List of devices attached\nsecret-serial device model:Pocket\n"
+                    .to_string(),
+                stderr: String::new(),
+            }),
+            Ok(CommandOutput {
+                status_code: Some(0),
+                stdout: "[ro.build.version.release]: [14]\n[ro.build.version.sdk]: [34]\n[ro.product.cpu.abilist]: [arm64-v8a]\n"
+                    .to_string(),
+                stderr: String::new(),
+            }),
+            Ok(CommandOutput {
+                status_code: Some(0),
+                stdout: "Filesystem 1K-blocks Used Available Use% Mounted on\n/dev/block/vold 100 10 90 10% /sdcard\n"
+                    .to_string(),
+                stderr: String::new(),
+            }),
+            Ok(CommandOutput {
+                status_code: Some(127),
+                stdout: String::new(),
+                stderr: "cmd: not found\n".to_string(),
+            }),
+            Ok(CommandOutput {
+                status_code: Some(0),
+                stdout: "package:/system/framework/framework-res.apk\n".to_string(),
+                stderr: String::new(),
+            }),
+            Ok(CommandOutput {
+                status_code: Some(127),
+                stdout: String::new(),
+                stderr: "Unknown command: get-config\n".to_string(),
+            }),
+            Ok(CommandOutput {
+                status_code: Some(0),
+                stdout: "config\n  mcc 310\n".to_string(),
+                stderr: String::new(),
+            }),
+        ]);
+
+        let result = qualify_device_with_runner("/managed/adb", "secret-serial", &runner).unwrap();
+
+        assert_eq!(result["packageManager"], "available");
+        assert_eq!(result["activityManager"], "available");
+        assert_eq!(runner.calls.borrow().len(), 7);
+        assert_eq!(runner.calls.borrow()[4][4..], ["pm", "path", "android"]);
+        assert_eq!(runner.calls.borrow()[6][4..], ["am", "get-config"]);
+    }
+
+    #[test]
+    fn qualification_does_not_fallback_for_timeout_or_malformed_cmd_output() {
+        let runner = ScriptedRunner::new(vec![
+            Ok(CommandOutput {
+                status_code: Some(0),
+                stdout: "List of devices attached\nsecret-serial device model:Pocket\n"
+                    .to_string(),
+                stderr: String::new(),
+            }),
+            Ok(CommandOutput {
+                status_code: Some(0),
+                stdout: "[ro.build.version.release]: [14]\n[ro.build.version.sdk]: [34]\n[ro.product.cpu.abilist]: [arm64-v8a]\n"
+                    .to_string(),
+                stderr: String::new(),
+            }),
+            Ok(CommandOutput {
+                status_code: Some(0),
+                stdout: "Filesystem 1K-blocks Used Available Use% Mounted on\n/dev/block/vold 100 10 90 10% /sdcard\n"
+                    .to_string(),
+                stderr: String::new(),
+            }),
+            Err(DeviceProbeError::TimedOut),
+            Ok(CommandOutput {
+                status_code: Some(0),
+                stdout: String::new(),
+                stderr: String::new(),
+            }),
+        ]);
+
+        let result = qualify_device_with_runner("/managed/adb", "secret-serial", &runner).unwrap();
+
+        assert_eq!(result["packageManager"], "unknown");
+        assert_eq!(result["activityManager"], "unknown");
+        assert_eq!(runner.calls.borrow().len(), 5);
+        assert!(runner.calls.borrow()[3][4..]
+            .starts_with(["cmd".to_string(), "package".to_string()].as_slice()));
+        assert!(runner.calls.borrow()[4][4..]
+            .starts_with(["cmd".to_string(), "activity".to_string()].as_slice()));
     }
 
     #[test]

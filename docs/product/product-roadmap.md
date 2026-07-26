@@ -27,7 +27,7 @@ Detailed evidence remains in the relevant product and release documents. In part
 
 | Product or track | Current state | Next priority |
 |---|---|---|
-| EmuChef proper | Phase 5A through 5H and Phase 6A completed | Begin Phase 6B device discovery and qualification |
+| EmuChef proper | Phase 5A through 5H, Phase 6A, and Phase 6B completed | Begin Phase 6C core executor qualification |
 | Config Editor | Authored generation implemented through GitHub release-pattern testing | Later refinements remain unsequenced unless explicitly promoted |
 | Shared Runtime | Rust is the sole runtime and retains device, filesystem, planning, execution, validation, and protocol authority | Add shared capabilities only when required by a bounded product slice |
 | Release engineering | Deliberately deferred from normal Phase 5 product work | Resume only when the owner declares the relevant application release-comfortable |
@@ -69,7 +69,7 @@ EmuChef proper Phase 5 established end-user feature completeness, usability, wor
 | 5G | Support, diagnostics, and recovery polish | Completed | Troubleshooting without a terminal |
 | 5H | Visual consistency and final product polish | Completed | Cohesive, release-comfortable end-user experience |
 | 6A | Development builds and feature gating | Completed | Intentional real-execution development builds without accidental production enablement |
-| 6B | Device discovery and qualification | Planned | Deterministic device capability and compatibility profiles |
+| 6B | Device discovery and qualification | Completed | Deterministic device capability and compatibility profiles |
 | 6C | Core executor qualification | Planned | Hardware-proven execution of supported step types |
 | 6D | Execution safety and recovery | Planned | Predictable cancellation, failure, disconnect, and cleanup behavior |
 | 6E | Recipe qualification | Planned | End-to-end success for core EmuChef workflows |
@@ -442,11 +442,12 @@ work.
 ### 6B — Device Discovery and Qualification
 
 **Owner: EmuChef proper / Shared Runtime**  
-**Status: In progress**
+**Status: Completed**
 
-Slice 1 establishes the backend-owned, sanitized qualification contract and
-deterministic fixture classifier. It does not perform live ADB inspection,
-probe root, select a device, persist authority, or authorize execution.
+Phase 6B establishes the backend-owned, sanitized qualification contract and
+bounded live read-only qualification path. Root checks remain explicit and
+separate; qualification context and root evidence never persist across a
+process restart or authorize execution from React.
 
 #### Objective
 
@@ -465,6 +466,40 @@ Produce a deterministic, backend-authored compatibility profile for the connecte
 - Every connected device produces a deterministic, sanitized qualification result.
 - Stale qualification cannot authorize execution after disconnect, reconnect, device replacement, or runtime restart.
 - Unsupported or incompletely qualified devices cannot begin real execution without an explicitly approved bounded policy.
+
+### Completion evidence
+
+Completed on 2026-07-26. EmuChef proper and the shared Rust runtime now:
+
+- perform bounded passive ADB inventory, `getprop`, shared-storage, package-manager,
+  and activity-manager checks using exact read-only commands;
+- classify available, explicitly unsupported, unknown, malformed, timed-out,
+  transport-failed, unauthorized, offline, no-device, and multiple-device
+  outcomes deterministically, with sanitized capability availability fields;
+- fall back from `cmd` to `pm`/`am` only when the command interface is confirmed
+  unavailable or unsupported, never for timeout, transport, permission,
+  malformed, or empty responses;
+- bind qualification and root evidence to the opaque handle, session epoch,
+  runtime generation, Platform-Tools revision, and a capability fingerprint;
+- invalidate dependent reviews when a supported requalification changes that
+  fingerprint, even if the resulting state remains Supported;
+- reconcile every fresh ADB inventory through one native continuity helper in
+  polling and final preflight, advancing session epochs and invalidating
+  qualification, root, and review authority across reconnect, transport, and
+  zero/one/multiple-device cardinality transitions;
+- re-list before resolving the reviewed target, then perform a separate
+  targeted qualification in the native final real-execution preflight,
+  requiring Supported and matching review context before any `startExecution`
+  request; and
+- retain simulation-only defaults and the existing compile-time real-execution
+  feature gate.
+
+Automated evidence includes backend and Tauri feature-matrix tests, integrated
+real-preflight request-boundary tests (zero starts for every rejected state and
+exactly one for a current supported non-root context), frontend
+tests/typecheck/lint/build, the sanitization/security policy suite, format
+checks, and `git diff --check`. No physical-device, VoiceOver, or packaged-GUI
+qualification was performed.
 
 ### 6C — Core Executor Qualification
 
@@ -821,44 +856,14 @@ Cross-platform packaging and release automation must define separate deliverable
 
 ## 25. Immediate next action
 
-### Phase 6B — Device Discovery and Qualification
+### Phase 6C — Core Executor Qualification
 
 **Owner: EmuChef proper / Shared Runtime**  
-**Status: In progress**
+**Status: Next**
 
-The bounded device-qualification contract, live read-only qualification path,
-and explicit root qualification path are implemented. The backend authors
-supported, unsupported, unauthorized, offline, no-device, and
-insufficiently-qualified states from bounded ADB facts; Tauri owns opaque-handle
-identity, runtime generation, qualification revision invalidation, and the
-single-flight root record; and the UI rejects stale responses. Root evidence
-is only a native capability input to an explicitly compiled real-execution
-path. Ordinary simulation and ordinary development/build/bundle/release
-scripts remain simulation-only.
-
-#### Completed validation evidence
-
-Deterministic automated tests cover the sanitized passive projection, opaque
-handle stale guards, exact root probe command, timeout and transport/shell
-classification, single-flight generation binding, capability masking, and
-executor preflight abort behavior. Root prerequisite failures cannot orphan an
-in-flight check, and polling stales reviews for the opaque device handle whose
-cached root evidence was removed. Executor preflight remains the final
-authorization check immediately before privileged execution. No physical-device or packaged-GUI
-qualification was performed for this slice.
-
-#### Non-blocking Phase 6B UX follow-up
-
-- Complete manual device and packaged-GUI accessibility/visual qualification
-  for the root-check states when a suitable test device is available.
-- Reduce the narrow Current Status sidebar to concise state labels so long
-  qualification summaries do not wrap into unreadable columns.
-- Improve the multiple-device presentation so it is explicit that no single
-  device is eligible while more than one device is attached, rather than
-  showing each entry only as connected.
-
-Proceed with the next bounded Phase 6B slice without expanding into recipe
-execution qualification or enabling real execution in ordinary production
-builds.
+Proceed with physical qualification of the supported executor operations
+without enabling real execution in ordinary production builds. Phase 6B's
+manual device, VoiceOver, and packaged-GUI evidence gaps remain explicit
+follow-ups and are not represented as completed hardware or release evidence.
 
 Manual Phase 5H macOS visual and accessibility qualification remains an outstanding bounded qualification follow-up and may be performed independently, but it is not the active implementation slice.
