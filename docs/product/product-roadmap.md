@@ -506,27 +506,91 @@ qualification was performed.
 **Owner: EmuChef proper / Shared Runtime**  
 **Status: Planned**
 
-#### Objective
+Phase 6C is split into non-root qualification first and root-only qualification afterward. Operation-level physical qualification is performed through controlled backend/manual real-ADB tests, followed by one end-to-end EmuChef proper UI smoke workflow.
 
-Prove each supported execution operation against physical Android hardware through the EmuChef proper workflow.
+#### 6C.1 — Non-root Executor Qualification
 
-#### Qualification scope
+##### Objective
 
-- Artifact acquisition and trusted staging.
+Qualify the complete production-supported non-root executor surface against physical Android hardware before adding rooted-device complexity.
+
+##### Qualification strategy
+
+- Qualify individual executor operations through controlled backend/manual real-ADB tests.
+- Use deterministic synthetic fixtures rather than relying exclusively on third-party applications.
+- Finish with one end-to-end EmuChef proper UI smoke workflow that proves planning, review, execution, progress, verification, cleanup, and reporting integration.
+- Keep simulation and physical-device execution visibly and structurally distinct.
+
+##### Android fixture application
+
+- Keep a minimal Java Android application in this repository.
+- Use standard Android Views with one launcher activity and no Kotlin, Compose, analytics, accounts, network dependency, or external runtime dependency.
+- Use a stable package name, version contract, and deterministic test-signing identity.
+- Commit the built APK beside its source, expected SHA-256 digest, and build and maintenance documentation.
+- Exercise production SHA-256 verification against the checked-in APK, including an invalid-digest case that blocks installation and downstream execution.
+- Have CI rebuild the application and verify package name, version, and signing metadata against the committed APK. Byte-for-byte reproducibility is not required.
+
+##### Controlled fixture corpus
+
+- A single-file fixture.
+- A nested directory fixture.
+- Deterministic archives and expected extracted trees.
+- Known-good and intentionally invalid SHA-256 digests.
+- Explicit staging and destination paths that can be cleaned safely.
+
+##### Operations to qualify
+
+- Local and controlled artifact acquisition and trusted staging.
+- SHA-256 verification.
 - APK installation and package verification.
-- Single-file and directory copy behavior.
+- Single-file copy.
+- Directory copy.
 - Archive extraction where represented by supported authored steps.
-- Permission grants.
-- Application launch and stop behavior where supported.
-- Step verification, skip behavior, progress events, and sanitized result projection.
-- Cleanup of temporary host and device staging material.
+- Runtime permission grants and supported app-op behavior.
+- Application launch and force stop.
+- Verification predicates and skip conditions.
+- Progress events and sanitized result projection.
+- Host and device staging cleanup.
+- Stable, sanitized execution and cleanup failure reporting.
 
-#### Exit criteria
+##### Deliverables
 
-- Every production-supported step type has at least one successful physical-device qualification case.
-- Expected failures produce stable classified errors and user-safe guidance.
+- Fixture application source, committed APK, checksum, signing metadata contract, and rebuild instructions.
+- Deterministic file, directory, archive, and expected-output fixtures.
+- Opt-in physical-device qualification tests for every supported non-root executor operation.
+- Negative tests for invalid checksums, unsupported states, failed verification, and cleanup failures.
+- One documented end-to-end UI smoke workflow using a realistic EmuChef recipe.
+
+##### Exit criteria
+
+- Every production-supported non-root executor operation has at least one successful physical-device qualification case.
+- Success, skip, verification-failure, execution-failure, and cleanup-failure outcomes are stable and distinguishable.
+- Checksum failure prevents installation and downstream execution.
 - Temporary staging is removed or reported explicitly when cleanup cannot complete.
+- Progress and cleanup behavior are verified.
+- The UI smoke workflow completes through the same reviewed execution boundary used by production workflows.
 - Simulation and real execution remain behaviorally distinguishable in review, progress, results, and reports.
+
+#### 6C.2 — Root Executor Qualification
+
+##### Objective
+
+Add physical qualification only for production-supported behaviors that require elevated privileges after Phase 6C.1 is complete.
+
+##### Root-specific scope
+
+- Privileged filesystem locations, including supported `/data` operations.
+- Root-only file placement and cleanup.
+- Privileged permission or shell operations exposed by the executor.
+- Supported `su` or Magisk execution paths.
+- Ownership, mode, and SELinux handling where the product explicitly supports them.
+- Stable handling of missing, denied, revoked, or changed root authority.
+
+##### Exit criteria
+
+- Every production-supported root-only operation has at least one successful physical-device qualification case on representative rooted hardware.
+- Non-root and root execution paths remain separately testable and report authority failures clearly.
+- Privileged cleanup leaves no unintended artifacts or permission changes.
 
 ### 6D — Execution Safety and Recovery
 
