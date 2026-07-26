@@ -62,7 +62,8 @@ fn handle_validated_object(object: &Map<String, Value>) -> Result<Value, ApiErro
         "describeCatalog" => handle_describe_catalog(object),
         "listAdbDevices" => handle_list_adb_devices(object),
         "probeDevice" => handle_probe_device(object),
-        "qualifyConnectedDevice" => handle_qualify_connected_device(object),
+        "qualifyDevice" => handle_qualify_device(object),
+        "checkRoot" => handle_check_root(object),
         "inspectApk" => handle_inspect_apk(object),
         "generateAppRecipeDraft" => handle_generate_app_recipe_draft(object),
         "generateRemoteAppRecipeDraft" => handle_generate_remote_app_recipe_draft(object),
@@ -98,7 +99,8 @@ fn handle_validated_sidecar_object(
         "describeCatalog" => handle_describe_catalog(object),
         "listAdbDevices" => handle_list_adb_devices(object),
         "probeDevice" => handle_probe_device(object),
-        "qualifyConnectedDevice" => handle_qualify_connected_device(object),
+        "qualifyDevice" => handle_qualify_device(object),
+        "checkRoot" => handle_check_root(object),
         "inspectApk" => handle_inspect_apk(object),
         "generateAppRecipeDraft" => handle_generate_app_recipe_draft(object),
         "generateRemoteAppRecipeDraft" => handle_generate_remote_app_recipe_draft(object),
@@ -397,12 +399,22 @@ fn handle_probe_device(object: &Map<String, Value>) -> Result<Value, ApiError> {
     )?))
 }
 
-fn handle_qualify_connected_device(object: &Map<String, Value>) -> Result<Value, ApiError> {
+fn handle_qualify_device(object: &Map<String, Value>) -> Result<Value, ApiError> {
     let payload = payload_object(object)?;
     let adb_path = required_string(payload, "adbPath")?;
-    Ok(envelope::success(
-        crate::end_user_runtime::qualify_connected_device(adb_path)?,
-    ))
+    let serial = required_string(payload, "serial")?;
+    Ok(envelope::success(crate::end_user_runtime::qualify_device(
+        adb_path, serial,
+    )?))
+}
+
+fn handle_check_root(object: &Map<String, Value>) -> Result<Value, ApiError> {
+    let payload = payload_object(object)?;
+    let adb_path = required_string(payload, "adbPath")?;
+    let serial = required_string(payload, "serial")?;
+    Ok(envelope::success(crate::end_user_runtime::check_root(
+        adb_path, serial,
+    )?))
 }
 
 fn handle_inspect_apk(object: &Map<String, Value>) -> Result<Value, ApiError> {
@@ -851,6 +863,8 @@ fn handle_runtime_configuration_request(
     let selected_recipes = optional_string_array(payload, "selectedRecipes")?;
     let explicit_bindings = optional_binding_map(payload, "bindings")?;
     let device_context = optional_device_context(payload, "deviceContext")?;
+    let runtime_capability_availability =
+        optional_runtime_capability_availability(payload, "runtimeCapabilityAvailability")?;
     let target_device = optional_target_device(payload, "targetDevice")?;
     let request = ConfigurationContextRequest {
         catalog,
@@ -861,6 +875,7 @@ fn handle_runtime_configuration_request(
         explicit_bindings,
         device_context,
         target_device,
+        runtime_capability_availability,
     };
     let result = if plan {
         runtime_configuration::plan_configuration(request).and_then(|result| {
@@ -1470,6 +1485,27 @@ fn optional_device_context(
     }
 }
 
+fn optional_runtime_capability_availability(
+    payload: &Map<String, Value>,
+    field: &str,
+) -> Result<Option<runtime_configuration::RuntimeCapabilityAvailability>, ApiError> {
+    match payload.get(field) {
+        None | Some(Value::Null) => Ok(None),
+        Some(Value::Object(value)) => serde_json::from_value(Value::Object(value.clone()))
+            .map(Some)
+            .map_err(|error| {
+                ApiError::invalid_request_with_details(
+                    format!("Request field '{field}' is invalid: {error}"),
+                    json!({ "field": field }),
+                )
+            }),
+        Some(_) => Err(ApiError::invalid_request_with_details(
+            format!("Request field '{field}' must be an object."),
+            json!({ "field": field }),
+        )),
+    }
+}
+
 fn user_configuration_path(payload: &Map<String, Value>) -> Result<std::path::PathBuf, ApiError> {
     let path = optional_string(payload, "path")?;
     let reference = optional_string(payload, "userConfiguration")?;
@@ -1574,6 +1610,45 @@ steps:
         assert_eq!(
             decoded.steps[0].params["replace_existing"],
             ParamValue::Literal(Value::Bool(false))
+        );
+    }
+
+    #[test]
+    fn qualify_device_dispatch_requires_the_serial_field() {
+        let mut sessions = crate::session::DocumentSessionManager::default();
+        let response = handle_sidecar_value(
+            json!({
+                "id": "qualification-test",
+                "type": "qualifyDevice",
+                "payload": { "adbPath": "/managed/adb" },
+            }),
+            &mut sessions,
+        );
+
+        assert_eq!(response["ok"], false);
+        assert_eq!(response["error"]["details"]["field"], "serial");
+        assert_ne!(
+            response["error"]["message"],
+            "Unknown request type: qualifyDevice"
+        );
+    }
+
+    #[test]
+    fn check_root_dispatch_requires_the_serial_field() {
+        let mut sessions = crate::session::DocumentSessionManager::default();
+        let response = handle_sidecar_value(
+            json!({
+                "id": "root-check-test",
+                "type": "checkRoot",
+                "payload": { "adbPath": "/managed/adb" },
+            }),
+            &mut sessions,
+        );
+        assert_eq!(response["ok"], false);
+        assert_eq!(response["error"]["details"]["field"], "serial");
+        assert_ne!(
+            response["error"]["message"],
+            "Unknown request type: checkRoot"
         );
     }
 

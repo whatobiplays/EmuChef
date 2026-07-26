@@ -358,6 +358,16 @@ export type DeviceQualificationState =
   | "unsupported"
   | "supported";
 
+export type RootQualification =
+  | { readonly status: "granted" }
+  | { readonly status: "denied" }
+  | { readonly status: "unavailable" }
+  | {
+      readonly status: "checkFailed";
+      readonly reason: "timedOut" | "transport" | "unexpectedResponse";
+      readonly message: string;
+    };
+
 /** Read-only, sanitized qualification authored by Rust. */
 export interface DeviceQualificationSnapshot {
   readonly state: DeviceQualificationState;
@@ -366,10 +376,17 @@ export interface DeviceQualificationSnapshot {
   readonly androidMajor: number | null;
   readonly androidApiLevel: number | null;
   readonly abiClass: "arm64" | "arm32" | "x86_64" | null;
-  readonly root: "notChecked";
+  readonly root: RootQualification | null;
   readonly runtimeGeneration: number;
   readonly qualificationRevision: number;
   readonly deviceIdentity: string | null;
+}
+
+export interface RootQualificationCheck {
+  readonly qualification: RootQualification;
+  readonly runtimeGeneration: number;
+  readonly qualificationRevision: number;
+  readonly deviceIdentity: string;
 }
 
 export interface RealExecutionConfirmation {

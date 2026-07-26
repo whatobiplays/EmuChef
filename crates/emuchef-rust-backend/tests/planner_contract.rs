@@ -35,6 +35,8 @@ fn capabilities_stay_editor_scoped_and_planner_requests_are_not_routed() {
             "describeCatalog",
             "listAdbDevices",
             "probeDevice",
+            "qualifyDevice",
+            "checkRoot",
             "inspectApk",
             "generateAppRecipeDraft",
             "generateRemoteAppRecipeDraft",

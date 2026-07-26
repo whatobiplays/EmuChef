@@ -7,6 +7,7 @@
 use std::collections::BTreeMap;
 use std::fs;
 use std::path::{Path, PathBuf};
+use std::time::Duration;
 
 use serde::Deserialize;
 use serde_json::{json, Value};
@@ -17,6 +18,7 @@ use crate::device_probe::{
     ProcessCommandRunner,
 };
 use crate::errors::ApiError;
+use crate::executor::adb::{probe_root, ProcessAdbCommandExecutor};
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 struct AdbInventoryEntry {
@@ -118,14 +120,23 @@ pub(crate) fn probe_device(adb_path: &str, serial: &str) -> Result<Value, ApiErr
     })
 }
 
-/// Perform one bounded, read-only qualification pass. Exact serials remain in
-/// the trusted sidecar response and are replaced at the Tauri IPC boundary.
-pub(crate) fn qualify_connected_device(adb_path: &str) -> Result<Value, ApiError> {
-    qualify_connected_device_with_runner(adb_path, &ProcessCommandRunner)
+/// Perform one bounded, read-only qualification pass for the requested serial.
+/// Exact serials remain in the trusted sidecar response and are replaced at the
+/// Tauri IPC boundary.
+pub(crate) fn qualify_device(adb_path: &str, serial: &str) -> Result<Value, ApiError> {
+    qualify_device_with_runner(adb_path, serial, &ProcessCommandRunner)
 }
 
-fn qualify_connected_device_with_runner(
+/// Run the sole privileged capability probe. The exact ADB command is owned by
+/// the executor boundary; this function only serializes its sanitized outcome.
+pub(crate) fn check_root(adb_path: &str, serial: &str) -> Result<Value, ApiError> {
+    let mut executor = ProcessAdbCommandExecutor;
+    Ok(probe_root(&mut executor, adb_path, serial, Duration::from_secs(30)).status_json())
+}
+
+fn qualify_device_with_runner(
     adb_path: &str,
+    requested_serial: &str,
     runner: &impl CommandRunner,
 ) -> Result<Value, ApiError> {
     let inventory = list_adb_devices_with_runner(adb_path, runner)?;
@@ -151,6 +162,9 @@ fn qualify_connected_device_with_runner(
                 json!({ "reason": "adb_inventory_invalid" }),
             )
         })?;
+    if serial != requested_serial {
+        return Ok(json!({ "state": "no_device" }));
+    }
     match device.get("state").and_then(Value::as_str) {
         Some("unauthorized") => Ok(json!({
             "state": "unauthorized",
@@ -641,7 +655,7 @@ mod tests {
                     stderr: String::new(),
                 }),
             };
-            let result = qualify_connected_device_with_runner("/managed/adb", &runner).unwrap();
+            let result = qualify_device_with_runner("/managed/adb", "one", &runner).unwrap();
             assert_eq!(result["state"], expected);
             assert_eq!(runner.calls.borrow().len(), 1);
         }
@@ -677,7 +691,7 @@ mod tests {
                 },
             ]),
         };
-        let result = qualify_connected_device_with_runner("/managed/adb", &runner).unwrap();
+        let result = qualify_device_with_runner("/managed/adb", "secret-serial", &runner).unwrap();
         assert_eq!(result["state"], "online");
         assert_eq!(result["serial"], "secret-serial");
         assert_eq!(result["androidMajor"], 14);
@@ -707,10 +721,29 @@ mod tests {
                 },
             ]),
         };
-        let error = qualify_connected_device_with_runner("/private/adb", &runner).unwrap_err();
+        let error =
+            qualify_device_with_runner("/private/adb", "private-serial", &runner).unwrap_err();
         assert_eq!(error.details["reason"], "adb_qualification_probe_failed");
         assert!(!error.message.contains("private-serial"));
         assert!(!error.message.contains("/private"));
+    }
+
+    #[test]
+    fn qualification_does_not_probe_a_different_serial() {
+        let runner = FakeRunner {
+            calls: RefCell::new(Vec::new()),
+            output: Ok(CommandOutput {
+                status_code: Some(0),
+                stdout: "List of devices attached\nother-serial device model:Other\n".to_string(),
+                stderr: String::new(),
+            }),
+        };
+
+        let result =
+            qualify_device_with_runner("/managed/adb", "selected-serial", &runner).unwrap();
+
+        assert_eq!(result["state"], "no_device");
+        assert_eq!(runner.calls.borrow().len(), 1);
     }
 
     #[test]

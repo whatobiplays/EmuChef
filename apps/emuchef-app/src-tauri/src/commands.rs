@@ -20,6 +20,10 @@ use uuid::Uuid;
 
 use crate::adb::{AdbManager, AdbSetupStatusDto, PLATFORM_TOOLS_URL};
 use crate::catalog::CatalogDescriptor;
+use crate::device_qualification::RootQualificationStore;
+use crate::device_qualification::{
+    RootQualificationInvalidation, RootQualificationKey, RootQualificationState,
+};
 use crate::execution::ExecutionHandleStore;
 use crate::handles::{ReviewedPlanSnapshot, SessionHandles};
 use crate::recovery::RecoveryState;
@@ -35,6 +39,7 @@ pub struct AppState {
     pub platform_tools_selections: Mutex<PlatformToolsSelectionStore>,
     pub input_contracts: Mutex<InputContractSnapshot>,
     pub handles: Mutex<SessionHandles>,
+    pub root_qualification: Mutex<RootQualificationStore>,
     pub executions: Mutex<ExecutionHandleStore>,
     pub saved_configurations: SavedConfigurationState,
     pub recovery: RecoveryState,
@@ -260,6 +265,16 @@ fn public_runtime_status(status: RuntimeStatusDto) -> Value {
 
 fn reset_app_session(state: &AppState, close_documents: bool) -> Result<(), String> {
     state
+        .root_qualification
+        .lock()
+        .map_err(|_| {
+            safe_error(
+                "qualification_state_unavailable",
+                "Device qualification state is unavailable.",
+            )
+        })?
+        .invalidate();
+    state
         .platform_tools_selections
         .lock()
         .map_err(|_| {
@@ -318,6 +333,18 @@ fn reset_app_session(state: &AppState, close_documents: bool) -> Result<(), Stri
         .map_err(|_| safe_error("support_state_unavailable", "Support state is unavailable."))?
         .invalidate();
     Ok(())
+}
+
+/// Stale only reviews that were planned with root evidence removed by the
+/// current device qualification context. The invalidation handle is opaque;
+/// no serial lookup is needed for this native-to-native transition.
+fn invalidate_reviews_for_root_invalidation(
+    handles: &mut SessionHandles,
+    invalidation: &RootQualificationInvalidation,
+) {
+    if let Some(device_handle) = invalidation.device_handle.as_deref() {
+        handles.invalidate_reviews_for_device(device_handle, "root_qualification_changed");
+    }
 }
 
 #[tauri::command]
@@ -488,6 +515,16 @@ pub async fn install_platform_tools_selection(
 
     let state = app.state::<AppState>();
     state
+        .root_qualification
+        .lock()
+        .map_err(|_| {
+            safe_error(
+                "qualification_state_unavailable",
+                "Device qualification state is unavailable.",
+            )
+        })?
+        .invalidate();
+    state
         .handles
         .lock()
         .map_err(|_| {
@@ -593,6 +630,16 @@ pub fn remove_platform_tools(
     let result = adb.remove()?;
     drop(adb);
     state
+        .root_qualification
+        .lock()
+        .map_err(|_| {
+            safe_error(
+                "qualification_state_unavailable",
+                "Device qualification state is unavailable.",
+            )
+        })?
+        .invalidate();
+    state
         .handles
         .lock()
         .map_err(|_| {
@@ -652,6 +699,51 @@ pub fn poll_devices(
             )
         })?
         .update_devices(&inventory)?;
+    let single_handle = state
+        .handles
+        .lock()
+        .map_err(|_| {
+            safe_error(
+                "session_state_unavailable",
+                "Device session state is unavailable.",
+            )
+        })?
+        .single_available_device_handle();
+    let runtime_generation = state.sidecar.try_generation().map_err(|_| {
+        safe_error(
+            "runtime_generation_unavailable",
+            "Device qualification state is temporarily unavailable.",
+        )
+    })?;
+    let qualification_revision = state
+        .adb
+        .lock()
+        .map_err(|_| {
+            safe_error(
+                "adb_state_unavailable",
+                "Platform-Tools setup state is unavailable.",
+            )
+        })?
+        .revision();
+    let key = single_handle.as_deref().map(|handle| {
+        RootQualificationKey::new(handle, runtime_generation, qualification_revision)
+    });
+    let invalidation = state
+        .root_qualification
+        .lock()
+        .map_err(|_| {
+            safe_error(
+                "qualification_state_unavailable",
+                "Device qualification state is unavailable.",
+            )
+        })?
+        .invalidate_if_not_key(key.as_ref());
+    if invalidation.device_handle.is_some() {
+        let mut handles = state.handles.lock().map_err(|_| {
+            safe_error("session_state_unavailable", "Session state is unavailable.")
+        })?;
+        invalidate_reviews_for_root_invalidation(&mut handles, &invalidation);
+    }
     serde_json::to_value(devices).map_err(|_| {
         safe_error(
             "device_projection_failed",
@@ -1224,22 +1316,60 @@ fn configuration_payload(
     selected_recipes: Option<Vec<String>>,
     bindings: HashMap<String, Value>,
 ) -> Result<Value, String> {
-    let handles = state.handles.lock().map_err(|_| {
-        safe_error(
-            "session_state_unavailable",
-            "Device session state is unavailable.",
-        )
-    })?;
-    let device = handles.device(device_handle)?;
-    let facts = handles.facts(device_handle)?;
-    Ok(configuration_payload_from_parts(
+    let (serial, facts) = {
+        let handles = state.handles.lock().map_err(|_| {
+            safe_error(
+                "session_state_unavailable",
+                "Device session state is unavailable.",
+            )
+        })?;
+        let device = handles.device(device_handle)?;
+        (device.serial.clone(), handles.facts(device_handle)?.clone())
+    };
+    let mut payload = configuration_payload_from_parts(
         catalog(state)?.internal_payload(),
         device_plan,
         selected_recipes,
         bindings,
-        &device.serial,
-        facts,
-    ))
+        &serial,
+        &facts,
+    );
+    let runtime_generation = state.sidecar.try_generation().map_err(|_| {
+        safe_error(
+            "runtime_generation_unavailable",
+            "Device qualification state is temporarily unavailable.",
+        )
+    })?;
+    let qualification_revision = state
+        .adb
+        .lock()
+        .map_err(|_| {
+            safe_error(
+                "adb_state_unavailable",
+                "Platform-Tools setup state is unavailable.",
+            )
+        })?
+        .revision();
+    let root_granted = state
+        .root_qualification
+        .lock()
+        .map_err(|_| {
+            safe_error(
+                "qualification_state_unavailable",
+                "Device qualification state is unavailable.",
+            )
+        })?
+        .get(&RootQualificationKey::new(
+            device_handle,
+            runtime_generation,
+            qualification_revision,
+        ))
+        .is_some_and(|result| result == RootQualificationState::Granted);
+    payload["runtimeCapabilityAvailability"] = json!({
+        "rootShell": root_granted,
+        "appDataWrite": root_granted,
+    });
+    Ok(payload)
 }
 
 /// Converts trusted snake_case probe facts into the sidecar's camelCase request.
@@ -1862,6 +1992,41 @@ pub(crate) fn redact_absolute_paths(value: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn review_snapshot(device_handle: &str) -> ReviewedPlanSnapshot {
+        ReviewedPlanSnapshot {
+            response: json!({ "plan": { "id": "plan" } }),
+            target: json!({ "deviceHandle": device_handle }),
+            catalog_identity: json!({ "sourceId": "catalog" }),
+            catalog_digest: "sha256:catalog".to_string(),
+            plan_digest: "sha256:plan".to_string(),
+            device_handle: device_handle.to_string(),
+            platform_tools_identity: None,
+            created: Instant::now(),
+            last_access: Instant::now(),
+        }
+    }
+
+    #[test]
+    fn root_poll_invalidation_stales_only_reviews_for_removed_evidence() {
+        let mut root_store = RootQualificationStore::default();
+        let old_key = RootQualificationKey::new("device-a", 4, 9);
+        let attempt = root_store.begin(old_key).unwrap();
+        assert!(root_store.complete(attempt, RootQualificationState::Granted));
+
+        let mut handles = SessionHandles::default();
+        let removed = handles.insert_review(review_snapshot("device-a"));
+        let retained = handles.insert_review(review_snapshot("device-b"));
+        let invalidation =
+            root_store.invalidate_if_not_key(Some(&RootQualificationKey::new("device-b", 4, 9)));
+        invalidate_reviews_for_root_invalidation(&mut handles, &invalidation);
+
+        assert!(handles
+            .review(&removed)
+            .unwrap_err()
+            .contains("root_qualification_changed"));
+        assert_eq!(handles.review(&retained).unwrap().device_handle, "device-b");
+    }
 
     fn file_contract(multiple: bool) -> InputContract {
         InputContract {

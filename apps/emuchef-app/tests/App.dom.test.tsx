@@ -16,6 +16,7 @@ const mockApi = vi.hoisted(() => ({
   endUpdateInteractionSession: vi.fn(),
   executionCapabilities: vi.fn(),
   deviceQualification: vi.fn(),
+  checkDeviceRoot: vi.fn(),
   installPlatformToolsSelection: vi.fn(),
   listRecentConfigurations: vi.fn(),
   matchDevice: vi.fn(),
@@ -265,10 +266,16 @@ function resetApi(): void {
     androidMajor: null,
     androidApiLevel: null,
     abiClass: null,
-    root: "notChecked",
+    root: null,
     runtimeGeneration: 0,
     qualificationRevision: 0,
     deviceIdentity: null,
+  });
+  mockApi.checkDeviceRoot.mockResolvedValue({
+    qualification: { status: "granted" },
+    runtimeGeneration: 0,
+    qualificationRevision: 0,
+    deviceIdentity: "device-opaque",
   });
   mockApi.catalog.mockResolvedValue({
     catalog: {
@@ -390,10 +397,10 @@ describe("Phase 6A execution capability reporting", () => {
       androidMajor: 14,
       androidApiLevel: 34,
       abiClass: "arm64",
-      root: "notChecked",
+      root: null,
       runtimeGeneration: 0,
       qualificationRevision: 2,
-      deviceIdentity: "device-identity-opaque",
+      deviceIdentity: "device-opaque",
     });
 
     await renderReadyApp();
@@ -409,6 +416,9 @@ describe("Phase 6A execution capability reporting", () => {
     expect(section?.textContent).toContain("Root accessNot checked");
     expect(section?.textContent).toContain("Root access was not checked.");
     expect(section?.textContent).not.toContain("device-identity-opaque");
+    await user.click(screen.getByRole("button", { name: "Check root access" }));
+    await waitFor(() => expect(mockApi.checkDeviceRoot).toHaveBeenCalledWith("device-opaque"));
+    expect(section?.textContent).toContain("Root accessGranted");
   });
 
   test("blocks every device and explains eligibility when multiple devices are connected", async () => {
@@ -423,7 +433,7 @@ describe("Phase 6A execution capability reporting", () => {
       androidMajor: null,
       androidApiLevel: null,
       abiClass: null,
-      root: "notChecked",
+      root: null,
       runtimeGeneration: 0,
       qualificationRevision: 3,
       deviceIdentity: null,

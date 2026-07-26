@@ -39,6 +39,14 @@ pub(crate) struct ConfigurationContextRequest {
     pub explicit_bindings: OrderedMap<Value>,
     pub device_context: Option<DeviceContextOverride>,
     pub target_device: Option<TargetDeviceBinding>,
+    pub runtime_capability_availability: Option<RuntimeCapabilityAvailability>,
+}
+
+#[derive(Clone, Debug, PartialEq, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub(crate) struct RuntimeCapabilityAvailability {
+    pub root_shell: bool,
+    pub app_data_write: bool,
 }
 
 #[derive(Clone, Debug, Default, PartialEq, Deserialize)]
@@ -74,6 +82,7 @@ pub(crate) struct PreparedConfiguration {
     pub user_configuration_bindings: OrderedMap<Value>,
     pub device_plan_input_bindings: OrderedMap<Value>,
     pub device_plan_parts: Option<PlannerInputParts>,
+    pub runtime_capabilities: crate::planner::RuntimeCapabilities,
     pub device_context: Option<DeviceContextOverride>,
     pub target_device: Option<TargetDeviceBinding>,
     pub binding_resolution: BindingResolution,
@@ -199,6 +208,12 @@ pub(crate) fn prepare_configuration(
             None
         }
     };
+    let runtime_capabilities = device_plan_parts.as_ref().map(|parts| {
+        apply_runtime_capability_availability(
+            parts.runtime_capabilities.clone(),
+            request.runtime_capability_availability.as_ref(),
+        )
+    });
     let selected_recipe_refs = request
         .selected_recipes
         .clone()
@@ -256,6 +271,16 @@ pub(crate) fn prepare_configuration(
         user_configuration_bindings,
         device_plan_input_bindings,
         device_plan_parts,
+        runtime_capabilities: runtime_capabilities.unwrap_or(crate::planner::RuntimeCapabilities {
+            adb_available: false,
+            apk_install: false,
+            shared_storage_write: false,
+            app_launch: false,
+            shell_command: false,
+            package_remove_for_user: false,
+            root_shell: false,
+            app_data_write: false,
+        }),
         device_context: request.device_context,
         target_device: request.target_device,
         binding_resolution,
@@ -294,7 +319,7 @@ impl PreparedConfiguration {
             device_plan_ref: parts.device_plan_ref.clone(),
             device_profile_ref: parts.device_profile_ref.clone(),
             device_context,
-            runtime_capabilities: parts.runtime_capabilities.clone(),
+            runtime_capabilities: self.runtime_capabilities.clone(),
             catalog_identity: self.catalog.identity().cloned(),
             target_device: self.target_device.clone(),
         })
@@ -466,11 +491,14 @@ pub(crate) fn describe_configuration(
             let unavailable_capabilities = prepared
                 .device_plan_parts
                 .as_ref()
-                .map(|parts| {
+                .map(|_| {
                     required_capabilities
                         .iter()
                         .filter(|capability| {
-                            !runtime_capability_available(&parts.runtime_capabilities, capability)
+                            !runtime_capability_available(
+                                &prepared.runtime_capabilities,
+                                capability,
+                            )
                         })
                         .cloned()
                         .collect::<Vec<_>>()
@@ -560,6 +588,17 @@ fn runtime_capability_available(
     }
 }
 
+fn apply_runtime_capability_availability(
+    mut capabilities: crate::planner::RuntimeCapabilities,
+    availability: Option<&RuntimeCapabilityAvailability>,
+) -> crate::planner::RuntimeCapabilities {
+    if let Some(availability) = availability {
+        capabilities.root_shell &= availability.root_shell;
+        capabilities.app_data_write &= availability.app_data_write;
+    }
+    capabilities
+}
+
 fn binding_diagnostic(diagnostic: &BindingDiagnostic) -> RuntimeConfigurationDiagnostic {
     RuntimeConfigurationDiagnostic {
         severity: "error",
@@ -600,5 +639,67 @@ fn planner_load_diagnostic(
         key: None,
         provenance: Some(BindingSource::DevicePlan),
         details: json!({ "devicePlan": device_plan }),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn capabilities() -> crate::planner::RuntimeCapabilities {
+        crate::planner::RuntimeCapabilities {
+            adb_available: true,
+            apk_install: true,
+            shared_storage_write: true,
+            app_launch: true,
+            shell_command: true,
+            package_remove_for_user: true,
+            root_shell: true,
+            app_data_write: true,
+        }
+    }
+
+    #[test]
+    fn root_capability_mask_is_fail_closed_and_does_not_change_unrelated_capabilities() {
+        let masked = apply_runtime_capability_availability(
+            capabilities(),
+            Some(&RuntimeCapabilityAvailability {
+                root_shell: false,
+                app_data_write: false,
+            }),
+        );
+        assert!(!masked.root_shell);
+        assert!(!masked.app_data_write);
+        assert!(masked.adb_available);
+        assert!(masked.shared_storage_write);
+
+        let granted = apply_runtime_capability_availability(capabilities(), None);
+        assert!(granted.root_shell);
+        assert!(granted.app_data_write);
+    }
+
+    #[test]
+    fn prepared_planner_input_uses_current_root_capability_evidence() {
+        let authored_root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../authored");
+        let catalog = CatalogSnapshot::legacy_local(&authored_root).unwrap();
+        let prepared = prepare_configuration(ConfigurationContextRequest {
+            catalog,
+            configuration_root: None,
+            user_configuration: None,
+            device_plan: Some("ayaneo.generic.base".to_string()),
+            selected_recipes: None,
+            explicit_bindings: OrderedMap::new(),
+            device_context: None,
+            target_device: None,
+            runtime_capability_availability: Some(RuntimeCapabilityAvailability {
+                root_shell: false,
+                app_data_write: false,
+            }),
+        })
+        .unwrap();
+        let input = prepared.planner_input("plan.test".to_string()).unwrap();
+        assert!(!input.runtime_capabilities.root_shell);
+        assert!(!input.runtime_capabilities.app_data_write);
+        assert!(input.runtime_capabilities.shared_storage_write);
     }
 }

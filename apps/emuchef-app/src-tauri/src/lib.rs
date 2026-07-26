@@ -59,6 +59,9 @@ pub fn run() {
                 ),
                 input_contracts: Mutex::new(commands::InputContractSnapshot::default()),
                 handles: Mutex::new(handles::SessionHandles::default()),
+                root_qualification: Mutex::new(
+                    device_qualification::RootQualificationStore::default(),
+                ),
                 executions: Mutex::new(execution::ExecutionHandleStore::default()),
                 saved_configurations: Mutex::new(
                     saved_configurations::SavedConfigurationStore::load(
@@ -91,6 +94,7 @@ pub fn run() {
             commands::remove_platform_tools,
             commands::poll_devices,
             commands::probe_device,
+            device_qualification::check_device_root,
             commands::match_device,
             commands::describe_configuration,
             commands::create_review,

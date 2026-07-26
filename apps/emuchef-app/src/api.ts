@@ -10,6 +10,7 @@ import type {
   DeviceSummary,
   ExecutionCancellation,
   DeviceQualificationSnapshot,
+  RootQualificationCheck,
   ExecutionCapabilities,
   ExecutionEventBatch,
   ExecutionSnapshot,
@@ -112,8 +113,10 @@ export const api = {
     invoke<ExecutionCancellation>("cancel_simulated_execution", { executionHandle }),
   executionCapabilities: () =>
     invoke<ExecutionCapabilities>("get_execution_capabilities"),
-  deviceQualification: () =>
-    invoke<DeviceQualificationSnapshot>("get_device_qualification"),
+  deviceQualification: (deviceHandle: string | null) =>
+    invoke<DeviceQualificationSnapshot>("get_device_qualification", { deviceHandle }),
+  checkDeviceRoot: (deviceHandle: string) =>
+    invoke<RootQualificationCheck>("check_device_root", { deviceHandle }),
   startRealExecution: (reviewHandle: string, confirmation: RealExecutionConfirmation) =>
     invoke<RealExecutionSnapshot>("start_real_execution", {
       request: { reviewHandle, confirmation },

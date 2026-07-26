@@ -158,6 +158,25 @@ impl SessionHandles {
         self.device_generation
     }
 
+    /// Return the trusted native device records used to resolve qualification
+    /// requests. Exact serials never cross the React projection boundary.
+    pub fn qualification_devices(&self) -> Vec<DeviceRecord> {
+        let mut devices = self.devices_by_handle.values().cloned().collect::<Vec<_>>();
+        devices.sort_by(|left, right| left.handle.cmp(&right.handle));
+        devices
+    }
+
+    pub fn single_available_device_handle(&self) -> Option<String> {
+        if self.devices_by_handle.len() != 1 {
+            return None;
+        }
+        self.devices_by_handle
+            .values()
+            .next()
+            .filter(|device| device.state == "available")
+            .map(|device| device.handle.clone())
+    }
+
     pub fn device(&self, handle: &str) -> Result<&DeviceRecord, String> {
         self.devices_by_handle.get(handle).ok_or_else(|| {
             stable_handle_error("device_unknown", "This device is no longer available.")
@@ -281,7 +300,7 @@ impl SessionHandles {
         }
     }
 
-    fn invalidate_reviews_for_device(&mut self, device_handle: &str, code: &'static str) {
+    pub fn invalidate_reviews_for_device(&mut self, device_handle: &str, code: &'static str) {
         let handles = self
             .reviews
             .iter()
@@ -380,6 +399,26 @@ mod tests {
         let serialized = serde_json::to_string(&first).unwrap();
         assert!(!serialized.contains("sensitive"));
         assert!(serialized.contains("1234"));
+    }
+
+    #[test]
+    fn qualification_devices_are_native_records_sorted_by_opaque_handle() {
+        let mut store = SessionHandles::default();
+        store
+            .update_devices(&json!({
+                "devices": [
+                    { "serial": "second", "state": "offline" },
+                    { "serial": "first", "state": "available" }
+                ]
+            }))
+            .unwrap();
+
+        let records = store.qualification_devices();
+        assert_eq!(records.len(), 2);
+        assert!(records
+            .windows(2)
+            .all(|pair| pair[0].handle <= pair[1].handle));
+        assert!(records.iter().any(|record| record.serial == "first"));
     }
 
     #[test]

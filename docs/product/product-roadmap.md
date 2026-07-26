@@ -826,32 +826,31 @@ Cross-platform packaging and release automation must define separate deliverable
 **Owner: EmuChef proper / Shared Runtime**  
 **Status: In progress**
 
-The bounded device-qualification contract and live read-only qualification path
-are implemented. The backend authors supported, unsupported, unauthorized,
-offline, no-device, and insufficiently-qualified states from bounded ADB facts;
-Tauri owns runtime generation and qualification revision invalidation; and the
-UI rejects stale qualification responses. Root probing and ordinary production
-real execution remain out of scope.
+The bounded device-qualification contract, live read-only qualification path,
+and explicit root qualification path are implemented. The backend authors
+supported, unsupported, unauthorized, offline, no-device, and
+insufficiently-qualified states from bounded ADB facts; Tauri owns opaque-handle
+identity, runtime generation, qualification revision invalidation, and the
+single-flight root record; and the UI rejects stale responses. Root evidence
+is only a native capability input to an explicitly compiled real-execution
+path. Ordinary simulation and ordinary development/build/bundle/release
+scripts remain simulation-only.
 
 #### Completed validation evidence
 
-Manual macOS validation with physical Android handhelds confirmed:
-
-- no-device detection after disconnect or disabling USB debugging;
-- supported qualification for one authorized Android 11+ ARM64 device;
-- unauthorized qualification when a newly connected device had not accepted
-  the host debugging authorization prompt;
-- insufficiently-qualified handling when two devices were connected;
-- correct disconnect, reconnect, and authorization transitions; and
-- no unmasked device serial projection in the application UI.
-
-The offline state remains covered by deterministic automated tests because it
-was not practical to reproduce reliably during the physical-device pass.
+Deterministic automated tests cover the sanitized passive projection, opaque
+handle stale guards, exact root probe command, timeout and transport/shell
+classification, single-flight generation binding, capability masking, and
+executor preflight abort behavior. Root prerequisite failures cannot orphan an
+in-flight check, and polling stales reviews for the opaque device handle whose
+cached root evidence was removed. Executor preflight remains the final
+authorization check immediately before privileged execution. No physical-device or packaged-GUI
+qualification was performed for this slice.
 
 #### Non-blocking Phase 6B UX follow-up
 
-- Surface the backend-authored Android version, API level, normalized ABI, root
-  status, and qualification limitations in the main Device step.
+- Complete manual device and packaged-GUI accessibility/visual qualification
+  for the root-check states when a suitable test device is available.
 - Reduce the narrow Current Status sidebar to concise state labels so long
   qualification summaries do not wrap into unreadable columns.
 - Improve the multiple-device presentation so it is explicit that no single

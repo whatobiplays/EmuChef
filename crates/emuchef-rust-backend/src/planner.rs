@@ -1496,40 +1496,40 @@ fn validate_binding_value(
                     _ => None,
                 },
             );
-            let metadata = fs::metadata(path);
-            if let Ok(metadata) = metadata {
-                let kind_matches = match expected_kind {
-                    Some("file") => metadata.is_file(),
-                    Some("directory") => metadata.is_dir(),
-                    _ => true,
-                };
-                if !kind_matches {
-                    errors.push(PlannerMessage {
-                        code: "binding_path_kind_mismatch".to_string(),
-                        message: format!(
-                            "Input '{input_id}' must reference an existing {}.",
-                            expected_kind.unwrap_or("host path")
-                        ),
-                        details: json!({
-                            "input_id": input_id,
-                            "expected_path_kind": expected_kind,
-                            "entry_index": entry_index,
-                        }),
-                    });
-                } else {
-                    errors.push(PlannerMessage {
-                        code: "binding_path_missing".to_string(),
-                        message: format!(
-                            "Input '{input_id}' must reference an existing {}.",
-                            expected_kind.unwrap_or("host path")
-                        ),
-                        details: json!({
-                            "input_id": input_id,
-                            "expected_path_kind": expected_kind,
-                            "entry_index": entry_index,
-                        }),
-                    });
+            match fs::metadata(path) {
+                Ok(metadata) => {
+                    let kind_matches = match expected_kind {
+                        Some("file") => metadata.is_file(),
+                        Some("directory") => metadata.is_dir(),
+                        _ => true,
+                    };
+                    if !kind_matches {
+                        errors.push(PlannerMessage {
+                            code: "binding_path_kind_mismatch".to_string(),
+                            message: format!(
+                                "Input '{input_id}' must reference an existing {}.",
+                                expected_kind.unwrap_or("host path")
+                            ),
+                            details: json!({
+                                "input_id": input_id,
+                                "expected_path_kind": expected_kind,
+                                "entry_index": entry_index,
+                            }),
+                        });
+                    }
                 }
+                Err(_) => errors.push(PlannerMessage {
+                    code: "binding_path_missing".to_string(),
+                    message: format!(
+                        "Input '{input_id}' must reference an existing {}.",
+                        expected_kind.unwrap_or("host path")
+                    ),
+                    details: json!({
+                        "input_id": input_id,
+                        "expected_path_kind": expected_kind,
+                        "entry_index": entry_index,
+                    }),
+                }),
             }
         }
         if !declaration.validation.allowed_prefixes.is_empty()

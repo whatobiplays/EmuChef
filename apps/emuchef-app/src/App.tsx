@@ -39,6 +39,7 @@ import type {
   DeviceSummary,
   ExecutionCapabilities,
   DeviceQualificationSnapshot,
+  RootQualification,
   InputDescriptor,
   RecentConfiguration,
   RuntimeStatus,
@@ -131,8 +132,24 @@ const deviceAbiLabels: Record<NonNullable<DeviceQualificationSnapshot["abiClass"
   x86_64: "64-bit x86",
 };
 
-function DeviceQualificationDetails({ qualification }: { qualification: DeviceQualificationSnapshot | null }) {
+function DeviceQualificationDetails({
+  qualification,
+  rootCheckPhase,
+  onCheckRoot,
+}: {
+  qualification: DeviceQualificationSnapshot | null;
+  rootCheckPhase: "idle" | "checking";
+  onCheckRoot: () => void;
+}) {
   if (!qualification) return null;
+
+  const rootLabel = (root: RootQualification | null) => {
+    if (!root) return "Not checked";
+    if (root.status === "granted") return "Granted";
+    if (root.status === "denied") return "Denied";
+    if (root.status === "unavailable") return "Unavailable";
+    return root.message;
+  };
 
   return (
     <section className="device-qualification" aria-labelledby="device-qualification-heading">
@@ -150,8 +167,22 @@ function DeviceQualificationDetails({ qualification }: { qualification: DeviceQu
         <div><dt>Android version</dt><dd>{qualification.androidMajor ?? "Unknown"}</dd></div>
         <div><dt>API level</dt><dd>{qualification.androidApiLevel ?? "Unknown"}</dd></div>
         <div><dt>Processor architecture</dt><dd>{qualification.abiClass ? deviceAbiLabels[qualification.abiClass] : "Unknown"}</dd></div>
-        <div><dt>Root access</dt><dd>{qualification.root === "notChecked" ? "Not checked" : "Unknown"}</dd></div>
+        <div><dt>Root access</dt><dd>{rootLabel(qualification.root)}</dd></div>
       </dl>
+      {qualification.state === "supported" && (
+        <div className="device-qualification-root-check">
+          <p>
+            {rootCheckPhase === "checking"
+              ? "Waiting for root authorization on the device. Approve the prompt from Magisk, KernelSU, APatch, or your root manager."
+              : "EmuChef will check root access only when you request it."}
+          </p>
+          <button type="button" onClick={onCheckRoot} disabled={rootCheckPhase === "checking"}>
+            {rootCheckPhase === "checking"
+              ? "Checking root access…"
+              : qualification.root && qualification.root.status !== "granted" ? "Check again" : "Check root access"}
+          </button>
+        </div>
+      )}
       {qualification.limitations.length > 0 && (
         <div className="device-qualification-limitations">
           <h4>Limitations and next steps</h4>
@@ -194,6 +225,7 @@ export function App({ dialogController: suppliedDialogController }: AppProps = {
   const [operationError, setOperationError] = useState<string | null>(null);
   const [executionCapabilities, setExecutionCapabilities] = useState<ExecutionCapabilities | null>(null);
   const [deviceQualification, setDeviceQualification] = useState<DeviceQualificationSnapshot | null>(null);
+  const [rootCheckPhase, setRootCheckPhase] = useState<"idle" | "checking">("idle");
   const [executionCapabilitiesRefresh, setExecutionCapabilitiesRefresh] = useState<
     "idle" | "refreshing" | "failed"
   >("idle");
@@ -232,6 +264,7 @@ export function App({ dialogController: suppliedDialogController }: AppProps = {
   const executionCapabilitiesRef = useRef<ExecutionCapabilities | null>(null);
   const devicePollGenerationRef = useRef(0);
   const deviceSelectionGenerationRef = useRef(0);
+  const rootCheckGenerationRef = useRef(0);
   const deviceRefreshTimerRef = useRef<number | null>(null);
   const manualDeviceRefreshRef = useRef(false);
   const initialWorkflowPresentationRef = useRef(false);
@@ -413,7 +446,7 @@ export function App({ dialogController: suppliedDialogController }: AppProps = {
       api.runtimeStatus(),
       api.adbStatus(),
       refreshExecutionCapabilities(true),
-      api.deviceQualification(),
+      api.deviceQualification(null),
     ]);
     if (runtimeGenerationRef.current !== runtimeGeneration) return;
     setRuntime(runtimeStatus);
@@ -1196,6 +1229,8 @@ export function App({ dialogController: suppliedDialogController }: AppProps = {
     executionCapabilitiesGenerationRef.current += 1;
     devicePollGenerationRef.current += 1;
     deviceSelectionGenerationRef.current += 1;
+    rootCheckGenerationRef.current += 1;
+    setRootCheckPhase("idle");
     supportGenerationRef.current += 1;
     if (deviceRefreshTimerRef.current !== null) {
       window.clearTimeout(deviceRefreshTimerRef.current);
@@ -1469,16 +1504,18 @@ export function App({ dialogController: suppliedDialogController }: AppProps = {
       announce("Refreshing connected devices.");
     }
     try {
-      const [next, qualification] = await Promise.all([
-        api.pollDevices(expectedSupportGeneration),
-        api.deviceQualification(),
-      ]);
+      const next = await api.pollDevices(expectedSupportGeneration);
+      const qualification = await api.deviceQualification(
+        next.length === 1 ? next[0].deviceHandle : null,
+      );
       if (
         devicePollGenerationRef.current !== generation
         || runtimeGenerationRef.current !== runtimeGeneration
       ) return null;
       setDevices(next);
       setDeviceQualification(qualification);
+      rootCheckGenerationRef.current += 1;
+      setRootCheckPhase("idle");
       const current = workflowRef.current;
       const selected = current.deviceHandle
         ? next.find((device) => device.deviceHandle === current.deviceHandle)
@@ -1531,6 +1568,37 @@ export function App({ dialogController: suppliedDialogController }: AppProps = {
     }
   }, [adb?.status, announce, runtime.status]);
 
+  const checkDeviceRoot = useCallback(async () => {
+    const candidate = devices.length === 1 && devices[0].state === "available"
+      ? devices[0].deviceHandle
+      : null;
+    if (!candidate || deviceQualification?.state !== "supported") return;
+    const checkGeneration = ++rootCheckGenerationRef.current;
+    const runtimeGeneration = runtimeGenerationRef.current;
+    const pollGeneration = devicePollGenerationRef.current;
+    setRootCheckPhase("checking");
+    try {
+      const result = await api.checkDeviceRoot(candidate);
+      if (
+        rootCheckGenerationRef.current !== checkGeneration
+        || devicePollGenerationRef.current !== pollGeneration
+        || runtimeGenerationRef.current !== runtimeGeneration
+        || result.deviceIdentity !== candidate
+      ) return;
+      setDeviceQualification((current) => current && current.deviceIdentity === candidate
+        ? { ...current, root: result.qualification }
+        : current);
+    } catch (error) {
+      if (
+        rootCheckGenerationRef.current === checkGeneration
+        && devicePollGenerationRef.current === pollGeneration
+        && runtimeGenerationRef.current === runtimeGeneration
+      ) setNotice(errorMessage(error));
+    } finally {
+      if (rootCheckGenerationRef.current === checkGeneration) setRootCheckPhase("idle");
+    }
+  }, [deviceQualification?.state, devices]);
+
   useEffect(() => {
     void pollDevices();
     const timer = window.setInterval(() => void pollDevices(), 2500);
@@ -1560,6 +1628,8 @@ export function App({ dialogController: suppliedDialogController }: AppProps = {
       ) return;
       devicePollGenerationRef.current += 1;
       deviceSelectionGenerationRef.current += 1;
+      rootCheckGenerationRef.current += 1;
+      setRootCheckPhase("idle");
       manualDeviceRefreshRef.current = false;
       setDeviceRefresh({ phase: "idle", generation: 0, message: null });
       setAdb(status);
@@ -1640,6 +1710,8 @@ export function App({ dialogController: suppliedDialogController }: AppProps = {
       ) return;
       devicePollGenerationRef.current += 1;
       deviceSelectionGenerationRef.current += 1;
+      rootCheckGenerationRef.current += 1;
+      setRootCheckPhase("idle");
       manualDeviceRefreshRef.current = false;
       setDeviceRefresh({ phase: "idle", generation: 0, message: null });
       setAdb(status);
@@ -1683,6 +1755,8 @@ export function App({ dialogController: suppliedDialogController }: AppProps = {
       if (confirmed !== true) return;
     }
     const generation = ++deviceSelectionGenerationRef.current;
+    rootCheckGenerationRef.current += 1;
+    setRootCheckPhase("idle");
     const runtimeGeneration = runtimeGenerationRef.current;
     dispatch({ type: "select-device", deviceHandle, preserveIntent: sameReconnect });
     setBusy(true);
@@ -2513,7 +2587,11 @@ export function App({ dialogController: suppliedDialogController }: AppProps = {
                   EmuChef detected {workflow.facts.manufacturer ?? "an Android"} {workflow.facts.model ?? "device"},
                   but no supported device-specific setup matches it.
                 </p>
-                <DeviceQualificationDetails qualification={deviceQualification} />
+                <DeviceQualificationDetails
+                  qualification={deviceQualification}
+                  rootCheckPhase={rootCheckPhase}
+                  onCheckRoot={() => void checkDeviceRoot()}
+                />
                 {workflow.match.safeGenericPlans.length > 0 ? (
                   <>
                     <label className="acknowledgment">
@@ -2554,7 +2632,11 @@ export function App({ dialogController: suppliedDialogController }: AppProps = {
                     ? "Unsupported device: choose one offered generic setup explicitly."
                     : "A supported device setup is available."}
                 </p>
-                <DeviceQualificationDetails qualification={deviceQualification} />
+                <DeviceQualificationDetails
+                  qualification={deviceQualification}
+                  rootCheckPhase={rootCheckPhase}
+                  onCheckRoot={() => void checkDeviceRoot()}
+                />
                 {savedPlanUnavailable && (
                   <p className="error">
                     The saved device plan reference is unavailable or incompatible with this current device.

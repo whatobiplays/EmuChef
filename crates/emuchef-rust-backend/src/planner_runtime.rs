@@ -68,6 +68,7 @@ pub(crate) fn plan_with_adb_runner<R: CommandRunner>(
         explicit_bindings: explicit_input_bindings,
         device_context: None,
         target_device: None,
+        runtime_capability_availability: None,
     })
     .map_err(configuration_context_error_output)?;
     let plan_id = format!("plan.{}.001", prepared.effective_device_plan);

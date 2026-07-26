@@ -2,6 +2,7 @@ use std::fmt;
 use std::io;
 use std::path::Path;
 use std::process::Command;
+use std::time::Duration;
 
 #[cfg(test)]
 use std::collections::VecDeque;
@@ -18,6 +19,7 @@ pub struct AdbCommandResult {
 pub enum AdbCommandError {
     Resolution(String),
     CommandFailed(AdbCommandResult),
+    TimedOut { args: Vec<String> },
     InvalidPlanCommand(String),
 }
 
@@ -39,12 +41,23 @@ impl fmt::Display for AdbCommandError {
                 }
                 Ok(())
             }
+            AdbCommandError::TimedOut { args } => {
+                write!(formatter, "ADB command timed out: {}", args.join(" "))
+            }
         }
     }
 }
 
 pub trait AdbCommandExecutor: fmt::Debug {
     fn run(&mut self, args: &[String]) -> Result<AdbCommandResult, AdbCommandError>;
+
+    fn run_with_timeout(
+        &mut self,
+        args: &[String],
+        _timeout: Duration,
+    ) -> Result<AdbCommandResult, AdbCommandError> {
+        self.run(args)
+    }
 }
 
 #[derive(Debug, Default)]
@@ -66,6 +79,188 @@ impl AdbCommandExecutor for ProcessAdbCommandExecutor {
             stderr: String::from_utf8_lossy(&output.stderr).into_owned(),
         })
     }
+
+    fn run_with_timeout(
+        &mut self,
+        args: &[String],
+        timeout: Duration,
+    ) -> Result<AdbCommandResult, AdbCommandError> {
+        use std::process::Stdio;
+        use wait_timeout::ChildExt;
+
+        let executable = args.first().ok_or_else(|| {
+            AdbCommandError::InvalidPlanCommand("ADB command must not be empty.".to_string())
+        })?;
+        let mut child = Command::new(executable)
+            .args(args.iter().skip(1))
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .map_err(map_command_spawn_error)?;
+        if child
+            .wait_timeout(timeout)
+            .map_err(|error| {
+                AdbCommandError::Resolution(format!("ADB process wait failed: {error}"))
+            })?
+            .is_none()
+        {
+            let _ = child.kill();
+            let _ = child.wait();
+            return Err(AdbCommandError::TimedOut {
+                args: args.to_vec(),
+            });
+        }
+        let output = child.wait_with_output().map_err(|error| {
+            AdbCommandError::Resolution(format!("ADB output could not be read: {error}"))
+        })?;
+        Ok(AdbCommandResult {
+            args: args.to_vec(),
+            returncode: output.status.code().unwrap_or(-1),
+            stdout: String::from_utf8_lossy(&output.stdout).into_owned(),
+            stderr: String::from_utf8_lossy(&output.stderr).into_owned(),
+        })
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum RootProbeOutcome {
+    Granted,
+    Denied,
+    Unavailable,
+    CheckFailed {
+        reason: RootProbeFailureReason,
+        message: &'static str,
+    },
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum RootProbeFailureReason {
+    TimedOut,
+    Transport,
+    UnexpectedResponse,
+}
+
+impl RootProbeOutcome {
+    pub fn status_json(&self) -> serde_json::Value {
+        match self {
+            Self::Granted => serde_json::json!({ "status": "granted" }),
+            Self::Denied => serde_json::json!({ "status": "denied" }),
+            Self::Unavailable => serde_json::json!({ "status": "unavailable" }),
+            Self::CheckFailed { reason, message } => serde_json::json!({
+                "status": "checkFailed",
+                "reason": match reason {
+                    RootProbeFailureReason::TimedOut => "timedOut",
+                    RootProbeFailureReason::Transport => "transport",
+                    RootProbeFailureReason::UnexpectedResponse => "unexpectedResponse",
+                },
+                "message": message,
+            }),
+        }
+    }
+}
+
+pub fn probe_root<E: AdbCommandExecutor>(
+    executor: &mut E,
+    adb_path: &str,
+    serial: &str,
+    timeout: Duration,
+) -> RootProbeOutcome {
+    let args = vec![
+        adb_path.to_string(),
+        "-s".to_string(),
+        serial.to_string(),
+        "shell".to_string(),
+        "su".to_string(),
+        "-c".to_string(),
+        "id".to_string(),
+    ];
+    let result = match executor.run_with_timeout(&args, timeout) {
+        Ok(result) => result,
+        Err(AdbCommandError::TimedOut { .. }) => {
+            return RootProbeOutcome::CheckFailed {
+                reason: RootProbeFailureReason::TimedOut,
+                message: "Root authorization timed out. Try again.",
+            }
+        }
+        Err(error) => {
+            let message = error.to_string();
+            if is_transport_failure(&message) {
+                return RootProbeOutcome::CheckFailed {
+                    reason: RootProbeFailureReason::Transport,
+                    message: "The device connection failed during the root access check.",
+                };
+            }
+            return RootProbeOutcome::CheckFailed {
+                reason: RootProbeFailureReason::UnexpectedResponse,
+                message: "The root access check could not be completed.",
+            };
+        }
+    };
+    if result.returncode == 0 {
+        let normalized = result.stdout.trim().to_ascii_lowercase();
+        if normalized.starts_with("uid=0(") || normalized.starts_with("uid=0 ") {
+            return RootProbeOutcome::Granted;
+        }
+        return RootProbeOutcome::CheckFailed {
+            reason: RootProbeFailureReason::UnexpectedResponse,
+            message: "The root access check returned an unexpected response.",
+        };
+    }
+    let combined = format!("{}\n{}", result.stdout, result.stderr);
+    let lower = combined.to_ascii_lowercase();
+    if is_transport_failure(&lower) {
+        RootProbeOutcome::CheckFailed {
+            reason: RootProbeFailureReason::Transport,
+            message: "The device connection failed during the root access check.",
+        }
+    } else if is_unavailable_root(&lower) {
+        RootProbeOutcome::Unavailable
+    } else if is_denied_root(&lower) {
+        RootProbeOutcome::Denied
+    } else {
+        RootProbeOutcome::CheckFailed {
+            reason: RootProbeFailureReason::UnexpectedResponse,
+            message: "The root access check returned an unexpected response.",
+        }
+    }
+}
+
+fn is_transport_failure(text: &str) -> bool {
+    [
+        "device not found",
+        "no devices/emulators found",
+        "no devices found",
+        "device offline",
+        "device unauthorized",
+        "cannot connect",
+        "failed to connect",
+        "transport error",
+        "transport id",
+    ]
+    .iter()
+    .any(|marker| text.to_ascii_lowercase().contains(marker))
+}
+
+fn is_unavailable_root(text: &str) -> bool {
+    [
+        "su: not found",
+        "su: inaccessible",
+        "command not found",
+        "no such file or directory",
+    ]
+    .iter()
+    .any(|marker| text.contains(marker))
+}
+
+fn is_denied_root(text: &str) -> bool {
+    [
+        "permission denied",
+        "not permitted",
+        "operation not permitted",
+        "access denied",
+    ]
+    .iter()
+    .any(|marker| text.contains(marker))
 }
 
 #[derive(Debug)]
@@ -178,6 +373,27 @@ impl<E: AdbCommandExecutor> RealAdbDevice<E> {
     #[cfg(test)]
     pub fn command_executor(&self) -> &E {
         self.runner.executor()
+    }
+
+    pub fn check_root(&mut self) -> Result<(), String> {
+        let serial = self
+            .runner
+            .serial
+            .as_deref()
+            .ok_or_else(|| "Root access requires a selected device.".to_string())?;
+        match probe_root(
+            &mut self.runner.executor,
+            &self.runner.executable,
+            serial,
+            Duration::from_secs(30),
+        ) {
+            RootProbeOutcome::Granted => Ok(()),
+            RootProbeOutcome::Denied => Err("Root access was denied by the device.".to_string()),
+            RootProbeOutcome::Unavailable => {
+                Err("Root access is unavailable on this device.".to_string())
+            }
+            RootProbeOutcome::CheckFailed { message, .. } => Err(message.to_string()),
+        }
     }
 
     pub fn install_apk(&mut self, apk_path: &Path, replace_existing: bool) -> Result<(), String> {
@@ -421,6 +637,7 @@ enum FakeAdbResponse {
         stderr: String,
     },
     MissingBinary,
+    TimedOut,
 }
 
 #[cfg(test)]
@@ -439,6 +656,10 @@ impl FakeAdbCommandExecutor {
 
     pub fn push_missing_binary(&mut self) {
         self.responses.push_back(FakeAdbResponse::MissingBinary);
+    }
+
+    pub fn push_timed_out(&mut self) {
+        self.responses.push_back(FakeAdbResponse::TimedOut);
     }
 }
 
@@ -460,6 +681,9 @@ impl AdbCommandExecutor for FakeAdbCommandExecutor {
             Some(FakeAdbResponse::MissingBinary) => {
                 Err(AdbCommandError::Resolution(adb_not_found_message()))
             }
+            Some(FakeAdbResponse::TimedOut) => Err(AdbCommandError::TimedOut {
+                args: args.to_vec(),
+            }),
             None => Ok(AdbCommandResult {
                 args: args.to_vec(),
                 returncode: 0,
@@ -540,4 +764,96 @@ fn list_repr(values: &[String]) -> String {
         .collect::<Vec<_>>()
         .join(", ");
     format!("[{items}]")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn probe_with(
+        response: impl FnOnce(&mut FakeAdbCommandExecutor),
+    ) -> (RootProbeOutcome, Vec<Vec<String>>) {
+        let mut executor = FakeAdbCommandExecutor::default();
+        response(&mut executor);
+        let outcome = probe_root(
+            &mut executor,
+            "/managed/platform-tools/adb",
+            "opaque-serial",
+            Duration::from_secs(30),
+        );
+        (outcome, executor.calls().to_vec())
+    }
+
+    #[test]
+    fn root_probe_uses_exact_serialized_su_id_command_and_grants_uid_zero() {
+        let (outcome, calls) = probe_with(|executor| {
+            executor.push_completed(0, "uid=0(root) gid=0(root) groups=0(root)\n", "");
+        });
+        assert_eq!(outcome, RootProbeOutcome::Granted);
+        assert_eq!(
+            calls,
+            vec![vec![
+                "/managed/platform-tools/adb",
+                "-s",
+                "opaque-serial",
+                "shell",
+                "su",
+                "-c",
+                "id",
+            ]]
+        );
+    }
+
+    #[test]
+    fn root_probe_preserves_completed_shell_classifications() {
+        let (denied, _) =
+            probe_with(|executor| executor.push_completed(1, "", "Permission denied"));
+        assert_eq!(denied, RootProbeOutcome::Denied);
+        let (unavailable, _) =
+            probe_with(|executor| executor.push_completed(1, "", "su: not found"));
+        assert_eq!(unavailable, RootProbeOutcome::Unavailable);
+        let (unexpected, _) =
+            probe_with(|executor| executor.push_completed(1, "shell failed", "bad response"));
+        assert!(matches!(
+            unexpected,
+            RootProbeOutcome::CheckFailed {
+                reason: RootProbeFailureReason::UnexpectedResponse,
+                ..
+            }
+        ));
+    }
+
+    #[test]
+    fn root_probe_classifies_only_recognized_transport_failures_as_transport() {
+        let (transport, _) =
+            probe_with(|executor| executor.push_completed(1, "", "device offline"));
+        assert!(matches!(
+            transport,
+            RootProbeOutcome::CheckFailed {
+                reason: RootProbeFailureReason::Transport,
+                ..
+            }
+        ));
+        let (missing_adb, _) = probe_with(|executor| executor.push_missing_binary());
+        assert!(matches!(
+            missing_adb,
+            RootProbeOutcome::CheckFailed {
+                reason: RootProbeFailureReason::UnexpectedResponse,
+                ..
+            }
+        ));
+    }
+
+    #[test]
+    fn root_probe_classifies_timeout_without_running_followup_commands() {
+        let (outcome, calls) = probe_with(|executor| executor.push_timed_out());
+        assert!(matches!(
+            outcome,
+            RootProbeOutcome::CheckFailed {
+                reason: RootProbeFailureReason::TimedOut,
+                ..
+            }
+        ));
+        assert_eq!(calls.len(), 1);
+    }
 }

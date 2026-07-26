@@ -489,17 +489,20 @@ test("device qualification is backend-authored, sanitized, and non-authorizing",
 
   assert.match(app, /mod device_qualification;/);
   assert.match(app, /device_qualification::get_device_qualification,/);
+  assert.match(app, /device_qualification::check_device_root,/);
   assert.match(
     qualificationApi,
-    /invoke<DeviceQualificationSnapshot>\("get_device_qualification"\)/,
+    /invoke<DeviceQualificationSnapshot>\("get_device_qualification", \{ deviceHandle \}\)/,
   );
   assert.doesNotMatch(
     qualificationApi,
-    /\b(?:serial|adbPath|deviceHandle|command|root|plan|reviewHandle|executionHandle)\b/,
+    /\b(?:serial|adbPath|command|plan|reviewHandle|executionHandle)\b/,
   );
-  assert.match(types, /readonly root: "notChecked";/);
+  assert.match(types, /readonly root: RootQualification \| null;/);
   assert.doesNotMatch(types, /interface DeviceQualificationSnapshot[\s\S]{0,900}\bserial\b/i);
-  assert.match(qualification, /RootQualificationState::NotChecked/);
+  assert.match(qualification, /RootQualificationState::CheckFailed/);
+  assert.match(qualification, /RootQualificationFailureReason::UnexpectedResponse/);
+  assert.match(qualification, /"checkRoot"/);
   assert.match(qualification, /devices\.len\(\) != 1/);
   assert.doesNotMatch(qualification, /Command::new|std::process|listAdbDevices|probeDevice|startExecution/);
   assert.doesNotMatch(execution, /DeviceQualificationSnapshotDto|qualification_revision/);

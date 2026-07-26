@@ -1019,6 +1019,7 @@ dependencies = [
  "tempfile",
  "time",
  "url",
+ "wait-timeout",
  "zip 8.6.0",
 ]
 

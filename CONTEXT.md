@@ -998,12 +998,39 @@ runtime smokes, and never submits, staples, uploads, or publishes artifacts.
 
 ## Phase 6B device qualification contract
 
-Phase 6B Slice 1 adds a separate Rust-owned, read-only device qualification
-projection. The classifier distinguishes feature-disabled, absent,
+Phase 6B device qualification is a Rust-owned projection keyed by an opaque
+session device handle. React receives no resolved ADB serial and uses only the
+opaque handle, runtime generation, and qualification revision for stale-result
+guards. Passive qualification distinguishes feature-disabled, absent,
 unauthorized, offline, ambiguous, unsupported, incompletely qualified, and
-initially supported states using sanitized normalized facts. Root remains
-explicitly `notChecked`; multiple devices never produce an implicitly selected
-target. Snapshots carry runtime-generation and qualification-revision fields so
-later live discovery can invalidate stale authority. This slice does not run
-ADB qualification commands, persist qualification, change execution
-eligibility, or authorize real execution.
+supported states using sanitized normalized facts; multiple devices never
+produce an implicitly selected target.
+
+Root qualification is an explicit user action. The native command resolves the
+selected handle to its current trusted serial and asks the sidecar to run the
+bounded probe `adb -s <serial> shell su -c id` with a 30-second timeout. Its
+sanitized result is one of `granted`, `denied`, `unavailable`, or
+`checkFailed` with `timedOut`, `transport`, or `unexpectedResponse`. Only
+recognized ADB/device transport failures use the `transport` reason; completed
+shell failures use the unavailable, denied, or unexpected-response rules.
+Results are held in an in-memory native store bound to the handle, runtime
+generation, and Platform-Tools revision. A root result change invalidates
+reviews and capability-dependent configuration projections. Polling removes
+cached evidence whose device, runtime, availability, or Platform-Tools context
+no longer matches; the removed opaque handle is used to stale only reviews
+planned with that evidence. A failed prerequisite is resolved before a root
+check is reserved, so it cannot leave a check permanently in flight.
+
+Real execution performs one lazy root preflight before any root-capable step,
+app-private skip check, app-private read/write, or app-private verification.
+The outcome is cached for the run; a failed preflight aborts later steps before
+any privileged operation. Ordinary simulation and ordinary development/build
+scripts remain unaffected. Automated tests cover the protocol, projection,
+classification, single-flight/stale behavior, capability masking, and
+executor guard. Physical-device, packaged-GUI, signing, notarization, and
+release qualification are not implied by those tests.
+
+Host input binding validation reports a missing-path diagnostic only when host
+metadata cannot be read; an existing path of the wrong kind reports a kind
+mismatch, and an existing path of the expected kind is accepted. This keeps
+configuration planning usable for the root-capability review gate.

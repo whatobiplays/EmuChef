@@ -14,6 +14,7 @@ const REQUIRED_CAPABILITIES: &[&str] = &[
     "listAdbDevices",
     "probeDevice",
     "qualifyDevice",
+    "checkRoot",
     "matchDevice",
     "describeConfiguration",
     "planConfiguration",
@@ -421,6 +422,7 @@ mod tests {
                 "listAdbDevices",
                 "probeDevice",
                 "qualifyDevice",
+                "checkRoot",
                 "matchDevice",
                 "describeConfiguration",
                 "planConfiguration",
@@ -453,7 +455,7 @@ mod tests {
         );
         assert_eq!(
             payload["requiredCapabilities"].as_array().unwrap().len(),
-            23
+            24
         );
         assert_eq!(payload["optionalCapabilities"], json!([]));
         assert!(payload.get("required").is_none());
@@ -467,7 +469,7 @@ mod tests {
                 .as_array()
                 .unwrap()
                 .len(),
-            23
+            24
         );
 
         let mut missing_execution = payload;

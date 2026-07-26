@@ -164,6 +164,70 @@ fn sandbox_adapters(
 }
 
 #[test]
+fn root_preflight_runs_once_before_root_steps_and_allows_followup_steps() {
+    let mut first = wait_step("root-one", "Root one", 1);
+    first.constraints.capabilities = vec!["root_shell".to_string()];
+    let mut second = wait_step("root-two", "Root two", 1);
+    second.constraints.capabilities = vec!["app_data_write".to_string()];
+    let mut runner = ExecutorRunner::new(DryRunExecutorAdapters::default());
+    let result = runner.run(&plan(vec![first, second]));
+    assert!(result.success);
+    assert_eq!(runner.adapters().device().root_preflight_calls(), 1);
+}
+
+#[test]
+fn failed_root_preflight_aborts_root_steps_without_privileged_conditions_or_later_mutation() {
+    let mut device = crate::executor::FakeDryRunDevice::default();
+    device.set_root_preflight_result(Err("root access denied".to_string()));
+    let mut guarded = wait_step("guarded", "Guarded", 1);
+    guarded.constraints.capabilities = vec!["root_shell".to_string()];
+    guarded.skip_if = vec![condition(
+        "path_exists",
+        json!({ "path": "/data/data/com.example/app" }),
+    )];
+    let later = wait_step("later", "Later", 1);
+    let mut runner = ExecutorRunner::new(ExecutorAdapters::with_device(device));
+    let result = runner.run(&plan(vec![guarded, later]));
+    assert!(!result.success);
+    assert_eq!(
+        result.steps[0].status,
+        crate::executor::StepRunStatus::Failed
+    );
+    assert_eq!(
+        result.steps[1].status,
+        crate::executor::StepRunStatus::Blocked
+    );
+    assert_eq!(runner.adapters().device().root_preflight_calls(), 1);
+    assert_eq!(
+        runner.adapters().device().commands(),
+        &[vec!["root_preflight".to_string()]]
+    );
+}
+
+#[test]
+fn app_private_skip_and_verification_preflight_before_any_device_read() {
+    let mut device = crate::executor::FakeDryRunDevice::default();
+    device.set_root_preflight_result(Err("root access denied".to_string()));
+    let mut guarded = wait_step("guarded", "Guarded", 1);
+    guarded.skip_if = vec![condition(
+        "path_exists",
+        json!({ "path": "/data/data/com.example/app" }),
+    )];
+    guarded.verify = vec![condition(
+        "path_exists",
+        json!({ "path": "/data/data/com.example/app" }),
+    )];
+    let mut runner = ExecutorRunner::new(ExecutorAdapters::with_device(device));
+    let result = runner.run(&plan(vec![guarded]));
+    assert!(!result.success);
+    assert_eq!(runner.adapters().device().root_preflight_calls(), 1);
+    assert_eq!(
+        runner.adapters().device().commands(),
+        &[vec!["root_preflight".to_string()]]
+    );
+}
+
+#[test]
 fn planned_rom_copy_input_refs_resolve_to_typed_executor_values() {
     let tmp = tempfile::tempdir().expect("runtime configuration temp root should be created");
     let source = tmp.path().join("roms");

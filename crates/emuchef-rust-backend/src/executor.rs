@@ -91,6 +91,10 @@ pub struct ExecutionProgressEvent {
 }
 
 pub trait ExecutorDevice: std::fmt::Debug {
+    fn revalidate_root(&mut self) -> Result<(), String> {
+        Ok(())
+    }
+
     fn uses_fake_device_filesystem(&self) -> bool {
         false
     }
@@ -118,19 +122,27 @@ pub trait ExecutorDevice: std::fmt::Debug {
 #[derive(Debug)]
 pub struct ExecutorRunner<D: ExecutorDevice = FakeDryRunDevice> {
     adapters: ExecutorAdapters<D>,
+    root_preflight: RootPreflightState,
+    root_preflight_failure: Option<String>,
 }
 
 impl Default for ExecutorRunner<FakeDryRunDevice> {
     fn default() -> Self {
         Self {
             adapters: ExecutorAdapters::default(),
+            root_preflight: RootPreflightState::NotRun,
+            root_preflight_failure: None,
         }
     }
 }
 
 impl<D: ExecutorDevice> ExecutorRunner<D> {
     pub fn new(adapters: ExecutorAdapters<D>) -> Self {
-        Self { adapters }
+        Self {
+            adapters,
+            root_preflight: RootPreflightState::NotRun,
+            root_preflight_failure: None,
+        }
     }
 
     #[cfg(test)]
@@ -172,8 +184,21 @@ impl<D: ExecutorDevice> ExecutorRunner<D> {
         let mut state = ExecutionState::from_plan(plan);
         let mut records = Vec::new();
         let mut cancelled = false;
+        let mut aborted = false;
+        self.root_preflight = RootPreflightState::NotRun;
+        self.root_preflight_failure = None;
 
         for step in &plan.steps {
+            if aborted {
+                let message = "execution aborted after root preflight failure".to_string();
+                records.push(record(
+                    step,
+                    StepRunStatus::Blocked,
+                    Some(message),
+                    OrderedMap::new(),
+                ));
+                continue;
+            }
             if cancelled || should_cancel() {
                 cancelled = true;
                 let message = "execution cancelled before step scheduling".to_string();
@@ -252,6 +277,36 @@ impl<D: ExecutorDevice> ExecutorRunner<D> {
                     OrderedMap::new(),
                 ));
                 continue;
+            }
+
+            if step_requires_root(step) {
+                if let Err(failure) = self.ensure_root_preflight() {
+                    let message = failure.message;
+                    self.root_preflight_failure = Some(message.clone());
+                    state.steps.insert(
+                        step.id.clone(),
+                        StepRuntimeState {
+                            status: StepRuntimeStatus::Failed,
+                            outputs: OrderedMap::new(),
+                        },
+                    );
+                    progress_callback(progress_event(
+                        step,
+                        total_steps,
+                        plan,
+                        ProgressPhase::Finished,
+                        Some(ProgressStatus::Failed),
+                        Some(message.clone()),
+                    ));
+                    records.push(record(
+                        step,
+                        StepRunStatus::Failed,
+                        Some(message),
+                        OrderedMap::new(),
+                    ));
+                    aborted = true;
+                    continue;
+                }
             }
 
             let active_conflicts = step
@@ -335,6 +390,9 @@ impl<D: ExecutorDevice> ExecutorRunner<D> {
                         Some(message),
                         OrderedMap::new(),
                     ));
+                    if self.root_preflight_failure.is_some() {
+                        aborted = true;
+                    }
                     continue;
                 }
             }
@@ -419,6 +477,9 @@ impl<D: ExecutorDevice> ExecutorRunner<D> {
                 message.clone(),
             ));
             records.push(record(step, status, message, outputs));
+            if self.root_preflight_failure.is_some() {
+                aborted = true;
+            }
         }
 
         let success = !records.iter().any(|record| {
@@ -443,6 +504,27 @@ impl<D: ExecutorDevice> ExecutorRunner<D> {
                 self.evaluate_condition(condition)
             }
         })
+    }
+
+    fn ensure_root_preflight(&mut self) -> Result<(), StepFailure> {
+        match &self.root_preflight {
+            RootPreflightState::Granted => return Ok(()),
+            RootPreflightState::Failed(message) => {
+                return Err(StepFailure::new(message.clone()));
+            }
+            RootPreflightState::NotRun => {}
+        }
+        match self.adapters.device.revalidate_root() {
+            Ok(()) => {
+                self.root_preflight = RootPreflightState::Granted;
+                Ok(())
+            }
+            Err(message) => {
+                self.root_preflight = RootPreflightState::Failed(message.clone());
+                self.root_preflight_failure = Some(message.clone());
+                Err(StepFailure::new(message))
+            }
+        }
     }
 
     fn run_step(
@@ -960,6 +1042,14 @@ impl<D: ExecutorDevice> ExecutorRunner<D> {
         }
         let sandbox = self.adapters.sandbox()?.clone();
         let app_private_dest = is_app_private_path(dest);
+        let app_private_source = source
+            .location
+            .as_deref()
+            .is_some_and(|location| location == "device")
+            && is_app_private_path(&value_to_string(&source.value));
+        if app_private_dest || app_private_source {
+            self.ensure_root_preflight()?;
+        }
         if app_private_dest
             && !(plan.runtime_capabilities.app_data_write && plan.runtime_capabilities.root_shell)
         {
@@ -1129,6 +1219,10 @@ impl<D: ExecutorDevice> ExecutorRunner<D> {
             }
             "path_exists" => {
                 let path = required_string_param(condition, "path")?;
+                if is_app_private_path(&path) {
+                    self.ensure_root_preflight()
+                        .map_err(|failure| failure.message)?;
+                }
                 let device_exists = self.adapters.device.path_exists(&path)?;
                 if !self.adapters.device.uses_fake_device_filesystem() {
                     return Ok(device_exists);
@@ -1143,6 +1237,10 @@ impl<D: ExecutorDevice> ExecutorRunner<D> {
             }
             "file_exists" => {
                 let path = required_string_param(condition, "path")?;
+                if is_app_private_path(&path) {
+                    self.ensure_root_preflight()
+                        .map_err(|failure| failure.message)?;
+                }
                 let device_exists = self.adapters.device.path_exists(&path)?;
                 let device_is_dir = self.adapters.device.path_is_dir(&path)?;
                 if !self.adapters.device.uses_fake_device_filesystem() {
@@ -1178,6 +1276,33 @@ fn calculate_apk_sha256(path: &Path) -> io::Result<String> {
         .iter()
         .map(|byte| format!("{byte:02X}"))
         .collect())
+}
+
+fn step_requires_root(step: &ExecutionStep) -> bool {
+    step.constraints
+        .capabilities
+        .iter()
+        .any(|capability| matches!(capability.as_str(), "root_shell" | "app_data_write"))
+        || step
+            .skip_if
+            .iter()
+            .chain(step.verify.iter())
+            .any(condition_requires_root)
+        || (step.type_name == "copy_files"
+            && step.params.get("dest").is_some_and(|value| {
+                matches!(value, ExecutionParamValue::Literal { value } if value
+                    .as_str()
+                    .is_some_and(is_app_private_path))
+            }))
+}
+
+fn condition_requires_root(condition: &ExecutionStepCondition) -> bool {
+    matches!(condition.type_name.as_str(), "path_exists" | "file_exists")
+        && condition
+            .params
+            .get("path")
+            .and_then(Value::as_str)
+            .is_some_and(is_app_private_path)
 }
 
 fn remote_release_outputs(
@@ -1614,6 +1739,8 @@ pub struct FakeDryRunDevice {
     install_failures: HashMap<(String, bool), String>,
     launch_failures: HashMap<(String, String), String>,
     force_stop_failures: HashMap<String, String>,
+    root_preflight_result: Option<Result<(), String>>,
+    root_preflight_calls: usize,
 }
 
 impl FakeDryRunDevice {
@@ -1635,6 +1762,16 @@ impl FakeDryRunDevice {
     #[cfg(test)]
     pub fn commands(&self) -> &[Vec<String>] {
         &self.commands
+    }
+
+    #[cfg(test)]
+    pub fn set_root_preflight_result(&mut self, result: Result<(), String>) {
+        self.root_preflight_result = Some(result);
+    }
+
+    #[cfg(test)]
+    pub fn root_preflight_calls(&self) -> usize {
+        self.root_preflight_calls
     }
 
     #[cfg(test)]
@@ -1728,6 +1865,12 @@ impl FakeDryRunDevice {
 }
 
 impl ExecutorDevice for FakeDryRunDevice {
+    fn revalidate_root(&mut self) -> Result<(), String> {
+        self.root_preflight_calls = self.root_preflight_calls.saturating_add(1);
+        self.commands.push(vec!["root_preflight".to_string()]);
+        self.root_preflight_result.clone().unwrap_or(Ok(()))
+    }
+
     fn uses_fake_device_filesystem(&self) -> bool {
         true
     }
@@ -1823,6 +1966,10 @@ impl ExecutorDevice for FakeDryRunDevice {
 }
 
 impl<E: adb::AdbCommandExecutor> ExecutorDevice for adb::RealAdbDevice<E> {
+    fn revalidate_root(&mut self) -> Result<(), String> {
+        adb::RealAdbDevice::check_root(self)
+    }
+
     fn install_apk(&mut self, apk_path: &Path, replace_existing: bool) -> Result<(), String> {
         adb::RealAdbDevice::install_apk(self, apk_path, replace_existing)
     }
@@ -2250,6 +2397,13 @@ struct ArtifactRuntimeState {
 pub(crate) struct StepFailure {
     pub(crate) message: String,
     outputs: OrderedMap<RuntimeValue>,
+}
+
+#[derive(Clone, Debug)]
+enum RootPreflightState {
+    NotRun,
+    Granted,
+    Failed(String),
 }
 
 impl StepFailure {
