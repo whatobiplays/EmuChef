@@ -4,6 +4,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use emuchef_rust_backend::{jsonl, run_with_args_and_input};
 use serde_json::{json, Value};
+use tempfile::TempDir;
 
 fn fixture_path(name: &str) -> String {
     Path::new(env!("CARGO_MANIFEST_DIR"))
@@ -50,30 +51,20 @@ fn sidecar_response(request: Value) -> Value {
 }
 
 struct TempRecipe {
-    dir: PathBuf,
+    dir: TempDir,
     path: PathBuf,
 }
 
 impl TempRecipe {
     fn copy_fixture(name: &str) -> Self {
-        let unique = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .expect("system clock should be after epoch")
-            .as_nanos();
-        let dir = std::env::temp_dir().join(format!(
-            "emuchef-rust-backend-phase6f-{}-{unique}",
-            std::process::id()
-        ));
-        fs::create_dir_all(&dir).expect("temp directory should be created");
-        let path = dir.join(name);
+        let dir = tempfile::tempdir().expect("temp directory should be created");
+        let path = dir.path().join(name);
         fs::copy(fixture_path(name), &path).expect("fixture should copy to temp path");
         Self { dir, path }
     }
-}
 
-impl Drop for TempRecipe {
-    fn drop(&mut self) {
-        let _ = fs::remove_dir_all(&self.dir);
+    fn dir(&self) -> &Path {
+        self.dir.path()
     }
 }
 
@@ -123,7 +114,7 @@ fn one_shot_session_requests_are_not_exposed() {
 fn save_recipe_as_writes_target_updates_path_and_preserves_history() {
     let temp_recipe = TempRecipe::copy_fixture("minimal_recipe.yaml");
     let original_source = fs::read_to_string(&temp_recipe.path).expect("source should be readable");
-    let save_as_path = temp_recipe.dir.join("saved_as.yaml");
+    let save_as_path = temp_recipe.dir().join("saved_as.yaml");
     let input = format!(
         "{}\n{}\n{}\n{}\n{}\n",
         json!({
@@ -228,12 +219,12 @@ fn save_recipe_as_validates_payload_and_unknown_documents() {
         json!({
             "id": "missing-document-id",
             "type": "saveRecipeAs",
-            "payload": {"path": temp_recipe.dir.join("ignored.yaml")}
+            "payload": {"path": temp_recipe.dir().join("ignored.yaml")}
         }),
         json!({
             "id": "wrong-document-id",
             "type": "saveRecipeAs",
-            "payload": {"documentId": 123, "path": temp_recipe.dir.join("ignored.yaml")}
+            "payload": {"documentId": 123, "path": temp_recipe.dir().join("ignored.yaml")}
         }),
         json!({
             "id": "missing-path",
@@ -253,7 +244,7 @@ fn save_recipe_as_validates_payload_and_unknown_documents() {
         json!({
             "id": "unknown-document",
             "type": "saveRecipeAs",
-            "payload": {"documentId": "missing-document", "path": temp_recipe.dir.join("ignored.yaml")}
+            "payload": {"documentId": "missing-document", "path": temp_recipe.dir().join("ignored.yaml")}
         }),
     );
 
@@ -274,7 +265,7 @@ fn save_recipe_as_validates_payload_and_unknown_documents() {
 fn save_recipe_as_missing_parent_does_not_create_dirs_or_mutate_session() {
     let temp_recipe = TempRecipe::copy_fixture("minimal_recipe.yaml");
     let original_path = temp_recipe.path.canonicalize().unwrap();
-    let missing_parent = temp_recipe.dir.join("missing").join("parent");
+    let missing_parent = temp_recipe.dir().join("missing").join("parent");
     let save_as_path = missing_parent.join("saved.yaml");
     let input = format!(
         "{}\n{}\n{}\n{}\n{}\n",
