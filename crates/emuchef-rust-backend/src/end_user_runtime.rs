@@ -253,7 +253,7 @@ fn probe_storage(adb_path: &str, serial: &str, runner: &impl CommandRunner) -> &
         &[
             "sh",
             "-c",
-            "test -d /sdcard && test -w /sdcard && df -k /sdcard",
+            "'test -w /sdcard && df -k /sdcard'",
         ],
     );
     match runner.run_bounded(&argv, PASSIVE_PROBE_TIMEOUT) {
@@ -343,7 +343,15 @@ fn cmd_interface_is_unavailable(output: &CommandOutput) -> bool {
 fn storage_output_is_valid(stdout: &str) -> bool {
     stdout.lines().any(|line| {
         let fields = line.split_whitespace().collect::<Vec<_>>();
-        fields.len() >= 6 && fields.last() == Some(&"/sdcard")
+        fields.len() >= 6
+            && fields[1].parse::<u64>().is_ok()
+            && fields[2].parse::<u64>().is_ok()
+            && fields[3].parse::<u64>().is_ok()
+            && fields[4]
+                .strip_suffix('%')
+                .and_then(|value| value.parse::<u8>().ok())
+                .is_some_and(|value| value <= 100)
+            && fields[5].starts_with('/')
     })
 }
 
@@ -839,6 +847,102 @@ mod tests {
     }
 
     #[test]
+    fn storage_output_accepts_resolved_emulated_storage_mount() {
+        let stdout = "Filesystem     1K-blocks    Used Available Use% Mounted on\n/dev/fuse       52232748 2533940  49551352   5% /storage/emulated\n";
+
+        assert!(storage_output_is_valid(stdout));
+    }
+
+    #[test]
+    fn qualification_accepts_storage_emulated_mount_reported_for_sdcard() {
+        let runner = SequenceRunner {
+            calls: RefCell::new(Vec::new()),
+            outputs: RefCell::new(vec![
+                CommandOutput {
+                    status_code: Some(0),
+                    stdout: "List of devices attached\nsecret-serial device model:Pocket\n"
+                        .to_string(),
+                    stderr: String::new(),
+                },
+                CommandOutput {
+                    status_code: Some(0),
+                    stdout: "[ro.build.version.release]: [14]\n[ro.build.version.sdk]: [34]\n[ro.product.cpu.abilist]: [arm64-v8a,armeabi-v7a]\n"
+                        .to_string(),
+                    stderr: String::new(),
+                },
+                CommandOutput {
+                    status_code: Some(0),
+                    stdout: "Filesystem     1K-blocks    Used Available Use% Mounted on\n/dev/fuse       52232748 2534032  49551260   5% /storage/emulated\n"
+                        .to_string(),
+                    stderr: String::new(),
+                },
+                CommandOutput {
+                    status_code: Some(0),
+                    stdout: "package:/system/framework/framework-res.apk\n".to_string(),
+                    stderr: String::new(),
+                },
+                CommandOutput {
+                    status_code: Some(0),
+                    stdout: "config\n".to_string(),
+                    stderr: String::new(),
+                },
+            ]),
+        };
+
+        let result = qualify_device_with_runner("/managed/adb", "secret-serial", &runner).unwrap();
+
+        assert_eq!(result["state"], "online");
+        assert_eq!(result["storage"], "available");
+        assert_eq!(
+            runner.calls.borrow()[2],
+            vec![
+                "/managed/adb",
+                "-s",
+                "secret-serial",
+                "shell",
+                "sh",
+                "-c",
+                "'test -w /sdcard && df -k /sdcard'",
+            ]
+        );
+    }
+
+    #[test]
+    fn storage_output_rejects_header_only_output() {
+        let stdout = "Filesystem 1K-blocks Used Available Use% Mounted on\n";
+
+        assert!(!storage_output_is_valid(stdout));
+    }
+
+    #[test]
+    fn storage_output_rejects_malformed_data_rows() {
+        let stdout = "Filesystem 1K-blocks Used Available Use% Mounted on\n/dev/fuse unknown 2533940 49551352 5% /storage/emulated\n";
+
+        assert!(!storage_output_is_valid(stdout));
+    }
+
+    #[test]
+    fn storage_output_rejects_numeric_row_without_percentage_usage() {
+        let stdout = "Filesystem 1K-blocks Used Available Use% Mounted on\n/dev/fuse 52232748 2533940 49551352 five /storage/emulated\n";
+
+        assert!(!storage_output_is_valid(stdout));
+    }
+
+    #[test]
+    fn storage_output_rejects_numeric_row_without_absolute_mount_path() {
+        let stdout = "Filesystem 1K-blocks Used Available Use% Mounted on\n/dev/fuse 52232748 2533940 49551352 5% storage/emulated\n";
+
+        assert!(!storage_output_is_valid(stdout));
+    }
+
+    #[test]
+    fn storage_output_rejects_usage_above_one_hundred_percent() {
+        let stdout = "Filesystem 1K-blocks Used Available Use% Mounted on\n/dev/fuse 52232748 2533940 49551352 101% /storage/emulated\n";
+
+        assert!(!storage_output_is_valid(stdout));
+    }
+
+    #[test]
     fn qualification_probes_only_one_online_device() {
         let runner = SequenceRunner {
             calls: RefCell::new(Vec::new()),
@@ -937,7 +1041,7 @@ mod tests {
                 "shell",
                 "sh",
                 "-c",
-                "test -d /sdcard && test -w /sdcard && df -k /sdcard",
+                "'test -w /sdcard && df -k /sdcard'",
             ]
         );
         assert_eq!(
