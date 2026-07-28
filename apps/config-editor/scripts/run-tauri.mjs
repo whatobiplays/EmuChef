@@ -12,9 +12,16 @@ export function tauriArgs(argv) {
   return [...argv, "--config", DEV_CONFIG_PATH];
 }
 
+export function tauriInvocation(argv) {
+  return {
+    command: process.platform === "win32" ? "npm.cmd" : "npm",
+    args: ["exec", "--", "tauri", ...tauriArgs(argv)],
+  };
+}
+
 function main() {
-  const command = process.platform === "win32" ? "tauri.cmd" : "tauri";
-  const result = spawnSync(command, tauriArgs(process.argv.slice(2)), {
+  const { command, args } = tauriInvocation(process.argv.slice(2));
+  const result = spawnSync(command, args, {
     stdio: "inherit",
   });
   if (result.error) {

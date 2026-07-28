@@ -601,6 +601,16 @@ and do not perform readiness validation. The development-only
 through the Tauri CLI and reports real execution as compiled; it does not alter
 Cargo defaults or any build, bundle, release, or packaging command.
 
+## Developer commands
+
+The repository root `Makefile` provides the standard developer workflow.
+`make build` builds the Rust backend and both frontend codebases. `make test`
+runs the full automated Rust, application, security, typecheck, and lint suite.
+`make emuchef-app` launches the end-user app, `make config-editor` launches the
+Config Editor, and `make dev` launches both apps concurrently. These Makefile
+targets use ordinary simulation-only development commands; they intentionally
+do not use the separate real-device `tauri:dev:real` command.
+
 The checked-in `EmuChef execution feature matrix` GitHub Actions workflow is the
 continuous compile-policy authority for Phase 6A. It runs `cargo check` and
 `cargo test` for the Tauri crate with `--no-default-features` and with

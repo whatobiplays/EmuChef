@@ -1,7 +1,21 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
-import { tauriArgs } from "./run-tauri.mjs";
+import { tauriArgs, tauriInvocation } from "./run-tauri.mjs";
+
+test("runs the project-local Tauri CLI through npm exec", () => {
+  assert.deepEqual(tauriInvocation(["dev"]), {
+    command: process.platform === "win32" ? "npm.cmd" : "npm",
+    args: [
+      "exec",
+      "--",
+      "tauri",
+      "dev",
+      "--config",
+      "src-tauri/tauri.dev.conf.json",
+    ],
+  });
+});
 
 test("adds the development-only config to tauri dev", () => {
   assert.deepEqual(tauriArgs(["dev"]), [
