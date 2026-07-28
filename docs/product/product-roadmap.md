@@ -27,7 +27,7 @@ Detailed evidence remains in the relevant product and release documents. In part
 
 | Product or track | Current state | Next priority |
 |---|---|---|
-| EmuChef proper | Phase 5A through 5H, Phase 6A, and Phase 6B completed | Begin Phase 6C core executor qualification |
+| EmuChef proper | Phase 5A through 5H, Phase 6A, Phase 6B, and Phase 6C.1 completed | Decide and qualify any production-supported Phase 6C.2 root-only executor scope |
 | Config Editor | Authored generation implemented through GitHub release-pattern testing | Later refinements remain unsequenced unless explicitly promoted |
 | Shared Runtime | Rust is the sole runtime and retains device, filesystem, planning, execution, validation, and protocol authority | Add shared capabilities only when required by a bounded product slice |
 | Release engineering | Deliberately deferred from normal Phase 5 product work | Resume only when the owner declares the relevant application release-comfortable |
@@ -70,7 +70,7 @@ EmuChef proper Phase 5 established end-user feature completeness, usability, wor
 | 5H | Visual consistency and final product polish | Completed | Cohesive, release-comfortable end-user experience |
 | 6A | Development builds and feature gating | Completed | Intentional real-execution development builds without accidental production enablement |
 | 6B | Device discovery and qualification | Completed | Deterministic device capability and compatibility profiles |
-| 6C | Core executor qualification | Planned | Hardware-proven execution of supported step types |
+| 6C | Core executor qualification | In progress | Non-root executor qualified on hardware; root-only production scope remains |
 | 6D | Execution safety and recovery | Planned | Predictable cancellation, failure, disconnect, and cleanup behavior |
 | 6E | Recipe qualification | Planned | End-to-end success for core EmuChef workflows |
 | 6F | Physical-device test matrix | Planned | Representative coverage across supported Android device classes |
@@ -504,22 +504,46 @@ qualification was performed.
 ### 6C — Core Executor Qualification
 
 **Owner: EmuChef proper / Shared Runtime**  
-**Status: Planned**
+**Status: In progress**
 
 Phase 6C is split into non-root qualification first and root-only qualification afterward. Operation-level physical qualification is performed through controlled backend/manual real-ADB tests, followed by one end-to-end EmuChef proper UI smoke workflow.
 
 #### 6C.1 — Non-root Executor Qualification
 
-**Status: Implementation ready; manual qualification in progress.**
+**Status: Completed**
 
-Automated evidence covers the committed and rebuilt Android fixture contracts,
-archive and destination safety, host-only executor outcomes, sanitized
-backend/Tauri/React projections, stale qualification authority, the guarded
-ignored production-path harness, and the gated qualification catalog and
-recipe. The complete backend, frontend, Tauri feature-matrix, fixture, format,
-and diff verification commands pass. Physical-device qualification and the
-combined UI smoke remain unrun and are required before this phase can be marked
-complete.
+Completed on 2026-07-28. Automated evidence covers the committed and rebuilt
+Android fixture contracts, archive and destination safety, host-only executor
+outcomes, sanitized backend/Tauri/React projections, stale qualification
+authority, the guarded production-path harness, and the gated qualification
+catalog and recipe.
+
+Physical qualification was completed on an Android 11, API 30, non-root device
+through the production executor and the reviewed EmuChef proper UI boundary.
+The real-device run completed all seven qualification steps with zero warnings,
+zero errors, and no partial changes:
+
+- fixture APK installation and package verification;
+- single-file copy to shared storage;
+- nested directory copy to shared storage;
+- archive extraction on the device;
+- runtime permission and supported app-op handling;
+- application launch; and
+- application force stop.
+
+The exported execution report identifies `verificationScope` as `real_device`,
+`simulated` as `false`, and completion as `success`. Shared-storage
+qualification was corrected to accept structurally valid Android `df` output
+whose resolved mount point is `/storage/emulated` rather than requiring the
+literal `/sdcard` alias. Positive regression coverage protects the real-device
+`/dev/fuse ... /storage/emulated` form, while negative coverage continues to
+reject malformed and header-only output.
+
+The temporary-directory test race was also corrected, and the full backend
+suite passed after the positive and negative regressions were added. The full
+frontend suite passed with 141 tests, typechecking passed, and lint completed
+with four pre-existing warnings and no errors. Real execution remains disabled
+in ordinary production builds.
 
 ##### Objective
 
@@ -583,6 +607,8 @@ Qualify the complete production-supported non-root executor surface against phys
 - Simulation and real execution remain behaviorally distinguishable in review, progress, results, and reports.
 
 #### 6C.2 — Root Executor Qualification
+
+**Status: Planned**
 
 ##### Objective
 
@@ -931,14 +957,20 @@ Cross-platform packaging and release automation must define separate deliverable
 
 ## 25. Immediate next action
 
-### Phase 6C — Core Executor Qualification
+### Phase 6C.2 — Root Executor Qualification
 
 **Owner: EmuChef proper / Shared Runtime**  
 **Status: Next**
 
-Proceed with physical qualification of the supported executor operations
-without enabling real execution in ordinary production builds. Phase 6B's
-manual device, VoiceOver, and packaged-GUI evidence gaps remain explicit
-follow-ups and are not represented as completed hardware or release evidence.
+Determine which root-only executor behaviors are production-supported and
+therefore require physical qualification. If no root-only behavior is intended
+for the current production scope, record that bounded scope decision and close
+Phase 6C without inventing qualification requirements. Otherwise, qualify each
+supported privileged operation on representative rooted hardware before
+starting Phase 6D.
+
+Real execution must remain disabled in ordinary production builds. Phase 6B's
+manual VoiceOver and packaged-GUI evidence gaps remain explicit follow-ups and
+are not represented as completed release evidence.
 
 Manual Phase 5H macOS visual and accessibility qualification remains an outstanding bounded qualification follow-up and may be performed independently, but it is not the active implementation slice.
