@@ -481,10 +481,10 @@ describe("Phase 6A execution capability reporting", () => {
 
     await renderReadyApp();
 
-    expect(screen.getByText("No device can be selected while multiple Android devices are connected.")).toBeTruthy();
+    expect(await screen.findByText("No device can be selected while multiple Android devices are connected.")).toBeTruthy();
     expect(screen.getByText("Disconnect all but one device, then refresh discovery.")).toBeTruthy();
     const deviceButtons = [
-      screen.getByRole("button", { name: /Supported Handheld.*Connected/ }),
+      await screen.findByRole("button", { name: /Supported Handheld.*Connected/ }),
       screen.getByRole("button", { name: /Second Handheld.*Connected/ }),
     ];
     expect(deviceButtons).toHaveLength(2);
