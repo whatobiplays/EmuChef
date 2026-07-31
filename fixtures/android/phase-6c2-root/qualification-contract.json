@@ -1,0 +1,6 @@
+{
+  "schemaVersion": 1,
+  "packageName": "com.emuchef.fixture",
+  "dataDataPrefix": "/data/data/com.emuchef.fixture/emuchef-qualification-data/",
+  "dataUserPrefix": "/data/user/0/com.emuchef.fixture/emuchef-qualification-user/"
+}

@@ -608,7 +608,17 @@ Qualify the complete production-supported non-root executor surface against phys
 
 #### 6C.2 — Root Executor Qualification
 
-**Status: Planned**
+**Status: In progress**
+
+Automated implementation is ready for manual rooted-device qualification.
+Deterministic tests cover the existing root probe, app-private path detection,
+safe `su -c` construction, non-root separation, executor preflight failure,
+authority loss on the first privileged mutation, operation failure, cleanup
+failure, strict physical-test guards, and distinct qualification outcomes.
+Ignored physical groups cover the production-supported privileged filesystem
+surface through `ExecutorRunner<RealAdbDevice>` plus the existing internal
+mkdir and removal adapters. No rooted-device group was run for this evidence;
+manual physical qualification remains pending.
 
 ##### Objective
 
@@ -616,12 +626,16 @@ Add physical qualification only for production-supported behaviors that require 
 
 ##### Root-specific scope
 
-- Privileged filesystem locations, including supported `/data` operations.
-- Root-only file placement and cleanup.
-- Privileged permission or shell operations exposed by the executor.
-- Supported `su` or Magisk execution paths.
-- Ownership, mode, and SELinux handling where the product explicitly supports them.
-- Stable handling of missing, denied, revoked, or changed root authority.
+- The bounded `adb -s <serial> shell su -c id` root probe.
+- Existing `/data/data/...` and `/data/user/...` existence and directory checks.
+- Existing app-private directory creation, file removal, and recursive tree removal used by `copy_files`.
+- Existing staged file placement, on-device file copy, and recursive directory copy.
+- Existing private-path verification and guarded qualification cleanup.
+- Stable reporting for missing, denied, revoked, changed, operation-failed, and cleanup-failed root authority.
+
+Arbitrary root shell, ownership or mode mutation, SELinux mutation, remounting,
+system writes, Magisk APIs, and privileged package-manager features are not
+production-supported Phase 6C.2 operations.
 
 ##### Exit criteria
 
@@ -960,7 +974,7 @@ Cross-platform packaging and release automation must define separate deliverable
 ### Phase 6C.2 — Root Executor Qualification
 
 **Owner: EmuChef proper / Shared Runtime**  
-**Status: Next**
+**Status: In progress**
 
 Determine which root-only executor behaviors are production-supported and
 therefore require physical qualification. If no root-only behavior is intended

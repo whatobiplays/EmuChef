@@ -1627,6 +1627,123 @@ fn adb_shell_payload_quoting_matches_compatibility_shlex_join() {
 }
 
 #[test]
+fn app_private_operations_route_through_safely_quoted_su_without_privileging_shared_storage() {
+    let mut executor = FakeAdbCommandExecutor::default();
+    for _ in 0..7 {
+        executor.push_completed(0, "", "");
+    }
+    let mut device = RealAdbDevice::with_executor("adb", Some("root-device"), executor);
+    let data_data = "/data/data/com.emuchef.fixture/space '$dollar;*[]\\";
+    let data_user = "/data/user/0/com.emuchef.fixture/space '$dollar;*[]\\";
+
+    assert!(device.path_exists(data_data).unwrap());
+    assert!(device.path_is_dir(data_user).unwrap());
+    device.mkdir_p(data_data).unwrap();
+    device.remove_file(data_user).unwrap();
+    device.remove_tree(data_data).unwrap();
+    device
+        .copy_on_device(data_data, data_user, true, false)
+        .unwrap();
+    device.mkdir_p("/sdcard/EmuChef Qualification").unwrap();
+
+    let calls = device.command_executor().calls();
+    assert_eq!(calls.len(), 7);
+    for call in &calls[..6] {
+        let payload = call.last().expect("app-private shell call needs a payload");
+        assert!(
+            payload.starts_with("su -c '"),
+            "privileged payload: {payload}"
+        );
+        assert!(
+            payload.contains("'\"'\"'"),
+            "nested single quotes must use the standard shell-safe escape: {payload}"
+        );
+        assert!(payload.contains("$dollar;*[]\\"));
+    }
+    assert_eq!(
+        calls[6].last().map(String::as_str),
+        Some("mkdir -p '/sdcard/EmuChef Qualification'")
+    );
+}
+
+#[test]
+fn authority_loss_after_successful_preflight_fails_first_privileged_mutation_and_blocks_dependency()
+{
+    let temp = tempfile::tempdir().expect("host source root should be created");
+    let source = temp.path().join("nested");
+    fs::create_dir(&source).expect("directory source should be created");
+    fs::write(source.join("payload.txt"), "payload").expect("source should be writable");
+    let destination = "/data/user/0/com.emuchef.fixture/emuchef-qualification-user/revoked";
+
+    let mut copy = wait_step("root-copy", "Root copy", 1);
+    copy.type_name = "copy_files".to_string();
+    copy.params.clear();
+    copy.params.insert(
+        "source".to_string(),
+        literal(runtime_value("directory_path", json!(source), Some("host"))),
+    );
+    copy.params
+        .insert("dest".to_string(), literal(json!(destination)));
+    copy.params
+        .insert("copy_policy".to_string(), literal(json!("replace")));
+    let mut dependent = wait_step("dependent", "Dependent", 1);
+    dependent.dependencies = vec![copy.id.clone()];
+
+    let mut executor = FakeAdbCommandExecutor::default();
+    executor.push_completed(0, "uid=0(root) gid=0(root)\n", "");
+    executor.push_completed(0, "", "");
+    executor.push_completed(0, "", "");
+    executor.push_completed(1, "", "su: permission denied");
+    executor.push_completed(0, "", "");
+    let device = RealAdbDevice::with_executor("adb", Some("root-device"), executor);
+    let sandbox = tempfile::tempdir().expect("executor sandbox should be created");
+    let mut runner = ExecutorRunner::new(ExecutorAdapters::with_device_and_sandbox_roots(
+        device,
+        sandbox.path().join("runtime"),
+        sandbox.path().join("cache"),
+        sandbox.path().join("fake-device"),
+        vec![temp.path().to_path_buf()],
+        false,
+    ));
+
+    let result = runner.run(&plan(vec![copy, dependent]));
+
+    assert!(!result.success);
+    assert_eq!(
+        result.steps[0].status,
+        crate::executor::StepRunStatus::Failed
+    );
+    assert_eq!(
+        result.steps[1].status,
+        crate::executor::StepRunStatus::Blocked
+    );
+    let calls = runner.adapters().device().command_executor().calls();
+    assert_eq!(
+        calls
+            .iter()
+            .filter(|call| call.ends_with(&[
+                "shell".to_string(),
+                "su".to_string(),
+                "-c".to_string(),
+                "id".to_string(),
+            ]))
+            .count(),
+        1,
+        "current production behavior performs at most one successful preflight in this run"
+    );
+    let denied = &calls[3];
+    assert!(denied
+        .last()
+        .expect("privileged removal needs a shell payload")
+        .starts_with("su -c 'rm -rf "));
+    assert_eq!(
+        calls.len(),
+        5,
+        "stage cleanup is the only command after denial"
+    );
+}
+
+#[test]
 fn run_plan_command_serial_injection_matches_compatibility() {
     let mut executor = FakeAdbCommandExecutor::default();
     executor.push_completed(0, "", "");

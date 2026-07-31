@@ -13,6 +13,7 @@ use crate::planner::{
 };
 
 mod qualification;
+mod root_qualification;
 
 use qualification::{
     classify_permission_appop_support, classify_preflight, load_contract, validate_group_opt_ins,
