@@ -27,7 +27,7 @@ Detailed evidence remains in the relevant product and release documents. In part
 
 | Product or track | Current state | Next priority |
 |---|---|---|
-| EmuChef proper | Phase 5A through 5H, Phase 6A, Phase 6B, and Phase 6C.1 completed | Decide and qualify any production-supported Phase 6C.2 root-only executor scope |
+| EmuChef proper | Phase 5A through 5H, Phase 6A through 6C, and the bounded Phase 6D.1 audit completed | Continue Phase 6D architectural timeout, transport, and physical-interruption qualification work |
 | Config Editor | Authored generation implemented through GitHub release-pattern testing | Later refinements remain unsequenced unless explicitly promoted |
 | Shared Runtime | Rust is the sole runtime and retains device, filesystem, planning, execution, validation, and protocol authority | Add shared capabilities only when required by a bounded product slice |
 | Release engineering | Deliberately deferred from normal Phase 5 product work | Resume only when the owner declares the relevant application release-comfortable |
@@ -71,7 +71,7 @@ EmuChef proper Phase 5 established end-user feature completeness, usability, wor
 | 6A | Development builds and feature gating | Completed | Intentional real-execution development builds without accidental production enablement |
 | 6B | Device discovery and qualification | Completed | Deterministic device capability and compatibility profiles |
 | 6C | Core executor qualification | Completed | Non-root and root executor qualification completed on representative hardware |
-| 6D | Execution safety and recovery | Planned | Predictable cancellation, failure, disconnect, and cleanup behavior |
+| 6D | Execution safety and recovery | In progress | Phase 6D.1 audit and bounded correctness fixes completed; architectural and physical interruption work remains |
 | 6E | Recipe qualification | Planned | End-to-end success for core EmuChef workflows |
 | 6F | Physical-device test matrix | Planned | Representative coverage across supported Android device classes |
 | 6G | Production readiness | Planned | Evidence-backed promotion of real execution into production builds |
@@ -638,7 +638,7 @@ production-supported Phase 6C.2 operations.
 ### 6D — Execution Safety and Recovery
 
 **Owner: EmuChef proper / Shared Runtime**  
-**Status: Planned**
+**Status: In progress**
 
 #### Objective
 
@@ -661,6 +661,22 @@ Make interruption and failure behavior deterministic, understandable, and bounde
 - Interrupted runs leave no hidden active executor and no stale authority capable of resuming automatically.
 - Users can identify completed, skipped, failed, and unattempted work and know the safe next action.
 - No Phase 6 behavior claims device rollback or execution resume after application restart.
+
+#### Phase 6D.1 completion evidence
+
+Completed on 2026-07-31. The audit and evidence matrix are recorded in
+`docs/product/phase-6d1-execution-safety-audit.md`. Bounded fixes preserve the
+existing protocol and authority architecture while making terminal
+never-started work present as **Not attempted**, keeping partial recipe state
+truthful, warning conservatively after failed real atomic work, and invalidating
+all authority derived from a detectably lost sidecar process generation.
+
+Phase 6D remains open. General ADB and sidecar deadlines, typed mid-run
+transport handling, same-serial device replacement detection, mid-run root and
+qualification revalidation, low-storage/host-sleep policy, and physical
+interruption qualification are explicitly deferred. No checkpoint, resume,
+automatic replay, rollback, persistent execution, new serialized status, or
+new production feature enablement was added.
 
 ### 6E — Recipe Qualification
 
@@ -963,12 +979,17 @@ Cross-platform packaging and release automation must define separate deliverable
 
 ## 25. Immediate next action
 
-### Phase 6C.2 — Root Executor Qualification
+### Phase 6D — Execution Safety and Recovery
 
 **Owner: EmuChef proper / Shared Runtime**  
 **Status: In progress**
 
-Begin Phase 6D — Execution Safety and Recovery. Audit existing interruption, cancellation, timeout, disconnect, retry, and recovery behavior, identify remaining implementation gaps, and define the bounded execution-safety work required before recipe qualification.
+Continue the deferred Phase 6D architecture and qualification backlog recorded
+in `docs/product/phase-6d1-execution-safety-audit.md`. Prioritize a bounded
+timeout/process-ownership design and typed transport outcomes before physical
+interruption qualification. Do not begin Phase 6E recipe qualification until
+the owner accepts the remaining Phase 6D limitations or completes the required
+evidence.
 
 Real execution must remain disabled in ordinary production builds. Phase 6B's
 manual VoiceOver and packaged-GUI evidence gaps remain explicit follow-ups and

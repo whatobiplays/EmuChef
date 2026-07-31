@@ -2,7 +2,7 @@ import { render, screen, within } from "@testing-library/react";
 import { describe, expect, test, vi } from "vitest";
 
 import { ExecutionStep } from "../src/ExecutionStep";
-import type { ExecutionSnapshot } from "../src/types";
+import type { ExecutionSnapshot, RealExecutionSnapshot } from "../src/types";
 
 function failedSnapshot(): ExecutionSnapshot {
   return {
@@ -109,6 +109,98 @@ describe("execution recovery actions", () => {
     expect(screen.getByText(/Copy core files/)).toBeTruthy();
     expect(screen.getByText(/current simulated atomic step may finish/i)).toBeTruthy();
     expect((screen.getByRole("button", { name: "Cancellation requested" }) as HTMLButtonElement).disabled).toBe(true);
+  });
+
+  test("terminal pending work is presented as not attempted and completes the progress accounting", () => {
+    const snapshot: ExecutionSnapshot = {
+      ...failedSnapshot(),
+      status: "cancelled",
+      recipes: [{
+        name: "Cancelled feature",
+        description: null,
+        status: "cancelled",
+        steps: [
+          { name: "Completed action", note: null, status: "succeeded", message: null },
+          { name: "Never-started action", note: null, status: "pending", message: null },
+        ],
+      }],
+      completion: {
+        ...failedSnapshot().completion,
+        classification: "cancelled",
+        counts: {
+          total: 2,
+          completed: 1,
+          skipped: 0,
+          blocked: 0,
+          failed: 0,
+          cancelled: 0,
+          pending: 1,
+        },
+      },
+    };
+    const { container } = render(
+      <ExecutionStep
+        execution={{
+          kind: "terminal",
+          generation: 1,
+          mode: "simulated",
+          snapshot,
+          events: [],
+          eventCursor: 0,
+          cancellationRequested: true,
+        }}
+        launchState="idle"
+        repairPreparing={false}
+        reportState="idle"
+        onCancel={vi.fn()}
+        onExportReport={vi.fn()}
+        onLaunchConfiguredApp={vi.fn()}
+        onPrepareRepair={vi.fn()}
+        onReturn={vi.fn()}
+      />,
+    );
+
+    expect(screen.getAllByText("Not attempted")).toHaveLength(2);
+    expect(screen.getByText("Not attempted", { selector: "dt" }).parentElement?.textContent).toBe("Not attempted1");
+    expect((container.querySelector("progress") as HTMLProgressElement).value).toBe(1);
+  });
+
+  test("failed real work describes partial changes as possible when none are proven complete", () => {
+    const snapshot: RealExecutionSnapshot = {
+      ...failedSnapshot(),
+      simulated: false,
+      verificationScope: "real_device",
+      target: { label: "Connected Android device" },
+      launchAction: null,
+      completion: {
+        ...failedSnapshot().completion,
+        partialChangesPossible: true,
+      },
+    };
+    render(
+      <ExecutionStep
+        execution={{
+          kind: "terminal",
+          generation: 1,
+          mode: "real",
+          snapshot,
+          events: [],
+          eventCursor: 0,
+          cancellationRequested: false,
+        }}
+        launchState="idle"
+        repairPreparing={false}
+        reportState="idle"
+        onCancel={vi.fn()}
+        onExportReport={vi.fn()}
+        onLaunchConfiguredApp={vi.fn()}
+        onPrepareRepair={vi.fn()}
+        onReturn={vi.fn()}
+      />,
+    );
+
+    expect(screen.getByText(/device changes may have occurred before this failed result/i)).toBeTruthy();
+    expect(screen.queryByText(/some device changes completed before this failed result/i)).toBeNull();
   });
 
   test("separates failed and blocked results without exposing raw result names or changing order", () => {

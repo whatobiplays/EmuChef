@@ -852,9 +852,22 @@ fn finish_panicked(state: &Arc<Mutex<ExecutionState>>, execution_id: &str) {
         recipe_id: None,
         step_id: None,
     };
+    for step in record
+        .report
+        .recipes
+        .iter_mut()
+        .flat_map(|recipe| recipe.steps.iter_mut())
+        .filter(|step| step.status == StepExecutionStatus::Running)
+    {
+        step.status = StepExecutionStatus::Failed;
+        step.message = Some(
+            "The execution worker stopped before this operation reported completion.".to_string(),
+        );
+    }
     record.report.status = ExecutionStatus::Failed;
     record.report.finished_at = Some(now());
     record.report.errors.push(issue.clone());
+    refresh_recipe_statuses(&mut record.report);
     append_event(
         record,
         "execution_worker_panicked",
@@ -935,6 +948,7 @@ fn issue_code(status: StepRunStatus, message: Option<&str>) -> String {
 }
 
 fn refresh_recipe_statuses(report: &mut ExecutionReport) {
+    let execution_status = report.status;
     for recipe in &mut report.recipes {
         recipe.status = if recipe
             .steps
@@ -963,9 +977,23 @@ fn refresh_recipe_statuses(report: &mut ExecutionReport) {
         } else if recipe
             .steps
             .iter()
-            .all(|step| step.status == StepExecutionStatus::Pending)
+            .any(|step| step.status == StepExecutionStatus::Pending)
         {
-            RecipeExecutionStatus::Pending
+            if recipe
+                .steps
+                .iter()
+                .all(|step| step.status == StepExecutionStatus::Pending)
+            {
+                RecipeExecutionStatus::Pending
+            } else {
+                match execution_status {
+                    ExecutionStatus::Cancelled => RecipeExecutionStatus::Cancelled,
+                    ExecutionStatus::Failed => RecipeExecutionStatus::Failed,
+                    ExecutionStatus::Running
+                    | ExecutionStatus::Succeeded
+                    | ExecutionStatus::SucceededWithWarnings => RecipeExecutionStatus::Running,
+                }
+            }
         } else {
             RecipeExecutionStatus::Succeeded
         };
@@ -1173,6 +1201,24 @@ mod tests {
     }
 
     #[test]
+    fn recipe_status_keeps_partially_processed_work_active_or_cancelled() {
+        let mut plan = test_plan("plan.recipe-status");
+        let mut second = plan.steps[0].clone();
+        second.id = "recipe.example/second".to_string();
+        plan.steps.push(second);
+        let digest = crate::plan_digest::execution_plan_digest(&plan).unwrap();
+        let mut report = initial_report(&plan.id, &plan, &digest, ExecutionMode::DryRun, None);
+        report.recipes[0].steps[0].status = StepExecutionStatus::Succeeded;
+
+        refresh_recipe_statuses(&mut report);
+        assert_eq!(report.recipes[0].status, RecipeExecutionStatus::Running);
+
+        report.status = ExecutionStatus::Cancelled;
+        refresh_recipe_statuses(&mut report);
+        assert_eq!(report.recipes[0].status, RecipeExecutionStatus::Cancelled);
+    }
+
+    #[test]
     fn dry_run_reports_are_grouped_simulated_and_emit_incremental_events() {
         let temp = tempfile::tempdir().unwrap();
         let manager = manager(temp.path());
@@ -1376,7 +1422,47 @@ mod tests {
     }
 
     #[test]
-    fn session_cancellation_is_evented_and_terminal_without_rollback_state() {
+    fn worker_panic_marks_only_in_progress_work_failed() {
+        let mut plan = test_plan("plan.worker-panic-progress");
+        let mut second = plan.steps[0].clone();
+        second.id = "recipe.example/second".to_string();
+        plan.steps.push(second);
+        let digest = crate::plan_digest::execution_plan_digest(&plan).unwrap();
+        let execution_id = "execution-panic-progress";
+        let mut report = initial_report(execution_id, &plan, &digest, ExecutionMode::Real, None);
+        report.recipes[0].steps[0].status = StepExecutionStatus::Running;
+        let mut records = HashMap::new();
+        records.insert(
+            execution_id.to_string(),
+            ExecutionRecord {
+                report,
+                events: Vec::new(),
+                cancel_requested: Arc::new(AtomicBool::new(false)),
+            },
+        );
+        let state = Arc::new(Mutex::new(ExecutionState {
+            next_execution_id: 1,
+            active_execution_id: Some(execution_id.to_string()),
+            records,
+        }));
+
+        finish_panicked(&state, execution_id);
+
+        let state = lock(&state);
+        let report = &state.records[execution_id].report;
+        assert_eq!(
+            report.recipes[0].steps[0].status,
+            StepExecutionStatus::Failed
+        );
+        assert_eq!(
+            report.recipes[0].steps[1].status,
+            StepExecutionStatus::Pending
+        );
+        assert_eq!(report.recipes[0].status, RecipeExecutionStatus::Failed);
+    }
+
+    #[test]
+    fn session_cancellation_leaves_never_started_work_pending_for_terminal_projection() {
         let temp = tempfile::tempdir().unwrap();
         let manager = manager(temp.path());
         let mut plan = test_plan("__test_execution_can_cancel__");
@@ -1402,11 +1488,9 @@ mod tests {
         assert_eq!(manager.cancel(&execution_id).unwrap()["accepted"], true);
         let report = wait_for_terminal(&manager, &execution_id);
         assert_eq!(report["status"], "cancelled");
-        assert!(report["recipes"][0]["steps"]
-            .as_array()
-            .unwrap()
-            .iter()
-            .any(|step| step["status"] == "cancelled"));
+        let steps = report["recipes"][0]["steps"].as_array().unwrap();
+        assert!(steps.iter().any(|step| step["status"] == "pending"));
+        assert!(steps.iter().all(|step| step["status"] != "cancelled"));
         let events = manager.events(&execution_id, 0).unwrap();
         assert!(events["events"]
             .as_array()

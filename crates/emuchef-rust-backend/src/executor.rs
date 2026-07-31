@@ -167,8 +167,10 @@ impl<D: ExecutorDevice> ExecutorRunner<D> {
     ///
     /// A cancellation request never interrupts or rolls back the current device
     /// operation. Once observed, no later step resolves parameters, executes,
-    /// or verifies; completed records remain intact and later records are marked
-    /// `cancelled` for an inspectable ordered snapshot.
+    /// or verifies. Completed progress remains intact; later runner records are
+    /// internally cancelled while the session report leaves those never-started
+    /// steps pending so a terminal projection can label them "Not attempted"
+    /// without adding a serialized status.
     pub fn run_with_progress_and_cancel(
         &mut self,
         plan: &ExecutionPlan,
@@ -202,14 +204,6 @@ impl<D: ExecutorDevice> ExecutorRunner<D> {
             if cancelled || should_cancel() {
                 cancelled = true;
                 let message = "execution cancelled before step scheduling".to_string();
-                progress_callback(progress_event(
-                    step,
-                    total_steps,
-                    plan,
-                    ProgressPhase::Finished,
-                    Some(ProgressStatus::Cancelled),
-                    Some(message.clone()),
-                ));
                 records.push(record(
                     step,
                     StepRunStatus::Cancelled,

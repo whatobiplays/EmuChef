@@ -443,20 +443,27 @@ pub fn get_simulated_execution(
     ) {
         Ok(response) => response,
         Err(error) => {
-            if sidecar_error_code(&error).as_deref() == Some("unknown_execution") {
-                state
-                    .executions
-                    .lock()
-                    .map_err(|_| execution_state_error())?
-                    .forget_active(ExecutionKind::Simulated, &execution_handle);
-                return Err(safe_error(
-                    "execution_unavailable",
-                    "The in-memory simulated run was lost. Return to Review or generate a new review.",
-                ));
+            match execution_session_loss(&error) {
+                Some(ExecutionSessionLoss::UnknownExecution) => {
+                    state
+                        .executions
+                        .lock()
+                        .map_err(|_| execution_state_error())?
+                        .forget_active(ExecutionKind::Simulated, &execution_handle);
+                }
+                Some(ExecutionSessionLoss::RuntimeSessionLost) => {
+                    invalidate_lost_runtime_authority(&state)?;
+                }
+                None => {
+                    return Err(safe_error(
+                        "execution_status_failed",
+                        "The simulated run status could not be refreshed.",
+                    ));
+                }
             }
             return Err(safe_error(
-                "execution_status_failed",
-                "The simulated run status could not be refreshed.",
+                "execution_unavailable",
+                "The in-memory simulated run was lost. Return to Review or generate a new review.",
             ));
         }
     };
@@ -487,12 +494,17 @@ pub fn get_simulated_execution_events(
         .executions
         .lock()
         .map_err(|_| execution_state_error())?;
-    request_simulated_execution_events(
+    let result = request_simulated_execution_events(
         &state.sidecar,
         &mut executions,
         &execution_handle,
         after_sequence,
-    )
+    );
+    drop(executions);
+    if result.is_err() && state.sidecar.runtime_session_was_lost() {
+        invalidate_lost_runtime_authority(&state)?;
+    }
+    result
 }
 
 fn request_simulated_execution_events(
@@ -516,8 +528,14 @@ fn request_simulated_execution_events(
     );
     let response = match response {
         Ok(response) => response,
-        Err(error) if sidecar_error_code(&error).as_deref() == Some("unknown_execution") => {
-            executions.forget_active(ExecutionKind::Simulated, execution_handle);
+        Err(error) if execution_session_loss(&error).is_some() => {
+            match execution_session_loss(&error) {
+                Some(ExecutionSessionLoss::RuntimeSessionLost) => executions.reset(),
+                Some(ExecutionSessionLoss::UnknownExecution) => {
+                    executions.forget_active(ExecutionKind::Simulated, execution_handle);
+                }
+                None => unreachable!("guard requires a recognized execution session loss"),
+            }
             return Err(safe_error(
                 "execution_unavailable",
                 "The in-memory simulated run was lost. Return to Review or generate a new review.",
@@ -551,13 +569,35 @@ pub fn cancel_simulated_execution(
         &state.sidecar,
         "cancelExecution",
         json!({ "executionId": mapping.sidecar_id }),
-    )
-    .map_err(|_| {
-        safe_error(
-            "execution_cancel_failed",
-            "Cancellation could not be requested for this simulated run.",
-        )
-    })?;
+    );
+    let response = match response {
+        Ok(response) => response,
+        Err(error) if execution_session_loss(&error).is_some() => {
+            match execution_session_loss(&error) {
+                Some(ExecutionSessionLoss::RuntimeSessionLost) => {
+                    invalidate_lost_runtime_authority(&state)?;
+                }
+                Some(ExecutionSessionLoss::UnknownExecution) => {
+                    state
+                        .executions
+                        .lock()
+                        .map_err(|_| execution_state_error())?
+                        .forget_active(ExecutionKind::Simulated, &execution_handle);
+                }
+                None => unreachable!("guard requires a recognized execution session loss"),
+            }
+            return Err(safe_error(
+                "execution_unavailable",
+                "The in-memory simulated run was lost. Return to Review or generate a new review.",
+            ));
+        }
+        Err(_) => {
+            return Err(safe_error(
+                "execution_cancel_failed",
+                "Cancellation could not be requested for this simulated run.",
+            ));
+        }
+    };
     Ok(json!({
         "executionHandle": execution_handle,
         "accepted": response.get("accepted").and_then(Value::as_bool).unwrap_or(false),
@@ -990,8 +1030,8 @@ pub fn get_real_execution(
         json!({ "executionId": mapping.sidecar_id }),
     ) {
         Ok(response) => response,
-        Err(error) if sidecar_error_code(&error).as_deref() == Some("unknown_execution") => {
-            forget_lost_real_mapping(&state, &execution_handle)?;
+        Err(error) if execution_session_loss(&error).is_some() => {
+            recover_from_real_execution_loss(&state, &execution_handle, &error)?;
             return Err(safe_error(
                 "execution_unavailable",
                 REAL_EXECUTION_UNAVAILABLE,
@@ -1050,8 +1090,8 @@ pub fn get_real_execution_events(
         }),
     ) {
         Ok(response) => response,
-        Err(error) if sidecar_error_code(&error).as_deref() == Some("unknown_execution") => {
-            forget_lost_real_mapping(&state, &execution_handle)?;
+        Err(error) if execution_session_loss(&error).is_some() => {
+            recover_from_real_execution_loss(&state, &execution_handle, &error)?;
             return Err(safe_error(
                 "execution_unavailable",
                 REAL_EXECUTION_UNAVAILABLE,
@@ -1087,8 +1127,8 @@ pub fn cancel_real_execution(
         json!({ "executionId": mapping.sidecar_id }),
     ) {
         Ok(response) => response,
-        Err(error) if sidecar_error_code(&error).as_deref() == Some("unknown_execution") => {
-            forget_lost_real_mapping(&state, &execution_handle)?;
+        Err(error) if execution_session_loss(&error).is_some() => {
+            recover_from_real_execution_loss(&state, &execution_handle, &error)?;
             return Err(safe_error(
                 "execution_unavailable",
                 REAL_EXECUTION_UNAVAILABLE,
@@ -1392,6 +1432,43 @@ fn forget_lost_real_mapping(state: &AppState, public_handle: &str) -> Result<(),
             .map_err(|_| session_error())?
             .invalidate_review(&mapping.review_handle, "review_stale");
     }
+    Ok(())
+}
+
+fn recover_from_real_execution_loss(
+    state: &AppState,
+    public_handle: &str,
+    error: &str,
+) -> Result<(), String> {
+    match execution_session_loss(error) {
+        Some(ExecutionSessionLoss::RuntimeSessionLost) => invalidate_lost_runtime_authority(state),
+        Some(ExecutionSessionLoss::UnknownExecution) => {
+            forget_lost_real_mapping(state, public_handle)
+        }
+        None => Ok(()),
+    }
+}
+
+/// Discard all native authority derived from a sidecar process generation that
+/// can no longer answer requests. Portable user intent is owned elsewhere and
+/// remains intact; executions, launch actions, reviews, device facts, and root
+/// qualification evidence cannot survive the lost in-memory runtime session.
+fn invalidate_lost_runtime_authority(state: &AppState) -> Result<(), String> {
+    state
+        .executions
+        .lock()
+        .map_err(|_| execution_state_error())?
+        .reset();
+    state
+        .handles
+        .lock()
+        .map_err(|_| session_error())?
+        .invalidate_runtime_authority_preserving_identities();
+    state
+        .root_qualification
+        .lock()
+        .map_err(|_| session_error())?
+        .invalidate();
     Ok(())
 }
 
@@ -2338,7 +2415,8 @@ fn completion_summary(snapshot: &Value, real: bool) -> Value {
         "features": features,
         "partialChangesPossible": real
             && matches!(status, "failed" | "cancelled")
-            && counts.get("completed").copied().unwrap_or(0) > 0,
+            && (counts.get("completed").copied().unwrap_or(0) > 0
+                || counts.get("failed").copied().unwrap_or(0) > 0),
     })
 }
 
@@ -2475,6 +2553,23 @@ fn sidecar_error_code(error: &str) -> Option<String> {
         .get("code")?
         .as_str()
         .map(str::to_string)
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum ExecutionSessionLoss {
+    UnknownExecution,
+    RuntimeSessionLost,
+}
+
+/// Classify only failures that prove execution authority no longer exists.
+/// An unknown execution invalidates one mapping; a lost runtime process
+/// invalidates every authority object derived from that process generation.
+fn execution_session_loss(error: &str) -> Option<ExecutionSessionLoss> {
+    match sidecar_error_code(error).as_deref() {
+        Some("unknown_execution") => Some(ExecutionSessionLoss::UnknownExecution),
+        Some("runtime_session_lost") => Some(ExecutionSessionLoss::RuntimeSessionLost),
+        _ => None,
+    }
 }
 
 fn execution_start_error(error: &str) -> String {
@@ -2852,6 +2947,47 @@ mod tests {
         assert_eq!(summary["warningCount"], 1);
         assert_eq!(summary["partialChangesPossible"], true);
         assert_eq!(remediation_for_code("unrecognized")["kind"], "view_report");
+    }
+
+    #[test]
+    fn terminal_pending_work_remains_derivable_without_a_new_completion_field() {
+        let snapshot = json!({
+            "status": "cancelled",
+            "warnings": [],
+            "recipes": [{
+                "name": "Recipe One",
+                "status": "cancelled",
+                "steps": [
+                    { "status": "succeeded" },
+                    { "status": "pending" }
+                ]
+            }]
+        });
+
+        let summary = completion_summary(&snapshot, true);
+
+        assert_eq!(summary["counts"]["completed"], 1);
+        assert_eq!(summary["counts"]["pending"], 1);
+        assert!(summary["counts"].get("unattempted").is_none());
+        assert_eq!(summary["partialChangesPossible"], true);
+    }
+
+    #[test]
+    fn failed_atomic_work_warns_about_possible_partial_changes() {
+        let snapshot = json!({
+            "status": "failed",
+            "warnings": [],
+            "recipes": [{
+                "name": "Recipe One",
+                "status": "failed",
+                "steps": [{ "status": "failed" }]
+            }]
+        });
+
+        let summary = completion_summary(&snapshot, true);
+
+        assert_eq!(summary["counts"]["failed"], 1);
+        assert_eq!(summary["partialChangesPossible"], true);
     }
 
     #[test]
@@ -3434,6 +3570,46 @@ mod tests {
         store
             .reserve_start(ExecutionKind::Real)
             .expect("the lost active slot should be reusable");
+    }
+
+    #[test]
+    fn lost_runtime_session_resets_all_execution_mappings() {
+        let runtime = FakeRuntime {
+            requests: Mutex::new(Vec::new()),
+            result: Err(json!({ "code": "runtime_session_lost" }).to_string()),
+        };
+        let mut store = ExecutionHandleStore::default();
+        store.reserve_start(ExecutionKind::Simulated).unwrap();
+        let terminal = store.bind_started(
+            ExecutionKind::Simulated,
+            "sidecar-terminal".into(),
+            "terminal-review".into(),
+            review(),
+        );
+        store.mark_terminal(ExecutionKind::Simulated, &terminal.public_handle);
+        store.reserve_start(ExecutionKind::Real).unwrap();
+        store.bind_started(
+            ExecutionKind::Real,
+            "sidecar-active".into(),
+            "active-review".into(),
+            review(),
+        );
+
+        let error =
+            request_simulated_execution_events(&runtime, &mut store, &terminal.public_handle, 0)
+                .unwrap_err();
+
+        assert!(error.contains("execution_unavailable"));
+        assert!(store
+            .mapping(
+                ExecutionKind::Simulated,
+                &terminal.public_handle,
+                "unavailable"
+            )
+            .is_err());
+        store
+            .reserve_start(ExecutionKind::Real)
+            .expect("an irrecoverably lost runtime session must release its active slot");
     }
 
     #[test]

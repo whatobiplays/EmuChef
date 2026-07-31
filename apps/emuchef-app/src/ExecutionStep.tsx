@@ -49,6 +49,14 @@ function eventStatusLabel(status: string | null): string | null {
     ?? "Updated";
 }
 
+function recipeStatusLabel(status: RecipeExecutionStatus, terminal: boolean): string {
+  return terminal && status === "pending" ? "Not attempted" : RECIPE_STATUS_LABELS[status];
+}
+
+function stepStatusLabel(status: StepExecutionStatus, terminal: boolean): string {
+  return terminal && status === "pending" ? "Not attempted" : STEP_STATUS_LABELS[status];
+}
+
 function localTimestamp(value: string | null): string {
   if (!value) return "Starting";
   const timestamp = new Date(value);
@@ -110,6 +118,7 @@ export function ExecutionStep({
   }
 
   const { snapshot } = execution;
+  const terminal = execution.kind === "terminal";
   const counts = snapshot.completion.counts;
   const completedCount = counts.completed
     + counts.skipped
@@ -166,11 +175,15 @@ export function ExecutionStep({
         <div><dt>Skipped</dt><dd>{counts.skipped}</dd></div>
         <div><dt>Blocked</dt><dd>{counts.blocked}</dd></div>
         <div><dt>Failed</dt><dd>{counts.failed}</dd></div>
+        <div><dt>Cancelled</dt><dd>{counts.cancelled}</dd></div>
+        <div><dt>{terminal ? "Not attempted" : "Waiting"}</dt><dd>{counts.pending}</dd></div>
       </dl>
       {snapshot.completion.partialChangesPossible && (
         <p className="warning">
-          Some device changes completed before this {EXECUTION_STATUS_LABELS[snapshot.status].toLowerCase()} result.
-          The result remains {EXECUTION_STATUS_LABELS[snapshot.status].toLowerCase()}; EmuChef does not infer partial success or rollback completed work.
+          {counts.completed > 0
+            ? `Some device changes completed before this ${EXECUTION_STATUS_LABELS[snapshot.status].toLowerCase()} result.`
+            : `Device changes may have occurred before this ${EXECUTION_STATUS_LABELS[snapshot.status].toLowerCase()} result.`}
+          {" "}The result remains {EXECUTION_STATUS_LABELS[snapshot.status].toLowerCase()}; EmuChef cannot determine whether a failed operation changed the device and does not infer rollback.
         </p>
       )}
       {(snapshot.warnings.length > 0 || snapshot.errors.length > 0) && (
@@ -198,13 +211,13 @@ export function ExecutionStep({
               <h3>{recipe.name}</h3>
               {recipe.description && <p>{recipe.description}</p>}
             </div>
-            <span className="execution-status">{RECIPE_STATUS_LABELS[recipe.status]}</span>
+            <span className="execution-status">{recipeStatusLabel(recipe.status, terminal)}</span>
           </div>
           <ol>
             {recipe.steps.map((step, stepIndex) => (
               <li key={`${step.name}-${stepIndex}`} className={`step-${step.status}`}>
                 <strong>{step.note ?? step.name}</strong>
-                <span>{STEP_STATUS_LABELS[step.status]}</span>
+                <span>{stepStatusLabel(step.status, terminal)}</span>
                 {step.note && step.note !== step.name && <small>{step.name}</small>}
                 {step.message && <small>{step.message}</small>}
               </li>
