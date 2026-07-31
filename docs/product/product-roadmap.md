@@ -70,7 +70,7 @@ EmuChef proper Phase 5 established end-user feature completeness, usability, wor
 | 5H | Visual consistency and final product polish | Completed | Cohesive, release-comfortable end-user experience |
 | 6A | Development builds and feature gating | Completed | Intentional real-execution development builds without accidental production enablement |
 | 6B | Device discovery and qualification | Completed | Deterministic device capability and compatibility profiles |
-| 6C | Core executor qualification | In progress | Non-root executor qualified on hardware; root-only production scope remains |
+| 6C | Core executor qualification | Completed | Non-root and root executor qualification completed on representative hardware |
 | 6D | Execution safety and recovery | Planned | Predictable cancellation, failure, disconnect, and cleanup behavior |
 | 6E | Recipe qualification | Planned | End-to-end success for core EmuChef workflows |
 | 6F | Physical-device test matrix | Planned | Representative coverage across supported Android device classes |
@@ -608,17 +608,9 @@ Qualify the complete production-supported non-root executor surface against phys
 
 #### 6C.2 — Root Executor Qualification
 
-**Status: In progress**
+**Status: Completed**
 
-Automated implementation is ready for manual rooted-device qualification.
-Deterministic tests cover the existing root probe, app-private path detection,
-safe `su -c` construction, non-root separation, executor preflight failure,
-authority loss on the first privileged mutation, operation failure, cleanup
-failure, strict physical-test guards, and distinct qualification outcomes.
-Ignored physical groups cover the production-supported privileged filesystem
-surface through `ExecutorRunner<RealAdbDevice>` plus the existing internal
-mkdir and removal adapters. No rooted-device group was run for this evidence;
-manual physical qualification remains pending.
+Completed on 2026-07-31. Physical rooted-device qualification was successfully performed on representative rooted hardware. All five qualification groups (preflight, filesystem, copy, combined workflow, and controlled cleanup-failure) passed, cleanup behavior matched the documented contract, the expected residual from the cleanup-failure qualification was manually removed, both approved qualification prefixes were verified clean afterward, and host validation (`cargo test`, `cargo test --features real-execution`, `make test`, `rustfmt --check`, and `git diff --check`) completed successfully. Root executor qualification evidence is recorded in `docs/qualification/phase-6c2-root-executor-evidence.md`.
 
 ##### Objective
 
@@ -976,12 +968,7 @@ Cross-platform packaging and release automation must define separate deliverable
 **Owner: EmuChef proper / Shared Runtime**  
 **Status: In progress**
 
-Determine which root-only executor behaviors are production-supported and
-therefore require physical qualification. If no root-only behavior is intended
-for the current production scope, record that bounded scope decision and close
-Phase 6C without inventing qualification requirements. Otherwise, qualify each
-supported privileged operation on representative rooted hardware before
-starting Phase 6D.
+Begin Phase 6D — Execution Safety and Recovery. Audit existing interruption, cancellation, timeout, disconnect, retry, and recovery behavior, identify remaining implementation gaps, and define the bounded execution-safety work required before recipe qualification.
 
 Real execution must remain disabled in ordinary production builds. Phase 6B's
 manual VoiceOver and packaged-GUI evidence gaps remain explicit follow-ups and
