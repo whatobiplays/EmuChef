@@ -1987,6 +1987,23 @@ fn project_real_issue(mapping: &ExecutionMapping, issue: &Value) -> Value {
         "missing_capability" => (internal, "The device lacks a required capability."),
         "step_conflict" => (internal, "Conflicting work prevented this operation."),
         "operation_timed_out" => (internal, "A device operation timed out."),
+        "device_offline" => (
+            internal,
+            "The reviewed device went offline during execution.",
+        ),
+        "device_unauthorized" => (
+            internal,
+            "The intended reviewed device needs USB debugging authorization.",
+        ),
+        "device_disconnected" => (
+            internal,
+            "The intended reviewed device disconnected or could not be found.",
+        ),
+        "adb_server_unavailable" => (
+            internal,
+            "The local ADB/Platform-Tools service was unavailable.",
+        ),
+        "device_transport_lost" => (internal, "The device connection was lost during execution."),
         "step_execution_failed" => (internal, "A device operation failed."),
         "optional_permission_failed" => (internal, "An optional permission action failed."),
         "execution_worker_panicked" => (internal, "The execution worker stopped unexpectedly."),
@@ -2070,6 +2087,16 @@ fn remediation_for_code(code: &str) -> Value {
             "generate_fresh_plan",
             "Repair and retry",
             "Resolve the reported feature problem, then generate and review a fresh plan.",
+        ),
+        "device_offline" | "device_unauthorized" | "device_disconnected" | "device_transport_lost" => (
+            "reconnect_device",
+            "Reconnect and requalify",
+            "Reconnect or authorize the intended reviewed device, then complete fresh qualification and generate and review a fresh plan before another real run. Reconnecting does not resume the old execution.",
+        ),
+        "adb_server_unavailable" => (
+            "repair_platform_tools",
+            "Repair local ADB",
+            "Restore the local ADB/Platform-Tools service, then complete fresh qualification and generate and review a fresh plan before another real run. Repairing the service does not resume the old execution.",
         ),
         _ => (
             "view_report",
@@ -2975,6 +3002,68 @@ mod tests {
         );
         assert_eq!(projected["remediation"]["kind"], "generate_fresh_plan");
         assert!(!projected.to_string().contains("private timeout detail"));
+    }
+
+    #[test]
+    fn transport_issue_codes_project_to_authored_guidance_without_backend_details() {
+        let mapping = ExecutionMapping {
+            kind: ExecutionKind::Real,
+            public_handle: "execution_public".into(),
+            sidecar_id: "execution-private".into(),
+            review_handle: "review_public".into(),
+            review: launch_review(),
+        };
+        let cases = [
+            (
+                "device_offline",
+                "The reviewed device went offline during execution.",
+                "reconnect_device",
+            ),
+            (
+                "device_unauthorized",
+                "The intended reviewed device needs USB debugging authorization.",
+                "reconnect_device",
+            ),
+            (
+                "device_disconnected",
+                "The intended reviewed device disconnected or could not be found.",
+                "reconnect_device",
+            ),
+            (
+                "adb_server_unavailable",
+                "The local ADB/Platform-Tools service was unavailable.",
+                "repair_platform_tools",
+            ),
+            (
+                "device_transport_lost",
+                "The device connection was lost during execution.",
+                "reconnect_device",
+            ),
+        ];
+        for (code, authored_message, remediation_kind) in cases {
+            let projected = project_real_issue(
+                &mapping,
+                &json!({
+                    "code": code,
+                    "recipeId": "recipe.one",
+                    "stepId": "recipe.one/launch",
+                    "message": "error: device 'private-serial' not found; /private/path; stderr detail",
+                }),
+            );
+            assert!(projected["message"]
+                .as_str()
+                .unwrap()
+                .contains(authored_message));
+            assert_eq!(projected["remediation"]["kind"], remediation_kind);
+            let remediation = projected["remediation"]["message"].as_str().unwrap();
+            assert!(remediation.contains("fresh qualification"));
+            assert!(remediation.contains("fresh plan"));
+            assert!(remediation.contains("does not resume"));
+            let text = projected.to_string();
+            assert!(!text.contains("private-serial"));
+            assert!(!text.contains("/private/path"));
+            assert!(!text.contains("stderr detail"));
+        }
     }
 
     #[test]

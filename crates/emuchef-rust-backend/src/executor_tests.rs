@@ -10,10 +10,12 @@ use sha2::{Digest, Sha256};
 
 use crate::artifact_resolver::artifact_local_filename;
 use crate::executor::{
-    adb::{FakeAdbCommandExecutor, RealAdbDevice},
-    DryRunExecutorAdapters, ExecutorAdapters, ExecutorRunner,
+    adb::{AdbCommandError, FakeAdbCommandExecutor, RealAdbDevice},
+    map_adb_error, DeviceOperationKind, DryRunExecutorAdapters, ExecutorAdapters, ExecutorRunner,
+    StepFailureKind,
 };
 use crate::model::OrderedMap;
+use crate::owned_process::{ProcessCleanup, ProcessFailureKind};
 use crate::planner::{
     plan_execution, DeviceContext, ExecutionArtifact, ExecutionParamValue, ExecutionPlan,
     ExecutionPlanSource, ExecutionStep, ExecutionStepCondition, ExecutionStepConstraints,
@@ -694,6 +696,293 @@ fn real_device_timeout_fails_current_step_and_leaves_later_steps_unscheduled() {
         "The device operation timed out."
     );
     assert!(!actual.to_string().contains("serial"));
+}
+
+#[test]
+fn real_device_transport_failure_stops_after_prior_evidence_and_keeps_later_steps_unstarted() {
+    let mut first_params = OrderedMap::new();
+    first_params.insert(
+        "runtime".to_string(),
+        literal(json!([{
+            "package_name": "com.example.first",
+            "name": "android.permission.CAMERA",
+            "required": true
+        }])),
+    );
+    let mut second_params = OrderedMap::new();
+    second_params.insert(
+        "runtime".to_string(),
+        literal(json!([{
+            "package_name": "com.example.second",
+            "name": "android.permission.CAMERA",
+            "required": true
+        }])),
+    );
+    let execution_plan = plan(vec![
+        ExecutionStep {
+            id: "example.recipe/first".to_string(),
+            recipe_ref: "example.recipe".to_string(),
+            type_name: "grant_permissions".to_string(),
+            name: "First".to_string(),
+            note: "First".to_string(),
+            dependencies: Vec::new(),
+            constraints: constraints(),
+            params: first_params,
+            skip_if: Vec::new(),
+            verify: Vec::new(),
+        },
+        ExecutionStep {
+            id: "example.recipe/transport".to_string(),
+            recipe_ref: "example.recipe".to_string(),
+            type_name: "grant_permissions".to_string(),
+            name: "Transport".to_string(),
+            note: "Transport".to_string(),
+            dependencies: Vec::new(),
+            constraints: constraints(),
+            params: second_params,
+            skip_if: Vec::new(),
+            verify: Vec::new(),
+        },
+        wait_step("example.recipe/unrelated", "Unrelated", 1),
+    ]);
+    let mut command_executor = FakeAdbCommandExecutor::default();
+    command_executor.push_completed(0, "", "");
+    command_executor.push_completed(1, "", "error: device offline");
+    let device = RealAdbDevice::with_executor("adb", Some("reviewed-serial"), command_executor);
+    let mut runner = ExecutorRunner::new(ExecutorAdapters::with_device(device));
+
+    let result = runner.run(&execution_plan);
+
+    assert!(!result.success);
+    assert_eq!(result.steps.len(), 2);
+    assert_eq!(
+        result.steps[0].status,
+        crate::executor::StepRunStatus::Executed
+    );
+    assert_eq!(
+        result.steps[1].status,
+        crate::executor::StepRunStatus::Failed
+    );
+    assert_eq!(
+        result.steps[1].failure_kind,
+        Some(StepFailureKind::DeviceOffline)
+    );
+    assert_eq!(
+        result.steps[1].message.as_deref(),
+        Some("The reviewed device is offline.")
+    );
+    assert_eq!(
+        runner.adapters().device().command_executor().calls().len(),
+        2
+    );
+    assert!(!serde_json::to_value(&result)
+        .unwrap()
+        .to_string()
+        .contains("reviewed-serial"));
+}
+
+#[test]
+fn transport_failure_in_skip_predicate_fails_current_step_without_false_result_or_followup() {
+    let mut guarded = wait_step("example.recipe/guarded", "Guarded", 1);
+    guarded.skip_if = vec![condition("path_exists", json!({"path": "/sdcard/guarded"}))];
+    let execution_plan = plan(vec![guarded, wait_step("example.recipe/later", "Later", 1)]);
+    let mut command_executor = FakeAdbCommandExecutor::default();
+    command_executor.push_completed(1, "", "error: no devices/emulators found");
+    let device = RealAdbDevice::with_executor("adb", Some("reviewed-serial"), command_executor);
+    let mut runner = ExecutorRunner::new(ExecutorAdapters::with_device(device));
+
+    let result = runner.run(&execution_plan);
+
+    assert_eq!(result.steps.len(), 1);
+    assert_eq!(
+        result.steps[0].failure_kind,
+        Some(StepFailureKind::DeviceDisconnected)
+    );
+    assert_eq!(
+        runner.adapters().device().command_executor().calls().len(),
+        1
+    );
+}
+
+#[test]
+fn transport_failure_in_root_preflight_fails_current_step_and_stops_later_work() {
+    let mut rooted = wait_step("example.recipe/rooted", "Rooted", 1);
+    rooted.constraints.capabilities = vec!["root_shell".to_string()];
+    let execution_plan = plan(vec![rooted, wait_step("example.recipe/later", "Later", 1)]);
+    let mut command_executor = FakeAdbCommandExecutor::default();
+    command_executor.push_completed(1, "", "error: device unauthorized");
+    let device = RealAdbDevice::with_executor("adb", Some("reviewed-serial"), command_executor);
+    let mut runner = ExecutorRunner::new(ExecutorAdapters::with_device(device));
+
+    let result = runner.run(&execution_plan);
+
+    assert_eq!(result.steps.len(), 1);
+    assert_eq!(
+        result.steps[0].failure_kind,
+        Some(StepFailureKind::DeviceUnauthorized)
+    );
+    assert_eq!(
+        runner.adapters().device().command_executor().calls().len(),
+        1
+    );
+}
+
+#[test]
+fn transport_failure_during_verification_preserves_completed_operation_outputs() {
+    let mut params = OrderedMap::new();
+    params.insert(
+        "runtime".to_string(),
+        literal(json!([{
+            "package_name": "com.example.verify",
+            "name": "android.permission.CAMERA",
+            "required": true
+        }])),
+    );
+    let mut step = ExecutionStep {
+        id: "example.recipe/verify_transport".to_string(),
+        recipe_ref: "example.recipe".to_string(),
+        type_name: "grant_permissions".to_string(),
+        name: "Verify transport".to_string(),
+        note: "Verify transport".to_string(),
+        dependencies: Vec::new(),
+        constraints: constraints(),
+        params,
+        skip_if: Vec::new(),
+        verify: Vec::new(),
+    };
+    step.verify = vec![condition("path_exists", json!({"path": "/sdcard/verify"}))];
+    let mut command_executor = FakeAdbCommandExecutor::default();
+    command_executor.push_completed(0, "", "");
+    command_executor.push_completed(1, "", "error: connection reset by peer");
+    let device = RealAdbDevice::with_executor("adb", Some("reviewed-serial"), command_executor);
+    let mut runner = ExecutorRunner::new(ExecutorAdapters::with_device(device));
+
+    let result = runner.run(&plan(vec![
+        step,
+        wait_step("example.recipe/later", "Later", 1),
+    ]));
+
+    assert_eq!(result.steps.len(), 1);
+    assert_eq!(
+        result.steps[0].failure_kind,
+        Some(StepFailureKind::TransportReset)
+    );
+    assert!(result.steps[0].outputs.contains_key("permission_results"));
+    assert_eq!(
+        runner.adapters().device().command_executor().calls().len(),
+        2
+    );
+}
+
+#[test]
+fn optional_permission_transport_failure_cannot_be_downgraded_or_followed() {
+    let mut params = OrderedMap::new();
+    params.insert(
+        "runtime".to_string(),
+        literal(json!([
+            {"package_name": "com.example.optional", "name": "android.permission.CAMERA", "required": false},
+            {"package_name": "com.example.optional", "name": "android.permission.RECORD_AUDIO", "required": false}
+        ])),
+    );
+    let mut command_executor = FakeAdbCommandExecutor::default();
+    command_executor.push_completed(1, "", "error: device unauthorized");
+    command_executor.push_completed(0, "", "");
+    let device = RealAdbDevice::with_executor("adb", Some("reviewed-serial"), command_executor);
+    let mut runner = ExecutorRunner::new(ExecutorAdapters::with_device(device));
+
+    let result = runner.run(&plan(vec![ExecutionStep {
+        id: "example.recipe/optional".to_string(),
+        recipe_ref: "example.recipe".to_string(),
+        type_name: "grant_permissions".to_string(),
+        name: "Optional".to_string(),
+        note: "Optional".to_string(),
+        dependencies: Vec::new(),
+        constraints: constraints(),
+        params,
+        skip_if: Vec::new(),
+        verify: Vec::new(),
+    }]));
+
+    assert_eq!(
+        result.steps[0].failure_kind,
+        Some(StepFailureKind::DeviceUnauthorized)
+    );
+    assert_eq!(
+        runner.adapters().device().command_executor().calls().len(),
+        1
+    );
+    assert!(result.steps[0]
+        .outputs
+        .get("permission_results")
+        .and_then(|value| value.value.get("actions"))
+        .and_then(Value::as_array)
+        .is_some_and(|actions| actions.len() == 1));
+}
+
+#[test]
+fn device_fail_stop_predicate_excludes_ordinary_and_root_failures() {
+    assert!(StepFailureKind::OperationTimedOut.requires_device_fail_stop());
+    assert!(StepFailureKind::DeviceOffline.requires_device_fail_stop());
+    assert!(StepFailureKind::TransportFailure.requires_device_fail_stop());
+    assert!(!StepFailureKind::OperationCommandFailed.requires_device_fail_stop());
+    assert!(!StepFailureKind::RootDenied.requires_device_fail_stop());
+    assert!(!StepFailureKind::RootUnavailable.requires_device_fail_stop());
+    assert!(!StepFailureKind::OperationFailed.requires_device_fail_stop());
+    assert!(DeviceOperationKind::AdbServerUnavailable.requires_device_fail_stop());
+    assert!(!DeviceOperationKind::CommandFailed.requires_device_fail_stop());
+}
+
+#[test]
+fn every_private_adb_transport_kind_maps_through_device_operation_kind() {
+    let cases = [
+        (
+            AdbCommandError::DeviceOffline,
+            DeviceOperationKind::DeviceOffline,
+        ),
+        (
+            AdbCommandError::DeviceUnauthorized,
+            DeviceOperationKind::DeviceUnauthorized,
+        ),
+        (
+            AdbCommandError::DeviceDisconnected,
+            DeviceOperationKind::DeviceDisconnected,
+        ),
+        (
+            AdbCommandError::AdbServerUnavailable,
+            DeviceOperationKind::AdbServerUnavailable,
+        ),
+        (
+            AdbCommandError::TransportReset,
+            DeviceOperationKind::TransportReset,
+        ),
+        (
+            AdbCommandError::TransportFailure,
+            DeviceOperationKind::TransportFailure,
+        ),
+    ];
+    for (error, expected) in cases {
+        assert_eq!(map_adb_error(error).kind, expected);
+    }
+
+    assert_eq!(
+        map_adb_error(AdbCommandError::TimedOut {
+            cleanup: ProcessCleanup::Confirmed,
+        })
+        .kind,
+        DeviceOperationKind::TimedOut
+    );
+    assert_eq!(
+        map_adb_error(AdbCommandError::ProcessFailed {
+            kind: ProcessFailureKind::StdoutOverflow,
+            cleanup: ProcessCleanup::Confirmed,
+        })
+        .kind,
+        DeviceOperationKind::ProcessFailed
+    );
+    assert_eq!(
+        map_adb_error(AdbCommandError::CommandFailed).kind,
+        DeviceOperationKind::CommandFailed
+    );
 }
 
 #[test]
@@ -1863,10 +2152,9 @@ fn adb_result_mapping_uses_fake_executor_without_launching_processes() {
         .install_apk(Path::new("/tmp/example app.apk"), true)
         .unwrap_err();
 
-    assert_eq!(
-        err,
-        "ADB command failed (1): adb install -r /tmp/example app.apk\nFailure [INSTALL_FAILED_ALREADY_EXISTS]"
-    );
+    assert_eq!(err, "The ADB command failed.");
+    assert!(!err.contains("/tmp/example app.apk"));
+    assert!(!err.contains("INSTALL_FAILED_ALREADY_EXISTS"));
     assert_eq!(
         device.command_executor().calls(),
         &[vec![

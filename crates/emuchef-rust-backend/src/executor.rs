@@ -60,21 +60,64 @@ pub(crate) enum StepFailureKind {
     OperationTimedOut,
     OperationCommandFailed,
     OperationProcessFailed,
+    DeviceOffline,
+    DeviceUnauthorized,
+    DeviceDisconnected,
+    AdbServerUnavailable,
+    TransportReset,
+    TransportFailure,
     RootDenied,
     RootUnavailable,
     OperationFailed,
 }
 
+impl StepFailureKind {
+    /// Device safety failures terminate a real run at the current atomic step.
+    pub(crate) const fn requires_device_fail_stop(self) -> bool {
+        matches!(
+            self,
+            Self::OperationTimedOut
+                | Self::DeviceOffline
+                | Self::DeviceUnauthorized
+                | Self::DeviceDisconnected
+                | Self::AdbServerUnavailable
+                | Self::TransportReset
+                | Self::TransportFailure
+        )
+    }
+}
+
 /// Internal device-operation error carrying stable classification and cleanup
 /// evidence across the executor boundary.
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum DeviceOperationKind {
     TimedOut,
     CommandFailed,
     ProcessFailed,
+    DeviceOffline,
+    DeviceUnauthorized,
+    DeviceDisconnected,
+    AdbServerUnavailable,
+    TransportReset,
+    TransportFailure,
     RootDenied,
     RootUnavailable,
     Other,
+}
+
+impl DeviceOperationKind {
+    pub(crate) const fn requires_device_fail_stop(self) -> bool {
+        matches!(
+            self,
+            Self::TimedOut
+                | Self::DeviceOffline
+                | Self::DeviceUnauthorized
+                | Self::DeviceDisconnected
+                | Self::AdbServerUnavailable
+                | Self::TransportReset
+                | Self::TransportFailure
+        )
+    }
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -98,6 +141,29 @@ impl DeviceOperationError {
             kind: DeviceOperationKind::TimedOut,
             message: "The device operation timed out.".to_string(),
             cleanup: Some(cleanup),
+        }
+    }
+
+    pub(crate) fn transport(kind: DeviceOperationKind) -> Self {
+        let message = match kind {
+            DeviceOperationKind::DeviceOffline => "The reviewed device is offline.",
+            DeviceOperationKind::DeviceUnauthorized => "The reviewed device is unauthorized.",
+            DeviceOperationKind::DeviceDisconnected => {
+                "The reviewed device is disconnected or missing."
+            }
+            DeviceOperationKind::AdbServerUnavailable => "The local ADB service is unavailable.",
+            DeviceOperationKind::TransportReset => {
+                "The device connection was reset during execution."
+            }
+            DeviceOperationKind::TransportFailure => {
+                "The device connection was lost during execution."
+            }
+            _ => "The device connection was lost during execution.",
+        };
+        Self {
+            kind,
+            message: message.to_string(),
+            cleanup: None,
         }
     }
 }
@@ -343,8 +409,9 @@ impl<D: ExecutorDevice> ExecutorRunner<D> {
 
             if step_requires_root(step) {
                 if let Err(failure) = self.ensure_root_preflight() {
-                    let timeout_abort =
-                        failure.failure_kind == Some(StepFailureKind::OperationTimedOut);
+                    let device_fail_stop = failure
+                        .failure_kind
+                        .is_some_and(StepFailureKind::requires_device_fail_stop);
                     let message = failure.message.clone();
                     self.root_preflight_failure = Some(message.clone());
                     state.steps.insert(
@@ -370,7 +437,7 @@ impl<D: ExecutorDevice> ExecutorRunner<D> {
                         failure.failure_kind,
                         failure.cleanup,
                     ));
-                    if timeout_abort {
+                    if device_fail_stop {
                         break;
                     }
                     aborted = true;
@@ -438,8 +505,9 @@ impl<D: ExecutorDevice> ExecutorRunner<D> {
                 }
                 Ok(false) => {}
                 Err(failure) => {
-                    let timeout_abort =
-                        failure.failure_kind == Some(StepFailureKind::OperationTimedOut);
+                    let device_fail_stop = failure
+                        .failure_kind
+                        .is_some_and(StepFailureKind::requires_device_fail_stop);
                     let message = failure.message.clone();
                     state.steps.insert(
                         step.id.clone(),
@@ -464,7 +532,7 @@ impl<D: ExecutorDevice> ExecutorRunner<D> {
                         failure.failure_kind,
                         failure.cleanup,
                     ));
-                    if timeout_abort {
+                    if device_fail_stop {
                         break;
                     }
                     if self.root_preflight_failure.is_some() {
@@ -483,7 +551,7 @@ impl<D: ExecutorDevice> ExecutorRunner<D> {
                 None,
             ));
             let run_result = self.run_step(plan, &mut state, step);
-            let (status, message, outputs, runtime_status, failure_kind, cleanup, timeout_abort) =
+            let (status, message, outputs, runtime_status, failure_kind, cleanup, device_fail_stop) =
                 match run_result {
                     Ok(outputs) => {
                         progress_callback(progress_event(
@@ -525,7 +593,9 @@ impl<D: ExecutorDevice> ExecutorRunner<D> {
                             Err(failure) => (
                                 StepRunStatus::Failed,
                                 Some(failure.message),
-                                if failure.failure_kind == Some(StepFailureKind::OperationTimedOut)
+                                if failure
+                                    .failure_kind
+                                    .is_some_and(StepFailureKind::requires_device_fail_stop)
                                 {
                                     outputs.clone()
                                 } else {
@@ -534,13 +604,16 @@ impl<D: ExecutorDevice> ExecutorRunner<D> {
                                 StepRuntimeStatus::Failed,
                                 failure.failure_kind,
                                 failure.cleanup,
-                                failure.failure_kind == Some(StepFailureKind::OperationTimedOut),
+                                failure
+                                    .failure_kind
+                                    .is_some_and(StepFailureKind::requires_device_fail_stop),
                             ),
                         }
                     }
                     Err(failure) => {
-                        let timeout_abort =
-                            failure.failure_kind == Some(StepFailureKind::OperationTimedOut);
+                        let device_fail_stop = failure
+                            .failure_kind
+                            .is_some_and(StepFailureKind::requires_device_fail_stop);
                         (
                             StepRunStatus::Failed,
                             Some(failure.message),
@@ -548,7 +621,7 @@ impl<D: ExecutorDevice> ExecutorRunner<D> {
                             StepRuntimeStatus::Failed,
                             failure.failure_kind,
                             failure.cleanup,
-                            timeout_abort,
+                            device_fail_stop,
                         )
                     }
                 };
@@ -583,7 +656,7 @@ impl<D: ExecutorDevice> ExecutorRunner<D> {
                 failure_kind,
                 cleanup,
             ));
-            if timeout_abort {
+            if device_fail_stop {
                 break;
             }
             if self.root_preflight_failure.is_some() {
@@ -721,7 +794,7 @@ impl<D: ExecutorDevice> ExecutorRunner<D> {
                     if action.required
                         || policy.require_all
                         || policy.on_failure == "fail"
-                        || error.kind == DeviceOperationKind::TimedOut
+                        || error.kind.requires_device_fail_stop()
                     {
                         failure = Some((error,));
                         break;
@@ -2112,14 +2185,32 @@ impl ExecutorDevice for FakeDryRunDevice {
     }
 }
 
-fn map_adb_error(error: adb::AdbCommandError) -> DeviceOperationError {
+pub(crate) fn map_adb_error(error: adb::AdbCommandError) -> DeviceOperationError {
     match error {
         adb::AdbCommandError::TimedOut { cleanup, .. } => DeviceOperationError::timed_out(cleanup),
-        adb::AdbCommandError::CommandFailed(_) => DeviceOperationError {
+        adb::AdbCommandError::CommandFailed => DeviceOperationError {
             kind: DeviceOperationKind::CommandFailed,
             message: "The device operation failed.".to_string(),
             cleanup: None,
         },
+        adb::AdbCommandError::DeviceOffline => {
+            DeviceOperationError::transport(DeviceOperationKind::DeviceOffline)
+        }
+        adb::AdbCommandError::DeviceUnauthorized => {
+            DeviceOperationError::transport(DeviceOperationKind::DeviceUnauthorized)
+        }
+        adb::AdbCommandError::DeviceDisconnected => {
+            DeviceOperationError::transport(DeviceOperationKind::DeviceDisconnected)
+        }
+        adb::AdbCommandError::AdbServerUnavailable => {
+            DeviceOperationError::transport(DeviceOperationKind::AdbServerUnavailable)
+        }
+        adb::AdbCommandError::TransportReset => {
+            DeviceOperationError::transport(DeviceOperationKind::TransportReset)
+        }
+        adb::AdbCommandError::TransportFailure => {
+            DeviceOperationError::transport(DeviceOperationKind::TransportFailure)
+        }
         adb::AdbCommandError::ProcessFailed { cleanup, .. } => DeviceOperationError {
             kind: DeviceOperationKind::ProcessFailed,
             message: "The device process failed before a trustworthy result was available."
@@ -2659,6 +2750,14 @@ impl From<DeviceOperationError> for StepFailure {
             DeviceOperationKind::TimedOut => Some(StepFailureKind::OperationTimedOut),
             DeviceOperationKind::CommandFailed => Some(StepFailureKind::OperationCommandFailed),
             DeviceOperationKind::ProcessFailed => Some(StepFailureKind::OperationProcessFailed),
+            DeviceOperationKind::DeviceOffline => Some(StepFailureKind::DeviceOffline),
+            DeviceOperationKind::DeviceUnauthorized => Some(StepFailureKind::DeviceUnauthorized),
+            DeviceOperationKind::DeviceDisconnected => Some(StepFailureKind::DeviceDisconnected),
+            DeviceOperationKind::AdbServerUnavailable => {
+                Some(StepFailureKind::AdbServerUnavailable)
+            }
+            DeviceOperationKind::TransportReset => Some(StepFailureKind::TransportReset),
+            DeviceOperationKind::TransportFailure => Some(StepFailureKind::TransportFailure),
             DeviceOperationKind::RootDenied => Some(StepFailureKind::RootDenied),
             DeviceOperationKind::RootUnavailable => Some(StepFailureKind::RootUnavailable),
             DeviceOperationKind::Other => Some(StepFailureKind::OperationFailed),

@@ -18,6 +18,8 @@ use time::OffsetDateTime;
 use crate::artifact_resolver::{ArtifactResolveRequest, ArtifactResolver};
 use crate::device_probe::{AdbDeviceProbe, AdbProbeConfig, DeviceProbe, ProcessCommandRunner};
 use crate::errors::{ApiError, ApiErrorCode};
+#[cfg(test)]
+use crate::executor::adb::FakeAdbCommandExecutor;
 use crate::executor::adb::RealAdbDevice;
 use crate::executor::{
     ExecutionProgressEvent, ExecutionRunResult, ExecutorAdapters, ExecutorDevice, ExecutorRunner,
@@ -528,6 +530,10 @@ fn preflight_target(
     supplied: Option<TargetDeviceBinding>,
     adb_path: &str,
 ) -> Result<Option<TargetDeviceBinding>, ApiError> {
+    #[cfg(test)]
+    if plan.id == "__test_execution_transport_failure__" && mode == ExecutionMode::Real {
+        return Ok(supplied.or_else(|| plan.target_device.clone()));
+    }
     let reviewed = plan.target_device.as_ref();
     if let (Some(reviewed), Some(supplied)) = (reviewed, supplied.as_ref()) {
         reject_target_mismatch(reviewed, supplied)?;
@@ -705,6 +711,30 @@ fn execute_attempt(
         }
         ExecutionMode::Real => {
             let serial = target.map(|target| target.serial);
+            #[cfg(test)]
+            if plan.id == "__test_execution_transport_failure__" {
+                let mut command_executor = FakeAdbCommandExecutor::default();
+                command_executor.push_completed(0, "", "");
+                command_executor.push_completed(1, "", "error: device offline");
+                return run_with_device(
+                    state,
+                    execution_id,
+                    plan,
+                    ExecutorAdapters::with_device_and_sandbox_roots(
+                        RealAdbDevice::with_executor(
+                            config.adb_path,
+                            serial.as_deref(),
+                            command_executor,
+                        ),
+                        attempt_root,
+                        config.cache_root,
+                        fake_device_root,
+                        read_only_roots,
+                        true,
+                    ),
+                    cancel_requested,
+                );
+            }
             run_with_device(
                 state,
                 execution_id,
@@ -933,6 +963,16 @@ fn issue_code(
     }
     if failure_kind == Some(StepFailureKind::OperationTimedOut) {
         return "operation_timed_out".to_string();
+    }
+    match failure_kind {
+        Some(StepFailureKind::DeviceOffline) => return "device_offline".to_string(),
+        Some(StepFailureKind::DeviceUnauthorized) => return "device_unauthorized".to_string(),
+        Some(StepFailureKind::DeviceDisconnected) => return "device_disconnected".to_string(),
+        Some(StepFailureKind::AdbServerUnavailable) => return "adb_server_unavailable".to_string(),
+        Some(StepFailureKind::TransportReset | StepFailureKind::TransportFailure) => {
+            return "device_transport_lost".to_string()
+        }
+        _ => {}
     }
     let message = message.unwrap_or_default();
     for code in [
@@ -1232,6 +1272,27 @@ mod tests {
     }
 
     #[test]
+    fn typed_transport_failures_keep_distinct_stable_issue_codes() {
+        let cases = [
+            (StepFailureKind::DeviceOffline, "device_offline"),
+            (StepFailureKind::DeviceUnauthorized, "device_unauthorized"),
+            (StepFailureKind::DeviceDisconnected, "device_disconnected"),
+            (
+                StepFailureKind::AdbServerUnavailable,
+                "adb_server_unavailable",
+            ),
+            (StepFailureKind::TransportReset, "device_transport_lost"),
+            (StepFailureKind::TransportFailure, "device_transport_lost"),
+        ];
+        for (kind, expected) in cases {
+            assert_eq!(
+                issue_code(StepRunStatus::Failed, Some("ignored"), Some(kind)),
+                expected
+            );
+        }
+    }
+
+    #[test]
     fn recipe_status_keeps_partially_processed_work_active_or_cancelled() {
         let mut plan = test_plan("plan.recipe-status");
         let mut second = plan.steps[0].clone();
@@ -1288,6 +1349,116 @@ mod tests {
             .unwrap()
             .iter()
             .all(|event| event["sequence"].as_u64().unwrap() > 1));
+    }
+
+    #[test]
+    fn real_transport_failure_terminalizes_pending_work_and_releases_active_slot() {
+        let temp = tempfile::tempdir().unwrap();
+        let manager = manager(temp.path());
+        let target = TargetDeviceBinding {
+            serial: "reviewed-serial".to_string(),
+            manufacturer: Some("Example".to_string()),
+            model: Some("Example".to_string()),
+            android_api_level: Some(35),
+        };
+        let mut plan = test_plan("__test_execution_transport_failure__");
+        plan.target_device = Some(target.clone());
+        let mut first_params = OrderedMap::new();
+        first_params.insert(
+            "runtime".to_string(),
+            ExecutionParamValue::Literal {
+                value: json!([{
+                    "package_name": "com.example.first",
+                    "name": "android.permission.CAMERA",
+                    "required": true
+                }]),
+            },
+        );
+        let mut second_params = OrderedMap::new();
+        second_params.insert(
+            "runtime".to_string(),
+            ExecutionParamValue::Literal {
+                value: json!([{
+                    "package_name": "com.example.second",
+                    "name": "android.permission.CAMERA",
+                    "required": true
+                }]),
+            },
+        );
+        let grant = |id: &str, name: &str, params: OrderedMap<ExecutionParamValue>| ExecutionStep {
+            id: id.to_string(),
+            recipe_ref: "recipe.example".to_string(),
+            type_name: "grant_permissions".to_string(),
+            name: name.to_string(),
+            note: name.to_string(),
+            dependencies: Vec::new(),
+            constraints: ExecutionStepConstraints {
+                capabilities: Vec::new(),
+                conflicts_with: Vec::new(),
+            },
+            params,
+            skip_if: Vec::new(),
+            verify: Vec::new(),
+        };
+        plan.steps = vec![
+            grant("recipe.example/first", "First", first_params),
+            grant("recipe.example/transport", "Transport", second_params),
+            ExecutionStep {
+                id: "recipe.example/unrelated".to_string(),
+                recipe_ref: "recipe.example".to_string(),
+                type_name: "wait".to_string(),
+                name: "Unrelated".to_string(),
+                note: "Unrelated".to_string(),
+                dependencies: Vec::new(),
+                constraints: ExecutionStepConstraints {
+                    capabilities: Vec::new(),
+                    conflicts_with: Vec::new(),
+                },
+                params: {
+                    let mut params = OrderedMap::new();
+                    params.insert(
+                        "duration_ms".to_string(),
+                        ExecutionParamValue::Literal { value: json!(1) },
+                    );
+                    params
+                },
+                skip_if: Vec::new(),
+                verify: Vec::new(),
+            },
+        ];
+        let digest = crate::plan_digest::execution_plan_digest(&plan).unwrap();
+
+        let started = manager
+            .start(
+                plan.clone(),
+                digest.clone(),
+                ExecutionMode::Real,
+                Some(target.clone()),
+            )
+            .unwrap();
+        let execution_id = started["execution"]["executionId"]
+            .as_str()
+            .unwrap()
+            .to_string();
+        let report = wait_for_terminal(&manager, &execution_id);
+
+        assert_eq!(report["status"], "failed");
+        let steps = report["recipes"][0]["steps"].as_array().unwrap();
+        assert_eq!(steps[0]["status"], "succeeded");
+        assert_eq!(steps[1]["status"], "failed");
+        assert_eq!(steps[2]["status"], "pending");
+        assert_eq!(report["errors"][0]["code"], "device_offline");
+        assert_eq!(
+            report["errors"][0]["message"],
+            "The reviewed device is offline."
+        );
+
+        let fresh = manager
+            .start(plan, digest, ExecutionMode::Real, Some(target))
+            .expect("terminal transport failure must release the active slot");
+        let fresh_id = fresh["execution"]["executionId"].as_str().unwrap();
+        assert_ne!(fresh_id, execution_id);
+        assert_eq!(wait_for_terminal(&manager, fresh_id)["status"], "failed");
     }
 
     #[test]

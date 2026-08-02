@@ -27,7 +27,7 @@ Detailed evidence remains in the relevant product and release documents. In part
 
 | Product or track | Current state | Next priority |
 |---|---|---|
-| EmuChef proper | Phase 5A through 5H, Phase 6A through 6C, the Phase 6D.1 audit, and automated Phase 6D.2 implementation completed | Continue Phase 6D physical interruption, transport, and device qualification work |
+| EmuChef proper | Phase 5A through 5H, Phase 6A through 6C, the Phase 6D.1 audit, and automated Phase 6D.2 and 6D.3 implementation completed | Continue Phase 6D physical interruption, identity, root, and device qualification work |
 | Config Editor | Authored generation implemented through GitHub release-pattern testing | Later refinements remain unsequenced unless explicitly promoted |
 | Shared Runtime | Rust is the sole runtime and retains device, filesystem, planning, execution, validation, and protocol authority | Add shared capabilities only when required by a bounded product slice |
 | Release engineering | Deliberately deferred from normal Phase 5 product work | Resume only when the owner declares the relevant application release-comfortable |
@@ -671,8 +671,8 @@ never-started work present as **Not attempted**, keeping partial recipe state
 truthful, warning conservatively after failed real atomic work, and invalidating
 all authority derived from a detectably lost sidecar process generation.
 
-Phase 6D remains open. General ADB and sidecar deadlines, typed mid-run
-transport handling, same-serial device replacement detection, mid-run root and
+Phase 6D remains open. General ADB and sidecar deadlines and typed mid-run
+transport handling are automated; same-serial device replacement detection, mid-run root and
 qualification revalidation, low-storage/host-sleep policy, and physical
 interruption qualification are explicitly deferred. No checkpoint, resume,
 automatic replay, rollback, persistent execution, new serialized status, or
@@ -714,6 +714,32 @@ low-storage, host sleep, packaged GUI, and release qualification remain open
 Phase 6D work. No checkpointing, resume, rollback, replay, automatic retry,
 persistent execution, public timeout controls, or production feature enablement
 was added.
+
+#### Phase 6D.3 — ADB transport failures completion evidence
+
+Completed as an automated implementation slice on 2026-08-02. The detailed
+boundary, stable issue-code mapping, fail-stop semantics, sanitized remediation,
+and host evidence are recorded in
+`docs/product/phase-6d3-adb-transport-failures.md` and the run-specific
+`RESULT.md`.
+
+The private ADB adapter now applies one line-anchored classifier to checked,
+unchecked, launcher-resolution, and root-probe result paths. Recognized offline,
+unauthorized, disconnected/missing, ADB-server, reset, and generic transport
+loss responses become typed private failures. Timeouts and process/output
+failures retain precedence; unknown nonzero results remain ordinary command or
+root failures. Typed transport failures use the existing fail-stop path,
+preserve completed evidence and possible partial-change warnings, leave later
+steps pending for **Not attempted** projection, release the active slot, and
+require fresh qualification, plan, review, and execution identity. Tauri and
+React receive only authored sanitized guidance.
+
+This evidence is host-automated only. Phase 6D remains **In progress**. Same-
+serial replacement detection (6D.4), repeated root-authority revalidation
+(6D.5), and physical offline/unauthorized/disconnect qualification (6D.6)
+remain pending. No automatic reconnect, ADB-server restart, retry, resume,
+rollback, replay, checkpointing, public schema/configuration expansion, or
+production qualification was added.
 
 ### 6E — Recipe Qualification
 

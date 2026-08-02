@@ -250,6 +250,126 @@ describe("execution recovery actions", () => {
     expect(screen.getByRole("button", { name: "Repair setup" })).toBeTruthy();
   });
 
+  test("transport issue projections distinguish reconnect, authorization, service repair, and lost connection", () => {
+    const base: RealExecutionSnapshot = {
+      ...failedSnapshot(),
+      simulated: false,
+      verificationScope: "real_device",
+      target: { label: "Connected Android device" },
+      launchAction: null,
+      completion: {
+        ...failedSnapshot().completion,
+        partialChangesPossible: true,
+      },
+    };
+    const { rerender } = render(
+      <ExecutionStep
+        execution={{
+          kind: "terminal",
+          generation: 1,
+          mode: "real",
+          snapshot: {
+            ...base,
+            errors: [{
+              message: "The intended reviewed device needs USB debugging authorization.",
+              remediation: {
+                kind: "reconnect_device",
+                title: "Reconnect and requalify",
+                message: "Reconnect or authorize the intended reviewed device, then complete fresh qualification and generate and review a fresh plan before another real run. Reconnecting does not resume the old execution.",
+              },
+            }],
+          },
+          events: [],
+          eventCursor: 0,
+          cancellationRequested: false,
+        }}
+        launchState="idle"
+        repairPreparing={false}
+        reportState="idle"
+        onCancel={vi.fn()}
+        onExportReport={vi.fn()}
+        onLaunchConfiguredApp={vi.fn()}
+        onPrepareRepair={vi.fn()}
+        onReturn={vi.fn()}
+      />,
+    );
+
+    expect(screen.getByText(/USB debugging authorization/i)).toBeTruthy();
+    expect(screen.getByText(/fresh qualification and generate and review a fresh plan/i)).toBeTruthy();
+    expect(screen.getByText(/does not resume the old execution/i)).toBeTruthy();
+
+    rerender(
+      <ExecutionStep
+        execution={{
+          kind: "terminal",
+          generation: 1,
+          mode: "real",
+          snapshot: {
+            ...base,
+            errors: [{
+              message: "The local ADB/Platform-Tools service was unavailable.",
+              remediation: {
+                kind: "repair_platform_tools",
+                title: "Repair local ADB",
+                message: "Restore the local ADB/Platform-Tools service, then complete fresh qualification and generate and review a fresh plan before another real run. Repairing the service does not resume the old execution.",
+              },
+            }],
+          },
+          events: [],
+          eventCursor: 0,
+          cancellationRequested: false,
+        }}
+        launchState="idle"
+        repairPreparing={false}
+        reportState="idle"
+        onCancel={vi.fn()}
+        onExportReport={vi.fn()}
+        onLaunchConfiguredApp={vi.fn()}
+        onPrepareRepair={vi.fn()}
+        onReturn={vi.fn()}
+      />,
+    );
+
+    expect(screen.getByText(/ADB\/Platform-Tools service was unavailable/i)).toBeTruthy();
+    expect(screen.getByText(/Repair local ADB/i)).toBeTruthy();
+    expect(screen.queryByText(/private-serial|error: device/i)).toBeNull();
+
+    rerender(
+      <ExecutionStep
+        execution={{
+          kind: "terminal",
+          generation: 1,
+          mode: "real",
+          snapshot: {
+            ...base,
+            errors: [{
+              message: "The device connection was lost during execution.",
+              remediation: {
+                kind: "reconnect_device",
+                title: "Reconnect and requalify",
+                message: "Reconnect or authorize the intended reviewed device, then complete fresh qualification and generate and review a fresh plan before another real run. Reconnecting does not resume the old execution.",
+              },
+            }],
+          },
+          events: [],
+          eventCursor: 0,
+          cancellationRequested: false,
+        }}
+        launchState="idle"
+        repairPreparing={false}
+        reportState="idle"
+        onCancel={vi.fn()}
+        onExportReport={vi.fn()}
+        onLaunchConfiguredApp={vi.fn()}
+        onPrepareRepair={vi.fn()}
+        onReturn={vi.fn()}
+      />,
+    );
+
+    expect(screen.getByText(/connection was lost during execution/i)).toBeTruthy();
+    expect(screen.getByText(/does not resume the old execution/i)).toBeTruthy();
+  });
+
   test("separates failed and blocked results without exposing raw result names or changing order", () => {
     const snapshot: ExecutionSnapshot = {
       ...failedSnapshot(),

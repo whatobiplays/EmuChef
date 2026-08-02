@@ -19,13 +19,18 @@ pub struct AdbCommandResult {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum AdbCommandError {
     Resolution(String),
-    CommandFailed(AdbCommandResult),
+    CommandFailed,
+    DeviceOffline,
+    DeviceUnauthorized,
+    DeviceDisconnected,
+    AdbServerUnavailable,
+    TransportReset,
+    TransportFailure,
     ProcessFailed {
         kind: ProcessFailureKind,
         cleanup: ProcessCleanup,
     },
     TimedOut {
-        args: Vec<String>,
         cleanup: ProcessCleanup,
     },
     RootDenied,
@@ -40,17 +45,24 @@ impl fmt::Display for AdbCommandError {
             AdbCommandError::Resolution(message) | AdbCommandError::InvalidPlanCommand(message) => {
                 formatter.write_str(message)
             }
-            AdbCommandError::CommandFailed(result) => {
-                write!(
-                    formatter,
-                    "ADB command failed ({}): {}",
-                    result.returncode,
-                    result.args.join(" ")
-                )?;
-                if !result.stderr.is_empty() {
-                    write!(formatter, "\n{}", result.stderr.trim())?;
-                }
-                Ok(())
+            AdbCommandError::CommandFailed => formatter.write_str("The ADB command failed."),
+            AdbCommandError::DeviceOffline => {
+                formatter.write_str("The reviewed device is offline.")
+            }
+            AdbCommandError::DeviceUnauthorized => {
+                formatter.write_str("The reviewed device is unauthorized.")
+            }
+            AdbCommandError::DeviceDisconnected => {
+                formatter.write_str("The reviewed device is disconnected or missing.")
+            }
+            AdbCommandError::AdbServerUnavailable => {
+                formatter.write_str("The local ADB service is unavailable.")
+            }
+            AdbCommandError::TransportReset => {
+                formatter.write_str("The device connection was reset during execution.")
+            }
+            AdbCommandError::TransportFailure => {
+                formatter.write_str("The device connection was lost during execution.")
             }
             AdbCommandError::ProcessFailed { .. } => {
                 formatter.write_str("The ADB process failed before producing a trustworthy result.")
@@ -91,7 +103,7 @@ impl AdbCommandExecutor for ProcessAdbCommandExecutor {
         })?;
         let output = run_owned_process(executable, command_args, operation)
             .map_err(|error| map_process_error(args, error))?;
-        Ok(AdbCommandResult {
+        classify_completed_transport(AdbCommandResult {
             args: args.to_vec(),
             returncode: output.status_code.unwrap_or(-1),
             stdout: String::from_utf8_lossy(&output.stdout).into_owned(),
@@ -149,8 +161,7 @@ pub fn probe_root<E: AdbCommandExecutor>(
             message: "Root authorization timed out. Try again.",
         },
         Err(error) => {
-            let message = error.to_string();
-            if is_transport_failure(&message) {
+            if error.is_transport_failure() {
                 RootProbeOutcome::CheckFailed {
                     reason: RootProbeFailureReason::Transport,
                     message: "The device connection failed during the root access check.",
@@ -180,6 +191,7 @@ pub(crate) fn probe_root_typed<E: AdbCommandExecutor>(
         "id".to_string(),
     ];
     let result = executor.run_for(&args, ProcessOperation::RootPreflight)?;
+    let result = classify_completed_transport(result)?;
     Ok(classify_root_result(&result))
 }
 
@@ -196,12 +208,7 @@ fn classify_root_result(result: &AdbCommandResult) -> RootProbeOutcome {
     }
     let combined = format!("{}\n{}", result.stdout, result.stderr);
     let lower = combined.to_ascii_lowercase();
-    if is_transport_failure(&lower) {
-        RootProbeOutcome::CheckFailed {
-            reason: RootProbeFailureReason::Transport,
-            message: "The device connection failed during the root access check.",
-        }
-    } else if is_unavailable_root(&lower) {
+    if is_unavailable_root(&lower) {
         RootProbeOutcome::Unavailable
     } else if is_denied_root(&lower) {
         RootProbeOutcome::Denied
@@ -213,20 +220,18 @@ fn classify_root_result(result: &AdbCommandResult) -> RootProbeOutcome {
     }
 }
 
-fn is_transport_failure(text: &str) -> bool {
-    [
-        "device not found",
-        "no devices/emulators found",
-        "no devices found",
-        "device offline",
-        "device unauthorized",
-        "cannot connect",
-        "failed to connect",
-        "transport error",
-        "transport id",
-    ]
-    .iter()
-    .any(|marker| text.to_ascii_lowercase().contains(marker))
+impl AdbCommandError {
+    fn is_transport_failure(&self) -> bool {
+        matches!(
+            self,
+            Self::DeviceOffline
+                | Self::DeviceUnauthorized
+                | Self::DeviceDisconnected
+                | Self::AdbServerUnavailable
+                | Self::TransportReset
+                | Self::TransportFailure
+        )
+    }
 }
 
 fn is_unavailable_root(text: &str) -> bool {
@@ -304,8 +309,9 @@ impl<E: AdbCommandExecutor> AdbCommandRunner<E> {
         operation: ProcessOperation,
     ) -> Result<AdbCommandResult, AdbCommandError> {
         let result = self.executor.run_for(&full_args, operation)?;
+        let result = classify_completed_transport(result)?;
         if check && result.returncode != 0 {
-            Err(AdbCommandError::CommandFailed(result))
+            Err(AdbCommandError::CommandFailed)
         } else {
             Ok(result)
         }
@@ -667,6 +673,7 @@ enum FakeAdbResponse {
     },
     MissingBinary,
     TimedOut,
+    ProcessFailed(ProcessFailureKind),
 }
 
 #[cfg(test)]
@@ -694,6 +701,11 @@ impl FakeAdbCommandExecutor {
     pub fn push_timed_out(&mut self) {
         self.responses.push_back(FakeAdbResponse::TimedOut);
     }
+
+    pub fn push_process_failed(&mut self, kind: ProcessFailureKind) {
+        self.responses
+            .push_back(FakeAdbResponse::ProcessFailed(kind));
+    }
 }
 
 #[cfg(test)]
@@ -720,7 +732,10 @@ impl AdbCommandExecutor for FakeAdbCommandExecutor {
                 Err(AdbCommandError::Resolution(adb_not_found_message()))
             }
             Some(FakeAdbResponse::TimedOut) => Err(AdbCommandError::TimedOut {
-                args: args.to_vec(),
+                cleanup: ProcessCleanup::Confirmed,
+            }),
+            Some(FakeAdbResponse::ProcessFailed(kind)) => Err(AdbCommandError::ProcessFailed {
+                kind,
                 cleanup: ProcessCleanup::Confirmed,
             }),
             None => Ok(AdbCommandResult {
@@ -733,11 +748,10 @@ impl AdbCommandExecutor for FakeAdbCommandExecutor {
     }
 }
 
-fn map_process_error(args: &[String], error: OwnedProcessError) -> AdbCommandError {
+fn map_process_error(_args: &[String], error: OwnedProcessError) -> AdbCommandError {
     match error.kind {
         ProcessFailureKind::Spawn => AdbCommandError::Resolution(adb_not_found_message()),
         ProcessFailureKind::TimedOut => AdbCommandError::TimedOut {
-            args: args.to_vec(),
             cleanup: error.cleanup,
         },
         kind => AdbCommandError::ProcessFailed {
@@ -745,6 +759,78 @@ fn map_process_error(args: &[String], error: OwnedProcessError) -> AdbCommandErr
             cleanup: error.cleanup,
         },
     }
+}
+
+/// Classifies only complete, bounded ADB-owned response lines. Remote shell
+/// output is deliberately ignored unless it has an ADB-owned error prefix.
+fn classify_completed_transport(
+    result: AdbCommandResult,
+) -> Result<AdbCommandResult, AdbCommandError> {
+    if result.returncode == 0 {
+        return Ok(result);
+    }
+
+    for line in result
+        .stdout
+        .lines()
+        .chain(result.stderr.lines())
+        .map(str::trim)
+        .map(|line| line.to_ascii_lowercase())
+    {
+        if let Some(error) = classify_transport_line(&line) {
+            return Err(error);
+        }
+    }
+    Ok(result)
+}
+
+fn classify_transport_line(line: &str) -> Option<AdbCommandError> {
+    let adb_error = line
+        .strip_prefix("adb: error:")
+        .or_else(|| line.strip_prefix("error:"))
+        .map(str::trim);
+
+    if let Some(body) = adb_error {
+        if body == "device offline" {
+            return Some(AdbCommandError::DeviceOffline);
+        }
+        if body.starts_with("device unauthorized") {
+            return Some(AdbCommandError::DeviceUnauthorized);
+        }
+        if let Some(serial) = body.strip_prefix("device '") {
+            if let Some(serial) = serial.strip_suffix("' not found") {
+                if !serial.is_empty() && !serial.contains('\'') {
+                    return Some(AdbCommandError::DeviceDisconnected);
+                }
+            }
+        }
+        if body == "no devices/emulators found" {
+            return Some(AdbCommandError::DeviceDisconnected);
+        }
+        if body.starts_with("cannot connect to daemon")
+            || body.starts_with("failed to connect to daemon")
+        {
+            return Some(AdbCommandError::AdbServerUnavailable);
+        }
+        if body == "connection reset by peer" {
+            return Some(AdbCommandError::TransportReset);
+        }
+        if body == "transport error" {
+            return Some(AdbCommandError::TransportFailure);
+        }
+        if body == "closed" || body.starts_with("failed to read response from device") {
+            return Some(AdbCommandError::TransportFailure);
+        }
+    }
+
+    if line.starts_with("* failed to start daemon") || line.starts_with("* cannot start daemon") {
+        return Some(AdbCommandError::AdbServerUnavailable);
+    }
+    if line.starts_with("adb server didn't ack") {
+        return Some(AdbCommandError::AdbServerUnavailable);
+    }
+
+    None
 }
 
 fn error_string(error: AdbCommandError) -> String {
@@ -868,7 +954,7 @@ mod tests {
     #[test]
     fn root_probe_classifies_only_recognized_transport_failures_as_transport() {
         let (transport, _) =
-            probe_with(|executor| executor.push_completed(1, "", "device offline"));
+            probe_with(|executor| executor.push_completed(1, "", "error: device offline"));
         assert!(matches!(
             transport,
             RootProbeOutcome::CheckFailed {
@@ -879,6 +965,15 @@ mod tests {
         let (missing_adb, _) = probe_with(|executor| executor.push_missing_binary());
         assert!(matches!(
             missing_adb,
+            RootProbeOutcome::CheckFailed {
+                reason: RootProbeFailureReason::UnexpectedResponse,
+                ..
+            }
+        ));
+        let (remote_phrase, _) =
+            probe_with(|executor| executor.push_completed(1, "", "connection reset by peer"));
+        assert!(matches!(
+            remote_phrase,
             RootProbeOutcome::CheckFailed {
                 reason: RootProbeFailureReason::UnexpectedResponse,
                 ..
@@ -897,6 +992,153 @@ mod tests {
             }
         ));
         assert_eq!(calls.len(), 1);
+    }
+
+    fn checked_error(stdout: &str, stderr: &str) -> AdbCommandError {
+        let mut executor = FakeAdbCommandExecutor::default();
+        executor.push_completed(1, stdout, stderr);
+        let mut runner =
+            AdbCommandRunner::with_executor("adb", Some("reviewed-serial".to_string()), executor);
+        runner
+            .run(
+                vec!["shell".to_string(), "true".to_string()],
+                true,
+                ProcessOperation::ShellMutation,
+            )
+            .unwrap_err()
+    }
+
+    #[test]
+    fn completed_adb_transport_forms_are_classified_without_retaining_details() {
+        let cases = [
+            ("error: device offline", "", AdbCommandError::DeviceOffline),
+            (
+                "ADB: ERROR: DEVICE UNAUTHORIZED. Please check the confirmation dialog.",
+                "",
+                AdbCommandError::DeviceUnauthorized,
+            ),
+            (
+                "",
+                "error: device 'reviewed-serial' not found",
+                AdbCommandError::DeviceDisconnected,
+            ),
+            (
+                "error: no devices/emulators found",
+                "",
+                AdbCommandError::DeviceDisconnected,
+            ),
+            (
+                "",
+                "adb: error: cannot connect to daemon at tcp:5037",
+                AdbCommandError::AdbServerUnavailable,
+            ),
+            (
+                "* failed to start daemon",
+                "",
+                AdbCommandError::AdbServerUnavailable,
+            ),
+            (
+                "adb: error: connection reset by peer",
+                "",
+                AdbCommandError::TransportReset,
+            ),
+            (
+                "error: failed to read response from device",
+                "",
+                AdbCommandError::TransportFailure,
+            ),
+            ("error: closed", "", AdbCommandError::TransportFailure),
+        ];
+
+        for (stdout, stderr, expected) in cases {
+            let actual = checked_error(stdout, stderr);
+            assert_eq!(actual, expected);
+            assert!(!actual.to_string().contains("reviewed-serial"));
+            assert!(!actual.to_string().contains("connection reset"));
+        }
+    }
+
+    #[test]
+    fn non_adb_transport_phrases_remain_ordinary_command_failures() {
+        for text in [
+            "remote command reported connection reset by peer",
+            "application transport error while handling the request",
+            "remote stream closed unexpectedly",
+            "remote shell cannot connect to its service",
+            "remote command failed to connect to a socket",
+        ] {
+            assert!(matches!(
+                checked_error(text, ""),
+                AdbCommandError::CommandFailed
+            ));
+        }
+    }
+
+    #[test]
+    fn successful_output_remains_available_and_timeout_or_overflow_keeps_precedence() {
+        let mut executor = FakeAdbCommandExecutor::default();
+        executor.push_completed(0, "package:com.example.app/base.apk\n", "");
+        let mut runner = AdbCommandRunner::with_executor("adb", None, executor);
+        let result = runner
+            .run(
+                vec!["shell".to_string(), "pm".to_string(), "path".to_string()],
+                false,
+                ProcessOperation::Predicate,
+            )
+            .unwrap();
+        assert_eq!(result.stdout, "package:com.example.app/base.apk\n");
+
+        let mut executor = FakeAdbCommandExecutor::default();
+        executor.push_timed_out();
+        let mut runner = AdbCommandRunner::with_executor("adb", None, executor);
+        assert!(matches!(
+            runner.run(
+                vec!["shell".to_string(), "true".to_string()],
+                true,
+                ProcessOperation::ShellMutation,
+            ),
+            Err(AdbCommandError::TimedOut { .. })
+        ));
+
+        let mut executor = FakeAdbCommandExecutor::default();
+        executor.push_process_failed(ProcessFailureKind::StdoutOverflow);
+        let mut runner = AdbCommandRunner::with_executor("adb", None, executor);
+        assert!(matches!(
+            runner.run(
+                vec!["shell".to_string(), "true".to_string()],
+                true,
+                ProcessOperation::ShellMutation,
+            ),
+            Err(AdbCommandError::ProcessFailed {
+                kind: ProcessFailureKind::StdoutOverflow,
+                ..
+            })
+        ));
+    }
+
+    #[test]
+    fn unchecked_completed_transport_results_are_not_interpreted_as_false() {
+        let mut executor = FakeAdbCommandExecutor::default();
+        executor.push_completed(1, "", "error: device offline");
+        let mut runner = AdbCommandRunner::with_executor("adb", None, executor);
+        let error = runner
+            .run(
+                vec!["shell".to_string(), "test".to_string()],
+                false,
+                ProcessOperation::Predicate,
+            )
+            .unwrap_err();
+        assert_eq!(error, AdbCommandError::DeviceOffline);
+    }
+
+    #[test]
+    fn root_probe_uses_the_same_completed_transport_classifier() {
+        let mut executor = FakeAdbCommandExecutor::default();
+        executor.push_completed(1, "", "error: device unauthorized");
+        assert_eq!(
+            probe_root_typed(&mut executor, "adb", "reviewed-serial"),
+            Err(AdbCommandError::DeviceUnauthorized)
+        );
     }
 
     #[test]
