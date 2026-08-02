@@ -35,6 +35,7 @@ pub(crate) mod generation;
 pub mod jsonl;
 pub mod model;
 pub mod one_shot;
+mod owned_process;
 mod plan_digest;
 mod planner;
 pub(crate) mod planner_device_plan;

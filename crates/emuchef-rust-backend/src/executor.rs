@@ -19,6 +19,7 @@ use sha2::{Digest, Sha256};
 use crate::apk_manifest::inspect_apk_manifest;
 use crate::artifact_resolver::{ArtifactResolveRequest, ArtifactResolver};
 use crate::model::OrderedMap;
+use crate::owned_process::ProcessCleanup;
 use crate::planner::{
     ExecutionParamValue, ExecutionPlan, ExecutionStep, ExecutionStepCondition, RuntimeValue,
 };
@@ -46,6 +47,65 @@ pub struct StepRunRecord {
     pub status: StepRunStatus,
     pub message: Option<String>,
     pub outputs: OrderedMap<RuntimeValue>,
+    #[serde(skip)]
+    pub(crate) failure_kind: Option<StepFailureKind>,
+    #[serde(skip)]
+    pub(crate) cleanup: Option<ProcessCleanup>,
+}
+
+/// Typed private failure kinds used to preserve safety decisions without
+/// parsing presentation strings or changing the serialized execution schema.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum StepFailureKind {
+    OperationTimedOut,
+    OperationCommandFailed,
+    OperationProcessFailed,
+    RootDenied,
+    RootUnavailable,
+    OperationFailed,
+}
+
+/// Internal device-operation error carrying stable classification and cleanup
+/// evidence across the executor boundary.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) enum DeviceOperationKind {
+    TimedOut,
+    CommandFailed,
+    ProcessFailed,
+    RootDenied,
+    RootUnavailable,
+    Other,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct DeviceOperationError {
+    pub(crate) kind: DeviceOperationKind,
+    pub(crate) message: String,
+    pub(crate) cleanup: Option<ProcessCleanup>,
+}
+
+impl DeviceOperationError {
+    pub(crate) fn other(message: impl Into<String>) -> Self {
+        Self {
+            kind: DeviceOperationKind::Other,
+            message: message.into(),
+            cleanup: None,
+        }
+    }
+
+    pub(crate) fn timed_out(cleanup: ProcessCleanup) -> Self {
+        Self {
+            kind: DeviceOperationKind::TimedOut,
+            message: "The device operation timed out.".to_string(),
+            cleanup: Some(cleanup),
+        }
+    }
+}
+
+impl From<String> for DeviceOperationError {
+    fn from(message: String) -> Self {
+        Self::other(message)
+    }
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize)]
@@ -91,7 +151,7 @@ pub struct ExecutionProgressEvent {
 }
 
 pub trait ExecutorDevice: std::fmt::Debug {
-    fn revalidate_root(&mut self) -> Result<(), String> {
+    fn revalidate_root(&mut self) -> Result<(), DeviceOperationError> {
         Ok(())
     }
 
@@ -99,24 +159,32 @@ pub trait ExecutorDevice: std::fmt::Debug {
         false
     }
 
-    fn install_apk(&mut self, apk_path: &Path, replace_existing: bool) -> Result<(), String>;
-    fn push(&mut self, source: &Path, dest: &str, sync: bool) -> Result<(), String>;
-    fn mkdir_p(&mut self, path: &str) -> Result<(), String>;
-    fn remove_file(&mut self, path: &str) -> Result<(), String>;
-    fn remove_tree(&mut self, path: &str) -> Result<(), String>;
+    fn install_apk(
+        &mut self,
+        apk_path: &Path,
+        replace_existing: bool,
+    ) -> Result<(), DeviceOperationError>;
+    fn push(&mut self, source: &Path, dest: &str, sync: bool) -> Result<(), DeviceOperationError>;
+    fn mkdir_p(&mut self, path: &str) -> Result<(), DeviceOperationError>;
+    fn remove_file(&mut self, path: &str) -> Result<(), DeviceOperationError>;
+    fn remove_tree(&mut self, path: &str) -> Result<(), DeviceOperationError>;
     fn copy_on_device(
         &mut self,
         source: &str,
         dest: &str,
         recursive: bool,
         privileged: bool,
-    ) -> Result<(), String>;
-    fn package_installed(&mut self, package_name: &str) -> Result<bool, String>;
-    fn path_exists(&mut self, path: &str) -> Result<bool, String>;
-    fn path_is_dir(&mut self, path: &str) -> Result<bool, String>;
-    fn run_plan_command(&mut self, command: Vec<String>) -> Result<(), String>;
-    fn launch_app(&mut self, package_name: &str, activity: Option<&str>) -> Result<(), String>;
-    fn force_stop_app(&mut self, package_name: &str) -> Result<(), String>;
+    ) -> Result<(), DeviceOperationError>;
+    fn package_installed(&mut self, package_name: &str) -> Result<bool, DeviceOperationError>;
+    fn path_exists(&mut self, path: &str) -> Result<bool, DeviceOperationError>;
+    fn path_is_dir(&mut self, path: &str) -> Result<bool, DeviceOperationError>;
+    fn run_plan_command(&mut self, command: Vec<String>) -> Result<(), DeviceOperationError>;
+    fn launch_app(
+        &mut self,
+        package_name: &str,
+        activity: Option<&str>,
+    ) -> Result<(), DeviceOperationError>;
+    fn force_stop_app(&mut self, package_name: &str) -> Result<(), DeviceOperationError>;
 }
 
 #[derive(Debug)]
@@ -275,7 +343,9 @@ impl<D: ExecutorDevice> ExecutorRunner<D> {
 
             if step_requires_root(step) {
                 if let Err(failure) = self.ensure_root_preflight() {
-                    let message = failure.message;
+                    let timeout_abort =
+                        failure.failure_kind == Some(StepFailureKind::OperationTimedOut);
+                    let message = failure.message.clone();
                     self.root_preflight_failure = Some(message.clone());
                     state.steps.insert(
                         step.id.clone(),
@@ -292,12 +362,17 @@ impl<D: ExecutorDevice> ExecutorRunner<D> {
                         Some(ProgressStatus::Failed),
                         Some(message.clone()),
                     ));
-                    records.push(record(
+                    records.push(record_with_failure(
                         step,
                         StepRunStatus::Failed,
                         Some(message),
                         OrderedMap::new(),
+                        failure.failure_kind,
+                        failure.cleanup,
                     ));
+                    if timeout_abort {
+                        break;
+                    }
                     aborted = true;
                     continue;
                 }
@@ -362,7 +437,10 @@ impl<D: ExecutorDevice> ExecutorRunner<D> {
                     continue;
                 }
                 Ok(false) => {}
-                Err(message) => {
+                Err(failure) => {
+                    let timeout_abort =
+                        failure.failure_kind == Some(StepFailureKind::OperationTimedOut);
+                    let message = failure.message.clone();
                     state.steps.insert(
                         step.id.clone(),
                         StepRuntimeState {
@@ -378,12 +456,17 @@ impl<D: ExecutorDevice> ExecutorRunner<D> {
                         Some(ProgressStatus::Failed),
                         Some(message.clone()),
                     ));
-                    records.push(record(
+                    records.push(record_with_failure(
                         step,
                         StepRunStatus::Failed,
                         Some(message),
                         OrderedMap::new(),
+                        failure.failure_kind,
+                        failure.cleanup,
                     ));
+                    if timeout_abort {
+                        break;
+                    }
                     if self.root_preflight_failure.is_some() {
                         aborted = true;
                     }
@@ -400,53 +483,75 @@ impl<D: ExecutorDevice> ExecutorRunner<D> {
                 None,
             ));
             let run_result = self.run_step(plan, &mut state, step);
-            let (status, message, outputs, runtime_status) = match run_result {
-                Ok(outputs) => {
-                    progress_callback(progress_event(
-                        step,
-                        total_steps,
-                        plan,
-                        ProgressPhase::Verifying,
-                        None,
-                        None,
-                    ));
-                    let failed_verify = step
-                        .verify
-                        .iter()
-                        .filter_map(|condition| match self.evaluate_condition(condition) {
-                            Ok(true) => None,
-                            Ok(false) => Some(Ok(condition.type_name.clone())),
-                            Err(error) => Some(Err(error)),
-                        })
-                        .collect::<Result<Vec<_>, _>>();
-                    match failed_verify {
-                        Ok(failed_verify) if failed_verify.is_empty() => (
-                            StepRunStatus::Executed,
+            let (status, message, outputs, runtime_status, failure_kind, cleanup, timeout_abort) =
+                match run_result {
+                    Ok(outputs) => {
+                        progress_callback(progress_event(
+                            step,
+                            total_steps,
+                            plan,
+                            ProgressPhase::Verifying,
                             None,
-                            outputs.clone(),
-                            StepRuntimeStatus::Succeeded,
-                        ),
-                        Ok(failed_verify) => (
-                            StepRunStatus::Failed,
-                            Some(format!("verify failed: {}", failed_verify.join(", "))),
-                            OrderedMap::new(),
-                            StepRuntimeStatus::Failed,
-                        ),
-                        Err(error) => (
-                            StepRunStatus::Failed,
-                            Some(error),
-                            OrderedMap::new(),
-                            StepRuntimeStatus::Failed,
-                        ),
+                            None,
+                        ));
+                        let failed_verify = step
+                            .verify
+                            .iter()
+                            .filter_map(|condition| match self.evaluate_condition(condition) {
+                                Ok(true) => None,
+                                Ok(false) => Some(Ok(condition.type_name.clone())),
+                                Err(error) => Some(Err(error)),
+                            })
+                            .collect::<Result<Vec<_>, _>>();
+                        match failed_verify {
+                            Ok(failed_verify) if failed_verify.is_empty() => (
+                                StepRunStatus::Executed,
+                                None,
+                                outputs.clone(),
+                                StepRuntimeStatus::Succeeded,
+                                None,
+                                None,
+                                false,
+                            ),
+                            Ok(failed_verify) => (
+                                StepRunStatus::Failed,
+                                Some(format!("verify failed: {}", failed_verify.join(", "))),
+                                OrderedMap::new(),
+                                StepRuntimeStatus::Failed,
+                                None,
+                                None,
+                                false,
+                            ),
+                            Err(failure) => (
+                                StepRunStatus::Failed,
+                                Some(failure.message),
+                                if failure.failure_kind == Some(StepFailureKind::OperationTimedOut)
+                                {
+                                    outputs.clone()
+                                } else {
+                                    OrderedMap::new()
+                                },
+                                StepRuntimeStatus::Failed,
+                                failure.failure_kind,
+                                failure.cleanup,
+                                failure.failure_kind == Some(StepFailureKind::OperationTimedOut),
+                            ),
+                        }
                     }
-                }
-                Err(failure) => (
-                    StepRunStatus::Failed,
-                    Some(failure.message),
-                    failure.outputs,
-                    StepRuntimeStatus::Failed,
-                ),
-            };
+                    Err(failure) => {
+                        let timeout_abort =
+                            failure.failure_kind == Some(StepFailureKind::OperationTimedOut);
+                        (
+                            StepRunStatus::Failed,
+                            Some(failure.message),
+                            failure.outputs,
+                            StepRuntimeStatus::Failed,
+                            failure.failure_kind,
+                            failure.cleanup,
+                            timeout_abort,
+                        )
+                    }
+                };
 
             state.steps.insert(
                 step.id.clone(),
@@ -470,7 +575,17 @@ impl<D: ExecutorDevice> ExecutorRunner<D> {
                 Some(progress_status),
                 message.clone(),
             ));
-            records.push(record(step, status, message, outputs));
+            records.push(record_with_failure(
+                step,
+                status,
+                message,
+                outputs,
+                failure_kind,
+                cleanup,
+            ));
+            if timeout_abort {
+                break;
+            }
             if self.root_preflight_failure.is_some() {
                 aborted = true;
             }
@@ -490,7 +605,7 @@ impl<D: ExecutorDevice> ExecutorRunner<D> {
         }
     }
 
-    fn skip_if_matched(&mut self, step: &ExecutionStep) -> Result<bool, String> {
+    fn skip_if_matched(&mut self, step: &ExecutionStep) -> Result<bool, StepFailure> {
         step.skip_if.iter().try_fold(false, |matched, condition| {
             if matched {
                 Ok(true)
@@ -513,10 +628,11 @@ impl<D: ExecutorDevice> ExecutorRunner<D> {
                 self.root_preflight = RootPreflightState::Granted;
                 Ok(())
             }
-            Err(message) => {
-                self.root_preflight = RootPreflightState::Failed(message.clone());
-                self.root_preflight_failure = Some(message.clone());
-                Err(StepFailure::new(message))
+            Err(error) => {
+                let failure: StepFailure = error.into();
+                self.root_preflight = RootPreflightState::Failed(failure.message.clone());
+                self.root_preflight_failure = Some(failure.message.clone());
+                Err(failure)
             }
         }
     }
@@ -571,7 +687,7 @@ impl<D: ExecutorDevice> ExecutorRunner<D> {
     ) -> Result<OrderedMap<RuntimeValue>, StepFailure> {
         let policy = permission_policy(resolved_params.get("policy"));
         let mut action_results = Vec::new();
-        let mut failure_message = None;
+        let mut failure = None;
 
         for action in permission_actions(resolved_params) {
             if let Some(reason) = permission_not_applicable_reason(
@@ -596,13 +712,18 @@ impl<D: ExecutorDevice> ExecutorRunner<D> {
                     result.insert("status".to_string(), json!("executed"));
                     action_results.push(Value::Object(result));
                 }
-                Err(message) => {
+                Err(error) => {
+                    let message = error.message.clone();
                     let mut result = permission_result_base(step, &action);
                     result.insert("status".to_string(), json!("failed"));
                     result.insert("message".to_string(), json!(message));
                     action_results.push(Value::Object(result));
-                    if action.required || policy.require_all || policy.on_failure == "fail" {
-                        failure_message = Some(message);
+                    if action.required
+                        || policy.require_all
+                        || policy.on_failure == "fail"
+                        || error.kind == DeviceOperationKind::TimedOut
+                    {
+                        failure = Some((error,));
                         break;
                     }
                 }
@@ -618,8 +739,10 @@ impl<D: ExecutorDevice> ExecutorRunner<D> {
                 location: None,
             },
         );
-        if let Some(message) = failure_message {
-            return Err(StepFailure { message, outputs });
+        if let Some((error,)) = failure {
+            let mut failure: StepFailure = error.into();
+            failure.outputs = outputs;
+            return Err(failure);
         }
         Ok(outputs)
     }
@@ -1203,19 +1326,29 @@ impl<D: ExecutorDevice> ExecutorRunner<D> {
         Ok(OrderedMap::new())
     }
 
-    fn evaluate_condition(&mut self, condition: &ExecutionStepCondition) -> Result<bool, String> {
+    fn evaluate_condition(
+        &mut self,
+        condition: &ExecutionStepCondition,
+    ) -> Result<bool, StepFailure> {
         match condition.type_name.as_str() {
             "package_installed" => {
-                let package_name = required_string_param(condition, "package_name")?;
-                self.adapters.device.package_installed(&package_name)
+                let package_name =
+                    required_string_param(condition, "package_name").map_err(StepFailure::new)?;
+                self.adapters
+                    .device
+                    .package_installed(&package_name)
+                    .map_err(StepFailure::from)
             }
             "path_exists" => {
-                let path = required_string_param(condition, "path")?;
+                let path = required_string_param(condition, "path").map_err(StepFailure::new)?;
                 if is_app_private_path(&path) {
-                    self.ensure_root_preflight()
-                        .map_err(|failure| failure.message)?;
+                    self.ensure_root_preflight()?;
                 }
-                let device_exists = self.adapters.device.path_exists(&path)?;
+                let device_exists = self
+                    .adapters
+                    .device
+                    .path_exists(&path)
+                    .map_err(StepFailure::from)?;
                 if !self.adapters.device.uses_fake_device_filesystem() {
                     return Ok(device_exists);
                 }
@@ -1228,13 +1361,20 @@ impl<D: ExecutorDevice> ExecutorRunner<D> {
                 Ok(device_exists || sandbox_exists)
             }
             "file_exists" => {
-                let path = required_string_param(condition, "path")?;
+                let path = required_string_param(condition, "path").map_err(StepFailure::new)?;
                 if is_app_private_path(&path) {
-                    self.ensure_root_preflight()
-                        .map_err(|failure| failure.message)?;
+                    self.ensure_root_preflight()?;
                 }
-                let device_exists = self.adapters.device.path_exists(&path)?;
-                let device_is_dir = self.adapters.device.path_is_dir(&path)?;
+                let device_exists = self
+                    .adapters
+                    .device
+                    .path_exists(&path)
+                    .map_err(StepFailure::from)?;
+                let device_is_dir = self
+                    .adapters
+                    .device
+                    .path_is_dir(&path)
+                    .map_err(StepFailure::from)?;
                 if !self.adapters.device.uses_fake_device_filesystem() {
                     return Ok(device_exists && !device_is_dir);
                 }
@@ -1246,7 +1386,9 @@ impl<D: ExecutorDevice> ExecutorRunner<D> {
                     .unwrap_or(false);
                 Ok((device_exists && !device_is_dir) || sandbox_is_file)
             }
-            other => Err(format!("Unsupported condition type: {other}")),
+            other => Err(StepFailure::new(format!(
+                "Unsupported condition type: {other}"
+            ))),
         }
     }
 }
@@ -1857,21 +1999,29 @@ impl FakeDryRunDevice {
 }
 
 impl ExecutorDevice for FakeDryRunDevice {
-    fn revalidate_root(&mut self) -> Result<(), String> {
+    fn revalidate_root(&mut self) -> Result<(), DeviceOperationError> {
         self.root_preflight_calls = self.root_preflight_calls.saturating_add(1);
         self.commands.push(vec!["root_preflight".to_string()]);
-        self.root_preflight_result.clone().unwrap_or(Ok(()))
+        self.root_preflight_result
+            .clone()
+            .unwrap_or(Ok(()))
+            .map_err(DeviceOperationError::from)
     }
 
     fn uses_fake_device_filesystem(&self) -> bool {
         true
     }
 
-    fn install_apk(&mut self, apk_path: &Path, replace_existing: bool) -> Result<(), String> {
+    fn install_apk(
+        &mut self,
+        apk_path: &Path,
+        replace_existing: bool,
+    ) -> Result<(), DeviceOperationError> {
         FakeDryRunDevice::install_apk(self, apk_path, replace_existing)
+            .map_err(DeviceOperationError::from)
     }
 
-    fn push(&mut self, source: &Path, dest: &str, sync: bool) -> Result<(), String> {
+    fn push(&mut self, source: &Path, dest: &str, sync: bool) -> Result<(), DeviceOperationError> {
         self.commands.push(vec![
             if sync { "push_sync" } else { "push" }.to_string(),
             source.to_string_lossy().to_string(),
@@ -1884,7 +2034,7 @@ impl ExecutorDevice for FakeDryRunDevice {
         Ok(())
     }
 
-    fn mkdir_p(&mut self, path: &str) -> Result<(), String> {
+    fn mkdir_p(&mut self, path: &str) -> Result<(), DeviceOperationError> {
         self.commands
             .push(vec!["mkdir_p".to_string(), path.to_string()]);
         self.remote_paths.insert(path.to_string());
@@ -1892,7 +2042,7 @@ impl ExecutorDevice for FakeDryRunDevice {
         Ok(())
     }
 
-    fn remove_file(&mut self, path: &str) -> Result<(), String> {
+    fn remove_file(&mut self, path: &str) -> Result<(), DeviceOperationError> {
         self.commands
             .push(vec!["remove_file".to_string(), path.to_string()]);
         self.remote_paths.remove(path);
@@ -1900,7 +2050,7 @@ impl ExecutorDevice for FakeDryRunDevice {
         Ok(())
     }
 
-    fn remove_tree(&mut self, path: &str) -> Result<(), String> {
+    fn remove_tree(&mut self, path: &str) -> Result<(), DeviceOperationError> {
         self.commands
             .push(vec!["remove_tree".to_string(), path.to_string()]);
         let prefix = format!("{}/", path.trim_end_matches('/'));
@@ -1917,7 +2067,7 @@ impl ExecutorDevice for FakeDryRunDevice {
         dest: &str,
         recursive: bool,
         privileged: bool,
-    ) -> Result<(), String> {
+    ) -> Result<(), DeviceOperationError> {
         self.commands.push(vec![
             "copy_on_device".to_string(),
             source.to_string(),
@@ -1932,54 +2082,107 @@ impl ExecutorDevice for FakeDryRunDevice {
         Ok(())
     }
 
-    fn package_installed(&mut self, package_name: &str) -> Result<bool, String> {
+    fn package_installed(&mut self, package_name: &str) -> Result<bool, DeviceOperationError> {
         Ok(FakeDryRunDevice::package_installed(self, package_name))
     }
 
-    fn path_exists(&mut self, path: &str) -> Result<bool, String> {
+    fn path_exists(&mut self, path: &str) -> Result<bool, DeviceOperationError> {
         Ok(FakeDryRunDevice::path_exists(self, path))
     }
 
-    fn path_is_dir(&mut self, path: &str) -> Result<bool, String> {
+    fn path_is_dir(&mut self, path: &str) -> Result<bool, DeviceOperationError> {
         Ok(FakeDryRunDevice::path_is_dir(self, path))
     }
 
-    fn run_plan_command(&mut self, command: Vec<String>) -> Result<(), String> {
-        FakeDryRunDevice::run_plan_command(self, command)
+    fn run_plan_command(&mut self, command: Vec<String>) -> Result<(), DeviceOperationError> {
+        FakeDryRunDevice::run_plan_command(self, command).map_err(DeviceOperationError::from)
     }
 
-    fn launch_app(&mut self, package_name: &str, activity: Option<&str>) -> Result<(), String> {
+    fn launch_app(
+        &mut self,
+        package_name: &str,
+        activity: Option<&str>,
+    ) -> Result<(), DeviceOperationError> {
         FakeDryRunDevice::launch_app(self, package_name, activity)
+            .map_err(DeviceOperationError::from)
     }
 
-    fn force_stop_app(&mut self, package_name: &str) -> Result<(), String> {
-        FakeDryRunDevice::force_stop_app(self, package_name)
+    fn force_stop_app(&mut self, package_name: &str) -> Result<(), DeviceOperationError> {
+        FakeDryRunDevice::force_stop_app(self, package_name).map_err(DeviceOperationError::from)
     }
 }
 
+fn map_adb_error(error: adb::AdbCommandError) -> DeviceOperationError {
+    match error {
+        adb::AdbCommandError::TimedOut { cleanup, .. } => DeviceOperationError::timed_out(cleanup),
+        adb::AdbCommandError::CommandFailed(_) => DeviceOperationError {
+            kind: DeviceOperationKind::CommandFailed,
+            message: "The device operation failed.".to_string(),
+            cleanup: None,
+        },
+        adb::AdbCommandError::ProcessFailed { cleanup, .. } => DeviceOperationError {
+            kind: DeviceOperationKind::ProcessFailed,
+            message: "The device process failed before a trustworthy result was available."
+                .to_string(),
+            cleanup: Some(cleanup),
+        },
+        adb::AdbCommandError::RootDenied => DeviceOperationError {
+            kind: DeviceOperationKind::RootDenied,
+            message: "Root access was denied by the device.".to_string(),
+            cleanup: None,
+        },
+        adb::AdbCommandError::RootUnavailable => DeviceOperationError {
+            kind: DeviceOperationKind::RootUnavailable,
+            message: "Root access is unavailable on this device.".to_string(),
+            cleanup: None,
+        },
+        adb::AdbCommandError::Resolution(_)
+        | adb::AdbCommandError::RootCheckFailed
+        | adb::AdbCommandError::InvalidPlanCommand(_) => DeviceOperationError::other(
+            "The device operation could not be started or completed safely.",
+        ),
+    }
+}
+
+fn real_adb_error<E: adb::AdbCommandExecutor>(
+    device: &mut adb::RealAdbDevice<E>,
+    fallback: String,
+) -> DeviceOperationError {
+    device
+        .take_last_error()
+        .map(map_adb_error)
+        .unwrap_or_else(|| DeviceOperationError::other(fallback))
+}
+
 impl<E: adb::AdbCommandExecutor> ExecutorDevice for adb::RealAdbDevice<E> {
-    fn revalidate_root(&mut self) -> Result<(), String> {
-        adb::RealAdbDevice::check_root(self)
+    fn revalidate_root(&mut self) -> Result<(), DeviceOperationError> {
+        adb::RealAdbDevice::check_root(self).map_err(|message| real_adb_error(self, message))
     }
 
-    fn install_apk(&mut self, apk_path: &Path, replace_existing: bool) -> Result<(), String> {
+    fn install_apk(
+        &mut self,
+        apk_path: &Path,
+        replace_existing: bool,
+    ) -> Result<(), DeviceOperationError> {
         adb::RealAdbDevice::install_apk(self, apk_path, replace_existing)
+            .map_err(|message| real_adb_error(self, message))
     }
 
-    fn push(&mut self, source: &Path, dest: &str, sync: bool) -> Result<(), String> {
+    fn push(&mut self, source: &Path, dest: &str, sync: bool) -> Result<(), DeviceOperationError> {
         adb::RealAdbDevice::push(self, source, dest, sync)
+            .map_err(|message| real_adb_error(self, message))
     }
 
-    fn mkdir_p(&mut self, path: &str) -> Result<(), String> {
-        adb::RealAdbDevice::mkdir_p(self, path)
+    fn mkdir_p(&mut self, path: &str) -> Result<(), DeviceOperationError> {
+        adb::RealAdbDevice::mkdir_p(self, path).map_err(|message| real_adb_error(self, message))
     }
 
-    fn remove_file(&mut self, path: &str) -> Result<(), String> {
-        adb::RealAdbDevice::remove_file(self, path)
+    fn remove_file(&mut self, path: &str) -> Result<(), DeviceOperationError> {
+        adb::RealAdbDevice::remove_file(self, path).map_err(|message| real_adb_error(self, message))
     }
 
-    fn remove_tree(&mut self, path: &str) -> Result<(), String> {
-        adb::RealAdbDevice::remove_tree(self, path)
+    fn remove_tree(&mut self, path: &str) -> Result<(), DeviceOperationError> {
+        adb::RealAdbDevice::remove_tree(self, path).map_err(|message| real_adb_error(self, message))
     }
 
     fn copy_on_device(
@@ -1988,32 +2191,41 @@ impl<E: adb::AdbCommandExecutor> ExecutorDevice for adb::RealAdbDevice<E> {
         dest: &str,
         recursive: bool,
         privileged: bool,
-    ) -> Result<(), String> {
+    ) -> Result<(), DeviceOperationError> {
         adb::RealAdbDevice::copy_on_device(self, source, dest, recursive, privileged)
+            .map_err(|message| real_adb_error(self, message))
     }
 
-    fn package_installed(&mut self, package_name: &str) -> Result<bool, String> {
+    fn package_installed(&mut self, package_name: &str) -> Result<bool, DeviceOperationError> {
         adb::RealAdbDevice::package_installed(self, package_name)
+            .map_err(|message| real_adb_error(self, message))
     }
 
-    fn path_exists(&mut self, path: &str) -> Result<bool, String> {
-        adb::RealAdbDevice::path_exists(self, path)
+    fn path_exists(&mut self, path: &str) -> Result<bool, DeviceOperationError> {
+        adb::RealAdbDevice::path_exists(self, path).map_err(|message| real_adb_error(self, message))
     }
 
-    fn path_is_dir(&mut self, path: &str) -> Result<bool, String> {
-        adb::RealAdbDevice::path_is_dir(self, path)
+    fn path_is_dir(&mut self, path: &str) -> Result<bool, DeviceOperationError> {
+        adb::RealAdbDevice::path_is_dir(self, path).map_err(|message| real_adb_error(self, message))
     }
 
-    fn run_plan_command(&mut self, command: Vec<String>) -> Result<(), String> {
+    fn run_plan_command(&mut self, command: Vec<String>) -> Result<(), DeviceOperationError> {
         adb::RealAdbDevice::run_plan_command(self, command)
+            .map_err(|message| real_adb_error(self, message))
     }
 
-    fn launch_app(&mut self, package_name: &str, activity: Option<&str>) -> Result<(), String> {
+    fn launch_app(
+        &mut self,
+        package_name: &str,
+        activity: Option<&str>,
+    ) -> Result<(), DeviceOperationError> {
         adb::RealAdbDevice::launch_app(self, package_name, activity)
+            .map_err(|message| real_adb_error(self, message))
     }
 
-    fn force_stop_app(&mut self, package_name: &str) -> Result<(), String> {
+    fn force_stop_app(&mut self, package_name: &str) -> Result<(), DeviceOperationError> {
         adb::RealAdbDevice::force_stop_app(self, package_name)
+            .map_err(|message| real_adb_error(self, message))
     }
 }
 
@@ -2422,10 +2634,42 @@ struct ArtifactRuntimeState {
     error: Option<String>,
 }
 
-#[derive(Debug)]
+#[derive(Clone, Debug)]
 pub(crate) struct StepFailure {
     pub(crate) message: String,
     outputs: OrderedMap<RuntimeValue>,
+    pub(crate) failure_kind: Option<StepFailureKind>,
+    pub(crate) cleanup: Option<ProcessCleanup>,
+}
+
+impl StepFailure {
+    fn new(message: String) -> Self {
+        Self {
+            message,
+            outputs: OrderedMap::new(),
+            failure_kind: None,
+            cleanup: None,
+        }
+    }
+}
+
+impl From<DeviceOperationError> for StepFailure {
+    fn from(error: DeviceOperationError) -> Self {
+        let failure_kind = match error.kind {
+            DeviceOperationKind::TimedOut => Some(StepFailureKind::OperationTimedOut),
+            DeviceOperationKind::CommandFailed => Some(StepFailureKind::OperationCommandFailed),
+            DeviceOperationKind::ProcessFailed => Some(StepFailureKind::OperationProcessFailed),
+            DeviceOperationKind::RootDenied => Some(StepFailureKind::RootDenied),
+            DeviceOperationKind::RootUnavailable => Some(StepFailureKind::RootUnavailable),
+            DeviceOperationKind::Other => Some(StepFailureKind::OperationFailed),
+        };
+        Self {
+            message: error.message,
+            outputs: OrderedMap::new(),
+            failure_kind,
+            cleanup: error.cleanup,
+        }
+    }
 }
 
 fn host_staging_cleanup_failure() -> StepFailure {
@@ -2445,6 +2689,8 @@ fn host_staging_cleanup_failure() -> StepFailure {
         message: "host_staging_cleanup_failed: temporary extraction staging could not be removed."
             .to_string(),
         outputs,
+        failure_kind: None,
+        cleanup: None,
     }
 }
 
@@ -2519,15 +2765,6 @@ enum RootPreflightState {
     Failed(String),
 }
 
-impl StepFailure {
-    fn new(message: String) -> Self {
-        Self {
-            message,
-            outputs: OrderedMap::new(),
-        }
-    }
-}
-
 impl From<String> for StepFailure {
     fn from(message: String) -> Self {
         Self::new(message)
@@ -2564,11 +2801,24 @@ fn record(
     message: Option<String>,
     outputs: OrderedMap<RuntimeValue>,
 ) -> StepRunRecord {
+    record_with_failure(step, status, message, outputs, None, None)
+}
+
+fn record_with_failure(
+    step: &ExecutionStep,
+    status: StepRunStatus,
+    message: Option<String>,
+    outputs: OrderedMap<RuntimeValue>,
+    failure_kind: Option<StepFailureKind>,
+    cleanup: Option<ProcessCleanup>,
+) -> StepRunRecord {
     StepRunRecord {
         step_id: step.id.clone(),
         status,
         message,
         outputs,
+        failure_kind,
+        cleanup,
     }
 }
 

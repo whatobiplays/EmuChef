@@ -27,7 +27,7 @@ Detailed evidence remains in the relevant product and release documents. In part
 
 | Product or track | Current state | Next priority |
 |---|---|---|
-| EmuChef proper | Phase 5A through 5H, Phase 6A through 6C, and the bounded Phase 6D.1 audit completed | Continue Phase 6D architectural timeout, transport, and physical-interruption qualification work |
+| EmuChef proper | Phase 5A through 5H, Phase 6A through 6C, the Phase 6D.1 audit, and automated Phase 6D.2 implementation completed | Continue Phase 6D physical interruption, transport, and device qualification work |
 | Config Editor | Authored generation implemented through GitHub release-pattern testing | Later refinements remain unsequenced unless explicitly promoted |
 | Shared Runtime | Rust is the sole runtime and retains device, filesystem, planning, execution, validation, and protocol authority | Add shared capabilities only when required by a bounded product slice |
 | Release engineering | Deliberately deferred from normal Phase 5 product work | Resume only when the owner declares the relevant application release-comfortable |
@@ -677,6 +677,43 @@ qualification revalidation, low-storage/host-sleep policy, and physical
 interruption qualification are explicitly deferred. No checkpoint, resume,
 automatic replay, rollback, persistent execution, new serialized status, or
 new production feature enablement was added.
+
+#### Phase 6D.2 — Operation Deadlines completion evidence
+
+Completed as an automated implementation slice on 2026-08-02. The detailed
+contract and evidence are recorded in
+`docs/product/phase-6d2-operation-deadlines.md` and the recovery run
+`RESULT.md`.
+
+The shared runtime now owns every one-shot ADB/process child and both output
+streams in a single locally driven future tree. Fixed internal budgets are 30
+seconds for probes, predicates, root preflight, launch, and force-stop;
+120 seconds for shell mutations; and 300 seconds for install, push, device
+copy, and defensive generic fallback. Each ADB stream retains at most 4 MiB;
+overflow remains distinct from timeout and cleanup uncertainty never erases a
+timeout primary cause.
+
+Timeout is carried through a private typed executor error into a stable
+`operation_timed_out` issue without adding serialized fields. A real timeout
+fails the current step, preserves completed evidence, stops later scheduling,
+leaves later work pending for terminal **Not attempted** projection, reports
+possible partial changes, and releases the existing active execution slot.
+
+EmuChef proper sidecar requests use a 300-second deadline and a bounded,
+incremental 16 MiB JSONL frame reader. Fatal timeout, EOF, partial/oversized
+frame, malformed response, ID mismatch, or transport loss persists
+`runtime_session_lost`, clears the exact process generation, and rejects later
+transport access. Valid structured backend errors remain nonfatal. Tauri
+Platform-Tools validation uses the same local ownership model while preserving
+its existing environment, five-second deadline, 64 KiB output policy, and
+public classifications.
+
+This evidence is host-automated only. Physical cancellation, disconnect,
+offline/unauthorized transitions, same-serial replacement, root revocation,
+low-storage, host sleep, packaged GUI, and release qualification remain open
+Phase 6D work. No checkpointing, resume, rollback, replay, automatic retry,
+persistent execution, public timeout controls, or production feature enablement
+was added.
 
 ### 6E — Recipe Qualification
 

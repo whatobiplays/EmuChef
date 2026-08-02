@@ -1,11 +1,12 @@
 use std::fmt;
-use std::io;
 use std::path::Path;
-use std::process::Command;
-use std::time::Duration;
 
 #[cfg(test)]
 use std::collections::VecDeque;
+
+use crate::owned_process::{
+    run_owned_process, OwnedProcessError, ProcessCleanup, ProcessFailureKind, ProcessOperation,
+};
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct AdbCommandResult {
@@ -19,7 +20,17 @@ pub struct AdbCommandResult {
 pub enum AdbCommandError {
     Resolution(String),
     CommandFailed(AdbCommandResult),
-    TimedOut { args: Vec<String> },
+    ProcessFailed {
+        kind: ProcessFailureKind,
+        cleanup: ProcessCleanup,
+    },
+    TimedOut {
+        args: Vec<String>,
+        cleanup: ProcessCleanup,
+    },
+    RootDenied,
+    RootUnavailable,
+    RootCheckFailed,
     InvalidPlanCommand(String),
 }
 
@@ -41,81 +52,48 @@ impl fmt::Display for AdbCommandError {
                 }
                 Ok(())
             }
-            AdbCommandError::TimedOut { args } => {
-                write!(formatter, "ADB command timed out: {}", args.join(" "))
+            AdbCommandError::ProcessFailed { .. } => {
+                formatter.write_str("The ADB process failed before producing a trustworthy result.")
+            }
+            AdbCommandError::TimedOut { .. } => formatter.write_str("The ADB operation timed out."),
+            AdbCommandError::RootDenied => {
+                formatter.write_str("Root access was denied by the device.")
+            }
+            AdbCommandError::RootUnavailable => {
+                formatter.write_str("Root access is unavailable on this device.")
+            }
+            AdbCommandError::RootCheckFailed => {
+                formatter.write_str("Root access could not be checked safely.")
             }
         }
     }
 }
 
 pub trait AdbCommandExecutor: fmt::Debug {
-    fn run(&mut self, args: &[String]) -> Result<AdbCommandResult, AdbCommandError>;
-
-    fn run_with_timeout(
+    fn run_for(
         &mut self,
         args: &[String],
-        _timeout: Duration,
-    ) -> Result<AdbCommandResult, AdbCommandError> {
-        self.run(args)
-    }
+        operation: ProcessOperation,
+    ) -> Result<AdbCommandResult, AdbCommandError>;
 }
 
 #[derive(Debug, Default)]
 pub struct ProcessAdbCommandExecutor;
 
 impl AdbCommandExecutor for ProcessAdbCommandExecutor {
-    fn run(&mut self, args: &[String]) -> Result<AdbCommandResult, AdbCommandError> {
-        let executable = args.first().ok_or_else(|| {
-            AdbCommandError::InvalidPlanCommand("ADB command must not be empty.".to_string())
-        })?;
-        let output = Command::new(executable)
-            .args(args.iter().skip(1))
-            .output()
-            .map_err(map_command_spawn_error)?;
-        Ok(AdbCommandResult {
-            args: args.to_vec(),
-            returncode: output.status.code().unwrap_or(-1),
-            stdout: String::from_utf8_lossy(&output.stdout).into_owned(),
-            stderr: String::from_utf8_lossy(&output.stderr).into_owned(),
-        })
-    }
-
-    fn run_with_timeout(
+    fn run_for(
         &mut self,
         args: &[String],
-        timeout: Duration,
+        operation: ProcessOperation,
     ) -> Result<AdbCommandResult, AdbCommandError> {
-        use std::process::Stdio;
-        use wait_timeout::ChildExt;
-
-        let executable = args.first().ok_or_else(|| {
+        let (executable, command_args) = args.split_first().ok_or_else(|| {
             AdbCommandError::InvalidPlanCommand("ADB command must not be empty.".to_string())
         })?;
-        let mut child = Command::new(executable)
-            .args(args.iter().skip(1))
-            .stdout(Stdio::piped())
-            .stderr(Stdio::piped())
-            .spawn()
-            .map_err(map_command_spawn_error)?;
-        if child
-            .wait_timeout(timeout)
-            .map_err(|error| {
-                AdbCommandError::Resolution(format!("ADB process wait failed: {error}"))
-            })?
-            .is_none()
-        {
-            let _ = child.kill();
-            let _ = child.wait();
-            return Err(AdbCommandError::TimedOut {
-                args: args.to_vec(),
-            });
-        }
-        let output = child.wait_with_output().map_err(|error| {
-            AdbCommandError::Resolution(format!("ADB output could not be read: {error}"))
-        })?;
+        let output = run_owned_process(executable, command_args, operation)
+            .map_err(|error| map_process_error(args, error))?;
         Ok(AdbCommandResult {
             args: args.to_vec(),
-            returncode: output.status.code().unwrap_or(-1),
+            returncode: output.status_code.unwrap_or(-1),
             stdout: String::from_utf8_lossy(&output.stdout).into_owned(),
             stderr: String::from_utf8_lossy(&output.stderr).into_owned(),
         })
@@ -163,8 +141,35 @@ pub fn probe_root<E: AdbCommandExecutor>(
     executor: &mut E,
     adb_path: &str,
     serial: &str,
-    timeout: Duration,
 ) -> RootProbeOutcome {
+    match probe_root_typed(executor, adb_path, serial) {
+        Ok(outcome) => outcome,
+        Err(AdbCommandError::TimedOut { .. }) => RootProbeOutcome::CheckFailed {
+            reason: RootProbeFailureReason::TimedOut,
+            message: "Root authorization timed out. Try again.",
+        },
+        Err(error) => {
+            let message = error.to_string();
+            if is_transport_failure(&message) {
+                RootProbeOutcome::CheckFailed {
+                    reason: RootProbeFailureReason::Transport,
+                    message: "The device connection failed during the root access check.",
+                }
+            } else {
+                RootProbeOutcome::CheckFailed {
+                    reason: RootProbeFailureReason::UnexpectedResponse,
+                    message: "The root access check could not be completed.",
+                }
+            }
+        }
+    }
+}
+
+pub(crate) fn probe_root_typed<E: AdbCommandExecutor>(
+    executor: &mut E,
+    adb_path: &str,
+    serial: &str,
+) -> Result<RootProbeOutcome, AdbCommandError> {
     let args = vec![
         adb_path.to_string(),
         "-s".to_string(),
@@ -174,28 +179,11 @@ pub fn probe_root<E: AdbCommandExecutor>(
         "-c".to_string(),
         "id".to_string(),
     ];
-    let result = match executor.run_with_timeout(&args, timeout) {
-        Ok(result) => result,
-        Err(AdbCommandError::TimedOut { .. }) => {
-            return RootProbeOutcome::CheckFailed {
-                reason: RootProbeFailureReason::TimedOut,
-                message: "Root authorization timed out. Try again.",
-            }
-        }
-        Err(error) => {
-            let message = error.to_string();
-            if is_transport_failure(&message) {
-                return RootProbeOutcome::CheckFailed {
-                    reason: RootProbeFailureReason::Transport,
-                    message: "The device connection failed during the root access check.",
-                };
-            }
-            return RootProbeOutcome::CheckFailed {
-                reason: RootProbeFailureReason::UnexpectedResponse,
-                message: "The root access check could not be completed.",
-            };
-        }
-    };
+    let result = executor.run_for(&args, ProcessOperation::RootPreflight)?;
+    Ok(classify_root_result(&result))
+}
+
+fn classify_root_result(result: &AdbCommandResult) -> RootProbeOutcome {
     if result.returncode == 0 {
         let normalized = result.stdout.trim().to_ascii_lowercase();
         if normalized.starts_with("uid=0(") || normalized.starts_with("uid=0 ") {
@@ -294,22 +282,28 @@ impl<E: AdbCommandExecutor> AdbCommandRunner<E> {
         &self.executor
     }
 
-    fn run(&mut self, args: Vec<String>, check: bool) -> Result<AdbCommandResult, AdbCommandError> {
+    fn run(
+        &mut self,
+        args: Vec<String>,
+        check: bool,
+        operation: ProcessOperation,
+    ) -> Result<AdbCommandResult, AdbCommandError> {
         let mut full_args = vec![self.executable.clone()];
         if let Some(serial) = self.serial.as_deref() {
             full_args.push("-s".to_string());
             full_args.push(serial.to_string());
         }
         full_args.extend(args);
-        self.run_raw(full_args, check)
+        self.run_raw(full_args, check, operation)
     }
 
     fn run_raw(
         &mut self,
         full_args: Vec<String>,
         check: bool,
+        operation: ProcessOperation,
     ) -> Result<AdbCommandResult, AdbCommandError> {
-        let result = self.executor.run(&full_args)?;
+        let result = self.executor.run_for(&full_args, operation)?;
         if check && result.returncode != 0 {
             Err(AdbCommandError::CommandFailed(result))
         } else {
@@ -341,19 +335,22 @@ impl<E: AdbCommandExecutor> AdbCommandRunner<E> {
         }
         let mut full_args = vec![self.executable.clone()];
         full_args.extend(tail);
-        self.run_raw(full_args, true).map(|_| ())
+        self.run_raw(full_args, true, ProcessOperation::GenericFallback)
+            .map(|_| ())
     }
 }
 
 #[derive(Debug)]
 pub struct RealAdbDevice<E: AdbCommandExecutor = ProcessAdbCommandExecutor> {
     runner: AdbCommandRunner<E>,
+    last_error: Option<AdbCommandError>,
 }
 
 impl RealAdbDevice<ProcessAdbCommandExecutor> {
     pub fn new(executable: impl Into<String>, serial: Option<String>) -> Self {
         Self {
             runner: AdbCommandRunner::new(executable, serial),
+            last_error: None,
         }
     }
 }
@@ -367,6 +364,7 @@ impl<E: AdbCommandExecutor> RealAdbDevice<E> {
                 serial.map(ToString::to_string),
                 executor,
             ),
+            last_error: None,
         }
     }
 
@@ -375,24 +373,51 @@ impl<E: AdbCommandExecutor> RealAdbDevice<E> {
         self.runner.executor()
     }
 
-    pub fn check_root(&mut self) -> Result<(), String> {
-        let serial = self
-            .runner
-            .serial
-            .as_deref()
-            .ok_or_else(|| "Root access requires a selected device.".to_string())?;
-        match probe_root(
-            &mut self.runner.executor,
-            &self.runner.executable,
-            serial,
-            Duration::from_secs(30),
-        ) {
-            RootProbeOutcome::Granted => Ok(()),
-            RootProbeOutcome::Denied => Err("Root access was denied by the device.".to_string()),
-            RootProbeOutcome::Unavailable => {
-                Err("Root access is unavailable on this device.".to_string())
+    pub(crate) fn take_last_error(&mut self) -> Option<AdbCommandError> {
+        self.last_error.take()
+    }
+
+    fn map_public<T>(&mut self, result: Result<T, AdbCommandError>) -> Result<T, String> {
+        match result {
+            Ok(value) => Ok(value),
+            Err(error) => {
+                self.last_error = Some(error.clone());
+                Err(error_string(error))
             }
-            RootProbeOutcome::CheckFailed { message, .. } => Err(message.to_string()),
+        }
+    }
+
+    pub fn check_root(&mut self) -> Result<(), String> {
+        let Some(serial) = self.runner.serial.clone() else {
+            let error = AdbCommandError::RootCheckFailed;
+            self.last_error = Some(error.clone());
+            return Err(error_string(error));
+        };
+        let result = probe_root_typed(&mut self.runner.executor, &self.runner.executable, &serial);
+        let result = match result {
+            Ok(result) => result,
+            Err(error) => {
+                self.last_error = Some(error.clone());
+                return Err(error_string(error));
+            }
+        };
+        match result {
+            RootProbeOutcome::Granted => Ok(()),
+            RootProbeOutcome::Denied => {
+                let error = AdbCommandError::RootDenied;
+                self.last_error = Some(error.clone());
+                Err(error_string(error))
+            }
+            RootProbeOutcome::Unavailable => {
+                let error = AdbCommandError::RootUnavailable;
+                self.last_error = Some(error.clone());
+                Err(error_string(error))
+            }
+            RootProbeOutcome::CheckFailed { .. } => {
+                let error = AdbCommandError::RootCheckFailed;
+                self.last_error = Some(error.clone());
+                Err(error_string(error))
+            }
         }
     }
 
@@ -402,10 +427,8 @@ impl<E: AdbCommandExecutor> RealAdbDevice<E> {
             args.push("-r".to_string());
         }
         args.push(apk_path.to_string_lossy().to_string());
-        self.runner
-            .run(args, true)
-            .map(|_| ())
-            .map_err(error_string)
+        let result = self.runner.run(args, true, ProcessOperation::Install);
+        self.map_public(result).map(|_| ())
     }
 
     pub fn push(&mut self, source: &Path, dest: &str, sync: bool) -> Result<(), String> {
@@ -415,16 +438,15 @@ impl<E: AdbCommandExecutor> RealAdbDevice<E> {
         }
         args.push(source.to_string_lossy().to_string());
         args.push(dest.to_string());
-        self.runner
-            .run(args, true)
-            .map(|_| ())
-            .map_err(error_string)
+        let result = self.runner.run(args, true, ProcessOperation::Push);
+        self.map_public(result).map(|_| ())
     }
 
     pub fn mkdir_p(&mut self, path: &str) -> Result<(), String> {
         self.run_shell(
             vec!["mkdir".to_string(), "-p".to_string(), path.to_string()],
             true,
+            ProcessOperation::ShellMutation,
         )
         .map(|_| ())
     }
@@ -433,6 +455,7 @@ impl<E: AdbCommandExecutor> RealAdbDevice<E> {
         self.run_shell(
             vec!["rm".to_string(), "-f".to_string(), path.to_string()],
             true,
+            ProcessOperation::ShellMutation,
         )
         .map(|_| ())
     }
@@ -441,6 +464,7 @@ impl<E: AdbCommandExecutor> RealAdbDevice<E> {
         self.run_shell(
             vec!["rm".to_string(), "-rf".to_string(), path.to_string()],
             true,
+            ProcessOperation::ShellMutation,
         )
         .map(|_| ())
     }
@@ -462,23 +486,23 @@ impl<E: AdbCommandExecutor> RealAdbDevice<E> {
             args,
             true,
             privileged || is_app_private_path(source) || is_app_private_path(dest),
+            ProcessOperation::DeviceCopy,
         )
         .map(|_| ())
     }
 
     pub fn package_installed(&mut self, package_name: &str) -> Result<bool, String> {
-        let result = self
-            .runner
-            .run(
-                vec![
-                    "shell".to_string(),
-                    "pm".to_string(),
-                    "path".to_string(),
-                    package_name.to_string(),
-                ],
-                false,
-            )
-            .map_err(error_string)?;
+        let result = self.runner.run(
+            vec![
+                "shell".to_string(),
+                "pm".to_string(),
+                "path".to_string(),
+                package_name.to_string(),
+            ],
+            false,
+            ProcessOperation::Predicate,
+        );
+        let result = self.map_public(result)?;
         Ok(result.returncode == 0 && result.stdout.contains("package:"))
     }
 
@@ -486,6 +510,7 @@ impl<E: AdbCommandExecutor> RealAdbDevice<E> {
         let result = self.run_shell(
             vec!["test".to_string(), "-e".to_string(), path.to_string()],
             false,
+            ProcessOperation::Predicate,
         )?;
         Ok(result.returncode == 0)
     }
@@ -494,79 +519,75 @@ impl<E: AdbCommandExecutor> RealAdbDevice<E> {
         let result = self.run_shell(
             vec!["test".to_string(), "-d".to_string(), path.to_string()],
             false,
+            ProcessOperation::Predicate,
         )?;
         Ok(result.returncode == 0)
     }
 
     pub fn run_plan_command(&mut self, command: Vec<String>) -> Result<(), String> {
-        self.runner.run_plan_command(command).map_err(error_string)
+        let result = self.runner.run_plan_command(command);
+        self.map_public(result).map(|_| ())
     }
 
     pub fn launch_app(&mut self, package_name: &str, activity: Option<&str>) -> Result<(), String> {
         if let Some(activity) = activity.filter(|value| !value.is_empty()) {
-            return self
-                .runner
-                .run(
-                    vec![
-                        "shell".to_string(),
-                        "am".to_string(),
-                        "start".to_string(),
-                        "-n".to_string(),
-                        format!("{package_name}/{activity}"),
-                    ],
-                    true,
-                )
-                .map(|_| ())
-                .map_err(error_string);
-        }
-
-        if let Some(resolved_activity) = self.resolve_launcher_activity(package_name)? {
-            return self
-                .runner
-                .run(
-                    vec![
-                        "shell".to_string(),
-                        "am".to_string(),
-                        "start".to_string(),
-                        "-n".to_string(),
-                        resolved_activity,
-                    ],
-                    true,
-                )
-                .map(|_| ())
-                .map_err(error_string);
-        }
-
-        self.runner
-            .run(
-                vec![
-                    "shell".to_string(),
-                    "monkey".to_string(),
-                    "-p".to_string(),
-                    package_name.to_string(),
-                    "-c".to_string(),
-                    "android.intent.category.LAUNCHER".to_string(),
-                    "1".to_string(),
-                ],
-                true,
-            )
-            .map(|_| ())
-            .map_err(error_string)
-    }
-
-    pub fn force_stop_app(&mut self, package_name: &str) -> Result<(), String> {
-        self.runner
-            .run(
+            let result = self.runner.run(
                 vec![
                     "shell".to_string(),
                     "am".to_string(),
-                    "force-stop".to_string(),
-                    package_name.to_string(),
+                    "start".to_string(),
+                    "-n".to_string(),
+                    format!("{package_name}/{activity}"),
                 ],
                 true,
-            )
-            .map(|_| ())
-            .map_err(error_string)
+                ProcessOperation::Launch,
+            );
+            return self.map_public(result).map(|_| ());
+        }
+
+        if let Some(resolved_activity) = self.resolve_launcher_activity(package_name)? {
+            let result = self.runner.run(
+                vec![
+                    "shell".to_string(),
+                    "am".to_string(),
+                    "start".to_string(),
+                    "-n".to_string(),
+                    resolved_activity,
+                ],
+                true,
+                ProcessOperation::Launch,
+            );
+            return self.map_public(result).map(|_| ());
+        }
+
+        let result = self.runner.run(
+            vec![
+                "shell".to_string(),
+                "monkey".to_string(),
+                "-p".to_string(),
+                package_name.to_string(),
+                "-c".to_string(),
+                "android.intent.category.LAUNCHER".to_string(),
+                "1".to_string(),
+            ],
+            true,
+            ProcessOperation::Launch,
+        );
+        self.map_public(result).map(|_| ())
+    }
+
+    pub fn force_stop_app(&mut self, package_name: &str) -> Result<(), String> {
+        let result = self.runner.run(
+            vec![
+                "shell".to_string(),
+                "am".to_string(),
+                "force-stop".to_string(),
+                package_name.to_string(),
+            ],
+            true,
+            ProcessOperation::ForceStop,
+        );
+        self.map_public(result).map(|_| ())
     }
 
     fn resolve_launcher_activity(&mut self, package_name: &str) -> Result<Option<String>, String> {
@@ -587,7 +608,8 @@ impl<E: AdbCommandExecutor> RealAdbDevice<E> {
                 package_name.to_string(),
             ],
         ] {
-            let result = self.runner.run(command, false).map_err(error_string)?;
+            let result = self.runner.run(command, false, ProcessOperation::Launch);
+            let result = self.map_public(result)?;
             if result.returncode != 0 {
                 continue;
             }
@@ -598,12 +620,17 @@ impl<E: AdbCommandExecutor> RealAdbDevice<E> {
         Ok(None)
     }
 
-    fn run_shell(&mut self, args: Vec<String>, check: bool) -> Result<AdbCommandResult, String> {
+    fn run_shell(
+        &mut self,
+        args: Vec<String>,
+        check: bool,
+        operation: ProcessOperation,
+    ) -> Result<AdbCommandResult, String> {
         let privileged = args
             .last()
             .map(|path| is_app_private_path(path))
             .unwrap_or(false);
-        self.run_shell_with_privilege(args, check, privileged)
+        self.run_shell_with_privilege(args, check, privileged, operation)
     }
 
     fn run_shell_with_privilege(
@@ -611,13 +638,14 @@ impl<E: AdbCommandExecutor> RealAdbDevice<E> {
         args: Vec<String>,
         check: bool,
         privileged: bool,
+        operation: ProcessOperation,
     ) -> Result<AdbCommandResult, String> {
-        self.runner
-            .run(
-                vec!["shell".to_string(), build_shell_command(&args, privileged)],
-                check,
-            )
-            .map_err(error_string)
+        let result = self.runner.run(
+            vec!["shell".to_string(), build_shell_command(&args, privileged)],
+            check,
+            operation,
+        );
+        self.map_public(result)
     }
 }
 
@@ -625,6 +653,7 @@ impl<E: AdbCommandExecutor> RealAdbDevice<E> {
 #[derive(Debug, Default)]
 pub struct FakeAdbCommandExecutor {
     calls: Vec<Vec<String>>,
+    operations: Vec<ProcessOperation>,
     responses: VecDeque<FakeAdbResponse>,
 }
 
@@ -646,6 +675,10 @@ impl FakeAdbCommandExecutor {
         &self.calls
     }
 
+    pub fn operations(&self) -> &[ProcessOperation] {
+        &self.operations
+    }
+
     pub fn push_completed(&mut self, returncode: i32, stdout: &str, stderr: &str) {
         self.responses.push_back(FakeAdbResponse::Completed {
             returncode,
@@ -665,8 +698,13 @@ impl FakeAdbCommandExecutor {
 
 #[cfg(test)]
 impl AdbCommandExecutor for FakeAdbCommandExecutor {
-    fn run(&mut self, args: &[String]) -> Result<AdbCommandResult, AdbCommandError> {
+    fn run_for(
+        &mut self,
+        args: &[String],
+        operation: ProcessOperation,
+    ) -> Result<AdbCommandResult, AdbCommandError> {
         self.calls.push(args.to_vec());
+        self.operations.push(operation);
         match self.responses.pop_front() {
             Some(FakeAdbResponse::Completed {
                 returncode,
@@ -683,6 +721,7 @@ impl AdbCommandExecutor for FakeAdbCommandExecutor {
             }
             Some(FakeAdbResponse::TimedOut) => Err(AdbCommandError::TimedOut {
                 args: args.to_vec(),
+                cleanup: ProcessCleanup::Confirmed,
             }),
             None => Ok(AdbCommandResult {
                 args: args.to_vec(),
@@ -694,13 +733,17 @@ impl AdbCommandExecutor for FakeAdbCommandExecutor {
     }
 }
 
-fn map_command_spawn_error(error: io::Error) -> AdbCommandError {
-    if error.kind() == io::ErrorKind::NotFound {
-        AdbCommandError::Resolution(adb_not_found_message())
-    } else {
-        AdbCommandError::Resolution(format!(
-            "The configured ADB executable could not be started: {error}"
-        ))
+fn map_process_error(args: &[String], error: OwnedProcessError) -> AdbCommandError {
+    match error.kind {
+        ProcessFailureKind::Spawn => AdbCommandError::Resolution(adb_not_found_message()),
+        ProcessFailureKind::TimedOut => AdbCommandError::TimedOut {
+            args: args.to_vec(),
+            cleanup: error.cleanup,
+        },
+        kind => AdbCommandError::ProcessFailed {
+            kind,
+            cleanup: error.cleanup,
+        },
     }
 }
 
@@ -779,7 +822,6 @@ mod tests {
             &mut executor,
             "/managed/platform-tools/adb",
             "opaque-serial",
-            Duration::from_secs(30),
         );
         (outcome, executor.calls().to_vec())
     }
@@ -855,5 +897,73 @@ mod tests {
             }
         ));
         assert_eq!(calls.len(), 1);
+    }
+
+    #[test]
+    fn real_device_methods_select_specific_operation_classes_exhaustively() {
+        use crate::owned_process::ProcessOperation;
+
+        let executor = FakeAdbCommandExecutor::default();
+        let mut device = RealAdbDevice::with_executor("adb", Some("serial"), executor);
+
+        let _ = device.check_root();
+        device.install_apk(Path::new("fixture.apk"), true).unwrap();
+        device
+            .push(Path::new("fixture.bin"), "/sdcard/fixture.bin", false)
+            .unwrap();
+        device.mkdir_p("/sdcard/fixture").unwrap();
+        device.remove_file("/sdcard/fixture.bin").unwrap();
+        device.remove_tree("/sdcard/fixture").unwrap();
+        device
+            .copy_on_device("/sdcard/source", "/sdcard/dest", true, false)
+            .unwrap();
+        let _ = device.package_installed("com.example.fixture").unwrap();
+        let _ = device.path_exists("/sdcard/fixture").unwrap();
+        let _ = device.path_is_dir("/sdcard/fixture").unwrap();
+        device
+            .run_plan_command(vec!["adb".to_string(), "version".to_string()])
+            .unwrap();
+        device
+            .launch_app("com.example.fixture", Some(".MainActivity"))
+            .unwrap();
+        device.force_stop_app("com.example.fixture").unwrap();
+
+        assert_eq!(
+            device.command_executor().operations(),
+            [
+                ProcessOperation::RootPreflight,
+                ProcessOperation::Install,
+                ProcessOperation::Push,
+                ProcessOperation::ShellMutation,
+                ProcessOperation::ShellMutation,
+                ProcessOperation::ShellMutation,
+                ProcessOperation::DeviceCopy,
+                ProcessOperation::Predicate,
+                ProcessOperation::Predicate,
+                ProcessOperation::Predicate,
+                ProcessOperation::GenericFallback,
+                ProcessOperation::Launch,
+                ProcessOperation::ForceStop,
+            ]
+        );
+    }
+
+    #[test]
+    fn launcher_resolution_and_fallback_stay_in_the_launch_class() {
+        use crate::owned_process::ProcessOperation;
+
+        let executor = FakeAdbCommandExecutor::default();
+        let mut device = RealAdbDevice::with_executor("adb", Some("serial"), executor);
+
+        device.launch_app("com.example.fixture", None).unwrap();
+
+        assert_eq!(
+            device.command_executor().operations(),
+            [
+                ProcessOperation::Launch,
+                ProcessOperation::Launch,
+                ProcessOperation::Launch,
+            ]
+        );
     }
 }

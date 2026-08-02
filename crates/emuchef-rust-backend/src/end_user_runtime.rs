@@ -7,7 +7,6 @@
 use std::collections::BTreeMap;
 use std::fs;
 use std::path::{Path, PathBuf};
-use std::time::Duration;
 
 use serde::Deserialize;
 use serde_json::{json, Value};
@@ -19,6 +18,7 @@ use crate::device_probe::{
 };
 use crate::errors::ApiError;
 use crate::executor::adb::{probe_root, ProcessAdbCommandExecutor};
+use crate::owned_process::ProcessOperation;
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 struct AdbInventoryEntry {
@@ -27,8 +27,6 @@ struct AdbInventoryEntry {
     model: Option<String>,
     transport_id: Option<String>,
 }
-
-const PASSIVE_PROBE_TIMEOUT: Duration = Duration::from_secs(5);
 
 pub(crate) fn list_adb_devices(adb_path: &str) -> Result<Value, ApiError> {
     list_adb_devices_with_runner(adb_path, &ProcessCommandRunner)
@@ -44,7 +42,7 @@ fn list_adb_devices_with_runner(
         "-l".to_string(),
     ];
     let output = runner
-        .run_bounded(&argv, PASSIVE_PROBE_TIMEOUT)
+        .run_for(&argv, ProcessOperation::Probe)
         .map_err(|_| {
             ApiError::command_failed(
                 "ADB device inventory could not be started.",
@@ -143,7 +141,7 @@ pub(crate) fn qualify_device(adb_path: &str, serial: &str) -> Result<Value, ApiE
 /// the executor boundary; this function only serializes its sanitized outcome.
 pub(crate) fn check_root(adb_path: &str, serial: &str) -> Result<Value, ApiError> {
     let mut executor = ProcessAdbCommandExecutor;
-    Ok(probe_root(&mut executor, adb_path, serial, Duration::from_secs(30)).status_json())
+    Ok(probe_root(&mut executor, adb_path, serial).status_json())
 }
 
 fn qualify_device_with_runner(
@@ -194,7 +192,7 @@ fn qualify_device_with_runner(
                 },
                 runner,
             };
-            let facts = probe.detect_bounded(PASSIVE_PROBE_TIMEOUT).map_err(|_| {
+            let facts = probe.detect().map_err(|_| {
                 ApiError::command_failed(
                     "Connected device qualification facts could not be read.",
                     json!({ "reason": "adb_qualification_probe_failed" }),
@@ -250,13 +248,9 @@ fn probe_storage(adb_path: &str, serial: &str, runner: &impl CommandRunner) -> &
     let argv = serial_shell_command(
         adb_path,
         serial,
-        &[
-            "sh",
-            "-c",
-            "'test -w /sdcard && df -k /sdcard'",
-        ],
+        &["sh", "-c", "'test -w /sdcard && df -k /sdcard'"],
     );
-    match runner.run_bounded(&argv, PASSIVE_PROBE_TIMEOUT) {
+    match runner.run_for(&argv, ProcessOperation::Predicate) {
         Ok(output) if output.status_code == Some(0) && storage_output_is_valid(&output.stdout) => {
             "available"
         }
@@ -285,14 +279,14 @@ fn probe_manager(
     kind: u8,
 ) -> &'static str {
     let primary_argv = serial_shell_command(adb_path, serial, primary);
-    let primary_result = runner.run_bounded(&primary_argv, PASSIVE_PROBE_TIMEOUT);
+    let primary_result = runner.run_for(&primary_argv, ProcessOperation::Predicate);
     if primary_result
         .as_ref()
         .is_ok_and(|output| cmd_interface_is_unavailable(output))
     {
         let fallback_argv = serial_shell_command(adb_path, serial, fallback);
         return primary_result_to_manager(
-            runner.run_bounded(&fallback_argv, PASSIVE_PROBE_TIMEOUT),
+            runner.run_for(&fallback_argv, ProcessOperation::Predicate),
             kind,
         );
     }

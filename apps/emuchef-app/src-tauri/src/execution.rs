@@ -1986,6 +1986,7 @@ fn project_real_issue(mapping: &ExecutionMapping, issue: &Value) -> Value {
         "verification_failed" => (internal, "Completed work could not be verified."),
         "missing_capability" => (internal, "The device lacks a required capability."),
         "step_conflict" => (internal, "Conflicting work prevented this operation."),
+        "operation_timed_out" => (internal, "A device operation timed out."),
         "step_execution_failed" => (internal, "A device operation failed."),
         "optional_permission_failed" => (internal, "An optional permission action failed."),
         "execution_worker_panicked" => (internal, "The execution worker stopped unexpectedly."),
@@ -2063,6 +2064,7 @@ fn remediation_for_code(code: &str) -> Value {
         ),
         "dependency_blocked"
         | "verification_failed"
+        | "operation_timed_out"
         | "step_execution_failed"
         | "optional_permission_failed" => (
             "generate_fresh_plan",
@@ -2947,6 +2949,32 @@ mod tests {
         assert_eq!(summary["warningCount"], 1);
         assert_eq!(summary["partialChangesPossible"], true);
         assert_eq!(remediation_for_code("unrecognized")["kind"], "view_report");
+    }
+
+    #[test]
+    fn timeout_issue_is_projected_without_backend_details() {
+        let mapping = ExecutionMapping {
+            kind: ExecutionKind::Real,
+            public_handle: "execution_public".into(),
+            sidecar_id: "execution-private".into(),
+            review_handle: "review_public".into(),
+            review: launch_review(),
+        };
+        let projected = project_real_issue(
+            &mapping,
+            &json!({
+                "code": "operation_timed_out",
+                "recipeId": "recipe.one",
+                "stepId": "recipe.one/launch",
+                "message": "private timeout detail",
+            }),
+        );
+        assert_eq!(
+            projected["message"],
+            "Launch configured app in Recipe One did not complete. A device operation timed out."
+        );
+        assert_eq!(projected["remediation"]["kind"], "generate_fresh_plan");
+        assert!(!projected.to_string().contains("private timeout detail"));
     }
 
     #[test]

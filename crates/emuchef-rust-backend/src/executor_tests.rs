@@ -654,6 +654,49 @@ fn grant_permissions_dry_run_failure_preserves_compatibility_step_outputs_and_bl
 }
 
 #[test]
+fn real_device_timeout_fails_current_step_and_leaves_later_steps_unscheduled() {
+    let mut params = OrderedMap::new();
+    params.insert(
+        "runtime".to_string(),
+        literal(json!([{
+            "package_name": "com.example.timeout",
+            "name": "android.permission.CAMERA",
+            "required": true
+        }])),
+    );
+    let execution_plan = plan(vec![
+        ExecutionStep {
+            id: "example.recipe/timeout".to_string(),
+            recipe_ref: "example.recipe".to_string(),
+            type_name: "grant_permissions".to_string(),
+            name: "Timeout".to_string(),
+            note: "Timeout".to_string(),
+            dependencies: Vec::new(),
+            constraints: constraints(),
+            params,
+            skip_if: Vec::new(),
+            verify: Vec::new(),
+        },
+        wait_step("example.recipe/dependent", "Dependent", 1),
+        wait_step("example.recipe/unrelated", "Unrelated", 1),
+    ]);
+    let mut command_executor = FakeAdbCommandExecutor::default();
+    command_executor.push_timed_out();
+    let device = RealAdbDevice::with_executor("adb", Some("serial"), command_executor);
+
+    let (actual, _) = run_real_adb_value(&execution_plan, device);
+
+    assert_eq!(actual["success"], false);
+    assert_eq!(actual["steps"].as_array().unwrap().len(), 1);
+    assert_eq!(actual["steps"][0]["status"], "failed");
+    assert_eq!(
+        actual["steps"][0]["message"],
+        "The device operation timed out."
+    );
+    assert!(!actual.to_string().contains("serial"));
+}
+
+#[test]
 fn file_exists_condition_uses_compatibility_dry_run_path_and_directory_state() {
     let mut step = wait_step("example.recipe/verify_file", "Verify File", 1);
     step.verify = vec![condition("file_exists", json!({"path": "/sdcard/config"}))];

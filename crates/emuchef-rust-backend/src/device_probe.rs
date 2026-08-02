@@ -5,15 +5,10 @@
 //! adapter when `--adb` or `--serial` requests live probing.
 
 use std::collections::HashSet;
-use std::process::Child;
-use std::process::Command;
-use std::process::Stdio;
-use std::time::Duration;
-
-use wait_timeout::ChildExt;
 
 use serde::{Deserialize, Serialize};
 
+use crate::owned_process::{run_owned_process, ProcessFailureKind, ProcessOperation};
 use crate::planner::DeviceContext;
 
 /// Device facts detected from a selected device.
@@ -71,12 +66,11 @@ pub(crate) struct CommandOutput {
 pub(crate) trait CommandRunner {
     fn run(&self, argv: &[String]) -> Result<CommandOutput, DeviceProbeError>;
 
-    fn run_bounded(
+    fn run_for(
         &self,
         argv: &[String],
-        timeout: Duration,
+        _operation: ProcessOperation,
     ) -> Result<CommandOutput, DeviceProbeError> {
-        let _ = timeout;
         self.run(argv)
     }
 }
@@ -86,84 +80,55 @@ impl<T: CommandRunner + ?Sized> CommandRunner for &T {
         (*self).run(argv)
     }
 
-    fn run_bounded(
+    fn run_for(
         &self,
         argv: &[String],
-        timeout: Duration,
+        operation: ProcessOperation,
     ) -> Result<CommandOutput, DeviceProbeError> {
-        (*self).run_bounded(argv, timeout)
+        (*self).run_for(argv, operation)
     }
 }
 
 /// Production command runner for the live ADB probe adapter.
 ///
-/// This is the only device-probe production path that starts a host process. It
-/// executes the modeled argv directly and never routes through a platform shell.
+/// This is the only device-probe adapter that delegates modeled argv to the
+/// shared owned-process boundary. It never routes argv through a platform shell.
 #[derive(Clone, Debug, Default)]
 pub(crate) struct ProcessCommandRunner;
 
 impl CommandRunner for ProcessCommandRunner {
     fn run(&self, argv: &[String]) -> Result<CommandOutput, DeviceProbeError> {
-        let child = spawn_command(argv)?;
-        let output = child
-            .wait_with_output()
-            .map_err(|_| DeviceProbeError::Unavailable {
-                message: "ADB probe output could not be read.".to_string(),
-            })?;
-        Ok(CommandOutput {
-            status_code: output.status.code(),
-            stdout: String::from_utf8_lossy(&output.stdout).into_owned(),
-            stderr: String::from_utf8_lossy(&output.stderr).into_owned(),
-        })
+        self.run_for(argv, ProcessOperation::Probe)
     }
 
-    fn run_bounded(
+    fn run_for(
         &self,
         argv: &[String],
-        timeout: Duration,
+        operation: ProcessOperation,
     ) -> Result<CommandOutput, DeviceProbeError> {
-        let mut child = spawn_command(argv)?;
-        if child
-            .wait_timeout(timeout)
-            .map_err(|_| DeviceProbeError::Unavailable {
-                message: "ADB probe process could not be monitored.".to_string(),
-            })?
-            .is_none()
-        {
-            let _ = child.kill();
-            let _ = child.wait();
-            return Err(DeviceProbeError::TimedOut);
-        }
-        let output = child
-            .wait_with_output()
-            .map_err(|_| DeviceProbeError::Unavailable {
-                message: "ADB probe output could not be read.".to_string(),
+        let Some((executable, args)) = argv.split_first() else {
+            return Err(adb_probe_start_error());
+        };
+        let output =
+            run_owned_process(executable, args, operation).map_err(|error| match error.kind {
+                ProcessFailureKind::Spawn => adb_probe_start_error(),
+                ProcessFailureKind::TimedOut => DeviceProbeError::TimedOut,
+                _ => DeviceProbeError::Failed {
+                    message: "ADB probe process failed".to_string(),
+                },
             })?;
         Ok(CommandOutput {
-            status_code: output.status.code(),
+            status_code: output.status_code,
             stdout: String::from_utf8_lossy(&output.stdout).into_owned(),
             stderr: String::from_utf8_lossy(&output.stderr).into_owned(),
         })
     }
 }
 
-fn spawn_command(argv: &[String]) -> Result<Child, DeviceProbeError> {
-    let Some((executable, args)) = argv.split_first() else {
-        return Err(adb_probe_start_error());
-    };
-    Command::new(executable)
-        .args(args)
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .spawn()
-        .map_err(|_| adb_probe_start_error())
-}
-
-/// Configuration for modeling a future ADB-backed getprop probe command.
+/// Configuration for the live ADB-backed getprop probe command.
 ///
-/// This is only a command specification. It preserves caller-supplied argv
-/// strings and never validates paths, looks up environment state, or starts a
-/// process.
+/// The configuration preserves caller-supplied argv strings and does not
+/// validate paths or look up additional environment state.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) struct AdbProbeConfig {
     pub adb_path: String,
@@ -172,9 +137,9 @@ pub(crate) struct AdbProbeConfig {
 
 /// Build the argv for collecting all device properties through getprop.
 ///
-/// The returned command is suitable as a future adapter input, but this helper
-/// intentionally does not execute it. Empty or whitespace-only serial values are
-/// treated as absent so callers do not model a selected empty device id.
+/// This pure helper does not execute the returned command. Empty or
+/// whitespace-only serial values are treated as absent so callers do not model
+/// a selected empty device id.
 pub(crate) fn build_adb_getprop_command(config: &AdbProbeConfig) -> Vec<String> {
     let mut command = vec![config.adb_path.clone()];
     if let Some(serial) = present_text(config.serial.as_deref()) {
@@ -320,24 +285,7 @@ pub(crate) struct AdbDeviceProbe<R> {
 impl<R: CommandRunner> DeviceProbe for AdbDeviceProbe<R> {
     fn detect(&self) -> Result<DetectedDeviceFacts, DeviceProbeError> {
         let command = build_adb_getprop_command(&self.config);
-        let output = self.runner.run(&command)?;
-        if output.status_code != Some(0) {
-            return Err(adb_getprop_failed_error());
-        }
-        Ok(detected_facts_from_getprop_output(
-            &output.stdout,
-            self.config.serial.clone(),
-        ))
-    }
-}
-
-impl<R: CommandRunner> AdbDeviceProbe<R> {
-    pub(crate) fn detect_bounded(
-        &self,
-        timeout: Duration,
-    ) -> Result<DetectedDeviceFacts, DeviceProbeError> {
-        let command = build_adb_getprop_command(&self.config);
-        let output = self.runner.run_bounded(&command, timeout)?;
+        let output = self.runner.run_for(&command, ProcessOperation::Probe)?;
         if output.status_code != Some(0) {
             return Err(adb_getprop_failed_error());
         }
@@ -451,6 +399,48 @@ mod tests {
             self.calls.borrow_mut().push(argv.to_vec());
             self.result.clone()
         }
+    }
+
+    #[derive(Debug, Default)]
+    struct DeadlineRecordingRunner {
+        operations: RefCell<Vec<ProcessOperation>>,
+    }
+
+    impl CommandRunner for DeadlineRecordingRunner {
+        fn run(&self, _argv: &[String]) -> Result<CommandOutput, DeviceProbeError> {
+            panic!("production getprop detection must use the bounded runner path")
+        }
+
+        fn run_for(
+            &self,
+            _argv: &[String],
+            operation: ProcessOperation,
+        ) -> Result<CommandOutput, DeviceProbeError> {
+            self.operations.borrow_mut().push(operation);
+            Ok(CommandOutput {
+                status_code: Some(0),
+                stdout: String::new(),
+                stderr: String::new(),
+            })
+        }
+    }
+
+    #[test]
+    fn production_getprop_detection_uses_the_fixed_probe_deadline() {
+        let probe = AdbDeviceProbe {
+            config: AdbProbeConfig {
+                adb_path: "adb".to_string(),
+                serial: Some("SERIAL123".to_string()),
+            },
+            runner: DeadlineRecordingRunner::default(),
+        };
+
+        probe.detect().expect("bounded probe should succeed");
+
+        assert_eq!(
+            *probe.runner.operations.borrow(),
+            [crate::owned_process::ProcessOperation::Probe]
+        );
     }
 
     #[test]
@@ -960,39 +950,6 @@ not a getprop line
             );
 
             assert_eq!(facts.serial, None, "serial={serial:?}");
-        }
-    }
-
-    #[test]
-    fn device_probe_process_command_usage_is_scoped_to_process_command_runner() {
-        let production_source = production_source_without_line_comments();
-
-        assert_eq!(
-            production_source.matches("std::process::Command").count(),
-            1,
-            "ProcessCommandRunner should be the only device_probe.rs import of std::process::Command"
-        );
-        assert_eq!(
-            production_source.matches("Command::new(").count(),
-            1,
-            "ProcessCommandRunner should be the only device_probe.rs caller of Command::new"
-        );
-        let runner_impl = production_source
-            .find("impl CommandRunner for ProcessCommandRunner")
-            .expect("ProcessCommandRunner implementation should exist");
-        let command_new = production_source
-            .find("Command::new(")
-            .expect("ProcessCommandRunner should launch direct argv");
-        assert!(
-            command_new > runner_impl,
-            "Command::new should be scoped inside ProcessCommandRunner"
-        );
-
-        for forbidden_shell in ["sh -c", "cmd /C", "cmd.exe", "powershell"] {
-            assert!(
-                !production_source.contains(forbidden_shell),
-                "device probe process runner must execute modeled argv directly, not through {forbidden_shell:?}"
-            );
         }
     }
 

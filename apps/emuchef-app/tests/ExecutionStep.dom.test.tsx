@@ -203,6 +203,53 @@ describe("execution recovery actions", () => {
     expect(screen.queryByText(/some device changes completed before this failed result/i)).toBeNull();
   });
 
+  test("real timeout results keep the timeout guidance and fresh-repair boundary", () => {
+    const snapshot: RealExecutionSnapshot = {
+      ...failedSnapshot(),
+      simulated: false,
+      verificationScope: "real_device",
+      target: { label: "Connected Android device" },
+      launchAction: null,
+      errors: [{
+        message: "A device operation timed out.",
+        remediation: {
+          kind: "generate_fresh_plan",
+          title: "Repair and retry",
+          message: "Resolve the reported feature problem, then generate and review a fresh plan.",
+        },
+      }],
+      completion: {
+        ...failedSnapshot().completion,
+        partialChangesPossible: true,
+      },
+    };
+    render(
+      <ExecutionStep
+        execution={{
+          kind: "terminal",
+          generation: 1,
+          mode: "real",
+          snapshot,
+          events: [],
+          eventCursor: 0,
+          cancellationRequested: false,
+        }}
+        launchState="idle"
+        repairPreparing={false}
+        reportState="idle"
+        onCancel={vi.fn()}
+        onExportReport={vi.fn()}
+        onLaunchConfiguredApp={vi.fn()}
+        onPrepareRepair={vi.fn()}
+        onReturn={vi.fn()}
+      />,
+    );
+
+    expect(screen.getByText("A device operation timed out.")).toBeTruthy();
+    expect(screen.getByText(/cannot determine whether a failed operation changed the device/i)).toBeTruthy();
+    expect(screen.getByRole("button", { name: "Repair setup" })).toBeTruthy();
+  });
+
   test("separates failed and blocked results without exposing raw result names or changing order", () => {
     const snapshot: ExecutionSnapshot = {
       ...failedSnapshot(),

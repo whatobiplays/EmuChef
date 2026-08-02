@@ -21,7 +21,7 @@ use crate::errors::{ApiError, ApiErrorCode};
 use crate::executor::adb::RealAdbDevice;
 use crate::executor::{
     ExecutionProgressEvent, ExecutionRunResult, ExecutorAdapters, ExecutorDevice, ExecutorRunner,
-    FakeDryRunDevice, ProgressPhase, ProgressStatus, SandboxRoots, StepRunStatus,
+    FakeDryRunDevice, ProgressPhase, ProgressStatus, SandboxRoots, StepFailureKind, StepRunStatus,
 };
 use crate::model::OrderedMap;
 use crate::planner::{ExecutionParamValue, ExecutionPlan, RuntimeValue, TargetDeviceBinding};
@@ -800,7 +800,11 @@ fn finish_attempt(
         match step_record.status {
             StepRunStatus::Failed | StepRunStatus::Blocked => {
                 record.report.errors.push(ExecutionIssue {
-                    code: issue_code(step_record.status.clone(), step_record.message.as_deref()),
+                    code: issue_code(
+                        step_record.status.clone(),
+                        step_record.message.as_deref(),
+                        step_record.failure_kind,
+                    ),
                     message: step_record
                         .message
                         .clone()
@@ -919,9 +923,16 @@ fn overall_status(result: &ExecutionRunResult, has_warnings: bool) -> ExecutionS
     }
 }
 
-fn issue_code(status: StepRunStatus, message: Option<&str>) -> String {
+fn issue_code(
+    status: StepRunStatus,
+    message: Option<&str>,
+    failure_kind: Option<StepFailureKind>,
+) -> String {
     if status == StepRunStatus::Blocked {
         return "dependency_blocked".to_string();
+    }
+    if failure_kind == Some(StepFailureKind::OperationTimedOut) {
+        return "operation_timed_out".to_string();
     }
     let message = message.unwrap_or_default();
     for code in [
@@ -1198,6 +1209,26 @@ mod tests {
         assert_eq!(overall_status(&result, false), ExecutionStatus::Failed);
         result.cancelled = true;
         assert_eq!(overall_status(&result, false), ExecutionStatus::Cancelled);
+    }
+
+    #[test]
+    fn typed_timeout_failure_keeps_operation_timeout_issue_code() {
+        assert_eq!(
+            issue_code(
+                StepRunStatus::Failed,
+                Some("ordinary presentation text"),
+                Some(StepFailureKind::OperationTimedOut),
+            ),
+            "operation_timed_out"
+        );
+        assert_eq!(
+            issue_code(
+                StepRunStatus::Failed,
+                Some("ordinary presentation text"),
+                Some(StepFailureKind::OperationFailed),
+            ),
+            "step_execution_failed"
+        );
     }
 
     #[test]

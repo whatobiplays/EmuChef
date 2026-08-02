@@ -7,19 +7,20 @@
 
 use std::collections::{HashMap, HashSet};
 use std::fs::{self, File, OpenOptions};
+use std::future::Future;
 use std::io::{self, Read, Seek, Write};
 use std::path::{Component, Path, PathBuf};
-use std::process::{Command, Stdio};
-use std::sync::mpsc;
-use std::thread;
 use std::time::Duration;
 
+use async_io::{block_on, Timer};
+use async_process::{Child, ChildStderr, ChildStdout, Command, Stdio};
+use futures_lite::future::{self, poll_fn};
+use futures_lite::io::{AsyncRead, AsyncReadExt};
 use semver::Version;
 use serde::{Deserialize, Serialize};
 use serde_json::json;
 use sha2::{Digest, Sha256};
 use uuid::Uuid;
-use wait_timeout::ChildExt;
 use zip::ZipArchive;
 
 pub const PLATFORM_TOOLS_URL: &str = "https://developer.android.com/tools/releases/platform-tools";
@@ -35,6 +36,8 @@ const MAX_ENTRY_UNCOMPRESSED: u64 = 128 * 1024 * 1024;
 const MAX_MEMBER_PATH_BYTES: usize = 512;
 const MAX_PROCESS_OUTPUT: usize = 64 * 1024;
 const PROCESS_TIMEOUT: Duration = Duration::from_secs(5);
+const PROCESS_CLEANUP_TIMEOUT: Duration = Duration::from_secs(2);
+const PROCESS_STREAM_BUFFER: usize = 16 * 1024;
 const RETAINED_FILES: [&str; 3] = ["adb", "NOTICE.txt", "source.properties"];
 
 #[derive(Clone, Debug, Serialize)]
@@ -1255,76 +1258,329 @@ impl ProcessExecutor for RealProcessExecutor {
                     vec!["retry"],
                 )
             })?;
-        let stdout = child.stdout.take().expect("piped stdout");
-        let stderr = child.stderr.take().expect("piped stderr");
-        let (sender, receiver) = mpsc::channel();
-        spawn_bounded_reader("stdout", stdout, sender.clone());
-        spawn_bounded_reader("stderr", stderr, sender.clone());
-        drop(sender);
-        let status = child.wait_timeout(timeout).map_err(|_| {
-            setup_error(
-                "validation_process_failed",
-                "A local validation process could not be monitored.",
-                vec!["retry"],
-            )
-        })?;
-        let status = match status {
-            Some(status) => status,
+        let stdout = match child.stdout.take() {
+            Some(stdout) => stdout,
             None => {
-                let _ = child.kill();
-                let _ = child.wait();
+                cleanup_process(&mut child);
                 return Err(setup_error(
-                    "validation_process_timeout",
-                    "A local validation process timed out and was terminated.",
+                    "validation_process_failed",
+                    "A local validation process could not be monitored.",
                     vec!["retry"],
                 ));
             }
         };
-        let mut stdout = Vec::new();
-        let mut stderr = Vec::new();
-        for (label, result) in receiver.iter().take(2) {
-            let bytes = result.map_err(|_| {
-                setup_error(
-                    "validation_output_failed",
-                    "Local validation output could not be read.",
-                    vec!["retry"],
-                )
-            })?;
-            if bytes.len() > MAX_PROCESS_OUTPUT {
+        let stderr = match child.stderr.take() {
+            Some(stderr) => stderr,
+            None => {
+                cleanup_process(&mut child);
                 return Err(setup_error(
-                    "validation_output_too_large",
-                    "Local validation produced too much output.",
+                    "validation_process_failed",
+                    "A local validation process could not be monitored.",
                     vec!["retry"],
                 ));
             }
-            if label == "stdout" {
-                stdout = bytes;
-            } else {
-                stderr = bytes;
+        };
+        match block_on(run_process(child, stdout, stderr, timeout)) {
+            Ok(output) => Ok(ControlledOutput {
+                success: output.status_success,
+                stdout: String::from_utf8_lossy(&output.stdout).into_owned(),
+                stderr: String::from_utf8_lossy(&output.stderr).into_owned(),
+            }),
+            Err(ProcessFailure::TimedOut | ProcessFailure::TimedOutCleanupUncertain) => {
+                Err(setup_error(
+                    "validation_process_timeout",
+                    "A local validation process timed out and was terminated.",
+                    vec!["retry"],
+                ))
             }
+            Err(
+                ProcessFailure::OutputTooLarge | ProcessFailure::OutputTooLargeCleanupUncertain,
+            ) => Err(setup_error(
+                "validation_output_too_large",
+                "Local validation produced too much output.",
+                vec!["retry"],
+            )),
+            Err(ProcessFailure::OutputRead | ProcessFailure::OutputReadCleanupUncertain) => {
+                Err(setup_error(
+                    "validation_output_failed",
+                    "Local validation output could not be read.",
+                    vec!["retry"],
+                ))
+            }
+            Err(
+                ProcessFailure::Wait
+                | ProcessFailure::WaitCleanupUncertain
+                | ProcessFailure::CleanupUncertain,
+            ) => Err(setup_error(
+                "validation_process_failed",
+                "A local validation process could not be monitored.",
+                vec!["retry"],
+            )),
         }
-        Ok(ControlledOutput {
-            success: status.success(),
-            stdout: String::from_utf8_lossy(&stdout).into_owned(),
-            stderr: String::from_utf8_lossy(&stderr).into_owned(),
-        })
     }
 }
 
-fn spawn_bounded_reader<R: Read + Send + 'static>(
-    label: &'static str,
-    mut stream: R,
-    sender: mpsc::Sender<(&'static str, io::Result<Vec<u8>>)>,
-) {
-    thread::spawn(move || {
-        let mut bytes = Vec::new();
-        let result = stream
-            .by_ref()
-            .take((MAX_PROCESS_OUTPUT + 1) as u64)
-            .read_to_end(&mut bytes)
-            .map(|_| bytes);
-        let _ = sender.send((label, result));
-    });
+#[derive(Debug)]
+struct ProcessOutput {
+    status_success: bool,
+    stdout: Vec<u8>,
+    stderr: Vec<u8>,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum ProcessFailure {
+    TimedOut,
+    TimedOutCleanupUncertain,
+    OutputTooLarge,
+    OutputTooLargeCleanupUncertain,
+    OutputRead,
+    OutputReadCleanupUncertain,
+    Wait,
+    WaitCleanupUncertain,
+    CleanupUncertain,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum ProcessStream {
+    Stdout,
+    Stderr,
+}
+
+impl ProcessStream {
+    fn read_failure(self) -> ProcessFailure {
+        let _ = self;
+        ProcessFailure::OutputRead
+    }
+
+    fn overflow_failure(self) -> ProcessFailure {
+        let _ = self;
+        ProcessFailure::OutputTooLarge
+    }
+}
+
+async fn capture_process_stream<R: AsyncRead + Unpin>(
+    mut reader: R,
+    stream: ProcessStream,
+) -> Result<Vec<u8>, ProcessFailure> {
+    let mut retained = Vec::with_capacity(MAX_PROCESS_OUTPUT.min(16 * 1024));
+    let mut buffer = [0_u8; PROCESS_STREAM_BUFFER];
+    loop {
+        match reader.read(&mut buffer).await {
+            Ok(0) => return Ok(retained),
+            Ok(count) => {
+                let remaining = MAX_PROCESS_OUTPUT.saturating_sub(retained.len());
+                let retained_count = count.min(remaining);
+                retained.extend_from_slice(&buffer[..retained_count]);
+                if count > remaining {
+                    return Err(stream.overflow_failure());
+                }
+            }
+            Err(_) => return Err(stream.read_failure()),
+        }
+    }
+}
+
+async fn read_process_streams(
+    stdout: ChildStdout,
+    stderr: ChildStderr,
+) -> Result<(Vec<u8>, Vec<u8>), ProcessFailure> {
+    let mut stdout_future = Box::pin(capture_process_stream(stdout, ProcessStream::Stdout));
+    let mut stderr_future = Box::pin(capture_process_stream(stderr, ProcessStream::Stderr));
+    let mut stdout_result = None;
+    let mut stderr_result = None;
+    poll_fn(|context| {
+        if stdout_result.is_none() {
+            if let std::task::Poll::Ready(result) = stdout_future.as_mut().poll(context) {
+                match result {
+                    Ok(bytes) => stdout_result = Some(bytes),
+                    Err(error) => return std::task::Poll::Ready(Err(error)),
+                }
+            }
+        }
+        if stderr_result.is_none() {
+            if let std::task::Poll::Ready(result) = stderr_future.as_mut().poll(context) {
+                match result {
+                    Ok(bytes) => stderr_result = Some(bytes),
+                    Err(error) => return std::task::Poll::Ready(Err(error)),
+                }
+            }
+        }
+        match (stdout_result.take(), stderr_result.take()) {
+            (Some(stdout), Some(stderr)) => std::task::Poll::Ready(Ok((stdout, stderr))),
+            (stdout, stderr) => {
+                stdout_result = stdout;
+                stderr_result = stderr;
+                std::task::Poll::Pending
+            }
+        }
+    })
+    .await
+}
+
+enum ProcessEvent {
+    Exited(Result<bool, ProcessFailure>),
+    Output(Result<(Vec<u8>, Vec<u8>), ProcessFailure>),
+    TimedOut,
+}
+
+async fn settle_process_output(
+    mut output_future: std::pin::Pin<
+        Box<impl Future<Output = Result<(Vec<u8>, Vec<u8>), ProcessFailure>>>,
+    >,
+) -> Result<(Vec<u8>, Vec<u8>), ProcessFailure> {
+    let mut timer = Box::pin(Timer::after(PROCESS_CLEANUP_TIMEOUT));
+    poll_fn(|context| {
+        if let std::task::Poll::Ready(result) = output_future.as_mut().poll(context) {
+            return std::task::Poll::Ready(result);
+        }
+        if let std::task::Poll::Ready(_) = timer.as_mut().poll(context) {
+            return std::task::Poll::Ready(Err(ProcessFailure::CleanupUncertain));
+        }
+        std::task::Poll::Pending
+    })
+    .await
+}
+
+async fn settle_process_status(
+    mut status_future: std::pin::Pin<
+        Box<impl Future<Output = Result<async_process::ExitStatus, io::Error>>>,
+    >,
+) -> Result<bool, ProcessFailure> {
+    let mut timer = Box::pin(Timer::after(PROCESS_CLEANUP_TIMEOUT));
+    poll_fn(|context| {
+        if let std::task::Poll::Ready(result) = status_future.as_mut().poll(context) {
+            return std::task::Poll::Ready(
+                result
+                    .map(|status| status.success())
+                    .map_err(|_| ProcessFailure::Wait),
+            );
+        }
+        if let std::task::Poll::Ready(_) = timer.as_mut().poll(context) {
+            return std::task::Poll::Ready(Err(ProcessFailure::CleanupUncertain));
+        }
+        std::task::Poll::Pending
+    })
+    .await
+}
+
+fn cleanup_process(child: &mut Child) -> bool {
+    if child.try_status().ok().flatten().is_some() {
+        return true;
+    }
+    let _ = child.kill();
+    block_on(future::race(
+        async { child.status().await.is_ok() },
+        async {
+            Timer::after(PROCESS_CLEANUP_TIMEOUT).await;
+            false
+        },
+    ))
+}
+
+fn retain_process_failure_primary(error: ProcessFailure) -> ProcessFailure {
+    match error {
+        ProcessFailure::TimedOut | ProcessFailure::TimedOutCleanupUncertain => {
+            ProcessFailure::TimedOutCleanupUncertain
+        }
+        ProcessFailure::OutputTooLarge | ProcessFailure::OutputTooLargeCleanupUncertain => {
+            ProcessFailure::OutputTooLargeCleanupUncertain
+        }
+        ProcessFailure::OutputRead | ProcessFailure::OutputReadCleanupUncertain => {
+            ProcessFailure::OutputReadCleanupUncertain
+        }
+        ProcessFailure::Wait | ProcessFailure::WaitCleanupUncertain => {
+            ProcessFailure::WaitCleanupUncertain
+        }
+        ProcessFailure::CleanupUncertain => ProcessFailure::CleanupUncertain,
+    }
+}
+
+async fn run_process(
+    mut child: Child,
+    stdout: ChildStdout,
+    stderr: ChildStderr,
+    timeout: Duration,
+) -> Result<ProcessOutput, ProcessFailure> {
+    let mut status_future = Box::pin(child.status());
+    let mut output_future = Box::pin(read_process_streams(stdout, stderr));
+    let mut timer = Box::pin(Timer::after(timeout));
+    let event = poll_fn(|context| {
+        if let std::task::Poll::Ready(result) = output_future.as_mut().poll(context) {
+            return std::task::Poll::Ready(ProcessEvent::Output(result));
+        }
+        if let std::task::Poll::Ready(result) = status_future.as_mut().poll(context) {
+            return std::task::Poll::Ready(ProcessEvent::Exited(
+                result
+                    .map(|status| status.success())
+                    .map_err(|_| ProcessFailure::Wait),
+            ));
+        }
+        if let std::task::Poll::Ready(_) = timer.as_mut().poll(context) {
+            return std::task::Poll::Ready(ProcessEvent::TimedOut);
+        }
+        std::task::Poll::Pending
+    })
+    .await;
+
+    match event {
+        ProcessEvent::Output(result) => {
+            drop(output_future);
+            match result {
+                Err(error) => {
+                    drop(status_future);
+                    if cleanup_process(&mut child) {
+                        Err(error)
+                    } else {
+                        Err(retain_process_failure_primary(error))
+                    }
+                }
+                Ok((stdout, stderr)) => {
+                    drop(timer);
+                    match settle_process_status(status_future).await {
+                        Ok(status_success) => Ok(ProcessOutput {
+                            status_success,
+                            stdout,
+                            stderr,
+                        }),
+                        Err(_) => {
+                            if cleanup_process(&mut child) {
+                                Err(ProcessFailure::Wait)
+                            } else {
+                                Err(ProcessFailure::WaitCleanupUncertain)
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        ProcessEvent::Exited(result) => {
+            drop(status_future);
+            match result {
+                Err(error) => {
+                    drop(output_future);
+                    let _ = cleanup_process(&mut child);
+                    Err(error)
+                }
+                Ok(status_success) => match settle_process_output(output_future).await {
+                    Ok((stdout, stderr)) => Ok(ProcessOutput {
+                        status_success,
+                        stdout,
+                        stderr,
+                    }),
+                    Err(error) => Err(error),
+                },
+            }
+        }
+        ProcessEvent::TimedOut => {
+            drop(status_future);
+            drop(output_future);
+            if cleanup_process(&mut child) {
+                Err(ProcessFailure::TimedOut)
+            } else {
+                Err(ProcessFailure::TimedOutCleanupUncertain)
+            }
+        }
+    }
 }
 
 fn read_settings(path: &Path) -> Result<ManagedSettings, io::Error> {
@@ -2288,20 +2544,51 @@ mod tests {
 
     #[test]
     fn controlled_process_times_out_and_bounds_output_without_a_shell() {
+        let executable = std::env::current_exe().expect("test executable should be available");
+        let cwd = std::env::current_dir().expect("test working directory should be available");
         let timeout = RealProcessExecutor.run(
-            Path::new("/bin/sleep"),
-            &["1"],
-            Path::new("/"),
+            &executable,
+            &[
+                "--exact",
+                "adb::tests::process_timeout_helper",
+                "--ignored",
+                "--nocapture",
+            ],
+            &cwd,
             Duration::from_millis(10),
         );
         assert_eq!(timeout.unwrap_err().code, "validation_process_timeout");
         let excessive = RealProcessExecutor.run(
-            Path::new("/usr/bin/yes"),
-            &[],
-            Path::new("/"),
+            &executable,
+            &[
+                "--exact",
+                "adb::tests::process_output_overflow_helper",
+                "--ignored",
+                "--nocapture",
+            ],
+            &cwd,
             Duration::from_secs(1),
         );
         assert_eq!(excessive.unwrap_err().code, "validation_output_too_large");
+    }
+
+    #[test]
+    #[ignore]
+    fn process_timeout_helper() {
+        std::thread::sleep(Duration::from_secs(60));
+    }
+
+    #[test]
+    #[ignore]
+    fn process_output_overflow_helper() {
+        let bytes = vec![b'x'; MAX_PROCESS_OUTPUT + 1];
+        std::io::stdout()
+            .write_all(&bytes)
+            .expect("overflow helper output should be writable");
+        std::io::stdout()
+            .flush()
+            .expect("overflow helper output should flush");
+        std::thread::sleep(Duration::from_secs(60));
     }
 
     #[test]
