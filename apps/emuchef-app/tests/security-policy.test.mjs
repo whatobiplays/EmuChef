@@ -198,7 +198,10 @@ test("release ADB resolution cannot depend on PATH", () => {
   );
   assert.match(adb, /\.env_clear\(\)/);
   assert.match(adb, /\.stdin\(Stdio::null\(\)\)/);
-  assert.match(adb, /wait_timeout\(timeout\)/);
+  assert.match(adb, /Timer::after\(/);
+  assert.match(adb, /future::race\(/);
+  assert.match(adb, /PROCESS_TIMEOUT/);
+  assert.match(adb, /PROCESS_CLEANUP_TIMEOUT/);
 });
 
 test("React DTOs contain opaque handles and no exact serial property", () => {
