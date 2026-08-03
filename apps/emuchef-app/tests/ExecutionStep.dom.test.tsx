@@ -370,6 +370,96 @@ describe("execution recovery actions", () => {
     expect(screen.getByText(/does not resume the old execution/i)).toBeTruthy();
   });
 
+  test("identity issue projections stay distinct and require fresh connection, qualification, plan, and review", () => {
+    const base: RealExecutionSnapshot = {
+      ...failedSnapshot(),
+      simulated: false,
+      verificationScope: "real_device",
+      target: { label: "Connected Android device" },
+      launchAction: null,
+      recipes: [{
+        name: "Identity-bound work",
+        description: null,
+        status: "failed",
+        steps: [{ name: "Later action", note: null, status: "pending", message: null }],
+      }],
+      completion: {
+        ...failedSnapshot().completion,
+        counts: { ...failedSnapshot().completion.counts, total: 1, failed: 0, pending: 1 },
+        partialChangesPossible: true,
+      },
+    };
+    const { rerender } = render(
+      <ExecutionStep
+        execution={{
+          kind: "terminal",
+          generation: 1,
+          mode: "real",
+          snapshot: {
+            ...base,
+            errors: [{
+              message: "The reviewed device identity changed during execution.",
+              remediation: {
+                kind: "reconnect_device",
+                title: "Reconnect and requalify",
+                message: "Reconnect the intended device, complete a fresh identity probe and qualification, then generate and review a fresh plan before another real run. The old execution cannot be resumed.",
+              },
+            }],
+          },
+          events: [],
+          eventCursor: 0,
+          cancellationRequested: false,
+        }}
+        launchState="idle"
+        repairPreparing={false}
+        reportState="idle"
+        onCancel={vi.fn()}
+        onExportReport={vi.fn()}
+        onLaunchConfiguredApp={vi.fn()}
+        onPrepareRepair={vi.fn()}
+        onReturn={vi.fn()}
+      />,
+    );
+
+    expect(screen.getByText(/identity changed during execution/i)).toBeTruthy();
+    expect(screen.getByText(/fresh identity probe and qualification/i)).toBeTruthy();
+    expect(screen.getByText(/old execution cannot be resumed/i)).toBeTruthy();
+    rerender(
+      <ExecutionStep
+        execution={{
+          kind: "terminal",
+          generation: 1,
+          mode: "real",
+          snapshot: {
+            ...base,
+            errors: [{
+              message: "The reviewed device identity could not be verified safely.",
+              remediation: {
+                kind: "reconnect_device",
+                title: "Reconnect and requalify",
+                message: "Reconnect the intended device, complete a fresh identity probe and qualification, then generate and review a fresh plan before another real run. The old execution cannot be resumed.",
+              },
+            }],
+          },
+          events: [],
+          eventCursor: 0,
+          cancellationRequested: false,
+        }}
+        launchState="idle"
+        repairPreparing={false}
+        reportState="idle"
+        onCancel={vi.fn()}
+        onExportReport={vi.fn()}
+        onLaunchConfiguredApp={vi.fn()}
+        onPrepareRepair={vi.fn()}
+        onReturn={vi.fn()}
+      />,
+    );
+    expect(screen.getByText(/identity could not be verified safely/i)).toBeTruthy();
+    expect(screen.getAllByText(/Not attempted/i).length).toBeGreaterThan(0);
+    expect(screen.queryByText(/android_id|build\.fingerprint|private serial/i)).toBeNull();
+  });
+
   test("separates failed and blocked results without exposing raw result names or changing order", () => {
     const snapshot: ExecutionSnapshot = {
       ...failedSnapshot(),

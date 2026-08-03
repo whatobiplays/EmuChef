@@ -7,6 +7,9 @@ use std::collections::VecDeque;
 use crate::owned_process::{
     run_owned_process, OwnedProcessError, ProcessCleanup, ProcessFailureKind, ProcessOperation,
 };
+use crate::planner::TargetDeviceBinding;
+
+use super::identity::{IdentityCheckPhase, POST_OPERATION_IDENTITY_FAILURE_MARKER};
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct AdbCommandResult {
@@ -26,6 +29,12 @@ pub enum AdbCommandError {
     AdbServerUnavailable,
     TransportReset,
     TransportFailure,
+    DeviceIdentityChanged {
+        phase: IdentityCheckPhase,
+    },
+    DeviceIdentityUnverified {
+        phase: IdentityCheckPhase,
+    },
     ProcessFailed {
         kind: ProcessFailureKind,
         cleanup: ProcessCleanup,
@@ -63,6 +72,14 @@ impl fmt::Display for AdbCommandError {
             }
             AdbCommandError::TransportFailure => {
                 formatter.write_str("The device connection was lost during execution.")
+            }
+            AdbCommandError::DeviceIdentityChanged { phase }
+            | AdbCommandError::DeviceIdentityUnverified { phase } => {
+                if *phase == IdentityCheckPhase::PostOperation {
+                    formatter.write_str(POST_OPERATION_IDENTITY_FAILURE_MARKER)
+                } else {
+                    formatter.write_str("The reviewed device identity could not be confirmed.")
+                }
             }
             AdbCommandError::ProcessFailed { .. } => {
                 formatter.write_str("The ADB process failed before producing a trustworthy result.")
@@ -221,6 +238,13 @@ fn classify_root_result(result: &AdbCommandResult) -> RootProbeOutcome {
 }
 
 impl AdbCommandError {
+    fn allows_post_identity_probe(&self) -> bool {
+        matches!(
+            self,
+            Self::CommandFailed | Self::RootDenied | Self::RootUnavailable | Self::RootCheckFailed
+        )
+    }
+
     fn is_transport_failure(&self) -> bool {
         matches!(
             self,
@@ -287,6 +311,17 @@ impl<E: AdbCommandExecutor> AdbCommandRunner<E> {
         &self.executor
     }
 
+    pub(super) fn serial(&self) -> Option<&str> {
+        self.serial.as_deref()
+    }
+
+    pub(super) fn run_identity_command(
+        &mut self,
+        args: Vec<String>,
+    ) -> Result<AdbCommandResult, AdbCommandError> {
+        self.run(args, true, ProcessOperation::Probe)
+    }
+
     fn run(
         &mut self,
         args: Vec<String>,
@@ -350,6 +385,7 @@ impl<E: AdbCommandExecutor> AdbCommandRunner<E> {
 pub struct RealAdbDevice<E: AdbCommandExecutor = ProcessAdbCommandExecutor> {
     runner: AdbCommandRunner<E>,
     last_error: Option<AdbCommandError>,
+    identity: super::identity::IdentityGuard,
 }
 
 impl RealAdbDevice<ProcessAdbCommandExecutor> {
@@ -357,6 +393,7 @@ impl RealAdbDevice<ProcessAdbCommandExecutor> {
         Self {
             runner: AdbCommandRunner::new(executable, serial),
             last_error: None,
+            identity: super::identity::IdentityGuard::default(),
         }
     }
 }
@@ -371,6 +408,7 @@ impl<E: AdbCommandExecutor> RealAdbDevice<E> {
                 executor,
             ),
             last_error: None,
+            identity: super::identity::IdentityGuard::default(),
         }
     }
 
@@ -383,6 +421,14 @@ impl<E: AdbCommandExecutor> RealAdbDevice<E> {
         self.last_error.take()
     }
 
+    pub(crate) fn configure_identity_guard(&mut self, target: Option<&TargetDeviceBinding>) {
+        if target.is_some() {
+            self.identity.configure(target);
+        } else {
+            self.identity.disable();
+        }
+    }
+
     fn map_public<T>(&mut self, result: Result<T, AdbCommandError>) -> Result<T, String> {
         match result {
             Ok(value) => Ok(value),
@@ -393,37 +439,48 @@ impl<E: AdbCommandExecutor> RealAdbDevice<E> {
         }
     }
 
+    fn guarded<T>(
+        &mut self,
+        operation: impl FnOnce(&mut Self) -> Result<T, AdbCommandError>,
+    ) -> Result<T, String> {
+        if let Err(error) = self
+            .identity
+            .check(&mut self.runner, IdentityCheckPhase::PreOperation)
+        {
+            return self.map_public(Err(error));
+        }
+        let result = operation(self);
+        let should_post_check = result
+            .as_ref()
+            .err()
+            .is_none_or(AdbCommandError::allows_post_identity_probe);
+        if should_post_check {
+            if let Err(error) = self
+                .identity
+                .check(&mut self.runner, IdentityCheckPhase::PostOperation)
+            {
+                return self.map_public(Err(error));
+            }
+        }
+        self.map_public(result)
+    }
+
     pub fn check_root(&mut self) -> Result<(), String> {
+        self.guarded(|device| device.check_root_unchecked())
+    }
+
+    fn check_root_unchecked(&mut self) -> Result<(), AdbCommandError> {
         let Some(serial) = self.runner.serial.clone() else {
             let error = AdbCommandError::RootCheckFailed;
-            self.last_error = Some(error.clone());
-            return Err(error_string(error));
+            return Err(error);
         };
         let result = probe_root_typed(&mut self.runner.executor, &self.runner.executable, &serial);
-        let result = match result {
-            Ok(result) => result,
-            Err(error) => {
-                self.last_error = Some(error.clone());
-                return Err(error_string(error));
-            }
-        };
+        let result = result?;
         match result {
             RootProbeOutcome::Granted => Ok(()),
-            RootProbeOutcome::Denied => {
-                let error = AdbCommandError::RootDenied;
-                self.last_error = Some(error.clone());
-                Err(error_string(error))
-            }
-            RootProbeOutcome::Unavailable => {
-                let error = AdbCommandError::RootUnavailable;
-                self.last_error = Some(error.clone());
-                Err(error_string(error))
-            }
-            RootProbeOutcome::CheckFailed { .. } => {
-                let error = AdbCommandError::RootCheckFailed;
-                self.last_error = Some(error.clone());
-                Err(error_string(error))
-            }
+            RootProbeOutcome::Denied => Err(AdbCommandError::RootDenied),
+            RootProbeOutcome::Unavailable => Err(AdbCommandError::RootUnavailable),
+            RootProbeOutcome::CheckFailed { .. } => Err(AdbCommandError::RootCheckFailed),
         }
     }
 
@@ -433,8 +490,12 @@ impl<E: AdbCommandExecutor> RealAdbDevice<E> {
             args.push("-r".to_string());
         }
         args.push(apk_path.to_string_lossy().to_string());
-        let result = self.runner.run(args, true, ProcessOperation::Install);
-        self.map_public(result).map(|_| ())
+        self.guarded(|device| {
+            device
+                .runner
+                .run(args, true, ProcessOperation::Install)
+                .map(|_| ())
+        })
     }
 
     pub fn push(&mut self, source: &Path, dest: &str, sync: bool) -> Result<(), String> {
@@ -444,35 +505,48 @@ impl<E: AdbCommandExecutor> RealAdbDevice<E> {
         }
         args.push(source.to_string_lossy().to_string());
         args.push(dest.to_string());
-        let result = self.runner.run(args, true, ProcessOperation::Push);
-        self.map_public(result).map(|_| ())
+        self.guarded(|device| {
+            device
+                .runner
+                .run(args, true, ProcessOperation::Push)
+                .map(|_| ())
+        })
     }
 
     pub fn mkdir_p(&mut self, path: &str) -> Result<(), String> {
-        self.run_shell(
-            vec!["mkdir".to_string(), "-p".to_string(), path.to_string()],
-            true,
-            ProcessOperation::ShellMutation,
-        )
-        .map(|_| ())
+        self.guarded(|device| {
+            device
+                .run_shell_unchecked(
+                    vec!["mkdir".to_string(), "-p".to_string(), path.to_string()],
+                    true,
+                    ProcessOperation::ShellMutation,
+                )
+                .map(|_| ())
+        })
     }
 
     pub fn remove_file(&mut self, path: &str) -> Result<(), String> {
-        self.run_shell(
-            vec!["rm".to_string(), "-f".to_string(), path.to_string()],
-            true,
-            ProcessOperation::ShellMutation,
-        )
-        .map(|_| ())
+        self.guarded(|device| {
+            device
+                .run_shell_unchecked(
+                    vec!["rm".to_string(), "-f".to_string(), path.to_string()],
+                    true,
+                    ProcessOperation::ShellMutation,
+                )
+                .map(|_| ())
+        })
     }
 
     pub fn remove_tree(&mut self, path: &str) -> Result<(), String> {
-        self.run_shell(
-            vec!["rm".to_string(), "-rf".to_string(), path.to_string()],
-            true,
-            ProcessOperation::ShellMutation,
-        )
-        .map(|_| ())
+        self.guarded(|device| {
+            device
+                .run_shell_unchecked(
+                    vec!["rm".to_string(), "-rf".to_string(), path.to_string()],
+                    true,
+                    ProcessOperation::ShellMutation,
+                )
+                .map(|_| ())
+        })
     }
 
     pub fn copy_on_device(
@@ -488,54 +562,71 @@ impl<E: AdbCommandExecutor> RealAdbDevice<E> {
         }
         args.push(source.to_string());
         args.push(dest.to_string());
-        self.run_shell_with_privilege(
-            args,
-            true,
-            privileged || is_app_private_path(source) || is_app_private_path(dest),
-            ProcessOperation::DeviceCopy,
-        )
-        .map(|_| ())
+        self.guarded(|device| {
+            device
+                .run_shell_with_privilege_unchecked(
+                    args,
+                    true,
+                    privileged || is_app_private_path(source) || is_app_private_path(dest),
+                    ProcessOperation::DeviceCopy,
+                )
+                .map(|_| ())
+        })
     }
 
     pub fn package_installed(&mut self, package_name: &str) -> Result<bool, String> {
-        let result = self.runner.run(
-            vec![
-                "shell".to_string(),
-                "pm".to_string(),
-                "path".to_string(),
-                package_name.to_string(),
-            ],
-            false,
-            ProcessOperation::Predicate,
-        );
-        let result = self.map_public(result)?;
-        Ok(result.returncode == 0 && result.stdout.contains("package:"))
+        self.guarded(|device| {
+            let result = device.runner.run(
+                vec![
+                    "shell".to_string(),
+                    "pm".to_string(),
+                    "path".to_string(),
+                    package_name.to_string(),
+                ],
+                false,
+                ProcessOperation::Predicate,
+            )?;
+            Ok(result.returncode == 0 && result.stdout.contains("package:"))
+        })
     }
 
     pub fn path_exists(&mut self, path: &str) -> Result<bool, String> {
-        let result = self.run_shell(
-            vec!["test".to_string(), "-e".to_string(), path.to_string()],
-            false,
-            ProcessOperation::Predicate,
-        )?;
-        Ok(result.returncode == 0)
+        self.guarded(|device| {
+            let result = device.run_shell_unchecked(
+                vec!["test".to_string(), "-e".to_string(), path.to_string()],
+                false,
+                ProcessOperation::Predicate,
+            )?;
+            Ok(result.returncode == 0)
+        })
     }
 
     pub fn path_is_dir(&mut self, path: &str) -> Result<bool, String> {
-        let result = self.run_shell(
-            vec!["test".to_string(), "-d".to_string(), path.to_string()],
-            false,
-            ProcessOperation::Predicate,
-        )?;
-        Ok(result.returncode == 0)
+        self.guarded(|device| {
+            let result = device.run_shell_unchecked(
+                vec!["test".to_string(), "-d".to_string(), path.to_string()],
+                false,
+                ProcessOperation::Predicate,
+            )?;
+            Ok(result.returncode == 0)
+        })
     }
 
     pub fn run_plan_command(&mut self, command: Vec<String>) -> Result<(), String> {
-        let result = self.runner.run_plan_command(command);
-        self.map_public(result).map(|_| ())
+        self.guarded(|device| device.runner.run_plan_command(command))
     }
 
     pub fn launch_app(&mut self, package_name: &str, activity: Option<&str>) -> Result<(), String> {
+        let package_name = package_name.to_string();
+        let activity = activity.map(ToString::to_string);
+        self.guarded(|device| device.launch_app_unchecked(&package_name, activity.as_deref()))
+    }
+
+    fn launch_app_unchecked(
+        &mut self,
+        package_name: &str,
+        activity: Option<&str>,
+    ) -> Result<(), AdbCommandError> {
         if let Some(activity) = activity.filter(|value| !value.is_empty()) {
             let result = self.runner.run(
                 vec![
@@ -548,10 +639,10 @@ impl<E: AdbCommandExecutor> RealAdbDevice<E> {
                 true,
                 ProcessOperation::Launch,
             );
-            return self.map_public(result).map(|_| ());
+            return result.map(|_| ());
         }
 
-        if let Some(resolved_activity) = self.resolve_launcher_activity(package_name)? {
+        if let Some(resolved_activity) = self.resolve_launcher_activity_unchecked(package_name)? {
             let result = self.runner.run(
                 vec![
                     "shell".to_string(),
@@ -563,7 +654,7 @@ impl<E: AdbCommandExecutor> RealAdbDevice<E> {
                 true,
                 ProcessOperation::Launch,
             );
-            return self.map_public(result).map(|_| ());
+            return result.map(|_| ());
         }
 
         let result = self.runner.run(
@@ -579,24 +670,32 @@ impl<E: AdbCommandExecutor> RealAdbDevice<E> {
             true,
             ProcessOperation::Launch,
         );
-        self.map_public(result).map(|_| ())
+        result.map(|_| ())
     }
 
     pub fn force_stop_app(&mut self, package_name: &str) -> Result<(), String> {
-        let result = self.runner.run(
-            vec![
-                "shell".to_string(),
-                "am".to_string(),
-                "force-stop".to_string(),
-                package_name.to_string(),
-            ],
-            true,
-            ProcessOperation::ForceStop,
-        );
-        self.map_public(result).map(|_| ())
+        let package_name = package_name.to_string();
+        self.guarded(|device| {
+            device
+                .runner
+                .run(
+                    vec![
+                        "shell".to_string(),
+                        "am".to_string(),
+                        "force-stop".to_string(),
+                        package_name,
+                    ],
+                    true,
+                    ProcessOperation::ForceStop,
+                )
+                .map(|_| ())
+        })
     }
 
-    fn resolve_launcher_activity(&mut self, package_name: &str) -> Result<Option<String>, String> {
+    fn resolve_launcher_activity_unchecked(
+        &mut self,
+        package_name: &str,
+    ) -> Result<Option<String>, AdbCommandError> {
         for command in [
             vec![
                 "shell".to_string(),
@@ -615,7 +714,7 @@ impl<E: AdbCommandExecutor> RealAdbDevice<E> {
             ],
         ] {
             let result = self.runner.run(command, false, ProcessOperation::Launch);
-            let result = self.map_public(result)?;
+            let result = result?;
             if result.returncode != 0 {
                 continue;
             }
@@ -626,32 +725,32 @@ impl<E: AdbCommandExecutor> RealAdbDevice<E> {
         Ok(None)
     }
 
-    fn run_shell(
+    fn run_shell_unchecked(
         &mut self,
         args: Vec<String>,
         check: bool,
         operation: ProcessOperation,
-    ) -> Result<AdbCommandResult, String> {
+    ) -> Result<AdbCommandResult, AdbCommandError> {
         let privileged = args
             .last()
             .map(|path| is_app_private_path(path))
             .unwrap_or(false);
-        self.run_shell_with_privilege(args, check, privileged, operation)
+        self.run_shell_with_privilege_unchecked(args, check, privileged, operation)
     }
 
-    fn run_shell_with_privilege(
+    fn run_shell_with_privilege_unchecked(
         &mut self,
         args: Vec<String>,
         check: bool,
         privileged: bool,
         operation: ProcessOperation,
-    ) -> Result<AdbCommandResult, String> {
+    ) -> Result<AdbCommandResult, AdbCommandError> {
         let result = self.runner.run(
             vec!["shell".to_string(), build_shell_command(&args, privileged)],
             check,
             operation,
         );
-        self.map_public(result)
+        result
     }
 }
 

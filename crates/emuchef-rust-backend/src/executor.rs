@@ -6,6 +6,7 @@
 //! constrained to explicit sandbox roots.
 
 pub mod adb;
+pub(crate) mod identity;
 
 use std::collections::{HashMap, HashSet};
 use std::fs::{self, File};
@@ -22,6 +23,7 @@ use crate::model::OrderedMap;
 use crate::owned_process::ProcessCleanup;
 use crate::planner::{
     ExecutionParamValue, ExecutionPlan, ExecutionStep, ExecutionStepCondition, RuntimeValue,
+    TargetDeviceBinding,
 };
 use crate::remote_release_resolver::{resolve_github_latest, resolve_remote_latest};
 use crate::validation::normalize_expected_sha256;
@@ -66,6 +68,8 @@ pub(crate) enum StepFailureKind {
     AdbServerUnavailable,
     TransportReset,
     TransportFailure,
+    DeviceIdentityChanged(identity::IdentityCheckPhase),
+    DeviceIdentityUnverified(identity::IdentityCheckPhase),
     RootDenied,
     RootUnavailable,
     OperationFailed,
@@ -83,6 +87,8 @@ impl StepFailureKind {
                 | Self::AdbServerUnavailable
                 | Self::TransportReset
                 | Self::TransportFailure
+                | Self::DeviceIdentityChanged(_)
+                | Self::DeviceIdentityUnverified(_)
         )
     }
 }
@@ -100,6 +106,8 @@ pub(crate) enum DeviceOperationKind {
     AdbServerUnavailable,
     TransportReset,
     TransportFailure,
+    DeviceIdentityChanged(identity::IdentityCheckPhase),
+    DeviceIdentityUnverified(identity::IdentityCheckPhase),
     RootDenied,
     RootUnavailable,
     Other,
@@ -116,6 +124,8 @@ impl DeviceOperationKind {
                 | Self::AdbServerUnavailable
                 | Self::TransportReset
                 | Self::TransportFailure
+                | Self::DeviceIdentityChanged(_)
+                | Self::DeviceIdentityUnverified(_)
         )
     }
 }
@@ -159,6 +169,19 @@ impl DeviceOperationError {
                 "The device connection was lost during execution."
             }
             _ => "The device connection was lost during execution.",
+        };
+        Self {
+            kind,
+            message: message.to_string(),
+            cleanup: None,
+        }
+    }
+
+    pub(crate) fn identity(kind: DeviceOperationKind, phase: identity::IdentityCheckPhase) -> Self {
+        let message = if phase == identity::IdentityCheckPhase::PostOperation {
+            identity::POST_OPERATION_IDENTITY_FAILURE_MARKER
+        } else {
+            "The reviewed device identity could not be confirmed."
         };
         Self {
             kind,
@@ -216,7 +239,14 @@ pub struct ExecutionProgressEvent {
     pub message: Option<String>,
 }
 
+/// Device boundary used by the executor. The operation surface intentionally
+/// remains the current thirteen executor-visible methods; identity setup and
+/// fake-filesystem selection are lifecycle/configuration hooks, not operations.
 pub trait ExecutorDevice: std::fmt::Debug {
+    /// Configure private real-device identity evidence from the reviewed plan.
+    /// Dry-run devices intentionally keep the default no-op implementation.
+    fn configure_identity_guard(&mut self, _target: Option<&TargetDeviceBinding>) {}
+
     fn revalidate_root(&mut self) -> Result<(), DeviceOperationError> {
         Ok(())
     }
@@ -323,6 +353,9 @@ impl<D: ExecutorDevice> ExecutorRunner<D> {
         let mut aborted = false;
         self.root_preflight = RootPreflightState::NotRun;
         self.root_preflight_failure = None;
+        self.adapters
+            .device
+            .configure_identity_guard(plan.target_device.as_ref());
 
         for step in &plan.steps {
             if aborted {
@@ -2211,6 +2244,13 @@ pub(crate) fn map_adb_error(error: adb::AdbCommandError) -> DeviceOperationError
         adb::AdbCommandError::TransportFailure => {
             DeviceOperationError::transport(DeviceOperationKind::TransportFailure)
         }
+        adb::AdbCommandError::DeviceIdentityChanged { phase } => {
+            DeviceOperationError::identity(DeviceOperationKind::DeviceIdentityChanged(phase), phase)
+        }
+        adb::AdbCommandError::DeviceIdentityUnverified { phase } => DeviceOperationError::identity(
+            DeviceOperationKind::DeviceIdentityUnverified(phase),
+            phase,
+        ),
         adb::AdbCommandError::ProcessFailed { cleanup, .. } => DeviceOperationError {
             kind: DeviceOperationKind::ProcessFailed,
             message: "The device process failed before a trustworthy result was available."
@@ -2246,6 +2286,10 @@ fn real_adb_error<E: adb::AdbCommandExecutor>(
 }
 
 impl<E: adb::AdbCommandExecutor> ExecutorDevice for adb::RealAdbDevice<E> {
+    fn configure_identity_guard(&mut self, target: Option<&TargetDeviceBinding>) {
+        adb::RealAdbDevice::configure_identity_guard(self, target);
+    }
+
     fn revalidate_root(&mut self) -> Result<(), DeviceOperationError> {
         adb::RealAdbDevice::check_root(self).map_err(|message| real_adb_error(self, message))
     }
@@ -2758,6 +2802,12 @@ impl From<DeviceOperationError> for StepFailure {
             }
             DeviceOperationKind::TransportReset => Some(StepFailureKind::TransportReset),
             DeviceOperationKind::TransportFailure => Some(StepFailureKind::TransportFailure),
+            DeviceOperationKind::DeviceIdentityChanged(phase) => {
+                Some(StepFailureKind::DeviceIdentityChanged(phase))
+            }
+            DeviceOperationKind::DeviceIdentityUnverified(phase) => {
+                Some(StepFailureKind::DeviceIdentityUnverified(phase))
+            }
             DeviceOperationKind::RootDenied => Some(StepFailureKind::RootDenied),
             DeviceOperationKind::RootUnavailable => Some(StepFailureKind::RootUnavailable),
             DeviceOperationKind::Other => Some(StepFailureKind::OperationFailed),

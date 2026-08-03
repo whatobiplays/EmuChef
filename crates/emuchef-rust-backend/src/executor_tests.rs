@@ -9,17 +9,18 @@ use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
 
 use crate::artifact_resolver::artifact_local_filename;
+use crate::executor::identity::IdentityCheckPhase;
 use crate::executor::{
     adb::{AdbCommandError, FakeAdbCommandExecutor, RealAdbDevice},
     map_adb_error, DeviceOperationKind, DryRunExecutorAdapters, ExecutorAdapters, ExecutorRunner,
     StepFailureKind,
 };
 use crate::model::OrderedMap;
-use crate::owned_process::{ProcessCleanup, ProcessFailureKind};
+use crate::owned_process::{ProcessCleanup, ProcessFailureKind, ProcessOperation};
 use crate::planner::{
     plan_execution, DeviceContext, ExecutionArtifact, ExecutionParamValue, ExecutionPlan,
     ExecutionPlanSource, ExecutionStep, ExecutionStepCondition, ExecutionStepConstraints,
-    PlannerInput, RuntimeCapabilities,
+    PlannerInput, RuntimeCapabilities, TargetDeviceBinding,
 };
 
 fn golden_path(name: &str) -> PathBuf {
@@ -86,6 +87,16 @@ fn plan_with_artifacts(
         schema_version: 1,
         kind: "execution_plan",
     }
+}
+
+fn plan_for_reviewed_target(mut execution_plan: ExecutionPlan) -> ExecutionPlan {
+    execution_plan.target_device = Some(TargetDeviceBinding {
+        serial: "serial-a".to_string(),
+        manufacturer: Some("Example".to_string()),
+        model: Some("Example".to_string()),
+        android_api_level: Some(33),
+    });
+    execution_plan
 }
 
 fn constraints() -> ExecutionStepConstraints {
@@ -443,6 +454,24 @@ fn sha256(bytes: &[u8]) -> String {
         .iter()
         .map(|byte| format!("{byte:02X}"))
         .collect()
+}
+
+fn push_identity_sample(executor: &mut FakeAdbCommandExecutor, android_id: &str) {
+    executor.push_completed(
+        0,
+        "[ro.product.manufacturer]: [Example]\n\
+[ro.product.brand]: [Example]\n\
+[ro.product.model]: [Example]\n\
+[ro.product.name]: [example]\n\
+[ro.product.device]: [example]\n\
+[ro.product.board]: [board]\n\
+[ro.hardware]: [hardware]\n\
+[ro.build.version.sdk]: [33]\n\
+[ro.product.cpu.abilist]: [arm64-v8a]\n\
+[ro.build.fingerprint]: [example/device/example:13/TQ1A:user/release-keys]\n",
+        "",
+    );
+    executor.push_completed(0, &format!("{android_id}\n"), "");
 }
 
 fn launch_app_step(id: &str, package_name: &str, activity: Option<&str>) -> ExecutionStep {
@@ -924,6 +953,14 @@ fn device_fail_stop_predicate_excludes_ordinary_and_root_failures() {
     assert!(StepFailureKind::OperationTimedOut.requires_device_fail_stop());
     assert!(StepFailureKind::DeviceOffline.requires_device_fail_stop());
     assert!(StepFailureKind::TransportFailure.requires_device_fail_stop());
+    assert!(
+        StepFailureKind::DeviceIdentityChanged(IdentityCheckPhase::PostOperation)
+            .requires_device_fail_stop()
+    );
+    assert!(
+        StepFailureKind::DeviceIdentityUnverified(IdentityCheckPhase::PreOperation)
+            .requires_device_fail_stop()
+    );
     assert!(!StepFailureKind::OperationCommandFailed.requires_device_fail_stop());
     assert!(!StepFailureKind::RootDenied.requires_device_fail_stop());
     assert!(!StepFailureKind::RootUnavailable.requires_device_fail_stop());
@@ -959,6 +996,18 @@ fn every_private_adb_transport_kind_maps_through_device_operation_kind() {
             AdbCommandError::TransportFailure,
             DeviceOperationKind::TransportFailure,
         ),
+        (
+            AdbCommandError::DeviceIdentityChanged {
+                phase: IdentityCheckPhase::PostOperation,
+            },
+            DeviceOperationKind::DeviceIdentityChanged(IdentityCheckPhase::PostOperation),
+        ),
+        (
+            AdbCommandError::DeviceIdentityUnverified {
+                phase: IdentityCheckPhase::PreOperation,
+            },
+            DeviceOperationKind::DeviceIdentityUnverified(IdentityCheckPhase::PreOperation),
+        ),
     ];
     for (error, expected) in cases {
         assert_eq!(map_adb_error(error).kind, expected);
@@ -982,6 +1031,89 @@ fn every_private_adb_transport_kind_maps_through_device_operation_kind() {
     assert_eq!(
         map_adb_error(AdbCommandError::CommandFailed).kind,
         DeviceOperationKind::CommandFailed
+    );
+}
+
+#[test]
+fn post_operation_identity_failure_fail_stops_and_preserves_partial_permission_evidence() {
+    let mut first_params = OrderedMap::new();
+    first_params.insert(
+        "runtime".to_string(),
+        literal(json!([{
+            "package_name": "com.example.first",
+            "name": "android.permission.CAMERA",
+            "required": false
+        }])),
+    );
+    let first = ExecutionStep {
+        id: "example.recipe/first".to_string(),
+        recipe_ref: "example.recipe".to_string(),
+        type_name: "grant_permissions".to_string(),
+        name: "First".to_string(),
+        note: "First".to_string(),
+        dependencies: Vec::new(),
+        constraints: constraints(),
+        params: first_params,
+        skip_if: Vec::new(),
+        verify: Vec::new(),
+    };
+    let mut second_params = OrderedMap::new();
+    second_params.insert(
+        "runtime".to_string(),
+        literal(json!([{
+            "package_name": "com.example.second",
+            "name": "android.permission.CAMERA",
+            "required": false
+        }])),
+    );
+    let second = ExecutionStep {
+        id: "example.recipe/second".to_string(),
+        recipe_ref: "example.recipe".to_string(),
+        type_name: "grant_permissions".to_string(),
+        name: "Second".to_string(),
+        note: "Second".to_string(),
+        dependencies: Vec::new(),
+        constraints: constraints(),
+        params: second_params,
+        skip_if: Vec::new(),
+        verify: Vec::new(),
+    };
+    let execution_plan = plan_for_reviewed_target(plan(vec![first, second]));
+
+    let mut executor = FakeAdbCommandExecutor::default();
+    push_identity_sample(&mut executor, "a1b2");
+    push_identity_sample(&mut executor, "a1b2");
+    executor.push_completed(0, "", "");
+    push_identity_sample(&mut executor, "c3d4");
+    push_identity_sample(&mut executor, "c3d4");
+    let device = RealAdbDevice::with_executor("adb", Some("serial-a"), executor);
+
+    let (actual, runner) = run_real_adb_value(&execution_plan, device);
+
+    assert_eq!(actual["success"], false);
+    assert_eq!(actual["steps"].as_array().unwrap().len(), 1);
+    assert_eq!(actual["steps"][0]["status"], "failed");
+    assert_eq!(
+        actual["steps"][0]["message"],
+        "The device identity could not be verified after the operation may have run."
+    );
+    assert_eq!(
+        actual["steps"][0]["outputs"]["permission_results"]["value"]["actions"][0]["status"],
+        "failed"
+    );
+    assert_eq!(
+        runner.adapters().device().command_executor().operations(),
+        &[
+            ProcessOperation::Probe,
+            ProcessOperation::Probe,
+            ProcessOperation::Probe,
+            ProcessOperation::Probe,
+            ProcessOperation::GenericFallback,
+            ProcessOperation::Probe,
+            ProcessOperation::Probe,
+            ProcessOperation::Probe,
+            ProcessOperation::Probe,
+        ]
     );
 }
 

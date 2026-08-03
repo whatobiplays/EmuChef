@@ -714,7 +714,16 @@ fn execute_attempt(
             #[cfg(test)]
             if plan.id == "__test_execution_transport_failure__" {
                 let mut command_executor = FakeAdbCommandExecutor::default();
+                for _ in 0..2 {
+                    push_test_identity_sample(&mut command_executor, "a1b2");
+                }
                 command_executor.push_completed(0, "", "");
+                for _ in 0..2 {
+                    push_test_identity_sample(&mut command_executor, "a1b2");
+                }
+                for _ in 0..2 {
+                    push_test_identity_sample(&mut command_executor, "a1b2");
+                }
                 command_executor.push_completed(1, "", "error: device offline");
                 return run_with_device(
                     state,
@@ -751,6 +760,25 @@ fn execute_attempt(
             )
         }
     }
+}
+
+#[cfg(test)]
+fn push_test_identity_sample(executor: &mut FakeAdbCommandExecutor, android_id: &str) {
+    executor.push_completed(
+        0,
+        "[ro.product.manufacturer]: [Example]\n\
+[ro.product.brand]: [Example]\n\
+[ro.product.model]: [Example]\n\
+[ro.product.name]: [example]\n\
+[ro.product.device]: [example]\n\
+[ro.product.board]: [board]\n\
+[ro.hardware]: [hardware]\n\
+[ro.build.version.sdk]: [35]\n\
+[ro.product.cpu.abilist]: [arm64-v8a]\n\
+[ro.build.fingerprint]: [example/example/example:13/TQ1A:user/release-keys]\n",
+        "",
+    );
+    executor.push_completed(0, &format!("{android_id}\n"), "");
 }
 
 fn run_with_device<D: ExecutorDevice>(
@@ -969,6 +997,12 @@ fn issue_code(
         Some(StepFailureKind::DeviceUnauthorized) => return "device_unauthorized".to_string(),
         Some(StepFailureKind::DeviceDisconnected) => return "device_disconnected".to_string(),
         Some(StepFailureKind::AdbServerUnavailable) => return "adb_server_unavailable".to_string(),
+        Some(StepFailureKind::DeviceIdentityChanged(_)) => {
+            return "device_identity_changed".to_string()
+        }
+        Some(StepFailureKind::DeviceIdentityUnverified(_)) => {
+            return "device_identity_unverified".to_string()
+        }
         Some(StepFailureKind::TransportReset | StepFailureKind::TransportFailure) => {
             return "device_transport_lost".to_string()
         }
@@ -1290,6 +1324,30 @@ mod tests {
                 expected
             );
         }
+    }
+
+    #[test]
+    fn identity_failures_keep_changed_and_unverified_issue_codes() {
+        assert_eq!(
+            issue_code(
+                StepRunStatus::Failed,
+                Some("The device identity could not be verified after the operation may have run."),
+                Some(StepFailureKind::DeviceIdentityChanged(
+                    crate::executor::identity::IdentityCheckPhase::PostOperation,
+                )),
+            ),
+            "device_identity_changed"
+        );
+        assert_eq!(
+            issue_code(
+                StepRunStatus::Failed,
+                Some("The reviewed device identity could not be confirmed."),
+                Some(StepFailureKind::DeviceIdentityUnverified(
+                    crate::executor::identity::IdentityCheckPhase::PreOperation,
+                )),
+            ),
+            "device_identity_unverified"
+        );
     }
 
     #[test]

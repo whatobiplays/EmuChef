@@ -7,6 +7,7 @@
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
+use std::collections::HashMap;
 use std::sync::Mutex;
 use tauri::State;
 
@@ -149,7 +150,7 @@ pub enum RootQualificationFailureReason {
     UnexpectedResponse,
 }
 
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, Eq, Hash, PartialEq)]
 pub(crate) struct RootQualificationKey {
     pub(crate) device_handle: String,
     pub(crate) runtime_generation: u64,
@@ -196,9 +197,11 @@ pub(crate) struct RootQualificationInvalidation {
     pub(crate) cancelled_in_flight: bool,
 }
 
+/// Retains generation-bound root results independently for each device context
+/// while serializing the native check that can be in flight at one time.
 #[derive(Debug, Default)]
 pub(crate) struct RootQualificationStore {
-    record: Option<(RootQualificationKey, RootQualificationState)>,
+    records: HashMap<RootQualificationKey, RootQualificationState>,
     in_flight: Option<RootQualificationAttempt>,
     next_id: u64,
 }
@@ -229,7 +232,7 @@ impl RootQualificationStore {
             return false;
         }
         self.in_flight = None;
-        self.record = Some((attempt.key, result));
+        self.records.insert(attempt.key, result);
         true
     }
 
@@ -245,16 +248,43 @@ impl RootQualificationStore {
     }
 
     pub(crate) fn get(&self, key: &RootQualificationKey) -> Option<RootQualificationState> {
-        self.record
-            .as_ref()
-            .filter(|(record_key, _)| record_key == key)
-            .map(|(_, result)| result.clone())
+        self.records.get(key).cloned()
     }
 
     pub(crate) fn invalidate(&mut self) {
-        self.record = None;
+        self.records.clear();
         self.in_flight = None;
         self.next_id = self.next_id.saturating_add(1).max(1);
+    }
+
+    /// Invalidate completed and in-flight root evidence for one device handle.
+    /// Bumping the attempt generation fences any late completion callback.
+    pub(crate) fn invalidate_for_device(
+        &mut self,
+        device_handle: &str,
+    ) -> RootQualificationInvalidation {
+        let mut invalidation = RootQualificationInvalidation::default();
+        let removed_record = self
+            .records
+            .keys()
+            .any(|key| key.device_handle == device_handle);
+        if removed_record {
+            self.records
+                .retain(|key, _| key.device_handle != device_handle);
+            invalidation.device_handle = Some(device_handle.to_string());
+        }
+        if self
+            .in_flight
+            .as_ref()
+            .is_some_and(|attempt| attempt.key.device_handle == device_handle)
+        {
+            self.in_flight = None;
+            invalidation.cancelled_in_flight = true;
+        }
+        if invalidation.device_handle.is_some() || invalidation.cancelled_in_flight {
+            self.next_id = self.next_id.saturating_add(1).max(1);
+        }
+        invalidation
     }
 
     pub(crate) fn invalidate_if_not_key(
@@ -262,19 +292,20 @@ impl RootQualificationStore {
         key: Option<&RootQualificationKey>,
     ) -> RootQualificationInvalidation {
         let mut invalidation = RootQualificationInvalidation::default();
-        let record_matches = self
-            .record
-            .as_ref()
-            .is_some_and(|(record_key, _)| key.is_some_and(|expected| record_key == expected));
+        let removed_device = self
+            .records
+            .keys()
+            .find(|record_key| key.is_none_or(|expected| *record_key != expected))
+            .map(|record_key| record_key.device_handle.clone());
+        if removed_device.is_some() {
+            self.records
+                .retain(|record_key, _| key.is_some_and(|expected| record_key == expected));
+            invalidation.device_handle = removed_device;
+        }
         let attempt_matches = self
             .in_flight
             .as_ref()
             .is_some_and(|attempt| key.is_some_and(|expected| &attempt.key == expected));
-        if !record_matches {
-            if let Some((record_key, _)) = self.record.take() {
-                invalidation.device_handle = Some(record_key.device_handle);
-            }
-        }
         if !attempt_matches && self.in_flight.take().is_some() {
             invalidation.cancelled_in_flight = true;
         }
@@ -1537,6 +1568,39 @@ mod tests {
 
         store.invalidate();
         assert_eq!(store.get(&key), None);
+    }
+
+    #[test]
+    fn identity_invalidation_fences_late_root_completion_for_only_the_matching_handle() {
+        let mut store = RootQualificationStore::default();
+        let matching_key = RootQualificationKey::new("opaque-device-a", 4, 9);
+        let completed = store.begin(matching_key.clone()).unwrap();
+        assert!(store.complete(completed, RootQualificationState::Granted));
+        let late_attempt = store.begin(matching_key.clone()).unwrap();
+
+        let invalidation = store.invalidate_for_device("opaque-device-a");
+
+        assert_eq!(
+            invalidation.device_handle.as_deref(),
+            Some("opaque-device-a")
+        );
+        assert!(invalidation.cancelled_in_flight);
+        assert_eq!(store.get(&matching_key), None);
+        assert!(!store.complete(late_attempt, RootQualificationState::Denied));
+
+        let unrelated_key = RootQualificationKey::new("opaque-device-b", 4, 9);
+        let unrelated = store.begin(unrelated_key.clone()).unwrap();
+        assert!(store.complete(unrelated, RootQualificationState::Granted));
+        let unrelated_attempt = store.begin(unrelated_key.clone()).unwrap();
+        assert_eq!(
+            store.invalidate_for_device("opaque-device-a"),
+            Default::default()
+        );
+        assert!(store.complete(unrelated_attempt, RootQualificationState::Granted));
+        assert_eq!(
+            store.get(&unrelated_key),
+            Some(RootQualificationState::Granted)
+        );
     }
 
     #[test]

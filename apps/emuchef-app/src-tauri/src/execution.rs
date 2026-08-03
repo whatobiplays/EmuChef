@@ -94,7 +94,18 @@ impl ExecutionHandleStore {
                     &["succeeded", "succeeded_with_warnings", "failed", "cancelled"],
                     "failed",
                 ),
-                "completion": completion_summary(report, mapping.kind == ExecutionKind::Real),
+                "completion": if mapping.kind == ExecutionKind::Real {
+                    let (identity_failure_count, post_identity_marker) =
+                        identity_projection_facts(report);
+                    completion_summary_with_identity_state(
+                        report,
+                        true,
+                        identity_failure_count,
+                        post_identity_marker,
+                    )
+                } else {
+                    completion_summary(report, false)
+                },
             }))
         });
         json!({
@@ -172,7 +183,7 @@ impl ExecutionHandleStore {
             })
     }
 
-    fn mark_terminal(&mut self, kind: ExecutionKind, public_handle: &str) {
+    fn mark_terminal(&mut self, kind: ExecutionKind, public_handle: &str) -> bool {
         if self
             .active
             .as_ref()
@@ -184,7 +195,9 @@ impl ExecutionHandleStore {
                 self.successful_launches.remove(&previous_handle);
             }
             self.latest_terminal = self.active.take();
+            return true;
         }
+        false
     }
 
     fn launch_action(&mut self, mapping: &ExecutionMapping, report: &Value) -> Option<Value> {
@@ -1015,23 +1028,48 @@ pub fn get_real_execution(
     execution_handle: String,
     state: State<'_, AppState>,
 ) -> Result<Value, String> {
-    let mapping = state
-        .executions
+    get_real_execution_inner_with_runtime(
+        &execution_handle,
+        &state.executions,
+        &state.handles,
+        &state.root_qualification,
+        &state.sidecar,
+        |error| recover_from_real_execution_loss(&state, &execution_handle, error),
+    )
+}
+
+/// Retrieve one real execution report and retain terminal identity failures
+/// exactly once. The runtime requester is injectable so deterministic tests
+/// exercise the same mapping, terminal transition, and authority invalidation
+/// path as the Tauri command without starting a native process.
+fn get_real_execution_inner_with_runtime<R, F>(
+    execution_handle: &str,
+    executions: &Mutex<ExecutionHandleStore>,
+    handles: &Mutex<SessionHandles>,
+    root_qualification: &Mutex<RootQualificationStore>,
+    runtime: &R,
+    recover_session_loss: F,
+) -> Result<Value, String>
+where
+    R: RuntimeRequester,
+    F: FnOnce(&str) -> Result<(), String>,
+{
+    let mapping = executions
         .lock()
         .map_err(|_| real_execution_state_error())?
         .mapping(
             ExecutionKind::Real,
-            &execution_handle,
+            execution_handle,
             REAL_EXECUTION_UNAVAILABLE,
         )?;
     let response = match runtime_request(
-        &state.sidecar,
+        runtime,
         "getExecution",
         json!({ "executionId": mapping.sidecar_id }),
     ) {
         Ok(response) => response,
         Err(error) if execution_session_loss(&error).is_some() => {
-            recover_from_real_execution_loss(&state, &execution_handle, &error)?;
+            recover_session_loss(&error)?;
             return Err(safe_error(
                 "execution_unavailable",
                 REAL_EXECUTION_UNAVAILABLE,
@@ -1052,11 +1090,16 @@ pub fn get_real_execution(
     })?;
     let mut public = project_real_snapshot(&mapping, report);
     if is_terminal_status(report.get("status").and_then(Value::as_str)) {
-        let mut executions = state
-            .executions
+        let newly_retained = executions
+            .lock()
+            .map_err(|_| real_execution_state_error())?
+            .mark_terminal(ExecutionKind::Real, execution_handle);
+        if newly_retained && report_has_identity_failure(report) {
+            invalidate_identity_terminal_authority(handles, root_qualification, &mapping)?;
+        }
+        let mut executions = executions
             .lock()
             .map_err(|_| real_execution_state_error())?;
-        executions.mark_terminal(ExecutionKind::Real, &execution_handle);
         public["launchAction"] = executions
             .launch_action(&mapping, report)
             .unwrap_or(Value::Null);
@@ -1761,6 +1804,7 @@ fn canonicalize(value: Value) -> Value {
 }
 
 fn project_real_snapshot(mapping: &ExecutionMapping, report: &Value) -> Value {
+    let (identity_failure_count, post_identity_marker) = identity_projection_facts(report);
     let mut public = project_snapshot(mapping, report);
     let exact_serial = mapping
         .review
@@ -1838,9 +1882,41 @@ fn project_real_snapshot(mapping: &ExecutionMapping, report: &Value) -> Value {
         }
     }
     public["target"] = project_real_target(mapping, exact_serial);
-    public["completion"] = completion_summary(&public, true);
+    public["completion"] = completion_summary_with_identity_state(
+        &public,
+        true,
+        identity_failure_count,
+        post_identity_marker,
+    );
     sanitize_real_projection(&mut public, exact_serial);
     public
+}
+
+fn identity_projection_facts(report: &Value) -> (u64, bool) {
+    let mut failures = 0;
+    let mut post_operation_marker = false;
+    for field in ["errors", "warnings"] {
+        for issue in report
+            .get(field)
+            .and_then(Value::as_array)
+            .into_iter()
+            .flatten()
+        {
+            if !matches!(
+                issue.get("code").and_then(Value::as_str),
+                Some("device_identity_changed" | "device_identity_unverified")
+            ) {
+                continue;
+            }
+            failures += 1;
+            if issue.get("message").and_then(Value::as_str)
+                == Some(POST_OPERATION_IDENTITY_FAILURE_MARKER)
+            {
+                post_operation_marker = true;
+            }
+        }
+    }
+    (failures, post_operation_marker)
 }
 
 fn eligible_launch_label(mapping: &ExecutionMapping, report: &Value) -> Option<String> {
@@ -2003,6 +2079,14 @@ fn project_real_issue(mapping: &ExecutionMapping, issue: &Value) -> Value {
             internal,
             "The local ADB/Platform-Tools service was unavailable.",
         ),
+        "device_identity_changed" => (
+            internal,
+            "The reviewed device identity changed during execution.",
+        ),
+        "device_identity_unverified" => (
+            internal,
+            "The reviewed device identity could not be verified safely.",
+        ),
         "device_transport_lost" => (internal, "The device connection was lost during execution."),
         "step_execution_failed" => (internal, "A device operation failed."),
         "optional_permission_failed" => (internal, "An optional permission action failed."),
@@ -2092,6 +2176,11 @@ fn remediation_for_code(code: &str) -> Value {
             "reconnect_device",
             "Reconnect and requalify",
             "Reconnect or authorize the intended reviewed device, then complete fresh qualification and generate and review a fresh plan before another real run. Reconnecting does not resume the old execution.",
+        ),
+        "device_identity_changed" | "device_identity_unverified" => (
+            "reconnect_device",
+            "Reconnect and requalify",
+            "Reconnect the intended device, complete a fresh identity probe and qualification, then generate and review a fresh plan before another real run. The old execution cannot be resumed.",
         ),
         "adb_server_unavailable" => (
             "repair_platform_tools",
@@ -2385,6 +2474,15 @@ fn project_issues(
 }
 
 fn completion_summary(snapshot: &Value, real: bool) -> Value {
+    completion_summary_with_identity_state(snapshot, real, 0, false)
+}
+
+fn completion_summary_with_identity_state(
+    snapshot: &Value,
+    real: bool,
+    identity_failure_count: u64,
+    post_identity_marker: bool,
+) -> Value {
     let status = snapshot
         .get("status")
         .and_then(Value::as_str)
@@ -2445,7 +2543,8 @@ fn completion_summary(snapshot: &Value, real: bool) -> Value {
         "partialChangesPossible": real
             && matches!(status, "failed" | "cancelled")
             && (counts.get("completed").copied().unwrap_or(0) > 0
-                || counts.get("failed").copied().unwrap_or(0) > 0),
+                || counts.get("failed").copied().unwrap_or(0) > identity_failure_count
+                || post_identity_marker),
     })
 }
 
@@ -2574,6 +2673,47 @@ fn is_terminal_status(status: Option<&str>) -> bool {
         status,
         Some("succeeded" | "succeeded_with_warnings" | "failed" | "cancelled")
     )
+}
+
+const POST_OPERATION_IDENTITY_FAILURE_MARKER: &str =
+    "The device identity could not be verified after the operation may have run.";
+
+fn report_has_identity_failure(report: &Value) -> bool {
+    ["errors", "warnings"].into_iter().any(|field| {
+        report
+            .get(field)
+            .and_then(Value::as_array)
+            .is_some_and(|issues| {
+                issues.iter().any(|issue| {
+                    matches!(
+                        issue.get("code").and_then(Value::as_str),
+                        Some("device_identity_changed" | "device_identity_unverified")
+                    )
+                })
+            })
+    })
+}
+
+fn invalidate_identity_terminal_authority(
+    handles: &Mutex<SessionHandles>,
+    root_qualification: &Mutex<RootQualificationStore>,
+    mapping: &ExecutionMapping,
+) -> Result<(), String> {
+    let device_handle = mapping.review.device_handle.clone();
+    handles
+        .lock()
+        .map_err(|_| session_error())?
+        .invalidate_identity_authority(&device_handle);
+    root_qualification
+        .lock()
+        .map_err(|_| {
+            safe_error(
+                "qualification_state_unavailable",
+                "Device qualification state is unavailable.",
+            )
+        })?
+        .invalidate_for_device(&device_handle);
+    Ok(())
 }
 
 fn sidecar_error_code(error: &str) -> Option<String> {
@@ -3067,6 +3207,193 @@ mod tests {
     }
 
     #[test]
+    fn identity_issue_codes_project_to_distinct_authored_guidance_without_backend_details() {
+        let mapping = ExecutionMapping {
+            kind: ExecutionKind::Real,
+            public_handle: "execution_public".into(),
+            sidecar_id: "execution-private".into(),
+            review_handle: "review_public".into(),
+            review: launch_review(),
+        };
+        let changed = project_real_issue(
+            &mapping,
+            &json!({
+                "code": "device_identity_changed",
+                "recipeId": "recipe.one",
+                "stepId": "recipe.one/launch",
+                "message": "private serial, android id, build fingerprint, and command"
+            }),
+        );
+        let unverified = project_real_issue(
+            &mapping,
+            &json!({
+                "code": "device_identity_unverified",
+                "recipeId": "recipe.one",
+                "stepId": "recipe.one/launch",
+                "message": "private serial, android id, build fingerprint, and command"
+            }),
+        );
+        assert_ne!(changed["message"], unverified["message"]);
+        assert!(changed["message"]
+            .as_str()
+            .unwrap()
+            .contains("identity changed"));
+        assert!(unverified["message"]
+            .as_str()
+            .unwrap()
+            .contains("could not be verified"));
+        for projected in [changed, unverified] {
+            assert_eq!(projected["remediation"]["kind"], "reconnect_device");
+            let text = projected.to_string();
+            assert!(!text.contains("private serial"));
+            assert!(!text.contains("android id"));
+            assert!(!text.contains("build fingerprint"));
+            assert!(!text.contains("command"));
+        }
+    }
+
+    #[test]
+    fn only_the_exact_post_identity_marker_allows_real_partial_warning_without_prior_evidence() {
+        let mapping = ExecutionMapping {
+            kind: ExecutionKind::Real,
+            public_handle: "execution_public".into(),
+            sidecar_id: "execution-private".into(),
+            review_handle: "review_public".into(),
+            review: launch_review(),
+        };
+        let report = |message: &str| {
+            json!({
+                "status": "failed",
+                "errors": [{
+                    "code": "device_identity_changed",
+                    "message": message
+                }],
+                "recipes": [{
+                    "recipeId": "recipe.one",
+                    "name": "Recipe One",
+                    "status": "failed",
+                    "steps": [{ "stepId": "recipe.one/launch", "status": "failed" }]
+                }]
+            })
+        };
+        let marked =
+            project_real_snapshot(&mapping, &report(POST_OPERATION_IDENTITY_FAILURE_MARKER));
+        let arbitrary = project_real_snapshot(
+            &mapping,
+            &report("identity changed; private serial and command output"),
+        );
+        assert_eq!(marked["completion"]["partialChangesPossible"], true);
+        assert_eq!(arbitrary["completion"]["partialChangesPossible"], false);
+        assert!(!marked
+            .to_string()
+            .contains(POST_OPERATION_IDENTITY_FAILURE_MARKER));
+        assert!(!arbitrary
+            .to_string()
+            .contains("private serial and command output"));
+    }
+
+    #[test]
+    fn real_identity_event_projection_is_authored_and_sanitized() {
+        let mapping = ExecutionMapping {
+            kind: ExecutionKind::Real,
+            public_handle: "execution_public".into(),
+            sidecar_id: "execution-private".into(),
+            review_handle: "review_public".into(),
+            review: launch_review(),
+        };
+        let projected = project_real_event_batch(
+            &mapping,
+            &json!({
+                "events": [{
+                    "sequence": 4,
+                    "timestamp": "2026-08-02T13:44:00Z",
+                    "executionId": "execution-private",
+                    "eventType": "step_failed",
+                    "stepId": "recipe.one/launch",
+                    "status": "failed",
+                    "issue": {
+                        "code": "device_identity_changed",
+                        "message": "serial=private; android_id=secret; build.fingerprint=raw; command=adb shell getprop"
+                    }
+                }],
+                "latestSequence": 4,
+                "terminal": true,
+            }),
+        );
+        assert_eq!(
+            projected["events"][0]["issue"]["message"],
+            "The reviewed device identity changed during execution."
+        );
+        let serialized = projected.to_string();
+        for forbidden in [
+            "execution-private",
+            "device_identity_changed",
+            "private",
+            "android_id",
+            "build.fingerprint",
+            "adb shell getprop",
+        ] {
+            assert!(!serialized.contains(forbidden), "leaked {forbidden}");
+        }
+    }
+
+    #[test]
+    fn real_identity_report_projection_is_sanitized_and_side_effect_free() {
+        let mapping = ExecutionMapping {
+            kind: ExecutionKind::Real,
+            public_handle: "execution_public".into(),
+            sidecar_id: "execution-private".into(),
+            review_handle: "review_public".into(),
+            review: launch_review(),
+        };
+        let report = json!({
+            "executionId": "execution-private",
+            "planId": "plan.one",
+            "status": "failed",
+            "recipes": [{
+                "recipeId": "recipe.one",
+                "name": "Recipe One",
+                "status": "failed",
+                "steps": [{
+                    "stepId": "recipe.one/launch",
+                    "name": "Launch app",
+                    "status": "failed"
+                }]
+            }],
+            "errors": [{
+                "code": "device_identity_unverified",
+                "recipeId": "recipe.one",
+                "stepId": "recipe.one/launch",
+                "message": "serial=private; android_id=secret; build.fingerprint=raw; path=/private"
+            }],
+            "warnings": []
+        });
+        let public = project_real_snapshot(&mapping, &report);
+        let document = execution_report_document(
+            &mapping,
+            &report,
+            &public,
+            json!({ "status": "ready", "protocolVersion": 1 }),
+        );
+        assert_eq!(
+            document["execution"]["errors"][0]["message"],
+            "Launch configured app in Recipe One did not complete. The reviewed device identity could not be verified safely."
+        );
+        let serialized = document.to_string();
+        for forbidden in [
+            "execution-private",
+            "device_identity_unverified",
+            "private",
+            "android_id",
+            "build.fingerprint",
+            "/private",
+        ] {
+            assert!(!serialized.contains(forbidden), "leaked {forbidden}");
+        }
+        assert_eq!(public["completion"]["partialChangesPossible"], false);
+    }
+
+    #[test]
     fn terminal_pending_work_remains_derivable_without_a_new_completion_field() {
         let snapshot = json!({
             "status": "cancelled",
@@ -3431,6 +3758,294 @@ mod tests {
             .filter(|(request_type, _)| request_type == "startExecution")
             .count();
         (result, starts)
+    }
+
+    #[test]
+    fn terminal_real_retrieval_invalidates_only_the_affected_identity_authority_once() {
+        let inventory = json!({
+            "devices": [
+                {
+                    "serial": "sensitive-serial",
+                    "state": "available",
+                    "model": "Pocket S",
+                    "transportId": "transport-affected"
+                },
+                {
+                    "serial": "unrelated-serial",
+                    "state": "available",
+                    "model": "Pocket Other",
+                    "transportId": "transport-unrelated"
+                }
+            ]
+        });
+        let handles = Mutex::new(SessionHandles::default());
+        let root = Mutex::new(RootQualificationStore::default());
+        let (affected_handle, unrelated_handle) = {
+            let mut handles = handles.lock().unwrap();
+            handles.update_devices(&inventory).unwrap();
+            let devices = handles.qualification_devices();
+            let affected = devices
+                .iter()
+                .find(|device| device.serial == "sensitive-serial")
+                .unwrap()
+                .handle
+                .clone();
+            let unrelated = devices
+                .iter()
+                .find(|device| device.serial == "unrelated-serial")
+                .unwrap()
+                .handle
+                .clone();
+            handles
+                .set_facts(&affected, target_facts())
+                .expect("affected facts should be retained");
+            handles
+                .set_facts(
+                    &unrelated,
+                    json!({
+                        "manufacturer": "Other",
+                        "model": "Pocket Other",
+                        "android_api_level": 33,
+                    }),
+                )
+                .expect("unrelated facts should be retained");
+            (affected, unrelated)
+        };
+        let affected_context = crate::device_qualification::QualificationContextKey::new(
+            &affected_handle,
+            1,
+            2,
+            3,
+            4,
+            "affected-capabilities",
+        );
+        let unrelated_context = crate::device_qualification::QualificationContextKey::new(
+            &unrelated_handle,
+            1,
+            2,
+            3,
+            4,
+            "unrelated-capabilities",
+        );
+        let (
+            affected_review_handle,
+            unrelated_review_handle,
+            affected_review,
+            affected_key,
+            unrelated_key,
+        ) = {
+            let mut handles = handles.lock().unwrap();
+            handles.set_qualification_context(affected_context.clone());
+            handles.set_qualification_context(unrelated_context.clone());
+
+            let mut affected_review = launch_review();
+            affected_review.device_handle = affected_handle.clone();
+            affected_review.qualification_context = Some(affected_context.clone());
+            let affected_review_handle = handles.insert_review(affected_review.clone());
+
+            let mut unrelated_review = review();
+            unrelated_review.device_handle = unrelated_handle.clone();
+            unrelated_review.qualification_context = Some(unrelated_context.clone());
+            let unrelated_review_handle = handles.insert_review(unrelated_review);
+
+            (
+                affected_review_handle,
+                unrelated_review_handle,
+                affected_review,
+                RootQualificationKey::from_context(&affected_context),
+                RootQualificationKey::from_context(&unrelated_context),
+            )
+        };
+        let late_attempt = {
+            let mut root = root.lock().unwrap();
+            let completed_affected = root.begin(affected_key.clone()).unwrap();
+            assert!(root.complete(completed_affected, RootQualificationState::Granted));
+            let completed_unrelated = root.begin(unrelated_key.clone()).unwrap();
+            assert!(root.complete(completed_unrelated, RootQualificationState::Granted));
+            assert_eq!(
+                root.get(&affected_key),
+                Some(RootQualificationState::Granted)
+            );
+            assert_eq!(
+                root.get(&unrelated_key),
+                Some(RootQualificationState::Granted)
+            );
+            root.begin(affected_key.clone()).unwrap()
+        };
+
+        let executions = Mutex::new(ExecutionHandleStore::default());
+        let execution_handle = {
+            let mut executions = executions.lock().unwrap();
+            executions.reserve_start(ExecutionKind::Real).unwrap();
+            executions
+                .bind_started(
+                    ExecutionKind::Real,
+                    "sidecar-terminal".to_string(),
+                    affected_review_handle.clone(),
+                    affected_review,
+                )
+                .public_handle
+                .clone()
+        };
+        let terminal_response = || {
+            Ok(json!({
+                "execution": {
+                    "executionId": "sidecar-terminal",
+                    "status": "failed",
+                    "errors": [{
+                        "code": "device_identity_changed",
+                        "message": POST_OPERATION_IDENTITY_FAILURE_MARKER
+                    }],
+                    "recipes": []
+                }
+            }))
+        };
+        let runtime = ScriptedRuntime {
+            requests: Mutex::new(Vec::new()),
+            responses: Mutex::new(vec![terminal_response(), terminal_response()]),
+        };
+        let generation_before = handles.lock().unwrap().device_generation();
+        let affected_epoch_before = handles
+            .lock()
+            .unwrap()
+            .session_epoch_for_test(&affected_handle)
+            .unwrap();
+
+        let first = get_real_execution_inner_with_runtime(
+            &execution_handle,
+            &executions,
+            &handles,
+            &root,
+            &runtime,
+            |_| Ok(()),
+        )
+        .expect("first terminal retrieval should succeed");
+        assert_eq!(first["status"], "failed");
+        assert_eq!(first["terminal"], true);
+        assert!(!first.to_string().contains("sensitive-serial"));
+
+        let generation_after_first = handles.lock().unwrap().device_generation();
+        assert!(generation_after_first > generation_before);
+        let mut handles_after_first = handles.lock().unwrap();
+        assert!(handles_after_first.device(&affected_handle).is_err());
+        assert!(handles_after_first.facts(&affected_handle).is_err());
+        assert!(handles_after_first
+            .qualification_context(&affected_handle)
+            .is_none());
+        assert!(handles_after_first
+            .review(&affected_review_handle)
+            .unwrap_err()
+            .contains("review_stale"));
+        assert!(handles_after_first.device(&unrelated_handle).is_ok());
+        assert!(handles_after_first.facts(&unrelated_handle).is_ok());
+        assert_eq!(
+            handles_after_first.qualification_context(&unrelated_handle),
+            Some(unrelated_context.clone())
+        );
+        assert!(handles_after_first.review(&unrelated_review_handle).is_ok());
+        drop(handles_after_first);
+        assert!(
+            handles
+                .lock()
+                .unwrap()
+                .session_epoch_for_test(&affected_handle)
+                .unwrap()
+                > affected_epoch_before
+        );
+        let affected_epoch_after_first = handles
+            .lock()
+            .unwrap()
+            .session_epoch_for_test(&affected_handle)
+            .unwrap();
+        let root_after_first = root.lock().unwrap();
+        assert_eq!(root_after_first.get(&affected_key), None);
+        assert_eq!(
+            root_after_first.get(&unrelated_key),
+            Some(RootQualificationState::Granted)
+        );
+        drop(root_after_first);
+        assert!(!root
+            .lock()
+            .unwrap()
+            .complete(late_attempt, RootQualificationState::Granted));
+        assert!(executions
+            .lock()
+            .unwrap()
+            .mapping(ExecutionKind::Real, &execution_handle, "missing")
+            .is_ok());
+
+        let second = get_real_execution_inner_with_runtime(
+            &execution_handle,
+            &executions,
+            &handles,
+            &root,
+            &runtime,
+            |_| Ok(()),
+        )
+        .expect("repeated terminal retrieval should retain the report");
+        assert_eq!(second["status"], "failed");
+        assert_eq!(
+            handles.lock().unwrap().device_generation(),
+            generation_after_first
+        );
+        assert_eq!(
+            handles
+                .lock()
+                .unwrap()
+                .session_epoch_for_test(&affected_handle),
+            Some(affected_epoch_after_first)
+        );
+        assert!(handles.lock().unwrap().device(&unrelated_handle).is_ok());
+        assert_eq!(
+            root.lock().unwrap().get(&unrelated_key),
+            Some(RootQualificationState::Granted)
+        );
+
+        let mapping = executions
+            .lock()
+            .unwrap()
+            .mapping(ExecutionKind::Real, &execution_handle, "missing")
+            .unwrap();
+        let report = terminal_response().unwrap()["execution"].clone();
+        let public_before_export = project_real_snapshot(&mapping, &report);
+        let generation_before_export = handles.lock().unwrap().device_generation();
+        let epoch_before_export = handles
+            .lock()
+            .unwrap()
+            .session_epoch_for_test(&affected_handle);
+        let document = execution_report_document(
+            &mapping,
+            &report,
+            &public_before_export,
+            json!({ "status": "ready" }),
+        );
+        let repeated_document = execution_report_document(
+            &mapping,
+            &report,
+            &project_real_snapshot(&mapping, &report),
+            json!({ "status": "ready" }),
+        );
+        assert_eq!(document, repeated_document);
+        assert!(!document.to_string().contains("sensitive-serial"));
+        assert!(!document
+            .to_string()
+            .contains(POST_OPERATION_IDENTITY_FAILURE_MARKER));
+        assert_eq!(
+            handles.lock().unwrap().device_generation(),
+            generation_before_export
+        );
+        assert_eq!(
+            handles
+                .lock()
+                .unwrap()
+                .session_epoch_for_test(&affected_handle),
+            epoch_before_export
+        );
+        assert!(executions
+            .lock()
+            .unwrap()
+            .mapping(ExecutionKind::Real, &execution_handle, "missing")
+            .is_ok());
     }
 
     #[test]
