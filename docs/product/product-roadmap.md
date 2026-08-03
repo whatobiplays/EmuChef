@@ -27,7 +27,7 @@ Detailed evidence remains in the relevant product and release documents. In part
 
 | Product or track | Current state | Next priority |
 |---|---|---|
-| EmuChef proper | Phase 5A through 5H, Phase 6A through 6C, the Phase 6D.1 audit, and automated Phase 6D.2 through 6D.4 implementation completed | Continue Phase 6D physical interruption, root, and device qualification work |
+| EmuChef proper | Phase 5A through 5H, Phase 6A through 6C, the Phase 6D.1 audit, and automated Phase 6D.2 through 6D.5 implementation completed | Continue Phase 6D physical interruption, root, and device qualification work |
 | Config Editor | Authored generation implemented through GitHub release-pattern testing | Later refinements remain unsequenced unless explicitly promoted |
 | Shared Runtime | Rust is the sole runtime and retains device, filesystem, planning, execution, validation, and protocol authority | Add shared capabilities only when required by a bounded product slice |
 | Release engineering | Deliberately deferred from normal Phase 5 product work | Resume only when the owner declares the relevant application release-comfortable |
@@ -71,7 +71,7 @@ EmuChef proper Phase 5 established end-user feature completeness, usability, wor
 | 6A | Development builds and feature gating | Completed | Intentional real-execution development builds without accidental production enablement |
 | 6B | Device discovery and qualification | Completed | Deterministic device capability and compatibility profiles |
 | 6C | Core executor qualification | Completed | Non-root and root executor qualification completed on representative hardware |
-| 6D | Execution safety and recovery | In progress | Phase 6D.1 audit and bounded correctness fixes through 6D.4 completed; root revalidation and physical interruption work remains |
+| 6D | Execution safety and recovery | In progress | Phase 6D.1 audit and bounded correctness fixes through 6D.5 completed; physical interruption and qualification work remains |
 | 6E | Recipe qualification | Planned | End-to-end success for core EmuChef workflows |
 | 6F | Physical-device test matrix | Planned | Representative coverage across supported Android device classes |
 | 6G | Production readiness | Planned | Evidence-backed promotion of real execution into production builds |
@@ -673,9 +673,9 @@ all authority derived from a detectably lost sidecar process generation.
 
 Phase 6D remains open. General ADB and sidecar deadlines, typed mid-run
 transport handling, and automated same-serial identity replacement handling
-are implemented; mid-run root revalidation, low-storage/host-sleep policy,
-physical identity qualification, and physical interruption qualification are
-explicitly deferred. No checkpoint, resume,
+are implemented; physical identity qualification, low-storage/host-sleep policy,
+and physical interruption qualification remain explicitly deferred. Root
+revalidation is completed as the automated Phase 6D.5 slice. No checkpoint, resume,
 automatic replay, rollback, persistent execution, new serialized status, or
 new production feature enablement was added.
 
@@ -774,11 +774,50 @@ in-flight completion while preserving the existing serial-to-opaque-handle
 reconciliation.
 
 This evidence is host-automated only. Phase 6D remains **In progress**. Physical
-identity qualification, repeated root-authority revalidation (6D.5), physical
+identity qualification, physical root-revocation qualification, physical
 offline/unauthorized/disconnect qualification (6D.6), attestation, recovery,
 low-storage, and host-sleep policy remain open. No persistent identity,
 checkpointing, resume, rollback, replay, automatic retry, public schema or
 frontend DTO expansion, or production qualification was added.
+
+#### Phase 6D.5 — Root Authority Revalidation During Execution completion evidence
+
+Completed as an automated implementation slice on 2026-08-03. The detailed
+contract and evidence are recorded in
+`docs/product/phase-6d5-root-authority-revalidation.md` and the run-specific
+`RESULT.md`.
+
+Real execution now probes root only at the adapter-owned boundary where the
+intended command will actually insert `su`. Every such command receives one
+fresh fixed-serial `adb -s <serial> shell su -c id` probe immediately before
+execution; nonprivileged operations, including current permission actions,
+receive zero Phase 6D.5 probes. Reviewed root authorization is derived from
+root-dependent reviewed work plus the matching runtime capability evidence;
+capability availability alone does not authorize privileged execution.
+
+Denied, unavailable, and unexpected completed probes have private typed
+`root_authority_revoked` and `root_authority_unverified` classifications. Each
+uses the existing fail-stop path and performs exactly one pre-operation identity
+recheck before returning the root failure. Timeout, process, output, spawn,
+and transport failures retain their existing precedence. Trustworthy completed
+mutating commands, including ordinary completed permission failures, establish
+prior-mutation evidence before any post-operation identity check; an exact
+private marker is used only for a later root failure after that evidence.
+
+Terminal real reports invalidate root qualification and only root-dependent
+reviews for the affected device once, preserving the live device, facts,
+qualification context, session epoch/generation, non-root reviews, unrelated
+authority, and the terminal execution mapping. Identity findings take precedence
+when a report contains both identity and root issues. Tauri and React expose
+distinct authored remediation requiring fresh root qualification, plan, review,
+and execution, with no raw root details or resume claim. Export remains a pure
+projection.
+
+This evidence is host-automated only. Phase 6D remains **In progress**. Physical
+root-revocation timing, identity qualification, offline/unauthorized/disconnect
+qualification (6D.6), low-storage, host-sleep, and release qualification remain
+open. No checkpointing, resume, rollback, replay, automatic retry, public schema
+or frontend DTO expansion, or production feature enablement was added.
 
 ### 6E — Recipe Qualification
 

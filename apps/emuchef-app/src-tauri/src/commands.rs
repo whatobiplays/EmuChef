@@ -1841,8 +1841,7 @@ fn public_diagnostic(diagnostic: &Value) -> Value {
     })
 }
 
-/// Attaches only the opaque handle to the backend-authored review projection.
-/// Tauri deliberately does not recreate action meaning from retained plan data.
+/// Attaches only the opaque handle to the backend-authored public review projection.
 fn public_review(review_handle: &str, review: &Value, exact_serial: Option<&str>) -> Value {
     let mut public = review.clone();
     if let Some(object) = public.as_object_mut() {

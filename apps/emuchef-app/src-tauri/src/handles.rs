@@ -409,10 +409,22 @@ impl SessionHandles {
     }
 
     pub fn invalidate_reviews_for_device(&mut self, device_handle: &str, code: &'static str) {
+        self.invalidate_reviews_for_device_if(device_handle, code, |_| true);
+    }
+
+    /// Invalidate only reviews for a device that match a caller-owned
+    /// authority predicate. Unrelated reviews and all device identity state
+    /// remain untouched.
+    pub fn invalidate_reviews_for_device_if(
+        &mut self,
+        device_handle: &str,
+        code: &'static str,
+        mut predicate: impl FnMut(&ReviewedPlanSnapshot) -> bool,
+    ) {
         let handles = self
             .reviews
             .iter()
-            .filter(|(_, review)| review.device_handle == device_handle)
+            .filter(|(_, review)| review.device_handle == device_handle && predicate(review))
             .map(|(handle, _)| handle.clone())
             .collect::<Vec<_>>();
         for handle in handles {

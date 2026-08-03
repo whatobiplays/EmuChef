@@ -4,6 +4,13 @@
 //! and digest revalidation, selects the execution mode inside Tauri, and projects
 //! sidecar reports into serial-free, path-safe DTOs.
 
+/// The sidecar owns typed backend execution, while this native boundary retains
+/// serialized reviews. Compile the dependency-free classifier from the same
+/// source so invalidation cannot reinterpret root requirements independently or
+/// expand the public review contract.
+#[path = "../../../../crates/emuchef-rust-backend/src/executor/root_requirements.rs"]
+mod root_requirements;
+
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::fs::{self, File};
 use std::path::Path;
@@ -27,6 +34,9 @@ use crate::device_qualification::{
 };
 use crate::handles::{ReviewedPlanSnapshot, SessionHandles};
 use crate::sidecar::SidecarState;
+
+const ROOT_AUTHORITY_FAILURE_AFTER_MUTATION_MARKER: &str =
+    "Root authority could not be confirmed after earlier device changes may have occurred.";
 
 /// One opaque app handle mapped to the sidecar execution that implements it.
 #[derive(Clone, Debug)]
@@ -95,13 +105,19 @@ impl ExecutionHandleStore {
                     "failed",
                 ),
                 "completion": if mapping.kind == ExecutionKind::Real {
-                    let (identity_failure_count, post_identity_marker) =
-                        identity_projection_facts(report);
+                    let (
+                        identity_failure_count,
+                        post_identity_marker,
+                        root_failure_count,
+                        root_marker,
+                    ) = real_projection_facts(report);
                     completion_summary_with_identity_state(
                         report,
                         true,
                         identity_failure_count,
                         post_identity_marker,
+                        root_failure_count,
+                        root_marker,
                     )
                 } else {
                     completion_summary(report, false)
@@ -1094,8 +1110,12 @@ where
             .lock()
             .map_err(|_| real_execution_state_error())?
             .mark_terminal(ExecutionKind::Real, execution_handle);
-        if newly_retained && report_has_identity_failure(report) {
-            invalidate_identity_terminal_authority(handles, root_qualification, &mapping)?;
+        if newly_retained {
+            if report_has_identity_failure(report) {
+                invalidate_identity_terminal_authority(handles, root_qualification, &mapping)?;
+            } else if report_has_root_authority_failure(report) {
+                invalidate_root_terminal_authority(handles, root_qualification, &mapping)?;
+            }
         }
         let mut executions = executions
             .lock()
@@ -1721,23 +1741,10 @@ fn validate_plan_digest(review: &ReviewedPlanSnapshot) -> Result<(), String> {
 }
 
 fn review_requires_root(review: &ReviewedPlanSnapshot) -> bool {
-    [
-        review
-            .response
-            .pointer("/plan/runtime_capabilities/root_shell"),
-        review
-            .response
-            .pointer("/plan/runtime_capabilities/app_data_write"),
-        review
-            .response
-            .pointer("/plan/runtimeCapabilities/rootShell"),
-        review
-            .response
-            .pointer("/plan/runtimeCapabilities/appDataWrite"),
-    ]
-    .into_iter()
-    .flatten()
-    .any(|value| value == &Value::Bool(true))
+    review
+        .response
+        .get("plan")
+        .is_some_and(root_requirements::reviewed_plan_requires_root_json)
 }
 
 fn validate_final_qualification(
@@ -1804,7 +1811,8 @@ fn canonicalize(value: Value) -> Value {
 }
 
 fn project_real_snapshot(mapping: &ExecutionMapping, report: &Value) -> Value {
-    let (identity_failure_count, post_identity_marker) = identity_projection_facts(report);
+    let (identity_failure_count, post_identity_marker, root_failure_count, root_marker) =
+        real_projection_facts(report);
     let mut public = project_snapshot(mapping, report);
     let exact_serial = mapping
         .review
@@ -1887,14 +1895,18 @@ fn project_real_snapshot(mapping: &ExecutionMapping, report: &Value) -> Value {
         true,
         identity_failure_count,
         post_identity_marker,
+        root_failure_count,
+        root_marker,
     );
     sanitize_real_projection(&mut public, exact_serial);
     public
 }
 
-fn identity_projection_facts(report: &Value) -> (u64, bool) {
+fn real_projection_facts(report: &Value) -> (u64, bool, u64, bool) {
     let mut failures = 0;
     let mut post_operation_marker = false;
+    let mut root_failures = 0;
+    let mut root_marker = false;
     for field in ["errors", "warnings"] {
         for issue in report
             .get(field)
@@ -1902,21 +1914,28 @@ fn identity_projection_facts(report: &Value) -> (u64, bool) {
             .into_iter()
             .flatten()
         {
-            if !matches!(
-                issue.get("code").and_then(Value::as_str),
-                Some("device_identity_changed" | "device_identity_unverified")
-            ) {
-                continue;
-            }
-            failures += 1;
-            if issue.get("message").and_then(Value::as_str)
-                == Some(POST_OPERATION_IDENTITY_FAILURE_MARKER)
-            {
-                post_operation_marker = true;
+            match issue.get("code").and_then(Value::as_str) {
+                Some("device_identity_changed" | "device_identity_unverified") => {
+                    failures += 1;
+                    if issue.get("message").and_then(Value::as_str)
+                        == Some(POST_OPERATION_IDENTITY_FAILURE_MARKER)
+                    {
+                        post_operation_marker = true;
+                    }
+                }
+                Some("root_authority_revoked" | "root_authority_unverified") => {
+                    root_failures += 1;
+                    if issue.get("message").and_then(Value::as_str)
+                        == Some(ROOT_AUTHORITY_FAILURE_AFTER_MUTATION_MARKER)
+                    {
+                        root_marker = true;
+                    }
+                }
+                _ => {}
             }
         }
     }
-    (failures, post_operation_marker)
+    (failures, post_operation_marker, root_failures, root_marker)
 }
 
 fn eligible_launch_label(mapping: &ExecutionMapping, report: &Value) -> Option<String> {
@@ -2087,6 +2106,11 @@ fn project_real_issue(mapping: &ExecutionMapping, issue: &Value) -> Value {
             internal,
             "The reviewed device identity could not be verified safely.",
         ),
+        "root_authority_revoked" => (internal, "Root access was revoked during execution."),
+        "root_authority_unverified" => (
+            internal,
+            "EmuChef could not safely confirm continued root access.",
+        ),
         "device_transport_lost" => (internal, "The device connection was lost during execution."),
         "step_execution_failed" => (internal, "A device operation failed."),
         "optional_permission_failed" => (internal, "An optional permission action failed."),
@@ -2181,6 +2205,11 @@ fn remediation_for_code(code: &str) -> Value {
             "reconnect_device",
             "Reconnect and requalify",
             "Reconnect the intended device, complete a fresh identity probe and qualification, then generate and review a fresh plan before another real run. The old execution cannot be resumed.",
+        ),
+        "root_authority_revoked" | "root_authority_unverified" => (
+            "requalify_root",
+            "Requalify root access",
+            "Complete fresh root qualification, generate a fresh plan, review it, and start a new execution. The old execution cannot be resumed.",
         ),
         "adb_server_unavailable" => (
             "repair_platform_tools",
@@ -2474,7 +2503,7 @@ fn project_issues(
 }
 
 fn completion_summary(snapshot: &Value, real: bool) -> Value {
-    completion_summary_with_identity_state(snapshot, real, 0, false)
+    completion_summary_with_identity_state(snapshot, real, 0, false, 0, false)
 }
 
 fn completion_summary_with_identity_state(
@@ -2482,6 +2511,8 @@ fn completion_summary_with_identity_state(
     real: bool,
     identity_failure_count: u64,
     post_identity_marker: bool,
+    root_failure_count: u64,
+    root_marker: bool,
 ) -> Value {
     let status = snapshot
         .get("status")
@@ -2543,8 +2574,13 @@ fn completion_summary_with_identity_state(
         "partialChangesPossible": real
             && matches!(status, "failed" | "cancelled")
             && (counts.get("completed").copied().unwrap_or(0) > 0
-                || counts.get("failed").copied().unwrap_or(0) > identity_failure_count
-                || post_identity_marker),
+                || counts
+                    .get("failed")
+                    .copied()
+                    .unwrap_or(0)
+                    > identity_failure_count.saturating_add(root_failure_count)
+                || post_identity_marker
+                || root_marker),
     })
 }
 
@@ -2694,6 +2730,22 @@ fn report_has_identity_failure(report: &Value) -> bool {
     })
 }
 
+fn report_has_root_authority_failure(report: &Value) -> bool {
+    ["errors", "warnings"].into_iter().any(|field| {
+        report
+            .get(field)
+            .and_then(Value::as_array)
+            .is_some_and(|issues| {
+                issues.iter().any(|issue| {
+                    matches!(
+                        issue.get("code").and_then(Value::as_str),
+                        Some("root_authority_revoked" | "root_authority_unverified")
+                    )
+                })
+            })
+    })
+}
+
 fn invalidate_identity_terminal_authority(
     handles: &Mutex<SessionHandles>,
     root_qualification: &Mutex<RootQualificationStore>,
@@ -2704,6 +2756,30 @@ fn invalidate_identity_terminal_authority(
         .lock()
         .map_err(|_| session_error())?
         .invalidate_identity_authority(&device_handle);
+    root_qualification
+        .lock()
+        .map_err(|_| {
+            safe_error(
+                "qualification_state_unavailable",
+                "Device qualification state is unavailable.",
+            )
+        })?
+        .invalidate_for_device(&device_handle);
+    Ok(())
+}
+
+fn invalidate_root_terminal_authority(
+    handles: &Mutex<SessionHandles>,
+    root_qualification: &Mutex<RootQualificationStore>,
+    mapping: &ExecutionMapping,
+) -> Result<(), String> {
+    let device_handle = mapping.review.device_handle.clone();
+    let mut handles = handles.lock().map_err(|_| session_error())?;
+    handles.invalidate_review(&mapping.review_handle, "root_authority_changed");
+    handles.invalidate_reviews_for_device_if(&device_handle, "root_authority_changed", |review| {
+        review_requires_root(review)
+    });
+    drop(handles);
     root_qualification
         .lock()
         .map_err(|_| {
@@ -2871,13 +2947,69 @@ mod tests {
     }
 
     #[test]
-    fn root_dependent_reviews_are_detected_from_authoritative_plan_capabilities() {
+    fn review_requires_root_uses_shared_classifier_for_root_dependent_work() {
         let mut review = review();
         assert!(!review_requires_root(&review));
-        review.response["plan"]["runtime_capabilities"] = json!({
-            "root_shell": true,
-            "app_data_write": false,
-        });
+        review.response["plan"]["runtime_capabilities"] = json!({ "root_shell": true });
+        assert!(
+            !review_requires_root(&review),
+            "capability availability alone must not retain root authority"
+        );
+
+        review.response["plan"]["steps"] = json!([{
+            "id": "recipe.one/extract",
+            "recipe_ref": "recipe.one",
+            "type": "extract_archive",
+            "name": "Extract",
+            "note": "Extract",
+            "dependencies": [],
+            "constraints": { "capabilities": [], "conflicts_with": [] },
+            "params": {
+                "extract_on": { "value": "device" },
+                "dest": { "value": "/data/data/com.example.app/extracted" }
+            },
+            "skip_if": [],
+            "verify": []
+        }]);
+        assert!(review_requires_root(&review));
+
+        let context = crate::device_qualification::QualificationContextKey::new(
+            "device_one",
+            1,
+            1,
+            2,
+            2,
+            "input-bound-root",
+        );
+        review.qualification_context = Some(context.clone());
+        let current = crate::device_qualification::test_current_qualification(
+            DeviceQualificationState::Supported,
+            Some(context),
+        );
+        assert!(validate_final_qualification(&review, &current, false)
+            .unwrap_err()
+            .contains("root_qualification_required"));
+
+        review.response["plan"]["steps"][0]["params"]["dest"] =
+            json!({ "value": "/sdcard/EmuChef/extracted" });
+        assert!(!review_requires_root(&review));
+        assert!(validate_final_qualification(&review, &current, false).is_ok());
+
+        review.response["plan"]["steps"] = json!([{
+            "id": "recipe.one/copy",
+            "recipe_ref": "recipe.one",
+            "type": "copy_files",
+            "name": "Copy",
+            "note": "Copy",
+            "dependencies": [],
+            "constraints": { "capabilities": [], "conflicts_with": [] },
+            "params": {
+                "source": { "value": "/sdcard/EmuChef/source" },
+                "dest": { "value": "/data/data/com.example.app/files" }
+            },
+            "skip_if": [],
+            "verify": []
+        }]);
         assert!(review_requires_root(&review));
     }
 
@@ -2890,7 +3022,10 @@ mod tests {
             "target_device": { "serial": "sensitive-serial", "manufacturer": "AYANEO", "model": "Pocket S", "android_api_level": 33 },
         });
         ReviewedPlanSnapshot {
-            response: json!({ "plan": plan, "review": { "canExecute": true } }),
+            response: json!({
+                "plan": plan,
+                "review": { "canExecute": true }
+            }),
             target: json!({ "serial": "sensitive-serial", "manufacturer": "AYANEO", "model": "Pocket S", "androidApiLevel": 33 }),
             catalog_identity: json!({
                 "sourceKind": "bundled", "sourceId": "catalog", "version": "1",
@@ -2943,7 +3078,25 @@ mod tests {
         );
         assert!(validate_final_qualification(&review, &current, false).is_ok());
 
-        review.response["plan"]["runtime_capabilities"] = json!({ "root_shell": true });
+        review.response["plan"]["runtime_capabilities"] = json!({
+            "root_shell": true,
+            "app_data_write": true,
+        });
+        review.response["plan"]["steps"] = json!([{
+            "id": "recipe.one/root-check",
+            "recipe_ref": "recipe.one",
+            "type": "wait",
+            "name": "Root check",
+            "note": "Root check",
+            "dependencies": [],
+            "constraints": { "capabilities": [], "conflicts_with": [] },
+            "params": { "duration_ms": { "value": 1 } },
+            "skip_if": [{
+                "type": "path_exists",
+                "params": { "path": "/data/data/com.example/root" }
+            }],
+            "verify": []
+        }]);
         assert!(validate_final_qualification(&review, &current, false)
             .unwrap_err()
             .contains("root_qualification_required"));
@@ -3253,6 +3406,37 @@ mod tests {
     }
 
     #[test]
+    fn root_issue_codes_project_to_authored_requalification_guidance() {
+        let mapping = ExecutionMapping {
+            kind: ExecutionKind::Real,
+            public_handle: "execution_public".into(),
+            sidecar_id: "execution-private".into(),
+            review_handle: "review_public".into(),
+            review: launch_review(),
+        };
+        for code in ["root_authority_revoked", "root_authority_unverified"] {
+            let projected = project_real_issue(
+                &mapping,
+                &json!({
+                    "code": code,
+                    "recipeId": "recipe.one",
+                    "stepId": "recipe.one/launch",
+                    "message": "private root stderr and serial detail",
+                }),
+            );
+            let authored = if code == "root_authority_revoked" {
+                "Root access was revoked during execution."
+            } else {
+                "EmuChef could not safely confirm continued root access."
+            };
+            assert!(projected["message"].as_str().unwrap().contains(authored));
+            assert_eq!(projected["remediation"]["kind"], "requalify_root");
+            assert!(!projected.to_string().contains("private root stderr"));
+            assert!(!projected.to_string().contains("serial detail"));
+        }
+    }
+
+    #[test]
     fn only_the_exact_post_identity_marker_allows_real_partial_warning_without_prior_evidence() {
         let mapping = ExecutionMapping {
             kind: ExecutionKind::Real,
@@ -3290,6 +3474,64 @@ mod tests {
         assert!(!arbitrary
             .to_string()
             .contains("private serial and command output"));
+    }
+
+    #[test]
+    fn root_marker_requires_exact_root_issue_pair_for_partial_warning() {
+        let mapping = ExecutionMapping {
+            kind: ExecutionKind::Real,
+            public_handle: "execution_public".into(),
+            sidecar_id: "execution-private".into(),
+            review_handle: "review_public".into(),
+            review: launch_review(),
+        };
+        let report = |code: &str, message: &str| {
+            json!({
+                "status": "failed",
+                "errors": [{ "code": code, "message": message }],
+                "recipes": [{
+                    "recipeId": "recipe.one",
+                    "name": "Recipe One",
+                    "status": "failed",
+                    "steps": [{ "stepId": "recipe.one/launch", "status": "failed" }]
+                }]
+            })
+        };
+        let unmarked = project_real_snapshot(
+            &mapping,
+            &report("root_authority_revoked", "Root access was revoked."),
+        );
+        let marked = project_real_snapshot(
+            &mapping,
+            &report(
+                "root_authority_unverified",
+                ROOT_AUTHORITY_FAILURE_AFTER_MUTATION_MARKER,
+            ),
+        );
+        let identity_with_root_marker = project_real_snapshot(
+            &mapping,
+            &report(
+                "device_identity_changed",
+                ROOT_AUTHORITY_FAILURE_AFTER_MUTATION_MARKER,
+            ),
+        );
+        let root_with_identity_marker = project_real_snapshot(
+            &mapping,
+            &report(
+                "root_authority_revoked",
+                POST_OPERATION_IDENTITY_FAILURE_MARKER,
+            ),
+        );
+        assert_eq!(unmarked["completion"]["partialChangesPossible"], false);
+        assert_eq!(marked["completion"]["partialChangesPossible"], true);
+        assert_eq!(
+            identity_with_root_marker["completion"]["partialChangesPossible"],
+            false
+        );
+        assert_eq!(
+            root_with_identity_marker["completion"]["partialChangesPossible"],
+            false
+        );
     }
 
     #[test]
@@ -3708,7 +3950,25 @@ mod tests {
         }
         retained.qualification_context = Some(context);
         if root_required {
-            retained.response["plan"]["runtime_capabilities"] = json!({ "root_shell": true });
+            retained.response["plan"]["runtime_capabilities"] = json!({
+                "root_shell": true,
+                "app_data_write": true,
+            });
+            retained.response["plan"]["steps"] = json!([{
+                "id": "recipe.one/extract",
+                "recipe_ref": "recipe.one",
+                "type": "extract_archive",
+                "name": "Extract",
+                "note": "Extract",
+                "dependencies": [],
+                "constraints": { "capabilities": [], "conflicts_with": [] },
+                "params": {
+                    "extract_on": { "value": "device" },
+                    "dest": { "value": "/data/data/com.example.app/extracted" }
+                },
+                "skip_if": [],
+                "verify": []
+            }]);
             retained.plan_digest = canonical_json_digest(&retained.response["plan"]).unwrap();
         }
         let review_handle = handles.lock().unwrap().insert_review(retained);
@@ -4046,6 +4306,673 @@ mod tests {
             .unwrap()
             .mapping(ExecutionKind::Real, &execution_handle, "missing")
             .is_ok());
+    }
+
+    #[test]
+    fn terminal_root_failure_invalidates_only_root_reviews_for_single_device_once() {
+        let (handles, root, root_review_handle) = prepared_real_review(true);
+        let (device_handle, context, root_review) = {
+            let mut handles = handles.lock().unwrap();
+            let root_review = handles.review(&root_review_handle).unwrap().clone();
+            let device_handle = root_review.device_handle.clone();
+            let context = root_review
+                .qualification_context
+                .clone()
+                .expect("prepared root review should retain qualification context");
+            let mut non_root_review = review();
+            non_root_review.device_handle = device_handle.clone();
+            non_root_review.qualification_context = Some(context.clone());
+            let non_root_handle = handles.insert_review(non_root_review);
+            (device_handle, context, (root_review, non_root_handle))
+        };
+        let non_root_handle = root_review.1;
+        let root_review = root_review.0;
+        let root_key = RootQualificationKey::from_context(&context);
+        handles
+            .lock()
+            .unwrap()
+            .set_facts(&device_handle, target_facts())
+            .expect("prepared device facts should be retained");
+        let late_attempt = {
+            let mut root = root.lock().unwrap();
+            let attempt = root.begin(root_key.clone()).unwrap();
+            assert!(root.complete(attempt, RootQualificationState::Granted));
+            root.begin(root_key.clone()).unwrap()
+        };
+
+        let executions = Mutex::new(ExecutionHandleStore::default());
+        let execution_handle = {
+            let mut executions = executions.lock().unwrap();
+            executions.reserve_start(ExecutionKind::Real).unwrap();
+            executions
+                .bind_started(
+                    ExecutionKind::Real,
+                    "sidecar-root-terminal".to_string(),
+                    root_review_handle.clone(),
+                    root_review,
+                )
+                .public_handle
+                .clone()
+        };
+        let terminal_response = || {
+            Ok(json!({
+                "execution": {
+                    "executionId": "sidecar-root-terminal",
+                    "status": "failed",
+                    "errors": [{
+                        "code": "root_authority_revoked",
+                        "message": "private root detail"
+                    }],
+                    "recipes": []
+                }
+            }))
+        };
+        let runtime = ScriptedRuntime {
+            requests: Mutex::new(Vec::new()),
+            responses: Mutex::new(vec![terminal_response(), terminal_response()]),
+        };
+        let generation_before = handles.lock().unwrap().device_generation();
+        let first = get_real_execution_inner_with_runtime(
+            &execution_handle,
+            &executions,
+            &handles,
+            &root,
+            &runtime,
+            |_| Ok(()),
+        )
+        .expect("first root terminal retrieval should succeed");
+        assert_eq!(first["status"], "failed");
+        assert_eq!(first["errors"][0]["remediation"]["kind"], "requalify_root");
+        assert!(!first.to_string().contains("private root detail"));
+        assert_eq!(
+            handles.lock().unwrap().device_generation(),
+            generation_before
+        );
+        assert!(handles.lock().unwrap().device(&device_handle).is_ok());
+        assert!(handles.lock().unwrap().facts(&device_handle).is_ok());
+        assert_eq!(
+            handles
+                .lock()
+                .unwrap()
+                .qualification_context(&device_handle),
+            Some(context.clone())
+        );
+        assert!(handles
+            .lock()
+            .unwrap()
+            .review(&root_review_handle)
+            .unwrap_err()
+            .contains("root_authority_changed"));
+        assert!(handles.lock().unwrap().review(&non_root_handle).is_ok());
+        assert_eq!(root.lock().unwrap().get(&root_key), None);
+        assert!(!root
+            .lock()
+            .unwrap()
+            .complete(late_attempt, RootQualificationState::Granted));
+
+        let second = get_real_execution_inner_with_runtime(
+            &execution_handle,
+            &executions,
+            &handles,
+            &root,
+            &runtime,
+            |_| Ok(()),
+        )
+        .expect("repeated root terminal retrieval should retain the report");
+        assert_eq!(second["status"], "failed");
+        assert_eq!(
+            handles.lock().unwrap().device_generation(),
+            generation_before
+        );
+        assert!(handles.lock().unwrap().review(&non_root_handle).is_ok());
+    }
+
+    #[test]
+    fn terminal_root_failure_invalidates_only_root_reviews_once() {
+        let inventory = json!({
+            "devices": [
+                {
+                    "serial": "sensitive-serial",
+                    "state": "available",
+                    "model": "Pocket S",
+                    "transportId": "transport-affected"
+                },
+                {
+                    "serial": "unrelated-serial",
+                    "state": "available",
+                    "model": "Pocket Other",
+                    "transportId": "transport-unrelated"
+                }
+            ]
+        });
+        let handles = Mutex::new(SessionHandles::default());
+        let root = Mutex::new(RootQualificationStore::default());
+        let (affected_handle, unrelated_handle) = {
+            let mut handles = handles.lock().unwrap();
+            handles.update_devices(&inventory).unwrap();
+            let devices = handles.qualification_devices();
+            let affected = devices
+                .iter()
+                .find(|device| device.serial == "sensitive-serial")
+                .unwrap()
+                .handle
+                .clone();
+            let unrelated = devices
+                .iter()
+                .find(|device| device.serial == "unrelated-serial")
+                .unwrap()
+                .handle
+                .clone();
+            handles
+                .set_facts(&affected, target_facts())
+                .expect("affected facts should be retained");
+            handles
+                .set_facts(
+                    &unrelated,
+                    json!({
+                        "manufacturer": "Other",
+                        "model": "Pocket Other",
+                        "android_api_level": 33,
+                    }),
+                )
+                .expect("unrelated facts should be retained");
+            (affected, unrelated)
+        };
+        let affected_context = crate::device_qualification::QualificationContextKey::new(
+            &affected_handle,
+            1,
+            2,
+            3,
+            4,
+            "affected-capabilities",
+        );
+        let unrelated_context = crate::device_qualification::QualificationContextKey::new(
+            &unrelated_handle,
+            1,
+            2,
+            3,
+            4,
+            "unrelated-capabilities",
+        );
+        let root_review_for = |device_handle: &str,
+                               context: &crate::device_qualification::QualificationContextKey,
+                               input_bound_destination: bool| {
+            let mut retained = review();
+            retained.device_handle = device_handle.to_string();
+            retained.qualification_context = Some(context.clone());
+            retained.response["plan"]["runtime_capabilities"] = json!({
+                "adb_available": true,
+                "apk_install": true,
+                "shared_storage_write": true,
+                "app_launch": true,
+                "shell_command": true,
+                "package_remove_for_user": false,
+                "root_shell": true,
+                "app_data_write": true,
+            });
+            retained.response["plan"]["inputs"] = if input_bound_destination {
+                json!([{
+                    "id": "destination",
+                    "value": {
+                        "type": "device_path",
+                        "value": "/data/data/com.example.app/files",
+                        "location": "device"
+                    }
+                }])
+            } else {
+                json!([])
+            };
+            retained.response["plan"]["steps"] = json!([{
+                "id": "recipe.one/root-copy",
+                "recipe_ref": "recipe.one",
+                "type": "copy_files",
+                "name": "Root copy",
+                "note": "Root copy",
+                "dependencies": [],
+                "constraints": { "capabilities": [], "conflicts_with": [] },
+                "params": {
+                    "source": {
+                        "value": {
+                            "type": "file_path",
+                            "value": "fixture.txt",
+                            "location": "host"
+                        }
+                    },
+                    "dest": if input_bound_destination {
+                        json!({ "ref": "inputs.destination" })
+                    } else {
+                        json!({ "value": "/data/data/com.example.app/files" })
+                    },
+                    "copy_policy": { "value": "merge" }
+                },
+                "skip_if": [],
+                "verify": []
+            }]);
+            retained.plan_digest = canonical_json_digest(&retained.response["plan"]).unwrap();
+            retained
+        };
+        let non_root_review_for =
+            |device_handle: &str,
+             context: &crate::device_qualification::QualificationContextKey| {
+                let mut retained = review();
+                retained.device_handle = device_handle.to_string();
+                retained.qualification_context = Some(context.clone());
+                retained
+            };
+        let (
+            originating_root_review_handle,
+            second_affected_root_review_handle,
+            input_bound_affected_root_review_handle,
+            affected_non_root_review_handle,
+            unrelated_root_review_handle,
+            unrelated_non_root_review_handle,
+            originating_root_review,
+        ) = {
+            let mut handles = handles.lock().unwrap();
+            handles.set_qualification_context(affected_context.clone());
+            handles.set_qualification_context(unrelated_context.clone());
+            let originating_root_review =
+                root_review_for(&affected_handle, &affected_context, true);
+            let originating_root_review_handle =
+                handles.insert_review(originating_root_review.clone());
+            let second_affected_root_review_handle =
+                handles.insert_review(root_review_for(&affected_handle, &affected_context, false));
+            let input_bound_affected_root_review_handle =
+                handles.insert_review(root_review_for(&affected_handle, &affected_context, true));
+            let affected_non_root_review_handle =
+                handles.insert_review(non_root_review_for(&affected_handle, &affected_context));
+            let unrelated_root_review_handle = handles.insert_review(root_review_for(
+                &unrelated_handle,
+                &unrelated_context,
+                false,
+            ));
+            let unrelated_non_root_review_handle =
+                handles.insert_review(non_root_review_for(&unrelated_handle, &unrelated_context));
+            (
+                originating_root_review_handle,
+                second_affected_root_review_handle,
+                input_bound_affected_root_review_handle,
+                affected_non_root_review_handle,
+                unrelated_root_review_handle,
+                unrelated_non_root_review_handle,
+                originating_root_review,
+            )
+        };
+        let affected_key = RootQualificationKey::from_context(&affected_context);
+        let unrelated_key = RootQualificationKey::from_context(&unrelated_context);
+        let late_attempt = {
+            let mut root = root.lock().unwrap();
+            let unrelated_attempt = root.begin(unrelated_key.clone()).unwrap();
+            assert!(root.complete(unrelated_attempt, RootQualificationState::Granted));
+            let completed_affected = root.begin(affected_key.clone()).unwrap();
+            assert!(root.complete(completed_affected, RootQualificationState::Granted));
+            root.begin(affected_key.clone()).unwrap()
+        };
+
+        let executions = Mutex::new(ExecutionHandleStore::default());
+        let execution_handle = {
+            let mut executions = executions.lock().unwrap();
+            executions.reserve_start(ExecutionKind::Real).unwrap();
+            executions
+                .bind_started(
+                    ExecutionKind::Real,
+                    "sidecar-root-terminal-expanded".to_string(),
+                    originating_root_review_handle.clone(),
+                    originating_root_review,
+                )
+                .public_handle
+                .clone()
+        };
+        let terminal_response = || {
+            Ok(json!({
+                "execution": {
+                    "executionId": "sidecar-root-terminal-expanded",
+                    "status": "failed",
+                    "errors": [{
+                        "code": "root_authority_revoked",
+                        "message": ROOT_AUTHORITY_FAILURE_AFTER_MUTATION_MARKER,
+                        "raw": "private root output: su -c id; uid=0; serial=sensitive-serial"
+                    }],
+                    "recipes": []
+                }
+            }))
+        };
+        let runtime = ScriptedRuntime {
+            requests: Mutex::new(Vec::new()),
+            responses: Mutex::new(vec![terminal_response(), terminal_response()]),
+        };
+        let generation_before = handles.lock().unwrap().device_generation();
+        let affected_epoch_before = handles
+            .lock()
+            .unwrap()
+            .session_epoch_for_test(&affected_handle)
+            .unwrap();
+        let unrelated_epoch_before = handles
+            .lock()
+            .unwrap()
+            .session_epoch_for_test(&unrelated_handle)
+            .unwrap();
+        assert_eq!(
+            root.lock().unwrap().get(&affected_key),
+            Some(RootQualificationState::Granted)
+        );
+        assert_eq!(
+            root.lock().unwrap().get(&unrelated_key),
+            Some(RootQualificationState::Granted)
+        );
+
+        let first = get_real_execution_inner_with_runtime(
+            &execution_handle,
+            &executions,
+            &handles,
+            &root,
+            &runtime,
+            |_| Ok(()),
+        )
+        .expect("first expanded root terminal retrieval should succeed");
+        assert_eq!(first["status"], "failed");
+        assert_eq!(first["errors"][0]["remediation"]["kind"], "requalify_root");
+        assert_eq!(first["completion"]["partialChangesPossible"], true);
+        for forbidden in [
+            "private root output",
+            "su -c id",
+            "uid=0",
+            "sensitive-serial",
+        ] {
+            assert!(!first.to_string().contains(forbidden), "leaked {forbidden}");
+        }
+        assert_eq!(
+            handles.lock().unwrap().device_generation(),
+            generation_before
+        );
+        assert!(handles.lock().unwrap().device(&affected_handle).is_ok());
+        assert_eq!(
+            handles.lock().unwrap().facts(&affected_handle).unwrap(),
+            &target_facts()
+        );
+        assert_eq!(
+            handles
+                .lock()
+                .unwrap()
+                .qualification_context(&affected_handle),
+            Some(affected_context.clone())
+        );
+        assert_eq!(
+            handles
+                .lock()
+                .unwrap()
+                .session_epoch_for_test(&affected_handle),
+            Some(affected_epoch_before)
+        );
+        for review_handle in [
+            &originating_root_review_handle,
+            &second_affected_root_review_handle,
+            &input_bound_affected_root_review_handle,
+        ] {
+            assert!(handles
+                .lock()
+                .unwrap()
+                .review(review_handle)
+                .unwrap_err()
+                .contains("root_authority_changed"));
+        }
+        assert!(handles
+            .lock()
+            .unwrap()
+            .review(&affected_non_root_review_handle)
+            .is_ok());
+        assert!(handles.lock().unwrap().device(&unrelated_handle).is_ok());
+        assert_eq!(
+            handles.lock().unwrap().facts(&unrelated_handle).unwrap(),
+            &json!({
+                "manufacturer": "Other",
+                "model": "Pocket Other",
+                "android_api_level": 33,
+            })
+        );
+        assert_eq!(
+            handles
+                .lock()
+                .unwrap()
+                .qualification_context(&unrelated_handle),
+            Some(unrelated_context.clone())
+        );
+        assert_eq!(
+            handles
+                .lock()
+                .unwrap()
+                .session_epoch_for_test(&unrelated_handle),
+            Some(unrelated_epoch_before)
+        );
+        assert!(handles
+            .lock()
+            .unwrap()
+            .review(&unrelated_root_review_handle)
+            .is_ok());
+        assert!(handles
+            .lock()
+            .unwrap()
+            .review(&unrelated_non_root_review_handle)
+            .is_ok());
+        assert!(handles
+            .lock()
+            .unwrap()
+            .qualification_devices()
+            .iter()
+            .any(|device| device.handle == affected_handle && device.serial == "sensitive-serial"));
+        assert!(
+            handles
+                .lock()
+                .unwrap()
+                .qualification_devices()
+                .iter()
+                .any(|device| device.handle == unrelated_handle
+                    && device.serial == "unrelated-serial")
+        );
+        assert_eq!(root.lock().unwrap().get(&affected_key), None);
+        assert_eq!(
+            root.lock().unwrap().get(&unrelated_key),
+            Some(RootQualificationState::Granted)
+        );
+        assert!(!root
+            .lock()
+            .unwrap()
+            .complete(late_attempt, RootQualificationState::Granted));
+        let originating_stale_error = handles
+            .lock()
+            .unwrap()
+            .review(&originating_root_review_handle)
+            .unwrap_err();
+        assert!(executions
+            .lock()
+            .unwrap()
+            .mapping(ExecutionKind::Real, &execution_handle, "missing")
+            .is_ok());
+
+        let second = get_real_execution_inner_with_runtime(
+            &execution_handle,
+            &executions,
+            &handles,
+            &root,
+            &runtime,
+            |_| Ok(()),
+        )
+        .expect("repeated expanded root terminal retrieval should succeed");
+        assert_eq!(second["status"], "failed");
+        assert_eq!(
+            handles.lock().unwrap().device_generation(),
+            generation_before
+        );
+        assert_eq!(
+            handles
+                .lock()
+                .unwrap()
+                .session_epoch_for_test(&affected_handle),
+            Some(affected_epoch_before)
+        );
+        assert_eq!(
+            handles
+                .lock()
+                .unwrap()
+                .session_epoch_for_test(&unrelated_handle),
+            Some(unrelated_epoch_before)
+        );
+        assert!(handles
+            .lock()
+            .unwrap()
+            .review(&affected_non_root_review_handle)
+            .is_ok());
+        assert!(handles
+            .lock()
+            .unwrap()
+            .review(&unrelated_root_review_handle)
+            .is_ok());
+        assert!(handles
+            .lock()
+            .unwrap()
+            .review(&unrelated_non_root_review_handle)
+            .is_ok());
+        assert_eq!(
+            handles
+                .lock()
+                .unwrap()
+                .review(&originating_root_review_handle)
+                .unwrap_err(),
+            originating_stale_error
+        );
+        assert_eq!(
+            root.lock().unwrap().get(&unrelated_key),
+            Some(RootQualificationState::Granted)
+        );
+
+        let mapping = executions
+            .lock()
+            .unwrap()
+            .mapping(ExecutionKind::Real, &execution_handle, "missing")
+            .unwrap();
+        let report = terminal_response().unwrap()["execution"].clone();
+        let public = project_real_snapshot(&mapping, &report);
+        let document =
+            execution_report_document(&mapping, &report, &public, json!({ "status": "ready" }));
+        let serialized = document.to_string();
+        for forbidden in [
+            ROOT_AUTHORITY_FAILURE_AFTER_MUTATION_MARKER,
+            "private root output",
+            "su -c id",
+            "uid=0",
+            "serial=sensitive-serial",
+        ] {
+            assert!(!serialized.contains(forbidden), "leaked {forbidden}");
+        }
+        assert_eq!(
+            handles.lock().unwrap().device_generation(),
+            generation_before
+        );
+        assert_eq!(
+            handles
+                .lock()
+                .unwrap()
+                .session_epoch_for_test(&affected_handle),
+            Some(affected_epoch_before)
+        );
+        assert_eq!(
+            handles
+                .lock()
+                .unwrap()
+                .session_epoch_for_test(&unrelated_handle),
+            Some(unrelated_epoch_before)
+        );
+        assert_eq!(root.lock().unwrap().get(&affected_key), None);
+        assert_eq!(
+            root.lock().unwrap().get(&unrelated_key),
+            Some(RootQualificationState::Granted)
+        );
+        assert!(handles
+            .lock()
+            .unwrap()
+            .review(&affected_non_root_review_handle)
+            .is_ok());
+        assert!(handles
+            .lock()
+            .unwrap()
+            .review(&unrelated_root_review_handle)
+            .is_ok());
+        assert!(handles
+            .lock()
+            .unwrap()
+            .review(&unrelated_non_root_review_handle)
+            .is_ok());
+        assert!(executions
+            .lock()
+            .unwrap()
+            .mapping(ExecutionKind::Real, &execution_handle, "missing")
+            .is_ok());
+    }
+
+    #[test]
+    fn identity_failure_takes_precedence_over_root_invalidation() {
+        let (handles, root, review_handle) = prepared_real_review(true);
+        let device_handle = handles
+            .lock()
+            .unwrap()
+            .review(&review_handle)
+            .unwrap()
+            .device_handle
+            .clone();
+        let review_snapshot = handles
+            .lock()
+            .unwrap()
+            .review(&review_handle)
+            .unwrap()
+            .clone();
+        let executions = Mutex::new(ExecutionHandleStore::default());
+        let execution_handle = {
+            let mut executions = executions.lock().unwrap();
+            executions.reserve_start(ExecutionKind::Real).unwrap();
+            executions
+                .bind_started(
+                    ExecutionKind::Real,
+                    "sidecar-combined-terminal".to_string(),
+                    review_handle.clone(),
+                    review_snapshot,
+                )
+                .public_handle
+                .clone()
+        };
+        let runtime = ScriptedRuntime {
+            requests: Mutex::new(Vec::new()),
+            responses: Mutex::new(vec![Ok(json!({
+                "execution": {
+                    "executionId": "sidecar-combined-terminal",
+                    "status": "failed",
+                    "errors": [
+                        { "code": "root_authority_revoked", "message": "root detail" },
+                        { "code": "device_identity_changed", "message": "identity detail" }
+                    ],
+                    "recipes": []
+                }
+            }))]),
+        };
+        let public = get_real_execution_inner_with_runtime(
+            &execution_handle,
+            &executions,
+            &handles,
+            &root,
+            &runtime,
+            |_| Ok(()),
+        )
+        .expect("combined terminal retrieval should succeed");
+        assert_eq!(
+            public["errors"][1]["remediation"]["kind"],
+            "reconnect_device"
+        );
+        assert!(handles.lock().unwrap().device(&device_handle).is_err());
+        assert!(handles
+            .lock()
+            .unwrap()
+            .review(&review_handle)
+            .unwrap_err()
+            .contains("review_stale"));
     }
 
     #[test]

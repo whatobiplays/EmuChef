@@ -18,9 +18,9 @@ use crate::executor::{
 use crate::model::OrderedMap;
 use crate::owned_process::{ProcessCleanup, ProcessFailureKind, ProcessOperation};
 use crate::planner::{
-    plan_execution, DeviceContext, ExecutionArtifact, ExecutionParamValue, ExecutionPlan,
-    ExecutionPlanSource, ExecutionStep, ExecutionStepCondition, ExecutionStepConstraints,
-    PlannerInput, RuntimeCapabilities, TargetDeviceBinding,
+    plan_execution, DeviceContext, ExecutionArtifact, ExecutionInputValue, ExecutionParamValue,
+    ExecutionPlan, ExecutionPlanSource, ExecutionStep, ExecutionStepCondition,
+    ExecutionStepConstraints, PlannerInput, RuntimeCapabilities, RuntimeValue, TargetDeviceBinding,
 };
 
 fn golden_path(name: &str) -> PathBuf {
@@ -189,6 +189,514 @@ fn root_preflight_runs_once_before_root_steps_and_allows_followup_steps() {
 }
 
 #[test]
+fn reviewed_root_authorization_requires_actual_root_work_and_matching_capabilities() {
+    let ordinary = plan(vec![wait_step("ordinary", "Ordinary", 1)]);
+    assert!(!crate::executor::reviewed_plan_requires_root(&ordinary));
+    assert!(!crate::executor::reviewed_root_authorized(&ordinary));
+    let capability_only = ordinary.clone();
+    assert!(capability_only.runtime_capabilities.root_shell);
+    assert!(!crate::executor::reviewed_plan_requires_root(
+        &capability_only
+    ));
+    assert!(!crate::executor::reviewed_root_authorized(&capability_only));
+
+    let mut rooted = wait_step("rooted", "Rooted", 1);
+    rooted.constraints.capabilities = vec!["root_shell".to_string()];
+    rooted.skip_if = vec![condition(
+        "path_exists",
+        json!({"path": "/data/data/com.example/rooted"}),
+    )];
+    let mut unavailable = plan(vec![rooted.clone()]);
+    unavailable.runtime_capabilities.root_shell = false;
+    assert!(crate::executor::reviewed_plan_requires_root(&unavailable));
+    assert!(!crate::executor::reviewed_root_authorized(&unavailable));
+
+    let authorized = plan(vec![rooted]);
+    assert!(crate::executor::reviewed_plan_requires_root(&authorized));
+    assert!(crate::executor::reviewed_root_authorized(&authorized));
+}
+
+#[test]
+fn reviewed_root_authorization_classifies_input_bound_copy_destinations() {
+    let copy_step = |dest| ExecutionStep {
+        id: "example.recipe/copy".to_string(),
+        recipe_ref: "example.recipe".to_string(),
+        type_name: "copy_files".to_string(),
+        name: "Copy".to_string(),
+        note: "Copy".to_string(),
+        dependencies: Vec::new(),
+        constraints: constraints(),
+        params: [
+            (
+                "source".to_string(),
+                literal(json!({
+                    "type": "file_path",
+                    "value": "fixture.txt",
+                    "location": "host"
+                })),
+            ),
+            ("dest".to_string(), dest),
+            ("copy_policy".to_string(), literal(json!("merge"))),
+        ]
+        .into_iter()
+        .collect(),
+        skip_if: Vec::new(),
+        verify: Vec::new(),
+    };
+    let device_input = |value: &str, location: Option<&str>| ExecutionInputValue {
+        id: "destination".to_string(),
+        value: RuntimeValue {
+            type_name: "device_path".to_string(),
+            value: json!(value),
+            location: location.map(str::to_string),
+        },
+    };
+
+    let literal = plan(vec![copy_step(literal(json!(
+        "/data/data/com.example.app/files"
+    )))]);
+    assert!(crate::executor::reviewed_plan_requires_root(&literal));
+    assert!(crate::executor::reviewed_root_authorized(&literal));
+
+    let mut input_bound = plan(vec![copy_step(ExecutionParamValue::Ref {
+        ref_value: "inputs.destination".to_string(),
+    })]);
+    input_bound.inputs = vec![device_input(
+        "/data/data/com.example.app/files",
+        Some("device"),
+    )];
+    assert!(crate::executor::reviewed_plan_requires_root(&input_bound));
+    assert!(crate::executor::reviewed_root_authorized(&input_bound));
+
+    let mut missing_root_shell = input_bound.clone();
+    missing_root_shell.runtime_capabilities.root_shell = false;
+    assert!(crate::executor::reviewed_plan_requires_root(
+        &missing_root_shell
+    ));
+    assert!(!crate::executor::reviewed_root_authorized(
+        &missing_root_shell
+    ));
+
+    let mut missing_app_data_write = input_bound.clone();
+    missing_app_data_write.runtime_capabilities.app_data_write = false;
+    assert!(crate::executor::reviewed_plan_requires_root(
+        &missing_app_data_write
+    ));
+    assert!(!crate::executor::reviewed_root_authorized(
+        &missing_app_data_write
+    ));
+
+    let mut shared_storage = input_bound.clone();
+    shared_storage.inputs = vec![device_input("/sdcard/EmuChef", Some("device"))];
+    assert!(!crate::executor::reviewed_plan_requires_root(
+        &shared_storage
+    ));
+    assert!(!crate::executor::reviewed_root_authorized(&shared_storage));
+
+    let mut missing_input = input_bound.clone();
+    missing_input.inputs.clear();
+    assert!(!crate::executor::reviewed_plan_requires_root(
+        &missing_input
+    ));
+    assert!(!crate::executor::reviewed_root_authorized(&missing_input));
+
+    let mut malformed_input = input_bound.clone();
+    malformed_input.inputs = vec![ExecutionInputValue {
+        id: "destination".to_string(),
+        value: RuntimeValue {
+            type_name: "device_path".to_string(),
+            value: json!(["/data/data/com.example.app/files"]),
+            location: Some("device".to_string()),
+        },
+    }];
+    assert!(!crate::executor::reviewed_plan_requires_root(
+        &malformed_input
+    ));
+    assert!(!crate::executor::reviewed_root_authorized(&malformed_input));
+
+    let mut host_input = input_bound;
+    host_input.inputs = vec![device_input(
+        "/data/data/com.example.app/files",
+        Some("host"),
+    )];
+    assert!(!crate::executor::reviewed_plan_requires_root(&host_input));
+    assert!(!crate::executor::reviewed_root_authorized(&host_input));
+}
+
+#[test]
+fn reviewed_root_authorization_classifies_device_archive_destinations_and_private_predicates() {
+    let extract_step = |extract_on: &str, dest: &str| {
+        let mut step = extract_archive_step(
+            "example.recipe/extract",
+            std::path::Path::new("/tmp/fixture.zip"),
+        );
+        step.params
+            .insert("extract_on".to_string(), literal(json!(extract_on)));
+        step.params.insert("dest".to_string(), literal(json!(dest)));
+        step
+    };
+
+    let app_private_extract = plan(vec![extract_step(
+        "device",
+        "/data/data/com.example.app/extracted",
+    )]);
+    assert!(crate::executor::reviewed_plan_requires_root(
+        &app_private_extract
+    ));
+    assert!(crate::executor::reviewed_root_authorized(
+        &app_private_extract
+    ));
+
+    let shared_storage_extract = plan(vec![extract_step("device", "/sdcard/EmuChef/extracted")]);
+    assert!(!crate::executor::reviewed_plan_requires_root(
+        &shared_storage_extract
+    ));
+    assert!(!crate::executor::reviewed_root_authorized(
+        &shared_storage_extract
+    ));
+
+    let host_extract_with_unused_private_dest = plan(vec![extract_step(
+        "host",
+        "/data/data/com.example.app/extracted",
+    )]);
+    assert!(!crate::executor::reviewed_plan_requires_root(
+        &host_extract_with_unused_private_dest
+    ));
+
+    let mut private_predicate = wait_step("private-predicate", "Private predicate", 1);
+    private_predicate.skip_if = vec![condition(
+        "path_exists",
+        json!({ "path": "/data/user/0/com.example.app/files" }),
+    )];
+    assert!(crate::executor::reviewed_plan_requires_root(&plan(vec![
+        private_predicate,
+    ])));
+
+    let mut shared_storage_predicate = wait_step("shared-predicate", "Shared predicate", 1);
+    shared_storage_predicate.skip_if = vec![condition(
+        "path_exists",
+        json!({ "path": "/sdcard/EmuChef/files" }),
+    )];
+    assert!(!crate::executor::reviewed_plan_requires_root(&plan(vec![
+        shared_storage_predicate,
+    ])));
+}
+
+#[test]
+fn reviewed_root_requirements_keep_current_permission_commands_nonprivileged() {
+    let mut permissions = wait_step("permissions", "Permissions", 1);
+    permissions.type_name = "grant_permissions".to_string();
+    permissions.constraints.capabilities =
+        vec!["root_shell".to_string(), "app_data_write".to_string()];
+    assert!(!crate::executor::reviewed_plan_requires_root(&plan(vec![
+        permissions.clone(),
+    ])));
+
+    permissions.skip_if = vec![condition(
+        "path_exists",
+        json!({ "path": "/data/data/com.example.app/permission-state" }),
+    )];
+    assert!(crate::executor::reviewed_plan_requires_root(&plan(vec![
+        permissions
+    ])));
+}
+
+#[test]
+fn runner_executes_input_bound_app_private_destination_with_fresh_root_probes() {
+    let temp = tempfile::tempdir().expect("temporary source root should be available");
+    let source_path = temp.path().join("payload.txt");
+    fs::write(&source_path, "payload").expect("source fixture should be written");
+    let mut params = OrderedMap::new();
+    params.insert(
+        "source".to_string(),
+        literal(json!({
+            "type": "file_path",
+            "value": source_path,
+            "location": "host"
+        })),
+    );
+    params.insert(
+        "dest".to_string(),
+        ExecutionParamValue::Ref {
+            ref_value: "inputs.destination".to_string(),
+        },
+    );
+    params.insert("copy_policy".to_string(), literal(json!("replace")));
+    let step = ExecutionStep {
+        id: "example.recipe/copy".to_string(),
+        recipe_ref: "example.recipe".to_string(),
+        type_name: "copy_files".to_string(),
+        name: "Copy".to_string(),
+        note: "Copy".to_string(),
+        dependencies: Vec::new(),
+        constraints: constraints(),
+        params,
+        skip_if: Vec::new(),
+        verify: Vec::new(),
+    };
+    let mut execution_plan = plan(vec![step]);
+    execution_plan.inputs = vec![ExecutionInputValue {
+        id: "destination".to_string(),
+        value: RuntimeValue {
+            type_name: "device_path".to_string(),
+            value: json!("/data/data/com.example.app/payload.txt"),
+            location: Some("device".to_string()),
+        },
+    }];
+    assert!(crate::executor::reviewed_root_authorized(&execution_plan));
+    let mut command_executor = FakeAdbCommandExecutor::default();
+    for _ in 0..3 {
+        command_executor.push_completed(0, "", "");
+    }
+    command_executor.push_completed(0, "uid=0(root) gid=0(root)\n", "");
+    command_executor.push_completed(0, "uid=0(root) gid=0(root)\n", "");
+    command_executor.push_completed(0, "uid=0(root) gid=0(root)\n", "");
+    command_executor.push_completed(0, "uid=0(root) gid=0(root)\n", "");
+    command_executor.push_completed(0, "uid=0(root) gid=0(root)\n", "");
+    let device = RealAdbDevice::with_executor("adb", Some("reviewed-serial"), command_executor);
+    let adapters = ExecutorAdapters::with_device_and_sandbox_roots(
+        device,
+        temp.path().join("runtime"),
+        temp.path().join("cache"),
+        temp.path().join("fake-device"),
+        vec![temp.path().to_path_buf()],
+        false,
+    );
+    let mut runner = ExecutorRunner::new(adapters);
+    let result = runner.run(&execution_plan);
+    assert!(
+        result.success,
+        "root-authorized reviewed work should execute: {result:?}; calls={:?}",
+        runner.adapters().device().command_executor().calls()
+    );
+    assert_eq!(
+        runner.adapters().device().command_executor().operations(),
+        &[
+            ProcessOperation::ShellMutation,
+            ProcessOperation::ShellMutation,
+            ProcessOperation::Push,
+            ProcessOperation::RootPreflight,
+            ProcessOperation::Predicate,
+            ProcessOperation::RootPreflight,
+            ProcessOperation::ShellMutation,
+            ProcessOperation::RootPreflight,
+            ProcessOperation::DeviceCopy,
+            ProcessOperation::ShellMutation,
+        ]
+    );
+}
+
+#[test]
+fn root_authority_failure_after_completed_mutation_uses_exact_private_marker() {
+    let mut command_executor = FakeAdbCommandExecutor::default();
+    command_executor.push_completed(1, "", "ordinary command failure");
+    command_executor.push_completed(1, "", "Permission denied");
+    let mut device = RealAdbDevice::with_executor("adb", Some("reviewed-serial"), command_executor);
+    device.configure_root_authority(true);
+    let _ = crate::executor::ExecutorDevice::mkdir_p(&mut device, "/sdcard/previous");
+    let failure = crate::executor::ExecutorDevice::copy_on_device(
+        &mut device,
+        "/sdcard/source",
+        "/data/data/com.example.app/dest",
+        false,
+        true,
+    )
+    .expect_err("denied fresh root evidence should fail the privileged command");
+    assert_eq!(failure.kind, DeviceOperationKind::RootAuthorityRevoked);
+    assert_eq!(
+        failure.message,
+        crate::executor::root_authority::ROOT_AUTHORITY_FAILURE_AFTER_MUTATION_MARKER
+    );
+
+    let mut fresh_executor = FakeAdbCommandExecutor::default();
+    fresh_executor.push_completed(1, "", "su: permission denied");
+    let mut fresh_device =
+        RealAdbDevice::with_executor("adb", Some("reviewed-serial"), fresh_executor);
+    fresh_device.configure_root_authority(true);
+    let fresh_failure = crate::executor::ExecutorDevice::copy_on_device(
+        &mut fresh_device,
+        "/sdcard/source",
+        "/data/data/com.example.app/dest",
+        false,
+        true,
+    )
+    .expect_err("root denial before any mutation should remain unmarked");
+    assert_eq!(
+        fresh_failure.kind,
+        DeviceOperationKind::RootAuthorityRevoked
+    );
+    assert_ne!(
+        fresh_failure.message,
+        crate::executor::root_authority::ROOT_AUTHORITY_FAILURE_AFTER_MUTATION_MARKER
+    );
+}
+
+#[test]
+fn permission_commands_are_nonprivileged_but_record_mutation_evidence() {
+    let mut command_executor = FakeAdbCommandExecutor::default();
+    command_executor.push_completed(1, "", "permission denied");
+    command_executor.push_completed(1, "", "su: permission denied");
+    let mut device = RealAdbDevice::with_executor("adb", Some("reviewed-serial"), command_executor);
+    device.configure_root_authority(true);
+
+    let permission_failure = crate::executor::ExecutorDevice::run_plan_command(
+        &mut device,
+        vec![
+            "adb".to_string(),
+            "shell".to_string(),
+            "pm".to_string(),
+            "grant".to_string(),
+            "com.example.app".to_string(),
+            "android.permission.CAMERA".to_string(),
+        ],
+    )
+    .expect_err("permission failure should remain an ordinary command failure");
+    assert_eq!(permission_failure.kind, DeviceOperationKind::CommandFailed);
+
+    let root_failure = crate::executor::ExecutorDevice::copy_on_device(
+        &mut device,
+        "/sdcard/source",
+        "/data/data/com.example.app/dest",
+        false,
+        true,
+    )
+    .expect_err("fresh root denial should fail before privileged work");
+    assert_eq!(root_failure.kind, DeviceOperationKind::RootAuthorityRevoked);
+    assert_eq!(
+        root_failure.message,
+        crate::executor::root_authority::ROOT_AUTHORITY_FAILURE_AFTER_MUTATION_MARKER
+    );
+    let calls = device.command_executor().calls();
+    assert_eq!(calls.len(), 2);
+    assert!(calls[0]
+        .windows(2)
+        .any(|pair| pair == ["shell".to_string(), "pm".to_string()]));
+    assert!(calls[0].iter().all(|argument| argument != "su"));
+    assert!(calls[1].ends_with(&[
+        "shell".to_string(),
+        "su".to_string(),
+        "-c".to_string(),
+        "id".to_string(),
+    ]));
+}
+
+#[test]
+fn mutation_evidence_precedes_post_identity_override() {
+    let mut command_executor = FakeAdbCommandExecutor::default();
+    push_identity_sample(&mut command_executor, "a1b2");
+    push_identity_sample(&mut command_executor, "a1b2");
+    command_executor.push_completed(1, "", "ordinary command failure");
+    push_identity_sample(&mut command_executor, "c3d4");
+    push_identity_sample(&mut command_executor, "c3d4");
+    command_executor.push_completed(1, "", "su: permission denied");
+    let mut device = RealAdbDevice::with_executor("adb", Some("reviewed-serial"), command_executor);
+    device.configure_identity_guard(Some(&crate::planner::TargetDeviceBinding {
+        serial: "reviewed-serial".to_string(),
+        manufacturer: Some("Example".to_string()),
+        model: Some("Example".to_string()),
+        android_api_level: Some(33),
+    }));
+    device.configure_root_authority(true);
+    let command = vec![
+        "adb".to_string(),
+        "shell".to_string(),
+        "pm".to_string(),
+        "grant".to_string(),
+        "com.example.app".to_string(),
+        "android.permission.CAMERA".to_string(),
+    ];
+    let identity_failure = crate::executor::ExecutorDevice::run_plan_command(&mut device, command)
+        .expect_err("post-operation identity change should override ordinary failure");
+    assert_eq!(
+        identity_failure.kind,
+        DeviceOperationKind::DeviceIdentityChanged(IdentityCheckPhase::PostOperation)
+    );
+    device.configure_identity_guard(None);
+    let root_failure = crate::executor::ExecutorDevice::copy_on_device(
+        &mut device,
+        "/sdcard/source",
+        "/data/data/com.example.app/dest",
+        false,
+        true,
+    )
+    .expect_err("later root loss should use prior mutation evidence");
+    assert_eq!(root_failure.kind, DeviceOperationKind::RootAuthorityRevoked);
+    assert_eq!(
+        root_failure.message,
+        crate::executor::root_authority::ROOT_AUTHORITY_FAILURE_AFTER_MUTATION_MARKER
+    );
+}
+
+#[test]
+fn unauthorized_privileged_adapter_call_fails_closed_without_probe_or_command() {
+    let device = RealAdbDevice::with_executor(
+        "adb",
+        Some("reviewed-serial"),
+        FakeAdbCommandExecutor::default(),
+    );
+    let mut adapters = ExecutorAdapters::with_device(device);
+    let failure = crate::executor::ExecutorDevice::copy_on_device(
+        adapters.device_mut(),
+        "/sdcard/source",
+        "/data/data/com.example.app/dest",
+        false,
+        true,
+    )
+    .expect_err("unreviewed privileged work must fail closed");
+    assert_eq!(failure.kind, DeviceOperationKind::RootAuthorityUnverified);
+    assert!(adapters.device().command_executor().calls().is_empty());
+}
+
+#[test]
+fn completed_root_denial_rechecks_identity_once_and_identity_failure_wins() {
+    let mut command_executor = FakeAdbCommandExecutor::default();
+    push_identity_sample(&mut command_executor, "a1b2");
+    push_identity_sample(&mut command_executor, "a1b2");
+    command_executor.push_completed(1, "", "su: permission denied");
+    push_identity_sample(&mut command_executor, "c3d4");
+    push_identity_sample(&mut command_executor, "c3d4");
+    let mut device = RealAdbDevice::with_executor("adb", Some("reviewed-serial"), command_executor);
+    device.configure_identity_guard(Some(&crate::planner::TargetDeviceBinding {
+        serial: "reviewed-serial".to_string(),
+        manufacturer: Some("Example".to_string()),
+        model: Some("Example".to_string()),
+        android_api_level: Some(33),
+    }));
+    device.configure_root_authority(true);
+
+    let failure = crate::executor::ExecutorDevice::path_exists(
+        &mut device,
+        "/data/data/com.example.app/private.txt",
+    )
+    .expect_err("root denial should fail closed");
+    assert_eq!(
+        failure.kind,
+        DeviceOperationKind::DeviceIdentityChanged(IdentityCheckPhase::PreOperation)
+    );
+    assert!(!failure
+        .message
+        .contains(crate::executor::identity::POST_OPERATION_IDENTITY_FAILURE_MARKER));
+    let calls = device.command_executor().calls();
+    assert_eq!(
+        calls
+            .iter()
+            .filter(|call| call.ends_with(&[
+                "shell".to_string(),
+                "su".to_string(),
+                "-c".to_string(),
+                "id".to_string(),
+            ]))
+            .count(),
+        1
+    );
+    assert_eq!(calls.len(), 9, "one root denial plus one identity recheck");
+    assert!(calls.iter().all(|call| {
+        call.last()
+            .is_none_or(|payload| payload != "test -e '/data/data/com.example.app/private.txt'")
+    }));
+}
+
+#[test]
 fn failed_root_preflight_aborts_root_steps_without_privileged_conditions_or_later_mutation() {
     let mut device = crate::executor::FakeDryRunDevice::default();
     device.set_root_preflight_result(Err("root access denied".to_string()));
@@ -202,6 +710,7 @@ fn failed_root_preflight_aborts_root_steps_without_privileged_conditions_or_late
     let mut runner = ExecutorRunner::new(ExecutorAdapters::with_device(device));
     let result = runner.run(&plan(vec![guarded, later]));
     assert!(!result.success);
+    assert_eq!(result.steps.len(), 2);
     assert_eq!(
         result.steps[0].status,
         crate::executor::StepRunStatus::Failed
@@ -606,7 +1115,7 @@ fn grant_permissions_dry_run_result_matches_compatibility_without_exposing_recor
             "when": {"rooted": false}
         }])),
     );
-    let execution_plan = plan(vec![ExecutionStep {
+    let mut grant_step = ExecutionStep {
         id: "example.recipe/grant".to_string(),
         recipe_ref: "example.recipe".to_string(),
         type_name: "grant_permissions".to_string(),
@@ -617,7 +1126,10 @@ fn grant_permissions_dry_run_result_matches_compatibility_without_exposing_recor
         params,
         skip_if: Vec::new(),
         verify: Vec::new(),
-    }]);
+    };
+    grant_step.constraints.capabilities =
+        vec!["root_shell".to_string(), "app_data_write".to_string()];
+    let execution_plan = plan(vec![grant_step]);
 
     let (actual, runner) = run_value(&execution_plan, DryRunExecutorAdapters::default());
 
@@ -626,6 +1138,7 @@ fn grant_permissions_dry_run_result_matches_compatibility_without_exposing_recor
         read_golden("phase6o_executor_grant_permissions.json")
     );
     assert_eq!(runner.adapters().device().commands().len(), 1);
+    assert_eq!(runner.adapters().device().root_preflight_calls(), 0);
     assert!(actual.to_string().contains("permission_results"));
     assert!(!actual.to_string().contains("run_plan_command"));
 }
@@ -837,6 +1350,10 @@ fn transport_failure_in_skip_predicate_fails_current_step_without_false_result_o
 fn transport_failure_in_root_preflight_fails_current_step_and_stops_later_work() {
     let mut rooted = wait_step("example.recipe/rooted", "Rooted", 1);
     rooted.constraints.capabilities = vec!["root_shell".to_string()];
+    rooted.skip_if = vec![condition(
+        "path_exists",
+        json!({"path": "/data/data/com.example/rooted"}),
+    )];
     let execution_plan = plan(vec![rooted, wait_step("example.recipe/later", "Later", 1)]);
     let mut command_executor = FakeAdbCommandExecutor::default();
     command_executor.push_completed(1, "", "error: device unauthorized");
@@ -964,6 +1481,8 @@ fn device_fail_stop_predicate_excludes_ordinary_and_root_failures() {
     assert!(!StepFailureKind::OperationCommandFailed.requires_device_fail_stop());
     assert!(!StepFailureKind::RootDenied.requires_device_fail_stop());
     assert!(!StepFailureKind::RootUnavailable.requires_device_fail_stop());
+    assert!(StepFailureKind::RootAuthorityRevoked.requires_device_fail_stop());
+    assert!(StepFailureKind::RootAuthorityUnverified.requires_device_fail_stop());
     assert!(!StepFailureKind::OperationFailed.requires_device_fail_stop());
     assert!(DeviceOperationKind::AdbServerUnavailable.requires_device_fail_stop());
     assert!(!DeviceOperationKind::CommandFailed.requires_device_fail_stop());
@@ -1007,6 +1526,14 @@ fn every_private_adb_transport_kind_maps_through_device_operation_kind() {
                 phase: IdentityCheckPhase::PreOperation,
             },
             DeviceOperationKind::DeviceIdentityUnverified(IdentityCheckPhase::PreOperation),
+        ),
+        (
+            AdbCommandError::RootAuthorityRevoked,
+            DeviceOperationKind::RootAuthorityRevoked,
+        ),
+        (
+            AdbCommandError::RootAuthorityUnverified,
+            DeviceOperationKind::RootAuthorityUnverified,
         ),
     ];
     for (error, expected) in cases {
@@ -2033,10 +2560,12 @@ fn real_adb_device_construction_does_not_run_commands() {
 #[test]
 fn adb_shell_payload_quoting_matches_compatibility_shlex_join() {
     let mut executor = FakeAdbCommandExecutor::default();
-    for _ in 0..5 {
+    for _ in 0..4 {
         executor.push_completed(0, "", "");
     }
+    executor.push_completed(0, "uid=0(root) gid=0(root)\n", "");
     let mut device = RealAdbDevice::with_executor("adb", Some("emulator-5554"), executor);
+    device.configure_root_authority(true);
 
     assert!(device.path_exists("/sdcard/My File.txt").unwrap());
     assert!(device.path_exists("/sdcard/has'quote.txt").unwrap());
@@ -2084,6 +2613,15 @@ fn adb_shell_payload_quoting_matches_compatibility_shlex_join() {
                 "-s".to_string(),
                 "emulator-5554".to_string(),
                 "shell".to_string(),
+                "su".to_string(),
+                "-c".to_string(),
+                "id".to_string(),
+            ],
+            vec![
+                "adb".to_string(),
+                "-s".to_string(),
+                "emulator-5554".to_string(),
+                "shell".to_string(),
                 r#"su -c 'test -e '"'"'/data/data/com.example/weird path'"'"''"#.to_string(),
             ],
         ]
@@ -2093,10 +2631,11 @@ fn adb_shell_payload_quoting_matches_compatibility_shlex_join() {
 #[test]
 fn app_private_operations_route_through_safely_quoted_su_without_privileging_shared_storage() {
     let mut executor = FakeAdbCommandExecutor::default();
-    for _ in 0..7 {
-        executor.push_completed(0, "", "");
+    for _ in 0..12 {
+        executor.push_completed(0, "uid=0(root) gid=0(root)\n", "");
     }
     let mut device = RealAdbDevice::with_executor("adb", Some("root-device"), executor);
+    device.configure_root_authority(true);
     let data_data = "/data/data/com.emuchef.fixture/space '$dollar;*[]\\";
     let data_user = "/data/user/0/com.emuchef.fixture/space '$dollar;*[]\\";
 
@@ -2111,8 +2650,28 @@ fn app_private_operations_route_through_safely_quoted_su_without_privileging_sha
     device.mkdir_p("/sdcard/EmuChef Qualification").unwrap();
 
     let calls = device.command_executor().calls();
-    assert_eq!(calls.len(), 7);
-    for call in &calls[..6] {
+    assert_eq!(calls.len(), 13);
+    let root_probes = calls
+        .iter()
+        .filter(|call| {
+            call.ends_with(&[
+                "shell".to_string(),
+                "su".to_string(),
+                "-c".to_string(),
+                "id".to_string(),
+            ])
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(root_probes.len(), 6);
+    let privileged_calls = calls
+        .iter()
+        .filter(|call| {
+            call.last()
+                .is_some_and(|payload| payload.starts_with("su -c '"))
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(privileged_calls.len(), 6);
+    for call in privileged_calls {
         let payload = call.last().expect("app-private shell call needs a payload");
         assert!(
             payload.starts_with("su -c '"),
@@ -2125,7 +2684,7 @@ fn app_private_operations_route_through_safely_quoted_su_without_privileging_sha
         assert!(payload.contains("$dollar;*[]\\"));
     }
     assert_eq!(
-        calls[6].last().map(String::as_str),
+        calls[12].last().map(String::as_str),
         Some("mkdir -p '/sdcard/EmuChef Qualification'")
     );
 }
@@ -2154,8 +2713,9 @@ fn authority_loss_after_successful_preflight_fails_first_privileged_mutation_and
     dependent.dependencies = vec![copy.id.clone()];
 
     let mut executor = FakeAdbCommandExecutor::default();
-    executor.push_completed(0, "uid=0(root) gid=0(root)\n", "");
     executor.push_completed(0, "", "");
+    executor.push_completed(0, "", "");
+    executor.push_completed(0, "uid=0(root) gid=0(root)\n", "");
     executor.push_completed(0, "", "");
     executor.push_completed(1, "", "su: permission denied");
     executor.push_completed(0, "", "");
@@ -2174,36 +2734,36 @@ fn authority_loss_after_successful_preflight_fails_first_privileged_mutation_and
 
     assert!(!result.success);
     assert_eq!(
+        result.steps.len(),
+        1,
+        "device fail-stop leaves later work pending"
+    );
+    assert_eq!(
         result.steps[0].status,
         crate::executor::StepRunStatus::Failed
     );
-    assert_eq!(
-        result.steps[1].status,
-        crate::executor::StepRunStatus::Blocked
-    );
     let calls = runner.adapters().device().command_executor().calls();
-    assert_eq!(
-        calls
-            .iter()
-            .filter(|call| call.ends_with(&[
+    let root_probes = calls
+        .iter()
+        .filter(|call| {
+            call.ends_with(&[
                 "shell".to_string(),
                 "su".to_string(),
                 "-c".to_string(),
                 "id".to_string(),
-            ]))
-            .count(),
-        1,
-        "current production behavior performs at most one successful preflight in this run"
-    );
-    let denied = &calls[3];
-    assert!(denied
+            ])
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(root_probes.len(), 2);
+    assert!(calls[3]
         .last()
-        .expect("privileged removal needs a shell payload")
+        .expect("first root mutation needs a shell payload")
         .starts_with("su -c 'rm -rf "));
+    assert_eq!(calls[4][6], "id");
     assert_eq!(
         calls.len(),
-        5,
-        "stage cleanup is the only command after denial"
+        6,
+        "stage cleanup is the only command after the denied root recheck"
     );
 }
 
@@ -2521,11 +3081,13 @@ fn rust_real_adb_file_operations_forward_exact_executable_and_serial() {
     let tmp = tempfile::tempdir().expect("temp root should be created");
     let source = tmp.path().join("payload.bin");
     fs::write(&source, "payload").expect("source should be writable");
-    let mut device = RealAdbDevice::with_executor(
-        "/opt/android/adb",
-        Some("device-123"),
-        FakeAdbCommandExecutor::default(),
-    );
+    let mut executor = FakeAdbCommandExecutor::default();
+    for _ in 0..5 {
+        executor.push_completed(0, "", "");
+    }
+    executor.push_completed(0, "uid=0(root) gid=0(root)\n", "");
+    let mut device = RealAdbDevice::with_executor("/opt/android/adb", Some("device-123"), executor);
+    device.configure_root_authority(true);
 
     device.push(&source, "/sdcard/payload.bin", false).unwrap();
     device.push(&source, "/sdcard/payload.bin", true).unwrap();
@@ -2542,7 +3104,7 @@ fn rust_real_adb_file_operations_forward_exact_executable_and_serial() {
         .unwrap();
 
     let calls = device.command_executor().calls();
-    assert_eq!(calls.len(), 6);
+    assert_eq!(calls.len(), 7);
     assert!(calls.iter().all(|call| {
         call.starts_with(&[
             "/opt/android/adb".to_string(),
@@ -2555,7 +3117,7 @@ fn rust_real_adb_file_operations_forward_exact_executable_and_serial() {
         calls[1][3..6],
         ["push", "--sync", source.to_string_lossy().as_ref()]
     );
-    assert!(calls[5]
+    assert!(calls[6]
         .last()
         .expect("privileged copy should have a shell payload")
         .starts_with("su -c "));

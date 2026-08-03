@@ -460,6 +460,94 @@ describe("execution recovery actions", () => {
     expect(screen.queryByText(/android_id|build\.fingerprint|private serial/i)).toBeNull();
   });
 
+  test("root authority issue projections stay sanitized and require fresh root qualification", () => {
+    const snapshot: RealExecutionSnapshot = {
+      ...failedSnapshot(),
+      simulated: false,
+      verificationScope: "real_device",
+      target: { label: "Connected Android device" },
+      launchAction: null,
+      recipes: [{
+        name: "Root-bound work",
+        description: null,
+        status: "failed",
+        steps: [{ name: "Later action", note: null, status: "pending", message: null }],
+      }],
+      completion: {
+        ...failedSnapshot().completion,
+        counts: { ...failedSnapshot().completion.counts, total: 1, failed: 0, pending: 1 },
+        partialChangesPossible: false,
+      },
+      errors: [{
+        message: "Root access was revoked during execution.",
+        remediation: {
+          kind: "requalify_root",
+          title: "Requalify root access",
+          message: "Complete fresh root qualification, generate a fresh plan, and review it before another real run. The old execution cannot be resumed.",
+        },
+      }],
+    };
+    const { rerender } = render(
+      <ExecutionStep
+        execution={{
+          kind: "terminal",
+          generation: 1,
+          mode: "real",
+          snapshot,
+          events: [],
+          eventCursor: 0,
+          cancellationRequested: false,
+        }}
+        launchState="idle"
+        repairPreparing={false}
+        reportState="idle"
+        onCancel={vi.fn()}
+        onExportReport={vi.fn()}
+        onLaunchConfiguredApp={vi.fn()}
+        onPrepareRepair={vi.fn()}
+        onReturn={vi.fn()}
+      />,
+    );
+    expect(screen.getByText(/root access was revoked/i)).toBeTruthy();
+    expect(screen.getByText(/fresh root qualification/i)).toBeTruthy();
+    expect(screen.getByText(/old execution cannot be resumed/i)).toBeTruthy();
+    expect(screen.getAllByText(/Not attempted/i).length).toBeGreaterThan(0);
+    expect(screen.queryByText(/\b(?:su|uid=0|raw root stderr|private serial)\b/i)).toBeNull();
+
+    rerender(
+      <ExecutionStep
+        execution={{
+          kind: "terminal",
+          generation: 1,
+          mode: "real",
+          snapshot: {
+            ...snapshot,
+            errors: [{
+              message: "EmuChef could not safely confirm continued root access.",
+              remediation: {
+                kind: "requalify_root",
+                title: "Requalify root access",
+                message: "Complete fresh root qualification, generate a fresh plan, and review it before another real run. The old execution cannot be resumed.",
+              },
+            }],
+          },
+          events: [],
+          eventCursor: 0,
+          cancellationRequested: false,
+        }}
+        launchState="idle"
+        repairPreparing={false}
+        reportState="idle"
+        onCancel={vi.fn()}
+        onExportReport={vi.fn()}
+        onLaunchConfiguredApp={vi.fn()}
+        onPrepareRepair={vi.fn()}
+        onReturn={vi.fn()}
+      />,
+    );
+    expect(screen.getByText(/could not safely confirm continued root access/i)).toBeTruthy();
+  });
+
   test("separates failed and blocked results without exposing raw result names or changing order", () => {
     const snapshot: ExecutionSnapshot = {
       ...failedSnapshot(),

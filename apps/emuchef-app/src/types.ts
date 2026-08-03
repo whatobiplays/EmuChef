@@ -225,6 +225,7 @@ export interface ExecutionIssue {
 
 export type RemediationKind =
   | "reconnect_device"
+  | "requalify_root"
   | "repair_platform_tools"
   | "review_inputs"
   | "generate_fresh_plan"

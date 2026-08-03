@@ -1003,6 +1003,10 @@ fn issue_code(
         Some(StepFailureKind::DeviceIdentityUnverified(_)) => {
             return "device_identity_unverified".to_string()
         }
+        Some(StepFailureKind::RootAuthorityRevoked) => return "root_authority_revoked".to_string(),
+        Some(StepFailureKind::RootAuthorityUnverified) => {
+            return "root_authority_unverified".to_string()
+        }
         Some(StepFailureKind::TransportReset | StepFailureKind::TransportFailure) => {
             return "device_transport_lost".to_string()
         }
@@ -1347,6 +1351,26 @@ mod tests {
                 )),
             ),
             "device_identity_unverified"
+        );
+    }
+
+    #[test]
+    fn root_authority_failures_keep_distinct_stable_issue_codes() {
+        assert_eq!(
+            issue_code(
+                StepRunStatus::Failed,
+                Some("ignored"),
+                Some(StepFailureKind::RootAuthorityRevoked),
+            ),
+            "root_authority_revoked"
+        );
+        assert_eq!(
+            issue_code(
+                StepRunStatus::Failed,
+                Some("ignored"),
+                Some(StepFailureKind::RootAuthorityUnverified),
+            ),
+            "root_authority_unverified"
         );
     }
 

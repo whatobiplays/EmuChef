@@ -198,10 +198,28 @@ test("release ADB resolution cannot depend on PATH", () => {
   );
   assert.match(adb, /\.env_clear\(\)/);
   assert.match(adb, /\.stdin\(Stdio::null\(\)\)/);
-  assert.match(adb, /Timer::after\(/);
+  assert.match(adb, /const PROCESS_TIMEOUT: Duration\s*=\s*Duration::from_secs\(\d+\);/);
+  assert.match(adb, /const PROCESS_CLEANUP_TIMEOUT: Duration\s*=\s*Duration::from_secs\(\d+\);/);
+  assert.match(adb, /Timer::after\(timeout\)/);
+  assert.match(adb, /Timer::after\(PROCESS_CLEANUP_TIMEOUT\)/);
   assert.match(adb, /future::race\(/);
-  assert.match(adb, /PROCESS_TIMEOUT/);
-  assert.match(adb, /PROCESS_CLEANUP_TIMEOUT/);
+  assert.match(adb, /Command::new\(program\)/);
+  assert.match(adb, /cleanup_process\(&mut child\)/);
+  assert.match(adb, /child\.kill\(\)/);
+  assert.doesNotMatch(adb, /Command::new\(\s*"adb"\s*\)/);
+  assert.doesNotMatch(adb, /\b(?:which|where)\b/);
+  assert.doesNotMatch(
+    adb,
+    /Command::new\(\s*"(?:sh|bash|zsh)"\s*\)|\b(?:sh|bash|zsh)\b\s+-c/,
+  );
+  assert.match(adb, /#\[cfg\(debug_assertions\)\]\s*fn find_system_adb\(\)/s);
+  const debugPathLookup = sourceSlice(adb, "fn find_system_adb()", "\nfn setup_error");
+  assert.match(debugPathLookup, /std::env::var_os\("PATH"\)/);
+  const releaseSource = adb.replace(debugPathLookup, "");
+  assert.doesNotMatch(
+    releaseSource,
+    /std::env::(?:var_os|var)\("PATH"\)|std::env::split_paths/,
+  );
 });
 
 test("React DTOs contain opaque handles and no exact serial property", () => {

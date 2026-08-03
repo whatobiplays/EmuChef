@@ -7,6 +7,8 @@
 
 pub mod adb;
 pub(crate) mod identity;
+pub(crate) mod root_authority;
+pub(crate) mod root_requirements;
 
 use std::collections::{HashMap, HashSet};
 use std::fs::{self, File};
@@ -70,6 +72,8 @@ pub(crate) enum StepFailureKind {
     TransportFailure,
     DeviceIdentityChanged(identity::IdentityCheckPhase),
     DeviceIdentityUnverified(identity::IdentityCheckPhase),
+    RootAuthorityRevoked,
+    RootAuthorityUnverified,
     RootDenied,
     RootUnavailable,
     OperationFailed,
@@ -89,6 +93,8 @@ impl StepFailureKind {
                 | Self::TransportFailure
                 | Self::DeviceIdentityChanged(_)
                 | Self::DeviceIdentityUnverified(_)
+                | Self::RootAuthorityRevoked
+                | Self::RootAuthorityUnverified
         )
     }
 }
@@ -108,6 +114,8 @@ pub(crate) enum DeviceOperationKind {
     TransportFailure,
     DeviceIdentityChanged(identity::IdentityCheckPhase),
     DeviceIdentityUnverified(identity::IdentityCheckPhase),
+    RootAuthorityRevoked,
+    RootAuthorityUnverified,
     RootDenied,
     RootUnavailable,
     Other,
@@ -126,6 +134,8 @@ impl DeviceOperationKind {
                 | Self::TransportFailure
                 | Self::DeviceIdentityChanged(_)
                 | Self::DeviceIdentityUnverified(_)
+                | Self::RootAuthorityRevoked
+                | Self::RootAuthorityUnverified
         )
     }
 }
@@ -247,6 +257,16 @@ pub trait ExecutorDevice: std::fmt::Debug {
     /// Dry-run devices intentionally keep the default no-op implementation.
     fn configure_identity_guard(&mut self, _target: Option<&TargetDeviceBinding>) {}
 
+    /// Configure private execution-time root authority from the reviewed plan.
+    /// This lifecycle hook is not part of the executor-visible operation surface.
+    fn configure_root_authority(&mut self, _reviewed_root_authorized: bool) {}
+
+    /// Identify adapters that revalidate root at each root-wrapped command.
+    /// This lifecycle hook prevents duplicate runner-level preflight probes.
+    fn owns_per_command_root_authority(&self) -> bool {
+        false
+    }
+
     fn revalidate_root(&mut self) -> Result<(), DeviceOperationError> {
         Ok(())
     }
@@ -356,6 +376,9 @@ impl<D: ExecutorDevice> ExecutorRunner<D> {
         self.adapters
             .device
             .configure_identity_guard(plan.target_device.as_ref());
+        self.adapters
+            .device
+            .configure_root_authority(reviewed_root_authorized(plan));
 
         for step in &plan.steps {
             if aborted {
@@ -440,7 +463,7 @@ impl<D: ExecutorDevice> ExecutorRunner<D> {
                 continue;
             }
 
-            if step_requires_root(step) {
+            if plan_step_root_requirements(plan, step).any() {
                 if let Err(failure) = self.ensure_root_preflight() {
                     let device_fail_stop = failure
                         .failure_kind
@@ -722,6 +745,9 @@ impl<D: ExecutorDevice> ExecutorRunner<D> {
     }
 
     fn ensure_root_preflight(&mut self) -> Result<(), StepFailure> {
+        if self.adapters.device.owns_per_command_root_authority() {
+            return Ok(());
+        }
         match &self.root_preflight {
             RootPreflightState::Granted => return Ok(()),
             RootPreflightState::Failed(message) => {
@@ -1262,12 +1288,12 @@ impl<D: ExecutorDevice> ExecutorRunner<D> {
             )));
         }
         let sandbox = self.adapters.sandbox()?.clone();
-        let app_private_dest = is_app_private_path(dest);
+        let app_private_dest = root_requirements::is_app_private_path(dest);
         let app_private_source = source
             .location
             .as_deref()
             .is_some_and(|location| location == "device")
-            && is_app_private_path(&value_to_string(&source.value));
+            && root_requirements::is_app_private_path(&value_to_string(&source.value));
         if app_private_dest || app_private_source {
             self.ensure_root_preflight()?;
         }
@@ -1447,7 +1473,7 @@ impl<D: ExecutorDevice> ExecutorRunner<D> {
             }
             "path_exists" => {
                 let path = required_string_param(condition, "path").map_err(StepFailure::new)?;
-                if is_app_private_path(&path) {
+                if root_requirements::is_app_private_path(&path) {
                     self.ensure_root_preflight()?;
                 }
                 let device_exists = self
@@ -1468,7 +1494,7 @@ impl<D: ExecutorDevice> ExecutorRunner<D> {
             }
             "file_exists" => {
                 let path = required_string_param(condition, "path").map_err(StepFailure::new)?;
-                if is_app_private_path(&path) {
+                if root_requirements::is_app_private_path(&path) {
                     self.ensure_root_preflight()?;
                 }
                 let device_exists = self
@@ -1518,31 +1544,162 @@ fn calculate_apk_sha256(path: &Path) -> io::Result<String> {
         .collect())
 }
 
-fn step_requires_root(step: &ExecutionStep) -> bool {
-    step.constraints
-        .capabilities
+pub(crate) fn reviewed_plan_requires_root(plan: &ExecutionPlan) -> bool {
+    plan.steps
         .iter()
-        .any(|capability| matches!(capability.as_str(), "root_shell" | "app_data_write"))
-        || step
-            .skip_if
+        .any(|step| plan_step_root_requirements(plan, step).any())
+}
+
+pub(crate) fn reviewed_root_authorized(plan: &ExecutionPlan) -> bool {
+    if !reviewed_plan_requires_root(plan) {
+        return false;
+    }
+    let requirements = plan
+        .steps
+        .iter()
+        .map(|step| plan_step_root_requirements(plan, step))
+        .fold(
+            root_requirements::RootRequirements::default(),
+            |mut all, current| {
+                all.merge(current);
+                all
+            },
+        );
+    requirements.any()
+        && (!requirements.root_shell || plan.runtime_capabilities.root_shell)
+        && (!requirements.app_data_write || plan.runtime_capabilities.app_data_write)
+}
+
+fn plan_step_root_requirements(
+    plan: &ExecutionPlan,
+    step: &ExecutionStep,
+) -> root_requirements::RootRequirements {
+    let operation = root_requirements::root_work_operation(&step.type_name);
+    let (root_shell_constraint, app_data_write_constraint) =
+        root_requirements::root_requirement_constraints(
+            step.constraints.capabilities.iter().map(String::as_str),
+        );
+    let condition_requires_root = step
+        .skip_if
+        .iter()
+        .chain(step.verify.iter())
+        .any(condition_requires_root);
+    let source_requires_root = step
+        .params
+        .get("source")
+        .is_some_and(|value| execution_param_runtime_value_requires_root(plan, value));
+    let destination_requires_root = step
+        .params
+        .get("dest")
+        .is_some_and(|value| execution_param_destination_requires_root(plan, value));
+    let extracts_to_device = step
+        .params
+        .get("extract_on")
+        .is_some_and(|value| execution_param_is_string(plan, value, "device"));
+    root_requirements::classify_root_requirement_step(root_requirements::RootRequirementStep {
+        operation,
+        root_shell_constraint,
+        app_data_write_constraint,
+        condition_requires_root,
+        source_requires_root,
+        destination_requires_root,
+        extracts_to_device,
+    })
+}
+
+fn input_runtime_value<'a>(plan: &'a ExecutionPlan, ref_value: &str) -> Option<&'a RuntimeValue> {
+    let input_id = ref_value.strip_prefix("inputs.")?;
+    if input_id.is_empty() {
+        return None;
+    }
+    plan.inputs
+        .iter()
+        .find(|input| input.id == input_id)
+        .map(|input| &input.value)
+}
+
+fn execution_param_runtime_value_requires_root(
+    plan: &ExecutionPlan,
+    value: &ExecutionParamValue,
+) -> bool {
+    match value {
+        ExecutionParamValue::Literal { value } => {
+            runtime_value_json_is_app_private_device_path(value)
+        }
+        ExecutionParamValue::Ref { ref_value } => input_runtime_value(plan, ref_value)
+            .is_some_and(runtime_value_device_value_requires_root),
+    }
+}
+
+fn execution_param_destination_requires_root(
+    plan: &ExecutionPlan,
+    value: &ExecutionParamValue,
+) -> bool {
+    match value {
+        ExecutionParamValue::Literal { value } => value
+            .as_str()
+            .is_some_and(root_requirements::is_app_private_path),
+        ExecutionParamValue::Ref { ref_value } => input_runtime_value(plan, ref_value)
+            .is_some_and(runtime_value_device_path_requires_root),
+    }
+}
+
+fn execution_param_is_string(
+    plan: &ExecutionPlan,
+    value: &ExecutionParamValue,
+    expected: &str,
+) -> bool {
+    match value {
+        ExecutionParamValue::Literal { value } => value.as_str() == Some(expected),
+        ExecutionParamValue::Ref { ref_value } => {
+            input_runtime_value(plan, ref_value).and_then(|value| value.value.as_str())
+                == Some(expected)
+        }
+    }
+}
+
+fn runtime_value_device_value_requires_root(value: &RuntimeValue) -> bool {
+    value.location.as_deref() == Some("device")
+        && match &value.value {
+            Value::String(path) => root_requirements::is_app_private_path(path),
+            Value::Array(paths) => paths
+                .iter()
+                .filter_map(Value::as_str)
+                .any(root_requirements::is_app_private_path),
+            _ => false,
+        }
+}
+
+fn runtime_value_device_path_requires_root(value: &RuntimeValue) -> bool {
+    value.location.as_deref() == Some("device")
+        && value
+            .value
+            .as_str()
+            .is_some_and(root_requirements::is_app_private_path)
+}
+
+fn runtime_value_json_is_app_private_device_path(value: &Value) -> bool {
+    let Some(object) = value.as_object() else {
+        return false;
+    };
+    if object.get("location").and_then(Value::as_str) != Some("device") {
+        return false;
+    }
+    match object.get("value") {
+        Some(Value::String(path)) => root_requirements::is_app_private_path(path),
+        Some(Value::Array(paths)) => paths
             .iter()
-            .chain(step.verify.iter())
-            .any(condition_requires_root)
-        || (step.type_name == "copy_files"
-            && step.params.get("dest").is_some_and(|value| {
-                matches!(value, ExecutionParamValue::Literal { value } if value
-                    .as_str()
-                    .is_some_and(is_app_private_path))
-            }))
+            .filter_map(Value::as_str)
+            .any(root_requirements::is_app_private_path),
+        _ => false,
+    }
 }
 
 fn condition_requires_root(condition: &ExecutionStepCondition) -> bool {
-    matches!(condition.type_name.as_str(), "path_exists" | "file_exists")
-        && condition
-            .params
-            .get("path")
-            .and_then(Value::as_str)
-            .is_some_and(is_app_private_path)
+    root_requirements::condition_requires_root(
+        &condition.type_name,
+        condition.params.get("path").and_then(Value::as_str),
+    )
 }
 
 fn remote_release_outputs(
@@ -2049,7 +2206,7 @@ impl FakeDryRunDevice {
     }
 
     fn path_exists(&mut self, path: &str) -> bool {
-        let privileged = py_bool(is_app_private_path(path));
+        let privileged = py_bool(root_requirements::is_app_private_path(path));
         self.commands.push(vec![
             "path_exists".to_string(),
             path.to_string(),
@@ -2059,7 +2216,7 @@ impl FakeDryRunDevice {
     }
 
     fn path_is_dir(&mut self, path: &str) -> bool {
-        let privileged = py_bool(is_app_private_path(path));
+        let privileged = py_bool(root_requirements::is_app_private_path(path));
         self.commands.push(vec![
             "path_is_dir".to_string(),
             path.to_string(),
@@ -2267,6 +2424,16 @@ pub(crate) fn map_adb_error(error: adb::AdbCommandError) -> DeviceOperationError
             message: "Root access is unavailable on this device.".to_string(),
             cleanup: None,
         },
+        adb::AdbCommandError::RootAuthorityRevoked => DeviceOperationError {
+            kind: DeviceOperationKind::RootAuthorityRevoked,
+            message: "Root authority was revoked during execution.".to_string(),
+            cleanup: None,
+        },
+        adb::AdbCommandError::RootAuthorityUnverified => DeviceOperationError {
+            kind: DeviceOperationKind::RootAuthorityUnverified,
+            message: "Continued root authority could not be confirmed safely.".to_string(),
+            cleanup: None,
+        },
         adb::AdbCommandError::Resolution(_)
         | adb::AdbCommandError::RootCheckFailed
         | adb::AdbCommandError::InvalidPlanCommand(_) => DeviceOperationError::other(
@@ -2279,15 +2446,37 @@ fn real_adb_error<E: adb::AdbCommandExecutor>(
     device: &mut adb::RealAdbDevice<E>,
     fallback: String,
 ) -> DeviceOperationError {
+    let mutation_precedes_root_failure = device.root_authority_failure_after_mutation();
     device
         .take_last_error()
-        .map(map_adb_error)
+        .map(|error| {
+            let root_failure = matches!(
+                error,
+                adb::AdbCommandError::RootAuthorityRevoked
+                    | adb::AdbCommandError::RootAuthorityUnverified
+            );
+            let mut mapped = map_adb_error(error);
+            if root_failure && mutation_precedes_root_failure {
+                mapped.message =
+                    crate::executor::root_authority::ROOT_AUTHORITY_FAILURE_AFTER_MUTATION_MARKER
+                        .to_string();
+            }
+            mapped
+        })
         .unwrap_or_else(|| DeviceOperationError::other(fallback))
 }
 
 impl<E: adb::AdbCommandExecutor> ExecutorDevice for adb::RealAdbDevice<E> {
     fn configure_identity_guard(&mut self, target: Option<&TargetDeviceBinding>) {
         adb::RealAdbDevice::configure_identity_guard(self, target);
+    }
+
+    fn configure_root_authority(&mut self, reviewed_root_authorized: bool) {
+        adb::RealAdbDevice::configure_root_authority(self, reviewed_root_authorized);
+    }
+
+    fn owns_per_command_root_authority(&self) -> bool {
+        true
     }
 
     fn revalidate_root(&mut self) -> Result<(), DeviceOperationError> {
@@ -2807,6 +2996,12 @@ impl From<DeviceOperationError> for StepFailure {
             }
             DeviceOperationKind::DeviceIdentityUnverified(phase) => {
                 Some(StepFailureKind::DeviceIdentityUnverified(phase))
+            }
+            DeviceOperationKind::RootAuthorityRevoked => {
+                Some(StepFailureKind::RootAuthorityRevoked)
+            }
+            DeviceOperationKind::RootAuthorityUnverified => {
+                Some(StepFailureKind::RootAuthorityUnverified)
             }
             DeviceOperationKind::RootDenied => Some(StepFailureKind::RootDenied),
             DeviceOperationKind::RootUnavailable => Some(StepFailureKind::RootUnavailable),
@@ -3583,10 +3778,6 @@ fn insert_object_entries(
     for (key, value) in source {
         target.insert(key, value);
     }
-}
-
-fn is_app_private_path(path: &str) -> bool {
-    path.starts_with("/data/user/") || path.starts_with("/data/data/")
 }
 
 fn py_bool(value: bool) -> &'static str {

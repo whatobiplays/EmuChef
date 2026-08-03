@@ -10,6 +10,8 @@ use crate::owned_process::{
 use crate::planner::TargetDeviceBinding;
 
 use super::identity::{IdentityCheckPhase, POST_OPERATION_IDENTITY_FAILURE_MARKER};
+use super::root_authority::{self, DeviceCommandEffect};
+use super::root_requirements::is_app_private_path;
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct AdbCommandResult {
@@ -45,6 +47,8 @@ pub enum AdbCommandError {
     RootDenied,
     RootUnavailable,
     RootCheckFailed,
+    RootAuthorityRevoked,
+    RootAuthorityUnverified,
     InvalidPlanCommand(String),
 }
 
@@ -93,6 +97,12 @@ impl fmt::Display for AdbCommandError {
             }
             AdbCommandError::RootCheckFailed => {
                 formatter.write_str("Root access could not be checked safely.")
+            }
+            AdbCommandError::RootAuthorityRevoked => {
+                formatter.write_str("Root authority was revoked during execution.")
+            }
+            AdbCommandError::RootAuthorityUnverified => {
+                formatter.write_str("Continued root authority could not be confirmed safely.")
             }
         }
     }
@@ -213,15 +223,9 @@ pub(crate) fn probe_root_typed<E: AdbCommandExecutor>(
 }
 
 fn classify_root_result(result: &AdbCommandResult) -> RootProbeOutcome {
-    if result.returncode == 0 {
-        let normalized = result.stdout.trim().to_ascii_lowercase();
-        if normalized.starts_with("uid=0(") || normalized.starts_with("uid=0 ") {
-            return RootProbeOutcome::Granted;
-        }
-        return RootProbeOutcome::CheckFailed {
-            reason: RootProbeFailureReason::UnexpectedResponse,
-            message: "The root access check returned an unexpected response.",
-        };
+    let normalized_stdout = result.stdout.trim().to_ascii_lowercase();
+    if normalized_stdout.starts_with("uid=0(") || normalized_stdout.starts_with("uid=0 ") {
+        return RootProbeOutcome::Granted;
     }
     let combined = format!("{}\n{}", result.stdout, result.stderr);
     let lower = combined.to_ascii_lowercase();
@@ -386,6 +390,7 @@ pub struct RealAdbDevice<E: AdbCommandExecutor = ProcessAdbCommandExecutor> {
     runner: AdbCommandRunner<E>,
     last_error: Option<AdbCommandError>,
     identity: super::identity::IdentityGuard,
+    root_authority: root_authority::RootAuthorityGuard,
 }
 
 impl RealAdbDevice<ProcessAdbCommandExecutor> {
@@ -394,6 +399,7 @@ impl RealAdbDevice<ProcessAdbCommandExecutor> {
             runner: AdbCommandRunner::new(executable, serial),
             last_error: None,
             identity: super::identity::IdentityGuard::default(),
+            root_authority: root_authority::RootAuthorityGuard::default(),
         }
     }
 }
@@ -409,6 +415,7 @@ impl<E: AdbCommandExecutor> RealAdbDevice<E> {
             ),
             last_error: None,
             identity: super::identity::IdentityGuard::default(),
+            root_authority: root_authority::RootAuthorityGuard::default(),
         }
     }
 
@@ -429,6 +436,14 @@ impl<E: AdbCommandExecutor> RealAdbDevice<E> {
         }
     }
 
+    pub(crate) fn configure_root_authority(&mut self, reviewed_root_authorized: bool) {
+        self.root_authority.configure(reviewed_root_authorized);
+    }
+
+    pub(crate) fn root_authority_failure_after_mutation(&self) -> bool {
+        self.root_authority.has_trustworthy_mutation()
+    }
+
     fn map_public<T>(&mut self, result: Result<T, AdbCommandError>) -> Result<T, String> {
         match result {
             Ok(value) => Ok(value),
@@ -441,6 +456,7 @@ impl<E: AdbCommandExecutor> RealAdbDevice<E> {
 
     fn guarded<T>(
         &mut self,
+        effect: DeviceCommandEffect,
         operation: impl FnOnce(&mut Self) -> Result<T, AdbCommandError>,
     ) -> Result<T, String> {
         if let Err(error) = self
@@ -450,6 +466,7 @@ impl<E: AdbCommandExecutor> RealAdbDevice<E> {
             return self.map_public(Err(error));
         }
         let result = operation(self);
+        self.root_authority.record_result(effect, &result);
         let should_post_check = result
             .as_ref()
             .err()
@@ -466,7 +483,9 @@ impl<E: AdbCommandExecutor> RealAdbDevice<E> {
     }
 
     pub fn check_root(&mut self) -> Result<(), String> {
-        self.guarded(|device| device.check_root_unchecked())
+        self.guarded(DeviceCommandEffect::ReadOnly, |device| {
+            device.check_root_unchecked()
+        })
     }
 
     fn check_root_unchecked(&mut self) -> Result<(), AdbCommandError> {
@@ -490,7 +509,7 @@ impl<E: AdbCommandExecutor> RealAdbDevice<E> {
             args.push("-r".to_string());
         }
         args.push(apk_path.to_string_lossy().to_string());
-        self.guarded(|device| {
+        self.guarded(DeviceCommandEffect::Mutating, |device| {
             device
                 .runner
                 .run(args, true, ProcessOperation::Install)
@@ -505,7 +524,7 @@ impl<E: AdbCommandExecutor> RealAdbDevice<E> {
         }
         args.push(source.to_string_lossy().to_string());
         args.push(dest.to_string());
-        self.guarded(|device| {
+        self.guarded(DeviceCommandEffect::Mutating, |device| {
             device
                 .runner
                 .run(args, true, ProcessOperation::Push)
@@ -514,7 +533,7 @@ impl<E: AdbCommandExecutor> RealAdbDevice<E> {
     }
 
     pub fn mkdir_p(&mut self, path: &str) -> Result<(), String> {
-        self.guarded(|device| {
+        self.guarded(DeviceCommandEffect::Mutating, |device| {
             device
                 .run_shell_unchecked(
                     vec!["mkdir".to_string(), "-p".to_string(), path.to_string()],
@@ -526,7 +545,7 @@ impl<E: AdbCommandExecutor> RealAdbDevice<E> {
     }
 
     pub fn remove_file(&mut self, path: &str) -> Result<(), String> {
-        self.guarded(|device| {
+        self.guarded(DeviceCommandEffect::Mutating, |device| {
             device
                 .run_shell_unchecked(
                     vec!["rm".to_string(), "-f".to_string(), path.to_string()],
@@ -538,7 +557,7 @@ impl<E: AdbCommandExecutor> RealAdbDevice<E> {
     }
 
     pub fn remove_tree(&mut self, path: &str) -> Result<(), String> {
-        self.guarded(|device| {
+        self.guarded(DeviceCommandEffect::Mutating, |device| {
             device
                 .run_shell_unchecked(
                     vec!["rm".to_string(), "-rf".to_string(), path.to_string()],
@@ -562,7 +581,7 @@ impl<E: AdbCommandExecutor> RealAdbDevice<E> {
         }
         args.push(source.to_string());
         args.push(dest.to_string());
-        self.guarded(|device| {
+        self.guarded(DeviceCommandEffect::Mutating, |device| {
             device
                 .run_shell_with_privilege_unchecked(
                     args,
@@ -575,7 +594,7 @@ impl<E: AdbCommandExecutor> RealAdbDevice<E> {
     }
 
     pub fn package_installed(&mut self, package_name: &str) -> Result<bool, String> {
-        self.guarded(|device| {
+        self.guarded(DeviceCommandEffect::ReadOnly, |device| {
             let result = device.runner.run(
                 vec![
                     "shell".to_string(),
@@ -591,7 +610,7 @@ impl<E: AdbCommandExecutor> RealAdbDevice<E> {
     }
 
     pub fn path_exists(&mut self, path: &str) -> Result<bool, String> {
-        self.guarded(|device| {
+        self.guarded(DeviceCommandEffect::ReadOnly, |device| {
             let result = device.run_shell_unchecked(
                 vec!["test".to_string(), "-e".to_string(), path.to_string()],
                 false,
@@ -602,7 +621,7 @@ impl<E: AdbCommandExecutor> RealAdbDevice<E> {
     }
 
     pub fn path_is_dir(&mut self, path: &str) -> Result<bool, String> {
-        self.guarded(|device| {
+        self.guarded(DeviceCommandEffect::ReadOnly, |device| {
             let result = device.run_shell_unchecked(
                 vec!["test".to_string(), "-d".to_string(), path.to_string()],
                 false,
@@ -613,13 +632,17 @@ impl<E: AdbCommandExecutor> RealAdbDevice<E> {
     }
 
     pub fn run_plan_command(&mut self, command: Vec<String>) -> Result<(), String> {
-        self.guarded(|device| device.runner.run_plan_command(command))
+        self.guarded(DeviceCommandEffect::Mutating, |device| {
+            device.runner.run_plan_command(command)
+        })
     }
 
     pub fn launch_app(&mut self, package_name: &str, activity: Option<&str>) -> Result<(), String> {
         let package_name = package_name.to_string();
         let activity = activity.map(ToString::to_string);
-        self.guarded(|device| device.launch_app_unchecked(&package_name, activity.as_deref()))
+        self.guarded(DeviceCommandEffect::Mutating, |device| {
+            device.launch_app_unchecked(&package_name, activity.as_deref())
+        })
     }
 
     fn launch_app_unchecked(
@@ -675,7 +698,7 @@ impl<E: AdbCommandExecutor> RealAdbDevice<E> {
 
     pub fn force_stop_app(&mut self, package_name: &str) -> Result<(), String> {
         let package_name = package_name.to_string();
-        self.guarded(|device| {
+        self.guarded(DeviceCommandEffect::Mutating, |device| {
             device
                 .runner
                 .run(
@@ -745,12 +768,40 @@ impl<E: AdbCommandExecutor> RealAdbDevice<E> {
         privileged: bool,
         operation: ProcessOperation,
     ) -> Result<AdbCommandResult, AdbCommandError> {
+        if privileged {
+            self.revalidate_root_authority_unchecked()?;
+        }
         let result = self.runner.run(
             vec!["shell".to_string(), build_shell_command(&args, privileged)],
             check,
             operation,
         );
         result
+    }
+
+    fn revalidate_root_authority_unchecked(&mut self) -> Result<(), AdbCommandError> {
+        if !self.root_authority.is_authorized() {
+            return Err(AdbCommandError::RootAuthorityUnverified);
+        }
+        let Some(serial) = self.runner.serial.clone() else {
+            return Err(AdbCommandError::RootAuthorityUnverified);
+        };
+        let outcome =
+            probe_root_typed(&mut self.runner.executor, &self.runner.executable, &serial)?;
+        match root_authority::classify_probe(outcome) {
+            Ok(()) => Ok(()),
+            Err(error @ AdbCommandError::RootAuthorityRevoked)
+            | Err(error @ AdbCommandError::RootAuthorityUnverified) => {
+                if let Err(identity_error) = self
+                    .identity
+                    .check(&mut self.runner, IdentityCheckPhase::PreOperation)
+                {
+                    return Err(identity_error);
+                }
+                Err(error)
+            }
+            Err(error) => Err(error),
+        }
     }
 }
 
@@ -972,10 +1023,6 @@ fn shell_quote(arg: &str) -> String {
     format!("'{}'", arg.replace('\'', "'\"'\"'"))
 }
 
-fn is_app_private_path(path: &str) -> bool {
-    path.starts_with("/data/user/") || path.starts_with("/data/data/")
-}
-
 fn parse_resolved_launcher_component(stdout: &str) -> Option<String> {
     stdout
         .lines()
@@ -1041,6 +1088,40 @@ mod tests {
         assert_eq!(unavailable, RootProbeOutcome::Unavailable);
         let (unexpected, _) =
             probe_with(|executor| executor.push_completed(1, "shell failed", "bad response"));
+        assert!(matches!(
+            unexpected,
+            RootProbeOutcome::CheckFailed {
+                reason: RootProbeFailureReason::UnexpectedResponse,
+                ..
+            }
+        ));
+    }
+
+    #[test]
+    fn root_probe_classifies_completed_denial_and_unavailable_evidence_before_status() {
+        let (denied_stdout, _) =
+            probe_with(|executor| executor.push_completed(0, "Permission denied", ""));
+        assert_eq!(denied_stdout, RootProbeOutcome::Denied);
+
+        let (denied_stderr, _) =
+            probe_with(|executor| executor.push_completed(0, "", "Operation not permitted"));
+        assert_eq!(denied_stderr, RootProbeOutcome::Denied);
+
+        let (unavailable, _) =
+            probe_with(|executor| executor.push_completed(0, "", "su: not found"));
+        assert_eq!(unavailable, RootProbeOutcome::Unavailable);
+
+        let (granted, _) = probe_with(|executor| {
+            executor.push_completed(
+                1,
+                "uid=0(root) gid=0(root)\n",
+                "permission denied for a later diagnostic",
+            )
+        });
+        assert_eq!(granted, RootProbeOutcome::Granted);
+
+        let (unexpected, _) =
+            probe_with(|executor| executor.push_completed(0, "unexpected output", ""));
         assert!(matches!(
             unexpected,
             RootProbeOutcome::CheckFailed {
