@@ -1075,6 +1075,7 @@ impl Sentinel {
             "operation-started",
             "boundary-ready",
             "operation-finished",
+            "terminal-ready",
             "cleanup-ready",
             "sleep-requested",
             "sleep-entered",
@@ -1103,6 +1104,16 @@ impl Sentinel {
         }
         Ok(())
     }
+}
+
+fn wait_for_root_cleanup_authority(sentinel: &Sentinel) -> Result<(), String> {
+    let terminal_ready = sentinel
+        .mark("terminal-ready", "ready\n")
+        .map_err(|error| format!("root terminal checkpoint failed: {error}"))?;
+    sentinel
+        .wait_for_named_action_after("cleanup-ready", terminal_ready)
+        .map(|_| ())
+        .map_err(|error| format!("root cleanup authority checkpoint failed: {error}"))
 }
 
 #[derive(Clone, Debug)]
@@ -1200,17 +1211,7 @@ fn run_invocation() -> Result<Value, String> {
 
     let mut checkpoint_error = checkpoint_error;
     if invocation.scenario.is_root() {
-        let root_cleanup_error = invocation
-            .sentinel
-            .marker_time("operation-finished")
-            .map_err(|_| "root cleanup checkpoint requires a terminal operation marker".to_string())
-            .and_then(|finished| {
-                invocation
-                    .sentinel
-                    .wait_for_named_action_after("cleanup-ready", finished)
-            })
-            .err()
-            .map(|error| format!("root cleanup authority checkpoint failed: {error}"));
+        let root_cleanup_error = wait_for_root_cleanup_authority(&invocation.sentinel).err();
         if checkpoint_error.is_none() {
             checkpoint_error = root_cleanup_error;
         }
@@ -3278,6 +3279,39 @@ mod tests {
             "phase6d6/cancellation_boundary/first",
             &event,
         ));
+    }
+
+    #[test]
+    fn root_cleanup_checkpoint_exposes_terminal_result_before_accepting_cleanup_ack() {
+        let directory = tempfile::tempdir().expect("sentinel directory should be available");
+        let sentinel = Sentinel {
+            directory: directory.path().to_path_buf(),
+        };
+        let operator = sentinel.clone();
+        let operator_thread = std::thread::spawn(move || {
+            let started = Instant::now();
+            while !operator.path("terminal-ready").exists() {
+                assert!(
+                    started.elapsed() < Duration::from_secs(5),
+                    "terminal-ready should be exposed before cleanup authorization"
+                );
+                std::thread::sleep(Duration::from_millis(10));
+            }
+            operator
+                .mark("cleanup-ready", "ack\n")
+                .expect("operator cleanup acknowledgement should be recorded");
+        });
+
+        wait_for_root_cleanup_authority(&sentinel)
+            .expect("fresh cleanup acknowledgement should release the checkpoint");
+        operator_thread
+            .join()
+            .expect("operator checkpoint thread should finish");
+        assert!(
+            sentinel.marker_time("terminal-ready").unwrap()
+                <= sentinel.marker_time("cleanup-ready").unwrap()
+        );
+        sentinel.cleanup().expect("sentinel markers should clean up");
     }
 
     #[test]

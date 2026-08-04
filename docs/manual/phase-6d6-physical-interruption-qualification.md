@@ -30,10 +30,11 @@ The ignored Rust harness refuses to touch ADB until every gate below is valid.
    use the physical transition markers `sleep-requested`, `sleep-entered`, and
    `wake` instead: create the first while `operation-started` is present,
    confirm entry, and create `wake` immediately after resuming while the
-   operation is still in flight. The root-revocation case additionally
-   requires `cleanup-ready` with the same contents after the terminal root
-   failure, once the operator has restored root authority for cleanup. Creating
-   `abort` stops the checkpoint. Every checkpoint expires after ten minutes
+   operation is still in flight. For root revocation, the harness creates
+   `terminal-ready` only after the terminal root failure has returned. Wait for
+   that marker, restore root authority for cleanup, then create `cleanup-ready`
+   containing `ack` followed by a newline. Creating `abort` stops the checkpoint.
+   Every checkpoint expires after ten minutes
    (`600` seconds); a missing, stale, or out-of-order marker is blocked.
 6. Select exactly one scenario and one repetition (`1` or `2`) per invocation.
    Run both repetitions from a freshly cleaned fixture state; the harness
@@ -115,7 +116,7 @@ blocks the repetition and cannot be counted as a pass.
 | `device_unauthorized` | Revoke debugging authorization on the selected device at the active checkpoint. Do not reset unrelated ADB state. The harness must observe an authorized inventory row, the genuine `unauthorized` row, and a final authorized row; a marker alone is not evidence. | `device_unauthorized`, stale authority invalidation, and authored reauthorization guidance. |
 | `identity_stability` | Perform one controlled reconnect at `boundary-ready` with the same device. | Repeated complete identity samples remain stable and the second operation succeeds. |
 | `identity_replacement` | With explicit owner-approved hardware, disconnect the first target before attaching the same-serial replacement at `boundary-ready`. The harness polls successful ADB inventory samples and stable fingerprints, proving original attachment, serial absence, replacement attachment, and no simultaneous target. | `device_identity_changed` or `device_identity_unverified` before later mutation. If hardware is unavailable, record this exact case unqualified. |
-| `root_revocation` | On a prepared rooted device, revoke EmuChef's adb-shell root authority after the first mutation and before the next root probe; restore it after the terminal failure and acknowledge `cleanup-ready`. | The second privileged command does not run, root failure is primary, prior mutation is retained, cleanup is separate and verified, and identity precedence is unchanged. |
+| `root_revocation` | On a prepared rooted device, revoke EmuChef's adb-shell root authority after `boundary-ready`, acknowledge `operator-action`, wait for `terminal-ready`, restore root authority, then acknowledge `cleanup-ready`. | The second privileged command does not run, root failure is primary, prior mutation is retained, cleanup is separate and verified, and identity precedence is unchanged. |
 | `operation_timeout` | Use only a genuinely bounded operation that reaches the fixed Rust-owned deadline while the exact child remains owned. The private delay regression seam is automated evidence only and cannot qualify this repetition. | `operation_timed_out`, kill/reap or uncertainty evidence, no descendant, no later scheduling. Block the case if a safe genuine deadline cannot be exercised. |
 | `low_storage` | With the separate destructive opt-in, verify at least 4 GiB free, create/verify the unique fixture-owned 1-GiB recovery reserve, allocate bounded filler, then acknowledge the checkpoint. | Genuine ENOSPC maps to `device_storage_exhausted`; no deletion/retry; cleanup removes only run-scoped payload/filler/sentinel/reserve and proves restored free capacity. Block the case if any proof is unavailable. |
 | `host_sleep_before_deadline` | Begin the long fixture operation, create `sleep-requested`, manually sleep the host before the fixed deadline, create `sleep-entered` after entry, then create `wake` immediately after resuming. | Record ordered sleep/wake times, measured executor and wall elapsed time, timer behavior, child result, identity, terminal state, slot release, and no second owner. |
