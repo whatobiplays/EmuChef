@@ -837,23 +837,27 @@ struct ActiveProcessContract {
     exact_run_binding: bool,
 }
 
+fn is_false(value: &bool) -> bool {
+    !*value
+}
+
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq)]
 #[serde(rename_all = "camelCase")]
 struct IdentityTransitionContract {
     required: bool,
     mode: String,
     same_serial: bool,
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "is_false")]
     same_fingerprint: bool,
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "is_false")]
     different_fingerprint: bool,
     requires_serial_absent_interval: bool,
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "is_false")]
     requires_original_disconnect_before_reconnect: bool,
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "is_false")]
     requires_original_disconnect_before_replacement_attach: bool,
     requires_never_simultaneous: bool,
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
     terminal_issue_codes: Vec<String>,
     authority_invalidated: bool,
 }
@@ -3140,6 +3144,18 @@ mod tests {
         assert!(Scenario::parse("low_storage").is_ok());
         assert!(Scenario::parse("not-a-scenario").is_err());
         assert_eq!(SENTINEL_TIMEOUT, Duration::from_secs(600));
+    }
+
+    #[test]
+    fn serialized_identity_contracts_match_the_authoritative_manifest_shape() {
+        let manifest = serde_json::from_str::<Value>(SCENARIO_MANIFEST)
+            .expect("the Phase 6D.6 scenario manifest must be valid JSON");
+        for scenario in [Scenario::IdentityStability, Scenario::IdentityReplacement] {
+            let expected = &manifest["scenarioContracts"][scenario.as_str()];
+            let actual = serde_json::to_value(scenario_contract(scenario))
+                .expect("the scenario contract must serialize");
+            assert_eq!(actual, *expected);
+        }
     }
 
     #[test]
