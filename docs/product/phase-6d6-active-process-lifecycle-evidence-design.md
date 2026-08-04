@@ -96,6 +96,12 @@ The owner emits one `Terminal` event on every post-spawn return path, after the 
 
 The terminal event reports only the timestamp and opaque operation identity. Existing return values remain authoritative for success, failure kind, and cleanup status.
 
+### 5A. Terminal recovery checkpoint
+
+`usb_disconnect_active`, `device_offline`, and `device_unauthorized` cannot clean fixture-owned state while the selected device remains unavailable. After the exact child terminal event and runner result return, the harness creates `terminal-ready` and waits for a fresh `cleanup-ready` acknowledgement. The operator restores the selected device to the required online and authorized state before creating `cleanup-ready`. Cleanup never starts before that acknowledgement, and reconnecting or reauthorizing never resumes the terminal execution.
+
+For `device_unauthorized`, the initial authorized observation must serialize before operation start, the genuine unauthorized observation must occur after `operator-action` and no later than the exact child terminal event, and the final authorized observation must serialize after cleanup completion. The harness waits across canonical Unix-second boundaries where necessary rather than weakening the strict evidence chronology.
+
 ### 6. ADB executor forwarding
 
 `ProcessAdbCommandExecutor` gains an optional invocation observer. Ordinary construction installs no observer and behaves exactly as today.
