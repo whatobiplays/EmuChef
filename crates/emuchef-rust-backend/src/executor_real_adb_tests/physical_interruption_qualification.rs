@@ -1598,6 +1598,16 @@ struct ReviewedPlanObservation {
     executor_elapsed_ms: Option<u64>,
 }
 
+fn is_boundary_checkpoint_event(
+    scenario: Scenario,
+    first_step_id: &str,
+    event: &ExecutionProgressEvent,
+) -> bool {
+    scenario.is_boundary_checkpoint()
+        && event.step_id == first_step_id
+        && event.phase == ProgressPhase::Finished
+}
+
 fn run_reviewed_plan(
     invocation: &Invocation,
     plan: ExecutionPlan,
@@ -1643,6 +1653,7 @@ fn run_reviewed_plan(
         .first()
         .map(|step| step.id.clone())
         .expect("reviewed qualification plan has a first atomic step");
+    let boundary_step_id = first_step_id.clone();
     let identity_observer = identity_capture.as_ref().map(|capture| {
         spawn_identity_transition_observer(
             facts.serial.clone(),
@@ -1766,10 +1777,7 @@ fn run_reviewed_plan(
         runner.run_with_progress_and_cancel_observed(
             &plan,
             move |event: ExecutionProgressEvent| {
-                if event.step_index == 0
-                    && event.phase == ProgressPhase::Finished
-                    && scenario.is_boundary_checkpoint()
-                {
+                if is_boundary_checkpoint_event(scenario, &boundary_step_id, &event) {
                     let boundary_ready = callback_sentinel.mark("boundary-ready", "ready\n");
                     match boundary_ready
                         .and_then(|timestamp| callback_sentinel.wait_for_action_after(timestamp))
@@ -3193,6 +3201,37 @@ mod tests {
         );
         let stderr = String::from_utf8_lossy(&output.stderr);
         assert!(stderr.contains("blocked") || stderr.contains("must equal"));
+    }
+
+    #[test]
+    fn boundary_checkpoint_matches_the_first_step_id_with_one_based_progress_index() {
+        let event = ExecutionProgressEvent {
+            step_index: 1,
+            total_steps: 2,
+            step_id: "phase6d6/cancellation_boundary/first".to_string(),
+            recipe_ref: "fixture.phase6d6".to_string(),
+            step_name: "first".to_string(),
+            note: "first".to_string(),
+            phase: ProgressPhase::Finished,
+            status: None,
+            message: None,
+        };
+
+        assert!(is_boundary_checkpoint_event(
+            Scenario::CancellationBoundary,
+            "phase6d6/cancellation_boundary/first",
+            &event,
+        ));
+        assert!(!is_boundary_checkpoint_event(
+            Scenario::CancellationBoundary,
+            "phase6d6/cancellation_boundary/second",
+            &event,
+        ));
+        assert!(!is_boundary_checkpoint_event(
+            Scenario::CancellationActive,
+            "phase6d6/cancellation_boundary/first",
+            &event,
+        ));
     }
 
     #[test]
