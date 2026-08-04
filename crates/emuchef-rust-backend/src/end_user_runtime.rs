@@ -140,7 +140,7 @@ pub(crate) fn qualify_device(adb_path: &str, serial: &str) -> Result<Value, ApiE
 /// Run the sole privileged capability probe. The exact ADB command is owned by
 /// the executor boundary; this function only serializes its sanitized outcome.
 pub(crate) fn check_root(adb_path: &str, serial: &str) -> Result<Value, ApiError> {
-    let mut executor = ProcessAdbCommandExecutor;
+    let mut executor = ProcessAdbCommandExecutor::default();
     Ok(probe_root(&mut executor, adb_path, serial).status_json())
 }
 

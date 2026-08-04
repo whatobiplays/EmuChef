@@ -20,22 +20,22 @@ The ignored Rust harness refuses to touch ADB until every gate below is valid.
    path, production package, or unrelated device is in scope.
 5. Create an empty temporary host directory and export it as
    `EMUCHEF_PHASE_6D6_SENTINEL_DIR`. The harness writes fixed markers there;
-   ordinary interruption checkpoints use exactly `operator-action` containing
-   `ack` followed by a newline. The production runner lifecycle is recorded for
-   correlation, but an `in_flight` callback is not proof that
-   the target child remains alive: active cases can pass only with exact child,
-   mutation-start, immediate pre-action liveness, action, and later terminal
-   evidence bound to the same run. The current harness cannot produce that
-   evidence and blocks active cases. Host-sleep cases
-   use the physical transition markers `sleep-requested`, `sleep-entered`, and
-   `wake` instead: create the first while `operation-started` is present,
-   confirm entry, and create `wake` immediately after resuming while the
-   operation is still in flight. For root revocation, the harness creates
-   `terminal-ready` only after the terminal root failure has returned. Wait for
-   that marker, restore root authority for cleanup, then create `cleanup-ready`
-   containing `ack` followed by a newline. Creating `abort` stops the checkpoint.
-   Every checkpoint expires after ten minutes
-   (`600` seconds); a missing, stale, or out-of-order marker is blocked.
+   operator acknowledgements use exactly `ack` followed by a newline. For the
+   four supported active cases, wait for `active-ready`. That marker is created
+   only after the production runner lifecycle observer samples the exact
+   `DeviceCopy` child alive.
+   Create `operator-action` within five seconds. For cancellation, that marker
+   is the cancellation request. For USB disconnect, device-offline, and
+   authorization revocation, create the marker first, wait 1.1–3 seconds, then
+   perform the prepared physical transition. After the typed terminal result,
+   wait for `terminal-ready`, restore the same selected device to its online and
+   authorized state, verify it, then create `cleanup-ready`. Reconnection or
+   reauthorization never resumes the old execution. Host-sleep cases continue
+   to use `sleep-requested`, `sleep-entered`, and `wake`; their deadline-clock
+   measurement remains a separate blocker. Root revocation uses the same
+   `terminal-ready` and `cleanup-ready` recovery boundary. Creating `abort`
+   stops a checkpoint. Every checkpoint expires after ten minutes (`600`
+   seconds); a missing, stale, or out-of-order marker is blocked.
 6. Select exactly one scenario and one repetition (`1` or `2`) per invocation.
    Run both repetitions from a freshly cleaned fixture state; the harness
    creates a unique run-scoped fixture directory, refuses any pre-existing
@@ -78,15 +78,48 @@ export EMUCHEF_PHASE_6D6_REPETITION=1
 export EMUCHEF_TEST_DEVICE_SERIAL=<one-exact-serial>
 export EMUCHEF_TEST_PACKAGE_ALLOWLIST=com.emuchef.fixture
 export EMUCHEF_PHASE_6D6_SENTINEL_DIR="$SENTINEL_DIR"
-cargo test --manifest-path crates/emuchef-rust-backend/Cargo.toml --features real-execution physical_interruption_qualification::manual_phase_6d6_physical_interruption_qualification -- --ignored --exact
+cargo test --manifest-path crates/emuchef-rust-backend/Cargo.toml --features real-execution --lib executor_real_adb_tests::physical_interruption_qualification::manual_phase_6d6_physical_interruption_qualification -- --ignored --exact --nocapture
 ```
 
-The operator must stay at the checkpoint. For an active-operation case,
-create the marker while `operation-started` exists. For a boundary case, wait
-for `boundary-ready`, then perform the documented transition and create the
-marker. The marker protocol is bounded to `600` seconds; do not leave a test
-waiting forever. After every attempt, confirm that the directory is empty and
-that fixture-owned device paths have no residual state.
+The operator must stay at the checkpoint. For one of the four supported active
+cases, wait for `active-ready`; do not use `operation-started` as liveness
+proof. Create `operator-action` within five seconds and follow the scenario's
+ordering below. For a boundary case, wait for `boundary-ready`, then perform
+the documented transition and create the marker. The marker protocol is
+bounded to `600` seconds; do not leave a test waiting forever. After every
+attempt, confirm that the sentinel directory is empty and that fixture-owned
+device paths have no residual state.
+
+## Active-operation stimulus and handshake
+
+For `cancellation_active`, `usb_disconnect_active`, `device_offline`, and
+`device_unauthorized`, the harness prepares a unique fixture-owned device-side
+source before the reviewed run. It creates and times a 256 MiB calibration
+copy, derives a source between 512 MiB and 8 GiB targeting approximately 30
+seconds, and blocks unless the predicted copy duration is 15–240 seconds. Free
+space must cover the active source, an equal destination, and 1 GiB of cleanup
+headroom. Calibration and active files remain under the unique run scope and
+are removed during fixture-only cleanup.
+
+The active sequence is:
+
+```text
+operation-started
+→ exact DeviceCopy child sampled alive
+→ active-ready
+→ operator-action within five seconds
+→ cancellation request, or wait 1.1–3 seconds and perform the physical transition
+→ exact child terminal result
+→ terminal-ready for disconnect/offline/authorization
+→ restore and verify the selected device
+→ cleanup-ready
+→ fixture-only cleanup
+```
+
+A stale action, same-second action/terminal pair, missing exact-child event,
+non-live sample, or source calibration outside the committed bounds blocks the
+attempt. The private process-delay seam and host process-table inspection are
+not physical evidence.
 
 ## Low-storage safety protocol
 
@@ -108,12 +141,12 @@ blocks the repetition and cannot be counted as a pass.
 
 | Scenario | Operator transition | Required proof |
 | --- | --- | --- |
-| `cancellation_active` | Request cancellation while the first atomic copy is active. | First operation remains completed or truthfully failed; the second is not scheduled; no hidden owner remains. |
+| `cancellation_active` | Wait for `active-ready`, then immediately create `operator-action`; this is the cancellation request. | The exact `DeviceCopy` child was alive before the request, the first atomic operation settles truthfully, later work is not scheduled, and no hidden owner remains. |
 | `cancellation_boundary` | Wait for `boundary-ready`, then request cancellation. | Safe-boundary cancellation preserves completed evidence and leaves later work Not attempted. |
-| `usb_disconnect_active` | Disconnect the selected cable during the active copy, then reconnect only after the terminal report. | Stable disconnected/transport issue, conservative partial state, cleanup outcome, and no automatic reconnect. |
+| `usb_disconnect_active` | Wait for `active-ready`, create `operator-action`, wait 1.1–3 seconds, disconnect the selected cable, wait for `terminal-ready`, reconnect the same device, verify its exact serial is `device`, then create `cleanup-ready`. | Exact live-child binding, stable disconnected/transport issue, conservative partial state, cleanup outcome, and no automatic resume. |
 | `usb_disconnect_boundary` | Disconnect after `boundary-ready` and before the second operation. | Same fail-stop and sanitized recovery behavior at the scheduling boundary. |
-| `device_offline` | Use the reversible device-side procedure approved for the selected device to enter ADB offline during the active operation. | `device_offline`, no later work, and a fresh qualification requirement. |
-| `device_unauthorized` | Revoke debugging authorization on the selected device at the active checkpoint. Do not reset unrelated ADB state. The harness must observe an authorized inventory row, the genuine `unauthorized` row, and a final authorized row; a marker alone is not evidence. | `device_unauthorized`, stale authority invalidation, and authored reauthorization guidance. |
+| `device_offline` | Wait for `active-ready`, create `operator-action`, wait 1.1–3 seconds, use the prepared reversible procedure to enter ADB offline, wait for `terminal-ready`, restore the same device online, verify it, then create `cleanup-ready`. | Exact live-child binding, `device_offline`, no later work, clean recovery, and a fresh qualification requirement. |
+| `device_unauthorized` | With the authorization-reset opt-in, wait for `active-ready`, create `operator-action`, wait 1.1–3 seconds, revoke only the selected device's debugging authorization, wait for `terminal-ready`, reauthorize the same device, verify its row is `device`, then create `cleanup-ready`. Do not reset unrelated ADB state. | Exact live-child binding plus ordered initial authorized, genuine `unauthorized`, terminal, cleanup, and final authorized observations; `device_unauthorized`; no automatic resume. |
 | `identity_stability` | Perform one controlled reconnect at `boundary-ready` with the same device. | Repeated complete identity samples remain stable and the second operation succeeds. |
 | `identity_replacement` | With explicit owner-approved hardware, disconnect the first target before attaching the same-serial replacement at `boundary-ready`. The harness polls successful ADB inventory samples and stable fingerprints, proving original attachment, serial absence, replacement attachment, and no simultaneous target. | `device_identity_changed` or `device_identity_unverified` before later mutation. If hardware is unavailable, record this exact case unqualified. |
 | `root_revocation` | On a prepared rooted device, revoke EmuChef's adb-shell root authority after `boundary-ready`, acknowledge `operator-action`, wait for `terminal-ready`, restore root authority, then acknowledge `cleanup-ready`. | The second privileged command does not run, root failure is primary, prior mutation is retained, cleanup is separate and verified, and identity precedence is unchanged. |

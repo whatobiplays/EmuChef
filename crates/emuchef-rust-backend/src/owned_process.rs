@@ -10,8 +10,12 @@ use std::cell::RefCell;
 use std::future::Future;
 use std::pin::Pin;
 use std::process::Stdio;
-use std::task::Poll;
-use std::time::Duration;
+use std::sync::atomic::{AtomicU64, Ordering as AtomicOrdering};
+use std::sync::{Arc, Mutex};
+use std::task::{Poll, Waker};
+#[cfg(test)]
+use std::time::Instant;
+use std::time::{Duration, SystemTime};
 
 use async_io::{block_on, Timer};
 use async_process::{Child, ChildStderr, ChildStdout, Command};
@@ -119,6 +123,346 @@ impl ProcessOperation {
                 Duration::from_secs(300)
             }
         }
+    }
+
+    pub(crate) const fn is_mutating(self) -> bool {
+        !matches!(self, Self::Probe | Self::Predicate | Self::RootPreflight)
+    }
+}
+
+static NEXT_OBSERVED_OPERATION_ID: AtomicU64 = AtomicU64::new(1);
+
+#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
+pub(crate) struct OwnedProcessOperationId(u64);
+
+impl OwnedProcessOperationId {
+    #[cfg(test)]
+    pub(crate) const fn as_u64(self) -> u64 {
+        self.0
+    }
+
+    #[cfg(test)]
+    pub(crate) const fn from_raw_for_test(value: u64) -> Self {
+        Self(value)
+    }
+}
+
+#[cfg(test)]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(crate) struct OwnedProcessLivenessSample {
+    pub(crate) operation_id: OwnedProcessOperationId,
+    pub(crate) at: SystemTime,
+    pub(crate) alive: Option<bool>,
+    pub(crate) terminal_reported: bool,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(crate) enum OwnedProcessLifecycleEvent {
+    Spawned {
+        operation_id: OwnedProcessOperationId,
+        operation: ProcessOperation,
+        at: SystemTime,
+    },
+    MutationStarted {
+        operation_id: OwnedProcessOperationId,
+        operation: ProcessOperation,
+        at: SystemTime,
+    },
+    LivenessSampled {
+        operation_id: OwnedProcessOperationId,
+        operation: ProcessOperation,
+        at: SystemTime,
+        alive: Option<bool>,
+        terminal_reported: bool,
+    },
+    Terminal {
+        operation_id: OwnedProcessOperationId,
+        operation: ProcessOperation,
+        at: SystemTime,
+    },
+}
+
+#[cfg(test)]
+impl OwnedProcessLifecycleEvent {
+    pub(crate) const fn operation_id(&self) -> OwnedProcessOperationId {
+        match self {
+            Self::Spawned { operation_id, .. }
+            | Self::MutationStarted { operation_id, .. }
+            | Self::LivenessSampled { operation_id, .. }
+            | Self::Terminal { operation_id, .. } => *operation_id,
+        }
+    }
+
+    pub(crate) const fn operation(&self) -> ProcessOperation {
+        match self {
+            Self::Spawned { operation, .. }
+            | Self::MutationStarted { operation, .. }
+            | Self::LivenessSampled { operation, .. }
+            | Self::Terminal { operation, .. } => *operation,
+        }
+    }
+
+    pub(crate) const fn at(&self) -> SystemTime {
+        match self {
+            Self::Spawned { at, .. }
+            | Self::MutationStarted { at, .. }
+            | Self::LivenessSampled { at, .. }
+            | Self::Terminal { at, .. } => *at,
+        }
+    }
+}
+
+#[derive(Debug, Default)]
+struct OwnedProcessObservationState {
+    events: Vec<OwnedProcessLifecycleEvent>,
+    liveness_request: Option<OwnedProcessOperationId>,
+    owner_waker: Option<Waker>,
+}
+
+#[derive(Clone, Debug, Default)]
+pub(crate) struct OwnedProcessObservationHandle {
+    state: Arc<Mutex<OwnedProcessObservationState>>,
+}
+
+impl OwnedProcessObservationHandle {
+    #[cfg(test)]
+    pub(crate) fn events(&self) -> Vec<OwnedProcessLifecycleEvent> {
+        self.state
+            .lock()
+            .map(|state| state.events.clone())
+            .unwrap_or_default()
+    }
+
+    #[cfg(test)]
+    pub(crate) fn wait_for_mutation(
+        &self,
+        operation: ProcessOperation,
+        timeout: Duration,
+    ) -> Result<OwnedProcessOperationId, String> {
+        let started = Instant::now();
+        loop {
+            let result = self
+                .state
+                .lock()
+                .map_err(|_| "owned-process observation state is unavailable".to_string())?
+                .events
+                .iter()
+                .find_map(|event| match event {
+                    OwnedProcessLifecycleEvent::MutationStarted {
+                        operation_id,
+                        operation: observed,
+                        ..
+                    } if *observed == operation => Some(*operation_id),
+                    _ => None,
+                });
+            if let Some(operation_id) = result {
+                return Ok(operation_id);
+            }
+            if started.elapsed() >= timeout {
+                return Err("owned-process mutation observation timed out".to_string());
+            }
+            std::thread::sleep(Duration::from_millis(10));
+        }
+    }
+
+    #[cfg(test)]
+    pub(crate) fn request_liveness_sample(
+        &self,
+        operation_id: OwnedProcessOperationId,
+    ) -> Result<(), String> {
+        let waker = {
+            let mut state = self
+                .state
+                .lock()
+                .map_err(|_| "owned-process observation state is unavailable".to_string())?;
+            let terminal_operation = state.events.iter().find_map(|event| match event {
+                OwnedProcessLifecycleEvent::Terminal {
+                    operation_id: observed,
+                    operation,
+                    ..
+                } if *observed == operation_id => Some(*operation),
+                _ => None,
+            });
+            if let Some(operation) = terminal_operation {
+                state
+                    .events
+                    .push(OwnedProcessLifecycleEvent::LivenessSampled {
+                        operation_id,
+                        operation,
+                        at: SystemTime::now(),
+                        alive: Some(false),
+                        terminal_reported: true,
+                    });
+                None
+            } else {
+                if state.liveness_request.replace(operation_id).is_some() {
+                    return Err("owned-process liveness request is already pending".to_string());
+                }
+                state.owner_waker.clone()
+            }
+        };
+        if let Some(waker) = waker {
+            waker.wake();
+        }
+        Ok(())
+    }
+
+    #[cfg(test)]
+    pub(crate) fn wait_for_liveness(
+        &self,
+        operation_id: OwnedProcessOperationId,
+        timeout: Duration,
+    ) -> Result<OwnedProcessLivenessSample, String> {
+        let started = Instant::now();
+        loop {
+            let sample = self
+                .state
+                .lock()
+                .map_err(|_| "owned-process observation state is unavailable".to_string())?
+                .events
+                .iter()
+                .find_map(|event| match event {
+                    OwnedProcessLifecycleEvent::LivenessSampled {
+                        operation_id: observed,
+                        at,
+                        alive,
+                        terminal_reported,
+                        ..
+                    } if *observed == operation_id => Some(OwnedProcessLivenessSample {
+                        operation_id,
+                        at: *at,
+                        alive: *alive,
+                        terminal_reported: *terminal_reported,
+                    }),
+                    _ => None,
+                });
+            if let Some(sample) = sample {
+                return Ok(sample);
+            }
+            if started.elapsed() >= timeout {
+                return Err("owned-process liveness observation timed out".to_string());
+            }
+            std::thread::sleep(Duration::from_millis(10));
+        }
+    }
+
+    fn record(&self, event: OwnedProcessLifecycleEvent) {
+        if let Ok(mut state) = self.state.lock() {
+            state.events.push(event);
+        }
+    }
+
+    fn record_terminal(&self, operation_id: OwnedProcessOperationId, operation: ProcessOperation) {
+        if let Ok(mut state) = self.state.lock() {
+            let at = SystemTime::now();
+            state.events.push(OwnedProcessLifecycleEvent::Terminal {
+                operation_id,
+                operation,
+                at,
+            });
+            if state.liveness_request == Some(operation_id) {
+                state.liveness_request = None;
+                state
+                    .events
+                    .push(OwnedProcessLifecycleEvent::LivenessSampled {
+                        operation_id,
+                        operation,
+                        at,
+                        alive: Some(false),
+                        terminal_reported: true,
+                    });
+            }
+        }
+    }
+
+    fn register_owner_waker(&self, waker: &Waker) {
+        if let Ok(mut state) = self.state.lock() {
+            state.owner_waker = Some(waker.clone());
+        }
+    }
+
+    fn take_liveness_request(&self, operation_id: OwnedProcessOperationId) -> bool {
+        self.state
+            .lock()
+            .map(|mut state| {
+                if state.liveness_request == Some(operation_id) {
+                    state.liveness_request = None;
+                    true
+                } else {
+                    false
+                }
+            })
+            .unwrap_or(false)
+    }
+
+    fn terminal_reported(&self, operation_id: OwnedProcessOperationId) -> bool {
+        self.state
+            .lock()
+            .map(|state| {
+                state.events.iter().any(|event| {
+                    matches!(
+                        event,
+                        OwnedProcessLifecycleEvent::Terminal {
+                            operation_id: observed,
+                            ..
+                        } if *observed == operation_id
+                    )
+                })
+            })
+            .unwrap_or(false)
+    }
+}
+
+#[derive(Clone, Debug)]
+struct OwnedProcessObservationContext {
+    handle: OwnedProcessObservationHandle,
+    operation_id: OwnedProcessOperationId,
+    operation: ProcessOperation,
+}
+
+impl OwnedProcessObservationContext {
+    fn begin(handle: OwnedProcessObservationHandle, operation: ProcessOperation) -> Self {
+        let operation_id = OwnedProcessOperationId(
+            NEXT_OBSERVED_OPERATION_ID.fetch_add(1, AtomicOrdering::Relaxed),
+        );
+        let context = Self {
+            handle,
+            operation_id,
+            operation,
+        };
+        context.handle.record(OwnedProcessLifecycleEvent::Spawned {
+            operation_id,
+            operation,
+            at: SystemTime::now(),
+        });
+        context
+    }
+
+    fn mutation_started(&self) {
+        if self.operation.is_mutating() {
+            self.handle
+                .record(OwnedProcessLifecycleEvent::MutationStarted {
+                    operation_id: self.operation_id,
+                    operation: self.operation,
+                    at: SystemTime::now(),
+                });
+        }
+    }
+
+    fn sample_liveness(&self, alive: Option<bool>) {
+        self.handle
+            .record(OwnedProcessLifecycleEvent::LivenessSampled {
+                operation_id: self.operation_id,
+                operation: self.operation,
+                at: SystemTime::now(),
+                alive,
+                terminal_reported: self.handle.terminal_reported(self.operation_id),
+            });
+    }
+
+    fn terminal(&self) {
+        self.handle
+            .record_terminal(self.operation_id, self.operation);
     }
 }
 
@@ -346,9 +690,17 @@ async fn run_child(
     stderr: ChildStderr,
     deadline: Duration,
     process_delay: Option<Duration>,
+    observation: Option<OwnedProcessObservationContext>,
 ) -> Result<CapturedProcessOutput, OwnedProcessError> {
-    run_child_with_deadline_signal(child, stdout, stderr, Timer::after(deadline), process_delay)
-        .await
+    run_child_with_deadline_signal(
+        child,
+        stdout,
+        stderr,
+        Timer::after(deadline),
+        process_delay,
+        observation,
+    )
+    .await
 }
 
 async fn run_child_with_deadline_signal<D: Future>(
@@ -357,12 +709,14 @@ async fn run_child_with_deadline_signal<D: Future>(
     stderr: ChildStderr,
     deadline_signal: D,
     process_delay: Option<Duration>,
+    observation: Option<OwnedProcessObservationContext>,
 ) -> Result<CapturedProcessOutput, OwnedProcessError> {
     let mut status_future = Box::pin(child.status());
     let mut output_future = Box::pin(read_streams(stdout, stderr));
     let mut timer = Box::pin(deadline_signal);
     let mut process_delay = process_delay.map(|delay| Box::pin(Timer::after(delay)));
     let mut process_delay_ready = process_delay.is_none();
+    let mut sampled_status = None;
 
     let event = poll_fn(|context| {
         if !process_delay_ready {
@@ -372,10 +726,32 @@ async fn run_child_with_deadline_signal<D: Future>(
                 }
             }
         }
+        if let Some(observation) = observation.as_ref() {
+            observation.handle.register_owner_waker(context.waker());
+            if observation
+                .handle
+                .take_liveness_request(observation.operation_id)
+            {
+                match status_future.as_mut().poll(context) {
+                    Poll::Ready(result) => {
+                        observation.sample_liveness(Some(false));
+                        sampled_status = Some(
+                            result
+                                .map(|status| status.code().unwrap_or(-1))
+                                .map_err(|_| ()),
+                        );
+                    }
+                    Poll::Pending => observation.sample_liveness(Some(true)),
+                }
+            }
+        }
         // Output is checked first so an already-observed overflow/read failure
         // retains precedence over a status or deadline observed in the same poll.
         if let Poll::Ready(result) = output_future.as_mut().poll(context) {
             return Poll::Ready(ProcessEvent::Output(result));
+        }
+        if let Some(result) = sampled_status.take() {
+            return Poll::Ready(ProcessEvent::Exited(result));
         }
         if let Poll::Ready(result) = status_future.as_mut().poll(context) {
             return Poll::Ready(ProcessEvent::Exited(
@@ -401,7 +777,13 @@ async fn run_child_with_deadline_signal<D: Future>(
                 }
                 Ok((stdout, stderr)) => {
                     drop(timer);
-                    match settle_status(status_future).await {
+                    let settled_status = if let Some(result) = sampled_status.take() {
+                        drop(status_future);
+                        SettledStatus::Complete(result)
+                    } else {
+                        settle_status(status_future).await
+                    };
+                    match settled_status {
                         SettledStatus::Complete(Ok(status_code)) => Ok(CapturedProcessOutput {
                             status_code: Some(status_code),
                             stdout: stdout.bytes,
@@ -454,6 +836,16 @@ fn run_owned_process_with_deadline(
     deadline: Duration,
     operation: ProcessOperation,
 ) -> Result<CapturedProcessOutput, OwnedProcessError> {
+    run_owned_process_with_deadline_and_observer(program, args, deadline, operation, None)
+}
+
+fn run_owned_process_with_deadline_and_observer(
+    program: &str,
+    args: &[String],
+    deadline: Duration,
+    operation: ProcessOperation,
+    observer: Option<OwnedProcessObservationHandle>,
+) -> Result<CapturedProcessOutput, OwnedProcessError> {
     let mut child = Command::new(program)
         .args(args)
         .stdin(Stdio::null())
@@ -463,21 +855,43 @@ fn run_owned_process_with_deadline(
         .map_err(|_| {
             OwnedProcessError::new(ProcessFailureKind::Spawn, ProcessCleanup::NotRequired)
         })?;
-    let stdout = child
-        .stdout
-        .take()
-        .ok_or_else(|| cleanup_child(&mut child, ProcessFailureKind::Spawn))?;
-    let stderr = child
-        .stderr
-        .take()
-        .ok_or_else(|| cleanup_child(&mut child, ProcessFailureKind::Spawn))?;
-    block_on(run_child(
+    let observation =
+        observer.map(|observer| OwnedProcessObservationContext::begin(observer, operation));
+    let stdout = match child.stdout.take() {
+        Some(stdout) => stdout,
+        None => {
+            let error = cleanup_child(&mut child, ProcessFailureKind::Spawn);
+            if let Some(observation) = observation.as_ref() {
+                observation.terminal();
+            }
+            return Err(error);
+        }
+    };
+    let stderr = match child.stderr.take() {
+        Some(stderr) => stderr,
+        None => {
+            let error = cleanup_child(&mut child, ProcessFailureKind::Spawn);
+            if let Some(observation) = observation.as_ref() {
+                observation.terminal();
+            }
+            return Err(error);
+        }
+    };
+    if let Some(observation) = observation.as_ref() {
+        observation.mutation_started();
+    }
+    let result = block_on(run_child(
         child,
         stdout,
         stderr,
         deadline,
         take_test_process_delay(operation),
-    ))
+        observation.clone(),
+    ));
+    if let Some(observation) = observation.as_ref() {
+        observation.terminal();
+    }
+    result
 }
 
 #[cfg(test)]
@@ -510,6 +924,7 @@ fn run_owned_process_with_deadline_signal<D: Future + 'static>(
         stderr,
         deadline_signal,
         None,
+        None,
     ))
 }
 
@@ -521,6 +936,33 @@ pub(crate) fn run_owned_process(
     operation: ProcessOperation,
 ) -> Result<CapturedProcessOutput, OwnedProcessError> {
     run_owned_process_with_deadline(program, args, operation.deadline(), operation)
+}
+
+#[cfg(test)]
+pub(crate) fn run_owned_process_observed(
+    program: &str,
+    args: &[String],
+    operation: ProcessOperation,
+    observer: OwnedProcessObservationHandle,
+) -> Result<CapturedProcessOutput, OwnedProcessError> {
+    run_owned_process_with_deadline_and_observer(
+        program,
+        args,
+        operation.deadline(),
+        operation,
+        Some(observer),
+    )
+}
+
+#[cfg(test)]
+fn run_owned_process_observed_for_test(
+    program: &str,
+    args: &[String],
+    deadline: Duration,
+    operation: ProcessOperation,
+    observer: OwnedProcessObservationHandle,
+) -> Result<CapturedProcessOutput, OwnedProcessError> {
+    run_owned_process_with_deadline_and_observer(program, args, deadline, operation, Some(observer))
 }
 
 #[cfg(test)]
@@ -798,6 +1240,166 @@ mod tests {
         assert_eq!(output.status_code, Some(0));
     }
 
+    #[test]
+    fn observed_child_preserves_one_identity_and_event_order() {
+        let observer = OwnedProcessObservationHandle::default();
+        let executable = std::env::current_exe().expect("test executable should be available");
+        let worker_observer = observer.clone();
+        let worker = std::thread::spawn(move || {
+            run_owned_process_observed(
+                executable
+                    .to_str()
+                    .expect("test executable should be utf-8"),
+                &[
+                    "--exact".to_string(),
+                    "owned_process::tests::observed_helper".to_string(),
+                    "--ignored".to_string(),
+                    "--nocapture".to_string(),
+                ],
+                ProcessOperation::DeviceCopy,
+                worker_observer,
+            )
+        });
+
+        let operation_id = observer
+            .wait_for_mutation(ProcessOperation::DeviceCopy, Duration::from_secs(2))
+            .expect("the observed mutation should start");
+        observer
+            .request_liveness_sample(operation_id)
+            .expect("the exact child liveness sample should be requested");
+        let sample = observer
+            .wait_for_liveness(operation_id, Duration::from_secs(2))
+            .expect("the exact child liveness sample should complete");
+        assert_eq!(sample.operation_id, operation_id);
+        assert_eq!(sample.alive, Some(true));
+        assert!(!sample.terminal_reported);
+
+        let result = worker
+            .join()
+            .expect("observed helper thread should finish")
+            .expect("observed helper should complete");
+        assert_eq!(result.status_code, Some(0));
+
+        let events = observer.events();
+        let matching = events
+            .iter()
+            .filter(|event| event.operation_id() == operation_id)
+            .collect::<Vec<_>>();
+        assert_eq!(matching.len(), 4);
+        assert!(matches!(
+            matching[0],
+            OwnedProcessLifecycleEvent::Spawned { .. }
+        ));
+        assert!(matches!(
+            matching[1],
+            OwnedProcessLifecycleEvent::MutationStarted { .. }
+        ));
+        assert!(matches!(
+            matching[2],
+            OwnedProcessLifecycleEvent::LivenessSampled {
+                alive: Some(true),
+                ..
+            }
+        ));
+        assert!(matches!(
+            matching[3],
+            OwnedProcessLifecycleEvent::Terminal { .. }
+        ));
+        assert!(matching.windows(2).all(|pair| pair[0].at() <= pair[1].at()));
+    }
+
+    #[test]
+    fn completed_child_cannot_be_sampled_as_alive() {
+        let observer = OwnedProcessObservationHandle::default();
+        let executable = std::env::current_exe().expect("test executable should be available");
+        let output = run_owned_process_observed_for_test(
+            executable
+                .to_str()
+                .expect("test executable should be utf-8"),
+            &[
+                "--exact".to_string(),
+                "owned_process::tests::normal_helper".to_string(),
+                "--ignored".to_string(),
+                "--nocapture".to_string(),
+            ],
+            Duration::from_secs(2),
+            ProcessOperation::DeviceCopy,
+            observer.clone(),
+        )
+        .expect("the observed helper should complete");
+        assert_eq!(output.status_code, Some(0));
+
+        let operation_id = observer
+            .wait_for_mutation(ProcessOperation::DeviceCopy, Duration::from_secs(1))
+            .expect("the completed mutation should remain observable");
+        observer
+            .request_liveness_sample(operation_id)
+            .expect("the terminal sample should be recorded");
+        let sample = observer
+            .wait_for_liveness(operation_id, Duration::from_secs(1))
+            .expect("the terminal sample should be available");
+        assert_eq!(sample.alive, Some(false));
+        assert!(sample.terminal_reported);
+    }
+
+    #[test]
+    fn observed_timeout_preserves_cleanup_and_emits_terminal() {
+        let observer = OwnedProcessObservationHandle::default();
+        let executable = std::env::current_exe().expect("test executable should be available");
+        let error = run_owned_process_observed_for_test(
+            executable
+                .to_str()
+                .expect("test executable should be utf-8"),
+            &[
+                "--exact".to_string(),
+                "owned_process::tests::timeout_helper".to_string(),
+                "--ignored".to_string(),
+                "--nocapture".to_string(),
+            ],
+            Duration::from_millis(100),
+            ProcessOperation::DeviceCopy,
+            observer.clone(),
+        )
+        .expect_err("the observed helper must exceed the test deadline");
+
+        assert_eq!(error.kind, ProcessFailureKind::TimedOut);
+        assert!(matches!(
+            error.cleanup,
+            ProcessCleanup::Confirmed | ProcessCleanup::Uncertain
+        ));
+        assert!(observer
+            .events()
+            .iter()
+            .any(|event| matches!(event, OwnedProcessLifecycleEvent::Terminal { .. })));
+    }
+
+    #[test]
+    fn observation_debug_output_contains_no_command_or_pid_data() {
+        let observer = OwnedProcessObservationHandle::default();
+        let executable = std::env::current_exe().expect("test executable should be available");
+        let output = run_owned_process_observed_for_test(
+            executable
+                .to_str()
+                .expect("test executable should be utf-8"),
+            &[
+                "--exact".to_string(),
+                "owned_process::tests::normal_helper".to_string(),
+                "--ignored".to_string(),
+                "--nocapture".to_string(),
+            ],
+            Duration::from_secs(2),
+            ProcessOperation::DeviceCopy,
+            observer.clone(),
+        )
+        .expect("the observed helper should complete");
+        assert_eq!(output.status_code, Some(0));
+
+        let debug = format!("{:?}", observer.events()).to_ascii_lowercase();
+        assert!(!debug.contains("--exact"));
+        assert!(!debug.contains("normal_helper"));
+        assert!(!debug.contains("pid"));
+    }
+
     #[derive(Default)]
     struct ElapsedJumpTimer {
         polled: bool,
@@ -818,6 +1420,13 @@ mod tests {
                 Poll::Pending
             }
         }
+    }
+
+    #[test]
+    #[ignore]
+    fn observed_helper() {
+        std::thread::sleep(Duration::from_millis(500));
+        println!("observed-helper");
     }
 
     #[test]

@@ -1,0 +1,44 @@
+{
+  "runId": "physical-run-sha256:1b886fb154f31b90a32e79db208077056eaca85885cb1bee59e8f4eae566e321",
+  "scenario": "identity_stability",
+  "repetition": 1,
+  "sentinel": {
+    "sentinelId": "sentinel-sha256:799788b6e1fb0a5e185916eec8521172c57c34bde90df5fb53e28d3dc749d36b",
+    "nonce": "nonce-sha256:f402c6e66191bb82118f894c792963590d00324994faf75ac38416396f542174",
+    "runId": "physical-run-sha256:1b886fb154f31b90a32e79db208077056eaca85885cb1bee59e8f4eae566e321",
+    "scenario": "identity_stability",
+    "repetition": 1,
+    "armedAt": "unix:1785830063",
+    "operationStartedAt": "unix:1785830063",
+    "boundaryReadyAt": "unix:1785830065",
+    "operatorActionAt": "unix:1785830093",
+    "operationFinishedAt": "unix:1785830065",
+    "cleanupReadyAt": null,
+    "sleepRequestedAt": null,
+    "sleepEnteredAt": null,
+    "wakeAt": null,
+    "chronologyValid": true,
+    "uniqueMarkers": true
+  },
+  "slot": {
+    "runId": "run-scope-sha256:9c7ebbcdc66433f01c8cbef9c878b43bcf4720c7c0594e21a8e673ee11aadd66",
+    "executionId": "execution-sha256:70e8f4abca92cd36dff2b1c6e55d65b4ab7f9a33c38755c1e283788bf727c5b6",
+    "acquired": true,
+    "released": true,
+    "acquiredAt": "unix:1785830063",
+    "terminalCleanupAt": "unix:1785830095",
+    "releasedAt": "unix:1785830095"
+  },
+  "terminal": {
+    "outcome": "passed",
+    "issueCode": null,
+    "stepStates": {
+      "executed": 2,
+      "skipped": 0,
+      "failed": 0,
+      "cancelled": 0,
+      "blocked": 0,
+      "notAttempted": 0
+    }
+  }
+}

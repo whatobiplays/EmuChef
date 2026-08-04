@@ -1,0 +1,216 @@
+{
+  "schemaVersion": 1,
+  "scenario": "cancellation_boundary",
+  "repetition": 2,
+  "timestamp": "unix:1785829673",
+  "commit": "fdd52f12b333d2049786800e91d506dd4c0ffd4e",
+  "host": {
+    "os": "macos",
+    "version": "26.5",
+    "architecture": "aarch64"
+  },
+  "platformToolsRevision": "Android Debug Bridge version 1.0.41",
+  "device": {
+    "identity": "serial-sha256:6c9c5122f10c51ea52e5180c2c6838ac44afadc943e602457ba8a30d0323af0a",
+    "model": "Pocket S2 Pro",
+    "androidVersion": "14",
+    "apiLevel": 34,
+    "abi": "arm64-v8a",
+    "buildFingerprint": "AYANEO/AYANEO_PocketS2_Pro/PocketS2Pro:14/01.00_20251126_private_user/eng.scm.20251126.150514:user/release-keys"
+  },
+  "root": null,
+  "fixtureApkSha256": "8495b56d5a191904fec5162d21a61561c4782e1d00a46748fb7ee5d3c5bb5179",
+  "optIns": [
+    "EMUCHEF_RUN_REAL_ADB_TESTS=1",
+    "EMUCHEF_RUN_PHASE_6D6_PHYSICAL_TESTS=1",
+    "EMUCHEF_PHASE_6D6_SCENARIO=cancellation_boundary",
+    "EMUCHEF_PHASE_6D6_REPETITION=2",
+    "EMUCHEF_TEST_DEVICE_SERIAL=selected",
+    "EMUCHEF_TEST_PACKAGE_ALLOWLIST=com.emuchef.fixture",
+    "EMUCHEF_PHASE_6D6_SENTINEL_DIR=test-owned-directory"
+  ],
+  "command": "cargo test --manifest-path crates/emuchef-rust-backend/Cargo.toml --features real-execution physical_interruption_qualification::manual_phase_6d6_physical_interruption_qualification -- --ignored --exact",
+  "preparation": "Phase 6C fixture contract, exact serial inventory, package allowlist, destination ownership, and empty sentinel directory validated.",
+  "operatorAction": "Required bounded sentinel action was requested from the operator.",
+  "executionSuccess": false,
+  "observedIssueCode": null,
+  "stepStates": {
+    "executed": 1,
+    "skipped": 0,
+    "failed": 0,
+    "cancelled": 1,
+    "blocked": 0,
+    "notAttempted": 0
+  },
+  "partialChangesPossible": true,
+  "authorityInvalidated": false,
+  "activeSlotReleased": true,
+  "activeSlotObservation": {
+    "observed": true,
+    "acquired": true,
+    "released": true,
+    "runId": "run-scope-sha256:fd1e0f23ae0c5b711933e89b2e4b4f0846a741fa4603e3f4257dae0dc7d91c86",
+    "executionId": "execution-sha256:83c44d0035b083c3179b3068837a6c73f58a28060374acfe2f367db7d4ee3acc",
+    "acquiredAt": "unix:1785829662",
+    "terminalCleanupAt": "unix:1785829673",
+    "releasedAt": "unix:1785829673",
+    "sourceKind": "production_owned_slot",
+    "evidence": "production-execution-session-slot"
+  },
+  "activeProcess": null,
+  "activeCancellation": {
+    "requestPhase": "safe_boundary",
+    "inFlightObservedAt": "unix:1785829662",
+    "requestedAt": "unix:1785829672",
+    "operationFinishedAt": "unix:1785829663",
+    "requestBeforeFinished": false,
+    "laterWorkNotAttempted": true,
+    "operatorEvidence": "bounded sentinel action observed at the production runner lifecycle checkpoint"
+  },
+  "hostSleep": null,
+  "identityTransition": null,
+  "authorizationTransition": null,
+  "scenarioContract": {
+    "expectedOutcome": "passed",
+    "expectedExecution": "interruption",
+    "allowedIssueCodes": [
+      null,
+      "step_execution_failed"
+    ],
+    "allowedStepStates": [
+      {
+        "executed": 1,
+        "skipped": 0,
+        "failed": 0,
+        "cancelled": 1,
+        "blocked": 0,
+        "notAttempted": 0
+      }
+    ],
+    "partialChanges": "allowed",
+    "authorityInvalidation": "allowed",
+    "requiresActiveSlotReleased": true,
+    "slotObservation": {
+      "source": "production-execution-session-slot",
+      "exactRunScope": true
+    },
+    "activeCancellation": {
+      "required": false,
+      "requestPhase": "safe_boundary",
+      "requestBeforeFinished": false,
+      "terminalBehavior": "later_work_not_attempted",
+      "disallowedIssueCodes": [
+        "device_transport_lost",
+        "device_offline",
+        "device_unauthorized",
+        "operation_timed_out"
+      ]
+    },
+    "cleanupOutcome": "succeeded",
+    "residualOutcome": "clean",
+    "facts": {
+      "rootShell": false,
+      "activeCheckpoint": false,
+      "boundaryCheckpoint": true,
+      "requiresSentinelAction": true,
+      "storage": false
+    }
+  },
+  "scenarioFacts": {
+    "rootShell": false,
+    "activeCheckpoint": false,
+    "boundaryCheckpoint": true,
+    "requiresSentinelAction": true,
+    "storage": false,
+    "runScope": "run-scope-sha256:fd1e0f23ae0c5b711933e89b2e4b4f0846a741fa4603e3f4257dae0dc7d91c86",
+    "operationClass": "device_copy"
+  },
+  "sentinel": {
+    "sentinelId": "sentinel-sha256:746b4950b04c80a8fc12a5dca0369c3a99fa849dfdad59b9ff3ca36bd5db9de3",
+    "nonce": "nonce-sha256:93fa143bf3f6b9c2dfa25bc67aaf94491a2ad7803a00f512d0f46bdc2acf7238",
+    "runId": "physical-run-sha256:e9d48d0a2a78f72276aee8b2924f978da875256b3cd026e3487d21852cb436f4",
+    "scenario": "cancellation_boundary",
+    "repetition": 2,
+    "armedAt": "unix:1785829661",
+    "operationStartedAt": "unix:1785829662",
+    "boundaryReadyAt": "unix:1785829664",
+    "operatorActionAt": "unix:1785829672",
+    "operationFinishedAt": "unix:1785829663",
+    "cleanupReadyAt": null,
+    "sleepRequestedAt": null,
+    "sleepEnteredAt": null,
+    "wakeAt": null,
+    "chronologyValid": true,
+    "uniqueMarkers": true
+  },
+  "storage": null,
+  "cleanup": {
+    "command": "adb -s <selected-serial> shell rm -f <fixture-owned-path>",
+    "outcome": "succeeded",
+    "ownedPathDigests": [
+      "path-sha256:33f1b2932b236218c0efbe044a04bb6d42a499b2c374a6597df9718112ee7cf5",
+      "path-sha256:5d7ae31ae23675d530b7a826c595a7f7d6f57d66888b505b6d82c080761f6f44"
+    ],
+    "verified": true,
+    "nonFixtureDeletion": false
+  },
+  "residualStateCheck": {
+    "outcome": "clean",
+    "residuals": []
+  },
+  "outcome": "passed",
+  "notes": [
+    "Physical qualification evidence is sanitized; raw ADB output is intentionally omitted.",
+    "The operation used the production reviewed plan and ExecutorRunner<RealAdbDevice> boundary.",
+    "operatorActionTimestampUnixSeconds=1785829672"
+  ],
+  "runId": "physical-run-sha256:e9d48d0a2a78f72276aee8b2924f978da875256b3cd026e3487d21852cb436f4",
+  "evidencePath": "docs/testing/phase-6d6/evidence/cancellation_boundary-rep2-e9d48d0a2a78f722.json",
+  "tracePath": "docs/testing/phase-6d6/evidence/traces/cancellation_boundary-rep2-e9d48d0a2a78f722.json",
+  "recordDigest": "sha256:e58293e965b0b6edf2170cf8d3364b464a5349841d75a72f9609d84263ba2b22",
+  "traceDigest": "sha256:757579f8b2bbde45db858a278e7219811a5320f7a638e8db563cecf2b5249e0a",
+  "trace": {
+    "runId": "physical-run-sha256:e9d48d0a2a78f72276aee8b2924f978da875256b3cd026e3487d21852cb436f4",
+    "scenario": "cancellation_boundary",
+    "repetition": 2,
+    "sentinel": {
+      "sentinelId": "sentinel-sha256:746b4950b04c80a8fc12a5dca0369c3a99fa849dfdad59b9ff3ca36bd5db9de3",
+      "nonce": "nonce-sha256:93fa143bf3f6b9c2dfa25bc67aaf94491a2ad7803a00f512d0f46bdc2acf7238",
+      "runId": "physical-run-sha256:e9d48d0a2a78f72276aee8b2924f978da875256b3cd026e3487d21852cb436f4",
+      "scenario": "cancellation_boundary",
+      "repetition": 2,
+      "armedAt": "unix:1785829661",
+      "operationStartedAt": "unix:1785829662",
+      "boundaryReadyAt": "unix:1785829664",
+      "operatorActionAt": "unix:1785829672",
+      "operationFinishedAt": "unix:1785829663",
+      "cleanupReadyAt": null,
+      "sleepRequestedAt": null,
+      "sleepEnteredAt": null,
+      "wakeAt": null,
+      "chronologyValid": true,
+      "uniqueMarkers": true
+    },
+    "slot": {
+      "runId": "run-scope-sha256:fd1e0f23ae0c5b711933e89b2e4b4f0846a741fa4603e3f4257dae0dc7d91c86",
+      "executionId": "execution-sha256:83c44d0035b083c3179b3068837a6c73f58a28060374acfe2f367db7d4ee3acc",
+      "acquired": true,
+      "released": true,
+      "acquiredAt": "unix:1785829662",
+      "terminalCleanupAt": "unix:1785829673",
+      "releasedAt": "unix:1785829673"
+    },
+    "terminal": {
+      "outcome": "passed",
+      "issueCode": null,
+      "stepStates": {
+        "executed": 1,
+        "skipped": 0,
+        "failed": 0,
+        "cancelled": 1,
+        "blocked": 0,
+        "notAttempted": 0
+      }
+    }
+  }
+}

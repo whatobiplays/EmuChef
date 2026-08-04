@@ -21,8 +21,8 @@ use sha2::{Digest, Sha256};
 
 use super::{
     adb_inventory, adb_path_exists, adb_query, condition, copy_step, fixture_apk_checksum,
-    fixture_root, load_contract, optional_env, validate_owned_destination, validate_package,
-    FIXTURE_PACKAGE,
+    fixture_root, literal, load_contract, optional_env, runtime_value, validate_owned_destination,
+    validate_package, FIXTURE_PACKAGE,
 };
 use crate::execution_session::ExecutionSessionManager;
 use crate::execution_session::ExecutionSlotObservation;
@@ -30,6 +30,10 @@ use crate::executor::adb::RealAdbDevice;
 use crate::executor::{
     ExecutionProgressEvent, ExecutionRunResult, ExecutorAdapters, ExecutorRunner,
     OperationLifecycle, ProgressPhase, StepFailureKind, StepRunRecord, StepRunStatus,
+};
+use crate::owned_process::{
+    OwnedProcessLifecycleEvent, OwnedProcessObservationHandle, OwnedProcessOperationId,
+    ProcessOperation,
 };
 use crate::planner::{
     DeviceContext, ExecutionPlan, ExecutionPlanSource, RuntimeCapabilities, TargetDeviceBinding,
@@ -69,6 +73,17 @@ const MAX_SERIAL_BYTES: usize = 256;
 const STORAGE_FILL_FILE: &str = "phase6d6-storage-fill.bin";
 const STORAGE_RESERVE_FILE: &str = "phase6d6-storage-recovery-reserve.bin";
 const LOW_STORAGE_HOST_PAYLOAD_BYTES: u64 = 128 * 1024 * 1024;
+const ACTIVE_CALIBRATION_KIB: u64 = 256 * 1024;
+const ACTIVE_TARGET_MS: u64 = 30_000;
+const ACTIVE_MIN_PREDICTED_MS: u64 = 15_000;
+const ACTIVE_MAX_PREDICTED_MS: u64 = 240_000;
+const ACTIVE_MIN_KIB: u64 = 512 * 1024;
+const ACTIVE_MAX_KIB: u64 = 8 * 1024 * 1024;
+const ACTIVE_CLEANUP_HEADROOM_KIB: u64 = 1024 * 1024;
+const ACTIVE_SAMPLE_FRESHNESS: Duration = Duration::from_secs(5);
+const ACTIVE_CALIBRATION_SOURCE_FILE: &str = "phase6d6-active-calibration-source.bin";
+const ACTIVE_CALIBRATION_DEST_FILE: &str = "phase6d6-active-calibration-dest.bin";
+const ACTIVE_SOURCE_FILE: &str = "phase6d6-active-source.bin";
 const SCENARIO_MANIFEST: &str =
     include_str!("../../../../docs/testing/phase-6d6/scenario-manifest.json");
 
@@ -182,6 +197,23 @@ impl Scenario {
                 | Self::IdentityStability
                 | Self::IdentityReplacement
                 | Self::RootRevocation
+        )
+    }
+
+    const fn supports_active_process_capture(self) -> bool {
+        matches!(
+            self,
+            Self::CancellationActive
+                | Self::UsbDisconnectActive
+                | Self::DeviceOffline
+                | Self::DeviceUnauthorized
+        )
+    }
+
+    const fn requires_terminal_recovery(self) -> bool {
+        matches!(
+            self,
+            Self::UsbDisconnectActive | Self::DeviceOffline | Self::DeviceUnauthorized
         )
     }
 
@@ -735,15 +767,15 @@ fn fixture_owned_run_path(path: &str) -> bool {
 }
 
 fn run_scope_paths(invocation: &Invocation) -> (String, String) {
-    let token = invocation
+    let scope_suffix = invocation
         .run_scope
         .rsplit('/')
         .next()
         .unwrap_or("phase6d6-invalid-scope");
     if invocation.scenario.is_root() {
         (
-            format!("{ROOT_DATA_PREFIX}{token}/phase6d6-first.txt"),
-            format!("{ROOT_USER_PREFIX}{token}/phase6d6-second.txt"),
+            format!("{ROOT_DATA_PREFIX}{scope_suffix}/phase6d6-first.txt"),
+            format!("{ROOT_USER_PREFIX}{scope_suffix}/phase6d6-second.txt"),
         )
     } else {
         (
@@ -755,14 +787,14 @@ fn run_scope_paths(invocation: &Invocation) -> (String, String) {
 
 fn run_scope_roots(invocation: &Invocation) -> Vec<String> {
     if invocation.scenario.is_root() {
-        let token = invocation
+        let scope_suffix = invocation
             .run_scope
             .rsplit('/')
             .next()
             .unwrap_or("phase6d6-invalid-scope");
         vec![
-            format!("{ROOT_DATA_PREFIX}{token}"),
-            format!("{ROOT_USER_PREFIX}{token}"),
+            format!("{ROOT_DATA_PREFIX}{scope_suffix}"),
+            format!("{ROOT_USER_PREFIX}{scope_suffix}"),
         ]
     } else {
         vec![invocation.run_scope.clone()]
@@ -968,6 +1000,145 @@ struct StorageObservation {
     cleanup_verified: bool,
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+struct ActiveStimulusDerivation {
+    payload_kib: u64,
+    predicted_ms: u64,
+}
+
+#[derive(Clone, Debug)]
+struct ActiveStimulus {
+    source_path: String,
+    payload_kib: u64,
+    predicted_ms: u64,
+}
+
+fn derive_active_stimulus(
+    calibration_kib: u64,
+    elapsed_ms: u64,
+) -> Result<ActiveStimulusDerivation, String> {
+    if calibration_kib == 0 || elapsed_ms == 0 {
+        return Err("active-copy calibration did not produce measurable throughput".to_string());
+    }
+    let target = (calibration_kib as u128)
+        .saturating_mul(ACTIVE_TARGET_MS as u128)
+        .checked_div(elapsed_ms as u128)
+        .and_then(|value| u64::try_from(value).ok())
+        .ok_or_else(|| "active-copy calibration overflowed its bounded calculation".to_string())?;
+    let payload_kib = target.clamp(ACTIVE_MIN_KIB, ACTIVE_MAX_KIB);
+    let predicted_ms = (payload_kib as u128)
+        .saturating_mul(elapsed_ms as u128)
+        .checked_div(calibration_kib as u128)
+        .and_then(|value| u64::try_from(value).ok())
+        .ok_or_else(|| "active-copy predicted duration was not representable".to_string())?;
+    if !(ACTIVE_MIN_PREDICTED_MS..=ACTIVE_MAX_PREDICTED_MS).contains(&predicted_ms) {
+        return Err(
+            "active-copy calibration cannot provide the required bounded operator window"
+                .to_string(),
+        );
+    }
+    Ok(ActiveStimulusDerivation {
+        payload_kib,
+        predicted_ms,
+    })
+}
+
+fn active_stimulus_paths(invocation: &Invocation) -> (String, String, String) {
+    (
+        format!(
+            "{}/{}",
+            invocation.run_scope, ACTIVE_CALIBRATION_SOURCE_FILE
+        ),
+        format!("{}/{}", invocation.run_scope, ACTIVE_CALIBRATION_DEST_FILE),
+        format!("{}/{}", invocation.run_scope, ACTIVE_SOURCE_FILE),
+    )
+}
+
+fn canonical_unix_seconds(time: SystemTime) -> Option<u64> {
+    time.duration_since(UNIX_EPOCH)
+        .ok()
+        .map(|duration| duration.as_secs())
+}
+
+fn active_process_evidence(
+    events: &[OwnedProcessLifecycleEvent],
+    action_time: Option<SystemTime>,
+    run_scope: &str,
+) -> Option<Value> {
+    let action = action_time?;
+    let (operation_id, mutation_started) = events.iter().find_map(|event| match event {
+        OwnedProcessLifecycleEvent::MutationStarted {
+            operation_id,
+            operation: ProcessOperation::DeviceCopy,
+            at,
+        } => Some((*operation_id, *at)),
+        _ => None,
+    })?;
+    let spawned = events.iter().find_map(|event| match event {
+        OwnedProcessLifecycleEvent::Spawned {
+            operation_id: observed,
+            operation: ProcessOperation::DeviceCopy,
+            at,
+        } if *observed == operation_id => Some(*at),
+        _ => None,
+    })?;
+    let (checked_alive, alive, terminal_reported) =
+        events.iter().find_map(|event| match event {
+            OwnedProcessLifecycleEvent::LivenessSampled {
+                operation_id: observed,
+                operation: ProcessOperation::DeviceCopy,
+                at,
+                alive,
+                terminal_reported,
+            } if *observed == operation_id => Some((*at, *alive, *terminal_reported)),
+            _ => None,
+        })?;
+    let terminal = events.iter().find_map(|event| match event {
+        OwnedProcessLifecycleEvent::Terminal {
+            operation_id: observed,
+            operation: ProcessOperation::DeviceCopy,
+            at,
+        } if *observed == operation_id => Some(*at),
+        _ => None,
+    })?;
+    let freshness = action.duration_since(checked_alive).ok()?;
+    let action_second = canonical_unix_seconds(action)?;
+    let terminal_second = canonical_unix_seconds(terminal)?;
+    if alive != Some(true)
+        || terminal_reported
+        || !(spawned <= mutation_started
+            && mutation_started <= checked_alive
+            && checked_alive <= action
+            && action < terminal)
+        || freshness > ACTIVE_SAMPLE_FRESHNESS
+        || action_second >= terminal_second
+    {
+        return None;
+    }
+    let raw_identity = operation_id.as_u64();
+    Some(json!({
+        "runId": run_scope,
+        "operationId": format!(
+            "operation-sha256:{}",
+            digest(&format!(
+                "phase6d6-operation:{run_scope}:{raw_identity}"
+            ))
+        ),
+        "operationClass": "device_copy",
+        "childIdentity": format!(
+            "child-sha256:{}",
+            digest(&format!("phase6d6-child:{run_scope}:{raw_identity}"))
+        ),
+        "spawnedAt": system_time_value(Some(spawned)),
+        "mutationStartedAt": system_time_value(Some(mutation_started)),
+        "checkedAliveAt": system_time_value(Some(checked_alive)),
+        "actionAt": system_time_value(Some(action)),
+        "terminalAt": system_time_value(Some(terminal)),
+        "aliveImmediatelyBeforeAction": true,
+        "terminalReportedBeforeAction": false,
+    }))
+}
+
 #[derive(Clone, Debug)]
 struct Sentinel {
     directory: PathBuf,
@@ -1073,6 +1244,7 @@ impl Sentinel {
         for name in [
             "armed",
             "operation-started",
+            "active-ready",
             "boundary-ready",
             "operation-finished",
             "terminal-ready",
@@ -1106,14 +1278,25 @@ impl Sentinel {
     }
 }
 
-fn wait_for_root_cleanup_authority(sentinel: &Sentinel) -> Result<(), String> {
+fn wait_for_terminal_cleanup_authority(
+    sentinel: &Sentinel,
+    checkpoint_kind: &str,
+) -> Result<(), String> {
     let terminal_ready = sentinel
         .mark("terminal-ready", "ready\n")
-        .map_err(|error| format!("root terminal checkpoint failed: {error}"))?;
+        .map_err(|error| format!("{checkpoint_kind} terminal checkpoint failed: {error}"))?;
     sentinel
         .wait_for_named_action_after("cleanup-ready", terminal_ready)
         .map(|_| ())
-        .map_err(|error| format!("root cleanup authority checkpoint failed: {error}"))
+        .map_err(|error| format!("{checkpoint_kind} cleanup authority checkpoint failed: {error}"))
+}
+
+fn wait_for_root_cleanup_authority(sentinel: &Sentinel) -> Result<(), String> {
+    wait_for_terminal_cleanup_authority(sentinel, "root")
+}
+
+fn wait_for_device_cleanup_authority(sentinel: &Sentinel) -> Result<(), String> {
+    wait_for_terminal_cleanup_authority(sentinel, "device recovery")
 }
 
 #[derive(Clone, Debug)]
@@ -1196,16 +1379,37 @@ fn run_invocation() -> Result<Value, String> {
     } else {
         None
     };
-    let plan = reviewed_plan(&invocation, &facts, low_storage_host_payload.as_deref());
+    let active_stimulus = if invocation.scenario.supports_active_process_capture() {
+        match prepare_active_stimulus(&invocation, &facts) {
+            Ok(stimulus) => Some(stimulus),
+            Err(error) => {
+                let cleanup =
+                    cleanup_fixture(&invocation, &facts, low_storage_host_payload.as_deref());
+                return Err(format!(
+                    "{error}; active-copy preparation cleanup outcome={}",
+                    cleanup.0
+                ));
+            }
+        }
+    } else {
+        None
+    };
+    let plan = reviewed_plan(
+        &invocation,
+        &facts,
+        low_storage_host_payload.as_deref(),
+        active_stimulus.as_ref(),
+    );
     let reviewed = run_reviewed_plan(&invocation, plan, &facts);
     let ReviewedPlanObservation {
         result,
         action_time,
         checkpoint_error,
         slot_observation,
+        active_process,
         active_cancellation,
         identity_capture,
-        authorization_capture,
+        mut authorization_capture,
         executor_elapsed_ms,
     } = reviewed;
 
@@ -1216,10 +1420,33 @@ fn run_invocation() -> Result<Value, String> {
             checkpoint_error = root_cleanup_error;
         }
     }
+    if invocation.scenario.requires_terminal_recovery() {
+        let recovery_error = wait_for_device_cleanup_authority(&invocation.sentinel).err();
+        if checkpoint_error.is_none() {
+            checkpoint_error = recovery_error;
+        }
+    }
+    if invocation.scenario == Scenario::DeviceUnauthorized {
+        if let Ok(terminal_ready) = invocation.sentinel.marker_time("terminal-ready") {
+            wait_until_later_canonical_second(terminal_ready);
+        }
+    }
     let sentinel = sentinel_evidence(&invocation);
     let cleanup_started_at = SystemTime::now();
     let cleanup = cleanup_fixture(&invocation, &facts, low_storage_host_payload.as_deref());
     let cleanup_completed_at = SystemTime::now();
+    if invocation.scenario == Scenario::DeviceUnauthorized {
+        wait_until_later_canonical_second(cleanup_completed_at);
+        let final_authorized = matches!(
+            selected_serial_observation(&invocation.serial),
+            Ok(SelectedSerialObservation::Attached(_))
+        );
+        let final_state_observed_at = final_authorized.then(SystemTime::now);
+        if let Some(capture) = authorization_capture.as_mut() {
+            capture.final_authorized = final_authorized;
+            capture.final_state_observed_at = final_state_observed_at;
+        }
+    }
     if let Some(observation) = storage.as_mut() {
         let root = invocation.contract.destination_root.trim_end_matches('/');
         observation.final_free_kib = free_space_kib(&invocation.serial, root).ok();
@@ -1245,12 +1472,14 @@ fn run_invocation() -> Result<Value, String> {
         checkpoint_error,
         cleanup,
         slot_observation,
+        active_process,
         active_cancellation,
         identity_capture,
         authorization_capture,
         executor_elapsed_ms,
         storage: storage.as_ref(),
         host_payload: low_storage_host_payload.as_deref(),
+        active_stimulus: active_stimulus.as_ref(),
         sentinel,
         cleanup_started_at,
         cleanup_completed_at,
@@ -1304,7 +1533,7 @@ fn validate_invocation() -> Result<Invocation, String> {
     let sentinel = Sentinel::from_environment()?;
     let run_scope = unique_run_scope(&contract, scenario, repetition, &serial)?;
     let run_digest = digest(&format!("phase6d6-run:{run_scope}"));
-    let path_token = &run_digest[..16];
+    let path_suffix = &run_digest[..16];
     Ok(Invocation {
         scenario,
         repetition,
@@ -1315,18 +1544,18 @@ fn validate_invocation() -> Result<Invocation, String> {
         run_id: format!("physical-run-sha256:{run_digest}"),
         sentinel_id: format!(
             "sentinel-sha256:{}",
-            digest(&format!("phase6d6-sentinel:{path_token}"))
+            digest(&format!("phase6d6-sentinel:{path_suffix}"))
         ),
         sentinel_nonce: format!(
             "nonce-sha256:{}",
-            digest(&format!("phase6d6-nonce:{path_token}"))
+            digest(&format!("phase6d6-nonce:{path_suffix}"))
         ),
         evidence_path: format!(
-            "docs/testing/phase-6d6/evidence/{}-rep{repetition}-{path_token}.json",
+            "docs/testing/phase-6d6/evidence/{}-rep{repetition}-{path_suffix}.json",
             scenario.as_str()
         ),
         trace_path: format!(
-            "docs/testing/phase-6d6/evidence/traces/{}-rep{repetition}-{path_token}.json",
+            "docs/testing/phase-6d6/evidence/traces/{}-rep{repetition}-{path_suffix}.json",
             scenario.as_str()
         ),
         scenario_contract: scenario_contract(scenario),
@@ -1343,7 +1572,7 @@ fn unique_run_scope(
         .duration_since(UNIX_EPOCH)
         .map(|duration| format!("{}-{}", duration.as_secs(), duration.subsec_nanos()))
         .unwrap_or_else(|_| "clock-unavailable".to_string());
-    let token = digest(&format!("{serial}:{nonce}"));
+    let scope_digest = digest(&format!("{serial}:{nonce}"));
     let root = if scenario.is_root() {
         ROOT_DATA_PREFIX.trim_end_matches('/')
     } else {
@@ -1352,7 +1581,7 @@ fn unique_run_scope(
     let scope = format!(
         "{root}/phase6d6-{}-rep{repetition}-{}",
         scenario.as_str(),
-        &token[..16]
+        &scope_digest[..16]
     );
     if scenario.is_root() {
         if scope.contains("..") || !scope.starts_with(ROOT_DATA_PREFIX) {
@@ -1511,6 +1740,7 @@ fn reviewed_plan(
     invocation: &Invocation,
     facts: &DeviceFacts,
     low_storage_host_payload: Option<&Path>,
+    active_stimulus: Option<&ActiveStimulus>,
 ) -> ExecutionPlan {
     let root = invocation.contract.destination_root.trim_end_matches('/');
     let mut steps = Vec::new();
@@ -1542,6 +1772,19 @@ fn reviewed_plan(
         first_source,
         &first_destination,
     );
+    if let Some(active_stimulus) = active_stimulus {
+        assert!(active_stimulus
+            .source_path
+            .starts_with(&invocation.run_scope));
+        first.params.insert(
+            "source".to_string(),
+            literal(runtime_value(
+                "file_path",
+                json!(active_stimulus.source_path.clone()),
+                Some("device"),
+            )),
+        );
+    }
     first.verify = vec![condition(
         "path_exists",
         json!({ "path": first_destination }),
@@ -1609,6 +1852,7 @@ struct ReviewedPlanObservation {
     action_time: Option<SystemTime>,
     checkpoint_error: Option<String>,
     slot_observation: ExecutionSlotObservation,
+    active_process: Option<Value>,
     active_cancellation: Option<Value>,
     identity_capture: Option<IdentityTransitionCapture>,
     authorization_capture: Option<AuthorizationTransitionCapture>,
@@ -1623,6 +1867,13 @@ fn is_boundary_checkpoint_event(
     scenario.is_boundary_checkpoint()
         && event.step_id == first_step_id
         && event.phase == ProgressPhase::Finished
+}
+
+fn wait_until_later_canonical_second(after: SystemTime) {
+    let after_second = canonical_unix_seconds(after).unwrap_or(0);
+    while canonical_unix_seconds(SystemTime::now()).unwrap_or(0) <= after_second {
+        std::thread::sleep(Duration::from_millis(20));
+    }
 }
 
 fn run_reviewed_plan(
@@ -1648,12 +1899,29 @@ fn run_reviewed_plan(
         }))
     });
     let authorization_capture = (scenario == Scenario::DeviceUnauthorized).then(|| {
+        let initial_authorized = matches!(
+            selected_serial_observation(&facts.serial),
+            Ok(SelectedSerialObservation::Attached(_))
+        );
+        let initial_observed_at = initial_authorized.then(SystemTime::now);
         Arc::new(std::sync::Mutex::new(AuthorizationTransitionCapture {
-            initial_authorized: true,
-            initial_observed_at: Some(SystemTime::now()),
+            initial_authorized,
+            initial_observed_at,
             ..AuthorizationTransitionCapture::default()
         }))
     });
+    if let Some(capture) = authorization_capture.as_ref() {
+        let initial = capture
+            .lock()
+            .ok()
+            .and_then(|value| value.initial_observed_at);
+        if let Some(initial) = initial {
+            wait_until_later_canonical_second(initial);
+        }
+    }
+    let process_observer = scenario
+        .supports_active_process_capture()
+        .then(OwnedProcessObservationHandle::default);
     let transition_stop = Arc::new(AtomicBool::new(false));
     let sentinel = invocation.sentinel.clone();
     let callback_sentinel = sentinel.clone();
@@ -1688,8 +1956,16 @@ fn run_reviewed_plan(
         )
     });
     let sandbox = tempfile::tempdir().expect("qualification sandbox should be created");
+    let device = match process_observer.as_ref() {
+        Some(observer) => RealAdbDevice::new_with_process_observer(
+            "adb",
+            Some(facts.serial.clone()),
+            observer.clone(),
+        ),
+        None => RealAdbDevice::new("adb", Some(facts.serial.clone())),
+    };
     let runner = ExecutorRunner::new(ExecutorAdapters::with_device_and_sandbox_roots(
-        RealAdbDevice::new("adb", Some(facts.serial.clone())),
+        device,
         sandbox.path().join("runtime"),
         sandbox.path().join("cache"),
         sandbox.path().join("device"),
@@ -1705,7 +1981,60 @@ fn run_reviewed_plan(
         let watcher_action_time = Arc::clone(&action_time);
         let watcher_checkpoint_failed = Arc::clone(&checkpoint_failed);
         let watcher_cancel_requested = Arc::clone(&cancel_requested);
+        let watcher_process_observer = process_observer.clone();
         Some(std::thread::spawn(move || {
+            if scenario.supports_active_process_capture() {
+                let result = (|| -> Result<(), String> {
+                    let observer = watcher_process_observer.ok_or_else(|| {
+                        "active scenario did not install the exact-child observer".to_string()
+                    })?;
+                    let operation_id = observer
+                        .wait_for_mutation(ProcessOperation::DeviceCopy, SENTINEL_TIMEOUT)?;
+                    let operation_started = watcher_sentinel
+                        .marker_time("operation-started")
+                        .map_err(|_| {
+                            "active operation-started marker was unavailable".to_string()
+                        })?;
+                    wait_until_later_canonical_second(operation_started);
+                    observer.request_liveness_sample(operation_id)?;
+                    let sample = observer.wait_for_liveness(operation_id, SENTINEL_TIMEOUT)?;
+                    if sample.alive != Some(true) || sample.terminal_reported {
+                        return Err(
+                            "exact target child was not alive before the operator action"
+                                .to_string(),
+                        );
+                    }
+                    let active_ready = watcher_sentinel.mark("active-ready", "ready\n")?;
+                    let timestamp = watcher_sentinel.wait_for_action_after(active_ready)?;
+                    let freshness = timestamp.duration_since(sample.at).map_err(|_| {
+                        "operator action preceded the exact-child liveness sample".to_string()
+                    })?;
+                    if freshness > ACTIVE_SAMPLE_FRESHNESS {
+                        return Err(
+                            "operator action exceeded the exact-child liveness freshness window"
+                                .to_string(),
+                        );
+                    }
+                    watcher_action_seen.store(true, Ordering::Release);
+                    if let Ok(mut slot) = watcher_action_time.lock() {
+                        *slot = Some(timestamp);
+                    }
+                    if let Ok(mut capture) = watcher_capture.lock() {
+                        capture.requested_at = Some(timestamp);
+                    }
+                    if scenario == Scenario::CancellationActive {
+                        watcher_cancel_requested.store(true, Ordering::Release);
+                    }
+                    Ok(())
+                })();
+                if result.is_err() {
+                    watcher_checkpoint_failed.store(true, Ordering::Release);
+                    if scenario == Scenario::CancellationActive {
+                        watcher_cancel_requested.store(true, Ordering::Release);
+                    }
+                }
+                return;
+            }
             let started = Instant::now();
             while !watcher_in_flight.load(Ordering::Acquire) && started.elapsed() < SENTINEL_TIMEOUT
             {
@@ -1861,6 +2190,7 @@ fn run_reviewed_plan(
                     released_at_unix: None,
                 },
                 active_cancellation: None,
+                active_process: None,
                 identity_capture: None,
                 authorization_capture: None,
                 executor_elapsed_ms: None,
@@ -1868,6 +2198,22 @@ fn run_reviewed_plan(
         }
     };
     let executor_elapsed_ms = Some(executor_timer.elapsed().as_millis() as u64);
+    if scenario == Scenario::DeviceUnauthorized {
+        let grace_started = Instant::now();
+        while grace_started.elapsed() < Duration::from_secs(3) {
+            let observed = authorization_capture.as_ref().is_some_and(|capture| {
+                capture
+                    .lock()
+                    .ok()
+                    .and_then(|value| value.observed_at)
+                    .is_some()
+            });
+            if observed {
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(20));
+        }
+    }
     transition_stop.store(true, Ordering::Release);
     if let Some(observer) = identity_observer {
         let _ = observer.join();
@@ -1883,7 +2229,7 @@ fn run_reviewed_plan(
         .map(|value| value.clone())
         .unwrap_or(ExecutionSlotObservation {
             run_id: run_id.clone(),
-            execution_id: run_id,
+            execution_id: run_id.clone(),
             acquired: false,
             released: false,
             acquired_at_unix: 0,
@@ -1891,6 +2237,9 @@ fn run_reviewed_plan(
             released_at_unix: None,
         });
     let action_time = action_time.lock().ok().and_then(|slot| *slot);
+    let active_process = process_observer
+        .as_ref()
+        .and_then(|observer| active_process_evidence(&observer.events(), action_time, &run_id));
     let checkpoint_error = if checkpoint_failed.load(Ordering::SeqCst) {
         Some("bounded operator checkpoint was missing or aborted".to_string())
     } else if invocation.scenario.is_active_checkpoint() && !action_seen.load(Ordering::SeqCst) {
@@ -1929,6 +2278,7 @@ fn run_reviewed_plan(
         action_time,
         checkpoint_error,
         slot_observation,
+        active_process,
         active_cancellation,
         identity_capture,
         authorization_capture,
@@ -1960,6 +2310,8 @@ struct AuthorizationTransitionCapture {
     initial_observed_at: Option<SystemTime>,
     revocation_checkpoint_at: Option<SystemTime>,
     observed_at: Option<SystemTime>,
+    final_authorized: bool,
+    final_state_observed_at: Option<SystemTime>,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -2077,8 +2429,10 @@ fn spawn_authorization_transition_observer(
                     }
                     break;
                 }
+                std::thread::sleep(Duration::from_millis(20));
+            } else {
+                std::thread::sleep(Duration::from_millis(250));
             }
-            std::thread::sleep(Duration::from_millis(250));
         }
     })
 }
@@ -2107,6 +2461,13 @@ fn cleanup_fixture(
     // recovery budget for the operator if an earlier cleanup operation fails.
     for path in [first, second] {
         remove_owned_path(&path, &mut residual);
+    }
+    if invocation.scenario.supports_active_process_capture() {
+        let (calibration_source, calibration_destination, active_source) =
+            active_stimulus_paths(invocation);
+        for path in [calibration_destination, active_source, calibration_source] {
+            remove_owned_path(&path, &mut residual);
+        }
     }
     if invocation.scenario == Scenario::LowStorage {
         remove_owned_path(
@@ -2157,12 +2518,14 @@ struct EvidenceInputs<'a> {
     checkpoint_error: Option<String>,
     cleanup: (String, Vec<String>),
     slot_observation: ExecutionSlotObservation,
+    active_process: Option<Value>,
     active_cancellation: Option<Value>,
     identity_capture: Option<IdentityTransitionCapture>,
     authorization_capture: Option<AuthorizationTransitionCapture>,
     executor_elapsed_ms: Option<u64>,
     storage: Option<&'a StorageObservation>,
     host_payload: Option<&'a Path>,
+    active_stimulus: Option<&'a ActiveStimulus>,
     sentinel: Value,
     cleanup_started_at: SystemTime,
     cleanup_completed_at: SystemTime,
@@ -2177,12 +2540,14 @@ fn evidence_record(inputs: EvidenceInputs<'_>) -> Value {
         checkpoint_error,
         cleanup,
         slot_observation,
+        active_process,
         active_cancellation,
         identity_capture,
         authorization_capture,
         executor_elapsed_ms,
         storage,
         host_payload,
+        active_stimulus,
         sentinel,
         cleanup_started_at,
         cleanup_completed_at,
@@ -2201,6 +2566,7 @@ fn evidence_record(inputs: EvidenceInputs<'_>) -> Value {
         invocation,
         result,
         authorization_capture.as_ref(),
+        active_process.as_ref(),
         &sentinel,
         cleanup_started_at,
         cleanup_completed_at,
@@ -2249,7 +2615,7 @@ fn evidence_record(inputs: EvidenceInputs<'_>) -> Value {
                         "sourceKind": "production_owned_slot",
                         "evidence": "production-execution-session-slot",
                     },
-                    "activeProcess": Value::Null,
+                    "activeProcess": active_process.clone().unwrap_or(Value::Null),
                     "activeCancellation": active_cancellation.clone().unwrap_or(Value::Null),
                     "hostSleep": host_sleep.clone(),
                     "identityTransition": identity_transition.clone(),
@@ -2315,6 +2681,12 @@ fn evidence_record(inputs: EvidenceInputs<'_>) -> Value {
             ));
         }
     }
+    if let Some(stimulus) = active_stimulus {
+        notes.push(format!(
+            "activeStimulusPayloadKib={} predictedDurationMs={}",
+            stimulus.payload_kib, stimulus.predicted_ms
+        ));
+    }
     let storage_value = storage
         .map(|observation| {
             json!({
@@ -2338,6 +2710,11 @@ fn evidence_record(inputs: EvidenceInputs<'_>) -> Value {
             format!("{}/{}", invocation.run_scope, STORAGE_FILL_FILE),
             format!("{}/{}", invocation.run_scope, STORAGE_RESERVE_FILE),
         ]);
+    }
+    if invocation.scenario.supports_active_process_capture() {
+        let (calibration_source, calibration_destination, active_source) =
+            active_stimulus_paths(invocation);
+        owned_paths.extend([calibration_source, calibration_destination, active_source]);
     }
     if let Some(path) = host_payload {
         owned_paths.push(path.to_string_lossy().into_owned());
@@ -2414,7 +2791,7 @@ fn evidence_record(inputs: EvidenceInputs<'_>) -> Value {
             "sourceKind": "production_owned_slot",
             "evidence": "production-execution-session-slot",
         },
-        "activeProcess": Value::Null,
+        "activeProcess": active_process.clone().unwrap_or(Value::Null),
         "activeCancellation": active_cancellation.unwrap_or(Value::Null),
         "hostSleep": host_sleep,
         "identityTransition": identity_transition,
@@ -2652,6 +3029,7 @@ fn authorization_transition_evidence(
     invocation: &Invocation,
     result: Result<&ExecutionRunResult, &String>,
     capture: Option<&AuthorizationTransitionCapture>,
+    active_process: Option<&Value>,
     sentinel: &Value,
     cleanup_started_at: SystemTime,
     cleanup_completed_at: SystemTime,
@@ -2662,13 +3040,23 @@ fn authorization_transition_evidence(
     let Some(capture) = capture else {
         return Value::Null;
     };
-    let (Some(initial_observed_at), Some(revocation_checkpoint_at), Some(observed_at)) = (
+    let (
+        Some(initial_observed_at),
+        Some(revocation_checkpoint_at),
+        Some(observed_at),
+        Some(final_state_observed_at),
+    ) = (
         capture.initial_observed_at,
         capture.revocation_checkpoint_at,
         capture.observed_at,
-    ) else {
+        capture.final_state_observed_at,
+    )
+    else {
         return Value::Null;
     };
+    if !capture.initial_authorized || !capture.final_authorized {
+        return Value::Null;
+    }
     let issue = result.ok().and_then(|run| {
         run.steps
             .iter()
@@ -2678,25 +3066,28 @@ fn authorization_transition_evidence(
     if issue.is_none() {
         return Value::Null;
     }
-    let cleanup_final_state = match selected_serial_observation(&invocation.serial) {
-        Ok(SelectedSerialObservation::Attached(_)) => "authorized",
-        _ => return Value::Null,
-    };
+    let terminal_detected_at = active_process
+        .and_then(|value| value.get("terminalAt"))
+        .cloned()
+        .unwrap_or(Value::Null);
+    if terminal_detected_at.is_null() {
+        return Value::Null;
+    }
     json!({
-        "initialState": if capture.initial_authorized { "authorized" } else { "unknown" },
+        "initialState": "authorized",
         "initialObservedAt": system_time_value(Some(initial_observed_at)),
         "operationStartedAt": sentinel.get("operationStartedAt").cloned().unwrap_or(Value::Null),
         "revocationCheckpointAt": system_time_value(Some(revocation_checkpoint_at)),
         "observedState": "unauthorized",
         "observedAt": system_time_value(Some(observed_at)),
-        "terminalDetectedAt": sentinel.get("operationFinishedAt").cloned().unwrap_or(Value::Null),
+        "terminalDetectedAt": terminal_detected_at,
         "cleanupStartedAt": system_time_value(Some(cleanup_started_at)),
         "cleanupCompletedAt": system_time_value(Some(cleanup_completed_at)),
         "issueCode": "device_unauthorized",
         "authorityInvalidated": true,
         "automaticResume": false,
-        "cleanupFinalState": cleanup_final_state,
-        "finalStateObservedAt": system_time_value(Some(SystemTime::now())),
+        "cleanupFinalState": "authorized",
+        "finalStateObservedAt": system_time_value(Some(final_state_observed_at)),
         "runId": format!("run-scope-sha256:{}", digest(&invocation.run_scope)),
         "deviceScope": format!("serial-sha256:{}", digest(&invocation.serial)),
     })
@@ -2864,9 +3255,7 @@ fn parse_available_kib(output: &str) -> Result<u64, String> {
     let available_index = header_fields
         .iter()
         .position(|field| matches!(*field, "Available" | "Avail"))
-        .ok_or_else(|| {
-            "device free-space output did not identify available blocks".to_string()
-        })?;
+        .ok_or_else(|| "device free-space output did not identify available blocks".to_string())?;
 
     for line in lines {
         let fields = line.split_whitespace().collect::<Vec<_>>();
@@ -2877,7 +3266,9 @@ fn parse_available_kib(output: &str) -> Result<u64, String> {
             return Ok(value);
         }
         if available_index > 0
-            && fields.first().is_some_and(|field| field.parse::<u64>().is_ok())
+            && fields
+                .first()
+                .is_some_and(|field| field.parse::<u64>().is_ok())
         {
             if let Some(value) = fields
                 .get(available_index - 1)
@@ -2894,6 +3285,14 @@ fn parse_available_kib(output: &str) -> Result<u64, String> {
 fn free_space_kib(serial: &str, path: &str) -> Result<u64, String> {
     let output = adb_query(serial, &["shell", "df", "-k", path])?;
     parse_available_kib(&output)
+}
+
+fn device_file_size_bytes(serial: &str, path: &str) -> Result<u64, String> {
+    let output = adb_query(serial, &["shell", "stat", "-c", "%s", path])?;
+    output
+        .trim()
+        .parse::<u64>()
+        .map_err(|_| "device file size was not parseable".to_string())
 }
 
 fn device_mutation(
@@ -2934,13 +3333,75 @@ fn create_bounded_device_file(
     )
 }
 
+fn prepare_active_stimulus(
+    invocation: &Invocation,
+    facts: &DeviceFacts,
+) -> Result<ActiveStimulus, String> {
+    if !invocation.scenario.supports_active_process_capture() {
+        return Err("active-copy stimulus was requested for an unsupported scenario".to_string());
+    }
+    let root = invocation.contract.destination_root.trim_end_matches('/');
+    let (calibration_source, calibration_destination, source_path) =
+        active_stimulus_paths(invocation);
+    create_run_scope(invocation, facts)?;
+    create_bounded_device_file(
+        invocation,
+        facts,
+        &calibration_source,
+        ACTIVE_CALIBRATION_KIB,
+    )?;
+    if !fixture_path_exists(invocation, facts, &calibration_source)?
+        || device_file_size_bytes(&facts.serial, &calibration_source)?
+            != ACTIVE_CALIBRATION_KIB.saturating_mul(1024)
+    {
+        return Err("active-copy calibration source could not be verified".to_string());
+    }
+    let calibration_started = Instant::now();
+    device_mutation(
+        invocation,
+        facts,
+        &format!("cp {calibration_source} {calibration_destination}"),
+    )?;
+    let elapsed_ms = u64::try_from(calibration_started.elapsed().as_millis())
+        .map_err(|_| "active-copy calibration duration was not representable".to_string())?;
+    device_mutation(
+        invocation,
+        facts,
+        &format!("rm -f {calibration_destination}"),
+    )?;
+    let derived = derive_active_stimulus(ACTIVE_CALIBRATION_KIB, elapsed_ms)?;
+    let free_kib = free_space_kib(&facts.serial, root)?;
+    let required_kib = derived
+        .payload_kib
+        .checked_mul(2)
+        .and_then(|value| value.checked_add(ACTIVE_CLEANUP_HEADROOM_KIB))
+        .ok_or_else(|| "active-copy free-space requirement overflowed".to_string())?;
+    if free_kib < required_kib {
+        return Err(format!(
+            "active-copy qualification requires at least {required_kib} KiB free after calibration"
+        ));
+    }
+    create_bounded_device_file(invocation, facts, &source_path, derived.payload_kib)?;
+    if !fixture_path_exists(invocation, facts, &source_path)?
+        || device_file_size_bytes(&facts.serial, &source_path)?
+            != derived.payload_kib.saturating_mul(1024)
+    {
+        return Err("active-copy source could not be verified".to_string());
+    }
+    Ok(ActiveStimulus {
+        source_path,
+        payload_kib: derived.payload_kib,
+        predicted_ms: derived.predicted_ms,
+    })
+}
+
 fn create_low_storage_host_payload(invocation: &Invocation) -> Result<PathBuf, String> {
-    let token = invocation
+    let scope_suffix = invocation
         .run_scope
         .rsplit('/')
         .next()
-        .ok_or_else(|| "low-storage run scope was missing its unique token".to_string())?;
-    let path = fixture_root().join(format!(".phase6d6-low-storage-payload-{token}.bin"));
+        .ok_or_else(|| "low-storage run scope was missing its unique suffix".to_string())?;
+    let path = fixture_root().join(format!(".phase6d6-low-storage-payload-{scope_suffix}.bin"));
     let file = OpenOptions::new()
         .write(true)
         .create_new(true)
@@ -3183,16 +3644,11 @@ mod tests {
 
     #[test]
     fn root_preflight_matches_the_production_magisk_su_probe() {
-        assert_eq!(
-            PRODUCTION_ROOT_PROBE_ARGS,
-            ["shell", "su", "-c", "id"]
-        );
+        assert_eq!(PRODUCTION_ROOT_PROBE_ARGS, ["shell", "su", "-c", "id"]);
         assert!(production_root_probe_granted(
             "uid=0(root) gid=0(root) groups=0(root)\n"
         ));
-        assert!(production_root_probe_granted(
-            "UID=0(ROOT) GID=0(ROOT)\n"
-        ));
+        assert!(production_root_probe_granted("UID=0(ROOT) GID=0(ROOT)\n"));
         assert!(!production_root_probe_granted("0\n"));
         assert!(!production_root_probe_granted(
             "uid=2000(shell) gid=2000(shell)\n"
@@ -3311,7 +3767,9 @@ mod tests {
             sentinel.marker_time("terminal-ready").unwrap()
                 <= sentinel.marker_time("cleanup-ready").unwrap()
         );
-        sentinel.cleanup().expect("sentinel markers should clean up");
+        sentinel
+            .cleanup()
+            .expect("sentinel markers should clean up");
     }
 
     #[test]
@@ -3512,6 +3970,97 @@ mod tests {
     }
 
     #[test]
+    fn active_stimulus_derivation_targets_the_bounded_operator_window() {
+        let derived = derive_active_stimulus(ACTIVE_CALIBRATION_KIB, 1_000)
+            .expect("bounded calibration should derive a payload");
+        assert!((ACTIVE_MIN_KIB..=ACTIVE_MAX_KIB).contains(&derived.payload_kib));
+        assert!((ACTIVE_MIN_PREDICTED_MS..=ACTIVE_MAX_PREDICTED_MS).contains(&derived.predicted_ms));
+    }
+
+    #[test]
+    fn active_stimulus_derivation_rejects_zero_or_unusable_throughput() {
+        assert!(derive_active_stimulus(ACTIVE_CALIBRATION_KIB, 0).is_err());
+        assert!(derive_active_stimulus(ACTIVE_CALIBRATION_KIB, 1).is_err());
+    }
+
+    #[test]
+    fn exact_child_capture_serializes_the_existing_active_process_schema() {
+        let operation_id = OwnedProcessOperationId::from_raw_for_test(7);
+        let base = UNIX_EPOCH + Duration::from_secs(10);
+        let events = vec![
+            OwnedProcessLifecycleEvent::Spawned {
+                operation_id,
+                operation: ProcessOperation::DeviceCopy,
+                at: base,
+            },
+            OwnedProcessLifecycleEvent::MutationStarted {
+                operation_id,
+                operation: ProcessOperation::DeviceCopy,
+                at: base,
+            },
+            OwnedProcessLifecycleEvent::LivenessSampled {
+                operation_id,
+                operation: ProcessOperation::DeviceCopy,
+                at: base + Duration::from_secs(1),
+                alive: Some(true),
+                terminal_reported: false,
+            },
+            OwnedProcessLifecycleEvent::Terminal {
+                operation_id,
+                operation: ProcessOperation::DeviceCopy,
+                at: base + Duration::from_secs(3),
+            },
+        ];
+        let evidence = active_process_evidence(
+            &events,
+            Some(base + Duration::from_secs(2)),
+            "run-scope-test",
+        )
+        .expect("complete exact-child evidence should serialize");
+
+        assert_eq!(evidence["runId"], "run-scope-test");
+        assert_eq!(evidence["operationClass"], "device_copy");
+        assert_eq!(evidence["aliveImmediatelyBeforeAction"], true);
+        assert_eq!(evidence["terminalReportedBeforeAction"], false);
+    }
+
+    #[test]
+    fn same_second_action_and_terminal_remain_blocked() {
+        let operation_id = OwnedProcessOperationId::from_raw_for_test(8);
+        let base = UNIX_EPOCH + Duration::from_secs(20);
+        let events = vec![
+            OwnedProcessLifecycleEvent::Spawned {
+                operation_id,
+                operation: ProcessOperation::DeviceCopy,
+                at: base,
+            },
+            OwnedProcessLifecycleEvent::MutationStarted {
+                operation_id,
+                operation: ProcessOperation::DeviceCopy,
+                at: base,
+            },
+            OwnedProcessLifecycleEvent::LivenessSampled {
+                operation_id,
+                operation: ProcessOperation::DeviceCopy,
+                at: base,
+                alive: Some(true),
+                terminal_reported: false,
+            },
+            OwnedProcessLifecycleEvent::Terminal {
+                operation_id,
+                operation: ProcessOperation::DeviceCopy,
+                at: base + Duration::from_millis(900),
+            },
+        ];
+        assert!(active_process_evidence(
+            &events,
+            Some(base + Duration::from_millis(500)),
+            "run-scope-test",
+        )
+        .is_none());
+    }
+
+    #[test]
     fn rust_contract_adapter_enforces_host_clock_measurement_and_phase() {
         let before_contract = scenario_contract(Scenario::HostSleepBeforeDeadline);
         let run_scope = format!("run-scope-sha256:{}", "1".repeat(64));
@@ -3607,7 +4156,8 @@ mod tests {
 
     #[test]
     fn df_parser_fails_closed_without_an_available_column() {
-        let output = "Filesystem 1K-blocks Used Use% Mounted on\nvolume 8000000 6000000 75% mountpoint\n";
+        let output =
+            "Filesystem 1K-blocks Used Use% Mounted on\nvolume 8000000 6000000 75% mountpoint\n";
         assert!(parse_available_kib(output).is_err());
     }
 

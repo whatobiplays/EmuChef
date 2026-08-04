@@ -7,6 +7,8 @@ use std::collections::VecDeque;
 use crate::owned_process::{
     run_owned_process, OwnedProcessError, ProcessCleanup, ProcessFailureKind, ProcessOperation,
 };
+#[cfg(test)]
+use crate::owned_process::{run_owned_process_observed, OwnedProcessObservationHandle};
 use crate::planner::TargetDeviceBinding;
 
 use super::identity::{IdentityCheckPhase, POST_OPERATION_IDENTITY_FAILURE_MARKER};
@@ -121,7 +123,19 @@ pub trait AdbCommandExecutor: fmt::Debug {
 }
 
 #[derive(Debug, Default)]
-pub struct ProcessAdbCommandExecutor;
+pub struct ProcessAdbCommandExecutor {
+    #[cfg(test)]
+    process_observer: Option<OwnedProcessObservationHandle>,
+}
+
+impl ProcessAdbCommandExecutor {
+    #[cfg(test)]
+    pub(crate) fn with_process_observer(observer: OwnedProcessObservationHandle) -> Self {
+        Self {
+            process_observer: Some(observer),
+        }
+    }
+}
 
 impl AdbCommandExecutor for ProcessAdbCommandExecutor {
     fn run_for(
@@ -132,6 +146,15 @@ impl AdbCommandExecutor for ProcessAdbCommandExecutor {
         let (executable, command_args) = args.split_first().ok_or_else(|| {
             AdbCommandError::InvalidPlanCommand("ADB command must not be empty.".to_string())
         })?;
+        #[cfg(test)]
+        let output = match self.process_observer.as_ref() {
+            Some(observer) => {
+                run_owned_process_observed(executable, command_args, operation, observer.clone())
+            }
+            None => run_owned_process(executable, command_args, operation),
+        }
+        .map_err(|error| map_process_error(args, error))?;
+        #[cfg(not(test))]
         let output = run_owned_process(executable, command_args, operation)
             .map_err(|error| map_process_error(args, error))?;
         classify_completed_transport(AdbCommandResult {
@@ -301,7 +324,7 @@ pub struct AdbCommandRunner<E: AdbCommandExecutor = ProcessAdbCommandExecutor> {
 
 impl AdbCommandRunner<ProcessAdbCommandExecutor> {
     pub fn new(executable: impl Into<String>, serial: Option<String>) -> Self {
-        Self::with_executor(executable, serial, ProcessAdbCommandExecutor)
+        Self::with_executor(executable, serial, ProcessAdbCommandExecutor::default())
     }
 }
 
@@ -441,6 +464,24 @@ impl RealAdbDevice<ProcessAdbCommandExecutor> {
     pub fn new(executable: impl Into<String>, serial: Option<String>) -> Self {
         Self {
             runner: AdbCommandRunner::new(executable, serial),
+            last_error: None,
+            identity: super::identity::IdentityGuard::default(),
+            root_authority: root_authority::RootAuthorityGuard::default(),
+        }
+    }
+
+    #[cfg(test)]
+    pub(crate) fn new_with_process_observer(
+        executable: impl Into<String>,
+        serial: Option<String>,
+        observer: OwnedProcessObservationHandle,
+    ) -> Self {
+        Self {
+            runner: AdbCommandRunner::with_executor(
+                executable,
+                serial,
+                ProcessAdbCommandExecutor::with_process_observer(observer),
+            ),
             last_error: None,
             identity: super::identity::IdentityGuard::default(),
             root_authority: root_authority::RootAuthorityGuard::default(),
@@ -1135,6 +1176,37 @@ fn list_repr(values: &[String]) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn process_executor_forwards_device_copy_observation_without_changing_result() {
+        let observer = crate::owned_process::OwnedProcessObservationHandle::default();
+        let mut executor = ProcessAdbCommandExecutor::with_process_observer(observer.clone());
+        let executable = std::env::current_exe()
+            .expect("test executable should be available")
+            .to_string_lossy()
+            .into_owned();
+        let result = executor
+            .run_for(
+                &[
+                    executable,
+                    "--exact".to_string(),
+                    "owned_process::tests::normal_helper".to_string(),
+                    "--ignored".to_string(),
+                    "--nocapture".to_string(),
+                ],
+                ProcessOperation::DeviceCopy,
+            )
+            .expect("the observed process should complete");
+
+        assert_eq!(result.returncode, 0);
+        assert!(observer.events().iter().any(|event| {
+            event.operation() == ProcessOperation::DeviceCopy
+                && matches!(
+                    event,
+                    crate::owned_process::OwnedProcessLifecycleEvent::Terminal { .. }
+                )
+        }));
+    }
 
     fn probe_with(
         response: impl FnOnce(&mut FakeAdbCommandExecutor),

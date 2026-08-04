@@ -47,7 +47,7 @@ Introduce an optional observer supplied for one owned-process invocation. The ob
 
 The observer is synchronous and non-owning. It must not retain or control the child and must not affect process scheduling or cleanup.
 
-The concrete interface is an invocation-scoped, cloneable observation handle shared only between the process owner, the ADB adapter, and the qualification watcher. It contains an event sink, one liveness-sample request slot keyed by opaque operation identity, and one sample-result slot. The owner checks the request inside its existing poll loop before polling terminal status, uses `try_status` on its exact child, and records the result. No observer thread, child handle, PID, command text, or control capability crosses the ownership boundary.
+The concrete interface is an invocation-scoped, cloneable observation handle shared only between the process owner, the ADB adapter, and the qualification watcher. It contains an event sink, one liveness-sample request slot keyed by opaque operation identity, and one sample-result slot. The owner checks the request inside its existing poll loop and samples the exact owner-held status future before normal terminal selection. A pending status proves the child remains alive; a ready status is consumed exactly once by the ordinary terminal path. No observer thread, child handle, PID, command text, or control capability crosses the ownership boundary.
 
 ### 2. Opaque lifecycle data
 
@@ -76,7 +76,7 @@ The active-process contract already requires the operator action to occur after 
 
 The physical harness cannot infer child liveness from `OperationLifecycle::Started`, and it cannot wait until `operator-action` exists before sampling because that would place `checkedAliveAt` after the physical action. Active cases therefore use a two-phase handshake.
 
-After the owner emits `MutationStarted`, the qualification watcher requests a liveness sample through invocation-scoped shared observation state. The owned-process owner services the request by checking the exact child with `try_status` while it still owns the child:
+After the owner emits `MutationStarted`, the qualification watcher requests a liveness sample through invocation-scoped shared observation state. The owned-process owner services the request by polling the exact child status future that it already owns:
 
 - no status: child is alive;
 - status available: child is already terminal;
@@ -214,7 +214,7 @@ Calibration is preparation evidence only. It cannot satisfy the active-process c
 
 - Spawn failure produces no active-process evidence because no child identity exists.
 - Pipe-acquisition failure emits terminal evidence only if spawn succeeded, while preserving the existing primary failure and cleanup result.
-- A failed `try_status` sample marks liveness evidence unavailable and blocks qualification.
+- An unavailable or poisoned status observation marks liveness evidence unavailable and blocks qualification.
 - An already-terminal sample records `aliveImmediatelyBeforeAction: false`; the physical repetition cannot pass.
 - Observer-state failure never replaces the existing ADB or process error.
 - Terminal emission must occur exactly once for every successfully spawned child.
@@ -271,6 +271,7 @@ Likely production files:
 
 - `crates/emuchef-rust-backend/src/owned_process.rs`
 - `crates/emuchef-rust-backend/src/executor/adb.rs`
+- `crates/emuchef-rust-backend/src/end_user_runtime.rs`
 - `crates/emuchef-rust-backend/src/executor_real_adb_tests/physical_interruption_qualification.rs`
 - `docs/manual/phase-6d6-physical-interruption-qualification.md`
 

@@ -26,6 +26,7 @@
 
 - `crates/emuchef-rust-backend/src/owned_process.rs`: exact-child lifecycle authority, observation handle, liveness request servicing, and owned-process regressions.
 - `crates/emuchef-rust-backend/src/executor/adb.rs`: optional observer forwarding through `ProcessAdbCommandExecutor` and `RealAdbDevice`.
+- `crates/emuchef-rust-backend/src/end_user_runtime.rs`: retain ordinary root-probe construction through `ProcessAdbCommandExecutor::default()` after the executor becomes observer-capable.
 - `crates/emuchef-rust-backend/src/executor_real_adb_tests/physical_interruption_qualification.rs`: bounded active stimulus, `active-ready` handshake, capture binding, recovery checkpoint, strict authorization chronology, evidence serialization, and harness tests.
 - `docs/manual/phase-6d6-physical-interruption-qualification.md`: operator protocol and safety limits.
 - `docs/product/phase-6d6-active-process-lifecycle-evidence-design.md`: clarified terminal-recovery design record.
@@ -43,7 +44,7 @@
 - `OwnedProcessLifecycleEvent::operation()` and `operation_id()` expose only the typed class and opaque ID.
 - `OwnedProcessObservationHandle::events()` returns a cloned ordered event list.
 - `OwnedProcessObservationHandle::wait_for_mutation(operation, timeout)` returns the first matching opaque ID.
-- `OwnedProcessObservationHandle::request_liveness_sample(operation_id)` wakes the owner poll loop and requests one exact-child `try_status` sample.
+- `OwnedProcessObservationHandle::request_liveness_sample(operation_id)` wakes the owner poll loop and requests one exact-child status-future sample.
 - `OwnedProcessObservationHandle::wait_for_liveness(operation_id, timeout)` returns `OwnedProcessLivenessSample { at, alive, terminal_reported }`.
 - `run_owned_process` remains unchanged for ordinary callers.
 
@@ -160,7 +161,7 @@ Required sequencing:
 3. Emit `Spawned`.
 4. Acquire both pipes.
 5. Emit `MutationStarted` for mutating operation classes, including `DeviceCopy`.
-6. In every poll, register the current waker, service a matching liveness request with `child.try_status()`, emit `LivenessSampled`, then preserve the existing output/status/deadline precedence.
+6. In every poll, register the current waker, service a matching liveness request by polling the exact owner-held status future, emit `LivenessSampled`, consume any ready status exactly once, then preserve the existing output/status/deadline precedence.
 7. Emit exactly one `Terminal` only after the existing terminal result and cleanup classification are known.
 
 Do not move or weaken the current output-first polling precedence.
@@ -565,6 +566,7 @@ Confirm only these tracked files changed:
 ```text
 crates/emuchef-rust-backend/src/owned_process.rs
 crates/emuchef-rust-backend/src/executor/adb.rs
+crates/emuchef-rust-backend/src/end_user_runtime.rs
 crates/emuchef-rust-backend/src/executor_real_adb_tests/physical_interruption_qualification.rs
 docs/manual/phase-6d6-physical-interruption-qualification.md
 docs/product/phase-6d6-active-process-lifecycle-evidence-design.md
