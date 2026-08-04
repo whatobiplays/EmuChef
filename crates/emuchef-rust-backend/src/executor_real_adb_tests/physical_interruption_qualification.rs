@@ -1370,6 +1370,13 @@ fn require_exact(name: &str, expected: &str) -> Result<(), String> {
     Ok(())
 }
 
+const PRODUCTION_ROOT_PROBE_ARGS: [&str; 4] = ["shell", "su", "-c", "id"];
+
+fn production_root_probe_granted(stdout: &str) -> bool {
+    let normalized = stdout.trim().to_ascii_lowercase();
+    normalized.starts_with("uid=0(") || normalized.starts_with("uid=0 ")
+}
+
 fn preflight_device(invocation: &Invocation) -> Result<DeviceFacts, String> {
     let inventory = adb_inventory()?;
     let inventory_rows = inventory
@@ -1406,15 +1413,20 @@ fn preflight_device(invocation: &Invocation) -> Result<DeviceFacts, String> {
         .map_err(|_| "device API level is not a number".to_string())?;
     let abi = query_property(&invocation.serial, "ro.product.cpu.abilist")?;
     let build_fingerprint = query_property(&invocation.serial, "ro.build.fingerprint")?;
-    let uid = adb_query(&invocation.serial, &["shell", "id", "-u"])?;
-    let root_shell = uid.trim() == "0";
-    if invocation.scenario.is_root() != root_shell {
-        return Err(if invocation.scenario.is_root() {
-            "root qualification requires a shell with uid 0".to_string()
-        } else {
-            "non-root qualification refuses a shell with uid 0".to_string()
-        });
-    }
+    let adb_shell_uid = adb_query(&invocation.serial, &["shell", "id", "-u"])?;
+    let adb_shell_is_root = adb_shell_uid.trim() == "0";
+    let root_shell = if invocation.scenario.is_root() {
+        let root_identity = adb_query(&invocation.serial, &PRODUCTION_ROOT_PROBE_ARGS)?;
+        if !production_root_probe_granted(&root_identity) {
+            return Err("root qualification requires granted su authority".to_string());
+        }
+        true
+    } else {
+        if adb_shell_is_root {
+            return Err("non-root qualification refuses a shell with uid 0".to_string());
+        }
+        false
+    };
     let root_version = if root_shell {
         adb_query(&invocation.serial, &["shell", "su", "--version"])
             .ok()
@@ -3166,6 +3178,24 @@ mod tests {
             sanitize_fact(" model\nwith\tunsafe\0bytes "),
             "modelwithunsafebytes"
         );
+    }
+
+    #[test]
+    fn root_preflight_matches_the_production_magisk_su_probe() {
+        assert_eq!(
+            PRODUCTION_ROOT_PROBE_ARGS,
+            ["shell", "su", "-c", "id"]
+        );
+        assert!(production_root_probe_granted(
+            "uid=0(root) gid=0(root) groups=0(root)\n"
+        ));
+        assert!(production_root_probe_granted(
+            "UID=0(ROOT) GID=0(ROOT)\n"
+        ));
+        assert!(!production_root_probe_granted("0\n"));
+        assert!(!production_root_probe_granted(
+            "uid=2000(shell) gid=2000(shell)\n"
+        ));
     }
 
     #[test]
