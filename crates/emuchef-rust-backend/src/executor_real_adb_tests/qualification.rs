@@ -201,7 +201,7 @@ pub fn validate_owned_destination(
         .into_iter()
         .map(normalize_absolute_device_path)
         .collect::<Result<Vec<_>, _>>()?;
-    let equals_root = roots.iter().any(|root| destination == *root);
+    let equals_root = roots.contains(&destination);
     let owned = roots
         .iter()
         .any(|root| destination == *root || destination.starts_with(&format!("{root}/")));

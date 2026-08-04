@@ -1,0 +1,378 @@
+{
+  "schemaVersion": 1,
+  "scenarios": [
+    "cancellation_active",
+    "cancellation_boundary",
+    "usb_disconnect_active",
+    "usb_disconnect_boundary",
+    "device_offline",
+    "device_unauthorized",
+    "identity_stability",
+    "identity_replacement",
+    "root_revocation",
+    "operation_timeout",
+    "low_storage",
+    "host_sleep_before_deadline",
+    "host_sleep_after_deadline"
+  ],
+  "requiredRepetitions": 2,
+  "uiSmokeScenario": "ui_smoke_composite",
+  "uiSmokeRequiredRepetitions": 2,
+  "uiSmokeSubcases": ["cancellation", "transport", "root", "storage", "host_sleep"],
+  "uiSmokeContracts": {
+    "cancellation": {
+      "allowedIssueCodes": [null],
+      "terminalStepProjection": "cancelled",
+      "notAttemptedRequired": true,
+      "partialChangePresentation": "possible_partial_change",
+      "authorityInvalidated": false,
+      "recoveryState": "fresh_review_required",
+      "authoredTitle": "Execution cancelled",
+      "authoredIssueText": "This action was cancelled at a safe boundary.",
+      "authoredRemediation": "Review the retained results, then create and review a fresh plan before another execution. The old execution cannot resume.",
+      "requiredArtifactKind": "ui_state_capture",
+      "forbiddenControls": ["resume", "replay", "checkpoint", "ownership_transfer"]
+    },
+    "transport": {
+      "allowedIssueCodes": ["device_transport_lost"],
+      "terminalStepProjection": "failed",
+      "notAttemptedRequired": true,
+      "partialChangePresentation": "possible_partial_change",
+      "authorityInvalidated": true,
+      "recoveryState": "requalification_required",
+      "authoredTitle": "Reconnect and requalify",
+      "authoredIssueText": "The device connection was lost during execution.",
+      "authoredRemediation": "Reconnect or authorize the intended reviewed device, then complete fresh qualification and generate and review a fresh plan before another real run. Reconnecting does not resume the old execution.",
+      "requiredArtifactKind": "ui_state_capture",
+      "forbiddenControls": ["resume", "replay", "checkpoint", "ownership_transfer"]
+    },
+    "root": {
+      "allowedIssueCodes": ["root_authority_revoked"],
+      "terminalStepProjection": "failed",
+      "notAttemptedRequired": true,
+      "partialChangePresentation": "possible_partial_change",
+      "authorityInvalidated": true,
+      "recoveryState": "root_requalification_required",
+      "authoredTitle": "Requalify root access",
+      "authoredIssueText": "Root access was revoked during execution.",
+      "authoredRemediation": "Complete fresh root qualification, generate a fresh plan, review it, and start a new execution. The old execution cannot be resumed.",
+      "requiredArtifactKind": "ui_state_capture",
+      "forbiddenControls": ["resume", "replay", "checkpoint", "ownership_transfer"]
+    },
+    "storage": {
+      "allowedIssueCodes": ["device_storage_exhausted"],
+      "terminalStepProjection": "failed",
+      "notAttemptedRequired": true,
+      "partialChangePresentation": "possible_partial_change",
+      "authorityInvalidated": true,
+      "recoveryState": "fresh_qualification_required",
+      "authoredTitle": "Free storage and start again",
+      "authoredIssueText": "The device ran out of storage during execution.",
+      "authoredRemediation": "Free device storage, complete fresh qualification, then generate and review a fresh plan before starting a new execution. The old execution cannot resume.",
+      "requiredArtifactKind": "ui_state_capture",
+      "forbiddenControls": ["resume", "replay", "checkpoint", "ownership_transfer"]
+    },
+    "host_sleep": {
+      "allowedIssueCodes": ["operation_timed_out"],
+      "terminalStepProjection": "failed",
+      "notAttemptedRequired": true,
+      "partialChangePresentation": "indeterminate",
+      "authorityInvalidated": true,
+      "recoveryState": "fresh_qualification_required",
+      "authoredTitle": "Repair and retry",
+      "authoredIssueText": "A device operation timed out.",
+      "authoredRemediation": "Resolve the reported feature problem, then generate and review a fresh plan.",
+      "requiredArtifactKind": "ui_state_capture",
+      "forbiddenControls": ["resume", "replay", "checkpoint", "ownership_transfer"]
+    }
+  },
+  "scenarioContracts": {
+    "cancellation_active": {
+      "expectedOutcome": "passed",
+      "expectedExecution": "interruption",
+      "allowedIssueCodes": [null],
+      "allowedStepStates": [
+        {"executed": 1, "skipped": 0, "failed": 0, "cancelled": 1, "blocked": 0, "notAttempted": 0}
+      ],
+      "partialChanges": "allowed",
+      "authorityInvalidation": "allowed",
+      "requiresActiveSlotReleased": true,
+      "slotObservation": {"source": "production-execution-session-slot", "exactRunScope": true},
+      "activeCancellation": {
+        "required": true,
+        "requestPhase": "in_flight",
+        "requestBeforeFinished": true,
+        "terminalBehavior": "active_operation_completes_then_later_work_not_attempted",
+        "disallowedIssueCodes": ["device_transport_lost", "device_offline", "device_unauthorized", "operation_timed_out", "device_identity_changed", "device_storage_exhausted"]
+      },
+      "activeProcess": {"required": true, "operationClass": "device_copy", "actionMustPrecedeTerminal": true, "exactRunBinding": true},
+      "cleanupOutcome": "succeeded",
+      "residualOutcome": "clean",
+      "facts": {"rootShell": false, "activeCheckpoint": true, "boundaryCheckpoint": false, "requiresSentinelAction": true, "storage": false}
+    },
+    "cancellation_boundary": {
+      "expectedOutcome": "passed",
+      "expectedExecution": "interruption",
+      "allowedIssueCodes": [null, "step_execution_failed"],
+      "allowedStepStates": [
+        {"executed": 1, "skipped": 0, "failed": 0, "cancelled": 1, "blocked": 0, "notAttempted": 0}
+      ],
+      "partialChanges": "allowed",
+      "authorityInvalidation": "allowed",
+      "requiresActiveSlotReleased": true,
+      "slotObservation": {"source": "production-execution-session-slot", "exactRunScope": true},
+      "activeCancellation": {"required": false, "requestPhase": "safe_boundary", "requestBeforeFinished": false, "terminalBehavior": "later_work_not_attempted", "disallowedIssueCodes": ["device_transport_lost", "device_offline", "device_unauthorized", "operation_timed_out"]},
+      "cleanupOutcome": "succeeded",
+      "residualOutcome": "clean",
+      "facts": {"rootShell": false, "activeCheckpoint": false, "boundaryCheckpoint": true, "requiresSentinelAction": true, "storage": false}
+    },
+    "usb_disconnect_active": {
+      "expectedOutcome": "passed",
+      "expectedExecution": "failure",
+      "allowedIssueCodes": ["device_disconnected", "device_transport_lost"],
+      "allowedStepStates": [
+        {"executed": 0, "skipped": 0, "failed": 1, "cancelled": 0, "blocked": 0, "notAttempted": 1},
+        {"executed": 1, "skipped": 0, "failed": 1, "cancelled": 0, "blocked": 0, "notAttempted": 0}
+      ],
+      "partialChanges": "allowed",
+      "authorityInvalidation": "required",
+      "requiresActiveSlotReleased": true,
+      "slotObservation": {"source": "production-execution-session-slot", "exactRunScope": true},
+      "activeProcess": {"required": true, "operationClass": "device_copy", "actionMustPrecedeTerminal": true, "exactRunBinding": true},
+      "cleanupOutcome": "succeeded",
+      "residualOutcome": "clean",
+      "facts": {"rootShell": false, "activeCheckpoint": true, "boundaryCheckpoint": false, "requiresSentinelAction": true, "storage": false}
+    },
+    "usb_disconnect_boundary": {
+      "expectedOutcome": "passed",
+      "expectedExecution": "failure",
+      "allowedIssueCodes": ["device_disconnected", "device_transport_lost"],
+      "allowedStepStates": [
+        {"executed": 0, "skipped": 0, "failed": 1, "cancelled": 0, "blocked": 0, "notAttempted": 1},
+        {"executed": 1, "skipped": 0, "failed": 1, "cancelled": 0, "blocked": 0, "notAttempted": 0}
+      ],
+      "partialChanges": "allowed",
+      "authorityInvalidation": "required",
+      "requiresActiveSlotReleased": true,
+      "slotObservation": {"source": "production-execution-session-slot", "exactRunScope": true},
+      "cleanupOutcome": "succeeded",
+      "residualOutcome": "clean",
+      "facts": {"rootShell": false, "activeCheckpoint": false, "boundaryCheckpoint": true, "requiresSentinelAction": true, "storage": false}
+    },
+    "device_offline": {
+      "expectedOutcome": "passed",
+      "expectedExecution": "failure",
+      "allowedIssueCodes": ["device_offline"],
+      "allowedStepStates": [
+        {"executed": 0, "skipped": 0, "failed": 1, "cancelled": 0, "blocked": 0, "notAttempted": 1},
+        {"executed": 1, "skipped": 0, "failed": 1, "cancelled": 0, "blocked": 0, "notAttempted": 0}
+      ],
+      "partialChanges": "allowed",
+      "authorityInvalidation": "required",
+      "requiresActiveSlotReleased": true,
+      "slotObservation": {"source": "production-execution-session-slot", "exactRunScope": true},
+      "activeProcess": {"required": true, "operationClass": "device_copy", "actionMustPrecedeTerminal": true, "exactRunBinding": true},
+      "cleanupOutcome": "succeeded",
+      "residualOutcome": "clean",
+      "facts": {"rootShell": false, "activeCheckpoint": true, "boundaryCheckpoint": false, "requiresSentinelAction": true, "storage": false}
+    },
+    "device_unauthorized": {
+      "expectedOutcome": "passed",
+      "expectedExecution": "failure",
+      "allowedIssueCodes": ["device_unauthorized"],
+      "allowedStepStates": [
+        {"executed": 0, "skipped": 0, "failed": 1, "cancelled": 0, "blocked": 0, "notAttempted": 1},
+        {"executed": 1, "skipped": 0, "failed": 1, "cancelled": 0, "blocked": 0, "notAttempted": 0}
+      ],
+      "partialChanges": "allowed",
+      "authorityInvalidation": "required",
+      "requiresActiveSlotReleased": true,
+      "slotObservation": {"source": "production-execution-session-slot", "exactRunScope": true},
+      "activeProcess": {"required": true, "operationClass": "device_copy", "actionMustPrecedeTerminal": true, "exactRunBinding": true},
+      "authorizationTransition": {
+        "required": true,
+        "initialState": "authorized",
+        "revokedState": "unauthorized",
+        "terminalIssueCodes": ["device_unauthorized"],
+        "authorityInvalidated": true,
+        "automaticResume": false,
+        "initialObservationBeforeOperation": true,
+        "revocationAfterOperationStart": true,
+        "unauthorizedBeforeOrAtTerminal": true,
+        "terminalBeforeCleanup": true,
+        "finalStateAfterCleanup": true,
+        "exactRunAndDeviceScope": true
+      },
+      "cleanupOutcome": "succeeded",
+      "residualOutcome": "clean",
+      "facts": {"rootShell": false, "activeCheckpoint": true, "boundaryCheckpoint": false, "requiresSentinelAction": true, "storage": false}
+    },
+    "identity_stability": {
+      "expectedOutcome": "passed",
+      "expectedExecution": "success",
+      "allowedIssueCodes": [null],
+      "allowedStepStates": [
+        {"executed": 2, "skipped": 0, "failed": 0, "cancelled": 0, "blocked": 0, "notAttempted": 0}
+      ],
+      "partialChanges": "forbidden",
+      "authorityInvalidation": "forbidden",
+      "requiresActiveSlotReleased": true,
+      "slotObservation": {"source": "production-execution-session-slot", "exactRunScope": true},
+      "identityTransition": {
+        "required": true,
+        "mode": "stable_reconnect",
+        "sameSerial": true,
+        "sameFingerprint": true,
+        "requiresSerialAbsentInterval": true,
+        "requiresOriginalDisconnectBeforeReconnect": true,
+        "requiresNeverSimultaneous": true,
+        "authorityInvalidated": false
+      },
+      "cleanupOutcome": "succeeded",
+      "residualOutcome": "clean",
+      "facts": {"rootShell": false, "activeCheckpoint": false, "boundaryCheckpoint": true, "requiresSentinelAction": true, "storage": false}
+    },
+    "identity_replacement": {
+      "expectedOutcome": "passed",
+      "expectedExecution": "failure",
+      "allowedIssueCodes": ["device_identity_changed", "device_identity_unverified"],
+      "allowedStepStates": [
+        {"executed": 0, "skipped": 0, "failed": 1, "cancelled": 0, "blocked": 0, "notAttempted": 1},
+        {"executed": 1, "skipped": 0, "failed": 1, "cancelled": 0, "blocked": 0, "notAttempted": 0}
+      ],
+      "partialChanges": "allowed",
+      "authorityInvalidation": "required",
+      "requiresActiveSlotReleased": true,
+      "slotObservation": {"source": "production-execution-session-slot", "exactRunScope": true},
+      "identityTransition": {
+        "required": true,
+        "mode": "same_serial_replacement",
+        "sameSerial": true,
+        "differentFingerprint": true,
+        "requiresSerialAbsentInterval": true,
+        "requiresOriginalDisconnectBeforeReplacementAttach": true,
+        "requiresNeverSimultaneous": true,
+        "terminalIssueCodes": ["device_identity_changed", "device_identity_unverified"],
+        "authorityInvalidated": true
+      },
+      "cleanupOutcome": "succeeded",
+      "residualOutcome": "clean",
+      "facts": {"rootShell": false, "activeCheckpoint": false, "boundaryCheckpoint": true, "requiresSentinelAction": true, "storage": false}
+    },
+    "root_revocation": {
+      "expectedOutcome": "passed",
+      "expectedExecution": "failure",
+      "allowedIssueCodes": ["root_authority_revoked", "root_authority_unverified"],
+      "allowedStepStates": [
+        {"executed": 0, "skipped": 0, "failed": 1, "cancelled": 0, "blocked": 0, "notAttempted": 1},
+        {"executed": 1, "skipped": 0, "failed": 1, "cancelled": 0, "blocked": 0, "notAttempted": 0}
+      ],
+      "partialChanges": "allowed",
+      "authorityInvalidation": "required",
+      "requiresActiveSlotReleased": true,
+      "slotObservation": {"source": "production-execution-session-slot", "exactRunScope": true},
+      "cleanupOutcome": "succeeded",
+      "residualOutcome": "clean",
+      "facts": {"rootShell": true, "activeCheckpoint": false, "boundaryCheckpoint": true, "requiresSentinelAction": true, "storage": false}
+    },
+    "operation_timeout": {
+      "expectedOutcome": "passed",
+      "expectedExecution": "failure",
+      "allowedIssueCodes": ["operation_timed_out"],
+      "allowedStepStates": [
+        {"executed": 0, "skipped": 0, "failed": 1, "cancelled": 0, "blocked": 0, "notAttempted": 1},
+        {"executed": 1, "skipped": 0, "failed": 1, "cancelled": 0, "blocked": 0, "notAttempted": 0}
+      ],
+      "partialChanges": "allowed",
+      "authorityInvalidation": "required",
+      "requiresActiveSlotReleased": true,
+      "slotObservation": {"source": "production-execution-session-slot", "exactRunScope": true},
+      "activeProcess": {"required": true, "operationClass": "device_copy", "actionMustPrecedeTerminal": true, "exactRunBinding": true},
+      "cleanupOutcome": "succeeded",
+      "residualOutcome": "clean",
+      "facts": {"rootShell": false, "activeCheckpoint": false, "boundaryCheckpoint": false, "requiresSentinelAction": false, "storage": false}
+    },
+    "low_storage": {
+      "expectedOutcome": "passed",
+      "expectedExecution": "failure",
+      "allowedIssueCodes": ["device_storage_exhausted"],
+      "allowedStepStates": [
+        {"executed": 0, "skipped": 0, "failed": 1, "cancelled": 0, "blocked": 0, "notAttempted": 1},
+        {"executed": 1, "skipped": 0, "failed": 1, "cancelled": 0, "blocked": 0, "notAttempted": 0}
+      ],
+      "partialChanges": "allowed",
+      "authorityInvalidation": "required",
+      "requiresActiveSlotReleased": true,
+      "slotObservation": {"source": "production-execution-session-slot", "exactRunScope": true},
+      "cleanupOutcome": "succeeded",
+      "residualOutcome": "clean",
+      "facts": {"rootShell": false, "activeCheckpoint": false, "boundaryCheckpoint": false, "requiresSentinelAction": true, "storage": true}
+    },
+    "host_sleep_before_deadline": {
+      "expectedOutcome": "passed",
+      "expectedExecution": "host_sleep_branch",
+      "allowedIssueCodes": [null, "operation_timed_out"],
+      "allowedStepStates": [
+        {"executed": 2, "skipped": 0, "failed": 0, "cancelled": 0, "blocked": 0, "notAttempted": 0},
+        {"executed": 0, "skipped": 0, "failed": 1, "cancelled": 0, "blocked": 0, "notAttempted": 1},
+        {"executed": 1, "skipped": 0, "failed": 1, "cancelled": 0, "blocked": 0, "notAttempted": 0}
+      ],
+      "partialChanges": "allowed",
+      "authorityInvalidation": "required",
+      "requiresActiveSlotReleased": true,
+      "slotObservation": {"source": "production-execution-session-slot", "exactRunScope": true},
+      "activeProcess": {"required": true, "operationClass": "device_copy", "actionMustPrecedeTerminal": true, "exactRunBinding": true},
+      "hostSleep": {
+        "phase": "before_deadline",
+        "allowedTimerClassifications": ["suspended_time_excluded", "suspended_time_included"],
+        "allowedTerminalOutcomes": ["completed", "timed_out"],
+        "transportLossBlocksMeasurement": true,
+        "deadlineClock": "owned_process_monotonic_deadline_clock",
+        "classificationBasis": "clock_advancement_and_remaining_budget",
+        "measurementToleranceRequired": true,
+        "phaseRule": "wake_before_deadline_threshold"
+      },
+      "cleanupOutcome": "succeeded",
+      "residualOutcome": "clean",
+      "facts": {"rootShell": false, "activeCheckpoint": true, "boundaryCheckpoint": false, "requiresSentinelAction": true, "storage": false}
+    },
+    "host_sleep_after_deadline": {
+      "expectedOutcome": "passed",
+      "expectedExecution": "host_sleep_branch",
+      "allowedIssueCodes": [null, "operation_timed_out"],
+      "allowedStepStates": [
+        {"executed": 2, "skipped": 0, "failed": 0, "cancelled": 0, "blocked": 0, "notAttempted": 0},
+        {"executed": 0, "skipped": 0, "failed": 1, "cancelled": 0, "blocked": 0, "notAttempted": 1},
+        {"executed": 1, "skipped": 0, "failed": 1, "cancelled": 0, "blocked": 0, "notAttempted": 0}
+      ],
+      "partialChanges": "allowed",
+      "authorityInvalidation": "required",
+      "requiresActiveSlotReleased": true,
+      "slotObservation": {"source": "production-execution-session-slot", "exactRunScope": true},
+      "activeProcess": {"required": true, "operationClass": "device_copy", "actionMustPrecedeTerminal": true, "exactRunBinding": true},
+      "hostSleep": {
+        "phase": "after_deadline",
+        "allowedTimerClassifications": ["suspended_time_excluded", "suspended_time_included"],
+        "allowedTerminalOutcomes": ["completed", "timed_out"],
+        "transportLossBlocksMeasurement": true,
+        "deadlineClock": "owned_process_monotonic_deadline_clock",
+        "classificationBasis": "clock_advancement_and_remaining_budget",
+        "measurementToleranceRequired": true,
+        "phaseRule": "wake_at_or_after_deadline_threshold"
+      },
+      "cleanupOutcome": "succeeded",
+      "residualOutcome": "clean",
+      "facts": {"rootShell": false, "activeCheckpoint": true, "boundaryCheckpoint": false, "requiresSentinelAction": true, "storage": false}
+    }
+  },
+  "gates": {
+    "global": "EMUCHEF_RUN_REAL_ADB_TESTS=1",
+    "phase": "EMUCHEF_RUN_PHASE_6D6_PHYSICAL_TESTS=1",
+    "scenario": "EMUCHEF_PHASE_6D6_SCENARIO=<one exact scenario>",
+    "repetition": "EMUCHEF_PHASE_6D6_REPETITION=1|2",
+    "serial": "EMUCHEF_TEST_DEVICE_SERIAL=<one exact selected serial>",
+    "package": "EMUCHEF_TEST_PACKAGE_ALLOWLIST=com.emuchef.fixture",
+    "sentinel": "EMUCHEF_PHASE_6D6_SENTINEL_DIR=<empty test-owned directory>"
+  },
+  "outcomes": ["passed", "failed", "skipped", "blocked"]
+}

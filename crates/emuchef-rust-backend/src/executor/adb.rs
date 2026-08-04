@@ -28,6 +28,7 @@ pub enum AdbCommandError {
     DeviceOffline,
     DeviceUnauthorized,
     DeviceDisconnected,
+    DeviceStorageExhausted,
     AdbServerUnavailable,
     TransportReset,
     TransportFailure,
@@ -67,6 +68,9 @@ impl fmt::Display for AdbCommandError {
             }
             AdbCommandError::DeviceDisconnected => {
                 formatter.write_str("The reviewed device is disconnected or missing.")
+            }
+            AdbCommandError::DeviceStorageExhausted => {
+                formatter.write_str("The device ran out of storage during execution.")
             }
             AdbCommandError::AdbServerUnavailable => {
                 formatter.write_str("The local ADB service is unavailable.")
@@ -245,7 +249,11 @@ impl AdbCommandError {
     fn allows_post_identity_probe(&self) -> bool {
         matches!(
             self,
-            Self::CommandFailed | Self::RootDenied | Self::RootUnavailable | Self::RootCheckFailed
+            Self::CommandFailed
+                | Self::RootDenied
+                | Self::RootUnavailable
+                | Self::RootCheckFailed
+                | Self::DeviceStorageExhausted
         )
     }
 
@@ -349,6 +357,9 @@ impl<E: AdbCommandExecutor> AdbCommandRunner<E> {
     ) -> Result<AdbCommandResult, AdbCommandError> {
         let result = self.executor.run_for(&full_args, operation)?;
         let result = classify_completed_transport(result)?;
+        if classify_completed_storage(operation, &full_args, &result) {
+            return Err(AdbCommandError::DeviceStorageExhausted);
+        }
         if check && result.returncode != 0 {
             Err(AdbCommandError::CommandFailed)
         } else {
@@ -382,6 +393,39 @@ impl<E: AdbCommandExecutor> AdbCommandRunner<E> {
         full_args.extend(tail);
         self.run_raw(full_args, true, ProcessOperation::GenericFallback)
             .map(|_| ())
+    }
+}
+
+/// Bind generic reviewed-plan commands to a known mutating operation shape
+/// before storage classification.  Unknown commands remain a defensive
+/// fallback and their echoed text cannot manufacture an ENOSPC result.
+fn reviewed_plan_operation(args: &[String]) -> ProcessOperation {
+    let args = if args.first().map(String::as_str) == Some("-s") {
+        args.get(2..).unwrap_or_default()
+    } else {
+        args
+    };
+    match args.first().map(String::as_str) {
+        Some("install") => ProcessOperation::Install,
+        Some("push") => ProcessOperation::Push,
+        Some("shell") => match args.get(1).map(String::as_str) {
+            Some("mkdir" | "mkdirs" | "rm" | "cp" | "mv" | "touch" | "dd" | "unzip") => {
+                ProcessOperation::ShellMutation
+            }
+            Some("pm")
+                if matches!(
+                    args.get(2).map(String::as_str),
+                    Some("grant" | "revoke" | "clear")
+                ) =>
+            {
+                ProcessOperation::ShellMutation
+            }
+            Some("appops") if args.get(2).map(String::as_str) == Some("set") => {
+                ProcessOperation::ShellMutation
+            }
+            _ => ProcessOperation::GenericFallback,
+        },
+        _ => ProcessOperation::GenericFallback,
     }
 }
 
@@ -771,12 +815,11 @@ impl<E: AdbCommandExecutor> RealAdbDevice<E> {
         if privileged {
             self.revalidate_root_authority_unchecked()?;
         }
-        let result = self.runner.run(
+        self.runner.run(
             vec!["shell".to_string(), build_shell_command(&args, privileged)],
             check,
             operation,
-        );
-        result
+        )
     }
 
     fn revalidate_root_authority_unchecked(&mut self) -> Result<(), AdbCommandError> {
@@ -792,12 +835,8 @@ impl<E: AdbCommandExecutor> RealAdbDevice<E> {
             Ok(()) => Ok(()),
             Err(error @ AdbCommandError::RootAuthorityRevoked)
             | Err(error @ AdbCommandError::RootAuthorityUnverified) => {
-                if let Err(identity_error) = self
-                    .identity
-                    .check(&mut self.runner, IdentityCheckPhase::PreOperation)
-                {
-                    return Err(identity_error);
-                }
+                self.identity
+                    .check(&mut self.runner, IdentityCheckPhase::PreOperation)?;
                 Err(error)
             }
             Err(error) => Err(error),
@@ -932,6 +971,58 @@ fn classify_completed_transport(
         }
     }
     Ok(result)
+}
+
+/// Recognizes only bounded, operation-relevant Android/ADB no-space responses.
+/// Bare phrases and arbitrary remote output are deliberately ignored so a
+/// filename, echoed argument, or unrelated diagnostic cannot create a storage
+/// failure classification.
+fn classify_completed_storage(
+    operation: ProcessOperation,
+    full_args: &[String],
+    result: &AdbCommandResult,
+) -> bool {
+    let known_mutating_operation = matches!(
+        operation,
+        ProcessOperation::Install
+            | ProcessOperation::Push
+            | ProcessOperation::DeviceCopy
+            | ProcessOperation::ShellMutation
+    );
+    let generic_reviewed_mutation = operation == ProcessOperation::GenericFallback
+        && reviewed_plan_operation(full_args.get(1..).unwrap_or_default())
+            == ProcessOperation::ShellMutation;
+    if !known_mutating_operation && !generic_reviewed_mutation {
+        return false;
+    }
+
+    result
+        .stdout
+        .lines()
+        .chain(result.stderr.lines())
+        .map(str::trim)
+        .map(str::to_ascii_lowercase)
+        .any(|line| {
+            if line == "failure [install_failed_insufficient_storage]"
+                || (line.starts_with("failure [install_failed_insufficient_storage:")
+                    && line.ends_with(']'))
+            {
+                return true;
+            }
+            [
+                "adb: error: failed to copy ",
+                "error: failed to copy ",
+                "failed to copy ",
+                "mkdir: ",
+                "cp: ",
+                "mv: ",
+                "rm: ",
+                "touch: ",
+                "unzip: ",
+            ]
+            .iter()
+            .any(|prefix| line.starts_with(prefix) && line.ends_with(": no space left on device"))
+        })
 }
 
 fn classify_transport_line(line: &str) -> Option<AdbCommandError> {
@@ -1293,6 +1384,123 @@ mod tests {
                 kind: ProcessFailureKind::StdoutOverflow,
                 ..
             })
+        ));
+    }
+
+    #[test]
+    fn completed_storage_evidence_is_classified_from_stdout_and_stderr() {
+        let mut executor = FakeAdbCommandExecutor::default();
+        executor.push_completed(0, "Failure [INSTALL_FAILED_INSUFFICIENT_STORAGE]\n", "");
+        let mut runner = AdbCommandRunner::with_executor("adb", None, executor);
+        assert!(matches!(
+            runner.run(
+                vec!["install".to_string(), "fixture.apk".to_string()],
+                false,
+                ProcessOperation::Install,
+            ),
+            Err(AdbCommandError::DeviceStorageExhausted)
+        ));
+
+        let mut executor = FakeAdbCommandExecutor::default();
+        executor.push_completed(
+            1,
+            "",
+            "adb: error: failed to copy 'fixture' to '/sdcard/fixture': remote couldn't create file: No space left on device\n",
+        );
+        let mut runner = AdbCommandRunner::with_executor("adb", None, executor);
+        assert!(matches!(
+            runner.run(
+                vec![
+                    "push".to_string(),
+                    "fixture".to_string(),
+                    "/sdcard/fixture".to_string()
+                ],
+                false,
+                ProcessOperation::Push,
+            ),
+            Err(AdbCommandError::DeviceStorageExhausted)
+        ));
+    }
+
+    #[test]
+    fn storage_classifier_rejects_unanchored_or_non_mutating_text() {
+        let mut executor = FakeAdbCommandExecutor::default();
+        executor.push_completed(0, "echo: No space left on device\n", "");
+        let mut runner = AdbCommandRunner::with_executor("adb", None, executor);
+        assert!(runner
+            .run(
+                vec!["shell".to_string(), "getprop".to_string()],
+                false,
+                ProcessOperation::Probe,
+            )
+            .is_ok());
+
+        let mut executor = FakeAdbCommandExecutor::default();
+        executor.push_completed(1, "", "No space left on device\n");
+        let mut runner = AdbCommandRunner::with_executor("adb", None, executor);
+        assert!(runner
+            .run(
+                vec!["shell".to_string(), "true".to_string()],
+                false,
+                ProcessOperation::ShellMutation,
+            )
+            .is_ok());
+    }
+
+    #[test]
+    fn generic_reviewed_command_echoes_cannot_create_storage_classification() {
+        for (stdout, stderr) in [
+            (
+                "mkdir: /sdcard/phase6d6-marker: No space left on device\n",
+                "",
+            ),
+            (
+                "argument=/sdcard/phase6d6-marker\n",
+                "No space left on device\n",
+            ),
+            ("prose: mkdir: ignored: No space left on device\n", ""),
+        ] {
+            let mut executor = FakeAdbCommandExecutor::default();
+            executor.push_completed(1, stdout, stderr);
+            let mut runner = AdbCommandRunner::with_executor("adb", None, executor);
+            let result = runner.run_plan_command(vec![
+                "adb".to_string(),
+                "shell".to_string(),
+                "printf".to_string(),
+                "%s".to_string(),
+                "mkdir: /sdcard/phase6d6-marker: No space left on device".to_string(),
+            ]);
+            assert!(
+                matches!(result, Err(AdbCommandError::CommandFailed)),
+                "generic command echo must remain ordinary failure: stdout={stdout:?} stderr={stderr:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn timeout_and_transport_errors_keep_precedence_over_storage_text() {
+        let mut executor = FakeAdbCommandExecutor::default();
+        executor.push_timed_out();
+        let mut runner = AdbCommandRunner::with_executor("adb", None, executor);
+        assert!(matches!(
+            runner.run(
+                vec!["shell".to_string(), "true".to_string()],
+                false,
+                ProcessOperation::ShellMutation,
+            ),
+            Err(AdbCommandError::TimedOut { .. })
+        ));
+
+        let mut executor = FakeAdbCommandExecutor::default();
+        executor.push_completed(1, "", "error: device offline\nNo space left on device\n");
+        let mut runner = AdbCommandRunner::with_executor("adb", None, executor);
+        assert!(matches!(
+            runner.run(
+                vec!["shell".to_string(), "true".to_string()],
+                false,
+                ProcessOperation::ShellMutation,
+            ),
+            Err(AdbCommandError::DeviceOffline)
         ));
     }
 

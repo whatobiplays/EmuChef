@@ -24,7 +24,7 @@ packaged-GUI, signing, notarization, or release qualification.
 
 | Area | Classification | Current behavior and user-visible result | Source and test evidence | Gap and disposition |
 |---|---|---|---|---|
-| Cancellation at safe boundaries | Fully implemented | Cancellation is cooperative. The current atomic operation may finish, completed work remains recorded, no rollback is claimed, and no later step is scheduled after cancellation is observed. Never-started steps retain the existing `pending` serialized status; once the run is terminal, Tauri/React interpret that state as **Not attempted** rather than inventing a new protocol status. | `ExecutorRunner::run_with_progress_and_cancel` in `crates/emuchef-rust-backend/src/executor.rs`; `ExecutionSessionManager::cancel` and `session_cancellation_leaves_never_started_work_pending_for_terminal_projection` in `execution_session.rs`; `ExecutionStep.dom.test.tsx`. | Physical cancellation timing remains a Phase 6D qualification item. No checkpoint, interrupt-in-flight, or rollback work is approved. |
+| Cancellation at safe boundaries | Fully implemented | Cancellation is cooperative. The current atomic operation may finish, completed work remains recorded, no rollback is claimed, and no later step is scheduled after cancellation is observed. Never-started steps retain the existing `pending` serialized status; once the run is terminal, Tauri/React interpret that state as **Not attempted** rather than inventing a new protocol status. The ignored Phase 6D.6 harness additionally observes an in-flight production lifecycle callback for its active-cancellation qualification without changing the public API. | `ExecutorRunner::run_with_progress_and_cancel` in `crates/emuchef-rust-backend/src/executor.rs`; `ExecutionSessionManager::cancel` and `session_cancellation_leaves_never_started_work_pending_for_terminal_projection` in `execution_session.rs`; `ExecutionStep.dom.test.tsx`; the private observed-runner test and Phase 6D.6 evidence contract. | Physical cancellation timing remains a Phase 6D qualification item. No checkpoint, interrupt-in-flight production feature, or rollback work is approved. |
 | Completed, cancelled, pending, and never-started work | Fully implemented | While active, `pending` means work may still execute. In a terminal snapshot, remaining `pending` work is never-started work and is labeled/counts as **Not attempted** in the UI. The overall run retains `cancelled`; completed, skipped, blocked, failed, and explicitly cancelled step states remain distinct. | `refresh_recipe_statuses` and `recipe_status_keeps_partially_processed_work_active_or_cancelled` in `execution_session.rs`; `completion_summary` and `terminal_pending_work_remains_derivable_without_a_new_completion_field` in Tauri `execution.rs`; `ExecutionStep.tsx` and its DOM regression. | Export schema 1 retains the existing `pending` field. Consumers must interpret terminal `pending` as never started. A new serialized status is unnecessary and therefore not introduced. |
 | ADB disconnect during execution | Fully implemented (automated) | Every real command remains bound to the reviewed serial. Stable completed ADB transport responses are classified at the private adapter boundary, including unchecked predicates and root probing. A typed transport failure fails the active step, preserves prior evidence and active-operation outputs, stops all later work, leaves later steps pending/Not attempted, reports possible partial changes, and releases the active slot. Tauri replaces raw executor messages with allowlisted guidance. | `AdbCommandRunner`, `probe_root_typed`, `DeviceOperationKind`, `StepFailureKind::requires_device_fail_stop`, `finish_attempt`, `issue_code`, `project_real_issue`, and deterministic executor/session/Tauri tests; `docs/product/phase-6d3-adb-transport-failures.md`. | Physical disconnect timing, identity evidence qualification, and representative-device qualification remain open. |
 | Offline or unauthorized device during execution | Fully implemented (automated) | Startup inventory and qualification distinguish offline and unauthorized devices and block execution before start. Stable mid-run ADB responses become typed `device_offline` or `device_unauthorized` failures, use the same fail-stop path, and project reconnect/authorization guidance that requires fresh qualification, plan, and review. | Device inventory/qualification code; `AdbCommandRunner` classifier; executor/session propagation; Tauri and frontend projection tests. | Physical offline/unauthorized transitions and qualification evidence remain Phase 6D.6. |
@@ -40,7 +40,7 @@ packaged-GUI, signing, notarization, or release qualification.
 | Event and snapshot sanitization | Fully implemented | React receives opaque handles, authored feature/action text, allowlisted statuses and issue guidance, localized timestamps, and serial/path-redacted content. Raw sidecar IDs, reviewed plans, target bindings, outputs, ADB output, and arbitrary backend messages are excluded. | `project_real_snapshot`, `project_real_event_batch`, `project_real_issue`, `sanitize_real_projection`, and projection/security tests in Tauri `execution.rs`. | Continue extending allowlists when an independently approved executor classification is added. |
 | Exported report sanitization | Fully implemented | Schema-1 reports contain sanitized runtime/catalog identity, plan identity, terminal state, completion summary, projected recipes/issues, and bounded target presentation. Private authority and raw executor data are excluded. | `execution_report_document`, `report_document_is_deterministic_and_excludes_private_authority`, and real-projection sanitization tests. | Terminal `pending` remains the existing serialized representation of not-attempted work; no schema/API expansion was approved for 6D.1. |
 | Frontend state and copy accuracy | Fully implemented | Active work says Waiting; the same remaining state says Not attempted only after terminal status. Not-attempted work is counted separately and does not inflate completed progress. Proven completed work and uncertain failed atomic work use different partial-change wording. Cancellation explains safe-boundary delay and no rollback. Unavailable real execution is explicitly indeterminate and requires a fresh workflow. | `ExecutionStep.tsx`, `useExecution.ts`, `workflow.ts`, `ExecutionStep.dom.test.tsx`, `useExecution.dom.test.tsx`, and `workflow.test.ts`. | Broad visual redesign is out of scope. |
-| Low storage and host sleep | Missing | No dedicated low-storage preflight, host-sleep transition, or stable classification exists. Symptoms currently collapse into an operation failure or an unbounded wait. | No authoritative implementation or qualification evidence found in the audited executor/Tauri surfaces. | Defer to the timeout/transport design and physical-device matrix. Do not claim support in Phase 6D.1. |
+| Low storage and host sleep | Partially implemented (automated policy; physical evidence pending) | Completed ADB/device operations classify bounded, line-anchored ENOSPC evidence as `device_storage_exhausted` without speculative free-space preflight. Storage failure uses the existing typed fail-stop path, preserves evidence and conservative partial-change reporting, projects authored storage guidance, and requires a fresh workflow. Host sleep keeps the existing locally owned child/future tree and fixed timer semantics; a surviving process may complete, time out, or report transport loss, while sidecar generation loss remains `runtime_session_lost` and cannot resume. The Phase 6D.6 contract records sleep request/entry/wake, wall and executor elapsed time, deadline, timer implementation/toolchain, and an included/excluded/indeterminate/contradictory classification; transport loss cannot qualify the timer branch. | `AdbCommandRunner::classify_completed_storage`, `DeviceStorageExhausted`, executor/session/Tauri tests, owned-process elapsed-jump and bounded-delay tests, sidecar runtime-loss test, the gated Phase 6D.6 harness, `docs/testing/phase-6d6/evidence-schema.json`, and `docs/manual/phase-6d6-physical-interruption-qualification.md`. | No physical low-storage or host-sleep attempt is claimed in this run. The safety reserve, operator checkpoint, measured timer behavior, cleanup, UI-smoke pair, and two clean repetitions remain mandatory before closure; exact clippy gates are also currently blocked by baseline findings. |
 
 ## 3. Bounded fixes completed
 
@@ -76,6 +76,22 @@ packaged-GUI, signing, notarization, or release qualification.
    post-operation marker enabling the conservative partial-change warning.
    Terminal identity findings invalidate only the affected Tauri authority and
    fence late root-qualification completions while preserving serial mapping.
+9. Phase 6D.6 adds the private completed-result `device_storage_exhausted`
+   classification, authored recovery projection, deterministic timeout/process
+   seams, and one ignored physical qualification harness. The harness selects
+   exactly one scenario and repetition, binds one exact serial, reuses the
+   Phase 6C fixture roots, requires explicit destructive/root/authorization/
+   host-sleep opt-ins, and uses a ten-minute sentinel checkpoint. Its shared
+   manifest requires measured host-sleep branches, in-flight cancellation,
+   production execution-session slot evidence, exact target-child liveness,
+   measured production deadline-clock behavior, bounded same-serial and
+   authorization chronology, globally unique canonical evidence identities,
+   and two artifact-bound composite development-build UI-smoke records. Exact
+   target-child and production deadline-clock observation are not currently
+   available in the physical adapter, so affected scenarios fail closed. The
+   dependency-free evidence validator accepts an incomplete matrix for CI but
+   reports Phase 6D incomplete until every mandatory physical and UI repetition
+   has a passing sanitized record.
 
 No fix adds a new serialized execution status, public command, API field,
 checkpoint, resume token, replay path, rollback behavior, or persistent active
@@ -83,18 +99,18 @@ execution.
 
 ## 4. Deferred architectural and qualification backlog
 
-1. Qualify the bounded timeout and child-process ownership model against
-   physical interruption, disconnect, host sleep, low storage, and representative
-   supported devices.
+1. Run the gated Phase 6D.6 matrix twice from clean state for cancellation,
+   disconnect, offline, unauthorized, identity stability/replacement, root
+   revocation, timeout, low storage, and host sleep. Record blocked cases
+   without treating host simulation as physical proof.
 2. Qualify the same-serial identity evidence on representative physical devices
    and decide whether any future attestation or persistent identity work is
    separately approved.
 3. Qualify repeated root-authority revalidation and its abort policy on representative physical devices.
-4. Define low-storage and host-sleep behavior, including whether the outcome is
-   terminal failed or explicitly indeterminate.
-5. Run the physical interruption matrix for cancellation timing, disconnect,
-   offline, unauthorized, root revocation, host sleep, and timeout behavior on
-   representative supported devices.
+4. Measure whether the fixed Rust timer observes active-host or suspended time
+   on each supported qualification host and retain that limitation in evidence.
+5. Complete the development-build Tauri/React recovery smoke without claiming
+   packaged-GUI or release readiness.
 
 These items keep Phase 6D open. They must not be implemented as automatic
 replay, rollback, checkpointing, or resume.

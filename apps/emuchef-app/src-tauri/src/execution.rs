@@ -2082,6 +2082,7 @@ fn project_real_issue(mapping: &ExecutionMapping, issue: &Value) -> Value {
         "missing_capability" => (internal, "The device lacks a required capability."),
         "step_conflict" => (internal, "Conflicting work prevented this operation."),
         "operation_timed_out" => (internal, "A device operation timed out."),
+        "device_storage_exhausted" => (internal, "The device ran out of storage during execution."),
         "device_offline" => (
             internal,
             "The reviewed device went offline during execution.",
@@ -2190,11 +2191,20 @@ fn remediation_for_code(code: &str) -> Value {
         "dependency_blocked"
         | "verification_failed"
         | "operation_timed_out"
+        | "device_storage_exhausted"
         | "step_execution_failed"
         | "optional_permission_failed" => (
             "generate_fresh_plan",
-            "Repair and retry",
-            "Resolve the reported feature problem, then generate and review a fresh plan.",
+            if code == "device_storage_exhausted" {
+                "Free storage and start again"
+            } else {
+                "Repair and retry"
+            },
+            if code == "device_storage_exhausted" {
+                "Free device storage, complete fresh qualification, then generate and review a fresh plan before starting a new execution. The old execution cannot resume."
+            } else {
+                "Resolve the reported feature problem, then generate and review a fresh plan."
+            },
         ),
         "device_offline" | "device_unauthorized" | "device_disconnected" | "device_transport_lost" => (
             "reconnect_device",
@@ -3298,6 +3308,37 @@ mod tests {
     }
 
     #[test]
+    fn storage_issue_is_projected_with_authored_recovery_without_backend_details() {
+        let mapping = ExecutionMapping {
+            kind: ExecutionKind::Real,
+            public_handle: "execution_public".into(),
+            sidecar_id: "execution-private".into(),
+            review_handle: "review_public".into(),
+            review: launch_review(),
+        };
+        let projected = project_real_issue(
+            &mapping,
+            &json!({
+                "code": "device_storage_exhausted",
+                "recipeId": "recipe.one",
+                "stepId": "recipe.one/copy",
+                "message": "private ADB output /data/private/path",
+            }),
+        );
+        assert!(projected["message"]
+            .as_str()
+            .unwrap()
+            .contains("The device ran out of storage during execution."));
+        assert_eq!(projected["remediation"]["kind"], "generate_fresh_plan");
+        let remediation = projected["remediation"]["message"].as_str().unwrap();
+        assert!(remediation.contains("Free device storage"));
+        assert!(remediation.contains("fresh qualification"));
+        assert!(remediation.contains("old execution cannot resume"));
+        assert!(!projected.to_string().contains("private ADB output"));
+        assert!(!projected.to_string().contains("/data/private/path"));
+    }
+
+    #[test]
     fn transport_issue_codes_project_to_authored_guidance_without_backend_details() {
         let mapping = ExecutionMapping {
             kind: ExecutionKind::Real,
@@ -3633,6 +3674,60 @@ mod tests {
             assert!(!serialized.contains(forbidden), "leaked {forbidden}");
         }
         assert_eq!(public["completion"]["partialChangesPossible"], false);
+    }
+
+    #[test]
+    fn real_storage_report_projection_exports_authored_recovery_without_private_details() {
+        let mapping = ExecutionMapping {
+            kind: ExecutionKind::Real,
+            public_handle: "execution_public".into(),
+            sidecar_id: "execution-private".into(),
+            review_handle: "review_public".into(),
+            review: launch_review(),
+        };
+        let report = json!({
+            "executionId": "execution-private",
+            "planId": "plan.private",
+            "status": "failed",
+            "recipes": [{
+                "recipeId": "recipe.one",
+                "name": "Recipe One",
+                "status": "failed",
+                "steps": [{ "stepId": "recipe.one/copy", "status": "failed" }]
+            }],
+            "errors": [{
+                "code": "device_storage_exhausted",
+                "recipeId": "recipe.one",
+                "stepId": "recipe.one/copy",
+                "message": "adb stderr /sdcard/private/raw-path secret-serial"
+            }],
+            "warnings": []
+        });
+        let public = project_real_snapshot(&mapping, &report);
+        let document = execution_report_document(
+            &mapping,
+            &report,
+            &public,
+            json!({ "status": "ready", "protocolVersion": 1 }),
+        );
+        assert!(document["execution"]["errors"][0]["message"]
+            .as_str()
+            .unwrap()
+            .contains("The device ran out of storage during execution."));
+        assert!(document["execution"]["errors"][0]["remediation"]["message"]
+            .as_str()
+            .unwrap()
+            .contains("old execution cannot resume"));
+        let serialized = document.to_string();
+        for forbidden in [
+            "execution-private",
+            "device_storage_exhausted",
+            "/sdcard/private/raw-path",
+            "secret-serial",
+            "adb stderr",
+        ] {
+            assert!(!serialized.contains(forbidden), "leaked {forbidden}");
+        }
     }
 
     #[test]

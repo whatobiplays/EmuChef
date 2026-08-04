@@ -3,6 +3,8 @@ use std::fs;
 use std::io::Write;
 use std::net::TcpListener;
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::Arc;
 use std::thread;
 
 use serde_json::{json, Value};
@@ -13,7 +15,7 @@ use crate::executor::identity::IdentityCheckPhase;
 use crate::executor::{
     adb::{AdbCommandError, FakeAdbCommandExecutor, RealAdbDevice},
     map_adb_error, DeviceOperationKind, DryRunExecutorAdapters, ExecutorAdapters, ExecutorRunner,
-    StepFailureKind,
+    OperationLifecycle, StepFailureKind,
 };
 use crate::model::OrderedMap;
 use crate::owned_process::{ProcessCleanup, ProcessFailureKind, ProcessOperation};
@@ -1033,6 +1035,48 @@ fn wait_success_matches_compatibility_executor_dry_run_result() {
 }
 
 #[test]
+fn observed_runner_cancellation_is_requested_in_flight_and_leaves_later_work_unstarted() {
+    let execution_plan = plan(vec![
+        wait_step("example.recipe/first", "First", 40),
+        wait_step("example.recipe/second", "Second", 1),
+    ]);
+    let cancel = Arc::new(AtomicBool::new(false));
+    let in_flight = Arc::new(AtomicBool::new(false));
+    let cancellation_before_finish = Arc::new(AtomicBool::new(false));
+    let mut runner = ExecutorRunner::new(DryRunExecutorAdapters::default());
+    let cancel_for_run = Arc::clone(&cancel);
+    let in_flight_for_observer = Arc::clone(&in_flight);
+    let cancellation_for_observer = Arc::clone(&cancellation_before_finish);
+    let result = runner.run_with_progress_and_cancel_observed(
+        &execution_plan,
+        |_| {},
+        move || cancel_for_run.load(Ordering::Acquire),
+        move |lifecycle| match lifecycle {
+            OperationLifecycle::Started { step_id } if step_id == "example.recipe/first" => {
+                in_flight_for_observer.store(true, Ordering::Release);
+                cancel.store(true, Ordering::Release);
+                cancellation_for_observer.store(true, Ordering::Release);
+            }
+            OperationLifecycle::Finished { step_id } if step_id == "example.recipe/first" => {
+                assert!(in_flight.load(Ordering::Acquire));
+                in_flight.store(false, Ordering::Release);
+            }
+            _ => {}
+        },
+    );
+    assert!(cancellation_before_finish.load(Ordering::Acquire));
+    assert_eq!(
+        result.steps[0].status,
+        crate::executor::StepRunStatus::Executed
+    );
+    assert_eq!(
+        result.steps[1].status,
+        crate::executor::StepRunStatus::Cancelled
+    );
+    assert_eq!(result.steps.len(), 2);
+}
+
+#[test]
 fn failures_block_dependents_but_not_unrelated_steps_like_compatibility() {
     let mut downstream = wait_step("example.recipe/downstream", "Downstream", 1);
     downstream.dependencies = vec!["example.recipe/fail".to_string()];
@@ -1324,6 +1368,77 @@ fn real_device_transport_failure_stops_after_prior_evidence_and_keeps_later_step
 }
 
 #[test]
+fn real_device_storage_failure_stops_after_prior_evidence_and_keeps_later_steps_unstarted() {
+    let mut first_params = OrderedMap::new();
+    first_params.insert(
+        "runtime".to_string(),
+        literal(json!([{
+            "package_name": "com.example.first",
+            "name": "android.permission.CAMERA",
+            "required": true
+        }])),
+    );
+    let mut second_params = OrderedMap::new();
+    second_params.insert(
+        "runtime".to_string(),
+        literal(json!([{
+            "package_name": "com.example.second",
+            "name": "android.permission.CAMERA",
+            "required": true
+        }])),
+    );
+    let execution_plan = plan(vec![
+        ExecutionStep {
+            id: "example.recipe/first-storage".to_string(),
+            recipe_ref: "example.recipe".to_string(),
+            type_name: "grant_permissions".to_string(),
+            name: "First".to_string(),
+            note: "First".to_string(),
+            dependencies: Vec::new(),
+            constraints: constraints(),
+            params: first_params,
+            skip_if: Vec::new(),
+            verify: Vec::new(),
+        },
+        ExecutionStep {
+            id: "example.recipe/storage".to_string(),
+            recipe_ref: "example.recipe".to_string(),
+            type_name: "grant_permissions".to_string(),
+            name: "Storage".to_string(),
+            note: "Storage".to_string(),
+            dependencies: Vec::new(),
+            constraints: constraints(),
+            params: second_params,
+            skip_if: Vec::new(),
+            verify: Vec::new(),
+        },
+        wait_step("example.recipe/storage-unrelated", "Unrelated", 1),
+    ]);
+    let mut command_executor = FakeAdbCommandExecutor::default();
+    command_executor.push_completed(0, "", "");
+    command_executor.push_completed(1, "", "mkdir: '/owned/fixture': No space left on device");
+    let device = RealAdbDevice::with_executor("adb", Some("reviewed-serial"), command_executor);
+    let mut runner = ExecutorRunner::new(ExecutorAdapters::with_device(device));
+
+    let result = runner.run(&execution_plan);
+
+    assert!(!result.success);
+    assert_eq!(result.steps.len(), 2);
+    assert_eq!(
+        result.steps[1].failure_kind,
+        Some(StepFailureKind::DeviceStorageExhausted)
+    );
+    assert_eq!(
+        result.steps[1].message.as_deref(),
+        Some("The device ran out of storage during execution.")
+    );
+    assert_eq!(
+        runner.adapters().device().command_executor().calls().len(),
+        2
+    );
+}
+
+#[test]
 fn transport_failure_in_skip_predicate_fails_current_step_without_false_result_or_followup() {
     let mut guarded = wait_step("example.recipe/guarded", "Guarded", 1);
     guarded.skip_if = vec![condition("path_exists", json!({"path": "/sdcard/guarded"}))];
@@ -1483,6 +1598,7 @@ fn device_fail_stop_predicate_excludes_ordinary_and_root_failures() {
     assert!(!StepFailureKind::RootUnavailable.requires_device_fail_stop());
     assert!(StepFailureKind::RootAuthorityRevoked.requires_device_fail_stop());
     assert!(StepFailureKind::RootAuthorityUnverified.requires_device_fail_stop());
+    assert!(StepFailureKind::DeviceStorageExhausted.requires_device_fail_stop());
     assert!(!StepFailureKind::OperationFailed.requires_device_fail_stop());
     assert!(DeviceOperationKind::AdbServerUnavailable.requires_device_fail_stop());
     assert!(!DeviceOperationKind::CommandFailed.requires_device_fail_stop());
@@ -1502,6 +1618,10 @@ fn every_private_adb_transport_kind_maps_through_device_operation_kind() {
         (
             AdbCommandError::DeviceDisconnected,
             DeviceOperationKind::DeviceDisconnected,
+        ),
+        (
+            AdbCommandError::DeviceStorageExhausted,
+            DeviceOperationKind::DeviceStorageExhausted,
         ),
         (
             AdbCommandError::AdbServerUnavailable,

@@ -372,6 +372,54 @@ fresh plan and starting a new execution id. There is no runtime rollback,
 device-state undo, reverse-step generation, automatic backup, or restoration
 promise.
 
+Completed ADB/device commands with bounded, anchored no-space evidence use the
+private `device_storage_exhausted` failure kind and stable issue code. The
+classifier accepts recognized ENOSPC output from either bounded stdout or
+stderr and either completed exit code, but never overrides timeout, process,
+transport, identity, or root failures and never matches arbitrary filenames or
+echoed prose. Storage exhaustion fails the active real step, preserves earlier
+evidence and conservative possible-partial-change reporting, stops later
+device/host work, leaves never-started work pending for terminal **Not
+attempted** projection, releases the active slot, and requires fresh device
+qualification, plan generation, review, and execution after the user frees
+space. EmuChef never deletes user data, retries, resumes, or continues the old
+execution automatically. Tauri exposes only authored storage guidance and no
+raw ADB text, paths, serials, or command arguments.
+
+Host suspension does not create a second execution owner. The same locally
+owned child/future tree remains authoritative if the process generation
+survives sleep; after wake the existing operation may complete, report typed
+transport loss, or reach `operation_timed_out` according to the fixed Rust
+deadline semantics. If the sidecar generation is lost, the terminal outcome is
+`runtime_session_lost` and Tauri projects `execution_unavailable` with an
+indeterminate real-device outcome. Application restart never resumes an
+execution. Host-sleep qualification measures whether the existing timer source
+observes suspended time on the qualified host. Passing evidence requires
+samples from the production deadline clock at start, before sleep, after wake,
+and terminal; remaining budget before and after suspension; wall duration;
+tolerance and rationale; and the scenario phase. Classification is derived
+from clock advancement and budget consumption, never from the terminal result.
+Excluded suspension may still time out after later active time. Transport loss,
+missing samples, or inconsistent measurements block qualification. The current
+physical harness has no exact production deadline-clock observation seam and
+therefore blocks both host-sleep cases. It does not add a sleep inhibitor, OS
+plugin, checkpoint, resume token, or replay path.
+
+Physical interruption qualification is isolated to the ignored Phase 6D.6
+harness. It requires one exact selected serial, the committed fixture package
+and roots, explicit destructive/root/authorization/identity/host-sleep opt-ins,
+an operator-controlled ten-minute sentinel checkpoint, and two clean
+repetitions per mandatory scenario. Active interruption requires exact target
+child and mutation liveness immediately before the action; a runner callback,
+delayed poll, post-operation probe, or harness boolean cannot qualify it. The
+current physical adapter emits no exact child evidence and blocks active cases.
+Each record has unique run, scope, sentinel, nonce, slot, path, trace, and
+canonical content identities, and UI-smoke subcases bind digested UI-state
+artifacts to distinct physical backend runs and traces. Host simulations and
+deterministic tests are regression evidence only, not physical-device evidence.
+Until the complete sanitized matrix and automated verification pass, Phase 6D
+remains In progress.
+
 Supported steps include artifact resolution/extraction, file copy, APK install,
 launch, force-stop, permission/app-op grants, and waits. Device-target archive
 extraction happens in the host staging area before files are pushed through
@@ -1044,3 +1092,67 @@ Host input binding validation reports a missing-path diagnostic only when host
 metadata cannot be read; an existing path of the wrong kind reports a kind
 mismatch, and an existing path of the expected kind is accepted. This keeps
 configuration planning usable for the root-capability review gate.
+
+## Phase 6D.6 physical interruption qualification
+
+The ignored Rust physical harness is fail-closed and fail-reporting: explicit
+execution returns a test error for missing gates, blocked checkpoints,
+unexpected terminal issue codes, incomplete step accounting, unsafe cleanup, or
+an incomplete scenario contract. It runs one exact scenario and repetition
+through a reviewed execution plan and the real ADB executor boundary.
+
+The checked-in scenario manifest is the authority shared by the Rust harness
+and the dependency-free Node evidence validator. Each contract specifies
+expected execution type and issue codes, accepted step/Not-attempted counts,
+partial-change and authority dispositions, exact target-process facts,
+production-slot lifecycle, host deadline-clock measurement and phase,
+transition chronology, UI artifacts, cleanup, and residual requirements.
+Evidence includes canonical record and trace digests plus unique run, scope,
+sentinel, nonce, path, and slot identities; copied or relabelled records are
+rejected.
+
+Active-cancellation qualification requires the exact target mutation child to
+be spawned, started, and alive immediately before cancellation, with the action
+strictly before the child's terminal event and bound to the same run and
+operation. A runner callback, post-operation probe, delayed poll, or local
+boolean is insufficient. The current physical adapter does not expose that
+exact child observation and blocks active cases. A safe-boundary cancellation
+uses a distinct finished-before-request phase. The active-slot record observes
+the RAII guard owning the production execution-session slot, carries the exact
+run-scope and execution identity, and cannot pass on an auxiliary lease,
+shadow flag, early release, or another run's lifecycle.
+
+Same-serial replacement qualification polls successful ADB inventory samples
+and stable fingerprints to prove original attachment, a serial-absent interval,
+replacement attachment after disconnect, changed identity, and no simultaneous
+target. Authorization qualification separately observes an authorized row,
+the genuine `unauthorized` row after the revocation checkpoint, and a final
+authorized cleanup state; generic offline or transport output is insufficient.
+Development-build UI smoke is mandatory closure evidence: two composite
+records each contain cancellation, transport, root, storage, and
+host-sleep/runtime-loss subcases. Every subcase binds an exact physical backend
+run and trace to a distinct UI sub-run, development-build digest, exact authored
+projection, **Not attempted** count, partial-change and authority recovery
+state, forbidden-control absence, canonical UI-state artifact, and
+artifact-bound operator observation. Nested unsafe text is rejected.
+
+Low-storage qualification requires a disposable selected device with between
+4 GiB and 5,308,416 KiB free before mutation, a verified fixture-owned 1 GiB
+recovery reserve, a bounded run-scoped filler capped at 4 GiB with 64 MiB of
+cleanup headroom, a generated 128 MiB host fixture payload for genuine
+production-path ENOSPC, and verified payload/filler/sentinel/reserve cleanup
+with free-space restoration.
+The evidence validator retains failed, skipped, and blocked attempts with
+their truthful cleanup/residual facts, but only passing records can satisfy a
+scenario contract or count toward matrix completion. The host-only delay seam
+is a one-shot, thread-local regression arm for exactly one DeviceCopy process;
+it cannot delay status/output polling, turn an exited child into a timeout, or
+qualify physical evidence. Identity probes and other operations are unaffected,
+and the arm clears on normal, timeout, panic, or parallel return.
+
+Phase 6D remains In Progress until all thirteen scenarios have two clean,
+sanitized, contract-valid passing repetitions and the complete automated matrix
+is green. The exact backend and Tauri `clippy -D warnings` gates currently have
+baseline diagnostics outside the authorized Phase 6D.6 paths, so automated
+remediation is not complete. No physical repetitions were available in this
+run; blocked scenarios do not count as evidence or closure.

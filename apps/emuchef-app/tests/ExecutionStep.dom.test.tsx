@@ -250,6 +250,54 @@ describe("execution recovery actions", () => {
     expect(screen.getByRole("button", { name: "Repair setup" })).toBeTruthy();
   });
 
+  test("real storage exhaustion keeps authored recovery and never resumes the old run", () => {
+    const snapshot: RealExecutionSnapshot = {
+      ...failedSnapshot(),
+      simulated: false,
+      verificationScope: "real_device",
+      target: { label: "Connected Android device" },
+      launchAction: null,
+      errors: [{
+        message: "The device ran out of storage during execution.",
+        remediation: {
+          kind: "generate_fresh_plan",
+          title: "Free storage and start again",
+          message: "Free device storage, complete fresh qualification, then generate and review a fresh plan before starting a new execution. The old execution cannot resume.",
+        },
+      }],
+      completion: {
+        ...failedSnapshot().completion,
+        partialChangesPossible: true,
+      },
+    };
+    render(
+      <ExecutionStep
+        execution={{
+          kind: "terminal",
+          generation: 1,
+          mode: "real",
+          snapshot,
+          events: [],
+          eventCursor: 0,
+          cancellationRequested: false,
+        }}
+        launchState="idle"
+        repairPreparing={false}
+        reportState="idle"
+        onCancel={vi.fn()}
+        onExportReport={vi.fn()}
+        onLaunchConfiguredApp={vi.fn()}
+        onPrepareRepair={vi.fn()}
+        onReturn={vi.fn()}
+      />,
+    );
+
+    expect(screen.getByText("The device ran out of storage during execution.")).toBeTruthy();
+    expect(screen.getByText(/Free storage and start again/)).toBeTruthy();
+    expect(screen.getByText(/old execution cannot resume/i)).toBeTruthy();
+    expect(screen.getByText(/device changes may have occurred/i)).toBeTruthy();
+  });
+
   test("transport issue projections distinguish reconnect, authorization, service repair, and lost connection", () => {
     const base: RealExecutionSnapshot = {
       ...failedSnapshot(),

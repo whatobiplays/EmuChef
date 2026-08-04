@@ -27,7 +27,7 @@ Detailed evidence remains in the relevant product and release documents. In part
 
 | Product or track | Current state | Next priority |
 |---|---|---|
-| EmuChef proper | Phase 5A through 5H, Phase 6A through 6C, the Phase 6D.1 audit, and automated Phase 6D.2 through 6D.5 implementation completed | Continue Phase 6D physical interruption, root, and device qualification work |
+| EmuChef proper | Phase 5A through 5H, Phase 6A through 6C, and the Phase 6D.1 audit are recorded; Phase 6D.2 through 6D.6 remain automated work with Phase 6D.6 remediation and mandatory clippy gates still in progress; physical evidence is absent | Resolve the authorized automated blockers, then run the gated Phase 6D.6 matrix and retain truthful blocked/unqualified cases |
 | Config Editor | Authored generation implemented through GitHub release-pattern testing | Later refinements remain unsequenced unless explicitly promoted |
 | Shared Runtime | Rust is the sole runtime and retains device, filesystem, planning, execution, validation, and protocol authority | Add shared capabilities only when required by a bounded product slice |
 | Release engineering | Deliberately deferred from normal Phase 5 product work | Resume only when the owner declares the relevant application release-comfortable |
@@ -71,7 +71,7 @@ EmuChef proper Phase 5 established end-user feature completeness, usability, wor
 | 6A | Development builds and feature gating | Completed | Intentional real-execution development builds without accidental production enablement |
 | 6B | Device discovery and qualification | Completed | Deterministic device capability and compatibility profiles |
 | 6C | Core executor qualification | Completed | Non-root and root executor qualification completed on representative hardware |
-| 6D | Execution safety and recovery | In progress | Phase 6D.1 audit and bounded correctness fixes through 6D.5 completed; physical interruption and qualification work remains |
+| 6D | Execution safety and recovery | In progress | Storage, timer, process-ownership, transport, identity, root, harness, validator, and documentation remediation is under way; exact clippy gates remain blocked and every mandatory physical/UI-smoke case still needs clean repetitions |
 | 6E | Recipe qualification | Planned | End-to-end success for core EmuChef workflows |
 | 6F | Physical-device test matrix | Planned | Representative coverage across supported Android device classes |
 | 6G | Production readiness | Planned | Evidence-backed promotion of real execution into production builds |
@@ -678,6 +678,35 @@ and physical interruption qualification remain explicitly deferred. Root
 revalidation is completed as the automated Phase 6D.5 slice. No checkpoint, resume,
 automatic replay, rollback, persistent execution, new serialized status, or
 new production feature enablement was added.
+
+#### Phase 6D.6 — Physical interruption qualification disposition
+
+Phase 6D.6 remediation remains **In progress**. The private
+`device_storage_exhausted` classification and authored recovery projection are
+covered by deterministic tests; the owned-process seams cover controlled
+deadline, bounded-output, kill/reap, and delayed-polling regressions; and one ignored, exact-serial physical
+harness covers the thirteen mandatory scenarios with a ten-minute sentinel
+protocol. The authoritative contract requires exact target-child liveness,
+measured production deadline-clock branches and phase, the real production
+execution-session slot lifecycle, bounded ADB identity and authorization
+chronology, globally unique canonical record/trace identities, and two
+artifact-bound composite development UI-smoke records. Active and host-sleep
+physical cases fail closed because the exact child and deadline-clock
+observations are not currently available. A dependency-free validator checks the strict sanitized
+evidence schema and runbook in host-only CI.
+
+The exact backend and Tauri `clippy -D warnings` commands remain blocked by
+baseline diagnostics outside the authorized Phase 6D.6 paths, so automated
+remediation is not reported complete.
+
+No physical scenario was run in the current environment. Cancellation,
+disconnect, offline, unauthorized, identity stability/replacement, root
+revocation, controlled timeout, low storage, host sleep, and development UI
+smoke therefore remain unqualified until an operator supplies the documented
+hardware, opt-ins, safety preconditions, cleanup verification, and two clean
+repetitions. Same-serial replacement additionally requires suitable hardware or
+explicit owner acceptance. Phase 6D remains In progress; Phase 6E is not
+started, and ordinary production real execution remains disabled.
 
 #### Phase 6D.2 — Operation Deadlines completion evidence
 

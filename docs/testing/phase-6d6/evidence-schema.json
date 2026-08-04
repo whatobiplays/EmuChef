@@ -1,0 +1,362 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://emuchef.local/schemas/phase-6d6-evidence-v1.json",
+  "title": "EmuChef Phase 6D.6 sanitized physical qualification evidence",
+  "description": "Core physical records use this object. Development-build UI smoke is a two-repetition composite record validated by the uiSmokeRecord definition below and the dependency-free validator.",
+  "$defs": {
+    "uiSmokeRecord": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["schemaVersion", "scenario", "repetition", "timestamp", "commit", "runId", "recordDigest", "developmentBuild", "subcases", "outcome", "notes"],
+      "properties": {
+        "schemaVersion": { "const": 1 },
+        "scenario": { "const": "ui_smoke_composite" },
+        "repetition": { "type": "integer", "enum": [1, 2] },
+        "timestamp": { "type": "string", "pattern": "^unix:(0|[1-9][0-9]{0,11})$" },
+        "commit": { "type": "string", "pattern": "^([0-9a-f]{40}|unreported)$" },
+        "runId": { "type": "string", "pattern": "^ui-smoke-run-sha256:[0-9a-f]{64}$" },
+        "recordDigest": { "type": "string", "pattern": "^sha256:[0-9a-f]{64}$" },
+        "developmentBuild": {
+          "type": "object", "additionalProperties": false, "required": ["identity", "version", "digest"],
+          "properties": {
+            "identity": { "type": "string", "minLength": 1 },
+            "version": { "type": "string", "minLength": 1 },
+            "digest": { "type": "string", "pattern": "^sha256:[0-9a-f]{64}$" }
+          }
+        },
+        "subcases": {
+          "type": "array", "minItems": 5, "maxItems": 5,
+          "items": {
+            "type": "object", "additionalProperties": false,
+            "required": ["name", "subRunId", "backendRunId", "backendTraceDigest", "backendIssueCode", "uiState", "uiArtifact", "operatorObservation"],
+            "properties": {
+              "name": { "enum": ["cancellation", "transport", "root", "storage", "host_sleep"] },
+              "subRunId": { "type": "string", "pattern": "^ui-subrun-sha256:[0-9a-f]{64}$" },
+              "backendRunId": { "type": "string", "pattern": "^physical-run-sha256:[0-9a-f]{64}$" },
+              "backendTraceDigest": { "type": "string", "pattern": "^sha256:[0-9a-f]{64}$" },
+              "backendIssueCode": { "type": ["string", "null"] },
+              "uiState": {
+                "type": "object", "additionalProperties": false,
+                "required": ["backendRunId", "authoredTitle", "authoredIssueText", "authoredRemediation", "terminalStepProjection", "notAttempted", "partialChangePresentation", "authorityInvalidated", "recoveryState", "availableControls"],
+                "properties": {
+                  "backendRunId": { "type": "string", "pattern": "^physical-run-sha256:[0-9a-f]{64}$" },
+                  "authoredTitle": { "type": "string", "minLength": 1 },
+                  "authoredIssueText": { "type": "string", "minLength": 1 },
+                  "authoredRemediation": { "type": "string", "minLength": 1 },
+                  "terminalStepProjection": { "enum": ["failed", "cancelled"] },
+                  "notAttempted": { "type": "integer", "minimum": 1 },
+                  "partialChangePresentation": { "enum": ["possible_partial_change", "indeterminate"] },
+                  "authorityInvalidated": { "type": "boolean" },
+                  "recoveryState": { "type": "string", "minLength": 1 },
+                  "availableControls": { "type": "array", "items": { "type": "string" } }
+                }
+              },
+              "uiArtifact": {
+                "type": "object", "additionalProperties": false,
+                "required": ["kind", "path", "content", "digest"],
+                "properties": {
+                  "kind": { "const": "ui_state_capture" },
+                  "path": { "type": "string", "pattern": "^docs/testing/phase-6d6/evidence/ui/[a-z0-9_-]+\\.json$" },
+                  "content": { "type": "object" },
+                  "digest": { "type": "string", "pattern": "^sha256:[0-9a-f]{64}$" }
+                }
+              },
+              "operatorObservation": {
+                "type": "object", "additionalProperties": false,
+                "required": ["artifactDigest", "observedAt", "statement"],
+                "properties": {
+                  "artifactDigest": { "type": "string", "pattern": "^sha256:[0-9a-f]{64}$" },
+                  "observedAt": { "type": "string", "pattern": "^unix:(0|[1-9][0-9]{0,11})$" },
+                  "statement": { "type": "string", "minLength": 1 }
+                }
+              }
+            }
+          }
+        },
+        "outcome": { "enum": ["passed", "failed", "skipped", "blocked"] },
+        "notes": { "type": "array", "items": { "type": "string" } }
+      }
+    }
+  },
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schemaVersion", "scenario", "repetition", "timestamp", "commit", "runId", "evidencePath", "tracePath", "recordDigest", "traceDigest", "trace", "host",
+    "platformToolsRevision", "device", "root", "fixtureApkSha256", "optIns", "command",
+    "preparation", "operatorAction", "executionSuccess", "observedIssueCode", "stepStates",
+    "partialChangesPossible", "authorityInvalidated", "activeSlotReleased", "activeSlotObservation",
+    "activeProcess", "activeCancellation", "hostSleep", "identityTransition", "authorizationTransition",
+    "scenarioContract", "scenarioFacts", "sentinel", "storage", "cleanup",
+    "residualStateCheck", "outcome", "notes"
+  ],
+  "properties": {
+    "schemaVersion": { "const": 1 },
+    "scenario": {
+      "enum": [
+        "cancellation_active", "cancellation_boundary", "usb_disconnect_active", "usb_disconnect_boundary",
+        "device_offline", "device_unauthorized", "identity_stability", "identity_replacement",
+        "root_revocation", "operation_timeout", "low_storage", "host_sleep_before_deadline",
+        "host_sleep_after_deadline"
+      ]
+    },
+    "repetition": { "type": "integer", "enum": [1, 2] },
+    "timestamp": { "type": "string", "pattern": "^unix:(0|[1-9][0-9]{0,11})$" },
+    "commit": { "type": "string", "pattern": "^([0-9a-f]{40}|unreported)$" },
+    "runId": { "type": "string", "pattern": "^physical-run-sha256:[0-9a-f]{64}$" },
+    "evidencePath": { "type": "string", "pattern": "^docs/testing/phase-6d6/evidence/[a-z0-9_-]+\\.json$" },
+    "tracePath": { "type": "string", "pattern": "^docs/testing/phase-6d6/evidence/traces/[a-z0-9_-]+\\.json$" },
+    "recordDigest": { "type": "string", "pattern": "^sha256:[0-9a-f]{64}$" },
+    "traceDigest": { "type": "string", "pattern": "^sha256:[0-9a-f]{64}$" },
+    "trace": { "type": "object" },
+    "host": {
+      "type": "object", "additionalProperties": false,
+      "required": ["os", "version", "architecture"],
+      "properties": {
+        "os": { "type": "string", "minLength": 1 },
+        "version": { "type": "string", "minLength": 1 },
+        "architecture": { "type": "string", "minLength": 1 }
+      }
+    },
+    "platformToolsRevision": { "type": "string", "minLength": 1 },
+    "device": {
+      "type": "object", "additionalProperties": false,
+      "required": ["identity", "model", "androidVersion", "apiLevel", "abi", "buildFingerprint"],
+      "properties": {
+        "identity": { "type": "string", "pattern": "^serial-sha256:[0-9a-f]{64}$" },
+        "model": { "type": "string", "minLength": 1 },
+        "androidVersion": { "type": "string", "minLength": 1 },
+        "apiLevel": { "type": "integer", "minimum": 1 },
+        "abi": { "type": "string", "minLength": 1 },
+        "buildFingerprint": { "type": "string", "minLength": 1 }
+      }
+    },
+    "root": {
+      "type": ["object", "null"],
+      "additionalProperties": false,
+      "required": ["implementationVersion"],
+      "properties": { "implementationVersion": { "type": "string", "minLength": 1 } }
+    },
+    "fixtureApkSha256": { "type": "string", "pattern": "^[0-9a-f]{64}$" },
+    "optIns": { "type": "array", "items": { "type": "string", "minLength": 1 } },
+    "command": { "type": "string", "minLength": 1 },
+    "preparation": { "type": "string", "minLength": 1 },
+    "operatorAction": { "type": "string", "minLength": 1 },
+    "executionSuccess": { "type": "boolean" },
+    "observedIssueCode": {
+      "type": ["string", "null"],
+      "enum": [null, "operation_timed_out", "device_storage_exhausted", "device_offline", "device_unauthorized", "device_disconnected", "adb_server_unavailable", "device_transport_lost", "device_identity_changed", "device_identity_unverified", "root_authority_revoked", "root_authority_unverified", "step_execution_failed"]
+    },
+    "stepStates": {
+      "type": "object", "additionalProperties": false,
+      "required": ["executed", "skipped", "failed", "cancelled", "blocked", "notAttempted"],
+      "properties": {
+        "executed": { "type": "integer", "minimum": 0 },
+        "skipped": { "type": "integer", "minimum": 0 },
+        "failed": { "type": "integer", "minimum": 0 },
+        "cancelled": { "type": "integer", "minimum": 0 },
+        "blocked": { "type": "integer", "minimum": 0 },
+        "notAttempted": { "type": "integer", "minimum": 0 }
+      }
+    },
+    "partialChangesPossible": { "type": "boolean" },
+    "authorityInvalidated": { "type": "boolean" },
+    "activeSlotReleased": { "type": "boolean" },
+    "activeSlotObservation": {
+      "type": "object", "additionalProperties": false,
+      "required": ["observed", "acquired", "released", "runId", "executionId", "acquiredAt", "terminalCleanupAt", "releasedAt", "sourceKind", "evidence"],
+      "properties": {
+        "observed": { "type": "boolean" },
+        "acquired": { "type": "boolean" },
+        "released": { "type": "boolean" },
+        "runId": { "type": "string", "pattern": "^run-scope-sha256:[0-9a-f]{64}$" },
+        "executionId": { "type": "string", "pattern": "^execution-sha256:[0-9a-f]{64}$" },
+        "acquiredAt": { "type": "string", "pattern": "^unix:(0|[1-9][0-9]{0,11})$" },
+        "terminalCleanupAt": { "type": ["string", "null"], "pattern": "^unix:(0|[1-9][0-9]{0,11})$" },
+        "releasedAt": { "type": ["string", "null"], "pattern": "^unix:(0|[1-9][0-9]{0,11})$" },
+        "sourceKind": { "const": "production_owned_slot" },
+        "evidence": { "const": "production-execution-session-slot" }
+      }
+    },
+    "activeProcess": {
+      "type": ["object", "null"], "additionalProperties": false,
+      "required": ["runId", "operationId", "operationClass", "childIdentity", "spawnedAt", "mutationStartedAt", "checkedAliveAt", "actionAt", "terminalAt", "aliveImmediatelyBeforeAction", "terminalReportedBeforeAction"],
+      "properties": {
+        "runId": { "type": "string", "pattern": "^run-scope-sha256:[0-9a-f]{64}$" },
+        "operationId": { "type": "string", "pattern": "^operation-sha256:[0-9a-f]{64}$" },
+        "operationClass": { "const": "device_copy" },
+        "childIdentity": { "type": "string", "pattern": "^child-sha256:[0-9a-f]{64}$" },
+        "spawnedAt": { "type": "string", "pattern": "^unix:(0|[1-9][0-9]{0,11})$" },
+        "mutationStartedAt": { "type": "string", "pattern": "^unix:(0|[1-9][0-9]{0,11})$" },
+        "checkedAliveAt": { "type": "string", "pattern": "^unix:(0|[1-9][0-9]{0,11})$" },
+        "actionAt": { "type": "string", "pattern": "^unix:(0|[1-9][0-9]{0,11})$" },
+        "terminalAt": { "type": "string", "pattern": "^unix:(0|[1-9][0-9]{0,11})$" },
+        "aliveImmediatelyBeforeAction": { "type": "boolean" },
+        "terminalReportedBeforeAction": { "type": "boolean" }
+      }
+    },
+    "activeCancellation": {
+      "type": ["object", "null"], "additionalProperties": false,
+      "required": ["requestPhase", "inFlightObservedAt", "requestedAt", "operationFinishedAt", "requestBeforeFinished", "laterWorkNotAttempted", "operatorEvidence"],
+      "properties": {
+        "requestPhase": { "enum": ["in_flight", "safe_boundary"] },
+        "inFlightObservedAt": { "type": ["string", "null"], "pattern": "^unix:(0|[1-9][0-9]{0,11})$" },
+        "requestedAt": { "type": ["string", "null"], "pattern": "^unix:(0|[1-9][0-9]{0,11})$" },
+        "operationFinishedAt": { "type": ["string", "null"], "pattern": "^unix:(0|[1-9][0-9]{0,11})$" },
+        "requestBeforeFinished": { "type": "boolean" },
+        "laterWorkNotAttempted": { "type": "boolean" },
+        "operatorEvidence": { "type": "string", "minLength": 1 }
+      }
+    },
+    "hostSleep": {
+      "type": ["object", "null"], "additionalProperties": false,
+      "required": ["sleepRequestedAt", "sleepEnteredAt", "wakeAt", "wallElapsedMs", "executorElapsedMs", "deadlineMs", "operationStartedAt", "terminalAt", "terminalOutcome", "hostOs", "hostVersion", "timerImplementation", "toolchain", "timerClassification", "measurementBasis", "transportLossBlockedMeasurement", "elapsedBeforeSleepMs", "deadlineClockStartNs", "deadlineClockBeforeSleepNs", "deadlineClockAfterWakeNs", "deadlineClockTerminalNs", "suspendedWallMs", "deadlineClockAdvanceDuringSuspensionMs", "remainingBeforeSleepMs", "remainingAfterWakeMs", "measurementToleranceMs", "toleranceRationale", "operatorActionPhase", "deadlineClockSource"],
+      "properties": {
+        "sleepRequestedAt": { "type": "string", "pattern": "^unix:(0|[1-9][0-9]{0,11})$" },
+        "sleepEnteredAt": { "type": "string", "pattern": "^unix:(0|[1-9][0-9]{0,11})$" },
+        "wakeAt": { "type": "string", "pattern": "^unix:(0|[1-9][0-9]{0,11})$" },
+        "wallElapsedMs": { "type": "integer", "minimum": 0 },
+        "executorElapsedMs": { "type": "integer", "minimum": 0 },
+        "deadlineMs": { "type": "integer", "minimum": 1 },
+        "operationStartedAt": { "type": "string", "pattern": "^unix:(0|[1-9][0-9]{0,11})$" },
+        "terminalAt": { "type": "string", "pattern": "^unix:(0|[1-9][0-9]{0,11})$" },
+        "terminalOutcome": { "enum": ["completed", "timed_out", "transport_loss", "runtime_loss"] },
+        "hostOs": { "type": "string", "minLength": 1 },
+        "hostVersion": { "type": "string", "minLength": 1 },
+        "timerImplementation": { "type": "string", "minLength": 1 },
+        "toolchain": { "type": "string", "minLength": 1 },
+        "timerClassification": { "enum": ["suspended_time_included", "suspended_time_excluded", "indeterminate", "contradictory"] },
+        "measurementBasis": { "type": "string", "minLength": 1 },
+        "transportLossBlockedMeasurement": { "type": "boolean" },
+        "elapsedBeforeSleepMs": { "type": "integer", "minimum": 0 },
+        "deadlineClockStartNs": { "type": "string", "pattern": "^monotonic-ns:(0|[1-9][0-9]{0,19})$" },
+        "deadlineClockBeforeSleepNs": { "type": "string", "pattern": "^monotonic-ns:(0|[1-9][0-9]{0,19})$" },
+        "deadlineClockAfterWakeNs": { "type": "string", "pattern": "^monotonic-ns:(0|[1-9][0-9]{0,19})$" },
+        "deadlineClockTerminalNs": { "type": "string", "pattern": "^monotonic-ns:(0|[1-9][0-9]{0,19})$" },
+        "suspendedWallMs": { "type": "integer", "minimum": 0 },
+        "deadlineClockAdvanceDuringSuspensionMs": { "type": "integer", "minimum": 0 },
+        "remainingBeforeSleepMs": { "type": "integer", "minimum": 0 },
+        "remainingAfterWakeMs": { "type": "integer", "minimum": 0 },
+        "measurementToleranceMs": { "type": "integer", "minimum": 0 },
+        "toleranceRationale": { "type": "string", "minLength": 1 },
+        "operatorActionPhase": { "enum": ["before_deadline", "after_deadline"] },
+        "deadlineClockSource": { "const": "owned_process_monotonic_deadline_clock" }
+      }
+    },
+    "identityTransition": {
+      "type": ["object", "null"], "additionalProperties": false,
+      "required": ["initialSerial", "initialFingerprint", "originalAttached", "originalDisconnectedAt", "serialAbsentFrom", "serialAbsentUntil", "replacementAttachedAt", "replacementSerial", "replacementFingerprint", "neverSimultaneous", "expectedIssueCode", "authorityInvalidated", "cleanupFinalAttached", "runId"],
+      "properties": {
+        "initialSerial": { "type": "string", "pattern": "^serial-sha256:[0-9a-f]{64}$" },
+        "initialFingerprint": { "type": "string", "pattern": "^fingerprint-sha256:[0-9a-f]{64}$" },
+        "originalAttached": { "type": "boolean" },
+        "originalDisconnectedAt": { "type": "string", "pattern": "^unix:(0|[1-9][0-9]{0,11})$" },
+        "serialAbsentFrom": { "type": "string", "pattern": "^unix:(0|[1-9][0-9]{0,11})$" },
+        "serialAbsentUntil": { "type": "string", "pattern": "^unix:(0|[1-9][0-9]{0,11})$" },
+        "replacementAttachedAt": { "type": "string", "pattern": "^unix:(0|[1-9][0-9]{0,11})$" },
+        "replacementSerial": { "type": "string", "pattern": "^serial-sha256:[0-9a-f]{64}$" },
+        "replacementFingerprint": { "type": "string", "pattern": "^fingerprint-sha256:[0-9a-f]{64}$" },
+        "neverSimultaneous": { "type": "boolean" },
+        "expectedIssueCode": { "enum": [null, "device_identity_changed", "device_identity_unverified"] },
+        "authorityInvalidated": { "type": "boolean" },
+        "cleanupFinalAttached": { "type": "boolean" },
+        "runId": { "type": "string", "pattern": "^run-scope-sha256:[0-9a-f]{64}$" }
+      }
+    },
+    "authorizationTransition": {
+      "type": ["object", "null"], "additionalProperties": false,
+      "required": ["initialState", "initialObservedAt", "operationStartedAt", "revocationCheckpointAt", "observedState", "observedAt", "terminalDetectedAt", "cleanupStartedAt", "cleanupCompletedAt", "issueCode", "authorityInvalidated", "automaticResume", "cleanupFinalState", "finalStateObservedAt", "runId", "deviceScope"],
+      "properties": {
+        "initialState": { "const": "authorized" },
+        "initialObservedAt": { "type": "string", "pattern": "^unix:(0|[1-9][0-9]{0,11})$" },
+        "operationStartedAt": { "type": "string", "pattern": "^unix:(0|[1-9][0-9]{0,11})$" },
+        "revocationCheckpointAt": { "type": "string", "pattern": "^unix:(0|[1-9][0-9]{0,11})$" },
+        "observedState": { "const": "unauthorized" },
+        "observedAt": { "type": "string", "pattern": "^unix:(0|[1-9][0-9]{0,11})$" },
+        "terminalDetectedAt": { "type": "string", "pattern": "^unix:(0|[1-9][0-9]{0,11})$" },
+        "cleanupStartedAt": { "type": "string", "pattern": "^unix:(0|[1-9][0-9]{0,11})$" },
+        "cleanupCompletedAt": { "type": "string", "pattern": "^unix:(0|[1-9][0-9]{0,11})$" },
+        "issueCode": { "const": "device_unauthorized" },
+        "authorityInvalidated": { "type": "boolean" },
+        "automaticResume": { "const": false },
+        "cleanupFinalState": { "type": "string", "minLength": 1 },
+        "finalStateObservedAt": { "type": "string", "pattern": "^unix:(0|[1-9][0-9]{0,11})$" },
+        "runId": { "type": "string", "pattern": "^run-scope-sha256:[0-9a-f]{64}$" },
+        "deviceScope": { "type": "string", "pattern": "^serial-sha256:[0-9a-f]{64}$" }
+      }
+    },
+    "scenarioContract": { "type": "object" },
+    "scenarioFacts": {
+      "type": "object", "additionalProperties": false,
+      "required": ["rootShell", "activeCheckpoint", "boundaryCheckpoint", "requiresSentinelAction", "storage", "runScope", "operationClass"],
+      "properties": {
+        "rootShell": { "type": "boolean" },
+        "activeCheckpoint": { "type": "boolean" },
+        "boundaryCheckpoint": { "type": "boolean" },
+        "requiresSentinelAction": { "type": "boolean" },
+        "storage": { "type": "boolean" },
+        "runScope": { "type": "string", "pattern": "^run-scope-sha256:[0-9a-f]{64}$" },
+        "operationClass": { "const": "device_copy" }
+      }
+    },
+    "sentinel": {
+      "type": "object", "additionalProperties": false,
+      "required": ["sentinelId", "nonce", "runId", "scenario", "repetition", "armedAt", "operationStartedAt", "boundaryReadyAt", "operatorActionAt", "operationFinishedAt", "cleanupReadyAt", "sleepRequestedAt", "sleepEnteredAt", "wakeAt", "chronologyValid", "uniqueMarkers"],
+      "properties": {
+        "sentinelId": { "type": "string", "pattern": "^sentinel-sha256:[0-9a-f]{64}$" },
+        "nonce": { "type": "string", "pattern": "^nonce-sha256:[0-9a-f]{64}$" },
+        "runId": { "type": "string", "pattern": "^physical-run-sha256:[0-9a-f]{64}$" },
+        "scenario": { "type": "string" },
+        "repetition": { "type": "integer", "enum": [1, 2] },
+        "armedAt": { "type": ["string", "null"], "pattern": "^unix:(0|[1-9][0-9]{0,11})$" },
+        "operationStartedAt": { "type": ["string", "null"], "pattern": "^unix:(0|[1-9][0-9]{0,11})$" },
+        "boundaryReadyAt": { "type": ["string", "null"], "pattern": "^unix:(0|[1-9][0-9]{0,11})$" },
+        "operatorActionAt": { "type": ["string", "null"], "pattern": "^unix:(0|[1-9][0-9]{0,11})$" },
+        "operationFinishedAt": { "type": ["string", "null"], "pattern": "^unix:(0|[1-9][0-9]{0,11})$" },
+        "cleanupReadyAt": { "type": ["string", "null"], "pattern": "^unix:(0|[1-9][0-9]{0,11})$" },
+        "sleepRequestedAt": { "type": ["string", "null"], "pattern": "^unix:(0|[1-9][0-9]{0,11})$" },
+        "sleepEnteredAt": { "type": ["string", "null"], "pattern": "^unix:(0|[1-9][0-9]{0,11})$" },
+        "wakeAt": { "type": ["string", "null"], "pattern": "^unix:(0|[1-9][0-9]{0,11})$" },
+        "chronologyValid": { "type": "boolean" },
+        "uniqueMarkers": { "type": "boolean" }
+      }
+    },
+    "storage": {
+      "type": ["object", "null"],
+      "additionalProperties": false,
+      "required": ["initialFreeKib", "recoveryReserveKib", "fillerKib", "finalFreeKib", "restoredRecoveryReserveKib", "reserveCreated", "reserveRemoved", "ownershipVerified", "boundedAllocation", "cleanupVerified"],
+      "properties": {
+        "initialFreeKib": { "type": "integer", "minimum": 4194304, "maximum": 5308416 },
+        "recoveryReserveKib": { "type": "integer", "minimum": 1048576 },
+        "fillerKib": { "type": "integer", "minimum": 1, "maximum": 4194304 },
+        "finalFreeKib": { "type": ["integer", "null"], "minimum": 0 },
+        "restoredRecoveryReserveKib": { "type": ["integer", "null"], "minimum": 1048576 },
+        "reserveCreated": { "type": "boolean" },
+        "reserveRemoved": { "type": "boolean" },
+        "ownershipVerified": { "type": "boolean" },
+        "boundedAllocation": { "type": "boolean" },
+        "cleanupVerified": { "type": "boolean" }
+      }
+    },
+    "cleanup": {
+      "type": "object", "additionalProperties": false,
+      "required": ["command", "outcome", "ownedPathDigests", "verified", "nonFixtureDeletion"],
+      "properties": {
+        "command": { "type": "string", "minLength": 1 },
+        "outcome": { "enum": ["succeeded", "failed", "not_attempted"] },
+        "ownedPathDigests": { "type": "array", "minItems": 2, "items": { "type": "string", "pattern": "^path-sha256:[0-9a-f]{64}$" } },
+        "verified": { "type": "boolean" },
+        "nonFixtureDeletion": { "const": false }
+      }
+    },
+    "residualStateCheck": {
+      "type": "object", "additionalProperties": false,
+      "required": ["outcome", "residuals"],
+      "properties": {
+        "outcome": { "enum": ["clean", "residual", "unknown"] },
+        "residuals": { "type": "array", "items": { "type": "string" } }
+      }
+    },
+    "outcome": { "enum": ["passed", "failed", "skipped", "blocked"] },
+    "notes": { "type": "array", "items": { "type": "string" } }
+  }
+}

@@ -67,6 +67,7 @@ pub(crate) enum StepFailureKind {
     DeviceOffline,
     DeviceUnauthorized,
     DeviceDisconnected,
+    DeviceStorageExhausted,
     AdbServerUnavailable,
     TransportReset,
     TransportFailure,
@@ -88,6 +89,7 @@ impl StepFailureKind {
                 | Self::DeviceOffline
                 | Self::DeviceUnauthorized
                 | Self::DeviceDisconnected
+                | Self::DeviceStorageExhausted
                 | Self::AdbServerUnavailable
                 | Self::TransportReset
                 | Self::TransportFailure
@@ -109,6 +111,7 @@ pub(crate) enum DeviceOperationKind {
     DeviceOffline,
     DeviceUnauthorized,
     DeviceDisconnected,
+    DeviceStorageExhausted,
     AdbServerUnavailable,
     TransportReset,
     TransportFailure,
@@ -129,6 +132,7 @@ impl DeviceOperationKind {
                 | Self::DeviceOffline
                 | Self::DeviceUnauthorized
                 | Self::DeviceDisconnected
+                | Self::DeviceStorageExhausted
                 | Self::AdbServerUnavailable
                 | Self::TransportReset
                 | Self::TransportFailure
@@ -183,6 +187,14 @@ impl DeviceOperationError {
         Self {
             kind,
             message: message.to_string(),
+            cleanup: None,
+        }
+    }
+
+    pub(crate) fn storage_exhausted() -> Self {
+        Self {
+            kind: DeviceOperationKind::DeviceStorageExhausted,
+            message: "The device ran out of storage during execution.".to_string(),
             cleanup: None,
         }
     }
@@ -310,6 +322,15 @@ pub struct ExecutorRunner<D: ExecutorDevice = FakeDryRunDevice> {
     root_preflight_failure: Option<String>,
 }
 
+/// Internal lifecycle markers used only by qualification seams.  They are
+/// emitted at the production runner boundary immediately around the selected
+/// atomic operation; they are not serialized execution state or a public DTO.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(crate) enum OperationLifecycle {
+    Started { step_id: String },
+    Finished { step_id: String },
+}
+
 impl Default for ExecutorRunner<FakeDryRunDevice> {
     fn default() -> Self {
         Self {
@@ -360,6 +381,37 @@ impl<D: ExecutorDevice> ExecutorRunner<D> {
         plan: &ExecutionPlan,
         mut progress_callback: impl FnMut(ExecutionProgressEvent),
         should_cancel: impl Fn() -> bool,
+    ) -> ExecutionRunResult {
+        self.run_with_progress_and_cancel_inner(plan, &mut progress_callback, should_cancel, |_| {})
+    }
+
+    /// Execute one qualification run while observing the production runner
+    /// lifecycle around each atomic operation. This is private test
+    /// infrastructure; production callers keep the unchanged public runner
+    /// method above. Execution-session slot ownership is observed separately
+    /// at the manager boundary rather than inferred from this callback.
+    #[cfg(test)]
+    pub(crate) fn run_with_progress_and_cancel_observed(
+        &mut self,
+        plan: &ExecutionPlan,
+        mut progress_callback: impl FnMut(ExecutionProgressEvent),
+        should_cancel: impl Fn() -> bool,
+        operation_observer: impl FnMut(OperationLifecycle),
+    ) -> ExecutionRunResult {
+        self.run_with_progress_and_cancel_inner(
+            plan,
+            &mut progress_callback,
+            should_cancel,
+            operation_observer,
+        )
+    }
+
+    fn run_with_progress_and_cancel_inner(
+        &mut self,
+        plan: &ExecutionPlan,
+        progress_callback: &mut impl FnMut(ExecutionProgressEvent),
+        should_cancel: impl Fn() -> bool,
+        mut operation_observer: impl FnMut(OperationLifecycle),
     ) -> ExecutionRunResult {
         let total_steps = plan.steps.len();
         let step_ids_in_plan = plan
@@ -606,7 +658,13 @@ impl<D: ExecutorDevice> ExecutorRunner<D> {
                 None,
                 None,
             ));
+            operation_observer(OperationLifecycle::Started {
+                step_id: step.id.clone(),
+            });
             let run_result = self.run_step(plan, &mut state, step);
+            operation_observer(OperationLifecycle::Finished {
+                step_id: step.id.clone(),
+            });
             let (status, message, outputs, runtime_status, failure_kind, cleanup, device_fail_stop) =
                 match run_result {
                     Ok(outputs) => {
@@ -2392,6 +2450,7 @@ pub(crate) fn map_adb_error(error: adb::AdbCommandError) -> DeviceOperationError
         adb::AdbCommandError::DeviceDisconnected => {
             DeviceOperationError::transport(DeviceOperationKind::DeviceDisconnected)
         }
+        adb::AdbCommandError::DeviceStorageExhausted => DeviceOperationError::storage_exhausted(),
         adb::AdbCommandError::AdbServerUnavailable => {
             DeviceOperationError::transport(DeviceOperationKind::AdbServerUnavailable)
         }
@@ -2668,7 +2727,7 @@ impl SandboxRoots {
             self.ensure_runtime_or_cache_write(&target)?;
             entries.push((index, entry_name, target, is_dir));
         }
-        for (path, _) in &declared_paths {
+        for path in declared_paths.keys() {
             for ancestor in path.ancestors().skip(1) {
                 if ancestor.as_os_str().is_empty() {
                     break;
@@ -2986,6 +3045,9 @@ impl From<DeviceOperationError> for StepFailure {
             DeviceOperationKind::DeviceOffline => Some(StepFailureKind::DeviceOffline),
             DeviceOperationKind::DeviceUnauthorized => Some(StepFailureKind::DeviceUnauthorized),
             DeviceOperationKind::DeviceDisconnected => Some(StepFailureKind::DeviceDisconnected),
+            DeviceOperationKind::DeviceStorageExhausted => {
+                Some(StepFailureKind::DeviceStorageExhausted)
+            }
             DeviceOperationKind::AdbServerUnavailable => {
                 Some(StepFailureKind::AdbServerUnavailable)
             }

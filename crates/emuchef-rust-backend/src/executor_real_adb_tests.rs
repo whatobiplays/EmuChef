@@ -12,6 +12,7 @@ use crate::planner::{
     ExecutionStepCondition, ExecutionStepConstraints, RuntimeCapabilities,
 };
 
+mod physical_interruption_qualification;
 mod qualification;
 mod root_qualification;
 
@@ -655,10 +656,7 @@ impl ManualQualification {
             } else {
                 adb_command(&self.serial, &["shell", "rm", "-rf", &root]).is_err()
             };
-            let root_remaining = match adb_path_exists(&self.serial, &root) {
-                Ok(remaining) => remaining,
-                Err(_) => true,
-            };
+            let root_remaining = adb_path_exists(&self.serial, &root).unwrap_or(true);
             if removal_failed || root_remaining {
                 cleanup_failed = true;
                 residual_roots.push(root);

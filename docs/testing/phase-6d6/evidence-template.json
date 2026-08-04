@@ -1,0 +1,142 @@
+{
+  "schemaVersion": 1,
+  "scenario": "cancellation_active",
+  "repetition": 1,
+  "timestamp": "unix:0",
+  "commit": "unreported",
+  "runId": "physical-run-sha256:0000000000000000000000000000000000000000000000000000000000000000",
+  "evidencePath": "docs/testing/phase-6d6/evidence/template.json",
+  "tracePath": "docs/testing/phase-6d6/evidence/traces/template.json",
+  "recordDigest": "sha256:4f2d0f67483b328761f32e0f919894f33e0da29b218709a083f406be824b3403",
+  "traceDigest": "sha256:27510bf40f2eaeabce8e1f7f4a0d9dcf92d7263e1f6745f5f28c4806d384f802",
+  "trace": { "events": ["template-only"] },
+  "host": { "os": "unreported", "version": "unreported", "architecture": "unreported" },
+  "platformToolsRevision": "unreported",
+  "device": {
+    "identity": "serial-sha256:0000000000000000000000000000000000000000000000000000000000000000",
+    "model": "unreported",
+    "androidVersion": "unreported",
+    "apiLevel": 1,
+    "abi": "unreported",
+    "buildFingerprint": "unreported"
+  },
+  "root": null,
+  "fixtureApkSha256": "0000000000000000000000000000000000000000000000000000000000000000",
+  "optIns": [
+    "EMUCHEF_RUN_REAL_ADB_TESTS=1",
+    "EMUCHEF_RUN_PHASE_6D6_PHYSICAL_TESTS=1",
+    "EMUCHEF_PHASE_6D6_SCENARIO=cancellation_active",
+    "EMUCHEF_PHASE_6D6_REPETITION=1",
+    "EMUCHEF_TEST_DEVICE_SERIAL=selected",
+    "EMUCHEF_TEST_PACKAGE_ALLOWLIST=com.emuchef.fixture",
+    "EMUCHEF_PHASE_6D6_SENTINEL_DIR=test-owned-directory"
+  ],
+  "command": "cargo test --manifest-path crates/emuchef-rust-backend/Cargo.toml --features real-execution physical_interruption_qualification::manual_phase_6d6_physical_interruption_qualification -- --ignored --exact",
+  "preparation": "Template only; no physical attempt is represented.",
+  "operatorAction": "Template only; no physical attempt is represented.",
+  "executionSuccess": false,
+  "observedIssueCode": null,
+  "stepStates": { "executed": 1, "skipped": 0, "failed": 0, "cancelled": 1, "blocked": 0, "notAttempted": 0 },
+  "partialChangesPossible": true,
+  "authorityInvalidated": false,
+  "activeSlotReleased": true,
+  "activeSlotObservation": {
+    "observed": true,
+    "acquired": true,
+    "released": true,
+    "runId": "run-scope-sha256:0000000000000000000000000000000000000000000000000000000000000000",
+    "executionId": "execution-sha256:0000000000000000000000000000000000000000000000000000000000000000",
+    "acquiredAt": "unix:0",
+    "terminalCleanupAt": "unix:3",
+    "releasedAt": "unix:3",
+    "sourceKind": "production_owned_slot",
+    "evidence": "production-execution-session-slot"
+  },
+  "activeProcess": {
+    "runId": "run-scope-sha256:0000000000000000000000000000000000000000000000000000000000000000",
+    "operationId": "operation-sha256:0000000000000000000000000000000000000000000000000000000000000000",
+    "operationClass": "device_copy",
+    "childIdentity": "child-sha256:0000000000000000000000000000000000000000000000000000000000000000",
+    "spawnedAt": "unix:1",
+    "mutationStartedAt": "unix:1",
+    "checkedAliveAt": "unix:2",
+    "actionAt": "unix:2",
+    "terminalAt": "unix:3",
+    "aliveImmediatelyBeforeAction": true,
+    "terminalReportedBeforeAction": false
+  },
+  "activeCancellation": null,
+  "hostSleep": null,
+  "identityTransition": null,
+  "authorizationTransition": null,
+  "scenarioContract": {
+    "expectedOutcome": "passed",
+    "expectedExecution": "interruption",
+    "allowedIssueCodes": [null],
+    "allowedStepStates": [
+      {"executed": 1, "skipped": 0, "failed": 0, "cancelled": 1, "blocked": 0, "notAttempted": 0}
+    ],
+    "partialChanges": "allowed",
+    "authorityInvalidation": "allowed",
+    "requiresActiveSlotReleased": true,
+    "slotObservation": {"source": "production-execution-session-slot", "exactRunScope": true},
+    "activeProcess": {"required": true, "operationClass": "device_copy", "actionMustPrecedeTerminal": true, "exactRunBinding": true},
+    "activeCancellation": {
+      "required": true,
+      "requestPhase": "in_flight",
+      "requestBeforeFinished": true,
+      "terminalBehavior": "active_operation_completes_then_later_work_not_attempted",
+      "disallowedIssueCodes": ["device_transport_lost", "device_offline", "device_unauthorized", "operation_timed_out", "device_identity_changed", "device_storage_exhausted"]
+    },
+    "cleanupOutcome": "succeeded",
+    "residualOutcome": "clean",
+    "facts": {
+      "rootShell": false,
+      "activeCheckpoint": true,
+      "boundaryCheckpoint": false,
+      "requiresSentinelAction": true,
+      "storage": false
+    }
+  },
+  "scenarioFacts": {
+    "rootShell": false,
+    "activeCheckpoint": true,
+    "boundaryCheckpoint": false,
+    "requiresSentinelAction": true,
+    "storage": false,
+    "runScope": "run-scope-sha256:0000000000000000000000000000000000000000000000000000000000000000",
+    "operationClass": "device_copy"
+  },
+  "sentinel": {
+    "sentinelId": "sentinel-sha256:0000000000000000000000000000000000000000000000000000000000000000",
+    "nonce": "nonce-sha256:0000000000000000000000000000000000000000000000000000000000000000",
+    "runId": "physical-run-sha256:0000000000000000000000000000000000000000000000000000000000000000",
+    "scenario": "cancellation_active",
+    "repetition": 1,
+    "armedAt": "unix:0",
+    "operationStartedAt": "unix:1",
+    "boundaryReadyAt": null,
+    "operatorActionAt": "unix:2",
+    "operationFinishedAt": "unix:3",
+    "cleanupReadyAt": null,
+    "sleepRequestedAt": null,
+    "sleepEnteredAt": null,
+    "wakeAt": null,
+    "chronologyValid": true,
+    "uniqueMarkers": true
+  },
+  "storage": null,
+  "cleanup": {
+    "command": "adb -s <selected-serial> shell rm -f <fixture-owned-path>",
+    "outcome": "succeeded",
+    "ownedPathDigests": [
+      "path-sha256:0000000000000000000000000000000000000000000000000000000000000000",
+      "path-sha256:1111111111111111111111111111111111111111111111111111111111111111"
+    ],
+    "verified": true,
+    "nonFixtureDeletion": false
+  },
+  "residualStateCheck": { "outcome": "clean", "residuals": [] },
+  "outcome": "blocked",
+  "notes": ["This template is not physical evidence and must not be counted as a repetition."]
+}

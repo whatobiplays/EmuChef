@@ -13,6 +13,10 @@ on:
       - "tests/fixtures/phase-6c/non-root/**"
       - "tools/phase-6c-fixture.mjs"
       - "tools/phase-6c-fixture.test.mjs"
+      - "tools/phase-6d6-*"
+      - "docs/testing/phase-6d6/**"
+      - "docs/manual/phase-6d6-physical-interruption-qualification.md"
+      - "docs/product/phase-6d6-physical-interruption-qualification.md"
       - "scripts/build-phase-6c-android-fixture.sh"
   push:
     branches:
@@ -28,6 +32,10 @@ on:
       - "tests/fixtures/phase-6c/non-root/**"
       - "tools/phase-6c-fixture.mjs"
       - "tools/phase-6c-fixture.test.mjs"
+      - "tools/phase-6d6-*"
+      - "docs/testing/phase-6d6/**"
+      - "docs/manual/phase-6d6-physical-interruption-qualification.md"
+      - "docs/product/phase-6d6-physical-interruption-qualification.md"
       - "scripts/build-phase-6c-android-fixture.sh"
   workflow_dispatch:
 
@@ -57,6 +65,12 @@ jobs:
         run: sdkmanager --install "platforms;android-35" "build-tools;35.0.0"
       - name: Test fixture contract tooling
         run: node --test tools/phase-6c-fixture.test.mjs
+      - name: Validate gated Phase 6D.6 evidence contract without ADB
+        run: |
+          node tools/phase-6d6-evidence.mjs
+          node --test tools/phase-6d6-evidence.test.mjs
+          node --test tools/phase-6d6-evidence-regression.test.mjs
+          node --test tools/phase-6d6-result.test.mjs
       - name: Verify committed fixture APK contract
         run: >-
           node tools/phase-6c-fixture.mjs

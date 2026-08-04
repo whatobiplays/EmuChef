@@ -196,6 +196,69 @@ struct ExecutionState {
     records: HashMap<String, ExecutionRecord>,
 }
 
+/// Private qualification observation of the manager's real single-owner slot.
+/// The public execution report and status DTOs do not expose this state.
+#[cfg(test)]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(crate) struct ExecutionSlotObservation {
+    pub(crate) run_id: String,
+    pub(crate) execution_id: String,
+    pub(crate) acquired: bool,
+    pub(crate) released: bool,
+    pub(crate) acquired_at_unix: u64,
+    pub(crate) terminal_cleanup_at_unix: Option<u64>,
+    pub(crate) released_at_unix: Option<u64>,
+}
+
+/// RAII owner for the production `active_execution_id` slot.
+///
+/// Every production worker carries this guard until terminal report cleanup.
+/// Tests may attach an observer, but the observer never owns or mutates a
+/// second slot.
+struct ExecutionSlotLease {
+    state: Arc<Mutex<ExecutionState>>,
+    execution_id: String,
+    #[cfg(test)]
+    observation: Option<Arc<Mutex<ExecutionSlotObservation>>>,
+}
+
+impl Drop for ExecutionSlotLease {
+    fn drop(&mut self) {
+        if let Ok(mut state) = self.state.lock() {
+            if state.active_execution_id.as_deref() == Some(self.execution_id.as_str()) {
+                state.active_execution_id = None;
+                #[cfg(test)]
+                if let Some(observation) = &self.observation {
+                    if let Ok(mut observation) = observation.lock() {
+                        let now = unix_timestamp();
+                        observation.terminal_cleanup_at_unix = Some(now);
+                        observation.released = true;
+                        observation.released_at_unix = Some(now);
+                    }
+                }
+            }
+        }
+    }
+}
+
+/// Acquire the single production slot while its state lock is held. Both the
+/// production `start` path and the private qualification boundary use this
+/// exact mutation; test observation is attached only after acquisition.
+fn acquire_execution_slot_locked(
+    state_owner: &Arc<Mutex<ExecutionState>>,
+    state: &mut ExecutionState,
+    execution_id: &str,
+) -> ExecutionSlotLease {
+    debug_assert!(state.active_execution_id.is_none());
+    state.active_execution_id = Some(execution_id.to_string());
+    ExecutionSlotLease {
+        state: Arc::clone(state_owner),
+        execution_id: execution_id.to_string(),
+        #[cfg(test)]
+        observation: None,
+    }
+}
+
 #[derive(Clone, Debug)]
 pub struct ExecutionSessionManager {
     config: SidecarRuntimeConfig,
@@ -214,6 +277,40 @@ impl ExecutionSessionManager {
             config,
             state: Arc::new(Mutex::new(ExecutionState::default())),
         }
+    }
+
+    /// Run one qualification closure under the same RAII slot guard carried by
+    /// production execution workers. The closure cannot release the slot; the
+    /// guard records release only after the closure has returned or unwound.
+    #[cfg(test)]
+    pub(crate) fn test_run_under_observed_slot<T>(
+        &self,
+        run_id: &str,
+        run: impl FnOnce() -> T,
+    ) -> Result<(T, Arc<Mutex<ExecutionSlotObservation>>), String> {
+        let observation = Arc::new(Mutex::new(ExecutionSlotObservation {
+            run_id: run_id.to_string(),
+            execution_id: run_id.to_string(),
+            acquired: true,
+            released: false,
+            acquired_at_unix: unix_timestamp(),
+            terminal_cleanup_at_unix: None,
+            released_at_unix: None,
+        }));
+        let mut lease = {
+            let mut state = self
+                .state
+                .lock()
+                .map_err(|_| "execution slot state was poisoned".to_string())?;
+            if state.active_execution_id.is_some() {
+                return Err("execution slot is already occupied".to_string());
+            }
+            acquire_execution_slot_locked(&self.state, &mut state, run_id)
+        };
+        lease.observation = Some(Arc::clone(&observation));
+        let result = run();
+        drop(lease);
+        Ok((result, observation))
     }
 
     pub(crate) fn start(
@@ -239,7 +336,7 @@ impl ExecutionSessionManager {
         }
         let target = preflight_target(&plan, mode, supplied_target, &self.config.adb_path)?;
 
-        let (execution_id, report, cancel_requested) = {
+        let (execution_id, report, cancel_requested, slot_lease) = {
             let mut state = lock(&self.state);
             if let Some(active) = &state.active_execution_id {
                 return Err(ApiError::new(
@@ -290,9 +387,9 @@ impl ExecutionSessionManager {
                 None,
             );
             let report = record.report.clone();
-            state.active_execution_id = Some(execution_id.clone());
             state.records.insert(execution_id.clone(), record);
-            (execution_id, report, cancel_requested)
+            let slot_lease = acquire_execution_slot_locked(&self.state, &mut state, &execution_id);
+            (execution_id, report, cancel_requested, slot_lease)
         };
 
         let state = Arc::clone(&self.state);
@@ -314,10 +411,7 @@ impl ExecutionSessionManager {
                 Ok(result) => finish_attempt(&state, &worker_execution_id, result),
                 Err(_) => finish_panicked(&state, &worker_execution_id),
             }
-            let mut state = lock(&state);
-            if state.active_execution_id.as_deref() == Some(&worker_execution_id) {
-                state.active_execution_id = None;
-            }
+            drop(slot_lease);
         });
 
         Ok(json!({ "execution": report }))
@@ -1007,6 +1101,9 @@ fn issue_code(
         Some(StepFailureKind::RootAuthorityUnverified) => {
             return "root_authority_unverified".to_string()
         }
+        Some(StepFailureKind::DeviceStorageExhausted) => {
+            return "device_storage_exhausted".to_string()
+        }
         Some(StepFailureKind::TransportReset | StepFailureKind::TransportFailure) => {
             return "device_transport_lost".to_string()
         }
@@ -1182,6 +1279,11 @@ fn now() -> String {
         .expect("RFC 3339 formatting for UTC time should succeed")
 }
 
+#[cfg(test)]
+fn unix_timestamp() -> u64 {
+    OffsetDateTime::now_utc().unix_timestamp().max(0) as u64
+}
+
 fn unknown_execution(execution_id: &str) -> ApiError {
     ApiError::new(
         ApiErrorCode::UnknownExecution,
@@ -1321,6 +1423,10 @@ mod tests {
             ),
             (StepFailureKind::TransportReset, "device_transport_lost"),
             (StepFailureKind::TransportFailure, "device_transport_lost"),
+            (
+                StepFailureKind::DeviceStorageExhausted,
+                "device_storage_exhausted",
+            ),
         ];
         for (kind, expected) in cases {
             assert_eq!(
@@ -1867,6 +1973,90 @@ mod tests {
             cache_root: root.join("cache"),
             adb_path: "adb".to_string(),
         })
+    }
+
+    #[test]
+    fn observed_slot_is_run_specific_and_released_by_the_production_state_guard() {
+        let manager = ExecutionSessionManager::default();
+        let nested_manager = manager.clone();
+        let (_, observation) = manager
+            .test_run_under_observed_slot("run-one", move || {
+                assert!(nested_manager
+                    .test_run_under_observed_slot("run-two", || ())
+                    .is_err());
+            })
+            .unwrap();
+        let released = observation.lock().unwrap().clone();
+        assert_eq!(released.run_id, "run-one");
+        assert!(released.acquired);
+        assert!(released.released);
+        let (_, second_observation) = manager
+            .test_run_under_observed_slot("run-two", || ())
+            .unwrap();
+        assert!(second_observation.lock().unwrap().released);
+    }
+
+    #[test]
+    fn observed_production_slot_releases_after_early_return_and_panic() {
+        let manager = ExecutionSessionManager::default();
+        let (result, observation) = manager
+            .test_run_under_observed_slot("early-return", || Err::<(), _>("expected"))
+            .unwrap();
+        assert_eq!(result, Err("expected"));
+        let observation = observation.lock().unwrap().clone();
+        assert!(observation.acquired);
+        assert!(observation.released);
+        assert!(observation.terminal_cleanup_at_unix.is_some());
+        assert!(observation.released_at_unix >= observation.terminal_cleanup_at_unix);
+
+        let panicked = std::panic::catch_unwind(std::panic::AssertUnwindSafe({
+            let manager = manager.clone();
+            move || {
+                let _ = manager.test_run_under_observed_slot("panicking-run", || {
+                    panic!("intentional slot-guard regression panic")
+                });
+            }
+        }));
+        assert!(panicked.is_err());
+        assert!(
+            manager
+                .test_run_under_observed_slot("after-panic", || ())
+                .unwrap()
+                .1
+                .lock()
+                .unwrap()
+                .released
+        );
+    }
+
+    #[test]
+    fn parallel_run_cannot_satisfy_or_release_another_runs_slot() {
+        let manager = ExecutionSessionManager::default();
+        let worker_manager = manager.clone();
+        let (entered_tx, entered_rx) = std::sync::mpsc::channel();
+        let (release_tx, release_rx) = std::sync::mpsc::channel();
+        let worker = std::thread::spawn(move || {
+            worker_manager
+                .test_run_under_observed_slot("parallel-one", || {
+                    entered_tx.send(()).unwrap();
+                    release_rx.recv().unwrap();
+                })
+                .unwrap()
+                .1
+        });
+        entered_rx.recv().unwrap();
+        assert!(manager
+            .test_run_under_observed_slot("parallel-two", || ())
+            .is_err());
+        release_tx.send(()).unwrap();
+        let first = worker.join().unwrap();
+        let first = first.lock().unwrap().clone();
+        assert_eq!(first.run_id, "parallel-one");
+        assert!(first.released);
+        let (_, second) = manager
+            .test_run_under_observed_slot("parallel-two", || ())
+            .unwrap();
+        assert_eq!(second.lock().unwrap().run_id, "parallel-two");
     }
 
     fn wait_for_terminal(manager: &ExecutionSessionManager, execution_id: &str) -> Value {

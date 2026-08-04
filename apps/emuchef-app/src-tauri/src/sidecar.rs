@@ -908,6 +908,37 @@ mod tests {
     }
 
     #[test]
+    fn simulated_host_sleep_interval_with_lost_generation_keeps_one_owner() {
+        let mut client = SidecarClient::new(PathBuf::from("unused-test-cache"));
+        client.status = RuntimeStatusDto::Ready {
+            protocol_version: 1,
+            catalog_version: None,
+        };
+        let (process, observer) = scripted_process_with_cleanup(None, SidecarCleanup::Uncertain);
+        client.process = Some(process);
+
+        // A short bounded pause stands in for the host-sleep interval. The
+        // deterministic assertion is about the lifecycle contract: a lost
+        // generation has one stopped owner and cannot create a replacement or
+        // resume transport after wake.
+        std::thread::sleep(Duration::from_millis(2));
+        let first = client.request("getExecution", json!({})).unwrap_err();
+        let accesses_after_loss = observer.transport_accesses.load(Ordering::SeqCst);
+        let first: Value = serde_json::from_str(&first).expect("loss should be structured");
+        assert_eq!(first["code"], "runtime_session_lost");
+        assert!(client.process.is_none());
+        assert!(observer.stopped.load(Ordering::SeqCst));
+
+        let second = client.request("getExecution", json!({})).unwrap_err();
+        let second: Value = serde_json::from_str(&second).expect("loss should remain structured");
+        assert_eq!(second["code"], "runtime_session_lost");
+        assert_eq!(
+            observer.transport_accesses.load(Ordering::SeqCst),
+            accesses_after_loss
+        );
+    }
+
+    #[test]
     fn malformed_success_envelope_invalidates_the_runtime_session() {
         let mut client = SidecarClient::new(PathBuf::from("unused-test-cache"));
         client.status = RuntimeStatusDto::Ready {

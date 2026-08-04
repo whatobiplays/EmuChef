@@ -527,6 +527,27 @@ test("CI continuously verifies both execution feature configurations", () => {
   }
 });
 
+test("Phase 6D.6 storage recovery is allowlisted and physical evidence is gated", () => {
+  const backend = read("../../crates/emuchef-rust-backend/src/execution_session.rs");
+  const executor = read("../../crates/emuchef-rust-backend/src/executor.rs");
+  const tauri = read("src-tauri/src/execution.rs");
+  const harness = read("../../crates/emuchef-rust-backend/src/executor_real_adb_tests/physical_interruption_qualification.rs");
+  const evidenceValidator = read("../../tools/phase-6d6-evidence.mjs");
+  assert.match(backend, /DeviceStorageExhausted/);
+  assert.match(backend, /device_storage_exhausted/);
+  assert.match(executor, /DeviceStorageExhausted/);
+  assert.match(tauri, /The device ran out of storage during execution/);
+  assert.match(tauri, /old execution cannot resume/);
+  const tauriProduction = tauri.slice(0, tauri.indexOf("#[cfg(test)]"));
+  assert.doesNotMatch(tauriProduction, /private ADB output|\/data\/private/);
+  assert.match(harness, /#\[ignore =/);
+  assert.match(harness, /EMUCHEF_RUN_PHASE_6D6_PHYSICAL_TESTS/);
+  assert.match(harness, /SENTINEL_TIMEOUT: Duration = Duration::from_secs\(10 \* 60\)/);
+  assert.match(harness, /online != \[invocation\.serial\.clone\(\)\]/);
+  assert.match(evidenceValidator, /device_storage_exhausted/);
+  assert.match(evidenceValidator, /raw serial or private payload/);
+});
+
 test("device qualification is backend-authored, sanitized, and non-authorizing", () => {
   const app = read("src-tauri/src/lib.rs");
   const api = read("src/api.ts");
