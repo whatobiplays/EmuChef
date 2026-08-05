@@ -27,8 +27,14 @@ observations rather than treating an operator marker as transition evidence.
 Authorization qualification runs at a safe boundary: after the first reviewed
 operation completes, the operator revokes trust and forces a same-serial
 reconnect; the harness requires a real absence interval and a genuine
-`unauthorized` row before releasing the second operation. The prior active
-attempt remains non-passing audit evidence under its exact historical contract.
+`unauthorized` row before releasing the second operation. The terminal branch
+may be the transport classifier's `device_unauthorized`, or
+`device_identity_unverified` when the production pre-operation identity guard
+fails first. The identity branch qualifies only with the same independently
+measured authorization chronology; generic identity failure cannot be
+relabelled. The active-session attempt and the pre-expansion safe-boundary
+attempt remain non-passing audit evidence under their exact historical
+contracts.
 Every operator checkpoint is bounded to ten minutes; a missing, stale,
 malformed, or aborted marker is blocked rather than passed.
 

@@ -644,6 +644,23 @@ test("legacy active authorization evidence remains auditable but cannot qualify"
   );
 });
 
+test("legacy safe-boundary authorization evidence remains auditable but cannot qualify", () => {
+  const legacyContract = LEGACY_AUDIT_CONTRACTS.device_unauthorized[1];
+  const blocked = recordForScenario("device_unauthorized", 1);
+  blocked.outcome = "blocked";
+  blocked.observedIssueCode = "device_identity_unverified";
+  blocked.scenarioContract = structuredClone(legacyContract);
+  blocked.authorizationTransition = null;
+  assert.doesNotThrow(() => validateEvidenceRecord(sealRecord(blocked)));
+
+  const promoted = structuredClone(blocked);
+  promoted.outcome = "passed";
+  assert.throws(
+    () => validateEvidenceRecord(sealRecord(promoted)),
+    /approved non-passing audit snapshot|scenario contract/i,
+  );
+});
+
 test("semantic scenario contracts accept expected failures and reject relabelled evidence", () => {
   const timeout = recordForScenario("operation_timeout", 1);
   timeout.outcome = "passed";
@@ -983,17 +1000,42 @@ test("identity and authorization transitions require ordered, genuine observatio
 
   const authorization = recordForScenario("device_unauthorized", 1);
   assert.doesNotThrow(() => validateEvidenceRecord(sealRecord(authorization)));
+  const identityPrecedence = structuredClone(authorization);
+  identityPrecedence.observedIssueCode = "device_identity_unverified";
+  identityPrecedence.authorizationTransition.issueCode = "device_identity_unverified";
+  assert.doesNotThrow(() => validateEvidenceRecord(sealRecord(identityPrecedence)));
+
+  const missingTransition = structuredClone(identityPrecedence);
+  missingTransition.authorizationTransition = null;
   assert.throws(
-    () => validateEvidenceRecord({
-      ...authorization,
-      observedIssueCode: "device_transport_lost",
-      authorizationTransition: {
-        ...authorization.authorizationTransition,
-        issueCode: "device_transport_lost",
-      },
-    }),
-    /authorization|unauthorized|contract/,
+    () => validateEvidenceRecord(sealRecord(missingTransition)),
+    /authorization revocation requires measured transition evidence/i,
   );
+
+  const mismatchedIdentityBranch = structuredClone(identityPrecedence);
+  mismatchedIdentityBranch.authorizationTransition.issueCode = "device_unauthorized";
+  assert.throws(
+    () => validateEvidenceRecord(sealRecord(mismatchedIdentityBranch)),
+    /authorization|terminal branch|issue/i,
+  );
+  for (const invalidIssue of [
+    "device_transport_lost",
+    "device_offline",
+    "device_disconnected",
+    "device_identity_changed",
+  ]) {
+    assert.throws(
+      () => validateEvidenceRecord(sealRecord({
+        ...authorization,
+        observedIssueCode: invalidIssue,
+        authorizationTransition: {
+          ...authorization.authorizationTransition,
+          issueCode: invalidIssue,
+        },
+      })),
+      /authorization|terminal branch|issue|contract/,
+    );
+  }
   assert.throws(
     () => validateEvidenceRecord({
       ...authorization,

@@ -1130,10 +1130,15 @@ target. Authorization qualification is a safe-boundary reconnect case: the
 first operation completes, stored trust is revoked, the exact selected serial
 is proven absent, and the same serial must reconnect as genuinely
 `unauthorized` before `operator-action` releases the second operation. The
-second operation must fail before mutation, followed by explicit
-reauthorization and a final authorized cleanup state. Generic offline or
-transport output is insufficient. The earlier active-session attempt remains
-non-passing audit evidence under its exact historical contract.
+second operation must fail before mutation. Its terminal issue may be
+`device_unauthorized`, or `device_identity_unverified` when the production
+pre-operation identity guard cannot collect complete evidence from that
+independently observed unauthorized device. The identity branch never qualifies
+without the exact authorization chronology. Explicit reauthorization and a
+final authorized cleanup state remain required; changed identity, generic
+identity failure, offline, disconnect, and mismatched issue evidence are
+insufficient. Earlier blocked attempts remain non-passing audit evidence under
+their exact historical contracts.
 Physical `device_offline` evidence is conditional diagnostic evidence rather
 than a closure requirement. ADB offline is normally a transient transport
 initialization or failure state with no general operator-controlled transition.

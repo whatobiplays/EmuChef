@@ -85,6 +85,14 @@ test("supported active scenarios require host-push evidence without changing tim
 test("device unauthorized is boundary-scoped without active-process evidence", () => {
   const contract = scenarioContractFor("device_unauthorized");
   assert.equal(contract.activeProcess, undefined);
+  assert.deepEqual(contract.allowedIssueCodes, [
+    "device_unauthorized",
+    "device_identity_unverified",
+  ]);
+  assert.deepEqual(contract.authorizationTransition.terminalIssueCodes, [
+    "device_unauthorized",
+    "device_identity_unverified",
+  ]);
   assert.deepEqual(contract.allowedStepStates, [{
     executed: 1,
     skipped: 0,

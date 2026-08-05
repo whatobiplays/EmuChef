@@ -748,11 +748,12 @@ fn evaluate_scenario_contract(contract: &ScenarioContract, observed: &Value) -> 
         let issue_valid = evidence
             .get("issueCode")
             .and_then(Value::as_str)
-            .is_some_and(|issue| {
-                authorization
-                    .terminal_issue_codes
-                    .iter()
-                    .any(|allowed| allowed == issue)
+            .is_some_and(|transition_issue| {
+                issue.as_deref() == Some(transition_issue)
+                    && authorization
+                        .terminal_issue_codes
+                        .iter()
+                        .any(|allowed| allowed == transition_issue)
             });
         let scope_valid = evidence.get("runId").and_then(Value::as_str)
             == observed.get("runScope").and_then(Value::as_str)
@@ -3267,6 +3268,10 @@ fn identity_transition_evidence(
     })
 }
 
+fn is_authorization_terminal_issue(code: &str) -> bool {
+    matches!(code, "device_unauthorized" | "device_identity_unverified")
+}
+
 fn authorization_transition_evidence(
     invocation: &Invocation,
     result: Result<&ExecutionRunResult, &String>,
@@ -3313,11 +3318,11 @@ fn authorization_transition_evidence(
         run.steps
             .iter()
             .find_map(|step| step.failure_kind.map(issue_code))
-            .filter(|code| *code == "device_unauthorized")
+            .filter(|code| is_authorization_terminal_issue(code))
     });
-    if issue.is_none() {
+    let Some(issue) = issue else {
         return Value::Null;
-    }
+    };
     let operation_started_at = sentinel
         .get("operationStartedAt")
         .cloned()
@@ -3344,7 +3349,7 @@ fn authorization_transition_evidence(
         "terminalDetectedAt": system_time_value(Some(terminal_detected_at)),
         "cleanupStartedAt": system_time_value(Some(cleanup_started_at)),
         "cleanupCompletedAt": system_time_value(Some(cleanup_completed_at)),
-        "issueCode": "device_unauthorized",
+        "issueCode": issue,
         "authorityInvalidated": true,
         "automaticResume": false,
         "cleanupFinalState": "authorized",
@@ -4396,6 +4401,24 @@ mod tests {
         assert_eq!(active_operation_class(scenario), "device_copy");
         assert!(contract.active_process.is_none());
         assert_eq!(
+            contract.allowed_issue_codes,
+            vec![
+                Some("device_unauthorized".to_string()),
+                Some("device_identity_unverified".to_string()),
+            ]
+        );
+        assert_eq!(
+            contract
+                .authorization_transition
+                .as_ref()
+                .expect("authorization transition contract is required")
+                .terminal_issue_codes,
+            vec![
+                "device_unauthorized".to_string(),
+                "device_identity_unverified".to_string(),
+            ]
+        );
+        assert_eq!(
             contract.allowed_step_states,
             vec![StepStateContract {
                 executed: 1,
@@ -4408,6 +4431,17 @@ mod tests {
         );
         assert!(contract.facts.boundary_checkpoint);
         assert!(!contract.facts.active_checkpoint);
+    }
+
+    #[test]
+    fn authorization_terminal_issue_accepts_transport_or_identity_precedence_only() {
+        assert!(is_authorization_terminal_issue("device_unauthorized"));
+        assert!(is_authorization_terminal_issue(
+            "device_identity_unverified"
+        ));
+        assert!(!is_authorization_terminal_issue("device_identity_changed"));
+        assert!(!is_authorization_terminal_issue("device_disconnected"));
+        assert!(!is_authorization_terminal_issue("device_offline"));
     }
 
     #[test]

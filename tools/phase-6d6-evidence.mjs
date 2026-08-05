@@ -737,7 +737,8 @@ function validateAuthorizationTransition(record, contract, passingRecord) {
   if (record.authorizationTransition.runId !== record.scenarioFacts.runScope) fail("authorization evidence belongs to another run");
   assertString(record.authorizationTransition.deviceScope, "authorizationTransition.deviceScope", /^serial-sha256:[0-9a-f]{64}$/);
   if (record.authorizationTransition.deviceScope !== record.device.identity) fail("authorization evidence belongs to another device scope");
-  if (record.authorizationTransition.issueCode !== "device_unauthorized" || record.observedIssueCode !== "device_unauthorized") fail("generic disconnect/offline evidence cannot qualify authorization revocation");
+  const transitionIssue = record.authorizationTransition.issueCode;
+  if (!rule.terminalIssueCodes.includes(transitionIssue) || record.observedIssueCode !== transitionIssue) fail("authorization transition issue does not match an allowed terminal branch");
   const chronology = initial < operationStarted
     && operationStarted < firstCompleted
     && firstCompleted < revoked
@@ -908,6 +909,8 @@ function validateSchemaContract(schema) {
   for (const field of ["initialObservedAt", "operationStartedAt", "firstOperationCompletedAt", "revocationCheckpointAt", "originalDisconnectedAt", "serialAbsentFrom", "serialAbsentUntil", "reconnectedAt", "terminalDetectedAt", "cleanupStartedAt", "cleanupCompletedAt", "finalStateObservedAt", "deviceScope"]) {
     if (!authorizationRequired?.includes(field)) fail(`evidence schema authorization contract is missing ${field}`);
   }
+  const authorizationIssueCodes = schema.properties?.authorizationTransition?.properties?.issueCode?.enum;
+  if (!equalJson(authorizationIssueCodes, SCENARIO_CONTRACTS.device_unauthorized.authorizationTransition.terminalIssueCodes)) fail("evidence schema authorization terminal branches drifted from the scenario contract");
   const uiRequired = schema.$defs?.uiSmokeRecord?.properties?.subcases?.items?.required;
   for (const field of ["subRunId", "backendRunId", "backendTraceDigest", "uiState", "uiArtifact", "operatorObservation"]) {
     if (!uiRequired?.includes(field)) fail(`evidence schema UI-smoke contract is missing ${field}`);

@@ -695,9 +695,13 @@ artifact-bound composite development UI-smoke records. Exact active-child
 observation is implemented through the production-owned host-`Push` lifecycle
 seam. Unauthorized qualification instead uses a completed first operation,
 revocation marker, selected-serial absence interval, and same-serial
-`unauthorized` reconnect before releasing the second operation; the prior
-active-session attempt remains non-passing audit evidence. Host-sleep remains
-fail-closed until the production deadline clock can be measured. A
+`unauthorized` reconnect before releasing the second operation. The terminal
+branch may be `device_unauthorized`, or `device_identity_unverified` when the
+production pre-operation identity guard fails first; the latter requires the
+same independent authorization chronology and cannot qualify as generic
+identity evidence. Both prior blocked contract snapshots remain non-passing
+audit evidence. Host-sleep remains fail-closed until the production deadline
+clock can be measured. A
 dependency-free validator checks the strict sanitized evidence schema and
 runbook in host-only CI.
 

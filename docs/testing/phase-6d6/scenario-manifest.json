@@ -133,6 +133,38 @@
         "cleanupOutcome": "succeeded",
         "residualOutcome": "clean",
         "facts": {"rootShell": false, "activeCheckpoint": true, "boundaryCheckpoint": false, "requiresSentinelAction": true, "storage": false}
+      },
+      {
+        "expectedOutcome": "passed",
+        "expectedExecution": "failure",
+        "allowedIssueCodes": ["device_unauthorized"],
+        "allowedStepStates": [
+          {"executed": 1, "skipped": 0, "failed": 1, "cancelled": 0, "blocked": 0, "notAttempted": 0}
+        ],
+        "partialChanges": "allowed",
+        "authorityInvalidation": "required",
+        "requiresActiveSlotReleased": true,
+        "slotObservation": {"source": "production-execution-session-slot", "exactRunScope": true},
+        "authorizationTransition": {
+          "required": true,
+          "initialState": "authorized",
+          "revokedState": "unauthorized",
+          "terminalIssueCodes": ["device_unauthorized"],
+          "authorityInvalidated": true,
+          "automaticResume": false,
+          "initialObservationBeforeOperation": true,
+          "firstOperationCompletedBeforeRevocation": true,
+          "revocationBeforeDisconnect": true,
+          "requiresSerialAbsentInterval": true,
+          "reconnectBeforeUnauthorized": true,
+          "unauthorizedBeforeOrAtTerminal": true,
+          "terminalBeforeCleanup": true,
+          "finalStateAfterCleanup": true,
+          "exactRunAndDeviceScope": true
+        },
+        "cleanupOutcome": "succeeded",
+        "residualOutcome": "clean",
+        "facts": {"rootShell": false, "activeCheckpoint": false, "boundaryCheckpoint": true, "requiresSentinelAction": true, "storage": false}
       }
     ]
   },
@@ -229,7 +261,7 @@
     "device_unauthorized": {
       "expectedOutcome": "passed",
       "expectedExecution": "failure",
-      "allowedIssueCodes": ["device_unauthorized"],
+      "allowedIssueCodes": ["device_unauthorized", "device_identity_unverified"],
       "allowedStepStates": [
         {"executed": 1, "skipped": 0, "failed": 1, "cancelled": 0, "blocked": 0, "notAttempted": 0}
       ],
@@ -241,7 +273,7 @@
         "required": true,
         "initialState": "authorized",
         "revokedState": "unauthorized",
-        "terminalIssueCodes": ["device_unauthorized"],
+        "terminalIssueCodes": ["device_unauthorized", "device_identity_unverified"],
         "authorityInvalidated": true,
         "automaticResume": false,
         "initialObservationBeforeOperation": true,
