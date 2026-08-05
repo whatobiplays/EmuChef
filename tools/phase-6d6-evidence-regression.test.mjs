@@ -77,10 +77,24 @@ test("supported active scenarios require host-push evidence without changing tim
     "cancellation_active",
     "usb_disconnect_active",
     "device_offline",
-    "device_unauthorized",
   ]) {
     assert.equal(scenarioContractFor(scenario).activeProcess.operationClass, "host_push");
   }
+});
+
+test("device unauthorized is boundary-scoped without active-process evidence", () => {
+  const contract = scenarioContractFor("device_unauthorized");
+  assert.equal(contract.activeProcess, undefined);
+  assert.deepEqual(contract.allowedStepStates, [{
+    executed: 1,
+    skipped: 0,
+    failed: 1,
+    cancelled: 0,
+    blocked: 0,
+    notAttempted: 0,
+  }]);
+  assert.equal(contract.facts.activeCheckpoint, false);
+  assert.equal(contract.facts.boundaryCheckpoint, true);
 });
 
 test("operation timeout requires exact live target-child evidence", () => {

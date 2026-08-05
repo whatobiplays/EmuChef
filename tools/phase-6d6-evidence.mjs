@@ -22,6 +22,7 @@ export const MANDATORY_SCENARIOS = CHECKED_IN_MANIFEST.mandatoryScenarios;
 export const CONDITIONAL_SCENARIOS = CHECKED_IN_MANIFEST.conditionalScenarios;
 export const REQUIRED_REPETITIONS = CHECKED_IN_MANIFEST.requiredRepetitions;
 export const SCENARIO_CONTRACTS = CHECKED_IN_MANIFEST.scenarioContracts;
+export const LEGACY_AUDIT_CONTRACTS = CHECKED_IN_MANIFEST.legacyAuditContracts;
 export const UI_SMOKE_SCENARIO = CHECKED_IN_MANIFEST.uiSmokeScenario;
 export const UI_SMOKE_REQUIRED_REPETITIONS = CHECKED_IN_MANIFEST.uiSmokeRequiredRepetitions;
 export const UI_SMOKE_SUBCASES = CHECKED_IN_MANIFEST.uiSmokeSubcases;
@@ -156,6 +157,19 @@ export function scenarioContractFor(scenario) {
   const contract = SCENARIO_CONTRACTS[scenario];
   if (!contract) fail("scenario contract is missing for the selected scenario");
   return JSON.parse(JSON.stringify(contract));
+}
+
+function evidenceContractForRecord(record) {
+  const current = scenarioContractFor(record.scenario);
+  if (equalJson(record.scenarioContract, current)) return current;
+  if (record.outcome !== "passed") {
+    for (const legacy of LEGACY_AUDIT_CONTRACTS[record.scenario] ?? []) {
+      if (equalJson(record.scenarioContract, legacy)) {
+        return JSON.parse(JSON.stringify(legacy));
+      }
+    }
+  }
+  fail("scenario contract does not match scenario identity or an approved non-passing audit snapshot");
 }
 
 function requiredScenarioOptIns(scenario) {
@@ -350,8 +364,7 @@ export function validateEvidenceRecord(record) {
   for (const field of ["partialChangesPossible", "authorityInvalidated", "activeSlotReleased"]) {
     if (typeof record[field] !== "boolean") fail(`${field} must be boolean`);
   }
-  const contract = scenarioContractFor(record.scenario);
-  if (!equalJson(record.scenarioContract, contract)) fail("scenario contract does not match scenario identity");
+  const contract = evidenceContractForRecord(record);
   assertKeys(record.scenarioFacts, [
     "rootShell", "activeCheckpoint", "boundaryCheckpoint", "requiresSentinelAction",
     "storage", "runScope", "operationClass",
@@ -699,15 +712,22 @@ function validateAuthorizationTransition(record, contract, passingRecord) {
     return;
   }
   assertKeys(record.authorizationTransition, [
-    "initialState", "initialObservedAt", "operationStartedAt", "revocationCheckpointAt",
-    "observedState", "observedAt", "terminalDetectedAt", "cleanupStartedAt",
-    "cleanupCompletedAt", "issueCode", "authorityInvalidated", "automaticResume",
-    "cleanupFinalState", "finalStateObservedAt", "runId", "deviceScope",
+    "initialState", "initialObservedAt", "operationStartedAt", "firstOperationCompletedAt",
+    "revocationCheckpointAt", "originalDisconnectedAt", "serialAbsentFrom",
+    "serialAbsentUntil", "reconnectedAt", "observedState", "observedAt",
+    "terminalDetectedAt", "cleanupStartedAt", "cleanupCompletedAt", "issueCode",
+    "authorityInvalidated", "automaticResume", "cleanupFinalState",
+    "finalStateObservedAt", "runId", "deviceScope",
   ], "authorizationTransition");
   if (record.authorizationTransition.initialState !== rule.initialState || record.authorizationTransition.observedState !== rule.revokedState) fail("authorization transition states do not match the contract");
   const initial = unixSeconds(record.authorizationTransition.initialObservedAt, "authorizationTransition.initialObservedAt");
   const operationStarted = unixSeconds(record.authorizationTransition.operationStartedAt, "authorizationTransition.operationStartedAt");
+  const firstCompleted = unixSeconds(record.authorizationTransition.firstOperationCompletedAt, "authorizationTransition.firstOperationCompletedAt");
   const revoked = unixSeconds(record.authorizationTransition.revocationCheckpointAt, "authorizationTransition.revocationCheckpointAt");
+  const disconnected = unixSeconds(record.authorizationTransition.originalDisconnectedAt, "authorizationTransition.originalDisconnectedAt");
+  const absentFrom = unixSeconds(record.authorizationTransition.serialAbsentFrom, "authorizationTransition.serialAbsentFrom");
+  const absentUntil = unixSeconds(record.authorizationTransition.serialAbsentUntil, "authorizationTransition.serialAbsentUntil");
+  const reconnected = unixSeconds(record.authorizationTransition.reconnectedAt, "authorizationTransition.reconnectedAt");
   const observed = unixSeconds(record.authorizationTransition.observedAt, "authorizationTransition.observedAt");
   const terminal = unixSeconds(record.authorizationTransition.terminalDetectedAt, "authorizationTransition.terminalDetectedAt");
   const cleanupStarted = unixSeconds(record.authorizationTransition.cleanupStartedAt, "authorizationTransition.cleanupStartedAt");
@@ -718,9 +738,36 @@ function validateAuthorizationTransition(record, contract, passingRecord) {
   assertString(record.authorizationTransition.deviceScope, "authorizationTransition.deviceScope", /^serial-sha256:[0-9a-f]{64}$/);
   if (record.authorizationTransition.deviceScope !== record.device.identity) fail("authorization evidence belongs to another device scope");
   if (record.authorizationTransition.issueCode !== "device_unauthorized" || record.observedIssueCode !== "device_unauthorized") fail("generic disconnect/offline evidence cannot qualify authorization revocation");
-  if (!(initial < operationStarted && operationStarted < revoked && revoked < observed && observed <= terminal && terminal < cleanupStarted && cleanupStarted <= cleanupCompleted && cleanupCompleted < finalObserved)) fail("authorization transition chronology is invalid");
+  const chronology = initial < operationStarted
+    && operationStarted < firstCompleted
+    && firstCompleted < revoked
+    && revoked <= disconnected
+    && disconnected <= absentFrom
+    && absentFrom < absentUntil
+    && absentUntil <= reconnected
+    && reconnected <= observed
+    && observed <= terminal
+    && terminal < cleanupStarted
+    && cleanupStarted <= cleanupCompleted
+    && cleanupCompleted < finalObserved;
+  if (!chronology) fail("authorization transition chronology is invalid");
+  const contractChronology = rule.initialObservationBeforeOperation
+    && rule.firstOperationCompletedBeforeRevocation
+    && rule.revocationBeforeDisconnect
+    && rule.requiresSerialAbsentInterval
+    && rule.reconnectBeforeUnauthorized
+    && rule.unauthorizedBeforeOrAtTerminal
+    && rule.terminalBeforeCleanup
+    && rule.finalStateAfterCleanup;
+  if (!contractChronology) fail("authorization transition contract is incomplete");
   if (record.sentinel.operationStartedAt === null || operationStarted !== unixSeconds(record.sentinel.operationStartedAt, "sentinel.operationStartedAt")) fail("authorization operation start is not bound to the qualifying run");
-  if (record.activeProcess === null || terminal !== unixSeconds(record.activeProcess.terminalAt, "activeProcess.terminalAt")) fail("authorization terminal detection is not bound to the target process");
+  if (record.sentinel.operationFinishedAt === null || firstCompleted !== unixSeconds(record.sentinel.operationFinishedAt, "sentinel.operationFinishedAt")) fail("authorization first operation completion is not bound to the qualifying run");
+  if (record.sentinel.boundaryReadyAt === null) fail("authorization safe boundary checkpoint is missing");
+  const boundaryReady = unixSeconds(record.sentinel.boundaryReadyAt, "sentinel.boundaryReadyAt");
+  if (!(firstCompleted <= boundaryReady && boundaryReady < revoked)) fail("authorization revocation was not performed after the completed safe boundary checkpoint");
+  if (record.sentinel.operatorActionAt === null) fail("authorization boundary release marker is missing");
+  const operatorAction = unixSeconds(record.sentinel.operatorActionAt, "sentinel.operatorActionAt");
+  if (!(observed <= operatorAction && operatorAction <= terminal)) fail("authorization boundary release must follow the genuine unauthorized observation and precede terminal detection");
   if (typeof record.authorizationTransition.authorityInvalidated !== "boolean" || typeof record.authorizationTransition.automaticResume !== "boolean" || typeof record.authorizationTransition.cleanupFinalState !== "string") fail("authorization transition evidence is incomplete");
   if (passingRecord && (!record.authorizationTransition.authorityInvalidated || record.authorizationTransition.automaticResume || record.authorizationTransition.cleanupFinalState !== "authorized")) fail("authorization revocation must invalidate authority without automatic resume and finish clean");
 }
@@ -821,6 +868,8 @@ export function validateRunbookCommands(text) {
     "EMUCHEF_TEST_PACKAGE_ALLOWLIST=com.emuchef.fixture",
     "EMUCHEF_PHASE_6D6_SENTINEL_DIR=",
     "cleanup-ready",
+    "authorization-revoked",
+    "unauthorized-observed",
     "sleep-requested",
     "sleep-entered",
     "wake",
@@ -856,7 +905,7 @@ function validateSchemaContract(schema) {
     if (!hostRequired?.includes(field)) fail(`evidence schema host-sleep contract is missing ${field}`);
   }
   const authorizationRequired = schema.properties?.authorizationTransition?.required;
-  for (const field of ["initialObservedAt", "operationStartedAt", "terminalDetectedAt", "cleanupStartedAt", "cleanupCompletedAt", "finalStateObservedAt", "deviceScope"]) {
+  for (const field of ["initialObservedAt", "operationStartedAt", "firstOperationCompletedAt", "revocationCheckpointAt", "originalDisconnectedAt", "serialAbsentFrom", "serialAbsentUntil", "reconnectedAt", "terminalDetectedAt", "cleanupStartedAt", "cleanupCompletedAt", "finalStateObservedAt", "deviceScope"]) {
     if (!authorizationRequired?.includes(field)) fail(`evidence schema authorization contract is missing ${field}`);
   }
   const uiRequired = schema.$defs?.uiSmokeRecord?.properties?.subcases?.items?.required;
@@ -883,14 +932,14 @@ export function validateRepositoryContract(args = process.argv.slice(2)) {
   const evidenceDirectory = commandOption(args, "--evidence-dir", path.join(root, "docs/testing/phase-6d6/evidence"));
   const projectionSourcePath = path.join(root, "apps/emuchef-app/src-tauri/src/execution.rs");
   const manifest = JSON.parse(readFileSync(manifestPath, "utf8"));
-  assertKeys(manifest, ["schemaVersion", "scenarios", "mandatoryScenarios", "conditionalScenarios", "requiredRepetitions", "uiSmokeScenario", "uiSmokeRequiredRepetitions", "uiSmokeSubcases", "uiSmokeContracts", "scenarioContracts", "gates", "outcomes"], "scenario manifest");
+  assertKeys(manifest, ["schemaVersion", "scenarios", "mandatoryScenarios", "conditionalScenarios", "requiredRepetitions", "uiSmokeScenario", "uiSmokeRequiredRepetitions", "uiSmokeSubcases", "uiSmokeContracts", "legacyAuditContracts", "scenarioContracts", "gates", "outcomes"], "scenario manifest");
   const supported = new Set(SCENARIOS);
   const mandatory = new Set(MANDATORY_SCENARIOS);
   const conditional = new Set(CONDITIONAL_SCENARIOS);
   if (supported.size !== SCENARIOS.length || mandatory.size !== MANDATORY_SCENARIOS.length || conditional.size !== CONDITIONAL_SCENARIOS.length) fail("scenario manifest contains duplicate scenario identities");
   if ([...mandatory].some((scenario) => conditional.has(scenario))) fail("mandatory and conditional scenarios must be disjoint");
   if (mandatory.size + conditional.size !== supported.size || [...mandatory, ...conditional].some((scenario) => !supported.has(scenario))) fail("mandatory and conditional scenarios must partition the supported scenario set");
-  if (manifest.schemaVersion !== 1 || JSON.stringify(manifest.scenarios) !== JSON.stringify(SCENARIOS) || JSON.stringify(manifest.mandatoryScenarios) !== JSON.stringify(MANDATORY_SCENARIOS) || JSON.stringify(manifest.conditionalScenarios) !== JSON.stringify(CONDITIONAL_SCENARIOS) || manifest.requiredRepetitions !== REQUIRED_REPETITIONS || manifest.uiSmokeScenario !== UI_SMOKE_SCENARIO || manifest.uiSmokeRequiredRepetitions !== UI_SMOKE_REQUIRED_REPETITIONS || !equalJson(manifest.uiSmokeSubcases, UI_SMOKE_SUBCASES) || !equalJson(manifest.uiSmokeContracts, UI_SMOKE_CONTRACTS) || !equalJson(manifest.scenarioContracts, SCENARIO_CONTRACTS)) fail("scenario manifest does not match the supported, mandatory, conditional, or scenario contracts");
+  if (manifest.schemaVersion !== 1 || JSON.stringify(manifest.scenarios) !== JSON.stringify(SCENARIOS) || JSON.stringify(manifest.mandatoryScenarios) !== JSON.stringify(MANDATORY_SCENARIOS) || JSON.stringify(manifest.conditionalScenarios) !== JSON.stringify(CONDITIONAL_SCENARIOS) || manifest.requiredRepetitions !== REQUIRED_REPETITIONS || manifest.uiSmokeScenario !== UI_SMOKE_SCENARIO || manifest.uiSmokeRequiredRepetitions !== UI_SMOKE_REQUIRED_REPETITIONS || !equalJson(manifest.uiSmokeSubcases, UI_SMOKE_SUBCASES) || !equalJson(manifest.uiSmokeContracts, UI_SMOKE_CONTRACTS) || !equalJson(manifest.legacyAuditContracts, LEGACY_AUDIT_CONTRACTS) || !equalJson(manifest.scenarioContracts, SCENARIO_CONTRACTS)) fail("scenario manifest does not match the supported, mandatory, conditional, legacy-audit, or current scenario contracts");
   const projectionSource = readFileSync(projectionSourcePath, "utf8");
   for (const [name, contract] of Object.entries(UI_SMOKE_CONTRACTS)) {
     const authoredFields = name === "cancellation"

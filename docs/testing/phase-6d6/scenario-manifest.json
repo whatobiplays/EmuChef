@@ -101,6 +101,41 @@
       "forbiddenControls": ["resume", "replay", "checkpoint", "ownership_transfer"]
     }
   },
+  "legacyAuditContracts": {
+    "device_unauthorized": [
+      {
+        "expectedOutcome": "passed",
+        "expectedExecution": "failure",
+        "allowedIssueCodes": ["device_unauthorized"],
+        "allowedStepStates": [
+          {"executed": 0, "skipped": 0, "failed": 1, "cancelled": 0, "blocked": 0, "notAttempted": 1},
+          {"executed": 1, "skipped": 0, "failed": 1, "cancelled": 0, "blocked": 0, "notAttempted": 0}
+        ],
+        "partialChanges": "allowed",
+        "authorityInvalidation": "required",
+        "requiresActiveSlotReleased": true,
+        "slotObservation": {"source": "production-execution-session-slot", "exactRunScope": true},
+        "activeProcess": {"required": true, "operationClass": "host_push", "actionMustPrecedeTerminal": true, "exactRunBinding": true},
+        "authorizationTransition": {
+          "required": true,
+          "initialState": "authorized",
+          "revokedState": "unauthorized",
+          "terminalIssueCodes": ["device_unauthorized"],
+          "authorityInvalidated": true,
+          "automaticResume": false,
+          "initialObservationBeforeOperation": true,
+          "revocationAfterOperationStart": true,
+          "unauthorizedBeforeOrAtTerminal": true,
+          "terminalBeforeCleanup": true,
+          "finalStateAfterCleanup": true,
+          "exactRunAndDeviceScope": true
+        },
+        "cleanupOutcome": "succeeded",
+        "residualOutcome": "clean",
+        "facts": {"rootShell": false, "activeCheckpoint": true, "boundaryCheckpoint": false, "requiresSentinelAction": true, "storage": false}
+      }
+    ]
+  },
   "scenarioContracts": {
     "cancellation_active": {
       "expectedOutcome": "passed",
@@ -196,14 +231,12 @@
       "expectedExecution": "failure",
       "allowedIssueCodes": ["device_unauthorized"],
       "allowedStepStates": [
-        {"executed": 0, "skipped": 0, "failed": 1, "cancelled": 0, "blocked": 0, "notAttempted": 1},
         {"executed": 1, "skipped": 0, "failed": 1, "cancelled": 0, "blocked": 0, "notAttempted": 0}
       ],
       "partialChanges": "allowed",
       "authorityInvalidation": "required",
       "requiresActiveSlotReleased": true,
       "slotObservation": {"source": "production-execution-session-slot", "exactRunScope": true},
-      "activeProcess": {"required": true, "operationClass": "host_push", "actionMustPrecedeTerminal": true, "exactRunBinding": true},
       "authorizationTransition": {
         "required": true,
         "initialState": "authorized",
@@ -212,7 +245,10 @@
         "authorityInvalidated": true,
         "automaticResume": false,
         "initialObservationBeforeOperation": true,
-        "revocationAfterOperationStart": true,
+        "firstOperationCompletedBeforeRevocation": true,
+        "revocationBeforeDisconnect": true,
+        "requiresSerialAbsentInterval": true,
+        "reconnectBeforeUnauthorized": true,
         "unauthorizedBeforeOrAtTerminal": true,
         "terminalBeforeCleanup": true,
         "finalStateAfterCleanup": true,
@@ -220,7 +256,7 @@
       },
       "cleanupOutcome": "succeeded",
       "residualOutcome": "clean",
-      "facts": {"rootShell": false, "activeCheckpoint": true, "boundaryCheckpoint": false, "requiresSentinelAction": true, "storage": false}
+      "facts": {"rootShell": false, "activeCheckpoint": false, "boundaryCheckpoint": true, "requiresSentinelAction": true, "storage": false}
     },
     "identity_stability": {
       "expectedOutcome": "passed",

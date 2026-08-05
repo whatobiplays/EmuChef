@@ -1126,9 +1126,14 @@ shadow flag, early release, or another run's lifecycle.
 Same-serial replacement qualification polls successful ADB inventory samples
 and stable fingerprints to prove original attachment, a serial-absent interval,
 replacement attachment after disconnect, changed identity, and no simultaneous
-target. Authorization qualification separately observes an authorized row,
-the genuine `unauthorized` row after the revocation checkpoint, and a final
-authorized cleanup state; generic offline or transport output is insufficient.
+target. Authorization qualification is a safe-boundary reconnect case: the
+first operation completes, stored trust is revoked, the exact selected serial
+is proven absent, and the same serial must reconnect as genuinely
+`unauthorized` before `operator-action` releases the second operation. The
+second operation must fail before mutation, followed by explicit
+reauthorization and a final authorized cleanup state. Generic offline or
+transport output is insufficient. The earlier active-session attempt remains
+non-passing audit evidence under its exact historical contract.
 Physical `device_offline` evidence is conditional diagnostic evidence rather
 than a closure requirement. ADB offline is normally a transient transport
 initialization or failure state with no general operator-controlled transition.

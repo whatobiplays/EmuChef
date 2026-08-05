@@ -22,11 +22,15 @@ mutation child is alive. Active interruption records require exact run,
 operation, child, spawn, mutation-start, pre-action liveness, action, and
 terminal evidence. The harness binds a production-owned observation to the
 first reviewed host `Push` and exposes `active-ready` only after sampling the
-exact child alive. Same-serial replacement and authorization revocation
-poll successful ADB inventory observations rather than treating an operator
-marker as transition evidence. Every operator checkpoint is bounded to ten
-minutes; a missing, stale, malformed, or aborted marker is blocked rather than
-passed.
+exact child alive. Same-serial replacement polls successful ADB inventory
+observations rather than treating an operator marker as transition evidence.
+Authorization qualification runs at a safe boundary: after the first reviewed
+operation completes, the operator revokes trust and forces a same-serial
+reconnect; the harness requires a real absence interval and a genuine
+`unauthorized` row before releasing the second operation. The prior active
+attempt remains non-passing audit evidence under its exact historical contract.
+Every operator checkpoint is bounded to ten minutes; a missing, stale,
+malformed, or aborted marker is blocked rather than passed.
 
 ## Automated contract evidence
 
@@ -67,7 +71,9 @@ diagnostic evidence:
 
 - cancellation during an active atomic operation and at a safe boundary;
 - USB disconnect during an operation and at a boundary;
-- a mandatory unauthorized transition and a conditional real-offline transition when a reviewed device-specific procedure exists;
+- a mandatory safe-boundary authorization-reset/reconnect transition and a
+  conditional real-offline transition when a reviewed device-specific procedure
+  exists;
 - stable identity/reconnect and same-serial replacement (replacement remains
   explicitly unqualified if appropriate hardware is unavailable);
 - root revocation between two privileged atomic commands, followed by a

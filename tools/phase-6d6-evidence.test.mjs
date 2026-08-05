@@ -5,6 +5,7 @@ import { fileURLToPath } from "node:url";
 
 import {
   CONDITIONAL_SCENARIOS,
+  LEGACY_AUDIT_CONTRACTS,
   MANDATORY_SCENARIOS,
   REQUIRED_REPETITIONS,
   SCENARIOS,
@@ -367,21 +368,33 @@ function recordForScenario(scenario, repetition) {
       runId: "run-scope-sha256:" + unique,
     };
   } else if (scenario === "device_unauthorized") {
+    record.sentinel.operationStartedAt = "unix:1785790001";
+    record.sentinel.operationFinishedAt = "unix:1785790002";
+    record.sentinel.boundaryReadyAt = "unix:1785790002";
+    record.sentinel.operatorActionAt = "unix:1785790007";
+    record.sentinel.cleanupReadyAt = "unix:1785790009";
+    record.activeSlotObservation.terminalCleanupAt = "unix:1785790010";
+    record.activeSlotObservation.releasedAt = "unix:1785790010";
     record.authorizationTransition = {
       initialState: "authorized",
       initialObservedAt: "unix:1785790000",
       operationStartedAt: "unix:1785790001",
-      revocationCheckpointAt: "unix:1785790002",
+      firstOperationCompletedAt: "unix:1785790002",
+      revocationCheckpointAt: "unix:1785790003",
+      originalDisconnectedAt: "unix:1785790004",
+      serialAbsentFrom: "unix:1785790004",
+      serialAbsentUntil: "unix:1785790005",
+      reconnectedAt: "unix:1785790005",
       observedState: "unauthorized",
-      observedAt: "unix:1785790003",
-      terminalDetectedAt: "unix:1785790004",
-      cleanupStartedAt: "unix:1785790005",
-      cleanupCompletedAt: "unix:1785790006",
+      observedAt: "unix:1785790006",
+      terminalDetectedAt: "unix:1785790008",
+      cleanupStartedAt: "unix:1785790009",
+      cleanupCompletedAt: "unix:1785790010",
       issueCode: "device_unauthorized",
       authorityInvalidated: true,
       automaticResume: false,
       cleanupFinalState: "authorized",
-      finalStateObservedAt: "unix:1785790007",
+      finalStateObservedAt: "unix:1785790011",
       runId: "run-scope-sha256:" + unique,
       deviceScope: record.device.identity,
     };
@@ -585,6 +598,52 @@ test("manifest completeness requires every mandatory scenario but not conditiona
   assert.deepEqual(withConditional.missing, []);
 });
 
+test("legacy active authorization evidence remains auditable but cannot qualify", () => {
+  const legacyContract = LEGACY_AUDIT_CONTRACTS.device_unauthorized[0];
+  const blocked = recordForScenario("device_unauthorized", 1);
+  blocked.outcome = "blocked";
+  blocked.executionSuccess = true;
+  blocked.observedIssueCode = null;
+  blocked.stepStates = {
+    executed: 2,
+    skipped: 0,
+    failed: 0,
+    cancelled: 0,
+    blocked: 0,
+    notAttempted: 0,
+  };
+  blocked.partialChangesPossible = false;
+  blocked.authorityInvalidated = false;
+  blocked.scenarioContract = structuredClone(legacyContract);
+  blocked.scenarioFacts = {
+    ...legacyContract.facts,
+    runScope: blocked.scenarioFacts.runScope,
+    operationClass: "host_push",
+  };
+  blocked.authorizationTransition = null;
+  blocked.sentinel.boundaryReadyAt = null;
+  blocked.sentinel.operatorActionAt = "unix:1785790002";
+  blocked.sentinel.operationFinishedAt = "unix:1785790004";
+  blocked.sentinel.cleanupReadyAt = "unix:1785790005";
+  blocked.activeSlotObservation.terminalCleanupAt = "unix:1785790004";
+  blocked.activeSlotObservation.releasedAt = "unix:1785790004";
+  blocked.activeProcess = structuredClone(recordForScenario("cancellation_active", 1).activeProcess);
+  blocked.activeProcess.runId = blocked.scenarioFacts.runScope;
+  blocked.activeProcess.spawnedAt = "unix:1785790001";
+  blocked.activeProcess.mutationStartedAt = "unix:1785790001";
+  blocked.activeProcess.checkedAliveAt = "unix:1785790002";
+  blocked.activeProcess.actionAt = "unix:1785790002";
+  blocked.activeProcess.terminalAt = "unix:1785790004";
+  assert.doesNotThrow(() => validateEvidenceRecord(sealRecord(blocked)));
+
+  const promoted = structuredClone(blocked);
+  promoted.outcome = "passed";
+  assert.throws(
+    () => validateEvidenceRecord(sealRecord(promoted)),
+    /approved non-passing audit snapshot|scenario contract/i,
+  );
+});
+
 test("semantic scenario contracts accept expected failures and reject relabelled evidence", () => {
   const timeout = recordForScenario("operation_timeout", 1);
   timeout.outcome = "passed";
@@ -666,6 +725,7 @@ test("runbook validation requires ignored execution, sentinel timeout, and expli
     "EMUCHEF_TEST_PACKAGE_ALLOWLIST=com.emuchef.fixture",
     "EMUCHEF_PHASE_6D6_SENTINEL_DIR=/tmp/phase-6d6",
     "root cleanup-ready marker uses ack",
+    "authorization-revoked uses ack; unauthorized-observed precedes operator-action",
     "sleep-requested sleep-entered wake",
     "production runner lifecycle reports in_flight; serial absence is observed",
     "device_offline is conditional diagnostic evidence",
@@ -1047,19 +1107,21 @@ test("UI smoke rejects arbitrary authored prose and self-attested artifacts", ()
 
 test("authorization chronology uses parsed numeric timestamps", () => {
   const authorization = recordForScenario("device_unauthorized", 1);
-  authorization.sentinel.operationStartedAt = "unix:1";
   authorization.sentinel.armedAt = "unix:0";
-  authorization.sentinel.operatorActionAt = "unix:2";
-  authorization.sentinel.operationFinishedAt = "unix:11";
-  authorization.activeProcess.spawnedAt = "unix:1";
-  authorization.activeProcess.mutationStartedAt = "unix:1";
-  authorization.activeProcess.checkedAliveAt = "unix:2";
-  authorization.activeProcess.actionAt = "unix:2";
-  authorization.activeProcess.terminalAt = "unix:11";
-  authorization.authorizationTransition.revocationCheckpointAt = "unix:2";
-  authorization.authorizationTransition.observedAt = "unix:10";
+  authorization.sentinel.operationStartedAt = "unix:1";
+  authorization.sentinel.operationFinishedAt = "unix:2";
+  authorization.sentinel.boundaryReadyAt = "unix:2";
+  authorization.sentinel.operatorActionAt = "unix:10";
+  authorization.sentinel.cleanupReadyAt = "unix:12";
   authorization.authorizationTransition.initialObservedAt = "unix:0";
   authorization.authorizationTransition.operationStartedAt = "unix:1";
+  authorization.authorizationTransition.firstOperationCompletedAt = "unix:2";
+  authorization.authorizationTransition.revocationCheckpointAt = "unix:3";
+  authorization.authorizationTransition.originalDisconnectedAt = "unix:4";
+  authorization.authorizationTransition.serialAbsentFrom = "unix:4";
+  authorization.authorizationTransition.serialAbsentUntil = "unix:5";
+  authorization.authorizationTransition.reconnectedAt = "unix:5";
+  authorization.authorizationTransition.observedAt = "unix:9";
   authorization.authorizationTransition.terminalDetectedAt = "unix:11";
   authorization.authorizationTransition.cleanupStartedAt = "unix:12";
   authorization.authorizationTransition.cleanupCompletedAt = "unix:13";
@@ -1078,20 +1140,48 @@ test("canonical timestamps reject leading zeros, mixed units, fractions, and tim
   assert.throws(() => validateEvidenceRecord(sealRecord(nested)), /activeProcess\.actionAt|format/i);
 });
 
-test("authorization rejects every invalid lifecycle boundary and cross-device evidence", () => {
+test("authorization rejects every invalid lifecycle boundary, reconnect chronology, and cross-device evidence", () => {
   const mutations = [
     ["initialObservedAt", "unix:1785790002"],
-    ["revocationCheckpointAt", "unix:1785790000"],
-    ["observedAt", "unix:1785790001"],
-    ["terminalDetectedAt", "unix:1785790002"],
-    ["cleanupStartedAt", "unix:1785790003"],
-    ["finalStateObservedAt", "unix:1785790005"],
+    ["firstOperationCompletedAt", "unix:1785790001"],
+    ["revocationCheckpointAt", "unix:1785790001"],
+    ["originalDisconnectedAt", "unix:1785790002"],
+    ["serialAbsentFrom", "unix:1785790002"],
+    ["serialAbsentUntil", "unix:1785790004"],
+    ["reconnectedAt", "unix:1785790004"],
+    ["observedAt", "unix:1785790004"],
+    ["terminalDetectedAt", "unix:1785790006"],
+    ["cleanupStartedAt", "unix:1785790008"],
+    ["finalStateObservedAt", "unix:1785790010"],
   ];
   for (const [field, value] of mutations) {
     const record = recordForScenario("device_unauthorized", 1);
     record.authorizationTransition[field] = value;
     assert.throws(() => validateEvidenceRecord(sealRecord(record)), /authorization|chronology|terminal|cleanup/i);
   }
+  for (const field of ["originalDisconnectedAt", "serialAbsentFrom", "serialAbsentUntil", "reconnectedAt"]) {
+    const record = recordForScenario("device_unauthorized", 1);
+    delete record.authorizationTransition[field];
+    assert.throws(() => validateEvidenceRecord(sealRecord(record)), /authorizationTransition|authorization transition/i);
+  }
+  const earlyRevocation = recordForScenario("device_unauthorized", 1);
+  earlyRevocation.sentinel.boundaryReadyAt = earlyRevocation.authorizationTransition.revocationCheckpointAt;
+  assert.throws(
+    () => validateEvidenceRecord(sealRecord(earlyRevocation)),
+    /completed safe boundary|authorization revocation/i,
+  );
+  const earlyRelease = recordForScenario("device_unauthorized", 1);
+  earlyRelease.sentinel.operatorActionAt = "unix:1785790005";
+  assert.throws(
+    () => validateEvidenceRecord(sealRecord(earlyRelease)),
+    /boundary release|unauthorized observation/i,
+  );
+  const activeRelabel = recordForScenario("device_unauthorized", 1);
+  activeRelabel.activeProcess = recordForScenario("cancellation_active", 1).activeProcess;
+  assert.throws(
+    () => validateEvidenceRecord(sealRecord(activeRelabel)),
+    /active target-process|active process|authorization/i,
+  );
   const crossDevice = recordForScenario("device_unauthorized", 1);
   crossDevice.authorizationTransition.deviceScope = "serial-sha256:" + "f".repeat(64);
   assert.throws(() => validateEvidenceRecord(sealRecord(crossDevice)), /device scope/i);

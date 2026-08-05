@@ -92,8 +92,8 @@ device paths have no residual state.
 
 ## Active-operation stimulus and handshake
 
-For `cancellation_active`, `usb_disconnect_active`, `device_offline`, and
-`device_unauthorized`, the harness creates a unique run-owned temporary host
+For `cancellation_active`, `usb_disconnect_active`, and `device_offline`, the
+harness creates a unique run-owned temporary host
 workspace and writes a deterministic, non-secret, non-compressible calibration
 file. It times a 256 MiB transfer through the ordinary production ADB push
 adapter, derives a host source between 512 MiB and 8 GiB targeting approximately
@@ -112,7 +112,7 @@ operation-started
 → operator-action within five seconds
 → cancellation request, or wait 1.1–3 seconds and perform the physical transition
 → exact child terminal result
-→ terminal-ready for disconnect/offline/authorization
+→ terminal-ready for disconnect/offline
 → restore and verify the selected device
 → cleanup-ready
 → fixture-only cleanup
@@ -122,6 +122,39 @@ A stale action, same-second action/terminal pair, missing exact-child event,
 non-live sample, or source calibration outside the committed bounds blocks the
 attempt. The private process-delay seam and host process-table inspection are
 not physical evidence.
+
+## Authorization boundary and reconnect handshake
+
+`device_unauthorized` is a safe-boundary scenario. Revoking stored USB-debugging
+trust does not reliably invalidate an already authenticated ADB transport, so
+qualification forces a new handshake after the first reviewed operation has
+completed. Use only the selected device and keep unrelated ADB state untouched.
+
+The authorization sequence is:
+
+```text
+first operation finishes
+→ boundary-ready
+→ revoke USB debugging authorizations on the selected device
+→ authorization-revoked with exact ack content
+→ disconnect the selected USB device
+→ prove the exact serial is absent for at least one canonical second
+→ reconnect the same device without accepting the prompt
+→ harness observes the exact serial as unauthorized
+→ unauthorized-observed
+→ operator-action releases the second operation
+→ second operation fails before mutation as device_unauthorized
+→ terminal-ready
+→ accept the selected device's authorization prompt
+→ prove the exact serial is device
+→ cleanup-ready
+→ fixture-only cleanup and final authorized observation
+```
+
+Do not create `operator-action` before `unauthorized-observed`. A missing
+revocation marker, no selected-serial absence interval, an authorized reconnect,
+or any disconnect/offline issue instead of `device_unauthorized` does not
+qualify.
 
 ## Low-storage safety protocol
 
@@ -156,7 +189,7 @@ failure as offline evidence.
 | `usb_disconnect_active` | Wait for `active-ready`, create `operator-action`, wait 1.1–3 seconds, disconnect the selected cable, wait for `terminal-ready`, reconnect the same device, verify its exact serial is `device`, then create `cleanup-ready`. | Exact live-child binding, stable disconnected/transport issue, conservative partial state, cleanup outcome, and no automatic resume. |
 | `usb_disconnect_boundary` | Wait for `boundary-ready`, disconnect the selected cable, verify the selected serial is absent, then create `operator-action` to release the second operation while the device is disconnected. Wait for `terminal-ready`, reconnect the same device, verify its exact serial is `device`, then create `cleanup-ready`. | The first operation remains completed, the second operation fails before mutation with a typed disconnect/transport issue, no later work runs, and cleanup occurs only after explicit recovery authorization. |
 | `device_offline` | **Conditional only.** When a reviewed reversible procedure exists, wait for `active-ready`, create `operator-action`, wait 1.1–3 seconds, enter ADB offline, wait for `terminal-ready`, restore the same device online, verify it, then create `cleanup-ready`. | Opportunistic exact live-child `device_offline` evidence remains valid and auditable, but this scenario is not required for closure. |
-| `device_unauthorized` | With the authorization-reset opt-in, wait for `active-ready`, create `operator-action`, wait 1.1–3 seconds, revoke only the selected device's debugging authorization, wait for `terminal-ready`, reauthorize the same device, verify its row is `device`, then create `cleanup-ready`. Do not reset unrelated ADB state. | Exact live-child binding plus ordered initial authorized, genuine `unauthorized`, terminal, cleanup, and final authorized observations; `device_unauthorized`; no automatic resume. |
+| `device_unauthorized` | With the authorization-reset opt-in, wait for `boundary-ready`; revoke only the selected device's USB-debugging authorizations and create `authorization-revoked`; disconnect the selected cable, prove the exact serial absent for at least one canonical second, reconnect the same device without accepting the prompt, wait for `unauthorized-observed`, then create `operator-action`. After `terminal-ready`, authorize the same device, verify its exact row is `device`, then create `cleanup-ready`. Do not reset unrelated ADB state. | The first operation is completed before revocation; a real absent interval and same-serial unauthorized reconnect precede the second operation; the second operation fails before mutation with `device_unauthorized`; authority is invalidated, the slot is released, no automatic resume occurs, and final authorized cleanup is proven. |
 | `identity_stability` | Perform one controlled reconnect at `boundary-ready` with the same device. | Repeated complete identity samples remain stable and the second operation succeeds. |
 | `identity_replacement` | With explicit owner-approved hardware, disconnect the first target before attaching the same-serial replacement at `boundary-ready`. The harness polls successful ADB inventory samples and stable fingerprints, proving original attachment, serial absence, replacement attachment, and no simultaneous target. | `device_identity_changed` or `device_identity_unverified` before later mutation. If hardware is unavailable, record this exact case unqualified. |
 | `root_revocation` | On a prepared rooted device, revoke EmuChef's adb-shell root authority after `boundary-ready`, acknowledge `operator-action`, wait for `terminal-ready`, restore root authority, then acknowledge `cleanup-ready`. | The second privileged command does not run, root failure is primary, prior mutation is retained, cleanup is separate and verified, and identity precedence is unchanged. |

@@ -264,12 +264,17 @@
     },
     "authorizationTransition": {
       "type": ["object", "null"], "additionalProperties": false,
-      "required": ["initialState", "initialObservedAt", "operationStartedAt", "revocationCheckpointAt", "observedState", "observedAt", "terminalDetectedAt", "cleanupStartedAt", "cleanupCompletedAt", "issueCode", "authorityInvalidated", "automaticResume", "cleanupFinalState", "finalStateObservedAt", "runId", "deviceScope"],
+      "required": ["initialState", "initialObservedAt", "operationStartedAt", "firstOperationCompletedAt", "revocationCheckpointAt", "originalDisconnectedAt", "serialAbsentFrom", "serialAbsentUntil", "reconnectedAt", "observedState", "observedAt", "terminalDetectedAt", "cleanupStartedAt", "cleanupCompletedAt", "issueCode", "authorityInvalidated", "automaticResume", "cleanupFinalState", "finalStateObservedAt", "runId", "deviceScope"],
       "properties": {
         "initialState": { "const": "authorized" },
         "initialObservedAt": { "type": "string", "pattern": "^unix:(0|[1-9][0-9]{0,11})$" },
         "operationStartedAt": { "type": "string", "pattern": "^unix:(0|[1-9][0-9]{0,11})$" },
+        "firstOperationCompletedAt": { "type": "string", "pattern": "^unix:(0|[1-9][0-9]{0,11})$" },
         "revocationCheckpointAt": { "type": "string", "pattern": "^unix:(0|[1-9][0-9]{0,11})$" },
+        "originalDisconnectedAt": { "type": "string", "pattern": "^unix:(0|[1-9][0-9]{0,11})$" },
+        "serialAbsentFrom": { "type": "string", "pattern": "^unix:(0|[1-9][0-9]{0,11})$" },
+        "serialAbsentUntil": { "type": "string", "pattern": "^unix:(0|[1-9][0-9]{0,11})$" },
+        "reconnectedAt": { "type": "string", "pattern": "^unix:(0|[1-9][0-9]{0,11})$" },
         "observedState": { "const": "unauthorized" },
         "observedAt": { "type": "string", "pattern": "^unix:(0|[1-9][0-9]{0,11})$" },
         "terminalDetectedAt": { "type": "string", "pattern": "^unix:(0|[1-9][0-9]{0,11})$" },

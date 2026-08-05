@@ -693,9 +693,13 @@ execution-session slot lifecycle, bounded ADB identity and authorization
 chronology, globally unique canonical record/trace identities, and two
 artifact-bound composite development UI-smoke records. Exact active-child
 observation is implemented through the production-owned host-`Push` lifecycle
-seam; host-sleep remains fail-closed until the production deadline clock can be
-measured. A dependency-free validator checks the strict sanitized evidence
-schema and runbook in host-only CI.
+seam. Unauthorized qualification instead uses a completed first operation,
+revocation marker, selected-serial absence interval, and same-serial
+`unauthorized` reconnect before releasing the second operation; the prior
+active-session attempt remains non-passing audit evidence. Host-sleep remains
+fail-closed until the production deadline clock can be measured. A
+dependency-free validator checks the strict sanitized evidence schema and
+runbook in host-only CI.
 
 The exact backend and Tauri `clippy -D warnings` commands remain blocked by
 baseline diagnostics outside the authorized Phase 6D.6 paths, so automated

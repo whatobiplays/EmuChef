@@ -201,7 +201,6 @@ impl Scenario {
             Self::CancellationActive
                 | Self::UsbDisconnectActive
                 | Self::DeviceOffline
-                | Self::DeviceUnauthorized
                 | Self::HostSleepBeforeDeadline
                 | Self::HostSleepAfterDeadline
         )
@@ -212,6 +211,7 @@ impl Scenario {
             self,
             Self::CancellationBoundary
                 | Self::UsbDisconnectBoundary
+                | Self::DeviceUnauthorized
                 | Self::IdentityStability
                 | Self::IdentityReplacement
                 | Self::RootRevocation
@@ -221,10 +221,7 @@ impl Scenario {
     const fn supports_active_process_capture(self) -> bool {
         matches!(
             self,
-            Self::CancellationActive
-                | Self::UsbDisconnectActive
-                | Self::DeviceOffline
-                | Self::DeviceUnauthorized
+            Self::CancellationActive | Self::UsbDisconnectActive | Self::DeviceOffline
         )
     }
 
@@ -701,21 +698,50 @@ fn evaluate_scenario_contract(contract: &ScenarioContract, observed: &Value) -> 
         };
         let initial = time("initialObservedAt")?;
         let operation = time("operationStartedAt")?;
+        let first_completed = time("firstOperationCompletedAt")?;
         let revoked = time("revocationCheckpointAt")?;
+        let disconnected = time("originalDisconnectedAt")?;
+        let absent_from = time("serialAbsentFrom")?;
+        let absent_until = time("serialAbsentUntil")?;
+        let reconnected = time("reconnectedAt")?;
         let unauthorized = time("observedAt")?;
         let terminal = time("terminalDetectedAt")?;
         let cleanup_started = time("cleanupStartedAt")?;
         let cleanup_completed = time("cleanupCompletedAt")?;
         let final_observed = time("finalStateObservedAt")?;
+        let boundary_ready = observed
+            .get("boundaryReadyAt")
+            .and_then(Value::as_str)
+            .and_then(parse_canonical_unix)
+            .ok_or_else(|| {
+                "authorization boundaryReadyAt is missing or noncanonical".to_string()
+            })?;
+        let operator_action = observed
+            .get("operatorActionAt")
+            .and_then(Value::as_str)
+            .and_then(parse_canonical_unix)
+            .ok_or_else(|| {
+                "authorization operatorActionAt is missing or noncanonical".to_string()
+            })?;
         let chronology = initial < operation
-            && operation < revoked
-            && revoked < unauthorized
-            && unauthorized <= terminal
+            && operation < first_completed
+            && first_completed <= boundary_ready
+            && boundary_ready < revoked
+            && revoked <= disconnected
+            && disconnected <= absent_from
+            && absent_from < absent_until
+            && absent_until <= reconnected
+            && reconnected <= unauthorized
+            && unauthorized <= operator_action
+            && operator_action <= terminal
             && terminal < cleanup_started
             && cleanup_started <= cleanup_completed
             && cleanup_completed < final_observed;
         let contract_chronology = authorization.initial_observation_before_operation
-            && authorization.revocation_after_operation_start
+            && authorization.first_operation_completed_before_revocation
+            && authorization.revocation_before_disconnect
+            && authorization.requires_serial_absent_interval
+            && authorization.reconnect_before_unauthorized
             && authorization.unauthorized_before_or_at_terminal
             && authorization.terminal_before_cleanup
             && authorization.final_state_after_cleanup;
@@ -950,7 +976,10 @@ struct AuthorizationTransitionContract {
     authority_invalidated: bool,
     automatic_resume: bool,
     initial_observation_before_operation: bool,
-    revocation_after_operation_start: bool,
+    first_operation_completed_before_revocation: bool,
+    revocation_before_disconnect: bool,
+    requires_serial_absent_interval: bool,
+    reconnect_before_unauthorized: bool,
     unauthorized_before_or_at_terminal: bool,
     terminal_before_cleanup: bool,
     final_state_after_cleanup: bool,
@@ -1376,6 +1405,8 @@ impl Sentinel {
             "boundary-ready",
             "operation-finished",
             "terminal-ready",
+            "authorization-revoked",
+            "unauthorized-observed",
             "cleanup-ready",
             "sleep-requested",
             "sleep-entered",
@@ -1542,6 +1573,7 @@ fn run_invocation() -> Result<Value, String> {
         active_cancellation,
         identity_capture,
         mut authorization_capture,
+        terminal_detected_at,
         executor_elapsed_ms,
     } = reviewed;
 
@@ -1613,6 +1645,7 @@ fn run_invocation() -> Result<Value, String> {
         active_cancellation,
         identity_capture,
         authorization_capture,
+        terminal_detected_at,
         executor_elapsed_ms,
         storage: storage.as_ref(),
         host_payload: low_storage_host_payload.as_deref(),
@@ -1987,6 +2020,7 @@ struct ReviewedPlanObservation {
     active_cancellation: Option<Value>,
     identity_capture: Option<IdentityTransitionCapture>,
     authorization_capture: Option<AuthorizationTransitionCapture>,
+    terminal_detected_at: Option<SystemTime>,
     executor_elapsed_ms: Option<u64>,
 }
 
@@ -2329,11 +2363,13 @@ fn run_reviewed_plan(
                 active_process: None,
                 identity_capture: None,
                 authorization_capture: None,
+                terminal_detected_at: None,
                 executor_elapsed_ms: None,
             };
         }
     };
     let executor_elapsed_ms = Some(executor_timer.elapsed().as_millis() as u64);
+    let terminal_detected_at = Some(SystemTime::now());
     if scenario == Scenario::DeviceUnauthorized {
         let grace_started = Instant::now();
         while grace_started.elapsed() < Duration::from_secs(3) {
@@ -2423,6 +2459,7 @@ fn run_reviewed_plan(
         active_cancellation,
         identity_capture,
         authorization_capture,
+        terminal_detected_at,
         executor_elapsed_ms,
     }
 }
@@ -2450,6 +2487,10 @@ struct AuthorizationTransitionCapture {
     initial_authorized: bool,
     initial_observed_at: Option<SystemTime>,
     revocation_checkpoint_at: Option<SystemTime>,
+    original_disconnected_at: Option<SystemTime>,
+    serial_absent_from: Option<SystemTime>,
+    serial_absent_until: Option<SystemTime>,
+    reconnected_at: Option<SystemTime>,
     observed_at: Option<SystemTime>,
     final_authorized: bool,
     final_state_observed_at: Option<SystemTime>,
@@ -2556,24 +2597,49 @@ fn spawn_authorization_transition_observer(
     stop: Arc<AtomicBool>,
 ) -> std::thread::JoinHandle<()> {
     std::thread::spawn(move || {
-        while !stop.load(Ordering::Acquire) {
-            let checkpoint = sentinel.action_now().ok().flatten();
-            if let Some(checkpoint) = checkpoint {
-                if let Ok(mut value) = capture.lock() {
-                    value.revocation_checkpoint_at.get_or_insert(checkpoint);
-                }
-                if let Ok(SelectedSerialObservation::Unauthorized) =
-                    selected_serial_observation(&serial)
-                {
-                    if let Ok(mut value) = capture.lock() {
-                        value.observed_at.get_or_insert(SystemTime::now());
-                    }
-                    break;
-                }
-                std::thread::sleep(Duration::from_millis(20));
-            } else {
-                std::thread::sleep(Duration::from_millis(250));
+        let started = Instant::now();
+        let revocation_checkpoint = loop {
+            if stop.load(Ordering::Acquire) || started.elapsed() >= SENTINEL_TIMEOUT {
+                return;
             }
+            match sentinel.named_action_now("authorization-revoked") {
+                Ok(Some(checkpoint)) => break checkpoint,
+                Ok(None) => std::thread::sleep(Duration::from_millis(50)),
+                Err(_) => return,
+            }
+        };
+        if let Ok(mut value) = capture.lock() {
+            value.revocation_checkpoint_at = Some(revocation_checkpoint);
+        }
+
+        let mut absence_started = None;
+        while !stop.load(Ordering::Acquire) {
+            if let Ok(observation) = selected_serial_observation(&serial) {
+                let now = SystemTime::now();
+                match observation {
+                    SelectedSerialObservation::Absent if absence_started.is_none() => {
+                        absence_started = Some(now);
+                        if let Ok(mut value) = capture.lock() {
+                            value.original_disconnected_at = Some(now);
+                            value.serial_absent_from = Some(now);
+                        }
+                    }
+                    SelectedSerialObservation::Unauthorized if absence_started.is_some() => {
+                        if let Ok(mut value) = capture.lock() {
+                            value.serial_absent_until = Some(now);
+                            value.reconnected_at = Some(now);
+                            value.observed_at = Some(now);
+                        }
+                        let _ = sentinel.mark("unauthorized-observed", "ready\n");
+                        break;
+                    }
+                    SelectedSerialObservation::Absent
+                    | SelectedSerialObservation::Attached(_)
+                    | SelectedSerialObservation::Unauthorized
+                    | SelectedSerialObservation::Other => {}
+                }
+            }
+            std::thread::sleep(Duration::from_millis(20));
         }
     })
 }
@@ -2677,6 +2743,7 @@ struct EvidenceInputs<'a> {
     active_cancellation: Option<Value>,
     identity_capture: Option<IdentityTransitionCapture>,
     authorization_capture: Option<AuthorizationTransitionCapture>,
+    terminal_detected_at: Option<SystemTime>,
     executor_elapsed_ms: Option<u64>,
     storage: Option<&'a StorageObservation>,
     host_payload: Option<&'a Path>,
@@ -2699,6 +2766,7 @@ fn evidence_record(inputs: EvidenceInputs<'_>) -> Value {
         active_cancellation,
         identity_capture,
         authorization_capture,
+        terminal_detected_at,
         executor_elapsed_ms,
         storage,
         host_payload,
@@ -2721,7 +2789,7 @@ fn evidence_record(inputs: EvidenceInputs<'_>) -> Value {
         invocation,
         result,
         authorization_capture.as_ref(),
-        active_process.as_ref(),
+        terminal_detected_at,
         &sentinel,
         cleanup_started_at,
         cleanup_completed_at,
@@ -2759,6 +2827,8 @@ fn evidence_record(inputs: EvidenceInputs<'_>) -> Value {
                     "activeSlotReleased": slot_observation.released,
                     "runScope": format!("run-scope-sha256:{}", digest(&invocation.run_scope)),
                     "deviceScope": format!("serial-sha256:{}", digest(&invocation.serial)),
+                    "boundaryReadyAt": sentinel.get("boundaryReadyAt").cloned().unwrap_or(Value::Null),
+                    "operatorActionAt": sentinel.get("operatorActionAt").cloned().unwrap_or(Value::Null),
                     "activeSlotObservation": {
                         "acquired": slot_observation.acquired,
                         "released": slot_observation.released,
@@ -3201,7 +3271,7 @@ fn authorization_transition_evidence(
     invocation: &Invocation,
     result: Result<&ExecutionRunResult, &String>,
     capture: Option<&AuthorizationTransitionCapture>,
-    active_process: Option<&Value>,
+    terminal_detected_at: Option<SystemTime>,
     sentinel: &Value,
     cleanup_started_at: SystemTime,
     cleanup_completed_at: SystemTime,
@@ -3215,13 +3285,23 @@ fn authorization_transition_evidence(
     let (
         Some(initial_observed_at),
         Some(revocation_checkpoint_at),
+        Some(original_disconnected_at),
+        Some(serial_absent_from),
+        Some(serial_absent_until),
+        Some(reconnected_at),
         Some(observed_at),
         Some(final_state_observed_at),
+        Some(terminal_detected_at),
     ) = (
         capture.initial_observed_at,
         capture.revocation_checkpoint_at,
+        capture.original_disconnected_at,
+        capture.serial_absent_from,
+        capture.serial_absent_until,
+        capture.reconnected_at,
         capture.observed_at,
         capture.final_state_observed_at,
+        terminal_detected_at,
     )
     else {
         return Value::Null;
@@ -3238,21 +3318,30 @@ fn authorization_transition_evidence(
     if issue.is_none() {
         return Value::Null;
     }
-    let terminal_detected_at = active_process
-        .and_then(|value| value.get("terminalAt"))
+    let operation_started_at = sentinel
+        .get("operationStartedAt")
         .cloned()
         .unwrap_or(Value::Null);
-    if terminal_detected_at.is_null() {
+    let first_operation_completed_at = sentinel
+        .get("operationFinishedAt")
+        .cloned()
+        .unwrap_or(Value::Null);
+    if operation_started_at.is_null() || first_operation_completed_at.is_null() {
         return Value::Null;
     }
     json!({
         "initialState": "authorized",
         "initialObservedAt": system_time_value(Some(initial_observed_at)),
-        "operationStartedAt": sentinel.get("operationStartedAt").cloned().unwrap_or(Value::Null),
+        "operationStartedAt": operation_started_at,
+        "firstOperationCompletedAt": first_operation_completed_at,
         "revocationCheckpointAt": system_time_value(Some(revocation_checkpoint_at)),
+        "originalDisconnectedAt": system_time_value(Some(original_disconnected_at)),
+        "serialAbsentFrom": system_time_value(Some(serial_absent_from)),
+        "serialAbsentUntil": system_time_value(Some(serial_absent_until)),
+        "reconnectedAt": system_time_value(Some(reconnected_at)),
         "observedState": "unauthorized",
         "observedAt": system_time_value(Some(observed_at)),
-        "terminalDetectedAt": terminal_detected_at,
+        "terminalDetectedAt": system_time_value(Some(terminal_detected_at)),
         "cleanupStartedAt": system_time_value(Some(cleanup_started_at)),
         "cleanupCompletedAt": system_time_value(Some(cleanup_completed_at)),
         "issueCode": "device_unauthorized",
@@ -3279,6 +3368,8 @@ fn sentinel_evidence(invocation: &Invocation) -> Value {
     let boundary_ready = sentinel.marker_time("boundary-ready").ok();
     let operator_action = sentinel.marker_time("operator-action").ok();
     let operation_finished = sentinel.marker_time("operation-finished").ok();
+    let authorization_revoked = sentinel.marker_time("authorization-revoked").ok();
+    let unauthorized_observed = sentinel.marker_time("unauthorized-observed").ok();
     let cleanup_ready = sentinel.marker_time("cleanup-ready").ok();
     let sleep_requested = sentinel.marker_time("sleep-requested").ok();
     let sleep_entered = sentinel.marker_time("sleep-entered").ok();
@@ -3289,6 +3380,8 @@ fn sentinel_evidence(invocation: &Invocation) -> Value {
         boundary_ready,
         operator_action,
         operation_finished,
+        authorization_revoked,
+        unauthorized_observed,
         cleanup_ready,
         sleep_requested,
         sleep_entered,
@@ -3312,6 +3405,13 @@ fn sentinel_evidence(invocation: &Invocation) -> Value {
         && operation_finished
             .zip(cleanup_ready)
             .is_none_or(|(finished, cleanup)| finished <= cleanup);
+    let authorization_chronology_valid = boundary_ready
+        .zip(authorization_revoked)
+        .zip(unauthorized_observed)
+        .zip(operator_action)
+        .is_none_or(|(((boundary, revoked), unauthorized), action)| {
+            boundary <= revoked && revoked <= unauthorized && unauthorized <= action
+        });
     let host_sleep_chronology_valid = operation_started
         .zip(sleep_requested)
         .zip(sleep_entered)
@@ -3335,7 +3435,9 @@ fn sentinel_evidence(invocation: &Invocation) -> Value {
         "sleepRequestedAt": system_time_value(sleep_requested),
         "sleepEnteredAt": system_time_value(sleep_entered),
         "wakeAt": system_time_value(wake),
-        "chronologyValid": chronology_valid && host_sleep_chronology_valid,
+        "chronologyValid": chronology_valid
+            && host_sleep_chronology_valid
+            && authorization_chronology_valid,
         "uniqueMarkers": unique_markers,
     })
 }
@@ -4265,7 +4367,6 @@ mod tests {
             Scenario::CancellationActive,
             Scenario::UsbDisconnectActive,
             Scenario::DeviceOffline,
-            Scenario::DeviceUnauthorized,
         ] {
             assert_eq!(active_process_operation(scenario), ProcessOperation::Push);
             assert_eq!(active_operation_class(scenario), "host_push");
@@ -4278,6 +4379,35 @@ mod tests {
             active_operation_class(Scenario::OperationTimeout),
             "device_copy"
         );
+    }
+
+    #[test]
+    fn device_unauthorized_uses_a_safe_boundary_without_active_process_capture() {
+        let scenario = Scenario::DeviceUnauthorized;
+        let contract = scenario_contract(scenario);
+
+        assert!(!scenario.is_active_checkpoint());
+        assert!(scenario.is_boundary_checkpoint());
+        assert!(!scenario.supports_active_process_capture());
+        assert_eq!(
+            active_process_operation(scenario),
+            ProcessOperation::DeviceCopy
+        );
+        assert_eq!(active_operation_class(scenario), "device_copy");
+        assert!(contract.active_process.is_none());
+        assert_eq!(
+            contract.allowed_step_states,
+            vec![StepStateContract {
+                executed: 1,
+                skipped: 0,
+                failed: 1,
+                cancelled: 0,
+                blocked: 0,
+                not_attempted: 0,
+            }]
+        );
+        assert!(contract.facts.boundary_checkpoint);
+        assert!(!contract.facts.active_checkpoint);
     }
 
     #[test]
