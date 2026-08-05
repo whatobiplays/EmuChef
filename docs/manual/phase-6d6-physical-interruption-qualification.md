@@ -23,7 +23,7 @@ The ignored Rust harness refuses to touch ADB until every gate below is valid.
    operator acknowledgements use exactly `ack` followed by a newline. For the
    four supported active cases, wait for `active-ready`. That marker is created
    only after the production runner lifecycle observer samples the exact
-   `DeviceCopy` child alive.
+   `Push` child alive.
    Create `operator-action` within five seconds. For cancellation, that marker
    is the cancellation request. For USB disconnect, device-offline, and
    authorization revocation, create the marker first, wait 1.1–3 seconds, then
@@ -93,19 +93,21 @@ device paths have no residual state.
 ## Active-operation stimulus and handshake
 
 For `cancellation_active`, `usb_disconnect_active`, `device_offline`, and
-`device_unauthorized`, the harness prepares a unique fixture-owned device-side
-source before the reviewed run. It creates and times a 256 MiB calibration
-copy, derives a source between 512 MiB and 8 GiB targeting approximately 30
-seconds, and blocks unless the predicted copy duration is 15–240 seconds. Free
-space must cover the active source, an equal destination, and 1 GiB of cleanup
-headroom. Calibration and active files remain under the unique run scope and
-are removed during fixture-only cleanup.
+`device_unauthorized`, the harness creates a unique run-owned temporary host
+workspace and writes a deterministic, non-secret, non-compressible calibration
+file. It times a 256 MiB transfer through the ordinary production ADB push
+adapter, derives a host source between 512 MiB and 8 GiB targeting approximately
+30 seconds, and blocks unless the predicted push duration is 15–240 seconds.
+Device free space must cover the active destination plus 1 GiB of cleanup
+headroom. The temporary host workspace is the only additional executor read
+root for that invocation. Calibration and active host/device files are removed
+during fixture-only cleanup; their raw paths never enter evidence.
 
 The active sequence is:
 
 ```text
 operation-started
-→ exact DeviceCopy child sampled alive
+→ exact Push child sampled alive
 → active-ready
 → operator-action within five seconds
 → cancellation request, or wait 1.1–3 seconds and perform the physical transition
@@ -141,7 +143,7 @@ blocks the repetition and cannot be counted as a pass.
 
 | Scenario | Operator transition | Required proof |
 | --- | --- | --- |
-| `cancellation_active` | Wait for `active-ready`, then immediately create `operator-action`; this is the cancellation request. | The exact `DeviceCopy` child was alive before the request, the first atomic operation settles truthfully, later work is not scheduled, and no hidden owner remains. |
+| `cancellation_active` | Wait for `active-ready`, then immediately create `operator-action`; this is the cancellation request. | The exact `Push` child was alive before the request, the first atomic operation settles truthfully, later work is not scheduled, and no hidden owner remains. |
 | `cancellation_boundary` | Wait for `boundary-ready`, then request cancellation. | Safe-boundary cancellation preserves completed evidence and leaves later work Not attempted. |
 | `usb_disconnect_active` | Wait for `active-ready`, create `operator-action`, wait 1.1–3 seconds, disconnect the selected cable, wait for `terminal-ready`, reconnect the same device, verify its exact serial is `device`, then create `cleanup-ready`. | Exact live-child binding, stable disconnected/transport issue, conservative partial state, cleanup outcome, and no automatic resume. |
 | `usb_disconnect_boundary` | Disconnect after `boundary-ready` and before the second operation. | Same fail-stop and sanitized recovery behavior at the scheduling boundary. |

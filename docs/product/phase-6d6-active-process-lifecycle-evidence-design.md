@@ -15,7 +15,7 @@ This slice supplies the existing `activeProcess` evidence contract for active in
 - Expose only sanitized, opaque process evidence to an optional observer.
 - Forward that evidence through `ProcessAdbCommandExecutor` to the physical qualification harness.
 - Bind the physical record to the current production execution-slot run scope.
-- Prepare a bounded, fixture-owned device-side source file for active physical scenarios so the first reviewed `copy_files` step executes a genuine `ProcessOperation::DeviceCopy` for a usable operator window.
+- Prepare a bounded, deterministic, non-compressible host fixture for active physical scenarios so the first reviewed `copy_files` step executes a genuine `ProcessOperation::Push` for a usable operator window.
 - Populate the existing `activeProcess` schema for scenarios whose manifest requires it.
 - Update the physical runbook to document the `active-ready` handshake and bounded active-stimulus safety rules.
 - Add automated regressions for event ordering, exact-child continuity, liveness sampling, sanitization, no-observer behavior, and evidence-contract integration.
@@ -116,7 +116,7 @@ For `cancellation_active`, `usb_disconnect_active`, `device_offline`, and `devic
 
 - the current execution-slot run-scope digest;
 - the first reviewed step;
-- `ProcessOperation::DeviceCopy`;
+- the scenario-selected `ProcessOperation` (`Push` for the four supported active scenarios);
 - one opaque operation identity.
 
 The harness records:
@@ -135,7 +135,7 @@ The record serializes:
 {
   "runId": "run-scope-sha256:<digest>",
   "operationId": "operation-sha256:<digest>",
-  "operationClass": "device_copy",
+  "operationClass": "host_push",
   "childIdentity": "child-sha256:<digest>",
   "spawnedAt": "unix:<seconds>",
   "mutationStartedAt": "unix:<seconds>",
@@ -155,41 +155,42 @@ The `active-ready` marker is an internal operator handshake only. It is removed 
 
 ## Bounded active-operation stimulus
 
-The existing physical plan pushes a tiny host file. That child is `ProcessOperation::Push`, does not match the manifest's `device_copy` class, and normally finishes before a human can perform a physical transition.
+Physical diagnostics showed that a fully allocated 256 MiB device-side `cp` completed in 0.27 seconds on the qualification device. Even the committed 8 GiB maximum would therefore provide only about 8.6 seconds, while the 30-second target would require roughly 28 GiB each for source and destination. The device-copy stimulus cannot satisfy the committed operator window safely.
 
-For `cancellation_active`, `usb_disconnect_active`, `device_offline`, and `device_unauthorized`, the harness therefore prepares a unique fixture-owned source file on the selected device before starting the reviewed plan. The first reviewed `copy_files` step uses that source with `location: "device"`, causing the ordinary executor path to call `copy_on_device` and spawn the exact `ProcessOperation::DeviceCopy` child required by the manifest.
+A 256 MiB deterministic non-compressible host file pushed through ADB took 6.88 seconds on the same device. For `cancellation_active`, `usb_disconnect_active`, `device_offline`, and `device_unauthorized`, the harness therefore creates a unique run-owned temporary host workspace. The first reviewed `copy_files` step uses its host `file_path`, causing the ordinary executor path to call `device.push` and spawn the exact `ProcessOperation::Push` child required by those scenario contracts. Evidence serializes that semantic class as `host_push`.
 
-The source size is selected by a bounded calibration performed only inside the unique run scope:
+The source size is selected by a bounded calibration:
 
-1. Create a fixed-size calibration source under the run scope.
-2. Time one device-side copy to a calibration destination.
-3. Remove the calibration destination.
-4. Derive a payload size targeting a committed operator window.
+1. Create a deterministic non-compressible 256 MiB host calibration file in the run-owned temporary workspace.
+2. Push it with the ordinary unobserved `RealAdbDevice` adapter to a unique fixture-owned device destination.
+3. Verify the destination size, then remove both calibration files.
+4. Derive a payload size targeting the committed operator window.
 5. Clamp the payload to explicit minimum and maximum sizes.
 6. Block before the reviewed plan if measured throughput cannot provide the minimum window without approaching the 300-second production deadline.
-7. Verify enough free space exists for the source, destination, and cleanup headroom.
-8. Create and verify the final active source.
+7. Verify enough device free space exists for the active destination and cleanup headroom.
+8. Create and verify the final deterministic host source.
+9. Add only that temporary workspace to the reviewed executor's read-only roots.
 
-The committed constants are:
+The committed constants remain:
 
 - calibration source: 256 MiB;
-- target observed-copy duration: 30 seconds;
+- target observed-push duration: 30 seconds;
 - minimum predicted operator window: 15 seconds;
-- maximum predicted copy duration: 240 seconds, preserving at least 60 seconds below the fixed 300-second deadline;
+- maximum predicted push duration: 240 seconds, preserving at least 60 seconds below the fixed 300-second deadline;
 - minimum active source: 512 MiB;
 - maximum active source: 8 GiB;
-- cleanup headroom: 1 GiB beyond the active source and destination;
+- cleanup headroom: 1 GiB beyond the active device destination;
 - live-sample freshness window: 5 seconds.
 
-The harness blocks before the reviewed plan when calibration produces zero or non-finite throughput, when the derived size falls outside these bounds, when predicted duration is outside 15–240 seconds, or when free space is less than twice the active payload plus 1 GiB.
+The harness blocks before the reviewed plan when calibration produces zero or unrepresentable throughput, when the derived size falls outside these bounds, when predicted duration is outside 15–240 seconds, or when device free space is less than the active payload plus 1 GiB.
 
-The calibration source, calibration destination, active source, and reviewed destination are all unique, fixture-owned paths. Cleanup removes them explicitly and verifies the run scope is absent. No unrelated file, package, user data, or system path is touched.
+The host workspace, calibration source, active source, calibration device destination, and reviewed destination are all unique and run-owned. Cleanup removes them explicitly and verifies no host workspace or device run scope remains. Raw host paths, device paths, fixture bytes, and the generator seed never enter evidence.
 
-Calibration is preparation evidence only. It cannot satisfy the active-process contract. Only lifecycle events from the first reviewed `ExecutorRunner<RealAdbDevice>` mutation may populate `activeProcess`.
+Calibration is preparation evidence only. It cannot satisfy the active-process contract. Only lifecycle events from the first reviewed `ExecutorRunner<RealAdbDevice>` mutation may populate `activeProcess`. Existing accepted boundary, identity, and root records remain unchanged as `device_copy`; timeout and host-sleep contracts also remain `device_copy`.
 
 ## Data flow
 
-1. The harness calibrates and creates the bounded fixture-owned device source, then builds the reviewed plan with that source as the first `copy_files` input.
+1. The harness calibrates the production push path, creates the bounded run-owned host source, and builds the reviewed plan with that host file as the first `copy_files` input.
 2. `ExecutorRunner` starts the first reviewed copy.
 3. `ProcessAdbCommandExecutor` calls the owned-process boundary with the optional observer.
 4. The owned-process owner spawns the child and emits `Spawned` and `MutationStarted`.
@@ -233,13 +234,13 @@ Calibration is preparation evidence only. It cannot satisfy the active-process c
 
 ### ADB adapter tests
 
-- `ProcessOperation::DeviceCopy` is forwarded unchanged to lifecycle observations.
+- `ProcessOperation::Push` and `ProcessOperation::DeviceCopy` are forwarded unchanged to lifecycle observations.
 - The observer adapter does not change completed transport or storage classification.
 - Fake executor behavior remains unchanged when no observer is installed.
 
 ### Qualification-harness tests
 
-- A complete exact-child capture serializes the existing `activeProcess` schema.
+- A complete exact `Push`-child capture serializes `host_push` for the four supported active scenarios, while existing `DeviceCopy` contracts remain `device_copy`.
 - The capture is bound to the current run-scope digest and first reviewed operation.
 - Mismatched operation identities are rejected.
 - Action at or after terminal is rejected.

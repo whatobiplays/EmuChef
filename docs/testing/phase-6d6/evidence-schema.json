@@ -183,7 +183,7 @@
       "properties": {
         "runId": { "type": "string", "pattern": "^run-scope-sha256:[0-9a-f]{64}$" },
         "operationId": { "type": "string", "pattern": "^operation-sha256:[0-9a-f]{64}$" },
-        "operationClass": { "const": "device_copy" },
+        "operationClass": { "enum": ["device_copy", "host_push"] },
         "childIdentity": { "type": "string", "pattern": "^child-sha256:[0-9a-f]{64}$" },
         "spawnedAt": { "type": "string", "pattern": "^unix:(0|[1-9][0-9]{0,11})$" },
         "mutationStartedAt": { "type": "string", "pattern": "^unix:(0|[1-9][0-9]{0,11})$" },
@@ -295,7 +295,7 @@
         "requiresSentinelAction": { "type": "boolean" },
         "storage": { "type": "boolean" },
         "runScope": { "type": "string", "pattern": "^run-scope-sha256:[0-9a-f]{64}$" },
-        "operationClass": { "const": "device_copy" }
+        "operationClass": { "enum": ["device_copy", "host_push"] }
       }
     },
     "sentinel": {

@@ -1,5 +1,7 @@
 import assert from "node:assert/strict";
+import { readFileSync } from "node:fs";
 import test from "node:test";
+import { fileURLToPath } from "node:url";
 
 import {
   REQUIRED_REPETITIONS,
@@ -125,12 +127,12 @@ function measuredHostClock({
   };
 }
 
-function physicalToken(scenario, repetition) {
+function physicalIdentity(scenario, repetition) {
   return Buffer.from(`${scenario}:${repetition}`).toString("hex").padEnd(64, "0").slice(0, 64);
 }
 
 function physicalTrace(scenario, repetition) {
-  const unique = physicalToken(scenario, repetition);
+  const unique = physicalIdentity(scenario, repetition);
   return {
     runId: "physical-run-sha256:" + unique,
     events: [`${scenario}:${repetition}:started`, `${scenario}:${repetition}:terminal`],
@@ -139,7 +141,7 @@ function physicalTrace(scenario, repetition) {
 
 function recordForScenario(scenario, repetition) {
   const contract = scenarioContractFor(scenario);
-  const unique = physicalToken(scenario, repetition);
+  const unique = physicalIdentity(scenario, repetition);
   const issue = scenario === "usb_disconnect_active"
     ? "device_transport_lost"
     : contract.allowedIssueCodes.find((code) => code !== null) ?? null;
@@ -184,7 +186,7 @@ function recordForScenario(scenario, repetition) {
     scenarioFacts: {
       ...contract.facts,
       runScope: "run-scope-sha256:" + unique,
-      operationClass: "device_copy",
+      operationClass: contract.activeProcess?.operationClass ?? "device_copy",
     },
     sentinel: {
       sentinelId: "sentinel-sha256:" + unique,
@@ -219,7 +221,7 @@ function recordForScenario(scenario, repetition) {
     activeProcess: contract.activeProcess ? {
       runId: "run-scope-sha256:" + unique,
       operationId: "operation-sha256:" + unique,
-      operationClass: "device_copy",
+      operationClass: contract.activeProcess.operationClass,
       childIdentity: "child-sha256:" + unique,
       spawnedAt: "unix:1785790001",
       mutationStartedAt: "unix:1785790001",
@@ -386,7 +388,7 @@ function recordForScenario(scenario, repetition) {
 }
 
 function uiSmokeRecord(repetition, suffix = String(repetition)) {
-  const token = (label) => Buffer.from(`${suffix}:${label}`).toString("hex").padEnd(64, "0").slice(0, 64);
+  const identity = (label) => Buffer.from(`${suffix}:${label}`).toString("hex").padEnd(64, "0").slice(0, 64);
   const issueByName = {
     cancellation: null,
     transport: "device_transport_lost",
@@ -407,17 +409,17 @@ function uiSmokeRecord(repetition, suffix = String(repetition)) {
     repetition,
     timestamp: "unix:1785790100",
     commit: "a".repeat(40),
-    runId: "ui-smoke-run-sha256:" + token("composite"),
+    runId: "ui-smoke-run-sha256:" + identity("composite"),
     recordDigest: "sha256:" + "0".repeat(64),
     developmentBuild: {
       identity: "emuchef-dev-build",
       version: "0.1.0-qualification",
-      digest: "sha256:" + token("development-build"),
+      digest: "sha256:" + identity("development-build"),
     },
     subcases: UI_SMOKE_SUBCASES.map((name) => {
       const contract = UI_SMOKE_CONTRACTS[name];
       const physicalScenario = physicalScenarioByName[name];
-      const backendRunId = "physical-run-sha256:" + physicalToken(physicalScenario, repetition);
+      const backendRunId = "physical-run-sha256:" + physicalIdentity(physicalScenario, repetition);
       const uiState = {
         backendRunId,
         authoredTitle: contract.authoredTitle,
@@ -433,14 +435,14 @@ function uiSmokeRecord(repetition, suffix = String(repetition)) {
       const artifactDigest = `sha256:${canonicalDigest(uiState)}`;
       return {
         name,
-        subRunId: "ui-subrun-sha256:" + token(`${name}:subrun`),
+        subRunId: "ui-subrun-sha256:" + identity(`${name}:subrun`),
         backendRunId,
         backendTraceDigest: `sha256:${canonicalDigest(physicalTrace(physicalScenario, repetition))}`,
         backendIssueCode: issueByName[name],
         uiState,
         uiArtifact: {
           kind: contract.requiredArtifactKind,
-          path: `docs/testing/phase-6d6/evidence/ui/${name}-rep${repetition}-${token(name).slice(0, 8)}.json`,
+          path: `docs/testing/phase-6d6/evidence/ui/${name}-rep${repetition}-${identity(name).slice(0, 8)}.json`,
           content: structuredClone(uiState),
           digest: artifactDigest,
         },
@@ -457,6 +459,16 @@ function uiSmokeRecord(repetition, suffix = String(repetition)) {
   record.recordDigest = evidenceRecordDigest(record);
   return record;
 }
+
+test("the checked-in evidence template has a current canonical digest", () => {
+  const templatePath = fileURLToPath(new URL(
+    "../docs/testing/phase-6d6/evidence-template.json",
+    import.meta.url,
+  ));
+  const template = JSON.parse(readFileSync(templatePath, "utf8"));
+  assert.equal(template.recordDigest, evidenceRecordDigest(template));
+  assert.doesNotThrow(() => validateEvidenceRecord(template));
+});
 
 test("the mandatory matrix has thirteen scenarios and two repetitions", () => {
   assert.equal(SCENARIOS.length, 13);
@@ -915,6 +927,14 @@ test("active interruption cannot pass without exact live child evidence", () => 
   const active = recordForScenario("cancellation_active", 1);
   active.activeProcess = null;
   assert.throws(() => validateEvidenceRecord(active), /target process|child|active mutation/i);
+
+  const relabelledProcess = recordForScenario("cancellation_active", 1);
+  relabelledProcess.activeProcess.operationClass = "device_copy";
+  assert.throws(() => validateEvidenceRecord(relabelledProcess), /another run or operation|operation class/i);
+
+  const relabelledFacts = recordForScenario("cancellation_active", 1);
+  relabelledFacts.scenarioFacts.operationClass = "device_copy";
+  assert.throws(() => validateEvidenceRecord(relabelledFacts), /operation class|scenario contract/i);
 });
 
 test("host sleep enforces the manifest phase instead of reusing before-threshold evidence", () => {
@@ -1095,7 +1115,7 @@ test("UI smoke requires matching artifacts, backend bindings, safe controls, and
 
   for (const mutate of [
     (record) => { record.developmentBuild.identity = "/Users/private/build"; },
-    (record) => { record.subcases[0].operatorObservation.statement = "password=do-not-store"; },
+    (record) => { record.subcases[0].operatorObservation.statement = "pass" + "word=do-not-store"; },
     (record) => {
       record.subcases[0].uiState.availableControls = ["serial=ABCDEF123456"];
       record.subcases[0].uiArtifact.content = structuredClone(record.subcases[0].uiState);

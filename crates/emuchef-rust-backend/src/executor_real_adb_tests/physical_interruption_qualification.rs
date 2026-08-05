@@ -8,7 +8,7 @@
 
 use std::env;
 use std::fs::{self, OpenOptions};
-use std::io::Write;
+use std::io::{self, Write};
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -84,6 +84,7 @@ const ACTIVE_SAMPLE_FRESHNESS: Duration = Duration::from_secs(5);
 const ACTIVE_CALIBRATION_SOURCE_FILE: &str = "phase6d6-active-calibration-source.bin";
 const ACTIVE_CALIBRATION_DEST_FILE: &str = "phase6d6-active-calibration-dest.bin";
 const ACTIVE_SOURCE_FILE: &str = "phase6d6-active-source.bin";
+const ACTIVE_HOST_CHUNK_BYTES: usize = 1024 * 1024;
 const SCENARIO_MANIFEST: &str =
     include_str!("../../../../docs/testing/phase-6d6/scenario-manifest.json");
 
@@ -219,6 +220,29 @@ impl Scenario {
 
     const fn is_root(self) -> bool {
         matches!(self, Self::RootRevocation)
+    }
+}
+
+const fn active_process_operation(scenario: Scenario) -> ProcessOperation {
+    if scenario.supports_active_process_capture() {
+        ProcessOperation::Push
+    } else {
+        ProcessOperation::DeviceCopy
+    }
+}
+
+const fn process_operation_class(operation: ProcessOperation) -> Option<&'static str> {
+    match operation {
+        ProcessOperation::Push => Some("host_push"),
+        ProcessOperation::DeviceCopy => Some("device_copy"),
+        _ => None,
+    }
+}
+
+const fn active_operation_class(scenario: Scenario) -> &'static str {
+    match process_operation_class(active_process_operation(scenario)) {
+        Some(value) => value,
+        None => "device_copy",
     }
 }
 
@@ -1006,9 +1030,11 @@ struct ActiveStimulusDerivation {
     predicted_ms: u64,
 }
 
-#[derive(Clone, Debug)]
+#[derive(Debug)]
 struct ActiveStimulus {
-    source_path: String,
+    host_workspace: tempfile::TempDir,
+    host_source_path: PathBuf,
+    device_destination_path: String,
     payload_kib: u64,
     predicted_ms: u64,
 }
@@ -1018,22 +1044,26 @@ fn derive_active_stimulus(
     elapsed_ms: u64,
 ) -> Result<ActiveStimulusDerivation, String> {
     if calibration_kib == 0 || elapsed_ms == 0 {
-        return Err("active-copy calibration did not produce measurable throughput".to_string());
+        return Err(
+            "active host-push calibration did not produce measurable throughput".to_string(),
+        );
     }
     let target = (calibration_kib as u128)
         .saturating_mul(ACTIVE_TARGET_MS as u128)
         .checked_div(elapsed_ms as u128)
         .and_then(|value| u64::try_from(value).ok())
-        .ok_or_else(|| "active-copy calibration overflowed its bounded calculation".to_string())?;
+        .ok_or_else(|| {
+            "active host-push calibration overflowed its bounded calculation".to_string()
+        })?;
     let payload_kib = target.clamp(ACTIVE_MIN_KIB, ACTIVE_MAX_KIB);
     let predicted_ms = (payload_kib as u128)
         .saturating_mul(elapsed_ms as u128)
         .checked_div(calibration_kib as u128)
         .and_then(|value| u64::try_from(value).ok())
-        .ok_or_else(|| "active-copy predicted duration was not representable".to_string())?;
+        .ok_or_else(|| "active host-push predicted duration was not representable".to_string())?;
     if !(ACTIVE_MIN_PREDICTED_MS..=ACTIVE_MAX_PREDICTED_MS).contains(&predicted_ms) {
         return Err(
-            "active-copy calibration cannot provide the required bounded operator window"
+            "active host-push calibration cannot provide the required bounded operator window"
                 .to_string(),
         );
     }
@@ -1043,14 +1073,78 @@ fn derive_active_stimulus(
     })
 }
 
-fn active_stimulus_paths(invocation: &Invocation) -> (String, String, String) {
+fn splitmix64_next(state: &mut u64) -> u64 {
+    *state = state.wrapping_add(0x9E37_79B9_7F4A_7C15);
+    let mut value = *state;
+    value = (value ^ (value >> 30)).wrapping_mul(0xBF58_476D_1CE4_E5B9);
+    value = (value ^ (value >> 27)).wrapping_mul(0x94D0_49BB_1331_11EB);
+    value ^ (value >> 31)
+}
+
+fn write_active_host_bytes(file: &mut fs::File, byte_len: u64, seed: u64) -> io::Result<()> {
+    let mut state = seed;
+    let mut remaining = byte_len;
+    let mut buffer = vec![0_u8; ACTIVE_HOST_CHUNK_BYTES];
+    while remaining > 0 {
+        let count = usize::try_from(remaining.min(ACTIVE_HOST_CHUNK_BYTES as u64))
+            .expect("bounded active host chunk length should fit usize");
+        let mut offset = 0;
+        while offset < count {
+            let word = splitmix64_next(&mut state).to_le_bytes();
+            let available = (count - offset).min(word.len());
+            buffer[offset..offset + available].copy_from_slice(&word[..available]);
+            offset += available;
+        }
+        file.write_all(&buffer[..count])?;
+        remaining -= count as u64;
+    }
+    Ok(())
+}
+
+fn write_active_host_fixture_with(
+    path: &Path,
+    byte_len: u64,
+    seed: u64,
+    writer: impl FnOnce(&mut fs::File, u64, u64) -> io::Result<()>,
+) -> Result<(), String> {
+    if byte_len == 0 {
+        return Err("active host fixture length must be non-zero".to_string());
+    }
+    let mut file = OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(path)
+        .map_err(|_| "active host fixture could not be created".to_string())?;
+    let result = writer(&mut file, byte_len, seed)
+        .and_then(|_| file.flush())
+        .and_then(|_| file.sync_all());
+    if result.is_err() {
+        drop(file);
+        let _ = fs::remove_file(path);
+        return Err("active host fixture could not be written".to_string());
+    }
+    drop(file);
+    if fs::metadata(path).map(|metadata| metadata.len()).ok() != Some(byte_len) {
+        let _ = fs::remove_file(path);
+        return Err("active host fixture size could not be verified".to_string());
+    }
+    Ok(())
+}
+
+fn write_active_host_fixture(path: &Path, byte_len: u64, seed: u64) -> Result<(), String> {
+    write_active_host_fixture_with(path, byte_len, seed, write_active_host_bytes)
+}
+
+fn active_host_seed(run_scope: &str) -> u64 {
+    let encoded = digest(&format!("phase6d6-active-host:{run_scope}"));
+    u64::from_str_radix(&encoded[..16], 16)
+        .expect("the internal active-host digest prefix should be hexadecimal")
+}
+
+fn active_stimulus_device_paths(invocation: &Invocation) -> (String, String) {
     (
-        format!(
-            "{}/{}",
-            invocation.run_scope, ACTIVE_CALIBRATION_SOURCE_FILE
-        ),
         format!("{}/{}", invocation.run_scope, ACTIVE_CALIBRATION_DEST_FILE),
-        format!("{}/{}", invocation.run_scope, ACTIVE_SOURCE_FILE),
+        run_scope_paths(invocation).0,
     )
 }
 
@@ -1064,41 +1158,45 @@ fn active_process_evidence(
     events: &[OwnedProcessLifecycleEvent],
     action_time: Option<SystemTime>,
     run_scope: &str,
+    expected_operation: ProcessOperation,
 ) -> Option<Value> {
     let action = action_time?;
+    let operation_class = process_operation_class(expected_operation)?;
     let (operation_id, mutation_started) = events.iter().find_map(|event| match event {
         OwnedProcessLifecycleEvent::MutationStarted {
             operation_id,
-            operation: ProcessOperation::DeviceCopy,
+            operation,
             at,
-        } => Some((*operation_id, *at)),
+        } if *operation == expected_operation => Some((*operation_id, *at)),
         _ => None,
     })?;
     let spawned = events.iter().find_map(|event| match event {
         OwnedProcessLifecycleEvent::Spawned {
             operation_id: observed,
-            operation: ProcessOperation::DeviceCopy,
+            operation,
             at,
-        } if *observed == operation_id => Some(*at),
+        } if *observed == operation_id && *operation == expected_operation => Some(*at),
         _ => None,
     })?;
     let (checked_alive, alive, terminal_reported) =
         events.iter().find_map(|event| match event {
             OwnedProcessLifecycleEvent::LivenessSampled {
                 operation_id: observed,
-                operation: ProcessOperation::DeviceCopy,
+                operation,
                 at,
                 alive,
                 terminal_reported,
-            } if *observed == operation_id => Some((*at, *alive, *terminal_reported)),
+            } if *observed == operation_id && *operation == expected_operation => {
+                Some((*at, *alive, *terminal_reported))
+            }
             _ => None,
         })?;
     let terminal = events.iter().find_map(|event| match event {
         OwnedProcessLifecycleEvent::Terminal {
             operation_id: observed,
-            operation: ProcessOperation::DeviceCopy,
+            operation,
             at,
-        } if *observed == operation_id => Some(*at),
+        } if *observed == operation_id && *operation == expected_operation => Some(*at),
         _ => None,
     })?;
     let freshness = action.duration_since(checked_alive).ok()?;
@@ -1124,7 +1222,7 @@ fn active_process_evidence(
                 "phase6d6-operation:{run_scope}:{raw_identity}"
             ))
         ),
-        "operationClass": "device_copy",
+        "operationClass": operation_class,
         "childIdentity": format!(
             "child-sha256:{}",
             digest(&format!("phase6d6-child:{run_scope}:{raw_identity}"))
@@ -1355,7 +1453,7 @@ fn run_invocation() -> Result<Value, String> {
         match result {
             Ok(observation) => Some(observation),
             Err(error) => {
-                let cleanup = cleanup_fixture(&invocation, &facts, None);
+                let cleanup = cleanup_fixture(&invocation, &facts, None, None);
                 return Err(format!(
                     "{error}; low-storage preparation cleanup outcome={}",
                     cleanup.0
@@ -1369,7 +1467,7 @@ fn run_invocation() -> Result<Value, String> {
         match create_low_storage_host_payload(&invocation) {
             Ok(path) => Some(path),
             Err(error) => {
-                let cleanup = cleanup_fixture(&invocation, &facts, None);
+                let cleanup = cleanup_fixture(&invocation, &facts, None, None);
                 return Err(format!(
                     "{error}; low-storage host payload cleanup outcome={}",
                     cleanup.0
@@ -1383,10 +1481,14 @@ fn run_invocation() -> Result<Value, String> {
         match prepare_active_stimulus(&invocation, &facts) {
             Ok(stimulus) => Some(stimulus),
             Err(error) => {
-                let cleanup =
-                    cleanup_fixture(&invocation, &facts, low_storage_host_payload.as_deref());
+                let cleanup = cleanup_fixture(
+                    &invocation,
+                    &facts,
+                    low_storage_host_payload.as_deref(),
+                    None,
+                );
                 return Err(format!(
-                    "{error}; active-copy preparation cleanup outcome={}",
+                    "{error}; active host-push preparation cleanup outcome={}",
                     cleanup.0
                 ));
             }
@@ -1400,7 +1502,7 @@ fn run_invocation() -> Result<Value, String> {
         low_storage_host_payload.as_deref(),
         active_stimulus.as_ref(),
     );
-    let reviewed = run_reviewed_plan(&invocation, plan, &facts);
+    let reviewed = run_reviewed_plan(&invocation, plan, &facts, active_stimulus.as_ref());
     let ReviewedPlanObservation {
         result,
         action_time,
@@ -1433,7 +1535,12 @@ fn run_invocation() -> Result<Value, String> {
     }
     let sentinel = sentinel_evidence(&invocation);
     let cleanup_started_at = SystemTime::now();
-    let cleanup = cleanup_fixture(&invocation, &facts, low_storage_host_payload.as_deref());
+    let cleanup = cleanup_fixture(
+        &invocation,
+        &facts,
+        low_storage_host_payload.as_deref(),
+        active_stimulus.as_ref(),
+    );
     let cleanup_completed_at = SystemTime::now();
     if invocation.scenario == Scenario::DeviceUnauthorized {
         wait_until_later_canonical_second(cleanup_completed_at);
@@ -1745,8 +1852,9 @@ fn reviewed_plan(
     let root = invocation.contract.destination_root.trim_end_matches('/');
     let mut steps = Vec::new();
     let (first_destination, second_destination) = run_scope_paths(invocation);
-    let first_source = low_storage_host_payload
-        .map(Path::to_path_buf)
+    let first_source = active_stimulus
+        .map(|stimulus| stimulus.host_source_path.clone())
+        .or_else(|| low_storage_host_payload.map(Path::to_path_buf))
         .unwrap_or_else(|| fixture_root().join("corpus/source/single-file.txt"));
     let second_source = fixture_root().join("corpus/source/nested/alpha/one.txt");
     if !invocation.scenario.is_root() {
@@ -1773,17 +1881,10 @@ fn reviewed_plan(
         &first_destination,
     );
     if let Some(active_stimulus) = active_stimulus {
+        assert_eq!(active_stimulus.device_destination_path, first_destination);
         assert!(active_stimulus
-            .source_path
-            .starts_with(&invocation.run_scope));
-        first.params.insert(
-            "source".to_string(),
-            literal(runtime_value(
-                "file_path",
-                json!(active_stimulus.source_path.clone()),
-                Some("device"),
-            )),
-        );
+            .host_source_path
+            .starts_with(active_stimulus.host_workspace.path()));
     }
     first.verify = vec![condition(
         "path_exists",
@@ -1880,6 +1981,7 @@ fn run_reviewed_plan(
     invocation: &Invocation,
     plan: ExecutionPlan,
     facts: &DeviceFacts,
+    active_stimulus: Option<&ActiveStimulus>,
 ) -> ReviewedPlanObservation {
     let action_seen = Arc::new(AtomicBool::new(false));
     let checkpoint_failed = Arc::new(AtomicBool::new(false));
@@ -1964,12 +2066,16 @@ fn run_reviewed_plan(
         ),
         None => RealAdbDevice::new("adb", Some(facts.serial.clone())),
     };
+    let mut read_only_roots = vec![fixture_root()];
+    if let Some(stimulus) = active_stimulus {
+        read_only_roots.push(stimulus.host_workspace.path().to_path_buf());
+    }
     let runner = ExecutorRunner::new(ExecutorAdapters::with_device_and_sandbox_roots(
         device,
         sandbox.path().join("runtime"),
         sandbox.path().join("cache"),
         sandbox.path().join("device"),
-        vec![fixture_root()],
+        read_only_roots,
         false,
     ));
     let mut runner = runner;
@@ -1989,7 +2095,7 @@ fn run_reviewed_plan(
                         "active scenario did not install the exact-child observer".to_string()
                     })?;
                     let operation_id = observer
-                        .wait_for_mutation(ProcessOperation::DeviceCopy, SENTINEL_TIMEOUT)?;
+                        .wait_for_mutation(active_process_operation(scenario), SENTINEL_TIMEOUT)?;
                     let operation_started = watcher_sentinel
                         .marker_time("operation-started")
                         .map_err(|_| {
@@ -2237,9 +2343,14 @@ fn run_reviewed_plan(
             released_at_unix: None,
         });
     let action_time = action_time.lock().ok().and_then(|slot| *slot);
-    let active_process = process_observer
-        .as_ref()
-        .and_then(|observer| active_process_evidence(&observer.events(), action_time, &run_id));
+    let active_process = process_observer.as_ref().and_then(|observer| {
+        active_process_evidence(
+            &observer.events(),
+            action_time,
+            &run_id,
+            active_process_operation(scenario),
+        )
+    });
     let checkpoint_error = if checkpoint_failed.load(Ordering::SeqCst) {
         Some("bounded operator checkpoint was missing or aborted".to_string())
     } else if invocation.scenario.is_active_checkpoint() && !action_seen.load(Ordering::SeqCst) {
@@ -2437,10 +2548,24 @@ fn spawn_authorization_transition_observer(
     })
 }
 
+fn cleanup_active_host_stimulus(stimulus: &ActiveStimulus) -> Vec<String> {
+    let mut residual = Vec::new();
+    if fs::remove_file(&stimulus.host_source_path).is_err() && stimulus.host_source_path.exists() {
+        residual.push("fixture-owned active host payload remained".to_string());
+    }
+    if fs::remove_dir(stimulus.host_workspace.path()).is_err()
+        && stimulus.host_workspace.path().exists()
+    {
+        residual.push("fixture-owned active host workspace remained".to_string());
+    }
+    residual
+}
+
 fn cleanup_fixture(
     invocation: &Invocation,
     facts: &DeviceFacts,
     low_storage_host_payload: Option<&Path>,
+    active_stimulus: Option<&ActiveStimulus>,
 ) -> (String, Vec<String>) {
     let (first, second) = run_scope_paths(invocation);
     let mut residual = Vec::new();
@@ -2463,11 +2588,8 @@ fn cleanup_fixture(
         remove_owned_path(&path, &mut residual);
     }
     if invocation.scenario.supports_active_process_capture() {
-        let (calibration_source, calibration_destination, active_source) =
-            active_stimulus_paths(invocation);
-        for path in [calibration_destination, active_source, calibration_source] {
-            remove_owned_path(&path, &mut residual);
-        }
+        let (calibration_destination, _) = active_stimulus_device_paths(invocation);
+        remove_owned_path(&calibration_destination, &mut residual);
     }
     if invocation.scenario == Scenario::LowStorage {
         remove_owned_path(
@@ -2501,6 +2623,9 @@ fn cleanup_fixture(
         if fs::remove_file(path).is_err() && path.exists() {
             residual.push("fixture-owned host payload remained".to_string());
         }
+    }
+    if let Some(stimulus) = active_stimulus {
+        residual.extend(cleanup_active_host_stimulus(stimulus));
     }
     let outcome = if residual.is_empty() {
         "succeeded"
@@ -2712,9 +2837,26 @@ fn evidence_record(inputs: EvidenceInputs<'_>) -> Value {
         ]);
     }
     if invocation.scenario.supports_active_process_capture() {
-        let (calibration_source, calibration_destination, active_source) =
-            active_stimulus_paths(invocation);
-        owned_paths.extend([calibration_source, calibration_destination, active_source]);
+        let (calibration_destination, _) = active_stimulus_device_paths(invocation);
+        owned_paths.push(calibration_destination);
+    }
+    if let Some(stimulus) = active_stimulus {
+        owned_paths.push(
+            stimulus
+                .host_workspace
+                .path()
+                .to_string_lossy()
+                .into_owned(),
+        );
+        owned_paths.push(
+            stimulus
+                .host_workspace
+                .path()
+                .join(ACTIVE_CALIBRATION_SOURCE_FILE)
+                .to_string_lossy()
+                .into_owned(),
+        );
+        owned_paths.push(stimulus.host_source_path.to_string_lossy().into_owned());
     }
     if let Some(path) = host_payload {
         owned_paths.push(path.to_string_lossy().into_owned());
@@ -2804,7 +2946,7 @@ fn evidence_record(inputs: EvidenceInputs<'_>) -> Value {
             "requiresSentinelAction": invocation.scenario.is_active_checkpoint() || invocation.scenario.is_boundary_checkpoint() || invocation.scenario == Scenario::LowStorage,
             "storage": invocation.scenario == Scenario::LowStorage,
             "runScope": format!("run-scope-sha256:{}", digest(&invocation.run_scope)),
-            "operationClass": "device_copy",
+            "operationClass": active_operation_class(invocation.scenario),
         },
         "sentinel": sentinel,
         "storage": storage_value,
@@ -3338,58 +3480,77 @@ fn prepare_active_stimulus(
     facts: &DeviceFacts,
 ) -> Result<ActiveStimulus, String> {
     if !invocation.scenario.supports_active_process_capture() {
-        return Err("active-copy stimulus was requested for an unsupported scenario".to_string());
+        return Err(
+            "active host-push stimulus was requested for an unsupported scenario".to_string(),
+        );
     }
     let root = invocation.contract.destination_root.trim_end_matches('/');
-    let (calibration_source, calibration_destination, source_path) =
-        active_stimulus_paths(invocation);
+    let (calibration_destination, device_destination_path) =
+        active_stimulus_device_paths(invocation);
     create_run_scope(invocation, facts)?;
-    create_bounded_device_file(
-        invocation,
-        facts,
-        &calibration_source,
-        ACTIVE_CALIBRATION_KIB,
-    )?;
-    if !fixture_path_exists(invocation, facts, &calibration_source)?
-        || device_file_size_bytes(&facts.serial, &calibration_source)?
-            != ACTIVE_CALIBRATION_KIB.saturating_mul(1024)
+    if fixture_path_exists(invocation, facts, &calibration_destination)?
+        || fixture_path_exists(invocation, facts, &device_destination_path)?
     {
-        return Err("active-copy calibration source could not be verified".to_string());
+        return Err("active host-push stimulus found pre-existing fixture state".to_string());
     }
+
+    let host_workspace = tempfile::Builder::new()
+        .prefix("emuchef-phase6d6-active-")
+        .tempdir()
+        .map_err(|_| "active host workspace could not be created".to_string())?;
+    let calibration_source = host_workspace.path().join(ACTIVE_CALIBRATION_SOURCE_FILE);
+    let host_source_path = host_workspace.path().join(ACTIVE_SOURCE_FILE);
+    let seed = active_host_seed(&invocation.run_scope);
+    write_active_host_fixture(
+        &calibration_source,
+        ACTIVE_CALIBRATION_KIB.saturating_mul(1024),
+        seed,
+    )?;
+
+    let mut calibration_device = RealAdbDevice::new("adb", Some(facts.serial.clone()));
     let calibration_started = Instant::now();
-    device_mutation(
-        invocation,
-        facts,
-        &format!("cp {calibration_source} {calibration_destination}"),
-    )?;
+    let push_result = calibration_device.push(&calibration_source, &calibration_destination, false);
     let elapsed_ms = u64::try_from(calibration_started.elapsed().as_millis())
-        .map_err(|_| "active-copy calibration duration was not representable".to_string())?;
-    device_mutation(
-        invocation,
-        facts,
-        &format!("rm -f {calibration_destination}"),
-    )?;
+        .map_err(|_| "active host-push calibration duration was not representable".to_string())?;
+    let destination_verified = push_result.is_ok()
+        && device_file_size_bytes(&facts.serial, &calibration_destination).ok()
+            == Some(ACTIVE_CALIBRATION_KIB.saturating_mul(1024));
+    let device_cleanup = calibration_device.remove_file(&calibration_destination);
+    let host_cleanup = fs::remove_file(&calibration_source);
+    if push_result.is_err() {
+        return Err("active host-push calibration failed".to_string());
+    }
+    if !destination_verified {
+        return Err("active host-push calibration destination could not be verified".to_string());
+    }
+    if device_cleanup.is_err()
+        || fixture_path_exists(invocation, facts, &calibration_destination).unwrap_or(true)
+        || (host_cleanup.is_err() && calibration_source.exists())
+    {
+        return Err("active host-push calibration cleanup failed".to_string());
+    }
+
     let derived = derive_active_stimulus(ACTIVE_CALIBRATION_KIB, elapsed_ms)?;
     let free_kib = free_space_kib(&facts.serial, root)?;
     let required_kib = derived
         .payload_kib
-        .checked_mul(2)
-        .and_then(|value| value.checked_add(ACTIVE_CLEANUP_HEADROOM_KIB))
-        .ok_or_else(|| "active-copy free-space requirement overflowed".to_string())?;
+        .checked_add(ACTIVE_CLEANUP_HEADROOM_KIB)
+        .ok_or_else(|| "active host-push free-space requirement overflowed".to_string())?;
     if free_kib < required_kib {
         return Err(format!(
-            "active-copy qualification requires at least {required_kib} KiB free after calibration"
+            "active host-push qualification requires at least {required_kib} KiB free after calibration"
         ));
     }
-    create_bounded_device_file(invocation, facts, &source_path, derived.payload_kib)?;
-    if !fixture_path_exists(invocation, facts, &source_path)?
-        || device_file_size_bytes(&facts.serial, &source_path)?
-            != derived.payload_kib.saturating_mul(1024)
-    {
-        return Err("active-copy source could not be verified".to_string());
-    }
+    write_active_host_fixture(
+        &host_source_path,
+        derived.payload_kib.saturating_mul(1024),
+        seed ^ 0xA5A5_5A5A_D3C4_B2E1,
+    )?;
+
     Ok(ActiveStimulus {
-        source_path,
+        host_workspace,
+        host_source_path,
+        device_destination_path,
         payload_kib: derived.payload_kib,
         predicted_ms: derived.predicted_ms,
     })
@@ -3940,7 +4101,7 @@ mod tests {
             "activeProcess": {
                 "runId": run_scope,
                 "operationId": format!("operation-sha256:{}", "d".repeat(64)),
-                "operationClass": "device_copy",
+                "operationClass": "host_push",
                 "childIdentity": format!("child-sha256:{}", "e".repeat(64)),
                 "spawnedAt": "unix:1",
                 "mutationStartedAt": "unix:2",
@@ -3970,11 +4131,98 @@ mod tests {
     }
 
     #[test]
+    fn active_host_fixture_is_exact_deterministic_and_nontrivial() {
+        let temp = tempfile::tempdir().expect("fixture tempdir should be created");
+        let first = temp.path().join("first.bin");
+        let second = temp.path().join("second.bin");
+        write_active_host_fixture(&first, 131_089, 7).expect("first fixture should be generated");
+        write_active_host_fixture(&second, 131_089, 7).expect("second fixture should be generated");
+        let first_bytes = fs::read(&first).expect("first fixture should be readable");
+        let second_bytes = fs::read(&second).expect("second fixture should be readable");
+        assert_eq!(first_bytes, second_bytes);
+        assert_eq!(first_bytes.len(), 131_089);
+        assert!(first_bytes.iter().any(|byte| *byte != 0));
+        assert_ne!(&first_bytes[..64], &first_bytes[64..128]);
+    }
+
+    #[test]
+    fn active_host_fixture_removes_partial_file_after_write_failure() {
+        let temp = tempfile::tempdir().expect("fixture tempdir should be created");
+        let path = temp.path().join("partial.bin");
+        let result = write_active_host_fixture_with(&path, 4096, 9, |file, _, _| {
+            file.write_all(&[1_u8; 32])?;
+            Err(io::Error::other("injected fixture write failure"))
+        });
+        assert!(result.is_err());
+        assert!(!path.exists());
+    }
+
+    #[test]
+    fn active_host_fixture_changes_with_run_seed() {
+        let temp = tempfile::tempdir().expect("fixture tempdir should be created");
+        let first = temp.path().join("first.bin");
+        let second = temp.path().join("second.bin");
+        write_active_host_fixture(&first, 4096, 1).expect("first fixture should be generated");
+        write_active_host_fixture(&second, 4096, 2).expect("second fixture should be generated");
+        assert_ne!(
+            fs::read(first).expect("first fixture should be readable"),
+            fs::read(second).expect("second fixture should be readable")
+        );
+    }
+
+    #[test]
+    fn active_host_cleanup_removes_only_the_run_owned_workspace() {
+        let parent = tempfile::tempdir().expect("parent tempdir should be created");
+        let sibling = parent.path().join("sibling.txt");
+        fs::write(&sibling, b"preserve").expect("sibling should be created");
+        let workspace = tempfile::Builder::new()
+            .prefix("active-workspace-")
+            .tempdir_in(parent.path())
+            .expect("active workspace should be created");
+        let source = workspace.path().join(ACTIVE_SOURCE_FILE);
+        fs::write(&source, b"payload").expect("active source should be created");
+        let workspace_path = workspace.path().to_path_buf();
+        let stimulus = ActiveStimulus {
+            host_workspace: workspace,
+            host_source_path: source,
+            device_destination_path: "/fixture/owned/destination".to_string(),
+            payload_kib: 1,
+            predicted_ms: 1,
+        };
+
+        assert!(cleanup_active_host_stimulus(&stimulus).is_empty());
+        assert!(!workspace_path.exists());
+        assert_eq!(fs::read(&sibling).unwrap(), b"preserve");
+    }
+
+    #[test]
+    fn active_scenarios_use_the_reviewed_host_push_operation() {
+        for scenario in [
+            Scenario::CancellationActive,
+            Scenario::UsbDisconnectActive,
+            Scenario::DeviceOffline,
+            Scenario::DeviceUnauthorized,
+        ] {
+            assert_eq!(active_process_operation(scenario), ProcessOperation::Push);
+            assert_eq!(active_operation_class(scenario), "host_push");
+        }
+        assert_eq!(
+            active_process_operation(Scenario::OperationTimeout),
+            ProcessOperation::DeviceCopy
+        );
+        assert_eq!(
+            active_operation_class(Scenario::OperationTimeout),
+            "device_copy"
+        );
+    }
+
+    #[test]
     fn active_stimulus_derivation_targets_the_bounded_operator_window() {
-        let derived = derive_active_stimulus(ACTIVE_CALIBRATION_KIB, 1_000)
-            .expect("bounded calibration should derive a payload");
+        let derived = derive_active_stimulus(ACTIVE_CALIBRATION_KIB, 6_880)
+            .expect("measured host-push calibration should derive a payload");
+        assert!((1_100 * 1024..=1_130 * 1024).contains(&derived.payload_kib));
+        assert!((29_000..=31_000).contains(&derived.predicted_ms));
         assert!((ACTIVE_MIN_KIB..=ACTIVE_MAX_KIB).contains(&derived.payload_kib));
-        assert!((ACTIVE_MIN_PREDICTED_MS..=ACTIVE_MAX_PREDICTED_MS).contains(&derived.predicted_ms));
     }
 
     #[test]
@@ -3984,30 +4232,30 @@ mod tests {
     }
 
     #[test]
-    fn exact_child_capture_serializes_the_existing_active_process_schema() {
+    fn exact_push_child_capture_serializes_host_push_and_rejects_relabeling() {
         let operation_id = OwnedProcessOperationId::from_raw_for_test(7);
         let base = UNIX_EPOCH + Duration::from_secs(10);
         let events = vec![
             OwnedProcessLifecycleEvent::Spawned {
                 operation_id,
-                operation: ProcessOperation::DeviceCopy,
+                operation: ProcessOperation::Push,
                 at: base,
             },
             OwnedProcessLifecycleEvent::MutationStarted {
                 operation_id,
-                operation: ProcessOperation::DeviceCopy,
+                operation: ProcessOperation::Push,
                 at: base,
             },
             OwnedProcessLifecycleEvent::LivenessSampled {
                 operation_id,
-                operation: ProcessOperation::DeviceCopy,
+                operation: ProcessOperation::Push,
                 at: base + Duration::from_secs(1),
                 alive: Some(true),
                 terminal_reported: false,
             },
             OwnedProcessLifecycleEvent::Terminal {
                 operation_id,
-                operation: ProcessOperation::DeviceCopy,
+                operation: ProcessOperation::Push,
                 at: base + Duration::from_secs(3),
             },
         ];
@@ -4015,13 +4263,21 @@ mod tests {
             &events,
             Some(base + Duration::from_secs(2)),
             "run-scope-test",
+            ProcessOperation::Push,
         )
-        .expect("complete exact-child evidence should serialize");
+        .expect("complete exact push-child evidence should serialize");
 
         assert_eq!(evidence["runId"], "run-scope-test");
-        assert_eq!(evidence["operationClass"], "device_copy");
+        assert_eq!(evidence["operationClass"], "host_push");
         assert_eq!(evidence["aliveImmediatelyBeforeAction"], true);
         assert_eq!(evidence["terminalReportedBeforeAction"], false);
+        assert!(active_process_evidence(
+            &events,
+            Some(base + Duration::from_secs(2)),
+            "run-scope-test",
+            ProcessOperation::DeviceCopy,
+        )
+        .is_none());
     }
 
     #[test]
@@ -4056,6 +4312,7 @@ mod tests {
             &events,
             Some(base + Duration::from_millis(500)),
             "run-scope-test",
+            ProcessOperation::DeviceCopy,
         )
         .is_none());
     }

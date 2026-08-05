@@ -359,7 +359,8 @@ export function validateEvidenceRecord(record) {
   delete facts.operationClass;
   if (!equalJson(facts, contract.facts)) fail("scenario facts do not match scenario contract");
   assertString(record.scenarioFacts.runScope, "scenarioFacts.runScope", /^run-scope-sha256:[0-9a-f]{64}$/);
-  if (record.scenarioFacts.operationClass !== "device_copy") fail("scenario operation class is not the reviewed device-copy operation");
+  const expectedOperationClass = contract.activeProcess?.operationClass ?? "device_copy";
+  if (record.scenarioFacts.operationClass !== expectedOperationClass) fail("scenario operation class does not match the reviewed scenario contract");
   if (record.scenarioFacts.rootShell !== (record.root !== null)) fail("root fact does not match root evidence");
   if (passingRecord) {
     if (!contract.allowedIssueCodes.some((code) => code === record.observedIssueCode)) fail("observed issue code is not allowed by the scenario contract");

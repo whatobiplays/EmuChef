@@ -72,6 +72,17 @@ test("failed attempts remain auditable and do not block a later passing repetiti
   );
 });
 
+test("supported active scenarios require host-push evidence without changing timeout", () => {
+  for (const scenario of [
+    "cancellation_active",
+    "usb_disconnect_active",
+    "device_offline",
+    "device_unauthorized",
+  ]) {
+    assert.equal(scenarioContractFor(scenario).activeProcess.operationClass, "host_push");
+  }
+});
+
 test("operation timeout requires exact live target-child evidence", () => {
   const contract = scenarioContractFor("operation_timeout");
   assert.deepEqual(contract.activeProcess, {

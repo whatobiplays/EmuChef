@@ -7,7 +7,7 @@
   "runId": "physical-run-sha256:0000000000000000000000000000000000000000000000000000000000000000",
   "evidencePath": "docs/testing/phase-6d6/evidence/template.json",
   "tracePath": "docs/testing/phase-6d6/evidence/traces/template.json",
-  "recordDigest": "sha256:4f2d0f67483b328761f32e0f919894f33e0da29b218709a083f406be824b3403",
+  "recordDigest": "sha256:f7e625d1b437ad6d974c127c9996841fef7eb43cb7eaec5d59a92e4c4aff9e01",
   "traceDigest": "sha256:27510bf40f2eaeabce8e1f7f4a0d9dcf92d7263e1f6745f5f28c4806d384f802",
   "trace": { "events": ["template-only"] },
   "host": { "os": "unreported", "version": "unreported", "architecture": "unreported" },
@@ -55,7 +55,7 @@
   "activeProcess": {
     "runId": "run-scope-sha256:0000000000000000000000000000000000000000000000000000000000000000",
     "operationId": "operation-sha256:0000000000000000000000000000000000000000000000000000000000000000",
-    "operationClass": "device_copy",
+    "operationClass": "host_push",
     "childIdentity": "child-sha256:0000000000000000000000000000000000000000000000000000000000000000",
     "spawnedAt": "unix:1",
     "mutationStartedAt": "unix:1",
@@ -80,7 +80,7 @@
     "authorityInvalidation": "allowed",
     "requiresActiveSlotReleased": true,
     "slotObservation": {"source": "production-execution-session-slot", "exactRunScope": true},
-    "activeProcess": {"required": true, "operationClass": "device_copy", "actionMustPrecedeTerminal": true, "exactRunBinding": true},
+    "activeProcess": {"required": true, "operationClass": "host_push", "actionMustPrecedeTerminal": true, "exactRunBinding": true},
     "activeCancellation": {
       "required": true,
       "requestPhase": "in_flight",
@@ -105,7 +105,7 @@
     "requiresSentinelAction": true,
     "storage": false,
     "runScope": "run-scope-sha256:0000000000000000000000000000000000000000000000000000000000000000",
-    "operationClass": "device_copy"
+    "operationClass": "host_push"
   },
   "sentinel": {
     "sentinelId": "sentinel-sha256:0000000000000000000000000000000000000000000000000000000000000000",

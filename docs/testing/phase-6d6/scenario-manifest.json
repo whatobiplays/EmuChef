@@ -105,7 +105,7 @@
         "terminalBehavior": "active_operation_completes_then_later_work_not_attempted",
         "disallowedIssueCodes": ["device_transport_lost", "device_offline", "device_unauthorized", "operation_timed_out", "device_identity_changed", "device_storage_exhausted"]
       },
-      "activeProcess": {"required": true, "operationClass": "device_copy", "actionMustPrecedeTerminal": true, "exactRunBinding": true},
+      "activeProcess": {"required": true, "operationClass": "host_push", "actionMustPrecedeTerminal": true, "exactRunBinding": true},
       "cleanupOutcome": "succeeded",
       "residualOutcome": "clean",
       "facts": {"rootShell": false, "activeCheckpoint": true, "boundaryCheckpoint": false, "requiresSentinelAction": true, "storage": false}
@@ -138,7 +138,7 @@
       "authorityInvalidation": "required",
       "requiresActiveSlotReleased": true,
       "slotObservation": {"source": "production-execution-session-slot", "exactRunScope": true},
-      "activeProcess": {"required": true, "operationClass": "device_copy", "actionMustPrecedeTerminal": true, "exactRunBinding": true},
+      "activeProcess": {"required": true, "operationClass": "host_push", "actionMustPrecedeTerminal": true, "exactRunBinding": true},
       "cleanupOutcome": "succeeded",
       "residualOutcome": "clean",
       "facts": {"rootShell": false, "activeCheckpoint": true, "boundaryCheckpoint": false, "requiresSentinelAction": true, "storage": false}
@@ -171,7 +171,7 @@
       "authorityInvalidation": "required",
       "requiresActiveSlotReleased": true,
       "slotObservation": {"source": "production-execution-session-slot", "exactRunScope": true},
-      "activeProcess": {"required": true, "operationClass": "device_copy", "actionMustPrecedeTerminal": true, "exactRunBinding": true},
+      "activeProcess": {"required": true, "operationClass": "host_push", "actionMustPrecedeTerminal": true, "exactRunBinding": true},
       "cleanupOutcome": "succeeded",
       "residualOutcome": "clean",
       "facts": {"rootShell": false, "activeCheckpoint": true, "boundaryCheckpoint": false, "requiresSentinelAction": true, "storage": false}
@@ -188,7 +188,7 @@
       "authorityInvalidation": "required",
       "requiresActiveSlotReleased": true,
       "slotObservation": {"source": "production-execution-session-slot", "exactRunScope": true},
-      "activeProcess": {"required": true, "operationClass": "device_copy", "actionMustPrecedeTerminal": true, "exactRunBinding": true},
+      "activeProcess": {"required": true, "operationClass": "host_push", "actionMustPrecedeTerminal": true, "exactRunBinding": true},
       "authorizationTransition": {
         "required": true,
         "initialState": "authorized",
