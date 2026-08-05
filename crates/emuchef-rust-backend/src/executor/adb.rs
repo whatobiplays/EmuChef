@@ -1067,6 +1067,15 @@ fn classify_completed_storage(
 }
 
 fn classify_transport_line(line: &str) -> Option<AdbCommandError> {
+    if let Some(serial) = line
+        .strip_prefix("adb: device '")
+        .and_then(|value| value.strip_suffix("' not found"))
+    {
+        if !serial.is_empty() && !serial.contains('\'') {
+            return Some(AdbCommandError::DeviceDisconnected);
+        }
+    }
+
     let adb_error = line
         .strip_prefix("adb: error:")
         .or_else(|| line.strip_prefix("error:"))
@@ -1367,6 +1376,11 @@ mod tests {
             (
                 "",
                 "error: device 'reviewed-serial' not found",
+                AdbCommandError::DeviceDisconnected,
+            ),
+            (
+                "",
+                "adb: device 'reviewed-serial' not found",
                 AdbCommandError::DeviceDisconnected,
             ),
             (
