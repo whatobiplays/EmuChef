@@ -21,8 +21,8 @@ use sha2::{Digest, Sha256};
 
 use super::{
     adb_inventory, adb_path_exists, adb_query, condition, copy_step, fixture_apk_checksum,
-    fixture_root, literal, load_contract, optional_env, runtime_value, validate_owned_destination,
-    validate_package, FIXTURE_PACKAGE,
+    fixture_root, load_contract, optional_env, validate_owned_destination, validate_package,
+    FIXTURE_PACKAGE,
 };
 use crate::execution_session::ExecutionSessionManager;
 use crate::execution_session::ExecutionSlotObservation;

@@ -1100,7 +1100,11 @@ fn classify_transport_line(line: &str) -> Option<AdbCommandError> {
         if body == "transport error" {
             return Some(AdbCommandError::TransportFailure);
         }
-        if body == "closed" || body.starts_with("failed to read response from device") {
+        if body == "closed"
+            || body.starts_with("failed to read response from device")
+            || body == "failed to read copy response"
+            || body.starts_with("failed to read copy response:")
+        {
             return Some(AdbCommandError::TransportFailure);
         }
     }
@@ -1388,6 +1392,11 @@ mod tests {
             (
                 "error: failed to read response from device",
                 "",
+                AdbCommandError::TransportFailure,
+            ),
+            (
+                "",
+                "adb: error: failed to read copy response: EOF",
                 AdbCommandError::TransportFailure,
             ),
             ("error: closed", "", AdbCommandError::TransportFailure),
