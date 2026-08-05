@@ -214,7 +214,10 @@ impl Scenario {
     const fn requires_terminal_recovery(self) -> bool {
         matches!(
             self,
-            Self::UsbDisconnectActive | Self::DeviceOffline | Self::DeviceUnauthorized
+            Self::UsbDisconnectActive
+                | Self::UsbDisconnectBoundary
+                | Self::DeviceOffline
+                | Self::DeviceUnauthorized
         )
     }
 
@@ -3896,6 +3899,13 @@ mod tests {
             "phase6d6/cancellation_boundary/first",
             &event,
         ));
+    }
+
+    #[test]
+    fn usb_disconnect_boundary_waits_for_terminal_recovery_before_cleanup() {
+        assert!(Scenario::UsbDisconnectActive.requires_terminal_recovery());
+        assert!(Scenario::UsbDisconnectBoundary.requires_terminal_recovery());
+        assert!(!Scenario::CancellationBoundary.requires_terminal_recovery());
     }
 
     #[test]

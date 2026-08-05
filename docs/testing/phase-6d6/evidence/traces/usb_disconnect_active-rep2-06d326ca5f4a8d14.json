@@ -1,0 +1,44 @@
+{
+  "runId": "physical-run-sha256:06d326ca5f4a8d145f158c1ebcfe718192a215700cf01f494dcef954407f36ad",
+  "scenario": "usb_disconnect_active",
+  "repetition": 2,
+  "sentinel": {
+    "sentinelId": "sentinel-sha256:4ccdd5300a8a849d220ec50b41ab94373a964524ee0aa2c58c087737960f607d",
+    "nonce": "nonce-sha256:cc7f75e750de2ea971980fd05186398598a0ee8ec92eab4f8ef325c623edde3d",
+    "runId": "physical-run-sha256:06d326ca5f4a8d145f158c1ebcfe718192a215700cf01f494dcef954407f36ad",
+    "scenario": "usb_disconnect_active",
+    "repetition": 2,
+    "armedAt": "unix:1785920932",
+    "operationStartedAt": "unix:1785920943",
+    "boundaryReadyAt": null,
+    "operatorActionAt": "unix:1785920944",
+    "operationFinishedAt": "unix:1785920947",
+    "cleanupReadyAt": "unix:1785920951",
+    "sleepRequestedAt": null,
+    "sleepEnteredAt": null,
+    "wakeAt": null,
+    "chronologyValid": true,
+    "uniqueMarkers": true
+  },
+  "slot": {
+    "runId": "run-scope-sha256:e215949a667f23e7f84bb4fefa795e7b41cd44e6f66c32a559ab5956721c5f0e",
+    "executionId": "execution-sha256:bc192c9f2031cb714dafde1c299eb700cc96412f9855c3f9ee8da0084fce0d21",
+    "acquired": true,
+    "released": true,
+    "acquiredAt": "unix:1785920943",
+    "terminalCleanupAt": "unix:1785920947",
+    "releasedAt": "unix:1785920947"
+  },
+  "terminal": {
+    "outcome": "passed",
+    "issueCode": "device_transport_lost",
+    "stepStates": {
+      "executed": 0,
+      "skipped": 0,
+      "failed": 1,
+      "cancelled": 0,
+      "blocked": 0,
+      "notAttempted": 1
+    }
+  }
+}
