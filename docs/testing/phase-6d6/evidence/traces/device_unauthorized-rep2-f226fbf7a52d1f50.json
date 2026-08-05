@@ -1,0 +1,44 @@
+{
+  "runId": "physical-run-sha256:f226fbf7a52d1f50c0470eff6bc22e4018d44edacda4401e2dd1f58cef18754b",
+  "scenario": "device_unauthorized",
+  "repetition": 2,
+  "sentinel": {
+    "sentinelId": "sentinel-sha256:99498b4e7e9538976e694ce94305482e3f6e6e54244d32884d9596d2cdedd6a1",
+    "nonce": "nonce-sha256:ce4bd444ce570b15da480144738981d65ed80238b53fc852827ca2355f77bd90",
+    "runId": "physical-run-sha256:f226fbf7a52d1f50c0470eff6bc22e4018d44edacda4401e2dd1f58cef18754b",
+    "scenario": "device_unauthorized",
+    "repetition": 2,
+    "armedAt": "unix:1785932143",
+    "operationStartedAt": "unix:1785932144",
+    "boundaryReadyAt": "unix:1785932145",
+    "operatorActionAt": "unix:1785932158",
+    "operationFinishedAt": "unix:1785932145",
+    "cleanupReadyAt": "unix:1785932162",
+    "sleepRequestedAt": null,
+    "sleepEnteredAt": null,
+    "wakeAt": null,
+    "chronologyValid": true,
+    "uniqueMarkers": true
+  },
+  "slot": {
+    "runId": "run-scope-sha256:d730e89c094b9e0c9a707a78fc79f42eed78dd2cd247575ab6fb945a9412d3b7",
+    "executionId": "execution-sha256:ae52876b898bef3106ef412653e78bb12c63e8299f5f8b6c50be1d7ef72d0a72",
+    "acquired": true,
+    "released": true,
+    "acquiredAt": "unix:1785932144",
+    "terminalCleanupAt": "unix:1785932159",
+    "releasedAt": "unix:1785932159"
+  },
+  "terminal": {
+    "outcome": "passed",
+    "issueCode": "device_identity_unverified",
+    "stepStates": {
+      "executed": 1,
+      "skipped": 0,
+      "failed": 1,
+      "cancelled": 0,
+      "blocked": 0,
+      "notAttempted": 0
+    }
+  }
+}

@@ -1,0 +1,239 @@
+{
+  "schemaVersion": 1,
+  "scenario": "device_unauthorized",
+  "repetition": 2,
+  "timestamp": "unix:1785932164",
+  "commit": "af3af5f610b950f004398940f63f84847ac05e9d",
+  "host": {
+    "os": "macos",
+    "version": "26.5",
+    "architecture": "aarch64"
+  },
+  "platformToolsRevision": "Android Debug Bridge version 1.0.41",
+  "device": {
+    "identity": "serial-sha256:a362c8ca5bc90621c2883e302b00bda93d2eb6c86590de06ebdd6b95f2386dd9",
+    "model": "GT78-VN",
+    "androidVersion": "11",
+    "apiLevel": 30,
+    "abi": "arm64-v8a,armeabi-v7a,armeabi",
+    "buildFingerprint": "ARBOR/GT78-VN/GT78-VN:11/RP1A.200720.011/mp1V95182:user/release-keys"
+  },
+  "root": null,
+  "fixtureApkSha256": "8495b56d5a191904fec5162d21a61561c4782e1d00a46748fb7ee5d3c5bb5179",
+  "optIns": [
+    "EMUCHEF_RUN_REAL_ADB_TESTS=1",
+    "EMUCHEF_RUN_PHASE_6D6_PHYSICAL_TESTS=1",
+    "EMUCHEF_PHASE_6D6_SCENARIO=device_unauthorized",
+    "EMUCHEF_PHASE_6D6_REPETITION=2",
+    "EMUCHEF_TEST_DEVICE_SERIAL=selected",
+    "EMUCHEF_TEST_PACKAGE_ALLOWLIST=com.emuchef.fixture",
+    "EMUCHEF_PHASE_6D6_SENTINEL_DIR=test-owned-directory",
+    "EMUCHEF_PHASE_6D6_AUTHORIZATION_RESET=1"
+  ],
+  "command": "cargo test --manifest-path crates/emuchef-rust-backend/Cargo.toml --features real-execution physical_interruption_qualification::manual_phase_6d6_physical_interruption_qualification -- --ignored --exact",
+  "preparation": "Phase 6C fixture contract, exact serial inventory, package allowlist, destination ownership, and empty sentinel directory validated.",
+  "operatorAction": "Required bounded sentinel action was requested from the operator.",
+  "executionSuccess": false,
+  "observedIssueCode": "device_identity_unverified",
+  "stepStates": {
+    "executed": 1,
+    "skipped": 0,
+    "failed": 1,
+    "cancelled": 0,
+    "blocked": 0,
+    "notAttempted": 0
+  },
+  "partialChangesPossible": true,
+  "authorityInvalidated": true,
+  "activeSlotReleased": true,
+  "activeSlotObservation": {
+    "observed": true,
+    "acquired": true,
+    "released": true,
+    "runId": "run-scope-sha256:d730e89c094b9e0c9a707a78fc79f42eed78dd2cd247575ab6fb945a9412d3b7",
+    "executionId": "execution-sha256:ae52876b898bef3106ef412653e78bb12c63e8299f5f8b6c50be1d7ef72d0a72",
+    "acquiredAt": "unix:1785932144",
+    "terminalCleanupAt": "unix:1785932159",
+    "releasedAt": "unix:1785932159",
+    "sourceKind": "production_owned_slot",
+    "evidence": "production-execution-session-slot"
+  },
+  "activeProcess": null,
+  "activeCancellation": null,
+  "hostSleep": null,
+  "identityTransition": null,
+  "authorizationTransition": {
+    "initialState": "authorized",
+    "initialObservedAt": "unix:1785932143",
+    "operationStartedAt": "unix:1785932144",
+    "firstOperationCompletedAt": "unix:1785932145",
+    "revocationCheckpointAt": "unix:1785932151",
+    "originalDisconnectedAt": "unix:1785932152",
+    "serialAbsentFrom": "unix:1785932152",
+    "serialAbsentUntil": "unix:1785932157",
+    "reconnectedAt": "unix:1785932157",
+    "observedState": "unauthorized",
+    "observedAt": "unix:1785932157",
+    "terminalDetectedAt": "unix:1785932159",
+    "cleanupStartedAt": "unix:1785932163",
+    "cleanupCompletedAt": "unix:1785932163",
+    "issueCode": "device_identity_unverified",
+    "authorityInvalidated": true,
+    "automaticResume": false,
+    "cleanupFinalState": "authorized",
+    "finalStateObservedAt": "unix:1785932164",
+    "runId": "run-scope-sha256:d730e89c094b9e0c9a707a78fc79f42eed78dd2cd247575ab6fb945a9412d3b7",
+    "deviceScope": "serial-sha256:a362c8ca5bc90621c2883e302b00bda93d2eb6c86590de06ebdd6b95f2386dd9"
+  },
+  "scenarioContract": {
+    "expectedOutcome": "passed",
+    "expectedExecution": "failure",
+    "allowedIssueCodes": [
+      "device_unauthorized",
+      "device_identity_unverified"
+    ],
+    "allowedStepStates": [
+      {
+        "executed": 1,
+        "skipped": 0,
+        "failed": 1,
+        "cancelled": 0,
+        "blocked": 0,
+        "notAttempted": 0
+      }
+    ],
+    "partialChanges": "allowed",
+    "authorityInvalidation": "required",
+    "requiresActiveSlotReleased": true,
+    "slotObservation": {
+      "source": "production-execution-session-slot",
+      "exactRunScope": true
+    },
+    "authorizationTransition": {
+      "required": true,
+      "initialState": "authorized",
+      "revokedState": "unauthorized",
+      "terminalIssueCodes": [
+        "device_unauthorized",
+        "device_identity_unverified"
+      ],
+      "authorityInvalidated": true,
+      "automaticResume": false,
+      "initialObservationBeforeOperation": true,
+      "firstOperationCompletedBeforeRevocation": true,
+      "revocationBeforeDisconnect": true,
+      "requiresSerialAbsentInterval": true,
+      "reconnectBeforeUnauthorized": true,
+      "unauthorizedBeforeOrAtTerminal": true,
+      "terminalBeforeCleanup": true,
+      "finalStateAfterCleanup": true,
+      "exactRunAndDeviceScope": true
+    },
+    "cleanupOutcome": "succeeded",
+    "residualOutcome": "clean",
+    "facts": {
+      "rootShell": false,
+      "activeCheckpoint": false,
+      "boundaryCheckpoint": true,
+      "requiresSentinelAction": true,
+      "storage": false
+    }
+  },
+  "scenarioFacts": {
+    "rootShell": false,
+    "activeCheckpoint": false,
+    "boundaryCheckpoint": true,
+    "requiresSentinelAction": true,
+    "storage": false,
+    "runScope": "run-scope-sha256:d730e89c094b9e0c9a707a78fc79f42eed78dd2cd247575ab6fb945a9412d3b7",
+    "operationClass": "device_copy"
+  },
+  "sentinel": {
+    "sentinelId": "sentinel-sha256:99498b4e7e9538976e694ce94305482e3f6e6e54244d32884d9596d2cdedd6a1",
+    "nonce": "nonce-sha256:ce4bd444ce570b15da480144738981d65ed80238b53fc852827ca2355f77bd90",
+    "runId": "physical-run-sha256:f226fbf7a52d1f50c0470eff6bc22e4018d44edacda4401e2dd1f58cef18754b",
+    "scenario": "device_unauthorized",
+    "repetition": 2,
+    "armedAt": "unix:1785932143",
+    "operationStartedAt": "unix:1785932144",
+    "boundaryReadyAt": "unix:1785932145",
+    "operatorActionAt": "unix:1785932158",
+    "operationFinishedAt": "unix:1785932145",
+    "cleanupReadyAt": "unix:1785932162",
+    "sleepRequestedAt": null,
+    "sleepEnteredAt": null,
+    "wakeAt": null,
+    "chronologyValid": true,
+    "uniqueMarkers": true
+  },
+  "storage": null,
+  "cleanup": {
+    "command": "adb -s <selected-serial> shell rm -f <fixture-owned-path>",
+    "outcome": "succeeded",
+    "ownedPathDigests": [
+      "path-sha256:11f038863eb18ad5a8f1d5992a2faf85b815df15e65a4e3210217c6379075a0a",
+      "path-sha256:483091811e41793926b044f22141cd5da9e6cff1cb64c58e628042c7e1bdd62c"
+    ],
+    "verified": true,
+    "nonFixtureDeletion": false
+  },
+  "residualStateCheck": {
+    "outcome": "clean",
+    "residuals": []
+  },
+  "outcome": "passed",
+  "notes": [
+    "Physical qualification evidence is sanitized; raw ADB output is intentionally omitted.",
+    "The operation used the production reviewed plan and ExecutorRunner<RealAdbDevice> boundary.",
+    "operatorActionTimestampUnixSeconds=1785932158"
+  ],
+  "runId": "physical-run-sha256:f226fbf7a52d1f50c0470eff6bc22e4018d44edacda4401e2dd1f58cef18754b",
+  "evidencePath": "docs/testing/phase-6d6/evidence/device_unauthorized-rep2-f226fbf7a52d1f50.json",
+  "tracePath": "docs/testing/phase-6d6/evidence/traces/device_unauthorized-rep2-f226fbf7a52d1f50.json",
+  "recordDigest": "sha256:c5b0de2ba8fe278e5f2d8ac23cd2a68a3de98600530c7bcd6d3d6be362e190a4",
+  "traceDigest": "sha256:c3d356a2c65d69e8fddd5364d7121aa8834b6b95b9a198048816ee2417a26edb",
+  "trace": {
+    "runId": "physical-run-sha256:f226fbf7a52d1f50c0470eff6bc22e4018d44edacda4401e2dd1f58cef18754b",
+    "scenario": "device_unauthorized",
+    "repetition": 2,
+    "sentinel": {
+      "sentinelId": "sentinel-sha256:99498b4e7e9538976e694ce94305482e3f6e6e54244d32884d9596d2cdedd6a1",
+      "nonce": "nonce-sha256:ce4bd444ce570b15da480144738981d65ed80238b53fc852827ca2355f77bd90",
+      "runId": "physical-run-sha256:f226fbf7a52d1f50c0470eff6bc22e4018d44edacda4401e2dd1f58cef18754b",
+      "scenario": "device_unauthorized",
+      "repetition": 2,
+      "armedAt": "unix:1785932143",
+      "operationStartedAt": "unix:1785932144",
+      "boundaryReadyAt": "unix:1785932145",
+      "operatorActionAt": "unix:1785932158",
+      "operationFinishedAt": "unix:1785932145",
+      "cleanupReadyAt": "unix:1785932162",
+      "sleepRequestedAt": null,
+      "sleepEnteredAt": null,
+      "wakeAt": null,
+      "chronologyValid": true,
+      "uniqueMarkers": true
+    },
+    "slot": {
+      "runId": "run-scope-sha256:d730e89c094b9e0c9a707a78fc79f42eed78dd2cd247575ab6fb945a9412d3b7",
+      "executionId": "execution-sha256:ae52876b898bef3106ef412653e78bb12c63e8299f5f8b6c50be1d7ef72d0a72",
+      "acquired": true,
+      "released": true,
+      "acquiredAt": "unix:1785932144",
+      "terminalCleanupAt": "unix:1785932159",
+      "releasedAt": "unix:1785932159"
+    },
+    "terminal": {
+      "outcome": "passed",
+      "issueCode": "device_identity_unverified",
+      "stepStates": {
+        "executed": 1,
+        "skipped": 0,
+        "failed": 1,
+        "cancelled": 0,
+        "blocked": 0,
+        "notAttempted": 0
+      }
+    }
+  }
+}
