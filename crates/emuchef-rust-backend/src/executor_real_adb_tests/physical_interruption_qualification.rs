@@ -60,6 +60,7 @@ const AUTHORIZATION_RESET_OPT_IN: &str = "EMUCHEF_PHASE_6D6_AUTHORIZATION_RESET"
 const IDENTITY_REPLACEMENT_OPT_IN: &str = "EMUCHEF_PHASE_6D6_IDENTITY_REPLACEMENT";
 const HOST_SLEEP_OPT_IN: &str = "EMUCHEF_PHASE_6D6_HOST_SLEEP";
 const SENTINEL_TIMEOUT: Duration = Duration::from_secs(10 * 60);
+const SENTINEL_CONTENT_SETTLE_TIMEOUT: Duration = Duration::from_millis(250);
 const MIN_STORAGE_INITIAL_FREE_KIB: u64 = 4 * 1024 * 1024;
 const RECOVERY_RESERVE_KIB: u64 = 1024 * 1024;
 // Keep enough free blocks to remove the filler and payload before the
@@ -88,7 +89,7 @@ const ACTIVE_HOST_CHUNK_BYTES: usize = 1024 * 1024;
 const SCENARIO_MANIFEST: &str =
     include_str!("../../../../docs/testing/phase-6d6/scenario-manifest.json");
 
-/// Every mandatory physical case has two independent clean repetitions.
+/// Every supported physical scenario allows two independent clean repetitions.
 pub const SCENARIOS: [&str; 13] = [
     "cancellation_active",
     "cancellation_boundary",
@@ -104,6 +105,22 @@ pub const SCENARIOS: [&str; 13] = [
     "host_sleep_before_deadline",
     "host_sleep_after_deadline",
 ];
+
+const MANDATORY_SCENARIOS: [&str; 12] = [
+    "cancellation_active",
+    "cancellation_boundary",
+    "usb_disconnect_active",
+    "usb_disconnect_boundary",
+    "device_unauthorized",
+    "identity_stability",
+    "identity_replacement",
+    "root_revocation",
+    "operation_timeout",
+    "low_storage",
+    "host_sleep_before_deadline",
+    "host_sleep_after_deadline",
+];
+const CONDITIONAL_SCENARIOS: [&str; 1] = ["device_offline"];
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum Scenario {
@@ -259,6 +276,8 @@ fn scenario_contract(scenario: Scenario) -> ScenarioContract {
     assert_eq!(manifest.schema_version, 1);
     assert_eq!(manifest.required_repetitions, 2);
     assert_eq!(manifest.scenarios, SCENARIOS);
+    assert_eq!(manifest.mandatory_scenarios, MANDATORY_SCENARIOS);
+    assert_eq!(manifest.conditional_scenarios, CONDITIONAL_SCENARIOS);
     assert_eq!(manifest.ui_smoke_scenario, "ui_smoke_composite");
     assert_eq!(manifest.ui_smoke_required_repetitions, 2);
     assert_eq!(
@@ -977,6 +996,8 @@ struct ScenarioFactsContract {
 struct ScenarioManifest {
     schema_version: u32,
     scenarios: Vec<String>,
+    mandatory_scenarios: Vec<String>,
+    conditional_scenarios: Vec<String>,
     required_repetitions: u8,
     ui_smoke_scenario: String,
     ui_smoke_required_repetitions: u8,
@@ -1305,12 +1326,18 @@ impl Sentinel {
             }
             return Ok(None);
         }
-        let content = fs::read_to_string(&action)
-            .map_err(|_| format!("{name} sentinel could not be read"))?;
-        if content != "ack\n" {
-            return Err(format!("{name} sentinel must contain exactly 'ack'"));
+        let settle_started = Instant::now();
+        loop {
+            let content = fs::read_to_string(&action)
+                .map_err(|_| format!("{name} sentinel could not be read"))?;
+            if content == "ack\n" {
+                return self.marker_time(name).map(Some);
+            }
+            if settle_started.elapsed() >= SENTINEL_CONTENT_SETTLE_TIMEOUT {
+                return Err(format!("{name} sentinel must contain exactly 'ack'"));
+            }
+            std::thread::sleep(Duration::from_millis(10));
         }
-        self.marker_time(name).map(Some)
     }
 
     fn action_now(&self) -> Result<Option<SystemTime>, String> {
@@ -3906,6 +3933,33 @@ mod tests {
         assert!(Scenario::UsbDisconnectActive.requires_terminal_recovery());
         assert!(Scenario::UsbDisconnectBoundary.requires_terminal_recovery());
         assert!(!Scenario::CancellationBoundary.requires_terminal_recovery());
+    }
+
+    #[test]
+    fn sentinel_action_allows_an_in_progress_marker_write_to_settle() {
+        let directory = tempfile::tempdir().expect("sentinel directory should be available");
+        let sentinel = Sentinel {
+            directory: directory.path().to_path_buf(),
+        };
+        let marker = sentinel.path("cleanup-ready");
+        OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&marker)
+            .expect("the operator marker should become visible before its write completes");
+        let writer = std::thread::spawn(move || {
+            std::thread::sleep(Duration::from_millis(50));
+            fs::write(marker, "ack\n").expect("the operator marker write should complete");
+        });
+
+        assert!(sentinel
+            .named_action_now("cleanup-ready")
+            .expect("a completing marker write should be accepted")
+            .is_some());
+        writer.join().expect("operator marker writer should finish");
+        sentinel
+            .cleanup()
+            .expect("sentinel markers should clean up");
     }
 
     #[test]

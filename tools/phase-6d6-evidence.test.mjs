@@ -4,6 +4,8 @@ import test from "node:test";
 import { fileURLToPath } from "node:url";
 
 import {
+  CONDITIONAL_SCENARIOS,
+  MANDATORY_SCENARIOS,
   REQUIRED_REPETITIONS,
   SCENARIOS,
   UI_SMOKE_SCENARIO,
@@ -470,10 +472,19 @@ test("the checked-in evidence template has a current canonical digest", () => {
   assert.doesNotThrow(() => validateEvidenceRecord(template));
 });
 
-test("the mandatory matrix has thirteen scenarios and two repetitions", () => {
+test("the supported matrix partitions twelve mandatory scenarios and one conditional scenario", () => {
   assert.equal(SCENARIOS.length, 13);
+  assert.equal(MANDATORY_SCENARIOS.length, 12);
+  assert.deepEqual(CONDITIONAL_SCENARIOS, ["device_offline"]);
   assert.equal(REQUIRED_REPETITIONS, 2);
   assert.equal(new Set(SCENARIOS).size, SCENARIOS.length);
+  assert.equal(new Set(MANDATORY_SCENARIOS).size, MANDATORY_SCENARIOS.length);
+  assert.equal(new Set(CONDITIONAL_SCENARIOS).size, CONDITIONAL_SCENARIOS.length);
+  assert.deepEqual(
+    new Set([...MANDATORY_SCENARIOS, ...CONDITIONAL_SCENARIOS]),
+    new Set(SCENARIOS),
+  );
+  assert.ok(!MANDATORY_SCENARIOS.includes("device_offline"));
 });
 
 test("gate validation requires one exact scenario and all safety bindings", () => {
@@ -487,6 +498,10 @@ test("gate validation requires one exact scenario and all safety bindings", () =
     EMUCHEF_PHASE_6D6_SENTINEL_DIR: "/tmp/phase-6d6",
   };
   assert.doesNotThrow(() => validateGateEnvironment(environment));
+  assert.doesNotThrow(() => validateGateEnvironment({
+    ...environment,
+    EMUCHEF_PHASE_6D6_SCENARIO: "device_offline",
+  }));
   assert.throws(
     () => validateGateEnvironment({ ...environment, EMUCHEF_PHASE_6D6_SCENARIO: "all" }),
     /exactly one supported scenario/,
@@ -533,12 +548,17 @@ test("low-storage evidence enforces the bounded filler and cleanup headroom", ()
   );
 });
 
-test("manifest completeness remains blocked until every scenario has two passes", () => {
+test("manifest completeness requires every mandatory scenario but not conditional offline evidence", () => {
   const incomplete = validateEvidenceManifest([recordForScenario("cancellation_active", 1)]);
   assert.equal(incomplete.complete, false);
-  assert.equal(incomplete.missing.length, SCENARIOS.length * REQUIRED_REPETITIONS - 1);
+  assert.equal(
+    incomplete.missing.length,
+    MANDATORY_SCENARIOS.length * REQUIRED_REPETITIONS - 1,
+  );
+  assert.ok(!incomplete.missing.includes("device_offline:1"));
+  assert.ok(!incomplete.missing.includes("device_offline:2"));
 
-  const complete = SCENARIOS.flatMap((scenario) =>
+  const mandatory = MANDATORY_SCENARIOS.flatMap((scenario) =>
     [1, 2].map((repetition) => ({
       ...recordForScenario(scenario, repetition),
       optIns: recordForScenario(scenario, repetition).optIns.map((value) =>
@@ -550,7 +570,19 @@ test("manifest completeness remains blocked until every scenario has two passes"
       ),
     })),
   );
-  assert.equal(validateEvidenceManifest([...complete, uiSmokeRecord(1, "1"), uiSmokeRecord(2, "2")]).complete, true);
+  const uiSmoke = [uiSmokeRecord(1, "1"), uiSmokeRecord(2, "2")];
+  assert.equal(validateEvidenceManifest([...mandatory, ...uiSmoke]).complete, true);
+
+  const conditionalOffline = [1, 2].map((repetition) =>
+    recordForScenario("device_offline", repetition),
+  );
+  const withConditional = validateEvidenceManifest([
+    ...mandatory,
+    ...conditionalOffline,
+    ...uiSmoke,
+  ]);
+  assert.equal(withConditional.complete, true);
+  assert.deepEqual(withConditional.missing, []);
 });
 
 test("semantic scenario contracts accept expected failures and reject relabelled evidence", () => {
@@ -636,6 +668,7 @@ test("runbook validation requires ignored execution, sentinel timeout, and expli
     "root cleanup-ready marker uses ack",
     "sleep-requested sleep-entered wake",
     "production runner lifecycle reports in_flight; serial absence is observed",
+    "device_offline is conditional diagnostic evidence",
     "UI smoke is mandatory closure evidence",
     "cargo test --manifest-path crates/emuchef-rust-backend/Cargo.toml --features real-execution -- --ignored --exact",
     "bounded sentinel timeout: 600 seconds",

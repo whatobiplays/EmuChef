@@ -139,7 +139,15 @@ space is recorded, and the recovery capacity is restored. A reserve,
 ownership, allocation-bound, cleanup, or restoration proof that is missing
 blocks the repetition and cannot be counted as a pass.
 
-## Mandatory matrix
+## Physical scenario matrix
+
+Twelve scenarios are mandatory closure evidence. `device_offline` is
+conditional diagnostic evidence because ADB does not provide a general,
+reliable operator-controlled transition into a stable offline state. Run it
+only when a reviewed device-specific procedure can prove
+`device → offline → device`; inability to produce that transition does not
+block Phase 6D.6 closure. Never relabel disconnect, unauthorized, or ADB-server
+failure as offline evidence.
 
 | Scenario | Operator transition | Required proof |
 | --- | --- | --- |
@@ -147,7 +155,7 @@ blocks the repetition and cannot be counted as a pass.
 | `cancellation_boundary` | Wait for `boundary-ready`, then request cancellation. | Safe-boundary cancellation preserves completed evidence and leaves later work Not attempted. |
 | `usb_disconnect_active` | Wait for `active-ready`, create `operator-action`, wait 1.1–3 seconds, disconnect the selected cable, wait for `terminal-ready`, reconnect the same device, verify its exact serial is `device`, then create `cleanup-ready`. | Exact live-child binding, stable disconnected/transport issue, conservative partial state, cleanup outcome, and no automatic resume. |
 | `usb_disconnect_boundary` | Wait for `boundary-ready`, disconnect the selected cable, verify the selected serial is absent, then create `operator-action` to release the second operation while the device is disconnected. Wait for `terminal-ready`, reconnect the same device, verify its exact serial is `device`, then create `cleanup-ready`. | The first operation remains completed, the second operation fails before mutation with a typed disconnect/transport issue, no later work runs, and cleanup occurs only after explicit recovery authorization. |
-| `device_offline` | Wait for `active-ready`, create `operator-action`, wait 1.1–3 seconds, use the prepared reversible procedure to enter ADB offline, wait for `terminal-ready`, restore the same device online, verify it, then create `cleanup-ready`. | Exact live-child binding, `device_offline`, no later work, clean recovery, and a fresh qualification requirement. |
+| `device_offline` | **Conditional only.** When a reviewed reversible procedure exists, wait for `active-ready`, create `operator-action`, wait 1.1–3 seconds, enter ADB offline, wait for `terminal-ready`, restore the same device online, verify it, then create `cleanup-ready`. | Opportunistic exact live-child `device_offline` evidence remains valid and auditable, but this scenario is not required for closure. |
 | `device_unauthorized` | With the authorization-reset opt-in, wait for `active-ready`, create `operator-action`, wait 1.1–3 seconds, revoke only the selected device's debugging authorization, wait for `terminal-ready`, reauthorize the same device, verify its row is `device`, then create `cleanup-ready`. Do not reset unrelated ADB state. | Exact live-child binding plus ordered initial authorized, genuine `unauthorized`, terminal, cleanup, and final authorized observations; `device_unauthorized`; no automatic resume. |
 | `identity_stability` | Perform one controlled reconnect at `boundary-ready` with the same device. | Repeated complete identity samples remain stable and the second operation succeeds. |
 | `identity_replacement` | With explicit owner-approved hardware, disconnect the first target before attaching the same-serial replacement at `boundary-ready`. The harness polls successful ADB inventory samples and stable fingerprints, proving original attachment, serial absence, replacement attachment, and no simultaneous target. | `device_identity_changed` or `device_identity_unverified` before later mutation. If hardware is unavailable, record this exact case unqualified. |
@@ -181,11 +189,16 @@ deadline-clock observation seam, so both host-sleep scenarios remain blocked.
 
 ## Development UI smoke
 
-UI smoke is mandatory closure evidence. Preserve the 26-record physical matrix
-(13 scenarios × 2 repetitions) and add exactly two composite development-build
-UI-smoke records, one per repetition. Each composite record separately covers
-cancellation, one transport failure, root revocation, low storage, and host
-sleep/runtime loss. For every subcase record the development-build identity,
+UI smoke is mandatory closure evidence. Preserve the 24-record mandatory
+physical matrix
+(12 scenarios × 2 repetitions) and add exactly two composite development-build
+UI-smoke records, one per repetition. Conditional `device_offline` records may
+be retained in addition to that matrix but do not affect completeness. Each
+composite record separately covers cancellation, one USB-disconnect transport
+failure, root revocation, low storage, and host sleep/runtime loss. The
+transport subcase must bind to passing `usb_disconnect_active` or
+`usb_disconnect_boundary` evidence, not conditional offline evidence. For
+every subcase record the development-build identity,
 version, and digest; a unique sub-run; the physical backend run and trace
 digest; exact authored title, issue, and remediation; terminal and **Not
 attempted** projection; partial-change and authority/recovery state; available
@@ -213,8 +226,10 @@ node tools/phase-6d6-result.mjs
 node --test tools/phase-6d6-result.test.mjs
 ```
 
-Phase 6D remains **In progress** until all thirteen scenarios have two clean
+Phase 6D remains **In progress** until all twelve mandatory scenarios have two clean
 passing repetitions, both composite UI-smoke repetitions pass, the automated
-matrix passes, and any named hardware limitation has explicit owner
-acceptance. A blocked or unrun scenario is never reported as passing, and
-Phase 6E must not start from this run.
+matrix passes, and any named mandatory hardware limitation has explicit owner
+acceptance. Conditional `device_offline` evidence may remain unrun or blocked
+without preventing closure; any attempted record must still report its outcome
+truthfully. A blocked or unrun mandatory scenario is never reported as passing,
+and Phase 6E must not start from this run.

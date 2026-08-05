@@ -1,7 +1,7 @@
 # Phase 6D.6 Physical Interruption Qualification
 
 **Owner:** EmuChef proper / Shared Runtime
-**Status:** In progress. Automated contract remediation is implemented, but exact target-child and production deadline-clock observations remain fail-closed blockers for affected physical scenarios. The denied-warning Clippy gates also retain baseline diagnostics, and no physical evidence has been produced.
+**Status:** In progress. Automated contract remediation is implemented and physical evidence collection is underway, but the mandatory matrix, UI-smoke pair, and denied-warning Clippy gates remain incomplete. The validator is authoritative for accepted and missing repetitions.
 
 ## Contract
 
@@ -20,9 +20,9 @@ authorization-reset, same-serial replacement, and host-sleep cases have extra
 opt-ins. The runner lifecycle callback alone is not proof that an active
 mutation child is alive. Active interruption records require exact run,
 operation, child, spawn, mutation-start, pre-action liveness, action, and
-terminal evidence. The current physical adapter emits no such child evidence,
-so those scenarios block instead of accepting a delayed observer. Same-serial
-replacement and authorization revocation
+terminal evidence. The harness binds a production-owned observation to the
+first reviewed host `Push` and exposes `active-ready` only after sampling the
+exact child alive. Same-serial replacement and authorization revocation
 poll successful ADB inventory observations rather than treating an operator
 marker as transition evidence. Every operator checkpoint is bounded to ten
 minutes; a missing, stale, malformed, or aborted marker is blocked rather than
@@ -61,11 +61,13 @@ or an automatic resume path.
 ## Controlled physical-path harness
 
 `crates/emuchef-rust-backend/src/executor_real_adb_tests/physical_interruption_qualification.rs`
-contains one ignored entry point and the complete thirteen-case matrix:
+contains one ignored entry point supporting thirteen physical scenarios.
+Twelve are mandatory closure cases and `device_offline` is conditional
+diagnostic evidence:
 
 - cancellation during an active atomic operation and at a safe boundary;
 - USB disconnect during an operation and at a boundary;
-- real offline and unauthorized transitions;
+- a mandatory unauthorized transition and a conditional real-offline transition when a reviewed device-specific procedure exists;
 - stable identity/reconnect and same-serial replacement (replacement remains
   explicitly unqualified if appropriate hardware is unavailable);
 - root revocation between two privileged atomic commands, followed by a
@@ -95,6 +97,13 @@ or restoration blocks the repetition.
 Raw serials, paths, command output, credentials, and payloads never enter
 evidence.
 
+ADB offline is normally a transient transport initialization or failure state
+rather than a generally controllable physical condition. The harness, schema,
+and validator retain full support for truthful offline attempts, but absence of
+a reproducible `device → offline → device` procedure does not block closure.
+The two USB-disconnect scenarios provide the mandatory active and boundary
+physical transport evidence.
+
 ## Evidence contract
 
 `docs/testing/phase-6d6/evidence-schema.json` is the strict machine-readable
@@ -123,7 +132,9 @@ blocked rather than treated as timer evidence. Development-build UI smoke is a
 mandatory pair of composite records; each repetition contains cancellation,
 transport, root, storage, and host-sleep/runtime-loss subcases with distinct
 backend run/trace bindings, sub-run identities, canonical UI-state artifacts,
-artifact digests, exact authored projections, and sanitized observations.
+artifact digests, exact authored projections, and sanitized observations. The
+transport subcase must bind to a passing active or boundary USB-disconnect
+record; conditional offline evidence cannot satisfy the mandatory UI binding.
 
 Every genuine attempt must record scenario/repetition, timestamp, commit, host
 OS/version/architecture, Platform-Tools revision, sanitized identity and
@@ -133,24 +144,21 @@ action, observed execution success, the contract snapshot, scenario facts,
 sentinel chronology, observed issue code, exact step-state counts, partial-
 change possibility, authority invalidation, an observable active-slot release,
 cleanup ownership digests/outcome, residual-state result, storage reserve facts
-when applicable, outcome, and sanitized notes. A case is repeatable only after
-two clean passing records. A failed, skipped, blocked, or absent record keeps
-Phase 6D open. Failed or blocked records remain valid audit evidence when they
-truthfully report non-clean cleanup or residual state; they are never counted
-as passing repetitions.
+when applicable, outcome, and sanitized notes. Each mandatory case is complete
+only after two clean passing records. A failed, skipped, blocked, or absent
+mandatory record keeps Phase 6D open. Conditional offline records remain valid
+audit evidence but do not affect completeness. Failed or blocked records remain
+valid audit evidence when they truthfully report non-clean cleanup or residual
+state; they are never counted as passing repetitions.
 
 ## Current disposition
 
-The automated contract remediation is not yet a complete physical harness:
-active-interruption cases remain blocked until the exact target child can be
-observed safely, and host-sleep cases remain blocked until the production
-deadline clock can be sampled. The exact backend and Tauri `clippy -D warnings`
-commands also retain pre-existing findings outside the authorized Phase 6D.6
-paths. No physical device action was performed in this run because the
-required operator checkpoint, unambiguous selected hardware, safety reserve,
-and cleanup verification were not available in the execution environment.
-Therefore low-storage, host-sleep, and every physical transition in the matrix
-remain unqualified; same-serial replacement additionally requires suitable
-hardware or explicit owner acceptance. Phase 6D remains **In progress** and
-Phase 6E has not started. Signing, notarization, packaged-GUI, and release
-qualification remain outside this slice.
+Physical evidence collection is underway, but the twelve-scenario mandatory
+matrix and two UI-smoke repetitions remain incomplete. `device_offline` is
+conditional diagnostic evidence and may remain unqualified without blocking
+closure; any attempted offline record must still satisfy the full evidence
+contract. The exact backend and Tauri `clippy -D warnings` commands also retain
+pre-existing findings outside the authorized Phase 6D.6 paths. Same-serial
+replacement still requires suitable hardware or explicit owner acceptance.
+Phase 6D remains **In progress** and Phase 6E has not started. Signing,
+notarization, packaged-GUI, and release qualification remain outside this slice.

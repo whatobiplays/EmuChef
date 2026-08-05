@@ -15,6 +15,21 @@
     "host_sleep_before_deadline",
     "host_sleep_after_deadline"
   ],
+  "mandatoryScenarios": [
+    "cancellation_active",
+    "cancellation_boundary",
+    "usb_disconnect_active",
+    "usb_disconnect_boundary",
+    "device_unauthorized",
+    "identity_stability",
+    "identity_replacement",
+    "root_revocation",
+    "operation_timeout",
+    "low_storage",
+    "host_sleep_before_deadline",
+    "host_sleep_after_deadline"
+  ],
+  "conditionalScenarios": ["device_offline"],
   "requiredRepetitions": 2,
   "uiSmokeScenario": "ui_smoke_composite",
   "uiSmokeRequiredRepetitions": 2,

@@ -108,6 +108,10 @@ test("UI smoke binding requires a passing matching physical scenario and issue",
     observedIssueCode: "device_transport_lost",
   };
   assert.doesNotThrow(() => validateUiBackendBinding(subcase, physical));
+  assert.doesNotThrow(() => validateUiBackendBinding(subcase, {
+    ...physical,
+    scenario: "usb_disconnect_boundary",
+  }));
   assert.throws(
     () => validateUiBackendBinding(subcase, { ...physical, outcome: "failed" }),
     /passing physical backend record/,
@@ -119,5 +123,14 @@ test("UI smoke binding requires a passing matching physical scenario and issue",
   assert.throws(
     () => validateUiBackendBinding(subcase, { ...physical, observedIssueCode: "device_offline" }),
     /issue code does not match/,
+  );
+  const offlineSubcase = { ...subcase, backendIssueCode: "device_offline" };
+  assert.throws(
+    () => validateUiBackendBinding(offlineSubcase, {
+      ...physical,
+      scenario: "device_offline",
+      observedIssueCode: "device_offline",
+    }),
+    /wrong physical scenario category/,
   );
 });

@@ -6,7 +6,7 @@
  * The validator deliberately treats missing physical records as an incomplete
  * qualification rather than as an error.  CI can therefore verify the gates,
  * schema, sanitization, and runbook without touching ADB; only a complete
- * matrix of two passing repetitions is allowed to report `complete: true`.
+ * mandatory matrix of two passing repetitions is allowed to report `complete: true`.
  */
 import { existsSync, readdirSync, readFileSync } from "node:fs";
 import { createHash } from "node:crypto";
@@ -18,6 +18,8 @@ const CHECKED_IN_MANIFEST = JSON.parse(readFileSync(
   "utf8",
 ));
 export const SCENARIOS = CHECKED_IN_MANIFEST.scenarios;
+export const MANDATORY_SCENARIOS = CHECKED_IN_MANIFEST.mandatoryScenarios;
+export const CONDITIONAL_SCENARIOS = CHECKED_IN_MANIFEST.conditionalScenarios;
 export const REQUIRED_REPETITIONS = CHECKED_IN_MANIFEST.requiredRepetitions;
 export const SCENARIO_CONTRACTS = CHECKED_IN_MANIFEST.scenarioContracts;
 export const UI_SMOKE_SCENARIO = CHECKED_IN_MANIFEST.uiSmokeScenario;
@@ -166,7 +168,7 @@ function requiredScenarioOptIns(scenario) {
 
 const UI_SMOKE_ISSUES = {
   cancellation: new Set([null, "step_execution_failed"]),
-  transport: new Set(["device_transport_lost", "device_disconnected", "device_offline"]),
+  transport: new Set(["device_transport_lost"]),
   root: new Set(["root_authority_revoked", "root_authority_unverified"]),
   storage: new Set(["device_storage_exhausted"]),
   host_sleep: new Set(["operation_timed_out", "runtime_session_lost"]),
@@ -174,7 +176,7 @@ const UI_SMOKE_ISSUES = {
 
 const UI_SMOKE_PHYSICAL_SCENARIOS = {
   cancellation: new Set(["cancellation_active", "cancellation_boundary"]),
-  transport: new Set(["usb_disconnect_active", "usb_disconnect_boundary", "device_offline"]),
+  transport: new Set(["usb_disconnect_active", "usb_disconnect_boundary"]),
   root: new Set(["root_revocation"]),
   storage: new Set(["low_storage"]),
   host_sleep: new Set(["host_sleep_before_deadline", "host_sleep_after_deadline"]),
@@ -292,7 +294,7 @@ export function validateGateEnvironment(environment) {
 export function validateEvidenceRecord(record) {
   assertKeys(record, REQUIRED_TOP_LEVEL_FIELDS, "evidence record");
   if (record.schemaVersion !== 1) fail("schemaVersion must be 1");
-  if (!SCENARIOS.includes(record.scenario)) fail("evidence scenario is not in the mandatory matrix");
+  if (!SCENARIOS.includes(record.scenario)) fail("evidence scenario is not in the supported scenario set");
   if (!Number.isInteger(record.repetition) || ![1, 2].includes(record.repetition)) {
     fail("evidence repetition must be 1 or 2");
   }
@@ -766,7 +768,7 @@ export function validateEvidenceManifest(records) {
     physicalByRun.set(record.runId, record);
   }
   const missing = [];
-  for (const scenario of SCENARIOS) {
+  for (const scenario of MANDATORY_SCENARIOS) {
     for (let repetition = 1; repetition <= REQUIRED_REPETITIONS; repetition += 1) {
       const key = `${scenario}:${repetition}`;
       if (!passingRepetitions.has(key)) missing.push(key);
@@ -824,6 +826,7 @@ export function validateRunbookCommands(text) {
     "wake",
     "production runner lifecycle",
     "serial absence",
+    "conditional diagnostic evidence",
     "UI smoke is mandatory",
     "--ignored",
     "--exact",
@@ -880,8 +883,14 @@ export function validateRepositoryContract(args = process.argv.slice(2)) {
   const evidenceDirectory = commandOption(args, "--evidence-dir", path.join(root, "docs/testing/phase-6d6/evidence"));
   const projectionSourcePath = path.join(root, "apps/emuchef-app/src-tauri/src/execution.rs");
   const manifest = JSON.parse(readFileSync(manifestPath, "utf8"));
-  assertKeys(manifest, ["schemaVersion", "scenarios", "requiredRepetitions", "uiSmokeScenario", "uiSmokeRequiredRepetitions", "uiSmokeSubcases", "uiSmokeContracts", "scenarioContracts", "gates", "outcomes"], "scenario manifest");
-  if (manifest.schemaVersion !== 1 || JSON.stringify(manifest.scenarios) !== JSON.stringify(SCENARIOS) || manifest.requiredRepetitions !== REQUIRED_REPETITIONS || manifest.uiSmokeScenario !== UI_SMOKE_SCENARIO || manifest.uiSmokeRequiredRepetitions !== UI_SMOKE_REQUIRED_REPETITIONS || !equalJson(manifest.uiSmokeSubcases, UI_SMOKE_SUBCASES) || !equalJson(manifest.uiSmokeContracts, UI_SMOKE_CONTRACTS) || !equalJson(manifest.scenarioContracts, SCENARIO_CONTRACTS)) fail("scenario manifest does not match the mandatory matrix or scenario contracts");
+  assertKeys(manifest, ["schemaVersion", "scenarios", "mandatoryScenarios", "conditionalScenarios", "requiredRepetitions", "uiSmokeScenario", "uiSmokeRequiredRepetitions", "uiSmokeSubcases", "uiSmokeContracts", "scenarioContracts", "gates", "outcomes"], "scenario manifest");
+  const supported = new Set(SCENARIOS);
+  const mandatory = new Set(MANDATORY_SCENARIOS);
+  const conditional = new Set(CONDITIONAL_SCENARIOS);
+  if (supported.size !== SCENARIOS.length || mandatory.size !== MANDATORY_SCENARIOS.length || conditional.size !== CONDITIONAL_SCENARIOS.length) fail("scenario manifest contains duplicate scenario identities");
+  if ([...mandatory].some((scenario) => conditional.has(scenario))) fail("mandatory and conditional scenarios must be disjoint");
+  if (mandatory.size + conditional.size !== supported.size || [...mandatory, ...conditional].some((scenario) => !supported.has(scenario))) fail("mandatory and conditional scenarios must partition the supported scenario set");
+  if (manifest.schemaVersion !== 1 || JSON.stringify(manifest.scenarios) !== JSON.stringify(SCENARIOS) || JSON.stringify(manifest.mandatoryScenarios) !== JSON.stringify(MANDATORY_SCENARIOS) || JSON.stringify(manifest.conditionalScenarios) !== JSON.stringify(CONDITIONAL_SCENARIOS) || manifest.requiredRepetitions !== REQUIRED_REPETITIONS || manifest.uiSmokeScenario !== UI_SMOKE_SCENARIO || manifest.uiSmokeRequiredRepetitions !== UI_SMOKE_REQUIRED_REPETITIONS || !equalJson(manifest.uiSmokeSubcases, UI_SMOKE_SUBCASES) || !equalJson(manifest.uiSmokeContracts, UI_SMOKE_CONTRACTS) || !equalJson(manifest.scenarioContracts, SCENARIO_CONTRACTS)) fail("scenario manifest does not match the supported, mandatory, conditional, or scenario contracts");
   const projectionSource = readFileSync(projectionSourcePath, "utf8");
   for (const [name, contract] of Object.entries(UI_SMOKE_CONTRACTS)) {
     const authoredFields = name === "cancellation"
@@ -907,7 +916,7 @@ if (process.argv[1] && import.meta.url === pathToFileURL(path.resolve(process.ar
     if (result.complete) {
       process.stdout.write(`Phase 6D.6 evidence contract complete (${result.recordCount} records).\n`);
     } else {
-      process.stdout.write(`Phase 6D.6 evidence contract valid but incomplete (${result.missing.length} physical repetitions and ${result.missingUiSmoke.length} UI-smoke repetitions missing).\n`);
+      process.stdout.write(`Phase 6D.6 evidence contract valid but incomplete (${result.missing.length} mandatory physical repetitions and ${result.missingUiSmoke.length} UI-smoke repetitions missing).\n`);
     }
   } catch (error) {
     process.stderr.write(`${error instanceof Error ? error.message : String(error)}\n`);

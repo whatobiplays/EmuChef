@@ -1115,10 +1115,11 @@ Active-cancellation qualification requires the exact target mutation child to
 be spawned, started, and alive immediately before cancellation, with the action
 strictly before the child's terminal event and bound to the same run and
 operation. A runner callback, post-operation probe, delayed poll, or local
-boolean is insufficient. The current physical adapter does not expose that
-exact child observation and blocks active cases. A safe-boundary cancellation
-uses a distinct finished-before-request phase. The active-slot record observes
-the RAII guard owning the production execution-session slot, carries the exact
+boolean is insufficient. The harness now binds a production-owned process
+observation to the first reviewed host `Push` and creates `active-ready` only
+after sampling that exact child alive. A safe-boundary cancellation uses a
+distinct finished-before-request phase. The active-slot record observes the
+RAII guard owning the production execution-session slot, carries the exact
 run-scope and execution identity, and cannot pass on an auxiliary lease,
 shadow flag, early release, or another run's lifecycle.
 
@@ -1128,9 +1129,17 @@ replacement attachment after disconnect, changed identity, and no simultaneous
 target. Authorization qualification separately observes an authorized row,
 the genuine `unauthorized` row after the revocation checkpoint, and a final
 authorized cleanup state; generic offline or transport output is insufficient.
+Physical `device_offline` evidence is conditional diagnostic evidence rather
+than a closure requirement. ADB offline is normally a transient transport
+initialization or failure state with no general operator-controlled transition.
+The harness and schema continue to accept truthful offline attempts, while the
+twelve-scenario mandatory matrix uses the active and boundary USB-disconnect
+cases as its physical transport proof.
 Development-build UI smoke is mandatory closure evidence: two composite
 records each contain cancellation, transport, root, storage, and
-host-sleep/runtime-loss subcases. Every subcase binds an exact physical backend
+host-sleep/runtime-loss subcases. The transport subcase binds only to passing
+active or boundary USB-disconnect evidence, not conditional offline evidence.
+Every subcase binds an exact physical backend
 run and trace to a distinct UI sub-run, development-build digest, exact authored
 projection, **Not attempted** count, partial-change and authority recovery
 state, forbidden-control absence, canonical UI-state artifact, and
@@ -1150,9 +1159,12 @@ it cannot delay status/output polling, turn an exited child into a timeout, or
 qualify physical evidence. Identity probes and other operations are unaffected,
 and the arm clears on normal, timeout, panic, or parallel return.
 
-Phase 6D remains In Progress until all thirteen scenarios have two clean,
-sanitized, contract-valid passing repetitions and the complete automated matrix
-is green. The exact backend and Tauri `clippy -D warnings` gates currently have
-baseline diagnostics outside the authorized Phase 6D.6 paths, so automated
-remediation is not complete. No physical repetitions were available in this
-run; blocked scenarios do not count as evidence or closure.
+Phase 6D remains In Progress until all twelve mandatory scenarios have two clean,
+sanitized, contract-valid passing repetitions, both UI-smoke repetitions pass,
+and the complete automated matrix is green. `device_offline` remains supported
+conditional evidence and does not contribute to the missing-repetition count.
+The exact backend and Tauri `clippy -D warnings` gates currently have baseline
+diagnostics outside the authorized Phase 6D.6 paths, so automated remediation
+is not complete. Physical evidence collection is in progress; the validator is
+the authority for accepted and missing repetitions, and blocked mandatory
+scenarios do not count as closure.

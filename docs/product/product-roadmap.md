@@ -685,28 +685,32 @@ Phase 6D.6 remediation remains **In progress**. The private
 `device_storage_exhausted` classification and authored recovery projection are
 covered by deterministic tests; the owned-process seams cover controlled
 deadline, bounded-output, kill/reap, and delayed-polling regressions; and one ignored, exact-serial physical
-harness covers the thirteen mandatory scenarios with a ten-minute sentinel
-protocol. The authoritative contract requires exact target-child liveness,
+harness supports thirteen scenarios with a ten-minute sentinel protocol. Twelve
+scenarios are mandatory; `device_offline` is conditional diagnostic evidence.
+The authoritative contract requires exact target-child liveness,
 measured production deadline-clock branches and phase, the real production
 execution-session slot lifecycle, bounded ADB identity and authorization
 chronology, globally unique canonical record/trace identities, and two
-artifact-bound composite development UI-smoke records. Active and host-sleep
-physical cases fail closed because the exact child and deadline-clock
-observations are not currently available. A dependency-free validator checks the strict sanitized
-evidence schema and runbook in host-only CI.
+artifact-bound composite development UI-smoke records. Exact active-child
+observation is implemented through the production-owned host-`Push` lifecycle
+seam; host-sleep remains fail-closed until the production deadline clock can be
+measured. A dependency-free validator checks the strict sanitized evidence
+schema and runbook in host-only CI.
 
 The exact backend and Tauri `clippy -D warnings` commands remain blocked by
 baseline diagnostics outside the authorized Phase 6D.6 paths, so automated
 remediation is not reported complete.
 
-No physical scenario was run in the current environment. Cancellation,
-disconnect, offline, unauthorized, identity stability/replacement, root
-revocation, controlled timeout, low storage, host sleep, and development UI
-smoke therefore remain unqualified until an operator supplies the documented
-hardware, opt-ins, safety preconditions, cleanup verification, and two clean
-repetitions. Same-serial replacement additionally requires suitable hardware or
-explicit owner acceptance. Phase 6D remains In progress; Phase 6E is not
-started, and ordinary production real execution remains disabled.
+Physical evidence collection is underway, but the validator still reports an
+incomplete mandatory matrix and UI-smoke pair. Cancellation, disconnect,
+unauthorized, identity stability/replacement, root revocation, controlled
+timeout, low storage, host sleep, and development UI smoke require the
+documented hardware, opt-ins, safety preconditions, cleanup verification, and
+two clean repetitions. `device_offline` remains supported conditional evidence
+and is not a closure blocker when no reliable device-specific transition exists.
+Same-serial replacement additionally requires suitable hardware or explicit
+owner acceptance. Phase 6D remains In progress; Phase 6E is not started, and
+ordinary production real execution remains disabled.
 
 #### Phase 6D.2 — Operation Deadlines completion evidence
 
