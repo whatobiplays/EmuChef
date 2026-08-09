@@ -164,16 +164,68 @@ or any disconnect/offline issue does not qualify.
 Low-storage is the only case that allocates device capacity. It is blocked
 unless the selected device is disposable, the initial free space is between
 4 GiB and 5,308,416 KiB, and the exact run-scoped fixture directory is absent.
-The harness then creates and verifies a fixture-owned 1 GiB recovery-reserve
-file before allocating a bounded fixture-owned filler. The filler is capped at
-4 GiB and leaves 64 MiB of cleanup headroom; the first reviewed copy uses a
-128 MiB host fixture payload so the destination receives genuine ENOSPC while
-the headroom remains available for cleanup. No user, system, or non-fixture
-path is ever deleted. Cleanup removes payloads, filler, sentinel state, and the
-reserve in that order, then verifies the run directory is absent, final free
-space is recorded, and the recovery capacity is restored. A reserve,
-ownership, allocation-bound, cleanup, or restoration proof that is missing
-blocks the repetition and cannot be counted as a pass.
+When the selected device has more than the accepted maximum, use the reviewed
+profile-based preflight utility instead of manually adding or deleting files:
+
+```sh
+node tools/device-storage-preflight.mjs status \
+  --serial <one-exact-serial> \
+  --profile phase-6d6-low-storage
+
+node tools/device-storage-preflight.mjs prepare \
+  --serial <one-exact-serial> \
+  --profile phase-6d6-low-storage \
+  --dry-run
+
+node tools/device-storage-preflight.mjs prepare \
+  --serial <one-exact-serial> \
+  --profile phase-6d6-low-storage \
+  --yes
+```
+
+The utility requires exactly one authorized selected device, verifies the
+fixture package, and proves that Downloads and the qualification destination
+are on the same reported filesystem and mount. It writes non-sparse zero-filled
+chunks directly on the device under only:
+
+```text
+/sdcard/Download/EmuChefStoragePreflight/phase-6d6-low-storage
+```
+
+That directory requires the exact EmuChef ownership marker and may contain only
+`chunk-NNNN.bin` files. Preparation remeasures available storage after every
+chunk, stops inside the committed 4,194,304–5,308,416 KiB window, and can resume
+an interrupted owned allocation. A missing marker, unknown entry, symlink,
+filesystem mismatch, another ADB device, or unexplained storage delta fails
+closed. `status` and `prepare --dry-run` never mutate the device.
+
+The Downloads allocation is operator preflight support, not physical evidence
+and not part of the run-scoped fixture cleanup. Keep it in place for both
+`low_storage` repetitions. The harness still creates and verifies its own
+fixture-owned 1 GiB recovery-reserve file before allocating a bounded
+fixture-owned filler. The filler is capped at 4 GiB and leaves 64 MiB of cleanup
+headroom; the first reviewed copy uses a 128 MiB host fixture payload so the
+destination receives genuine ENOSPC while the headroom remains available for
+cleanup. Harness cleanup removes payloads, filler, sentinel state, and the
+reserve in that order, then verifies the run directory is absent and restores
+capacity to the preflight baseline.
+
+After both repetitions, or when abandoning the storage qualification, remove
+only the exact owned preflight directory:
+
+```sh
+node tools/device-storage-preflight.mjs cleanup \
+  --serial <one-exact-serial> \
+  --profile phase-6d6-low-storage
+```
+
+When the owned directory exists, cleanup requires its exact marker and rejects
+mismatched markers or unknown entries. An already absent directory is a clean
+no-op. Cleanup deletes no other Downloads content, synchronizes the device,
+verifies the owned directory is absent, and reports available space before and
+after.
+A reserve, ownership, allocation-bound, cleanup, or restoration proof that is
+missing blocks the repetition and cannot be counted as a pass.
 
 ## Physical scenario matrix
 
@@ -197,7 +249,7 @@ failure as offline evidence.
 | `identity_replacement` | With explicit owner-approved hardware, disconnect the first target before attaching the same-serial replacement at `boundary-ready`. The harness polls successful ADB inventory samples and stable fingerprints, proving original attachment, serial absence, replacement attachment, and no simultaneous target. | `device_identity_changed` or `device_identity_unverified` before later mutation. If hardware is unavailable, record this exact case unqualified. |
 | `root_revocation` | On a prepared rooted device, revoke EmuChef's adb-shell root authority after `boundary-ready`, acknowledge `operator-action`, wait for `terminal-ready`, restore root authority, then acknowledge `cleanup-ready`. | The second privileged command does not run, root failure is primary, prior mutation is retained, cleanup is separate and verified, and identity precedence is unchanged. |
 | `operation_timeout` | Use only a genuinely bounded operation that reaches the fixed Rust-owned deadline while the exact child remains owned. The private delay regression seam is automated evidence only and cannot qualify this repetition. | `operation_timed_out`, kill/reap or uncertainty evidence, no descendant, no later scheduling. Block the case if a safe genuine deadline cannot be exercised. |
-| `low_storage` | With the separate destructive opt-in, verify at least 4 GiB free, create/verify the unique fixture-owned 1-GiB recovery reserve, allocate bounded filler, then acknowledge the checkpoint. | Genuine ENOSPC maps to `device_storage_exhausted`; no deletion/retry; cleanup removes only run-scoped payload/filler/sentinel/reserve and proves restored free capacity. Block the case if any proof is unavailable. |
+| `low_storage` | With the separate destructive opt-in, first use the reviewed storage-preflight profile when the device is above the accepted free-space window. Keep that exact owned Downloads allocation for both repetitions. The harness then verifies at least 4 GiB free, creates/verifies the unique fixture-owned 1-GiB recovery reserve, allocates bounded filler, and waits for the checkpoint. | Genuine ENOSPC maps to `device_storage_exhausted`; no deletion/retry; harness cleanup removes only run-scoped payload/filler/sentinel/reserve and restores the preflight baseline. The separate profile-owned Downloads allocation is removed explicitly after both repetitions. Block the case if any ownership, bound, or restoration proof is unavailable. |
 | `host_sleep_before_deadline` | Begin the long fixture operation, create `sleep-requested`, manually sleep the host before the fixed deadline, create `sleep-entered` after entry, then create `wake` immediately after resuming. | Record ordered sleep/wake times, measured executor and wall elapsed time, timer behavior, child result, identity, terminal state, slot release, and no second owner. |
 | `host_sleep_after_deadline` | Repeat after enough active elapsed time to cross the fixed deadline, using the same three physical markers. | Record whether the timer observes active-host or suspended time; a measured completion or timeout is valid only when the branch is internally consistent. Transport loss, indeterminate timing, and contradictory timestamps remain blocked. |
 
@@ -260,6 +312,7 @@ node tools/phase-6d6-evidence.mjs
 node --test tools/phase-6d6-evidence.test.mjs
 node tools/phase-6d6-result.mjs
 node --test tools/phase-6d6-result.test.mjs
+node --test tools/device-storage-preflight.test.mjs
 ```
 
 Phase 6D remains **In progress** until all twelve mandatory scenarios have two clean

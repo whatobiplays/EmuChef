@@ -386,6 +386,23 @@ space. EmuChef never deletes user data, retries, resumes, or continues the old
 execution automatically. Tauri exposes only authored storage guidance and no
 raw ADB text, paths, serials, or command arguments.
 
+Physical storage qualification has a separate dependency-free operator utility
+at `tools/device-storage-preflight.mjs`. Its immutable
+`phase-6d6-low-storage` profile requires exactly one selected authorized ADB
+device and `com.emuchef.fixture`, verifies that `/sdcard/Download` and the
+qualification destination share the same reported filesystem and mount, and
+uses device-local `dd` to create non-sparse chunks only under the exact marked
+`/sdcard/Download/EmuChefStoragePreflight/phase-6d6-low-storage` directory.
+Status and dry-run are non-mutating; preparation requires explicit confirmation,
+remeasures after each chunk, stops inside the 4,194,304–5,308,416 KiB window,
+and resumes only an exactly marked directory containing recognized chunk
+names. Cleanup rejects symlinks, missing or mismatched markers, and unknown
+entries; it removes only the owned profile directory, synchronizes the device,
+verifies absence, and reports restored capacity. This preflight allocation is
+operator setup rather than physical evidence or production execution. It
+remains across both low-storage repetitions while the harness independently
+owns and cleans its run-scoped reserve, filler, payload, and sentinel state.
+
 Host suspension does not create a second execution owner. The same locally
 owned child/future tree remains authoritative if the process generation
 survives sleep; after wake the existing operation may complete, report typed

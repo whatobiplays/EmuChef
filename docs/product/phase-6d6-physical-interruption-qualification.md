@@ -109,6 +109,20 @@ or restoration blocks the repetition.
 Raw serials, paths, command output, credentials, and payloads never enter
 evidence.
 
+`tools/device-storage-preflight.mjs` provides separate operator preflight support
+for devices whose initial free space exceeds the low-storage harness maximum.
+Its immutable `phase-6d6-low-storage` profile requires one exact authorized ADB
+device and the fixture package, verifies that Downloads and the qualification
+destination share the same reported filesystem and mount, and writes only
+non-sparse device-local chunks under the marked
+`/sdcard/Download/EmuChefStoragePreflight/phase-6d6-low-storage` directory.
+Preparation is explicit, resumable, and remeasured after every chunk; status and
+dry-run are non-mutating. Cleanup requires the exact marker and recognized
+chunk names, removes only that directory, synchronizes the device, and verifies
+absence. This allocation is not physical evidence, is not production execution,
+and remains outside the harness-owned run scope. It stays in place across both
+low-storage repetitions and is removed separately afterward.
+
 ADB offline is normally a transient transport initialization or failure state
 rather than a generally controllable physical condition. The harness, schema,
 and validator retain full support for truthful offline attempts, but absence of
@@ -130,7 +144,10 @@ residual state, sanitization, duplicate repetitions, and matrix completeness.
 missing tests, unauthorized changed files, or a false Phase 6D closure. The
 evidence validator intentionally exits successfully with an explicit “valid
 but incomplete” result when the evidence directory is empty so CI can verify
-the harness without touching ADB.
+the harness without touching ADB. The host-only storage-preflight test exercises
+`df` and ADB parsing, profile bounds, chunk planning, ownership, resume,
+consumption-delta checks, CLI gates, and exact cleanup scope without touching a
+device.
 
 Host-sleep evidence can pass only when it records the deadline clock at start,
 before sleep, after wake, and terminal; remaining budget on both sides of the
