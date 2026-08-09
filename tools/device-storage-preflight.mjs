@@ -512,7 +512,7 @@ export class AdbStorageDevice {
     validateDevicePath(devicePath);
     const quoted = shellQuote(devicePath);
     return this.run([
-      "-s", serial, "shell", "sh", "-c",
+      "-s", serial, "shell",
       `if [ -L ${quoted} ]; then printf symlink; elif [ -d ${quoted} ]; then printf directory; elif [ -e ${quoted} ]; then printf other; else printf absent; fi`,
     ]).trim();
   }

@@ -419,6 +419,30 @@ test("real adapter allocates only through device-local dd arguments", () => {
   assert.deepEqual(calls[0].options.stdio, ["ignore", "inherit", "inherit"]);
 });
 
+test("real adapter sends path-type probes directly through adb shell", () => {
+  const calls = [];
+  const device = new AdbStorageDevice({
+    execFile: (command, args, options) => {
+      calls.push({ command, args, options });
+      return "directory\n";
+    },
+  });
+
+  assert.equal(device.pathType(SERIAL, "/sdcard/Download"), "directory");
+  assert.equal(calls.length, 1);
+  assert.deepEqual(calls[0].args.slice(0, 3), [
+    "-s",
+    SERIAL,
+    "shell",
+  ]);
+  assert.equal(calls[0].args.length, 4);
+  assert.match(calls[0].args[3], /^if \[ -L /);
+  assert.match(calls[0].args[3], /\/sdcard\/Download/);
+  assert.match(calls[0].args[3], /then printf symlink/);
+  assert.equal(calls[0].args.includes("sh"), false);
+  assert.equal(calls[0].args.includes("-c"), false);
+});
+
 test("runbook documents the owned preflight lifecycle", () => {
   const runbook = readFileSync(
     new URL("../docs/manual/phase-6d6-physical-interruption-qualification.md", import.meta.url),
