@@ -831,6 +831,18 @@ fn bounded_storage_filler_kib(after_reserve_kib: u64) -> u64 {
         .min(MAX_STORAGE_FILLER_KIB)
 }
 
+fn bounded_storage_filler_kib_from_observations(
+    initial_free_kib: u64,
+    after_reserve_kib: u64,
+) -> u64 {
+    let initial_budget_kib = initial_free_kib
+        .saturating_sub(RECOVERY_RESERVE_KIB)
+        .saturating_sub(STORAGE_CLEANUP_HEADROOM_KIB)
+        .min(MAX_STORAGE_FILLER_KIB);
+
+    bounded_storage_filler_kib(after_reserve_kib).min(initial_budget_kib)
+}
+
 fn storage_cleanup_order() -> [&'static str; 4] {
     ["payload", "filler", "sentinel", "recovery-reserve"]
 }
@@ -3815,7 +3827,7 @@ fn prepare_low_storage(
         return Err("one-GiB recovery reserve could not be verified".to_string());
     }
     let after_reserve = free_space_kib(&facts.serial, root)?;
-    let filler_kib = bounded_storage_filler_kib(after_reserve);
+    let filler_kib = bounded_storage_filler_kib_from_observations(initial_free_kib, after_reserve);
     if filler_kib == 0 {
         return Err(
             "bounded filler could not be allocated while retaining recovery reserve".to_string(),
@@ -4816,6 +4828,29 @@ mod tests {
             filler_owned: true,
         })
         .is_err());
+    }
+
+    #[test]
+    fn low_storage_filler_uses_conservative_budget_when_df_reserve_accounting_is_optimistic() {
+        let initial_free_kib = 4_920_980;
+        let nominal_after_reserve = initial_free_kib - RECOVERY_RESERVE_KIB;
+        let after_reserve_kib = nominal_after_reserve + 128;
+
+        let filler_kib =
+            bounded_storage_filler_kib_from_observations(initial_free_kib, after_reserve_kib);
+        let initial_budget_kib =
+            initial_free_kib - RECOVERY_RESERVE_KIB - STORAGE_CLEANUP_HEADROOM_KIB;
+
+        assert_eq!(filler_kib, initial_budget_kib);
+        assert!(validate_low_storage_preflight(LowStoragePreflight {
+            initial_free_kib,
+            recovery_reserve_kib: RECOVERY_RESERVE_KIB,
+            filler_kib,
+            max_filler_kib: MAX_STORAGE_FILLER_KIB,
+            reserve_owned: true,
+            filler_owned: true,
+        })
+        .is_ok());
     }
 
     #[test]
