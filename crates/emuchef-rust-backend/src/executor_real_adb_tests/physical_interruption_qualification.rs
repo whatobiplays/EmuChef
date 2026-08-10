@@ -3757,6 +3757,20 @@ fn prepare_active_stimulus(
     })
 }
 
+fn write_low_storage_host_payload(
+    path: &Path,
+    payload_bytes: u64,
+    run_scope: &str,
+) -> Result<(), String> {
+    // A zero-filled set_len payload can consume substantially fewer device
+    // blocks than its logical length on /storage/emulated. Reuse the
+    // deterministic nontrivial fixture writer so the qualification forces
+    // real data allocation before the post-push fsync durability boundary.
+    let seed = active_host_seed(run_scope) ^ 0x4C4F_575F_5354_4F52;
+    write_active_host_fixture(path, payload_bytes, seed)
+        .map_err(|_| "low-storage host payload could not be written".to_string())
+}
+
 fn create_low_storage_host_payload(
     invocation: &Invocation,
     payload_kib: u64,
@@ -3773,15 +3787,7 @@ fn create_low_storage_host_payload(
         .next()
         .ok_or_else(|| "low-storage run scope was missing its unique suffix".to_string())?;
     let path = fixture_root().join(format!(".phase6d6-low-storage-payload-{scope_suffix}.bin"));
-    let file = OpenOptions::new()
-        .write(true)
-        .create_new(true)
-        .open(&path)
-        .map_err(|_| "low-storage host payload could not be created".to_string())?;
-    if file.set_len(payload_bytes).is_err() {
-        let _ = fs::remove_file(&path);
-        return Err("low-storage host payload could not be sized".to_string());
-    }
+    write_low_storage_host_payload(&path, payload_bytes, &invocation.run_scope)?;
     Ok(path)
 }
 
@@ -4837,5 +4843,25 @@ mod tests {
     #[test]
     fn low_storage_payload_fails_closed_when_total_free_exceeds_the_bound() {
         assert!(bounded_low_storage_payload_kib(MAX_LOW_STORAGE_HOST_PAYLOAD_KIB).is_err());
+    }
+
+    #[test]
+    fn low_storage_host_payload_contains_deterministic_nontrivial_bytes() {
+        let workspace = tempfile::tempdir().expect("temporary workspace should be available");
+        let first = workspace.path().join("first.bin");
+        let second = workspace.path().join("second.bin");
+        let byte_len = 32 * 1024 + 7;
+
+        write_low_storage_host_payload(&first, byte_len, "phase6d6-low-storage-test")
+            .expect("first low-storage fixture should be written");
+        write_low_storage_host_payload(&second, byte_len, "phase6d6-low-storage-test")
+            .expect("second low-storage fixture should be written");
+        let first_bytes = fs::read(&first).expect("first low-storage fixture should be readable");
+        let second_bytes =
+            fs::read(&second).expect("second low-storage fixture should be readable");
+
+        assert_eq!(first_bytes.len(), byte_len as usize);
+        assert!(first_bytes.iter().any(|byte| *byte != 0));
+        assert_eq!(first_bytes, second_bytes);
     }
 }

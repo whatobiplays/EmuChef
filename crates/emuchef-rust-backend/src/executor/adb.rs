@@ -603,6 +603,7 @@ impl<E: AdbCommandExecutor> RealAdbDevice<E> {
     }
 
     pub fn push(&mut self, source: &Path, dest: &str, sync: bool) -> Result<(), String> {
+        let durable_file = !source.is_dir();
         let mut args = vec!["push".to_string()];
         if sync {
             args.push("--sync".to_string());
@@ -610,10 +611,18 @@ impl<E: AdbCommandExecutor> RealAdbDevice<E> {
         args.push(source.to_string_lossy().to_string());
         args.push(dest.to_string());
         self.guarded(DeviceCommandEffect::Mutating, |device| {
-            device
-                .runner
-                .run(args, true, ProcessOperation::Push)
-                .map(|_| ())
+            device.runner.run(args, true, ProcessOperation::Push)?;
+            if durable_file {
+                // ADB sync completion is not a durability boundary. Force the
+                // exact copied file through the device filesystem before the
+                // push is considered successful so delayed ENOSPC is visible.
+                device.run_shell_unchecked(
+                    vec!["fsync".to_string(), dest.to_string()],
+                    true,
+                    ProcessOperation::DeviceCopy,
+                )?;
+            }
+            Ok(())
         })
     }
 
@@ -1060,6 +1069,7 @@ fn classify_completed_storage(
                 "rm: ",
                 "touch: ",
                 "unzip: ",
+                "fsync: ",
             ]
             .iter()
             .any(|prefix| line.starts_with(prefix) && line.ends_with(": no space left on device"))
@@ -1518,6 +1528,90 @@ mod tests {
     }
 
     #[test]
+    fn file_push_requires_fsync_and_classifies_delayed_storage_exhaustion() {
+        let mut executor = FakeAdbCommandExecutor::default();
+        executor.push_completed(0, "", "");
+        executor.push_completed(
+            1,
+            "",
+            "fsync: /sdcard/fixture.bin: No space left on device\n",
+        );
+        let mut device = RealAdbDevice::with_executor("adb", Some("serial"), executor);
+
+        assert!(device
+            .push(Path::new("fixture.bin"), "/sdcard/fixture.bin", false)
+            .is_err());
+        assert_eq!(
+            device.take_last_error(),
+            Some(AdbCommandError::DeviceStorageExhausted)
+        );
+        assert_eq!(
+            device.command_executor().operations(),
+            [ProcessOperation::Push, ProcessOperation::DeviceCopy]
+        );
+        assert_eq!(
+            device.command_executor().calls()[1],
+            vec![
+                "adb".to_string(),
+                "-s".to_string(),
+                "serial".to_string(),
+                "shell".to_string(),
+                "fsync /sdcard/fixture.bin".to_string(),
+            ]
+        );
+    }
+
+    #[test]
+    fn failed_file_push_does_not_run_fsync() {
+        let mut executor = FakeAdbCommandExecutor::default();
+        executor.push_completed(1, "", "remote write failed\n");
+        let mut device = RealAdbDevice::with_executor("adb", Some("serial"), executor);
+
+        assert!(device
+            .push(Path::new("fixture.bin"), "/sdcard/fixture.bin", false)
+            .is_err());
+        assert_eq!(
+            device.command_executor().operations(),
+            [ProcessOperation::Push]
+        );
+    }
+
+    #[test]
+    fn directory_push_does_not_run_file_fsync() {
+        let source = tempfile::tempdir().expect("temporary source directory should be available");
+        let executor = FakeAdbCommandExecutor::default();
+        let mut device = RealAdbDevice::with_executor("adb", Some("serial"), executor);
+
+        device
+            .push(source.path(), "/sdcard/fixture-dir", false)
+            .expect("directory push should retain its existing behavior");
+        assert_eq!(
+            device.command_executor().operations(),
+            [ProcessOperation::Push]
+        );
+    }
+
+    #[test]
+    fn file_push_fsync_keeps_timeout_precedence() {
+        let mut executor = FakeAdbCommandExecutor::default();
+        executor.push_completed(0, "", "");
+        executor.push_timed_out();
+        let mut device = RealAdbDevice::with_executor("adb", Some("serial"), executor);
+
+        assert!(device
+            .push(Path::new("fixture.bin"), "/sdcard/fixture.bin", false)
+            .is_err());
+        assert!(matches!(
+            device.take_last_error(),
+            Some(AdbCommandError::TimedOut { .. })
+        ));
+        assert_eq!(
+            device.command_executor().operations(),
+            [ProcessOperation::Push, ProcessOperation::DeviceCopy]
+        );
+    }
+
+    #[test]
     fn storage_classifier_rejects_unanchored_or_non_mutating_text() {
         let mut executor = FakeAdbCommandExecutor::default();
         executor.push_completed(0, "echo: No space left on device\n", "");
@@ -1659,6 +1753,7 @@ mod tests {
                 ProcessOperation::RootPreflight,
                 ProcessOperation::Install,
                 ProcessOperation::Push,
+                ProcessOperation::DeviceCopy,
                 ProcessOperation::ShellMutation,
                 ProcessOperation::ShellMutation,
                 ProcessOperation::ShellMutation,
