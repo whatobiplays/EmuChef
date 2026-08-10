@@ -613,11 +613,19 @@ impl<E: AdbCommandExecutor> RealAdbDevice<E> {
         self.guarded(DeviceCommandEffect::Mutating, |device| {
             device.runner.run(args, true, ProcessOperation::Push)?;
             if durable_file {
-                // ADB sync completion is not a durability boundary. Force the
-                // exact copied file through the device filesystem before the
-                // push is considered successful so delayed ENOSPC is visible.
+                // ADB sync completion is not a durability boundary. Reopen the
+                // exact copied file writable through dd and request conv=fsync
+                // without truncating or changing its contents. The standalone
+                // fsync applet opens shared-storage paths in a mode that can be
+                // rejected even when a writable descriptor can be synchronized.
                 device.run_shell_unchecked(
-                    vec!["fsync".to_string(), dest.to_string()],
+                    vec![
+                        "dd".to_string(),
+                        "if=/dev/null".to_string(),
+                        format!("of={dest}"),
+                        "count=0".to_string(),
+                        "conv=notrunc,fsync".to_string(),
+                    ],
                     true,
                     ProcessOperation::DeviceCopy,
                 )?;
@@ -1059,6 +1067,11 @@ fn classify_completed_storage(
             {
                 return true;
             }
+            if operation == ProcessOperation::DeviceCopy
+                && line.ends_with(": fsync: no space left on device")
+            {
+                return true;
+            }
             [
                 "adb: error: failed to copy ",
                 "error: failed to copy ",
@@ -1069,7 +1082,6 @@ fn classify_completed_storage(
                 "rm: ",
                 "touch: ",
                 "unzip: ",
-                "fsync: ",
             ]
             .iter()
             .any(|prefix| line.starts_with(prefix) && line.ends_with(": no space left on device"))
@@ -1528,13 +1540,13 @@ mod tests {
     }
 
     #[test]
-    fn file_push_requires_fsync_and_classifies_delayed_storage_exhaustion() {
+    fn file_push_uses_writable_dd_fsync_and_classifies_delayed_storage_exhaustion() {
         let mut executor = FakeAdbCommandExecutor::default();
         executor.push_completed(0, "", "");
         executor.push_completed(
             1,
             "",
-            "fsync: /sdcard/fixture.bin: No space left on device\n",
+            "/sdcard/fixture.bin: fsync: No space left on device\n",
         );
         let mut device = RealAdbDevice::with_executor("adb", Some("serial"), executor);
 
@@ -1556,13 +1568,13 @@ mod tests {
                 "-s".to_string(),
                 "serial".to_string(),
                 "shell".to_string(),
-                "fsync /sdcard/fixture.bin".to_string(),
+                "dd if=/dev/null of=/sdcard/fixture.bin count=0 conv=notrunc,fsync".to_string(),
             ]
         );
     }
 
     #[test]
-    fn failed_file_push_does_not_run_fsync() {
+    fn failed_file_push_does_not_run_durability_flush() {
         let mut executor = FakeAdbCommandExecutor::default();
         executor.push_completed(1, "", "remote write failed\n");
         let mut device = RealAdbDevice::with_executor("adb", Some("serial"), executor);
@@ -1577,7 +1589,7 @@ mod tests {
     }
 
     #[test]
-    fn directory_push_does_not_run_file_fsync() {
+    fn directory_push_does_not_run_file_durability_flush() {
         let source = tempfile::tempdir().expect("temporary source directory should be available");
         let executor = FakeAdbCommandExecutor::default();
         let mut device = RealAdbDevice::with_executor("adb", Some("serial"), executor);
@@ -1592,7 +1604,7 @@ mod tests {
     }
 
     #[test]
-    fn file_push_fsync_keeps_timeout_precedence() {
+    fn file_push_durability_flush_keeps_timeout_precedence() {
         let mut executor = FakeAdbCommandExecutor::default();
         executor.push_completed(0, "", "");
         executor.push_timed_out();
