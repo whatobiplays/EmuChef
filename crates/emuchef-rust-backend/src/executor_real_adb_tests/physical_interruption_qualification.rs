@@ -63,9 +63,9 @@ const SENTINEL_TIMEOUT: Duration = Duration::from_secs(10 * 60);
 const SENTINEL_CONTENT_SETTLE_TIMEOUT: Duration = Duration::from_millis(250);
 const MIN_STORAGE_INITIAL_FREE_KIB: u64 = 4 * 1024 * 1024;
 const RECOVERY_RESERVE_KIB: u64 = 1024 * 1024;
-// Keep enough free blocks to remove the filler and payload before the
-// recovery reserve is released, while still leaving the reviewed mutation
-// with a deliberately exhausted destination.
+// Keep shell-visible headroom while constructing the bounded reserve/filler.
+// The reviewed ADB copy is sized separately against total free blocks so
+// filesystem-reserved free space cannot make the mutation unexpectedly fit.
 const STORAGE_CLEANUP_HEADROOM_KIB: u64 = 64 * 1024;
 const MAX_STORAGE_FILLER_KIB: u64 = 4 * 1024 * 1024;
 const MAX_STORAGE_INITIAL_FREE_KIB: u64 =
@@ -73,7 +73,8 @@ const MAX_STORAGE_INITIAL_FREE_KIB: u64 =
 const MAX_SERIAL_BYTES: usize = 256;
 const STORAGE_FILL_FILE: &str = "phase6d6-storage-fill.bin";
 const STORAGE_RESERVE_FILE: &str = "phase6d6-storage-recovery-reserve.bin";
-const LOW_STORAGE_HOST_PAYLOAD_BYTES: u64 = 128 * 1024 * 1024;
+const LOW_STORAGE_FAILURE_MARGIN_KIB: u64 = 64 * 1024;
+const MAX_LOW_STORAGE_HOST_PAYLOAD_KIB: u64 = 512 * 1024;
 const ACTIVE_CALIBRATION_KIB: u64 = 256 * 1024;
 const ACTIVE_TARGET_MS: u64 = 30_000;
 const ACTIVE_MIN_PREDICTED_MS: u64 = 15_000;
@@ -1069,6 +1070,7 @@ struct StorageObservation {
     initial_free_kib: u64,
     recovery_reserve_kib: u64,
     filler_kib: u64,
+    payload_kib: u64,
     final_free_kib: Option<u64>,
     restored_recovery_reserve_kib: Option<u64>,
     reserve_created: bool,
@@ -1526,7 +1528,12 @@ fn run_invocation() -> Result<Value, String> {
         None
     };
     let low_storage_host_payload = if invocation.scenario == Scenario::LowStorage {
-        match create_low_storage_host_payload(&invocation) {
+        match storage
+            .as_ref()
+            .map(|observation| observation.payload_kib)
+            .ok_or_else(|| "low-storage preparation did not produce a payload size".to_string())
+            .and_then(|payload_kib| create_low_storage_host_payload(&invocation, payload_kib))
+        {
             Ok(path) => Some(path),
             Err(error) => {
                 let cleanup = cleanup_fixture(&invocation, &facts, None, None);
@@ -3566,6 +3573,63 @@ fn free_space_kib(serial: &str, path: &str) -> Result<u64, String> {
     parse_available_kib(&output)
 }
 
+fn total_free_space_kib(serial: &str, path: &str) -> Result<u64, String> {
+    let output = adb_query(serial, &["shell", "df", "-k", path])?;
+    parse_total_free_kib(&output)
+}
+
+fn parse_total_free_kib(output: &str) -> Result<u64, String> {
+    let available_kib = parse_available_kib(output)?;
+    let fields = output
+        .lines()
+        .skip(1)
+        .flat_map(|line| line.split_whitespace())
+        .collect::<Vec<_>>();
+
+    for window in fields.windows(5) {
+        let Ok(blocks_kib) = window[0].parse::<u64>() else {
+            continue;
+        };
+        let Ok(used_kib) = window[1].parse::<u64>() else {
+            continue;
+        };
+        let Ok(row_available_kib) = window[2].parse::<u64>() else {
+            continue;
+        };
+        let Some(percent) = window[3].strip_suffix('%') else {
+            continue;
+        };
+        let Ok(percent) = percent.parse::<u8>() else {
+            continue;
+        };
+        if percent > 100 || !window[4].starts_with('/') || row_available_kib != available_kib {
+            continue;
+        }
+
+        let total_free_kib = blocks_kib
+            .checked_sub(used_kib)
+            .ok_or_else(|| "df reported used blocks above total blocks".to_string())?;
+        if available_kib > total_free_kib {
+            return Err("df reported available blocks above total free blocks".to_string());
+        }
+        return Ok(total_free_kib);
+    }
+
+    Err("df output did not contain a complete storage row".to_string())
+}
+
+fn bounded_low_storage_payload_kib(total_free_kib: u64) -> Result<u64, String> {
+    let payload_kib = total_free_kib
+        .checked_add(LOW_STORAGE_FAILURE_MARGIN_KIB)
+        .ok_or_else(|| "low-storage payload size overflowed".to_string())?;
+    if payload_kib > MAX_LOW_STORAGE_HOST_PAYLOAD_KIB {
+        return Err(
+            "low-storage total free space exceeds the bounded host payload window".to_string(),
+        );
+    }
+    Ok(payload_kib)
+}
+
 fn device_file_size_bytes(serial: &str, path: &str) -> Result<u64, String> {
     let output = adb_query(serial, &["shell", "stat", "-c", "%s", path])?;
     output
@@ -3693,7 +3757,16 @@ fn prepare_active_stimulus(
     })
 }
 
-fn create_low_storage_host_payload(invocation: &Invocation) -> Result<PathBuf, String> {
+fn create_low_storage_host_payload(
+    invocation: &Invocation,
+    payload_kib: u64,
+) -> Result<PathBuf, String> {
+    if payload_kib == 0 || payload_kib > MAX_LOW_STORAGE_HOST_PAYLOAD_KIB {
+        return Err("low-storage host payload exceeded its explicit bound".to_string());
+    }
+    let payload_bytes = payload_kib
+        .checked_mul(1024)
+        .ok_or_else(|| "low-storage host payload size overflowed".to_string())?;
     let scope_suffix = invocation
         .run_scope
         .rsplit('/')
@@ -3705,7 +3778,7 @@ fn create_low_storage_host_payload(invocation: &Invocation) -> Result<PathBuf, S
         .create_new(true)
         .open(&path)
         .map_err(|_| "low-storage host payload could not be created".to_string())?;
-    if file.set_len(LOW_STORAGE_HOST_PAYLOAD_BYTES).is_err() {
+    if file.set_len(payload_bytes).is_err() {
         let _ = fs::remove_file(&path);
         return Err("low-storage host payload could not be sized".to_string());
     }
@@ -3754,10 +3827,13 @@ fn prepare_low_storage(
     if !fixture_path_exists(invocation, facts, &filler_path)? {
         return Err("bounded low-storage filler could not be verified".to_string());
     }
+    let post_filler_total_free_kib = total_free_space_kib(&facts.serial, root)?;
+    let payload_kib = bounded_low_storage_payload_kib(post_filler_total_free_kib)?;
     Ok(StorageObservation {
         initial_free_kib,
         recovery_reserve_kib: RECOVERY_RESERVE_KIB,
         filler_kib,
+        payload_kib,
         final_free_kib: None,
         restored_recovery_reserve_kib: None,
         reserve_created: true,
@@ -4720,7 +4796,7 @@ mod tests {
     }
 
     #[test]
-    fn low_storage_filler_preserves_cleanup_headroom_and_can_exhaust_payload_space() {
+    fn low_storage_filler_preserves_cleanup_headroom_and_stays_bounded() {
         assert_eq!(
             bounded_storage_filler_kib(3 * 1024 * 1024),
             3 * 1024 * 1024 - STORAGE_CLEANUP_HEADROOM_KIB
@@ -4734,5 +4810,32 @@ mod tests {
             filler_owned: true,
         })
         .is_err());
+    }
+
+    #[test]
+    fn low_storage_payload_exceeds_total_free_blocks_including_reserved_space() {
+        // Physical GT78-VN evidence exposed 147,456 KiB of free blocks that were
+        // absent from df's Available column.  Leaving 64 MiB Available therefore
+        // still let the old static 128 MiB payload fit.  Size against Blocks-Used.
+        let output = concat!(
+            "Filesystem 1K-blocks Used Available Use% Mounted on\n",
+            "/dev/fuse 52232748 52019752 65540 100% /storage/emulated\n",
+        );
+        let available_kib = parse_available_kib(output).expect("Available KiB should parse");
+        let total_free_kib = parse_total_free_kib(output).expect("total free KiB should parse");
+        assert_eq!(available_kib, 65_540);
+        assert_eq!(total_free_kib, 212_996);
+        assert_eq!(total_free_kib - available_kib, 147_456);
+
+        let payload_kib = bounded_low_storage_payload_kib(total_free_kib)
+            .expect("observed reserve gap should fit inside the bounded payload window");
+        assert_eq!(payload_kib, total_free_kib + LOW_STORAGE_FAILURE_MARGIN_KIB);
+        assert!(payload_kib > total_free_kib);
+        assert!(payload_kib <= MAX_LOW_STORAGE_HOST_PAYLOAD_KIB);
+    }
+
+    #[test]
+    fn low_storage_payload_fails_closed_when_total_free_exceeds_the_bound() {
+        assert!(bounded_low_storage_payload_kib(MAX_LOW_STORAGE_HOST_PAYLOAD_KIB).is_err());
     }
 }
