@@ -450,6 +450,10 @@ fn runner_executes_input_bound_app_private_destination_with_fresh_root_probes() 
     for _ in 0..3 {
         command_executor.push_completed(0, "", "");
     }
+    // The durable file push performs its explicit post-push dd/flush before
+    // the first root preflight, so keep that command's successful result
+    // separate from the root-probe responses below.
+    command_executor.push_completed(0, "", "");
     command_executor.push_completed(0, "uid=0(root) gid=0(root)\n", "");
     command_executor.push_completed(0, "uid=0(root) gid=0(root)\n", "");
     command_executor.push_completed(0, "uid=0(root) gid=0(root)\n", "");
@@ -477,6 +481,7 @@ fn runner_executes_input_bound_app_private_destination_with_fresh_root_probes() 
             ProcessOperation::ShellMutation,
             ProcessOperation::ShellMutation,
             ProcessOperation::Push,
+            ProcessOperation::DeviceCopy,
             ProcessOperation::RootPreflight,
             ProcessOperation::Predicate,
             ProcessOperation::RootPreflight,
@@ -3202,7 +3207,13 @@ fn rust_real_adb_file_operations_forward_exact_executable_and_serial() {
     let source = tmp.path().join("payload.bin");
     fs::write(&source, "payload").expect("source should be writable");
     let mut executor = FakeAdbCommandExecutor::default();
-    for _ in 0..5 {
+    // Each durable file push consumes one push result followed immediately by
+    // its explicit dd/flush result.
+    for _ in 0..2 {
+        executor.push_completed(0, "", "");
+        executor.push_completed(0, "", "");
+    }
+    for _ in 0..3 {
         executor.push_completed(0, "", "");
     }
     executor.push_completed(0, "uid=0(root) gid=0(root)\n", "");
@@ -3224,7 +3235,7 @@ fn rust_real_adb_file_operations_forward_exact_executable_and_serial() {
         .unwrap();
 
     let calls = device.command_executor().calls();
-    assert_eq!(calls.len(), 7);
+    assert_eq!(calls.len(), 9);
     assert!(calls.iter().all(|call| {
         call.starts_with(&[
             "/opt/android/adb".to_string(),
@@ -3234,10 +3245,42 @@ fn rust_real_adb_file_operations_forward_exact_executable_and_serial() {
     }));
     assert_eq!(calls[0][3..5], ["push", source.to_string_lossy().as_ref()]);
     assert_eq!(
-        calls[1][3..6],
+        calls[1],
+        vec![
+            "/opt/android/adb".to_string(),
+            "-s".to_string(),
+            "device-123".to_string(),
+            "shell".to_string(),
+            "dd if=/dev/null of=/sdcard/payload.bin count=0 conv=notrunc,fsync".to_string(),
+        ]
+    );
+    assert_eq!(
+        calls[2][3..6],
         ["push", "--sync", source.to_string_lossy().as_ref()]
     );
-    assert!(calls[6]
+    assert_eq!(
+        calls[3],
+        vec![
+            "/opt/android/adb".to_string(),
+            "-s".to_string(),
+            "device-123".to_string(),
+            "shell".to_string(),
+            "dd if=/dev/null of=/sdcard/payload.bin count=0 conv=notrunc,fsync".to_string(),
+        ]
+    );
+    assert_eq!(
+        calls[7],
+        vec![
+            "/opt/android/adb".to_string(),
+            "-s".to_string(),
+            "device-123".to_string(),
+            "shell".to_string(),
+            "su".to_string(),
+            "-c".to_string(),
+            "id".to_string(),
+        ]
+    );
+    assert!(calls[8]
         .last()
         .expect("privileged copy should have a shell payload")
         .starts_with("su -c "));
