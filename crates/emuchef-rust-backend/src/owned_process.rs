@@ -32,6 +32,10 @@ thread_local! {
     /// the arm in thread-local storage prevents one qualification invocation
     /// from changing an unrelated probe or parallel test.
     static TEST_PROCESS_DELAY: RefCell<Option<(ProcessOperation, Duration)>> = const { RefCell::new(None) };
+    /// A one-shot deadline arm belongs only to the current test thread.  It is
+    /// consumed by exactly one matching owned-process invocation and cannot
+    /// change production deadlines in non-test builds.
+    static TEST_PROCESS_DEADLINE: RefCell<Option<(ProcessOperation, Duration)>> = const { RefCell::new(None) };
 }
 
 #[cfg(test)]
@@ -73,6 +77,61 @@ fn take_test_process_delay(operation: ProcessOperation) -> Option<Duration> {
             }
         }
     })
+}
+
+#[cfg(test)]
+/// RAII scope for a test-only deadline override.
+///
+/// Dropping the guard clears an unconsumed arm, so a qualification or unit test
+/// cannot leak a shorter deadline into a later owned-process invocation.
+pub(crate) struct TestProcessDeadlineGuard;
+
+#[cfg(test)]
+impl Drop for TestProcessDeadlineGuard {
+    fn drop(&mut self) {
+        TEST_PROCESS_DEADLINE.with(|slot| {
+            slot.borrow_mut().take();
+        });
+    }
+}
+
+#[cfg(test)]
+/// Arm one matching, thread-local process deadline for a test invocation.
+///
+/// The production `ProcessOperation::deadline` table remains authoritative in
+/// non-test builds. A nonmatching operation leaves this arm available for the
+/// intended operation; the matching invocation consumes it exactly once.
+pub(crate) fn arm_test_process_deadline(
+    operation: ProcessOperation,
+    deadline: Duration,
+) -> TestProcessDeadlineGuard {
+    TEST_PROCESS_DEADLINE.with(|slot| {
+        let mut slot = slot.borrow_mut();
+        assert!(
+            slot.replace((operation, deadline)).is_none(),
+            "a process-deadline arm must be scoped and cannot be replaced"
+        );
+    });
+    TestProcessDeadlineGuard
+}
+
+#[cfg(test)]
+fn take_test_process_deadline(operation: ProcessOperation) -> Option<Duration> {
+    TEST_PROCESS_DEADLINE.with(|slot| {
+        let mut slot = slot.borrow_mut();
+        match slot.take() {
+            Some((armed_operation, deadline)) if armed_operation == operation => Some(deadline),
+            other => {
+                *slot = other;
+                None
+            }
+        }
+    })
+}
+
+#[cfg(not(test))]
+fn take_test_process_deadline(_operation: ProcessOperation) -> Option<Duration> {
+    None
 }
 
 #[cfg(not(test))]
@@ -175,6 +234,12 @@ pub(crate) enum OwnedProcessLifecycleEvent {
         alive: Option<bool>,
         terminal_reported: bool,
     },
+    DeadlineReached {
+        operation_id: OwnedProcessOperationId,
+        operation: ProcessOperation,
+        deadline: Duration,
+        at: SystemTime,
+    },
     Terminal {
         operation_id: OwnedProcessOperationId,
         operation: ProcessOperation,
@@ -189,6 +254,7 @@ impl OwnedProcessLifecycleEvent {
             Self::Spawned { operation_id, .. }
             | Self::MutationStarted { operation_id, .. }
             | Self::LivenessSampled { operation_id, .. }
+            | Self::DeadlineReached { operation_id, .. }
             | Self::Terminal { operation_id, .. } => *operation_id,
         }
     }
@@ -198,6 +264,7 @@ impl OwnedProcessLifecycleEvent {
             Self::Spawned { operation, .. }
             | Self::MutationStarted { operation, .. }
             | Self::LivenessSampled { operation, .. }
+            | Self::DeadlineReached { operation, .. }
             | Self::Terminal { operation, .. } => *operation,
         }
     }
@@ -207,6 +274,7 @@ impl OwnedProcessLifecycleEvent {
             Self::Spawned { at, .. }
             | Self::MutationStarted { at, .. }
             | Self::LivenessSampled { at, .. }
+            | Self::DeadlineReached { at, .. }
             | Self::Terminal { at, .. } => *at,
         }
     }
@@ -460,6 +528,16 @@ impl OwnedProcessObservationContext {
             });
     }
 
+    fn deadline_reached(&self, deadline: Duration) {
+        self.handle
+            .record(OwnedProcessLifecycleEvent::DeadlineReached {
+                operation_id: self.operation_id,
+                operation: self.operation,
+                deadline,
+                at: SystemTime::now(),
+            });
+    }
+
     fn terminal(&self) {
         self.handle
             .record_terminal(self.operation_id, self.operation);
@@ -697,6 +775,7 @@ async fn run_child(
         stdout,
         stderr,
         Timer::after(deadline),
+        Some(deadline),
         process_delay,
         observation,
     )
@@ -708,6 +787,7 @@ async fn run_child_with_deadline_signal<D: Future>(
     stdout: ChildStdout,
     stderr: ChildStderr,
     deadline_signal: D,
+    deadline: Option<Duration>,
     process_delay: Option<Duration>,
     observation: Option<OwnedProcessObservationContext>,
 ) -> Result<CapturedProcessOutput, OwnedProcessError> {
@@ -761,6 +841,9 @@ async fn run_child_with_deadline_signal<D: Future>(
             ));
         }
         if timer.as_mut().poll(context).is_ready() {
+            if let (Some(deadline), Some(observation)) = (deadline, observation.as_ref()) {
+                observation.deadline_reached(deadline);
+            }
             return Poll::Ready(ProcessEvent::TimedOut);
         }
         Poll::Pending
@@ -925,6 +1008,7 @@ fn run_owned_process_with_deadline_signal<D: Future + 'static>(
         deadline_signal,
         None,
         None,
+        None,
     ))
 }
 
@@ -935,7 +1019,8 @@ pub(crate) fn run_owned_process(
     args: &[String],
     operation: ProcessOperation,
 ) -> Result<CapturedProcessOutput, OwnedProcessError> {
-    run_owned_process_with_deadline(program, args, operation.deadline(), operation)
+    let deadline = take_test_process_deadline(operation).unwrap_or_else(|| operation.deadline());
+    run_owned_process_with_deadline(program, args, deadline, operation)
 }
 
 #[cfg(test)]
@@ -945,13 +1030,8 @@ pub(crate) fn run_owned_process_observed(
     operation: ProcessOperation,
     observer: OwnedProcessObservationHandle,
 ) -> Result<CapturedProcessOutput, OwnedProcessError> {
-    run_owned_process_with_deadline_and_observer(
-        program,
-        args,
-        operation.deadline(),
-        operation,
-        Some(observer),
-    )
+    let deadline = take_test_process_deadline(operation).unwrap_or_else(|| operation.deadline());
+    run_owned_process_with_deadline_and_observer(program, args, deadline, operation, Some(observer))
 }
 
 #[cfg(test)]
@@ -1008,6 +1088,134 @@ mod tests {
                 (ProcessOperation::DeviceCopy, Duration::from_secs(300)),
                 (ProcessOperation::GenericFallback, Duration::from_secs(300)),
             ]
+        );
+    }
+
+    #[test]
+    fn scoped_deadline_override_is_consumed_once_for_matching_operation() {
+        let _deadline =
+            arm_test_process_deadline(ProcessOperation::DeviceCopy, Duration::from_millis(10));
+        let executable = std::env::current_exe().expect("test executable should be available");
+        let args = vec![
+            "--exact".to_string(),
+            "owned_process::tests::short_helper".to_string(),
+            "--ignored".to_string(),
+            "--nocapture".to_string(),
+        ];
+
+        let first = run_owned_process(
+            executable
+                .to_str()
+                .expect("test executable should be utf-8"),
+            &args,
+            ProcessOperation::DeviceCopy,
+        )
+        .expect_err("the matching scoped deadline should time out the first child");
+        assert_eq!(first.kind, ProcessFailureKind::TimedOut);
+
+        let second = run_owned_process(
+            executable
+                .to_str()
+                .expect("test executable should be utf-8"),
+            &args,
+            ProcessOperation::DeviceCopy,
+        )
+        .expect("the consumed override must not affect a later copy");
+        assert_eq!(second.status_code, Some(0));
+    }
+
+    #[test]
+    fn scoped_deadline_override_does_not_affect_nonmatching_operation() {
+        let _deadline =
+            arm_test_process_deadline(ProcessOperation::DeviceCopy, Duration::from_millis(10));
+        let executable = std::env::current_exe().expect("test executable should be available");
+        let args = vec![
+            "--exact".to_string(),
+            "owned_process::tests::short_helper".to_string(),
+            "--ignored".to_string(),
+            "--nocapture".to_string(),
+        ];
+
+        let probe = run_owned_process(
+            executable
+                .to_str()
+                .expect("test executable should be utf-8"),
+            &args,
+            ProcessOperation::Probe,
+        )
+        .expect("a nonmatching operation must retain the armed override");
+        assert_eq!(probe.status_code, Some(0));
+
+        let copy = run_owned_process(
+            executable
+                .to_str()
+                .expect("test executable should be utf-8"),
+            &args,
+            ProcessOperation::DeviceCopy,
+        )
+        .expect_err("the matching operation should consume the retained override");
+        assert_eq!(copy.kind, ProcessFailureKind::TimedOut);
+    }
+
+    #[test]
+    fn dropping_unused_deadline_override_removes_it() {
+        {
+            let _deadline =
+                arm_test_process_deadline(ProcessOperation::DeviceCopy, Duration::from_millis(10));
+        }
+        let executable = std::env::current_exe().expect("test executable should be available");
+        let output = run_owned_process(
+            executable
+                .to_str()
+                .expect("test executable should be utf-8"),
+            &[
+                "--exact".to_string(),
+                "owned_process::tests::short_helper".to_string(),
+                "--ignored".to_string(),
+                "--nocapture".to_string(),
+            ],
+            ProcessOperation::DeviceCopy,
+        )
+        .expect("dropping an unused arm must restore the production deadline");
+        assert_eq!(output.status_code, Some(0));
+    }
+
+    #[test]
+    fn deadline_override_is_thread_local() {
+        let executable = std::env::current_exe().expect("test executable should be available");
+        let args = vec![
+            "--exact".to_string(),
+            "owned_process::tests::short_helper".to_string(),
+            "--ignored".to_string(),
+            "--nocapture".to_string(),
+        ];
+        let worker_executable = executable.clone();
+        let worker_args = args.clone();
+        let worker = std::thread::spawn(move || {
+            let _deadline =
+                arm_test_process_deadline(ProcessOperation::DeviceCopy, Duration::from_millis(10));
+            run_owned_process(
+                worker_executable
+                    .to_str()
+                    .expect("worker executable should be utf-8"),
+                &worker_args,
+                ProcessOperation::DeviceCopy,
+            )
+            .expect_err("the worker's scoped deadline should apply on its thread")
+            .kind
+        });
+        let main_result = run_owned_process(
+            executable
+                .to_str()
+                .expect("test executable should be utf-8"),
+            &args,
+            ProcessOperation::DeviceCopy,
+        )
+        .expect("the worker's scoped deadline must not cross thread boundaries");
+        assert_eq!(main_result.status_code, Some(0));
+        assert_eq!(
+            worker.join().expect("worker should finish"),
+            ProcessFailureKind::TimedOut
         );
     }
 
@@ -1340,13 +1548,19 @@ mod tests {
             .expect("the terminal sample should be available");
         assert_eq!(sample.alive, Some(false));
         assert!(sample.terminal_reported);
+        assert!(!observer
+            .events()
+            .iter()
+            .any(|event| { matches!(event, OwnedProcessLifecycleEvent::DeadlineReached { .. }) }));
     }
 
     #[test]
     fn observed_timeout_preserves_cleanup_and_emits_terminal() {
         let observer = OwnedProcessObservationHandle::default();
         let executable = std::env::current_exe().expect("test executable should be available");
-        let error = run_owned_process_observed_for_test(
+        let _deadline =
+            arm_test_process_deadline(ProcessOperation::DeviceCopy, Duration::from_millis(100));
+        let error = run_owned_process_observed(
             executable
                 .to_str()
                 .expect("test executable should be utf-8"),
@@ -1356,7 +1570,6 @@ mod tests {
                 "--ignored".to_string(),
                 "--nocapture".to_string(),
             ],
-            Duration::from_millis(100),
             ProcessOperation::DeviceCopy,
             observer.clone(),
         )
@@ -1371,6 +1584,20 @@ mod tests {
             .events()
             .iter()
             .any(|event| matches!(event, OwnedProcessLifecycleEvent::Terminal { .. })));
+        let events = observer.events();
+        let timeout_index = events
+            .iter()
+            .position(|event| matches!(event, OwnedProcessLifecycleEvent::DeadlineReached { .. }))
+            .expect("the actual timer transition should be observed");
+        let terminal_index = events
+            .iter()
+            .position(|event| matches!(event, OwnedProcessLifecycleEvent::Terminal { .. }))
+            .expect("terminal cleanup should be observed");
+        assert!(timeout_index < terminal_index);
+        assert_eq!(
+            events[timeout_index].operation_id(),
+            events[terminal_index].operation_id()
+        );
     }
 
     #[test]
@@ -1439,6 +1666,13 @@ mod tests {
     #[ignore]
     fn normal_helper() {
         println!("normal-helper");
+    }
+
+    #[test]
+    #[ignore]
+    fn short_helper() {
+        std::thread::sleep(Duration::from_millis(50));
+        println!("short-helper");
     }
 
     #[test]

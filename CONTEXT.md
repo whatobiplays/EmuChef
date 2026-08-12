@@ -1172,6 +1172,41 @@ projection, **Not attempted** count, partial-change and authority recovery
 state, forbidden-control absence, canonical UI-state artifact, and
 artifact-bound operator observation. Nested unsafe text is rejected.
 
+The mandatory `operation_timeout` physical scenario uses the reviewed first
+copy step with a fixture-owned device FIFO source and no writer. The FIFO is
+created and verified inside the unique run scope, so the real path is
+`copy_files` with `source.location == "device"` through
+`RealAdbDevice::copy_on_device` and the owned `DeviceCopy` process. A private,
+thread-local, one-shot `#[cfg(test)]` deadline override selects exactly 15
+seconds for this ignored qualification entry point; production
+`ProcessOperation::DeviceCopy.deadline()` remains 300 seconds and has no
+public or environment-controlled timeout configuration. The exact child must
+be sampled alive about 12 seconds after its matching mutation, then the actual
+timer transition must be recorded as `DeadlineReached` before existing
+kill/reap cleanup and `Terminal`. Passing evidence uses one opaque operation
+identity, `actionKind: "deadline_reached"`, confirmed process cleanup,
+`operation_timed_out`, a failed first step with the second step Not attempted,
+and clean FIFO/run-scope residual verification. No operator marker or Terminal
+2 procedure is used for this scenario; active host-push observation remains
+limited to cancellation, USB-disconnect, and conditional offline cases.
+The timeout lifecycle observer may contain unrelated Probe, Predicate, or other
+operation events. Timeout evidence selects exactly one `DeviceCopy`
+`DeadlineReached` event at 15 seconds, then requires that selected operation's
+single Spawned, MutationStarted, live LivenessSampled, DeadlineReached, and
+Terminal events in raw chronological order. Missing, duplicate, contradictory,
+wrong-class, wrong-deadline, or mixed-identity target events are rejected while
+unrelated operation IDs are ignored.
+
+Schema-v1 compatibility is additive for historical non-timeout records: their
+`timeout` object and `activeProcess.actionKind` may be absent. Every
+`operation_timeout` record must carry exactly the four timeout fields with the
+300,000 ms production deadline, 15,000 ms scoped qualification deadline, and
+`test_only_scoped_override` source. `processCleanup` is one of `confirmed`,
+`uncertain`, or `not_observed`; only a passing timeout record requires
+`confirmed`. A non-null timeout `activeProcess` always requires
+`actionKind: "deadline_reached"`, while a passing timeout still requires that
+process evidence to be present.
+
 Low-storage qualification requires a disposable selected device with between
 4 GiB and 5,308,416 KiB free before mutation, a verified fixture-owned 1 GiB
 recovery reserve, a bounded run-scoped filler capped at 4 GiB with 64 MiB of

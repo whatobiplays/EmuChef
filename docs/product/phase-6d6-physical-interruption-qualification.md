@@ -61,10 +61,11 @@ deadline signal and a one-shot process-delay regression bound to exactly one
 `DeviceCopy` invocation. Delayed polling cannot turn a child that already
 exited into an active operation or timeout. Tests retain timeout precedence,
 child kill/reap, output bounds, panic cleanup, and parallel isolation. Identity
-probes and every other operation class remain unaffected. Production still uses the existing fixed `async_io::Timer`
-deadlines and no test delay. Existing cancellation, transport, identity, root,
-partial-result, slot, projection, export, and sidecar-loss tests remain the
-automated evidence for their invariants. Sidecar loss stays terminal
+probes and every other operation class remain unaffected. Production still uses
+the existing fixed `async_io::Timer` deadlines and no test delay; in particular,
+`ProcessOperation::DeviceCopy` remains 300 seconds. Existing cancellation,
+transport, identity, root, partial-result, slot, projection, export, and
+sidecar-loss tests remain the automated evidence for their invariants. Sidecar loss stays terminal
 `runtime_session_lost`/`execution_unavailable`; it never creates a second owner
 or an automatic resume path.
 
@@ -84,8 +85,13 @@ diagnostic evidence:
   explicitly unqualified if appropriate hardware is unavailable);
 - root revocation between two privileged atomic commands, followed by a
   bounded `cleanup-ready` checkpoint after root authority is restored;
-- deterministic owned-process timeout regression evidence, which is not a
-  physical repetition and cannot be promoted by relabeling;
+- a physical `operation_timeout` repetition using a fixture-owned device FIFO
+  as the reviewed `DeviceCopy` source, with a fixed 15-second `#[cfg(test)]`
+  scoped deadline; the exact child is sampled alive before the real timer
+  transition, and confirmed kill/reap cleanup plus FIFO/run-scope cleanup are
+  required;
+- deterministic owned-process timeout regression evidence, which remains
+  automated evidence and cannot be promoted by relabeling;
 - low storage using only a fixture-owned destination and a one-GiB reserve;
 - host sleep before and after the fixed deadline; and
 - development-build Tauri/React recovery smoke for cancellation, transport,

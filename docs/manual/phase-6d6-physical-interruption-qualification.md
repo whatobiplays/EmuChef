@@ -248,7 +248,7 @@ failure as offline evidence.
 | `identity_stability` | Perform one controlled reconnect at `boundary-ready` with the same device. | Repeated complete identity samples remain stable and the second operation succeeds. |
 | `identity_replacement` | With explicit owner-approved hardware, disconnect the first target before attaching the same-serial replacement at `boundary-ready`. The harness polls successful ADB inventory samples and stable fingerprints, proving original attachment, serial absence, replacement attachment, and no simultaneous target. | `device_identity_changed` or `device_identity_unverified` before later mutation. If hardware is unavailable, record this exact case unqualified. |
 | `root_revocation` | On a prepared rooted device, revoke EmuChef's adb-shell root authority after `boundary-ready`, acknowledge `operator-action`, wait for `terminal-ready`, restore root authority, then acknowledge `cleanup-ready`. | The second privileged command does not run, root failure is primary, prior mutation is retained, cleanup is separate and verified, and identity precedence is unchanged. |
-| `operation_timeout` | Use only a genuinely bounded operation that reaches the fixed Rust-owned deadline while the exact child remains owned. The private delay regression seam is automated evidence only and cannot qualify this repetition. | `operation_timed_out`, kill/reap or uncertainty evidence, no descendant, no later scheduling. Block the case if a safe genuine deadline cannot be exercised. |
+| `operation_timeout` | No operator marker is required. The harness creates a fixture-owned FIFO inside the unique run scope, verifies it with `test -p`, and runs the reviewed first copy with `source.location == "device"` through `RealAdbDevice::copy_on_device`. A private `#[cfg(test)]` scoped override selects a fixed 15-second qualification deadline; production `DeviceCopy` remains 300 seconds. | The same exact child is sampled alive about 12 seconds after its matching `DeviceCopy` mutation, then the real timer wins, kill/reap cleanup is confirmed, and `DeadlineReached` precedes `Terminal`. The result is `operation_timed_out` with the second step Not attempted, clean FIFO/run-scope cleanup, and explicit timeout metadata. Any missing stimulus, liveness, deadline, confirmed cleanup, or residual proof blocks the repetition. |
 | `low_storage` | With the separate destructive opt-in, first use the reviewed storage-preflight profile when the device is above the accepted free-space window. Keep that exact owned Downloads allocation for both repetitions. The harness then verifies at least 4 GiB free, creates/verifies the unique fixture-owned 1-GiB recovery reserve, allocates bounded filler, and waits for the checkpoint. | Genuine ENOSPC maps to `device_storage_exhausted`; no deletion/retry; harness cleanup removes only run-scoped payload/filler/sentinel/reserve and restores the preflight baseline. The separate profile-owned Downloads allocation is removed explicitly after both repetitions. Block the case if any ownership, bound, or restoration proof is unavailable. |
 | `host_sleep_before_deadline` | Begin the long fixture operation, create `sleep-requested`, manually sleep the host before the fixed deadline, create `sleep-entered` after entry, then create `wake` immediately after resuming. | Record ordered sleep/wake times, measured executor and wall elapsed time, timer behavior, child result, identity, terminal state, slot release, and no second owner. |
 | `host_sleep_after_deadline` | Repeat after enough active elapsed time to cross the fixed deadline, using the same three physical markers. | Record whether the timer observes active-host or suspended time; a measured completion or timeout is valid only when the branch is internally consistent. Transport loss, indeterminate timing, and contradictory timestamps remain blocked. |
@@ -257,6 +257,15 @@ For every mutating case, the harness cleans only the fixture-owned destination
 files and reports residual state independently from the operation result. Do
 not modify boot images, modules, SELinux policy, system partitions, root
 manager configuration, user data, or unrelated devices.
+
+The timeout repetition is the one exception to the operator-action protocol:
+the blocking source is a real fixture-owned device FIFO with no writer, and the
+existing owned-process timer performs the timeout, kill/reap, and terminal
+cleanup sequence. The 15-second value is a thread-local, one-shot test seam
+used only by this ignored qualification entry point; ordinary production
+execution still resolves `ProcessOperation::DeviceCopy` to its 300-second
+deadline. The FIFO is removed before its run scope, and no Terminal 2 or
+operator-marker procedure is required.
 
 ## Host-sleep policy
 

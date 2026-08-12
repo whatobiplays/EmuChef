@@ -371,6 +371,7 @@
       "requiresActiveSlotReleased": true,
       "slotObservation": {"source": "production-execution-session-slot", "exactRunScope": true},
       "activeProcess": {"required": true, "operationClass": "device_copy", "actionMustPrecedeTerminal": true, "exactRunBinding": true},
+      "timeout": {"productionDeadlineMs": 300000, "qualificationDeadlineMs": 15000, "deadlineSource": "test_only_scoped_override", "processCleanup": "confirmed"},
       "cleanupOutcome": "succeeded",
       "residualOutcome": "clean",
       "facts": {"rootShell": false, "activeCheckpoint": false, "boundaryCheckpoint": false, "requiresSentinelAction": false, "storage": false}

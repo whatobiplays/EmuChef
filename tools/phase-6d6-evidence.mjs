@@ -306,7 +306,12 @@ export function validateGateEnvironment(environment) {
 
 /** Validate one sanitized evidence record against the strict schema contract. */
 export function validateEvidenceRecord(record) {
-  assertKeys(record, REQUIRED_TOP_LEVEL_FIELDS, "evidence record");
+  const topLevelFields = record !== null
+    && typeof record === "object"
+    && Object.prototype.hasOwnProperty.call(record, "timeout")
+    ? [...REQUIRED_TOP_LEVEL_FIELDS, "timeout"]
+    : REQUIRED_TOP_LEVEL_FIELDS;
+  assertKeys(record, topLevelFields, "evidence record");
   if (record.schemaVersion !== 1) fail("schemaVersion must be 1");
   if (!SCENARIOS.includes(record.scenario)) fail("evidence scenario is not in the supported scenario set");
   if (!Number.isInteger(record.repetition) || ![1, 2].includes(record.repetition)) {
@@ -407,6 +412,7 @@ export function validateEvidenceRecord(record) {
   const slotReleased = record.activeSlotObservation.releasedAt === null ? null : unixSeconds(record.activeSlotObservation.releasedAt, "activeSlotObservation.releasedAt");
   if (record.activeSlotObservation.released && (slotTerminal === null || slotReleased === null || slotTerminal < slotAcquired || slotReleased < slotTerminal)) fail("active slot release must follow terminal cleanup for the same execution");
 
+  validateTimeout(record, contract, passingRecord);
   validateActiveProcess(record, contract, passingRecord);
 
   validateActiveCancellation(record, contract, passingRecord);
@@ -434,10 +440,14 @@ export function validateEvidenceRecord(record) {
   if (sentinelSeconds.armedAt !== undefined && sentinelSeconds.operationStartedAt !== undefined && sentinelSeconds.operationStartedAt < sentinelSeconds.armedAt) fail("sentinel operation started before arming");
   if (sentinelSeconds.operationFinishedAt !== undefined && sentinelSeconds.operationFinishedAt < (sentinelSeconds.operationStartedAt ?? sentinelSeconds.armedAt ?? sentinelSeconds.operationFinishedAt)) fail("sentinel operation finished before start");
   if (sentinelSeconds.armedAt !== undefined && sentinelSeconds.boundaryReadyAt !== undefined && sentinelSeconds.boundaryReadyAt < sentinelSeconds.armedAt) fail("sentinel boundary marker predates arming");
-  if (sentinelSeconds.armedAt !== undefined && sentinelSeconds.operatorActionAt !== undefined && sentinelSeconds.operatorActionAt < (sentinelSeconds.boundaryReadyAt ?? sentinelSeconds.operationStartedAt ?? sentinelSeconds.armedAt)) fail("sentinel operator action predates its checkpoint");
+  const operatorCheckpoint = contract.facts.storage
+    ? sentinelSeconds.armedAt
+    : (sentinelSeconds.boundaryReadyAt ?? sentinelSeconds.operationStartedAt ?? sentinelSeconds.armedAt);
+  if (sentinelSeconds.armedAt !== undefined && sentinelSeconds.operatorActionAt !== undefined && operatorCheckpoint !== undefined && sentinelSeconds.operatorActionAt < operatorCheckpoint) fail("sentinel operator action predates its checkpoint");
   if (sentinelSeconds.operationFinishedAt !== undefined && sentinelSeconds.cleanupReadyAt !== undefined && sentinelSeconds.cleanupReadyAt < sentinelSeconds.operationFinishedAt) fail("sentinel cleanup-ready marker predates terminal operation");
   if (passingRecord && (sentinelSeconds.armedAt === undefined || sentinelSeconds.operationFinishedAt === undefined)) fail("sentinel chronology must include armed and finished markers");
   if (passingRecord && contract.facts.requiresSentinelAction && record.hostSleep === null && sentinelSeconds.operatorActionAt === undefined) fail("scenario requires a fresh operator sentinel action");
+  if (passingRecord && contract.timeout && (record.sentinel.operatorActionAt !== null || record.sentinel.boundaryReadyAt !== null)) fail("operation-timeout qualification must not use an operator or boundary marker");
   if (passingRecord && record.hostSleep !== null && (sentinelSeconds.sleepRequestedAt === undefined || sentinelSeconds.sleepEnteredAt === undefined || sentinelSeconds.wakeAt === undefined)) fail("host sleep scenario requires fresh sleep transition markers");
   if (passingRecord && contract.facts.boundaryCheckpoint && sentinelSeconds.boundaryReadyAt === undefined) fail("boundary scenario is missing boundary-ready chronology");
   if (passingRecord && record.scenario === "root_revocation" && sentinelSeconds.cleanupReadyAt === undefined) fail("root cleanup authority was not restored at the bounded checkpoint");
@@ -504,6 +514,31 @@ function monotonicNanos(value, label) {
   return BigInt(value.slice("monotonic-ns:".length));
 }
 
+function validateTimeout(record, contract, passingRecord) {
+  const rule = contract.timeout ?? null;
+  if (!rule) {
+    if (record.timeout !== undefined && record.timeout !== null) fail("non-timeout scenarios must not contain timeout metadata");
+    return;
+  }
+  if (record.timeout === undefined || record.timeout === null) {
+    fail("operation-timeout records require timeout metadata");
+  }
+  assertKeys(record.timeout, [
+    "productionDeadlineMs", "qualificationDeadlineMs", "deadlineSource", "processCleanup",
+  ], "timeout");
+  for (const field of ["productionDeadlineMs", "qualificationDeadlineMs"]) {
+    if (!Number.isSafeInteger(record.timeout[field]) || record.timeout[field] < 0) fail(`timeout.${field} must be a non-negative safe integer`);
+  }
+  assertString(record.timeout.deadlineSource, "timeout.deadlineSource");
+  if (!new Set(["confirmed", "uncertain", "not_observed"]).has(record.timeout.processCleanup)) fail("timeout.processCleanup is invalid");
+  if (
+    record.timeout.productionDeadlineMs !== rule.productionDeadlineMs
+    || record.timeout.qualificationDeadlineMs !== rule.qualificationDeadlineMs
+    || record.timeout.deadlineSource !== rule.deadlineSource
+  ) fail("operation-timeout metadata does not prove the fixed scoped deadline");
+  if (passingRecord && record.timeout.processCleanup !== "confirmed") fail("passing operation-timeout metadata does not prove confirmed cleanup");
+}
+
 function validateActiveProcess(record, contract, passingRecord) {
   const rule = contract.activeProcess ?? null;
   if (!rule) {
@@ -514,11 +549,13 @@ function validateActiveProcess(record, contract, passingRecord) {
     if (passingRecord) fail("active mutation qualification requires exact target process evidence");
     return;
   }
-  assertKeys(record.activeProcess, [
+  const baseKeys = [
     "runId", "operationId", "operationClass", "childIdentity", "spawnedAt",
     "mutationStartedAt", "checkedAliveAt", "actionAt", "terminalAt",
     "aliveImmediatelyBeforeAction", "terminalReportedBeforeAction",
-  ], "activeProcess");
+  ];
+  const hasActionKind = Object.prototype.hasOwnProperty.call(record.activeProcess, "actionKind");
+  assertKeys(record.activeProcess, hasActionKind ? [...baseKeys, "actionKind"] : baseKeys, "activeProcess");
   assertString(record.activeProcess.runId, "activeProcess.runId", /^run-scope-sha256:[0-9a-f]{64}$/);
   assertString(record.activeProcess.operationId, "activeProcess.operationId", /^operation-sha256:[0-9a-f]{64}$/);
   assertString(record.activeProcess.childIdentity, "activeProcess.childIdentity", /^child-sha256:[0-9a-f]{64}$/);
@@ -528,7 +565,18 @@ function validateActiveProcess(record, contract, passingRecord) {
   const checkedAlive = unixSeconds(record.activeProcess.checkedAliveAt, "activeProcess.checkedAliveAt");
   const action = unixSeconds(record.activeProcess.actionAt, "activeProcess.actionAt");
   const terminal = unixSeconds(record.activeProcess.terminalAt, "activeProcess.terminalAt");
-  if (!(spawned <= mutationStarted && mutationStarted <= checkedAlive && checkedAlive <= action && action < terminal)) fail("operator action must precede the exact target process terminal event");
+  const expectedActionKind = contract.timeout ? "deadline_reached" : "operator_action";
+  if (contract.timeout && !hasActionKind) fail("operation-timeout evidence requires actionKind");
+  if (hasActionKind) {
+    assertString(record.activeProcess.actionKind, "activeProcess.actionKind");
+    if (record.activeProcess.actionKind !== expectedActionKind) fail("active process action kind does not match the scenario");
+  }
+  const chronologyValid = contract.timeout
+    ? spawned <= mutationStarted && mutationStarted <= checkedAlive && checkedAlive <= action && action <= terminal
+    : spawned <= mutationStarted && mutationStarted <= checkedAlive && checkedAlive <= action && action < terminal;
+  if (!chronologyValid) fail(contract.timeout
+    ? "deadline must not follow the exact target process terminal event"
+    : "operator action must precede the exact target process terminal event");
   if (record.activeProcess.aliveImmediatelyBeforeAction !== true || record.activeProcess.terminalReportedBeforeAction !== false) fail("exact target child was not proven alive immediately before the action");
 }
 
@@ -901,6 +949,15 @@ function commandOption(args, name, fallback) {
 function validateSchemaContract(schema) {
   assertObject(schema, "evidence schema");
   if (!equalJson(schema.required, REQUIRED_TOP_LEVEL_FIELDS)) fail("evidence schema top-level fields drifted from the validator");
+  const activeProcessProperties = schema.properties?.activeProcess?.properties;
+  if (!activeProcessProperties?.actionKind?.enum
+    || !equalJson(activeProcessProperties.actionKind.enum, ["operator_action", "deadline_reached"])) {
+    fail("evidence schema active-process action discriminator drifted from the validator");
+  }
+  const timeoutSchema = schema.properties?.timeout;
+  if (!timeoutSchema || !equalJson(timeoutSchema.required, ["productionDeadlineMs", "qualificationDeadlineMs", "deadlineSource", "processCleanup"])) {
+    fail("evidence schema timeout metadata is missing or incomplete");
+  }
   const hostRequired = schema.properties?.hostSleep?.required;
   for (const field of ["deadlineClockStartNs", "deadlineClockBeforeSleepNs", "deadlineClockAfterWakeNs", "deadlineClockTerminalNs", "measurementToleranceMs", "operatorActionPhase", "deadlineClockSource"]) {
     if (!hostRequired?.includes(field)) fail(`evidence schema host-sleep contract is missing ${field}`);

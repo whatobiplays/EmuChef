@@ -113,6 +113,12 @@ test("operation timeout requires exact live target-child evidence", () => {
     actionMustPrecedeTerminal: true,
     exactRunBinding: true,
   });
+  assert.deepEqual(contract.timeout, {
+    productionDeadlineMs: 300000,
+    qualificationDeadlineMs: 15000,
+    deadlineSource: "test_only_scoped_override",
+    processCleanup: "confirmed",
+  });
 });
 
 test("UI smoke binding requires a passing matching physical scenario and issue", () => {

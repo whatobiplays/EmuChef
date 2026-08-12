@@ -230,10 +230,12 @@ function recordForScenario(scenario, repetition) {
       mutationStartedAt: "unix:1785790001",
       checkedAliveAt: "unix:1785790002",
       actionAt: "unix:1785790002",
+      actionKind: contract.timeout ? "deadline_reached" : "operator_action",
       terminalAt: "unix:1785790004",
       aliveImmediatelyBeforeAction: true,
       terminalReportedBeforeAction: false,
     } : null,
+    timeout: contract.timeout ? structuredClone(contract.timeout) : null,
     storage: contract.facts.storage ? {
       initialFreeKib: 4 * 1024 * 1024,
       recoveryReserveKib: 1024 * 1024,
@@ -734,6 +736,66 @@ test("failed physical attempts retain non-clean evidence without qualifying", ()
   assert.equal(validateEvidenceManifest([failed]).complete, false);
 });
 
+test("timeout metadata stays strict on failed records while historical omissions remain compatible", () => {
+  const failed = recordForScenario("operation_timeout", 1);
+  failed.outcome = "failed";
+  failed.observedIssueCode = "device_transport_lost";
+  failed.activeSlotReleased = false;
+  failed.activeSlotObservation = {
+    observed: true,
+    acquired: true,
+    released: false,
+    runId: failed.scenarioFacts.runScope,
+    executionId: failed.activeSlotObservation.executionId,
+    acquiredAt: failed.activeSlotObservation.acquiredAt,
+    terminalCleanupAt: null,
+    releasedAt: null,
+    sourceKind: "production_owned_slot",
+    evidence: "production-execution-session-slot",
+  };
+  failed.cleanup = { ...failed.cleanup, outcome: "failed", verified: false };
+  failed.residualStateCheck = { outcome: "residual", residuals: ["fixture-owned residual path"] };
+  assert.doesNotThrow(() => validateEvidenceRecord(sealRecord(failed)));
+
+  for (const [field, value] of [
+    ["productionDeadlineMs", 1],
+    ["qualificationDeadlineMs", 1],
+    ["deadlineSource", "unscoped_override"],
+  ]) {
+    const invalid = structuredClone(failed);
+    invalid.timeout[field] = value;
+    assert.throws(() => validateEvidenceRecord(sealRecord(invalid)), /timeout|deadline/i);
+  }
+
+  const missingTimeout = structuredClone(failed);
+  delete missingTimeout.timeout;
+  assert.throws(() => validateEvidenceRecord(sealRecord(missingTimeout)), /timeout metadata/i);
+
+  for (const cleanup of ["uncertain", "not_observed"]) {
+    const incompleteCleanup = structuredClone(failed);
+    incompleteCleanup.timeout.processCleanup = cleanup;
+    assert.doesNotThrow(() => validateEvidenceRecord(sealRecord(incompleteCleanup)));
+    assert.equal(validateEvidenceManifest([incompleteCleanup]).complete, false);
+  }
+
+  const missingActionKind = structuredClone(failed);
+  delete missingActionKind.activeProcess.actionKind;
+  assert.throws(() => validateEvidenceRecord(sealRecord(missingActionKind)), /actionKind/i);
+
+  const failedWithoutProcess = structuredClone(failed);
+  failedWithoutProcess.activeProcess = null;
+  assert.doesNotThrow(() => validateEvidenceRecord(sealRecord(failedWithoutProcess)));
+
+  const passingWithoutProcess = recordForScenario("operation_timeout", 1);
+  passingWithoutProcess.activeProcess = null;
+  assert.throws(() => validateEvidenceRecord(sealRecord(passingWithoutProcess)), /target process|active mutation/i);
+
+  const historical = recordForScenario("cancellation_active", 1);
+  delete historical.timeout;
+  delete historical.activeProcess.actionKind;
+  assert.doesNotThrow(() => validateEvidenceRecord(sealRecord(historical)));
+});
+
 test("runbook validation requires ignored execution, sentinel timeout, and explicit gates", () => {
   const runbook = [
     "EMUCHEF_RUN_REAL_ADB_TESTS=1 EMUCHEF_RUN_PHASE_6D6_PHYSICAL_TESTS=1",
@@ -1070,6 +1132,35 @@ test("active interruption cannot pass without exact live child evidence", () => 
   const relabelledFacts = recordForScenario("cancellation_active", 1);
   relabelledFacts.scenarioFacts.operationClass = "device_copy";
   assert.throws(() => validateEvidenceRecord(relabelledFacts), /operation class|scenario contract/i);
+});
+
+test("operation timeout cannot qualify with altered deadline, liveness, chronology, or operator evidence", () => {
+  const valid = recordForScenario("operation_timeout", 1);
+  assert.doesNotThrow(() => validateEvidenceRecord(valid));
+  const cases = [
+    ["production deadline", (record) => { record.timeout.productionDeadlineMs = 15_000; }],
+    ["qualification deadline", (record) => { record.timeout.qualificationDeadlineMs = 16_000; }],
+    ["deadline source", (record) => { record.timeout.deadlineSource = "process_delay"; }],
+    ["uncertain cleanup", (record) => { record.timeout.processCleanup = "uncertain"; }],
+    ["missing timeout", (record) => { delete record.timeout; }],
+    ["wrong operation class", (record) => { record.activeProcess.operationClass = "host_push"; }],
+    ["unknown liveness", (record) => { record.activeProcess.aliveImmediatelyBeforeAction = false; }],
+    ["terminal reported", (record) => { record.activeProcess.terminalReportedBeforeAction = true; }],
+    ["deadline before liveness", (record) => { record.activeProcess.actionAt = "unix:1"; }],
+    ["terminal before deadline", (record) => { record.activeProcess.terminalAt = "unix:1"; }],
+    ["operator action kind", (record) => { record.activeProcess.actionKind = "operator_action"; }],
+    ["operator marker", (record) => { record.sentinel.operatorActionAt = "unix:2"; }],
+  ];
+  for (const [label, mutate] of cases) {
+    const candidate = recordForScenario("operation_timeout", 1);
+    mutate(candidate);
+    sealRecord(candidate);
+    assert.throws(
+      () => validateEvidenceRecord(candidate),
+      undefined,
+      `${label} must not qualify`,
+    );
+  }
 });
 
 test("host sleep enforces the manifest phase instead of reusing before-threshold evidence", () => {

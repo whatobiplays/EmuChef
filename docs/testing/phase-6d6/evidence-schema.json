@@ -189,9 +189,20 @@
         "mutationStartedAt": { "type": "string", "pattern": "^unix:(0|[1-9][0-9]{0,11})$" },
         "checkedAliveAt": { "type": "string", "pattern": "^unix:(0|[1-9][0-9]{0,11})$" },
         "actionAt": { "type": "string", "pattern": "^unix:(0|[1-9][0-9]{0,11})$" },
+        "actionKind": { "enum": ["operator_action", "deadline_reached"] },
         "terminalAt": { "type": "string", "pattern": "^unix:(0|[1-9][0-9]{0,11})$" },
         "aliveImmediatelyBeforeAction": { "type": "boolean" },
         "terminalReportedBeforeAction": { "type": "boolean" }
+      }
+    },
+    "timeout": {
+      "type": ["object", "null"], "additionalProperties": false,
+      "required": ["productionDeadlineMs", "qualificationDeadlineMs", "deadlineSource", "processCleanup"],
+      "properties": {
+        "productionDeadlineMs": { "type": "integer", "minimum": 0 },
+        "qualificationDeadlineMs": { "type": "integer", "minimum": 0 },
+        "deadlineSource": { "type": "string", "minLength": 1 },
+        "processCleanup": { "enum": ["confirmed", "uncertain", "not_observed"] }
       }
     },
     "activeCancellation": {

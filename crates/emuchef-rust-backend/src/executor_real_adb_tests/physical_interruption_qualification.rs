@@ -32,11 +32,12 @@ use crate::executor::{
     OperationLifecycle, ProgressPhase, StepFailureKind, StepRunRecord, StepRunStatus,
 };
 use crate::owned_process::{
-    OwnedProcessLifecycleEvent, OwnedProcessObservationHandle, OwnedProcessOperationId,
-    ProcessOperation,
+    arm_test_process_deadline, OwnedProcessLifecycleEvent, OwnedProcessObservationHandle,
+    OwnedProcessOperationId, ProcessCleanup, ProcessOperation,
 };
 use crate::planner::{
-    DeviceContext, ExecutionPlan, ExecutionPlanSource, RuntimeCapabilities, TargetDeviceBinding,
+    DeviceContext, ExecutionParamValue, ExecutionPlan, ExecutionPlanSource, RuntimeCapabilities,
+    TargetDeviceBinding,
 };
 
 const PHASE_OPT_IN: &str = "EMUCHEF_RUN_PHASE_6D6_PHYSICAL_TESTS";
@@ -87,6 +88,9 @@ const ACTIVE_CALIBRATION_SOURCE_FILE: &str = "phase6d6-active-calibration-source
 const ACTIVE_CALIBRATION_DEST_FILE: &str = "phase6d6-active-calibration-dest.bin";
 const ACTIVE_SOURCE_FILE: &str = "phase6d6-active-source.bin";
 const ACTIVE_HOST_CHUNK_BYTES: usize = 1024 * 1024;
+const TIMEOUT_QUALIFICATION_DEADLINE: Duration = Duration::from_secs(15);
+const TIMEOUT_LIVENESS_SAMPLE_OFFSET: Duration = Duration::from_secs(12);
+const TIMEOUT_FIFO_FILE: &str = "phase6d6-timeout-source.fifo";
 const SCENARIO_MANIFEST: &str =
     include_str!("../../../../docs/testing/phase-6d6/scenario-manifest.json");
 
@@ -219,11 +223,15 @@ impl Scenario {
         )
     }
 
-    const fn supports_active_process_capture(self) -> bool {
+    const fn supports_host_push_active_stimulus(self) -> bool {
         matches!(
             self,
             Self::CancellationActive | Self::UsbDisconnectActive | Self::DeviceOffline
         )
+    }
+
+    const fn requires_process_observer(self) -> bool {
+        self.supports_host_push_active_stimulus() || matches!(self, Self::OperationTimeout)
     }
 
     const fn requires_terminal_recovery(self) -> bool {
@@ -242,7 +250,7 @@ impl Scenario {
 }
 
 const fn active_process_operation(scenario: Scenario) -> ProcessOperation {
-    if scenario.supports_active_process_capture() {
+    if scenario.supports_host_push_active_stimulus() {
         ProcessOperation::Push
     } else {
         ProcessOperation::DeviceCopy
@@ -460,6 +468,17 @@ fn evaluate_scenario_contract(contract: &ScenarioContract, observed: &Value) -> 
         let terminal = parse_time("terminalAt")?;
         let run_bound = evidence.get("runId").and_then(Value::as_str)
             == observed.get("runScope").and_then(Value::as_str);
+        let expected_action_kind = if contract.timeout.is_some() {
+            "deadline_reached"
+        } else {
+            "operator_action"
+        };
+        let action_kind = evidence.get("actionKind").and_then(Value::as_str);
+        let chronology_valid = if contract.timeout.is_some() {
+            spawned <= mutation && mutation <= checked && checked <= action && action <= terminal
+        } else {
+            spawned <= mutation && mutation <= checked && checked <= action && action < terminal
+        };
         if !active.required
             || evidence.get("operationClass").and_then(Value::as_str)
                 != Some(active.operation_class.as_str())
@@ -472,11 +491,71 @@ fn evaluate_scenario_contract(contract: &ScenarioContract, observed: &Value) -> 
                 .get("terminalReportedBeforeAction")
                 .and_then(Value::as_bool)
                 != Some(false)
-            || !(spawned <= mutation && mutation <= checked && checked <= action)
-            || (active.action_must_precede_terminal && action >= terminal)
+            || !chronology_valid
+            || (contract.timeout.is_some() && action_kind != Some(expected_action_kind))
+            || (contract.timeout.is_none()
+                && action_kind.is_some()
+                && action_kind != Some(expected_action_kind))
+            || (contract.timeout.is_none()
+                && active.action_must_precede_terminal
+                && action >= terminal)
         {
-            return Err("operator action was not bound to the live target mutation".to_string());
+            return Err("lifecycle action was not bound to the live target mutation".to_string());
         }
+    }
+    if let Some(timeout) = &contract.timeout {
+        let observed_timeout = observed
+            .get("timeout")
+            .and_then(Value::as_object)
+            .ok_or_else(|| "operation-timeout metadata is missing".to_string())?;
+        let expected_timeout_keys = [
+            "productionDeadlineMs",
+            "qualificationDeadlineMs",
+            "deadlineSource",
+            "processCleanup",
+        ];
+        if observed_timeout.len() != expected_timeout_keys.len()
+            || expected_timeout_keys
+                .iter()
+                .any(|key| !observed_timeout.contains_key(*key))
+        {
+            return Err(
+                "operation-timeout metadata must contain exactly the four contract fields"
+                    .to_string(),
+            );
+        }
+        let process_cleanup = observed_timeout
+            .get("processCleanup")
+            .and_then(Value::as_str);
+        if !matches!(
+            process_cleanup,
+            Some("confirmed" | "uncertain" | "not_observed")
+        ) {
+            return Err("operation-timeout process cleanup state is invalid".to_string());
+        }
+        if observed_timeout
+            .get("productionDeadlineMs")
+            .and_then(Value::as_u64)
+            != Some(timeout.production_deadline_ms)
+            || observed_timeout
+                .get("qualificationDeadlineMs")
+                .and_then(Value::as_u64)
+                != Some(timeout.qualification_deadline_ms)
+            || observed_timeout
+                .get("deadlineSource")
+                .and_then(Value::as_str)
+                != Some(timeout.deadline_source.as_str())
+            || process_cleanup != Some(timeout.process_cleanup.as_str())
+        {
+            return Err(
+                "operation-timeout metadata does not match the authoritative contract".to_string(),
+            );
+        }
+    } else if observed
+        .get("timeout")
+        .is_some_and(|timeout| !timeout.is_null())
+    {
+        return Err("non-timeout scenario contains timeout metadata".to_string());
     }
     if let Some(active) = &contract.active_cancellation {
         let evidence = observed
@@ -919,6 +998,8 @@ struct ScenarioContract {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     active_process: Option<ActiveProcessContract>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    timeout: Option<TimeoutContract>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     host_sleep: Option<HostSleepContract>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     identity_transition: Option<IdentityTransitionContract>,
@@ -953,6 +1034,15 @@ struct ActiveProcessContract {
     operation_class: String,
     action_must_precede_terminal: bool,
     exact_run_binding: bool,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+struct TimeoutContract {
+    production_deadline_ms: u64,
+    qualification_deadline_ms: u64,
+    deadline_source: String,
+    process_cleanup: String,
 }
 
 fn is_false(value: &bool) -> bool {
@@ -1107,6 +1197,16 @@ struct ActiveStimulus {
     predicted_ms: u64,
 }
 
+/// Device-resident FIFO used only by the timeout qualification. No host writer
+/// is created: the reviewed device-side copy must block on this exact
+/// fixture-owned source until the scoped qualification deadline wins through
+/// the ordinary owned-process timeout path.
+#[derive(Clone, Debug)]
+struct TimeoutStimulus {
+    device_source_path: String,
+    device_destination_path: String,
+}
+
 fn derive_active_stimulus(
     calibration_kib: u64,
     elapsed_ms: u64,
@@ -1216,6 +1316,46 @@ fn active_stimulus_device_paths(invocation: &Invocation) -> (String, String) {
     )
 }
 
+fn timeout_fifo_path(run_scope: &str) -> String {
+    format!("{run_scope}/{TIMEOUT_FIFO_FILE}")
+}
+
+fn timeout_fifo_is_owned_by_run_scope(run_scope: &str, path: &str) -> bool {
+    let prefix = format!("{run_scope}/");
+    path.starts_with(&prefix)
+        && !path.contains("..")
+        && path.ends_with(TIMEOUT_FIFO_FILE)
+        && path.len() >= prefix.len() + TIMEOUT_FIFO_FILE.len()
+}
+
+fn reviewed_plan_source_location(scenario: Scenario) -> &'static str {
+    if scenario == Scenario::OperationTimeout {
+        "device"
+    } else {
+        "host"
+    }
+}
+
+fn cleanup_device_paths_for_scenario(
+    scenario: Scenario,
+    first: &str,
+    second: &str,
+    run_scope: &str,
+) -> Vec<String> {
+    let mut paths = vec![first.to_string(), second.to_string()];
+    if scenario.supports_host_push_active_stimulus() {
+        paths.push(format!("{run_scope}/{ACTIVE_CALIBRATION_DEST_FILE}"));
+    }
+    if scenario == Scenario::OperationTimeout {
+        paths.push(timeout_fifo_path(run_scope));
+    }
+    if scenario == Scenario::LowStorage {
+        paths.push(format!("{run_scope}/{STORAGE_FILL_FILE}"));
+        paths.push(format!("{run_scope}/{STORAGE_RESERVE_FILE}"));
+    }
+    paths
+}
+
 fn canonical_unix_seconds(time: SystemTime) -> Option<u64> {
     time.duration_since(UNIX_EPOCH)
         .ok()
@@ -1299,10 +1439,196 @@ fn active_process_evidence(
         "mutationStartedAt": system_time_value(Some(mutation_started)),
         "checkedAliveAt": system_time_value(Some(checked_alive)),
         "actionAt": system_time_value(Some(action)),
+        "actionKind": "operator_action",
         "terminalAt": system_time_value(Some(terminal)),
         "aliveImmediatelyBeforeAction": true,
         "terminalReportedBeforeAction": false,
     }))
+}
+
+fn timeout_process_evidence(
+    events: &[OwnedProcessLifecycleEvent],
+    run_scope: &str,
+) -> Option<Value> {
+    // The shared observer records lifecycle events for many operations. Select the
+    // timeout target from the unique DeviceCopy deadline at the qualification
+    // duration, then validate only that operation's complete lifecycle.
+    let deadline_targets: Vec<_> = events
+        .iter()
+        .filter_map(|event| match event {
+            OwnedProcessLifecycleEvent::DeadlineReached {
+                operation_id,
+                operation: ProcessOperation::DeviceCopy,
+                deadline,
+                at,
+            } if *deadline == TIMEOUT_QUALIFICATION_DEADLINE => Some((*operation_id, *at)),
+            _ => None,
+        })
+        .collect();
+    if deadline_targets.len() != 1 {
+        return None;
+    }
+    let (operation_id, _) = deadline_targets[0];
+
+    // An event for the selected operation ID with a different operation class
+    // makes the identity correlation ambiguous, even when the DeviceCopy events
+    // otherwise form a valid sequence.
+    if events.iter().any(|event| {
+        let (observed_id, operation) = match event {
+            OwnedProcessLifecycleEvent::Spawned {
+                operation_id,
+                operation,
+                ..
+            }
+            | OwnedProcessLifecycleEvent::MutationStarted {
+                operation_id,
+                operation,
+                ..
+            }
+            | OwnedProcessLifecycleEvent::LivenessSampled {
+                operation_id,
+                operation,
+                ..
+            }
+            | OwnedProcessLifecycleEvent::DeadlineReached {
+                operation_id,
+                operation,
+                ..
+            }
+            | OwnedProcessLifecycleEvent::Terminal {
+                operation_id,
+                operation,
+                ..
+            } => (*operation_id, *operation),
+        };
+        observed_id == operation_id && operation != ProcessOperation::DeviceCopy
+    }) {
+        return None;
+    }
+
+    let spawned: Vec<_> = events
+        .iter()
+        .filter_map(|event| match event {
+            OwnedProcessLifecycleEvent::Spawned {
+                operation_id: observed,
+                operation: ProcessOperation::DeviceCopy,
+                at,
+            } if *observed == operation_id => Some(*at),
+            _ => None,
+        })
+        .collect();
+    let mutation_started: Vec<_> = events
+        .iter()
+        .filter_map(|event| match event {
+            OwnedProcessLifecycleEvent::MutationStarted {
+                operation_id: observed,
+                operation: ProcessOperation::DeviceCopy,
+                at,
+            } if *observed == operation_id => Some(*at),
+            _ => None,
+        })
+        .collect();
+    let liveness: Vec<_> = events
+        .iter()
+        .filter_map(|event| match event {
+            OwnedProcessLifecycleEvent::LivenessSampled {
+                operation_id: observed,
+                operation: ProcessOperation::DeviceCopy,
+                at,
+                alive,
+                terminal_reported,
+            } if *observed == operation_id => Some((*at, *alive, *terminal_reported)),
+            _ => None,
+        })
+        .collect();
+    let deadlines: Vec<_> = events
+        .iter()
+        .filter_map(|event| match event {
+            OwnedProcessLifecycleEvent::DeadlineReached {
+                operation_id: observed,
+                operation: ProcessOperation::DeviceCopy,
+                deadline,
+                at,
+            } if *observed == operation_id => Some((*at, *deadline)),
+            _ => None,
+        })
+        .collect();
+    let terminals: Vec<_> = events
+        .iter()
+        .filter_map(|event| match event {
+            OwnedProcessLifecycleEvent::Terminal {
+                operation_id: observed,
+                operation: ProcessOperation::DeviceCopy,
+                at,
+            } if *observed == operation_id => Some(*at),
+            _ => None,
+        })
+        .collect();
+    if spawned.len() != 1
+        || mutation_started.len() != 1
+        || liveness.len() != 1
+        || deadlines.len() != 1
+        || terminals.len() != 1
+    {
+        return None;
+    }
+    let spawned = spawned[0];
+    let mutation_started = mutation_started[0];
+    let (checked_alive, alive, terminal_reported) = liveness[0];
+    let (deadline_at, deadline) = deadlines[0];
+    let terminal = terminals[0];
+    if alive != Some(true)
+        || terminal_reported
+        || deadline != TIMEOUT_QUALIFICATION_DEADLINE
+        || !(spawned <= mutation_started
+            && mutation_started < checked_alive
+            && checked_alive < deadline_at
+            && deadline_at < terminal)
+    {
+        return None;
+    }
+    let raw_identity = operation_id.as_u64();
+    Some(json!({
+        "runId": run_scope,
+        "operationId": format!(
+            "operation-sha256:{}",
+            digest(&format!("phase6d6-operation:{run_scope}:{raw_identity}"))
+        ),
+        "operationClass": "device_copy",
+        "childIdentity": format!(
+            "child-sha256:{}",
+            digest(&format!("phase6d6-child:{run_scope}:{raw_identity}"))
+        ),
+        "spawnedAt": system_time_value(Some(spawned)),
+        "mutationStartedAt": system_time_value(Some(mutation_started)),
+        "checkedAliveAt": system_time_value(Some(checked_alive)),
+        "actionAt": system_time_value(Some(deadline_at)),
+        "actionKind": "deadline_reached",
+        "terminalAt": system_time_value(Some(terminal)),
+        "aliveImmediatelyBeforeAction": true,
+        "terminalReportedBeforeAction": false,
+    }))
+}
+
+fn timeout_process_cleanup(result: Result<&ExecutionRunResult, &String>) -> &'static str {
+    match result
+        .ok()
+        .and_then(|run| run.steps.first())
+        .and_then(|step| step.cleanup)
+    {
+        Some(ProcessCleanup::Confirmed) => "confirmed",
+        Some(ProcessCleanup::Uncertain) => "uncertain",
+        Some(ProcessCleanup::NotRequired) | None => "not_observed",
+    }
+}
+
+fn timeout_metadata(result: Result<&ExecutionRunResult, &String>) -> Value {
+    json!({
+        "productionDeadlineMs": ProcessOperation::DeviceCopy.deadline().as_millis(),
+        "qualificationDeadlineMs": TIMEOUT_QUALIFICATION_DEADLINE.as_millis(),
+        "deadlineSource": "test_only_scoped_override",
+        "processCleanup": timeout_process_cleanup(result),
+    })
 }
 
 #[derive(Clone, Debug)]
@@ -1558,7 +1884,7 @@ fn run_invocation() -> Result<Value, String> {
     } else {
         None
     };
-    let active_stimulus = if invocation.scenario.supports_active_process_capture() {
+    let active_stimulus = if invocation.scenario.supports_host_push_active_stimulus() {
         match prepare_active_stimulus(&invocation, &facts) {
             Ok(stimulus) => Some(stimulus),
             Err(error) => {
@@ -1577,13 +1903,39 @@ fn run_invocation() -> Result<Value, String> {
     } else {
         None
     };
+    let timeout_stimulus = if invocation.scenario == Scenario::OperationTimeout {
+        match prepare_timeout_stimulus(&invocation, &facts) {
+            Ok(stimulus) => Some(stimulus),
+            Err(error) => {
+                let cleanup = cleanup_fixture(
+                    &invocation,
+                    &facts,
+                    low_storage_host_payload.as_deref(),
+                    active_stimulus.as_ref(),
+                );
+                return Err(format!(
+                    "{error}; timeout FIFO preparation cleanup outcome={}",
+                    cleanup.0
+                ));
+            }
+        }
+    } else {
+        None
+    };
     let plan = reviewed_plan(
         &invocation,
         &facts,
         low_storage_host_payload.as_deref(),
         active_stimulus.as_ref(),
+        timeout_stimulus.as_ref(),
     );
-    let reviewed = run_reviewed_plan(&invocation, plan, &facts, active_stimulus.as_ref());
+    let reviewed = run_reviewed_plan(
+        &invocation,
+        plan,
+        &facts,
+        active_stimulus.as_ref(),
+        timeout_stimulus.as_ref(),
+    );
     let ReviewedPlanObservation {
         result,
         action_time,
@@ -1595,6 +1947,7 @@ fn run_invocation() -> Result<Value, String> {
         mut authorization_capture,
         terminal_detected_at,
         executor_elapsed_ms,
+        timeout,
     } = reviewed;
 
     let mut checkpoint_error = checkpoint_error;
@@ -1667,6 +2020,7 @@ fn run_invocation() -> Result<Value, String> {
         authorization_capture,
         terminal_detected_at,
         executor_elapsed_ms,
+        timeout,
         storage: storage.as_ref(),
         host_payload: low_storage_host_payload.as_deref(),
         active_stimulus: active_stimulus.as_ref(),
@@ -1931,12 +2285,14 @@ fn reviewed_plan(
     facts: &DeviceFacts,
     low_storage_host_payload: Option<&Path>,
     active_stimulus: Option<&ActiveStimulus>,
+    timeout_stimulus: Option<&TimeoutStimulus>,
 ) -> ExecutionPlan {
     let root = invocation.contract.destination_root.trim_end_matches('/');
     let mut steps = Vec::new();
     let (first_destination, second_destination) = run_scope_paths(invocation);
-    let first_source = active_stimulus
-        .map(|stimulus| stimulus.host_source_path.clone())
+    let first_source = timeout_stimulus
+        .map(|stimulus| PathBuf::from(&stimulus.device_source_path))
+        .or_else(|| active_stimulus.map(|stimulus| stimulus.host_source_path.clone()))
         .or_else(|| low_storage_host_payload.map(Path::to_path_buf))
         .unwrap_or_else(|| fixture_root().join("corpus/source/single-file.txt"));
     let second_source = fixture_root().join("corpus/source/nested/alpha/one.txt");
@@ -1968,6 +2324,20 @@ fn reviewed_plan(
         assert!(active_stimulus
             .host_source_path
             .starts_with(active_stimulus.host_workspace.path()));
+    }
+    if let Some(timeout_stimulus) = timeout_stimulus {
+        assert_eq!(timeout_stimulus.device_destination_path, first_destination);
+        assert!(timeout_fifo_is_owned_by_run_scope(
+            &invocation.run_scope,
+            &timeout_stimulus.device_source_path,
+        ));
+        match first.params.get_mut("source") {
+            Some(ExecutionParamValue::Literal { value }) => {
+                value["location"] =
+                    Value::String(reviewed_plan_source_location(invocation.scenario).to_string());
+            }
+            _ => panic!("reviewed timeout copy source must remain a literal runtime value"),
+        }
     }
     first.verify = vec![condition(
         "path_exists",
@@ -2042,6 +2412,7 @@ struct ReviewedPlanObservation {
     authorization_capture: Option<AuthorizationTransitionCapture>,
     terminal_detected_at: Option<SystemTime>,
     executor_elapsed_ms: Option<u64>,
+    timeout: Option<Value>,
 }
 
 fn is_boundary_checkpoint_event(
@@ -2054,10 +2425,153 @@ fn is_boundary_checkpoint_event(
         && event.phase == ProgressPhase::Finished
 }
 
+fn checkpoint_failure_message(scenario: Scenario) -> &'static str {
+    if scenario == Scenario::OperationTimeout {
+        "timeout liveness/deadline observation was missing or invalid"
+    } else {
+        "bounded operator checkpoint was missing or aborted"
+    }
+}
+
 fn wait_until_later_canonical_second(after: SystemTime) {
     let after_second = canonical_unix_seconds(after).unwrap_or(0);
     while canonical_unix_seconds(SystemTime::now()).unwrap_or(0) <= after_second {
         std::thread::sleep(Duration::from_millis(20));
+    }
+}
+
+fn timeout_liveness_checkpoint(
+    observer: OwnedProcessObservationHandle,
+    stop: Arc<AtomicBool>,
+) -> Result<(), String> {
+    let started = Instant::now();
+    let operation_id = loop {
+        let events = observer.events();
+        if let Some((operation_id, _)) = events.iter().find_map(|event| match event {
+            OwnedProcessLifecycleEvent::MutationStarted {
+                operation_id,
+                operation: ProcessOperation::DeviceCopy,
+                at,
+            } => Some((*operation_id, *at)),
+            _ => None,
+        }) {
+            break operation_id;
+        }
+        if events.iter().any(|event| {
+            matches!(
+                event,
+                OwnedProcessLifecycleEvent::Terminal {
+                    operation: ProcessOperation::DeviceCopy,
+                    ..
+                }
+            )
+        }) {
+            return Err(
+                "timeout child reached terminal cleanup before the liveness sample".to_string(),
+            );
+        }
+        if stop.load(Ordering::Acquire) || started.elapsed() >= SENTINEL_TIMEOUT {
+            return Err(
+                "timeout mutation was not observed before the bounded deadline".to_string(),
+            );
+        }
+        std::thread::sleep(Duration::from_millis(10));
+    };
+    let mutation_started = observer
+        .events()
+        .iter()
+        .find_map(|event| match event {
+            OwnedProcessLifecycleEvent::MutationStarted {
+                operation_id: observed,
+                operation: ProcessOperation::DeviceCopy,
+                at,
+            } if *observed == operation_id => Some(*at),
+            _ => None,
+        })
+        .ok_or_else(|| "matching timeout mutation timestamp was not retained".to_string())?;
+    let sample_target = mutation_started
+        .checked_add(TIMEOUT_LIVENESS_SAMPLE_OFFSET)
+        .ok_or_else(|| "timeout liveness sample target overflowed".to_string())?;
+    while SystemTime::now() < sample_target {
+        let events = observer.events();
+        if events.iter().any(|event| {
+            matches!(
+                event,
+                OwnedProcessLifecycleEvent::DeadlineReached {
+                    operation_id: observed,
+                    operation: ProcessOperation::DeviceCopy,
+                    ..
+                } if *observed == operation_id
+            ) || matches!(
+                event,
+                OwnedProcessLifecycleEvent::Terminal {
+                    operation_id: observed,
+                    operation: ProcessOperation::DeviceCopy,
+                    ..
+                } if *observed == operation_id
+            )
+        }) {
+            return Err(
+                "timeout child reached its deadline before the 12-second liveness sample"
+                    .to_string(),
+            );
+        }
+        if stop.load(Ordering::Acquire) {
+            return Err(
+                "timeout qualification stopped before the 12-second liveness sample".to_string(),
+            );
+        }
+        std::thread::sleep(Duration::from_millis(20));
+    }
+    observer.request_liveness_sample(operation_id)?;
+    loop {
+        let events = observer.events();
+        if let Some(sample) = events.iter().find_map(|event| match event {
+            OwnedProcessLifecycleEvent::LivenessSampled {
+                operation_id: observed,
+                operation: ProcessOperation::DeviceCopy,
+                at,
+                alive,
+                terminal_reported,
+            } if *observed == operation_id => Some((*at, *alive, *terminal_reported)),
+            _ => None,
+        }) {
+            if sample.1 == Some(true) && !sample.2 {
+                return Ok(());
+            }
+            return Err("timeout child was not alive immediately before the deadline".to_string());
+        }
+        if events.iter().any(|event| {
+            matches!(
+                event,
+                OwnedProcessLifecycleEvent::DeadlineReached {
+                    operation_id: observed,
+                    operation: ProcessOperation::DeviceCopy,
+                    ..
+                } if *observed == operation_id
+            ) || matches!(
+                event,
+                OwnedProcessLifecycleEvent::Terminal {
+                    operation_id: observed,
+                    operation: ProcessOperation::DeviceCopy,
+                    ..
+                } if *observed == operation_id
+            )
+        }) {
+            return Err(
+                "timeout child reached its deadline before the liveness sample was recorded"
+                    .to_string(),
+            );
+        }
+        if stop.load(Ordering::Acquire) {
+            return Err(
+                "timeout qualification stopped before the liveness sample was recorded".to_string(),
+            );
+        }
+        if started.elapsed() >= SENTINEL_TIMEOUT {
+            return Err("timeout liveness sample was not recorded before the deadline".to_string());
+        }
+        std::thread::sleep(Duration::from_millis(10));
     }
 }
 
@@ -2066,6 +2580,7 @@ fn run_reviewed_plan(
     plan: ExecutionPlan,
     facts: &DeviceFacts,
     active_stimulus: Option<&ActiveStimulus>,
+    timeout_stimulus: Option<&TimeoutStimulus>,
 ) -> ReviewedPlanObservation {
     let action_seen = Arc::new(AtomicBool::new(false));
     let checkpoint_failed = Arc::new(AtomicBool::new(false));
@@ -2106,8 +2621,11 @@ fn run_reviewed_plan(
         }
     }
     let process_observer = scenario
-        .supports_active_process_capture()
+        .requires_process_observer()
         .then(OwnedProcessObservationHandle::default);
+    if scenario == Scenario::OperationTimeout && timeout_stimulus.is_none() {
+        checkpoint_failed.store(true, Ordering::Release);
+    }
     let transition_stop = Arc::new(AtomicBool::new(false));
     let sentinel = invocation.sentinel.clone();
     let callback_sentinel = sentinel.clone();
@@ -2173,7 +2691,7 @@ fn run_reviewed_plan(
         let watcher_cancel_requested = Arc::clone(&cancel_requested);
         let watcher_process_observer = process_observer.clone();
         Some(std::thread::spawn(move || {
-            if scenario.supports_active_process_capture() {
+            if scenario.supports_host_push_active_stimulus() {
                 let result = (|| -> Result<(), String> {
                     let observer = watcher_process_observer.ok_or_else(|| {
                         "active scenario did not install the exact-child observer".to_string()
@@ -2310,7 +2828,22 @@ fn run_reviewed_plan(
     let executor_timer = Instant::now();
     let session_manager = ExecutionSessionManager::default();
     let observed_run = session_manager.test_run_under_observed_slot(&run_id, || {
-        runner.run_with_progress_and_cancel_observed(
+        let _deadline_guard = (scenario == Scenario::OperationTimeout).then(|| {
+            arm_test_process_deadline(ProcessOperation::DeviceCopy, TIMEOUT_QUALIFICATION_DEADLINE)
+        });
+        let timeout_stop = Arc::new(AtomicBool::new(false));
+        let timeout_watcher = if scenario == Scenario::OperationTimeout {
+            let observer = process_observer
+                .clone()
+                .expect("operation-timeout qualification must install the exact-child observer");
+            let watcher_stop = Arc::clone(&timeout_stop);
+            Some(std::thread::spawn(move || {
+                timeout_liveness_checkpoint(observer, watcher_stop)
+            }))
+        } else {
+            None
+        };
+        let result = runner.run_with_progress_and_cancel_observed(
             &plan,
             move |event: ExecutionProgressEvent| {
                 if is_boundary_checkpoint_event(scenario, &boundary_step_id, &event) {
@@ -2359,11 +2892,23 @@ fn run_reviewed_plan(
                 }
                 _ => {}
             },
-        )
+        );
+        if let Some(watcher) = timeout_watcher {
+            timeout_stop.store(true, Ordering::Release);
+            match watcher.join() {
+                Ok(Ok(())) => {}
+                Ok(Err(_)) | Err(_) => {
+                    checkpoint_failed.store(true, Ordering::Release);
+                }
+            }
+        }
+        result
     });
     let (result, session_slot_observation) = match observed_run {
         Ok(value) => value,
         Err(error) => {
+            let timeout =
+                (scenario == Scenario::OperationTimeout).then(|| timeout_metadata(Err(&error)));
             return ReviewedPlanObservation {
                 result: Err(error),
                 action_time: None,
@@ -2385,6 +2930,7 @@ fn run_reviewed_plan(
                 authorization_capture: None,
                 terminal_detected_at: None,
                 executor_elapsed_ms: None,
+                timeout,
             };
         }
     };
@@ -2430,15 +2976,19 @@ fn run_reviewed_plan(
         });
     let action_time = action_time.lock().ok().and_then(|slot| *slot);
     let active_process = process_observer.as_ref().and_then(|observer| {
-        active_process_evidence(
-            &observer.events(),
-            action_time,
-            &run_id,
-            active_process_operation(scenario),
-        )
+        if scenario == Scenario::OperationTimeout {
+            timeout_process_evidence(&observer.events(), &run_id)
+        } else {
+            active_process_evidence(
+                &observer.events(),
+                action_time,
+                &run_id,
+                active_process_operation(scenario),
+            )
+        }
     });
     let checkpoint_error = if checkpoint_failed.load(Ordering::SeqCst) {
-        Some("bounded operator checkpoint was missing or aborted".to_string())
+        Some(checkpoint_failure_message(scenario).to_string())
     } else if invocation.scenario.is_active_checkpoint() && !action_seen.load(Ordering::SeqCst) {
         Some("operator action was not observed before the first operation completed".to_string())
     } else {
@@ -2470,6 +3020,7 @@ fn run_reviewed_plan(
         identity_capture.and_then(|capture| capture.lock().ok().map(|value| value.clone()));
     let authorization_capture =
         authorization_capture.and_then(|capture| capture.lock().ok().map(|value| value.clone()));
+    let timeout = (scenario == Scenario::OperationTimeout).then(|| timeout_metadata(Ok(&result)));
     ReviewedPlanObservation {
         result: Ok(result),
         action_time,
@@ -2481,6 +3032,7 @@ fn run_reviewed_plan(
         authorization_capture,
         terminal_detected_at,
         executor_elapsed_ms,
+        timeout,
     }
 }
 
@@ -2703,9 +3255,12 @@ fn cleanup_fixture(
     for path in [first, second] {
         remove_owned_path(&path, &mut residual);
     }
-    if invocation.scenario.supports_active_process_capture() {
+    if invocation.scenario.supports_host_push_active_stimulus() {
         let (calibration_destination, _) = active_stimulus_device_paths(invocation);
         remove_owned_path(&calibration_destination, &mut residual);
+    }
+    if invocation.scenario == Scenario::OperationTimeout {
+        remove_owned_path(&timeout_fifo_path(&invocation.run_scope), &mut residual);
     }
     if invocation.scenario == Scenario::LowStorage {
         remove_owned_path(
@@ -2765,6 +3320,7 @@ struct EvidenceInputs<'a> {
     authorization_capture: Option<AuthorizationTransitionCapture>,
     terminal_detected_at: Option<SystemTime>,
     executor_elapsed_ms: Option<u64>,
+    timeout: Option<Value>,
     storage: Option<&'a StorageObservation>,
     host_payload: Option<&'a Path>,
     active_stimulus: Option<&'a ActiveStimulus>,
@@ -2788,6 +3344,7 @@ fn evidence_record(inputs: EvidenceInputs<'_>) -> Value {
         authorization_capture,
         terminal_detected_at,
         executor_elapsed_ms,
+        timeout,
         storage,
         host_payload,
         active_stimulus,
@@ -2861,6 +3418,7 @@ fn evidence_record(inputs: EvidenceInputs<'_>) -> Value {
                         "evidence": "production-execution-session-slot",
                     },
                     "activeProcess": active_process.clone().unwrap_or(Value::Null),
+                    "timeout": timeout.clone().unwrap_or(Value::Null),
                     "activeCancellation": active_cancellation.clone().unwrap_or(Value::Null),
                     "hostSleep": host_sleep.clone(),
                     "identityTransition": identity_transition.clone(),
@@ -2949,17 +3507,12 @@ fn evidence_record(inputs: EvidenceInputs<'_>) -> Value {
         })
         .unwrap_or(Value::Null);
     let (first_path, second_path) = run_scope_paths(invocation);
-    let mut owned_paths = vec![first_path, second_path];
-    if invocation.scenario == Scenario::LowStorage {
-        owned_paths.extend([
-            format!("{}/{}", invocation.run_scope, STORAGE_FILL_FILE),
-            format!("{}/{}", invocation.run_scope, STORAGE_RESERVE_FILE),
-        ]);
-    }
-    if invocation.scenario.supports_active_process_capture() {
-        let (calibration_destination, _) = active_stimulus_device_paths(invocation);
-        owned_paths.push(calibration_destination);
-    }
+    let mut owned_paths = cleanup_device_paths_for_scenario(
+        invocation.scenario,
+        &first_path,
+        &second_path,
+        &invocation.run_scope,
+    );
     if let Some(stimulus) = active_stimulus {
         owned_paths.push(
             stimulus
@@ -3034,7 +3587,7 @@ fn evidence_record(inputs: EvidenceInputs<'_>) -> Value {
         "optIns": opt_ins(invocation),
         "command": "cargo test --manifest-path crates/emuchef-rust-backend/Cargo.toml --features real-execution physical_interruption_qualification::manual_phase_6d6_physical_interruption_qualification -- --ignored --exact",
         "preparation": "Phase 6C fixture contract, exact serial inventory, package allowlist, destination ownership, and empty sentinel directory validated.",
-        "operatorAction": if invocation.scenario.is_active_checkpoint() || invocation.scenario.is_boundary_checkpoint() || invocation.scenario == Scenario::LowStorage { "Required bounded sentinel action was requested from the operator." } else { "No operator transition required; controlled test seam or identity observation used." },
+        "operatorAction": if invocation.scenario.is_active_checkpoint() || invocation.scenario.is_boundary_checkpoint() || invocation.scenario == Scenario::LowStorage { "Required bounded sentinel action was requested from the operator." } else if invocation.scenario == Scenario::OperationTimeout { "No operator transition or action marker was used; the fixed test-only qualification deadline exercised the production owned-process timeout path." } else { "No operator transition required; controlled test seam or identity observation used." },
         "executionSuccess": result.as_ref().ok().is_some_and(|run| run.success),
         "observedIssueCode": issue_code,
         "stepStates": steps,
@@ -3054,6 +3607,7 @@ fn evidence_record(inputs: EvidenceInputs<'_>) -> Value {
             "evidence": "production-execution-session-slot",
         },
         "activeProcess": active_process.clone().unwrap_or(Value::Null),
+        "timeout": timeout.unwrap_or(Value::Null),
         "activeCancellation": active_cancellation.unwrap_or(Value::Null),
         "hostSleep": host_sleep,
         "identityTransition": identity_transition,
@@ -3692,7 +4246,7 @@ fn prepare_active_stimulus(
     invocation: &Invocation,
     facts: &DeviceFacts,
 ) -> Result<ActiveStimulus, String> {
-    if !invocation.scenario.supports_active_process_capture() {
+    if !invocation.scenario.supports_host_push_active_stimulus() {
         return Err(
             "active host-push stimulus was requested for an unsupported scenario".to_string(),
         );
@@ -3766,6 +4320,50 @@ fn prepare_active_stimulus(
         device_destination_path,
         payload_kib: derived.payload_kib,
         predicted_ms: derived.predicted_ms,
+    })
+}
+
+fn device_fifo_exists(serial: &str, path: &str) -> Result<bool, String> {
+    let output = Command::new("adb")
+        .args(["-s", serial, "shell", "test", "-p", path])
+        .output()
+        .map_err(|_| "ADB FIFO verification is unavailable".to_string())?;
+    if output.status.success() {
+        return Ok(true);
+    }
+    if output.status.code() == Some(1) && output.stdout.is_empty() && output.stderr.is_empty() {
+        return Ok(false);
+    }
+    Err("ADB FIFO verification failed".to_string())
+}
+
+fn prepare_timeout_stimulus(
+    invocation: &Invocation,
+    facts: &DeviceFacts,
+) -> Result<TimeoutStimulus, String> {
+    if invocation.scenario != Scenario::OperationTimeout {
+        return Err("timeout FIFO stimulus was requested for an unsupported scenario".to_string());
+    }
+    let fifo_path = timeout_fifo_path(&invocation.run_scope);
+    let device_destination_path = run_scope_paths(invocation).0;
+    if !timeout_fifo_is_owned_by_run_scope(&invocation.run_scope, &fifo_path) {
+        return Err("timeout FIFO path escaped the fixture run scope".to_string());
+    }
+    validate_owned_destination(&invocation.contract, &fifo_path, false)?;
+    validate_owned_destination(&invocation.contract, &device_destination_path, false)?;
+    create_run_scope(invocation, facts)?;
+    if fixture_path_exists(invocation, facts, &fifo_path)?
+        || fixture_path_exists(invocation, facts, &device_destination_path)?
+    {
+        return Err("timeout FIFO stimulus found pre-existing fixture state".to_string());
+    }
+    device_mutation(invocation, facts, &format!("mkfifo {fifo_path}"))?;
+    if !device_fifo_exists(&facts.serial, &fifo_path)? {
+        return Err("timeout FIFO could not be verified with test -p".to_string());
+    }
+    Ok(TimeoutStimulus {
+        device_source_path: fifo_path,
+        device_destination_path,
     })
 }
 
@@ -4213,7 +4811,7 @@ mod tests {
             "sourceKind": "production_owned_slot",
             "evidence": "production-execution-session-slot",
         });
-        let expected = json!({
+        let mut expected = json!({
             "success": false,
             "issue": "operation_timed_out",
             "stepStates": {"executed": 0, "skipped": 0, "failed": 1, "cancelled": 0, "blocked": 0, "notAttempted": 1},
@@ -4231,14 +4829,41 @@ mod tests {
                 "mutationStartedAt": "unix:1",
                 "checkedAliveAt": "unix:2",
                 "actionAt": "unix:2",
+                "actionKind": "deadline_reached",
                 "terminalAt": "unix:3",
                 "aliveImmediatelyBeforeAction": true,
                 "terminalReportedBeforeAction": false,
+            },
+            "timeout": {
+                "productionDeadlineMs": 300000,
+                "qualificationDeadlineMs": 15000,
+                "deadlineSource": "test_only_scoped_override",
+                "processCleanup": "confirmed"
             },
             "cleanup": "succeeded",
             "residual": "clean"
         });
         assert!(evaluate_scenario_contract(&contract, &expected).is_ok());
+        expected["timeout"]["extra"] = json!(true);
+        assert!(evaluate_scenario_contract(&contract, &expected).is_err());
+        expected["timeout"] = json!({
+            "productionDeadlineMs": 300000,
+            "qualificationDeadlineMs": 15000,
+            "deadlineSource": "test_only_scoped_override",
+            "processCleanup": "uncertain"
+        });
+        assert!(evaluate_scenario_contract(&contract, &expected).is_err());
+        expected["timeout"] = json!({
+            "productionDeadlineMs": 300000,
+            "qualificationDeadlineMs": 15000,
+            "deadlineSource": "test_only_scoped_override",
+            "processCleanup": "confirmed"
+        });
+        expected["activeProcess"]
+            .as_object_mut()
+            .unwrap()
+            .remove("actionKind");
+        assert!(evaluate_scenario_contract(&contract, &expected).is_err());
         assert!(evaluate_scenario_contract(
             &contract,
             &json!({
@@ -4481,13 +5106,427 @@ mod tests {
     }
 
     #[test]
+    fn timeout_observer_is_separate_from_host_push_stimulus_support() {
+        assert!(!Scenario::OperationTimeout.supports_host_push_active_stimulus());
+        assert!(Scenario::OperationTimeout.requires_process_observer());
+        assert!(Scenario::CancellationActive.supports_host_push_active_stimulus());
+        assert!(Scenario::CancellationActive.requires_process_observer());
+        assert!(!Scenario::DeviceUnauthorized.requires_process_observer());
+    }
+
+    #[test]
+    fn timeout_fifo_path_is_confined_to_the_fixture_run_scope() {
+        let scope = "/sdcard/EmuChefQualification/com.emuchef.fixture/output/phase6d6-run-a";
+        let fifo = timeout_fifo_path(scope);
+        assert_eq!(fifo, format!("{scope}/{TIMEOUT_FIFO_FILE}"));
+        assert!(timeout_fifo_is_owned_by_run_scope(scope, &fifo));
+        assert!(!timeout_fifo_is_owned_by_run_scope(
+            scope,
+            "/sdcard/other/phase6d6-timeout-source.fifo"
+        ));
+        assert!(!timeout_fifo_is_owned_by_run_scope(
+            scope,
+            &format!("{scope}/../escape")
+        ));
+    }
+
+    #[test]
+    fn timeout_fifo_path_must_remain_inside_manifest_owned_destination() {
+        let contract = load_contract().expect("the committed qualification contract should load");
+        let owned = format!(
+            "{}/phase6d6-timeout-source.fifo",
+            contract.destination_root.trim_end_matches('/')
+        );
+        assert!(validate_owned_destination(&contract, &owned, false).is_ok());
+        assert!(validate_owned_destination(
+            &contract,
+            "/sdcard/NotOwned/phase6d6-timeout-source.fifo",
+            false,
+        )
+        .is_err());
+    }
+
+    #[test]
+    fn timeout_plan_source_location_changes_only_the_timeout_scenario() {
+        assert_eq!(
+            reviewed_plan_source_location(Scenario::OperationTimeout),
+            "device"
+        );
+        for scenario in [
+            Scenario::CancellationActive,
+            Scenario::CancellationBoundary,
+            Scenario::LowStorage,
+            Scenario::HostSleepBeforeDeadline,
+        ] {
+            assert_eq!(reviewed_plan_source_location(scenario), "host");
+        }
+    }
+
+    #[test]
+    fn timeout_reviewed_plan_keeps_second_step_dependent_on_fifo_first_step() {
+        let contract = load_contract().expect("the committed qualification contract should load");
+        let run_scope = format!(
+            "{}/phase6d6-operation-timeout-test",
+            contract.destination_root.trim_end_matches('/')
+        );
+        let sentinel_directory = tempfile::tempdir().expect("sentinel directory should exist");
+        let invocation = Invocation {
+            scenario: Scenario::OperationTimeout,
+            repetition: 1,
+            serial: "selected-serial".to_string(),
+            sentinel: Sentinel {
+                directory: sentinel_directory.path().to_path_buf(),
+            },
+            contract,
+            run_scope: run_scope.clone(),
+            run_id: "physical-run-sha256:test".to_string(),
+            sentinel_id: "sentinel-sha256:test".to_string(),
+            sentinel_nonce: "nonce-sha256:test".to_string(),
+            evidence_path: "evidence.json".to_string(),
+            trace_path: "trace.json".to_string(),
+            scenario_contract: scenario_contract(Scenario::OperationTimeout),
+        };
+        let facts = DeviceFacts {
+            serial: invocation.serial.clone(),
+            manufacturer: "fixture".to_string(),
+            model: "fixture".to_string(),
+            android_version: "35".to_string(),
+            api_level: 35,
+            abi: "arm64-v8a".to_string(),
+            build_fingerprint: "fixture/fingerprint".to_string(),
+            root_shell: false,
+            root_version: None,
+        };
+        let timeout = TimeoutStimulus {
+            device_source_path: timeout_fifo_path(&run_scope),
+            device_destination_path: run_scope_paths(&invocation).0,
+        };
+        let plan = reviewed_plan(&invocation, &facts, None, None, Some(&timeout));
+
+        assert_eq!(plan.steps.len(), 2);
+        assert_eq!(plan.steps[1].dependencies, vec![plan.steps[0].id.clone()]);
+        match plan.steps[0].params.get("source") {
+            Some(ExecutionParamValue::Literal { value }) => {
+                assert_eq!(value["location"], Value::String("device".to_string()));
+            }
+            _ => panic!("timeout first source should remain a literal runtime value"),
+        }
+    }
+
+    #[test]
+    fn timeout_cleanup_inventory_contains_fifo_only_for_timeout() {
+        let first = "/sdcard/EmuChefQualification/com.emuchef.fixture/output/phase6d6-run-a/phase6d6-first.txt";
+        let second = "/sdcard/EmuChefQualification/com.emuchef.fixture/output/phase6d6-run-a/phase6d6-second.txt";
+        let timeout = cleanup_device_paths_for_scenario(
+            Scenario::OperationTimeout,
+            first,
+            second,
+            "/sdcard/EmuChefQualification/com.emuchef.fixture/output/phase6d6-run-a",
+        );
+        assert!(timeout.iter().any(|path| path.ends_with(TIMEOUT_FIFO_FILE)));
+        let ordinary = cleanup_device_paths_for_scenario(
+            Scenario::CancellationBoundary,
+            first,
+            second,
+            "/sdcard/EmuChefQualification/com.emuchef.fixture/output/phase6d6-run-a",
+        );
+        assert!(!ordinary
+            .iter()
+            .any(|path| path.ends_with(TIMEOUT_FIFO_FILE)));
+    }
+
+    #[test]
+    fn timeout_checkpoint_failure_uses_a_timeout_specific_reason() {
+        assert_eq!(
+            checkpoint_failure_message(Scenario::OperationTimeout),
+            "timeout liveness/deadline observation was missing or invalid"
+        );
+        assert_eq!(
+            checkpoint_failure_message(Scenario::CancellationActive),
+            "bounded operator checkpoint was missing or aborted"
+        );
+    }
+
+    #[test]
+    fn timeout_process_evidence_requires_one_live_child_until_deadline_then_terminal() {
+        let operation_id = OwnedProcessOperationId::from_raw_for_test(700);
+        let base = UNIX_EPOCH + Duration::from_secs(10);
+        let events = vec![
+            OwnedProcessLifecycleEvent::Spawned {
+                operation_id,
+                operation: ProcessOperation::DeviceCopy,
+                at: base,
+            },
+            OwnedProcessLifecycleEvent::MutationStarted {
+                operation_id,
+                operation: ProcessOperation::DeviceCopy,
+                at: base + Duration::from_millis(100),
+            },
+            OwnedProcessLifecycleEvent::LivenessSampled {
+                operation_id,
+                operation: ProcessOperation::DeviceCopy,
+                at: base + Duration::from_millis(12_000),
+                alive: Some(true),
+                terminal_reported: false,
+            },
+            OwnedProcessLifecycleEvent::DeadlineReached {
+                operation_id,
+                operation: ProcessOperation::DeviceCopy,
+                deadline: TIMEOUT_QUALIFICATION_DEADLINE,
+                at: base + Duration::from_millis(15_000),
+            },
+            OwnedProcessLifecycleEvent::Terminal {
+                operation_id,
+                operation: ProcessOperation::DeviceCopy,
+                at: base + Duration::from_millis(15_100),
+            },
+        ];
+        let evidence = timeout_process_evidence(&events, "run-scope-test")
+            .expect("the exact timeout lifecycle should serialize");
+        assert_eq!(evidence["operationClass"], "device_copy");
+        assert_eq!(evidence["actionKind"], "deadline_reached");
+        assert_eq!(evidence["aliveImmediatelyBeforeAction"], true);
+        assert_eq!(evidence["terminalReportedBeforeAction"], false);
+        assert!(timeout_process_evidence(&events[..3], "run-scope-test").is_none());
+    }
+
+    #[test]
+    fn timeout_process_evidence_ignores_unrelated_observer_lifecycle_events() {
+        let operation_id = OwnedProcessOperationId::from_raw_for_test(703);
+        let unrelated_id = OwnedProcessOperationId::from_raw_for_test(704);
+        let base = UNIX_EPOCH + Duration::from_secs(30);
+        let events = vec![
+            OwnedProcessLifecycleEvent::Spawned {
+                operation_id: unrelated_id,
+                operation: ProcessOperation::Probe,
+                at: base,
+            },
+            OwnedProcessLifecycleEvent::Spawned {
+                operation_id,
+                operation: ProcessOperation::DeviceCopy,
+                at: base + Duration::from_millis(1),
+            },
+            OwnedProcessLifecycleEvent::MutationStarted {
+                operation_id: unrelated_id,
+                operation: ProcessOperation::Probe,
+                at: base + Duration::from_millis(2),
+            },
+            OwnedProcessLifecycleEvent::MutationStarted {
+                operation_id,
+                operation: ProcessOperation::DeviceCopy,
+                at: base + Duration::from_millis(3),
+            },
+            OwnedProcessLifecycleEvent::LivenessSampled {
+                operation_id: unrelated_id,
+                operation: ProcessOperation::Probe,
+                at: base + Duration::from_millis(4),
+                alive: Some(false),
+                terminal_reported: true,
+            },
+            OwnedProcessLifecycleEvent::LivenessSampled {
+                operation_id,
+                operation: ProcessOperation::DeviceCopy,
+                at: base + Duration::from_millis(5),
+                alive: Some(true),
+                terminal_reported: false,
+            },
+            OwnedProcessLifecycleEvent::DeadlineReached {
+                operation_id: unrelated_id,
+                operation: ProcessOperation::Probe,
+                deadline: Duration::from_secs(30),
+                at: base + Duration::from_millis(6),
+            },
+            OwnedProcessLifecycleEvent::DeadlineReached {
+                operation_id,
+                operation: ProcessOperation::DeviceCopy,
+                deadline: TIMEOUT_QUALIFICATION_DEADLINE,
+                at: base + Duration::from_millis(7),
+            },
+            OwnedProcessLifecycleEvent::Terminal {
+                operation_id: unrelated_id,
+                operation: ProcessOperation::Probe,
+                at: base + Duration::from_millis(8),
+            },
+            OwnedProcessLifecycleEvent::Terminal {
+                operation_id,
+                operation: ProcessOperation::DeviceCopy,
+                at: base + Duration::from_millis(9),
+            },
+        ];
+
+        assert!(timeout_process_evidence(&events, "run-scope-test").is_some());
+
+        let mut mismatched_target = events.clone();
+        mismatched_target.push(OwnedProcessLifecycleEvent::Spawned {
+            operation_id,
+            operation: ProcessOperation::Push,
+            at: base + Duration::from_millis(10),
+        });
+        assert!(timeout_process_evidence(&mismatched_target, "run-scope-test").is_none());
+    }
+
+    #[test]
+    fn timeout_process_evidence_rejects_duplicate_target_deadlines() {
+        let operation_id = OwnedProcessOperationId::from_raw_for_test(705);
+        let base = UNIX_EPOCH + Duration::from_secs(40);
+        let valid_events = vec![
+            OwnedProcessLifecycleEvent::Spawned {
+                operation_id,
+                operation: ProcessOperation::DeviceCopy,
+                at: base,
+            },
+            OwnedProcessLifecycleEvent::MutationStarted {
+                operation_id,
+                operation: ProcessOperation::DeviceCopy,
+                at: base + Duration::from_millis(1),
+            },
+            OwnedProcessLifecycleEvent::LivenessSampled {
+                operation_id,
+                operation: ProcessOperation::DeviceCopy,
+                at: base + Duration::from_millis(2),
+                alive: Some(true),
+                terminal_reported: false,
+            },
+            OwnedProcessLifecycleEvent::DeadlineReached {
+                operation_id,
+                operation: ProcessOperation::DeviceCopy,
+                deadline: TIMEOUT_QUALIFICATION_DEADLINE,
+                at: base + Duration::from_millis(3),
+            },
+            OwnedProcessLifecycleEvent::Terminal {
+                operation_id,
+                operation: ProcessOperation::DeviceCopy,
+                at: base + Duration::from_millis(4),
+            },
+        ];
+        let mut duplicate_target = valid_events.clone();
+        duplicate_target.push(OwnedProcessLifecycleEvent::DeadlineReached {
+            operation_id,
+            operation: ProcessOperation::DeviceCopy,
+            deadline: TIMEOUT_QUALIFICATION_DEADLINE,
+            at: base + Duration::from_millis(5),
+        });
+        assert!(timeout_process_evidence(&duplicate_target, "run-scope-test").is_none());
+
+        let mut contradictory_deadline = valid_events.clone();
+        contradictory_deadline.push(OwnedProcessLifecycleEvent::DeadlineReached {
+            operation_id,
+            operation: ProcessOperation::DeviceCopy,
+            deadline: Duration::from_secs(14),
+            at: base + Duration::from_millis(5),
+        });
+        assert!(timeout_process_evidence(&contradictory_deadline, "run-scope-test").is_none());
+
+        let mut wrong_deadline = valid_events.clone();
+        for event in &mut wrong_deadline {
+            if let OwnedProcessLifecycleEvent::DeadlineReached { deadline, .. } = event {
+                *deadline = Duration::from_secs(14);
+            }
+        }
+        assert!(timeout_process_evidence(&wrong_deadline, "run-scope-test").is_none());
+
+        let mut dead_liveness = valid_events.clone();
+        if let Some(OwnedProcessLifecycleEvent::LivenessSampled { alive, .. }) =
+            dead_liveness.iter_mut().find(|event| {
+                matches!(
+                    event,
+                    OwnedProcessLifecycleEvent::LivenessSampled {
+                        operation_id: observed,
+                        operation: ProcessOperation::DeviceCopy,
+                        ..
+                    } if *observed == operation_id
+                )
+            })
+        {
+            *alive = Some(false);
+        }
+        assert!(timeout_process_evidence(&dead_liveness, "run-scope-test").is_none());
+
+        let mut terminal_before_deadline = valid_events.clone();
+        if let Some(OwnedProcessLifecycleEvent::Terminal { at, .. }) =
+            terminal_before_deadline.iter_mut().find(|event| {
+                matches!(
+                    event,
+                    OwnedProcessLifecycleEvent::Terminal {
+                        operation_id: observed,
+                        operation: ProcessOperation::DeviceCopy,
+                        ..
+                    } if *observed == operation_id
+                )
+            })
+        {
+            *at = base + Duration::from_millis(2);
+        }
+        assert!(timeout_process_evidence(&terminal_before_deadline, "run-scope-test").is_none());
+
+        let other_id = OwnedProcessOperationId::from_raw_for_test(706);
+        let mut ambiguous_targets = valid_events;
+        ambiguous_targets.push(OwnedProcessLifecycleEvent::DeadlineReached {
+            operation_id: other_id,
+            operation: ProcessOperation::DeviceCopy,
+            deadline: TIMEOUT_QUALIFICATION_DEADLINE,
+            at: base + Duration::from_millis(6),
+        });
+        assert!(timeout_process_evidence(&ambiguous_targets, "run-scope-test").is_none());
+    }
+
+    #[test]
+    fn timeout_process_evidence_rejects_mixed_operation_ids_and_classes() {
+        let operation_id = OwnedProcessOperationId::from_raw_for_test(701);
+        let other_id = OwnedProcessOperationId::from_raw_for_test(702);
+        let base = UNIX_EPOCH + Duration::from_secs(20);
+        let events = vec![
+            OwnedProcessLifecycleEvent::Spawned {
+                operation_id,
+                operation: ProcessOperation::DeviceCopy,
+                at: base,
+            },
+            OwnedProcessLifecycleEvent::MutationStarted {
+                operation_id,
+                operation: ProcessOperation::DeviceCopy,
+                at: base + Duration::from_millis(1),
+            },
+            OwnedProcessLifecycleEvent::LivenessSampled {
+                operation_id: other_id,
+                operation: ProcessOperation::DeviceCopy,
+                at: base + Duration::from_millis(2),
+                alive: Some(true),
+                terminal_reported: false,
+            },
+            OwnedProcessLifecycleEvent::DeadlineReached {
+                operation_id,
+                operation: ProcessOperation::DeviceCopy,
+                deadline: TIMEOUT_QUALIFICATION_DEADLINE,
+                at: base + Duration::from_millis(3),
+            },
+            OwnedProcessLifecycleEvent::Terminal {
+                operation_id,
+                operation: ProcessOperation::DeviceCopy,
+                at: base + Duration::from_millis(4),
+            },
+        ];
+        assert!(timeout_process_evidence(&events, "run-scope-test").is_none());
+
+        let mut wrong_class = events;
+        wrong_class.insert(
+            0,
+            OwnedProcessLifecycleEvent::Spawned {
+                operation_id,
+                operation: ProcessOperation::Push,
+                at: base,
+            },
+        );
+        assert!(timeout_process_evidence(&wrong_class, "run-scope-test").is_none());
+    }
+
+    #[test]
     fn device_unauthorized_uses_a_safe_boundary_without_active_process_capture() {
         let scenario = Scenario::DeviceUnauthorized;
         let contract = scenario_contract(scenario);
 
         assert!(!scenario.is_active_checkpoint());
         assert!(scenario.is_boundary_checkpoint());
-        assert!(!scenario.supports_active_process_capture());
+        assert!(!scenario.supports_host_push_active_stimulus());
         assert_eq!(
             active_process_operation(scenario),
             ProcessOperation::DeviceCopy
