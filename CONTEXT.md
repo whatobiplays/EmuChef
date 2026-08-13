@@ -1173,22 +1173,26 @@ state, forbidden-control absence, canonical UI-state artifact, and
 artifact-bound operator observation. Nested unsafe text is rejected.
 
 The mandatory `operation_timeout` physical scenario uses the reviewed first
-copy step with a fixture-owned device FIFO source and no writer. The FIFO is
-created and verified inside the unique run scope, so the real path is
-`copy_files` with `source.location == "device"` through
-`RealAdbDevice::copy_on_device` and the owned `DeviceCopy` process. A private,
-thread-local, one-shot `#[cfg(test)]` deadline override selects exactly 15
-seconds for this ignored qualification entry point; production
-`ProcessOperation::DeviceCopy.deadline()` remains 300 seconds and has no
-public or environment-controlled timeout configuration. The exact child must
-be sampled alive about 12 seconds after its matching mutation, then the actual
-timer transition must be recorded as `DeadlineReached` before existing
-kill/reap cleanup and `Terminal`. Passing evidence uses one opaque operation
-identity, `actionKind: "deadline_reached"`, confirmed process cleanup,
-`operation_timed_out`, a failed first step with the second step Not attempted,
-and clean FIFO/run-scope residual verification. No operator marker or Terminal
-2 procedure is used for this scenario; active host-push observation remains
-limited to cancellation, USB-disconnect, and conditional offline cases.
+copy step with the exact hard-coded private pseudo-device paths `/dev/zero`
+(source) and `/dev/null` (destination). No FIFO or other special file is
+created on the device; the real path is `copy_files` with
+`source.location == "device"` through `RealAdbDevice::copy_on_device` and the
+owned `DeviceCopy` process. A private, thread-local, one-shot `#[cfg(test)]`
+deadline override selects exactly 15 seconds for this ignored qualification
+entry point; production `ProcessOperation::DeviceCopy.deadline()` remains 300
+seconds and has no public or environment-controlled timeout configuration. The
+exact child must be sampled alive about 12 seconds after its matching
+mutation, then the actual timer transition must be recorded as
+`DeadlineReached` before existing kill/reap cleanup and `Terminal`. Passing
+evidence uses one opaque operation identity, `actionKind: "deadline_reached"`,
+confirmed process cleanup, `operation_timed_out`, a failed first step with the
+second step Not attempted, and clean run-scope residual verification; the
+unique run scope remains authoritative even though the timeout copy creates no
+persistent payload. No operator marker or Terminal 2 procedure is used for
+this scenario; active host-push observation remains limited to cancellation,
+USB-disconnect, and conditional offline cases. The `/dev/zero` and `/dev/null`
+paths are private to this qualification and never enter evidence, cleanup
+inventory, authored plans, or ordinary execution.
 The timeout lifecycle observer may contain unrelated Probe, Predicate, or other
 operation events. Timeout evidence selects exactly one `DeviceCopy`
 `DeadlineReached` event at 15 seconds, then requires that selected operation's

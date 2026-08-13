@@ -22,7 +22,9 @@ This slice supplies the existing `activeProcess` evidence contract for active in
 
 ### Excluded
 
-- A new timeout stimulus or altered timeout duration.
+- An altered timeout duration or a public timeout stimulus; the private
+  `/dev/zero -> /dev/null` qualification copy is test-only and not a general
+  execution feature.
 - Any test-only delay used as physical evidence.
 - Host-sleep deadline-clock measurement.
 - Process discovery by scanning the host process table.
@@ -30,7 +32,9 @@ This slice supplies the existing `activeProcess` evidence contract for active in
 - New background threads, detached tasks, or ownership transfer.
 - Changes to production error classification, cancellation behavior, or cleanup policy.
 
-`operation_timeout` remains physically blocked until a separate slice defines a safe genuine operation that reaches the existing production deadline.
+`operation_timeout` uses the private hard-coded `/dev/zero -> /dev/null` device
+copy through `RealAdbDevice::copy_on_device` as its genuine blocking stimulus;
+host-sleep remains blocked for its separate deadline-clock measurement.
 
 ## Architecture
 
@@ -263,7 +267,9 @@ Calibration is preparation evidence only. It cannot satisfy the active-process c
 5. Active evidence is accepted only when mutation start precedes an immediate live sample, the sample precedes the operator action, and the action precedes terminal completion.
 6. Existing timeout, cleanup, transport, storage, identity, root, and cancellation semantics remain unchanged.
 7. `cancellation_active`, `usb_disconnect_active`, `device_offline`, and `device_unauthorized` are no longer structurally blocked by `activeProcess: null`.
-8. `operation_timeout` and host-sleep remain blocked for their separate missing physical stimuli or clock measurements.
+8. `operation_timeout` is no longer structurally blocked: it uses the private
+   `/dev/zero -> /dev/null` copy and its existing evidence contract.
+   Host-sleep remains blocked for its missing deadline-clock measurement.
 9. All Rust and Node regression suites pass.
 
 ## Implementation boundaries

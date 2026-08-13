@@ -85,11 +85,11 @@ diagnostic evidence:
   explicitly unqualified if appropriate hardware is unavailable);
 - root revocation between two privileged atomic commands, followed by a
   bounded `cleanup-ready` checkpoint after root authority is restored;
-- a physical `operation_timeout` repetition using a fixture-owned device FIFO
-  as the reviewed `DeviceCopy` source, with a fixed 15-second `#[cfg(test)]`
-  scoped deadline; the exact child is sampled alive before the real timer
-  transition, and confirmed kill/reap cleanup plus FIFO/run-scope cleanup are
-  required;
+- a physical `operation_timeout` repetition using the exact hard-coded private
+  `/dev/zero -> /dev/null` device copy as the reviewed `DeviceCopy` source and
+  destination, with a fixed 15-second `#[cfg(test)]` scoped deadline; the exact
+  child is sampled alive before the real timer transition, and confirmed
+  kill/reap cleanup plus clean run-scope cleanup are required;
 - deterministic owned-process timeout regression evidence, which remains
   automated evidence and cannot be promoted by relabeling;
 - low storage using only a fixture-owned destination and a one-GiB reserve;

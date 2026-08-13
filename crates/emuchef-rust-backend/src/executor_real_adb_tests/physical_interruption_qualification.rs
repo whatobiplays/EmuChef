@@ -28,7 +28,7 @@ use crate::execution_session::ExecutionSessionManager;
 use crate::execution_session::ExecutionSlotObservation;
 use crate::executor::adb::RealAdbDevice;
 use crate::executor::{
-    ExecutionProgressEvent, ExecutionRunResult, ExecutorAdapters, ExecutorRunner,
+    ExecutionProgressEvent, ExecutionRunResult, ExecutorAdapters, ExecutorRunner, FakeDryRunDevice,
     OperationLifecycle, ProgressPhase, StepFailureKind, StepRunRecord, StepRunStatus,
 };
 use crate::owned_process::{
@@ -90,7 +90,8 @@ const ACTIVE_SOURCE_FILE: &str = "phase6d6-active-source.bin";
 const ACTIVE_HOST_CHUNK_BYTES: usize = 1024 * 1024;
 const TIMEOUT_QUALIFICATION_DEADLINE: Duration = Duration::from_secs(15);
 const TIMEOUT_LIVENESS_SAMPLE_OFFSET: Duration = Duration::from_secs(12);
-const TIMEOUT_FIFO_FILE: &str = "phase6d6-timeout-source.fifo";
+const TIMEOUT_SOURCE_PATH: &str = "/dev/zero";
+const TIMEOUT_DESTINATION_PATH: &str = "/dev/null";
 const SCENARIO_MANIFEST: &str =
     include_str!("../../../../docs/testing/phase-6d6/scenario-manifest.json");
 
@@ -1197,10 +1198,11 @@ struct ActiveStimulus {
     predicted_ms: u64,
 }
 
-/// Device-resident FIFO used only by the timeout qualification. No host writer
-/// is created: the reviewed device-side copy must block on this exact
-/// fixture-owned source until the scoped qualification deadline wins through
-/// the ordinary owned-process timeout path.
+/// Exact private pseudo-device copy used only by the timeout qualification.
+/// `cp /dev/zero /dev/null` is a genuinely live device-side copy with no
+/// persistent payload; it requires no special-file creation and stays active
+/// until the scoped qualification deadline wins through the ordinary
+/// owned-process timeout path.
 #[derive(Clone, Debug)]
 struct TimeoutStimulus {
     device_source_path: String,
@@ -1316,16 +1318,12 @@ fn active_stimulus_device_paths(invocation: &Invocation) -> (String, String) {
     )
 }
 
-fn timeout_fifo_path(run_scope: &str) -> String {
-    format!("{run_scope}/{TIMEOUT_FIFO_FILE}")
+fn is_timeout_source_path(path: &str) -> bool {
+    path == TIMEOUT_SOURCE_PATH
 }
 
-fn timeout_fifo_is_owned_by_run_scope(run_scope: &str, path: &str) -> bool {
-    let prefix = format!("{run_scope}/");
-    path.starts_with(&prefix)
-        && !path.contains("..")
-        && path.ends_with(TIMEOUT_FIFO_FILE)
-        && path.len() >= prefix.len() + TIMEOUT_FIFO_FILE.len()
+fn is_timeout_destination_path(path: &str) -> bool {
+    path == TIMEOUT_DESTINATION_PATH
 }
 
 fn reviewed_plan_source_location(scenario: Scenario) -> &'static str {
@@ -1345,9 +1343,6 @@ fn cleanup_device_paths_for_scenario(
     let mut paths = vec![first.to_string(), second.to_string()];
     if scenario.supports_host_push_active_stimulus() {
         paths.push(format!("{run_scope}/{ACTIVE_CALIBRATION_DEST_FILE}"));
-    }
-    if scenario == Scenario::OperationTimeout {
-        paths.push(timeout_fifo_path(run_scope));
     }
     if scenario == Scenario::LowStorage {
         paths.push(format!("{run_scope}/{STORAGE_FILL_FILE}"));
@@ -1914,7 +1909,7 @@ fn run_invocation() -> Result<Value, String> {
                     active_stimulus.as_ref(),
                 );
                 return Err(format!(
-                    "{error}; timeout FIFO preparation cleanup outcome={}",
+                    "{error}; timeout stimulus preparation cleanup outcome={}",
                     cleanup.0
                 ));
             }
@@ -2287,9 +2282,15 @@ fn reviewed_plan(
     active_stimulus: Option<&ActiveStimulus>,
     timeout_stimulus: Option<&TimeoutStimulus>,
 ) -> ExecutionPlan {
+    if timeout_stimulus.is_some() && invocation.scenario != Scenario::OperationTimeout {
+        panic!("timeout pseudo-device stimulus is only valid for Scenario::OperationTimeout");
+    }
     let root = invocation.contract.destination_root.trim_end_matches('/');
     let mut steps = Vec::new();
-    let (first_destination, second_destination) = run_scope_paths(invocation);
+    let (run_scope_first_destination, second_destination) = run_scope_paths(invocation);
+    let first_destination = timeout_stimulus
+        .map(|stimulus| stimulus.device_destination_path.clone())
+        .unwrap_or(run_scope_first_destination);
     let first_source = timeout_stimulus
         .map(|stimulus| PathBuf::from(&stimulus.device_source_path))
         .or_else(|| active_stimulus.map(|stimulus| stimulus.host_source_path.clone()))
@@ -2327,9 +2328,9 @@ fn reviewed_plan(
     }
     if let Some(timeout_stimulus) = timeout_stimulus {
         assert_eq!(timeout_stimulus.device_destination_path, first_destination);
-        assert!(timeout_fifo_is_owned_by_run_scope(
-            &invocation.run_scope,
-            &timeout_stimulus.device_source_path,
+        assert!(is_timeout_source_path(&timeout_stimulus.device_source_path));
+        assert!(is_timeout_destination_path(
+            &timeout_stimulus.device_destination_path
         ));
         match first.params.get_mut("source") {
             Some(ExecutionParamValue::Literal { value }) => {
@@ -2337,6 +2338,13 @@ fn reviewed_plan(
                     Value::String(reviewed_plan_source_location(invocation.scenario).to_string());
             }
             _ => panic!("reviewed timeout copy source must remain a literal runtime value"),
+        }
+        // The ordinary file-copy path removes the destination first under
+        // "replace"; "merge" preserves the existing /dev/null node so the
+        // exact production `cp /dev/zero /dev/null` operation remains the only
+        // DeviceCopy and never unlinks or recreates either pseudo-device.
+        if let Some(ExecutionParamValue::Literal { value }) = first.params.get_mut("copy_policy") {
+            *value = Value::String("merge".to_string());
         }
     }
     first.verify = vec![condition(
@@ -3258,9 +3266,6 @@ fn cleanup_fixture(
     if invocation.scenario.supports_host_push_active_stimulus() {
         let (calibration_destination, _) = active_stimulus_device_paths(invocation);
         remove_owned_path(&calibration_destination, &mut residual);
-    }
-    if invocation.scenario == Scenario::OperationTimeout {
-        remove_owned_path(&timeout_fifo_path(&invocation.run_scope), &mut residual);
     }
     if invocation.scenario == Scenario::LowStorage {
         remove_owned_path(
@@ -4323,47 +4328,26 @@ fn prepare_active_stimulus(
     })
 }
 
-fn device_fifo_exists(serial: &str, path: &str) -> Result<bool, String> {
-    let output = Command::new("adb")
-        .args(["-s", serial, "shell", "test", "-p", path])
-        .output()
-        .map_err(|_| "ADB FIFO verification is unavailable".to_string())?;
-    if output.status.success() {
-        return Ok(true);
-    }
-    if output.status.code() == Some(1) && output.stdout.is_empty() && output.stderr.is_empty() {
-        return Ok(false);
-    }
-    Err("ADB FIFO verification failed".to_string())
-}
-
 fn prepare_timeout_stimulus(
     invocation: &Invocation,
     facts: &DeviceFacts,
 ) -> Result<TimeoutStimulus, String> {
     if invocation.scenario != Scenario::OperationTimeout {
-        return Err("timeout FIFO stimulus was requested for an unsupported scenario".to_string());
+        return Err(
+            "timeout pseudo-device stimulus was requested for an unsupported scenario".to_string(),
+        );
     }
-    let fifo_path = timeout_fifo_path(&invocation.run_scope);
-    let device_destination_path = run_scope_paths(invocation).0;
-    if !timeout_fifo_is_owned_by_run_scope(&invocation.run_scope, &fifo_path) {
-        return Err("timeout FIFO path escaped the fixture run scope".to_string());
-    }
-    validate_owned_destination(&invocation.contract, &fifo_path, false)?;
-    validate_owned_destination(&invocation.contract, &device_destination_path, false)?;
-    create_run_scope(invocation, facts)?;
-    if fixture_path_exists(invocation, facts, &fifo_path)?
-        || fixture_path_exists(invocation, facts, &device_destination_path)?
+    if !is_timeout_source_path(TIMEOUT_SOURCE_PATH)
+        || !is_timeout_destination_path(TIMEOUT_DESTINATION_PATH)
     {
-        return Err("timeout FIFO stimulus found pre-existing fixture state".to_string());
+        return Err(
+            "timeout pseudo-device stimulus path escaped its private constants".to_string(),
+        );
     }
-    device_mutation(invocation, facts, &format!("mkfifo {fifo_path}"))?;
-    if !device_fifo_exists(&facts.serial, &fifo_path)? {
-        return Err("timeout FIFO could not be verified with test -p".to_string());
-    }
+    create_run_scope(invocation, facts)?;
     Ok(TimeoutStimulus {
-        device_source_path: fifo_path,
-        device_destination_path,
+        device_source_path: TIMEOUT_SOURCE_PATH.to_string(),
+        device_destination_path: TIMEOUT_DESTINATION_PATH.to_string(),
     })
 }
 
@@ -5114,36 +5098,85 @@ mod tests {
         assert!(!Scenario::DeviceUnauthorized.requires_process_observer());
     }
 
-    #[test]
-    fn timeout_fifo_path_is_confined_to_the_fixture_run_scope() {
-        let scope = "/sdcard/EmuChefQualification/com.emuchef.fixture/output/phase6d6-run-a";
-        let fifo = timeout_fifo_path(scope);
-        assert_eq!(fifo, format!("{scope}/{TIMEOUT_FIFO_FILE}"));
-        assert!(timeout_fifo_is_owned_by_run_scope(scope, &fifo));
-        assert!(!timeout_fifo_is_owned_by_run_scope(
-            scope,
-            "/sdcard/other/phase6d6-timeout-source.fifo"
-        ));
-        assert!(!timeout_fifo_is_owned_by_run_scope(
-            scope,
-            &format!("{scope}/../escape")
-        ));
+    fn timeout_test_invocation(scenario: Scenario) -> (Invocation, DeviceFacts) {
+        let contract = load_contract().expect("the committed qualification contract should load");
+        let run_scope = format!(
+            "{}/phase6d6-operation-timeout-test",
+            contract.destination_root.trim_end_matches('/')
+        );
+        let sentinel_directory = tempfile::tempdir().expect("sentinel directory should exist");
+        let invocation = Invocation {
+            scenario,
+            repetition: 1,
+            serial: "selected-serial".to_string(),
+            sentinel: Sentinel {
+                directory: sentinel_directory.path().to_path_buf(),
+            },
+            contract,
+            run_scope: run_scope.clone(),
+            run_id: "physical-run-sha256:test".to_string(),
+            sentinel_id: "sentinel-sha256:test".to_string(),
+            sentinel_nonce: "nonce-sha256:test".to_string(),
+            evidence_path: "evidence.json".to_string(),
+            trace_path: "trace.json".to_string(),
+            scenario_contract: scenario_contract(scenario),
+        };
+        let facts = DeviceFacts {
+            serial: invocation.serial.clone(),
+            manufacturer: "fixture".to_string(),
+            model: "fixture".to_string(),
+            android_version: "35".to_string(),
+            api_level: 35,
+            abi: "arm64-v8a".to_string(),
+            build_fingerprint: "fixture/fingerprint".to_string(),
+            root_shell: false,
+            root_version: None,
+        };
+        (invocation, facts)
     }
 
     #[test]
-    fn timeout_fifo_path_must_remain_inside_manifest_owned_destination() {
-        let contract = load_contract().expect("the committed qualification contract should load");
-        let owned = format!(
-            "{}/phase6d6-timeout-source.fifo",
-            contract.destination_root.trim_end_matches('/')
+    fn timeout_stimulus_paths_are_exact_private_pseudo_devices_and_ignore_environment() {
+        assert_eq!(TIMEOUT_SOURCE_PATH, "/dev/zero");
+        assert_eq!(TIMEOUT_DESTINATION_PATH, "/dev/null");
+        assert_eq!(TIMEOUT_QUALIFICATION_DEADLINE, Duration::from_secs(15));
+        assert_eq!(TIMEOUT_LIVENESS_SAMPLE_OFFSET, Duration::from_secs(12));
+        assert_eq!(
+            ProcessOperation::DeviceCopy.deadline(),
+            Duration::from_secs(300)
         );
-        assert!(validate_owned_destination(&contract, &owned, false).is_ok());
-        assert!(validate_owned_destination(
-            &contract,
-            "/sdcard/NotOwned/phase6d6-timeout-source.fifo",
-            false,
-        )
-        .is_err());
+        assert!(is_timeout_source_path(TIMEOUT_SOURCE_PATH));
+        assert!(!is_timeout_source_path("/dev/random"));
+        assert!(is_timeout_destination_path(TIMEOUT_DESTINATION_PATH));
+        assert!(!is_timeout_destination_path("/dev/null/"));
+
+        env::set_var("EMUCHEF_PHASE_6D6_TIMEOUT_SOURCE_PATH", "/dev/random");
+        env::set_var("EMUCHEF_PHASE_6D6_TIMEOUT_DESTINATION_PATH", "/dev/zero");
+        assert_eq!(TIMEOUT_SOURCE_PATH, "/dev/zero");
+        assert_eq!(TIMEOUT_DESTINATION_PATH, "/dev/null");
+        env::remove_var("EMUCHEF_PHASE_6D6_TIMEOUT_SOURCE_PATH");
+        env::remove_var("EMUCHEF_PHASE_6D6_TIMEOUT_DESTINATION_PATH");
+    }
+
+    #[test]
+    fn timeout_pseudo_device_paths_are_not_fixture_owned_and_absent_from_cleanup_inventory() {
+        let contract = load_contract().expect("the committed qualification contract should load");
+        assert!(validate_owned_destination(&contract, TIMEOUT_SOURCE_PATH, false,).is_err());
+        assert!(validate_owned_destination(&contract, TIMEOUT_DESTINATION_PATH, false,).is_err());
+
+        let first = "/sdcard/EmuChefQualification/com.emuchef.fixture/output/phase6d6-run-a/phase6d6-first.txt";
+        let second = "/sdcard/EmuChefQualification/com.emuchef.fixture/output/phase6d6-run-a/phase6d6-second.txt";
+        let run_scope = "/sdcard/EmuChefQualification/com.emuchef.fixture/output/phase6d6-run-a";
+        let timeout =
+            cleanup_device_paths_for_scenario(Scenario::OperationTimeout, first, second, run_scope);
+        assert_eq!(timeout, vec![first.to_string(), second.to_string()]);
+        let ordinary = cleanup_device_paths_for_scenario(
+            Scenario::CancellationBoundary,
+            first,
+            second,
+            run_scope,
+        );
+        assert_eq!(ordinary, vec![first.to_string(), second.to_string()]);
     }
 
     #[test]
@@ -5163,43 +5196,11 @@ mod tests {
     }
 
     #[test]
-    fn timeout_reviewed_plan_keeps_second_step_dependent_on_fifo_first_step() {
-        let contract = load_contract().expect("the committed qualification contract should load");
-        let run_scope = format!(
-            "{}/phase6d6-operation-timeout-test",
-            contract.destination_root.trim_end_matches('/')
-        );
-        let sentinel_directory = tempfile::tempdir().expect("sentinel directory should exist");
-        let invocation = Invocation {
-            scenario: Scenario::OperationTimeout,
-            repetition: 1,
-            serial: "selected-serial".to_string(),
-            sentinel: Sentinel {
-                directory: sentinel_directory.path().to_path_buf(),
-            },
-            contract,
-            run_scope: run_scope.clone(),
-            run_id: "physical-run-sha256:test".to_string(),
-            sentinel_id: "sentinel-sha256:test".to_string(),
-            sentinel_nonce: "nonce-sha256:test".to_string(),
-            evidence_path: "evidence.json".to_string(),
-            trace_path: "trace.json".to_string(),
-            scenario_contract: scenario_contract(Scenario::OperationTimeout),
-        };
-        let facts = DeviceFacts {
-            serial: invocation.serial.clone(),
-            manufacturer: "fixture".to_string(),
-            model: "fixture".to_string(),
-            android_version: "35".to_string(),
-            api_level: 35,
-            abi: "arm64-v8a".to_string(),
-            build_fingerprint: "fixture/fingerprint".to_string(),
-            root_shell: false,
-            root_version: None,
-        };
+    fn timeout_reviewed_plan_uses_exact_pseudo_device_copy_and_keeps_second_step_dependent() {
+        let (invocation, facts) = timeout_test_invocation(Scenario::OperationTimeout);
         let timeout = TimeoutStimulus {
-            device_source_path: timeout_fifo_path(&run_scope),
-            device_destination_path: run_scope_paths(&invocation).0,
+            device_source_path: TIMEOUT_SOURCE_PATH.to_string(),
+            device_destination_path: TIMEOUT_DESTINATION_PATH.to_string(),
         };
         let plan = reviewed_plan(&invocation, &facts, None, None, Some(&timeout));
 
@@ -5207,32 +5208,117 @@ mod tests {
         assert_eq!(plan.steps[1].dependencies, vec![plan.steps[0].id.clone()]);
         match plan.steps[0].params.get("source") {
             Some(ExecutionParamValue::Literal { value }) => {
+                assert_eq!(value["value"], json!(TIMEOUT_SOURCE_PATH));
                 assert_eq!(value["location"], Value::String("device".to_string()));
             }
             _ => panic!("timeout first source should remain a literal runtime value"),
         }
+        match plan.steps[0].params.get("dest") {
+            Some(ExecutionParamValue::Literal { value }) => {
+                assert_eq!(value, &json!(TIMEOUT_DESTINATION_PATH));
+            }
+            _ => panic!("timeout first destination should remain a literal runtime value"),
+        }
+        match plan.steps[0].params.get("copy_policy") {
+            Some(ExecutionParamValue::Literal { value }) => {
+                assert_eq!(value, &json!("merge"));
+            }
+            _ => panic!("timeout copy policy should remain a literal runtime value"),
+        }
+        assert_eq!(
+            plan.steps[0].verify[0].params.get("path"),
+            Some(&json!(TIMEOUT_DESTINATION_PATH))
+        );
+        match plan.steps[1].params.get("dest") {
+            Some(ExecutionParamValue::Literal { value }) => {
+                assert_eq!(value, &json!(run_scope_paths(&invocation).1));
+            }
+            _ => panic!("timeout second destination should remain run-scoped"),
+        }
     }
 
     #[test]
-    fn timeout_cleanup_inventory_contains_fifo_only_for_timeout() {
-        let first = "/sdcard/EmuChefQualification/com.emuchef.fixture/output/phase6d6-run-a/phase6d6-first.txt";
-        let second = "/sdcard/EmuChefQualification/com.emuchef.fixture/output/phase6d6-run-a/phase6d6-second.txt";
-        let timeout = cleanup_device_paths_for_scenario(
-            Scenario::OperationTimeout,
-            first,
-            second,
-            "/sdcard/EmuChefQualification/com.emuchef.fixture/output/phase6d6-run-a",
-        );
-        assert!(timeout.iter().any(|path| path.ends_with(TIMEOUT_FIFO_FILE)));
-        let ordinary = cleanup_device_paths_for_scenario(
-            Scenario::CancellationBoundary,
-            first,
-            second,
-            "/sdcard/EmuChefQualification/com.emuchef.fixture/output/phase6d6-run-a",
-        );
-        assert!(!ordinary
+    fn timeout_plan_production_device_copy_path_never_unlinks_or_recurses_on_pseudo_devices() {
+        let (invocation, facts) = timeout_test_invocation(Scenario::OperationTimeout);
+        let timeout = TimeoutStimulus {
+            device_source_path: TIMEOUT_SOURCE_PATH.to_string(),
+            device_destination_path: TIMEOUT_DESTINATION_PATH.to_string(),
+        };
+        let plan = reviewed_plan(&invocation, &facts, None, None, Some(&timeout));
+        let sandbox = tempfile::tempdir().expect("qualification sandbox should be available");
+        let runner = ExecutorRunner::new(ExecutorAdapters::with_device_and_sandbox_roots(
+            FakeDryRunDevice::default(),
+            sandbox.path().join("runtime"),
+            sandbox.path().join("cache"),
+            sandbox.path().join("fake-device"),
+            vec![fixture_root()],
+            false,
+        ));
+        let mut runner = runner;
+        let _result = runner.run(&plan);
+        let commands = runner.adapters().device().commands().to_vec();
+
+        // The exact production copy is a non-recursive, non-privileged
+        // `copy_on_device("/dev/zero", "/dev/null")`; no replace/remove or
+        // special-file creation path can precede it.
+        assert!(commands.iter().any(|command| command
+            == &vec![
+                "copy_on_device".to_string(),
+                TIMEOUT_SOURCE_PATH.to_string(),
+                TIMEOUT_DESTINATION_PATH.to_string(),
+                "False".to_string(),
+                "False".to_string(),
+            ]));
+        assert!(!commands.iter().any(|command| matches!(
+            command.first().map(String::as_str),
+            Some("remove_file" | "remove_tree" | "mknod")
+        )));
+        for pseudo_device in [TIMEOUT_SOURCE_PATH, TIMEOUT_DESTINATION_PATH] {
+            assert!(!commands.iter().any(|command| {
+                command.first().map(String::as_str) == Some("remove_file")
+                    && command.get(1).map(String::as_str) == Some(pseudo_device)
+            }));
+            assert!(!commands.iter().any(|command| {
+                command.first().map(String::as_str) == Some("mkdir_p")
+                    && command.get(1).map(String::as_str) == Some(pseudo_device)
+            }));
+        }
+        // The only non-read-only prerequisite is the ordinary file-copy
+        // no-op `mkdir_p("/dev")`; the pseudo-device nodes themselves are only
+        // probed read-only and then used as the exact copy source/destination.
+        assert!(commands
             .iter()
-            .any(|path| path.ends_with(TIMEOUT_FIFO_FILE)));
+            .any(|command| command == &vec!["mkdir_p".to_string(), "/dev".to_string(),]));
+        assert!(commands.iter().any(|command| command
+            == &vec![
+                "path_is_dir".to_string(),
+                TIMEOUT_DESTINATION_PATH.to_string(),
+                "False".to_string(),
+            ]));
+    }
+
+    #[test]
+    fn prepare_timeout_stimulus_rejects_non_timeout_scenarios() {
+        let (invocation, facts) = timeout_test_invocation(Scenario::CancellationBoundary);
+        let error = prepare_timeout_stimulus(&invocation, &facts)
+            .expect_err("non-timeout scenarios must not obtain the pseudo-device stimulus");
+        assert!(
+            error.contains("unsupported scenario"),
+            "unexpected rejection message: {error}"
+        );
+    }
+
+    #[test]
+    #[should_panic(
+        expected = "timeout pseudo-device stimulus is only valid for Scenario::OperationTimeout"
+    )]
+    fn reviewed_plan_rejects_timeout_stimulus_for_ordinary_scenarios() {
+        let (invocation, facts) = timeout_test_invocation(Scenario::CancellationBoundary);
+        let timeout = TimeoutStimulus {
+            device_source_path: TIMEOUT_SOURCE_PATH.to_string(),
+            device_destination_path: TIMEOUT_DESTINATION_PATH.to_string(),
+        };
+        let _ = reviewed_plan(&invocation, &facts, None, None, Some(&timeout));
     }
 
     #[test]
