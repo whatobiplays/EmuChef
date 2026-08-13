@@ -253,6 +253,6 @@ test("uses a portable CLI entry check and pins the fixture job to Node 22", () =
   assert.match(fixtureToolSource, /pathToFileURL/);
   assert.match(
     workflow,
-    /android-qualification-fixture:[\s\S]*actions\/setup-node@v4[\s\S]*node-version: 22/,
+    /android-qualification-fixture:[\s\S]*actions\/setup-node@v7[\s\S]*node-version: 22/,
   );
 });
