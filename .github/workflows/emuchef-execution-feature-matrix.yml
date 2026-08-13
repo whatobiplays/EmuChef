@@ -52,17 +52,17 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 15
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
         with:
           lfs: true
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-node@v7
         with:
           node-version: 22
-      - uses: actions/setup-java@v4
+      - uses: actions/setup-java@v5
         with:
           distribution: temurin
           java-version: "17"
-      - uses: android-actions/setup-android@v3
+      - uses: android-actions/setup-android@v4
       - name: Install locked Android SDK tools
         run: sdkmanager --install "platforms;android-35" "build-tools;35.0.0"
       - name: Test fixture contract tooling
@@ -96,8 +96,8 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 10
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-node@v4
+      - uses: actions/checkout@v7
+      - uses: actions/setup-node@v7
         with:
           node-version: 22
           cache: npm
@@ -120,11 +120,11 @@ jobs:
           - configuration: real-execution
             cargo_arguments: --no-default-features --features real-execution
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - uses: dtolnay/rust-toolchain@stable
         with:
           components: rustfmt
-      - name: Prepare compile-only Tauri sidecar placeholder
+      - name: Prepare compile-only Tauri inputs (sidecar placeholder + frontendDist)
         run: |
           # Tauri validates bundle.externalBin during cargo check/test, even though
           # these jobs do not package or launch the sidecar. Real sidecar packaging
@@ -134,6 +134,12 @@ jobs:
           mkdir -p "$(dirname "$sidecar")"
           printf '#!/bin/sh\nexit 0\n' > "$sidecar"
           chmod +x "$sidecar"
+
+          # tauri::generate_context!() validates frontendDist ("../dist" relative to
+          # src-tauri/) during raw cargo check/test on a clean checkout. An empty
+          # directory is sufficient for this compile/test matrix; the real frontend
+          # is still produced and verified by the macOS packaging pipeline.
+          mkdir -p apps/emuchef-app/dist
       - uses: Swatinem/rust-cache@v2
         with:
           workspaces: apps/emuchef-app/src-tauri

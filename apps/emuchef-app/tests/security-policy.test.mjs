@@ -527,6 +527,42 @@ test("CI continuously verifies both execution feature configurations", () => {
   }
 });
 
+test("CI workflows stay on Node 24 action runtimes and preserve Tauri compile preconditions", () => {
+  const featureMatrix = read("../../.github/workflows/emuchef-execution-feature-matrix.yml");
+  const macosQualification = read("../../.github/workflows/emuchef-macos-qualification.yml");
+  const combinedWorkflows = `${featureMatrix}\n${macosQualification}`;
+
+  for (const reference of [
+    "actions/checkout@v4",
+    "actions/setup-node@v4",
+    "actions/setup-java@v4",
+    "android-actions/setup-android@v3",
+    "actions/upload-artifact@v4",
+  ]) {
+    assert.equal(combinedWorkflows.includes(reference), false, `${reference} must not remain`);
+  }
+
+  for (const reference of [
+    "actions/checkout@v7",
+    "actions/setup-node@v7",
+    "actions/setup-java@v5",
+    "android-actions/setup-android@v4",
+    "actions/upload-artifact@v7",
+  ]) {
+    assert.equal(combinedWorkflows.includes(reference), true, `${reference} must be used`);
+  }
+
+  const androidJob = sourceSlice(featureMatrix, "android-qualification-fixture:", "security-policy:");
+  assert.match(androidJob, /actions\/checkout@v7[\s\S]*?lfs: true/);
+
+  assert.equal(featureMatrix.includes('target="$(rustc --print host-tuple)"'), true);
+  assert.equal(featureMatrix.includes('sidecar="apps/emuchef-app/src-tauri/binaries/emuchef-${target}"'), true);
+  assert.equal(featureMatrix.includes("mkdir -p apps/emuchef-app/dist"), true);
+
+  const gitignore = read("../../.gitignore");
+  assert.equal(gitignore.split("\n").map((line) => line.trim()).includes("dist/"), true);
+});
+
 test("Phase 6D.6 storage recovery is allowlisted and physical evidence is gated", () => {
   const backend = read("../../crates/emuchef-rust-backend/src/execution_session.rs");
   const executor = read("../../crates/emuchef-rust-backend/src/executor.rs");
