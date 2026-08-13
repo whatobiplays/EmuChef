@@ -1,0 +1,233 @@
+{
+  "schemaVersion": 1,
+  "scenario": "operation_timeout",
+  "repetition": 2,
+  "timestamp": "unix:1786609039",
+  "commit": "b5aad96788da15520387914eeef60358cd23f47a",
+  "host": {
+    "os": "macos",
+    "version": "26.5",
+    "architecture": "aarch64"
+  },
+  "platformToolsRevision": "Android Debug Bridge version 1.0.41",
+  "device": {
+    "identity": "serial-sha256:a362c8ca5bc90621c2883e302b00bda93d2eb6c86590de06ebdd6b95f2386dd9",
+    "model": "GT78-VN",
+    "androidVersion": "11",
+    "apiLevel": 30,
+    "abi": "arm64-v8a,armeabi-v7a,armeabi",
+    "buildFingerprint": "ARBOR/GT78-VN/GT78-VN:11/RP1A.200720.011/mp1V95182:user/release-keys"
+  },
+  "root": null,
+  "fixtureApkSha256": "8495b56d5a191904fec5162d21a61561c4782e1d00a46748fb7ee5d3c5bb5179",
+  "optIns": [
+    "EMUCHEF_RUN_REAL_ADB_TESTS=1",
+    "EMUCHEF_RUN_PHASE_6D6_PHYSICAL_TESTS=1",
+    "EMUCHEF_PHASE_6D6_SCENARIO=operation_timeout",
+    "EMUCHEF_PHASE_6D6_REPETITION=2",
+    "EMUCHEF_TEST_DEVICE_SERIAL=selected",
+    "EMUCHEF_TEST_PACKAGE_ALLOWLIST=com.emuchef.fixture",
+    "EMUCHEF_PHASE_6D6_SENTINEL_DIR=test-owned-directory"
+  ],
+  "command": "cargo test --manifest-path crates/emuchef-rust-backend/Cargo.toml --features real-execution physical_interruption_qualification::manual_phase_6d6_physical_interruption_qualification -- --ignored --exact",
+  "preparation": "Phase 6C fixture contract, exact serial inventory, package allowlist, destination ownership, and empty sentinel directory validated.",
+  "operatorAction": "No operator transition or action marker was used; the fixed test-only qualification deadline exercised the production owned-process timeout path.",
+  "executionSuccess": false,
+  "observedIssueCode": "operation_timed_out",
+  "stepStates": {
+    "executed": 0,
+    "skipped": 0,
+    "failed": 1,
+    "cancelled": 0,
+    "blocked": 0,
+    "notAttempted": 1
+  },
+  "partialChangesPossible": true,
+  "authorityInvalidated": true,
+  "activeSlotReleased": true,
+  "activeSlotObservation": {
+    "observed": true,
+    "acquired": true,
+    "released": true,
+    "runId": "run-scope-sha256:0d729c9b76433a25037289ea1ca0bfebc31e508c6cac7c1a7343891906385cbf",
+    "executionId": "execution-sha256:9f20af3dd46bb1bcf6b39c50fb835a219b85b91e93531bc031b4e996fc5a5b2b",
+    "acquiredAt": "unix:1786609023",
+    "terminalCleanupAt": "unix:1786609039",
+    "releasedAt": "unix:1786609039",
+    "sourceKind": "production_owned_slot",
+    "evidence": "production-execution-session-slot"
+  },
+  "activeProcess": {
+    "runId": "run-scope-sha256:0d729c9b76433a25037289ea1ca0bfebc31e508c6cac7c1a7343891906385cbf",
+    "operationId": "operation-sha256:789a1cf3eafcfd225ec003cc31e601fc29a9d167e4c4e1ef78fa0a42bad742ae",
+    "operationClass": "device_copy",
+    "childIdentity": "child-sha256:7b59a965ffdac73c4c676fa2ab49f59835823464ec8d62ada62bc72f7cedbcb1",
+    "spawnedAt": "unix:1786609024",
+    "mutationStartedAt": "unix:1786609024",
+    "checkedAliveAt": "unix:1786609036",
+    "actionAt": "unix:1786609039",
+    "actionKind": "deadline_reached",
+    "terminalAt": "unix:1786609039",
+    "aliveImmediatelyBeforeAction": true,
+    "terminalReportedBeforeAction": false
+  },
+  "timeout": {
+    "productionDeadlineMs": 300000,
+    "qualificationDeadlineMs": 15000,
+    "deadlineSource": "test_only_scoped_override",
+    "processCleanup": "confirmed"
+  },
+  "activeCancellation": null,
+  "hostSleep": null,
+  "identityTransition": null,
+  "authorizationTransition": null,
+  "scenarioContract": {
+    "expectedOutcome": "passed",
+    "expectedExecution": "failure",
+    "allowedIssueCodes": [
+      "operation_timed_out"
+    ],
+    "allowedStepStates": [
+      {
+        "executed": 0,
+        "skipped": 0,
+        "failed": 1,
+        "cancelled": 0,
+        "blocked": 0,
+        "notAttempted": 1
+      },
+      {
+        "executed": 1,
+        "skipped": 0,
+        "failed": 1,
+        "cancelled": 0,
+        "blocked": 0,
+        "notAttempted": 0
+      }
+    ],
+    "partialChanges": "allowed",
+    "authorityInvalidation": "required",
+    "requiresActiveSlotReleased": true,
+    "slotObservation": {
+      "source": "production-execution-session-slot",
+      "exactRunScope": true
+    },
+    "activeProcess": {
+      "required": true,
+      "operationClass": "device_copy",
+      "actionMustPrecedeTerminal": true,
+      "exactRunBinding": true
+    },
+    "timeout": {
+      "productionDeadlineMs": 300000,
+      "qualificationDeadlineMs": 15000,
+      "deadlineSource": "test_only_scoped_override",
+      "processCleanup": "confirmed"
+    },
+    "cleanupOutcome": "succeeded",
+    "residualOutcome": "clean",
+    "facts": {
+      "rootShell": false,
+      "activeCheckpoint": false,
+      "boundaryCheckpoint": false,
+      "requiresSentinelAction": false,
+      "storage": false
+    }
+  },
+  "scenarioFacts": {
+    "rootShell": false,
+    "activeCheckpoint": false,
+    "boundaryCheckpoint": false,
+    "requiresSentinelAction": false,
+    "storage": false,
+    "runScope": "run-scope-sha256:0d729c9b76433a25037289ea1ca0bfebc31e508c6cac7c1a7343891906385cbf",
+    "operationClass": "device_copy"
+  },
+  "sentinel": {
+    "sentinelId": "sentinel-sha256:7ad6452c118e8d94457249e7f2ea00ab8f2d85d608d12651c882037c704c3e2d",
+    "nonce": "nonce-sha256:7c88b3b5758aa220aa10306d198c1dbb70ecf2fcad9f7e05d580488bd2c4b0c9",
+    "runId": "physical-run-sha256:4baf257a048384506e9b3469bfddb4db107c236ca76cc8a9ea60b4218317e405",
+    "scenario": "operation_timeout",
+    "repetition": 2,
+    "armedAt": "unix:1786609023",
+    "operationStartedAt": "unix:1786609023",
+    "boundaryReadyAt": null,
+    "operatorActionAt": null,
+    "operationFinishedAt": "unix:1786609039",
+    "cleanupReadyAt": null,
+    "sleepRequestedAt": null,
+    "sleepEnteredAt": null,
+    "wakeAt": null,
+    "chronologyValid": true,
+    "uniqueMarkers": true
+  },
+  "storage": null,
+  "cleanup": {
+    "command": "adb -s <selected-serial> shell rm -f <fixture-owned-path>",
+    "outcome": "succeeded",
+    "ownedPathDigests": [
+      "path-sha256:5a4cf62cfbe95cfefb833cb24b04b022a645dcdedbcdb42576f2f6eaae387a85",
+      "path-sha256:9243045aa3e2fb4dbb650c80cab2a3b06c7435418900a04882be99a0e83bde13"
+    ],
+    "verified": true,
+    "nonFixtureDeletion": false
+  },
+  "residualStateCheck": {
+    "outcome": "clean",
+    "residuals": []
+  },
+  "outcome": "passed",
+  "notes": [
+    "Physical qualification evidence is sanitized; raw ADB output is intentionally omitted.",
+    "The operation used the production reviewed plan and ExecutorRunner<RealAdbDevice> boundary."
+  ],
+  "runId": "physical-run-sha256:4baf257a048384506e9b3469bfddb4db107c236ca76cc8a9ea60b4218317e405",
+  "evidencePath": "docs/testing/phase-6d6/evidence/operation_timeout-rep2-4baf257a04838450.json",
+  "tracePath": "docs/testing/phase-6d6/evidence/traces/operation_timeout-rep2-4baf257a04838450.json",
+  "recordDigest": "sha256:fd341a9f25c9de96a4051f0d7551ccbf148c44b15abb2e54730347d7ad87ba1f",
+  "traceDigest": "sha256:631332cc0ec16319530c0ea76e798d3139fd343d4113ca7fb9724b9118e824d1",
+  "trace": {
+    "runId": "physical-run-sha256:4baf257a048384506e9b3469bfddb4db107c236ca76cc8a9ea60b4218317e405",
+    "scenario": "operation_timeout",
+    "repetition": 2,
+    "sentinel": {
+      "sentinelId": "sentinel-sha256:7ad6452c118e8d94457249e7f2ea00ab8f2d85d608d12651c882037c704c3e2d",
+      "nonce": "nonce-sha256:7c88b3b5758aa220aa10306d198c1dbb70ecf2fcad9f7e05d580488bd2c4b0c9",
+      "runId": "physical-run-sha256:4baf257a048384506e9b3469bfddb4db107c236ca76cc8a9ea60b4218317e405",
+      "scenario": "operation_timeout",
+      "repetition": 2,
+      "armedAt": "unix:1786609023",
+      "operationStartedAt": "unix:1786609023",
+      "boundaryReadyAt": null,
+      "operatorActionAt": null,
+      "operationFinishedAt": "unix:1786609039",
+      "cleanupReadyAt": null,
+      "sleepRequestedAt": null,
+      "sleepEnteredAt": null,
+      "wakeAt": null,
+      "chronologyValid": true,
+      "uniqueMarkers": true
+    },
+    "slot": {
+      "runId": "run-scope-sha256:0d729c9b76433a25037289ea1ca0bfebc31e508c6cac7c1a7343891906385cbf",
+      "executionId": "execution-sha256:9f20af3dd46bb1bcf6b39c50fb835a219b85b91e93531bc031b4e996fc5a5b2b",
+      "acquired": true,
+      "released": true,
+      "acquiredAt": "unix:1786609023",
+      "terminalCleanupAt": "unix:1786609039",
+      "releasedAt": "unix:1786609039"
+    },
+    "terminal": {
+      "outcome": "passed",
+      "issueCode": "operation_timed_out",
+      "stepStates": {
+        "executed": 0,
+        "skipped": 0,
+        "failed": 1,
+        "cancelled": 0,
+        "blocked": 0,
+        "notAttempted": 1
+      }
+    }
+  }
+}
