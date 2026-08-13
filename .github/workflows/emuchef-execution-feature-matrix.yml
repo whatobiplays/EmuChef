@@ -53,6 +53,8 @@ jobs:
     timeout-minutes: 15
     steps:
       - uses: actions/checkout@v4
+        with:
+          lfs: true
       - uses: actions/setup-node@v4
         with:
           node-version: 22
@@ -122,6 +124,16 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
         with:
           components: rustfmt
+      - name: Prepare compile-only Tauri sidecar placeholder
+        run: |
+          # Tauri validates bundle.externalBin during cargo check/test, even though
+          # these jobs do not package or launch the sidecar. Real sidecar packaging
+          # is covered by the dedicated macOS qualification workflow.
+          target="$(rustc --print host-tuple)"
+          sidecar="apps/emuchef-app/src-tauri/binaries/emuchef-${target}"
+          mkdir -p "$(dirname "$sidecar")"
+          printf '#!/bin/sh\nexit 0\n' > "$sidecar"
+          chmod +x "$sidecar"
       - uses: Swatinem/rust-cache@v2
         with:
           workspaces: apps/emuchef-app/src-tauri
