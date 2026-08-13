@@ -417,10 +417,35 @@ and terminal; remaining budget before and after suspension; wall duration;
 tolerance and rationale; and the scenario phase. Classification is derived
 from clock advancement and budget consumption, never from the terminal result.
 Excluded suspension may still time out after later active time. Transport loss,
-missing samples, or inconsistent measurements block qualification. The current
-physical harness has no exact production deadline-clock observation seam and
-therefore blocks both host-sleep cases. It does not add a sleep inhibitor, OS
-plugin, checkpoint, resume token, or replay path.
+missing samples, or inconsistent measurements block qualification. The owned
+process timer now shares one exact monotonic start/deadline basis with the
+qualification observations: the harness samples the exact deadline clock
+immediately before the `sleep-entered` handoff and again after the `wake`
+marker, and the owner records the terminal clock sample from the same basis.
+The retained basis keeps a truthful post-wake sample available even when the
+owner selected terminal immediately after resume. `sleep-entered` is the final
+operator handoff immediately before physical suspension (not an OS sleep-entry
+event) and is the activeProcess action boundary; `wake` is the first post-resume
+operator acknowledgement. Both host-sleep scenarios reuse the private
+`/dev/zero -> /dev/null` `DeviceCopy` stimulus with a scoped, one-shot,
+`#[cfg(test)]` 120-second qualification deadline; production `DeviceCopy`
+remains 300 seconds. The implementation blocker is removed, but the two
+physical host-sleep repetitions are still missing until an operator runs them.
+It does not add a sleep inhibitor, OS plugin, checkpoint, resume token, or
+replay path. The host-sleep deadline phase is anchored to the exact
+owned-process deadline-clock start (`DeadlineClockStarted.at`), which is also
+serialized as `hostSleep.operationStartedAt`; the earlier
+`operation-started` sentinel marker remains an independent chronology
+observation and is not the 120-second deadline threshold authority. That wall
+timestamp is the wall observation retained alongside construction of the exact
+monotonic timer basis, not a later observer-install timestamp. The final
+host-sleep lifecycle snapshot is taken only after the bounded watcher has
+published its retained-basis post-wake sample, so the owner may reach terminal
+immediately after resume and terminal may precede that post-wake sample.
+`transport_loss` requires zero owner-emitted `DeadlineReached` events; the
+owner event is the only authority for whether the timeout branch won, and a
+monotonic clock sample at or beyond the nominal deadline never converts a
+transport failure into a timeout.
 
 Physical interruption qualification is isolated to the ignored Phase 6D.6
 harness. It requires one exact selected serial, the committed fixture package
@@ -1200,6 +1225,25 @@ single Spawned, MutationStarted, live LivenessSampled, DeadlineReached, and
 Terminal events in raw chronological order. Missing, duplicate, contradictory,
 wrong-class, wrong-deadline, or mixed-identity target events are rejected while
 unrelated operation IDs are ignored.
+
+Host-sleep qualification uses the same private `/dev/zero -> /dev/null`
+stimulus with a 120-second scoped qualification deadline and an exact
+deadline-clock observation seam. The operator creates `sleep-requested` while
+awake; the harness proves the exact child alive, samples the exact deadline
+clock, and creates the internal `sleep-ready` marker; the operator then creates
+`sleep-entered` within four seconds (the final awake handoff and activeProcess
+action boundary), suspends the host, and creates `wake` immediately after
+resume. The post-wake sample is requested only after `wake` is observed and may
+legitimately follow the owner terminal sample when the deadline became ready
+during suspension. The measurement tolerance is 8,000 ms and the timer
+classification derives from measured clock advancement, wall duration, and
+remaining budget; `indeterminate` and `contradictory` block. The owner-recorded
+`DeadlineReached` event is authoritative for whether the deadline branch won:
+a timeout requires it, and completion at the deadline boundary without it is
+not relabelled as a timeout. `sleepEnteredAt` means the last operator/harness
+handoff immediately before physical suspension, and `wakeAt` means the first
+post-resume acknowledgement; neither claims an exact OS event timestamp.
+Physical host-sleep repetitions remain unqualified.
 
 Schema-v1 compatibility is additive for historical non-timeout records: their
 `timeout` object and `activeProcess.actionKind` may be absent. Every

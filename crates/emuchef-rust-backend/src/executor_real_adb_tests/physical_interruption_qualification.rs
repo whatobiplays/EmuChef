@@ -92,6 +92,33 @@ const TIMEOUT_QUALIFICATION_DEADLINE: Duration = Duration::from_secs(15);
 const TIMEOUT_LIVENESS_SAMPLE_OFFSET: Duration = Duration::from_secs(12);
 const TIMEOUT_SOURCE_PATH: &str = "/dev/zero";
 const TIMEOUT_DESTINATION_PATH: &str = "/dev/null";
+/// The scoped, one-shot host-sleep qualification deadline for the private
+/// `DeviceCopy` stimulus. 120 seconds gives the operator a practical window to
+/// create the pre-suspend markers, physically sleep and wake the host, and (for
+/// `host_sleep_before_deadline`) wake before the deadline, while keeping the
+/// after-deadline repetition bounded. It is deliberately longer than the
+/// 15-second operation-timeout value, which is too short for reliable manual
+/// sleep qualification. Production `ProcessOperation::DeviceCopy` remains
+/// 300 seconds.
+const HOST_SLEEP_QUALIFICATION_DEADLINE: Duration = Duration::from_secs(120);
+/// The documented host-sleep measurement tolerance in milliseconds. It covers
+/// the enforced 4-second `sleep-entered` handoff window after `sleep-ready`,
+/// the 1-second sample-to-`sleep-ready` latency budget, canonical-second
+/// sentinel quantization on both the sleep and wake boundaries, and scheduler
+/// margin. The enforced handoff plus latency budget and the tolerance are
+/// asserted compatible by tests.
+const HOST_SLEEP_MEASUREMENT_TOLERANCE_MS: u64 = 8_000;
+/// The operator must create `sleep-entered` within this window after the
+/// harness creates `sleep-ready`; combined with
+/// `HOST_SLEEP_READY_LATENCY_BUDGET` it fits inside the exact-child liveness
+/// freshness bound.
+const HOST_SLEEP_HANDOFF_WINDOW: Duration = Duration::from_secs(4);
+/// The harness must create `sleep-ready` within this budget after the
+/// authoritative pre-suspend liveness sample.
+const HOST_SLEEP_READY_LATENCY_BUDGET: Duration = Duration::from_secs(1);
+const HOST_SLEEP_TIMER_IMPLEMENTATION: &str = "async_io::Timer";
+const HOST_SLEEP_MEASUREMENT_BASIS: &str =
+    "owned_process_monotonic_deadline_clock_samples_and_sentinel_timestamps";
 const SCENARIO_MANIFEST: &str =
     include_str!("../../../../docs/testing/phase-6d6/scenario-manifest.json");
 
@@ -232,7 +259,14 @@ impl Scenario {
     }
 
     const fn requires_process_observer(self) -> bool {
-        self.supports_host_push_active_stimulus() || matches!(self, Self::OperationTimeout)
+        self.supports_host_push_active_stimulus() || self.requires_device_copy_stimulus()
+    }
+
+    const fn requires_device_copy_stimulus(self) -> bool {
+        matches!(
+            self,
+            Self::OperationTimeout | Self::HostSleepBeforeDeadline | Self::HostSleepAfterDeadline
+        )
     }
 
     const fn requires_terminal_recovery(self) -> bool {
@@ -1327,7 +1361,7 @@ fn is_timeout_destination_path(path: &str) -> bool {
 }
 
 fn reviewed_plan_source_location(scenario: Scenario) -> &'static str {
-    if scenario == Scenario::OperationTimeout {
+    if scenario.requires_device_copy_stimulus() {
         "device"
     } else {
         "host"
@@ -1486,6 +1520,16 @@ fn timeout_process_evidence(
                 ..
             }
             | OwnedProcessLifecycleEvent::DeadlineReached {
+                operation_id,
+                operation,
+                ..
+            }
+            | OwnedProcessLifecycleEvent::DeadlineClockStarted {
+                operation_id,
+                operation,
+                ..
+            }
+            | OwnedProcessLifecycleEvent::DeadlineClockSampled {
                 operation_id,
                 operation,
                 ..
@@ -1738,6 +1782,7 @@ impl Sentinel {
             "armed",
             "operation-started",
             "active-ready",
+            "sleep-ready",
             "boundary-ready",
             "operation-finished",
             "terminal-ready",
@@ -1771,6 +1816,117 @@ impl Sentinel {
         }
         Ok(())
     }
+}
+
+fn wait_for_sentinel_marker(
+    sentinel: &Sentinel,
+    name: &str,
+    timeout: Duration,
+) -> Result<SystemTime, String> {
+    let started = Instant::now();
+    loop {
+        if let Ok(time) = sentinel.marker_time(name) {
+            return Ok(time);
+        }
+        if sentinel.path("abort").exists() {
+            return Err("operator aborted the bounded checkpoint".to_string());
+        }
+        if started.elapsed() >= timeout {
+            return Err(format!("{name} checkpoint timed out after ten minutes"));
+        }
+        std::thread::sleep(Duration::from_millis(50));
+    }
+}
+
+fn wait_for_sentinel_action(
+    sentinel: &Sentinel,
+    name: &str,
+    timeout: Duration,
+) -> Result<SystemTime, String> {
+    let started = Instant::now();
+    loop {
+        if let Some(time) = sentinel.named_action_now(name)? {
+            return Ok(time);
+        }
+        if started.elapsed() >= timeout {
+            return Err(format!("{name} checkpoint timed out after ten minutes"));
+        }
+        std::thread::sleep(Duration::from_millis(50));
+    }
+}
+
+/// Run the deterministic host-sleep pre-suspend handshake.
+///
+/// The operator creates `sleep-requested` while the host is awake; the watcher
+/// proves the exact `DeviceCopy` child is alive, samples the exact
+/// owned-process deadline clock, creates `sleep-ready`, and only then allows
+/// the operator to create `sleep-entered` (the final awake handoff, within a
+/// bounded window) and physically suspend the host. After resume the operator
+/// creates `wake`, and the watcher samples the deadline clock again from the
+/// retained exact basis. The returned time is the `sleep-entered` handoff,
+/// which is the activeProcess action boundary for host sleep.
+fn run_host_sleep_watcher(
+    observer: &OwnedProcessObservationHandle,
+    sentinel: &Sentinel,
+) -> Result<SystemTime, String> {
+    let operation_started =
+        wait_for_sentinel_marker(sentinel, "operation-started", SENTINEL_TIMEOUT)?;
+    let sleep_requested = wait_for_sentinel_action(sentinel, "sleep-requested", SENTINEL_TIMEOUT)?;
+    if sleep_requested < operation_started {
+        return Err("sleep-requested predates operation start".to_string());
+    }
+    let operation_id =
+        observer.wait_for_mutation(ProcessOperation::DeviceCopy, SENTINEL_TIMEOUT)?;
+    observer.request_liveness_sample(operation_id)?;
+    let liveness = observer.wait_for_liveness(operation_id, SENTINEL_TIMEOUT)?;
+    if liveness.alive != Some(true) || liveness.terminal_reported {
+        return Err(
+            "the exact target DeviceCopy child was not alive at the pre-suspend handoff"
+                .to_string(),
+        );
+    }
+    observer.request_deadline_clock_sample(operation_id)?;
+    let sleep_ready = sentinel.mark("sleep-ready", "ready\n")?;
+    let ready_latency = sleep_ready
+        .duration_since(liveness.at)
+        .map_err(|_| "sleep-ready preceded the exact-child liveness sample".to_string())?;
+    if ready_latency > HOST_SLEEP_READY_LATENCY_BUDGET {
+        return Err("sleep-ready exceeded the pre-suspend sample latency budget".to_string());
+    }
+    let sleep_entered = wait_for_sentinel_action(sentinel, "sleep-entered", SENTINEL_TIMEOUT)?;
+    if sleep_entered < sleep_ready {
+        return Err("sleep-entered predates the sleep-ready handshake".to_string());
+    }
+    let handoff = sleep_entered
+        .duration_since(sleep_ready)
+        .map_err(|_| "sleep-entered predates the sleep-ready handshake".to_string())?;
+    if handoff > HOST_SLEEP_HANDOFF_WINDOW {
+        return Err("sleep-entered exceeded the bounded handoff window".to_string());
+    }
+    let freshness = sleep_entered
+        .duration_since(liveness.at)
+        .map_err(|_| "sleep-entered preceded the exact-child liveness sample".to_string())?;
+    if freshness > ACTIVE_SAMPLE_FRESHNESS {
+        return Err("sleep-entered exceeded the exact-child liveness freshness window".to_string());
+    }
+    let wake = wait_for_sentinel_action(sentinel, "wake", SENTINEL_TIMEOUT)?;
+    if wake < sleep_entered {
+        return Err("wake predates the pre-suspend handoff".to_string());
+    }
+    observer.request_deadline_clock_sample(operation_id)?;
+    Ok(sleep_entered)
+}
+
+/// Final host-sleep lifecycle snapshot.
+///
+/// This must be taken only after the bounded host-sleep watcher has finished,
+/// so the retained-basis post-wake sample is included even when the owner
+/// reached terminal immediately after resume and the operator created `wake`
+/// afterward.
+fn host_sleep_events_snapshot(
+    observer: &Option<OwnedProcessObservationHandle>,
+) -> Option<Vec<OwnedProcessLifecycleEvent>> {
+    observer.as_ref().map(|observer| observer.events())
 }
 
 fn wait_for_terminal_cleanup_authority(
@@ -1898,7 +2054,7 @@ fn run_invocation() -> Result<Value, String> {
     } else {
         None
     };
-    let timeout_stimulus = if invocation.scenario == Scenario::OperationTimeout {
+    let timeout_stimulus = if invocation.scenario.requires_device_copy_stimulus() {
         match prepare_timeout_stimulus(&invocation, &facts) {
             Ok(stimulus) => Some(stimulus),
             Err(error) => {
@@ -1941,7 +2097,7 @@ fn run_invocation() -> Result<Value, String> {
         identity_capture,
         mut authorization_capture,
         terminal_detected_at,
-        executor_elapsed_ms,
+        host_sleep_events,
         timeout,
     } = reviewed;
 
@@ -2014,7 +2170,7 @@ fn run_invocation() -> Result<Value, String> {
         identity_capture,
         authorization_capture,
         terminal_detected_at,
-        executor_elapsed_ms,
+        host_sleep_events,
         timeout,
         storage: storage.as_ref(),
         host_payload: low_storage_host_payload.as_deref(),
@@ -2282,8 +2438,8 @@ fn reviewed_plan(
     active_stimulus: Option<&ActiveStimulus>,
     timeout_stimulus: Option<&TimeoutStimulus>,
 ) -> ExecutionPlan {
-    if timeout_stimulus.is_some() && invocation.scenario != Scenario::OperationTimeout {
-        panic!("timeout pseudo-device stimulus is only valid for Scenario::OperationTimeout");
+    if timeout_stimulus.is_some() && !invocation.scenario.requires_device_copy_stimulus() {
+        panic!("pseudo-device stimulus is only valid for timeout or host-sleep scenarios");
     }
     let root = invocation.contract.destination_root.trim_end_matches('/');
     let mut steps = Vec::new();
@@ -2419,7 +2575,7 @@ struct ReviewedPlanObservation {
     identity_capture: Option<IdentityTransitionCapture>,
     authorization_capture: Option<AuthorizationTransitionCapture>,
     terminal_detected_at: Option<SystemTime>,
-    executor_elapsed_ms: Option<u64>,
+    host_sleep_events: Option<Vec<OwnedProcessLifecycleEvent>>,
     timeout: Option<Value>,
 }
 
@@ -2434,7 +2590,12 @@ fn is_boundary_checkpoint_event(
 }
 
 fn checkpoint_failure_message(scenario: Scenario) -> &'static str {
-    if scenario == Scenario::OperationTimeout {
+    if matches!(
+        scenario,
+        Scenario::HostSleepBeforeDeadline | Scenario::HostSleepAfterDeadline
+    ) {
+        "host-sleep pre-suspend handshake or deadline-clock observation was missing or invalid"
+    } else if scenario == Scenario::OperationTimeout {
         "timeout liveness/deadline observation was missing or invalid"
     } else {
         "bounded operator checkpoint was missing or aborted"
@@ -2751,6 +2912,32 @@ fn run_reviewed_plan(
                 }
                 return;
             }
+            if matches!(
+                scenario,
+                Scenario::HostSleepBeforeDeadline | Scenario::HostSleepAfterDeadline
+            ) {
+                let result = (|| -> Result<SystemTime, String> {
+                    let observer = watcher_process_observer.ok_or_else(|| {
+                        "host-sleep scenario did not install the exact-child observer".to_string()
+                    })?;
+                    run_host_sleep_watcher(&observer, &watcher_sentinel)
+                })();
+                match result {
+                    Ok(action_time) => {
+                        watcher_action_seen.store(true, Ordering::Release);
+                        if let Ok(mut slot) = watcher_action_time.lock() {
+                            *slot = Some(action_time);
+                        }
+                        if let Ok(mut capture) = watcher_capture.lock() {
+                            capture.requested_at = Some(action_time);
+                        }
+                    }
+                    Err(_) => {
+                        watcher_checkpoint_failed.store(true, Ordering::Release);
+                    }
+                }
+                return;
+            }
             let started = Instant::now();
             while !watcher_in_flight.load(Ordering::Acquire) && started.elapsed() < SENTINEL_TIMEOUT
             {
@@ -2759,44 +2946,15 @@ fn run_reviewed_plan(
             let mut action_observed = false;
             while watcher_in_flight.load(Ordering::Acquire) && started.elapsed() < SENTINEL_TIMEOUT
             {
-                // Host sleep is a physical transition rather than a cancellation
-                // request.  The wake marker is the operator's bounded proof that
-                // the host actually slept while the production operation was in
-                // flight; ordinary interruption cases continue to use the
-                // explicit operator-action marker.
-                let action = if matches!(
-                    scenario,
-                    Scenario::HostSleepBeforeDeadline | Scenario::HostSleepAfterDeadline
-                ) {
-                    watcher_sentinel.named_action_now("wake")
-                } else {
-                    watcher_sentinel.action_now()
-                };
+                // Host sleep uses its own pre-suspend handshake watcher above;
+                // this branch handles the ordinary in-flight interruption
+                // cases through the explicit operator-action marker.
+                let action = watcher_sentinel.action_now();
                 match action {
                     Ok(Some(timestamp)) => {
                         let operation_started =
                             watcher_sentinel.marker_time("operation-started").ok();
-                        let host_markers_valid = if matches!(
-                            scenario,
-                            Scenario::HostSleepBeforeDeadline | Scenario::HostSleepAfterDeadline
-                        ) {
-                            let requested = watcher_sentinel.marker_time("sleep-requested");
-                            let entered = watcher_sentinel.marker_time("sleep-entered");
-                            requested
-                                .ok()
-                                .zip(entered.ok())
-                                .is_some_and(|(requested, entered)| {
-                                    operation_started.is_some_and(|started| started <= requested)
-                                        && requested <= entered
-                                        && entered <= timestamp
-                                })
-                        } else {
-                            true
-                        };
-                        if operation_started.is_none()
-                            || timestamp < operation_started.unwrap()
-                            || !host_markers_valid
-                        {
+                        if operation_started.is_none() || timestamp < operation_started.unwrap() {
                             watcher_checkpoint_failed.store(true, Ordering::Release);
                             watcher_cancel_requested.store(true, Ordering::Release);
                             return;
@@ -2833,12 +2991,21 @@ fn run_reviewed_plan(
         None
     };
     let run_id = format!("run-scope-sha256:{}", digest(&invocation.run_scope));
-    let executor_timer = Instant::now();
     let session_manager = ExecutionSessionManager::default();
     let observed_run = session_manager.test_run_under_observed_slot(&run_id, || {
-        let _deadline_guard = (scenario == Scenario::OperationTimeout).then(|| {
-            arm_test_process_deadline(ProcessOperation::DeviceCopy, TIMEOUT_QUALIFICATION_DEADLINE)
-        });
+        let _deadline_guard = match scenario {
+            Scenario::OperationTimeout => Some(arm_test_process_deadline(
+                ProcessOperation::DeviceCopy,
+                TIMEOUT_QUALIFICATION_DEADLINE,
+            )),
+            Scenario::HostSleepBeforeDeadline | Scenario::HostSleepAfterDeadline => {
+                Some(arm_test_process_deadline(
+                    ProcessOperation::DeviceCopy,
+                    HOST_SLEEP_QUALIFICATION_DEADLINE,
+                ))
+            }
+            _ => None,
+        };
         let timeout_stop = Arc::new(AtomicBool::new(false));
         let timeout_watcher = if scenario == Scenario::OperationTimeout {
             let observer = process_observer
@@ -2937,12 +3104,11 @@ fn run_reviewed_plan(
                 identity_capture: None,
                 authorization_capture: None,
                 terminal_detected_at: None,
-                executor_elapsed_ms: None,
+                host_sleep_events: None,
                 timeout,
             };
         }
     };
-    let executor_elapsed_ms = Some(executor_timer.elapsed().as_millis() as u64);
     let terminal_detected_at = Some(SystemTime::now());
     if scenario == Scenario::DeviceUnauthorized {
         let grace_started = Instant::now();
@@ -2968,8 +3134,15 @@ fn run_reviewed_plan(
         let _ = observer.join();
     }
     if let Some(watcher) = watcher {
-        let _ = watcher.join();
+        if watcher.join().is_err() {
+            checkpoint_failed.store(true, Ordering::Release);
+        }
     }
+    // The final host-sleep lifecycle snapshot must happen only after the
+    // bounded host-sleep watcher has finished: the watcher publishes the
+    // retained-basis post-wake sample after observing the wake marker, which
+    // may be after the owner reached terminal immediately following resume.
+    let host_sleep_events = host_sleep_events_snapshot(&process_observer);
     let slot_observation = session_slot_observation
         .lock()
         .map(|value| value.clone())
@@ -3039,7 +3212,7 @@ fn run_reviewed_plan(
         identity_capture,
         authorization_capture,
         terminal_detected_at,
-        executor_elapsed_ms,
+        host_sleep_events,
         timeout,
     }
 }
@@ -3324,7 +3497,7 @@ struct EvidenceInputs<'a> {
     identity_capture: Option<IdentityTransitionCapture>,
     authorization_capture: Option<AuthorizationTransitionCapture>,
     terminal_detected_at: Option<SystemTime>,
-    executor_elapsed_ms: Option<u64>,
+    host_sleep_events: Option<Vec<OwnedProcessLifecycleEvent>>,
     timeout: Option<Value>,
     storage: Option<&'a StorageObservation>,
     host_payload: Option<&'a Path>,
@@ -3348,7 +3521,7 @@ fn evidence_record(inputs: EvidenceInputs<'_>) -> Value {
         identity_capture,
         authorization_capture,
         terminal_detected_at,
-        executor_elapsed_ms,
+        host_sleep_events,
         timeout,
         storage,
         host_payload,
@@ -3358,8 +3531,12 @@ fn evidence_record(inputs: EvidenceInputs<'_>) -> Value {
         cleanup_completed_at,
     } = inputs;
     let (cleanup_outcome, residuals) = cleanup;
-    let host_sleep =
-        host_sleep_evidence(&invocation.scenario, &sentinel, result, executor_elapsed_ms);
+    let host_sleep = host_sleep_evidence(
+        &invocation.scenario,
+        &sentinel,
+        result,
+        host_sleep_events.as_deref().unwrap_or(&[]),
+    );
     let identity_transition = identity_transition_evidence(
         &invocation.scenario,
         facts,
@@ -3752,11 +3929,50 @@ fn classify_host_sleep_clock(
     }
 }
 
+fn host_sleep_unix_seconds(value: &Value, field: &str) -> Option<u64> {
+    value
+        .get(field)?
+        .as_str()?
+        .strip_prefix("unix:")?
+        .parse()
+        .ok()
+}
+
+fn toolchain() -> String {
+    let output = Command::new("rustc").arg("--version").output();
+    let Ok(output) = output else {
+        return "unreported".to_string();
+    };
+    output
+        .status
+        .success()
+        .then(|| {
+            String::from_utf8_lossy(&output.stdout)
+                .lines()
+                .next()
+                .map(sanitize_fact)
+        })
+        .flatten()
+        .filter(|value| !value.is_empty())
+        .unwrap_or_else(|| "unreported".to_string())
+}
+
+/// Build the complete sanitized host-sleep evidence object from the exact
+/// owned-process deadline-clock samples, the fresh sentinel markers, and the
+/// terminal execution result.
+///
+/// Fail-closed behavior: any missing, mismatched, out-of-order, or
+/// contradictory observation returns `Value::Null` so the repetition is
+/// blocked. The pre-suspend and post-wake samples are the two watcher-requested
+/// samples on the exact selected operation; the terminal sample is
+/// owner-recorded and authoritative for terminal chronology. The post-wake
+/// sample may legitimately follow the owner terminal sample when the deadline
+/// became ready immediately after host resume.
 fn host_sleep_evidence(
     scenario: &Scenario,
-    _sentinel: &Value,
-    _result: Result<&ExecutionRunResult, &String>,
-    _executor_elapsed_ms: Option<u64>,
+    sentinel: &Value,
+    result: Result<&ExecutionRunResult, &String>,
+    events: &[OwnedProcessLifecycleEvent],
 ) -> Value {
     if !matches!(
         scenario,
@@ -3764,11 +3980,329 @@ fn host_sleep_evidence(
     ) {
         return Value::Null;
     }
-    // The production deadline clock is owned inside the async process helper.
-    // Until a safe observation seam exposes before-sleep, after-wake, and
-    // terminal samples from that exact clock, terminal success or timeout is
-    // not timer evidence. A null measurement makes the physical case block.
-    Value::Null
+    let run = match result {
+        Ok(run) => run,
+        Err(_) => return Value::Null,
+    };
+    let issue = run
+        .steps
+        .iter()
+        .find_map(|step| step.failure_kind.map(issue_code));
+    // Only truthful terminal branches may serialize host-sleep evidence.
+    // Identity, root, storage, authorization, generic step, unknown, and
+    // contradictory result states block the repetition rather than being
+    // relabeled as transport loss. Runtime loss is not produced by this
+    // harness because it has no authoritative runtime/session-loss evidence.
+    let terminal_outcome = match (run.success, issue) {
+        (true, None) => "completed",
+        (false, Some("operation_timed_out")) => "timed_out",
+        (
+            false,
+            Some(
+                "device_offline"
+                | "device_disconnected"
+                | "adb_server_unavailable"
+                | "device_transport_lost",
+            ),
+        ) => "transport_loss",
+        _ => return Value::Null,
+    };
+    let deadline_ns = u64::try_from(HOST_SLEEP_QUALIFICATION_DEADLINE.as_nanos())
+        .expect("the host-sleep qualification deadline must fit u64 nanoseconds");
+    let mut candidates = events.iter().filter_map(|event| match event {
+        OwnedProcessLifecycleEvent::DeadlineClockStarted {
+            operation_id,
+            operation: ProcessOperation::DeviceCopy,
+            deadline_ns: observed,
+            ..
+        } if *observed == deadline_ns => Some(*operation_id),
+        _ => None,
+    });
+    let Some(operation_id) = candidates.next() else {
+        return Value::Null;
+    };
+    if candidates.next().is_some() {
+        return Value::Null;
+    }
+    if events.iter().any(|event| {
+        event.operation_id() == operation_id && event.operation() != ProcessOperation::DeviceCopy
+    }) {
+        return Value::Null;
+    }
+    let clock_starts = events
+        .iter()
+        .filter(|event| {
+            matches!(
+                event,
+                OwnedProcessLifecycleEvent::DeadlineClockStarted {
+                    operation_id: observed,
+                    ..
+                } if *observed == operation_id
+            )
+        })
+        .count();
+    if clock_starts != 1 {
+        return Value::Null;
+    }
+    let (deadline_clock_start_ns, deadline_start_at) = events
+        .iter()
+        .find_map(|event| match event {
+            OwnedProcessLifecycleEvent::DeadlineClockStarted {
+                operation_id: observed,
+                deadline_clock_start_ns,
+                at,
+                ..
+            } if *observed == operation_id => Some((*deadline_clock_start_ns, *at)),
+            _ => None,
+        })
+        .expect("the single clock start must be present");
+    if deadline_clock_start_ns != 0 {
+        return Value::Null;
+    }
+    let deadline_start_sec = canonical_unix_seconds(deadline_start_at).unwrap_or(0);
+    let Some((sentinel_started_sec, requested_sec, entered_sec, wake_sec)) = (|| {
+        Some((
+            host_sleep_unix_seconds(sentinel, "operationStartedAt")?,
+            host_sleep_unix_seconds(sentinel, "sleepRequestedAt")?,
+            host_sleep_unix_seconds(sentinel, "sleepEnteredAt")?,
+            host_sleep_unix_seconds(sentinel, "wakeAt")?,
+        ))
+    })() else {
+        return Value::Null;
+    };
+    // The sentinel progress marker is an independent observation and must
+    // precede the exact owned-process deadline-clock start, which is the
+    // authority for the 120-second host-sleep deadline phase.
+    if !(sentinel_started_sec <= deadline_start_sec
+        && deadline_start_sec <= requested_sec
+        && requested_sec <= entered_sec
+        && entered_sec <= wake_sec)
+    {
+        return Value::Null;
+    }
+    let requested_samples = events
+        .iter()
+        .filter(|event| {
+            matches!(
+                event,
+                OwnedProcessLifecycleEvent::DeadlineClockSampled {
+                    operation_id: observed,
+                    owner_reported: false,
+                    ..
+                } if *observed == operation_id
+            )
+        })
+        .collect::<Vec<_>>();
+    if requested_samples.len() != 2 {
+        return Value::Null;
+    }
+    let before = match requested_samples[0] {
+        OwnedProcessLifecycleEvent::DeadlineClockSampled {
+            deadline_clock_ns,
+            remaining_ns,
+            ..
+        } => (*deadline_clock_ns, *remaining_ns),
+        _ => unreachable!("requested sample must be a sampled event"),
+    };
+    let after = match requested_samples[1] {
+        OwnedProcessLifecycleEvent::DeadlineClockSampled {
+            deadline_clock_ns,
+            remaining_ns,
+            ..
+        } => (*deadline_clock_ns, *remaining_ns),
+        _ => unreachable!("requested sample must be a sampled event"),
+    };
+    let terminal_samples = events
+        .iter()
+        .filter(|event| {
+            matches!(
+                event,
+                OwnedProcessLifecycleEvent::DeadlineClockSampled {
+                    operation_id: observed,
+                    owner_reported: true,
+                    ..
+                } if *observed == operation_id
+            )
+        })
+        .count();
+    if terminal_samples != 1 {
+        return Value::Null;
+    }
+    let terminal_sample = events
+        .iter()
+        .find_map(|event| match event {
+            OwnedProcessLifecycleEvent::DeadlineClockSampled {
+                operation_id: observed,
+                owner_reported: true,
+                deadline_clock_ns,
+                remaining_ns,
+                deadline_reached,
+                ..
+            } if *observed == operation_id => {
+                Some((*deadline_clock_ns, *remaining_ns, *deadline_reached))
+            }
+            _ => None,
+        })
+        .expect("the single owner terminal sample must be present");
+    let (terminal_ns, _terminal_remaining_ns, terminal_reached) = terminal_sample;
+    let terminal_events = events
+        .iter()
+        .filter(|event| {
+            matches!(
+                event,
+                OwnedProcessLifecycleEvent::Terminal {
+                    operation_id: observed,
+                    ..
+                } if *observed == operation_id
+            )
+        })
+        .count();
+    if terminal_events != 1 {
+        return Value::Null;
+    }
+    let terminal_at = events
+        .iter()
+        .find_map(|event| match event {
+            OwnedProcessLifecycleEvent::Terminal {
+                operation_id: observed,
+                at,
+                ..
+            } if *observed == operation_id => Some(*at),
+            _ => None,
+        })
+        .expect("the single terminal event must be present");
+    let before_seconds = canonical_unix_seconds(requested_samples[0].at()).unwrap_or(0);
+    let after_seconds = canonical_unix_seconds(requested_samples[1].at()).unwrap_or(0);
+    let terminal_seconds = canonical_unix_seconds(terminal_at).unwrap_or(0);
+    if before_seconds > entered_sec
+        || after_seconds < wake_sec
+        || before.0 > after.0
+        || before.0 > terminal_ns
+    {
+        return Value::Null;
+    }
+    let deadline_events = events
+        .iter()
+        .filter(|event| {
+            matches!(
+                event,
+                OwnedProcessLifecycleEvent::DeadlineReached {
+                    operation_id: observed,
+                    ..
+                } if *observed == operation_id
+            )
+        })
+        .count();
+    let matching_deadline_events = events
+        .iter()
+        .filter(|event| {
+            matches!(
+                event,
+                OwnedProcessLifecycleEvent::DeadlineReached {
+                    operation_id: observed,
+                    deadline,
+                    ..
+                } if *observed == operation_id
+                    && *deadline == HOST_SLEEP_QUALIFICATION_DEADLINE
+            )
+        })
+        .count();
+    // The owner-emitted DeadlineReached event is the authority for whether the
+    // timeout branch won. timed_out requires exactly one matching event;
+    // completed and transport_loss both require zero. A monotonic clock sample
+    // at or beyond the nominal deadline is only a clock observation and does
+    // not select the timeout branch.
+    match terminal_outcome {
+        "timed_out"
+            if deadline_events != 1 || matching_deadline_events != 1 || !terminal_reached =>
+        {
+            return Value::Null;
+        }
+        "completed" | "transport_loss" if deadline_events != 0 => {
+            return Value::Null;
+        }
+        _ => {}
+    }
+    let remaining_before_ms = before.1 / 1_000_000;
+    let remaining_after_ms = after.1 / 1_000_000;
+    if remaining_before_ms == 0 || remaining_after_ms > remaining_before_ms {
+        return Value::Null;
+    }
+    let deadline_ms = HOST_SLEEP_QUALIFICATION_DEADLINE.as_millis() as u64;
+    let wake_elapsed_ms = wake_sec
+        .saturating_sub(deadline_start_sec)
+        .saturating_mul(1000);
+    let phase_valid = if *scenario == Scenario::HostSleepBeforeDeadline {
+        wake_elapsed_ms < deadline_ms
+    } else {
+        wake_elapsed_ms >= deadline_ms
+    };
+    if !phase_valid {
+        return Value::Null;
+    }
+    let advance_ms = after.0.saturating_sub(before.0) / 1_000_000;
+    let classification = match classify_host_sleep_clock(HostSleepClockMeasurement {
+        suspended_wall_ms: wake_sec.saturating_sub(entered_sec).saturating_mul(1000),
+        deadline_clock_advance_ms: advance_ms,
+        remaining_before_sleep_ms: remaining_before_ms,
+        remaining_after_wake_ms: remaining_after_ms,
+        tolerance_ms: HOST_SLEEP_MEASUREMENT_TOLERANCE_MS,
+    }) {
+        HostSleepClockClassification::SuspendedTimeIncluded => "suspended_time_included",
+        HostSleepClockClassification::SuspendedTimeExcluded => "suspended_time_excluded",
+        HostSleepClockClassification::Indeterminate
+        | HostSleepClockClassification::Contradictory => return Value::Null,
+    };
+    let terminal_clock_elapsed_ms = terminal_ns / 1_000_000;
+    if terminal_outcome == "timed_out" && terminal_clock_elapsed_ms < deadline_ms {
+        return Value::Null;
+    }
+    let host = host_facts();
+    let host_os = host
+        .get("os")
+        .and_then(Value::as_str)
+        .unwrap_or("unreported")
+        .to_string();
+    let host_version = host
+        .get("version")
+        .and_then(Value::as_str)
+        .unwrap_or("unreported")
+        .to_string();
+    json!({
+        "sleepRequestedAt": format!("unix:{requested_sec}"),
+        "sleepEnteredAt": format!("unix:{entered_sec}"),
+        "wakeAt": format!("unix:{wake_sec}"),
+        "wallElapsedMs": terminal_seconds.saturating_sub(deadline_start_sec).saturating_mul(1000),
+        "executorElapsedMs": terminal_clock_elapsed_ms,
+        "deadlineMs": deadline_ms,
+        "operationStartedAt": format!("unix:{deadline_start_sec}"),
+        "terminalAt": format!("unix:{terminal_seconds}"),
+        "terminalOutcome": terminal_outcome,
+        "hostOs": host_os,
+        "hostVersion": host_version,
+        "timerImplementation": HOST_SLEEP_TIMER_IMPLEMENTATION,
+        "toolchain": toolchain(),
+        "timerClassification": classification,
+        "measurementBasis": HOST_SLEEP_MEASUREMENT_BASIS,
+        "transportLossBlockedMeasurement": matches!(terminal_outcome, "transport_loss" | "runtime_loss"),
+        "elapsedBeforeSleepMs": requested_sec.saturating_sub(deadline_start_sec).saturating_mul(1000),
+        "deadlineClockStartNs": format!("monotonic-ns:{deadline_clock_start_ns}"),
+        "deadlineClockBeforeSleepNs": format!("monotonic-ns:{}", before.0),
+        "deadlineClockAfterWakeNs": format!("monotonic-ns:{}", after.0),
+        "deadlineClockTerminalNs": format!("monotonic-ns:{terminal_ns}"),
+        "suspendedWallMs": wake_sec.saturating_sub(entered_sec).saturating_mul(1000),
+        "deadlineClockAdvanceDuringSuspensionMs": advance_ms,
+        "remainingBeforeSleepMs": remaining_before_ms,
+        "remainingAfterWakeMs": remaining_after_ms,
+        "measurementToleranceMs": HOST_SLEEP_MEASUREMENT_TOLERANCE_MS,
+        "toleranceRationale": "8000 ms covers the enforced 4-second sleep-entered handoff window after sleep-ready, the 1-second sample-to-sleep-ready latency budget, canonical-second sentinel quantization on both sleep/wake boundaries, and scheduler margin.",
+        "operatorActionPhase": if *scenario == Scenario::HostSleepBeforeDeadline {
+            "before_deadline"
+        } else {
+            "after_deadline"
+        },
+        "deadlineClockSource": "owned_process_monotonic_deadline_clock",
+    })
 }
 
 fn identity_transition_evidence(
@@ -3999,9 +4533,11 @@ fn sentinel_evidence(invocation: &Invocation) -> Value {
         .zip(sleep_requested)
         .zip(sleep_entered)
         .zip(wake)
-        .zip(operation_finished)
-        .is_none_or(|((((started, requested), entered), wake), finished)| {
-            started <= requested && requested <= entered && entered <= wake && wake <= finished
+        .is_none_or(|(((started, requested), entered), wake)| {
+            // wake is the operator's first post-resume acknowledgement. The
+            // owned process may reach terminal immediately after resume, so
+            // the wake marker may follow the operation-finished marker.
+            started <= requested && requested <= entered && entered <= wake
         });
     json!({
         "sentinelId": invocation.sentinel_id,
@@ -4332,7 +4868,15 @@ fn prepare_timeout_stimulus(
     invocation: &Invocation,
     facts: &DeviceFacts,
 ) -> Result<TimeoutStimulus, String> {
-    if invocation.scenario != Scenario::OperationTimeout {
+    let stimulus = timeout_stimulus_for_scenario(invocation.scenario)?;
+    create_run_scope(invocation, facts)?;
+    Ok(stimulus)
+}
+
+/// Validate that a scenario may use the private pseudo-device copy and build
+/// the stimulus without touching ADB.
+fn timeout_stimulus_for_scenario(scenario: Scenario) -> Result<TimeoutStimulus, String> {
+    if !scenario.requires_device_copy_stimulus() {
         return Err(
             "timeout pseudo-device stimulus was requested for an unsupported scenario".to_string(),
         );
@@ -4344,7 +4888,6 @@ fn prepare_timeout_stimulus(
             "timeout pseudo-device stimulus path escaped its private constants".to_string(),
         );
     }
-    create_run_scope(invocation, facts)?;
     Ok(TimeoutStimulus {
         device_source_path: TIMEOUT_SOURCE_PATH.to_string(),
         device_destination_path: TIMEOUT_DESTINATION_PATH.to_string(),
@@ -5185,11 +5728,18 @@ mod tests {
             reviewed_plan_source_location(Scenario::OperationTimeout),
             "device"
         );
+        assert_eq!(
+            reviewed_plan_source_location(Scenario::HostSleepBeforeDeadline),
+            "device"
+        );
+        assert_eq!(
+            reviewed_plan_source_location(Scenario::HostSleepAfterDeadline),
+            "device"
+        );
         for scenario in [
             Scenario::CancellationActive,
             Scenario::CancellationBoundary,
             Scenario::LowStorage,
-            Scenario::HostSleepBeforeDeadline,
         ] {
             assert_eq!(reviewed_plan_source_location(scenario), "host");
         }
@@ -5310,7 +5860,7 @@ mod tests {
 
     #[test]
     #[should_panic(
-        expected = "timeout pseudo-device stimulus is only valid for Scenario::OperationTimeout"
+        expected = "pseudo-device stimulus is only valid for timeout or host-sleep scenarios"
     )]
     fn reviewed_plan_rejects_timeout_stimulus_for_ordinary_scenarios() {
         let (invocation, facts) = timeout_test_invocation(Scenario::CancellationBoundary);
@@ -5326,6 +5876,14 @@ mod tests {
         assert_eq!(
             checkpoint_failure_message(Scenario::OperationTimeout),
             "timeout liveness/deadline observation was missing or invalid"
+        );
+        assert_eq!(
+            checkpoint_failure_message(Scenario::HostSleepBeforeDeadline),
+            "host-sleep pre-suspend handshake or deadline-clock observation was missing or invalid"
+        );
+        assert_eq!(
+            checkpoint_failure_message(Scenario::HostSleepAfterDeadline),
+            "host-sleep pre-suspend handshake or deadline-clock observation was missing or invalid"
         );
         assert_eq!(
             checkpoint_failure_message(Scenario::CancellationActive),
@@ -6023,5 +6581,1626 @@ mod tests {
         assert_eq!(first_bytes.len(), byte_len as usize);
         assert!(first_bytes.iter().any(|byte| *byte != 0));
         assert_eq!(first_bytes, second_bytes);
+    }
+
+    #[test]
+    fn host_sleep_deadline_and_handshake_constants_are_bounded_and_compatible() {
+        assert_eq!(HOST_SLEEP_QUALIFICATION_DEADLINE, Duration::from_secs(120));
+        assert_eq!(HOST_SLEEP_MEASUREMENT_TOLERANCE_MS, 8_000);
+        assert_eq!(HOST_SLEEP_HANDOFF_WINDOW, Duration::from_secs(4));
+        assert_eq!(HOST_SLEEP_READY_LATENCY_BUDGET, Duration::from_secs(1));
+        assert_eq!(
+            ProcessOperation::DeviceCopy.deadline(),
+            Duration::from_secs(300)
+        );
+        assert!(
+            HOST_SLEEP_HANDOFF_WINDOW + HOST_SLEEP_READY_LATENCY_BUDGET <= ACTIVE_SAMPLE_FRESHNESS,
+            "the enforced handoff window plus ready latency must fit the liveness freshness bound"
+        );
+        assert!(
+            HOST_SLEEP_HANDOFF_WINDOW.as_millis() as u64
+                + HOST_SLEEP_READY_LATENCY_BUDGET.as_millis() as u64
+                + 2_000
+                + 1_000
+                <= HOST_SLEEP_MEASUREMENT_TOLERANCE_MS,
+            "the tolerance must cover handoff latency, marker quantization, and scheduler margin"
+        );
+    }
+
+    #[test]
+    fn host_sleep_scenarios_require_the_exact_child_observer_and_device_copy_stimulus() {
+        for scenario in [
+            Scenario::HostSleepBeforeDeadline,
+            Scenario::HostSleepAfterDeadline,
+        ] {
+            assert!(scenario.requires_process_observer());
+            assert!(scenario.requires_device_copy_stimulus());
+            assert_eq!(
+                active_process_operation(scenario),
+                ProcessOperation::DeviceCopy
+            );
+            assert_eq!(
+                process_operation_class(ProcessOperation::DeviceCopy),
+                Some("device_copy")
+            );
+            assert!(scenario.is_active_checkpoint());
+        }
+    }
+
+    #[test]
+    fn timeout_stimulus_for_scenario_accepts_only_timeout_and_host_sleep() {
+        for scenario in [
+            Scenario::OperationTimeout,
+            Scenario::HostSleepBeforeDeadline,
+            Scenario::HostSleepAfterDeadline,
+        ] {
+            let stimulus = timeout_stimulus_for_scenario(scenario).expect(
+                "timeout and host-sleep scenarios must obtain the private pseudo-device copy",
+            );
+            assert_eq!(stimulus.device_source_path, TIMEOUT_SOURCE_PATH);
+            assert_eq!(stimulus.device_destination_path, TIMEOUT_DESTINATION_PATH);
+        }
+        assert!(timeout_stimulus_for_scenario(Scenario::CancellationBoundary).is_err());
+    }
+
+    #[test]
+    fn reviewed_plan_accepts_host_sleep_pseudo_device_stimulus() {
+        let (invocation, facts) = timeout_test_invocation(Scenario::HostSleepBeforeDeadline);
+        let stimulus = timeout_stimulus_for_scenario(Scenario::HostSleepBeforeDeadline)
+            .expect("host sleep must obtain the private pseudo-device copy");
+        let plan = reviewed_plan(&invocation, &facts, None, None, Some(&stimulus));
+        assert_eq!(plan.steps.len(), 2);
+        match plan.steps[0].params.get("source") {
+            Some(ExecutionParamValue::Literal { value }) => {
+                assert_eq!(value["value"], json!(TIMEOUT_SOURCE_PATH));
+                assert_eq!(value["location"], Value::String("device".to_string()));
+            }
+            _ => panic!("host-sleep first source should remain a literal runtime value"),
+        }
+        match plan.steps[0].params.get("dest") {
+            Some(ExecutionParamValue::Literal { value }) => {
+                assert_eq!(value, &json!(TIMEOUT_DESTINATION_PATH));
+            }
+            _ => panic!("host-sleep first destination should remain a literal runtime value"),
+        }
+        match plan.steps[0].params.get("copy_policy") {
+            Some(ExecutionParamValue::Literal { value }) => {
+                assert_eq!(value, &json!("merge"));
+            }
+            _ => panic!("host-sleep copy policy should remain a literal runtime value"),
+        }
+    }
+
+    fn wait_for_test_marker(sentinel: &Sentinel, name: &str) -> SystemTime {
+        let started = Instant::now();
+        loop {
+            if let Ok(time) = sentinel.marker_time(name) {
+                return time;
+            }
+            assert!(
+                started.elapsed() < Duration::from_secs(10),
+                "{name} marker did not appear within the test window"
+            );
+            std::thread::sleep(Duration::from_millis(5));
+        }
+    }
+
+    fn host_sleep_watcher_process(
+        observer: OwnedProcessObservationHandle,
+    ) -> std::thread::JoinHandle<
+        Result<
+            crate::owned_process::CapturedProcessOutput,
+            crate::owned_process::OwnedProcessError,
+        >,
+    > {
+        let executable = std::env::current_exe().expect("test executable should be available");
+        let executable = executable
+            .to_str()
+            .expect("test executable should be utf-8")
+            .to_string();
+        std::thread::spawn(move || {
+            let _deadline = arm_test_process_deadline(
+                ProcessOperation::DeviceCopy,
+                HOST_SLEEP_QUALIFICATION_DEADLINE,
+            );
+            crate::owned_process::run_owned_process_observed(
+                &executable,
+                &[
+                    "--exact".to_string(),
+                    "executor_real_adb_tests::physical_interruption_qualification::tests::watcher_helper"
+                        .to_string(),
+                    "--ignored".to_string(),
+                    "--nocapture".to_string(),
+                ],
+                ProcessOperation::DeviceCopy,
+                observer,
+            )
+        })
+    }
+
+    #[test]
+    fn host_sleep_watcher_completes_the_pre_suspend_handshake_and_returns_the_handoff_action() {
+        let observer = OwnedProcessObservationHandle::default();
+        let process = host_sleep_watcher_process(observer.clone());
+        let sentinel_directory = tempfile::tempdir().expect("sentinel directory should exist");
+        let sentinel = Sentinel {
+            directory: sentinel_directory.path().to_path_buf(),
+        };
+        sentinel
+            .mark("operation-started", "started\n")
+            .expect("operation-started marker should be created");
+        sentinel
+            .mark("sleep-requested", "ack\n")
+            .expect("sleep-requested marker should be created");
+
+        let watcher_observer = observer.clone();
+        let watcher_sentinel = sentinel.clone();
+        let watcher = std::thread::spawn(move || {
+            run_host_sleep_watcher(&watcher_observer, &watcher_sentinel)
+        });
+
+        let sleep_ready = wait_for_test_marker(&sentinel, "sleep-ready");
+        assert!(
+            sleep_ready
+                >= sentinel
+                    .marker_time("sleep-requested")
+                    .expect("requested time")
+        );
+        sentinel
+            .mark("sleep-entered", "ack\n")
+            .expect("sleep-entered marker should be created");
+        sentinel
+            .mark("wake", "ack\n")
+            .expect("wake marker should be created");
+
+        let action_at = watcher
+            .join()
+            .expect("host-sleep watcher should finish")
+            .expect("the pre-suspend handshake should complete");
+        let entered = sentinel.marker_time("sleep-entered").expect("entered time");
+        let wake = sentinel.marker_time("wake").expect("wake time");
+        assert_eq!(
+            action_at, entered,
+            "the action boundary must be the sleep-entered handoff"
+        );
+        assert!(entered < wake, "wake must follow the pre-suspend handoff");
+
+        let events = observer.events();
+        let requested = events
+            .iter()
+            .filter(|event| {
+                matches!(
+                    event,
+                    OwnedProcessLifecycleEvent::DeadlineClockSampled {
+                        owner_reported: false,
+                        ..
+                    }
+                )
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(
+            requested.len(),
+            2,
+            "exactly one pre-suspend and one post-wake sample"
+        );
+        let after_at = match requested[1] {
+            OwnedProcessLifecycleEvent::DeadlineClockSampled { at, .. } => *at,
+            _ => unreachable!("requested sample must carry a timestamp"),
+        };
+        assert!(
+            after_at >= wake,
+            "the post-wake sample must be requested only after the wake marker is observed"
+        );
+        process
+            .join()
+            .expect("host-sleep helper process should finish")
+            .expect("the observed helper should complete");
+    }
+
+    #[test]
+    fn host_sleep_watcher_blocks_when_the_exact_child_is_not_alive() {
+        let observer = OwnedProcessObservationHandle::default();
+        let executable = std::env::current_exe().expect("test executable should be available");
+        let executable = executable
+            .to_str()
+            .expect("test executable should be utf-8")
+            .to_string();
+        let process_observer = observer.clone();
+        let process = std::thread::spawn(move || {
+            crate::owned_process::run_owned_process_observed(
+                &executable,
+                &[
+                    "--exact".to_string(),
+                    "owned_process::tests::normal_helper".to_string(),
+                    "--ignored".to_string(),
+                    "--nocapture".to_string(),
+                ],
+                ProcessOperation::DeviceCopy,
+                process_observer,
+            )
+        });
+        process
+            .join()
+            .expect("helper process should finish")
+            .expect("the completed child should remain completed");
+
+        let sentinel_directory = tempfile::tempdir().expect("sentinel directory should exist");
+        let sentinel = Sentinel {
+            directory: sentinel_directory.path().to_path_buf(),
+        };
+        sentinel
+            .mark("operation-started", "started\n")
+            .expect("operation-started marker should be created");
+        sentinel
+            .mark("sleep-requested", "ack\n")
+            .expect("sleep-requested marker should be created");
+        let error = run_host_sleep_watcher(&observer, &sentinel)
+            .expect_err("a terminal exact child cannot pass the pre-suspend handshake");
+        assert!(
+            error.contains("not alive"),
+            "the rejection must name the failed liveness proof: {error}"
+        );
+    }
+
+    #[test]
+    fn host_sleep_watcher_rejects_markers_out_of_order() {
+        let observer = OwnedProcessObservationHandle::default();
+        let sentinel_directory = tempfile::tempdir().expect("sentinel directory should exist");
+        let sentinel = Sentinel {
+            directory: sentinel_directory.path().to_path_buf(),
+        };
+        sentinel
+            .mark("sleep-requested", "ack\n")
+            .expect("sleep-requested marker should be created");
+        sentinel
+            .mark("operation-started", "started\n")
+            .expect("operation-started marker should be created");
+        let error = run_host_sleep_watcher(&observer, &sentinel)
+            .expect_err("a handoff marker before operation start must be rejected");
+        assert!(
+            error.contains("predates operation start"),
+            "the rejection must name the stale marker: {error}"
+        );
+    }
+
+    #[test]
+    fn host_sleep_watcher_rejects_non_ack_markers() {
+        let observer = OwnedProcessObservationHandle::default();
+        let sentinel_directory = tempfile::tempdir().expect("sentinel directory should exist");
+        let sentinel = Sentinel {
+            directory: sentinel_directory.path().to_path_buf(),
+        };
+        sentinel
+            .mark("operation-started", "started\n")
+            .expect("operation-started marker should be created");
+        sentinel
+            .mark("sleep-requested", "not-ack\n")
+            .expect("sleep-requested marker should be created");
+        let error = run_host_sleep_watcher(&observer, &sentinel)
+            .expect_err("a marker without the exact ack content must be rejected");
+        assert!(
+            error.contains("ack"),
+            "the rejection must name the ack requirement: {error}"
+        );
+    }
+
+    #[test]
+    fn host_sleep_watcher_enforces_the_bounded_handoff_window() {
+        let observer = OwnedProcessObservationHandle::default();
+        let process = host_sleep_watcher_process(observer.clone());
+        let sentinel_directory = tempfile::tempdir().expect("sentinel directory should exist");
+        let sentinel = Sentinel {
+            directory: sentinel_directory.path().to_path_buf(),
+        };
+        sentinel
+            .mark("operation-started", "started\n")
+            .expect("operation-started marker should be created");
+        sentinel
+            .mark("sleep-requested", "ack\n")
+            .expect("sleep-requested marker should be created");
+
+        let watcher_observer = observer.clone();
+        let watcher_sentinel = sentinel.clone();
+        let watcher = std::thread::spawn(move || {
+            run_host_sleep_watcher(&watcher_observer, &watcher_sentinel)
+        });
+        let _ = wait_for_test_marker(&sentinel, "sleep-ready");
+        std::thread::sleep(HOST_SLEEP_HANDOFF_WINDOW + Duration::from_millis(300));
+        sentinel
+            .mark("sleep-entered", "ack\n")
+            .expect("sleep-entered marker should be created");
+        let error = watcher
+            .join()
+            .expect("host-sleep watcher should finish")
+            .expect_err("a late sleep-entered marker must exceed the bounded handoff window");
+        assert!(
+            error.contains("handoff window"),
+            "the rejection must name the bounded handoff window: {error}"
+        );
+        process
+            .join()
+            .expect("host-sleep helper process should finish")
+            .expect("the observed helper should complete");
+    }
+
+    #[derive(Clone, Copy, Debug)]
+    struct HostSleepSampleFixture {
+        deadline_start_wall_ms: u64,
+        before_wall_ms: u64,
+        before_ns: u64,
+        before_remaining_ns: u64,
+        after_wall_ms: u64,
+        after_ns: u64,
+        after_remaining_ns: u64,
+        terminal_wall_ms: u64,
+        terminal_ns: u64,
+        terminal_remaining_ns: u64,
+    }
+
+    const HOST_SLEEP_EXCLUDED_SAMPLES: HostSleepSampleFixture = HostSleepSampleFixture {
+        deadline_start_wall_ms: 1_000,
+        before_wall_ms: 3_050,
+        before_ns: 2_050_000_000,
+        before_remaining_ns: 117_950_000_000,
+        after_wall_ms: 30_200,
+        after_ns: 2_250_000_000,
+        after_remaining_ns: 117_750_000_000,
+        terminal_wall_ms: 31_000,
+        terminal_ns: 3_050_000_000,
+        terminal_remaining_ns: 116_950_000_000,
+    };
+
+    const HOST_SLEEP_INCLUDED_SAMPLES: HostSleepSampleFixture = HostSleepSampleFixture {
+        deadline_start_wall_ms: 1_000,
+        before_wall_ms: 3_100,
+        before_ns: 2_100_000_000,
+        before_remaining_ns: 117_900_000_000,
+        after_wall_ms: 130_500,
+        after_ns: 129_500_000_000,
+        after_remaining_ns: 0,
+        terminal_wall_ms: 129_000,
+        terminal_ns: 128_000_000_000,
+        terminal_remaining_ns: 0,
+    };
+
+    fn host_sleep_events(
+        operation_id: OwnedProcessOperationId,
+        base: SystemTime,
+        deadline_ns: u64,
+        samples: HostSleepSampleFixture,
+        deadline_reached_event: bool,
+    ) -> Vec<OwnedProcessLifecycleEvent> {
+        let mut events = vec![
+            OwnedProcessLifecycleEvent::Spawned {
+                operation_id,
+                operation: ProcessOperation::DeviceCopy,
+                at: base,
+            },
+            OwnedProcessLifecycleEvent::MutationStarted {
+                operation_id,
+                operation: ProcessOperation::DeviceCopy,
+                at: base + Duration::from_millis(100),
+            },
+            OwnedProcessLifecycleEvent::LivenessSampled {
+                operation_id,
+                operation: ProcessOperation::DeviceCopy,
+                at: base + Duration::from_secs(2),
+                alive: Some(true),
+                terminal_reported: false,
+            },
+            OwnedProcessLifecycleEvent::DeadlineClockStarted {
+                operation_id,
+                operation: ProcessOperation::DeviceCopy,
+                deadline_clock_start_ns: 0,
+                deadline_ns,
+                at: base + Duration::from_millis(samples.deadline_start_wall_ms),
+            },
+            OwnedProcessLifecycleEvent::DeadlineClockSampled {
+                operation_id,
+                operation: ProcessOperation::DeviceCopy,
+                at: base + Duration::from_millis(samples.before_wall_ms),
+                deadline_clock_ns: samples.before_ns,
+                remaining_ns: samples.before_remaining_ns,
+                deadline_reached: false,
+                owner_reported: false,
+            },
+        ];
+        if deadline_reached_event {
+            events.push(OwnedProcessLifecycleEvent::DeadlineReached {
+                operation_id,
+                operation: ProcessOperation::DeviceCopy,
+                deadline: HOST_SLEEP_QUALIFICATION_DEADLINE,
+                at: base + Duration::from_secs(120),
+            });
+        }
+        events.push(OwnedProcessLifecycleEvent::Terminal {
+            operation_id,
+            operation: ProcessOperation::DeviceCopy,
+            at: base + Duration::from_millis(samples.terminal_wall_ms),
+        });
+        events.push(OwnedProcessLifecycleEvent::DeadlineClockSampled {
+            operation_id,
+            operation: ProcessOperation::DeviceCopy,
+            at: base + Duration::from_millis(samples.terminal_wall_ms),
+            deadline_clock_ns: samples.terminal_ns,
+            remaining_ns: samples.terminal_remaining_ns,
+            deadline_reached: samples.terminal_ns >= deadline_ns,
+            owner_reported: true,
+        });
+        events.push(OwnedProcessLifecycleEvent::DeadlineClockSampled {
+            operation_id,
+            operation: ProcessOperation::DeviceCopy,
+            at: base + Duration::from_millis(samples.after_wall_ms),
+            deadline_clock_ns: samples.after_ns,
+            remaining_ns: samples.after_remaining_ns,
+            deadline_reached: samples.after_ns >= deadline_ns,
+            owner_reported: false,
+        });
+        events
+    }
+
+    fn host_sleep_sentinel(started: u64, requested: u64, entered: u64, wake: u64) -> Value {
+        json!({
+            "operationStartedAt": format!("unix:{started}"),
+            "sleepRequestedAt": format!("unix:{requested}"),
+            "sleepEnteredAt": format!("unix:{entered}"),
+            "wakeAt": format!("unix:{wake}"),
+        })
+    }
+
+    fn host_sleep_step(failure: Option<StepFailureKind>) -> ExecutionRunResult {
+        ExecutionRunResult {
+            success: failure.is_none(),
+            cancelled: false,
+            total_steps: 2,
+            steps: vec![StepRunRecord {
+                step_id: "phase6d6/host-sleep/first".to_string(),
+                status: if failure.is_some() {
+                    StepRunStatus::Failed
+                } else {
+                    StepRunStatus::Executed
+                },
+                message: None,
+                outputs: Default::default(),
+                failure_kind: failure,
+                cleanup: Some(ProcessCleanup::Confirmed),
+            }],
+        }
+    }
+
+    #[test]
+    fn host_sleep_evidence_builds_a_complete_excluded_before_deadline_completion() {
+        let operation_id = OwnedProcessOperationId::from_raw_for_test(900);
+        let base = UNIX_EPOCH;
+        let deadline_ns =
+            u64::try_from(HOST_SLEEP_QUALIFICATION_DEADLINE.as_nanos()).expect("deadline fits u64");
+        let events = host_sleep_events(
+            operation_id,
+            base,
+            deadline_ns,
+            HOST_SLEEP_EXCLUDED_SAMPLES,
+            false,
+        );
+        let run = host_sleep_step(None);
+        let evidence = host_sleep_evidence(
+            &Scenario::HostSleepBeforeDeadline,
+            &host_sleep_sentinel(1, 3, 4, 30),
+            Ok(&run),
+            &events,
+        );
+        let value = evidence
+            .as_object()
+            .expect("a complete excluded before-deadline record must serialize");
+        assert_eq!(value["terminalOutcome"], "completed");
+        assert_eq!(value["timerClassification"], "suspended_time_excluded");
+        assert_eq!(value["deadlineClockStartNs"], "monotonic-ns:0");
+        assert_eq!(
+            value["deadlineClockBeforeSleepNs"],
+            "monotonic-ns:2050000000"
+        );
+        assert_eq!(value["deadlineClockAfterWakeNs"], "monotonic-ns:2250000000");
+        assert_eq!(value["deadlineClockTerminalNs"], "monotonic-ns:3050000000");
+        assert_eq!(value["deadlineClockAdvanceDuringSuspensionMs"], 200);
+        assert_eq!(value["suspendedWallMs"], 26000);
+        assert_eq!(value["remainingBeforeSleepMs"], 117950);
+        assert_eq!(value["remainingAfterWakeMs"], 117750);
+        assert_eq!(value["measurementToleranceMs"], 8000);
+        assert_eq!(value["deadlineMs"], 120000);
+        assert_eq!(value["executorElapsedMs"], 3050);
+        assert_eq!(value["wallElapsedMs"], 30000);
+        assert_eq!(value["elapsedBeforeSleepMs"], 2000);
+        assert_eq!(value["operationStartedAt"], "unix:1");
+        assert_eq!(value["operatorActionPhase"], "before_deadline");
+        assert_eq!(
+            value["deadlineClockSource"],
+            "owned_process_monotonic_deadline_clock"
+        );
+        assert_eq!(value["transportLossBlockedMeasurement"], false);
+        assert_eq!(value["terminalAt"], "unix:31");
+    }
+
+    #[test]
+    fn host_sleep_evidence_builds_an_included_after_deadline_timeout_with_terminal_before_post_wake(
+    ) {
+        let operation_id = OwnedProcessOperationId::from_raw_for_test(901);
+        let base = UNIX_EPOCH;
+        let deadline_ns =
+            u64::try_from(HOST_SLEEP_QUALIFICATION_DEADLINE.as_nanos()).expect("deadline fits u64");
+        let events = host_sleep_events(
+            operation_id,
+            base,
+            deadline_ns,
+            HOST_SLEEP_INCLUDED_SAMPLES,
+            true,
+        );
+        let run = host_sleep_step(Some(StepFailureKind::OperationTimedOut));
+        let evidence = host_sleep_evidence(
+            &Scenario::HostSleepAfterDeadline,
+            &host_sleep_sentinel(1, 3, 4, 130),
+            Ok(&run),
+            &events,
+        );
+        let value = evidence
+            .as_object()
+            .expect("a complete included after-deadline record must serialize");
+        assert_eq!(value["terminalOutcome"], "timed_out");
+        assert_eq!(value["timerClassification"], "suspended_time_included");
+        assert_eq!(
+            value["deadlineClockBeforeSleepNs"],
+            "monotonic-ns:2100000000"
+        );
+        assert_eq!(
+            value["deadlineClockTerminalNs"],
+            "monotonic-ns:128000000000"
+        );
+        assert_eq!(
+            value["deadlineClockAfterWakeNs"],
+            "monotonic-ns:129500000000"
+        );
+        assert_eq!(value["deadlineClockAdvanceDuringSuspensionMs"], 127400);
+        assert_eq!(value["remainingBeforeSleepMs"], 117900);
+        assert_eq!(value["remainingAfterWakeMs"], 0);
+        assert_eq!(value["operationStartedAt"], "unix:1");
+        assert_eq!(value["operatorActionPhase"], "after_deadline");
+        assert_eq!(value["terminalAt"], "unix:129");
+    }
+
+    #[test]
+    fn host_sleep_evidence_blocks_missing_clock_samples() {
+        let operation_id = OwnedProcessOperationId::from_raw_for_test(902);
+        let base = UNIX_EPOCH;
+        let deadline_ns =
+            u64::try_from(HOST_SLEEP_QUALIFICATION_DEADLINE.as_nanos()).expect("deadline fits u64");
+        let events = vec![
+            OwnedProcessLifecycleEvent::Spawned {
+                operation_id,
+                operation: ProcessOperation::DeviceCopy,
+                at: base,
+            },
+            OwnedProcessLifecycleEvent::DeadlineClockStarted {
+                operation_id,
+                operation: ProcessOperation::DeviceCopy,
+                deadline_clock_start_ns: 0,
+                deadline_ns,
+                at: base + Duration::from_millis(1),
+            },
+            OwnedProcessLifecycleEvent::Terminal {
+                operation_id,
+                operation: ProcessOperation::DeviceCopy,
+                at: base + Duration::from_secs(5),
+            },
+        ];
+        let run = host_sleep_step(Some(StepFailureKind::OperationTimedOut));
+        assert!(
+            host_sleep_evidence(
+                &Scenario::HostSleepBeforeDeadline,
+                &host_sleep_sentinel(1, 3, 4, 30),
+                Ok(&run),
+                &events,
+            )
+            .is_null(),
+            "missing requested deadline-clock samples must block"
+        );
+    }
+
+    #[test]
+    fn host_sleep_evidence_blocks_a_different_operation_identity() {
+        let operation_id = OwnedProcessOperationId::from_raw_for_test(903);
+        let base = UNIX_EPOCH;
+        let events = vec![OwnedProcessLifecycleEvent::DeadlineClockStarted {
+            operation_id,
+            operation: ProcessOperation::DeviceCopy,
+            deadline_clock_start_ns: 0,
+            deadline_ns: u64::try_from(TIMEOUT_QUALIFICATION_DEADLINE.as_nanos())
+                .expect("timeout deadline fits u64"),
+            at: base,
+        }];
+        let run = host_sleep_step(Some(StepFailureKind::OperationTimedOut));
+        assert!(
+            host_sleep_evidence(
+                &Scenario::HostSleepBeforeDeadline,
+                &host_sleep_sentinel(1, 3, 4, 30),
+                Ok(&run),
+                &events,
+            )
+            .is_null(),
+            "a deadline-clock basis from a different operation identity must block"
+        );
+    }
+
+    #[test]
+    fn host_sleep_evidence_blocks_timeout_without_the_owner_deadline_event() {
+        let operation_id = OwnedProcessOperationId::from_raw_for_test(904);
+        let base = UNIX_EPOCH;
+        let deadline_ns =
+            u64::try_from(HOST_SLEEP_QUALIFICATION_DEADLINE.as_nanos()).expect("deadline fits u64");
+        let events = host_sleep_events(
+            operation_id,
+            base,
+            deadline_ns,
+            HOST_SLEEP_EXCLUDED_SAMPLES,
+            false,
+        );
+        let run = host_sleep_step(Some(StepFailureKind::OperationTimedOut));
+        assert!(
+            host_sleep_evidence(
+                &Scenario::HostSleepBeforeDeadline,
+                &host_sleep_sentinel(1, 2, 3, 4),
+                Ok(&run),
+                &events,
+            )
+            .is_null(),
+            "a timeout without the owner-recorded DeadlineReached event must block"
+        );
+    }
+
+    #[test]
+    fn host_sleep_evidence_blocks_completion_with_an_owner_deadline_event() {
+        let operation_id = OwnedProcessOperationId::from_raw_for_test(905);
+        let base = UNIX_EPOCH;
+        let deadline_ns =
+            u64::try_from(HOST_SLEEP_QUALIFICATION_DEADLINE.as_nanos()).expect("deadline fits u64");
+        let events = host_sleep_events(
+            operation_id,
+            base,
+            deadline_ns,
+            HOST_SLEEP_EXCLUDED_SAMPLES,
+            true,
+        );
+        let run = host_sleep_step(None);
+        assert!(
+            host_sleep_evidence(
+                &Scenario::HostSleepBeforeDeadline,
+                &host_sleep_sentinel(1, 2, 3, 4),
+                Ok(&run),
+                &events,
+            )
+            .is_null(),
+            "completion with an owner-recorded DeadlineReached event must block"
+        );
+    }
+
+    #[test]
+    fn host_sleep_evidence_blocks_an_increased_remaining_budget() {
+        let operation_id = OwnedProcessOperationId::from_raw_for_test(906);
+        let base = UNIX_EPOCH;
+        let deadline_ns =
+            u64::try_from(HOST_SLEEP_QUALIFICATION_DEADLINE.as_nanos()).expect("deadline fits u64");
+        let events = host_sleep_events(
+            operation_id,
+            base,
+            deadline_ns,
+            HostSleepSampleFixture {
+                deadline_start_wall_ms: 1_000,
+                before_wall_ms: 3_100,
+                before_ns: 2_100_000_000,
+                before_remaining_ns: 100_000_000_000,
+                after_wall_ms: 30_200,
+                after_ns: 2_250_000_000,
+                after_remaining_ns: 110_000_000_000,
+                terminal_wall_ms: 31_000,
+                terminal_ns: 3_050_000_000,
+                terminal_remaining_ns: 116_950_000_000,
+            },
+            false,
+        );
+        let run = host_sleep_step(None);
+        assert!(
+            host_sleep_evidence(
+                &Scenario::HostSleepBeforeDeadline,
+                &host_sleep_sentinel(1, 3, 4, 30),
+                Ok(&run),
+                &events,
+            )
+            .is_null(),
+            "an increased remaining budget across suspension must block"
+        );
+    }
+
+    #[test]
+    fn host_sleep_evidence_marks_transport_loss_as_a_measurement_blocker() {
+        let operation_id = OwnedProcessOperationId::from_raw_for_test(907);
+        let base = UNIX_EPOCH;
+        let deadline_ns =
+            u64::try_from(HOST_SLEEP_QUALIFICATION_DEADLINE.as_nanos()).expect("deadline fits u64");
+        let events = host_sleep_events(
+            operation_id,
+            base,
+            deadline_ns,
+            HOST_SLEEP_EXCLUDED_SAMPLES,
+            false,
+        );
+        let run = host_sleep_step(Some(StepFailureKind::DeviceDisconnected));
+        let evidence = host_sleep_evidence(
+            &Scenario::HostSleepBeforeDeadline,
+            &host_sleep_sentinel(1, 3, 4, 30),
+            Ok(&run),
+            &events,
+        );
+        let value = evidence
+            .as_object()
+            .expect("a transport-loss record must serialize with its blocker flag");
+        assert_eq!(value["terminalOutcome"], "transport_loss");
+        assert_eq!(value["transportLossBlockedMeasurement"], true);
+    }
+
+    #[test]
+    fn host_sleep_evidence_accepts_transport_loss_with_deadline_crossed_and_no_deadline_reached() {
+        let operation_id = OwnedProcessOperationId::from_raw_for_test(914);
+        let base = UNIX_EPOCH;
+        let deadline_ns =
+            u64::try_from(HOST_SLEEP_QUALIFICATION_DEADLINE.as_nanos()).expect("deadline fits u64");
+        let events = host_sleep_events(
+            operation_id,
+            base,
+            deadline_ns,
+            HostSleepSampleFixture {
+                deadline_start_wall_ms: 1_000,
+                before_wall_ms: 3_050,
+                before_ns: 2_050_000_000,
+                before_remaining_ns: 117_950_000_000,
+                after_wall_ms: 30_200,
+                after_ns: 2_250_000_000,
+                after_remaining_ns: 117_750_000_000,
+                terminal_wall_ms: 130_000,
+                terminal_ns: 121_000_000_000,
+                terminal_remaining_ns: 0,
+            },
+            false,
+        );
+        let run = host_sleep_step(Some(StepFailureKind::DeviceDisconnected));
+        let evidence = host_sleep_evidence(
+            &Scenario::HostSleepBeforeDeadline,
+            &host_sleep_sentinel(1, 3, 4, 30),
+            Ok(&run),
+            &events,
+        );
+        let value = evidence
+            .as_object()
+            .expect("transport loss with a crossed monotonic deadline and zero DeadlineReached must serialize");
+        assert_eq!(value["terminalOutcome"], "transport_loss");
+        assert_eq!(value["transportLossBlockedMeasurement"], true);
+        assert_eq!(
+            value["deadlineClockTerminalNs"],
+            "monotonic-ns:121000000000"
+        );
+    }
+
+    #[test]
+    fn host_sleep_evidence_blocks_transport_loss_with_an_owner_deadline_reached() {
+        let operation_id = OwnedProcessOperationId::from_raw_for_test(915);
+        let base = UNIX_EPOCH;
+        let deadline_ns =
+            u64::try_from(HOST_SLEEP_QUALIFICATION_DEADLINE.as_nanos()).expect("deadline fits u64");
+        let events = host_sleep_events(
+            operation_id,
+            base,
+            deadline_ns,
+            HostSleepSampleFixture {
+                deadline_start_wall_ms: 1_000,
+                before_wall_ms: 3_050,
+                before_ns: 2_050_000_000,
+                before_remaining_ns: 117_950_000_000,
+                after_wall_ms: 30_200,
+                after_ns: 2_250_000_000,
+                after_remaining_ns: 117_750_000_000,
+                terminal_wall_ms: 130_000,
+                terminal_ns: 121_000_000_000,
+                terminal_remaining_ns: 0,
+            },
+            true,
+        );
+        let run = host_sleep_step(Some(StepFailureKind::DeviceDisconnected));
+        assert!(
+            host_sleep_evidence(
+                &Scenario::HostSleepBeforeDeadline,
+                &host_sleep_sentinel(1, 3, 4, 30),
+                Ok(&run),
+                &events,
+            )
+            .is_null(),
+            "transport loss with an owner DeadlineReached event must block"
+        );
+    }
+
+    #[test]
+    fn host_sleep_evidence_blocks_wrong_phase_chronology() {
+        let operation_id = OwnedProcessOperationId::from_raw_for_test(908);
+        let base = UNIX_EPOCH;
+        let deadline_ns =
+            u64::try_from(HOST_SLEEP_QUALIFICATION_DEADLINE.as_nanos()).expect("deadline fits u64");
+        let events = host_sleep_events(
+            operation_id,
+            base,
+            deadline_ns,
+            HOST_SLEEP_EXCLUDED_SAMPLES,
+            false,
+        );
+        let run = host_sleep_step(None);
+        assert!(
+            host_sleep_evidence(
+                &Scenario::HostSleepAfterDeadline,
+                &host_sleep_sentinel(1, 3, 4, 4),
+                Ok(&run),
+                &events,
+            )
+            .is_null(),
+            "a wake before the after-deadline threshold must not qualify as after-deadline"
+        );
+    }
+
+    #[test]
+    fn host_sleep_evidence_blocks_missing_sentinel_markers() {
+        let operation_id = OwnedProcessOperationId::from_raw_for_test(909);
+        let base = UNIX_EPOCH;
+        let deadline_ns =
+            u64::try_from(HOST_SLEEP_QUALIFICATION_DEADLINE.as_nanos()).expect("deadline fits u64");
+        let events = host_sleep_events(
+            operation_id,
+            base,
+            deadline_ns,
+            HOST_SLEEP_EXCLUDED_SAMPLES,
+            false,
+        );
+        let run = host_sleep_step(None);
+        assert!(
+            host_sleep_evidence(
+                &Scenario::HostSleepBeforeDeadline,
+                &json!({ "operationStartedAt": "unix:1" }),
+                Ok(&run),
+                &events,
+            )
+            .is_null(),
+            "missing sentinel sleep markers must block"
+        );
+    }
+
+    #[test]
+    fn host_sleep_evidence_anchors_phase_to_the_exact_deadline_clock_start() {
+        let operation_id = OwnedProcessOperationId::from_raw_for_test(910);
+        let base = UNIX_EPOCH;
+        let deadline_ns =
+            u64::try_from(HOST_SLEEP_QUALIFICATION_DEADLINE.as_nanos()).expect("deadline fits u64");
+        let events = host_sleep_events(
+            operation_id,
+            base,
+            deadline_ns,
+            HostSleepSampleFixture {
+                deadline_start_wall_ms: 5_000,
+                before_wall_ms: 6_100,
+                before_ns: 1_100_000_000,
+                before_remaining_ns: 118_900_000_000,
+                after_wall_ms: 122_200,
+                after_ns: 1_300_000_000,
+                after_remaining_ns: 118_700_000_000,
+                terminal_wall_ms: 123_000,
+                terminal_ns: 2_100_000_000,
+                terminal_remaining_ns: 117_900_000_000,
+            },
+            false,
+        );
+        let run = host_sleep_step(None);
+        let sentinel = host_sleep_sentinel(1, 6, 7, 122);
+        let before_value = host_sleep_evidence(
+            &Scenario::HostSleepBeforeDeadline,
+            &sentinel,
+            Ok(&run),
+            &events,
+        );
+        let before = before_value
+            .as_object()
+            .expect("the exact deadline-clock start must qualify the before-deadline phase");
+        assert_eq!(before["operationStartedAt"], "unix:5");
+        assert_eq!(before["elapsedBeforeSleepMs"], 1000);
+        assert_eq!(before["wallElapsedMs"], 118000);
+        assert_eq!(before["operatorActionPhase"], "before_deadline");
+        assert!(
+            host_sleep_evidence(
+                &Scenario::HostSleepAfterDeadline,
+                &sentinel,
+                Ok(&run),
+                &events
+            )
+            .is_null(),
+            "the sentinel progress marker alone must not qualify the after-deadline phase"
+        );
+    }
+
+    #[test]
+    fn host_sleep_evidence_only_relabels_genuine_transport_failures_as_transport_loss() {
+        let operation_id = OwnedProcessOperationId::from_raw_for_test(911);
+        let base = UNIX_EPOCH;
+        let deadline_ns =
+            u64::try_from(HOST_SLEEP_QUALIFICATION_DEADLINE.as_nanos()).expect("deadline fits u64");
+        let events = host_sleep_events(
+            operation_id,
+            base,
+            deadline_ns,
+            HOST_SLEEP_EXCLUDED_SAMPLES,
+            false,
+        );
+        let sentinel = host_sleep_sentinel(1, 3, 4, 30);
+        let outcome = |kind| {
+            let run = host_sleep_step(Some(kind));
+            host_sleep_evidence(
+                &Scenario::HostSleepBeforeDeadline,
+                &sentinel,
+                Ok(&run),
+                &events,
+            )
+        };
+        let timed_out_events = host_sleep_events(
+            operation_id,
+            base,
+            deadline_ns,
+            HOST_SLEEP_INCLUDED_SAMPLES,
+            true,
+        );
+        let timed_out = host_sleep_evidence(
+            &Scenario::HostSleepAfterDeadline,
+            &host_sleep_sentinel(1, 3, 4, 130),
+            Ok(&host_sleep_step(Some(StepFailureKind::OperationTimedOut))),
+            &timed_out_events,
+        );
+        assert_eq!(timed_out["terminalOutcome"], "timed_out");
+        for kind in [
+            StepFailureKind::DeviceDisconnected,
+            StepFailureKind::DeviceOffline,
+            StepFailureKind::AdbServerUnavailable,
+            StepFailureKind::TransportReset,
+            StepFailureKind::TransportFailure,
+        ] {
+            assert_eq!(
+                outcome(kind)["terminalOutcome"],
+                "transport_loss",
+                "a genuine transport failure must serialize transport_loss"
+            );
+        }
+        for kind in [
+            StepFailureKind::DeviceUnauthorized,
+            StepFailureKind::DeviceStorageExhausted,
+            StepFailureKind::DeviceIdentityChanged(
+                crate::executor::identity::IdentityCheckPhase::PreOperation,
+            ),
+            StepFailureKind::DeviceIdentityUnverified(
+                crate::executor::identity::IdentityCheckPhase::PreOperation,
+            ),
+            StepFailureKind::RootAuthorityRevoked,
+            StepFailureKind::RootAuthorityUnverified,
+            StepFailureKind::OperationCommandFailed,
+            StepFailureKind::OperationProcessFailed,
+            StepFailureKind::OperationFailed,
+            StepFailureKind::RootDenied,
+            StepFailureKind::RootUnavailable,
+        ] {
+            assert!(
+                outcome(kind).is_null(),
+                "an unrelated failure must block instead of being relabeled as transport loss"
+            );
+        }
+        let contradictory_success = ExecutionRunResult {
+            success: true,
+            cancelled: false,
+            total_steps: 2,
+            steps: vec![StepRunRecord {
+                step_id: "phase6d6/host-sleep/first".to_string(),
+                status: StepRunStatus::Failed,
+                message: None,
+                outputs: Default::default(),
+                failure_kind: Some(StepFailureKind::OperationTimedOut),
+                cleanup: Some(ProcessCleanup::Confirmed),
+            }],
+        };
+        assert!(
+            host_sleep_evidence(
+                &Scenario::HostSleepBeforeDeadline,
+                &sentinel,
+                Ok(&contradictory_success),
+                &events,
+            )
+            .is_null(),
+            "success with a failure issue is contradictory and must block"
+        );
+        let contradictory_failure = ExecutionRunResult {
+            success: false,
+            cancelled: false,
+            total_steps: 2,
+            steps: vec![StepRunRecord {
+                step_id: "phase6d6/host-sleep/first".to_string(),
+                status: StepRunStatus::Failed,
+                message: None,
+                outputs: Default::default(),
+                failure_kind: None,
+                cleanup: Some(ProcessCleanup::Confirmed),
+            }],
+        };
+        assert!(
+            host_sleep_evidence(
+                &Scenario::HostSleepBeforeDeadline,
+                &sentinel,
+                Ok(&contradictory_failure),
+                &events,
+            )
+            .is_null(),
+            "failure without an issue is contradictory and must block"
+        );
+    }
+
+    #[test]
+    fn host_sleep_evidence_blocks_ambiguous_duplicate_observations() {
+        let operation_id = OwnedProcessOperationId::from_raw_for_test(912);
+        let base = UNIX_EPOCH;
+        let deadline_ns =
+            u64::try_from(HOST_SLEEP_QUALIFICATION_DEADLINE.as_nanos()).expect("deadline fits u64");
+        let events = host_sleep_events(
+            operation_id,
+            base,
+            deadline_ns,
+            HOST_SLEEP_EXCLUDED_SAMPLES,
+            false,
+        );
+        let run = host_sleep_step(None);
+        let sentinel = host_sleep_sentinel(1, 3, 4, 30);
+        let extra_owner_sample = {
+            let mut events = events.clone();
+            events.push(OwnedProcessLifecycleEvent::DeadlineClockSampled {
+                operation_id,
+                operation: ProcessOperation::DeviceCopy,
+                at: base + Duration::from_secs(31),
+                deadline_clock_ns: 3_100_000_000,
+                remaining_ns: 116_900_000_000,
+                deadline_reached: false,
+                owner_reported: true,
+            });
+            events
+        };
+        assert!(
+            host_sleep_evidence(
+                &Scenario::HostSleepBeforeDeadline,
+                &sentinel,
+                Ok(&run),
+                &extra_owner_sample,
+            )
+            .is_null(),
+            "a duplicate owner terminal sample must block"
+        );
+        let extra_terminal = {
+            let mut events = events.clone();
+            events.push(OwnedProcessLifecycleEvent::Terminal {
+                operation_id,
+                operation: ProcessOperation::DeviceCopy,
+                at: base + Duration::from_secs(32),
+            });
+            events
+        };
+        assert!(
+            host_sleep_evidence(
+                &Scenario::HostSleepBeforeDeadline,
+                &sentinel,
+                Ok(&run),
+                &extra_terminal,
+            )
+            .is_null(),
+            "a duplicate Terminal event must block"
+        );
+        let extra_requested_sample = {
+            let mut events = events.clone();
+            events.push(OwnedProcessLifecycleEvent::DeadlineClockSampled {
+                operation_id,
+                operation: ProcessOperation::DeviceCopy,
+                at: base + Duration::from_millis(30_300),
+                deadline_clock_ns: 2_300_000_000,
+                remaining_ns: 117_700_000_000,
+                deadline_reached: false,
+                owner_reported: false,
+            });
+            events
+        };
+        assert!(
+            host_sleep_evidence(
+                &Scenario::HostSleepBeforeDeadline,
+                &sentinel,
+                Ok(&run),
+                &extra_requested_sample,
+            )
+            .is_null(),
+            "a third watcher-requested sample must block"
+        );
+        let extra_clock_start = {
+            let mut events = events.clone();
+            events.push(OwnedProcessLifecycleEvent::DeadlineClockStarted {
+                operation_id,
+                operation: ProcessOperation::DeviceCopy,
+                deadline_clock_start_ns: 0,
+                deadline_ns: u64::try_from(TIMEOUT_QUALIFICATION_DEADLINE.as_nanos())
+                    .expect("timeout deadline fits u64"),
+                at: base + Duration::from_millis(1_100),
+            });
+            events
+        };
+        assert!(
+            host_sleep_evidence(
+                &Scenario::HostSleepBeforeDeadline,
+                &sentinel,
+                Ok(&run),
+                &extra_clock_start,
+            )
+            .is_null(),
+            "a second DeadlineClockStarted for the selected operation must block"
+        );
+    }
+
+    #[test]
+    fn host_sleep_evidence_requires_the_run_local_zero_origin() {
+        let operation_id = OwnedProcessOperationId::from_raw_for_test(913);
+        let base = UNIX_EPOCH;
+        let deadline_ns =
+            u64::try_from(HOST_SLEEP_QUALIFICATION_DEADLINE.as_nanos()).expect("deadline fits u64");
+        let mut events = host_sleep_events(
+            operation_id,
+            base,
+            deadline_ns,
+            HOST_SLEEP_EXCLUDED_SAMPLES,
+            false,
+        );
+        for event in &mut events {
+            if let OwnedProcessLifecycleEvent::DeadlineClockStarted {
+                deadline_clock_start_ns,
+                ..
+            } = event
+            {
+                *deadline_clock_start_ns = 1;
+            }
+        }
+        let run = host_sleep_step(None);
+        assert!(
+            host_sleep_evidence(
+                &Scenario::HostSleepBeforeDeadline,
+                &host_sleep_sentinel(1, 3, 4, 30),
+                Ok(&run),
+                &events,
+            )
+            .is_null(),
+            "a non-zero run-local deadline-clock origin must block"
+        );
+    }
+
+    #[test]
+    fn host_sleep_watcher_abort_stops_each_operator_checkpoint_promptly() {
+        let sentinel_directory = tempfile::tempdir().expect("sentinel directory should exist");
+        let sentinel = Sentinel {
+            directory: sentinel_directory.path().to_path_buf(),
+        };
+        sentinel
+            .mark("operation-started", "started\n")
+            .expect("operation-started marker should be created");
+        sentinel
+            .mark("abort", "abort\n")
+            .expect("abort marker should be created");
+        let observer = OwnedProcessObservationHandle::default();
+        let started = Instant::now();
+        let error = run_host_sleep_watcher(&observer, &sentinel)
+            .expect_err("abort while waiting for sleep-requested must stop the checkpoint");
+        assert!(
+            error.contains("abort"),
+            "the rejection must name the abort: {error}"
+        );
+        assert!(
+            started.elapsed() < Duration::from_secs(5),
+            "abort must stop the wait promptly instead of waiting for the ten-minute timeout"
+        );
+        assert!(
+            !sentinel.path("sleep-ready").exists(),
+            "abort must prevent the sleep-ready handshake marker"
+        );
+    }
+
+    #[test]
+    fn host_sleep_watcher_abort_stops_while_waiting_for_sleep_entered() {
+        let observer = OwnedProcessObservationHandle::default();
+        let process = host_sleep_watcher_process(observer.clone());
+        let sentinel_directory = tempfile::tempdir().expect("sentinel directory should exist");
+        let sentinel = Sentinel {
+            directory: sentinel_directory.path().to_path_buf(),
+        };
+        sentinel
+            .mark("operation-started", "started\n")
+            .expect("operation-started marker should be created");
+        sentinel
+            .mark("sleep-requested", "ack\n")
+            .expect("sleep-requested marker should be created");
+        let watcher_observer = observer.clone();
+        let watcher_sentinel = sentinel.clone();
+        let watcher = std::thread::spawn(move || {
+            run_host_sleep_watcher(&watcher_observer, &watcher_sentinel)
+        });
+        let _ = wait_for_test_marker(&sentinel, "sleep-ready");
+        sentinel
+            .mark("abort", "abort\n")
+            .expect("abort marker should be created");
+        let started = Instant::now();
+        let error = watcher
+            .join()
+            .expect("host-sleep watcher should finish")
+            .expect_err("abort while waiting for sleep-entered must stop the checkpoint");
+        assert!(
+            error.contains("abort"),
+            "the rejection must name the abort: {error}"
+        );
+        assert!(
+            started.elapsed() < Duration::from_secs(5),
+            "abort must stop the wait promptly"
+        );
+        process
+            .join()
+            .expect("host-sleep helper process should finish")
+            .expect("the observed helper should complete");
+    }
+
+    #[test]
+    fn host_sleep_watcher_abort_stops_while_waiting_for_wake() {
+        let observer = OwnedProcessObservationHandle::default();
+        let process = host_sleep_watcher_process(observer.clone());
+        let sentinel_directory = tempfile::tempdir().expect("sentinel directory should exist");
+        let sentinel = Sentinel {
+            directory: sentinel_directory.path().to_path_buf(),
+        };
+        sentinel
+            .mark("operation-started", "started\n")
+            .expect("operation-started marker should be created");
+        sentinel
+            .mark("sleep-requested", "ack\n")
+            .expect("sleep-requested marker should be created");
+        let watcher_observer = observer.clone();
+        let watcher_sentinel = sentinel.clone();
+        let watcher = std::thread::spawn(move || {
+            run_host_sleep_watcher(&watcher_observer, &watcher_sentinel)
+        });
+        let _ = wait_for_test_marker(&sentinel, "sleep-ready");
+        sentinel
+            .mark("sleep-entered", "ack\n")
+            .expect("sleep-entered marker should be created");
+        sentinel
+            .mark("abort", "abort\n")
+            .expect("abort marker should be created");
+        let started = Instant::now();
+        let error = watcher
+            .join()
+            .expect("host-sleep watcher should finish")
+            .expect_err("abort while waiting for wake must stop the checkpoint");
+        assert!(
+            error.contains("abort"),
+            "the rejection must name the abort: {error}"
+        );
+        assert!(
+            started.elapsed() < Duration::from_secs(5),
+            "abort must stop the wait promptly"
+        );
+        process
+            .join()
+            .expect("host-sleep helper process should finish")
+            .expect("the observed helper should complete");
+    }
+
+    #[test]
+    fn host_sleep_final_snapshot_includes_the_post_wake_sample_after_owner_terminal() {
+        let observer = OwnedProcessObservationHandle::default();
+        let process = host_sleep_watcher_process(observer.clone());
+        let sentinel_directory = tempfile::tempdir().expect("sentinel directory should exist");
+        let sentinel = Sentinel {
+            directory: sentinel_directory.path().to_path_buf(),
+        };
+        sentinel
+            .mark("operation-started", "started\n")
+            .expect("operation-started marker should be created");
+        sentinel
+            .mark("sleep-requested", "ack\n")
+            .expect("sleep-requested marker should be created");
+        let watcher_observer = observer.clone();
+        let watcher_sentinel = sentinel.clone();
+        let watcher = std::thread::spawn(move || {
+            run_host_sleep_watcher(&watcher_observer, &watcher_sentinel)
+        });
+        let _ = wait_for_test_marker(&sentinel, "sleep-ready");
+        sentinel
+            .mark("sleep-entered", "ack\n")
+            .expect("sleep-entered marker should be created");
+
+        // Model the supported terminal-before-wake chronology: the exact child
+        // reaches terminal first, and only then does the operator create wake.
+        let terminal_deadline = Instant::now() + Duration::from_secs(15);
+        loop {
+            if observer
+                .events()
+                .iter()
+                .any(|event| matches!(event, OwnedProcessLifecycleEvent::Terminal { .. }))
+            {
+                break;
+            }
+            assert!(
+                Instant::now() < terminal_deadline,
+                "the owner terminal event must appear before the wake marker"
+            );
+            std::thread::sleep(Duration::from_millis(20));
+        }
+        let before_at = observer
+            .events()
+            .iter()
+            .find_map(|event| match event {
+                OwnedProcessLifecycleEvent::DeadlineClockSampled {
+                    owner_reported: false,
+                    at,
+                    ..
+                } => Some(*at),
+                _ => None,
+            })
+            .expect("the pre-suspend deadline-clock sample must exist");
+        while SystemTime::now()
+            .duration_since(before_at)
+            .expect("the pre-suspend sample must precede now")
+            < Duration::from_millis(8_500)
+        {
+            std::thread::sleep(Duration::from_millis(50));
+        }
+        sentinel
+            .mark("wake", "ack\n")
+            .expect("wake marker should be created");
+        let action_at = watcher
+            .join()
+            .expect("host-sleep watcher should finish")
+            .expect("the handshake should complete");
+        process
+            .join()
+            .expect("host-sleep helper process should finish")
+            .expect("the observed helper should complete");
+
+        // The final snapshot uses the same path as run_reviewed_plan and must
+        // therefore be taken only after the watcher finished.
+        let snapshot = host_sleep_events_snapshot(&Some(observer.clone()))
+            .expect("the final observer snapshot must be available");
+        let operation_id = snapshot
+            .iter()
+            .find_map(|event| match event {
+                OwnedProcessLifecycleEvent::DeadlineClockStarted { operation_id, .. } => {
+                    Some(*operation_id)
+                }
+                _ => None,
+            })
+            .expect("the selected operation must have a clock start");
+        assert_eq!(
+            snapshot
+                .iter()
+                .filter(|event| {
+                    matches!(
+                        event,
+                        OwnedProcessLifecycleEvent::DeadlineClockStarted {
+                            operation_id: observed,
+                            ..
+                        } if *observed == operation_id
+                    )
+                })
+                .count(),
+            1,
+            "the final snapshot must contain exactly one DeadlineClockStarted"
+        );
+        assert_eq!(
+            snapshot
+                .iter()
+                .filter(|event| {
+                    matches!(
+                        event,
+                        OwnedProcessLifecycleEvent::DeadlineClockSampled {
+                            operation_id: observed,
+                            owner_reported: false,
+                            ..
+                        } if *observed == operation_id
+                    )
+                })
+                .count(),
+            2,
+            "the final snapshot must contain exactly two watcher-requested samples"
+        );
+        assert_eq!(
+            snapshot
+                .iter()
+                .filter(|event| {
+                    matches!(
+                        event,
+                        OwnedProcessLifecycleEvent::DeadlineClockSampled {
+                            operation_id: observed,
+                            owner_reported: true,
+                            ..
+                        } if *observed == operation_id
+                    )
+                })
+                .count(),
+            1,
+            "the final snapshot must contain exactly one owner-reported terminal sample"
+        );
+        assert_eq!(
+            snapshot
+                .iter()
+                .filter(|event| {
+                    matches!(
+                        event,
+                        OwnedProcessLifecycleEvent::Terminal {
+                            operation_id: observed,
+                            ..
+                        } if *observed == operation_id
+                    )
+                })
+                .count(),
+            1,
+            "the final snapshot must contain exactly one Terminal event"
+        );
+        let clock_start_at = snapshot
+            .iter()
+            .find_map(|event| match event {
+                OwnedProcessLifecycleEvent::DeadlineClockStarted {
+                    operation_id: observed,
+                    at,
+                    ..
+                } if *observed == operation_id => Some(*at),
+                _ => None,
+            })
+            .expect("the clock start wall observation must exist");
+        let after_at = snapshot
+            .iter()
+            .filter_map(|event| match event {
+                OwnedProcessLifecycleEvent::DeadlineClockSampled {
+                    operation_id: observed,
+                    owner_reported: false,
+                    at,
+                    ..
+                } if *observed == operation_id => Some(*at),
+                _ => None,
+            })
+            .next_back()
+            .expect("the post-wake sample must exist");
+        assert!(
+            action_at < sentinel.marker_time("wake").expect("wake time"),
+            "the sleep-entered handoff must precede the wake acknowledgement"
+        );
+        let sentinel_value = json!({
+            "operationStartedAt": format!("unix:{}", canonical_unix_seconds(clock_start_at).unwrap_or(0)),
+            "sleepRequestedAt": format!("unix:{}", canonical_unix_seconds(before_at).unwrap_or(0)),
+            "sleepEnteredAt": format!("unix:{}", canonical_unix_seconds(before_at).unwrap_or(0)),
+            "wakeAt": format!("unix:{}", canonical_unix_seconds(after_at).unwrap_or(0)),
+        });
+        let evidence = host_sleep_evidence(
+            &Scenario::HostSleepBeforeDeadline,
+            &sentinel_value,
+            Ok(&host_sleep_step(None)),
+            &snapshot,
+        );
+        assert!(
+            evidence.as_object().is_some(),
+            "the complete host-sleep evidence must be non-null from the final snapshot"
+        );
+    }
+
+    #[test]
+    fn active_process_evidence_uses_the_sleep_entered_handoff_not_wake() {
+        let operation_id = OwnedProcessOperationId::from_raw_for_test(920);
+        let base = UNIX_EPOCH + Duration::from_secs(100);
+        let events = vec![
+            OwnedProcessLifecycleEvent::Spawned {
+                operation_id,
+                operation: ProcessOperation::DeviceCopy,
+                at: base,
+            },
+            OwnedProcessLifecycleEvent::MutationStarted {
+                operation_id,
+                operation: ProcessOperation::DeviceCopy,
+                at: base + Duration::from_secs(1),
+            },
+            OwnedProcessLifecycleEvent::LivenessSampled {
+                operation_id,
+                operation: ProcessOperation::DeviceCopy,
+                at: base + Duration::from_secs(2),
+                alive: Some(true),
+                terminal_reported: false,
+            },
+            OwnedProcessLifecycleEvent::Terminal {
+                operation_id,
+                operation: ProcessOperation::DeviceCopy,
+                at: base + Duration::from_secs(10),
+            },
+        ];
+        let sleep_entered = base + Duration::from_secs(4);
+        let wake = base + Duration::from_secs(30);
+        let evidence = active_process_evidence(
+            &events,
+            Some(sleep_entered),
+            "run-scope-host-sleep",
+            ProcessOperation::DeviceCopy,
+        )
+        .expect("a complete host-sleep lifecycle capture must serialize activeProcess");
+        assert_eq!(evidence["operationClass"], "device_copy");
+        assert_eq!(evidence["actionKind"], "operator_action");
+        assert_eq!(evidence["checkedAliveAt"], "unix:102");
+        assert_eq!(evidence["actionAt"], "unix:104");
+        assert_ne!(
+            evidence["actionAt"],
+            system_time_value(Some(wake)),
+            "the wake timestamp must not be substituted for the sleep-entered action"
+        );
+        assert_eq!(evidence["terminalAt"], "unix:110");
+        assert_eq!(evidence["aliveImmediatelyBeforeAction"], true);
+        assert_eq!(evidence["terminalReportedBeforeAction"], false);
+        assert!(
+            sleep_entered
+                .duration_since(base + Duration::from_secs(2))
+                .expect("the handoff must follow the liveness sample")
+                <= ACTIVE_SAMPLE_FRESHNESS,
+            "the pre-suspend liveness freshness bound must hold"
+        );
+    }
+
+    #[test]
+    fn active_process_evidence_rejects_a_stale_pre_suspend_liveness_sample() {
+        let operation_id = OwnedProcessOperationId::from_raw_for_test(921);
+        let base = UNIX_EPOCH + Duration::from_secs(200);
+        let events = vec![
+            OwnedProcessLifecycleEvent::Spawned {
+                operation_id,
+                operation: ProcessOperation::DeviceCopy,
+                at: base,
+            },
+            OwnedProcessLifecycleEvent::MutationStarted {
+                operation_id,
+                operation: ProcessOperation::DeviceCopy,
+                at: base + Duration::from_secs(1),
+            },
+            OwnedProcessLifecycleEvent::LivenessSampled {
+                operation_id,
+                operation: ProcessOperation::DeviceCopy,
+                at: base + Duration::from_secs(2),
+                alive: Some(true),
+                terminal_reported: false,
+            },
+            OwnedProcessLifecycleEvent::Terminal {
+                operation_id,
+                operation: ProcessOperation::DeviceCopy,
+                at: base + Duration::from_secs(20),
+            },
+        ];
+        let stale_handoff = base + Duration::from_secs(9);
+        assert!(
+            active_process_evidence(
+                &events,
+                Some(stale_handoff),
+                "run-scope-host-sleep",
+                ProcessOperation::DeviceCopy,
+            )
+            .is_none(),
+            "a pre-suspend liveness sample older than the freshness bound must not qualify"
+        );
+    }
+
+    #[test]
+    #[ignore]
+    fn watcher_helper() {
+        std::thread::sleep(Duration::from_secs(5));
     }
 }

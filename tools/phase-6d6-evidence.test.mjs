@@ -964,6 +964,133 @@ test("post-threshold host sleep accepts a measured suspended-time-included timeo
   assert.doesNotThrow(() => validateEvidenceRecord(sealRecord(after)));
 });
 
+test("host sleep accepts an owner terminal that precedes the retained-basis post-wake sample", () => {
+  const after = recordForScenario("host_sleep_after_deadline", 1);
+  after.executionSuccess = false;
+  after.observedIssueCode = "operation_timed_out";
+  after.stepStates = { executed: 1, skipped: 0, failed: 1, cancelled: 0, blocked: 0, notAttempted: 0 };
+  after.partialChangesPossible = true;
+  after.authorityInvalidated = true;
+  after.sentinel = {
+    ...after.sentinel,
+    operationFinishedAt: "unix:1785790010",
+    operatorActionAt: null,
+    sleepRequestedAt: "unix:1785790006",
+    sleepEnteredAt: "unix:1785790006",
+    wakeAt: "unix:1785790010",
+  };
+  after.hostSleep = {
+    sleepRequestedAt: "unix:1785790006",
+    sleepEnteredAt: "unix:1785790006",
+    wakeAt: "unix:1785790010",
+    wallElapsedMs: 8000,
+    executorElapsedMs: 9000,
+    deadlineMs: 5000,
+    operationStartedAt: "unix:1785790001",
+    terminalAt: "unix:1785790009",
+    terminalOutcome: "timed_out",
+    hostOs: "macOS",
+    hostVersion: "15.6",
+    timerImplementation: "async_io::Timer",
+    toolchain: "rustc 1.85.0",
+    timerClassification: "suspended_time_included",
+    measurementBasis: "owned_process_monotonic_deadline_clock_samples_and_sentinel_timestamps",
+    transportLossBlockedMeasurement: false,
+    elapsedBeforeSleepMs: 5000,
+    ...measuredHostClock({
+      phase: "after_deadline",
+      classification: "suspended_time_included",
+      beforeNs: 5_000_000_000,
+      afterNs: 9_050_000_000,
+      terminalNs: 9_000_000_000,
+      suspendedWallMs: 4_000,
+      remainingBeforeSleepMs: 0,
+      remainingAfterWakeMs: 0,
+    }),
+  };
+  assert.doesNotThrow(() => validateEvidenceRecord(sealRecord(after)));
+});
+
+test("host sleep accepts completion when the owner won before the timer at the deadline boundary", () => {
+  const before = recordForScenario("host_sleep_before_deadline", 1);
+  before.executionSuccess = true;
+  before.observedIssueCode = null;
+  before.stepStates = { executed: 2, skipped: 0, failed: 0, cancelled: 0, blocked: 0, notAttempted: 0 };
+  before.sentinel.operationFinishedAt = "unix:1785790006";
+  before.hostSleep = {
+    ...before.hostSleep,
+    terminalAt: "unix:1785790006",
+    wallElapsedMs: 6000,
+    executorElapsedMs: 6000,
+    terminalOutcome: "completed",
+    ...measuredHostClock({
+      phase: "before_deadline",
+      classification: "suspended_time_excluded",
+      beforeNs: 1_000_000_000,
+      afterNs: 1_050_000_000,
+      terminalNs: 6_000_000_000,
+    }),
+  };
+  assert.doesNotThrow(() => validateEvidenceRecord(sealRecord(before)));
+});
+
+test("host sleep deadline phase derives from the exact deadline-clock start, not the sentinel progress marker", () => {
+  const before = recordForScenario("host_sleep_before_deadline", 1);
+  before.sentinel = {
+    ...before.sentinel,
+    operationStartedAt: "unix:1785790000",
+    operationFinishedAt: "unix:1785790006",
+    sleepRequestedAt: "unix:1785790004",
+    sleepEnteredAt: "unix:1785790004",
+    wakeAt: "unix:1785790005",
+  };
+  before.hostSleep = {
+    ...before.hostSleep,
+    operationStartedAt: "unix:1785790004",
+    sleepRequestedAt: "unix:1785790004",
+    sleepEnteredAt: "unix:1785790004",
+    wakeAt: "unix:1785790005",
+    terminalAt: "unix:1785790006",
+    wallElapsedMs: 2000,
+    executorElapsedMs: 2000,
+    elapsedBeforeSleepMs: 0,
+    terminalOutcome: "completed",
+    ...measuredHostClock({
+      phase: "before_deadline",
+      classification: "suspended_time_excluded",
+      beforeNs: 1_000_000_000,
+      afterNs: 1_050_000_000,
+      terminalNs: 2_000_000_000,
+      suspendedWallMs: 1_000,
+      remainingBeforeSleepMs: 4_000,
+      remainingAfterWakeMs: 3_950,
+    }),
+  };
+  // The sentinel progress marker alone would place wake at 5 seconds, at the
+  // 5-second deadline; the exact deadline-clock start at 4 seconds leaves
+  // wake before the deadline, so the before-deadline branch must qualify.
+  assert.doesNotThrow(() => validateEvidenceRecord(sealRecord(before)));
+  const after = {
+    ...before,
+    scenario: "host_sleep_after_deadline",
+    optIns: before.optIns.map((value) =>
+      value === "EMUCHEF_PHASE_6D6_SCENARIO=host_sleep_before_deadline"
+        ? "EMUCHEF_PHASE_6D6_SCENARIO=host_sleep_after_deadline"
+        : value,
+    ),
+    scenarioContract: scenarioContractFor("host_sleep_after_deadline"),
+    hostSleep: {
+      ...before.hostSleep,
+      operatorActionPhase: "after_deadline",
+    },
+  };
+  assert.throws(
+    () => validateEvidenceRecord(after),
+    /phase|threshold/i,
+    "the earlier sentinel progress marker must not qualify the after-deadline branch",
+  );
+});
+
 test("active cancellation evidence is exact and slot evidence names the observed run lifecycle", () => {
   const active = recordForScenario("cancellation_active", 1);
   active.outcome = "passed";

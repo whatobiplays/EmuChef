@@ -1035,15 +1035,6 @@ not a getprop line
         assert_eq!(primary.abis, ["primary", "secondary"]);
     }
 
-    fn production_source_without_line_comments() -> String {
-        source_without_line_comments(
-            include_str!("device_probe.rs")
-                .split("#[cfg(test)]")
-                .next()
-                .expect("source should include production section"),
-        )
-    }
-
     fn source_without_line_comments(source: &str) -> String {
         source
             .lines()

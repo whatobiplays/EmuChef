@@ -641,7 +641,12 @@ function validateHostSleep(record, contract, passingRecord) {
   const wake = unixSeconds(record.hostSleep.wakeAt, "hostSleep.wakeAt");
   const started = unixSeconds(record.hostSleep.operationStartedAt, "hostSleep.operationStartedAt");
   const terminal = unixSeconds(record.hostSleep.terminalAt, "hostSleep.terminalAt");
-  if (!(started <= requested && requested <= entered && entered <= wake && wake <= terminal)) fail("host sleep timestamps are not ordered");
+  // wakeAt is the operator's first post-resume acknowledgement, not an exact
+  // OS wake instant. The owned process may reach terminal immediately after
+  // resume (deadline became ready during suspension), so terminal may precede
+  // wake; both wake-after-terminal and terminal-after-wake orderings are valid
+  // measured branches. The handoff and wake must still follow operation start.
+  if (!(started <= requested && requested <= entered && entered <= wake && entered <= terminal)) fail("host sleep timestamps are not ordered");
   for (const field of ["wallElapsedMs", "executorElapsedMs", "deadlineMs", "elapsedBeforeSleepMs"]) {
     if (!Number.isSafeInteger(record.hostSleep[field]) || record.hostSleep[field] < 0) fail(`hostSleep.${field} must be a non-negative integer`);
   }
@@ -663,7 +668,13 @@ function validateHostSleep(record, contract, passingRecord) {
   const clockBefore = monotonicNanos(record.hostSleep.deadlineClockBeforeSleepNs, "hostSleep.deadlineClockBeforeSleepNs");
   const clockAfter = monotonicNanos(record.hostSleep.deadlineClockAfterWakeNs, "hostSleep.deadlineClockAfterWakeNs");
   const clockTerminal = monotonicNanos(record.hostSleep.deadlineClockTerminalNs, "hostSleep.deadlineClockTerminalNs");
-  if (!(clockStart <= clockBefore && clockBefore <= clockAfter && clockAfter <= clockTerminal)) fail("deadline-clock samples are not ordered");
+  // The pre-suspend sample must precede both the post-wake sample and the
+  // owner-recorded terminal sample. The post-wake sample may legitimately be
+  // taken after the owner selected terminal immediately after host resume
+  // (deadline became ready during suspension); the owner terminal sample is
+  // authoritative for terminal chronology, and the retained exact deadline
+  // basis still allows a truthful post-wake sample.
+  if (!(clockStart <= clockBefore && clockBefore <= clockAfter && clockBefore <= clockTerminal)) fail("deadline-clock samples are not ordered");
   for (const field of ["suspendedWallMs", "deadlineClockAdvanceDuringSuspensionMs", "remainingBeforeSleepMs", "remainingAfterWakeMs", "measurementToleranceMs"]) {
     if (!Number.isSafeInteger(record.hostSleep[field]) || record.hostSleep[field] < 0) fail(`hostSleep.${field} must be a non-negative safe integer`);
   }
@@ -691,7 +702,13 @@ function validateHostSleep(record, contract, passingRecord) {
   const terminalClockElapsedMs = Number((clockTerminal - clockStart) / 1_000_000n);
   if (!near(record.hostSleep.executorElapsedMs, terminalClockElapsedMs)) fail("executor elapsed time is inconsistent with the deadline clock");
   if (record.hostSleep.terminalOutcome === "timed_out" && terminalClockElapsedMs < record.hostSleep.deadlineMs) fail("timeout occurred before the measured deadline clock exhausted its budget");
-  if (record.hostSleep.terminalOutcome === "completed" && terminalClockElapsedMs >= record.hostSleep.deadlineMs) fail("completion contradicts the measured exhausted deadline budget");
+  // The owned-process poll order checks output/status before the timer, so a
+  // child observed complete in the same poll where the deadline became
+  // eligible may complete without the timer winning. Monotonic clock position
+  // is consistency evidence only; the owner-emitted DeadlineReached event is
+  // the authority for whether the deadline branch actually won, and it is not
+  // serialized in the record. Completion at or beyond the nominal deadline is
+  // therefore not contradictory.
   if (passingRecord) {
     if (record.hostSleep.timerClassification === "indeterminate" || record.hostSleep.timerClassification === "contradictory") fail("indeterminate or contradictory host timer evidence cannot pass");
     if (!rule.allowedTimerClassifications.includes(record.hostSleep.timerClassification)) fail("host timer classification is not allowed by the scenario contract");

@@ -30,9 +30,14 @@ The ignored Rust harness refuses to touch ADB until every gate below is valid.
    perform the prepared physical transition. After the typed terminal result,
    wait for `terminal-ready`, restore the same selected device to its online and
    authorized state, verify it, then create `cleanup-ready`. Reconnection or
-   reauthorization never resumes the old execution. Host-sleep cases continue
-   to use `sleep-requested`, `sleep-entered`, and `wake`; their deadline-clock
-   measurement remains a separate blocker. Root revocation uses the same
+   reauthorization never resumes the old execution. Host-sleep cases use the
+   deterministic pre-suspend handshake described below: `sleep-requested` and
+   `sleep-entered` are created while the host is still awake (`sleep-entered`
+   is the final operator handoff immediately before physical suspension, not
+   an OS sleep-entry event), the harness creates `sleep-ready` only after
+   proving the exact `DeviceCopy` child alive and sampling the exact
+   owned-process deadline clock, and `wake` is created immediately after
+   resume as the first post-resume acknowledgement. Root revocation uses the same
    `terminal-ready` and `cleanup-ready` recovery boundary. Creating `abort`
    stops a checkpoint. Every checkpoint expires after ten minutes (`600`
    seconds); a missing, stale, or out-of-order marker is blocked.
@@ -122,6 +127,67 @@ A stale action, same-second action/terminal pair, missing exact-child event,
 non-live sample, or source calibration outside the committed bounds blocks the
 attempt. The private process-delay seam and host process-table inspection are
 not physical evidence.
+
+## Host-sleep stimulus and pre-suspend handshake
+
+Both host-sleep scenarios reuse the exact private pseudo-device copy stimulus
+`/dev/zero -> /dev/null` through the production `RealAdbDevice::copy_on_device`
+path, exactly like `operation_timeout`. The copy does not normally complete on
+its own and remains live until timeout, transport failure, or explicit process
+cleanup; it creates no persistent device payload and never modifies `/dev/zero`
+or `/dev/null`. A
+private, thread-local, one-shot `#[cfg(test)]` override selects a 120-second
+qualification deadline for this ignored qualification entry point; production
+`ProcessOperation::DeviceCopy` remains 300 seconds. 120 seconds gives the
+operator a practical window to create the pre-suspend markers, physically
+sleep and wake the host, and (for `host_sleep_before_deadline`) wake before the
+deadline, while keeping the after-deadline repetition bounded; the 15-second
+operation-timeout value is too short for reliable manual sleep qualification.
+
+The host-sleep sequence is deterministic and every operator-created marker is
+created while the host is awake:
+
+```text
+operation-started
+→ operator creates sleep-requested (awake)
+→ watcher samples the exact DeviceCopy child alive
+→ watcher samples the exact owned-process deadline clock
+→ watcher creates sleep-ready
+→ operator observes sleep-ready
+→ operator creates sleep-entered within four seconds (final awake handoff)
+→ operator immediately initiates physical host sleep
+→ host resumes
+→ operator immediately creates wake (first post-resume acknowledgement)
+→ watcher samples the deadline clock again from the retained exact basis
+→ exact child terminal result
+→ fixture-only cleanup
+```
+
+`sleep-ready` is an internal qualification-only handshake marker; it never
+enters the strict evidence schema and is removed during sentinel cleanup. The
+harness never creates `sleep-ready` unless the exact child is alive, terminal
+has not been reported, and the deadline-clock sample succeeded. `sleep-entered`
+must follow `sleep-ready` within four seconds, which keeps the exact-child
+liveness sample within the same bounded freshness window used by the active
+scenarios. The documented measurement tolerance is 8,000 ms, covering the
+enforced handoff window, the sample-to-`sleep-ready` latency budget,
+canonical-second marker quantization on both the sleep and wake boundaries,
+and scheduler margin. Keep the host suspended long enough (at least about
+15 seconds) that the included and excluded branches are distinguishable within
+that tolerance.
+
+The host-sleep deadline phase is anchored to the exact owned-process
+deadline-clock start (the selected `DeadlineClockStarted.at` wall timestamp),
+not the earlier `operation-started` progress marker. The serialized
+`hostSleep.operationStartedAt` therefore represents the actual 120-second
+timer start; `sentinel.operationStartedAt` remains the independent
+progress-marker observation and is not the deadline threshold authority.
+That wall timestamp is the wall observation retained alongside construction
+of the exact monotonic timer basis; it correlates with timer creation and is
+not a separate observer-install timestamp. The final host-sleep lifecycle
+snapshot is taken only after the bounded watcher has finished publishing its
+retained-basis post-wake sample, so the owner may reach terminal immediately
+after resume and terminal may precede that post-wake sample.
 
 ## Authorization boundary and reconnect handshake
 
@@ -250,8 +316,8 @@ failure as offline evidence.
 | `root_revocation` | On a prepared rooted device, revoke EmuChef's adb-shell root authority after `boundary-ready`, acknowledge `operator-action`, wait for `terminal-ready`, restore root authority, then acknowledge `cleanup-ready`. | The second privileged command does not run, root failure is primary, prior mutation is retained, cleanup is separate and verified, and identity precedence is unchanged. |
 | `operation_timeout` | No operator marker is required. The harness uses the exact hard-coded private pseudo-device paths `/dev/zero` (source) and `/dev/null` (destination) from the ignored qualification module and runs the reviewed first copy with `source.location == "device"` through `RealAdbDevice::copy_on_device`. No FIFO or other special file is created on the device; the copy is a real non-root device-side `cp /dev/zero /dev/null` that stays live until the owned-process timer wins. A private `#[cfg(test)]` scoped override selects a fixed 15-second qualification deadline; production `DeviceCopy` remains 300 seconds. | The same exact child is sampled alive about 12 seconds after its matching `DeviceCopy` mutation, then the real timer wins, kill/reap cleanup is confirmed, and `DeadlineReached` precedes `Terminal`. The result is `operation_timed_out` with the second step Not attempted, clean run-scope cleanup, and explicit timeout metadata. Any missing stimulus, liveness, deadline, confirmed cleanup, or residual proof blocks the repetition. |
 | `low_storage` | With the separate destructive opt-in, first use the reviewed storage-preflight profile when the device is above the accepted free-space window. Keep that exact owned Downloads allocation for both repetitions. The harness then verifies at least 4 GiB free, creates/verifies the unique fixture-owned 1-GiB recovery reserve, allocates bounded filler, and waits for the checkpoint. | Genuine ENOSPC maps to `device_storage_exhausted`; no deletion/retry; harness cleanup removes only run-scoped payload/filler/sentinel/reserve and restores the preflight baseline. The separate profile-owned Downloads allocation is removed explicitly after both repetitions. Block the case if any ownership, bound, or restoration proof is unavailable. |
-| `host_sleep_before_deadline` | Begin the long fixture operation, create `sleep-requested`, manually sleep the host before the fixed deadline, create `sleep-entered` after entry, then create `wake` immediately after resuming. | Record ordered sleep/wake times, measured executor and wall elapsed time, timer behavior, child result, identity, terminal state, slot release, and no second owner. |
-| `host_sleep_after_deadline` | Repeat after enough active elapsed time to cross the fixed deadline, using the same three physical markers. | Record whether the timer observes active-host or suspended time; a measured completion or timeout is valid only when the branch is internally consistent. Transport loss, indeterminate timing, and contradictory timestamps remain blocked. |
+| `host_sleep_before_deadline` | Use the private `/dev/zero -> /dev/null` copy with the 120-second scoped qualification deadline. After `operation-started`, create `sleep-requested`, wait for `sleep-ready`, create `sleep-entered` within four seconds, immediately suspend the host, then create `wake` immediately after resume while the measured wake chronology is still before the 120-second deadline window. | The exact child was alive immediately before the `sleep-entered` handoff; before-sleep, after-wake, and owner-terminal deadline-clock samples derive from one exact basis; wall and executor elapsed time, remaining budget, tolerance, and timer classification are internally consistent; the terminal result agrees with owner lifecycle events; no second owner. |
+| `host_sleep_after_deadline` | Use the same stimulus and handshake, but remain suspended long enough that wall time crosses the 120-second deadline before `wake`. | Same measured clock and consistency requirements. If suspended time is included, the deadline may become ready immediately on resume and terminal may precede the post-wake sample; if suspended time is excluded, executor budget may remain after wake and timeout may occur only after additional active-host time. Transport loss, missing samples, and indeterminate or contradictory measurements remain blocked. |
 
 For every mutating case, the harness cleans only the fixture-owned destination
 files and reports residual state independently from the operation result. Do
@@ -270,7 +336,10 @@ no attempt is made to delete, replace, or modify `/dev/zero` or `/dev/null`.
 The 15-second value is a thread-local, one-shot test seam used only by this
 ignored qualification entry point; ordinary production execution still
 resolves `ProcessOperation::DeviceCopy` to its 300-second deadline. No
-operator-marker or Terminal 2 procedure is required.
+operator-marker or Terminal 2 procedure is required. The host-sleep
+repetitions use the same private `/dev/zero -> /dev/null` copy with a
+120-second scoped qualification deadline (see
+Host-sleep stimulus and pre-suspend handshake).
 
 ## Host-sleep policy
 
@@ -286,8 +355,19 @@ of assuming that suspension counts as elapsed executor time. Classification
 comes only from production deadline-clock samples and remaining budget
 immediately before sleep and after wake, within a documented tolerance.
 Terminal outcome is a separate consistency check: excluded suspension may
-still time out after enough later active time. The current harness has no exact
-deadline-clock observation seam, so both host-sleep scenarios remain blocked.
+still time out after enough later active time. The owned-process timer now
+shares one exact monotonic start/deadline basis with the qualification
+observations: before-sleep, after-wake, and owner-terminal samples derive from
+that basis, and the retained basis keeps post-wake sampling truthful even when
+the owner selected terminal immediately after resume. `sleepEnteredAt` is the
+last operator/harness handoff immediately before physical suspension, not an
+OS-level sleep-entry event; `wakeAt` is the first post-resume operator
+acknowledgement, not an exact OS wake instant. The implementation blocker is
+removed, but no physical host-sleep repetition is qualified until the operator
+deliberately runs it against a physical device. `transport_loss` requires zero
+owner-emitted `DeadlineReached` events: the owner event is the only authority
+for whether the timeout branch won, and a monotonic clock sample at or beyond
+the nominal deadline never converts a transport failure into a timeout.
 
 ## Development UI smoke
 

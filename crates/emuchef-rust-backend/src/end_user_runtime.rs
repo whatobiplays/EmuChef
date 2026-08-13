@@ -282,7 +282,7 @@ fn probe_manager(
     let primary_result = runner.run_for(&primary_argv, ProcessOperation::Predicate);
     if primary_result
         .as_ref()
-        .is_ok_and(|output| cmd_interface_is_unavailable(output))
+        .is_ok_and(cmd_interface_is_unavailable)
     {
         let fallback_argv = serial_shell_command(adb_path, serial, fallback);
         return primary_result_to_manager(

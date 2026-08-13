@@ -26,15 +26,18 @@ This slice supplies the existing `activeProcess` evidence contract for active in
   `/dev/zero -> /dev/null` qualification copy is test-only and not a general
   execution feature.
 - Any test-only delay used as physical evidence.
-- Host-sleep deadline-clock measurement.
 - Process discovery by scanning the host process table.
 - Command arguments, serials, device paths, stdout, or stderr in lifecycle evidence.
 - New background threads, detached tasks, or ownership transfer.
 - Changes to production error classification, cancellation behavior, or cleanup policy.
+- A production sleep inhibitor, macOS sleep/wake notification plugin, or
+  checkpoint/resume/replay path.
 
 `operation_timeout` uses the private hard-coded `/dev/zero -> /dev/null` device
 copy through `RealAdbDevice::copy_on_device` as its genuine blocking stimulus;
-host-sleep remains blocked for its separate deadline-clock measurement.
+`host_sleep_before_deadline` and `host_sleep_after_deadline` reuse the same
+stimulus with a scoped 120-second qualification deadline and the exact
+deadline-clock observation described below.
 
 ## Architecture
 
@@ -105,6 +108,72 @@ The terminal event reports only the timestamp and opaque operation identity. Exi
 `usb_disconnect_active`, `device_offline`, and `device_unauthorized` cannot clean fixture-owned state while the selected device remains unavailable. After the exact child terminal event and runner result return, the harness creates `terminal-ready` and waits for a fresh `cleanup-ready` acknowledgement. The operator restores the selected device to the required online and authorized state before creating `cleanup-ready`. Cleanup never starts before that acknowledgement, and reconnecting or reauthorizing never resumes the terminal execution.
 
 For `device_unauthorized`, the initial authorized observation must serialize before operation start, the genuine unauthorized observation must occur after `operator-action` and no later than the exact child terminal event, and the final authorized observation must serialize after cleanup completion. The harness waits across canonical Unix-second boundaries where necessary rather than weakening the strict evidence chronology.
+
+### 5B. Host-sleep deadline-clock observation
+
+The host-sleep scenarios need to measure whether the fixed Rust deadline clock
+advances during host suspension. The owned-process timer is constructed from
+one explicit monotonic pair:
+
+```text
+deadline_clock_start = Instant::now()
+deadline_at = deadline_clock_start + configured deadline
+timer = Timer::at(deadline_at)
+```
+
+The same pair is retained in the invocation-scoped observation state as the
+exact deadline basis. The owner records a `DeadlineClockStarted` event
+(run-local origin zero) and one owner-reported terminal sample at the existing
+terminal path. A test-only handle method derives sanitized
+`DeadlineClockSampled` events (nanoseconds from the exact start, remaining
+budget, deadline-reached flag) from `Instant::now()` against that retained
+basis, so a sample remains available even after the owner has already observed
+terminal state immediately after host resume.
+
+The host-sleep qualification handshake is deterministic and every
+operator-created marker is created while the host is awake:
+
+```text
+operation-started
+→ operator creates sleep-requested
+→ watcher samples the exact DeviceCopy child alive
+→ watcher samples the exact owned-process deadline clock
+→ watcher creates sleep-ready (internal, non-schema marker)
+→ operator creates sleep-entered within four seconds (final awake handoff)
+→ operator immediately initiates physical host sleep
+→ host resumes
+→ operator immediately creates wake
+→ watcher samples the deadline clock again from the retained exact basis
+```
+
+`sleep-entered` is the activeProcess action boundary: the exact child must be
+sampled alive immediately before it, within the same bounded freshness window
+as the active scenarios. `wake` is the first post-resume operator
+acknowledgement and remains in the hostSleep/sentinel chronology. The owner
+terminal sample is authoritative for terminal chronology; it may precede the
+post-wake sample when the deadline became ready during suspension, and the
+retained basis still produces a truthful post-wake sample. Classification is
+derived from the measured deadline-clock advancement, wall duration, and
+remaining budget within a documented tolerance; the owner-emitted
+`DeadlineReached` event is the authority for whether the deadline branch won,
+and output/status-before-timer precedence is unchanged.
+
+The host-sleep deadline phase is anchored to the exact owned-process
+deadline-clock start (the selected `DeadlineClockStarted.at` wall timestamp),
+which is also serialized as `hostSleep.operationStartedAt`. The earlier
+sentinel `operation-started` progress marker remains an independent operator
+chronology observation and is not the 120-second deadline threshold authority.
+`DeadlineClockStarted.at` is the wall observation retained alongside
+construction of the exact monotonic timer basis (a paired read, not a claim of
+literal simultaneity), and the owner terminal may precede the retained-basis
+post-wake sample. The final host-sleep lifecycle snapshot is taken only after
+the bounded watcher has finished, so that post-wake sample is always present
+in the evidence assembly path.
+
+`transport_loss` requires zero owner-emitted `DeadlineReached` events.
+`DeadlineClockSampled.deadline_reached` is only a monotonic-clock observation;
+the owner-emitted `DeadlineReached` event is the authority that the timeout
+branch actually won, and output/status-before-timer precedence is unchanged.
 
 ### 6. ADB executor forwarding
 
@@ -257,6 +326,12 @@ Calibration is preparation evidence only. It cannot satisfy the active-process c
 - Active-stimulus cleanup removes calibration and source artifacts before the run scope is verified absent.
 - `active-ready` is created only after a live exact-child sample and is always removed by sentinel cleanup.
 - Same-second `actionAt` and `terminalAt` evidence blocks instead of weakening the strict chronology contract.
+- The host-sleep handshake creates `sleep-ready` only after a live exact-child
+  sample and an exact deadline-clock sample; `sleep-entered` is the action
+  boundary within the bounded freshness window; the post-wake sample is
+  requested only after the `wake` marker and remains derivable from the
+  retained basis after owner terminal; missing, mismatched, out-of-order, or
+  contradictory observations block.
 
 ## Acceptance criteria
 
@@ -269,7 +344,9 @@ Calibration is preparation evidence only. It cannot satisfy the active-process c
 7. `cancellation_active`, `usb_disconnect_active`, `device_offline`, and `device_unauthorized` are no longer structurally blocked by `activeProcess: null`.
 8. `operation_timeout` is no longer structurally blocked: it uses the private
    `/dev/zero -> /dev/null` copy and its existing evidence contract.
-   Host-sleep remains blocked for its missing deadline-clock measurement.
+   The host-sleep scenarios reuse that stimulus with a scoped 120-second
+   qualification deadline and the exact deadline-clock observation seam above;
+   their physical repetitions remain unqualified until the operator runs them.
 9. All Rust and Node regression suites pass.
 
 ## Implementation boundaries

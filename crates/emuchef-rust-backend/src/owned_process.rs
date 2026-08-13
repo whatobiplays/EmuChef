@@ -7,13 +7,13 @@
 
 #[cfg(test)]
 use std::cell::RefCell;
+use std::collections::HashMap;
 use std::future::Future;
 use std::pin::Pin;
 use std::process::Stdio;
 use std::sync::atomic::{AtomicU64, Ordering as AtomicOrdering};
 use std::sync::{Arc, Mutex};
 use std::task::{Poll, Waker};
-#[cfg(test)]
 use std::time::Instant;
 use std::time::{Duration, SystemTime};
 
@@ -206,6 +206,63 @@ impl OwnedProcessOperationId {
     }
 }
 
+/// The exact monotonic start/deadline pair that drives the owned-process
+/// timer. The timer and every qualification clock sample derive from this one
+/// captured pair; no second clock authority is created.
+#[derive(Clone, Copy, Debug)]
+pub(crate) struct DeadlineClockBasis {
+    start: Instant,
+    /// Wall observation captured adjacent to construction of the authoritative
+    /// monotonic start. It is correlation/evidence only: `Instant` remains the
+    /// sole deadline authority, and `SystemTime`/`Instant` are not claimed to
+    /// have been read literally simultaneously.
+    start_wall: SystemTime,
+    deadline_at: Instant,
+    deadline: Duration,
+}
+
+/// A sanitized, run-local monotonic clock sample derived from the exact
+/// owned-process deadline basis. Nanoseconds are relative to the basis start
+/// and never expose a raw `Instant`, PID, or command.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+struct DeadlineClockSample {
+    deadline_clock_ns: u64,
+    remaining_ns: u64,
+    deadline_reached: bool,
+}
+
+/// Build the explicit deadline basis for one owned-process invocation.
+///
+/// This is semantically equivalent to `async_io::Timer::after(deadline)`,
+/// which itself computes `Instant::now().checked_add(deadline)` and falls
+/// back to a never-firing timer on overflow.
+fn deadline_basis(
+    start: Instant,
+    start_wall: SystemTime,
+    deadline: Duration,
+) -> Option<DeadlineClockBasis> {
+    start
+        .checked_add(deadline)
+        .map(|deadline_at| DeadlineClockBasis {
+            start,
+            start_wall,
+            deadline_at,
+            deadline,
+        })
+}
+
+impl DeadlineClockBasis {
+    fn sample(&self, now: Instant) -> DeadlineClockSample {
+        let elapsed = now.duration_since(self.start);
+        let remaining = self.deadline_at.saturating_duration_since(now);
+        DeadlineClockSample {
+            deadline_clock_ns: u64::try_from(elapsed.as_nanos()).unwrap_or(u64::MAX),
+            remaining_ns: u64::try_from(remaining.as_nanos()).unwrap_or(u64::MAX),
+            deadline_reached: now >= self.deadline_at,
+        }
+    }
+}
+
 #[cfg(test)]
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub(crate) struct OwnedProcessLivenessSample {
@@ -240,6 +297,22 @@ pub(crate) enum OwnedProcessLifecycleEvent {
         deadline: Duration,
         at: SystemTime,
     },
+    DeadlineClockStarted {
+        operation_id: OwnedProcessOperationId,
+        operation: ProcessOperation,
+        deadline_clock_start_ns: u64,
+        deadline_ns: u64,
+        at: SystemTime,
+    },
+    DeadlineClockSampled {
+        operation_id: OwnedProcessOperationId,
+        operation: ProcessOperation,
+        at: SystemTime,
+        deadline_clock_ns: u64,
+        remaining_ns: u64,
+        deadline_reached: bool,
+        owner_reported: bool,
+    },
     Terminal {
         operation_id: OwnedProcessOperationId,
         operation: ProcessOperation,
@@ -255,6 +328,8 @@ impl OwnedProcessLifecycleEvent {
             | Self::MutationStarted { operation_id, .. }
             | Self::LivenessSampled { operation_id, .. }
             | Self::DeadlineReached { operation_id, .. }
+            | Self::DeadlineClockStarted { operation_id, .. }
+            | Self::DeadlineClockSampled { operation_id, .. }
             | Self::Terminal { operation_id, .. } => *operation_id,
         }
     }
@@ -265,6 +340,8 @@ impl OwnedProcessLifecycleEvent {
             | Self::MutationStarted { operation, .. }
             | Self::LivenessSampled { operation, .. }
             | Self::DeadlineReached { operation, .. }
+            | Self::DeadlineClockStarted { operation, .. }
+            | Self::DeadlineClockSampled { operation, .. }
             | Self::Terminal { operation, .. } => *operation,
         }
     }
@@ -275,6 +352,8 @@ impl OwnedProcessLifecycleEvent {
             | Self::MutationStarted { at, .. }
             | Self::LivenessSampled { at, .. }
             | Self::DeadlineReached { at, .. }
+            | Self::DeadlineClockStarted { at, .. }
+            | Self::DeadlineClockSampled { at, .. }
             | Self::Terminal { at, .. } => *at,
         }
     }
@@ -285,6 +364,7 @@ struct OwnedProcessObservationState {
     events: Vec<OwnedProcessLifecycleEvent>,
     liveness_request: Option<OwnedProcessOperationId>,
     owner_waker: Option<Waker>,
+    deadline_basis: HashMap<OwnedProcessOperationId, DeadlineClockBasis>,
 }
 
 #[derive(Clone, Debug, Default)]
@@ -420,6 +500,100 @@ impl OwnedProcessObservationHandle {
         }
     }
 
+    /// Install the exact deadline basis for one owned-process invocation.
+    /// The owner calls this once, at the same instant the timer is
+    /// constructed, so the timer and every later clock sample share the same
+    /// monotonic start/deadline pair.
+    fn install_deadline_basis(
+        &self,
+        operation_id: OwnedProcessOperationId,
+        operation: ProcessOperation,
+        basis: Option<DeadlineClockBasis>,
+    ) {
+        let Some(basis) = basis else {
+            return;
+        };
+        if let Ok(mut state) = self.state.lock() {
+            if state.deadline_basis.contains_key(&operation_id) {
+                return;
+            }
+            state.deadline_basis.insert(operation_id, basis);
+            state
+                .events
+                .push(OwnedProcessLifecycleEvent::DeadlineClockStarted {
+                    operation_id,
+                    operation,
+                    deadline_clock_start_ns: 0,
+                    deadline_ns: u64::try_from(basis.deadline.as_nanos()).unwrap_or(u64::MAX),
+                    at: basis.start_wall,
+                });
+        }
+    }
+
+    /// Derive a sanitized sample from the exact retained deadline basis.
+    ///
+    /// The sample is computed from `Instant::now()` against the shared basis,
+    /// so it remains available even after the owned-process owner has observed
+    /// terminal state (for example immediately after host wake).
+    ///
+    /// The operation is atomic and fail closed: one successful state lock
+    /// resolves the exact basis, captures the monotonic sample and its
+    /// corresponding wall timestamp at the same sampling point, appends
+    /// exactly one `DeadlineClockSampled` event, and returns `Ok(())` only
+    /// after that event is present. A poisoned or unavailable observation
+    /// state returns `Err` and never reports sampling success.
+    #[cfg(test)]
+    pub(crate) fn request_deadline_clock_sample(
+        &self,
+        operation_id: OwnedProcessOperationId,
+    ) -> Result<(), String> {
+        let mut state = self
+            .state
+            .lock()
+            .map_err(|_| "owned-process observation state is unavailable".to_string())?;
+        let basis = state
+            .deadline_basis
+            .get(&operation_id)
+            .copied()
+            .ok_or_else(|| "owned-process deadline-clock basis is unavailable".to_string())?;
+        let operation = state.events.iter().find_map(|event| match event {
+            OwnedProcessLifecycleEvent::Spawned {
+                operation_id: observed,
+                operation,
+                ..
+            } if *observed == operation_id => Some(*operation),
+            _ => None,
+        });
+        let operation = operation
+            .ok_or_else(|| "owned-process deadline-clock operation is unavailable".to_string())?;
+        let sample = basis.sample(Instant::now());
+        let at = SystemTime::now();
+        state
+            .events
+            .push(OwnedProcessLifecycleEvent::DeadlineClockSampled {
+                operation_id,
+                operation,
+                at,
+                deadline_clock_ns: sample.deadline_clock_ns,
+                remaining_ns: sample.remaining_ns,
+                deadline_reached: sample.deadline_reached,
+                owner_reported: false,
+            });
+        let published = matches!(
+            state.events.last(),
+            Some(OwnedProcessLifecycleEvent::DeadlineClockSampled {
+                operation_id: observed,
+                owner_reported: false,
+                ..
+            }) if *observed == operation_id
+        );
+        if published {
+            Ok(())
+        } else {
+            Err("owned-process deadline-clock sample was not published".to_string())
+        }
+    }
+
     fn record_terminal(&self, operation_id: OwnedProcessOperationId, operation: ProcessOperation) {
         if let Ok(mut state) = self.state.lock() {
             let at = SystemTime::now();
@@ -428,6 +602,20 @@ impl OwnedProcessObservationHandle {
                 operation,
                 at,
             });
+            if let Some(basis) = state.deadline_basis.get(&operation_id).copied() {
+                let sample = basis.sample(Instant::now());
+                state
+                    .events
+                    .push(OwnedProcessLifecycleEvent::DeadlineClockSampled {
+                        operation_id,
+                        operation,
+                        at,
+                        deadline_clock_ns: sample.deadline_clock_ns,
+                        remaining_ns: sample.remaining_ns,
+                        deadline_reached: sample.deadline_reached,
+                        owner_reported: true,
+                    });
+            }
             if state.liveness_request == Some(operation_id) {
                 state.liveness_request = None;
                 state
@@ -536,6 +724,11 @@ impl OwnedProcessObservationContext {
                 deadline,
                 at: SystemTime::now(),
             });
+    }
+
+    fn install_deadline_basis(&self, basis: Option<DeadlineClockBasis>) {
+        self.handle
+            .install_deadline_basis(self.operation_id, self.operation, basis);
     }
 
     fn terminal(&self) {
@@ -770,11 +963,21 @@ async fn run_child(
     process_delay: Option<Duration>,
     observation: Option<OwnedProcessObservationContext>,
 ) -> Result<CapturedProcessOutput, OwnedProcessError> {
+    // Capture the wall observation adjacent to the authoritative monotonic
+    // start so DeadlineClockStarted.at correlates with actual timer-basis
+    // construction rather than later observer installation.
+    let start_wall = SystemTime::now();
+    let deadline_clock_start = Instant::now();
+    let deadline_basis = deadline_basis(deadline_clock_start, start_wall, deadline);
+    let timer = deadline_basis.map_or_else(Timer::never, |basis| Timer::at(basis.deadline_at));
+    if let Some(observation) = observation.as_ref() {
+        observation.install_deadline_basis(deadline_basis);
+    }
     run_child_with_deadline_signal(
         child,
         stdout,
         stderr,
-        Timer::after(deadline),
+        timer,
         Some(deadline),
         process_delay,
         observation,
@@ -1493,7 +1696,7 @@ mod tests {
             .iter()
             .filter(|event| event.operation_id() == operation_id)
             .collect::<Vec<_>>();
-        assert_eq!(matching.len(), 4);
+        assert_eq!(matching.len(), 6);
         assert!(matches!(
             matching[0],
             OwnedProcessLifecycleEvent::Spawned { .. }
@@ -1504,14 +1707,25 @@ mod tests {
         ));
         assert!(matches!(
             matching[2],
+            OwnedProcessLifecycleEvent::DeadlineClockStarted { .. }
+        ));
+        assert!(matches!(
+            matching[3],
             OwnedProcessLifecycleEvent::LivenessSampled {
                 alive: Some(true),
                 ..
             }
         ));
         assert!(matches!(
-            matching[3],
+            matching[4],
             OwnedProcessLifecycleEvent::Terminal { .. }
+        ));
+        assert!(matches!(
+            matching[5],
+            OwnedProcessLifecycleEvent::DeadlineClockSampled {
+                owner_reported: true,
+                ..
+            }
         ));
         assert!(matching.windows(2).all(|pair| pair[0].at() <= pair[1].at()));
     }
@@ -1625,6 +1839,523 @@ mod tests {
         assert!(!debug.contains("--exact"));
         assert!(!debug.contains("normal_helper"));
         assert!(!debug.contains("pid"));
+    }
+
+    #[test]
+    fn deadline_basis_captures_one_exact_start_deadline_pair_and_never_fires_on_overflow() {
+        let start = Instant::now();
+        let start_wall = SystemTime::now();
+        let basis = deadline_basis(start, start_wall, Duration::from_secs(7))
+            .expect("a finite deadline must produce an exact basis");
+        assert_eq!(basis.start, start);
+        assert_eq!(basis.start_wall, start_wall);
+        assert_eq!(basis.deadline, Duration::from_secs(7));
+        assert_eq!(basis.deadline_at, start + Duration::from_secs(7));
+        assert!(
+            deadline_basis(Instant::now(), SystemTime::now(), Duration::MAX).is_none(),
+            "an overflowing deadline must preserve the never-fire timer fallback"
+        );
+    }
+
+    #[test]
+    fn observed_process_records_one_deadline_clock_basis_and_consistent_samples() {
+        let observer = OwnedProcessObservationHandle::default();
+        let executable = std::env::current_exe().expect("test executable should be available");
+        let worker_observer = observer.clone();
+        let worker = std::thread::spawn(move || {
+            run_owned_process_observed(
+                executable
+                    .to_str()
+                    .expect("test executable should be utf-8"),
+                &[
+                    "--exact".to_string(),
+                    "owned_process::tests::observed_helper".to_string(),
+                    "--ignored".to_string(),
+                    "--nocapture".to_string(),
+                ],
+                ProcessOperation::DeviceCopy,
+                worker_observer,
+            )
+        });
+
+        let operation_id = observer
+            .wait_for_mutation(ProcessOperation::DeviceCopy, Duration::from_secs(2))
+            .expect("the observed mutation should start");
+        observer
+            .request_liveness_sample(operation_id)
+            .expect("the exact child liveness sample should be requested");
+        observer
+            .wait_for_liveness(operation_id, Duration::from_secs(2))
+            .expect("the exact child liveness sample should complete");
+        observer
+            .request_deadline_clock_sample(operation_id)
+            .expect("the exact deadline-clock sample should be requested");
+
+        worker
+            .join()
+            .expect("observed helper thread should finish")
+            .expect("observed helper should complete");
+
+        let events = observer.events();
+        let starts = events
+            .iter()
+            .filter_map(|event| match event {
+                OwnedProcessLifecycleEvent::DeadlineClockStarted {
+                    operation_id: observed,
+                    operation,
+                    deadline_clock_start_ns,
+                    deadline_ns,
+                    ..
+                } if *observed == operation_id => {
+                    Some((*operation, *deadline_clock_start_ns, *deadline_ns))
+                }
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(starts.len(), 1);
+        let (operation, start_ns, deadline_ns) = starts[0];
+        assert_eq!(operation, ProcessOperation::DeviceCopy);
+        assert_eq!(start_ns, 0, "the run-local origin must be zero");
+        assert_eq!(
+            deadline_ns,
+            u64::try_from(ProcessOperation::DeviceCopy.deadline().as_nanos())
+                .expect("the production deadline must fit u64 nanoseconds")
+        );
+
+        let samples = events
+            .iter()
+            .filter_map(|event| match event {
+                OwnedProcessLifecycleEvent::DeadlineClockSampled {
+                    operation_id: observed,
+                    deadline_clock_ns,
+                    remaining_ns,
+                    deadline_reached,
+                    owner_reported,
+                    ..
+                } if *observed == operation_id => Some((
+                    *deadline_clock_ns,
+                    *remaining_ns,
+                    *deadline_reached,
+                    *owner_reported,
+                )),
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        assert!(
+            samples.len() >= 2,
+            "a requested and an owner terminal sample are required"
+        );
+        let requested = samples
+            .iter()
+            .find(|(_, _, _, owner_reported)| !*owner_reported)
+            .expect("a watcher-requested sample must be recorded");
+        let terminal = samples
+            .iter()
+            .find(|(_, _, _, owner_reported)| *owner_reported)
+            .expect("an owner terminal sample must be recorded");
+        assert!(
+            requested.0 <= terminal.0,
+            "both samples must advance on the same exact deadline basis"
+        );
+        assert!(
+            requested.1 >= terminal.1,
+            "remaining budget must be non-increasing while the observed clock advances"
+        );
+        assert!(
+            !terminal.2,
+            "a completed child must not claim the deadline was reached"
+        );
+    }
+
+    #[test]
+    fn deadline_clock_sample_survives_owner_terminal_for_the_post_wake_race() {
+        let observer = OwnedProcessObservationHandle::default();
+        let executable = std::env::current_exe().expect("test executable should be available");
+        let _deadline =
+            arm_test_process_deadline(ProcessOperation::DeviceCopy, Duration::from_millis(100));
+        let error = run_owned_process_observed(
+            executable
+                .to_str()
+                .expect("test executable should be utf-8"),
+            &[
+                "--exact".to_string(),
+                "owned_process::tests::timeout_helper".to_string(),
+                "--ignored".to_string(),
+                "--nocapture".to_string(),
+            ],
+            ProcessOperation::DeviceCopy,
+            observer.clone(),
+        )
+        .expect_err("the observed helper must exceed the test deadline");
+        assert_eq!(error.kind, ProcessFailureKind::TimedOut);
+
+        let operation_id = observer
+            .events()
+            .iter()
+            .find_map(|event| match event {
+                OwnedProcessLifecycleEvent::DeadlineClockStarted { operation_id, .. } => {
+                    Some(*operation_id)
+                }
+                _ => None,
+            })
+            .expect("a deadline-clock basis should have been installed");
+        observer
+            .request_deadline_clock_sample(operation_id)
+            .expect("a post-terminal sample must still derive from the retained exact basis");
+
+        let events = observer.events();
+        let terminal_index = events
+            .iter()
+            .position(|event| matches!(event, OwnedProcessLifecycleEvent::Terminal { .. }))
+            .expect("the owner terminal event must be recorded");
+        let sample_index = events
+            .iter()
+            .position(|event| {
+                matches!(
+                    event,
+                    OwnedProcessLifecycleEvent::DeadlineClockSampled {
+                        owner_reported: false,
+                        ..
+                    }
+                )
+            })
+            .expect("the post-terminal requested sample must be recorded");
+        assert!(
+            terminal_index < sample_index,
+            "the retained basis must allow sampling after the owner terminal"
+        );
+        let (clock_ns, reached) = match &events[sample_index] {
+            OwnedProcessLifecycleEvent::DeadlineClockSampled {
+                deadline_clock_ns,
+                deadline_reached,
+                ..
+            } => (*deadline_clock_ns, *deadline_reached),
+            _ => unreachable!("sample_index must select a sampled event"),
+        };
+        assert!(
+            clock_ns >= 100_000_000,
+            "the post-terminal sample must be at or past the deadline"
+        );
+        assert!(
+            reached,
+            "the post-terminal sample must observe the deadline as reached"
+        );
+    }
+
+    #[test]
+    fn observed_completion_at_the_deadline_boundary_keeps_completion_without_deadline_reached() {
+        let observer = OwnedProcessObservationHandle::default();
+        let executable = std::env::current_exe().expect("test executable should be available");
+        let output = run_owned_process_observed_for_test(
+            executable
+                .to_str()
+                .expect("test executable should be utf-8"),
+            &[
+                "--exact".to_string(),
+                "owned_process::tests::normal_helper".to_string(),
+                "--ignored".to_string(),
+                "--nocapture".to_string(),
+            ],
+            Duration::from_millis(10),
+            ProcessOperation::DeviceCopy,
+            observer.clone(),
+        )
+        .expect("a completed exact child must remain completed at the deadline boundary");
+        assert_eq!(output.status_code, Some(0));
+        assert!(
+            !observer
+                .events()
+                .iter()
+                .any(|event| matches!(event, OwnedProcessLifecycleEvent::DeadlineReached { .. })),
+            "completion observed by the owner before the timer must win without a deadline event"
+        );
+        assert!(
+            observer.events().iter().any(|event| {
+                matches!(
+                    event,
+                    OwnedProcessLifecycleEvent::DeadlineClockSampled {
+                        owner_reported: true,
+                        ..
+                    }
+                )
+            }),
+            "the owner terminal deadline-clock sample must be recorded"
+        );
+    }
+
+    #[test]
+    fn observed_timeout_records_owner_deadline_and_terminal_clock_sample() {
+        let observer = OwnedProcessObservationHandle::default();
+        let executable = std::env::current_exe().expect("test executable should be available");
+        let _deadline =
+            arm_test_process_deadline(ProcessOperation::DeviceCopy, Duration::from_millis(100));
+        let error = run_owned_process_observed(
+            executable
+                .to_str()
+                .expect("test executable should be utf-8"),
+            &[
+                "--exact".to_string(),
+                "owned_process::tests::timeout_helper".to_string(),
+                "--ignored".to_string(),
+                "--nocapture".to_string(),
+            ],
+            ProcessOperation::DeviceCopy,
+            observer.clone(),
+        )
+        .expect_err("the observed helper must exceed the test deadline");
+        assert_eq!(error.kind, ProcessFailureKind::TimedOut);
+
+        let events = observer.events();
+        let deadline_index = events
+            .iter()
+            .position(|event| matches!(event, OwnedProcessLifecycleEvent::DeadlineReached { .. }))
+            .expect("the owner-recorded deadline event must be present");
+        let terminal_sample_index = events
+            .iter()
+            .position(|event| {
+                matches!(
+                    event,
+                    OwnedProcessLifecycleEvent::DeadlineClockSampled {
+                        owner_reported: true,
+                        ..
+                    }
+                )
+            })
+            .expect("the owner terminal deadline-clock sample must be present");
+        let terminal_index = events
+            .iter()
+            .position(|event| matches!(event, OwnedProcessLifecycleEvent::Terminal { .. }))
+            .expect("the terminal event must be present");
+        assert!(
+            deadline_index < terminal_index,
+            "DeadlineReached must precede terminal cleanup"
+        );
+        let (clock_ns, reached) = match &events[terminal_sample_index] {
+            OwnedProcessLifecycleEvent::DeadlineClockSampled {
+                deadline_clock_ns,
+                deadline_reached,
+                ..
+            } => (*deadline_clock_ns, *deadline_reached),
+            _ => unreachable!("terminal_sample_index must select a sampled event"),
+        };
+        assert!(
+            clock_ns >= 100_000_000,
+            "the timeout terminal sample must be at or past the deadline"
+        );
+        assert!(
+            reached,
+            "the timeout terminal sample must observe the deadline as reached"
+        );
+    }
+
+    #[test]
+    fn deadline_clock_sample_without_an_exact_basis_is_rejected() {
+        let observer = OwnedProcessObservationHandle::default();
+        let error = observer
+            .request_deadline_clock_sample(OwnedProcessOperationId::from_raw_for_test(1))
+            .expect_err("a sample without the exact shared deadline basis must be rejected");
+        assert!(
+            error.contains("basis"),
+            "the rejection must name the missing exact basis: {error}"
+        );
+    }
+
+    #[test]
+    fn deadline_clock_sample_request_publishes_exactly_one_event() {
+        let observer = OwnedProcessObservationHandle::default();
+        let operation_id = OwnedProcessOperationId::from_raw_for_test(510);
+        observer.record(OwnedProcessLifecycleEvent::Spawned {
+            operation_id,
+            operation: ProcessOperation::DeviceCopy,
+            at: SystemTime::now(),
+        });
+        let basis = deadline_basis(Instant::now(), SystemTime::now(), Duration::from_secs(120))
+            .expect("a finite deadline must produce a basis");
+        observer.install_deadline_basis(operation_id, ProcessOperation::DeviceCopy, Some(basis));
+        observer
+            .request_deadline_clock_sample(operation_id)
+            .expect("a sample with an exact basis must publish");
+        let samples = observer
+            .events()
+            .iter()
+            .filter(|event| {
+                matches!(
+                    event,
+                    OwnedProcessLifecycleEvent::DeadlineClockSampled {
+                        owner_reported: false,
+                        ..
+                    }
+                )
+            })
+            .count();
+        assert_eq!(
+            samples, 1,
+            "one successful sampling request must publish exactly one sampled event"
+        );
+    }
+
+    #[test]
+    fn deadline_clock_sample_pairs_wall_and_monotonic_values_at_one_sampling_point() {
+        let observer = OwnedProcessObservationHandle::default();
+        let operation_id = OwnedProcessOperationId::from_raw_for_test(511);
+        observer.record(OwnedProcessLifecycleEvent::Spawned {
+            operation_id,
+            operation: ProcessOperation::DeviceCopy,
+            at: SystemTime::now(),
+        });
+        let start = Instant::now();
+        let basis = deadline_basis(start, SystemTime::now(), Duration::from_secs(120))
+            .expect("a finite deadline must produce a basis");
+        observer.install_deadline_basis(operation_id, ProcessOperation::DeviceCopy, Some(basis));
+        let wall_before = SystemTime::now();
+        let instant_before = Instant::now();
+        observer
+            .request_deadline_clock_sample(operation_id)
+            .expect("a sample with an exact basis must publish");
+        let wall_after = SystemTime::now();
+        let instant_after = Instant::now();
+        let (at, deadline_clock_ns) = observer
+            .events()
+            .iter()
+            .find_map(|event| match event {
+                OwnedProcessLifecycleEvent::DeadlineClockSampled {
+                    operation_id: observed,
+                    at,
+                    deadline_clock_ns,
+                    ..
+                } if *observed == operation_id => Some((*at, *deadline_clock_ns)),
+                _ => None,
+            })
+            .expect("the sampling request must publish its event");
+        assert!(
+            wall_before <= at && at <= wall_after,
+            "the published wall timestamp must fall inside the sampling operation"
+        );
+        let ns_before = u64::try_from(instant_before.duration_since(start).as_nanos())
+            .expect("bounded elapsed nanoseconds");
+        let ns_after = u64::try_from(instant_after.duration_since(start).as_nanos())
+            .expect("bounded elapsed nanoseconds");
+        assert!(
+            ns_before <= deadline_clock_ns && deadline_clock_ns <= ns_after,
+            "the published monotonic value must fall inside the same sampling operation"
+        );
+    }
+
+    #[test]
+    fn deadline_clock_sample_with_unavailable_state_fails_closed() {
+        let observer = OwnedProcessObservationHandle::default();
+        let operation_id = OwnedProcessOperationId::from_raw_for_test(512);
+        observer.record(OwnedProcessLifecycleEvent::Spawned {
+            operation_id,
+            operation: ProcessOperation::DeviceCopy,
+            at: SystemTime::now(),
+        });
+        let basis = deadline_basis(Instant::now(), SystemTime::now(), Duration::from_secs(120))
+            .expect("a finite deadline must produce a basis");
+        observer.install_deadline_basis(operation_id, ProcessOperation::DeviceCopy, Some(basis));
+        let _ = std::panic::catch_unwind(|| {
+            let _guard = observer
+                .state
+                .lock()
+                .expect("state should lock for poisoning");
+            panic!("poison the observation state");
+        });
+        let error = observer
+            .request_deadline_clock_sample(operation_id)
+            .expect_err("a poisoned observation state must not report sampling success");
+        assert!(
+            error.contains("unavailable"),
+            "the rejection must name the unavailable state: {error}"
+        );
+        assert_eq!(
+            observer
+                .events()
+                .iter()
+                .filter(|event| {
+                    matches!(
+                        event,
+                        OwnedProcessLifecycleEvent::DeadlineClockSampled {
+                            owner_reported: false,
+                            ..
+                        }
+                    )
+                })
+                .count(),
+            0,
+            "a failed sampling request must not publish a sample"
+        );
+    }
+
+    #[test]
+    fn deadline_clock_started_at_uses_the_retained_basis_wall_observation() {
+        let observer = OwnedProcessObservationHandle::default();
+        let operation_id = OwnedProcessOperationId::from_raw_for_test(513);
+        let start_wall = SystemTime::now();
+        let start = Instant::now();
+        let basis = deadline_basis(start, start_wall, Duration::from_secs(120))
+            .expect("a finite deadline must produce a basis");
+        // Deliberately separate basis construction from observer installation
+        // so a later SystemTime::now() inside install would be distinguishable.
+        std::thread::sleep(Duration::from_millis(25));
+        observer.install_deadline_basis(operation_id, ProcessOperation::DeviceCopy, Some(basis));
+        let (origin_ns, deadline_ns, at) = observer
+            .events()
+            .iter()
+            .find_map(|event| match event {
+                OwnedProcessLifecycleEvent::DeadlineClockStarted {
+                    operation_id: observed,
+                    deadline_clock_start_ns,
+                    deadline_ns,
+                    at,
+                    ..
+                } if *observed == operation_id => {
+                    Some((*deadline_clock_start_ns, *deadline_ns, *at))
+                }
+                _ => None,
+            })
+            .expect("the clock start event must be published");
+        assert_eq!(
+            at, start_wall,
+            "DeadlineClockStarted.at must be the wall observation retained with basis construction"
+        );
+        assert_eq!(
+            origin_ns, 0,
+            "the run-local monotonic origin must remain zero"
+        );
+        assert_eq!(
+            deadline_ns,
+            u64::try_from(Duration::from_secs(120).as_nanos())
+                .expect("the deadline must fit u64 nanoseconds")
+        );
+    }
+
+    #[test]
+    fn poisoned_observation_state_does_not_alter_the_owned_process_result() {
+        let observer = OwnedProcessObservationHandle::default();
+        let _ = std::panic::catch_unwind(|| {
+            let _guard = observer
+                .state
+                .lock()
+                .expect("state should lock for poisoning");
+            panic!("poison the observation state");
+        });
+        let executable = std::env::current_exe().expect("test executable should be available");
+        let output = run_owned_process_observed_for_test(
+            executable
+                .to_str()
+                .expect("test executable should be utf-8"),
+            &[
+                "--exact".to_string(),
+                "owned_process::tests::normal_helper".to_string(),
+                "--ignored".to_string(),
+                "--nocapture".to_string(),
+            ],
+            Duration::from_secs(2),
+            ProcessOperation::DeviceCopy,
+            observer.clone(),
+        )
+        .expect("a poisoned observer must never replace the owned-process result");
+        assert_eq!(output.status_code, Some(0));
     }
 
     #[derive(Default)]
