@@ -1433,7 +1433,7 @@ async fn settle_process_output(
         if let std::task::Poll::Ready(result) = output_future.as_mut().poll(context) {
             return std::task::Poll::Ready(result);
         }
-        if let std::task::Poll::Ready(_) = timer.as_mut().poll(context) {
+        if timer.as_mut().poll(context).is_ready() {
             return std::task::Poll::Ready(Err(ProcessFailure::CleanupUncertain));
         }
         std::task::Poll::Pending
@@ -1455,7 +1455,7 @@ async fn settle_process_status(
                     .map_err(|_| ProcessFailure::Wait),
             );
         }
-        if let std::task::Poll::Ready(_) = timer.as_mut().poll(context) {
+        if timer.as_mut().poll(context).is_ready() {
             return std::task::Poll::Ready(Err(ProcessFailure::CleanupUncertain));
         }
         std::task::Poll::Pending
@@ -1515,7 +1515,7 @@ async fn run_process(
                     .map_err(|_| ProcessFailure::Wait),
             ));
         }
-        if let std::task::Poll::Ready(_) = timer.as_mut().poll(context) {
+        if timer.as_mut().poll(context).is_ready() {
             return std::task::Poll::Ready(ProcessEvent::TimedOut);
         }
         std::task::Poll::Pending

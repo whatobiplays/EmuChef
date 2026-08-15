@@ -496,7 +496,7 @@ impl SidecarProcess {
                         if let std::task::Poll::Ready(result) = exchange.as_mut().poll(context) {
                             return std::task::Poll::Ready(result);
                         }
-                        if let std::task::Poll::Ready(_) = timer.as_mut().poll(context) {
+                        if timer.as_mut().poll(context).is_ready() {
                             return std::task::Poll::Ready(Err(
                                 "Rust runtime response timed out.".to_string()
                             ));
