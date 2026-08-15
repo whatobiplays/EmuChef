@@ -892,16 +892,28 @@ fn start_real_execution_inner(
             )
         })?
         .revision();
+    let platform_tools = PlatformToolsSnapshot {
+        adb_path: &adb_path,
+        runtime_generation,
+        platform_tools_revision,
+    };
     start_real_execution_inner_with_runtime(
         review_handle,
         &state.handles,
         &state.root_qualification,
         executions,
         &state.sidecar,
-        &adb_path,
-        runtime_generation,
-        platform_tools_revision,
+        &platform_tools,
     )
+}
+
+/// Immutable snapshot of the revalidated Platform-Tools state consumed by the
+/// integrated final execution seam. The adb path remains a borrowed reference
+/// owned by the caller, so no copy or ownership transfer is introduced.
+struct PlatformToolsSnapshot<'a> {
+    adb_path: &'a str,
+    runtime_generation: u64,
+    platform_tools_revision: u64,
 }
 
 /// Integrated final execution seam. Inventory reconciliation, target probes,
@@ -914,9 +926,7 @@ fn start_real_execution_inner_with_runtime<R: RuntimeRequester>(
     root_qualification: &Mutex<RootQualificationStore>,
     executions: &mut ExecutionHandleStore,
     runtime: &R,
-    adb_path: &str,
-    runtime_generation: u64,
-    platform_tools_revision: u64,
+    platform_tools: &PlatformToolsSnapshot<'_>,
 ) -> Result<Value, String> {
     let review = handles
         .lock()
@@ -930,9 +940,9 @@ fn start_real_execution_inner_with_runtime<R: RuntimeRequester>(
     list_and_reconcile_inventory_with_authority(
         handles,
         root_qualification,
-        adb_path,
-        runtime_generation,
-        platform_tools_revision,
+        platform_tools.adb_path,
+        platform_tools.runtime_generation,
+        platform_tools.platform_tools_revision,
         &mut inventory_request,
     )
     .map_err(|_| device_disconnected())?;
@@ -954,7 +964,7 @@ fn start_real_execution_inner_with_runtime<R: RuntimeRequester>(
     let facts = runtime_request(
         runtime,
         "probeDevice",
-        json!({ "adbPath": adb_path, "serial": &serial }),
+        json!({ "adbPath": platform_tools.adb_path, "serial": &serial }),
     )
     .map_err(|_| device_disconnected())?;
     validate_target(&refreshed_review.target, &serial, &facts)?;
@@ -966,9 +976,9 @@ fn start_real_execution_inner_with_runtime<R: RuntimeRequester>(
     let current = qualify_reconciled_current_with_runtime(
         handles,
         root_qualification,
-        adb_path,
-        runtime_generation,
-        platform_tools_revision,
+        platform_tools.adb_path,
+        platform_tools.runtime_generation,
+        platform_tools.platform_tools_revision,
         Some(&refreshed_review.device_handle),
         &mut qualification_request,
     )?;
@@ -4225,15 +4235,18 @@ mod tests {
         executions
             .reserve_start(ExecutionKind::Real)
             .expect("integrated preflight owns the real start reservation");
+        let platform_tools = PlatformToolsSnapshot {
+            adb_path: "/trusted/adb",
+            runtime_generation,
+            platform_tools_revision,
+        };
         let result = start_real_execution_inner_with_runtime(
             review_handle,
             handles,
             root,
             &mut executions,
             &runtime,
-            "/trusted/adb",
-            runtime_generation,
-            platform_tools_revision,
+            &platform_tools,
         );
         let starts = runtime
             .requests
