@@ -20,10 +20,10 @@ use uuid::Uuid;
 
 use crate::adb::{AdbManager, AdbSetupStatusDto, PLATFORM_TOOLS_URL};
 use crate::catalog::CatalogDescriptor;
+#[cfg(test)]
+use crate::device_qualification::RootQualificationInvalidation;
 use crate::device_qualification::{reconcile_inventory_with_context, RootQualificationStore};
-use crate::device_qualification::{
-    RootQualificationInvalidation, RootQualificationKey, RootQualificationState,
-};
+use crate::device_qualification::{RootQualificationKey, RootQualificationState};
 use crate::execution::ExecutionHandleStore;
 use crate::handles::{DeviceDto, ReviewedPlanSnapshot, SessionHandles};
 use crate::recovery::RecoveryState;
@@ -402,6 +402,7 @@ fn reset_app_session(state: &AppState, close_documents: bool) -> Result<(), Stri
 /// Stale only reviews that were planned with root evidence removed by the
 /// current device qualification context. The invalidation handle is opaque;
 /// no serial lookup is needed for this native-to-native transition.
+#[cfg(test)]
 fn invalidate_reviews_for_root_invalidation(
     handles: &mut SessionHandles,
     invalidation: &RootQualificationInvalidation,

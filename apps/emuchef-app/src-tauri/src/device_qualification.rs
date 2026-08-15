@@ -631,15 +631,9 @@ pub(crate) fn classify_complete(
                 device.package_manager,
                 device.activity_manager,
             ];
-            let state = if capabilities
-                .iter()
-                .any(|capability| *capability == CapabilityOutcome::Unsupported)
-            {
+            let state = if capabilities.contains(&CapabilityOutcome::Unsupported) {
                 DeviceQualificationState::Unsupported
-            } else if capabilities
-                .iter()
-                .any(|capability| *capability == CapabilityOutcome::Unknown)
-            {
+            } else if capabilities.contains(&CapabilityOutcome::Unknown) {
                 DeviceQualificationState::InsufficientlyQualified
             } else {
                 DeviceQualificationState::Supported
@@ -874,7 +868,7 @@ where
     // separate; its internal listing is not a continuity authority.
     list_and_reconcile_inventory(state, request)?;
 
-    let adb_path = current_adb_path(&state)?;
+    let adb_path = current_adb_path(state)?;
     qualify_reconciled_current_with_runtime(
         &state.handles,
         &state.root_qualification,
@@ -1250,6 +1244,7 @@ fn classify_observed_complete<'a>(
 
 /// Compatibility projection used by legacy unit fixtures. Production paths use
 /// `classify_observed_complete`, which includes all required capability probes.
+#[cfg(test)]
 fn classify_observed(
     runtime_generation: u64,
     qualification_revision: u64,
@@ -1301,6 +1296,7 @@ fn qualification_fingerprint(observed: &ObservedQualification<'_>) -> String {
     ))
 }
 
+#[cfg(test)]
 fn observed_device<'a>(
     observed: &'a Value,
     state: ObservedDeviceState,
@@ -1321,6 +1317,7 @@ fn observed_device<'a>(
     }
 }
 
+#[cfg(test)]
 fn online_placeholder(identity: &str) -> ObservedDevice<'_> {
     ObservedDevice {
         opaque_identity: identity,
@@ -1502,7 +1499,7 @@ mod tests {
             package_manager: CapabilityOutcome::Available,
             activity_manager: CapabilityOutcome::Available,
         };
-        let result = classify_complete(true, 8, 13, &[supported.clone()]);
+        let result = classify_complete(true, 8, 13, std::slice::from_ref(&supported));
         assert_eq!(result.state, DeviceQualificationState::Supported);
         assert_eq!(result.storage, CapabilityAvailabilityDto::Available);
         assert_eq!(result.package_manager, CapabilityAvailabilityDto::Available);
