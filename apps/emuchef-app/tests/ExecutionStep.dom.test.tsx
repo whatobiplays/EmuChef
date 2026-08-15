@@ -670,4 +670,142 @@ describe("execution recovery actions", () => {
     expect(container.textContent).toContain("Updated");
     expect(container.textContent).not.toMatch(/succeeded_with_warnings|internal_result_name/);
   });
+
+  test("real cancelled snapshots render production cancellation guidance", () => {
+    const snapshot: RealExecutionSnapshot = {
+      ...failedSnapshot(),
+      simulated: false,
+      verificationScope: "real_device",
+      target: { label: "Connected Android device" },
+      launchAction: null,
+      status: "cancelled",
+      cancellation: {
+        title: "Execution cancelled",
+        message: "This action was cancelled at a safe boundary.",
+        remediation: {
+          kind: "generate_fresh_plan",
+          title: "Execution cancelled",
+          message:
+            "Review the retained results, then create and review a fresh plan before another execution. The old execution cannot resume.",
+        },
+      },
+      completion: {
+        ...failedSnapshot().completion,
+        classification: "cancelled",
+        counts: {
+          ...failedSnapshot().completion.counts,
+          failed: 0,
+          cancelled: 1,
+          pending: 1,
+        },
+      },
+    };
+    render(
+      <ExecutionStep
+        execution={{
+          kind: "terminal",
+          generation: 1,
+          mode: "real",
+          snapshot,
+          events: [],
+          eventCursor: 0,
+          cancellationRequested: false,
+        }}
+        launchState="idle"
+        repairPreparing={false}
+        reportState="idle"
+        onCancel={vi.fn()}
+        onExportReport={vi.fn()}
+        onLaunchConfiguredApp={vi.fn()}
+        onPrepareRepair={vi.fn()}
+        onReturn={vi.fn()}
+      />,
+    );
+
+    expect(screen.getByRole("heading", { name: "Execution cancelled" })).toBeTruthy();
+    expect(screen.getByText("This action was cancelled at a safe boundary.")).toBeTruthy();
+    expect(screen.getByText(/old execution cannot resume/i)).toBeTruthy();
+  });
+
+  test("real terminal controls follow the production terminal policy", () => {
+    const base: RealExecutionSnapshot = {
+      ...failedSnapshot(),
+      simulated: false,
+      verificationScope: "real_device",
+      target: { label: "Connected Android device" },
+      launchAction: null,
+      terminalPolicy: {
+        authorityInvalidated: true,
+        recoveryState: "requalification_required",
+        partialChangePresentation: "indeterminate",
+        availableControls: ["export_report", "fresh_workflow"],
+      },
+      errors: [{
+        message: "A device operation timed out.",
+        remediation: {
+          kind: "generate_fresh_plan",
+          title: "Repair and retry",
+          message: "Resolve the reported feature problem, then generate and review a fresh plan.",
+        },
+      }],
+      completion: {
+        ...failedSnapshot().completion,
+        partialChangesPossible: true,
+      },
+    };
+    const { rerender } = render(
+      <ExecutionStep
+        execution={{
+          kind: "terminal",
+          generation: 1,
+          mode: "real",
+          snapshot: base,
+          events: [],
+          eventCursor: 0,
+          cancellationRequested: false,
+        }}
+        launchState="idle"
+        repairPreparing={false}
+        reportState="idle"
+        onCancel={vi.fn()}
+        onExportReport={vi.fn()}
+        onLaunchConfiguredApp={vi.fn()}
+        onPrepareRepair={vi.fn()}
+        onReturn={vi.fn()}
+      />,
+    );
+
+    expect(screen.getByRole("button", { name: "Export report" })).toBeTruthy();
+    expect(screen.getByRole("button", { name: "Start a fresh workflow" })).toBeTruthy();
+    expect(screen.queryByRole("button", { name: "Repair setup" })).toBeNull();
+
+    rerender(
+      <ExecutionStep
+        execution={{
+          kind: "terminal",
+          generation: 1,
+          mode: "real",
+          snapshot: {
+            ...base,
+            terminalPolicy: {
+              ...base.terminalPolicy!,
+              availableControls: ["export_report", "repair_setup", "fresh_workflow"],
+            },
+          },
+          events: [],
+          eventCursor: 0,
+          cancellationRequested: false,
+        }}
+        launchState="idle"
+        repairPreparing={false}
+        reportState="idle"
+        onCancel={vi.fn()}
+        onExportReport={vi.fn()}
+        onLaunchConfiguredApp={vi.fn()}
+        onPrepareRepair={vi.fn()}
+        onReturn={vi.fn()}
+      />,
+    );
+    expect(screen.getByRole("button", { name: "Repair setup" })).toBeTruthy();
+  });
 });

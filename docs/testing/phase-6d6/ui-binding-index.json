@@ -1,0 +1,151 @@
+{
+  "schemaVersion": 1,
+  "sourceDigests": {
+    "docs/testing/phase-6d6/scenario-manifest.json": "sha256:9fc75d0fea6d5eb5d8ef89b1384d4599a2a29a58e276c3f97161b566e8faf397",
+    "docs/testing/phase-6d6/evidence-schema.json": "sha256:866fb6082a30f7508a217f9a97c762d23692d143dce9b2e8c56b1a091b40b571",
+    "apps/emuchef-app/src-tauri/src/execution.rs": "sha256:45a897e534273202c06fccc07d002bf01a3ed80bdf1b75371cc1df8458660b90",
+    "tools/phase-6d6-evidence.mjs": "sha256:3ec91a2768b3f6c02a69d9b419f06165ddc048e5677a2559e2f5836e35916ab3"
+  },
+  "bindings": {
+    "cancellation": [
+      {
+        "repetition": 1,
+        "runId": "physical-run-sha256:8f8cbaf7ec6b8d6045d8e0c5fcb669c8972d9d7ec05f2d54aa0ae4e2ccc8d6b0",
+        "scenario": "cancellation_active",
+        "commit": "99eb00a51d3ab61d400af5ad8bbed37f3d799aca",
+        "issueCode": null,
+        "evidencePath": "docs/testing/phase-6d6/evidence/cancellation_active-rep1-8f8cbaf7ec6b8d60.json",
+        "tracePath": "docs/testing/phase-6d6/evidence/traces/cancellation_active-rep1-8f8cbaf7ec6b8d60.json",
+        "recordDigest": "sha256:2123341cd3bd869cc98a099014fd6dd3db69acc7e6117aa130f2b80d695cefe7",
+        "traceDigest": "sha256:d969276c0835497043235348625eca80c1a709a8219711768f88237324e75d58",
+        "evidenceSha256": "sha256:b8429a370afb834d47175564749f804018babceb81f8985ee22a9b764a354cb4",
+        "traceSha256": "sha256:c2e3d5ab7862cd4a26fc7430c82c3edcc8859c3263e231520cf69dbb33bd08c6"
+      },
+      {
+        "repetition": 1,
+        "runId": "physical-run-sha256:cbd85220cf24b2cf8416e39ebb37cbcb4fa02839aa24263febf6971e29a55a76",
+        "scenario": "cancellation_boundary",
+        "commit": "fdd52f12b333d2049786800e91d506dd4c0ffd4e",
+        "issueCode": null,
+        "evidencePath": "docs/testing/phase-6d6/evidence/cancellation_boundary-rep1-cbd85220cf24b2cf.json",
+        "tracePath": "docs/testing/phase-6d6/evidence/traces/cancellation_boundary-rep1-cbd85220cf24b2cf.json",
+        "recordDigest": "sha256:78c070a4ff125c9957863d372f277fdf090bd67a5f6d4a1c97afea6563d21a0c",
+        "traceDigest": "sha256:be20ba065dffe6150d4fefa1d27ddc7f6da78214a216b21da427cd7816a9add9",
+        "evidenceSha256": "sha256:b8d064f01e08e205698468b840c5d26f1b49fb61df8492c86d078b5884b46d17",
+        "traceSha256": "sha256:5671572377400327dda96494c3cf58e2ec0817e65a62ffd6a2f7dde12b2002c9"
+      },
+      {
+        "repetition": 2,
+        "runId": "physical-run-sha256:d8136441b847204b0fb587cea55e107b95617c792babec05b5668459f1d9a6f0",
+        "scenario": "cancellation_active",
+        "commit": "99eb00a51d3ab61d400af5ad8bbed37f3d799aca",
+        "issueCode": null,
+        "evidencePath": "docs/testing/phase-6d6/evidence/cancellation_active-rep2-d8136441b847204b.json",
+        "tracePath": "docs/testing/phase-6d6/evidence/traces/cancellation_active-rep2-d8136441b847204b.json",
+        "recordDigest": "sha256:f6c3cc7e500680075c91a84ce0bfd6553b8c68ec06229a0023d9b1c98ea79699",
+        "traceDigest": "sha256:23d1570430c0e07a7924f06197abbd5a086e55a8f645ed80b9f20f56d9a571f0",
+        "evidenceSha256": "sha256:c43e2ecb672cba4ea7a73876175ab5d3f354dba13af6da0031f79bb6137d3c46",
+        "traceSha256": "sha256:a34a2d1b745d39abffbe8e33c941371ec0966a9d40a36a55f5508b48da818fb1"
+      },
+      {
+        "repetition": 2,
+        "runId": "physical-run-sha256:e9d48d0a2a78f72276aee8b2924f978da875256b3cd026e3487d21852cb436f4",
+        "scenario": "cancellation_boundary",
+        "commit": "fdd52f12b333d2049786800e91d506dd4c0ffd4e",
+        "issueCode": null,
+        "evidencePath": "docs/testing/phase-6d6/evidence/cancellation_boundary-rep2-e9d48d0a2a78f722.json",
+        "tracePath": "docs/testing/phase-6d6/evidence/traces/cancellation_boundary-rep2-e9d48d0a2a78f722.json",
+        "recordDigest": "sha256:e58293e965b0b6edf2170cf8d3364b464a5349841d75a72f9609d84263ba2b22",
+        "traceDigest": "sha256:757579f8b2bbde45db858a278e7219811a5320f7a638e8db563cecf2b5249e0a",
+        "evidenceSha256": "sha256:7dfdb02aeae98593af700ce7cdea7fccfbde1f0cb28ab60ab42f1c25a3f485c5",
+        "traceSha256": "sha256:3092373a19b16bbf4ab4cc41e053a3c750df57463ba9c4cacd8f814e0bcba994"
+      }
+    ],
+    "transport": [
+      {
+        "repetition": 1,
+        "runId": "physical-run-sha256:be0ba89089556f9195181acdc5614b06a1bf4d8b1d16406c6893746610d8fbc2",
+        "scenario": "usb_disconnect_active",
+        "commit": "b902bd67504479152713c3760d046f7517f50baf",
+        "issueCode": "device_transport_lost",
+        "evidencePath": "docs/testing/phase-6d6/evidence/usb_disconnect_active-rep1-be0ba89089556f91.json",
+        "tracePath": "docs/testing/phase-6d6/evidence/traces/usb_disconnect_active-rep1-be0ba89089556f91.json",
+        "recordDigest": "sha256:26421cc4a98a96f2125ae4650a4ce09f5fea29665448b3297afcf9a5bbf5b161",
+        "traceDigest": "sha256:b700cb24db4c4be13d6eb3f9662bf2a45ca103f58e102fc78b92304a69294adb",
+        "evidenceSha256": "sha256:8a9953845502a12a7ea15959528c7a2cfd37c61d3bda1765aaa1281d6d99ba42",
+        "traceSha256": "sha256:4b71e039b5d0d18bae06ab51cb14a58717ca28de5e0f5b02cb0270dcccdadd58"
+      },
+      {
+        "repetition": 2,
+        "runId": "physical-run-sha256:06d326ca5f4a8d145f158c1ebcfe718192a215700cf01f494dcef954407f36ad",
+        "scenario": "usb_disconnect_active",
+        "commit": "b902bd67504479152713c3760d046f7517f50baf",
+        "issueCode": "device_transport_lost",
+        "evidencePath": "docs/testing/phase-6d6/evidence/usb_disconnect_active-rep2-06d326ca5f4a8d14.json",
+        "tracePath": "docs/testing/phase-6d6/evidence/traces/usb_disconnect_active-rep2-06d326ca5f4a8d14.json",
+        "recordDigest": "sha256:7cc62109102ce103932fe9c1b126af813499dda32d4b579b315b3876f07ce62f",
+        "traceDigest": "sha256:823b51550957b6ffdcbf8a285f9cf3afa918a830e532ab5aeacc058b197ac700",
+        "evidenceSha256": "sha256:488ba3d04f06c7d6f9704d73db668295bbb092ae236b08f750233a3bd4e25ba3",
+        "traceSha256": "sha256:ffdff9bd8b98ce3203c76a765ff260ddb03449eddf430864db43721b331b542c"
+      }
+    ],
+    "root": [
+      {
+        "repetition": 1,
+        "runId": "physical-run-sha256:613a716a969787845df4f36bd7b0c0229e91cb93dce533153ddc83fc7e207bf6",
+        "scenario": "root_revocation",
+        "commit": "52a7b7de99e97c7ec00713225da63acca1a3b2a7",
+        "issueCode": "root_authority_revoked",
+        "evidencePath": "docs/testing/phase-6d6/evidence/root_revocation-rep1-613a716a96978784.json",
+        "tracePath": "docs/testing/phase-6d6/evidence/traces/root_revocation-rep1-613a716a96978784.json",
+        "recordDigest": "sha256:81fd74c5e27d21941c8c130f4b5813f0aba89efa54b0a2479c0580d0187dd4c7",
+        "traceDigest": "sha256:886cf76ec39cfbdc8bb3a6e764916e512cf219a6fdde2e9d804b74003269bf5a",
+        "evidenceSha256": "sha256:0a2f605a400d219cd20962925718763996b6871fa3820ef981cfd78cf14b080f",
+        "traceSha256": "sha256:dbeb5e97eab93b418f24b6dbb3c31c9a40be953548b17df4f6c5c7dce06d47d4"
+      },
+      {
+        "repetition": 2,
+        "runId": "physical-run-sha256:93e3ec65830aaf3a801cae58c62921839e2d262a442aa036b0300b0881d8d555",
+        "scenario": "root_revocation",
+        "commit": "52a7b7de99e97c7ec00713225da63acca1a3b2a7",
+        "issueCode": "root_authority_revoked",
+        "evidencePath": "docs/testing/phase-6d6/evidence/root_revocation-rep2-93e3ec65830aaf3a.json",
+        "tracePath": "docs/testing/phase-6d6/evidence/traces/root_revocation-rep2-93e3ec65830aaf3a.json",
+        "recordDigest": "sha256:bc53ada13fed0c8d6a7405b76997c412203567f4c82e2d2bd427d258497df3ff",
+        "traceDigest": "sha256:9976bbed8444a913053c5126ebe26c30a8e95cd65b955e24c52b9c28a0a979af",
+        "evidenceSha256": "sha256:bb2ca37e36683c656d72528d5f054de88d2e4c8c0dc0b6e945aa4907cc142137",
+        "traceSha256": "sha256:daef0330374a600c261a7c6ed42961b315eef65a70c21c1352a3021d0b17ebe5"
+      }
+    ],
+    "storage": [
+      {
+        "repetition": 1,
+        "runId": "physical-run-sha256:6bc3a3d2fa30b5738245e772e4ffb4a053781e3b860516cda9eea80e9e99141f",
+        "scenario": "low_storage",
+        "commit": "5e29e9afc17e8a4331d7cd2deb8f8fbb3f4fad7c",
+        "issueCode": "device_storage_exhausted",
+        "evidencePath": "docs/testing/phase-6d6/evidence/low_storage-rep1-6bc3a3d2fa30b573.json",
+        "tracePath": "docs/testing/phase-6d6/evidence/traces/low_storage-rep1-6bc3a3d2fa30b573.json",
+        "recordDigest": "sha256:0e1f0edf2e0ad43404b47679e121caf0c6978426c3b5f9c5c5ac5571415835cd",
+        "traceDigest": "sha256:81eeebf0ea6c0b441bdb2db2a08496e5dc72293463ae2d0a084423c240b46403",
+        "evidenceSha256": "sha256:f99ac6ccd15785eff4a1ba37c4028290c050c5a96589fa9ab534213b9c930ce6",
+        "traceSha256": "sha256:4c5ead266a589d8cd4360fe9f6fae0857e4e1bda5178d0164406672feee15d2a"
+      },
+      {
+        "repetition": 2,
+        "runId": "physical-run-sha256:bee30a868ee9b5551fc0c09f6d4cfaeb6cf782169532d845d6b4d1f4bb8e14f3",
+        "scenario": "low_storage",
+        "commit": "5e29e9afc17e8a4331d7cd2deb8f8fbb3f4fad7c",
+        "issueCode": "device_storage_exhausted",
+        "evidencePath": "docs/testing/phase-6d6/evidence/low_storage-rep2-bee30a868ee9b555.json",
+        "tracePath": "docs/testing/phase-6d6/evidence/traces/low_storage-rep2-bee30a868ee9b555.json",
+        "recordDigest": "sha256:9093825ce9ff383b799840094284a00fea712e5dcda66c51725e2b47f1225ac1",
+        "traceDigest": "sha256:afb273a2d85aaaa05c785d09e9b3b0c4128ababe001649512689d8b6e2352be6",
+        "evidenceSha256": "sha256:60cbd8ffc32921ccc89bc9a4e770b861b58ca5e4eff7c716c8d0ac78d46481cf",
+        "traceSha256": "sha256:01813f5cc5b7c646f021fc4aa068e18235140f0271b5198c2922b1ac06f695c2"
+      }
+    ],
+    "host_sleep": []
+  },
+  "digest": "sha256:66375a2021b8f2baf3336f13ad8df2504deef0b80871fdf4259a8651cc3f12c4"
+}

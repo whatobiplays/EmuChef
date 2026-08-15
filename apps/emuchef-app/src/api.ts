@@ -14,6 +14,9 @@ import type {
   ExecutionCapabilities,
   ExecutionEventBatch,
   ExecutionSnapshot,
+  Phase6d6LoadedProjection,
+  Phase6d6UiCaptureResult,
+  Phase6d6UiSmokeStatus,
   RealExecutionConfirmation,
   RealExecutionSnapshot,
   ReportExportResult,
@@ -113,6 +116,15 @@ export const api = {
     invoke<ExecutionCancellation>("cancel_simulated_execution", { executionHandle }),
   executionCapabilities: () =>
     invoke<ExecutionCapabilities>("get_execution_capabilities"),
+  phase6d6UiSmokeStatus: () =>
+    invoke<Phase6d6UiSmokeStatus>("phase6d6_ui_smoke_status"),
+  phase6d6LoadProjection: (bindingHandle: string) =>
+    invoke<Phase6d6LoadedProjection>("phase6d6_ui_smoke_load_projection", { bindingHandle }),
+  phase6d6Capture: (projectionHandle: string, uiRepetition: 1 | 2) =>
+    invoke<Phase6d6UiCaptureResult>("phase6d6_ui_smoke_capture", {
+      projectionHandle,
+      uiRepetition,
+    }),
   deviceQualification: (deviceHandle: string | null) =>
     invoke<DeviceQualificationSnapshot>("get_device_qualification", { deviceHandle }),
   checkDeviceRoot: (deviceHandle: string) =>

@@ -37,6 +37,7 @@ use crate::sidecar::SidecarState;
 
 const ROOT_AUTHORITY_FAILURE_AFTER_MUTATION_MARKER: &str =
     "Root authority could not be confirmed after earlier device changes may have occurred.";
+const CANCELLED_SAFE_BOUNDARY_TEXT: &str = "This action was cancelled at a safe boundary.";
 
 /// One opaque app handle mapped to the sidecar execution that implements it.
 #[derive(Clone, Debug)]
@@ -1126,6 +1127,11 @@ where
     } else {
         public["launchAction"] = Value::Null;
     }
+    let launch_action_present = public
+        .get("launchAction")
+        .and_then(Value::as_object)
+        .is_some();
+    attach_terminal_policy(&mut public, launch_action_present);
     Ok(public)
 }
 
@@ -1787,7 +1793,7 @@ fn validate_final_qualification(
     Ok(())
 }
 
-fn canonical_json_digest(value: &Value) -> Result<String, serde_json::Error> {
+pub(crate) fn canonical_json_digest(value: &Value) -> Result<String, serde_json::Error> {
     let canonical = canonicalize(value.clone());
     let bytes = serde_json::to_vec(&canonical)?;
     Ok(hex::encode(Sha256::digest(bytes)))
@@ -1898,8 +1904,132 @@ fn project_real_snapshot(mapping: &ExecutionMapping, report: &Value) -> Value {
         root_failure_count,
         root_marker,
     );
+    attach_terminal_policy(&mut public, false);
     sanitize_real_projection(&mut public, exact_serial);
     public
+}
+
+/// Project one development Phase 6D.6 UI-smoke terminal report through the
+/// same production real-execution projection used for retained executions.
+///
+/// The mapping is deliberately authority-free: it owns no sidecar execution,
+/// device target, review, or session authority. All recipes, step states,
+/// statuses, and issues come from the caller-provided fixed terminal report,
+/// and the returned DTO carries the same production terminal policy that a
+/// normal retained real execution would present.
+pub(crate) fn project_phase6d6_terminal(public_handle: &str, report: Value) -> Value {
+    let mapping = ExecutionMapping {
+        kind: ExecutionKind::Real,
+        public_handle: public_handle.to_string(),
+        sidecar_id: "phase6d6-ui-smoke".to_string(),
+        review_handle: "phase6d6-ui-smoke-review".to_string(),
+        review: ReviewedPlanSnapshot {
+            response: json!({ "plan": { "recipes": [], "steps": [] } }),
+            target: json!({}),
+            catalog_identity: Value::Null,
+            catalog_digest: String::new(),
+            plan_digest: String::new(),
+            device_handle: String::new(),
+            qualification_context: None,
+            platform_tools_identity: None,
+            created: std::time::Instant::now(),
+            last_access: std::time::Instant::now(),
+        },
+    };
+    project_real_snapshot(&mapping, &report)
+}
+
+/// Attach the production-authored terminal presentation policy to one public
+/// real-execution snapshot.
+///
+/// This is the single production source for authority-invalidation state,
+/// recovery-state identity, partial-change presentation classification, and
+/// available terminal controls. Development UI-smoke capture copies these
+/// values from the projected DTO instead of reconstructing a second catalog.
+pub(crate) fn attach_terminal_policy(public: &mut Value, launch_action_present: bool) {
+    if !is_terminal_status(public.get("status").and_then(Value::as_str)) {
+        return;
+    }
+    let mut policy = terminal_policy(public);
+    if launch_action_present {
+        if let Some(controls) = policy
+            .get_mut("availableControls")
+            .and_then(Value::as_array_mut)
+        {
+            controls.push(Value::String("launch_configured_app".to_string()));
+        }
+    }
+    public["terminalPolicy"] = policy;
+    if public.get("status").and_then(Value::as_str) == Some("cancelled") {
+        public["cancellation"] = json!({
+            "title": "Execution cancelled",
+            "message": CANCELLED_SAFE_BOUNDARY_TEXT,
+            "remediation": {
+                "kind": "generate_fresh_plan",
+                "title": "Execution cancelled",
+                "message": "Review the retained results, then create and review a fresh plan before another execution. The old execution cannot resume.",
+            },
+        });
+    }
+}
+
+/// Derive the terminal presentation policy from one already-projected public
+/// snapshot. Values are authored here, once, for both the normal real-terminal
+/// UI and the Phase 6D.6 qualification bridge.
+fn terminal_policy(snapshot: &Value) -> Value {
+    let status = snapshot
+        .get("status")
+        .and_then(Value::as_str)
+        .unwrap_or("running");
+    let completion = snapshot.get("completion");
+    let completed = completion
+        .and_then(|value| value.get("counts"))
+        .and_then(|value| value.get("completed"))
+        .and_then(Value::as_u64)
+        .unwrap_or(0);
+    let partial_possible = completion
+        .and_then(|value| value.get("partialChangesPossible"))
+        .and_then(Value::as_bool)
+        .unwrap_or(false);
+    let partial_presentation = if !partial_possible {
+        "none"
+    } else if completed > 0 {
+        "possible_partial_change"
+    } else {
+        "indeterminate"
+    };
+    let (recovery_state, authority_invalidated) = if status == "cancelled" {
+        ("fresh_review_required", false)
+    } else if status == "failed" {
+        let remediation_kind = snapshot
+            .get("errors")
+            .and_then(Value::as_array)
+            .and_then(|issues| issues.first())
+            .and_then(|issue| issue.get("remediation"))
+            .and_then(|remediation| remediation.get("kind"))
+            .and_then(Value::as_str)
+            .unwrap_or("view_report");
+        match remediation_kind {
+            "reconnect_device" => ("requalification_required", true),
+            "requalify_root" => ("root_requalification_required", true),
+            "generate_fresh_plan" | "repair_platform_tools" => {
+                ("fresh_qualification_required", true)
+            }
+            _ => ("fresh_review_required", false),
+        }
+    } else {
+        ("none", false)
+    };
+    let mut controls = vec!["export_report", "fresh_workflow"];
+    if matches!(status, "failed" | "cancelled" | "succeeded_with_warnings") {
+        controls.push("repair_setup");
+    }
+    json!({
+        "authorityInvalidated": authority_invalidated,
+        "recoveryState": recovery_state,
+        "partialChangePresentation": partial_presentation,
+        "availableControls": controls,
+    })
 }
 
 fn real_projection_facts(report: &Value) -> (u64, bool, u64, bool) {
@@ -2484,7 +2614,7 @@ fn project_step(step: &Value, exact_serial: &str) -> Value {
     let message = match status {
         "failed" => Some("This action did not complete."),
         "blocked" => Some("This action was blocked by required earlier work."),
-        "cancelled" => Some("This action was cancelled at a safe boundary."),
+        "cancelled" => Some(CANCELLED_SAFE_BOUNDARY_TEXT),
         _ => None,
     };
     json!({
@@ -5797,5 +5927,137 @@ mod tests {
         assert!(public.contains("artifact_not_ready"));
         assert!(!public.contains("private_cause"));
         assert!(!public.contains("private path"));
+    }
+
+    #[test]
+    fn phase6d6_terminal_projection_reports_possible_partial_change_for_completed_failure() {
+        let report = json!({
+            "status": "failed",
+            "errors": [{ "code": "device_transport_lost" }],
+            "recipes": [{
+                "recipeId": "phase6d6-qualification",
+                "name": "Reviewed device setup",
+                "status": "failed",
+                "steps": [
+                    { "name": "Prepare reviewed setup", "status": "succeeded" },
+                    { "name": "Apply reviewed changes", "status": "failed" },
+                    { "name": "Verify completed setup", "status": "pending" }
+                ]
+            }]
+        });
+        let projected = project_phase6d6_terminal("phase6d6-projection-test", report);
+        assert_eq!(projected["status"], "failed");
+        assert_eq!(projected["terminal"], true);
+        assert_eq!(
+            projected["errors"][0]["message"],
+            "The device connection was lost during execution."
+        );
+        assert_eq!(
+            projected["errors"][0]["remediation"]["title"],
+            "Reconnect and requalify"
+        );
+        let policy = &projected["terminalPolicy"];
+        assert_eq!(
+            policy["partialChangePresentation"],
+            "possible_partial_change"
+        );
+        assert_eq!(policy["recoveryState"], "requalification_required");
+        assert_eq!(policy["authorityInvalidated"], true);
+        let controls = policy["availableControls"].as_array().unwrap();
+        for expected in ["export_report", "repair_setup", "fresh_workflow"] {
+            assert!(
+                controls.contains(&Value::String(expected.to_string())),
+                "missing {expected}"
+            );
+        }
+        for forbidden in ["resume", "replay", "checkpoint", "ownership_transfer"] {
+            assert!(
+                !controls.contains(&Value::String(forbidden.to_string())),
+                "forbidden {forbidden}"
+            );
+        }
+        assert_eq!(projected["completion"]["counts"]["pending"], 1);
+    }
+
+    #[test]
+    fn phase6d6_terminal_projection_reports_indeterminate_without_completed_work() {
+        let report = json!({
+            "status": "failed",
+            "errors": [{ "code": "operation_timed_out" }],
+            "recipes": [{
+                "recipeId": "phase6d6-qualification",
+                "name": "Reviewed device setup",
+                "status": "failed",
+                "steps": [
+                    { "name": "Apply reviewed changes", "status": "failed" },
+                    { "name": "Verify completed setup", "status": "pending" }
+                ]
+            }]
+        });
+        let projected = project_phase6d6_terminal("phase6d6-projection-test", report);
+        assert_eq!(
+            projected["terminalPolicy"]["partialChangePresentation"],
+            "indeterminate"
+        );
+        assert_eq!(
+            projected["terminalPolicy"]["recoveryState"],
+            "fresh_qualification_required"
+        );
+        assert_eq!(projected["terminalPolicy"]["authorityInvalidated"], true);
+        assert_eq!(projected["completion"]["counts"]["completed"], 0);
+        assert_eq!(projected["completion"]["counts"]["pending"], 1);
+    }
+
+    #[test]
+    fn phase6d6_terminal_projection_attaches_production_cancellation_guidance() {
+        let report = json!({
+            "status": "cancelled",
+            "recipes": [{
+                "recipeId": "phase6d6-qualification",
+                "name": "Reviewed device setup",
+                "status": "cancelled",
+                "steps": [
+                    { "name": "Prepare reviewed setup", "status": "succeeded" },
+                    { "name": "Apply reviewed changes", "status": "cancelled" },
+                    { "name": "Verify completed setup", "status": "pending" }
+                ]
+            }]
+        });
+        let projected = project_phase6d6_terminal("phase6d6-projection-test", report);
+        assert_eq!(projected["cancellation"]["title"], "Execution cancelled");
+        assert_eq!(
+            projected["cancellation"]["message"],
+            "This action was cancelled at a safe boundary."
+        );
+        assert!(projected["cancellation"]["remediation"]["message"]
+            .as_str()
+            .unwrap()
+            .contains("The old execution cannot resume."));
+        assert_eq!(
+            projected["terminalPolicy"]["recoveryState"],
+            "fresh_review_required"
+        );
+        assert_eq!(projected["terminalPolicy"]["authorityInvalidated"], false);
+        assert_eq!(
+            projected["terminalPolicy"]["partialChangePresentation"],
+            "possible_partial_change"
+        );
+        assert_eq!(projected["completion"]["counts"]["pending"], 1);
+    }
+
+    #[test]
+    fn terminal_policy_adds_launch_control_only_when_attached() {
+        let report = json!({ "status": "succeeded", "recipes": [] });
+        let mut projected = project_phase6d6_terminal("phase6d6-projection-test", report);
+        let initial = projected["terminalPolicy"]["availableControls"]
+            .as_array()
+            .unwrap()
+            .clone();
+        assert!(!initial.contains(&Value::String("launch_configured_app".to_string())));
+        attach_terminal_policy(&mut projected, true);
+        let attached = projected["terminalPolicy"]["availableControls"]
+            .as_array()
+            .unwrap();
+        assert!(attached.contains(&Value::String("launch_configured_app".to_string())));
     }
 }

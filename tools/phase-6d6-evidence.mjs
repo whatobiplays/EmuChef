@@ -8,7 +8,7 @@
  * schema, sanitization, and runbook without touching ADB; only a complete
  * mandatory matrix of two passing repetitions is allowed to report `complete: true`.
  */
-import { existsSync, readdirSync, readFileSync } from "node:fs";
+import { existsSync, readdirSync, readFileSync, writeFileSync } from "node:fs";
 import { createHash } from "node:crypto";
 import path from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
@@ -27,6 +27,14 @@ export const UI_SMOKE_SCENARIO = CHECKED_IN_MANIFEST.uiSmokeScenario;
 export const UI_SMOKE_REQUIRED_REPETITIONS = CHECKED_IN_MANIFEST.uiSmokeRequiredRepetitions;
 export const UI_SMOKE_SUBCASES = CHECKED_IN_MANIFEST.uiSmokeSubcases;
 export const UI_SMOKE_CONTRACTS = CHECKED_IN_MANIFEST.uiSmokeContracts;
+export const UI_BINDING_INDEX_SCHEMA_VERSION = 1;
+export const UI_BINDING_INDEX_RELATIVE_PATH = "docs/testing/phase-6d6/ui-binding-index.json";
+export const UI_BINDING_INDEX_SOURCES = [
+  "docs/testing/phase-6d6/scenario-manifest.json",
+  "docs/testing/phase-6d6/evidence-schema.json",
+  "apps/emuchef-app/src-tauri/src/execution.rs",
+  "tools/phase-6d6-evidence.mjs",
+];
 const ROOT_PREFIX_ALLOWLIST = "/data/data/com.emuchef.fixture/emuchef-qualification-data/,/data/user/0/com.emuchef.fixture/emuchef-qualification-user/";
 const MIN_STORAGE_INITIAL_FREE_KIB = 4 * 1024 * 1024;
 const RECOVERY_RESERVE_KIB = 1024 * 1024;
@@ -999,14 +1007,127 @@ function validateSchemaContract(schema) {
   inspectPatterns(schema);
 }
 
-/** Run the host-only validator used by CI and local qualification preparation. */
-export function validateRepositoryContract(args = process.argv.slice(2)) {
+function defaultEvidenceDirectory() {
+  return path.join(repositoryRoot(), "docs/testing/phase-6d6/evidence");
+}
+
+function rawSha256(file) {
+  return `sha256:${createHash("sha256").update(readFileSync(file)).digest("hex")}`;
+}
+
+/**
+ * Resolve one record-relative evidence or trace path beneath an overridable
+ * evidence directory while preserving the committed `traces/` layout. The
+ * resolved file must never escape the evidence directory.
+ */
+function rawPathFor(evidenceDir, recordPath) {
+  const relative = path.relative(
+    defaultEvidenceDirectory(),
+    path.resolve(repositoryRoot(), recordPath),
+  );
+  if (relative.startsWith("..") || path.isAbsolute(relative)) {
+    fail(`evidence path escapes the Phase 6D.6 evidence directory: ${recordPath}`);
+  }
+  return path.join(evidenceDir, relative);
+}
+
+/**
+ * Derive the deterministic UI-smoke binding set from already-validated
+ * physical records. Only passing records whose scenario category and observed
+ * issue match the authoritative uiSmokeContracts entry become eligible; no
+ * authored UI presentation text is copied into the index.
+ */
+export function eligibleUiBindings(records) {
+  const bindings = Object.fromEntries(UI_SMOKE_SUBCASES.map((name) => [name, []]));
+  for (const record of records) {
+    if (record.outcome !== "passed") continue;
+    for (const subcase of UI_SMOKE_SUBCASES) {
+      const allowedScenarios = UI_SMOKE_PHYSICAL_SCENARIOS[subcase];
+      const contract = UI_SMOKE_CONTRACTS[subcase];
+      if (!allowedScenarios || !allowedScenarios.has(record.scenario)) continue;
+      if (!contract.allowedIssueCodes.some((code) => code === record.observedIssueCode)) continue;
+      bindings[subcase].push({
+        repetition: record.repetition,
+        runId: record.runId,
+        scenario: record.scenario,
+        commit: record.commit,
+        issueCode: record.observedIssueCode,
+        evidencePath: record.evidencePath,
+        tracePath: record.tracePath,
+        recordDigest: record.recordDigest,
+        traceDigest: record.traceDigest,
+      });
+    }
+  }
+  for (const subcase of UI_SMOKE_SUBCASES) {
+    bindings[subcase].sort((left, right) =>
+      left.repetition - right.repetition
+      || String(left.scenario).localeCompare(String(right.scenario))
+      || String(left.runId).localeCompare(String(right.runId)));
+  }
+  return bindings;
+}
+
+/** Build the canonical self-digested UI-binding index for the current tree. */
+export function deriveUiBindingIndex({ records, evidenceDir, sourceRoot }) {
+  const bindings = eligibleUiBindings(records);
+  const rawBindings = {};
+  for (const subcase of UI_SMOKE_SUBCASES) {
+    rawBindings[subcase] = bindings[subcase].map((binding) => ({
+      ...binding,
+      evidenceSha256: rawSha256(rawPathFor(evidenceDir, binding.evidencePath)),
+      traceSha256: rawSha256(rawPathFor(evidenceDir, binding.tracePath)),
+    }));
+  }
+  const index = {
+    schemaVersion: UI_BINDING_INDEX_SCHEMA_VERSION,
+    sourceDigests: Object.fromEntries(
+      UI_BINDING_INDEX_SOURCES.map((relative) => [relative, rawSha256(path.join(sourceRoot, relative))]),
+    ),
+    bindings: rawBindings,
+  };
+  index.digest = `sha256:${canonicalDigest(indexWithoutDigest(index))}`;
+  return index;
+}
+
+function indexWithoutDigest(index) {
+  const copy = structuredClone(index);
+  delete copy.digest;
+  return copy;
+}
+
+/**
+ * Verify one checked-in UI-binding index against the current validated
+ * records and source files. Any missing, stale, tampered, or manually edited
+ * binding is rejected; only explicit regeneration may write the index.
+ */
+export function verifyUiBindingIndex({ index, records, evidenceDir, sourceRoot }) {
+  assertObject(index, "ui binding index");
+  if (index.schemaVersion !== UI_BINDING_INDEX_SCHEMA_VERSION) {
+    fail("ui-binding-index schema version is invalid; regenerate with --regenerate-ui-binding-index");
+  }
+  const expected = deriveUiBindingIndex({ records, evidenceDir, sourceRoot });
+  if (!equalJson(indexWithoutDigest(index), indexWithoutDigest(expected))) {
+    fail("ui-binding-index is stale or tampered; regenerate with --regenerate-ui-binding-index");
+  }
+  if (index.digest !== expected.digest) {
+    fail("ui-binding-index self digest does not match its content; regenerate with --regenerate-ui-binding-index");
+  }
+  return true;
+}
+
+/**
+ * Run the base host-only Phase 6D.6 validator without requiring or verifying
+ * the derived UI-binding index. This is the authority for physical records and
+ * the precondition for any explicit index regeneration.
+ */
+export function validateBaseRepositoryContract(args = process.argv.slice(2)) {
   const root = repositoryRoot();
   const manifestPath = commandOption(args, "--manifest", path.join(root, "docs/testing/phase-6d6/scenario-manifest.json"));
   const schemaPath = commandOption(args, "--schema", path.join(root, "docs/testing/phase-6d6/evidence-schema.json"));
   const templatePath = commandOption(args, "--template", path.join(root, "docs/testing/phase-6d6/evidence-template.json"));
   const runbookPath = commandOption(args, "--runbook", path.join(root, "docs/manual/phase-6d6-physical-interruption-qualification.md"));
-  const evidenceDirectory = commandOption(args, "--evidence-dir", path.join(root, "docs/testing/phase-6d6/evidence"));
+  const evidenceDirectory = commandOption(args, "--evidence-dir", defaultEvidenceDirectory());
   const projectionSourcePath = path.join(root, "apps/emuchef-app/src-tauri/src/execution.rs");
   const manifest = JSON.parse(readFileSync(manifestPath, "utf8"));
   assertKeys(manifest, ["schemaVersion", "scenarios", "mandatoryScenarios", "conditionalScenarios", "requiredRepetitions", "uiSmokeScenario", "uiSmokeRequiredRepetitions", "uiSmokeSubcases", "uiSmokeContracts", "legacyAuditContracts", "scenarioContracts", "gates", "outcomes"], "scenario manifest");
@@ -1033,16 +1154,61 @@ export function validateRepositoryContract(args = process.argv.slice(2)) {
       records.push(JSON.parse(readFileSync(path.join(evidenceDirectory, file), "utf8")));
     }
   }
-  return { ...validateEvidenceManifest(records), recordCount: records.length };
+  return { ...validateEvidenceManifest(records), recordCount: records.length, records };
+}
+
+/**
+ * Run base validation and then require the checked-in UI-binding index to be
+ * present, deterministic, self-digested, source-digested, and raw-record/trace
+ * digested. This is the default read-only command used by CI and preflight.
+ */
+export function validateRepositoryContract(args = process.argv.slice(2)) {
+  const base = validateBaseRepositoryContract(args);
+  const root = repositoryRoot();
+  const indexPath = commandOption(args, "--index", path.join(root, UI_BINDING_INDEX_RELATIVE_PATH));
+  const evidenceDirectory = commandOption(args, "--evidence-dir", defaultEvidenceDirectory());
+  const index = JSON.parse(readFileSync(indexPath, "utf8"));
+  verifyUiBindingIndex({
+    index,
+    records: base.records,
+    evidenceDir: evidenceDirectory,
+    sourceRoot: root,
+  });
+  return base;
 }
 
 if (process.argv[1] && import.meta.url === pathToFileURL(path.resolve(process.argv[1])).href) {
   try {
-    const result = validateRepositoryContract();
-    if (result.complete) {
-      process.stdout.write(`Phase 6D.6 evidence contract complete (${result.recordCount} records).\n`);
+    const args = process.argv.slice(2);
+    if (args.includes("--regenerate-ui-binding-index")) {
+      const base = validateBaseRepositoryContract(args);
+      const root = repositoryRoot();
+      const indexPath = commandOption(args, "--index", path.join(root, UI_BINDING_INDEX_RELATIVE_PATH));
+      const evidenceDirectory = commandOption(args, "--evidence-dir", defaultEvidenceDirectory());
+      const index = deriveUiBindingIndex({
+        records: base.records,
+        evidenceDir: evidenceDirectory,
+        sourceRoot: root,
+      });
+      writeFileSync(indexPath, `${JSON.stringify(index, null, 2)}\n`, "utf8");
+      verifyUiBindingIndex({
+        index: JSON.parse(readFileSync(indexPath, "utf8")),
+        records: base.records,
+        evidenceDir: evidenceDirectory,
+        sourceRoot: root,
+      });
+      if (base.complete) {
+        process.stdout.write(`Phase 6D.6 ui-binding-index regenerated and verified (${base.recordCount} records; evidence contract complete).\n`);
+      } else {
+        process.stdout.write(`Phase 6D.6 ui-binding-index regenerated and verified (${base.recordCount} records; evidence contract valid but incomplete).\n`);
+      }
     } else {
-      process.stdout.write(`Phase 6D.6 evidence contract valid but incomplete (${result.missing.length} mandatory physical repetitions and ${result.missingUiSmoke.length} UI-smoke repetitions missing).\n`);
+      const result = validateRepositoryContract(args);
+      if (result.complete) {
+        process.stdout.write(`Phase 6D.6 evidence contract complete (${result.recordCount} records).\n`);
+      } else {
+        process.stdout.write(`Phase 6D.6 evidence contract valid but incomplete (${result.missing.length} mandatory physical repetitions and ${result.missingUiSmoke.length} UI-smoke repetitions missing).\n`);
+      }
     }
   } catch (error) {
     process.stderr.write(`${error instanceof Error ? error.message : String(error)}\n`);

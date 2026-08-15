@@ -415,7 +415,10 @@ test("real execution is default-disabled with compile-time-only enablement", () 
   const realExecutionScriptNames = Object.entries(scripts)
     .filter(([, command]) => command.includes("real-execution"))
     .map(([name]) => name);
-  assert.deepEqual(new Set(realExecutionScriptNames), new Set(["tauri:dev:real"]));
+  assert.deepEqual(
+    new Set(realExecutionScriptNames),
+    new Set(["tauri:dev:real", "tauri:dev:phase6d6-ui-smoke"]),
+  );
 
   assert.match(
     app,
@@ -685,4 +688,73 @@ test("recovery persistence is fixed-path, strict, and schema-sensitive", () => {
   assert.match(frontend, />Not now<\/button>/);
   assert.match(frontend, /onDismiss=\{\(\) => dialogController\.settle\(activeDialog\.id, "not-now"\)\}/);
   assert.ok(frontend.indexOf("await offerRecovery(session.recovery)") < frontend.indexOf("setStartupReady(true)"));
+});
+
+test("Phase 6D.6 UI-smoke qualification is gate-first and exposes only opaque handles", () => {
+  const bridge = read("src-tauri/src/phase6d6_ui_smoke.rs");
+  const lib = read("src-tauri/src/lib.rs");
+  const api = read("src/api.ts");
+  const main = read("src/main.tsx");
+  const shell = read("src/Phase6d6UiSmoke.tsx");
+  const packageJson = read("package.json");
+  const scripts = JSON.parse(packageJson).scripts;
+
+  assert.equal((bridge.match(/#\[tauri::command\]/g) ?? []).length, 3);
+  assert.match(bridge, /EMUCHEF_RUN_REAL_ADB_TESTS/);
+  assert.match(bridge, /EMUCHEF_PHASE_6D6_UI_SMOKE/);
+  assert.match(bridge, /cfg!\(debug_assertions\)/);
+  assert.match(bridge, /cfg!\(feature = "real-execution"\)/);
+  assert.doesNotMatch(
+    bridge,
+    /runtime_request|startExecution|reserve_start|ExecutorRunner|listAdbDevices|start_real_execution|get_real_execution|cancel_real_execution|launch_configured_app/,
+  );
+  assert.doesNotMatch(bridge, /std::env::args|URLSearchParams|localStorage|sessionStorage/);
+
+  assert.match(lib, /phase6d6_ui_smoke::phase6d6_ui_smoke_status,/);
+  assert.match(lib, /phase6d6_ui_smoke::phase6d6_ui_smoke_load_projection,/);
+  assert.match(lib, /phase6d6_ui_smoke::phase6d6_ui_smoke_capture,/);
+  assert.match(lib, /app\.manage\(phase6d6_ui_smoke::Phase6d6UiSmokeStore::default\(\)\)/);
+
+  const statusApi = sourceSlice(api, "phase6d6UiSmokeStatus:", "\n  phase6d6LoadProjection:");
+  const loadApi = sourceSlice(api, "phase6d6LoadProjection:", "\n  phase6d6Capture:");
+  const captureApi = sourceSlice(api, "phase6d6Capture:", "\n  deviceQualification:");
+  assert.match(statusApi, /invoke<Phase6d6UiSmokeStatus>\("phase6d6_ui_smoke_status"\)/);
+  assert.match(
+    loadApi,
+    /invoke<Phase6d6LoadedProjection>\("phase6d6_ui_smoke_load_projection", \{ bindingHandle \}\)/,
+  );
+  assert.match(
+    captureApi,
+    /invoke<Phase6d6UiCaptureResult>\("phase6d6_ui_smoke_capture", \{\s*projectionHandle,\s*uiRepetition,\s*\}\)/,
+  );
+  assert.doesNotMatch(
+    `${statusApi}\n${loadApi}\n${captureApi}`,
+    /\b(?:path|serial|issueCode|scenario|buildDigest|recordDigest|traceDigest|runId|evidencePath|commit)\b/i,
+  );
+
+  assert.match(main, /api\s*\.phase6d6UiSmokeStatus\(\)/);
+  assert.ok(main.indexOf("phase6d6UiSmokeStatus") < main.indexOf("<App"));
+  assert.match(
+    main,
+    /status\.enabled \? \{ kind: "qualification", status \} : \{ kind: "app" \}/,
+  );
+  assert.match(main, /<Phase6d6UiSmoke status=\{state\.status\} \/>/);
+  assert.match(main, /EmuChef could not start safely/);
+  assert.doesNotMatch(main, /process\.env|import\.meta\.env|localStorage|sessionStorage/);
+
+  assert.match(shell, /api\.phase6d6Capture\(loaded\.projectionHandle, uiRepetition\)/);
+  assert.match(shell, /data-development-qualification="phase6d6-ui-smoke"/);
+  assert.doesNotMatch(
+    shell,
+    /startRealExecution|launchConfiguredApp|executionCapabilities|pollDevices|probeDevice|createReview/,
+  );
+
+  const qualificationScript = scripts["tauri:dev:phase6d6-ui-smoke"];
+  assert.match(qualificationScript, /phase6d6:ui-smoke:preflight/);
+  assert.ok(qualificationScript.includes("EMUCHEF_RUN_REAL_ADB_TESTS=1"));
+  assert.ok(qualificationScript.includes("EMUCHEF_PHASE_6D6_UI_SMOKE=1"));
+  assert.ok(commandFeatures(qualificationScript).has("real-execution"));
+  assert.equal(scripts["tauri:dev:real"].includes("EMUCHEF_PHASE_6D6_UI_SMOKE"), false);
+  assert.match(scripts["phase6d6:ui-binding-index"], /--regenerate-ui-binding-index/);
+  assert.match(scripts["phase6d6:ui-smoke:preflight"], /phase-6d6-evidence\.mjs/);
 });

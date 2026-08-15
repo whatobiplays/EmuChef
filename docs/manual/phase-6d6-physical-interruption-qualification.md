@@ -389,6 +389,44 @@ artifact-bound operator observation. Missing, duplicated, copied, or
 inconsistent subcases keep closure blocked. This is not packaged-GUI or release
 qualification.
 
+## Development UI-smoke binding and capture
+
+The development build provides a gated, evidence-bound terminal projection so
+an operator can later run the mandatory UI smoke without replaying a physical
+fault through the GUI. The checked-in
+`docs/testing/phase-6d6/ui-binding-index.json` is derived metadata: it lists
+only UI-contract-compatible passing physical bindings plus raw evidence/trace
+and source digests. It is not qualification evidence and contains no authored
+UI strings.
+
+Validate the repository read-only, or regenerate the index explicitly after
+the base evidence contract passes:
+
+```sh
+node tools/phase-6d6-evidence.mjs
+node tools/phase-6d6-evidence.mjs --regenerate-ui-binding-index
+npm --prefix apps/emuchef-app run phase6d6:ui-smoke:preflight
+```
+
+The qualification development app requires a debug build, the
+`real-execution` Cargo feature, `EMUCHEF_RUN_REAL_ADB_TESTS=1`, and the exact
+`EMUCHEF_PHASE_6D6_UI_SMOKE=1` opt-in:
+
+```sh
+npm --prefix apps/emuchef-app run tauri:dev:phase6d6-ui-smoke
+```
+
+In the qualification shell, select a subcase and physical repetition, load the
+projection (no device or ADB is required), verify the normal terminal UI, and
+capture the canonical sanitized `ui_state_capture` under
+`docs/testing/phase-6d6/evidence/ui/`. Capture returns the artifact path and
+digest, the backend run/trace binding, the trusted development-build identity,
+and a deterministic `ui-subrun-sha256:*` identity. The operator observation and
+the final `ui_smoke_composite` record remain deliberate manual evidence steps
+and are never created by the application. No UI-smoke repetition has been run
+or counted yet, and no compatible host-sleep binding exists, so host sleep is
+shown unavailable.
+
 ## Evidence and closure
 
 The harness writes only sanitized JSON under

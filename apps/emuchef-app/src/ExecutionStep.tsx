@@ -3,6 +3,7 @@ import type {
   ExecutionStatus,
   RecipeExecutionStatus,
   StepExecutionStatus,
+  TerminalControl,
 } from "./types";
 import type { ExecutionWorkflowState } from "./workflow";
 
@@ -120,6 +121,9 @@ export function ExecutionStep({
   const { snapshot } = execution;
   const terminal = execution.kind === "terminal";
   const counts = snapshot.completion.counts;
+  const terminalPolicy = !snapshot.simulated ? snapshot.terminalPolicy : undefined;
+  const hasControl = (control: string): boolean =>
+    !terminalPolicy || terminalPolicy.availableControls.includes(control as TerminalControl);
   const completedCount = counts.completed
     + counts.skipped
     + counts.blocked
@@ -185,6 +189,18 @@ export function ExecutionStep({
             : `Device changes may have occurred before this ${EXECUTION_STATUS_LABELS[snapshot.status].toLowerCase()} result.`}
           {" "}The result remains {EXECUTION_STATUS_LABELS[snapshot.status].toLowerCase()}; EmuChef cannot determine whether a failed operation changed the device and does not infer rollback.
         </p>
+      )}
+      {!snapshot.simulated && snapshot.cancellation && (
+        <section aria-label="Cancellation guidance" className="result-card-list">
+          <article className="result-card result-cancelled">
+            <h3>{snapshot.cancellation.title}</h3>
+            <p>{snapshot.cancellation.message}</p>
+            <small>
+              <strong>{snapshot.cancellation.remediation.title}:</strong>{" "}
+              {snapshot.cancellation.remediation.message}
+            </small>
+          </article>
+        </section>
       )}
       {(snapshot.warnings.length > 0 || snapshot.errors.length > 0) && (
         <section aria-label="Run notices" className="result-card-list">
@@ -269,18 +285,20 @@ export function ExecutionStep({
         </>
       ) : (
         <div className="button-row">
-          <button
-            className="secondary"
-            disabled={reportState === "exporting"}
-            onClick={onExportReport}
-          >
-            {reportState === "exporting"
-              ? "Exporting…"
-              : reportState === "saved"
-                ? "Report saved"
-                : "Export report"}
-          </button>
-          {snapshot.status !== "succeeded" && (
+          {hasControl("export_report") && (
+            <button
+              className="secondary"
+              disabled={reportState === "exporting"}
+              onClick={onExportReport}
+            >
+              {reportState === "exporting"
+                ? "Exporting…"
+                : reportState === "saved"
+                  ? "Report saved"
+                  : "Export report"}
+            </button>
+          )}
+          {snapshot.status !== "succeeded" && hasControl("repair_setup") && (
             <div className="execution-repair-action">
               <button
                 aria-describedby="execution-repair-explanation"
@@ -299,7 +317,7 @@ export function ExecutionStep({
               </p>
             </div>
           )}
-          {!snapshot.simulated && snapshot.launchAction && (
+          {!snapshot.simulated && snapshot.launchAction && hasControl("launch_configured_app") && (
             <button
               disabled={launchState === "launching" || launchState === "launched"}
               onClick={onLaunchConfiguredApp}
@@ -311,13 +329,15 @@ export function ExecutionStep({
                   : snapshot.launchAction.label}
             </button>
           )}
-          <button className="secondary" onClick={onReturn}>
-            {execution.mode === "real"
-              ? "Start a fresh workflow"
-              : matchesFreshReviewRequirement(snapshot.status)
-                ? "View previous review"
-                : "Return to Review"}
-          </button>
+          {hasControl("fresh_workflow") && (
+            <button className="secondary" onClick={onReturn}>
+              {execution.mode === "real"
+                ? "Start a fresh workflow"
+                : matchesFreshReviewRequirement(snapshot.status)
+                  ? "View previous review"
+                  : "Return to Review"}
+            </button>
+          )}
         </div>
       )}
     </>

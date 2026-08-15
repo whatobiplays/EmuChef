@@ -1,5 +1,15 @@
 import assert from "node:assert/strict";
-import { readFileSync } from "node:fs";
+import { execFileSync } from "node:child_process";
+import {
+  copyFileSync,
+  mkdirSync,
+  mkdtempSync,
+  readFileSync,
+  rmSync,
+  writeFileSync,
+} from "node:fs";
+import { tmpdir } from "node:os";
+import path from "node:path";
 import test from "node:test";
 import { fileURLToPath } from "node:url";
 
@@ -12,14 +22,20 @@ import {
   UI_SMOKE_SCENARIO,
   UI_SMOKE_SUBCASES,
   UI_SMOKE_CONTRACTS,
+  UI_BINDING_INDEX_SOURCES,
   canonicalDigest,
+  deriveUiBindingIndex,
+  eligibleUiBindings,
   evidenceRecordDigest,
   scenarioContractFor,
+  validateBaseRepositoryContract,
   validateEvidenceManifest,
   validateEvidenceRecord,
   validateGateEnvironment,
+  validateRepositoryContract,
   validateRunbookCommands,
   validateUiSmokeRecord,
+  verifyUiBindingIndex,
 } from "./phase-6d6-evidence.mjs";
 
 const BASE_RECORD = {
@@ -1510,5 +1526,188 @@ test("UI smoke requires matching artifacts, backend bindings, safe controls, and
     mutate(record);
     record.recordDigest = evidenceRecordDigest(record);
     assert.throws(() => validateUiSmokeRecord(record), /unsafe|unsanitized/i);
+  }
+});
+
+const REPOSITORY_ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
+const CHECKED_IN_EVIDENCE_DIR = path.join(REPOSITORY_ROOT, "docs/testing/phase-6d6/evidence");
+
+function checkedInRecordObjects() {
+  const names = [
+    "cancellation_active-rep1-8f8cbaf7ec6b8d60.json",
+    "cancellation_active-rep2-d8136441b847204b.json",
+    "cancellation_boundary-rep1-cbd85220cf24b2cf.json",
+    "cancellation_boundary-rep2-e9d48d0a2a78f722.json",
+    "usb_disconnect_active-rep1-be0ba89089556f91.json",
+    "usb_disconnect_active-rep2-06d326ca5f4a8d14.json",
+    "root_revocation-rep1-613a716a96978784.json",
+    "root_revocation-rep2-93e3ec65830aaf3a.json",
+    "low_storage-rep1-6bc3a3d2fa30b573.json",
+    "low_storage-rep2-bee30a868ee9b555.json",
+    "usb_disconnect_boundary-rep1-9d95b0a1f7328a59.json",
+    "usb_disconnect_boundary-rep2-a59a7f939d79d6a0.json",
+    "operation_timeout-rep1-69ce0c5bc594a244.json",
+    "operation_timeout-rep2-4baf257a04838450.json",
+  ];
+  return names.map((name) => JSON.parse(readFileSync(path.join(CHECKED_IN_EVIDENCE_DIR, name), "utf8")));
+}
+
+function copyEvidenceTree(target) {
+  const targetEvidence = path.join(target, "evidence");
+  mkdirSync(path.join(targetEvidence, "traces"), { recursive: true });
+  const records = checkedInRecordObjects();
+  for (const record of records) {
+    copyFileSync(
+      path.join(CHECKED_IN_EVIDENCE_DIR, path.basename(record.evidencePath)),
+      path.join(targetEvidence, path.basename(record.evidencePath)),
+    );
+    copyFileSync(
+      path.join(CHECKED_IN_EVIDENCE_DIR, "traces", path.basename(record.tracePath)),
+      path.join(targetEvidence, "traces", path.basename(record.tracePath)),
+    );
+  }
+  return records;
+}
+
+test("ui binding index eligibility is exact and excludes incompatible physical evidence", () => {
+  const bindings = eligibleUiBindings(checkedInRecordObjects());
+  assert.deepEqual(Object.keys(bindings).sort(), [...UI_SMOKE_SUBCASES].sort());
+  assert.equal(bindings.cancellation.length, 4);
+  assert.equal(bindings.transport.length, 2);
+  assert.deepEqual(new Set(bindings.transport.map((binding) => binding.scenario)), new Set(["usb_disconnect_active"]));
+  assert.ok(bindings.transport.every((binding) => binding.issueCode === "device_transport_lost"));
+  assert.ok(bindings.transport.every((binding) => /be0ba89089556f91|06d326ca5f4a8d14/.test(binding.runId)));
+  assert.equal(bindings.root.length, 2);
+  assert.equal(bindings.storage.length, 2);
+  assert.equal(bindings.host_sleep.length, 0);
+  assert.ok(bindings.transport.every((binding) => !binding.evidencePath.includes("boundary")));
+  assert.ok(bindings.host_sleep.every((binding) => binding.scenario !== "operation_timeout"));
+});
+
+test("ui binding index derivation is deterministic and contains no authored UI strings", () => {
+  const records = checkedInRecordObjects();
+  const options = { records, evidenceDir: CHECKED_IN_EVIDENCE_DIR, sourceRoot: REPOSITORY_ROOT };
+  const first = deriveUiBindingIndex(options);
+  const second = deriveUiBindingIndex(options);
+  assert.equal(JSON.stringify(first), JSON.stringify(second));
+  assert.match(first.digest, /^sha256:[0-9a-f]{64}$/);
+  assert.deepEqual(Object.keys(first.sourceDigests).sort(), [...UI_BINDING_INDEX_SOURCES].sort());
+  assert.deepEqual(Object.keys(first.bindings).sort(), [...UI_SMOKE_SUBCASES].sort());
+  const serialized = JSON.stringify(first);
+  for (const contract of Object.values(UI_SMOKE_CONTRACTS)) {
+    assert.equal(serialized.includes(contract.authoredTitle), false);
+    assert.equal(serialized.includes(contract.authoredIssueText), false);
+    assert.equal(serialized.includes(contract.authoredRemediation), false);
+  }
+});
+
+test("checked-in ui binding index verifies against the current evidence contract", () => {
+  const records = checkedInRecordObjects();
+  const indexPath = path.join(REPOSITORY_ROOT, "docs/testing/phase-6d6/ui-binding-index.json");
+  const index = JSON.parse(readFileSync(indexPath, "utf8"));
+  assert.doesNotThrow(() => verifyUiBindingIndex({
+    index,
+    records,
+    evidenceDir: CHECKED_IN_EVIDENCE_DIR,
+    sourceRoot: REPOSITORY_ROOT,
+  }));
+});
+
+test("ui binding index rejects tampering and stale source digests", () => {
+  const records = checkedInRecordObjects();
+  const options = { records, evidenceDir: CHECKED_IN_EVIDENCE_DIR, sourceRoot: REPOSITORY_ROOT };
+  const good = deriveUiBindingIndex(options);
+
+  const tampered = structuredClone(good);
+  tampered.bindings.transport[0].runId = `physical-run-sha256:${"a".repeat(64)}`;
+  assert.throws(
+    () => verifyUiBindingIndex({ index: tampered, ...options }),
+    /stale|tampered|digest/i,
+  );
+
+  const stale = structuredClone(good);
+  stale.sourceDigests[UI_BINDING_INDEX_SOURCES[0]] = `sha256:${"0".repeat(64)}`;
+  assert.throws(
+    () => verifyUiBindingIndex({ index: stale, ...options }),
+    /stale|tampered|digest/i,
+  );
+});
+
+test("ui binding index rejects raw evidence or trace digest mismatch", () => {
+  const temp = mkdtempSync(path.join(tmpdir(), "emuchef-index-"));
+  try {
+    const records = copyEvidenceTree(temp);
+    const tempEvidence = path.join(temp, "evidence");
+    const options = { records, evidenceDir: tempEvidence, sourceRoot: REPOSITORY_ROOT };
+    const good = deriveUiBindingIndex(options);
+    assert.doesNotThrow(() => verifyUiBindingIndex({ index: good, ...options }));
+
+    const transport = good.bindings.transport[0];
+    writeFileSync(path.join(tempEvidence, path.basename(transport.evidencePath)), "{\"tampered\":true}\n");
+    assert.throws(
+      () => verifyUiBindingIndex({ index: good, ...options }),
+      /stale|tampered|digest/i,
+    );
+  } finally {
+    rmSync(temp, { recursive: true, force: true });
+  }
+});
+
+test("base validation separates evidence validation from binding-index verification", () => {
+  const base = validateBaseRepositoryContract([]);
+  assert.equal(typeof base.complete, "boolean");
+  assert.ok(Array.isArray(base.records));
+  assert.ok(base.recordCount > 0);
+  const full = validateRepositoryContract([]);
+  assert.equal(full.complete, base.complete);
+  assert.equal(full.recordCount, base.recordCount);
+});
+
+test("index regeneration refuses invalid evidence and repairs a stale or missing index", () => {
+  const temp = mkdtempSync(path.join(tmpdir(), "emuchef-regen-"));
+  try {
+    const records = copyEvidenceTree(temp);
+    const tempEvidence = path.join(temp, "evidence");
+    const badRecordPath = path.join(tempEvidence, "cancellation_active-rep1-8f8cbaf7ec6b8d60.json");
+    const bad = JSON.parse(readFileSync(badRecordPath, "utf8"));
+    bad.recordDigest = `sha256:${"0".repeat(64)}`;
+    writeFileSync(badRecordPath, JSON.stringify(bad));
+    assert.throws(
+      () => validateBaseRepositoryContract(["--evidence-dir", tempEvidence]),
+      /digest/i,
+    );
+
+    writeFileSync(badRecordPath, JSON.stringify(records[0]));
+    const indexArg = path.join(temp, "ui-binding-index.json");
+    const regenerate = (extra = []) => execFileSync(
+      process.execPath,
+      ["tools/phase-6d6-evidence.mjs", "--regenerate-ui-binding-index", "--evidence-dir", tempEvidence, "--index", indexArg, ...extra],
+      { cwd: REPOSITORY_ROOT, encoding: "utf8" },
+    );
+    const regeneratedOutput = regenerate();
+    assert.match(regeneratedOutput, /regenerated/i);
+    const written = JSON.parse(readFileSync(indexArg, "utf8"));
+    assert.doesNotThrow(() => verifyUiBindingIndex({
+      index: written,
+      records,
+      evidenceDir: tempEvidence,
+      sourceRoot: REPOSITORY_ROOT,
+    }));
+
+    const defaultOutput = execFileSync(
+      process.execPath,
+      ["tools/phase-6d6-evidence.mjs", "--evidence-dir", tempEvidence, "--index", indexArg],
+      { cwd: REPOSITORY_ROOT, encoding: "utf8" },
+    );
+    assert.match(defaultOutput, /valid but incomplete|contract complete/i);
+    assert.throws(() => {
+      execFileSync(
+        process.execPath,
+        ["tools/phase-6d6-evidence.mjs", "--evidence-dir", tempEvidence, "--index", path.join(temp, "missing-index.json")],
+        { cwd: REPOSITORY_ROOT, encoding: "utf8" },
+      );
+    }, /ui-binding-index|ENOENT|missing/i);
+  } finally {
+    rmSync(temp, { recursive: true, force: true });
   }
 });

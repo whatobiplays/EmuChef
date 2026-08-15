@@ -1269,12 +1269,48 @@ it cannot delay status/output polling, turn an exited child into a timeout, or
 qualify physical evidence. Identity probes and other operations are unaffected,
 and the arm clears on normal, timeout, panic, or parallel return.
 
+The development UI-smoke binding/capture plumbing is implemented; manual
+UI-smoke qualification remains deferred while the Tauri denied-warning Clippy
+gate is red; the final five-subcase composite additionally cannot be completed
+until a compatible passing host-sleep physical binding exists;
+`identity_replacement` and the remaining host-sleep physical repetitions are
+still required for Phase 6D closure; both UI-smoke repetitions themselves
+remain missing because manual UI-smoke qualification has not been run.
+`tools/phase-6d6-evidence.mjs` derives and verifies the
+checked-in `docs/testing/phase-6d6/ui-binding-index.json`, which lists only
+UI-contract-compatible passing physical bindings plus source and raw
+evidence/trace digests; default validation is read-only and
+`--regenerate-ui-binding-index` writes the index only after the base evidence
+contract passes. A debug-only Tauri bridge (`phase6d6_ui_smoke.rs`) activates
+only with the `real-execution` Cargo feature,
+`EMUCHEF_RUN_REAL_ADB_TESTS=1`, and `EMUCHEF_PHASE_6D6_UI_SMOKE=1`; it verifies
+the index self digest, source digests, exact evidence/trace raw bytes, and the
+parsed run/record/trace identities itself, then projects a fixed terminal
+report through the production real-execution projection and renders it in the
+normal React terminal UI. React receives and sends only opaque handles plus the
+UI repetition. Capture writes a canonical create-new `ui_state_capture`
+artifact under `docs/testing/phase-6d6/evidence/ui/` bound to the exact backend
+run/trace and trusted development-build identity. The application never
+creates the operator observation or the final `ui_smoke_composite` record.
+Accepted passing physical evidence exists for `cancellation_active`,
+`cancellation_boundary`, `usb_disconnect_active`, `usb_disconnect_boundary`,
+`device_unauthorized`, `identity_stability`, `root_revocation`, `low_storage`,
+and `operation_timeout`. Only the two accepted `usb_disconnect_active` records
+with `device_transport_lost` satisfy the mandatory transport UI contract;
+passing `usb_disconnect_boundary` records reporting `device_disconnected`
+remain accepted physical evidence but are excluded from the UI binding.
+`identity_replacement` repetitions 1–2, `host_sleep_before_deadline`
+repetitions 1–2, `host_sleep_after_deadline` repetitions 1–2, and both
+composite UI-smoke repetitions remain missing; no UI-smoke repetition has been
+run or counted. `device_offline` remains conditional diagnostic evidence.
+
 Phase 6D remains In Progress until all twelve mandatory scenarios have two clean,
 sanitized, contract-valid passing repetitions, both UI-smoke repetitions pass,
 and the complete automated matrix is green. `device_offline` remains supported
 conditional evidence and does not contribute to the missing-repetition count.
-The exact backend and Tauri `clippy -D warnings` gates currently have baseline
-diagnostics outside the authorized Phase 6D.6 paths, so automated remediation
-is not complete. Physical evidence collection is in progress; the validator is
-the authority for accepted and missing repetitions, and blocked mandatory
+The exact backend `clippy -D warnings` gate passes; the Tauri crate retains
+lint findings outside the authorized Phase 6D.6 paths under the installed
+toolchain that reproduce identically in an isolated clean checkout at `HEAD`
+(`b8bf14a`), so repository-wide strict Clippy is not yet green. The validator
+is the authority for accepted and missing repetitions, and blocked mandatory
 scenarios do not count as closure.

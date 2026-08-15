@@ -262,6 +262,37 @@ export interface LaunchAction {
   label: string;
 }
 
+/** Production-authored recovery-state identity for real terminal results. */
+export type RecoveryStateId =
+  | "none"
+  | "fresh_review_required"
+  | "requalification_required"
+  | "root_requalification_required"
+  | "fresh_qualification_required";
+
+export type PartialChangePresentation = "none" | "possible_partial_change" | "indeterminate";
+
+export type TerminalControl =
+  | "export_report"
+  | "repair_setup"
+  | "fresh_workflow"
+  | "launch_configured_app";
+
+/** Production-authored terminal presentation policy attached to real snapshots. */
+export interface RealTerminalPolicy {
+  authorityInvalidated: boolean;
+  recoveryState: RecoveryStateId;
+  partialChangePresentation: PartialChangePresentation;
+  availableControls: TerminalControl[];
+}
+
+/** Production-authored cancellation guidance for real terminal snapshots. */
+export interface CancellationGuidance {
+  title: string;
+  message: string;
+  remediation: RemediationGuidance;
+}
+
 export interface ExecutionStep {
   name: string;
   note: string | null;
@@ -324,6 +355,8 @@ export interface RealExecutionSnapshot {
     currentAction: string | null;
   };
   launchAction: LaunchAction | null;
+  terminalPolicy?: RealTerminalPolicy | null;
+  cancellation?: CancellationGuidance | null;
 }
 
 export type AnyExecutionSnapshot = ExecutionSnapshot | RealExecutionSnapshot;
@@ -425,6 +458,66 @@ export interface ExecutionCancellation {
 
 export interface ReportExportResult {
   outcome: "saved" | "cancelled";
+}
+
+export type Phase6d6UiSmokeSubcase =
+  | "cancellation"
+  | "transport"
+  | "root"
+  | "storage"
+  | "host_sleep";
+
+export interface Phase6d6UiSmokeCandidate {
+  subcase: Phase6d6UiSmokeSubcase;
+  handle: string;
+  label: string;
+  repetition: 1 | 2;
+}
+
+export interface Phase6d6UiSmokeStatus {
+  enabled: boolean;
+  ready: boolean;
+  message: string | null;
+  candidates: Phase6d6UiSmokeCandidate[];
+}
+
+export interface Phase6d6LoadedProjection {
+  projectionHandle: string;
+  snapshot: RealExecutionSnapshot;
+}
+
+export interface UiSmokeUiState {
+  backendRunId: string;
+  authoredTitle: string;
+  authoredIssueText: string;
+  authoredRemediation: string;
+  terminalStepProjection: "cancelled" | "failed";
+  notAttempted: number;
+  partialChangePresentation: "possible_partial_change" | "indeterminate";
+  authorityInvalidated: boolean;
+  recoveryState: RecoveryStateId;
+  availableControls: TerminalControl[];
+}
+
+export interface Phase6d6DevelopmentBuild {
+  identity: string;
+  version: string;
+  digest: string;
+}
+
+export interface Phase6d6UiCaptureResult {
+  subcase: Phase6d6UiSmokeSubcase;
+  subRunId: string;
+  backendRunId: string;
+  backendTraceDigest: string;
+  backendIssueCode: string | null;
+  developmentBuild: Phase6d6DevelopmentBuild;
+  artifact: {
+    kind: "ui_state_capture";
+    path: string;
+    content: UiSmokeUiState;
+    digest: string;
+  };
 }
 
 export interface LaunchResult {

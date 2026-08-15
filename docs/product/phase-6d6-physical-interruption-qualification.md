@@ -1,7 +1,20 @@
 # Phase 6D.6 Physical Interruption Qualification
 
 **Owner:** EmuChef proper / Shared Runtime
-**Status:** In progress. Automated contract remediation is implemented and physical evidence collection is underway, but the mandatory matrix, UI-smoke pair, and denied-warning Clippy gates remain incomplete. The validator is authoritative for accepted and missing repetitions.
+**Status:** In progress. Accepted passing physical evidence exists for
+`cancellation_active`, `cancellation_boundary`, `usb_disconnect_active`,
+`usb_disconnect_boundary`, `device_unauthorized`, `identity_stability`,
+`root_revocation`, `low_storage`, and `operation_timeout`; the development
+UI-smoke binding/capture plumbing is implemented; the backend denied-warning
+Clippy gate passes while the Tauri denied-warning Clippy gate still fails on
+findings that reproduce identically in an isolated clean checkout at `HEAD`
+(`b8bf14a`); and the host-sleep deadline-clock observability seam is no longer
+structurally blocked.
+`identity_replacement` repetitions 1–2, `host_sleep_before_deadline`
+repetitions 1–2, `host_sleep_after_deadline` repetitions 1–2, and both
+`ui_smoke_composite` repetitions remain missing. `device_offline` remains
+conditional diagnostic evidence. The validator is authoritative for accepted
+and missing repetitions.
 
 ## Contract
 
@@ -159,9 +172,9 @@ Host-sleep evidence can pass only when it records the deadline clock at start,
 before sleep, after wake, and terminal; remaining budget on both sides of the
 suspension; wall suspension; tolerance and rationale; phase; terminal outcome;
 and host/toolchain facts. Classification is derived from clock advancement and
-budget consumption, never from completion or timeout. The current physical
-harness cannot observe that exact production deadline clock, emits a null
-measurement, and blocks both host-sleep paths. A
+budget consumption, never from completion or timeout. The harness exposes the
+exact owned-process deadline-clock seam and records the clock samples; physical
+host-sleep repetitions remain unqualified. A
 transport failure, indeterminate/contradictory timing, or missing marker is
 blocked rather than treated as timer evidence. Development-build UI smoke is a
 mandatory pair of composite records; each repetition contains cancellation,
@@ -170,6 +183,27 @@ backend run/trace bindings, sub-run identities, canonical UI-state artifacts,
 artifact digests, exact authored projections, and sanitized observations. The
 transport subcase must bind to a passing active or boundary USB-disconnect
 record; conditional offline evidence cannot satisfy the mandatory UI binding.
+
+The development UI-smoke binding/capture bridge is implemented as a gated
+development-only path. The dependency-free validator derives and verifies the
+checked-in `docs/testing/phase-6d6/ui-binding-index.json`, which contains only
+UI-contract-compatible passing physical bindings plus source and raw
+evidence/trace digests; default validation is read-only and explicit
+regeneration writes the index only after the base evidence contract passes.
+Tauri resolves the repository roots itself and independently verifies the
+index self digest, source digests, raw evidence/trace bytes, and the parsed
+run/record/trace identities before projecting a fixed terminal report through
+the production real-execution projection. React receives only opaque handles
+and sanitized labels. Capture writes a canonical create-new `ui_state_capture`
+artifact under `docs/testing/phase-6d6/evidence/ui/` bound to the exact backend
+run/trace and trusted development-build identity. The application never creates
+the operator observation or the final `ui_smoke_composite` record, and no
+UI-smoke repetition has been run or counted.
+The UI binding is narrower than the accepted evidence set: only the two
+accepted `usb_disconnect_active` records with `device_transport_lost` currently
+satisfy the mandatory transport UI contract. Passing `usb_disconnect_boundary`
+records reporting `device_disconnected` are accepted physical evidence but are
+not UI-contract-compatible and remain excluded.
 
 Every genuine attempt must record scenario/repetition, timestamp, commit, host
 OS/version/architecture, Platform-Tools revision, sanitized identity and
@@ -188,12 +222,23 @@ state; they are never counted as passing repetitions.
 
 ## Current disposition
 
-Physical evidence collection is underway, but the twelve-scenario mandatory
-matrix and two UI-smoke repetitions remain incomplete. `device_offline` is
+Accepted passing physical evidence exists for `cancellation_active`,
+`cancellation_boundary`, `usb_disconnect_active`, `usb_disconnect_boundary`,
+`device_unauthorized`, `identity_stability`, `root_revocation`, `low_storage`,
+and `operation_timeout`, with two repetitions per mandatory scenario where
+applicable. The mandatory matrix and both UI-smoke repetitions remain
+incomplete: `identity_replacement` repetitions 1–2, `host_sleep_before_deadline`
+repetitions 1–2, `host_sleep_after_deadline` repetitions 1–2, and both
+`ui_smoke_composite` repetitions are still missing. `device_offline` is
 conditional diagnostic evidence and may remain unqualified without blocking
 closure; any attempted offline record must still satisfy the full evidence
-contract. The exact backend and Tauri `clippy -D warnings` commands also retain
-pre-existing findings outside the authorized Phase 6D.6 paths. Same-serial
-replacement still requires suitable hardware or explicit owner acceptance.
+contract. The backend `clippy -D warnings` command passes; the Tauri
+`clippy -D warnings` command still fails on 12 lib-target and 9 test-target
+findings at `adb.rs`, `sidecar.rs`, `device_qualification.rs`, `execution.rs`,
+and `commands.rs` that reproduce identically in an isolated clean checkout at
+`HEAD` (`b8bf14a`), so repository-wide strict Clippy is not yet green and
+manual UI-smoke qualification remains deferred. Same-serial replacement still
+requires suitable hardware or explicit owner acceptance.
 Phase 6D remains **In progress** and Phase 6E has not started. Signing,
-notarization, packaged-GUI, and release qualification remain outside this slice.
+notarization, packaged-GUI, and release qualification remain outside this
+slice.

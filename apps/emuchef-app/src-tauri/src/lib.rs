@@ -5,6 +5,7 @@ mod device_qualification;
 mod execution;
 mod handles;
 mod menu;
+mod phase6d6_ui_smoke;
 mod qualification;
 mod recovery;
 mod saved_configurations;
@@ -76,6 +77,7 @@ pub fn run() {
                 updates: updates::UpdateService::from_production_document()?,
                 update_activity: updates::ActivityGate::default(),
             });
+            app.manage(phase6d6_ui_smoke::Phase6d6UiSmokeStore::default());
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
@@ -145,6 +147,9 @@ pub fn run() {
             updates::end_update_interaction_session,
             updates::open_update_download,
             menu::update_saved_configuration_menu,
+            phase6d6_ui_smoke::phase6d6_ui_smoke_status,
+            phase6d6_ui_smoke::phase6d6_ui_smoke_load_projection,
+            phase6d6_ui_smoke::phase6d6_ui_smoke_capture,
         ])
         .build(tauri::generate_context!())
         .expect("error while building EmuChef");
