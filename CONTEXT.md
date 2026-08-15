@@ -1270,9 +1270,10 @@ qualify physical evidence. Identity probes and other operations are unaffected,
 and the arm clears on normal, timeout, panic, or parallel return.
 
 The development UI-smoke binding/capture plumbing is implemented; manual
-UI-smoke qualification remains deferred while the Tauri denied-warning Clippy
-gate is red; the final five-subcase composite additionally cannot be completed
-until a compatible passing host-sleep physical binding exists;
+UI-smoke qualification remains deferred until the required compatible
+host-sleep physical binding exists and the operator chooses to perform the
+deferred manual work; the final five-subcase composite additionally cannot be
+completed until a compatible passing host-sleep physical binding exists;
 `identity_replacement` and the remaining host-sleep physical repetitions are
 still required for Phase 6D closure; both UI-smoke repetitions themselves
 remain missing because manual UI-smoke qualification has not been run.
@@ -1300,17 +1301,17 @@ with `device_transport_lost` satisfy the mandatory transport UI contract;
 passing `usb_disconnect_boundary` records reporting `device_disconnected`
 remain accepted physical evidence but are excluded from the UI binding.
 `identity_replacement` repetitions 1–2, `host_sleep_before_deadline`
-repetitions 1–2, `host_sleep_after_deadline` repetitions 1–2, and both
-composite UI-smoke repetitions remain missing; no UI-smoke repetition has been
-run or counted. `device_offline` remains conditional diagnostic evidence.
+repetitions 1–2, `host_sleep_after_deadline` repetitions 1–2, and
+`ui_smoke_composite` repetitions 1–2 remain missing; no UI-smoke repetition has
+been run or counted. `device_offline` remains conditional diagnostic evidence.
 
 Phase 6D remains In Progress until all twelve mandatory scenarios have two clean,
 sanitized, contract-valid passing repetitions, both UI-smoke repetitions pass,
 and the complete automated matrix is green. `device_offline` remains supported
 conditional evidence and does not contribute to the missing-repetition count.
-The exact backend `clippy -D warnings` gate passes; the Tauri crate retains
-lint findings outside the authorized Phase 6D.6 paths under the installed
-toolchain that reproduce identically in an isolated clean checkout at `HEAD`
-(`b8bf14a`), so repository-wide strict Clippy is not yet green. The validator
-is the authority for accepted and missing repetitions, and blocked mandatory
-scenarios do not count as closure.
+The exact backend `clippy -D warnings` gate passes; the Tauri strict Clippy
+gate now passes under both the default and `real-execution` feature sets,
+resolving the lint findings that previously reproduced identically in an
+isolated clean checkout at `HEAD` (`b8bf14a`), so repository-wide strict Clippy
+is green. The validator is the authority for accepted and missing repetitions,
+and blocked mandatory scenarios do not count as closure.

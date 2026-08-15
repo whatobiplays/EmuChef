@@ -5,14 +5,13 @@
 `cancellation_active`, `cancellation_boundary`, `usb_disconnect_active`,
 `usb_disconnect_boundary`, `device_unauthorized`, `identity_stability`,
 `root_revocation`, `low_storage`, and `operation_timeout`; the development
-UI-smoke binding/capture plumbing is implemented; the backend denied-warning
-Clippy gate passes while the Tauri denied-warning Clippy gate still fails on
-findings that reproduce identically in an isolated clean checkout at `HEAD`
-(`b8bf14a`); and the host-sleep deadline-clock observability seam is no longer
+UI-smoke binding/capture plumbing is implemented; the backend and Tauri
+denied-warning Clippy gates pass under both default and real-execution feature
+sets; and the host-sleep deadline-clock observability seam is no longer
 structurally blocked.
 `identity_replacement` repetitions 1–2, `host_sleep_before_deadline`
-repetitions 1–2, `host_sleep_after_deadline` repetitions 1–2, and both
-`ui_smoke_composite` repetitions remain missing. `device_offline` remains
+repetitions 1–2, `host_sleep_after_deadline` repetitions 1–2, and
+`ui_smoke_composite` repetitions 1–2 remain missing. `device_offline` remains
 conditional diagnostic evidence. The validator is authoritative for accepted
 and missing repetitions.
 
@@ -228,17 +227,19 @@ Accepted passing physical evidence exists for `cancellation_active`,
 and `operation_timeout`, with two repetitions per mandatory scenario where
 applicable. The mandatory matrix and both UI-smoke repetitions remain
 incomplete: `identity_replacement` repetitions 1–2, `host_sleep_before_deadline`
-repetitions 1–2, `host_sleep_after_deadline` repetitions 1–2, and both
-`ui_smoke_composite` repetitions are still missing. `device_offline` is
+repetitions 1–2, `host_sleep_after_deadline` repetitions 1–2, and
+`ui_smoke_composite` repetitions 1–2 are still missing. `device_offline` is
 conditional diagnostic evidence and may remain unqualified without blocking
 closure; any attempted offline record must still satisfy the full evidence
-contract. The backend `clippy -D warnings` command passes; the Tauri
-`clippy -D warnings` command still fails on 12 lib-target and 9 test-target
+contract. The exact backend `clippy -D warnings` command passes; the Tauri
+`clippy -D warnings` command now passes under both the default and
+`real-execution` feature sets, resolving the 12 lib-target and 9 test-target
 findings at `adb.rs`, `sidecar.rs`, `device_qualification.rs`, `execution.rs`,
-and `commands.rs` that reproduce identically in an isolated clean checkout at
-`HEAD` (`b8bf14a`), so repository-wide strict Clippy is not yet green and
-manual UI-smoke qualification remains deferred. Same-serial replacement still
-requires suitable hardware or explicit owner acceptance.
+and `commands.rs` that previously reproduced identically in an isolated clean
+checkout at `HEAD` (`b8bf14a`); manual UI-smoke qualification remains deferred
+until the required compatible host-sleep physical binding exists and the
+operator chooses to perform the deferred manual work. Same-serial replacement
+still requires suitable hardware or explicit owner acceptance.
 Phase 6D remains **In progress** and Phase 6E has not started. Signing,
 notarization, packaged-GUI, and release qualification remain outside this
 slice.

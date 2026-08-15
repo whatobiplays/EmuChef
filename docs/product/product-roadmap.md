@@ -27,7 +27,7 @@ Detailed evidence remains in the relevant product and release documents. In part
 
 | Product or track | Current state | Next priority |
 |---|---|---|
-| EmuChef proper | Phase 5A through 5H, Phase 6A through 6C, and the Phase 6D.1 audit are recorded; Phase 6D.2 through 6D.6 automated work is recorded; accepted Phase 6D.6 physical evidence exists for cancellation active/boundary, USB-disconnect active/boundary, device unauthorized, identity stability, root revocation, low storage, and operation timeout; the UI-smoke binding/capture plumbing is implemented; backend strict Clippy passes while the Tauri crate retains lint findings that reproduce identically at HEAD; identity-replacement and host-sleep repetitions and both UI-smoke repetitions remain missing | Clear the blocking Tauri strict-Clippy gate, collect the remaining required physical evidence including a compatible host-sleep backend binding, then run the deferred UI-smoke qualification/composite repetitions and retain truthful blocked/unqualified cases |
+| EmuChef proper | Phase 5A through 5H, Phase 6A through 6C, and the Phase 6D.1 audit are recorded; Phase 6D.2 through 6D.6 automated work is recorded; accepted Phase 6D.6 physical evidence exists for cancellation active/boundary, USB-disconnect active/boundary, device unauthorized, identity stability, root revocation, low storage, and operation timeout; the UI-smoke binding/capture plumbing is implemented; backend and Tauri strict Clippy pass under both default and real-execution feature sets; `identity_replacement` repetitions 1–2, `host_sleep_before_deadline` repetitions 1–2, `host_sleep_after_deadline` repetitions 1–2, and `ui_smoke_composite` repetitions 1–2 remain missing | Collect the remaining required physical evidence including a compatible host-sleep backend binding, then run the deferred UI-smoke qualification/composite repetitions and retain truthful blocked/unqualified cases |
 | Config Editor | Authored generation implemented through GitHub release-pattern testing | Later refinements remain unsequenced unless explicitly promoted |
 | Shared Runtime | Rust is the sole runtime and retains device, filesystem, planning, execution, validation, and protocol authority | Add shared capabilities only when required by a bounded product slice |
 | Release engineering | Deliberately deferred from normal Phase 5 product work | Resume only when the owner declares the relevant application release-comfortable |
@@ -71,7 +71,7 @@ EmuChef proper Phase 5 established end-user feature completeness, usability, wor
 | 6A | Development builds and feature gating | Completed | Intentional real-execution development builds without accidental production enablement |
 | 6B | Device discovery and qualification | Completed | Deterministic device capability and compatibility profiles |
 | 6C | Core executor qualification | Completed | Non-root and root executor qualification completed on representative hardware |
-| 6D | Execution safety and recovery | In progress | Storage, timer, process-ownership, transport, identity, root, harness, validator, UI-smoke binding/capture, and documentation remediation is implemented; backend strict Clippy passes while the Tauri crate retains lint findings that reproduce identically at HEAD; identity-replacement and host-sleep physical repetitions and both UI-smoke repetitions remain missing |
+| 6D | Execution safety and recovery | In progress | Storage, timer, process-ownership, transport, identity, root, harness, validator, UI-smoke binding/capture, and documentation remediation is implemented; backend and Tauri strict Clippy pass under both default and real-execution feature sets; `identity_replacement` repetitions 1–2, `host_sleep_before_deadline` repetitions 1–2, `host_sleep_after_deadline` repetitions 1–2, and `ui_smoke_composite` repetitions 1–2 remain missing |
 | 6E | Recipe qualification | Planned | End-to-end success for core EmuChef workflows |
 | 6F | Physical-device test matrix | Planned | Representative coverage across supported Android device classes |
 | 6G | Production readiness | Planned | Evidence-backed promotion of real execution into production builds |
@@ -706,10 +706,11 @@ operator runs them. A
 dependency-free validator checks the strict sanitized evidence schema and
 runbook in host-only CI.
 
-The exact backend `clippy -D warnings` command passes; the Tauri crate retains
-lint findings outside the authorized Phase 6D.6 paths under the installed
-toolchain that reproduce identically in an isolated clean checkout at `HEAD`
-(`b8bf14a`), so repository-wide strict Clippy is not yet green. The development
+The exact backend `clippy -D warnings` command passes; the Tauri strict Clippy
+gate now passes under both the default and `real-execution` feature sets,
+resolving the lint findings that previously reproduced identically in an
+isolated clean checkout at `HEAD` (`b8bf14a`), so repository-wide strict Clippy
+is green. The development
 UI-smoke binding/capture plumbing is implemented: the validator
 derives and verifies the checked-in `ui-binding-index.json`, and a gated Tauri
 bridge projects only validator-approved passing physical bindings through the
@@ -726,7 +727,7 @@ with `device_transport_lost` satisfy the transport UI contract; passing
 excluded from the UI binding. The validator still reports an incomplete
 mandatory matrix and UI-smoke pair: `identity_replacement` repetitions 1–2,
 `host_sleep_before_deadline` repetitions 1–2, `host_sleep_after_deadline`
-repetitions 1–2, and both composite UI-smoke repetitions remain missing.
+repetitions 1–2, and `ui_smoke_composite` repetitions 1–2 remain missing.
 `device_offline` remains supported conditional evidence and is not a closure
 blocker when no reliable device-specific transition exists. Same-serial
 replacement additionally requires suitable hardware or explicit owner
