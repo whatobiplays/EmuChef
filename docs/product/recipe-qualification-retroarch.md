@@ -1,27 +1,27 @@
-# Phase 6E.1 Recipe Qualification Foundation
+# RetroArch Recipe Qualification
 
 **Owner:** EmuChef proper / Shared Runtime
-**Status:** Automated qualification foundation complete for
-`app.retroarch.provision`; Phase 6E is In progress; physical qualification
-remains deferred.
+**Status:** Automated qualification complete for
+`app.retroarch.provision`; Phase 6E is In progress; physical and full
+end-to-end qualification remain deferred.
 
 ## 1. Status and authority
 
-Phase 6E.1 is the first automated recipe-qualification slice. The owner
-explicitly deferred all remaining manual and physical qualification and
-approved starting Phase 6E automated work without closing Phase 6D. Phase 6D
-therefore remains **In progress** with every existing missing-evidence and
+This document records the standalone RetroArch automated qualification that
+originated as Phase 6E.1 roadmap work. The owner explicitly deferred all
+remaining manual and physical qualification without closing Phase 6D. Phase
+6D therefore remains **In progress** with every existing missing-evidence and
 closure requirement unchanged; the deferral is a sequencing decision, not a
-waiver. Ordinary production real execution remains disabled behind its existing
-gating boundary.
+waiver. Ordinary production real execution remains disabled behind its
+existing gating boundary.
 
 ## 2. Qualified automated boundary
 
-The Phase 6E.1 foundation qualifies the real authored
+The qualification covers the real authored
 `app.retroarch.provision` workflow through production code paths only:
 
 - a strict qualification contract at
-  `tests/fixtures/phase-6e/retroarch/qualification-contract.json` bound by
+  `tests/fixtures/recipe-qualification/retroarch/qualification-contract.json` bound by
   SHA-256 to the raw authored recipe bytes, so authored changes fail closed
   until expectations are deliberately reviewed;
 - real catalog admission through `CatalogSnapshot::legacy_local` and production
@@ -52,7 +52,7 @@ The Phase 6E.1 foundation qualifies the real authored
 
 ## 4. What the tests do not prove
 
-The deterministic foundation does not prove real download service availability,
+The deterministic qualification does not prove real download service availability,
 APK acceptance on Android, Android permission/app-op behavior, private or
 shared-storage semantics on hardware, actual application launches, device
 cleanup or reset, packaged-GUI behavior, or physical end-to-end success.
@@ -60,14 +60,13 @@ RetroArch is **not** physically or fully end-to-end qualified.
 
 ## 5. Physical qualification disposition
 
-Physical qualification is **Deferred by owner**. Phase 6E.1 grants no physical
-cleanup authority (`not_authorized_in_phase_6e1`), and no ADB, ignored,
-host-sleep, identity-replacement, UI-smoke, packaged-GUI, or operator
-qualification ran as part of this slice.
+Physical qualification is **Deferred by owner**. The qualification grants no
+physical cleanup authority (`not_authorized_for_recipe_qualification`), and no
+ADB, ignored, host-sleep, identity-replacement, UI-smoke, packaged-GUI, or
+operator qualification ran as part of this automated workflow.
 
-## 6. Next automated recipe slices
+## 6. Next automated workflow
 
-Obtainium installation, BIOS copy, ROM/content copy, and canonical combined
-device-plan workflows may be promoted as separate automated slices reusing this
-contract and harness pattern. None of those workflows is marked started by
-Phase 6E.1.
+Standalone BIOS qualification is recorded separately. Combined RetroArch + BIOS
+device-plan qualification remains unqualified and is the next automated
+workflow. Obtainium and ROM/content qualification remain separate future work.

@@ -1,4 +1,4 @@
-//! Phase 6E.1 automated recipe-qualification foundation for the real
+//! Automated RetroArch recipe qualification for the real
 //! `app.retroarch.provision` workflow.
 //!
 //! These tests bind qualification expectations to the authored source digest,
@@ -67,7 +67,8 @@ fn authored_root() -> PathBuf {
 }
 
 fn contract_path() -> PathBuf {
-    repository_root().join("tests/fixtures/phase-6e/retroarch/qualification-contract.json")
+    repository_root()
+        .join("tests/fixtures/recipe-qualification/retroarch/qualification-contract.json")
 }
 
 fn sha256_hex(bytes: &[u8]) -> String {
@@ -77,9 +78,9 @@ fn sha256_hex(bytes: &[u8]) -> String {
 
 fn load_contract() -> RetroArchQualificationContract {
     let text = fs::read_to_string(contract_path())
-        .expect("Phase 6E.1 qualification contract should be readable");
+        .expect("RetroArch qualification contract should be readable");
     let contract: RetroArchQualificationContract = serde_json::from_str(&text)
-        .expect("Phase 6E.1 qualification contract should deserialize strictly");
+        .expect("RetroArch qualification contract should deserialize strictly");
     assert_eq!(
         contract.schema_version, 1,
         "contract schema version must be 1"
@@ -89,8 +90,8 @@ fn load_contract() -> RetroArchQualificationContract {
     assert_eq!(contract.automated_status, "foundation");
     assert_eq!(contract.physical_status, "deferred");
     assert_eq!(
-        contract.physical_cleanup_authority, "not_authorized_in_phase_6e1",
-        "Phase 6E.1 grants no physical cleanup authority"
+        contract.physical_cleanup_authority, "not_authorized_for_recipe_qualification",
+        "RetroArch recipe qualification grants no physical cleanup authority"
     );
     assert!(!contract.live_network_required_for_automated_qualification);
     contract
@@ -163,7 +164,7 @@ fn runtime_capability_enabled(plan: &ExecutionPlan, capability: &str) -> bool {
 }
 
 #[test]
-fn phase_6e1_contract_binds_current_retroarch_source_and_deferred_physical_status() {
+fn retroarch_contract_binds_current_source_and_deferred_physical_status() {
     let contract = load_contract();
     let source_path = Path::new(&contract.authored_source.path);
     assert!(
@@ -194,7 +195,7 @@ fn phase_6e1_contract_binds_current_retroarch_source_and_deferred_physical_statu
 }
 
 #[test]
-fn phase_6e1_real_authored_retroarch_plan_matches_qualification_contract() {
+fn retroarch_real_authored_plan_matches_qualification_contract() {
     let contract = load_contract();
     let result = plan_retroarch(None);
     assert!(
@@ -275,7 +276,7 @@ fn phase_6e1_real_authored_retroarch_plan_matches_qualification_contract() {
 }
 
 #[test]
-fn phase_6e1_optional_retroarch_cfg_is_not_required_for_planning() {
+fn retroarch_optional_cfg_is_not_required_for_planning() {
     let result = plan_retroarch(None);
     assert!(
         result
@@ -301,7 +302,7 @@ fn phase_6e1_optional_retroarch_cfg_is_not_required_for_planning() {
 }
 
 #[test]
-fn phase_6e1_supplied_retroarch_cfg_is_bound_and_reviewed_without_parent_path_leakage() {
+fn retroarch_supplied_cfg_is_bound_and_reviewed_without_parent_path_leakage() {
     let temp = tempfile::tempdir().expect("tempdir should be created");
     let config_path = temp.path().join("retroarch.cfg");
     fs::write(&config_path, b"video_driver = \"vulkan\"\n").expect("config should be written");
@@ -443,7 +444,7 @@ fn write_zip(path: &Path, entries: &[&str]) {
     for entry in entries {
         zip.start_file(*entry, zip::write::SimpleFileOptions::default())
             .expect("zip entry should start");
-        zip.write_all(b"phase-6e1\n")
+        zip.write_all(b"retroarch qualification fixture\n")
             .expect("zip entry should write");
     }
     zip.finish().expect("zip should finish");
@@ -463,7 +464,7 @@ fn seed_artifact_cache(cache_root: &Path, plan: &ExecutionPlan, system_mode: Sys
             .next()
             .expect("artifact id should have a leaf");
         if artifact.type_name == "remote_file" && leaf == "retroarch_apk" {
-            fs::write(&path, b"phase-6e1 deterministic apk fixture\n")
+            fs::write(&path, b"retroarch deterministic apk fixture\n")
                 .expect("apk fixture should be written");
             continue;
         }
@@ -490,7 +491,7 @@ fn dry_run_adapters(workspace: &QualificationWorkspace) -> ExecutorAdapters {
 }
 
 #[test]
-fn phase_6e1_retroarch_generated_plan_executes_successfully_without_network_or_adb() {
+fn retroarch_generated_plan_executes_successfully_without_network_or_adb() {
     let workspace = QualificationWorkspace::new();
     let prepared = plan_retroarch(Some(&workspace.config_path));
     let plan = prepared.plan.expect("plan should be generated");
@@ -537,7 +538,7 @@ fn phase_6e1_retroarch_generated_plan_executes_successfully_without_network_or_a
 }
 
 #[test]
-fn phase_6e1_retroarch_install_skip_on_repeated_deterministic_run() {
+fn retroarch_install_skips_on_repeated_deterministic_run() {
     let workspace = QualificationWorkspace::new();
     let prepared = plan_retroarch(Some(&workspace.config_path));
     let plan = prepared.plan.expect("plan should be generated");
@@ -581,7 +582,7 @@ fn phase_6e1_retroarch_install_skip_on_repeated_deterministic_run() {
 }
 
 #[test]
-fn phase_6e1_missing_core_system_verification_fails_and_stops_later_recipe_work() {
+fn retroarch_missing_core_system_verification_fails_and_stops_later_recipe_work() {
     let workspace = QualificationWorkspace::new();
     let prepared = plan_retroarch(Some(&workspace.config_path));
     let plan = prepared.plan.expect("plan should be generated");

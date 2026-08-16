@@ -36,8 +36,6 @@ pub mod jsonl;
 pub mod model;
 pub mod one_shot;
 mod owned_process;
-#[cfg(test)]
-mod phase_6e1_recipe_qualification_tests;
 mod plan_digest;
 mod planner;
 pub(crate) mod planner_device_plan;
@@ -47,6 +45,10 @@ mod planner_tests;
 mod product_catalog;
 pub mod protocol;
 mod raw_request;
+#[cfg(test)]
+mod recipe_qualification_bios_tests;
+#[cfg(test)]
+mod recipe_qualification_retroarch_tests;
 pub mod ref_index;
 mod remote_release_resolver;
 pub mod request;

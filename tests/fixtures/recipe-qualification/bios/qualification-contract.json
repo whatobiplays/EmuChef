@@ -1,0 +1,26 @@
+{
+  "schemaVersion": 1,
+  "targetRecipe": "feature.copy_bios",
+  "planningDevicePlan": "ayaneo.generic.base",
+  "authoredSource": {
+    "path": "authored/recipes/feature.copy_bios.yaml",
+    "sha256": "1a3b04aa3f26720701ccbe56336d1f451d3f402c9a092be10ef80682cd9a998b"
+  },
+  "selectedRecipes": ["feature.copy_bios"],
+  "expandedRecipes": ["feature.copy_bios"],
+  "recipeConstraintCapabilities": ["shared_storage_write"],
+  "qualificationContextCapabilities": ["shared_storage_write"],
+  "requiredInputs": ["feature.copy_bios/bios_source_dir"],
+  "optionalInputs": [],
+  "requiredOperationFamilies": ["copy_files"],
+  "copyPolicy": "sync",
+  "destination": "/sdcard/RetroArch/system",
+  "verification": {
+    "type": "path_exists",
+    "path": "/sdcard/RetroArch/system"
+  },
+  "liveNetworkRequiredForAutomatedQualification": false,
+  "automatedStatus": "qualified",
+  "physicalStatus": "deferred",
+  "physicalCleanupAuthority": "not_authorized_for_recipe_qualification"
+}
