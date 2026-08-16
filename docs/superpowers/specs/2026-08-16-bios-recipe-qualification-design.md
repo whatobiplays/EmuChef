@@ -8,7 +8,7 @@
 
 Qualify the real authored `feature.copy_bios` workflow through production planning, review, input validation, and deterministic executor paths without expanding into physical-device or combined-device-plan qualification.
 
-This task also removes roadmap-phase nomenclature from the existing RetroArch qualification implementation artifacts. Phase identifiers remain valid historical/product-roadmap language in documentation, but they must not become API, module, helper, test, fixture, or implementation-path identities.
+This task also removes roadmap-phase nomenclature from the existing RetroArch qualification implementation artifacts. Phase identifiers remain valid historical/product-roadmap language in documentation, but they must not become API, module, helper, test, fixture, contract-value, or implementation-path identities.
 
 Phase 6D remains **In progress**. All remaining Phase 6D manual and physical qualification is still owner-deferred; this sequencing decision does not waive or reduce those requirements. Phase 6E remains **In progress** after this task.
 
@@ -45,6 +45,7 @@ Implementation artifacts use stable domain terminology only. Do not introduce `p
 - Rust module or file names;
 - helper/function/type/test names;
 - fixture directory or file names;
+- machine-readable qualification contract values;
 - implementation-facing documentation filenames; or
 - reusable APIs.
 
@@ -83,7 +84,9 @@ Rename:
 
 Update the corresponding module declaration, fixture references, `CONTEXT.md`, product-roadmap references, comments, and implementation-facing helper/test identifiers that contain phase-coded naming.
 
-The migration is mechanical. It must not change the qualified RetroArch semantics, source digest expectations, production planning/review paths, deterministic executor behavior, or physical-qualification disposition.
+The existing RetroArch qualification contract value `physicalCleanupAuthority: "not_authorized_in_phase_6e1"` must migrate to the domain-stable value `physicalCleanupAuthority: "not_authorized_for_recipe_qualification"`, with its assertions and product documentation updated accordingly. This is a naming migration only: cleanup remains unauthorized, physical qualification remains deferred, and no authority boundary changes.
+
+The migration is otherwise mechanical. It must not change the qualified RetroArch semantics, source digest expectations, production planning/review paths, deterministic executor behavior, or physical-qualification disposition.
 
 ## 5. BIOS qualification artifacts
 
@@ -103,7 +106,8 @@ The contract should capture at least:
 
 - target recipe: `feature.copy_bios`;
 - planning context: `ayaneo.generic.base`;
-- selected and expanded recipe set: only `feature.copy_bios` unless production dependency expansion legitimately requires otherwise;
+- selected recipe set: exactly `feature.copy_bios`;
+- expanded recipe set: exactly `feature.copy_bios`;
 - required input: `feature.copy_bios/bios_source_dir`;
 - required capability: `shared_storage_write`;
 - required operation family: `copy_files`;
@@ -111,8 +115,9 @@ The contract should capture at least:
 - destination: `/sdcard/RetroArch/system`;
 - authored verification: `path_exists` for `/sdcard/RetroArch/system`;
 - live-network requirement: false;
-- automated qualification status; and
-- physical qualification status: deferred with no new cleanup authority.
+- automated qualification status;
+- physical qualification status: deferred; and
+- physical cleanup authority: `not_authorized_for_recipe_qualification`.
 
 Do not bind incidental internal representation that is irrelevant to qualification semantics.
 
@@ -216,7 +221,7 @@ This task does not include:
 Implementation is complete only when all of the following are true:
 
 1. Existing RetroArch qualification passes unchanged after its domain-naming migration.
-2. No implementation-facing recipe-qualification artifact introduced or migrated by this task uses phase/slice nomenclature.
+2. No implementation-facing recipe-qualification artifact introduced or migrated by this task uses phase/slice nomenclature, including machine-readable qualification contract values.
 3. The BIOS qualification contract is SHA-256-bound to the real authored source and fails closed when that source changes.
 4. Valid BIOS input plans through the production runtime with `ayaneo.generic.base` context while selecting only the BIOS recipe.
 5. The production review for valid input is executable and blocker-free.
