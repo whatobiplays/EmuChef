@@ -172,7 +172,9 @@ pub fn run() {
 // from both ExitRequested and the final Exit event. The operation is
 // idempotent, so repeated calls are safe.
 fn finish_recovery_process_session(app_handle: &tauri::AppHandle) -> bool {
-    let state = app_handle.state::<commands::AppState>();
+    let Some(state) = app_handle.try_state::<commands::AppState>() else {
+        return true;
+    };
     state
         .recovery
         .lock()
