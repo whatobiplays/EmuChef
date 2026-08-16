@@ -1316,25 +1316,39 @@ isolated clean checkout at `HEAD` (`b8bf14a`), so repository-wide strict Clippy
 is green. The validator is the authority for accepted and missing repetitions,
 and blocked mandatory scenarios do not count as closure.
 
-## Phase 6E.1 recipe qualification foundation
+## Recipe qualification current state
 
-Phase 6E.1 establishes the automated recipe-qualification foundation for the
-real `app.retroarch.provision` workflow. The strict qualification contract at
-`tests/fixtures/phase-6e/retroarch/qualification-contract.json` is bound by
-SHA-256 to the raw authored recipe bytes and fails closed when the source
-changes. Qualification uses the real authored catalog through
+Standalone RetroArch automated qualification covers the real
+`app.retroarch.provision` workflow. Its strict source-bound contract is at
+`tests/fixtures/recipe-qualification/retroarch/qualification-contract.json`,
+and the active qualification module is
+`crates/emuchef-rust-backend/src/recipe_qualification_retroarch_tests.rs`.
+The qualification uses the real authored catalog through
 `runtime_configuration::plan_configuration` with the
 `ayaneo.konkr_pocket_fit.base` device plan, exercises the production review
 projection, and executes the unchanged generated plan through
-`ExecutorAdapters::with_sandbox_roots`. Deterministic default-cache fixtures
-are pre-seeded at the exact production cache filenames, so the automated
-qualification requires no live public network access and no ADB or physical
-device.
+`ExecutorAdapters::with_sandbox_roots`. It proves the seven existing
+RetroArch behaviors without live public network access or ADB, while physical
+and full end-to-end qualification remain deferred.
 
-Phase 6E is In progress for automated qualification work. RetroArch has an
-automated qualification foundation only; it is not physically or fully
-end-to-end qualified, and physical qualification remains deferred by the owner
-with no cleanup authority granted. Phase 6D remains In progress with its
-existing missing physical and UI-smoke evidence unchanged. Phase 6E started
-because the owner explicitly deferred all remaining manual/physical
-qualification, not because any Phase 6D requirement was reduced.
+Standalone BIOS automated qualification covers the real authored
+`feature.copy_bios` workflow. Its strict source-bound contract is at
+`tests/fixtures/recipe-qualification/bios/qualification-contract.json`, bound
+to the raw authored recipe SHA-256
+`1a3b04aa3f26720701ccbe56336d1f451d3f402c9a092be10ef80682cd9a998b`, and its
+active qualification module is
+`crates/emuchef-rust-backend/src/recipe_qualification_bios_tests.rs`.
+Qualification uses `ayaneo.generic.base` as production capability context but
+explicitly selects only `feature.copy_bios`. It proves production planning and
+review, required-input rejection, recursive nested copy through normal sandbox
+adapters, and authored destination-verification failure through a private test
+device wrapper. No authored YAML, device-plan/profile semantics, public API,
+or production executor source is changed.
+
+Physical qualification for both workflows is deferred by owner with cleanup
+authority `not_authorized_for_recipe_qualification`. Phase 6E remains In
+progress because combined RetroArch + BIOS qualification and other workflow
+qualification remain outstanding; the combined workflow is explicitly
+unqualified and next. Phase 6D remains In progress with all existing missing
+physical and UI-smoke evidence unchanged. The automated work follows the
+owner's sequencing decision and does not waive any Phase 6D requirement.

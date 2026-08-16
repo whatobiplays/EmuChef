@@ -46,5 +46,5 @@
   "liveNetworkRequiredForAutomatedQualification": false,
   "automatedStatus": "foundation",
   "physicalStatus": "deferred",
-  "physicalCleanupAuthority": "not_authorized_in_phase_6e1"
+  "physicalCleanupAuthority": "not_authorized_for_recipe_qualification"
 }

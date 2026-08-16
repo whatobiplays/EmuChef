@@ -27,7 +27,7 @@ Detailed evidence remains in the relevant product and release documents. In part
 
 | Product or track | Current state | Next priority |
 |---|---|---|
-| EmuChef proper | Phase 5A through 5H, Phase 6A through 6C, and the Phase 6D.1 audit are recorded; Phase 6D.2 through 6D.6 automated work is recorded; accepted Phase 6D.6 physical evidence exists for cancellation active/boundary, USB-disconnect active/boundary, device unauthorized, identity stability, root revocation, low storage, and operation timeout; the UI-smoke binding/capture plumbing is implemented; backend and Tauri strict Clippy pass under both default and real-execution feature sets; `identity_replacement` repetitions 1–2, `host_sleep_before_deadline` repetitions 1–2, `host_sleep_after_deadline` repetitions 1–2, and `ui_smoke_composite` repetitions 1–2 remain missing; all remaining manual/physical qualification is owner-deferred until explicitly resumed | Select and implement the next automated Phase 6E recipe-qualification slice; manual/physical evidence collection remains owner-deferred |
+| EmuChef proper | Phase 5A through 5H, Phase 6A through 6C, and the Phase 6D.1 audit are recorded; Phase 6D.2 through 6D.6 automated work is recorded; accepted Phase 6D.6 physical evidence exists for cancellation active/boundary, USB-disconnect active/boundary, device unauthorized, identity stability, root revocation, low storage, and operation timeout; the UI-smoke binding/capture plumbing is implemented; backend and Tauri strict Clippy pass under both default and real-execution feature sets; standalone RetroArch and BIOS automated recipe qualification is recorded; `identity_replacement` repetitions 1–2, `host_sleep_before_deadline` repetitions 1–2, `host_sleep_after_deadline` repetitions 1–2, and `ui_smoke_composite` repetitions 1–2 remain missing; all remaining manual/physical qualification is owner-deferred until explicitly resumed | Qualify the combined RetroArch + BIOS workflow through the real default device-plan selection; manual/physical evidence collection remains owner-deferred |
 | Config Editor | Authored generation implemented through GitHub release-pattern testing | Later refinements remain unsequenced unless explicitly promoted |
 | Shared Runtime | Rust is the sole runtime and retains device, filesystem, planning, execution, validation, and protocol authority | Add shared capabilities only when required by a bounded product slice |
 | Release engineering | Deliberately deferred from normal Phase 5 product work | Resume only when the owner declares the relevant application release-comfortable |
@@ -72,7 +72,7 @@ EmuChef proper Phase 5 established end-user feature completeness, usability, wor
 | 6B | Device discovery and qualification | Completed | Deterministic device capability and compatibility profiles |
 | 6C | Core executor qualification | Completed | Non-root and root executor qualification completed on representative hardware |
 | 6D | Execution safety and recovery | In progress | Storage, timer, process-ownership, transport, identity, root, harness, validator, UI-smoke binding/capture, and documentation remediation is implemented; backend and Tauri strict Clippy pass under both default and real-execution feature sets; `identity_replacement` repetitions 1–2, `host_sleep_before_deadline` repetitions 1–2, `host_sleep_after_deadline` repetitions 1–2, and `ui_smoke_composite` repetitions 1–2 remain missing |
-| 6E | Recipe qualification | In progress | Phase 6E.1 automated RetroArch qualification foundation is complete; physical/end-to-end qualification remains deferred |
+| 6E | Recipe qualification | In progress | Standalone RetroArch and BIOS automated qualification are complete; combined workflows and other recipe qualification remain; physical/end-to-end qualification remains deferred |
 | 6F | Physical-device test matrix | Planned | Representative coverage across supported Android device classes |
 | 6G | Production readiness | Planned | Evidence-backed promotion of real execution into production builds |
 
@@ -732,7 +732,7 @@ repetitions 1–2, and `ui_smoke_composite` repetitions 1–2 remain missing.
 blocker when no reliable device-specific transition exists. Same-serial
 replacement additionally requires suitable hardware or explicit owner
 acceptance. Phase 6D remains In progress; Phase 6E is in progress for automated
-qualification foundation work under the owner's sequencing decision, while all
+recipe-qualification work under the owner's sequencing decision, while all
 remaining manual/physical qualification stays owner-deferred and ordinary
 production real execution remains disabled.
 
@@ -885,12 +885,12 @@ or frontend DTO expansion, or production feature enablement was added.
 
 The owner explicitly deferred all remaining manual and physical qualification
 and approved beginning Phase 6E automated recipe-qualification work without
-closing Phase 6D. Phase 6E.1 established the automated qualification foundation
-for `app.retroarch.provision`: a source-digest-bound contract, production
-planning and review projection, and deterministic executor dry-run
-qualification. RetroArch is **not** physically or fully end-to-end qualified.
-Phase 6D remains **In progress** with every missing-evidence requirement
-unchanged.
+closing Phase 6D. Standalone automated qualification is complete for
+`app.retroarch.provision` and `feature.copy_bios`: each has a source-digest-
+bound contract, production planning and review projection, and deterministic
+executor qualification. Neither workflow is physically or fully end-to-end
+qualified. Phase 6D remains **In progress** with every missing-evidence
+requirement unchanged.
 
 #### Objective
 
