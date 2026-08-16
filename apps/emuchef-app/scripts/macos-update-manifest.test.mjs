@@ -65,16 +65,46 @@ test("Node canonical bytes match the Rust-consumed golden exactly", () => {
 test("external Ed25519 signatures finalize and verify", () => {
   const value = unsigned();
   const signature = crypto.sign(null, canonicalUnsignedBytes(value), privateKey).toString("hex");
+  const bytes = finalizeManifest(value, `${signature}\n`, trust, { now: TEST_NOW });
+  const manifest = parseExactManifest(bytes, { now: TEST_NOW });
+  assert.deepEqual(verifyMetadataSignature(manifest, trust, { now: TEST_NOW }), manifest);
+  assert.throws(() => finalizeManifest({ ...value, notes: "tampered" }, signature, trust, { now: TEST_NOW }), /verification failed/);
+  assert.throws(() => finalizeManifest(value, signature.toUpperCase(), trust), /lowercase hex/);
+});
+
+test("pure manifest APIs propagate an injected policy clock", () => {
+  const value = unsigned();
+  const signature = crypto.sign(null, canonicalUnsignedBytes(value), privateKey).toString("hex");
+  const signatureText = `${signature}\n`;
+  const bytes = finalizeManifest(value, signatureText, trust, { now: TEST_NOW });
+  const manifest = parseExactManifest(bytes, { now: TEST_NOW });
+
+  assert.deepEqual(verifyMetadataSignature(manifest, trust, { now: TEST_NOW }), manifest);
+
+  const afterExpiry = Date.parse("2026-07-21T00:00:00Z");
+  assert.throws(() => parseExactManifest(bytes, { now: afterExpiry }), /manifest validity window is invalid/);
+  assert.throws(() => verifyMetadataSignature(manifest, trust, { now: afterExpiry }), /manifest validity window is invalid/);
+  assert.throws(() => finalizeManifest(value, signatureText, trust, { now: afterExpiry }), /manifest validity window is invalid/);
+});
+
+test("pure manifest APIs use the real clock by default", () => {
+  const current = Date.now();
+  const isoSeconds = (milliseconds) => new Date(Math.floor(milliseconds / 1000) * 1000)
+    .toISOString().replace(".000Z", "Z");
+  const value = prepareUnsignedManifest(prepareInput({
+    publishedAt: isoSeconds(current - 60_000),
+    expiresAt: isoSeconds(current + 24 * 60 * 60 * 1000),
+  }), trust);
+  const signature = crypto.sign(null, canonicalUnsignedBytes(value), privateKey).toString("hex");
   const bytes = finalizeManifest(value, `${signature}\n`, trust);
   const manifest = parseExactManifest(bytes);
+
   assert.deepEqual(verifyMetadataSignature(manifest, trust), manifest);
-  assert.throws(() => finalizeManifest({ ...value, notes: "tampered" }, signature, trust), /verification failed/);
-  assert.throws(() => finalizeManifest(value, signature.toUpperCase(), trust), /lowercase hex/);
 });
 
 test("fixed JSON rejects byte-different equivalents, unknowns, duplicates, escaped names, and unsafe numbers", () => {
   const exact = canonicalFullBytes(signed());
-  assert.equal(parseExactManifest(exact).version, "9.0.0");
+  assert.equal(parseExactManifest(exact, { now: TEST_NOW }).version, "9.0.0");
   for (const bytes of [
     Buffer.concat([exact, Buffer.from("\n")]),
     Buffer.from(exact.toString("utf8").replace(":1,", ": 1,")),
@@ -86,8 +116,8 @@ test("fixed JSON rejects byte-different equivalents, unknowns, duplicates, escap
     Buffer.from('{"schemaVersion":01}'),
     Buffer.from('{"schemaVersion":9007199254740992}'),
     Buffer.from([0xff]),
-  ]) assert.throws(() => parseExactManifest(bytes));
-  assert.throws(() => parseExactManifest(Buffer.from(`${exact.toString("utf8").slice(0, -1)},"unknown":1}`)));
+  ]) assert.throws(() => parseExactManifest(bytes, { now: TEST_NOW }));
+  assert.throws(() => parseExactManifest(Buffer.from(`${exact.toString("utf8").slice(0, -1)},"unknown":1}`), { now: TEST_NOW }));
 });
 
 test("manifest policy binds product, stable target, validity, size, hash, and URL", () => {
@@ -241,13 +271,13 @@ test("production trust rejects unknown schema, insecure endpoints, and malformed
 test("wrong metadata keys and malformed signature inputs fail", () => {
   const value = unsigned();
   const signature = crypto.sign(null, canonicalUnsignedBytes(value), privateKey).toString("hex");
-  assert.throws(() => finalizeManifest(value, null, trust));
-  assert.throws(() => finalizeManifest(value, `${signature}\n\n`, trust));
+  assert.throws(() => finalizeManifest(value, null, trust, { now: TEST_NOW }));
+  assert.throws(() => finalizeManifest(value, `${signature}\n\n`, trust, { now: TEST_NOW }));
   assert.throws(() => verifyMetadataSignature({ ...value, metadataSignature: signature }, {
     ...trust,
     metadataPublicKey: "0".repeat(64),
-  }));
-  assert.throws(() => parseExactManifest(Buffer.alloc(0)));
-  assert.throws(() => parseExactManifest(Buffer.from([0xef, 0xbb, 0xbf, 0x7b, 0x7d])));
-  assert.throws(() => parseExactManifest(Buffer.from("{")));
+  }, { now: TEST_NOW }));
+  assert.throws(() => parseExactManifest(Buffer.alloc(0), { now: TEST_NOW }));
+  assert.throws(() => parseExactManifest(Buffer.from([0xef, 0xbb, 0xbf, 0x7b, 0x7d]), { now: TEST_NOW }));
+  assert.throws(() => parseExactManifest(Buffer.from("{"), { now: TEST_NOW }));
 });

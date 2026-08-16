@@ -101,13 +101,18 @@ function validateLexicalJson(bytes) {
   return text;
 }
 
-export function parseExactManifest(bytes) {
+/**
+ * Parse and validate canonical manifest bytes against an optional policy clock.
+ * Production callers omit the options object to use the current wall clock;
+ * deterministic callers pass `{ now }` to evaluate a fixed validity window.
+ */
+export function parseExactManifest(bytes, { now = Date.now() } = {}) {
   const text = validateLexicalJson(bytes);
   let parsed;
   try { parsed = JSON.parse(text); } catch { fail(); }
   const allowed = new Set(FULL_FIELD_ORDER);
   if (Object.keys(parsed).some((key) => !allowed.has(key))) fail("unknown field");
-  validateManifest(parsed);
+  validateManifest(parsed, { now });
   if (!canonicalFullBytes(parsed).equals(bytes)) fail("manifest bytes are not canonical");
   return parsed;
 }
@@ -190,8 +195,12 @@ function publicKeyFromRawHex(rawHex) {
   return crypto.createPublicKey({ key: Buffer.concat([prefix, Buffer.from(rawHex, "hex")]), format: "der", type: "spki" });
 }
 
-export function verifyMetadataSignature(manifest, trust) {
-  validateManifest(manifest, { trust });
+/**
+ * Verify a manifest signature while preserving its validity and trust checks.
+ * The optional policy clock follows the same defaulting rule as validation.
+ */
+export function verifyMetadataSignature(manifest, trust, { now = Date.now() } = {}) {
+  validateManifest(manifest, { trust, now });
   const verified = crypto.verify(
     null,
     canonicalUnsignedBytes(manifest),
@@ -251,10 +260,13 @@ export function prepareUnsignedManifest(input, trust, { now = Date.now() } = {})
   return unsigned;
 }
 
-export function finalizeManifest(unsigned, signatureText, trust) {
+/**
+ * Attach and verify a signature using the supplied or current policy clock.
+ */
+export function finalizeManifest(unsigned, signatureText, trust, { now = Date.now() } = {}) {
   if (typeof signatureText !== "string" || !/^[0-9a-f]{128}\n?$/u.test(signatureText)) fail("signature file must contain lowercase hex");
   const manifest = { ...unsigned, metadataSignature: signatureText.trimEnd() };
-  verifyMetadataSignature(manifest, trust);
+  verifyMetadataSignature(manifest, trust, { now });
   return canonicalFullBytes(manifest);
 }
 
