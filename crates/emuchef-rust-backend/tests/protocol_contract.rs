@@ -423,6 +423,7 @@ fn product_catalog_and_plan_use_resolved_snapshot_identity_and_digest() {
         .join("../../authored")
         .canonicalize()
         .unwrap();
+    let bios_source = tempfile::tempdir().unwrap();
     let catalog = json!({
         "root": authored,
         "sourceKind": "bundled",
@@ -459,6 +460,12 @@ fn product_catalog_and_plan_use_resolved_snapshot_identity_and_digest() {
         "payload": {
             "catalog": catalog,
             "devicePlan": "ayaneo.konkr_pocket_fit.base",
+            "bindings": {
+                "feature.copy_bios/bios_source_dir": bios_source
+                    .path()
+                    .to_string_lossy()
+                    .to_string()
+            },
             "targetDevice": {
                 "serial": "SERIAL-REVIEWED",
                 "manufacturer": "AYANEO",

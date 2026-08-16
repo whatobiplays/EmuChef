@@ -45,7 +45,8 @@ or device-plan/profile semantics are changed by the qualification.
 This automated qualification does not prove real ADB behavior, device storage
 permissions or writability, hardware performance, device cleanup or reset,
 packaged-GUI behavior, physical end-to-end success, or combined RetroArch +
-BIOS behavior.
+BIOS physical behavior. The automated combined result is recorded separately
+in [the combined qualification document](recipe-qualification-retroarch-bios.md).
 
 ## 5. Physical qualification disposition
 
@@ -54,8 +55,10 @@ Physical qualification is **Deferred by owner**. Cleanup authority is
 manual/operator, live-network, packaged-GUI, signing, notarization, release,
 or cleanup qualification ran.
 
-## 6. Next automated workflow
+## 6. Combined qualification boundary
 
 Combined RetroArch + BIOS qualification through the real default device-plan
-selection remains unqualified and is the next workflow. This standalone BIOS
-result must not be read as qualification of that combined selection.
+selection is recorded in
+[the combined qualification document](recipe-qualification-retroarch-bios.md).
+This standalone BIOS result remains limited to the BIOS workflow and must not be
+read as the combined qualification itself.

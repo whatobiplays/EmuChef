@@ -330,13 +330,15 @@ fn file_snapshot(root: &Path) -> Vec<(PathBuf, Vec<u8>)> {
 }
 
 fn spawn_self_signed_tls_server() -> (String, JoinHandle<()>) {
+    use std::net::{IpAddr, Ipv4Addr};
+
     use rcgen::{CertificateParams, KeyPair, SanType};
     use rustls::pki_types::{PrivateKeyDer, PrivatePkcs8KeyDer};
     use rustls::{ServerConfig, ServerConnection, StreamOwned};
 
     let _ = rustls::crypto::aws_lc_rs::default_provider().install_default();
     let mut params = CertificateParams::default();
-    params.subject_alt_names = vec![SanType::DnsName("localhost".try_into().unwrap())];
+    params.subject_alt_names = vec![SanType::IpAddress(IpAddr::V4(Ipv4Addr::LOCALHOST))];
     let key = KeyPair::generate().unwrap();
     let certificate = params.self_signed(&key).unwrap();
     let private_key = PrivateKeyDer::Pkcs8(PrivatePkcs8KeyDer::from(key.serialize_der()));
@@ -359,7 +361,7 @@ fn spawn_self_signed_tls_server() -> (String, JoinHandle<()>) {
     });
     (
         format!(
-            "https://localhost:{}/artifact.apk?token=tls-secret",
+            "https://127.0.0.1:{}/artifact.apk?token=tls-secret",
             address.port()
         ),
         thread,

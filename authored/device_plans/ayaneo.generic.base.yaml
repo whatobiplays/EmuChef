@@ -6,7 +6,7 @@ description: Starter setup for supported AYANEO devices.
 device_profile_ref: ayaneo.generic
 recipes:
   - recipe_ref: app.retroarch.provision
-    selected_by_default: true
+    selected_by_default: false
   - recipe_ref: feature.copy_bios
     selected_by_default: true
 defaults:

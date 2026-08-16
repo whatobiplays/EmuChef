@@ -1346,9 +1346,22 @@ device wrapper. No authored YAML, device-plan/profile semantics, public API,
 or production executor source is changed.
 
 Physical qualification for both workflows is deferred by owner with cleanup
-authority `not_authorized_for_recipe_qualification`. Phase 6E remains In
-progress because combined RetroArch + BIOS qualification and other workflow
-qualification remain outstanding; the combined workflow is explicitly
-unqualified and next. Phase 6D remains In progress with all existing missing
-physical and UI-smoke evidence unchanged. The automated work follows the
-owner's sequencing decision and does not waive any Phase 6D requirement.
+authority `not_authorized_for_recipe_qualification`. Composition-level automated
+qualification is complete for the real `ayaneo.konkr_pocket_fit.base` default,
+which selects `app.retroarch.provision` followed by `feature.copy_bios` through
+`selected_recipes: None`. Its strict source-bound contract is at
+`tests/fixtures/recipe-qualification/retroarch-bios/qualification-contract.json`
+and its qualification document is
+`docs/product/recipe-qualification-retroarch-bios.md`. The combined result covers
+production planning/review, required BIOS binding failure, deterministic sandbox
+execution, repeated-run install skipping with BIOS re-execution, and failure
+semantics in which BIOS copy operations precede the forced BIOS destination
+verification failure, all results actually produced before the failure remain
+truthful, and the BIOS step and overall run fail. The generated production plan
+remains unchanged, and this makes no claim that BIOS follows the complete
+RetroArch workflow. The fake filesystem does not treat `/sdcard` and
+`/storage/emulated/0` as aliases. Phase 6E remains In progress for
+other workflow qualification and physical/full end-to-end work; Phase 6D
+remains In progress with all existing missing physical and UI-smoke evidence
+unchanged. The automated work follows the owner's sequencing decision and does
+not waive any Phase 6D requirement.
