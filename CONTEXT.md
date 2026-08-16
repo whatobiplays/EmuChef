@@ -1315,3 +1315,26 @@ resolving the lint findings that previously reproduced identically in an
 isolated clean checkout at `HEAD` (`b8bf14a`), so repository-wide strict Clippy
 is green. The validator is the authority for accepted and missing repetitions,
 and blocked mandatory scenarios do not count as closure.
+
+## Phase 6E.1 recipe qualification foundation
+
+Phase 6E.1 establishes the automated recipe-qualification foundation for the
+real `app.retroarch.provision` workflow. The strict qualification contract at
+`tests/fixtures/phase-6e/retroarch/qualification-contract.json` is bound by
+SHA-256 to the raw authored recipe bytes and fails closed when the source
+changes. Qualification uses the real authored catalog through
+`runtime_configuration::plan_configuration` with the
+`ayaneo.konkr_pocket_fit.base` device plan, exercises the production review
+projection, and executes the unchanged generated plan through
+`ExecutorAdapters::with_sandbox_roots`. Deterministic default-cache fixtures
+are pre-seeded at the exact production cache filenames, so the automated
+qualification requires no live public network access and no ADB or physical
+device.
+
+Phase 6E is In progress for automated qualification work. RetroArch has an
+automated qualification foundation only; it is not physically or fully
+end-to-end qualified, and physical qualification remains deferred by the owner
+with no cleanup authority granted. Phase 6D remains In progress with its
+existing missing physical and UI-smoke evidence unchanged. Phase 6E started
+because the owner explicitly deferred all remaining manual/physical
+qualification, not because any Phase 6D requirement was reduced.

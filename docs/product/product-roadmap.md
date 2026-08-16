@@ -27,7 +27,7 @@ Detailed evidence remains in the relevant product and release documents. In part
 
 | Product or track | Current state | Next priority |
 |---|---|---|
-| EmuChef proper | Phase 5A through 5H, Phase 6A through 6C, and the Phase 6D.1 audit are recorded; Phase 6D.2 through 6D.6 automated work is recorded; accepted Phase 6D.6 physical evidence exists for cancellation active/boundary, USB-disconnect active/boundary, device unauthorized, identity stability, root revocation, low storage, and operation timeout; the UI-smoke binding/capture plumbing is implemented; backend and Tauri strict Clippy pass under both default and real-execution feature sets; `identity_replacement` repetitions 1–2, `host_sleep_before_deadline` repetitions 1–2, `host_sleep_after_deadline` repetitions 1–2, and `ui_smoke_composite` repetitions 1–2 remain missing | Collect the remaining required physical evidence including a compatible host-sleep backend binding, then run the deferred UI-smoke qualification/composite repetitions and retain truthful blocked/unqualified cases |
+| EmuChef proper | Phase 5A through 5H, Phase 6A through 6C, and the Phase 6D.1 audit are recorded; Phase 6D.2 through 6D.6 automated work is recorded; accepted Phase 6D.6 physical evidence exists for cancellation active/boundary, USB-disconnect active/boundary, device unauthorized, identity stability, root revocation, low storage, and operation timeout; the UI-smoke binding/capture plumbing is implemented; backend and Tauri strict Clippy pass under both default and real-execution feature sets; `identity_replacement` repetitions 1–2, `host_sleep_before_deadline` repetitions 1–2, `host_sleep_after_deadline` repetitions 1–2, and `ui_smoke_composite` repetitions 1–2 remain missing; all remaining manual/physical qualification is owner-deferred until explicitly resumed | Select and implement the next automated Phase 6E recipe-qualification slice; manual/physical evidence collection remains owner-deferred |
 | Config Editor | Authored generation implemented through GitHub release-pattern testing | Later refinements remain unsequenced unless explicitly promoted |
 | Shared Runtime | Rust is the sole runtime and retains device, filesystem, planning, execution, validation, and protocol authority | Add shared capabilities only when required by a bounded product slice |
 | Release engineering | Deliberately deferred from normal Phase 5 product work | Resume only when the owner declares the relevant application release-comfortable |
@@ -72,7 +72,7 @@ EmuChef proper Phase 5 established end-user feature completeness, usability, wor
 | 6B | Device discovery and qualification | Completed | Deterministic device capability and compatibility profiles |
 | 6C | Core executor qualification | Completed | Non-root and root executor qualification completed on representative hardware |
 | 6D | Execution safety and recovery | In progress | Storage, timer, process-ownership, transport, identity, root, harness, validator, UI-smoke binding/capture, and documentation remediation is implemented; backend and Tauri strict Clippy pass under both default and real-execution feature sets; `identity_replacement` repetitions 1–2, `host_sleep_before_deadline` repetitions 1–2, `host_sleep_after_deadline` repetitions 1–2, and `ui_smoke_composite` repetitions 1–2 remain missing |
-| 6E | Recipe qualification | Planned | End-to-end success for core EmuChef workflows |
+| 6E | Recipe qualification | In progress | Phase 6E.1 automated RetroArch qualification foundation is complete; physical/end-to-end qualification remains deferred |
 | 6F | Physical-device test matrix | Planned | Representative coverage across supported Android device classes |
 | 6G | Production readiness | Planned | Evidence-backed promotion of real execution into production builds |
 
@@ -731,7 +731,9 @@ repetitions 1–2, and `ui_smoke_composite` repetitions 1–2 remain missing.
 `device_offline` remains supported conditional evidence and is not a closure
 blocker when no reliable device-specific transition exists. Same-serial
 replacement additionally requires suitable hardware or explicit owner
-acceptance. Phase 6D remains In progress; Phase 6E is not started, and ordinary
+acceptance. Phase 6D remains In progress; Phase 6E is in progress for automated
+qualification foundation work under the owner's sequencing decision, while all
+remaining manual/physical qualification stays owner-deferred and ordinary
 production real execution remains disabled.
 
 #### Phase 6D.2 — Operation Deadlines completion evidence
@@ -877,7 +879,18 @@ or frontend DTO expansion, or production feature enablement was added.
 ### 6E — Recipe Qualification
 
 **Owner: EmuChef proper**  
-**Status: Planned**
+**Status: In progress**
+
+#### Current status
+
+The owner explicitly deferred all remaining manual and physical qualification
+and approved beginning Phase 6E automated recipe-qualification work without
+closing Phase 6D. Phase 6E.1 established the automated qualification foundation
+for `app.retroarch.provision`: a source-digest-bound contract, production
+planning and review projection, and deterministic executor dry-run
+qualification. RetroArch is **not** physically or fully end-to-end qualified.
+Phase 6D remains **In progress** with every missing-evidence requirement
+unchanged.
 
 #### Objective
 
@@ -1183,9 +1196,11 @@ Cross-platform packaging and release automation must define separate deliverable
 Continue the deferred Phase 6D architecture and qualification backlog recorded
 in `docs/product/phase-6d1-execution-safety-audit.md`. Prioritize physical
 identity and interruption qualification, then repeated root-authority
-revalidation and the remaining low-storage/host-sleep policy. Do not begin
-Phase 6E recipe qualification until the owner accepts the remaining Phase 6D
-limitations or completes the required evidence.
+revalidation and the remaining low-storage/host-sleep policy. The owner has
+explicitly deferred all remaining manual/physical qualification and approved
+beginning Phase 6E automated recipe-qualification work without closing Phase
+6D; Phase 6D closure criteria and every missing-evidence requirement remain
+unchanged.
 
 Real execution must remain disabled in ordinary production builds. Phase 6B's
 manual VoiceOver and packaged-GUI evidence gaps remain explicit follow-ups and

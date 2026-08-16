@@ -240,6 +240,8 @@ checkout at `HEAD` (`b8bf14a`); manual UI-smoke qualification remains deferred
 until the required compatible host-sleep physical binding exists and the
 operator chooses to perform the deferred manual work. Same-serial replacement
 still requires suitable hardware or explicit owner acceptance.
-Phase 6D remains **In progress** and Phase 6E has not started. Signing,
+Phase 6D remains **In progress**. The remaining manual/physical Phase 6D.6
+qualification is deferred by owner decision, not waived; Phase 6E is in
+progress for automated qualification foundation work only. Signing,
 notarization, packaged-GUI, and release qualification remain outside this
 slice.

@@ -1,0 +1,50 @@
+{
+  "schemaVersion": 1,
+  "targetRecipe": "app.retroarch.provision",
+  "planningDevicePlan": "ayaneo.konkr_pocket_fit.base",
+  "authoredSource": {
+    "path": "authored/recipes/app.retroarch.provision.yaml",
+    "sha256": "d3fb4fc56064377e1d8e6954e0ac0aa3fc79d2e51d22e59ab00e0bbad821b2fa"
+  },
+  "selectedRecipes": ["app.retroarch.provision"],
+  "expandedRecipes": ["app.retroarch.provision"],
+  "recipeConstraintCapabilities": ["apk_install", "app_launch", "app_data_write"],
+  "qualificationContextCapabilities": [
+    "adb_available",
+    "apk_install",
+    "shared_storage_write",
+    "app_launch",
+    "shell_command",
+    "root_shell",
+    "app_data_write"
+  ],
+  "requiredInputs": [],
+  "optionalInputs": ["app.retroarch.provision/retroarch_cfg"],
+  "requiredOperationFamilies": [
+    "resolve_artifacts",
+    "install_apk",
+    "launch_app",
+    "wait",
+    "force_stop_app",
+    "grant_permissions",
+    "extract_archive",
+    "extract_artifacts",
+    "copy_files"
+  ],
+  "materialDependencyEdges": [
+    ["resolve_artifacts", "install_retroarch"],
+    ["install_retroarch", "launch_retroarch_bootstrap"],
+    ["launch_retroarch_bootstrap", "wait_for_retroarch_bootstrap"],
+    ["wait_for_retroarch_bootstrap", "stop_retroarch_after_bootstrap"],
+    ["stop_retroarch_after_bootstrap", "grant_retroarch_permissions"],
+    ["grant_retroarch_permissions", "launch_retroarch_permissions"],
+    ["launch_retroarch_permissions", "wait_for_retroarch_permissions"],
+    ["wait_for_retroarch_permissions", "stop_retroarch_after_permissions"],
+    ["extract_core_system_files", "copy_core_system_files"],
+    ["copy_core_system_files", "launch_retroarch"]
+  ],
+  "liveNetworkRequiredForAutomatedQualification": false,
+  "automatedStatus": "foundation",
+  "physicalStatus": "deferred",
+  "physicalCleanupAuthority": "not_authorized_in_phase_6e1"
+}

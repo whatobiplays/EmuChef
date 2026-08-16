@@ -292,6 +292,12 @@ pub trait ExecutorDevice: std::fmt::Debug {
         apk_path: &Path,
         replace_existing: bool,
     ) -> Result<(), DeviceOperationError>;
+
+    /// Record synthetic package state for deterministic dry-run predicates.
+    /// Real devices intentionally retain the default no-op implementation and
+    /// query their actual package manager state instead.
+    fn record_installed_package(&mut self, _package_name: &str) {}
+
     fn push(&mut self, source: &Path, dest: &str, sync: bool) -> Result<(), DeviceOperationError>;
     fn mkdir_p(&mut self, path: &str) -> Result<(), DeviceOperationError>;
     fn remove_file(&mut self, path: &str) -> Result<(), DeviceOperationError>;
@@ -844,7 +850,7 @@ impl<D: ExecutorDevice> ExecutorRunner<D> {
             "extract_artifacts" => self.execute_extract_artifacts(state, step, &resolved_params),
             "extract_archive" => self.execute_extract_archive(step, &resolved_params),
             "copy_files" => self.execute_copy_files(plan, step, &resolved_params),
-            "install_apk" => self.execute_install_apk(&resolved_params),
+            "install_apk" => self.execute_install_apk(step, &resolved_params),
             "launch_app" => self.execute_launch_app(&resolved_params),
             "force_stop_app" => self.execute_force_stop_app(&resolved_params),
             other => Err(StepFailure::new(format!(
@@ -1399,8 +1405,41 @@ impl<D: ExecutorDevice> ExecutorRunner<D> {
         Ok(outputs)
     }
 
+    /// Infer one unambiguous package identity for synthetic dry-run state.
+    /// Ambiguous, empty, or inconsistent declarations intentionally return
+    /// `None` so bookkeeping can never turn a successful install into a
+    /// failed operation.
+    fn inferred_installed_package(
+        step: &ExecutionStep,
+        resolved_params: &OrderedMap<Value>,
+    ) -> Option<String> {
+        let identities = step
+            .skip_if
+            .iter()
+            .chain(step.verify.iter())
+            .filter(|condition| condition.type_name == "package_installed")
+            .filter_map(|condition| condition.params.get("package_name"))
+            .filter_map(Value::as_str)
+            .filter(|value| !value.trim().is_empty())
+            .map(ToOwned::to_owned)
+            .collect::<HashSet<_>>();
+        if identities.len() != 1 {
+            return None;
+        }
+        let package_name = identities.into_iter().next()?;
+        if resolved_params
+            .get("expected_package_name")
+            .and_then(Value::as_str)
+            .is_some_and(|expected| expected != package_name)
+        {
+            return None;
+        }
+        Some(package_name)
+    }
+
     fn execute_install_apk(
         &mut self,
+        step: &ExecutionStep,
         resolved_params: &OrderedMap<Value>,
     ) -> Result<OrderedMap<RuntimeValue>, StepFailure> {
         let app = runtime_value_param(resolved_params, "app")?;
@@ -1478,6 +1517,9 @@ impl<D: ExecutorDevice> ExecutorRunner<D> {
         self.adapters
             .device
             .install_apk(&apk_path, replace_existing)?;
+        if let Some(package_name) = Self::inferred_installed_package(step, resolved_params) {
+            self.adapters.device.record_installed_package(&package_name);
+        }
         Ok(OrderedMap::new())
     }
 
@@ -2340,6 +2382,10 @@ impl ExecutorDevice for FakeDryRunDevice {
     ) -> Result<(), DeviceOperationError> {
         FakeDryRunDevice::install_apk(self, apk_path, replace_existing)
             .map_err(DeviceOperationError::from)
+    }
+
+    fn record_installed_package(&mut self, package_name: &str) {
+        self.installed_packages.insert(package_name.to_string());
     }
 
     fn push(&mut self, source: &Path, dest: &str, sync: bool) -> Result<(), DeviceOperationError> {
