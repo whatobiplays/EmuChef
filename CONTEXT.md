@@ -31,6 +31,14 @@ code and alternate-backend selection paths.
 The canonical retirement contract and evidence checklist are in
 `docs/product/phase-4a-python-runtime-retirement.md`.
 
+## GPT Repo MCP Product Contract
+
+The repository-owned machine-readable product contract is
+docs/product-contract.json. It is a bounded projection of PRODUCT.md and
+the canonical product and qualification documents used for product-grounded
+planning. Product decisions remain authoritative in the human-readable
+documents; update the contract when those decisions change.
+
 ## Config Editor Authored Generation
 
 The Config Editor provides guided generation workflows for a starter app
