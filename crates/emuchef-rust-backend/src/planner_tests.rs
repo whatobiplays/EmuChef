@@ -451,8 +451,8 @@ fn repo_plan_e2e_cases() -> Vec<RepoPlanE2eCase> {
         RepoPlanE2eCase {
             device_plan_ref: "ayaneo.konkr_pocket_fit.base",
             device_profile_ref: "ayaneo.konkr_pocket_fit",
-            selected_recipe_refs: RETROARCH_ONLY_REFS,
-            required_bindings: NO_REQUIRED_BINDINGS,
+            selected_recipe_refs: RETROARCH_BIOS_REFS,
+            required_bindings: BIOS_BINDINGS,
         },
         RepoPlanE2eCase {
             device_plan_ref: "ayaneo.pocket_s_mini.base",
@@ -3410,16 +3410,16 @@ fn repo_device_plan_inventory_is_explicit_by_path_id_profile_and_selected_order(
                 "authored/device_plans/ayaneo.generic.base.yaml".to_string(),
                 "ayaneo.generic.base".to_string(),
                 "ayaneo.generic".to_string(),
-                vec![
-                    "app.retroarch.provision".to_string(),
-                    "feature.copy_bios".to_string(),
-                ],
+                vec!["feature.copy_bios".to_string()],
             ),
             (
                 "authored/device_plans/ayaneo.konkr_pocket_fit.base.yaml".to_string(),
                 "ayaneo.konkr_pocket_fit.base".to_string(),
                 "ayaneo.konkr_pocket_fit".to_string(),
-                vec!["app.retroarch.provision".to_string()],
+                vec![
+                    "app.retroarch.provision".to_string(),
+                    "feature.copy_bios".to_string(),
+                ],
             ),
             (
                 "authored/device_plans/ayaneo.pocket_air_mini.base.yaml".to_string(),
@@ -3478,7 +3478,10 @@ fn repo_device_plan_context_builds_planner_input_from_profile_data() {
     assert_eq!(input.device_profile_ref, "ayaneo.konkr_pocket_fit");
     assert_eq!(
         input.selected_recipe_refs,
-        vec!["app.retroarch.provision".to_string()]
+        vec![
+            "app.retroarch.provision".to_string(),
+            "feature.copy_bios".to_string(),
+        ]
     );
     assert_eq!(input.device_context.manufacturer, "AYANEO");
     assert_eq!(input.device_context.model, "AYANEO KONKR Pocket FIT");
@@ -4832,11 +4835,6 @@ fn repo_plan_e2e_normalized_steps_match_runtime_contract() {
 #[test]
 fn repo_plan_e2e_requires_only_explicit_external_bindings_for_unbound_inputs() {
     for case in repo_plan_e2e_cases() {
-        assert!(
-            case.required_bindings.is_empty(),
-            "{} should not need required external bindings in the current current repository success set",
-            case.device_plan_ref
-        );
         let temp = TempDir::new().expect("repo plan e2e temp root should be created");
         let actual = planning_result_value(repo_plan_e2e_input(&case, &temp));
 
@@ -4847,8 +4845,15 @@ fn repo_plan_e2e_requires_only_explicit_external_bindings_for_unbound_inputs() {
         );
         assert_eq!(
             execution_input_ids(&actual),
-            Vec::<&str>::new(),
-            "{} should not synthesize optional input bindings",
+            case.required_bindings
+                .iter()
+                .map(|binding| match binding {
+                    RepoPlanE2eBinding::BiosSourceDir => "feature.copy_bios/bios_source_dir",
+                    RepoPlanE2eBinding::XaniteogApk => "app.xaniteog.install/xaniteog_apk",
+                    RepoPlanE2eBinding::RetroarchCfg => "app.retroarch.provision/retroarch_cfg",
+                })
+                .collect::<Vec<_>>(),
+            "{} should expose only its explicitly supplied external bindings",
             case.device_plan_ref
         );
     }

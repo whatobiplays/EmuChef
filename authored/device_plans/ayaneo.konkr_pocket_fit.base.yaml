@@ -7,8 +7,8 @@ device_profile_ref: ayaneo.konkr_pocket_fit
 recipes:
   - recipe_ref: app.retroarch.provision
     selected_by_default: true
-  # - recipe_ref: feature.copy_bios
-  #   selected_by_default: true
+  - recipe_ref: feature.copy_bios
+    selected_by_default: true
   # - recipe_ref: app.xaniteog.install
   #   selected_by_default: true
 defaults:

@@ -65,8 +65,9 @@ physical cleanup authority (`not_authorized_for_recipe_qualification`), and no
 ADB, ignored, host-sleep, identity-replacement, UI-smoke, packaged-GUI, or
 operator qualification ran as part of this automated workflow.
 
-## 6. Next automated workflow
+## 6. Combined qualification boundary
 
 Standalone BIOS qualification is recorded separately. Combined RetroArch + BIOS
-device-plan qualification remains unqualified and is the next automated
-workflow. Obtainium and ROM/content qualification remain separate future work.
+qualification for the real `ayaneo.konkr_pocket_fit.base` default is recorded in
+[the combined qualification document](recipe-qualification-retroarch-bios.md).
+Obtainium and ROM/content qualification remain separate future work.

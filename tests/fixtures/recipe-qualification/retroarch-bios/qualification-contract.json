@@ -1,0 +1,66 @@
+{
+  "schemaVersion": 1,
+  "planningDevicePlan": "ayaneo.konkr_pocket_fit.base",
+  "deviceProfile": "ayaneo.konkr_pocket_fit",
+  "authoredSources": [
+    {
+      "sourceKind": "recipe",
+      "id": "app.retroarch.provision",
+      "path": "authored/recipes/app.retroarch.provision.yaml",
+      "sha256": "d3fb4fc56064377e1d8e6954e0ac0aa3fc79d2e51d22e59ab00e0bbad821b2fa"
+    },
+    {
+      "sourceKind": "recipe",
+      "id": "feature.copy_bios",
+      "path": "authored/recipes/feature.copy_bios.yaml",
+      "sha256": "1a3b04aa3f26720701ccbe56336d1f451d3f402c9a092be10ef80682cd9a998b"
+    },
+    {
+      "sourceKind": "devicePlan",
+      "id": "ayaneo.konkr_pocket_fit.base",
+      "path": "authored/device_plans/ayaneo.konkr_pocket_fit.base.yaml",
+      "sha256": "3da268bf1ce2dca8600baa47d7663a5d6542c0b5cd8c9a41510f2e9d71a3a969"
+    },
+    {
+      "sourceKind": "deviceProfile",
+      "id": "ayaneo.konkr_pocket_fit",
+      "path": "authored/device_profiles/ayaneo.konkr_pocket_fit.yaml",
+      "sha256": "c1cef00eacf96760f1e21f405621b08e8b6070b983cfa5ec064209caf61a2db9"
+    }
+  ],
+  "selectedRecipes": ["app.retroarch.provision", "feature.copy_bios"],
+  "expandedRecipes": ["app.retroarch.provision", "feature.copy_bios"],
+  "recipeConstraintCapabilities": [
+    "apk_install",
+    "app_launch",
+    "app_data_write",
+    "shared_storage_write"
+  ],
+  "qualificationContextCapabilities": [
+    "adb_available",
+    "apk_install",
+    "shared_storage_write",
+    "app_launch",
+    "shell_command",
+    "root_shell",
+    "app_data_write"
+  ],
+  "requiredInputs": ["feature.copy_bios/bios_source_dir"],
+  "optionalInputs": ["app.retroarch.provision/retroarch_cfg"],
+  "requiredOperationFamilies": [
+    "resolve_artifacts",
+    "install_apk",
+    "launch_app",
+    "wait",
+    "force_stop_app",
+    "grant_permissions",
+    "extract_archive",
+    "extract_artifacts",
+    "copy_files"
+  ],
+  "fakeStorageAliasesQualified": false,
+  "liveNetworkRequiredForAutomatedQualification": false,
+  "automatedStatus": "qualified",
+  "physicalStatus": "deferred",
+  "physicalCleanupAuthority": "not_authorized_for_recipe_qualification"
+}

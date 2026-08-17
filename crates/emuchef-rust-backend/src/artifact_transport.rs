@@ -647,13 +647,15 @@ mod tests {
     }
 
     fn spawn_tls_server(response_bytes: Vec<u8>) -> (String, Vec<u8>, JoinHandle<()>) {
+        use std::net::{IpAddr, Ipv4Addr};
+
         use rcgen::{CertificateParams, KeyPair, SanType};
         use rustls::pki_types::{PrivateKeyDer, PrivatePkcs8KeyDer};
         use rustls::{ServerConfig, ServerConnection, StreamOwned};
 
         let _ = rustls::crypto::aws_lc_rs::default_provider().install_default();
         let mut params = CertificateParams::default();
-        params.subject_alt_names = vec![SanType::DnsName("localhost".try_into().unwrap())];
+        params.subject_alt_names = vec![SanType::IpAddress(IpAddr::V4(Ipv4Addr::LOCALHOST))];
         let key = KeyPair::generate().unwrap();
         let certificate = params.self_signed(&key).unwrap();
         let certificate_der = certificate.der().to_vec();
@@ -674,7 +676,7 @@ mod tests {
             }
         });
         (
-            format!("https://localhost:{}/artifact", address.port()),
+            format!("https://127.0.0.1:{}/artifact", address.port()),
             certificate_der,
             thread,
         )
@@ -712,7 +714,7 @@ mod tests {
         thread.join().unwrap();
 
         let (url, certificate, thread) = spawn_tls_server(response("200 OK", "", b"tls"));
-        let wrong_host_url = url.replace("localhost", "127.0.0.1");
+        let wrong_host_url = url.replace("127.0.0.1", "localhost");
         let transport = HttpArtifactTransport::with_test_root(test_config(), &certificate).unwrap();
         let error = transport
             .download(&Url::parse(&wrong_host_url).unwrap(), &mut Vec::new())

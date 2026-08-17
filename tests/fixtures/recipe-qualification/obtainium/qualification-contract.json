@@ -1,0 +1,49 @@
+{
+  "schemaVersion": 1,
+  "targetRecipe": "app.obtainium.install",
+  "planningDevicePlan": "ayaneo.generic.base",
+  "authoredSource": {
+    "path": "authored/recipes/app.obtainium.install.yaml",
+    "sha256": "d3f96f4d6f0fa812af75b0ddc18edad9da69b7b2ceae62468c0bd3c8b645caa7"
+  },
+  "selectedRecipes": [
+    "app.obtainium.install"
+  ],
+  "expandedRecipes": [
+    "app.obtainium.install"
+  ],
+  "recipeConstraintCapabilities": [
+    "apk_install"
+  ],
+  "qualificationContextCapabilities": [
+    "apk_install"
+  ],
+  "requiredInputs": [],
+  "optionalInputs": [],
+  "requiredOperationFamilies": [
+    "resolve_artifacts",
+    "install_apk"
+  ],
+  "materialDependencyEdges": [
+    [
+      "resolve_artifacts",
+      "install_obtainium"
+    ]
+  ],
+  "artifact": {
+    "idSuffix": "obtainium_apk",
+    "type": "remote_file",
+    "url": "https://github.com/ImranR98/Obtainium/releases/latest/download/app-release.apk",
+    "cache": "default"
+  },
+  "install": {
+    "stepIdSuffix": "install_obtainium",
+    "packageName": "dev.imranr.obtainium",
+    "replaceExisting": false,
+    "skipConditionType": "package_installed"
+  },
+  "liveNetworkRequiredForAutomatedQualification": false,
+  "automatedStatus": "qualified",
+  "physicalStatus": "deferred",
+  "physicalCleanupAuthority": "not_authorized_for_recipe_qualification"
+}

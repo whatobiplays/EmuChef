@@ -48,6 +48,10 @@ mod raw_request;
 #[cfg(test)]
 mod recipe_qualification_bios_tests;
 #[cfg(test)]
+mod recipe_qualification_obtainium_tests;
+#[cfg(test)]
+mod recipe_qualification_retroarch_bios_tests;
+#[cfg(test)]
 mod recipe_qualification_retroarch_tests;
 pub mod ref_index;
 mod remote_release_resolver;
