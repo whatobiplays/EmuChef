@@ -72,7 +72,7 @@ EmuChef proper Phase 5 established end-user feature completeness, usability, wor
 | 6B | Device discovery and qualification | Completed | Deterministic device capability and compatibility profiles |
 | 6C | Core executor qualification | Completed | Non-root and root executor qualification completed on representative hardware |
 | 6D | Execution safety and recovery | In progress | Storage, timer, process-ownership, transport, identity, root, harness, validator, UI-smoke binding/capture, and documentation remediation is implemented; backend and Tauri strict Clippy pass under both default and real-execution feature sets; `identity_replacement` repetitions 1–2, `host_sleep_before_deadline` repetitions 1–2, `host_sleep_after_deadline` repetitions 1–2, and `ui_smoke_composite` repetitions 1–2 remain missing |
-| 6E | Recipe qualification | In progress | Standalone RetroArch, BIOS, and the real-default combined RetroArch + BIOS automated qualification are complete; other authored workflows remain; physical/end-to-end qualification remains deferred |
+| 6E | Recipe qualification | In progress | Standalone RetroArch, BIOS, and Obtainium, plus the real-default combined RetroArch + BIOS automated qualification, are complete; other authored workflows remain; physical/end-to-end qualification remains deferred |
 | 6F | Physical-device test matrix | Planned | Representative coverage across supported Android device classes |
 | 6G | Production readiness | Planned | Evidence-backed promotion of real execution into production builds |
 
@@ -886,12 +886,17 @@ or frontend DTO expansion, or production feature enablement was added.
 The owner explicitly deferred all remaining manual and physical qualification
 and approved beginning Phase 6E automated recipe-qualification work without
 closing Phase 6D. Standalone automated qualification is complete for
-`app.retroarch.provision` and `feature.copy_bios`, and the real
-`ayaneo.konkr_pocket_fit.base` default composition is qualified for the combined
-RetroArch + BIOS workflow. The source-bound contracts, production planning and
-review projections, and deterministic executor qualifications are recorded in
-the [RetroArch](recipe-qualification-retroarch.md),
-[BIOS](recipe-qualification-bios.md), and
+`app.retroarch.provision`, `feature.copy_bios`, and
+`app.obtainium.install`, and the real `ayaneo.konkr_pocket_fit.base` default
+composition is qualified for the combined RetroArch + BIOS workflow. The
+Obtainium qualification uses `ayaneo.generic.base` only as production
+capability context and explicitly selects `app.obtainium.install`; it does not
+change device-plan membership or derive product provenance from it. The
+source-bound contracts, production planning and review projections, and
+deterministic executor qualifications are recorded in the
+[RetroArch](recipe-qualification-retroarch.md),
+[BIOS](recipe-qualification-bios.md),
+[Obtainium](recipe-qualification-obtainium.md), and
 [combined](recipe-qualification-retroarch-bios.md) documents. None of these
 automated results is physical or fully end-to-end qualification. Phase 6D
 remains **In progress** with every missing-evidence requirement unchanged.
