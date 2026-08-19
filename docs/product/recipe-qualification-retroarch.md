@@ -37,12 +37,20 @@ The qualification covers the real authored
 - Recipe admission, expansion, capability context, optional/supplied config
   behavior, and material dependency ordering match the qualification contract.
 - The production review remains executable and blocker-free, covers the
-  expected action sections and authored waits, and sanitizes file-input
-  summaries without leaking host parent paths.
+  expected action sections and the authored 7-second aggregate wait total,
+  and sanitizes file-input summaries without leaking host parent paths.
+- The source-bound contract and generated plan preserve both authored
+  first-launch sequences: bootstrap launch, 1500 ms wait, and force-stop;
+  then post-permission launch, 5000 ms wait, and force-stop, with direct
+  dependency and ordering assertions.
 - Artifact definitions enter the production resolution model at their exact
   default-cache filenames with authored URLs unchanged.
 - The generated workflow completes successfully through the deterministic
-  dry-run adapters with no Failed, Blocked, or Cancelled record.
+  dry-run adapters with no Failed, Blocked, or Cancelled record, including
+  successful execution records for all six first-launch lifecycle steps.
+- A test-private bootstrap force-stop failure preserves completed installation,
+  launch, and wait results, reports the lifecycle failure, and blocks dependent
+  permission and downstream work without mutating the generated plan.
 - A repeated deterministic run skips the authored `install_retroarch` step
   through the production `package_installed` predicate while remaining
   successful.

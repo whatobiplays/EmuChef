@@ -1335,9 +1335,15 @@ The qualification uses the real authored catalog through
 `runtime_configuration::plan_configuration` with the
 `ayaneo.konkr_pocket_fit.base` device plan, exercises the production review
 projection, and executes the unchanged generated plan through
-`ExecutorAdapters::with_sandbox_roots`. It proves the seven existing
-RetroArch behaviors without live public network access or ADB, while physical
-and full end-to-end qualification remain deferred.
+`ExecutorAdapters::with_sandbox_roots`. It explicitly qualifies the authored
+first-launch/bootstrap lifecycle as bootstrap launch -> 1500 ms wait -> force-stop
+followed by permission launch -> 5000 ms wait -> force-stop, including generated
+plan dependency/order checks, successful deterministic execution records, and a
+test-private lifecycle failure regression that preserves prior results and blocks
+dependent work. It also preserves optional configuration behavior, repeated-install
+skip behavior, PPSSPP verification failure semantics, and production review
+coverage without live public network access or ADB. Physical and full end-to-end
+qualification remain deferred.
 
 Standalone BIOS automated qualification covers the real authored
 `feature.copy_bios` workflow. Its strict source-bound contract is at
