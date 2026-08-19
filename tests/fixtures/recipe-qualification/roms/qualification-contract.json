@@ -1,0 +1,42 @@
+{
+  "schemaVersion": 1,
+  "targetRecipe": "feature.copy_roms",
+  "planningDevicePlan": "ayaneo.generic.base",
+  "authoredSource": {
+    "path": "authored/recipes/feature.copy_roms.yaml",
+    "sha256": "956838151ed9048421e4c88d0895abe5b7f1a1998731c7dd2fbbee9cc13c2041"
+  },
+  "selectedRecipes": ["feature.copy_roms"],
+  "expandedRecipes": ["feature.copy_roms"],
+  "recipeConstraintCapabilities": ["shared_storage_write"],
+  "qualificationContextCapabilities": ["shared_storage_write"],
+  "requiredOperationFamilies": ["copy_files"],
+  "inputs": {
+    "source": {
+      "key": "feature.copy_roms/source",
+      "required": true,
+      "type": "directory",
+      "role": "rom_library"
+    },
+    "destination": {
+      "key": "feature.copy_roms/destination",
+      "required": true,
+      "type": "device_path",
+      "role": "rom_destination",
+      "default": "/sdcard/ROMs"
+    },
+    "policy": {
+      "key": "feature.copy_roms/policy",
+      "required": false,
+      "type": "enum",
+      "role": "copy_policy",
+      "default": "merge",
+      "options": ["merge", "replace", "sync"]
+    }
+  },
+  "copyStepIdSuffix": "copy_rom_library",
+  "liveNetworkRequiredForAutomatedQualification": false,
+  "automatedStatus": "qualified",
+  "physicalStatus": "deferred",
+  "physicalCleanupAuthority": "not_authorized_for_recipe_qualification"
+}

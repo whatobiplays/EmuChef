@@ -27,7 +27,7 @@ Detailed evidence remains in the relevant product and release documents. In part
 
 | Product or track | Current state | Next priority |
 |---|---|---|
-| EmuChef proper | Phase 5A through 5H, Phase 6A through 6C, and the Phase 6D.1 audit are recorded; Phase 6D.2 through 6D.6 automated work is recorded; accepted Phase 6D.6 physical evidence exists for cancellation active/boundary, USB-disconnect active/boundary, device unauthorized, identity stability, root revocation, low storage, and operation timeout; the UI-smoke binding/capture plumbing is implemented; backend and Tauri strict Clippy pass under both default and real-execution feature sets; standalone RetroArch, BIOS, and combined RetroArch + BIOS automated recipe qualification is recorded; `identity_replacement` repetitions 1–2, `host_sleep_before_deadline` repetitions 1–2, `host_sleep_after_deadline` repetitions 1–2, and `ui_smoke_composite` repetitions 1–2 remain missing; all remaining manual/physical qualification is owner-deferred until explicitly resumed | Continue bounded automated qualification of remaining authored workflows; manual/physical evidence collection remains owner-deferred |
+| EmuChef proper | Phase 5A through 5H, Phase 6A through 6C, and the Phase 6D.1 audit are recorded; Phase 6D.2 through 6D.6 automated work is recorded; accepted Phase 6D.6 physical evidence exists for cancellation active/boundary, USB-disconnect active/boundary, device unauthorized, identity stability, root revocation, low storage, and operation timeout; the UI-smoke binding/capture plumbing is implemented; backend and Tauri strict Clippy pass under both default and real-execution feature sets; standalone RetroArch, BIOS, ROM/content-copy, and combined RetroArch + BIOS automated recipe qualification is recorded; `identity_replacement` repetitions 1–2, `host_sleep_before_deadline` repetitions 1–2, `host_sleep_after_deadline` repetitions 1–2, and `ui_smoke_composite` repetitions 1–2 remain missing; all remaining manual/physical qualification is owner-deferred until explicitly resumed | Continue bounded automated qualification of remaining authored workflows; manual/physical evidence collection remains owner-deferred |
 | Config Editor | Authored generation implemented through GitHub release-pattern testing | Later refinements remain unsequenced unless explicitly promoted |
 | Shared Runtime | Rust is the sole runtime and retains device, filesystem, planning, execution, validation, and protocol authority | Add shared capabilities only when required by a bounded product slice |
 | Release engineering | Deliberately deferred from normal Phase 5 product work | Resume only when the owner declares the relevant application release-comfortable |
@@ -72,7 +72,7 @@ EmuChef proper Phase 5 established end-user feature completeness, usability, wor
 | 6B | Device discovery and qualification | Completed | Deterministic device capability and compatibility profiles |
 | 6C | Core executor qualification | Completed | Non-root and root executor qualification completed on representative hardware |
 | 6D | Execution safety and recovery | In progress | Storage, timer, process-ownership, transport, identity, root, harness, validator, UI-smoke binding/capture, and documentation remediation is implemented; backend and Tauri strict Clippy pass under both default and real-execution feature sets; `identity_replacement` repetitions 1–2, `host_sleep_before_deadline` repetitions 1–2, `host_sleep_after_deadline` repetitions 1–2, and `ui_smoke_composite` repetitions 1–2 remain missing |
-| 6E | Recipe qualification | In progress | Standalone RetroArch, BIOS, and Obtainium, plus the real-default combined RetroArch + BIOS automated qualification, are complete; other authored workflows remain; physical/end-to-end qualification remains deferred |
+| 6E | Recipe qualification | In progress | Standalone RetroArch, BIOS, Obtainium, and ROM/content-copy, plus the real-default combined RetroArch + BIOS automated qualification, are complete; other authored workflows remain; physical/end-to-end qualification remains deferred |
 | 6F | Physical-device test matrix | Planned | Representative coverage across supported Android device classes |
 | 6G | Production readiness | Planned | Evidence-backed promotion of real execution into production builds |
 
@@ -886,8 +886,8 @@ or frontend DTO expansion, or production feature enablement was added.
 The owner explicitly deferred all remaining manual and physical qualification
 and approved beginning Phase 6E automated recipe-qualification work without
 closing Phase 6D. Standalone automated qualification is complete for
-`app.retroarch.provision`, `feature.copy_bios`, and
-`app.obtainium.install`, and the real `ayaneo.konkr_pocket_fit.base` default
+`app.retroarch.provision`, `feature.copy_bios`, `app.obtainium.install`, and
+`feature.copy_roms`, and the real `ayaneo.konkr_pocket_fit.base` default
 composition is qualified for the combined RetroArch + BIOS workflow. The
 Obtainium qualification uses `ayaneo.generic.base` only as production
 capability context and explicitly selects `app.obtainium.install`; it does not
@@ -896,10 +896,13 @@ source-bound contracts, production planning and review projections, and
 deterministic executor qualifications are recorded in the
 [RetroArch](recipe-qualification-retroarch.md),
 [BIOS](recipe-qualification-bios.md),
-[Obtainium](recipe-qualification-obtainium.md), and
+[Obtainium](recipe-qualification-obtainium.md), [ROM library](recipe-qualification-roms.md), and
 [combined](recipe-qualification-retroarch-bios.md) documents. None of these
 automated results is physical or fully end-to-end qualification. Phase 6D
 remains **In progress** with every missing-evidence requirement unchanged.
+For the authored ROM-copy workflow, directory-style `sync` follows its
+“Mirror source” meaning and removes destination-only files; physical
+qualification remains deferred.
 
 #### Objective
 

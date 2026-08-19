@@ -1353,6 +1353,25 @@ adapters, and authored destination-verification failure through a private test
 device wrapper. No authored YAML, device-plan/profile semantics, public API,
 or production executor source is changed.
 
+Standalone ROM/content-copy automated qualification covers the real authored
+`feature.copy_roms` workflow. Its strict source-bound contract is at
+`tests/fixtures/recipe-qualification/roms/qualification-contract.json`, bound
+to the raw authored recipe SHA-256
+`956838151ed9048421e4c88d0895abe5b7f1a1998731c7dd2fbbee9cc13c2041`, and its
+qualification document is `docs/product/recipe-qualification-roms.md`.
+Qualification uses `ayaneo.generic.base` as production capability context but
+explicitly selects only `feature.copy_roms`. It proves production planning and
+review, required/default/alternate/invalid bindings, deterministic nested
+`merge`, `replace`, and directory-style `sync` execution, and truthful copy
+failure reporting without ADB, live network, physical hardware, or packaged
+GUI work. The authored `verify: []` remains without verification-predicate
+coverage. Directory-style `sync` is the authored “Mirror source” contract and
+removes destination-only files; the correction is limited to the shared
+fake-device directory-copy branch, while single-file, path-list, and unrelated
+execution branches retain their existing behavior. Physical qualification is
+deferred with cleanup authority
+`not_authorized_for_recipe_qualification`.
+
 Standalone Obtainium automated qualification covers the real authored
 `app.obtainium.install` workflow. Its strict source-bound contract is at
 `tests/fixtures/recipe-qualification/obtainium/qualification-contract.json`,

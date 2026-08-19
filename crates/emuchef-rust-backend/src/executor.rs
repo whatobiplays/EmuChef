@@ -2840,7 +2840,9 @@ impl SandboxRoots {
                 let source_path = source_path_from_value(source)?;
                 self.ensure_read_allowed(&source_path)?;
                 let target_dir = self.fake_device_path(dest)?;
-                if copy_policy == "replace" && target_dir.exists() {
+                // Directory-style `sync` mirrors the source. File and path-list
+                // policy handling intentionally remains in its own branch.
+                if matches!(copy_policy, "replace" | "sync") && target_dir.exists() {
                     self.remove_fake_device_path(&target_dir)?;
                 }
                 reject_symlink_ancestor(&self.fake_device_root, &target_dir)?;
