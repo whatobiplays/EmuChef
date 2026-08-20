@@ -18,8 +18,13 @@ use serde_json::Value;
 use sha2::{Digest, Sha256};
 
 use crate::artifact_resolver::artifact_local_filename;
-use crate::executor::{ExecutorAdapters, ExecutorRunner, StepRunStatus};
-use crate::planner::{BindingSource, ExecutionArtifact, ExecutionPlan, ExecutionStep};
+use crate::executor::{
+    DeviceOperationError, ExecutorAdapters, ExecutorDevice, ExecutorRunner, FakeDryRunDevice,
+    StepRunStatus,
+};
+use crate::planner::{
+    BindingSource, ExecutionArtifact, ExecutionParamValue, ExecutionPlan, ExecutionStep,
+};
 use crate::runtime_configuration::PlanConfigurationResult;
 
 const TARGET_RECIPE: &str = "app.retroarch.provision";
@@ -40,6 +45,7 @@ struct RetroArchQualificationContract {
     required_inputs: Vec<String>,
     optional_inputs: Vec<String>,
     required_operation_families: Vec<String>,
+    first_launch_sequences: Vec<FirstLaunchSequenceContract>,
     material_dependency_edges: Vec<Vec<String>>,
     live_network_required_for_automated_qualification: bool,
     automated_status: String,
@@ -52,6 +58,15 @@ struct RetroArchQualificationContract {
 struct AuthoredSourceContract {
     path: String,
     sha256: String,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct FirstLaunchSequenceContract {
+    launch_step: String,
+    wait_step: String,
+    wait_duration_ms: i64,
+    force_stop_step: String,
 }
 
 fn repository_root() -> PathBuf {
@@ -273,6 +288,51 @@ fn retroarch_real_authored_plan_matches_qualification_contract() {
             "material dependency edge {edge:?} must be a direct generated dependency"
         );
     }
+
+    assert_eq!(
+        contract
+            .first_launch_sequences
+            .iter()
+            .map(|sequence| {
+                (
+                    sequence.launch_step.as_str(),
+                    sequence.wait_step.as_str(),
+                    sequence.wait_duration_ms,
+                    sequence.force_stop_step.as_str(),
+                )
+            })
+            .collect::<Vec<_>>(),
+        vec![
+            (
+                "launch_retroarch_bootstrap",
+                "wait_for_retroarch_bootstrap",
+                1500,
+                "stop_retroarch_after_bootstrap",
+            ),
+            (
+                "launch_retroarch_permissions",
+                "wait_for_retroarch_permissions",
+                5000,
+                "stop_retroarch_after_permissions",
+            ),
+        ]
+    );
+    for sequence in &contract.first_launch_sequences {
+        let launch = generated_step_for_authored_id(&plan, &sequence.launch_step);
+        let wait = generated_step_for_authored_id(&plan, &sequence.wait_step);
+        let force_stop = generated_step_for_authored_id(&plan, &sequence.force_stop_step);
+        assert_eq!(launch.type_name, "launch_app");
+        assert_eq!(wait.type_name, "wait");
+        assert_eq!(force_stop.type_name, "force_stop_app");
+        assert_eq!(
+            wait.params.get("duration_ms"),
+            Some(&ExecutionParamValue::Literal {
+                value: Value::from(sequence.wait_duration_ms),
+            })
+        );
+        assert!(wait.dependencies.contains(&launch.id));
+        assert!(force_stop.dependencies.contains(&wait.id));
+    }
 }
 
 #[test]
@@ -490,9 +550,111 @@ fn dry_run_adapters(workspace: &QualificationWorkspace) -> ExecutorAdapters {
     )
 }
 
+/// Test-only device adapter that fails the first authored RetroArch force-stop
+/// while delegating every other operation to the deterministic dry-run device.
+#[derive(Debug, Default)]
+struct FirstLaunchFailureDevice {
+    inner: FakeDryRunDevice,
+    fail_bootstrap_force_stop: bool,
+}
+
+impl FirstLaunchFailureDevice {
+    fn fail_bootstrap_force_stop() -> Self {
+        Self {
+            inner: FakeDryRunDevice::default(),
+            fail_bootstrap_force_stop: true,
+        }
+    }
+}
+
+impl ExecutorDevice for FirstLaunchFailureDevice {
+    fn uses_fake_device_filesystem(&self) -> bool {
+        false
+    }
+
+    fn install_apk(
+        &mut self,
+        apk_path: &Path,
+        replace_existing: bool,
+    ) -> Result<(), DeviceOperationError> {
+        <FakeDryRunDevice as ExecutorDevice>::install_apk(
+            &mut self.inner,
+            apk_path,
+            replace_existing,
+        )
+    }
+
+    fn push(&mut self, source: &Path, dest: &str, sync: bool) -> Result<(), DeviceOperationError> {
+        <FakeDryRunDevice as ExecutorDevice>::push(&mut self.inner, source, dest, sync)
+    }
+
+    fn mkdir_p(&mut self, path: &str) -> Result<(), DeviceOperationError> {
+        <FakeDryRunDevice as ExecutorDevice>::mkdir_p(&mut self.inner, path)
+    }
+
+    fn remove_file(&mut self, path: &str) -> Result<(), DeviceOperationError> {
+        <FakeDryRunDevice as ExecutorDevice>::remove_file(&mut self.inner, path)
+    }
+
+    fn remove_tree(&mut self, path: &str) -> Result<(), DeviceOperationError> {
+        <FakeDryRunDevice as ExecutorDevice>::remove_tree(&mut self.inner, path)
+    }
+
+    fn copy_on_device(
+        &mut self,
+        source: &str,
+        dest: &str,
+        recursive: bool,
+        privileged: bool,
+    ) -> Result<(), DeviceOperationError> {
+        <FakeDryRunDevice as ExecutorDevice>::copy_on_device(
+            &mut self.inner,
+            source,
+            dest,
+            recursive,
+            privileged,
+        )
+    }
+
+    fn package_installed(&mut self, package_name: &str) -> Result<bool, DeviceOperationError> {
+        <FakeDryRunDevice as ExecutorDevice>::package_installed(&mut self.inner, package_name)
+    }
+
+    fn path_exists(&mut self, path: &str) -> Result<bool, DeviceOperationError> {
+        <FakeDryRunDevice as ExecutorDevice>::path_exists(&mut self.inner, path)
+    }
+
+    fn path_is_dir(&mut self, path: &str) -> Result<bool, DeviceOperationError> {
+        <FakeDryRunDevice as ExecutorDevice>::path_is_dir(&mut self.inner, path)
+    }
+
+    fn run_plan_command(&mut self, command: Vec<String>) -> Result<(), DeviceOperationError> {
+        <FakeDryRunDevice as ExecutorDevice>::run_plan_command(&mut self.inner, command)
+    }
+
+    fn launch_app(
+        &mut self,
+        package_name: &str,
+        activity: Option<&str>,
+    ) -> Result<(), DeviceOperationError> {
+        <FakeDryRunDevice as ExecutorDevice>::launch_app(&mut self.inner, package_name, activity)
+    }
+
+    fn force_stop_app(&mut self, package_name: &str) -> Result<(), DeviceOperationError> {
+        if self.fail_bootstrap_force_stop {
+            self.fail_bootstrap_force_stop = false;
+            return Err(DeviceOperationError::other(
+                "deterministic RetroArch bootstrap stop failure",
+            ));
+        }
+        <FakeDryRunDevice as ExecutorDevice>::force_stop_app(&mut self.inner, package_name)
+    }
+}
+
 #[test]
 fn retroarch_generated_plan_executes_successfully_without_network_or_adb() {
     let workspace = QualificationWorkspace::new();
+    let contract = load_contract();
     let prepared = plan_retroarch(Some(&workspace.config_path));
     let plan = prepared.plan.expect("plan should be generated");
     seed_artifact_cache(&workspace.cache_root, &plan, SystemFixtureMode::Complete);
@@ -533,6 +695,98 @@ fn retroarch_generated_plan_executes_successfully_without_network_or_adb() {
             record.status,
             StepRunStatus::Executed,
             "{suffix} must execute"
+        );
+    }
+    for sequence in &contract.first_launch_sequences {
+        for suffix in [
+            &sequence.launch_step,
+            &sequence.wait_step,
+            &sequence.force_stop_step,
+        ] {
+            let record = result
+                .steps
+                .iter()
+                .find(|record| record.step_id.ends_with(&format!("/{suffix}")))
+                .unwrap_or_else(|| panic!("missing execution record for /{suffix}"));
+            assert_eq!(
+                record.status,
+                StepRunStatus::Executed,
+                "first-launch lifecycle step /{suffix} must execute"
+            );
+        }
+    }
+}
+
+#[test]
+fn retroarch_first_launch_failure_blocks_dependent_work_truthfully() {
+    let workspace = QualificationWorkspace::new();
+    let prepared = plan_retroarch(Some(&workspace.config_path));
+    let plan = prepared.plan.expect("plan should be generated");
+    let plan_before = plan.clone();
+    seed_artifact_cache(&workspace.cache_root, &plan, SystemFixtureMode::Complete);
+    let adapters = ExecutorAdapters::with_device_and_sandbox_roots(
+        FirstLaunchFailureDevice::fail_bootstrap_force_stop(),
+        workspace.runtime_root.clone(),
+        workspace.cache_root.clone(),
+        workspace.fake_device_root.clone(),
+        vec![workspace.host_input_root.clone()],
+        false,
+    );
+    let mut runner = ExecutorRunner::new(adapters);
+    let result = runner.run(&plan);
+    let status = |suffix: &str| {
+        result
+            .steps
+            .iter()
+            .find(|record| record.step_id.ends_with(suffix))
+            .unwrap_or_else(|| panic!("missing execution record for {suffix}"))
+            .status
+            .clone()
+    };
+
+    assert_eq!(
+        plan, plan_before,
+        "execution must not mutate the generated plan"
+    );
+    assert!(
+        !result.success,
+        "forced bootstrap stop failure must fail the run"
+    );
+    assert_eq!(
+        status("/install_retroarch"),
+        StepRunStatus::Executed,
+        "prior installation evidence must remain successful"
+    );
+    assert_eq!(
+        status("/launch_retroarch_bootstrap"),
+        StepRunStatus::Executed
+    );
+    assert_eq!(
+        status("/wait_for_retroarch_bootstrap"),
+        StepRunStatus::Executed
+    );
+    assert_eq!(
+        status("/stop_retroarch_after_bootstrap"),
+        StepRunStatus::Failed
+    );
+    assert!(result
+        .steps
+        .iter()
+        .find(|record| record.step_id.ends_with("/stop_retroarch_after_bootstrap"))
+        .and_then(|record| record.message.as_deref())
+        .is_some_and(|message| message.contains("deterministic RetroArch bootstrap stop failure")));
+    for suffix in [
+        "/grant_retroarch_permissions",
+        "/launch_retroarch_permissions",
+        "/wait_for_retroarch_permissions",
+        "/stop_retroarch_after_permissions",
+        "/copy_core_system_files",
+        "/launch_retroarch",
+    ] {
+        assert_eq!(
+            status(suffix),
+            StepRunStatus::Blocked,
+            "dependent step {suffix} must be blocked after the lifecycle failure"
         );
     }
 }

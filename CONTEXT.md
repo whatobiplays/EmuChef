@@ -31,6 +31,14 @@ code and alternate-backend selection paths.
 The canonical retirement contract and evidence checklist are in
 `docs/product/phase-4a-python-runtime-retirement.md`.
 
+## GPT Repo MCP Product Contract
+
+The repository-owned machine-readable product contract is
+docs/product-contract.json. It is a bounded projection of PRODUCT.md and
+the canonical product and qualification documents used for product-grounded
+planning. Product decisions remain authoritative in the human-readable
+documents; update the contract when those decisions change.
+
 ## Config Editor Authored Generation
 
 The Config Editor provides guided generation workflows for a starter app
@@ -1327,9 +1335,15 @@ The qualification uses the real authored catalog through
 `runtime_configuration::plan_configuration` with the
 `ayaneo.konkr_pocket_fit.base` device plan, exercises the production review
 projection, and executes the unchanged generated plan through
-`ExecutorAdapters::with_sandbox_roots`. It proves the seven existing
-RetroArch behaviors without live public network access or ADB, while physical
-and full end-to-end qualification remain deferred.
+`ExecutorAdapters::with_sandbox_roots`. It explicitly qualifies the authored
+first-launch/bootstrap lifecycle as bootstrap launch -> 1500 ms wait -> force-stop
+followed by permission launch -> 5000 ms wait -> force-stop, including generated
+plan dependency/order checks, successful deterministic execution records, and a
+test-private lifecycle failure regression that preserves prior results and blocks
+dependent work. It also preserves optional configuration behavior, repeated-install
+skip behavior, PPSSPP verification failure semantics, and production review
+coverage without live public network access or ADB. Physical and full end-to-end
+qualification remain deferred.
 
 Standalone BIOS automated qualification covers the real authored
 `feature.copy_bios` workflow. Its strict source-bound contract is at
@@ -1344,6 +1358,25 @@ review, required-input rejection, recursive nested copy through normal sandbox
 adapters, and authored destination-verification failure through a private test
 device wrapper. No authored YAML, device-plan/profile semantics, public API,
 or production executor source is changed.
+
+Standalone ROM/content-copy automated qualification covers the real authored
+`feature.copy_roms` workflow. Its strict source-bound contract is at
+`tests/fixtures/recipe-qualification/roms/qualification-contract.json`, bound
+to the raw authored recipe SHA-256
+`956838151ed9048421e4c88d0895abe5b7f1a1998731c7dd2fbbee9cc13c2041`, and its
+qualification document is `docs/product/recipe-qualification-roms.md`.
+Qualification uses `ayaneo.generic.base` as production capability context but
+explicitly selects only `feature.copy_roms`. It proves production planning and
+review, required/default/alternate/invalid bindings, deterministic nested
+`merge`, `replace`, and directory-style `sync` execution, and truthful copy
+failure reporting without ADB, live network, physical hardware, or packaged
+GUI work. The authored `verify: []` remains without verification-predicate
+coverage. Directory-style `sync` is the authored “Mirror source” contract and
+removes destination-only files; the correction is limited to the shared
+fake-device directory-copy branch, while single-file, path-list, and unrelated
+execution branches retain their existing behavior. Physical qualification is
+deferred with cleanup authority
+`not_authorized_for_recipe_qualification`.
 
 Standalone Obtainium automated qualification covers the real authored
 `app.obtainium.install` workflow. Its strict source-bound contract is at

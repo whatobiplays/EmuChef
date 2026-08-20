@@ -31,6 +31,20 @@
     "extract_artifacts",
     "copy_files"
   ],
+  "firstLaunchSequences": [
+    {
+      "launchStep": "launch_retroarch_bootstrap",
+      "waitStep": "wait_for_retroarch_bootstrap",
+      "waitDurationMs": 1500,
+      "forceStopStep": "stop_retroarch_after_bootstrap"
+    },
+    {
+      "launchStep": "launch_retroarch_permissions",
+      "waitStep": "wait_for_retroarch_permissions",
+      "waitDurationMs": 5000,
+      "forceStopStep": "stop_retroarch_after_permissions"
+    }
+  ],
   "materialDependencyEdges": [
     ["resolve_artifacts", "install_retroarch"],
     ["install_retroarch", "launch_retroarch_bootstrap"],

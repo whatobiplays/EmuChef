@@ -4202,7 +4202,7 @@ fn copy_replace_deletes_only_inside_fake_device_root() {
 }
 
 #[test]
-fn copy_sync_preserves_stale_files_like_compatibility_push_sync() {
+fn copy_sync_removes_destination_only_files_from_directory_source() {
     let tmp = tempfile::tempdir().expect("temp root should be created");
     let fixture_root = tmp.path().join("fixtures");
     let runtime_root = tmp.path().join(".emuchef_runtime");
@@ -4249,10 +4249,7 @@ fn copy_sync_preserves_stale_files_like_compatibility_push_sync() {
     );
 
     assert_eq!(actual["success"], true);
-    assert_eq!(
-        fs::read_to_string(fake_device_root.join("sdcard/cores/stale.so")).unwrap(),
-        "stale"
-    );
+    assert!(!fake_device_root.join("sdcard/cores/stale.so").exists());
     assert_eq!(
         fs::read_to_string(fake_device_root.join("sdcard/cores/new.so")).unwrap(),
         "new"

@@ -1,0 +1,91 @@
+{
+  "schema_version": 1,
+  "product": {
+    "name": "EmuChef",
+    "purpose": "Help nontechnical Android handheld owners configure one supported device safely and reproducibly through a simulation-first, reviewable workflow while enabling technical authors to maintain the catalog that drives those configurations; Rust/Tauri remains the trusted authority and the two applications remain distinct."
+  },
+  "primary_users": [
+    {
+      "id": "emuchef-end-user",
+      "role": "Nontechnical Android handheld owner using EmuChef proper",
+      "technical_level": "Nontechnical and needs clear guidance instead of runtime or protocol concepts",
+      "work_context": "Uses a native macOS/Tauri workflow with one connected Android handheld to detect the device, choose a setup, provide inputs, review a plan, simulate it, and apply it only when explicitly enabled and qualified."
+    },
+    {
+      "id": "config-author",
+      "role": "Technical author maintaining Config Editor catalog content",
+      "technical_level": "Technical and responsible for authored recipes, application definitions, device profiles, and validation evidence",
+      "work_context": "Creates and maintains catalog content consumed by EmuChef proper while preserving typed provenance, validation, and the separation between authoring and end-user workflows."
+    }
+  ],
+  "jobs_to_be_done": [
+    {
+      "id": "configure-supported-device",
+      "statement": "Configure a supported Android handheld through a guided, reproducible workflow."
+    },
+    {
+      "id": "review-and-simulate-plan",
+      "statement": "Understand planned impact and recovery before changing a real device, using simulation as the normal first step."
+    },
+    {
+      "id": "apply-qualified-configuration",
+      "statement": "Apply an explicitly enabled and separately qualified configuration while preserving truthful status and recovery behavior."
+    },
+    {
+      "id": "qualify-authored-workflow",
+      "statement": "Establish automated, evidence-backed qualification for an authored workflow before broader release or physical-device claims."
+    },
+    {
+      "id": "author-catalog-content",
+      "statement": "Create, validate, and maintain recipes, application definitions, device profiles, and generated catalog content."
+    },
+    {
+      "id": "diagnose-and-recover",
+      "statement": "Inspect bounded diagnostics and recover unsaved intent or failed workflow state without requiring a terminal."
+    }
+  ],
+  "must_reduce": [
+    "Uncertainty before device changes",
+    "Repeated manual configuration work",
+    "Unsafe or unreviewed real-device execution",
+    "Authority confusion between Rust/Tauri and React",
+    "Unrecoverable failures and loss of user intent",
+    "Leakage of sensitive device or configuration data"
+  ],
+  "must_not_become": [
+    "A generic shell or device-management tool",
+    "An unsandboxed execution engine",
+    "A hosted service",
+    "A frontend-owned authority layer",
+    "An automatic license-acceptance or SDK-acquisition path",
+    "A product that implies rollback capabilities the runtime does not provide"
+  ],
+  "experience_principles": [
+    "Simulation and review before execution",
+    "Trusted Rust/Tauri authority with sanitized presentation",
+    "Truthful accessible status and recovery",
+    "Bounded local control",
+    "Explicit separation of EmuChef proper and Config Editor",
+    "Evidence before qualification or release claims"
+  ],
+  "canonical_docs": [
+    "README.md",
+    "PRODUCT.md",
+    "docs/product/product-roadmap.md",
+    "docs/product/remaining-product-backlog.md",
+    "docs/product/phase-5-app-quality-roadmap.md",
+    "docs/product/phase-6d1-execution-safety-audit.md",
+    "docs/product/recipe-qualification-obtainium.md",
+    "docs/product/recipe-qualification-bios.md",
+    "docs/product/recipe-qualification-retroarch.md",
+    "docs/product/recipe-qualification-retroarch-bios.md"
+  ],
+  "governance": {
+    "mode": "advisory",
+    "product_review_required_for": [
+      "product_slice",
+      "product_correction"
+    ],
+    "checkpoint_every_root_runs": 5
+  }
+}

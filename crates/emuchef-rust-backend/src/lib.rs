@@ -53,6 +53,10 @@ mod recipe_qualification_obtainium_tests;
 mod recipe_qualification_retroarch_bios_tests;
 #[cfg(test)]
 mod recipe_qualification_retroarch_tests;
+#[cfg(test)]
+mod recipe_qualification_roms_tests;
+#[cfg(test)]
+mod recipe_qualification_xaniteog_tests;
 pub mod ref_index;
 mod remote_release_resolver;
 pub mod request;
