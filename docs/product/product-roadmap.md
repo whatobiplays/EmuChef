@@ -27,7 +27,7 @@ Detailed evidence remains in the relevant product and release documents. In part
 
 | Product or track | Current state | Next priority |
 |---|---|---|
-| EmuChef proper | Phase 5A through 5H, Phase 6A through 6C, and the Phase 6D.1 audit are recorded; Phase 6D.2 through 6D.6 automated work is recorded; accepted Phase 6D.6 physical evidence exists for cancellation active/boundary, USB-disconnect active/boundary, device unauthorized, identity stability, root revocation, low storage, and operation timeout; the UI-smoke binding/capture plumbing is implemented; backend and Tauri strict Clippy pass under both default and real-execution feature sets; standalone RetroArch including its explicit first-launch/bootstrap lifecycle, BIOS, ROM/content-copy, and combined RetroArch + BIOS automated recipe qualification is recorded; `identity_replacement` repetitions 1–2, `host_sleep_before_deadline` repetitions 1–2, `host_sleep_after_deadline` repetitions 1–2, and `ui_smoke_composite` repetitions 1–2 remain missing; all remaining manual/physical qualification is owner-deferred until explicitly resumed | Continue bounded automated qualification of remaining authored workflows; manual/physical evidence collection remains owner-deferred |
+| EmuChef proper | Phase 5A through 5H, Phase 6A through 6C, and the Phase 6D.1 audit are recorded; Phase 6D.2 through 6D.6 automated work is recorded; accepted Phase 6D.6 physical evidence exists for cancellation active/boundary, USB-disconnect active/boundary, device unauthorized, identity stability, root revocation, low storage, and operation timeout; the UI-smoke binding/capture plumbing is implemented; backend and Tauri strict Clippy pass under both default and real-execution feature sets; standalone RetroArch including its explicit first-launch/bootstrap lifecycle, BIOS, Obtainium, ROM/content-copy, XaniteOG, and combined RetroArch + BIOS automated recipe qualification is recorded; `identity_replacement` repetitions 1–2, `host_sleep_before_deadline` repetitions 1–2, `host_sleep_after_deadline` repetitions 1–2, and `ui_smoke_composite` repetitions 1–2 remain missing; all remaining manual/physical qualification is owner-deferred until explicitly resumed | Continue bounded automated qualification of remaining authored workflows; manual/physical evidence collection remains owner-deferred |
 | Config Editor | Authored generation implemented through GitHub release-pattern testing | Later refinements remain unsequenced unless explicitly promoted |
 | Shared Runtime | Rust is the sole runtime and retains device, filesystem, planning, execution, validation, and protocol authority | Add shared capabilities only when required by a bounded product slice |
 | Release engineering | Deliberately deferred from normal Phase 5 product work | Resume only when the owner declares the relevant application release-comfortable |
@@ -887,17 +887,23 @@ The owner explicitly deferred all remaining manual and physical qualification
 and approved beginning Phase 6E automated recipe-qualification work without
 closing Phase 6D. Standalone automated qualification is complete for
 `app.retroarch.provision` including its explicit first-launch/bootstrap lifecycle,
-`feature.copy_bios`, `app.obtainium.install`, and
-`feature.copy_roms`, and the real `ayaneo.konkr_pocket_fit.base` default
+`feature.copy_bios`, `app.obtainium.install`, `feature.copy_roms`, and
+`app.xaniteog.install`. The real `ayaneo.konkr_pocket_fit.base` default
 composition is qualified for the combined RetroArch + BIOS workflow. The
 Obtainium qualification uses `ayaneo.generic.base` only as production
 capability context and explicitly selects `app.obtainium.install`; it does not
 change device-plan membership or derive product provenance from it. The
+XaniteOG qualification uses `ayaneo.pocket_s2.base` only as production
+capability context and explicitly selects `app.xaniteog.install`; it does not
+use that plan's existing XaniteOG membership or default selection as product
+provenance. The
 source-bound contracts, production planning and review projections, and
 deterministic executor qualifications are recorded in the
 [RetroArch](recipe-qualification-retroarch.md),
 [BIOS](recipe-qualification-bios.md),
-[Obtainium](recipe-qualification-obtainium.md), [ROM library](recipe-qualification-roms.md), and
+[Obtainium](recipe-qualification-obtainium.md),
+[ROM library](recipe-qualification-roms.md),
+[XaniteOG](recipe-qualification-xaniteog.md), and
 [combined](recipe-qualification-retroarch-bios.md) documents. None of these
 automated results is physical or fully end-to-end qualification. Phase 6D
 remains **In progress** with every missing-evidence requirement unchanged.
@@ -913,6 +919,7 @@ Qualify complete end-user workflows rather than isolated executor operations.
 
 - Install RetroArch.
 - Install Obtainium.
+- Install XaniteOG.
 - Copy BIOS files.
 - Copy ROM or content files.
 - Complete RetroArch first-launch initialization where required.
