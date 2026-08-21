@@ -224,3 +224,7 @@ AGENTS.md
 .codex
 .codegraph
 .chatgpt
+
+# Repository-owned Superpowers design/spec/plan documents are commit-able.
+!docs/superpowers/
+!docs/superpowers/**
