@@ -1,0 +1,43 @@
+{
+  "schemaVersion": 1,
+  "workflows": [
+    {
+      "id": "retroarch-plus-bios",
+      "version": 1,
+      "purpose": "Provision RetroArch and copy the required BIOS set through the production EmuChef workflow.",
+      "productionRecipes": [
+        "app.retroarch.provision"
+      ],
+      "requiredCapabilities": [],
+      "prerequisites": [],
+      "compatibilityDimensions": [
+        "emuchef_build"
+      ],
+      "automatedObservations": [
+        {
+          "id": "execution-report",
+          "required": true
+        }
+      ],
+      "humanCheckpoints": []
+    },
+    {
+      "id": "retroarch-plus-bios",
+      "version": 1,
+      "purpose": "Duplicate workflow identity.",
+      "productionRecipes": [],
+      "requiredCapabilities": [],
+      "prerequisites": [],
+      "compatibilityDimensions": [
+        "emuchef_build"
+      ],
+      "automatedObservations": [
+        {
+          "id": "execution-report",
+          "required": true
+        }
+      ],
+      "humanCheckpoints": []
+    }
+  ]
+}

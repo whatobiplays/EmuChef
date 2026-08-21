@@ -1,0 +1,902 @@
+#!/usr/bin/env node
+
+/**
+ * Dependency-free Phase 6F qualification evidence foundation.
+ *
+ * This module owns the repository contracts for physical-device
+ * qualification: canonical workflow definitions, device-target identity,
+ * immutable evidence records, compatibility projection, derived workflow
+ * state, derived support tiers, and the generated qualification matrix.
+ * It is pure tooling and never replaces production planner or executor
+ * authority. No function in this module performs a physical-device run.
+ */
+import { createHash } from "node:crypto";
+import { existsSync, readFileSync, readdirSync, writeFileSync } from "node:fs";
+import path from "node:path";
+import { fileURLToPath, pathToFileURL } from "node:url";
+
+const REPO_ROOT = fileURLToPath(new URL("../", import.meta.url));
+
+const WORKFLOW_FIELDS = [
+  "id",
+  "version",
+  "purpose",
+  "productionRecipes",
+  "requiredCapabilities",
+  "prerequisites",
+  "compatibilityDimensions",
+  "automatedObservations",
+  "humanCheckpoints",
+];
+const AUTOMATED_OBSERVATION_FIELDS = ["id", "required"];
+const HUMAN_CHECKPOINT_FIELDS = [
+  "id",
+  "instruction",
+  "fact",
+  "allowedOutcomes",
+  "required",
+];
+const TARGET_FIELDS = [
+  "id",
+  "profileId",
+  "manufacturer",
+  "model",
+  "androidVersion",
+  "androidApi",
+  "abiSocClass",
+  "rootState",
+  "connectionType",
+  "firmwareBuild",
+  "capabilities",
+  "deferredWorkflows",
+];
+const COMPATIBILITY_DIMENSIONS = new Set([
+  "emuchef_build",
+  "workflow_version",
+  "authored_content",
+  "runtime_contract",
+  "device_profile",
+  "android_api",
+  "firmware_build",
+  "abi_soc_class",
+  "root_state",
+]);
+const ROOT_STATES = new Set(["non_root", "rooted"]);
+const CONNECTION_TYPES = new Set(["usb2", "usb3"]);
+const CHECKPOINT_OUTCOME_SET = new Set(["pass", "fail", "unable_to_verify"]);
+
+export const EVIDENCE_RECORD_FIELDS = [
+  "schemaVersion",
+  "runId",
+  "recordDigest",
+  "capturedAt",
+  "workflowId",
+  "workflowVersion",
+  "deviceTarget",
+  "fingerprint",
+  "fingerprintDigest",
+  "runValidity",
+  "qualificationOutcome",
+  "automatedObservations",
+  "humanCheckpoints",
+  "targetWideFailure",
+  "limitations",
+];
+export const FINGERPRINT_FIELDS = [
+  "schemaVersion",
+  "emuchefBuild",
+  "workflowVersion",
+  "authoredContent",
+  "runtimeContract",
+  "deviceProfile",
+  "androidApi",
+  "firmwareBuild",
+  "abiSocClass",
+  "rootState",
+  "connectionType",
+];
+export const RUN_VALIDITIES = ["valid", "invalid"];
+export const QUALIFICATION_OUTCOMES = ["passed", "failed", "not_observed"];
+export const CHECKPOINT_OUTCOMES = ["pass", "fail", "unable_to_verify"];
+export const TARGET_WIDE_FAILURES = [
+  null,
+  "device_identity_unverified",
+  "device_identity_changed",
+  "required_device_prerequisite_unavailable",
+  "safety_invariant_failed",
+];
+const AUTHORED_CONTENT_ENTRY_FIELDS = ["id", "sha256"];
+const EVIDENCE_DEVICE_TARGET_FIELDS = [
+  "id",
+  "profileId",
+  "manufacturer",
+  "model",
+  "androidVersion",
+  "androidApi",
+  "abiSocClass",
+  "rootState",
+  "connectionType",
+  "firmwareBuild",
+];
+const AUTOMATED_OBSERVATION_RECORD_FIELDS = ["id", "outcome", "observedAt"];
+const HUMAN_CHECKPOINT_RECORD_FIELDS = ["checkpointId", "outcome", "observedAt"];
+const DIMENSION_FIELDS = {
+  emuchef_build: "emuchefBuild",
+  workflow_version: "workflowVersion",
+  authored_content: "authoredContent",
+  runtime_contract: "runtimeContract",
+  device_profile: "deviceProfile",
+  android_api: "androidApi",
+  firmware_build: "firmwareBuild",
+  abi_soc_class: "abiSocClass",
+  root_state: "rootState",
+};
+const RUN_ID_PATTERN = /^phase-6f-run-sha256:[0-9a-f]{64}$/;
+const DIGEST_PATTERN = /^sha256:[0-9a-f]{64}$/;
+const SHA256_PATTERN = /^[0-9a-f]{64}$/;
+const RFC3339_PATTERN = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d+)?(?:Z|[+-]\d{2}:\d{2})$/;
+
+function fail(message) {
+  throw new Error(message);
+}
+
+function assertObject(value, label) {
+  if (value === null || typeof value !== "object" || Array.isArray(value)) {
+    fail(`${label} must be an object`);
+  }
+}
+
+function assertExactKeys(value, expected, label) {
+  assertObject(value, label);
+  const actual = Object.keys(value).sort();
+  const wanted = [...expected].sort();
+  if (JSON.stringify(actual) !== JSON.stringify(wanted)) {
+    fail(`${label} fields must be exactly ${wanted.join(", ")}`);
+  }
+}
+
+function assertString(value, label) {
+  if (typeof value !== "string" || value.length === 0) {
+    fail(`${label} must be a non-empty string`);
+  }
+}
+
+function assertStringArray(value, label) {
+  if (!Array.isArray(value) || value.some((item) => typeof item !== "string" || item.length === 0)) {
+    fail(`${label} must be an array of non-empty strings`);
+  }
+  if (new Set(value).size !== value.length) {
+    fail(`${label} must not contain duplicates`);
+  }
+}
+
+function assertPositiveInteger(value, label) {
+  if (!Number.isInteger(value) || value < 1) {
+    fail(`${label} must be a positive integer`);
+  }
+}
+
+export function canonicalize(value) {
+  if (Array.isArray(value)) return value.map(canonicalize);
+  if (value !== null && typeof value === "object") {
+    return Object.fromEntries(
+      Object.keys(value).sort().map((key) => [key, canonicalize(value[key])]),
+    );
+  }
+  return value;
+}
+
+export function canonicalDigest(value) {
+  return `sha256:${createHash("sha256")
+    .update(JSON.stringify(canonicalize(value)))
+    .digest("hex")}`;
+}
+
+function equalJson(left, right) {
+  return JSON.stringify(canonicalize(left)) === JSON.stringify(canonicalize(right));
+}
+
+export function validateWorkflowCatalog(value) {
+  assertExactKeys(value, ["schemaVersion", "workflows"], "workflow catalog");
+  if (value.schemaVersion !== 1) fail("workflow catalog schemaVersion must be 1");
+  if (!Array.isArray(value.workflows) || value.workflows.length === 0) {
+    fail("workflow catalog must contain at least one workflow");
+  }
+  const seenIds = new Set();
+  for (const workflow of value.workflows) {
+    assertExactKeys(workflow, WORKFLOW_FIELDS, "workflow");
+    assertString(workflow.id, "workflow id");
+    if (seenIds.has(workflow.id)) fail(`duplicate workflow id ${workflow.id}`);
+    seenIds.add(workflow.id);
+    assertPositiveInteger(workflow.version, "workflow version");
+    assertString(workflow.purpose, "workflow purpose");
+    assertStringArray(workflow.productionRecipes, "workflow productionRecipes");
+    assertStringArray(workflow.requiredCapabilities, "workflow requiredCapabilities");
+    assertStringArray(workflow.prerequisites, "workflow prerequisites");
+    assertStringArray(workflow.compatibilityDimensions, "workflow compatibilityDimensions");
+    if (workflow.compatibilityDimensions.length === 0) {
+      fail("workflow compatibilityDimensions must not be empty");
+    }
+    for (const dimension of workflow.compatibilityDimensions) {
+      if (!COMPATIBILITY_DIMENSIONS.has(dimension)) {
+        fail(`workflow compatibility dimension ${dimension} is not supported`);
+      }
+    }
+    if (!Array.isArray(workflow.automatedObservations) || workflow.automatedObservations.length === 0) {
+      fail("workflow automatedObservations must contain at least one entry");
+    }
+    const observationIds = new Set();
+    for (const observation of workflow.automatedObservations) {
+      assertExactKeys(observation, AUTOMATED_OBSERVATION_FIELDS, "automated observation");
+      assertString(observation.id, "automated observation id");
+      if (observationIds.has(observation.id)) fail(`duplicate automated observation id ${observation.id}`);
+      observationIds.add(observation.id);
+      if (typeof observation.required !== "boolean") {
+        fail("automated observation required must be a boolean");
+      }
+    }
+    if (!Array.isArray(workflow.humanCheckpoints)) {
+      fail("workflow humanCheckpoints must be an array");
+    }
+    const checkpointIds = new Set();
+    for (const checkpoint of workflow.humanCheckpoints) {
+      assertExactKeys(checkpoint, HUMAN_CHECKPOINT_FIELDS, "human checkpoint");
+      assertString(checkpoint.id, "human checkpoint id");
+      if (checkpointIds.has(checkpoint.id)) fail(`duplicate human checkpoint id ${checkpoint.id}`);
+      checkpointIds.add(checkpoint.id);
+      assertString(checkpoint.instruction, "human checkpoint instruction");
+      assertString(checkpoint.fact, "human checkpoint fact");
+      if (!Array.isArray(checkpoint.allowedOutcomes) || checkpoint.allowedOutcomes.length === 0) {
+        fail("human checkpoint allowedOutcomes must contain at least one outcome");
+      }
+      for (const outcome of checkpoint.allowedOutcomes) {
+        if (!CHECKPOINT_OUTCOME_SET.has(outcome)) fail(`human checkpoint outcome ${outcome} is not supported`);
+      }
+      if (new Set(checkpoint.allowedOutcomes).size !== checkpoint.allowedOutcomes.length) {
+        fail("human checkpoint allowedOutcomes must not contain duplicates");
+      }
+      if (typeof checkpoint.required !== "boolean") {
+        fail("human checkpoint required must be a boolean");
+      }
+    }
+  }
+  return value;
+}
+
+export function validateDeviceTargets(value, { authoredProfilesDir }) {
+  assertExactKeys(value, ["schemaVersion", "targets"], "device targets");
+  if (value.schemaVersion !== 1) fail("device targets schemaVersion must be 1");
+  if (!Array.isArray(value.targets)) fail("device targets must be an array");
+  const seenIds = new Set();
+  for (const target of value.targets) {
+    assertExactKeys(target, TARGET_FIELDS, "device target");
+    assertString(target.id, "device target id");
+    if (seenIds.has(target.id)) fail(`duplicate device target id ${target.id}`);
+    seenIds.add(target.id);
+    assertString(target.profileId, "device target profileId");
+    for (const field of ["manufacturer", "model", "androidVersion", "abiSocClass", "firmwareBuild"]) {
+      assertString(target[field], `device target ${field}`);
+    }
+    assertPositiveInteger(target.androidApi, "device target androidApi");
+    if (!ROOT_STATES.has(target.rootState)) fail(`device target rootState ${target.rootState} is not supported`);
+    if (!CONNECTION_TYPES.has(target.connectionType)) {
+      fail(`device target connectionType ${target.connectionType} is not supported`);
+    }
+    assertStringArray(target.capabilities, "device target capabilities");
+    assertStringArray(target.deferredWorkflows, "device target deferredWorkflows");
+    const profilePath = path.join(authoredProfilesDir, `${target.profileId}.yaml`);
+    if (!existsSync(profilePath)) {
+      fail(`unknown authored device profile ${target.profileId}`);
+    }
+  }
+  return value;
+}
+
+export function loadWorkflowCatalog(catalogPath) {
+  return validateWorkflowCatalog(JSON.parse(readFileSync(catalogPath, "utf8")));
+}
+
+export function loadDeviceTargets(targetsPath, options) {
+  return validateDeviceTargets(JSON.parse(readFileSync(targetsPath, "utf8")), options);
+}
+
+function assertRfc3339(value, label) {
+  assertString(value, label);
+  if (!RFC3339_PATTERN.test(value) || Number.isNaN(Date.parse(value))) {
+    fail(`${label} must be an RFC3339 timestamp`);
+  }
+}
+
+export function evidenceRecordDigest(record) {
+  const canonical = structuredClone(record);
+  delete canonical.recordDigest;
+  return canonicalDigest(canonical);
+}
+
+function validateFingerprint(fingerprint) {
+  assertExactKeys(fingerprint, FINGERPRINT_FIELDS, "fingerprint");
+  if (fingerprint.schemaVersion !== 1) fail("fingerprint schemaVersion must be 1");
+  for (const field of ["emuchefBuild", "runtimeContract", "deviceProfile", "firmwareBuild", "abiSocClass"]) {
+    assertString(fingerprint[field], `fingerprint ${field}`);
+  }
+  assertPositiveInteger(fingerprint.workflowVersion, "fingerprint workflowVersion");
+  assertPositiveInteger(fingerprint.androidApi, "fingerprint androidApi");
+  if (!ROOT_STATES.has(fingerprint.rootState)) fail(`fingerprint rootState ${fingerprint.rootState} is not supported`);
+  if (!CONNECTION_TYPES.has(fingerprint.connectionType)) {
+    fail(`fingerprint connectionType ${fingerprint.connectionType} is not supported`);
+  }
+  if (!Array.isArray(fingerprint.authoredContent)) {
+    fail("fingerprint authoredContent must be an array");
+  }
+  const seenIds = new Set();
+  for (const entry of fingerprint.authoredContent) {
+    assertExactKeys(entry, AUTHORED_CONTENT_ENTRY_FIELDS, "authored content entry");
+    assertString(entry.id, "authored content entry id");
+    if (seenIds.has(entry.id)) fail(`duplicate authored content id ${entry.id}`);
+    seenIds.add(entry.id);
+    if (typeof entry.sha256 !== "string" || !SHA256_PATTERN.test(entry.sha256)) {
+      fail("authored content entry sha256 must be a 64-character lowercase hex digest");
+    }
+  }
+  return true;
+}
+
+export function evidenceFingerprintDigest(fingerprint) {
+  validateFingerprint(fingerprint);
+  return canonicalDigest(fingerprint);
+}
+
+function compareDimension(dimension, currentFingerprint, evidenceFingerprint) {
+  const field = DIMENSION_FIELDS[dimension];
+  if (!field) return "not_applicable";
+  if (dimension === "authored_content") {
+    return equalJson(currentFingerprint.authoredContent, evidenceFingerprint.authoredContent)
+      ? "compatible"
+      : "invalidating";
+  }
+  return currentFingerprint[field] === evidenceFingerprint[field]
+    ? "compatible"
+    : "invalidating";
+}
+
+export function classifyCompatibility({ workflow, currentFingerprint, evidenceFingerprint }) {
+  for (const dimension of workflow.compatibilityDimensions) {
+    if (compareDimension(dimension, currentFingerprint, evidenceFingerprint) === "invalidating") {
+      return "invalidating";
+    }
+  }
+  return "compatible";
+}
+
+function assertEvidenceDeviceTarget(deviceTarget, target) {
+  const observed = {};
+  const registered = {};
+  for (const field of EVIDENCE_DEVICE_TARGET_FIELDS) {
+    observed[field] = deviceTarget[field];
+    registered[field] = target[field];
+  }
+  if (!equalJson(observed, registered)) {
+    fail("device target facts do not match the registered target");
+  }
+}
+
+function validateAutomatedObservationRecords(record, workflow) {
+  const declared = new Set(workflow.automatedObservations.map((observation) => observation.id));
+  if (!Array.isArray(record.automatedObservations)) {
+    fail("automatedObservations must be an array");
+  }
+  const seen = new Set();
+  for (const observation of record.automatedObservations) {
+    assertExactKeys(observation, AUTOMATED_OBSERVATION_RECORD_FIELDS, "automated observation record");
+    assertString(observation.id, "automated observation record id");
+    if (!declared.has(observation.id)) {
+      fail(`automated observation id ${observation.id} is not declared by the workflow`);
+    }
+    if (seen.has(observation.id)) fail(`duplicate automated observation ${observation.id}`);
+    seen.add(observation.id);
+    if (!["passed", "failed"].includes(observation.outcome)) {
+      fail(`automated observation ${observation.id} outcome ${observation.outcome} is not supported`);
+    }
+    assertRfc3339(observation.observedAt, `automated observation ${observation.id} observedAt`);
+  }
+  return seen;
+}
+
+function validateHumanCheckpointRecords(record, workflow) {
+  const declared = new Map(
+    workflow.humanCheckpoints.map((checkpoint) => [checkpoint.id, checkpoint]),
+  );
+  if (!Array.isArray(record.humanCheckpoints)) {
+    fail("humanCheckpoints must be an array");
+  }
+  const seen = new Set();
+  for (const checkpoint of record.humanCheckpoints) {
+    assertExactKeys(checkpoint, HUMAN_CHECKPOINT_RECORD_FIELDS, "human checkpoint record");
+    assertString(checkpoint.checkpointId, "human checkpoint record checkpointId");
+    const contract = declared.get(checkpoint.checkpointId);
+    if (!contract) {
+      fail(`human checkpoint id ${checkpoint.checkpointId} is not declared by the workflow`);
+    }
+    if (seen.has(checkpoint.checkpointId)) fail(`duplicate human checkpoint ${checkpoint.checkpointId}`);
+    seen.add(checkpoint.checkpointId);
+    if (!CHECKPOINT_OUTCOME_SET.has(checkpoint.outcome)) {
+      fail(`human checkpoint ${checkpoint.checkpointId} outcome ${checkpoint.outcome} is not supported`);
+    }
+    if (!contract.allowedOutcomes.includes(checkpoint.outcome)) {
+      fail(`human checkpoint ${checkpoint.checkpointId} outcome ${checkpoint.outcome} is not allowed by its contract`);
+    }
+    assertRfc3339(checkpoint.observedAt, `human checkpoint ${checkpoint.checkpointId} observedAt`);
+    if (
+      contract.required
+      && checkpoint.outcome === "unable_to_verify"
+      && (record.runValidity !== "invalid" || record.qualificationOutcome !== "not_observed")
+    ) {
+      fail('required checkpoint unable_to_verify requires runValidity "invalid" and qualificationOutcome "not_observed"');
+    }
+  }
+  return seen;
+}
+
+export function validateEvidenceRecord(record, context) {
+  assertExactKeys(record, EVIDENCE_RECORD_FIELDS, "evidence record");
+  if (record.schemaVersion !== 1) fail("evidence record schemaVersion must be 1");
+  if (!RUN_ID_PATTERN.test(record.runId)) fail("evidence record runId format is invalid");
+  if (!DIGEST_PATTERN.test(record.recordDigest)) fail("evidence record recordDigest format is invalid");
+  assertRfc3339(record.capturedAt, "capturedAt");
+  assertString(record.workflowId, "workflowId");
+  assertPositiveInteger(record.workflowVersion, "workflowVersion");
+  const workflow = context.workflowCatalog.workflows.find(
+    (candidate) => candidate.id === record.workflowId,
+  );
+  if (!workflow) fail(`unknown workflow id ${record.workflowId}`);
+  if (record.workflowVersion !== workflow.version) {
+    fail(`workflow version ${record.workflowVersion} does not match catalog version ${workflow.version}`);
+  }
+  const target = context.targets.find((candidate) => candidate.id === record.deviceTarget?.id);
+  if (!target) fail(`unknown device target id ${record.deviceTarget?.id}`);
+  assertExactKeys(record.deviceTarget, EVIDENCE_DEVICE_TARGET_FIELDS, "evidence device target");
+  assertEvidenceDeviceTarget(record.deviceTarget, target);
+  validateFingerprint(record.fingerprint);
+  if (record.fingerprint.workflowVersion !== workflow.version) {
+    fail("fingerprint workflowVersion does not match the workflow version");
+  }
+  if (record.fingerprint.deviceProfile !== target.profileId) {
+    fail("fingerprint deviceProfile does not match the registered target");
+  }
+  if (
+    record.fingerprint.androidApi !== target.androidApi
+    || record.fingerprint.firmwareBuild !== target.firmwareBuild
+    || record.fingerprint.abiSocClass !== target.abiSocClass
+    || record.fingerprint.rootState !== target.rootState
+    || record.fingerprint.connectionType !== target.connectionType
+  ) {
+    fail("fingerprint device facts do not match the registered target");
+  }
+  const actualRecipeIds = record.fingerprint.authoredContent.map((entry) => entry.id);
+  if (JSON.stringify(actualRecipeIds) !== JSON.stringify(workflow.productionRecipes)) {
+    fail("fingerprint authoredContent does not match the workflow production recipes");
+  }
+  if (record.fingerprintDigest !== evidenceFingerprintDigest(record.fingerprint)) {
+    fail("fingerprintDigest does not match canonical fingerprint");
+  }
+  if (record.recordDigest !== evidenceRecordDigest(record)) {
+    fail("canonical record content digest does not match the evidence record");
+  }
+  if (!RUN_VALIDITIES.includes(record.runValidity)) {
+    fail(`runValidity ${record.runValidity} is not supported`);
+  }
+  if (!QUALIFICATION_OUTCOMES.includes(record.qualificationOutcome)) {
+    fail(`qualificationOutcome ${record.qualificationOutcome} is not supported`);
+  }
+  if (!TARGET_WIDE_FAILURES.includes(record.targetWideFailure)) {
+    fail(`targetWideFailure ${record.targetWideFailure} is not supported`);
+  }
+  if (!Array.isArray(record.limitations) || record.limitations.some((item) => typeof item !== "string" || item.length === 0)) {
+    fail("limitations must be an array of non-empty strings");
+  }
+  validateAutomatedObservationRecords(record, workflow);
+  validateHumanCheckpointRecords(record, workflow);
+  if (record.runValidity === "invalid") {
+    if (record.qualificationOutcome !== "not_observed") {
+      fail('invalid run must use qualificationOutcome "not_observed"');
+    }
+    if (record.targetWideFailure !== null) {
+      fail("an invalid run cannot record a target-wide failure");
+    }
+    return true;
+  }
+  if (record.qualificationOutcome === "not_observed") {
+    fail('valid run must use qualificationOutcome "passed" or "failed"');
+  }
+  if (record.targetWideFailure !== null && record.qualificationOutcome !== "failed") {
+    fail("targetWideFailure requires a failed valid record");
+  }
+  const observedIds = new Set(record.automatedObservations.map((observation) => observation.id));
+  for (const observation of workflow.automatedObservations) {
+    if (observation.required && !observedIds.has(observation.id)) {
+      fail(`missing required automated observation ${observation.id}`);
+    }
+  }
+  const checkpointIds = new Set(record.humanCheckpoints.map((checkpoint) => checkpoint.checkpointId));
+  for (const checkpoint of workflow.humanCheckpoints) {
+    if (checkpoint.required && !checkpointIds.has(checkpoint.id)) {
+      fail(`missing required human checkpoint ${checkpoint.id}`);
+    }
+  }
+  if (record.qualificationOutcome === "passed") {
+    for (const observation of workflow.automatedObservations) {
+      if (observation.required) {
+        const result = record.automatedObservations.find((item) => item.id === observation.id);
+        if (!result || result.outcome !== "passed") {
+          fail(`required automated observation ${observation.id} did not pass`);
+        }
+      }
+    }
+    for (const checkpoint of workflow.humanCheckpoints) {
+      if (checkpoint.required) {
+        const result = record.humanCheckpoints.find((item) => item.checkpointId === checkpoint.id);
+        if (!result || result.outcome !== "pass") {
+          fail(`required human checkpoint ${checkpoint.id} did not pass`);
+        }
+      }
+    }
+    if (
+      record.automatedObservations.some((item) => item.outcome === "failed")
+      || record.humanCheckpoints.some((item) => item.outcome === "fail")
+    ) {
+      fail("a passed record cannot contain failed observations or checkpoints");
+    }
+  } else {
+    const hasFailure = record.automatedObservations.some((item) => item.outcome === "failed")
+      || record.humanCheckpoints.some((item) => item.outcome === "fail")
+      || record.targetWideFailure !== null;
+    if (!hasFailure) {
+      fail("failed record has no failed observation, failed checkpoint, or target-wide failure");
+    }
+  }
+  return true;
+}
+
+export function validateEvidenceSchemaContract(schema) {
+  assertObject(schema, "evidence schema");
+  if (!equalJson(schema.required, EVIDENCE_RECORD_FIELDS)) {
+    fail("evidence schema top-level fields drifted from the validator");
+  }
+  if (!equalJson(schema.properties.runValidity.enum, RUN_VALIDITIES)) {
+    fail("evidence schema runValidity enum drifted from the validator");
+  }
+  if (!equalJson(schema.properties.qualificationOutcome.enum, QUALIFICATION_OUTCOMES)) {
+    fail("evidence schema qualificationOutcome enum drifted from the validator");
+  }
+  if (!equalJson(
+    schema.properties.targetWideFailure.oneOf[1].enum,
+    TARGET_WIDE_FAILURES.filter((value) => value !== null),
+  )) {
+    fail("evidence schema targetWideFailure enum drifted from the validator");
+  }
+  if (!equalJson(schema.$defs.fingerprint.required, FINGERPRINT_FIELDS)) {
+    fail("evidence schema fingerprint fields drifted from the validator");
+  }
+  if (!equalJson(schema.$defs.deviceTarget.required, EVIDENCE_DEVICE_TARGET_FIELDS)) {
+    fail("evidence schema deviceTarget fields drifted from the validator");
+  }
+  if (!equalJson(schema.$defs.automatedObservation.required, AUTOMATED_OBSERVATION_RECORD_FIELDS)) {
+    fail("evidence schema automated observation fields drifted from the validator");
+  }
+  if (!equalJson(schema.$defs.humanCheckpoint.required, HUMAN_CHECKPOINT_RECORD_FIELDS)) {
+    fail("evidence schema human checkpoint fields drifted from the validator");
+  }
+  if (!equalJson(schema.$defs.automatedObservation.properties.outcome.enum, ["passed", "failed"])) {
+    fail("evidence schema automated observation outcomes drifted from the validator");
+  }
+  if (!equalJson(schema.$defs.humanCheckpoint.properties.outcome.enum, CHECKPOINT_OUTCOMES)) {
+    fail("evidence schema human checkpoint outcomes drifted from the validator");
+  }
+  return true;
+}
+
+export function buildCurrentFingerprint({
+  workflow,
+  target,
+  currentBuild,
+  runtimeContract,
+  authoredContentDigests,
+}) {
+  const authoredContent = workflow.productionRecipes.map((recipeId) => {
+    const sha256 = authoredContentDigests[recipeId];
+    if (typeof sha256 !== "string" || !SHA256_PATTERN.test(sha256)) {
+      fail(`authored content digest is missing or invalid for ${recipeId}`);
+    }
+    return { id: recipeId, sha256 };
+  });
+  return {
+    schemaVersion: 1,
+    emuchefBuild: currentBuild,
+    workflowVersion: workflow.version,
+    authoredContent,
+    runtimeContract,
+    deviceProfile: target.profileId,
+    androidApi: target.androidApi,
+    firmwareBuild: target.firmwareBuild,
+    abiSocClass: target.abiSocClass,
+    rootState: target.rootState,
+    connectionType: target.connectionType,
+  };
+}
+
+export function deriveApplicability(workflow, target) {
+  if (target.deferredWorkflows.includes(workflow.id)) {
+    return { state: "deferred", reason: "explicitly_deferred" };
+  }
+  const missing = workflow.requiredCapabilities.filter(
+    (capability) => !target.capabilities.includes(capability),
+  );
+  if (missing.length > 0) {
+    return { state: "not_applicable", reason: `missing_capabilities:${missing.join(",")}` };
+  }
+  return { state: "required", reason: "production_intent_and_capabilities" };
+}
+
+function byDateThenId(left, right) {
+  return String(left.capturedAt).localeCompare(String(right.capturedAt))
+    || String(left.runId).localeCompare(String(right.runId));
+}
+
+export function selectCurrentEvidence({
+  workflow,
+  target,
+  currentFingerprint,
+  records,
+}) {
+  const eligible = records
+    .filter((record) => (
+      record.deviceTarget?.id === target.id
+      && record.workflowId === workflow.id
+      && record.workflowVersion === workflow.version
+      && record.runValidity === "valid"
+      && classifyCompatibility({
+        workflow,
+        currentFingerprint,
+        evidenceFingerprint: record.fingerprint,
+      }) === "compatible"
+    ))
+    .sort(byDateThenId);
+  return eligible.length > 0 ? eligible[eligible.length - 1] : null;
+}
+
+function newestHistoricalRecord({ workflow, target, records }) {
+  return records
+    .filter((record) => (
+      record.deviceTarget?.id === target.id
+      && record.workflowId === workflow.id
+      && record.workflowVersion === workflow.version
+      && record.runValidity === "valid"
+    ))
+    .sort(byDateThenId)
+    .at(-1) ?? null;
+}
+
+export function deriveWorkflowState({
+  workflow,
+  target,
+  currentFingerprint,
+  records,
+}) {
+  const applicability = deriveApplicability(workflow, target);
+  if (applicability.state !== "required") {
+    return {
+      workflowId: workflow.id,
+      applicability: applicability.state,
+      state: applicability.state,
+      reason: applicability.reason,
+      runId: null,
+      capturedAt: null,
+      targetWideFailure: null,
+    };
+  }
+  const current = selectCurrentEvidence({
+    workflow,
+    target,
+    currentFingerprint,
+    records,
+  });
+  if (current) {
+    return {
+      workflowId: workflow.id,
+      applicability: "required",
+      state: current.qualificationOutcome === "passed" ? "qualified" : "failed",
+      reason: current.limitations.length > 0 ? current.limitations.join("; ") : null,
+      runId: current.runId,
+      capturedAt: current.capturedAt,
+      targetWideFailure: current.targetWideFailure,
+    };
+  }
+  const historical = newestHistoricalRecord({ workflow, target, records });
+  if (historical) {
+    return {
+      workflowId: workflow.id,
+      applicability: "required",
+      state: "stale",
+      reason: "no current compatible evidence; historical valid evidence exists",
+      runId: historical.runId,
+      capturedAt: historical.capturedAt,
+      targetWideFailure: null,
+    };
+  }
+  return {
+    workflowId: workflow.id,
+    applicability: "required",
+    state: "missing",
+    reason: "no applicable valid physical evidence",
+    runId: null,
+    capturedAt: null,
+    targetWideFailure: null,
+  };
+}
+
+export function deriveDeviceSupportTier(workflowStates) {
+  if (workflowStates.some((row) => row.targetWideFailure !== null)) return "unqualified";
+  const required = workflowStates.filter((row) => row.applicability === "required");
+  if (required.length === 0) return "unqualified";
+  if (required.every((row) => row.state === "qualified")) return "qualified";
+  if (required.some((row) => row.state === "qualified")) return "limited";
+  return "unqualified";
+}
+
+export function loadEvidenceDirectory(evidenceDir, { fixtureMode }) {
+  const resolved = path.resolve(evidenceDir);
+  const fixtureRoot = path.resolve(REPO_ROOT, "tests/fixtures");
+  if (
+    !fixtureMode
+    && (resolved === fixtureRoot || resolved.startsWith(`${fixtureRoot}${path.sep}`))
+  ) {
+    fail("synthetic fixture path cannot be used as production evidence");
+  }
+  if (!existsSync(resolved)) return [];
+  const records = [];
+  const seenRunIds = new Set();
+  for (const name of readdirSync(resolved).filter((entry) => entry.endsWith(".json")).sort()) {
+    const record = JSON.parse(readFileSync(path.join(resolved, name), "utf8"));
+    if (seenRunIds.has(record.runId)) fail(`duplicate run identity ${record.runId}`);
+    seenRunIds.add(record.runId);
+    records.push(record);
+  }
+  return records;
+}
+
+export function projectQualificationState({
+  workflowCatalog,
+  targets,
+  records,
+  currentBuild,
+  runtimeContract,
+  authoredContentDigests,
+}) {
+  return {
+    targets: targets.map((target) => {
+      const rows = workflowCatalog.workflows.map((workflow) => deriveWorkflowState({
+        workflow,
+        target,
+        currentFingerprint: buildCurrentFingerprint({
+          workflow,
+          target,
+          currentBuild,
+          runtimeContract,
+          authoredContentDigests,
+        }),
+        records,
+      }));
+      return {
+        target,
+        tier: deriveDeviceSupportTier(rows),
+        workflows: rows.filter((row) => row.state !== "not_applicable"),
+      };
+    }),
+  };
+}
+
+function renderTargetSection(entry) {
+  const { target, tier, workflows } = entry;
+  const lines = [
+    `## ${target.id}`,
+    "",
+    `- Configuration: ${target.manufacturer} ${target.model}, Android ${target.androidVersion} (API ${target.androidApi}), ${target.abiSocClass}, ${target.rootState}, ${target.connectionType}`,
+    `- Authored profile: ${target.profileId}`,
+    `- Support tier: ${tier}`,
+    "",
+    "| Workflow | State | Current evidence | Reason / limitation |",
+    "|---|---|---|---|",
+  ];
+  for (const row of workflows) {
+    const evidence = row.runId ? `${row.runId} (${row.capturedAt})` : "—";
+    const reason = row.reason ?? "—";
+    lines.push(`| ${row.workflowId} | ${row.state} | ${evidence} | ${reason} |`);
+  }
+  return lines.join("\n");
+}
+
+export function renderQualificationMatrix(projection) {
+  const lines = [
+    "# Phase 6F Physical-Device Qualification Matrix",
+    "",
+    "Generated from `docs/testing/phase-6f/` definitions and immutable physical evidence.",
+    "",
+  ];
+  if (projection.targets.length === 0) {
+    lines.push(
+      "No physical-device qualification targets have been registered yet. Phase 6F foundation infrastructure exists, but no device or workflow is physically qualified by this repository state.",
+    );
+    lines.push("");
+    return lines.join("\n");
+  }
+  for (const entry of projection.targets) {
+    lines.push(renderTargetSection(entry), "");
+  }
+  return lines.join("\n");
+}
+
+function productionAuthoredContentDigests(workflowCatalog) {
+  const digests = {};
+  for (const workflow of workflowCatalog.workflows) {
+    for (const recipeId of workflow.productionRecipes) {
+      const recipePath = path.join(REPO_ROOT, "authored/recipes", `${recipeId}.yaml`);
+      digests[recipeId] = createHash("sha256").update(readFileSync(recipePath)).digest("hex");
+    }
+  }
+  return digests;
+}
+
+function projectProductionQualification() {
+  const workflowCatalog = loadWorkflowCatalog(
+    path.join(REPO_ROOT, "docs/testing/phase-6f/workflow-catalog.json"),
+  );
+  const targetsFile = loadDeviceTargets(
+    path.join(REPO_ROOT, "docs/testing/phase-6f/device-targets.json"),
+    { authoredProfilesDir: path.join(REPO_ROOT, "authored/device_profiles") },
+  );
+  const schema = JSON.parse(readFileSync(
+    path.join(REPO_ROOT, "docs/testing/phase-6f/evidence-schema.json"),
+    "utf8",
+  ));
+  validateEvidenceSchemaContract(schema);
+  const records = loadEvidenceDirectory(
+    path.join(REPO_ROOT, "docs/testing/phase-6f/evidence"),
+    { fixtureMode: false },
+  );
+  for (const record of records) {
+    validateEvidenceRecord(record, { workflowCatalog, targets: targetsFile.targets });
+  }
+  return projectQualificationState({
+    workflowCatalog,
+    targets: targetsFile.targets,
+    records,
+    currentBuild: process.env.EMUCHEF_PHASE_6F_BUILD_IDENTITY ?? "unreported",
+    runtimeContract: process.env.EMUCHEF_PHASE_6F_RUNTIME_CONTRACT ?? "v1",
+    authoredContentDigests: productionAuthoredContentDigests(workflowCatalog),
+  });
+}
+
+if (process.argv[1] && import.meta.url === pathToFileURL(path.resolve(process.argv[1])).href) {
+  const args = process.argv.slice(2);
+  if (args.some((arg) => !["--check", "--write-matrix"].includes(arg))) {
+    process.stderr.write("usage: node tools/phase-6f-qualification.mjs [--check|--write-matrix]\n");
+    process.exitCode = 1;
+  } else {
+    try {
+      const projection = projectProductionQualification();
+      const rendered = renderQualificationMatrix(projection);
+      const matrixPath = path.join(REPO_ROOT, "docs/qualification/phase-6f-device-matrix.md");
+      if (args.includes("--write-matrix")) {
+        writeFileSync(matrixPath, rendered, "utf8");
+      }
+      const committed = readFileSync(matrixPath, "utf8");
+      if (committed !== rendered) {
+        fail("generated Phase 6F qualification matrix is out of date; run --write-matrix");
+      }
+      process.stdout.write("Phase 6F qualification foundation check passed.\n");
+    } catch (error) {
+      process.stderr.write(`${error instanceof Error ? error.message : String(error)}\n`);
+      process.exitCode = 1;
+    }
+  }
+}

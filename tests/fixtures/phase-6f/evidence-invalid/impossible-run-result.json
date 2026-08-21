@@ -1,0 +1,48 @@
+{
+  "schemaVersion": 1,
+  "runId": "phase-6f-run-sha256:5555555555555555555555555555555555555555555555555555555555555555",
+  "recordDigest": "sha256:eb0651940a9e0521499d10fab7229500aae03915bb9fdc722d4e48a47077b51e",
+  "capturedAt": "2026-08-21T00:06:00Z",
+  "workflowId": "checkpoint-gated",
+  "workflowVersion": 1,
+  "deviceTarget": {
+    "id": "synthetic-pocket-s2",
+    "profileId": "ayaneo.pocket_s2",
+    "manufacturer": "AYANEO",
+    "model": "Synthetic Pocket S2",
+    "androidVersion": "15",
+    "androidApi": 35,
+    "abiSocClass": "arm64-snapdragon",
+    "rootState": "non_root",
+    "connectionType": "usb3",
+    "firmwareBuild": "synthetic/build"
+  },
+  "fingerprint": {
+    "schemaVersion": 1,
+    "emuchefBuild": "2026-08-21-foundation",
+    "workflowVersion": 1,
+    "authoredContent": [],
+    "runtimeContract": "v1",
+    "deviceProfile": "ayaneo.pocket_s2",
+    "androidApi": 35,
+    "firmwareBuild": "synthetic/build",
+    "abiSocClass": "arm64-snapdragon",
+    "rootState": "non_root",
+    "connectionType": "usb3"
+  },
+  "fingerprintDigest": "sha256:71b5b80d851869dc5c0f5a7345a7a40f26ed9737b63b19fcda2ef5dc6c8e202f",
+  "runValidity": "invalid",
+  "qualificationOutcome": "failed",
+  "automatedObservations": [
+    {
+      "id": "execution-report",
+      "outcome": "passed",
+      "observedAt": "2026-08-21T00:07:00Z"
+    }
+  ],
+  "humanCheckpoints": [],
+  "targetWideFailure": null,
+  "limitations": [
+    "harness failure prevented reliable product observation"
+  ]
+}

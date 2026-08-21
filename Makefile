@@ -12,7 +12,7 @@ BACKEND_MANIFEST := crates/emuchef-rust-backend/Cargo.toml
 # Rust workspace boundary: the EmuChef Tauri application's workspace.
 EMUCHEF_TAURI_MANIFEST := apps/emuchef-app/src-tauri/Cargo.toml
 
-.PHONY: help install ensure-deps build test emuchef-app config-editor dev
+.PHONY: help install ensure-deps build test phase-6f-qualification-check emuchef-app config-editor dev
 
 help:
 	@printf '%s\n' \
@@ -22,6 +22,7 @@ help:
 		'  ensure-deps   Install missing or stale frontend dependencies' \
 		'  build         Build the Rust backend and both frontend applications' \
 		'  test          Run Rust, application, security, typecheck, and lint tests' \
+		'  phase-6f-qualification-check  Validate Phase 6F qualification definitions, evidence, and matrix' \
 		'  emuchef-app   Launch the EmuChef app in development mode' \
 		'  config-editor Launch the Config Editor app in development mode' \
 		'  dev           Launch both applications in development mode'
@@ -47,7 +48,7 @@ build: ensure-deps
 	npm --prefix $(EMUCHEF_APP_PREFIX) run build
 	npm --prefix $(CONFIG_EDITOR_PREFIX) run build
 
-test: ensure-deps
+test: ensure-deps phase-6f-qualification-check
 	cargo test --manifest-path $(BACKEND_MANIFEST)
 	cargo test --manifest-path $(EMUCHEF_TAURI_MANIFEST)
 	npm --prefix $(EMUCHEF_APP_PREFIX) run test
@@ -57,6 +58,10 @@ test: ensure-deps
 	npm --prefix $(CONFIG_EDITOR_PREFIX) run check:rust-runtime
 	npm --prefix $(CONFIG_EDITOR_PREFIX) run typecheck
 	npm --prefix $(CONFIG_EDITOR_PREFIX) run lint
+
+phase-6f-qualification-check:
+	node --test tools/phase-6f-qualification.test.mjs
+	node tools/phase-6f-qualification.mjs --check
 
 # Ordinary app development is simulation-only; real execution requires its separate guarded command.
 emuchef-app: ensure-deps

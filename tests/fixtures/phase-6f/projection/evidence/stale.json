@@ -1,0 +1,51 @@
+{
+  "schemaVersion": 1,
+  "runId": "phase-6f-run-sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+  "recordDigest": "sha256:ca107dc582667480864a15241bb1fda577e70bef48c803514b39f208c1cc78c2",
+  "capturedAt": "2026-08-19T00:00:00Z",
+  "workflowId": "obtainium-install",
+  "workflowVersion": 1,
+  "deviceTarget": {
+    "id": "synthetic-pocket-s2",
+    "profileId": "ayaneo.pocket_s2",
+    "manufacturer": "AYANEO",
+    "model": "Synthetic Pocket S2",
+    "androidVersion": "15",
+    "androidApi": 35,
+    "abiSocClass": "arm64-snapdragon",
+    "rootState": "non_root",
+    "connectionType": "usb3",
+    "firmwareBuild": "synthetic/build"
+  },
+  "fingerprint": {
+    "schemaVersion": 1,
+    "emuchefBuild": "2026-08-19-old-build",
+    "workflowVersion": 1,
+    "authoredContent": [
+      {
+        "id": "app.obtainium.install",
+        "sha256": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc"
+      }
+    ],
+    "runtimeContract": "v1",
+    "deviceProfile": "ayaneo.pocket_s2",
+    "androidApi": 35,
+    "firmwareBuild": "synthetic/build",
+    "abiSocClass": "arm64-snapdragon",
+    "rootState": "non_root",
+    "connectionType": "usb3"
+  },
+  "fingerprintDigest": "sha256:d5d5753d5db909fb4884988234ea48c533be4ca5b50d6d034289c44032f8aceb",
+  "runValidity": "valid",
+  "qualificationOutcome": "passed",
+  "automatedObservations": [
+    {
+      "id": "execution-report",
+      "outcome": "passed",
+      "observedAt": "2026-08-19T00:01:00Z"
+    }
+  ],
+  "humanCheckpoints": [],
+  "targetWideFailure": null,
+  "limitations": []
+}

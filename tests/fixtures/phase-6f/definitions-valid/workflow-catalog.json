@@ -1,0 +1,169 @@
+{
+  "schemaVersion": 1,
+  "workflows": [
+    {
+      "id": "retroarch-plus-bios",
+      "version": 1,
+      "purpose": "Provision RetroArch and copy the required BIOS set through the production EmuChef workflow.",
+      "productionRecipes": [
+        "app.retroarch.provision",
+        "feature.copy_bios"
+      ],
+      "requiredCapabilities": [
+        "apk_install",
+        "shared_storage_write"
+      ],
+      "prerequisites": [
+        "clean_or_deliberately_reset_device"
+      ],
+      "compatibilityDimensions": [
+        "emuchef_build",
+        "workflow_version",
+        "authored_content",
+        "runtime_contract",
+        "device_profile",
+        "android_api",
+        "firmware_build",
+        "abi_soc_class",
+        "root_state"
+      ],
+      "automatedObservations": [
+        {
+          "id": "execution-report",
+          "required": true
+        }
+      ],
+      "humanCheckpoints": []
+    },
+    {
+      "id": "obtainium-install",
+      "version": 1,
+      "purpose": "Install Obtainium through the production EmuChef workflow.",
+      "productionRecipes": [
+        "app.obtainium.install"
+      ],
+      "requiredCapabilities": [
+        "apk_install"
+      ],
+      "prerequisites": [],
+      "compatibilityDimensions": [
+        "emuchef_build",
+        "workflow_version",
+        "authored_content",
+        "runtime_contract",
+        "device_profile",
+        "android_api",
+        "firmware_build",
+        "abi_soc_class",
+        "root_state"
+      ],
+      "automatedObservations": [
+        {
+          "id": "execution-report",
+          "required": true
+        }
+      ],
+      "humanCheckpoints": []
+    },
+    {
+      "id": "xaniteog-install",
+      "version": 1,
+      "purpose": "Install XaniteOG through the production EmuChef workflow.",
+      "productionRecipes": [
+        "app.xaniteog.install"
+      ],
+      "requiredCapabilities": [
+        "apk_install"
+      ],
+      "prerequisites": [],
+      "compatibilityDimensions": [
+        "emuchef_build",
+        "workflow_version",
+        "authored_content",
+        "runtime_contract",
+        "device_profile",
+        "android_api",
+        "firmware_build",
+        "abi_soc_class",
+        "root_state"
+      ],
+      "automatedObservations": [
+        {
+          "id": "execution-report",
+          "required": true
+        }
+      ],
+      "humanCheckpoints": []
+    },
+    {
+      "id": "rom-library-sync",
+      "version": 1,
+      "purpose": "Copy ROM or content files into the device library through the production EmuChef workflow.",
+      "productionRecipes": [
+        "feature.copy_roms"
+      ],
+      "requiredCapabilities": [
+        "shared_storage_write"
+      ],
+      "prerequisites": [],
+      "compatibilityDimensions": [
+        "emuchef_build",
+        "workflow_version",
+        "authored_content",
+        "runtime_contract",
+        "device_profile",
+        "android_api",
+        "firmware_build",
+        "abi_soc_class",
+        "root_state"
+      ],
+      "automatedObservations": [
+        {
+          "id": "execution-report",
+          "required": true
+        }
+      ],
+      "humanCheckpoints": []
+    },
+    {
+      "id": "checkpoint-gated",
+      "version": 1,
+      "purpose": "Fixture-only workflow proving typed human-checkpoint evidence semantics.",
+      "productionRecipes": [],
+      "requiredCapabilities": [
+        "fixture_checkpoint_capability"
+      ],
+      "prerequisites": [],
+      "compatibilityDimensions": [
+        "emuchef_build",
+        "workflow_version",
+        "authored_content",
+        "runtime_contract",
+        "device_profile",
+        "android_api",
+        "firmware_build",
+        "abi_soc_class",
+        "root_state"
+      ],
+      "automatedObservations": [
+        {
+          "id": "execution-report",
+          "required": true
+        }
+      ],
+      "humanCheckpoints": [
+        {
+          "id": "device_behavior_verified",
+          "instruction": "Confirm that the device behavior required by this workflow was observed.",
+          "fact": "The device behavior required by this workflow is verified by the operator.",
+          "allowedOutcomes": [
+            "pass",
+            "fail",
+            "unable_to_verify"
+          ],
+          "required": true
+        }
+      ]
+    }
+  ]
+}

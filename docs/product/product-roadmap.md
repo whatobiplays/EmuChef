@@ -73,7 +73,7 @@ EmuChef proper Phase 5 established end-user feature completeness, usability, wor
 | 6C | Core executor qualification | Completed | Non-root and root executor qualification completed on representative hardware |
 | 6D | Execution safety and recovery | In progress | Storage, timer, process-ownership, transport, identity, root, harness, validator, UI-smoke binding/capture, and documentation remediation is implemented; backend and Tauri strict Clippy pass under both default and real-execution feature sets; `identity_replacement` repetitions 1–2, `host_sleep_before_deadline` repetitions 1–2, `host_sleep_after_deadline` repetitions 1–2, and `ui_smoke_composite` repetitions 1–2 remain missing |
 | 6E | Recipe qualification | In progress | Standalone RetroArch including its explicit first-launch/bootstrap lifecycle, BIOS, Obtainium, and ROM/content-copy, plus the real-default combined RetroArch + BIOS automated qualification, are complete; other authored workflows remain; physical/end-to-end qualification remains deferred |
-| 6F | Physical-device test matrix | Planned | Representative coverage across supported Android device classes |
+| 6F | Physical-device test matrix | In progress | Representative coverage across supported Android device classes |
 | 6G | Production readiness | Planned | Evidence-backed promotion of real execution into production builds |
 
 ## 6. Phase 5A — End-to-End UX and Feature-Gap Audit
@@ -936,7 +936,7 @@ Qualify complete end-user workflows rather than isolated executor operations.
 ### 6F — Physical-Device Test Matrix
 
 **Owner: EmuChef proper**  
-**Status: Planned**
+**Status: In progress**
 
 #### Objective
 
@@ -961,6 +961,14 @@ Maintain a qualification matrix containing device model, Android version, ABI/So
 - Every deliberately supported device class has representative physical evidence.
 - Known OEM- or Android-specific limitations are surfaced before execution where possible.
 - The supported-device policy is explicit and does not imply broad compatibility beyond tested classes.
+
+#### Completion evidence
+
+Phase 6F foundation work is in progress as of 2026-08-21. Versioned workflow,
+device-target, evidence, checkpoint, applicability, and compatibility contracts
+exist under `docs/testing/phase-6f/`, with synthetic-only fixtures, strict Node
+validation and projection, a deterministic generated qualification matrix, an
+operator runbook, and Makefile and CI validation. No physical-device qualification evidence has been added and no device is newly claimed as supported by this foundation work.
 
 ### 6G — Production Readiness
 

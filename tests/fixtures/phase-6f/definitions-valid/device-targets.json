@@ -1,0 +1,40 @@
+{
+  "schemaVersion": 1,
+  "targets": [
+    {
+      "id": "synthetic-pocket-s2",
+      "profileId": "ayaneo.pocket_s2",
+      "manufacturer": "AYANEO",
+      "model": "Synthetic Pocket S2",
+      "androidVersion": "15",
+      "androidApi": 35,
+      "abiSocClass": "arm64-snapdragon",
+      "rootState": "non_root",
+      "connectionType": "usb3",
+      "firmwareBuild": "synthetic/build",
+      "capabilities": [
+        "apk_install",
+        "shared_storage_write"
+      ],
+      "deferredWorkflows": []
+    },
+    {
+      "id": "synthetic-air-mini",
+      "profileId": "ayaneo.pocket_air_mini",
+      "manufacturer": "AYANEO",
+      "model": "Synthetic Pocket Air Mini",
+      "androidVersion": "14",
+      "androidApi": 34,
+      "abiSocClass": "arm64-mtk",
+      "rootState": "non_root",
+      "connectionType": "usb2",
+      "firmwareBuild": "synthetic/build-mini",
+      "capabilities": [
+        "shared_storage_write"
+      ],
+      "deferredWorkflows": [
+        "xaniteog-install"
+      ]
+    }
+  ]
+}

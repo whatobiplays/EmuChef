@@ -1,0 +1,57 @@
+{
+  "schemaVersion": 1,
+  "runId": "phase-6f-run-sha256:2222222222222222222222222222222222222222222222222222222222222222",
+  "recordDigest": "sha256:c3665a64b12d50178737629d1604ddbd7530b7198651d9334c3c3fe6d64fd424",
+  "capturedAt": "2026-08-21T00:00:00Z",
+  "workflowId": "retroarch-plus-bios",
+  "workflowVersion": 1,
+  "deviceTarget": {
+    "id": "synthetic-pocket-s2",
+    "profileId": "ayaneo.pocket_s2",
+    "manufacturer": "AYANEO",
+    "model": "Synthetic Pocket S2",
+    "androidVersion": "15",
+    "androidApi": 35,
+    "abiSocClass": "arm64-snapdragon",
+    "rootState": "non_root",
+    "connectionType": "usb3",
+    "firmwareBuild": "synthetic/build"
+  },
+  "fingerprint": {
+    "schemaVersion": 1,
+    "emuchefBuild": "2026-08-21-foundation",
+    "workflowVersion": 1,
+    "authoredContent": [
+      {
+        "id": "app.retroarch.provision",
+        "sha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+      },
+      {
+        "id": "feature.copy_bios",
+        "sha256": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+      }
+    ],
+    "runtimeContract": "v1",
+    "deviceProfile": "ayaneo.pocket_s2",
+    "androidApi": 35,
+    "firmwareBuild": "synthetic/build",
+    "abiSocClass": "arm64-snapdragon",
+    "rootState": "non_root",
+    "connectionType": "usb3"
+  },
+  "fingerprintDigest": "sha256:e1dc18c8f0b367099c1141fe873581b94f6809b869251340f1853c7b9d27ed4b",
+  "runValidity": "valid",
+  "qualificationOutcome": "failed",
+  "automatedObservations": [
+    {
+      "id": "execution-report",
+      "outcome": "failed",
+      "observedAt": "2026-08-21T00:01:00Z"
+    }
+  ],
+  "humanCheckpoints": [],
+  "targetWideFailure": null,
+  "limitations": [
+    "execution-report failed"
+  ]
+}

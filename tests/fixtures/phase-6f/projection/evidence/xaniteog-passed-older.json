@@ -1,0 +1,51 @@
+{
+  "schemaVersion": 1,
+  "runId": "phase-6f-run-sha256:eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee",
+  "recordDigest": "sha256:c9b7569443ecf029164e5e9ce58a95db2ef8e971eadb51d3926bb072a99f90f9",
+  "capturedAt": "2026-08-18T00:00:00Z",
+  "workflowId": "xaniteog-install",
+  "workflowVersion": 1,
+  "deviceTarget": {
+    "id": "synthetic-pocket-s2",
+    "profileId": "ayaneo.pocket_s2",
+    "manufacturer": "AYANEO",
+    "model": "Synthetic Pocket S2",
+    "androidVersion": "15",
+    "androidApi": 35,
+    "abiSocClass": "arm64-snapdragon",
+    "rootState": "non_root",
+    "connectionType": "usb3",
+    "firmwareBuild": "synthetic/build"
+  },
+  "fingerprint": {
+    "schemaVersion": 1,
+    "emuchefBuild": "2026-08-21-foundation",
+    "workflowVersion": 1,
+    "authoredContent": [
+      {
+        "id": "app.xaniteog.install",
+        "sha256": "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd"
+      }
+    ],
+    "runtimeContract": "v1",
+    "deviceProfile": "ayaneo.pocket_s2",
+    "androidApi": 35,
+    "firmwareBuild": "synthetic/build",
+    "abiSocClass": "arm64-snapdragon",
+    "rootState": "non_root",
+    "connectionType": "usb3"
+  },
+  "fingerprintDigest": "sha256:9c56552a86c9b369843224893a2eb20af04528209a708637018ddc0f699263ca",
+  "runValidity": "valid",
+  "qualificationOutcome": "passed",
+  "automatedObservations": [
+    {
+      "id": "execution-report",
+      "outcome": "passed",
+      "observedAt": "2026-08-18T00:01:00Z"
+    }
+  ],
+  "humanCheckpoints": [],
+  "targetWideFailure": null,
+  "limitations": []
+}
