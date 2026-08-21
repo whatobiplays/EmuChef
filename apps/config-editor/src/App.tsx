@@ -1,6 +1,6 @@
 import { getCurrentWindow } from "@tauri-apps/api/window";
 import { confirm as nativeConfirm, open, save as saveFile } from "@tauri-apps/plugin-dialog";
-import { useEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 
 import type { EditorCommand } from "./api/commands";
 import {
@@ -121,6 +121,79 @@ export default function App() {
   // This guard lets only that intentional second event pass without reopening the confirmation.
   const allowCloseRef = useRef(false);
   const closePromptOpenRef = useRef(false);
+
+  const markDocumentSessionInvalid = useCallback((message: string) => {
+    documentSessionValidRef.current = false;
+    sessionInvalidReasonRef.current = message;
+    setDocumentSessionValid(false);
+    setSessionInvalidReason(message);
+  }, []);
+
+  const handleOperationFailure = useCallback(
+    <T,>(
+      response: Exclude<EditorApiResult<T>, { kind: "success" }>,
+      fallback: string,
+      context: Parameters<typeof classifyOperationFailure>[2] = {},
+    ) => {
+      const classification = classifyOperationFailure(response, fallback, context);
+      setErrorMessage(classification.message);
+      setStatusMessage(null);
+      if (classification.sessionInvalid) {
+        markDocumentSessionInvalid(classification.message);
+      }
+      return classification;
+    },
+    [markDocumentSessionInvalid],
+  );
+
+  const handleStatusResponse = useCallback(
+    (response: EditorApiResult<SidecarStatusResult>) => {
+      if (response.kind === "success") {
+        sidecarStateRef.current = response.result;
+        setSidecarState(response.result);
+        const classification = classifySidecarStatus(response.result);
+        if (classification.sessionInvalid && classification.message !== null) {
+          markDocumentSessionInvalid(classification.message);
+          setErrorMessage(classification.message);
+          setStatusMessage(null);
+        }
+        return;
+      }
+
+      const classification = handleOperationFailure(response, "Sidecar status unavailable.");
+      if (classification.sessionInvalid) {
+        markDocumentSessionInvalid(classification.message);
+      }
+    },
+    [handleOperationFailure, markDocumentSessionInvalid],
+  );
+
+  const confirmNativeAction = useCallback(
+    async (title: string, message: string, options: ConfirmActionOptions = {}) => {
+      promptActiveRef.current = true;
+      try {
+        return await nativeConfirm(message, {
+          title,
+          kind: options.destructive ? "warning" : "info",
+        });
+      } catch {
+        return window.confirm(`${title}\n\n${message}`);
+      } finally {
+        promptActiveRef.current = false;
+      }
+    },
+    [],
+  );
+
+  const confirmAction = useCallback(
+    (title: string, message: string, options: ConfirmActionOptions = {}): Promise<boolean> => {
+      if (promptActiveRef.current) {
+        return Promise.resolve(false);
+      }
+      return confirmNativeAction(title, message, options);
+    },
+    [confirmNativeAction],
+  );
 
   const actionAvailability = useMemo(
     () =>
@@ -308,7 +381,7 @@ export default function App() {
       disposed = true;
       cleanup?.();
     };
-  }, []);
+  }, [confirmAction]);
 
   useEffect(() => {
     let cancelled = false;
@@ -341,7 +414,7 @@ export default function App() {
     return () => {
       cancelled = true;
     };
-  }, []);
+  }, [handleOperationFailure, handleStatusResponse]);
 
   const menuHandlers: Record<MenuAction, () => void> = {
     openRecipe: () => void openRecipe(),
@@ -1065,46 +1138,6 @@ export default function App() {
     handleStatusResponse(response);
   }
 
-  function handleStatusResponse(response: EditorApiResult<SidecarStatusResult>) {
-    if (response.kind === "success") {
-      sidecarStateRef.current = response.result;
-      setSidecarState(response.result);
-      const classification = classifySidecarStatus(response.result);
-      if (classification.sessionInvalid && classification.message !== null) {
-        markDocumentSessionInvalid(classification.message);
-        setErrorMessage(classification.message);
-        setStatusMessage(null);
-      }
-      return;
-    }
-
-    const classification = handleOperationFailure(response, "Sidecar status unavailable.");
-    if (classification.sessionInvalid) {
-      markDocumentSessionInvalid(classification.message);
-    }
-  }
-
-  function handleOperationFailure<T>(
-    response: Exclude<EditorApiResult<T>, { kind: "success" }>,
-    fallback: string,
-    context: Parameters<typeof classifyOperationFailure>[2] = {},
-  ) {
-    const classification = classifyOperationFailure(response, fallback, context);
-    setErrorMessage(classification.message);
-    setStatusMessage(null);
-    if (classification.sessionInvalid) {
-      markDocumentSessionInvalid(classification.message);
-    }
-    return classification;
-  }
-
-  function markDocumentSessionInvalid(message: string) {
-    documentSessionValidRef.current = false;
-    sessionInvalidReasonRef.current = message;
-    setDocumentSessionValid(false);
-    setSessionInvalidReason(message);
-  }
-
   function showInvalidSessionMessage() {
     setErrorMessage(sessionInvalidReasonRef.current ?? invalidSessionMessage());
     setStatusMessage(null);
@@ -1168,31 +1201,6 @@ export default function App() {
       promptActiveRef.current = true;
       setTextPrompt({ ...options, resolve });
     });
-  }
-
-  function confirmAction(title: string, message: string, options: ConfirmActionOptions = {}): Promise<boolean> {
-    if (promptActiveRef.current) {
-      return Promise.resolve(false);
-    }
-    return confirmNativeAction(title, message, options);
-  }
-
-  async function confirmNativeAction(
-    title: string,
-    message: string,
-    options: ConfirmActionOptions = {},
-  ): Promise<boolean> {
-    promptActiveRef.current = true;
-    try {
-      return await nativeConfirm(message, {
-        title,
-        kind: options.destructive ? "warning" : "info",
-      });
-    } catch {
-      return window.confirm(`${title}\n\n${message}`);
-    } finally {
-      promptActiveRef.current = false;
-    }
   }
 
   function resolveTextPrompt(value: string | null) {

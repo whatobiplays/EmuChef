@@ -12,7 +12,13 @@ BACKEND_MANIFEST := crates/emuchef-rust-backend/Cargo.toml
 # Rust workspace boundary: the EmuChef Tauri application's workspace.
 EMUCHEF_TAURI_MANIFEST := apps/emuchef-app/src-tauri/Cargo.toml
 
-.PHONY: help install ensure-deps build test phase-6f-qualification-check emuchef-app config-editor dev
+# Backend Cargo test freshness gate: the stamp records a content digest of the
+# backend crate's build inputs so `make test` never reuses a stale test binary.
+BACKEND_DIR := $(dir $(BACKEND_MANIFEST))
+BACKEND_TEST_STAMP := $(BACKEND_DIR)target/.emuchef-cargo-test-source.sha256
+BACKEND_TEST_PENDING := $(BACKEND_TEST_STAMP).pending
+
+.PHONY: help install ensure-deps build test phase-6f-qualification-check cargo-test-freshness-check backend-test-fresh emuchef-app config-editor dev
 
 help:
 	@printf '%s\n' \
@@ -48,7 +54,7 @@ build: ensure-deps
 	npm --prefix $(EMUCHEF_APP_PREFIX) run build
 	npm --prefix $(CONFIG_EDITOR_PREFIX) run build
 
-test: ensure-deps phase-6f-qualification-check
+test: ensure-deps phase-6f-qualification-check cargo-test-freshness-check backend-test-fresh
 	cargo test --manifest-path $(BACKEND_MANIFEST)
 	cargo test --manifest-path $(EMUCHEF_TAURI_MANIFEST)
 	npm --prefix $(EMUCHEF_APP_PREFIX) run test
@@ -62,6 +68,17 @@ test: ensure-deps phase-6f-qualification-check
 phase-6f-qualification-check:
 	node --test tools/phase-6f-qualification.test.mjs
 	node tools/phase-6f-qualification.mjs --check
+
+cargo-test-freshness-check:
+	node --test tools/cargo-test-freshness.test.mjs
+
+backend-test-fresh:
+	@node tools/cargo-test-freshness.mjs $(BACKEND_DIR) $(BACKEND_TEST_STAMP)
+	@if [ -f $(BACKEND_TEST_PENDING) ]; then \
+		echo 'backend-test-fresh: backend source changed; cleaning emuchef-rust-backend test artifacts'; \
+		cargo clean --manifest-path $(BACKEND_MANIFEST) -p emuchef-rust-backend; \
+		rm -f $(BACKEND_TEST_PENDING); \
+	fi
 
 # Ordinary app development is simulation-only; real execution requires its separate guarded command.
 emuchef-app: ensure-deps
