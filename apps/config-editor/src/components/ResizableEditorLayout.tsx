@@ -1,5 +1,7 @@
 import { PointerEvent, ReactNode, useCallback, useEffect, useRef, useState } from "react";
 
+import { clampSidebarWidth, parseStoredSidebarWidth, type WidthClampOptions } from "./resizableEditorLayout.logic.js";
+
 const HANDLE_WIDTH = 8;
 const KEYBOARD_STEP = 16;
 
@@ -13,14 +15,6 @@ interface ResizableEditorLayoutProps {
   minSidebarWidth?: number;
   maxSidebarWidth?: number;
   minDetailWidth?: number;
-}
-
-interface WidthClampOptions {
-  minSidebarWidth: number;
-  maxSidebarWidth: number;
-  containerWidth: number;
-  minDetailWidth: number;
-  handleWidth: number;
 }
 
 interface DragState {
@@ -194,24 +188,6 @@ export function ResizableEditorLayout({
       <section className="min-h-0 min-w-0 overflow-y-auto p-6">{children}</section>
     </div>
   );
-}
-
-export function clampSidebarWidth(width: number, options: WidthClampOptions): number {
-  const finiteWidth = Number.isFinite(width) ? width : options.minSidebarWidth;
-  const sectionClamped = Math.min(Math.max(finiteWidth, options.minSidebarWidth), options.maxSidebarWidth);
-  if (options.containerWidth <= 0) {
-    return sectionClamped;
-  }
-  const maxWidthForDetail = Math.max(0, options.containerWidth - options.minDetailWidth - options.handleWidth);
-  return Math.min(sectionClamped, maxWidthForDetail);
-}
-
-export function parseStoredSidebarWidth(value: string | null): number | null {
-  if (value === null) {
-    return null;
-  }
-  const parsed = Number(value);
-  return Number.isFinite(parsed) ? parsed : null;
 }
 
 function readStoredSidebarWidth(
