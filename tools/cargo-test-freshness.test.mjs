@@ -157,14 +157,16 @@ test("ignored files do not alter the digest", (t) => {
   assert.match(second.stdout, /fresh/);
 });
 
-test("unreadable build input fails closed", (t) => {
+test("digest computation failure fails closed", (t) => {
   const crateDir = makeCrate();
-  t.after(() => {
-    fs.chmodSync(path.join(crateDir, "src", "lib.rs"), 0o644);
-    fs.rmSync(crateDir, { recursive: true, force: true });
-  });
+  t.after(() => fs.rmSync(crateDir, { recursive: true, force: true }));
   const stampFile = path.join(crateDir, "target", ".fixture-source.sha256");
-  fs.chmodSync(path.join(crateDir, "src", "lib.rs"), 0o000);
+  // Replacing the src directory with a regular file makes readdirSync throw
+  // (ENOTDIR) on every platform and user. Unlike chmod 0o000, this does not
+  // rely on mode-bit enforcement, which root, Windows, or permissive
+  // filesystems may not honor.
+  fs.rmSync(path.join(crateDir, "src"), { recursive: true, force: true });
+  fs.writeFileSync(path.join(crateDir, "src"), "not a directory\n");
 
   const result = runFreshness(crateDir, stampFile);
 
