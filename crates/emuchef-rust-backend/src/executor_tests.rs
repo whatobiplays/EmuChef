@@ -655,6 +655,32 @@ fn unauthorized_privileged_adapter_call_fails_closed_without_probe_or_command() 
 }
 
 #[test]
+fn successful_check_root_does_not_authorize_a_fresh_private_path_call() {
+    let mut command_executor = FakeAdbCommandExecutor::default();
+    command_executor.push_completed(0, "uid=0(root) gid=0(root)\n", "");
+    let mut device = RealAdbDevice::with_executor("adb", Some("reviewed-serial"), command_executor);
+    device
+        .check_root()
+        .expect("the live root probe should succeed");
+
+    let failure = crate::executor::ExecutorDevice::path_exists(
+        &mut device,
+        "/data/data/com.example.app/private.txt",
+    )
+    .expect_err("check_root alone must not grant reviewed authority");
+    assert_eq!(failure.kind, DeviceOperationKind::RootAuthorityUnverified);
+
+    let calls = device.command_executor().calls();
+    assert_eq!(calls.len(), 1);
+    assert!(calls[0].ends_with(&[
+        "shell".to_string(),
+        "su".to_string(),
+        "-c".to_string(),
+        "id".to_string(),
+    ]));
+}
+
+#[test]
 fn completed_root_denial_rechecks_identity_once_and_identity_failure_wins() {
     let mut command_executor = FakeAdbCommandExecutor::default();
     push_identity_sample(&mut command_executor, "a1b2");

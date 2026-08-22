@@ -8,7 +8,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::json;
 
 use super::{condition, executor_step, fixture_install_step, fixture_root, literal, runtime_value};
-use crate::executor::adb::RealAdbDevice;
+use crate::executor::adb::{AdbCommandExecutor, RealAdbDevice};
 use crate::executor::{ExecutorAdapters, ExecutorRunner};
 use crate::planner::{
     DeviceContext, ExecutionPlan, ExecutionPlanSource, ExecutionStep, RuntimeCapabilities,
@@ -294,9 +294,31 @@ struct ManualRootQualification {
     contract: RootQualificationContract,
 }
 
+/// Apply the reviewed-root authority that production `ExecutorRunner` derives
+/// from a root-capable plan to a supplied adapter. The Phase 6C.2 direct
+/// helpers use this exact configuration so their privileged commands run under
+/// the same root-authority boundary as the reviewed production path.
+fn with_reviewed_root_authority<E: AdbCommandExecutor>(
+    mut device: RealAdbDevice<E>,
+) -> RealAdbDevice<E> {
+    device.configure_root_authority(true);
+    device
+}
+
 impl ManualRootQualification {
+    /// Fresh, unconfigured adapter used only at the reviewed production-plan
+    /// boundary. `ExecutorRunner` derives and applies reviewed-root authority
+    /// from the plan itself; this method must never pre-authorize the device.
     fn device(&self) -> RealAdbDevice {
         RealAdbDevice::new("adb", Some(self.invocation.serial.clone()))
+    }
+
+    /// Qualification-only direct adapter for the post-plan helpers. The Phase
+    /// 6C.2 invocation guards already authorized the manual harness, so the
+    /// adapter is granted the same reviewed-root authority that the production
+    /// runner applies to root-capable plans.
+    fn authorized_direct_device(&self) -> RealAdbDevice {
+        with_reviewed_root_authority(self.device())
     }
 
     fn validate_paths(&self, paths: &[String]) {
@@ -306,8 +328,9 @@ impl ManualRootQualification {
         }
     }
 
-    fn qualify_filesystem_operations(
+    fn qualify_filesystem_operations<E: AdbCommandExecutor>(
         &self,
+        device: &mut RealAdbDevice<E>,
         copied_file: &str,
         created_tree: &str,
     ) -> Result<(), String> {
@@ -323,7 +346,6 @@ impl ManualRootQualification {
             .ok_or_else(|| "root filesystem file must have an owned parent".to_string())?;
         validate_owned_path(&self.contract, copied_parent)?;
 
-        let mut device = self.device();
         device.check_root()?;
         if !device.path_exists(copied_file)? || !device.path_is_dir(copied_parent)? {
             return Err("root filesystem predicates did not observe prepared state".to_string());
@@ -345,9 +367,12 @@ impl ManualRootQualification {
         Ok(())
     }
 
-    fn create_owned_directory(&self, path: &str) -> Result<(), String> {
+    fn create_owned_directory<E: AdbCommandExecutor>(
+        &self,
+        device: &mut RealAdbDevice<E>,
+        path: &str,
+    ) -> Result<(), String> {
         validate_owned_path(&self.contract, path)?;
-        let mut device = self.device();
         device.check_root()?;
         device.mkdir_p(path)?;
         if device.path_is_dir(path)? {
@@ -358,8 +383,9 @@ impl ManualRootQualification {
     }
 
     /// Remove only exact children that have already passed the committed contract guard.
-    fn cleanup_paths(
+    fn cleanup_paths<E: AdbCommandExecutor>(
         &self,
+        device: &mut RealAdbDevice<E>,
         paths: &[String],
         injected_residual: Option<&str>,
     ) -> (Result<(), String>, Vec<String>) {
@@ -368,7 +394,6 @@ impl ManualRootQualification {
             validate_owned_path(&self.contract, residual)
                 .expect("injected residual must remain contract-owned");
         }
-        let mut device = self.device();
         if device.check_root().is_err() {
             return (
                 Err("root qualification cleanup preflight failed".to_string()),
@@ -553,8 +578,8 @@ fn root_copy_group_plan(contract: &RootQualificationContract) -> RootCopyGroupPl
     }
 }
 
-fn run_root_executor_plan(
-    device: RealAdbDevice,
+fn run_root_executor_plan<E: AdbCommandExecutor>(
+    device: RealAdbDevice<E>,
     steps: Vec<ExecutionStep>,
 ) -> crate::executor::ExecutionRunResult {
     let sandbox = tempfile::tempdir().expect("root qualification sandbox should be created");
@@ -679,9 +704,16 @@ fn manual_real_adb_root_filesystem_group() {
     let operation = if !plan_result.success {
         Err("root filesystem preparation plan failed".to_string())
     } else {
-        qualification.qualify_filesystem_operations(&copied_file, &created_tree)
+        let mut operation_device = qualification.authorized_direct_device();
+        qualification.qualify_filesystem_operations(
+            &mut operation_device,
+            &copied_file,
+            &created_tree,
+        )
     };
-    let (cleanup, residual_paths) = qualification.cleanup_paths(&owned_paths, None);
+    let mut cleanup_device = qualification.authorized_direct_device();
+    let (cleanup, residual_paths) =
+        qualification.cleanup_paths(&mut cleanup_device, &owned_paths, None);
     let report = RootQualificationReport::from_operation_and_cleanup(
         operation,
         Some(cleanup),
@@ -710,7 +742,9 @@ fn manual_real_adb_root_copy_group() {
         .success
         .then_some(())
         .ok_or_else(|| "root copy qualification plan failed".to_string());
-    let (cleanup, residual_paths) = qualification.cleanup_paths(&plan.cleanup_paths, None);
+    let mut cleanup_device = qualification.authorized_direct_device();
+    let (cleanup, residual_paths) =
+        qualification.cleanup_paths(&mut cleanup_device, &plan.cleanup_paths, None);
     let report = RootQualificationReport::from_operation_and_cleanup(
         operation,
         Some(cleanup),
@@ -791,7 +825,9 @@ fn manual_real_adb_root_combined_group() {
         .success
         .then_some(())
         .ok_or_else(|| "combined root qualification plan failed".to_string());
-    let (cleanup, residual_paths) = qualification.cleanup_paths(&owned_paths, None);
+    let mut cleanup_device = qualification.authorized_direct_device();
+    let (cleanup, residual_paths) =
+        qualification.cleanup_paths(&mut cleanup_device, &owned_paths, None);
     let report = RootQualificationReport::from_operation_and_cleanup(
         operation,
         Some(cleanup),
@@ -821,12 +857,17 @@ fn manual_real_adb_root_cleanup_failure_group() {
         panic!("root cleanup-failure qualification preflight failed");
     }
     let operation = if preparation.success {
-        qualification.create_owned_directory(&residual)
+        let mut operation_device = qualification.authorized_direct_device();
+        qualification.create_owned_directory(&mut operation_device, &residual)
     } else {
         Err("root cleanup-failure preparation plan failed".to_string())
     };
-    let (cleanup, residual_paths) =
-        qualification.cleanup_paths(std::slice::from_ref(&residual), Some(residual.as_str()));
+    let mut cleanup_device = qualification.authorized_direct_device();
+    let (cleanup, residual_paths) = qualification.cleanup_paths(
+        &mut cleanup_device,
+        std::slice::from_ref(&residual),
+        Some(residual.as_str()),
+    );
     let report = RootQualificationReport::from_operation_and_cleanup(
         operation,
         Some(cleanup),
@@ -841,6 +882,41 @@ fn manual_real_adb_root_cleanup_failure_group() {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    use crate::executor::adb::FakeAdbCommandExecutor;
+
+    fn qualification_for(group: RootQualificationGroup) -> ManualRootQualification {
+        ManualRootQualification {
+            invocation: RootQualificationInvocation {
+                serial: "prepared-device".to_string(),
+                group,
+            },
+            contract: exact_contract(),
+        }
+    }
+
+    fn granted_root_probe() -> (i32, &'static str, &'static str) {
+        (0, "uid=0(root) gid=0(root)\n", "")
+    }
+
+    fn plain_result(returncode: i32) -> (i32, &'static str, &'static str) {
+        (returncode, "", "")
+    }
+
+    fn fake_executor(responses: &[(i32, &'static str, &'static str)]) -> FakeAdbCommandExecutor {
+        let mut executor = FakeAdbCommandExecutor::default();
+        for (returncode, stdout, stderr) in responses {
+            executor.push_completed(*returncode, stdout, stderr);
+        }
+        executor
+    }
+
+    fn filesystem_paths() -> (String, String) {
+        (
+            format!("{DATA_DATA_PREFIX}filesystem/copied.txt"),
+            format!("{DATA_USER_PREFIX}filesystem/tree/nested"),
+        )
+    }
 
     fn exact_environment(group: RootQualificationGroup) -> Vec<(&'static str, String)> {
         vec![
@@ -1162,5 +1238,345 @@ mod tests {
         let serialized = serde_json::to_string(&combined).expect("report should serialize");
         assert!(!serialized.contains("privileged copy denied"));
         assert!(!serialized.contains("owned child remains"));
+    }
+
+    #[test]
+    fn direct_helper_rejects_fresh_device_even_after_successful_check_root() {
+        let qualification = qualification_for(RootQualificationGroup::Filesystem);
+        let (copied_file, created_tree) = filesystem_paths();
+        let mut device = RealAdbDevice::with_executor(
+            "adb",
+            Some("prepared-device"),
+            fake_executor(&[granted_root_probe()]),
+        );
+
+        let error = qualification
+            .qualify_filesystem_operations(&mut device, &copied_file, &created_tree)
+            .expect_err("a fresh direct device must not gain authority from check_root");
+
+        assert_eq!(
+            error,
+            "Continued root authority could not be confirmed safely."
+        );
+        let calls = device.command_executor().calls();
+        assert_eq!(calls.len(), 1);
+        assert!(calls[0].ends_with(&[
+            "shell".to_string(),
+            "su".to_string(),
+            "-c".to_string(),
+            "id".to_string(),
+        ]));
+    }
+
+    #[test]
+    fn authorized_direct_helper_runs_privileged_commands_with_live_revalidation() {
+        let qualification = qualification_for(RootQualificationGroup::Filesystem);
+        let (copied_file, created_tree) = filesystem_paths();
+        let tree_root = format!("{DATA_USER_PREFIX}filesystem/tree");
+        let responses = [
+            granted_root_probe(), // check_root
+            granted_root_probe(), // path_exists(copied_file) revalidation
+            plain_result(0),      // test -e copied_file
+            granted_root_probe(), // path_is_dir(copied_parent) revalidation
+            plain_result(0),      // test -d copied_parent
+            granted_root_probe(), // mkdir_p revalidation
+            plain_result(0),      // mkdir -p created_tree
+            granted_root_probe(), // path_is_dir(created_tree) revalidation
+            plain_result(0),      // test -d created_tree
+            granted_root_probe(), // remove_file revalidation
+            plain_result(0),      // rm -f copied_file
+            granted_root_probe(), // path_exists(copied_file) revalidation
+            plain_result(1),      // test -e copied_file
+            granted_root_probe(), // remove_tree revalidation
+            plain_result(0),      // rm -rf tree_root
+            granted_root_probe(), // path_exists(tree_root) revalidation
+            plain_result(1),      // test -e tree_root
+        ];
+        let mut device = with_reviewed_root_authority(RealAdbDevice::with_executor(
+            "adb",
+            Some("prepared-device"),
+            fake_executor(&responses),
+        ));
+
+        qualification
+            .qualify_filesystem_operations(&mut device, &copied_file, &created_tree)
+            .expect("reviewed qualification authority should permit direct filesystem work");
+
+        let calls = device.command_executor().calls();
+        assert_eq!(calls.len(), 17);
+        assert!(calls[0].ends_with(&[
+            "shell".to_string(),
+            "su".to_string(),
+            "-c".to_string(),
+            "id".to_string(),
+        ]));
+        for command_index in (2..calls.len()).step_by(2) {
+            assert!(
+                calls[command_index - 1].ends_with(&[
+                    "shell".to_string(),
+                    "su".to_string(),
+                    "-c".to_string(),
+                    "id".to_string(),
+                ]),
+                "every privileged command must be preceded by a live root probe"
+            );
+            let command = calls[command_index]
+                .last()
+                .expect("command call should include a shell payload");
+            assert!(
+                command.starts_with("su -c '") && command != "su -c id",
+                "privileged command must be su-wrapped"
+            );
+        }
+        assert!(calls[2]
+            .last()
+            .unwrap()
+            .contains(format!("test -e {copied_file}").as_str()));
+        assert!(calls[6]
+            .last()
+            .unwrap()
+            .contains(format!("mkdir -p {created_tree}").as_str()));
+        assert!(calls[10]
+            .last()
+            .unwrap()
+            .contains(format!("rm -f {copied_file}").as_str()));
+        assert!(calls[14]
+            .last()
+            .unwrap()
+            .contains(format!("rm -rf {tree_root}").as_str()));
+    }
+
+    #[test]
+    fn create_owned_directory_uses_reviewed_authority_and_revalidation() {
+        let qualification = qualification_for(RootQualificationGroup::CleanupFailure);
+        let path = format!("{DATA_USER_PREFIX}cleanup-failure-123");
+        let responses = [
+            granted_root_probe(), // check_root
+            granted_root_probe(), // mkdir_p revalidation
+            plain_result(0),      // mkdir -p path
+            granted_root_probe(), // path_is_dir revalidation
+            plain_result(0),      // test -d path
+        ];
+        let mut device = with_reviewed_root_authority(RealAdbDevice::with_executor(
+            "adb",
+            Some("prepared-device"),
+            fake_executor(&responses),
+        ));
+
+        qualification
+            .create_owned_directory(&mut device, &path)
+            .expect("reviewed qualification authority should permit owned directory setup");
+
+        let calls = device.command_executor().calls();
+        assert_eq!(calls.len(), 5);
+        assert!(calls[0].ends_with(&[
+            "shell".to_string(),
+            "su".to_string(),
+            "-c".to_string(),
+            "id".to_string(),
+        ]));
+        assert!(calls[2]
+            .last()
+            .unwrap()
+            .contains(format!("mkdir -p {path}").as_str()));
+        assert!(calls[4]
+            .last()
+            .unwrap()
+            .contains(format!("test -d {path}").as_str()));
+    }
+
+    #[test]
+    fn root_denial_after_authorization_fails_before_mutation() {
+        let qualification = qualification_for(RootQualificationGroup::Filesystem);
+        let (copied_file, created_tree) = filesystem_paths();
+        let responses = [
+            granted_root_probe(),             // check_root
+            (1, "", "su: permission denied"), // revalidation denial
+        ];
+        let mut device = with_reviewed_root_authority(RealAdbDevice::with_executor(
+            "adb",
+            Some("prepared-device"),
+            fake_executor(&responses),
+        ));
+
+        let error = qualification
+            .qualify_filesystem_operations(&mut device, &copied_file, &created_tree)
+            .expect_err("live root denial must fail the direct operation");
+
+        assert_eq!(error, "Root authority was revoked during execution.");
+        let calls = device.command_executor().calls();
+        assert_eq!(calls.len(), 2);
+        assert!(calls
+            .iter()
+            .all(|call| !call.iter().any(|argument| argument.contains("test -e"))));
+    }
+
+    #[test]
+    fn root_timeout_after_authorization_fails_before_mutation() {
+        let qualification = qualification_for(RootQualificationGroup::Filesystem);
+        let (copied_file, created_tree) = filesystem_paths();
+        let mut executor = FakeAdbCommandExecutor::default();
+        executor.push_completed(0, "uid=0(root) gid=0(root)\n", "");
+        executor.push_timed_out();
+        let mut device = with_reviewed_root_authority(RealAdbDevice::with_executor(
+            "adb",
+            Some("prepared-device"),
+            executor,
+        ));
+
+        let error = qualification
+            .qualify_filesystem_operations(&mut device, &copied_file, &created_tree)
+            .expect_err("live root timeout must fail the direct operation");
+
+        assert_eq!(error, "The ADB operation timed out.");
+        let calls = device.command_executor().calls();
+        assert_eq!(calls.len(), 2);
+        assert!(calls
+            .iter()
+            .all(|call| !call.iter().any(|argument| argument.contains("test -e"))));
+    }
+
+    #[test]
+    fn cleanup_removes_only_contract_owned_children_with_revalidation() {
+        let qualification = qualification_for(RootQualificationGroup::Filesystem);
+        let owned_paths = vec![
+            format!("{DATA_DATA_PREFIX}filesystem"),
+            format!("{DATA_USER_PREFIX}filesystem"),
+        ];
+        let responses = [
+            granted_root_probe(), // check_root
+            granted_root_probe(), // remove_tree(data_data) revalidation
+            plain_result(0),      // rm -rf data_data
+            granted_root_probe(), // path_exists(data_data) revalidation
+            plain_result(1),      // test -e data_data
+            granted_root_probe(), // remove_tree(data_user) revalidation
+            plain_result(0),      // rm -rf data_user
+            granted_root_probe(), // path_exists(data_user) revalidation
+            plain_result(1),      // test -e data_user
+        ];
+        let mut device = with_reviewed_root_authority(RealAdbDevice::with_executor(
+            "adb",
+            Some("prepared-device"),
+            fake_executor(&responses),
+        ));
+
+        let (cleanup, residual_paths) =
+            qualification.cleanup_paths(&mut device, &owned_paths, None);
+
+        assert_eq!(cleanup, Ok(()));
+        assert!(residual_paths.is_empty());
+        let calls = device.command_executor().calls();
+        assert_eq!(calls.len(), 9);
+        for command_index in [2, 4, 6, 8] {
+            assert!(calls[command_index - 1].ends_with(&[
+                "shell".to_string(),
+                "su".to_string(),
+                "-c".to_string(),
+                "id".to_string(),
+            ]));
+        }
+        assert!(calls[2]
+            .last()
+            .unwrap()
+            .contains(format!("rm -rf {}", owned_paths[0]).as_str()));
+        assert!(calls[6]
+            .last()
+            .unwrap()
+            .contains(format!("rm -rf {}", owned_paths[1]).as_str()));
+    }
+
+    #[test]
+    fn cleanup_root_revocation_reports_residual_without_mutation() {
+        let qualification = qualification_for(RootQualificationGroup::Filesystem);
+        let owned_paths = vec![format!("{DATA_DATA_PREFIX}filesystem")];
+        let responses = [
+            granted_root_probe(),             // check_root
+            (1, "", "su: permission denied"), // remove_tree revalidation denial
+            (1, "", "su: permission denied"), // path_exists revalidation denial
+        ];
+        let mut device = with_reviewed_root_authority(RealAdbDevice::with_executor(
+            "adb",
+            Some("prepared-device"),
+            fake_executor(&responses),
+        ));
+
+        let (cleanup, residual_paths) =
+            qualification.cleanup_paths(&mut device, &owned_paths, None);
+
+        assert_eq!(
+            cleanup,
+            Err("root qualification cleanup left contract-owned residual state".to_string())
+        );
+        assert_eq!(residual_paths, owned_paths);
+        let calls = device.command_executor().calls();
+        assert_eq!(calls.len(), 3);
+        assert!(calls
+            .iter()
+            .all(|call| !call.iter().any(|argument| argument.contains("rm -rf"))));
+    }
+
+    #[test]
+    fn cleanup_skips_injected_residual_and_reports_it() {
+        let qualification = qualification_for(RootQualificationGroup::CleanupFailure);
+        let residual = format!("{DATA_USER_PREFIX}cleanup-failure-123");
+        let owned_paths = vec![residual.clone()];
+        let mut device = with_reviewed_root_authority(RealAdbDevice::with_executor(
+            "adb",
+            Some("prepared-device"),
+            fake_executor(&[granted_root_probe()]),
+        ));
+
+        let (cleanup, residual_paths) =
+            qualification.cleanup_paths(&mut device, &owned_paths, Some(&residual));
+
+        assert_eq!(
+            cleanup,
+            Err("root qualification cleanup left contract-owned residual state".to_string())
+        );
+        assert_eq!(residual_paths, vec![residual]);
+        let calls = device.command_executor().calls();
+        assert_eq!(calls.len(), 1);
+        assert!(calls
+            .iter()
+            .all(|call| !call.iter().any(|argument| argument.contains("rm -rf"))));
+    }
+
+    #[test]
+    #[should_panic(expected = "physical root qualification path must remain contract-owned")]
+    fn cleanup_rejects_outside_prefix_before_any_device_command() {
+        let qualification = qualification_for(RootQualificationGroup::Filesystem);
+        let mut device = RealAdbDevice::with_executor(
+            "adb",
+            Some("prepared-device"),
+            FakeAdbCommandExecutor::default(),
+        );
+        let _ = qualification.cleanup_paths(
+            &mut device,
+            &["/data/data/com.other.app/escape".to_string()],
+            None,
+        );
+    }
+
+    #[test]
+    fn plan_runner_derives_reviewed_root_authority_for_fresh_direct_device() {
+        let copied_file = format!("{DATA_DATA_PREFIX}filesystem/copied.txt");
+        let device = RealAdbDevice::with_executor(
+            "adb",
+            Some("prepared-device"),
+            fake_executor(&[granted_root_probe(), plain_result(0)]),
+        );
+        let mut step = executor_step("fixture.root/verify", "wait");
+        step.recipe_ref = "fixture.root".to_string();
+        step.constraints.capabilities = vec!["root_shell".to_string()];
+        step.params
+            .insert("duration_ms".to_string(), literal(json!(1)));
+        step.verify = vec![condition("path_exists", json!({ "path": copied_file }))];
+
+        let result = run_root_executor_plan(device, vec![step]);
+
+        assert!(
+            result.success,
+            "the reviewed root-capable plan should authorize the fresh device"
+        );
     }
 }
