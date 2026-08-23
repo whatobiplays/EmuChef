@@ -62,6 +62,12 @@ enum ExecutionKind {
     Real,
 }
 
+#[derive(Clone, Debug)]
+struct StoredExecutionReport {
+    report: Value,
+    runtime: Value,
+}
+
 /// Bounded, restart-volatile execution handle state.
 ///
 /// A start reservation prevents concurrent preflight races. At most one active
@@ -72,6 +78,7 @@ pub struct ExecutionHandleStore {
     start_reserved: Option<ExecutionKind>,
     active: Option<ExecutionMapping>,
     latest_terminal: Option<ExecutionMapping>,
+    latest_terminal_report: Option<StoredExecutionReport>,
     launch_actions: HashMap<String, LaunchActionRecord>,
     successful_launches: HashSet<String>,
 }
@@ -200,7 +207,31 @@ impl ExecutionHandleStore {
             })
     }
 
+    #[cfg(test)]
     fn mark_terminal(&mut self, kind: ExecutionKind, public_handle: &str) -> bool {
+        self.promote_active_to_terminal(kind, public_handle, None)
+    }
+
+    fn mark_terminal_with_report(
+        &mut self,
+        kind: ExecutionKind,
+        public_handle: &str,
+        report: Value,
+        runtime: Value,
+    ) -> bool {
+        self.promote_active_to_terminal(
+            kind,
+            public_handle,
+            Some(StoredExecutionReport { report, runtime }),
+        )
+    }
+
+    fn promote_active_to_terminal(
+        &mut self,
+        kind: ExecutionKind,
+        public_handle: &str,
+        report: Option<StoredExecutionReport>,
+    ) -> bool {
         if self
             .active
             .as_ref()
@@ -212,9 +243,54 @@ impl ExecutionHandleStore {
                 self.successful_launches.remove(&previous_handle);
             }
             self.latest_terminal = self.active.take();
+            self.latest_terminal_report = report;
             return true;
         }
         false
+    }
+
+    fn set_terminal_report_runtime(
+        &mut self,
+        public_handle: &str,
+        runtime: Value,
+    ) -> Result<(), String> {
+        let is_matching_terminal = self
+            .latest_terminal
+            .as_ref()
+            .is_some_and(|mapping| mapping.public_handle == public_handle);
+        if !is_matching_terminal {
+            return Err(safe_error(
+                "report_unavailable",
+                "This execution report is no longer available in this app session.",
+            ));
+        }
+        let Some(report) = self.latest_terminal_report.as_mut() else {
+            return Err(safe_error(
+                "report_unavailable",
+                "This execution report could not be prepared.",
+            ));
+        };
+        report.runtime = runtime;
+        Ok(())
+    }
+
+    fn terminal_report(&self, public_handle: &str) -> Result<StoredExecutionReport, String> {
+        let is_matching_terminal = self
+            .latest_terminal
+            .as_ref()
+            .is_some_and(|mapping| mapping.public_handle == public_handle);
+        if !is_matching_terminal {
+            return Err(safe_error(
+                "report_unavailable",
+                "This execution report is no longer available in this app session.",
+            ));
+        }
+        self.latest_terminal_report.clone().ok_or_else(|| {
+            safe_error(
+                "report_unavailable",
+                "This execution report could not be prepared.",
+            )
+        })
     }
 
     fn launch_action(&mut self, mapping: &ExecutionMapping, report: &Value) -> Option<Value> {
@@ -285,6 +361,7 @@ impl ExecutionHandleStore {
         {
             self.discard_launch_actions_for_execution(public_handle);
             self.successful_launches.remove(public_handle);
+            self.latest_terminal_report = None;
             return self.latest_terminal.take();
         }
         None
@@ -505,11 +582,22 @@ pub fn get_simulated_execution(
     })?;
     let public = project_snapshot(&mapping, report);
     if is_terminal_status(report.get("status").and_then(Value::as_str)) {
+        let runtime = serde_json::to_value(state.sidecar.status()).map_err(|_| {
+            safe_error(
+                "report_serialization_failed",
+                "Runtime metadata could not be prepared for the report.",
+            )
+        })?;
         state
             .executions
             .lock()
             .map_err(|_| execution_state_error())?
-            .mark_terminal(ExecutionKind::Simulated, &execution_handle);
+            .mark_terminal_with_report(
+                ExecutionKind::Simulated,
+                &execution_handle,
+                report.clone(),
+                runtime,
+            );
     }
     Ok(public)
 }
@@ -1055,14 +1143,28 @@ pub fn get_real_execution(
     execution_handle: String,
     state: State<'_, AppState>,
 ) -> Result<Value, String> {
-    get_real_execution_inner_with_runtime(
+    let public = get_real_execution_inner_with_runtime(
         &execution_handle,
         &state.executions,
         &state.handles,
         &state.root_qualification,
         &state.sidecar,
         |error| recover_from_real_execution_loss(&state, &execution_handle, error),
-    )
+    )?;
+    if public.get("terminal").and_then(Value::as_bool) == Some(true) {
+        let runtime = serde_json::to_value(state.sidecar.status()).map_err(|_| {
+            safe_error(
+                "report_serialization_failed",
+                "Runtime metadata could not be prepared for the report.",
+            )
+        })?;
+        state
+            .executions
+            .lock()
+            .map_err(|_| real_execution_state_error())?
+            .set_terminal_report_runtime(&execution_handle, runtime)?;
+    }
+    Ok(public)
 }
 
 /// Retrieve one real execution report and retain terminal identity failures
@@ -1120,7 +1222,12 @@ where
         let newly_retained = executions
             .lock()
             .map_err(|_| real_execution_state_error())?
-            .mark_terminal(ExecutionKind::Real, execution_handle);
+            .mark_terminal_with_report(
+                ExecutionKind::Real,
+                execution_handle,
+                report.clone(),
+                Value::Null,
+            );
         if newly_retained {
             if report_has_identity_failure(report) {
                 invalidate_identity_terminal_authority(handles, root_qualification, &mapping)?;
@@ -1337,51 +1444,26 @@ pub fn launch_configured_app(
     }))
 }
 
-#[tauri::command]
-pub async fn export_execution_report(
-    app: AppHandle,
-    execution_handle: String,
-) -> Result<Value, String> {
-    let state = app.state::<AppState>();
-    let mapping = state
-        .executions
-        .lock()
-        .map_err(|_| real_execution_state_error())?
-        .mapping_any(&execution_handle)?;
-    let response = runtime_request(
-        &state.sidecar,
-        "getExecution",
-        json!({ "executionId": mapping.sidecar_id }),
-    )
-    .map_err(|_| {
-        safe_error(
-            "report_unavailable",
-            "This execution report is no longer available in this app session.",
-        )
-    })?;
-    let report = response.get("execution").ok_or_else(|| {
-        safe_error(
-            "report_unavailable",
-            "This execution report could not be prepared.",
-        )
-    })?;
-    if !is_terminal_status(report.get("status").and_then(Value::as_str)) {
+/// Serialize the exact sanitized report retained for one terminal production
+/// execution. Normal export and qualification capture call this helper so the
+/// report projection, redaction, and byte formatting remain one authority.
+pub(crate) fn production_execution_report_bytes(
+    store: &ExecutionHandleStore,
+    execution_handle: &str,
+) -> Result<Vec<u8>, String> {
+    let mapping = store.mapping_any(execution_handle)?;
+    let stored = store.terminal_report(execution_handle)?;
+    if !is_terminal_status(stored.report.get("status").and_then(Value::as_str)) {
         return Err(safe_error(
             "report_not_terminal",
             "Wait for execution to finish before exporting its report.",
         ));
     }
     let public = match mapping.kind {
-        ExecutionKind::Simulated => project_snapshot(&mapping, report),
-        ExecutionKind::Real => project_real_snapshot(&mapping, report),
+        ExecutionKind::Simulated => project_snapshot(&mapping, &stored.report),
+        ExecutionKind::Real => project_real_snapshot(&mapping, &stored.report),
     };
-    let runtime = serde_json::to_value(state.sidecar.status()).map_err(|_| {
-        safe_error(
-            "report_serialization_failed",
-            "Runtime metadata could not be prepared for the report.",
-        )
-    })?;
-    let document = execution_report_document(&mapping, report, &public, runtime);
+    let document = execution_report_document(&mapping, &stored.report, &public, stored.runtime);
     let mut serialized = serde_json::to_string_pretty(&document).map_err(|_| {
         safe_error(
             "report_serialization_failed",
@@ -1389,6 +1471,22 @@ pub async fn export_execution_report(
         )
     })?;
     serialized.push('\n');
+    Ok(serialized.into_bytes())
+}
+
+#[tauri::command]
+pub async fn export_execution_report(
+    app: AppHandle,
+    execution_handle: String,
+) -> Result<Value, String> {
+    let state = app.state::<AppState>();
+    let serialized = {
+        let executions = state
+            .executions
+            .lock()
+            .map_err(|_| real_execution_state_error())?;
+        production_execution_report_bytes(&executions, &execution_handle)?
+    };
 
     let _dialog_activity = app
         .state::<AppState>()
@@ -3952,6 +4050,42 @@ mod tests {
         }
         assert_eq!(first["schemaVersion"], 1);
         assert_eq!(first["execution"]["verificationScope"], "real_device");
+    }
+
+    #[test]
+    fn production_report_bytes_match_the_sanitized_export_document() {
+        let mut store = ExecutionHandleStore::default();
+        store.reserve_start(ExecutionKind::Real).unwrap();
+        let mapping = store.bind_started(
+            ExecutionKind::Real,
+            "sidecar-private-id".into(),
+            "review-private-id".into(),
+            review(),
+        );
+        let report = json!({ "planId": "/private/plan", "status": "failed" });
+        let runtime = json!({ "status": "ready", "protocolVersion": 1 });
+        let public = project_real_snapshot(&mapping, &report);
+        let expected_document =
+            execution_report_document(&mapping, &report, &public, runtime.clone());
+        let mut expected_bytes = serde_json::to_string_pretty(&expected_document).unwrap();
+        expected_bytes.push('\n');
+
+        assert!(store.mark_terminal_with_report(
+            ExecutionKind::Real,
+            &mapping.public_handle,
+            report,
+            Value::Null,
+        ));
+        store
+            .set_terminal_report_runtime(&mapping.public_handle, runtime)
+            .unwrap();
+        let actual = production_execution_report_bytes(&store, &mapping.public_handle).unwrap();
+
+        assert_eq!(actual, expected_bytes.as_bytes());
+        assert_eq!(
+            serde_json::from_slice::<Value>(&actual).unwrap(),
+            expected_document
+        );
     }
 
     #[test]

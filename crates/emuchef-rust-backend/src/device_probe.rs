@@ -32,6 +32,7 @@ pub(crate) struct DetectedDeviceFacts {
     pub abis: Vec<String>,
     pub android_version: Option<i64>,
     pub android_api_level: Option<i64>,
+    pub firmware_build: Option<String>,
     #[serde(default)]
     pub device_tags: Vec<String>,
 }
@@ -204,6 +205,9 @@ pub(crate) fn detected_facts_from_getprop_output(
             }
             "ro.build.version.sdk" => {
                 facts.android_api_level = parse_android_api_level(value);
+            }
+            "ro.build.fingerprint" => {
+                facts.firmware_build = present_text(Some(value)).map(ToString::to_string);
             }
             _ => {}
         }
@@ -844,6 +848,7 @@ mod tests {
 [ro.product.manufacturer]: [AYANEO]
 [ro.product.brand]: [AYANEO]
 [ro.product.model]: [Pocket S Mini]
+[ro.build.fingerprint]: [AYANEO/device/build:15/ABC/123:user/release-keys]
 [ro.build.version.release]: [13]
 [ro.build.version.sdk]: [33]
 ";
@@ -859,9 +864,16 @@ mod tests {
                 model: Some("Pocket S Mini".to_string()),
                 android_version: Some(13),
                 android_api_level: Some(33),
+                firmware_build: Some(
+                    "AYANEO/device/build:15/ABC/123:user/release-keys".to_string(),
+                ),
                 device_tags: Vec::new(),
                 ..DetectedDeviceFacts::default()
             }
+        );
+        assert_eq!(
+            facts.firmware_build.as_deref(),
+            Some("AYANEO/device/build:15/ABC/123:user/release-keys")
         );
     }
 

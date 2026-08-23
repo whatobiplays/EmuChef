@@ -757,6 +757,18 @@ pub fn poll_devices(
 
 #[tauri::command]
 pub fn probe_device(device_handle: String, state: State<'_, AppState>) -> Result<Value, String> {
+    let (facts, serial) = probe_device_facts(&device_handle, &state)?;
+    Ok(public_device_facts(&device_handle, &facts, &serial))
+}
+
+/// Probe one selected device through the production sidecar boundary and retain
+/// the trusted facts in the existing session store. The normal React command
+/// and qualification orchestration share this helper so neither path creates
+/// a second device-probing authority.
+pub(crate) fn probe_device_facts(
+    device_handle: &str,
+    state: &AppState,
+) -> Result<(Value, String), String> {
     let adb_path = current_adb_path(&state)?;
     let serial = state
         .handles
@@ -792,7 +804,7 @@ pub fn probe_device(device_handle: String, state: State<'_, AppState>) -> Result
             )
         })?
         .set_facts(&device_handle, facts.clone())?;
-    Ok(public_device_facts(&device_handle, &facts, &serial))
+    Ok((facts, serial))
 }
 
 #[tauri::command]
@@ -1430,6 +1442,7 @@ fn public_device_facts(device_handle: &str, facts: &Value, exact_serial: &str) -
         "model": facts.get("model"),
         "androidVersion": facts.get("android_version"),
         "androidApiLevel": facts.get("android_api_level"),
+        "firmwareBuild": facts.get("firmware_build"),
     });
     if !exact_serial.is_empty() {
         redact_exact_serial(&mut public, exact_serial);
@@ -2398,12 +2411,17 @@ mod tests {
                 "model": "Pocket",
                 "android_version": 13,
                 "android_api_level": 33,
+                "firmware_build": "AYANEO/device/build:15/ABC/123:user/release-keys",
             }),
             "exact-sensitive-serial",
         );
         let serialized = public.to_string();
         assert!(!serialized.contains("exact-sensitive-serial"));
         assert!(!serialized.contains("serial"));
+        assert_eq!(
+            public["firmwareBuild"],
+            "AYANEO/device/build:15/ABC/123:user/release-keys"
+        );
     }
 
     #[test]

@@ -55,6 +55,7 @@ export interface DeviceFacts {
   model: string | null;
   androidVersion: number | null;
   androidApiLevel: number | null;
+  firmwareBuild: string | null;
 }
 
 export interface PlanCandidate {

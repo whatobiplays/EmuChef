@@ -27,6 +27,7 @@ const facts = {
   model: "Pocket S Mini",
   androidVersion: 13,
   androidApiLevel: 33,
+  firmwareBuild: null,
 };
 
 const match = {

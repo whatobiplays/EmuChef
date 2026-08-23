@@ -914,8 +914,11 @@ Exact ADB serials and executable paths exist only inside trusted Rust/Tauri
 communication. Tauri assigns stable opaque device handles while a serial
 remains present during one application session and invalidates them on device
 disappearance. React receives the opaque handle, masked serial, display facts,
-connection state, and actionable errors. Exact serials never enter React
-payloads, state, logs, storage, or markup.
+connection state, and actionable errors. The production device probe also
+preserves the optional Android build fingerprint from `ro.build.fingerprint`
+as an internal `firmware_build` fact and exposes it at the React boundary as
+nullable `firmwareBuild`. Exact serials never enter React payloads, state,
+logs, storage, or markup.
 
 The backend owns exact/high/low/none device matching. A unique exact/high match
 may recommend a plan. Low/no matches are never auto-selected. Backend-approved
@@ -933,7 +936,9 @@ level only when no input diagnostic represents the same binding key and code,
 or the same code and message when no binding key is available. React and Tauri
 send camelCase product fields;
 probe facts remain snake_case inside the trusted inventory DTO and are converted
-to camelCase `deviceContext` and `targetDevice` objects for the sidecar.
+to camelCase `deviceContext` and `targetDevice` objects for the sidecar. The
+selected-device command and qualification orchestration share the trusted
+production probe helper; neither path issues a second build-fingerprint probe.
 `selectedRecipes: null` selects device-plan defaults, while an explicit empty
 array selects no recipes. Missing required input values remain successful
 description results with `binding_missing` diagnostics instead of transport
@@ -1005,6 +1010,12 @@ only the matching active or latest-terminal mapping, invalidates its originating
 review, and reports an unknown outcome without inferring terminal status.
 Reviews otherwise retain their independent stale, expiry, discard, and capacity
 lifecycle.
+
+When a terminal execution snapshot is retained, the trusted store also retains
+the production report and runtime metadata needed for report capture. The
+`production_execution_report_bytes` helper owns the sanitized projection,
+redaction, deterministic pretty-JSON serialization, and trailing newline used
+by both the native export dialog and qualification evidence capture.
 
 `getExecution` snapshots are authoritative for feature-grouped progress,
 current user-facing action, completion counts, and terminal state. Incremental
