@@ -14,6 +14,7 @@ import {
   errorMessage,
 } from "./app-helpers";
 import { ExecutionStep } from "./ExecutionStep";
+import { DeviceQualificationOverlay } from "./DeviceQualificationOverlay";
 import { InputsStep } from "./InputsStep";
 import { ReviewStep } from "./ReviewStep";
 import { SupportPanel } from "./SupportPanel";
@@ -24,6 +25,7 @@ import {
   type SavedConfigurationMenuAction,
 } from "./SavedConfigurationMenuBridge";
 import { useExecution } from "./useExecution";
+import { useDeviceQualificationMode } from "./useDeviceQualificationMode";
 import { AccessibleDialog } from "./AccessibleDialog";
 import {
   claimFocusTransition,
@@ -279,6 +281,7 @@ export function App({ dialogController: suppliedDialogController }: AppProps = {
   const initialWorkflowPresentationRef = useRef(false);
   const savedConfigurationRef = useRef<SavedConfigurationDocument | null>(null);
   const workflowRef = useRef(workflow);
+  const qualificationSessionAppliedRef = useRef<string | null>(null);
   const configurationMutationQueue = useRef<Promise<void>>(Promise.resolve());
   const sessionInitializedRef = useRef(false);
   const supportGenerationRef = useRef(0);
@@ -293,6 +296,13 @@ export function App({ dialogController: suppliedDialogController }: AppProps = {
   const updateInteractionSessionRef = useRef<UpdateInteractionSession | null>(null);
   const updateInteractionQueueRef = useRef<Promise<void>>(Promise.resolve());
   const [updateInteractionRevision, setUpdateInteractionRevision] = useState(0);
+
+  const qualification = useDeviceQualificationMode({
+    enabled: startupReady,
+    workflow,
+    workflowRef,
+  });
+  const qualificationLocksIntent = qualification.intentLock !== null;
 
   const announce = useCallback((text: string, assertive = false) => {
     const update = (previous: { id: number; text: string }) => ({ id: previous.id + 1, text });
@@ -577,6 +587,10 @@ export function App({ dialogController: suppliedDialogController }: AppProps = {
   };
 
   const applySavedDocument = async (document: SavedConfigurationDocument) => {
+    if (qualificationLocksIntent) {
+      setNotice("The qualification session must finish before changing setup intent.");
+      return;
+    }
     cancelPendingDialog();
     const previous = savedConfigurationRef.current;
     if (previous && previous.configurationHandle !== document.configurationHandle) {
@@ -600,6 +614,10 @@ export function App({ dialogController: suppliedDialogController }: AppProps = {
   };
 
   const applyRecoveryResult = async (result: RecoveryRestoreResult) => {
+    if (qualificationLocksIntent) {
+      setNotice("The qualification session must finish before changing setup intent.");
+      return;
+    }
     const previous = savedConfigurationRef.current;
     if (previous && previous.configurationHandle !== result.document?.configurationHandle) {
       await api.closeSavedConfiguration(previous.configurationHandle).catch(() => undefined);
@@ -812,6 +830,10 @@ export function App({ dialogController: suppliedDialogController }: AppProps = {
   };
 
   const startNewConfiguration = async () => {
+    if (qualificationLocksIntent) {
+      setNotice("The qualification session must finish before changing setup intent.");
+      return;
+    }
     await runProtectedTransition(async () => {
       cancelPendingDialog();
       const current = savedConfigurationRef.current;
@@ -827,6 +849,10 @@ export function App({ dialogController: suppliedDialogController }: AppProps = {
     mode: "open" | "import",
     recentHandle?: string,
   ) => {
+    if (qualificationLocksIntent) {
+      setNotice("The qualification session must finish before changing setup intent.");
+      return;
+    }
     const generation = ++configurationPreviewGenerationRef.current;
     setConfigurationManagerOpen(true);
     setConfigurationManagerBusy(true);
@@ -1103,6 +1129,10 @@ export function App({ dialogController: suppliedDialogController }: AppProps = {
     devicePlan: string,
     recipeSelection: "defaults" | "blank" = "defaults",
   ) => {
+    if (qualificationLocksIntent) {
+      setNotice("The qualification session owns the device setup and recipe intent.");
+      return;
+    }
     dispatch({ type: "select-plan", devicePlan, recipeSelection });
     queueSavedMutation({ kind: "device_plan", value: devicePlan });
     if (recipeSelection === "blank") {
@@ -1111,11 +1141,36 @@ export function App({ dialogController: suppliedDialogController }: AppProps = {
   };
 
   const updateRecipeIntent = (selectedRecipes: string[]) => {
+    if (qualificationLocksIntent) {
+      setNotice("The qualification session owns the device setup and recipe intent.");
+      return;
+    }
     setTouchedInputKeys(new Set());
     setValidationRequested(false);
     dispatch({ type: "set-recipes", selectedRecipes });
     queueSavedMutation({ kind: "selected_recipes", value: selectedRecipes });
   };
+
+  useEffect(() => {
+    const currentSession = qualification.session;
+    if (!currentSession) {
+      qualificationSessionAppliedRef.current = null;
+      return;
+    }
+    if (qualificationSessionAppliedRef.current === currentSession.sessionHandle) return;
+    qualificationSessionAppliedRef.current = currentSession.sessionHandle;
+
+    const current = workflowRef.current;
+    if (current.devicePlan !== currentSession.devicePlan) {
+      dispatch({ type: "select-plan", devicePlan: currentSession.devicePlan, recipeSelection: "blank" });
+      queueSavedMutation({ kind: "device_plan", value: currentSession.devicePlan });
+    }
+    const selectedRecipes = current.selectedRecipes ?? [];
+    if (JSON.stringify(selectedRecipes) !== JSON.stringify(currentSession.requiredRecipes)) {
+      dispatch({ type: "set-recipes", selectedRecipes: currentSession.requiredRecipes });
+      queueSavedMutation({ kind: "selected_recipes", value: currentSession.requiredRecipes });
+    }
+  }, [qualification.session, queueSavedMutation]);
 
   const updateBindingIntent = (key: string, value: unknown) => {
     setTouchedInputKeys((current) => {
@@ -1201,6 +1256,10 @@ export function App({ dialogController: suppliedDialogController }: AppProps = {
     invoker: HTMLElement | null = null,
     expectedGeneration?: number,
   ) => {
+    if (qualificationLocksIntent) {
+      setNotice("The qualification session must finish before restarting the app service.");
+      return;
+    }
     const current = workflowRef.current;
     let recoveryAck: RecoveryWriteAck | null = null;
     try {
@@ -1753,6 +1812,10 @@ export function App({ dialogController: suppliedDialogController }: AppProps = {
   };
 
   const selectDevice = async (deviceHandle: string, invoker: HTMLElement | null = null) => {
+    if (qualificationLocksIntent) {
+      setNotice("The qualification session is bound to the current device.");
+      return;
+    }
     if (savedConfigurationBlocksProgress(savedConfigurationRef.current)) {
       setNotice("Repair or replace the incompatible saved setup before selecting a device.");
       announce("This saved setup must be repaired before continuing.", true);
@@ -2010,7 +2073,7 @@ export function App({ dialogController: suppliedDialogController }: AppProps = {
   };
 
   const prepareRepair = async () => {
-    if (repairPreparing) return;
+    if (repairPreparing || qualificationLocksIntent) return;
     const prior = workflow;
     const runtimeGeneration = runtimeGenerationRef.current;
     setRepairPreparing(true);
@@ -2237,6 +2300,7 @@ export function App({ dialogController: suppliedDialogController }: AppProps = {
   const configurationActionsLocked = !startupReady
     || busy
     || repairPreparing
+    || qualificationLocksIntent
     || platformToolsBusy
     || workflow.execution.kind === "active"
     || workflow.execution.kind === "starting";
@@ -2335,6 +2399,12 @@ export function App({ dialogController: suppliedDialogController }: AppProps = {
           >Troubleshooting</button>
         </div>
       </header>
+
+      <DeviceQualificationOverlay
+        controller={qualification}
+        deviceHandle={workflow.deviceHandle}
+        devicePlan={workflow.devicePlan}
+      />
 
       <UpdatesPanel
         state={updates}
@@ -2551,7 +2621,7 @@ export function App({ dialogController: suppliedDialogController }: AppProps = {
                           ? stableDomId("device-reason", device.deviceHandle)
                           : undefined}
                         className="device-row"
-                        disabled={device.state !== "available" || busy || savedConfigurationBlocked || multipleDevicesConnected}
+                        disabled={device.state !== "available" || busy || savedConfigurationBlocked || multipleDevicesConnected || qualificationLocksIntent}
                         onClick={(event) => void selectDevice(device.deviceHandle, event.currentTarget)}
                       >
                         <span><strong>{device.displayName}</strong><small>{device.maskedSerial}</small></span>
@@ -2664,6 +2734,7 @@ export function App({ dialogController: suppliedDialogController }: AppProps = {
                           type="radio"
                           name="device-plan"
                           checked={workflow.devicePlan === plan.planId && workflow.selectedRecipes?.length !== 0}
+                          disabled={qualificationLocksIntent}
                           onChange={() => updateDevicePlanIntent(plan.planId, "defaults")}
                         />
                         <span><strong>{plan.name}</strong><small>{plan.description}</small></span>
@@ -2675,6 +2746,7 @@ export function App({ dialogController: suppliedDialogController }: AppProps = {
                           type="radio"
                           name="device-plan"
                           checked={workflow.devicePlan === plan.planId && workflow.selectedRecipes?.length === 0}
+                          disabled={qualificationLocksIntent}
                           onChange={() => updateDevicePlanIntent(plan.planId, "blank")}
                         />
                         <span><strong>{plan.name}</strong><small>{plan.description}</small></span>
@@ -2741,7 +2813,7 @@ export function App({ dialogController: suppliedDialogController }: AppProps = {
                   <button
                     className="secondary"
                     type="button"
-                    disabled={recommendedRecipeIds.length === 0 || recommendedSelectionActive || busy}
+                    disabled={qualificationLocksIntent || recommendedRecipeIds.length === 0 || recommendedSelectionActive || busy}
                     onClick={() => updateRecipeIntent(recommendedRecipeIds)}
                   >
                     {recommendedSelectionActive ? "Recommended setup selected" : "Select recommended setup"}
@@ -2758,7 +2830,7 @@ export function App({ dialogController: suppliedDialogController }: AppProps = {
                     <label key={recipe.id} className={!recipe.available ? "unavailable" : ""}>
                       <input
                         type="checkbox"
-                        disabled={recipeSelectionDisabled(recipe)}
+                        disabled={qualificationLocksIntent || recipeSelectionDisabled(recipe)}
                         checked={selectedRecipeIds.has(recipe.id) || recipe.dependencyRequired}
                         onChange={(event) => {
                           const selected = updateRecipeSelection(

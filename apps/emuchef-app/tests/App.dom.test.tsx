@@ -17,6 +17,17 @@ const mockApi = vi.hoisted(() => ({
   executionCapabilities: vi.fn(),
   deviceQualification: vi.fn(),
   checkDeviceRoot: vi.fn(),
+  deviceQualificationModeStatus: vi.fn(),
+  beginQualificationSession: vi.fn(),
+  bindQualificationReview: vi.fn(),
+  bindQualificationExecution: vi.fn(),
+  finalizeQualificationCandidate: vi.fn(),
+  createQualificationTargetCandidate: vi.fn(),
+  registerQualificationTarget: vi.fn(),
+  recordQualificationCheckpoint: vi.fn(),
+  recordQualificationRun: vi.fn(),
+  discardQualificationCandidate: vi.fn(),
+  refreshQualificationSession: vi.fn(),
   installPlatformToolsSelection: vi.fn(),
   listRecentConfigurations: vi.fn(),
   matchDevice: vi.fn(),
@@ -279,6 +290,16 @@ function resetApi(): void {
     runtimeGeneration: 0,
     qualificationRevision: 0,
     deviceIdentity: "device-opaque",
+  });
+  mockApi.deviceQualificationModeStatus.mockResolvedValue({
+    enabled: false,
+    recordable: false,
+    message: null,
+    build: null,
+    runtimeContract: null,
+    workflows: [],
+    targets: [],
+    resumableCandidates: [],
   });
   mockApi.catalog.mockResolvedValue({
     catalog: {
@@ -1185,6 +1206,105 @@ describe("Phase 5B workflow surfaces", () => {
       (screen.getByRole("button", { name: "Troubleshooting" }) as HTMLButtonElement).disabled,
     ).toBe(false));
     expect(document.body.textContent).not.toMatch(/runtime_restart_failed/);
+  });
+});
+
+describe("device qualification controller integration", () => {
+  test("qualification mode observes the normal workflow without creating review or starting execution", async () => {
+    const user = userEvent.setup();
+    mockApi.deviceQualificationModeStatus.mockResolvedValue({
+      enabled: true,
+      recordable: true,
+      message: null,
+      build: {
+        appVersion: "0.1.0",
+        gitCommit: "commit-opaque",
+        materialBuildDigest: "digest-opaque",
+        realExecutionEnabled: true,
+        qualificationContract: 2,
+      },
+      runtimeContract: "runtime-contract-2",
+      workflows: [{
+        id: "workflow.one",
+        version: 1,
+        purpose: "Workflow one",
+        productionRecipes: ["recipe.one"],
+        requiredCapabilities: [],
+        prerequisites: [],
+        humanCheckpoints: [],
+      }],
+      targets: [{
+        id: "target.one",
+        profileId: "profile.one",
+        manufacturer: "Example",
+        model: "Handheld",
+        androidVersion: "14",
+        androidApi: 34,
+        abiSocClass: "arm64",
+        rootState: "non_root",
+        connectionType: "usb3",
+        firmwareBuild: "firmware-opaque",
+      }],
+      resumableCandidates: [],
+    });
+    mockApi.beginQualificationSession.mockResolvedValue({
+      sessionHandle: "session-opaque",
+      targetId: "target.one",
+      workflowId: "workflow.one",
+      workflowVersion: 1,
+      devicePlan: "plan.supported",
+      requiredRecipes: ["recipe.one"],
+      humanCheckpoints: [],
+      recordedCheckpoints: [],
+      runValidity: "valid",
+      qualificationOutcome: "not_observed",
+      invalidReason: null,
+      candidate: {
+        candidateHandle: "candidate-opaque",
+        kind: "qualification_run",
+        capturedAt: "2026-08-23T10:00:00Z",
+        promotable: true,
+        nonPromotableReason: null,
+        runValidity: "valid",
+        qualificationOutcome: "not_observed",
+      },
+    });
+    mockApi.pollDevices.mockResolvedValue([availableDevice]);
+    mockApi.describeConfiguration.mockResolvedValue(descriptionWithTextInput({
+      key: "recipe.one/option",
+      inputId: "option",
+      label: "Optional setting",
+      required: false,
+      sensitive: false,
+    }));
+    mockApi.createReview.mockResolvedValue({
+      reviewHandle: "review-opaque",
+      setup: { name: "Reviewed setup" },
+      target: { label: "Connected Android device" },
+      features: [],
+      inputs: [],
+      notices: [],
+      work: { actionCount: 1 },
+      canExecute: true,
+    });
+
+    await advanceToInputs(user);
+
+    expect(await screen.findByRole("heading", { name: "Device qualification mode" })).toBeTruthy();
+    const beginSession = screen.getByRole("button", { name: "Begin qualification session" });
+    await waitFor(() => expect((beginSession as HTMLButtonElement).disabled).toBe(false));
+    await user.click(beginSession);
+    await screen.findByRole("heading", { name: "Normal workflow intent is locked" });
+    expect(mockApi.createReview).not.toHaveBeenCalled();
+    expect(mockApi.startRealExecution).not.toHaveBeenCalled();
+
+    await user.click(screen.getByRole("button", { name: "Review plan" }));
+    await waitFor(() => expect(mockApi.createReview).toHaveBeenCalledTimes(1));
+    expect(mockApi.createReview).toHaveBeenCalledWith(expect.objectContaining({
+      devicePlan: "plan.supported",
+      selectedRecipes: ["recipe.one"],
+    }));
+    expect(mockApi.startRealExecution).not.toHaveBeenCalled();
   });
 });
 

@@ -1336,6 +1336,29 @@ only opaque handles and sanitized DTOs; it has no repository, candidate,
 evidence, executable, or process authority. No target or physical evidence is
 created by the qualification-mode implementation itself.
 
+The ordinary React application includes a development-only qualification
+overlay when the trusted mode status is enabled. Disabled mode renders no
+overlay and performs no qualification mutation. The overlay offers explicit
+target/workflow binding, target-candidate capture and review, register and
+discard actions, workflow-declared checkpoint recording, terminal
+classification, and explicit run recording. It displays stored typed values
+with their provenance and reconstructs resumable target-registration previews
+from persisted sanitized summaries without recapturing a device. Checkpoint
+controls start with no selected outcome, and persisted outcomes and timestamps
+remain unchanged on reload.
+
+The overlay observes the existing production review and execution state. It
+binds review and real-execution handles only after those normal workflow
+states exist, deduplicating binding and terminal finalization across React
+StrictMode. It never creates a review, starts execution, or renders a parallel
+device, configuration, review, confirmation, execution, or report flow. An
+active qualification session locks its device plan and required recipes by
+applying them once through the existing workflow reducer actions; the normal
+inputs, review, explicit real-execution confirmation, execution, and report
+surfaces remain authoritative. Qualification-mode implementation and
+automated tests do not perform physical qualification or add a qualification-
+only device command.
+
 Qualification session state is Rust-owned and restartable. A session uses an
 opaque qualification-session-<32 lowercase hex> handle associated with its
 opaque run candidate and persists strict lifecycle state in a separate

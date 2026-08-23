@@ -143,10 +143,36 @@ h4 { margin-bottom: var(--space-2); font-size: 1rem; line-height: 1.35; }
 .status.qualification-unauthorized { color: var(--color-warning); background: var(--color-warning-surface); border-color: var(--color-warning-border); }
 .status.qualification-offline { color: var(--color-danger); background: var(--color-danger-surface); border-color: var(--color-danger-border); }
 
+.qualification-overlay { display: grid; gap: var(--space-4); max-width: var(--content-max); margin: var(--space-4) auto 0; padding: var(--space-5); border: 2px solid var(--color-info); border-radius: var(--radius-lg); background: var(--color-info-surface); }
+.qualification-overlay-heading, .qualification-section-heading { display: flex; align-items: flex-start; justify-content: space-between; gap: var(--space-4); }
+.qualification-overlay-heading > div, .qualification-section-heading > div { min-width: 0; }
+.qualification-overlay h2, .qualification-overlay h3, .qualification-overlay h4 { margin-bottom: var(--space-2); }
+.qualification-overlay section { display: grid; gap: var(--space-3); padding: var(--space-4); border: 1px solid var(--color-border-strong); border-radius: var(--radius-md); background: var(--color-surface); }
+.qualification-overlay section > p:last-child { margin-bottom: 0; }
+.qualification-selectors { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: var(--space-3); }
+.qualification-overlay label { display: grid; gap: var(--space-1); font-weight: 700; }
+.qualification-overlay select { width: 100%; min-height: var(--control-min-height); border: 1px solid var(--color-border-strong); border-radius: var(--radius-sm); padding: var(--space-2) var(--space-3); background: var(--color-control); color: var(--color-text); }
+.qualification-build, .qualification-session-facts { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: var(--space-3); margin: 0; }
+.qualification-build div, .qualification-session-facts div { display: grid; gap: var(--space-1); min-width: 0; }
+.qualification-build dt, .qualification-session-facts dt, .qualification-facts dt { color: var(--color-text-muted); }
+.qualification-build dd, .qualification-session-facts dd { margin: 0; overflow-wrap: anywhere; }
+.qualification-facts { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: var(--space-3); margin: 0; }
+.qualification-facts div { display: grid; gap: var(--space-1); min-width: 0; }
+.qualification-facts dd { display: grid; gap: var(--space-1); margin: 0; }
+.qualification-facts dd small { overflow-wrap: anywhere; }
+.qualification-checkpoints { display: grid; gap: var(--space-3); }
+.qualification-checkpoints fieldset { display: grid; gap: var(--space-2); padding: var(--space-3); border: 1px solid var(--color-border); border-radius: var(--radius-sm); background: var(--color-surface-muted); }
+.qualification-checkpoints legend { margin-bottom: 0; }
+.qualification-outcomes { display: flex; flex-wrap: wrap; gap: var(--space-3); }
+.qualification-outcomes label { display: inline-flex; align-items: center; gap: var(--space-2); font-weight: 600; }
+
 @media (max-width: 620px) {
   .device-qualification-facts { grid-template-columns: 1fr; }
   .device-qualification-heading { align-items: stretch; flex-direction: column; }
   .device-qualification-heading .status { align-self: flex-start; }
+  .qualification-selectors, .qualification-build, .qualification-session-facts, .qualification-facts { grid-template-columns: 1fr; }
+  .qualification-overlay-heading, .qualification-section-heading { align-items: stretch; flex-direction: column; }
+  .qualification-overlay-heading .status, .qualification-section-heading .status { align-self: flex-start; }
 }
 
 .recipe-discovery { display: grid; gap: var(--space-2); margin: var(--space-5) 0; }
