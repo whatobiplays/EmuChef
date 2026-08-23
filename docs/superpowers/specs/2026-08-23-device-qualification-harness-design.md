@@ -275,7 +275,8 @@ Version 2 must:
 
 - require target-fact provenance;
 - use domain-oriented target/run ID prefixes;
-- bind the actual production execution-report artifact;
+- bind the actual production execution-report artifact for every valid run and for any invalid run where that artifact was successfully captured;
+- permit an invalid/not-observed audit bundle to omit the execution-report artifact when missing or failed report capture is itself part of why the run is invalid;
 - preserve strict exact-field validation;
 - fail closed on unsupported schema versions or illegal mixed-version records; and
 - maintain deterministic canonicalization/digest behavior.
@@ -423,7 +424,7 @@ Each recorded qualification run is an immutable directory under:
 
 `docs/testing/device-qualification/evidence/`
 
-with a structure equivalent to:
+A valid run, and any invalid run for which report capture succeeded, has the structure:
 
 ```text
 docs/testing/device-qualification/evidence/
@@ -432,11 +433,13 @@ docs/testing/device-qualification/evidence/
     execution-report.json
 ```
 
-`execution-report.json` must originate from the existing production report/export boundary. Qualification code may perform narrowly defined sanitization required for safe repository storage, but sanitization cannot manufacture success or alter the semantic execution outcome.
+An invalid/not-observed audit run may contain only `evidence.json` when the production execution report was never available or its capture/integrity check failed. That exception cannot be used by a valid run.
 
-`evidence.json` contains a typed artifact reference including the execution-report SHA-256. The record digest binds the artifact metadata/digest. Replacing or altering the report invalidates the bundle.
+Whenever `execution-report.json` is present, it must originate from the existing production report/export boundary. Qualification code may perform narrowly defined sanitization required for safe repository storage, but sanitization cannot manufacture success or alter the semantic execution outcome.
 
-The canonical tool validates both files together.
+`evidence.json` contains a typed artifacts array. A present execution-report entry carries the report SHA-256 and is bound by the record digest. Replacing, altering, or omitting a referenced report invalidates the bundle. Every valid run must contain exactly one execution-report artifact and the required `execution-report` automated observation; an invalid run may omit both when the report could not be captured.
+
+The canonical tool validates the bundle as a unit.
 
 The deterministic run ID uses the domain form:
 
@@ -591,7 +594,8 @@ Implementation must prove the harness and repository contracts without running o
 - deterministic fingerprint/run/record digests;
 - domain-oriented run-ID validation;
 - execution-report artifact reference validation;
-- missing execution-report rejection;
+- missing execution-report rejection for valid runs and for records that reference the artifact;
+- invalid/not-observed audit-bundle acceptance when report capture itself failed and no artifact is referenced;
 - changed/replaced execution-report rejection;
 - create-new immutable target/evidence behavior;
 - duplicate/collision handling;
@@ -671,7 +675,7 @@ The implementation is acceptable when all of the following are true:
 9. device identity drift permanently invalidates the session;
 10. human checkpoints are captured inside qualification mode strictly from catalog declarations;
 11. candidates persist under `.emuchef_runtime/qualification-candidates/` and can survive restart without becoming authoritative;
-12. the exact sanitized production execution report is preserved as a digest-bound artifact in the evidence bundle;
+12. every valid run preserves the exact sanitized production execution report as a digest-bound artifact, while an invalid/not-observed audit run may omit it only when report capture itself failed or never became available;
 13. explicit promotion creates immutable create-new evidence bundles with deterministic domain-oriented run IDs;
 14. valid product failures and invalid infrastructure/harness runs remain distinct;
 15. invalid runs may be explicitly recorded for audit but cannot affect current qualification state;
