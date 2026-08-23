@@ -6,12 +6,14 @@
 //! authority for candidate semantics, canonical digests, and repository state.
 
 use std::fs::{self, File, OpenOptions};
-use std::io::{Read, Write};
+use std::io::{self, Read, Write};
 use std::path::{Component, Path, PathBuf};
 use std::process::Command;
 
 #[cfg(any(target_os = "macos", target_os = "linux"))]
 use std::os::unix::fs::OpenOptionsExt;
+#[cfg(target_os = "macos")]
+use std::{ffi::CString, os::unix::ffi::OsStrExt};
 
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -903,17 +905,71 @@ fn publish_staged_candidate(
     staging: &Path,
     final_directory: &Path,
 ) -> Result<(), PublishCandidateError> {
+    publish_staged_candidate_with_hook(staging, final_directory, || {})
+}
+
+fn publish_staged_candidate_with_hook<F>(
+    staging: &Path,
+    final_directory: &Path,
+    after_absence_check: F,
+) -> Result<(), PublishCandidateError>
+where
+    F: FnOnce(),
+{
     if fs::symlink_metadata(final_directory).is_ok() {
+        cleanup_owned_staging(staging);
         return Err(PublishCandidateError::Collision);
     }
-    match fs::rename(staging, final_directory) {
+
+    after_absence_check();
+    match rename_without_replacing(staging, final_directory) {
         Ok(()) => Ok(()),
-        Err(_) if fs::symlink_metadata(final_directory).is_ok() => {
+        Err(error) if error.kind() == io::ErrorKind::AlreadyExists => {
+            cleanup_owned_staging(staging);
             Err(PublishCandidateError::Collision)
         }
-        Err(_) => Err(PublishCandidateError::Io(
-            "qualification candidate directory could not be committed".to_string(),
-        )),
+        Err(_) => {
+            cleanup_owned_staging(staging);
+            Err(PublishCandidateError::Io(
+                "qualification candidate directory could not be committed".to_string(),
+            ))
+        }
+    }
+}
+
+/// Renames a complete staged candidate directory without replacing a destination.
+///
+/// The macOS primitive evaluates the destination-exists condition as part of the
+/// filesystem operation, so a competing publisher cannot win the check/rename
+/// interval and have its candidate replaced.
+fn rename_without_replacing(staging: &Path, final_directory: &Path) -> io::Result<()> {
+    #[cfg(target_os = "macos")]
+    {
+        let staging = CString::new(staging.as_os_str().as_bytes())
+            .map_err(|_| io::Error::new(io::ErrorKind::InvalidInput, "invalid staging path"))?;
+        let final_directory = CString::new(final_directory.as_os_str().as_bytes())
+            .map_err(|_| io::Error::new(io::ErrorKind::InvalidInput, "invalid candidate path"))?;
+        let result = unsafe {
+            libc::renamex_np(
+                staging.as_ptr(),
+                final_directory.as_ptr(),
+                libc::RENAME_EXCL,
+            )
+        };
+        if result == 0 {
+            Ok(())
+        } else {
+            Err(io::Error::last_os_error())
+        }
+    }
+
+    #[cfg(not(target_os = "macos"))]
+    {
+        let _ = (staging, final_directory);
+        Err(io::Error::new(
+            io::ErrorKind::Unsupported,
+            "atomic no-replace candidate publication is unsupported on this platform",
+        ))
     }
 }
 
@@ -1532,8 +1588,36 @@ mod tests {
                 .expect("existing candidate should remain"),
             b"existing"
         );
-        assert!(staging.exists());
-        std::fs::remove_dir_all(staging).expect("test staging directory should be removed");
+        assert!(!staging.exists());
+    }
+
+    #[test]
+    fn competing_destination_after_absence_check_is_not_replaced_and_staging_is_cleaned() {
+        let temp = TempDir::new().expect("temporary repository should be created");
+        let root = temp
+            .path()
+            .join(".emuchef_runtime/qualification-candidates");
+        std::fs::create_dir_all(&root).expect("candidate root should be created");
+        let handle = "qualification-candidate-fedcba9876543210fedcba9876543210";
+        let destination = root.join(handle);
+        let staging = root.join(".qualification-candidate-tmp-race");
+        std::fs::create_dir(&staging).expect("staging directory should be created");
+        std::fs::write(staging.join(CANDIDATE_FILE), b"replacement")
+            .expect("staging candidate should be written");
+
+        let result = publish_staged_candidate_with_hook(&staging, &destination, || {
+            std::fs::create_dir(&destination).expect("competing destination should be created");
+            std::fs::write(destination.join(CANDIDATE_FILE), b"competitor")
+                .expect("competing candidate should be written");
+        });
+
+        assert!(matches!(result, Err(PublishCandidateError::Collision)));
+        assert_eq!(
+            std::fs::read(destination.join(CANDIDATE_FILE))
+                .expect("competing candidate should remain readable"),
+            b"competitor"
+        );
+        assert!(!staging.exists());
     }
 
     #[test]
