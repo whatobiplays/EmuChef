@@ -1385,7 +1385,7 @@ mod tests {
             assert_eq!(subcase_candidates(&status, "transport").len(), 2);
             assert_eq!(subcase_candidates(&status, "root").len(), 2);
             assert_eq!(subcase_candidates(&status, "storage").len(), 2);
-            assert_eq!(subcase_candidates(&status, "host_sleep").len(), 0);
+            assert_eq!(subcase_candidates(&status, "host_sleep").len(), 2);
             let serialized = status.to_string();
             for forbidden in [
                 "physical-run-sha256",
@@ -1393,6 +1393,8 @@ mod tests {
                 "device_transport_lost",
                 "usb_disconnect_active",
                 "be0ba890",
+                "18917650",
+                "735aba0b",
                 "sha256:",
             ] {
                 assert!(
@@ -1401,6 +1403,13 @@ mod tests {
                 );
             }
             for candidate in subcase_candidates(&status, "transport") {
+                assert!(candidate["handle"]
+                    .as_str()
+                    .unwrap()
+                    .starts_with("phase6d6-binding-"));
+                assert!(matches!(candidate["repetition"].as_u64(), Some(1 | 2)));
+            }
+            for candidate in subcase_candidates(&status, "host_sleep") {
                 assert!(candidate["handle"]
                     .as_str()
                     .unwrap()
