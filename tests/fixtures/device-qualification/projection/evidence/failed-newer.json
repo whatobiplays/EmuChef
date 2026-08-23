@@ -1,24 +1,51 @@
 {
-  "schemaVersion": 1,
+  "schemaVersion": 2,
   "runId": "phase-6f-run-sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
-  "recordDigest": "sha256:2b7c72bc366fa1711382b5c54fa932d093722520c0433f99e9fed4db3cc5f841",
+  "recordDigest": "sha256:a9afced7fd8e6f7010d9447d50478007de520def35f3ff696309de9af317bbf7",
   "capturedAt": "2026-08-21T00:00:00Z",
   "workflowId": "rom-library-sync",
   "workflowVersion": 1,
   "deviceTarget": {
-    "id": "synthetic-pocket-s2",
-    "profileId": "ayaneo.pocket_s2",
-    "manufacturer": "AYANEO",
-    "model": "Synthetic Pocket S2",
-    "androidVersion": "15",
-    "androidApi": 35,
-    "abiSocClass": "arm64-snapdragon",
-    "rootState": "non_root",
-    "connectionType": "usb3",
-    "firmwareBuild": "synthetic/build"
+    "id": "device-target-sha256:8b9f6cf2dc8831a9188c2ad1d85b8a83ea8e8baf0d674943b7d5e9925f047c62",
+    "profileId": {
+      "value": "ayaneo.pocket_s2",
+      "source": "production_observation"
+    },
+    "manufacturer": {
+      "value": "AYANEO",
+      "source": "production_observation"
+    },
+    "model": {
+      "value": "Synthetic Pocket S2",
+      "source": "production_observation"
+    },
+    "androidVersion": {
+      "value": "15",
+      "source": "production_observation"
+    },
+    "androidApi": {
+      "value": 35,
+      "source": "production_observation"
+    },
+    "abiSocClass": {
+      "value": "arm64-snapdragon",
+      "source": "production_observation"
+    },
+    "rootState": {
+      "value": "non_root",
+      "source": "explicit_root_check"
+    },
+    "connectionType": {
+      "value": "usb3",
+      "source": "operator_attestation"
+    },
+    "firmwareBuild": {
+      "value": "synthetic/build",
+      "source": "production_observation"
+    }
   },
   "fingerprint": {
-    "schemaVersion": 1,
+    "schemaVersion": 2,
     "emuchefBuild": "2026-08-21-foundation",
     "workflowVersion": 1,
     "authoredContent": [
@@ -35,7 +62,7 @@
     "rootState": "non_root",
     "connectionType": "usb3"
   },
-  "fingerprintDigest": "sha256:16cc04e4e27d532b08ebb95ff81d1a7d0401e4a19f78b429e2d2292c7d3e0e7b",
+  "fingerprintDigest": "sha256:438b680f91e00d217b9815cb263f671789d94ba7b1637fede08a6b46096b08a8",
   "runValidity": "valid",
   "qualificationOutcome": "failed",
   "automatedObservations": [

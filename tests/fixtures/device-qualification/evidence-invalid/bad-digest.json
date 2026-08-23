@@ -1,24 +1,51 @@
 {
-  "schemaVersion": 1,
+  "schemaVersion": 2,
   "runId": "phase-6f-run-sha256:3333333333333333333333333333333333333333333333333333333333333333",
-  "recordDigest": "sha256:59204c6c902aa4f48cb632db2145be1b2a9fc4550969e5f6b96dbe909f0469d6",
+  "recordDigest": "sha256:67349d7fea2530bbc098265da9950b4a8c00de8346b6f723fd495629c4917d95",
   "capturedAt": "2026-08-21T00:02:00Z",
   "workflowId": "retroarch-plus-bios",
   "workflowVersion": 1,
   "deviceTarget": {
-    "id": "synthetic-pocket-s2",
-    "profileId": "ayaneo.pocket_s2",
-    "manufacturer": "AYANEO",
-    "model": "Synthetic Pocket S2",
-    "androidVersion": "15",
-    "androidApi": 35,
-    "abiSocClass": "arm64-snapdragon",
-    "rootState": "non_root",
-    "connectionType": "usb3",
-    "firmwareBuild": "synthetic/build"
+    "id": "device-target-sha256:8b9f6cf2dc8831a9188c2ad1d85b8a83ea8e8baf0d674943b7d5e9925f047c62",
+    "profileId": {
+      "value": "ayaneo.pocket_s2",
+      "source": "production_observation"
+    },
+    "manufacturer": {
+      "value": "AYANEO",
+      "source": "production_observation"
+    },
+    "model": {
+      "value": "Synthetic Pocket S2",
+      "source": "production_observation"
+    },
+    "androidVersion": {
+      "value": "15",
+      "source": "production_observation"
+    },
+    "androidApi": {
+      "value": 35,
+      "source": "production_observation"
+    },
+    "abiSocClass": {
+      "value": "arm64-snapdragon",
+      "source": "production_observation"
+    },
+    "rootState": {
+      "value": "non_root",
+      "source": "explicit_root_check"
+    },
+    "connectionType": {
+      "value": "usb3",
+      "source": "operator_attestation"
+    },
+    "firmwareBuild": {
+      "value": "synthetic/build",
+      "source": "production_observation"
+    }
   },
   "fingerprint": {
-    "schemaVersion": 1,
+    "schemaVersion": 2,
     "emuchefBuild": "2026-08-21-foundation",
     "workflowVersion": 1,
     "authoredContent": [

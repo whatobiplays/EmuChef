@@ -2,7 +2,7 @@
 
 Generated from `docs/testing/device-qualification/` definitions and immutable physical evidence.
 
-## synthetic-pocket-s2
+## device-target-sha256:8b9f6cf2dc8831a9188c2ad1d85b8a83ea8e8baf0d674943b7d5e9925f047c62
 
 - Configuration: AYANEO Synthetic Pocket S2, Android 15 (API 35), arm64-snapdragon, non_root, usb3
 - Authored profile: ayaneo.pocket_s2
@@ -15,7 +15,7 @@ Generated from `docs/testing/device-qualification/` definitions and immutable ph
 | xaniteog-install | qualified | phase-6f-run-sha256:eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee (2026-08-18T00:00:00Z) | — |
 | rom-library-sync | failed | phase-6f-run-sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb (2026-08-21T00:00:00Z) | execution-report failed |
 
-## synthetic-air-mini
+## device-target-sha256:2565a33f08b4d19600d5a7cf3039fa1c250bb93384e2087fae3fd2d56512faec
 
 - Configuration: AYANEO Synthetic Pocket Air Mini, Android 14 (API 34), arm64-mtk, non_root, usb2
 - Authored profile: ayaneo.pocket_air_mini

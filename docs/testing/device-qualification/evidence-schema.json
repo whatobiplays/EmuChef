@@ -1,8 +1,8 @@
 {
+  "$id": "repo://emuchef/device-qualification/evidence-schema",
   "$schema": "https://json-schema.org/draft/2020-12/schema",
-  "$id": "repo://emuchef/phase-6f/evidence-schema",
-  "title": "Phase 6F Physical Qualification Evidence Record",
-  "description": "Immutable machine-readable record of one physical qualification run for a device target and canonical workflow.",
+  "title": "Device Qualification Evidence Record",
+  "description": "Immutable machine-readable record of one physical qualification run for a development-only device qualification workflow.",
   "type": "object",
   "additionalProperties": false,
   "required": [
@@ -24,7 +24,7 @@
   ],
   "properties": {
     "schemaVersion": {
-      "const": 1
+      "const": 2
     },
     "runId": {
       "type": "string",
@@ -105,148 +105,62 @@
     }
   },
   "$defs": {
-    "deviceTarget": {
+    "factSource": {
+      "enum": [
+        "production_observation",
+        "explicit_root_check",
+        "operator_attestation"
+      ]
+    },
+    "stringFact": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "value",
+        "source"
+      ],
+      "properties": {
+        "value": {
+          "type": "string",
+          "minLength": 1
+        },
+        "source": {
+          "$ref": "#/$defs/factSource"
+        }
+      }
+    },
+    "integerFact": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "value",
+        "source"
+      ],
+      "properties": {
+        "value": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "source": {
+          "$ref": "#/$defs/factSource"
+        }
+      }
+    },
+    "authoredContentEntry": {
       "type": "object",
       "additionalProperties": false,
       "required": [
         "id",
-        "profileId",
-        "manufacturer",
-        "model",
-        "androidVersion",
-        "androidApi",
-        "abiSocClass",
-        "rootState",
-        "connectionType",
-        "firmwareBuild"
+        "sha256"
       ],
       "properties": {
         "id": {
           "type": "string",
           "minLength": 1
         },
-        "profileId": {
+        "sha256": {
           "type": "string",
-          "minLength": 1
-        },
-        "manufacturer": {
-          "type": "string",
-          "minLength": 1
-        },
-        "model": {
-          "type": "string",
-          "minLength": 1
-        },
-        "androidVersion": {
-          "type": "string",
-          "minLength": 1
-        },
-        "androidApi": {
-          "type": "integer",
-          "minimum": 1
-        },
-        "abiSocClass": {
-          "type": "string",
-          "minLength": 1
-        },
-        "rootState": {
-          "enum": [
-            "non_root",
-            "rooted"
-          ]
-        },
-        "connectionType": {
-          "enum": [
-            "usb2",
-            "usb3"
-          ]
-        },
-        "firmwareBuild": {
-          "type": "string",
-          "minLength": 1
-        }
-      }
-    },
-    "fingerprint": {
-      "type": "object",
-      "additionalProperties": false,
-      "required": [
-        "schemaVersion",
-        "emuchefBuild",
-        "workflowVersion",
-        "authoredContent",
-        "runtimeContract",
-        "deviceProfile",
-        "androidApi",
-        "firmwareBuild",
-        "abiSocClass",
-        "rootState",
-        "connectionType"
-      ],
-      "properties": {
-        "schemaVersion": {
-          "const": 1
-        },
-        "emuchefBuild": {
-          "type": "string",
-          "minLength": 1
-        },
-        "workflowVersion": {
-          "type": "integer",
-          "minimum": 1
-        },
-        "authoredContent": {
-          "type": "array",
-          "items": {
-            "type": "object",
-            "additionalProperties": false,
-            "required": [
-              "id",
-              "sha256"
-            ],
-            "properties": {
-              "id": {
-                "type": "string",
-                "minLength": 1
-              },
-              "sha256": {
-                "type": "string",
-                "pattern": "^[0-9a-f]{64}$"
-              }
-            }
-          }
-        },
-        "runtimeContract": {
-          "type": "string",
-          "minLength": 1
-        },
-        "deviceProfile": {
-          "type": "string",
-          "minLength": 1
-        },
-        "androidApi": {
-          "type": "integer",
-          "minimum": 1
-        },
-        "firmwareBuild": {
-          "type": "string",
-          "minLength": 1
-        },
-        "abiSocClass": {
-          "type": "string",
-          "minLength": 1
-        },
-        "rootState": {
-          "enum": [
-            "non_root",
-            "rooted"
-          ]
-        },
-        "connectionType": {
-          "enum": [
-            "usb2",
-            "usb3"
-          ]
+          "pattern": "^[0-9a-f]{64}$"
         }
       }
     },
@@ -298,6 +212,123 @@
         "observedAt": {
           "type": "string",
           "format": "date-time"
+        }
+      }
+    },
+    "deviceTarget": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "id",
+        "profileId",
+        "manufacturer",
+        "model",
+        "androidVersion",
+        "androidApi",
+        "abiSocClass",
+        "rootState",
+        "connectionType",
+        "firmwareBuild"
+      ],
+      "properties": {
+        "id": {
+          "type": "string",
+          "pattern": "^device-target-sha256:[0-9a-f]{64}$"
+        },
+        "profileId": {
+          "$ref": "#/$defs/stringFact"
+        },
+        "manufacturer": {
+          "$ref": "#/$defs/stringFact"
+        },
+        "model": {
+          "$ref": "#/$defs/stringFact"
+        },
+        "androidVersion": {
+          "$ref": "#/$defs/stringFact"
+        },
+        "androidApi": {
+          "$ref": "#/$defs/integerFact"
+        },
+        "abiSocClass": {
+          "$ref": "#/$defs/stringFact"
+        },
+        "rootState": {
+          "$ref": "#/$defs/stringFact"
+        },
+        "connectionType": {
+          "$ref": "#/$defs/stringFact"
+        },
+        "firmwareBuild": {
+          "$ref": "#/$defs/stringFact"
+        }
+      }
+    },
+    "fingerprint": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "schemaVersion",
+        "emuchefBuild",
+        "workflowVersion",
+        "authoredContent",
+        "runtimeContract",
+        "deviceProfile",
+        "androidApi",
+        "firmwareBuild",
+        "abiSocClass",
+        "rootState",
+        "connectionType"
+      ],
+      "properties": {
+        "schemaVersion": {
+          "const": 2
+        },
+        "emuchefBuild": {
+          "type": "string",
+          "minLength": 1
+        },
+        "workflowVersion": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "authoredContent": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/authoredContentEntry"
+          }
+        },
+        "runtimeContract": {
+          "type": "string",
+          "minLength": 1
+        },
+        "deviceProfile": {
+          "type": "string",
+          "minLength": 1
+        },
+        "androidApi": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "firmwareBuild": {
+          "type": "string",
+          "minLength": 1
+        },
+        "abiSocClass": {
+          "type": "string",
+          "minLength": 1
+        },
+        "rootState": {
+          "enum": [
+            "non_root",
+            "rooted"
+          ]
+        },
+        "connectionType": {
+          "enum": [
+            "usb2",
+            "usb3"
+          ]
         }
       }
     }

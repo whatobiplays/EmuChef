@@ -50,6 +50,34 @@ const TARGET_FIELDS = [
   "capabilities",
   "deferredWorkflows",
 ];
+const FACT_FIELDS = ["value", "source"];
+const FACT_SOURCES = new Set([
+  "production_observation",
+  "explicit_root_check",
+  "operator_attestation",
+]);
+const TARGET_FACT_FIELDS = [
+  "profileId",
+  "manufacturer",
+  "model",
+  "androidVersion",
+  "androidApi",
+  "abiSocClass",
+  "rootState",
+  "connectionType",
+  "firmwareBuild",
+];
+const FACT_SOURCE_BY_FIELD = new Map([
+  ["profileId", new Set(["production_observation"])],
+  ["manufacturer", new Set(["production_observation"])],
+  ["model", new Set(["production_observation"])],
+  ["androidVersion", new Set(["production_observation"])],
+  ["androidApi", new Set(["production_observation"])],
+  ["abiSocClass", new Set(["production_observation"])],
+  ["rootState", new Set(["explicit_root_check"])],
+  ["connectionType", new Set(["operator_attestation", "production_observation"])],
+  ["firmwareBuild", new Set(["production_observation"])],
+]);
 const COMPATIBILITY_DIMENSIONS = new Set([
   "emuchef_build",
   "workflow_version",
@@ -108,15 +136,7 @@ export const TARGET_WIDE_FAILURES = [
 const AUTHORED_CONTENT_ENTRY_FIELDS = ["id", "sha256"];
 const EVIDENCE_DEVICE_TARGET_FIELDS = [
   "id",
-  "profileId",
-  "manufacturer",
-  "model",
-  "androidVersion",
-  "androidApi",
-  "abiSocClass",
-  "rootState",
-  "connectionType",
-  "firmwareBuild",
+  ...TARGET_FACT_FIELDS,
 ];
 const AUTOMATED_OBSERVATION_RECORD_FIELDS = ["id", "outcome", "observedAt"];
 const HUMAN_CHECKPOINT_RECORD_FIELDS = ["checkpointId", "outcome", "observedAt"];
@@ -134,6 +154,7 @@ const DIMENSION_FIELDS = {
 const RUN_ID_PATTERN = /^phase-6f-run-sha256:[0-9a-f]{64}$/;
 const DIGEST_PATTERN = /^sha256:[0-9a-f]{64}$/;
 const SHA256_PATTERN = /^[0-9a-f]{64}$/;
+const TARGET_ID_PATTERN = /^device-target-sha256:[0-9a-f]{64}$/;
 const RFC3339_PATTERN = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d+)?(?:Z|[+-]\d{2}:\d{2})$/;
 
 function fail(message) {
@@ -176,6 +197,20 @@ function assertPositiveInteger(value, label) {
   }
 }
 
+function assertFactWrapper(target, field, validator) {
+  const fact = target[field];
+  assertExactKeys(fact, FACT_FIELDS, `device target ${field}`);
+  if (!FACT_SOURCES.has(fact.source)) {
+    fail(`device target ${field} source ${fact.source} is not supported`);
+  }
+  const legalSources = FACT_SOURCE_BY_FIELD.get(field);
+  if (!legalSources?.has(fact.source)) {
+    fail(`device target ${field} source must be one of ${[...legalSources].join(", ")}`);
+  }
+  validator(fact.value, `device target ${field} value`);
+  return fact;
+}
+
 export function canonicalize(value) {
   if (Array.isArray(value)) return value.map(canonicalize);
   if (value !== null && typeof value === "object") {
@@ -190,6 +225,20 @@ export function canonicalDigest(value) {
   return `sha256:${createHash("sha256")
     .update(JSON.stringify(canonicalize(value)))
     .digest("hex")}`;
+}
+
+export function targetFactValue(target, field) {
+  return target[field].value;
+}
+
+export function deviceTargetIdentityPayload(target) {
+  return Object.fromEntries(
+    TARGET_FACT_FIELDS.map((field) => [field, targetFactValue(target, field)]),
+  );
+}
+
+export function deviceTargetId(target) {
+  return `device-target-sha256:${canonicalDigest(deviceTargetIdentityPayload(target)).slice("sha256:".length)}`;
 }
 
 function equalJson(left, right) {
@@ -265,28 +314,38 @@ export function validateWorkflowCatalog(value) {
 
 export function validateDeviceTargets(value, { authoredProfilesDir }) {
   assertExactKeys(value, ["schemaVersion", "targets"], "device targets");
-  if (value.schemaVersion !== 1) fail("device targets schemaVersion must be 1");
+  if (value.schemaVersion !== 2) fail("device targets schemaVersion must be 2");
   if (!Array.isArray(value.targets)) fail("device targets must be an array");
   const seenIds = new Set();
   for (const target of value.targets) {
     assertExactKeys(target, TARGET_FIELDS, "device target");
     assertString(target.id, "device target id");
+    if (!TARGET_ID_PATTERN.test(target.id)) {
+      fail("device target id format is invalid");
+    }
     if (seenIds.has(target.id)) fail(`duplicate device target id ${target.id}`);
     seenIds.add(target.id);
-    assertString(target.profileId, "device target profileId");
+    assertFactWrapper(target, "profileId", assertString);
     for (const field of ["manufacturer", "model", "androidVersion", "abiSocClass", "firmwareBuild"]) {
-      assertString(target[field], `device target ${field}`);
+      assertFactWrapper(target, field, assertString);
     }
-    assertPositiveInteger(target.androidApi, "device target androidApi");
-    if (!ROOT_STATES.has(target.rootState)) fail(`device target rootState ${target.rootState} is not supported`);
-    if (!CONNECTION_TYPES.has(target.connectionType)) {
-      fail(`device target connectionType ${target.connectionType} is not supported`);
+    assertFactWrapper(target, "androidApi", assertPositiveInteger);
+    if (!ROOT_STATES.has(targetFactValue(target, "rootState"))) {
+      fail(`device target rootState value ${targetFactValue(target, "rootState")} is not supported`);
+    }
+    assertFactWrapper(target, "rootState", assertString);
+    if (!CONNECTION_TYPES.has(targetFactValue(target, "connectionType"))) {
+      fail(`device target connectionType value ${targetFactValue(target, "connectionType")} is not supported`);
+    }
+    assertFactWrapper(target, "connectionType", assertString);
+    if (target.id !== deviceTargetId(target)) {
+      fail("device target id does not match canonical target identity");
     }
     assertStringArray(target.capabilities, "device target capabilities");
     assertStringArray(target.deferredWorkflows, "device target deferredWorkflows");
-    const profilePath = path.join(authoredProfilesDir, `${target.profileId}.yaml`);
+    const profilePath = path.join(authoredProfilesDir, `${targetFactValue(target, "profileId")}.yaml`);
     if (!existsSync(profilePath)) {
-      fail(`unknown authored device profile ${target.profileId}`);
+      fail(`unknown authored device profile ${targetFactValue(target, "profileId")}`);
     }
   }
   return value;
@@ -315,7 +374,7 @@ export function evidenceRecordDigest(record) {
 
 function validateFingerprint(fingerprint) {
   assertExactKeys(fingerprint, FINGERPRINT_FIELDS, "fingerprint");
-  if (fingerprint.schemaVersion !== 1) fail("fingerprint schemaVersion must be 1");
+  if (fingerprint.schemaVersion !== 2) fail("fingerprint schemaVersion must be 2");
   for (const field of ["emuchefBuild", "runtimeContract", "deviceProfile", "firmwareBuild", "abiSocClass"]) {
     assertString(fingerprint[field], `fingerprint ${field}`);
   }
@@ -439,7 +498,7 @@ function validateHumanCheckpointRecords(record, workflow) {
 
 export function validateEvidenceRecord(record, context) {
   assertExactKeys(record, EVIDENCE_RECORD_FIELDS, "evidence record");
-  if (record.schemaVersion !== 1) fail("evidence record schemaVersion must be 1");
+  if (record.schemaVersion !== 2) fail("evidence record schemaVersion must be 2");
   if (!RUN_ID_PATTERN.test(record.runId)) fail("evidence record runId format is invalid");
   if (!DIGEST_PATTERN.test(record.recordDigest)) fail("evidence record recordDigest format is invalid");
   assertRfc3339(record.capturedAt, "capturedAt");
@@ -455,20 +514,33 @@ export function validateEvidenceRecord(record, context) {
   const target = context.targets.find((candidate) => candidate.id === record.deviceTarget?.id);
   if (!target) fail(`unknown device target id ${record.deviceTarget?.id}`);
   assertExactKeys(record.deviceTarget, EVIDENCE_DEVICE_TARGET_FIELDS, "evidence device target");
+  if (!TARGET_ID_PATTERN.test(record.deviceTarget.id)) {
+    fail("evidence device target id format is invalid");
+  }
+  for (const field of TARGET_FACT_FIELDS) {
+    const validator = field === "androidApi" ? assertPositiveInteger : assertString;
+    assertFactWrapper(record.deviceTarget, field, validator);
+  }
+  if (!ROOT_STATES.has(targetFactValue(record.deviceTarget, "rootState"))) {
+    fail(`evidence device target rootState value ${targetFactValue(record.deviceTarget, "rootState")} is not supported`);
+  }
+  if (!CONNECTION_TYPES.has(targetFactValue(record.deviceTarget, "connectionType"))) {
+    fail(`evidence device target connectionType value ${targetFactValue(record.deviceTarget, "connectionType")} is not supported`);
+  }
   assertEvidenceDeviceTarget(record.deviceTarget, target);
   validateFingerprint(record.fingerprint);
   if (record.fingerprint.workflowVersion !== workflow.version) {
     fail("fingerprint workflowVersion does not match the workflow version");
   }
-  if (record.fingerprint.deviceProfile !== target.profileId) {
+  if (record.fingerprint.deviceProfile !== targetFactValue(target, "profileId")) {
     fail("fingerprint deviceProfile does not match the registered target");
   }
   if (
-    record.fingerprint.androidApi !== target.androidApi
-    || record.fingerprint.firmwareBuild !== target.firmwareBuild
-    || record.fingerprint.abiSocClass !== target.abiSocClass
-    || record.fingerprint.rootState !== target.rootState
-    || record.fingerprint.connectionType !== target.connectionType
+    record.fingerprint.androidApi !== targetFactValue(target, "androidApi")
+    || record.fingerprint.firmwareBuild !== targetFactValue(target, "firmwareBuild")
+    || record.fingerprint.abiSocClass !== targetFactValue(target, "abiSocClass")
+    || record.fingerprint.rootState !== targetFactValue(target, "rootState")
+    || record.fingerprint.connectionType !== targetFactValue(target, "connectionType")
   ) {
     fail("fingerprint device facts do not match the registered target");
   }
@@ -610,17 +682,17 @@ export function buildCurrentFingerprint({
     return { id: recipeId, sha256 };
   });
   return {
-    schemaVersion: 1,
+    schemaVersion: 2,
     emuchefBuild: currentBuild,
     workflowVersion: workflow.version,
     authoredContent,
     runtimeContract,
-    deviceProfile: target.profileId,
-    androidApi: target.androidApi,
-    firmwareBuild: target.firmwareBuild,
-    abiSocClass: target.abiSocClass,
-    rootState: target.rootState,
-    connectionType: target.connectionType,
+    deviceProfile: targetFactValue(target, "profileId"),
+    androidApi: targetFactValue(target, "androidApi"),
+    firmwareBuild: targetFactValue(target, "firmwareBuild"),
+    abiSocClass: targetFactValue(target, "abiSocClass"),
+    rootState: targetFactValue(target, "rootState"),
+    connectionType: targetFactValue(target, "connectionType"),
   };
 }
 
@@ -800,8 +872,8 @@ function renderTargetSection(entry) {
   const lines = [
     `## ${target.id}`,
     "",
-    `- Configuration: ${target.manufacturer} ${target.model}, Android ${target.androidVersion} (API ${target.androidApi}), ${target.abiSocClass}, ${target.rootState}, ${target.connectionType}`,
-    `- Authored profile: ${target.profileId}`,
+    `- Configuration: ${targetFactValue(target, "manufacturer")} ${targetFactValue(target, "model")}, Android ${targetFactValue(target, "androidVersion")} (API ${targetFactValue(target, "androidApi")}), ${targetFactValue(target, "abiSocClass")}, ${targetFactValue(target, "rootState")}, ${targetFactValue(target, "connectionType")}`,
+    `- Authored profile: ${targetFactValue(target, "profileId")}`,
     `- Support tier: ${tier}`,
     "",
     "| Workflow | State | Current evidence | Reason / limitation |",

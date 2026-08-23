@@ -16,6 +16,7 @@ import {
   canonicalDigest,
   canonicalize,
   classifyCompatibility,
+  deviceTargetId,
   deriveApplicability,
   deriveDeviceSupportTier,
   deriveWorkflowState,
@@ -36,6 +37,8 @@ import {
 const REPO_ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const FIXTURES = path.join(REPO_ROOT, "tests/fixtures/device-qualification");
 const AUTHORED_PROFILES = path.join(REPO_ROOT, "authored/device_profiles");
+const SYNTHETIC_POCKET_S2_PROFILE = "ayaneo.pocket_s2";
+const SYNTHETIC_AIR_MINI_PROFILE = "ayaneo.pocket_air_mini";
 
 function readJson(relative) {
   return JSON.parse(readFileSync(path.join(FIXTURES, relative), "utf8"));
@@ -115,6 +118,10 @@ function currentFingerprint(workflow, target) {
   });
 }
 
+function targetByProfile(targets, profileId) {
+  return targets.find((target) => target.profileId.value === profileId);
+}
+
 function projectionState(context, targetId, workflowId) {
   const workflow = context.workflowCatalog.workflows.find((item) => item.id === workflowId);
   const target = context.targets.find((item) => item.id === targetId);
@@ -133,16 +140,65 @@ test("loads a strict version-1 workflow catalog from fixtures", () => {
   assert.equal(catalog.workflows[0].id, "retroarch-plus-bios");
 });
 
-test("loads version-1 device targets and verifies authored profile files", () => {
+test("loads version-2 device targets and verifies authored profile files", () => {
   const targets = loadDeviceTargets(
     path.join(FIXTURES, "definitions-valid/device-targets.json"),
     { authoredProfilesDir: AUTHORED_PROFILES },
   );
-  assert.equal(targets.schemaVersion, 1);
-  assert.deepEqual(targets.targets.map((target) => target.id), [
-    "synthetic-pocket-s2",
-    "synthetic-air-mini",
-  ]);
+  assert.equal(targets.schemaVersion, 2);
+  assert.deepEqual(
+    targets.targets.map((target) => target.id),
+    targets.targets.map((target) => deviceTargetId(target)),
+  );
+});
+
+test("schema-v2 device targets require legal per-fact provenance and deterministic ids", () => {
+  const observed = (value) => ({ value, source: "production_observation" });
+  const rooted = (value) => ({ value, source: "explicit_root_check" });
+  const attested = (value) => ({ value, source: "operator_attestation" });
+  const target = {
+    id: "",
+    profileId: observed("ayaneo.pocket_s2"),
+    manufacturer: observed("AYANEO"),
+    model: observed("Pocket S2"),
+    androidVersion: observed("15"),
+    androidApi: observed(35),
+    abiSocClass: observed("arm64"),
+    rootState: rooted("non_root"),
+    connectionType: attested("usb3"),
+    firmwareBuild: observed("vendor/device/build:15/ABC/123:user/release-keys"),
+    capabilities: ["apk_install", "shared_storage_write"],
+    deferredWorkflows: [],
+  };
+  const id = deviceTargetId(target);
+  assert.match(id, /^device-target-sha256:[0-9a-f]{64}$/);
+  target.id = id;
+  assert.doesNotThrow(() => validateDeviceTargets(
+    { schemaVersion: 2, targets: [target] },
+    { authoredProfilesDir: AUTHORED_PROFILES },
+  ));
+
+  const illegalRoot = structuredClone(target);
+  illegalRoot.rootState.source = "operator_attestation";
+  illegalRoot.id = deviceTargetId(illegalRoot);
+  assert.throws(
+    () => validateDeviceTargets(
+      { schemaVersion: 2, targets: [illegalRoot] },
+      { authoredProfilesDir: AUTHORED_PROFILES },
+    ),
+    /rootState.*explicit_root_check/i,
+  );
+});
+
+test("target identity excludes provenance source and policy fields", () => {
+  const target = structuredClone(readJson("definitions-valid/device-targets.json").targets[0]);
+  const original = deviceTargetId(target);
+  target.capabilities = [];
+  target.deferredWorkflows = ["xaniteog-install"];
+  target.connectionType.source = "production_observation";
+  assert.equal(deviceTargetId(target), original);
+  target.connectionType.value = target.connectionType.value === "usb3" ? "usb2" : "usb3";
+  assert.notEqual(deviceTargetId(target), original);
 });
 
 test("rejects duplicate workflow ids", () => {
@@ -186,16 +242,50 @@ test("rejects unknown, missing, and mistyped device target fields", () => {
   const target = valid.targets[0];
   assert.throws(() => validateDeviceTargets({ ...valid, extra: true }, { authoredProfilesDir: AUTHORED_PROFILES }), /fields must be exactly/i);
   assert.throws(
-    () => validateDeviceTargets({ ...valid, targets: [{ ...target, androidApi: "35" }] }, { authoredProfilesDir: AUTHORED_PROFILES }),
+    () => validateDeviceTargets({
+      ...valid,
+      targets: [{
+        ...target,
+        androidApi: { ...target.androidApi, value: "35" },
+        id: deviceTargetId({
+          ...target,
+          androidApi: { ...target.androidApi, value: "35" },
+        }),
+      }],
+    }, { authoredProfilesDir: AUTHORED_PROFILES }),
     /androidApi/,
   );
   assert.throws(
-    () => validateDeviceTargets({ ...valid, targets: [{ ...target, rootState: "unknown" }] }, { authoredProfilesDir: AUTHORED_PROFILES }),
+    () => validateDeviceTargets({
+      ...valid,
+      targets: [{
+        ...target,
+        rootState: { ...target.rootState, value: "unknown" },
+        id: deviceTargetId({
+          ...target,
+          rootState: { ...target.rootState, value: "unknown" },
+        }),
+      }],
+    }, { authoredProfilesDir: AUTHORED_PROFILES }),
     /rootState/,
   );
   assert.throws(
-    () => validateDeviceTargets({ ...valid, targets: [{ ...target, connectionType: "wifi" }] }, { authoredProfilesDir: AUTHORED_PROFILES }),
+    () => validateDeviceTargets({
+      ...valid,
+      targets: [{
+        ...target,
+        connectionType: { ...target.connectionType, value: "wifi" },
+        id: deviceTargetId({
+          ...target,
+          connectionType: { ...target.connectionType, value: "wifi" },
+        }),
+      }],
+    }, { authoredProfilesDir: AUTHORED_PROFILES }),
     /connectionType/,
+  );
+  assert.throws(
+    () => validateDeviceTargets({ ...valid, schemaVersion: 1 }, { authoredProfilesDir: AUTHORED_PROFILES }),
+    /schemaVersion/i,
   );
 });
 
@@ -233,6 +323,7 @@ test("production device registry starts with no targets", () => {
     path.join(REPO_ROOT, "docs/testing/device-qualification/device-targets.json"),
     { authoredProfilesDir: AUTHORED_PROFILES },
   );
+  assert.equal(targets.schemaVersion, 2);
   assert.deepEqual(targets.targets, []);
 });
 
@@ -423,7 +514,7 @@ test("a valid failed record must contain a failed observation, failed checkpoint
 test("evidence must bind to a registered target, workflow, and workflow version", () => {
   const context = syntheticContext();
   const wrongTarget = recordFor("evidence-valid/passing-retroarch-bios.json");
-  wrongTarget.deviceTarget.id = "synthetic-air-mini";
+  wrongTarget.deviceTarget.id = targetByProfile(context.targets, SYNTHETIC_AIR_MINI_PROFILE).id;
   assert.throws(
     () => validateEvidenceRecord(sealRecord(wrongTarget), context),
     /unknown device target|registered target/,
@@ -531,8 +622,8 @@ test("applicability derives from production intent, capabilities, and deferral",
   const obtainium = context.workflowCatalog.workflows.find((item) => item.id === "obtainium-install");
   const xaniteog = context.workflowCatalog.workflows.find((item) => item.id === "xaniteog-install");
   const checkpointGated = context.workflowCatalog.workflows.find((item) => item.id === "checkpoint-gated");
-  const pocketS2 = context.targets.find((item) => item.id === "synthetic-pocket-s2");
-  const airMini = context.targets.find((item) => item.id === "synthetic-air-mini");
+  const pocketS2 = targetByProfile(context.targets, SYNTHETIC_POCKET_S2_PROFILE);
+  const airMini = targetByProfile(context.targets, SYNTHETIC_AIR_MINI_PROFILE);
 
   assert.deepEqual(deriveApplicability(retroarch, pocketS2), {
     state: "required",
@@ -559,7 +650,7 @@ test("applicability derives from production intent, capabilities, and deferral",
 test("current evidence selection picks the newest compatible valid record", () => {
   const context = projectionContext();
   const workflow = context.workflowCatalog.workflows.find((item) => item.id === "retroarch-plus-bios");
-  const target = context.targets.find((item) => item.id === "synthetic-pocket-s2");
+  const target = targetByProfile(context.targets, SYNTHETIC_POCKET_S2_PROFILE);
   const selected = selectCurrentEvidence({
     workflow,
     target,
@@ -572,7 +663,7 @@ test("current evidence selection picks the newest compatible valid record", () =
 test("newer invalid evidence never replaces older valid evidence", () => {
   const context = projectionContext();
   const workflow = context.workflowCatalog.workflows.find((item) => item.id === "xaniteog-install");
-  const target = context.targets.find((item) => item.id === "synthetic-pocket-s2");
+  const target = targetByProfile(context.targets, SYNTHETIC_POCKET_S2_PROFILE);
   const selected = selectCurrentEvidence({
     workflow,
     target,
@@ -586,7 +677,7 @@ test("newer invalid evidence never replaces older valid evidence", () => {
 test("incompatible historical evidence is never selected as current", () => {
   const context = projectionContext();
   const workflow = context.workflowCatalog.workflows.find((item) => item.id === "obtainium-install");
-  const target = context.targets.find((item) => item.id === "synthetic-pocket-s2");
+  const target = targetByProfile(context.targets, SYNTHETIC_POCKET_S2_PROFILE);
   const selected = selectCurrentEvidence({
     workflow,
     target,
@@ -599,7 +690,7 @@ test("incompatible historical evidence is never selected as current", () => {
 test("current evidence selection is deterministic on capturedAt then runId", () => {
   const context = syntheticContext();
   const workflow = context.workflowCatalog.workflows.find((item) => item.id === "retroarch-plus-bios");
-  const target = context.targets.find((item) => item.id === "synthetic-pocket-s2");
+  const target = targetByProfile(context.targets, SYNTHETIC_POCKET_S2_PROFILE);
   const fingerprint = currentFingerprint(workflow, target);
   const base = recordFor("evidence-valid/passing-retroarch-bios.json");
   const first = structuredClone(base);
@@ -615,12 +706,12 @@ test("current evidence selection is deterministic on capturedAt then runId", () 
 
 test("workflow state derivation covers all six states", () => {
   const context = projectionContext();
-  assert.equal(projectionState(context, "synthetic-pocket-s2", "retroarch-plus-bios").state, "qualified");
-  assert.equal(projectionState(context, "synthetic-pocket-s2", "rom-library-sync").state, "failed");
-  assert.equal(projectionState(context, "synthetic-pocket-s2", "obtainium-install").state, "stale");
-  assert.equal(projectionState(context, "synthetic-air-mini", "xaniteog-install").state, "deferred");
-  assert.equal(projectionState(context, "synthetic-air-mini", "rom-library-sync").state, "missing");
-  assert.equal(projectionState(context, "synthetic-air-mini", "retroarch-plus-bios").state, "not_applicable");
+  assert.equal(projectionState(context, targetByProfile(context.targets, SYNTHETIC_POCKET_S2_PROFILE).id, "retroarch-plus-bios").state, "qualified");
+  assert.equal(projectionState(context, targetByProfile(context.targets, SYNTHETIC_POCKET_S2_PROFILE).id, "rom-library-sync").state, "failed");
+  assert.equal(projectionState(context, targetByProfile(context.targets, SYNTHETIC_POCKET_S2_PROFILE).id, "obtainium-install").state, "stale");
+  assert.equal(projectionState(context, targetByProfile(context.targets, SYNTHETIC_AIR_MINI_PROFILE).id, "xaniteog-install").state, "deferred");
+  assert.equal(projectionState(context, targetByProfile(context.targets, SYNTHETIC_AIR_MINI_PROFILE).id, "rom-library-sync").state, "missing");
+  assert.equal(projectionState(context, targetByProfile(context.targets, SYNTHETIC_AIR_MINI_PROFILE).id, "retroarch-plus-bios").state, "not_applicable");
 });
 
 test("a failed workflow does not erase unrelated qualified evidence", () => {
@@ -660,7 +751,7 @@ test("device support tier requires every required workflow to be qualified", () 
 test("projected fixture state matches the synthetic qualification history", () => {
   const context = projectionContext();
   const pocketRows = ["retroarch-plus-bios", "obtainium-install", "xaniteog-install", "rom-library-sync"]
-    .map((workflowId) => projectionState(context, "synthetic-pocket-s2", workflowId));
+    .map((workflowId) => projectionState(context, targetByProfile(context.targets, SYNTHETIC_POCKET_S2_PROFILE).id, workflowId));
   assert.deepEqual(
     pocketRows.map((row) => [row.workflowId, row.state]),
     [
@@ -673,7 +764,7 @@ test("projected fixture state matches the synthetic qualification history", () =
   assert.equal(deriveDeviceSupportTier(pocketRows), "limited");
 
   const airRows = ["retroarch-plus-bios", "obtainium-install", "xaniteog-install", "rom-library-sync"]
-    .map((workflowId) => projectionState(context, "synthetic-air-mini", workflowId));
+    .map((workflowId) => projectionState(context, targetByProfile(context.targets, SYNTHETIC_AIR_MINI_PROFILE).id, workflowId));
   assert.equal(deriveDeviceSupportTier(airRows), "unqualified");
 });
 
@@ -747,7 +838,10 @@ test("projection preserves device target and workflow catalog order", () => {
   });
   assert.deepEqual(
     projection.targets.map((entry) => entry.target.id),
-    ["synthetic-pocket-s2", "synthetic-air-mini"],
+    [
+      targetByProfile(context.targets, SYNTHETIC_POCKET_S2_PROFILE).id,
+      targetByProfile(context.targets, SYNTHETIC_AIR_MINI_PROFILE).id,
+    ],
   );
   const catalogOrder = context.workflowCatalog.workflows.map((workflow) => workflow.id);
   for (const entry of projection.targets) {

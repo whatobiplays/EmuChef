@@ -1148,6 +1148,30 @@ metadata cannot be read; an existing path of the wrong kind reports a kind
 mismatch, and an existing path of the expected kind is accepted. This keeps
 configuration planning usable for the root-capability review gate.
 
+## Device qualification repository contract
+
+The repository-owned device qualification Node tool remains the canonical
+authority for target registration validation, evidence validation, canonical
+digests, compatibility projection, and matrix rendering. Production runtime
+behavior is unchanged by these repository contracts.
+
+`docs/testing/device-qualification/device-targets.json` now uses schema
+version 2. Every material target fact is stored as an exact `{ value, source }`
+wrapper, with legal provenance restricted by field: ordinary identity facts use
+`production_observation`, `rootState` uses `explicit_root_check`, and
+`connectionType` may use `operator_attestation` or
+`production_observation`. Registered target IDs are deterministic
+`device-target-sha256:<64 hex>` digests over the wrapped facts' values only, so
+policy arrays and provenance-source changes do not alter identity while
+material fact-value changes do.
+
+Device qualification evidence records and fingerprints also use schema version
+2. Embedded `deviceTarget` facts preserve the same typed provenance wrappers as
+the registered target, while compatibility fingerprints project only the fact
+values needed by workflow invalidation. The current production target registry
+remains empty, so repository validation and matrix generation still make no
+claim that any physical device is qualified.
+
 ## Phase 6D.6 physical interruption qualification
 
 The ignored Rust physical harness is fail-closed and fail-reporting: explicit
