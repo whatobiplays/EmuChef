@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
-import { execFileSync } from "node:child_process";
+import { execFileSync, spawnSync } from "node:child_process";
 import { createHash } from "node:crypto";
-import { cpSync, existsSync, mkdtempSync, mkdirSync, readdirSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
+import { cpSync, existsSync, mkdtempSync, mkdirSync, readdirSync, readFileSync, realpathSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import test from "node:test";
@@ -574,33 +574,39 @@ test("material build digest changes for product inputs but ignores qualification
 });
 
 test("material identity refreshes for changed inputs and rejects dirty state", () => {
-  const repoRoot = mkdtempSync(path.join(tmpdir(), "device-qualification-identity-"));
-  const materialPath = path.join(repoRoot, "apps/emuchef-app/src-tauri/src/material.rs");
+  const repoRoot = createTempQualificationRepo();
+  const toolDestination = path.join(repoRoot, "tools/device-qualification.mjs");
+  const packagePath = path.join(repoRoot, "apps/emuchef-app/package.json");
 
   try {
-    mkdirSync(path.dirname(materialPath), { recursive: true });
-    writeFileSync(
-      path.join(repoRoot, "apps/emuchef-app/package.json"),
-      JSON.stringify({ version: "0.1.0" }),
-      "utf8",
+    mkdirSync(path.dirname(toolDestination), { recursive: true });
+    cpSync(path.join(REPO_ROOT, "tools/device-qualification.mjs"), toolDestination);
+    const toolPath = realpathSync(toolDestination);
+    execFileSync("git", ["add", "tools/device-qualification.mjs"], { cwd: repoRoot, stdio: "pipe" });
+    execFileSync("git", ["commit", "-m", "add canonical identity tool"], { cwd: repoRoot, stdio: "pipe" });
+
+    const runIdentity = (requireClean) => spawnSync(
+      process.execPath,
+      [toolPath, "--build-identity", ...(requireClean ? ["--require-clean"] : [])],
+      { cwd: repoRoot, encoding: "utf8" },
     );
-    writeFileSync(materialPath, "pub const VALUE: u8 = 1;\n", "utf8");
 
-    execFileSync("git", ["init"], { cwd: repoRoot, stdio: "pipe" });
-    execFileSync("git", ["config", "user.name", "Codex"], { cwd: repoRoot, stdio: "pipe" });
-    execFileSync("git", ["config", "user.email", "codex@example.com"], { cwd: repoRoot, stdio: "pipe" });
-    execFileSync("git", ["add", "."], { cwd: repoRoot, stdio: "pipe" });
-    execFileSync("git", ["commit", "-m", "initial identity fixture"], { cwd: repoRoot, stdio: "pipe" });
+    const cleanResult = runIdentity(true);
+    assert.equal(cleanResult.status, 0, cleanResult.stderr);
+    const cleanIdentity = JSON.parse(cleanResult.stdout);
 
-    const cleanIdentity = buildMaterialIdentity({ repoRoot, requireClean: true });
-    writeFileSync(materialPath, "pub const VALUE: u8 = 2;\n", "utf8");
+    const packageJson = JSON.parse(readFileSync(packagePath, "utf8"));
+    packageJson.version = "0.1.1";
+    writeFileSync(packagePath, `${JSON.stringify(packageJson, null, 2)}\n`, "utf8");
 
-    const refreshedIdentity = buildMaterialIdentity({ repoRoot, requireClean: false });
+    const refreshedResult = runIdentity(false);
+    assert.equal(refreshedResult.status, 0, refreshedResult.stderr);
+    const refreshedIdentity = JSON.parse(refreshedResult.stdout);
     assert.notEqual(refreshedIdentity.materialBuildDigest, cleanIdentity.materialBuildDigest);
-    assert.throws(
-      () => buildMaterialIdentity({ repoRoot, requireClean: true }),
-      /clean tracked worktree/,
-    );
+
+    const dirtyResult = runIdentity(true);
+    assert.notEqual(dirtyResult.status, 0);
+    assert.match(`${dirtyResult.stdout}${dirtyResult.stderr}`, /clean tracked worktree/);
   } finally {
     rmSync(repoRoot, { recursive: true, force: true });
   }

@@ -46,7 +46,7 @@ fn qualification_requested() -> bool {
 
 fn configure_qualification_reruns(manifest_dir: &Path) {
     let repo_root = manifest_dir.join("../../..");
-    emit_rerun_if_changed(&manifest_dir.join(QUALIFICATION_TOOL));
+    emit_rerun_if_changed(&qualification_tool(manifest_dir));
 
     for relative_path in MATERIAL_ROOTS.iter().chain(MATERIAL_FILES) {
         emit_rerun_if_changed(&manifest_dir.join(relative_path));
@@ -62,7 +62,7 @@ fn configure_qualification_reruns(manifest_dir: &Path) {
 }
 
 fn embed_build_identity(manifest_dir: &Path) {
-    let tool = manifest_dir.join(QUALIFICATION_TOOL);
+    let tool = qualification_tool(manifest_dir);
     let output = Command::new("node")
         .arg(tool)
         .arg("--build-identity")
@@ -78,6 +78,13 @@ fn embed_build_identity(manifest_dir: &Path) {
         .expect("device qualification build identity must be valid JSON");
     let encoded = serde_json::to_string(&value).expect("build identity must serialize");
     println!("cargo:rustc-env=EMUCHEF_QUALIFICATION_BUILD_IDENTITY={encoded}");
+}
+
+fn qualification_tool(manifest_dir: &Path) -> PathBuf {
+    manifest_dir
+        .join(QUALIFICATION_TOOL)
+        .canonicalize()
+        .expect("device qualification Node tool must exist")
 }
 
 fn emit_rerun_if_changed(path: &Path) {
