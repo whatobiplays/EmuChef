@@ -175,12 +175,16 @@ pub struct QualificationRepository {
 /// enabled and a valid source checkout is available.
 pub struct QualificationRepositoryProvider {
     repository: OnceLock<Option<QualificationRepository>>,
+    #[cfg(test)]
+    test_mode_build: Option<QualificationBuildIdentity>,
 }
 
 impl Default for QualificationRepositoryProvider {
     fn default() -> Self {
         Self {
             repository: OnceLock::new(),
+            #[cfg(test)]
+            test_mode_build: None,
         }
     }
 }
@@ -207,8 +211,17 @@ impl QualificationRepositoryProvider {
     #[cfg(test)]
     pub(crate) fn for_test(repository: QualificationRepository) -> Self {
         let provider = Self::default();
+        let test_mode_build = repository.embedded_build_identity.clone();
         let _ = provider.repository.set(Some(repository));
-        provider
+        Self {
+            repository: provider.repository,
+            test_mode_build,
+        }
+    }
+
+    #[cfg(test)]
+    pub(crate) fn test_mode_build(&self) -> Option<&QualificationBuildIdentity> {
+        self.test_mode_build.as_ref()
     }
 }
 

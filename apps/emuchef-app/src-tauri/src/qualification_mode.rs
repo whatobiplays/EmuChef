@@ -238,7 +238,14 @@ struct QualificationModeState {
 }
 
 impl QualificationModeState {
-    fn current() -> Self {
+    fn current(_provider: &QualificationRepositoryProvider) -> Self {
+        #[cfg(test)]
+        if let Some(build) = _provider.test_mode_build() {
+            return Self {
+                enabled: true,
+                build: Some(build.clone()),
+            };
+        }
         let inputs = qualification_gate_inputs();
         Self {
             enabled: qualification_mode_enabled_at_runtime(),
@@ -289,7 +296,7 @@ fn safe_qualification_error(code: &str) -> String {
 pub fn get_device_qualification_mode_status(
     state: State<'_, AppState>,
 ) -> Result<QualificationModeStatus, String> {
-    let mode = QualificationModeState::current();
+    let mode = QualificationModeState::current(&state.qualification_repository);
     qualification_mode_status(&mode, &state.qualification_repository)
 }
 
@@ -373,7 +380,7 @@ pub fn create_qualification_target_candidate(
     request: CreateQualificationTargetCandidateRequest,
     state: State<'_, AppState>,
 ) -> Result<QualificationTargetCandidatePreview, String> {
-    let mode = QualificationModeState::current();
+    let mode = QualificationModeState::current(&state.qualification_repository);
     let build = require_recordable_mode(&mode)?.clone();
     let repository = state
         .qualification_repository
@@ -397,7 +404,7 @@ pub fn register_qualification_target(
     candidate_handle: String,
     state: State<'_, AppState>,
 ) -> Result<QualificationTargetRegistrationResult, String> {
-    let mode = QualificationModeState::current();
+    let mode = QualificationModeState::current(&state.qualification_repository);
     register_qualification_target_with_repository(
         &candidate_handle,
         &mode,
@@ -448,7 +455,7 @@ pub fn discard_qualification_candidate(
     candidate_handle: String,
     state: State<'_, AppState>,
 ) -> Result<(), String> {
-    let mode = QualificationModeState::current();
+    let mode = QualificationModeState::current(&state.qualification_repository);
     let _ = require_recordable_mode(&mode)?;
     let repository = state
         .qualification_repository
@@ -728,14 +735,24 @@ fn target_candidate_preview(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::adb::AdbManager;
+    use crate::commands::{AppState, InputContractSnapshot, PlatformToolsSelectionStore};
     use crate::device_qualification::{
         CapabilityAvailabilityDto, DeviceQualificationSnapshotDto, RootQualificationCheckDto,
         RootQualificationFailureReason,
     };
+    use crate::execution::ExecutionHandleStore;
+    use crate::handles::SessionHandles;
     use crate::qualification_repository::QualificationRepositoryProvider;
+    use crate::recovery::RecoveryStore;
+    use crate::saved_configurations::SavedConfigurationStore;
+    use crate::sidecar::SidecarState;
+    use crate::support::SupportStore;
+    use crate::updates::{ActivityGate, UpdateService};
     use serde_json::json;
     use std::path::Path;
     use std::sync::{Arc, Mutex};
+    use tauri::Manager;
 
     #[derive(Clone)]
     struct FakeObservationSource {
@@ -827,6 +844,142 @@ mod tests {
             "qualificationContract": 1
         }))
         .expect("test build should decode")
+    }
+
+    fn test_app(
+        provider: QualificationRepositoryProvider,
+    ) -> (tempfile::TempDir, tauri::App<tauri::test::MockRuntime>) {
+        let temp = tempfile::tempdir().expect("test app directory should be created");
+        let app_root = temp.path();
+        let app_state = AppState {
+            sidecar: SidecarState::new(app_root.join("sidecar-cache")),
+            catalog: Err("test catalog is not needed by qualification commands".to_string()),
+            qualification_repository: provider,
+            adb: Mutex::new(AdbManager::new(app_root.join("platform-tools"))),
+            platform_tools_selections: Mutex::new(PlatformToolsSelectionStore::default()),
+            input_contracts: Mutex::new(InputContractSnapshot::default()),
+            handles: Mutex::new(SessionHandles::default()),
+            root_qualification: Mutex::new(
+                crate::device_qualification::RootQualificationStore::default(),
+            ),
+            executions: Mutex::new(ExecutionHandleStore::default()),
+            saved_configurations: Mutex::new(SavedConfigurationStore::load(
+                app_root.join("recent-configurations.json"),
+            )),
+            recovery: Mutex::new(RecoveryStore::load(
+                app_root.join("recovery-draft.json"),
+                app_root.join("session-active.marker"),
+            )),
+            support: Mutex::new(SupportStore::new(app_root.join("support-cache"))),
+            updates: UpdateService::from_production_document()
+                .expect("test update trust should be available"),
+            update_activity: ActivityGate::default(),
+        };
+        let app = tauri::test::mock_app();
+        assert!(app.manage(app_state));
+        (temp, app)
+    }
+
+    #[test]
+    fn exported_status_keeps_disabled_mode_from_initializing_repository() {
+        let (_temp, app) = test_app(QualificationRepositoryProvider::default());
+        let status = get_device_qualification_mode_status(app.state())
+            .expect("disabled status should be returned through the command");
+
+        assert!(!status.enabled);
+        assert!(!status.recordable);
+        assert!(status.workflows.is_empty());
+        assert!(!app
+            .state::<AppState>()
+            .qualification_repository
+            .is_initialized_for_test());
+    }
+
+    #[test]
+    fn exported_create_maps_disabled_mode_without_touching_node() {
+        let (_temp, app) = test_app(QualificationRepositoryProvider::default());
+        let error = create_qualification_target_candidate(capture_request(), app.state())
+            .expect_err("disabled mode must reject candidate creation");
+        let error: Value = serde_json::from_str(&error).expect("command error should be JSON");
+
+        assert_eq!(error["code"], "qualification_mode_disabled");
+        assert!(!app
+            .state::<AppState>()
+            .qualification_repository
+            .is_initialized_for_test());
+    }
+
+    #[test]
+    fn exported_registration_blocks_after_successful_registration() {
+        let build = test_build();
+        let runner = RegistrationRunner::default();
+        let calls = runner.clone();
+        let temp = tempfile::tempdir().expect("test repository directory should be created");
+        let repository = crate::qualification_repository::QualificationRepository::new_for_test_with_source_state(
+            temp.path().to_path_buf(),
+            Box::new(runner),
+            build.clone(),
+            crate::qualification_repository::QualificationSourceState {
+                head: build.git_commit.clone(),
+                tracked_worktree_clean: true,
+            },
+        );
+        let candidate = repository
+            .create_candidate(
+                CandidateKind::TargetRegistration,
+                &json!({ "build": serde_json::to_value(&build).expect("build should serialize") }),
+                None,
+            )
+            .expect("candidate should be stored");
+        let provider = QualificationRepositoryProvider::for_test(repository);
+        let (_app_temp, app) = test_app(provider);
+
+        let result = register_qualification_target(candidate.clone(), app.state())
+            .expect("exported registration should succeed once");
+        assert!(result.requires_commit_and_rebuild);
+
+        let error = register_qualification_target(candidate, app.state())
+            .expect_err("exported registration must block until rebuild");
+        let error: Value = serde_json::from_str(&error).expect("command error should be JSON");
+        assert_eq!(error["code"], "qualification_source_changed");
+        assert_eq!(
+            *calls.calls.lock().expect("calls should not be poisoned"),
+            1
+        );
+    }
+
+    #[test]
+    fn exported_discard_removes_candidate() {
+        let build = test_build();
+        let temp = tempfile::tempdir().expect("test repository directory should be created");
+        let repository = crate::qualification_repository::QualificationRepository::new_for_test_with_source_state(
+            temp.path().to_path_buf(),
+            Box::new(RegistrationRunner::default()),
+            build.clone(),
+            crate::qualification_repository::QualificationSourceState {
+                head: build.git_commit.clone(),
+                tracked_worktree_clean: true,
+            },
+        );
+        let candidate = repository
+            .create_candidate(
+                CandidateKind::TargetRegistration,
+                &json!({ "build": serde_json::to_value(&build).expect("build should serialize") }),
+                None,
+            )
+            .expect("candidate should be stored");
+        let provider = QualificationRepositoryProvider::for_test(repository);
+        let (_app_temp, app) = test_app(provider);
+
+        discard_qualification_candidate(candidate.clone(), app.state())
+            .expect("exported discard should remove the candidate");
+        assert!(app
+            .state::<AppState>()
+            .qualification_repository
+            .get()
+            .expect("test repository should be available")
+            .load_candidate(&candidate)
+            .is_err());
     }
 
     #[test]

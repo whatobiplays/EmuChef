@@ -61,6 +61,34 @@ PASS: 27 tests
 
 The focused tests cover disabled Node suppression, sanitized unavailable status, production observation order, strict manufacturer/model/firmware types, numeric Android-version normalization, every root outcome, stale source/build classification, lifecycle blocking, candidate immutability, and registration/discard/status serialization.
 
+### Review fix round 2 RED: exported Tauri command boundary
+
+The new tests were then run through the exported command functions themselves. The first run failed because Tauri's managed-state test module was not enabled and the injected call counter assertion used the wrong type:
+
+```text
+rtk cargo test --manifest-path apps/emuchef-app/src-tauri/Cargo.toml qualification_mode
+FAIL, exit 101
+tauri::test was unavailable and the registration call counter had no len method
+```
+
+After the test dependency was enabled and the harness assertion corrected, the tests reached the exported commands and failed for the intended missing seam:
+
+```text
+FAIL: 17 passed, 2 failed
+exported registration and discard stopped at qualification_mode_disabled
+```
+
+### Review fix round 2 GREEN
+
+The provider now supplies a build identity only under `cfg(test)` so the exported commands can run against injected state without weakening production gates. The complete exported boundary suite passes:
+
+```text
+rtk cargo test --manifest-path apps/emuchef-app/src-tauri/Cargo.toml qualification_mode
+PASS: 19 tests
+```
+
+These tests directly call `get_device_qualification_mode_status`, `create_qualification_target_candidate`, `register_qualification_target`, and `discard_qualification_candidate`. The registration test calls the exported registration command twice and verifies the second action returns sanitized `qualification_source_changed` after the first successful registration.
+
 ## 3. Review fixes implemented
 
 1. `QualificationRepositoryProvider` uses `OnceLock<Option<_>>`; ordinary and packaged builds do not resolve or canonicalize a source checkout during startup, and unavailable repositories produce empty sanitized status.
@@ -69,15 +97,16 @@ The focused tests cover disabled Node suppression, sanitized unavailable status,
 4. Candidate promotability is recomputed from current source/build facts on load/list and preserves the stored target values and provenance when stale.
 5. Manufacturer, model, and firmware observations require non-empty strings. Only numeric Android version values are normalized. Granted and denied root checks map to rooted/non-root; unavailable, failed, and identity-mismatched root checks reject the candidate.
 6. `CONTEXT.md` documents the lazy provider, trusted lifecycle, serialization gate, stale classification, and strict observation semantics.
+7. The exported-command tests use a real Tauri test app with injected `AppState` and repository provider state. The test-only provider identity override is unavailable to ordinary and packaged builds.
 
 ## 4. Validation
 
 All validation completed without connected hardware:
 
 1. `rtk cargo fmt --manifest-path apps/emuchef-app/src-tauri/Cargo.toml -- --check` passed.
-2. Focused mode tests passed: 15.
+2. Focused mode tests passed: 19, including direct exported-command calls.
 3. Focused repository tests passed: 27.
-4. Full default Tauri Rust tests passed: 302 passed, 2 ignored.
+4. Full default Tauri Rust tests passed: 306 passed, 2 ignored.
 5. `rtk cargo check --manifest-path apps/emuchef-app/src-tauri/Cargo.toml --features real-execution` passed with 0 errors; two existing dead-code warnings remain for future run-record repository APIs.
 6. App typecheck and lint passed.
 7. Full app tests passed: 82 logic tests and 76 Vitest tests. A parallel invocation produced one non-reproducible call-count assertion; the isolated file and complete suite both passed on rerun.
@@ -88,13 +117,11 @@ All validation completed without connected hardware:
 12. `rtk node tools/device-qualification.mjs --check` and `rtk make device-qualification-check` passed.
 13. `rtk git diff --check` passed. New Task 8 source/test additions contain no active phase/slice identifiers, React qualification inputs remain opaque, and no qualification path authority is exposed.
 
-## 5. Fix-round changed files
+## 5. Review-fix-round-2 changed files
 
-1. `CONTEXT.md`
-2. `apps/emuchef-app/src-tauri/src/commands.rs`
-3. `apps/emuchef-app/src-tauri/src/lib.rs`
-4. `apps/emuchef-app/src-tauri/src/qualification_mode.rs`
-5. `apps/emuchef-app/src-tauri/src/qualification_repository.rs`
-6. `.superpowers/sdd/2026-08-23-device-qualification-harness/task-8-report.md`
+1. `apps/emuchef-app/src-tauri/Cargo.toml`
+2. `apps/emuchef-app/src-tauri/src/qualification_mode.rs`
+3. `apps/emuchef-app/src-tauri/src/qualification_repository.rs`
+4. `.superpowers/sdd/2026-08-23-device-qualification-harness/task-8-report.md`
 
-No `.chatgpt` files, SDD ledgers, canonical qualification tool/schema files, physical-device evidence, or external systems were modified.
+`CONTEXT.md` was not changed in this round because the changes are test-only infrastructure and do not alter production semantics. No `.chatgpt` files, SDD ledgers, canonical qualification tool/schema files, physical-device evidence, or external systems were modified.
