@@ -1,7 +1,11 @@
 import assert from "node:assert/strict";
+import { readFileSync } from "node:fs";
+import path from "node:path";
 import test from "node:test";
 
 import { APP_ROOT, runQualification } from "./run-device-qualification.mjs";
+
+const BUILD_SCRIPT = path.join(APP_ROOT, "src-tauri", "build.rs");
 
 test("qualification launcher runs the clean build, sidecar, and pinned real app in order", () => {
   const calls = [];
@@ -68,4 +72,35 @@ test("qualification launcher treats a process-start error as a failed step", () 
 
   assert.equal(exitStatus, 1);
   assert.equal(calls.length, 1);
+});
+
+test("recordable builds watch canonical identity, material, and Git inputs", () => {
+  const buildScript = readFileSync(BUILD_SCRIPT, "utf8");
+
+  for (const watchedInput of [
+    "../../../tools/device-qualification.mjs",
+    "../../../authored",
+    "../../../crates/emuchef-rust-backend",
+    "../src",
+    "src",
+    "../package.json",
+    "../package-lock.json",
+    "Cargo.toml",
+    "Cargo.lock",
+    "tauri.conf.json",
+    "HEAD",
+    "index",
+    "packed-refs",
+    "refs",
+    "logs/HEAD",
+  ]) {
+    assert.match(buildScript, new RegExp(watchedInput.replaceAll(".", "\\.")), watchedInput);
+  }
+
+  assert.match(buildScript, /git/);
+  assert.match(buildScript, /ls-files/);
+  assert.match(buildScript, /rev-parse/);
+  assert.match(buildScript, /cargo:rerun-if-changed/);
+  assert.match(buildScript, /--build-identity/);
+  assert.match(buildScript, /--require-clean/);
 });

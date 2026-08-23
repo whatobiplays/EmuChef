@@ -573,6 +573,39 @@ test("material build digest changes for product inputs but ignores qualification
   assert.equal(withEvidence, original);
 });
 
+test("material identity refreshes for changed inputs and rejects dirty state", () => {
+  const repoRoot = mkdtempSync(path.join(tmpdir(), "device-qualification-identity-"));
+  const materialPath = path.join(repoRoot, "apps/emuchef-app/src-tauri/src/material.rs");
+
+  try {
+    mkdirSync(path.dirname(materialPath), { recursive: true });
+    writeFileSync(
+      path.join(repoRoot, "apps/emuchef-app/package.json"),
+      JSON.stringify({ version: "0.1.0" }),
+      "utf8",
+    );
+    writeFileSync(materialPath, "pub const VALUE: u8 = 1;\n", "utf8");
+
+    execFileSync("git", ["init"], { cwd: repoRoot, stdio: "pipe" });
+    execFileSync("git", ["config", "user.name", "Codex"], { cwd: repoRoot, stdio: "pipe" });
+    execFileSync("git", ["config", "user.email", "codex@example.com"], { cwd: repoRoot, stdio: "pipe" });
+    execFileSync("git", ["add", "."], { cwd: repoRoot, stdio: "pipe" });
+    execFileSync("git", ["commit", "-m", "initial identity fixture"], { cwd: repoRoot, stdio: "pipe" });
+
+    const cleanIdentity = buildMaterialIdentity({ repoRoot, requireClean: true });
+    writeFileSync(materialPath, "pub const VALUE: u8 = 2;\n", "utf8");
+
+    const refreshedIdentity = buildMaterialIdentity({ repoRoot, requireClean: false });
+    assert.notEqual(refreshedIdentity.materialBuildDigest, cleanIdentity.materialBuildDigest);
+    assert.throws(
+      () => buildMaterialIdentity({ repoRoot, requireClean: true }),
+      /clean tracked worktree/,
+    );
+  } finally {
+    rmSync(repoRoot, { recursive: true, force: true });
+  }
+});
+
 test("emuchef build compatibility ignores git commit but honors material content", () => {
   const left = {
     appVersion: "0.1.0",

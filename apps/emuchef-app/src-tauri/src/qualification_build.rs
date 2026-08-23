@@ -40,7 +40,7 @@ pub(crate) fn qualification_mode_enabled(inputs: &QualificationGateInputs) -> bo
 
 /// Reads the trusted build identity embedded by the qualification build script.
 pub(crate) fn embedded_build_identity() -> Option<QualificationBuildIdentity> {
-    option_env!("EMUCHEF_QUALIFICATION_BUILD_IDENTITY").and_then(parse_embedded_build_identity)
+    embedded_build_identity_from(option_env!("EMUCHEF_QUALIFICATION_BUILD_IDENTITY"))
 }
 
 /// Collects the compile-time and runtime inputs used by the mode gate.
@@ -59,6 +59,10 @@ pub(crate) fn qualification_gate_inputs() -> QualificationGateInputs {
 /// Evaluates qualification mode using the current application environment.
 pub(crate) fn qualification_mode_enabled_at_runtime() -> bool {
     qualification_mode_enabled(&qualification_gate_inputs())
+}
+
+fn embedded_build_identity_from(value: Option<&str>) -> Option<QualificationBuildIdentity> {
+    value.and_then(parse_embedded_build_identity)
 }
 
 fn parse_embedded_build_identity(value: &str) -> Option<QualificationBuildIdentity> {
@@ -132,21 +136,35 @@ mod tests {
 
     #[test]
     fn malformed_embedded_identity_is_not_usable() {
-        assert!(parse_embedded_build_identity("not-json").is_none());
-        assert!(parse_embedded_build_identity(
+        assert!(embedded_build_identity_from(Some("not-json")).is_none());
+        assert!(embedded_build_identity_from(Some(
             r#"{"appVersion":"0.1.0","gitCommit":"1111111111111111111111111111111111111111","materialBuildDigest":"sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","realExecutionEnabled":true,"qualificationContract":1,"unexpected":true}"#
-        )
+        ))
         .is_none());
     }
 
     #[test]
-    fn runtime_gate_inputs_are_disabled_without_all_runtime_inputs() {
-        let inputs = QualificationGateInputs {
-            debug_build: cfg!(debug_assertions),
-            real_execution_enabled: cfg!(feature = "real-execution"),
-            runtime_opt_in: false,
-            embedded_identity: None,
-        };
+    fn embedded_build_identity_is_absent_for_an_ordinary_build() {
+        assert!(embedded_build_identity().is_none());
+    }
+
+    #[test]
+    fn qualification_gate_inputs_capture_default_runtime_state() {
+        let inputs = qualification_gate_inputs();
+
+        assert_eq!(inputs.debug_build, cfg!(debug_assertions));
+        assert_eq!(
+            inputs.real_execution_enabled,
+            cfg!(feature = "real-execution")
+        );
+        assert!(!inputs.runtime_opt_in);
+        assert_eq!(inputs.embedded_identity, embedded_build_identity());
+        assert!(!qualification_mode_enabled_at_runtime());
+    }
+
+    #[test]
+    fn qualification_gate_inputs_remain_disabled_without_all_runtime_inputs() {
+        let inputs = qualification_gate_inputs();
         assert!(!qualification_mode_enabled(&inputs));
     }
 

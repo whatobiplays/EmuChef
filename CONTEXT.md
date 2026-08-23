@@ -1236,8 +1236,12 @@ identity only from `tools/device-qualification.mjs --build-identity
 `EMUCHEF_QUALIFICATION_BUILD_IDENTITY`. Rust qualification mode requires a
 debug build, the compiled `real-execution` feature, the explicit runtime opt-in,
 and a successfully parsed embedded identity whose real-execution capability is
-enabled. Ordinary application builds omit this identity and retain their normal
-production behavior.
+enabled. Before invoking the canonical Node command, an opted-in Cargo build
+watches that tool, the declared authored/backend/application material roots and
+exact package/lock/config files, every tracked repository path, and the Git
+reference/index state used by the identity command, so a changed input cannot
+reuse stale embedded metadata. Ordinary application builds omit these watches
+and the identity, retaining their normal production behavior.
 
 Active schema-v2 run records use the domain-oriented immutable ID form
 `qualification-run-sha256:<64 lowercase hex characters>`, derived from the
