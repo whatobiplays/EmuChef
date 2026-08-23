@@ -49,4 +49,62 @@ describe("device qualification API", () => {
       candidateHandle: "qualification-candidate-bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
     });
   });
+
+  it("orchestrates qualification sessions through typed opaque handles", async () => {
+    await api.beginQualificationSession({
+      deviceHandle: "device_opaque",
+      devicePlan: "plan_opaque",
+      targetId: "device-target-sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      workflowId: "workflow_opaque",
+    });
+    expect(invokeMock).toHaveBeenLastCalledWith("begin_qualification_session", {
+      request: {
+        deviceHandle: "device_opaque",
+        devicePlan: "plan_opaque",
+        targetId: "device-target-sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        workflowId: "workflow_opaque",
+      },
+    });
+
+    await api.refreshQualificationSession("qualification-session-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", "device_opaque");
+    expect(invokeMock).toHaveBeenLastCalledWith("refresh_qualification_session", {
+      sessionHandle: "qualification-session-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      deviceHandle: "device_opaque",
+    });
+
+    await api.bindQualificationReview("qualification-session-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", "review_opaque");
+    expect(invokeMock).toHaveBeenLastCalledWith("bind_qualification_review", {
+      sessionHandle: "qualification-session-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      reviewHandle: "review_opaque",
+    });
+
+    await api.bindQualificationExecution("qualification-session-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", "execution_opaque");
+    expect(invokeMock).toHaveBeenLastCalledWith("bind_qualification_execution", {
+      sessionHandle: "qualification-session-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      executionHandle: "execution_opaque",
+    });
+
+    await api.recordQualificationCheckpoint(
+      "qualification-session-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "clean_or_deliberately_reset_device",
+      "pass",
+    );
+    expect(invokeMock).toHaveBeenLastCalledWith("record_qualification_checkpoint", {
+      sessionHandle: "qualification-session-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      checkpointId: "clean_or_deliberately_reset_device",
+      outcome: "pass",
+    });
+
+    await api.finalizeQualificationCandidate("qualification-session-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa");
+    expect(invokeMock).toHaveBeenLastCalledWith("finalize_qualification_candidate", {
+      sessionHandle: "qualification-session-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+    });
+
+    await api.recordQualificationRun(
+      "qualification-candidate-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+    );
+    expect(invokeMock).toHaveBeenLastCalledWith("record_qualification_run", {
+      candidateHandle: "qualification-candidate-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+    });
+  });
 });

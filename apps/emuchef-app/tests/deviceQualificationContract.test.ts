@@ -4,6 +4,8 @@ import test from "node:test";
 
 import type {
   QualificationModeStatus,
+  QualificationRunRecordingResult,
+  QualificationSessionSnapshot,
   QualificationTargetCandidatePreview,
 } from "../src/types";
 
@@ -45,6 +47,25 @@ const enabledStatus: QualificationModeStatus = {
   resumableCandidates: [targetPreview],
 };
 
+const sessionSnapshot: QualificationSessionSnapshot = {
+  sessionHandle: "qualification-session-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+  targetId: "device-target-sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+  workflowId: "workflow_opaque",
+  workflowVersion: 1,
+  devicePlan: "plan_opaque",
+  requiredRecipes: ["recipe.opaque"],
+  humanCheckpoints: [],
+  recordedCheckpoints: [],
+  runValidity: "valid",
+  qualificationOutcome: "not_observed",
+  invalidReason: null,
+  candidate: null,
+};
+
+const recordingResult: QualificationRunRecordingResult = {
+  runId: "qualification-run-sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+};
+
 test("qualification TypeScript DTOs preserve provenance and build identity", () => {
   assert.equal(enabledStatus.build?.realExecutionEnabled, true);
   assert.equal(enabledStatus.resumableCandidates[0].target?.connectionType.value, "usb3");
@@ -53,6 +74,12 @@ test("qualification TypeScript DTOs preserve provenance and build identity", () 
     "operator_attestation",
   );
   assert.equal(enabledStatus.runtimeContract, "real-execution-v1");
+});
+
+test("qualification session DTOs preserve opaque handles and typed outcomes", () => {
+  assert.equal(sessionSnapshot.sessionHandle.startsWith("qualification-session-"), true);
+  assert.equal(sessionSnapshot.qualificationOutcome, "not_observed");
+  assert.equal(recordingResult.runId.startsWith("qualification-run-sha256:"), true);
 });
 
 test("qualification API exposes only opaque candidate operations", () => {

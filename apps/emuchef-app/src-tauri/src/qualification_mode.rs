@@ -9,7 +9,6 @@ use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use sha2::{Digest, Sha256};
-use std::path::Path;
 use tauri::State;
 use time::{format_description::well_known::Rfc3339, OffsetDateTime};
 
@@ -213,6 +212,7 @@ pub(crate) enum QualificationInvalidation {
     TargetProfileChanged,
     ManufacturerChanged,
     ModelChanged,
+    AndroidVersionChanged,
     AndroidApiChanged,
     AbiSocClassChanged,
     FirmwareBuildChanged,
@@ -233,6 +233,7 @@ impl QualificationInvalidation {
             Self::TargetProfileChanged => "target_profile_changed",
             Self::ManufacturerChanged => "manufacturer_changed",
             Self::ModelChanged => "model_changed",
+            Self::AndroidVersionChanged => "android_version_changed",
             Self::AndroidApiChanged => "android_api_changed",
             Self::AbiSocClassChanged => "abi_soc_class_changed",
             Self::FirmwareBuildChanged => "firmware_build_changed",
@@ -504,10 +505,6 @@ impl QualificationSession {
         session.with_device_plan("test-plan".to_string())
     }
 
-    pub(crate) fn session_handle(&self) -> &str {
-        &self.session_handle
-    }
-
     pub(crate) fn candidate_handle(&self) -> &str {
         &self.candidate_handle
     }
@@ -628,6 +625,8 @@ impl QualificationSession {
             Some(QualificationInvalidation::ManufacturerChanged)
         } else if observation.model != self.target.model {
             Some(QualificationInvalidation::ModelChanged)
+        } else if observation.android_version != self.target.android_version {
+            Some(QualificationInvalidation::AndroidVersionChanged)
         } else if observation.android_api != self.target.android_api {
             Some(QualificationInvalidation::AndroidApiChanged)
         } else if observation.abi_soc_class != self.target.abi_soc_class {
@@ -665,13 +664,15 @@ impl QualificationSession {
             .human_checkpoints
             .iter()
             .find(|checkpoint| checkpoint.id == checkpoint_id)
-            .ok_or_else(|| "qualification checkpoint is not declared by the workflow".to_string())?;
+            .ok_or_else(|| {
+                "qualification checkpoint is not declared by the workflow".to_string()
+            })?;
         if !declaration.allowed_outcomes.contains(&outcome) {
-            return Err("qualification checkpoint outcome is not allowed by the workflow".to_string());
+            return Err(
+                "qualification checkpoint outcome is not allowed by the workflow".to_string(),
+            );
         }
-        if observed_at.is_empty() {
-            return Err("qualification checkpoint timestamp is invalid".to_string());
-        }
+        validate_checkpoint_timestamp(observed_at)?;
         let checkpoint = RecordedQualificationCheckpoint {
             checkpoint_id: checkpoint_id.to_string(),
             outcome,
@@ -710,14 +711,12 @@ impl QualificationSession {
             })
     }
 
+    #[cfg(test)]
     pub(crate) fn classify_execution(&mut self, status: &str) -> Result<(), String> {
         self.classify_execution_status(Some(status))
     }
 
-    pub(crate) fn classify_execution_status(
-        &mut self,
-        status: Option<&str>,
-    ) -> Result<(), String> {
+    pub(crate) fn classify_execution_status(&mut self, status: Option<&str>) -> Result<(), String> {
         self.terminal_execution_status = status.map(ToString::to_string);
         let Some(status) = status else {
             self.invalidate(QualificationInvalidation::ExecutionUnavailable);
@@ -792,9 +791,7 @@ impl QualificationSession {
         }
     }
 
-    pub(crate) fn from_persisted(
-        persisted: PersistedQualificationSession,
-    ) -> Result<Self, String> {
+    pub(crate) fn from_persisted(persisted: PersistedQualificationSession) -> Result<Self, String> {
         if persisted.session_schema_version != SESSION_SCHEMA_VERSION {
             return Err("qualification session schema version is unsupported".to_string());
         }
@@ -810,7 +807,10 @@ impl QualificationSession {
         }
         if persisted.target_id != persisted.target.target_id
             || persisted.workflow_id.is_empty()
-            || persisted.human_checkpoints.iter().any(|checkpoint| checkpoint.id.is_empty())
+            || persisted
+                .human_checkpoints
+                .iter()
+                .any(|checkpoint| checkpoint.id.is_empty())
         {
             return Err("qualification session binding is inconsistent".to_string());
         }
@@ -825,7 +825,7 @@ impl QualificationSession {
                 .find(|declared| declared.id == checkpoint.checkpoint_id)
                 .ok_or_else(|| "qualification session records an unknown checkpoint".to_string())?;
             if !declaration.allowed_outcomes.contains(&checkpoint.outcome)
-                || checkpoint.observed_at.is_empty()
+                || validate_checkpoint_timestamp(&checkpoint.observed_at).is_err()
             {
                 return Err("qualification session checkpoint record is invalid".to_string());
             }
@@ -895,6 +895,54 @@ fn validate_session_handle(handle: &str) -> Result<(), String> {
             .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
     {
         return Err("qualification session handle is invalid".to_string());
+    }
+    Ok(())
+}
+
+fn validate_checkpoint_timestamp(timestamp: &str) -> Result<(), String> {
+    let bytes = timestamp.as_bytes();
+    let fixed_shape = bytes.len() >= 20
+        && bytes[4] == b'-'
+        && bytes[7] == b'-'
+        && bytes[10] == b'T'
+        && bytes[13] == b':'
+        && bytes[16] == b':'
+        && bytes[0..4].iter().all(u8::is_ascii_digit)
+        && bytes[5..7].iter().all(u8::is_ascii_digit)
+        && bytes[8..10].iter().all(u8::is_ascii_digit)
+        && bytes[11..13].iter().all(u8::is_ascii_digit)
+        && bytes[14..16].iter().all(u8::is_ascii_digit)
+        && bytes[17..19].iter().all(u8::is_ascii_digit);
+    if !fixed_shape {
+        return Err("qualification checkpoint timestamp is invalid".to_string());
+    }
+    let mut timezone_start = 19;
+    if bytes.get(timezone_start) == Some(&b'.') {
+        timezone_start += 1;
+        let fraction_start = timezone_start;
+        while bytes.get(timezone_start).is_some_and(u8::is_ascii_digit) {
+            timezone_start += 1;
+        }
+        if timezone_start == fraction_start {
+            return Err("qualification checkpoint timestamp is invalid".to_string());
+        }
+    }
+    let valid_timezone = match bytes.get(timezone_start) {
+        Some(b'Z') => timezone_start + 1 == bytes.len(),
+        Some(b'+' | b'-') => {
+            timezone_start + 6 == bytes.len()
+                && bytes[timezone_start + 3] == b':'
+                && bytes[timezone_start + 1..timezone_start + 3]
+                    .iter()
+                    .all(u8::is_ascii_digit)
+                && bytes[timezone_start + 4..timezone_start + 6]
+                    .iter()
+                    .all(u8::is_ascii_digit)
+        }
+        _ => false,
+    };
+    if !valid_timezone || OffsetDateTime::parse(timestamp, &Rfc3339).is_err() {
+        return Err("qualification checkpoint timestamp is invalid".to_string());
     }
     Ok(())
 }
@@ -1032,13 +1080,10 @@ fn safe_qualification_error(code: &str) -> String {
             "The qualification source state changed. Rebuild from the unchanged committed source."
         }
         "qualification_candidate_invalid" => {
-            "The qualification target candidate is invalid or no longer available."
+            "The qualification target, session, or candidate is invalid or no longer available."
         }
         "qualification_target_unverified" => {
             "The connected device target could not be verified from trusted observations."
-        }
-        "qualification_candidate_invalid" => {
-            "The qualification session or candidate is invalid or no longer available."
         }
         "qualification_review_mismatch" => {
             "The reviewed production plan does not match this qualification session."
@@ -1285,11 +1330,7 @@ pub fn begin_qualification_session(
         "deviceTargetId": request.target_id,
     });
     let candidate_handle = repository
-        .create_candidate(
-            CandidateKind::QualificationRun,
-            &provisional_payload,
-            None,
-        )
+        .create_candidate(CandidateKind::QualificationRun, &provisional_payload, None)
         .map_err(|_| safe_qualification_error("qualification_candidate_invalid"))?;
     let session_handle = session_handle_for_candidate(&candidate_handle)?;
     let mut session = QualificationSession::new(
@@ -1500,7 +1541,10 @@ pub fn finalize_qualification_candidate(
             session.classify_execution_status(binding.status.as_deref())?;
             if binding.terminal
                 && binding.report_available
-                && binding.status.as_deref().is_some_and(is_terminal_execution_status)
+                && binding
+                    .status
+                    .as_deref()
+                    .is_some_and(is_terminal_execution_status)
             {
                 let report = state
                     .executions
@@ -1591,11 +1635,8 @@ fn capture_target_registration_payload_from(
     request: &CreateQualificationTargetCandidateRequest,
     build: &QualificationBuildIdentity,
 ) -> Result<Value, String> {
-    let (observation, capabilities) = observe_device_from_source(
-        source,
-        &request.device_handle,
-        &request.device_plan,
-    )?;
+    let (observation, capabilities) =
+        observe_device_from_source(source, &request.device_handle, &request.device_plan)?;
     let target = QualificationTargetCandidateTarget {
         profile_id: observed_fact(observation.profile_id),
         manufacturer: observed_fact(observation.manufacturer),
@@ -1909,22 +1950,31 @@ fn review_matches_session(
     review: &crate::handles::ReviewedPlanSnapshot,
 ) -> bool {
     if review.device_handle != session.device_handle()
-        || review
-            .response
-            .get("devicePlan")
-            .and_then(Value::as_str)
-            != Some(session.device_plan())
+        || review.response.get("devicePlan").and_then(Value::as_str) != Some(session.device_plan())
     {
         return false;
     }
-    let Some(recipes) = review.response.get("selectedRecipes").and_then(Value::as_array) else {
+    let Some(recipes) = review
+        .response
+        .get("selectedRecipes")
+        .and_then(Value::as_array)
+    else {
         return false;
     };
     let recipes = recipes
         .iter()
         .map(Value::as_str)
         .collect::<Option<Vec<_>>>();
-    if recipes.as_deref() != Some(session.required_recipes().iter().map(String::as_str).collect::<Vec<_>>().as_slice()) {
+    if recipes.as_deref()
+        != Some(
+            session
+                .required_recipes()
+                .iter()
+                .map(String::as_str)
+                .collect::<Vec<_>>()
+                .as_slice(),
+        )
+    {
         return false;
     }
     let target = &review.target;
@@ -1940,9 +1990,7 @@ fn review_matches_session(
     }
     target.get("manufacturer").and_then(Value::as_str) == Some(&session.target().manufacturer)
         && target.get("model").and_then(Value::as_str) == Some(&session.target().model)
-        && target
-            .get("androidApiLevel")
-            .and_then(Value::as_u64)
+        && target.get("androidApiLevel").and_then(Value::as_u64)
             == Some(session.target().android_api)
 }
 
@@ -1960,8 +2008,14 @@ fn run_candidate_payload(
 ) -> Result<Value, String> {
     let mut authored_content = Vec::new();
     for recipe_id in session.required_recipes() {
-        if recipe_id.is_empty() || recipe_id.contains('/') || recipe_id.contains('\\') || recipe_id.contains("..") {
-            return Err(safe_qualification_error("qualification_finalization_failed"));
+        if recipe_id.is_empty()
+            || recipe_id.contains('/')
+            || recipe_id.contains('\\')
+            || recipe_id.contains("..")
+        {
+            return Err(safe_qualification_error(
+                "qualification_finalization_failed",
+            ));
         }
         let path = repository
             .repo_root()
@@ -1998,7 +2052,11 @@ fn run_candidate_payload(
         let outcome = match session.terminal_execution_status() {
             Some("succeeded") | Some("succeeded_with_warnings") => "passed",
             Some("failed") => "failed",
-            _ => return Err(safe_qualification_error("qualification_finalization_failed")),
+            _ => {
+                return Err(safe_qualification_error(
+                    "qualification_finalization_failed",
+                ))
+            }
         };
         session
             .automated_observations()
@@ -2785,13 +2843,25 @@ mod tests {
     }
 
     #[test]
+    fn android_version_drift_permanently_invalidates_the_session() {
+        let mut session = test_session();
+        let mut observation = test_observation();
+        observation.android_version = "16".to_string();
+        session.observe_matching_device(observation);
+        assert_eq!(session.run_validity(), RunValidity::Invalid);
+        assert_eq!(
+            session.invalid_reason().as_deref(),
+            Some("android_version_changed")
+        );
+        session.observe_matching_device(test_observation());
+        assert_eq!(session.run_validity(), RunValidity::Invalid);
+    }
+
+    #[test]
     fn checkpoint_ids_and_outcomes_must_come_from_the_workflow_contract() {
         let mut session = checkpoint_session();
         assert!(session
-            .record_checkpoint(
-                "device_behavior_verified",
-                CheckpointOutcome::Pass
-            )
+            .record_checkpoint("device_behavior_verified", CheckpointOutcome::Pass)
             .is_ok());
         assert!(session
             .record_checkpoint("invented", CheckpointOutcome::Pass)
@@ -2803,7 +2873,10 @@ mod tests {
             )
             .is_ok());
         assert_eq!(session.run_validity(), RunValidity::Invalid);
-        assert_eq!(session.qualification_outcome(), QualificationOutcome::NotObserved);
+        assert_eq!(
+            session.qualification_outcome(),
+            QualificationOutcome::NotObserved
+        );
     }
 
     #[test]
@@ -2824,6 +2897,33 @@ mod tests {
     }
 
     #[test]
+    fn checkpoint_timestamps_require_rfc3339_and_preserve_original_bytes() {
+        let mut session = checkpoint_session();
+        let timestamp = "2026-08-23T12:34:56.123456789+05:30";
+        session
+            .record_checkpoint_at(
+                "device_behavior_verified",
+                CheckpointOutcome::Pass,
+                timestamp,
+            )
+            .unwrap();
+        assert_eq!(session.recorded_checkpoints()[0].observed_at, timestamp);
+        let restored = QualificationSession::from_persisted(session.to_persisted()).unwrap();
+        assert_eq!(restored.recorded_checkpoints()[0].observed_at, timestamp);
+
+        let mut invalid_persisted = session.to_persisted();
+        invalid_persisted.recorded_checkpoints[0].observed_at = "not-rfc3339".to_string();
+        assert!(QualificationSession::from_persisted(invalid_persisted).is_err());
+        assert!(session
+            .record_checkpoint_at(
+                "device_behavior_verified",
+                CheckpointOutcome::Pass,
+                "2026-08-23 12:34:56Z",
+            )
+            .is_err());
+    }
+
+    #[test]
     fn prerequisite_checkpoint_failure_invalidates_before_review_binding() {
         let mut session = QualificationSession::for_test(&["clean_or_deliberately_reset_device"]);
         session
@@ -2840,27 +2940,27 @@ mod tests {
     fn execution_status_classification_preserves_reportable_product_failure() {
         let mut session = checkpoint_session();
         session
-            .record_checkpoint(
-                "device_behavior_verified",
-                CheckpointOutcome::Pass,
-            )
+            .record_checkpoint("device_behavior_verified", CheckpointOutcome::Pass)
             .unwrap();
         session.classify_execution("failed").unwrap();
         assert_eq!(session.run_validity(), RunValidity::Valid);
-        assert_eq!(session.qualification_outcome(), QualificationOutcome::Failed);
+        assert_eq!(
+            session.qualification_outcome(),
+            QualificationOutcome::Failed
+        );
     }
 
     #[test]
     fn cancelled_execution_invalidates_without_becoming_a_product_failure() {
         let mut session = checkpoint_session();
         session
-            .record_checkpoint(
-                "device_behavior_verified",
-                CheckpointOutcome::Pass,
-            )
+            .record_checkpoint("device_behavior_verified", CheckpointOutcome::Pass)
             .unwrap();
         session.classify_execution("cancelled").unwrap();
         assert_eq!(session.run_validity(), RunValidity::Invalid);
-        assert_eq!(session.qualification_outcome(), QualificationOutcome::NotObserved);
+        assert_eq!(
+            session.qualification_outcome(),
+            QualificationOutcome::NotObserved
+        );
     }
 }

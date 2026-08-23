@@ -522,6 +522,13 @@ export interface QualificationModeStatus {
   resumableCandidates: QualificationCandidateSummary[];
 }
 
+export interface BeginQualificationSessionRequest {
+  deviceHandle: string;
+  devicePlan: string;
+  targetId: string;
+  workflowId: string;
+}
+
 export interface QualificationRecordedCheckpoint {
   checkpointId: string;
   outcome: QualificationCheckpointOutcome;
@@ -541,6 +548,10 @@ export interface QualificationSessionSnapshot {
   qualificationOutcome: "passed" | "failed" | "not_observed";
   invalidReason: string | null;
   candidate: QualificationCandidateSummary | null;
+}
+
+export interface QualificationRunRecordingResult {
+  runId: string;
 }
 
 export interface RealExecutionConfirmation {

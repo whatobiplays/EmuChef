@@ -556,12 +556,7 @@ impl QualificationRepository {
         let mut bytes = serde_json::to_vec_pretty(&envelope)
             .map_err(|_| "qualification candidate could not be serialized".to_string())?;
         bytes.push(b'\n');
-        write_synced_replaced_file(
-            &directory,
-            CANDIDATE_FILE,
-            CANDIDATE_STAGING_PREFIX,
-            &bytes,
-        )?;
+        write_synced_replaced_file(&directory, CANDIDATE_FILE, CANDIDATE_STAGING_PREFIX, &bytes)?;
         let report_path = directory.join(EXECUTION_REPORT_FILE);
         match report_bytes {
             Some(report_bytes) => write_synced_replaced_file(
@@ -574,8 +569,9 @@ impl QualificationRepository {
                 Ok(metadata) if metadata.file_type().is_symlink() || !metadata.is_file() => {
                     return Err("qualification execution report is not regular".to_string())
                 }
-                Ok(_) => fs::remove_file(report_path)
-                    .map_err(|_| "qualification execution report could not be removed".to_string())?,
+                Ok(_) => fs::remove_file(report_path).map_err(|_| {
+                    "qualification execution report could not be removed".to_string()
+                })?,
                 Err(error) if error.kind() == io::ErrorKind::NotFound => {}
                 Err(_) => {
                     return Err("qualification execution report could not be inspected".to_string())
@@ -2468,7 +2464,8 @@ mod tests {
     #[test]
     fn persisted_session_survives_repository_restart_without_becoming_candidate_data() {
         let temp = TempDir::new().expect("temporary repository should be created");
-        let repository = repository_with_embedded_build(&temp, FakeQualificationToolRunner::default());
+        let repository =
+            repository_with_embedded_build(&temp, FakeQualificationToolRunner::default());
         let candidate_handle = repository
             .create_candidate(
                 CandidateKind::QualificationRun,
@@ -2479,14 +2476,15 @@ mod tests {
                 None,
             )
             .expect("session candidate should be stored");
-        let mut persisted = QualificationSession::for_test(&["device_behavior_verified"])
-            .to_persisted();
+        let mut persisted =
+            QualificationSession::for_test(&["device_behavior_verified"]).to_persisted();
         persisted.candidate_handle = candidate_handle.clone();
         repository
             .save_session(&candidate_handle, &persisted)
             .expect("session should be persisted");
 
-        let restarted = repository_with_embedded_build(&temp, FakeQualificationToolRunner::default());
+        let restarted =
+            repository_with_embedded_build(&temp, FakeQualificationToolRunner::default());
         let restored = restarted
             .load_session(&candidate_handle)
             .expect("session should survive restart");
