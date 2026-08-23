@@ -1285,6 +1285,39 @@ cannot replace current qualification state. The current production target
 registry remains empty, so repository validation and matrix generation still
 make no claim that any physical device is qualified.
 
+The development-only qualification mode exposes target-registration status and
+capture through the existing EmuChef application workflow. Its status command
+returns an empty disabled projection without starting Node unless all four
+runtime gates pass: debug build, compiled `real-execution` feature, embedded
+clean-build identity, and `EMUCHEF_DEVICE_QUALIFICATION=1`. An enabled status
+uses the canonical repository `--describe` operation, keeps
+`runtimeContract` separate from the embedded build identity, projects
+workflow and registered-target selectors, and includes restart-safe candidate
+summaries. A current repository/build mismatch makes the mode non-recordable
+until a fresh clean build is produced.
+
+Target capture accepts only an opaque device handle, an opaque authored device
+plan, and the attested `usb2` or `usb3` connection enum. Rust resolves the
+selected plan through the production probe/match path, obtains identity and
+capability facts from the existing production device qualification path, and
+obtains root state only through the existing explicit root-check authority.
+Captured schema-v2 facts retain `production_observation`,
+`explicit_root_check`, or `operator_attestation` provenance. Package-manager
+and storage availability map exactly to `apk_install` and
+`shared_storage_write`; unavailable or failed root verification rejects the
+candidate. The review preview is read-only and contains the exact typed facts
+and sources persisted in the opaque candidate directory.
+
+Target registration and candidate discard are explicit Tauri actions. The
+registration action accepts only an opaque candidate handle, delegates
+validation and deterministic target identity/mutation to
+`tools/device-qualification.mjs`, and returns the canonical target ID plus a
+`requiresCommitAndRebuild` consequence. The discard action removes only the
+validated candidate directory beneath the fixed runtime root. React receives
+only these opaque handles and sanitized DTOs; it has no repository, candidate,
+evidence, executable, or process authority. No target or physical evidence is
+created by the qualification-mode implementation itself.
+
 ## Phase 6D.6 physical interruption qualification
 
 The ignored Rust physical harness is fail-closed and fail-reporting: explicit

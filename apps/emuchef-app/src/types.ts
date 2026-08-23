@@ -429,6 +429,99 @@ export interface RootQualificationCheck {
   readonly deviceIdentity: string;
 }
 
+export type QualificationCheckpointOutcome = "pass" | "fail" | "unable_to_verify";
+export type QualificationConnectionType = "usb2" | "usb3";
+
+export interface QualificationBuildIdentity {
+  appVersion: string;
+  gitCommit: string;
+  materialBuildDigest: string;
+  realExecutionEnabled: true;
+  qualificationContract: number;
+}
+
+export interface QualificationWorkflow {
+  id: string;
+  version: number;
+  purpose: string;
+  productionRecipes: string[];
+  requiredCapabilities: string[];
+  prerequisites: string[];
+  humanCheckpoints: Array<{
+    id: string;
+    instruction: string;
+    fact: string;
+    allowedOutcomes: QualificationCheckpointOutcome[];
+    required: boolean;
+  }>;
+}
+
+export interface QualificationTargetSummary {
+  id: string;
+  profileId: string;
+  manufacturer: string;
+  model: string;
+  androidVersion: string;
+  androidApi: number;
+  abiSocClass: string;
+  rootState: "non_root" | "rooted";
+  connectionType: QualificationConnectionType;
+  firmwareBuild: string;
+}
+
+export type QualificationFactSource =
+  | "production_observation"
+  | "explicit_root_check"
+  | "operator_attestation";
+
+export interface QualificationFactPreview<T> {
+  value: T;
+  source: QualificationFactSource;
+}
+
+export interface QualificationTargetCandidatePreview {
+  candidateHandle: string;
+  kind: "target_registration";
+  capturedAt: string;
+  target: {
+    profileId: QualificationFactPreview<string>;
+    manufacturer: QualificationFactPreview<string>;
+    model: QualificationFactPreview<string>;
+    androidVersion: QualificationFactPreview<string>;
+    androidApi: QualificationFactPreview<number>;
+    abiSocClass: QualificationFactPreview<string>;
+    rootState: QualificationFactPreview<"non_root" | "rooted">;
+    connectionType: QualificationFactPreview<QualificationConnectionType>;
+    firmwareBuild: QualificationFactPreview<string>;
+    capabilities: string[];
+    deferredWorkflows: string[];
+  };
+  promotable: boolean;
+  nonPromotableReason: string | null;
+}
+
+export interface QualificationCandidateSummary {
+  candidateHandle: string;
+  kind: "target_registration" | "qualification_run";
+  capturedAt: string;
+  promotable: boolean;
+  nonPromotableReason: string | null;
+  target?: QualificationTargetCandidatePreview["target"];
+  runValidity?: "valid" | "invalid";
+  qualificationOutcome?: "passed" | "failed" | "not_observed";
+}
+
+export interface QualificationModeStatus {
+  enabled: boolean;
+  recordable: boolean;
+  message: string | null;
+  build: QualificationBuildIdentity | null;
+  runtimeContract: string | null;
+  workflows: QualificationWorkflow[];
+  targets: QualificationTargetSummary[];
+  resumableCandidates: QualificationCandidateSummary[];
+}
+
 export interface RealExecutionConfirmation {
   phrase: string;
   irreversibleChangesAcknowledged: boolean;

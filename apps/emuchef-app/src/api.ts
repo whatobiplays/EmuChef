@@ -11,6 +11,9 @@ import type {
   ExecutionCancellation,
   DeviceQualificationSnapshot,
   RootQualificationCheck,
+  QualificationConnectionType,
+  QualificationModeStatus,
+  QualificationTargetCandidatePreview,
   ExecutionCapabilities,
   ExecutionEventBatch,
   ExecutionSnapshot,
@@ -129,6 +132,21 @@ export const api = {
     invoke<DeviceQualificationSnapshot>("get_device_qualification", { deviceHandle }),
   checkDeviceRoot: (deviceHandle: string) =>
     invoke<RootQualificationCheck>("check_device_root", { deviceHandle }),
+  deviceQualificationModeStatus: () =>
+    invoke<QualificationModeStatus>("get_device_qualification_mode_status"),
+  createQualificationTargetCandidate: (request: {
+    deviceHandle: string;
+    devicePlan: string;
+    connectionType: QualificationConnectionType;
+  }) => invoke<QualificationTargetCandidatePreview>("create_qualification_target_candidate", {
+    request,
+  }),
+  registerQualificationTarget: (candidateHandle: string) =>
+    invoke<{ targetId: string; requiresCommitAndRebuild: true }>("register_qualification_target", {
+      candidateHandle,
+    }),
+  discardQualificationCandidate: (candidateHandle: string) =>
+    invoke<void>("discard_qualification_candidate", { candidateHandle }),
   startRealExecution: (reviewHandle: string, confirmation: RealExecutionConfirmation) =>
     invoke<RealExecutionSnapshot>("start_real_execution", {
       request: { reviewHandle, confirmation },

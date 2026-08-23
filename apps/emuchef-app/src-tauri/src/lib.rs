@@ -7,11 +7,8 @@ mod handles;
 mod menu;
 mod phase6d6_ui_smoke;
 mod qualification;
-// The gate API is introduced before the later qualification orchestration
-// layer consumes it, so it is intentionally unused by the ordinary app flow.
-#[allow(dead_code)]
 pub(crate) mod qualification_build;
-#[allow(dead_code)]
+mod qualification_mode;
 pub(crate) mod qualification_repository;
 mod recovery;
 mod saved_configurations;
@@ -60,6 +57,7 @@ pub fn run() {
             app.manage(commands::AppState {
                 sidecar,
                 catalog,
+                qualification_repository: qualification_repository::QualificationRepository::production(),
                 adb: Mutex::new(adb::AdbManager::new(app_data.join("platform-tools"))),
                 platform_tools_selections: Mutex::new(
                     commands::PlatformToolsSelectionStore::default(),
@@ -104,6 +102,10 @@ pub fn run() {
             commands::probe_device,
             device_qualification::check_device_root,
             commands::match_device,
+            qualification_mode::get_device_qualification_mode_status,
+            qualification_mode::create_qualification_target_candidate,
+            qualification_mode::register_qualification_target,
+            qualification_mode::discard_qualification_candidate,
             commands::describe_configuration,
             commands::create_review,
             commands::discard_review,
