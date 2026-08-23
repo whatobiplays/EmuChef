@@ -1,9 +1,7 @@
 {
   "schemaVersion": 2,
-  "runId": "qualification-run-sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
-  "recordDigest": "sha256:9ea482de6bac31f11469828b53beb9a66070051782cd20996b98cc4394f4c709",
-  "capturedAt": "2026-08-20T00:00:00Z",
-  "workflowId": "retroarch-plus-bios",
+  "capturedAt": "2026-08-21T00:04:00Z",
+  "workflowId": "checkpoint-gated",
   "workflowVersion": 1,
   "deviceTarget": {
     "id": "device-target-sha256:8b9f6cf2dc8831a9188c2ad1d85b8a83ea8e8baf0d674943b7d5e9925f047c62",
@@ -54,16 +52,7 @@
       "qualificationContract": 1
     },
     "workflowVersion": 1,
-    "authoredContent": [
-      {
-        "id": "app.retroarch.provision",
-        "sha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
-      },
-      {
-        "id": "feature.copy_bios",
-        "sha256": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
-      }
-    ],
+    "authoredContent": [],
     "runtimeContract": "real-execution-v1",
     "deviceProfile": "ayaneo.pocket_s2",
     "androidApi": 35,
@@ -72,17 +61,27 @@
     "rootState": "non_root",
     "connectionType": "usb3"
   },
-  "fingerprintDigest": "sha256:dbee598ec4620a8b6ac2caa6f96b86278b816546ea4168d44fb5526ac1ec0273",
   "runValidity": "valid",
   "qualificationOutcome": "passed",
   "automatedObservations": [
     {
       "id": "execution-report",
       "outcome": "passed",
-      "observedAt": "2026-08-20T00:01:00Z"
+      "observedAt": "2026-08-21T00:05:00Z"
     }
   ],
   "humanCheckpoints": [],
   "targetWideFailure": null,
-  "limitations": []
+  "limitations": [],
+  "artifacts": [
+    {
+      "id": "execution-report",
+      "kind": "production_execution_report",
+      "path": "execution-report.json",
+      "sha256": "4eca7a03826386b6cb9720fcb0b35ebae2d55c051f9e72b5e52ae3b46a494962"
+    }
+  ],
+  "fingerprintDigest": "sha256:1879d3e8d53b7debc46f97069ec1a60941a23f873c14cd155cc3ebb38a13608a",
+  "runId": "qualification-run-sha256:ea7e7130c8caed34afff2734b487e5db3e443a2479fec8be26f70388505fe86e",
+  "recordDigest": "sha256:de7d9adb30d46769b09868a14ce58642594056b9115ea5aecfc50f9400fe9023"
 }

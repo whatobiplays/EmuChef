@@ -1,8 +1,6 @@
 {
   "schemaVersion": 2,
-  "runId": "qualification-run-sha256:dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd",
-  "recordDigest": "sha256:3891ec8b844015463a438b0555e40aae57b128b546532ac891cce72406485477",
-  "capturedAt": "2026-08-22T00:00:00Z",
+  "capturedAt": "2026-08-18T00:00:00Z",
   "workflowId": "xaniteog-install",
   "workflowVersion": 1,
   "deviceTarget": {
@@ -68,13 +66,27 @@
     "rootState": "non_root",
     "connectionType": "usb3"
   },
-  "fingerprintDigest": "sha256:c61eeb3ff3ffc3ca25f4ec14ae5daa6a0056f0a4abc1b917eef80695460fc4e9",
-  "runValidity": "invalid",
-  "qualificationOutcome": "not_observed",
-  "automatedObservations": [],
+  "runValidity": "valid",
+  "qualificationOutcome": "passed",
+  "automatedObservations": [
+    {
+      "id": "execution-report",
+      "outcome": "passed",
+      "observedAt": "2026-08-18T00:01:00Z"
+    }
+  ],
   "humanCheckpoints": [],
   "targetWideFailure": null,
-  "limitations": [
-    "harness failed before product observation"
-  ]
+  "limitations": [],
+  "artifacts": [
+    {
+      "id": "execution-report",
+      "kind": "production_execution_report",
+      "path": "execution-report.json",
+      "sha256": "4eca7a03826386b6cb9720fcb0b35ebae2d55c051f9e72b5e52ae3b46a494962"
+    }
+  ],
+  "fingerprintDigest": "sha256:c61eeb3ff3ffc3ca25f4ec14ae5daa6a0056f0a4abc1b917eef80695460fc4e9",
+  "runId": "qualification-run-sha256:c7c297fa674427c9e32c91f5aeb319c03d3951734235d38a4b83f4c42f15f1aa",
+  "recordDigest": "sha256:13a10faf2ce3b595fd62d9f056ac6d1c8822650397596f6cd673192c29741bbd"
 }

@@ -1,10 +1,8 @@
 {
   "schemaVersion": 2,
-  "runId": "qualification-run-sha256:4444444444444444444444444444444444444444444444444444444444444444",
-  "recordDigest": "sha256:10a89638dc043613e0707a07f05b7fc1db2c6bdd97454a29a2c93493ddc5e726",
-  "capturedAt": "2026-08-21T00:04:00Z",
-  "workflowId": "checkpoint-gated",
-  "workflowVersion": 1,
+  "capturedAt": "2026-08-21T00:00:00Z",
+  "workflowId": "retroarch-plus-bios",
+  "workflowVersion": 2,
   "deviceTarget": {
     "id": "device-target-sha256:8b9f6cf2dc8831a9188c2ad1d85b8a83ea8e8baf0d674943b7d5e9925f047c62",
     "profileId": {
@@ -53,8 +51,17 @@
       "realExecutionEnabled": true,
       "qualificationContract": 1
     },
-    "workflowVersion": 1,
-    "authoredContent": [],
+    "workflowVersion": 2,
+    "authoredContent": [
+      {
+        "id": "app.retroarch.provision",
+        "sha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+      },
+      {
+        "id": "feature.copy_bios",
+        "sha256": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+      }
+    ],
     "runtimeContract": "real-execution-v1",
     "deviceProfile": "ayaneo.pocket_s2",
     "androidApi": 35,
@@ -63,17 +70,35 @@
     "rootState": "non_root",
     "connectionType": "usb3"
   },
-  "fingerprintDigest": "sha256:1879d3e8d53b7debc46f97069ec1a60941a23f873c14cd155cc3ebb38a13608a",
   "runValidity": "valid",
-  "qualificationOutcome": "passed",
+  "qualificationOutcome": "failed",
   "automatedObservations": [
     {
       "id": "execution-report",
-      "outcome": "passed",
-      "observedAt": "2026-08-21T00:05:00Z"
+      "outcome": "failed",
+      "observedAt": "2026-08-21T00:01:00Z"
     }
   ],
-  "humanCheckpoints": [],
+  "humanCheckpoints": [
+    {
+      "checkpointId": "clean_or_deliberately_reset_device",
+      "outcome": "pass",
+      "observedAt": "2026-08-23T12:30:30Z"
+    }
+  ],
   "targetWideFailure": null,
-  "limitations": []
+  "limitations": [
+    "execution-report failed"
+  ],
+  "artifacts": [
+    {
+      "id": "execution-report",
+      "kind": "production_execution_report",
+      "path": "execution-report.json",
+      "sha256": "4eca7a03826386b6cb9720fcb0b35ebae2d55c051f9e72b5e52ae3b46a494962"
+    }
+  ],
+  "fingerprintDigest": "sha256:7ddccdd0ba72152cd17c247e81081295f0aa645201579596ed7edd31e8b289a5",
+  "runId": "qualification-run-sha256:b33f259745254323b0e910b649b039ce230352b796abc0e91adb1c1f1660da59",
+  "recordDigest": "sha256:2299c59feebaa5118592be922e86e5ab58fa3c1751978bac011ceb1ec05e554f"
 }

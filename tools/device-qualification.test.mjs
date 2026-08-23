@@ -1,6 +1,8 @@
 import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
-import { existsSync, readdirSync, readFileSync } from "node:fs";
+import { createHash } from "node:crypto";
+import { cpSync, existsSync, mkdtempSync, mkdirSync, readdirSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
 import path from "node:path";
 import test from "node:test";
 import { fileURLToPath } from "node:url";
@@ -25,13 +27,19 @@ import {
   deriveWorkflowState,
   evidenceFingerprintDigest,
   evidenceRecordDigest,
+  buildMaterialIdentity,
   loadEvidenceDirectory,
+  loadEvidenceBundle,
   loadDeviceTargets,
   loadWorkflowCatalog,
   materialBuildDigestFromEntries,
   projectQualificationState,
+  recordQualificationRunCandidate,
+  registerQualificationTargetCandidate,
   renderQualificationMatrix,
+  sealEvidenceRecord,
   selectCurrentEvidence,
+  validateEvidenceBundle,
   validateEvidenceRecord,
   validateEvidenceSchemaContract,
   validateDeviceTargets,
@@ -59,20 +67,33 @@ function syntheticContext() {
 }
 
 function recordFor(relative) {
-  return JSON.parse(readFileSync(path.join(FIXTURES, relative), "utf8"));
+  const resolved = path.join(FIXTURES, relative);
+  const evidencePath = statSync(resolved).isDirectory()
+    ? path.join(resolved, "evidence.json")
+    : resolved;
+  return JSON.parse(readFileSync(evidencePath, "utf8"));
 }
 
 function sealRecord(record) {
-  record.recordDigest = evidenceRecordDigest(record);
-  return record;
+  return sealEvidenceRecord(record);
 }
 
 function checkpointGatedRecord() {
-  const record = recordFor("evidence-valid/passing-retroarch-bios.json");
+  const record = recordFor("evidence-valid/passing-retroarch-bios");
   record.runId = `qualification-run-sha256:${"7".repeat(64)}`;
   record.capturedAt = "2026-08-21T02:00:00Z";
   record.workflowId = "checkpoint-gated";
+  record.workflowVersion = 1;
+  record.artifacts = [
+    {
+      id: "execution-report",
+      kind: "production_execution_report",
+      path: "execution-report.json",
+      sha256: createHash("sha256").update(REPORT_BYTES).digest("hex"),
+    },
+  ];
   record.fingerprint.authoredContent = [];
+  record.fingerprint.workflowVersion = 1;
   record.fingerprintDigest = evidenceFingerprintDigest(record.fingerprint);
   record.automatedObservations = [
     { id: "execution-report", outcome: "passed", observedAt: "2026-08-21T02:01:00Z" },
@@ -101,19 +122,23 @@ const AUTHORED_DIGESTS = {
 };
 
 function projectionContext() {
+  const workflowCatalog = loadWorkflowCatalog(path.join(FIXTURES, "definitions-valid/workflow-catalog.json"));
+  const targets = loadDeviceTargets(
+    path.join(FIXTURES, "projection/device-targets.json"),
+    { authoredProfilesDir: AUTHORED_PROFILES },
+  ).targets;
+  const records = readdirSync(path.join(FIXTURES, "projection/evidence"), { withFileTypes: true })
+    .filter((entry) => entry.isDirectory())
+    .sort((left, right) => left.name.localeCompare(right.name))
+    .map((entry) => {
+      const bundle = loadEvidenceBundle(path.join(FIXTURES, "projection/evidence", entry.name));
+      validateEvidenceBundle(bundle, { workflowCatalog, targets });
+      return bundle.record;
+    });
   return {
-    workflowCatalog: loadWorkflowCatalog(path.join(FIXTURES, "definitions-valid/workflow-catalog.json")),
-    targets: loadDeviceTargets(
-      path.join(FIXTURES, "projection/device-targets.json"),
-      { authoredProfilesDir: AUTHORED_PROFILES },
-    ).targets,
-    records: [
-      "qualified.json",
-      "failed-newer.json",
-      "stale.json",
-      "invalid-newer.json",
-      "xaniteog-passed-older.json",
-    ].map((name) => JSON.parse(readFileSync(path.join(FIXTURES, "projection/evidence", name), "utf8"))),
+    workflowCatalog,
+    targets,
+    records,
   };
 }
 
@@ -140,6 +165,175 @@ function projectionState(context, targetId, workflowId) {
     currentFingerprint: currentFingerprint(workflow, target),
     records: context.records,
   });
+}
+
+const REPORT_BYTES = Buffer.from('{"schemaVersion":1,"status":"succeeded"}\n', "utf8");
+
+function copyTrackedFile(repoRoot, relativePath) {
+  const destination = path.join(repoRoot, relativePath);
+  mkdirSync(path.dirname(destination), { recursive: true });
+  cpSync(path.join(REPO_ROOT, relativePath), destination);
+}
+
+function createTempQualificationRepo({ deviceTargetsSource } = {}) {
+  const repoRoot = mkdtempSync(path.join(tmpdir(), "device-qualification-"));
+  mkdirSync(path.join(repoRoot, "docs/testing/device-qualification/evidence"), { recursive: true });
+  mkdirSync(path.join(repoRoot, "docs/qualification"), { recursive: true });
+  mkdirSync(path.join(repoRoot, "authored/recipes"), { recursive: true });
+  mkdirSync(path.join(repoRoot, "authored/device_profiles"), { recursive: true });
+  mkdirSync(path.join(repoRoot, "apps/emuchef-app/src-tauri"), { recursive: true });
+
+  copyTrackedFile(repoRoot, "apps/emuchef-app/package.json");
+  copyTrackedFile(repoRoot, "apps/emuchef-app/package-lock.json");
+  copyTrackedFile(repoRoot, "apps/emuchef-app/src-tauri/Cargo.toml");
+  copyTrackedFile(repoRoot, "apps/emuchef-app/src-tauri/Cargo.lock");
+  copyTrackedFile(repoRoot, "apps/emuchef-app/src-tauri/tauri.conf.json");
+  copyTrackedFile(repoRoot, "docs/testing/device-qualification/evidence-schema.json");
+  copyTrackedFile(repoRoot, "docs/testing/device-qualification/workflow-catalog.json");
+  copyTrackedFile(repoRoot, "docs/testing/device-qualification/evidence/README.md");
+  copyTrackedFile(repoRoot, "docs/qualification/device-qualification-matrix.md");
+  cpSync(path.join(REPO_ROOT, "authored/device_profiles"), path.join(repoRoot, "authored/device_profiles"), { recursive: true });
+
+  const workflowCatalog = JSON.parse(readFileSync(
+    path.join(REPO_ROOT, "docs/testing/device-qualification/workflow-catalog.json"),
+    "utf8",
+  ));
+  const recipeIds = [...new Set(workflowCatalog.workflows.flatMap((workflow) => workflow.productionRecipes))];
+  for (const recipeId of recipeIds) {
+    copyTrackedFile(repoRoot, `authored/recipes/${recipeId}.yaml`);
+  }
+
+  const targetsSource = deviceTargetsSource
+    ?? path.join(REPO_ROOT, "docs/testing/device-qualification/device-targets.json");
+  copyTrackedFile(repoRoot, path.relative(REPO_ROOT, targetsSource));
+  if (targetsSource !== path.join(REPO_ROOT, "docs/testing/device-qualification/device-targets.json")) {
+    cpSync(
+      targetsSource,
+      path.join(repoRoot, "docs/testing/device-qualification/device-targets.json"),
+    );
+  }
+
+  execFileSync("git", ["init"], { cwd: repoRoot, stdio: "pipe" });
+  execFileSync("git", ["config", "user.name", "Codex"], { cwd: repoRoot, stdio: "pipe" });
+  execFileSync("git", ["config", "user.email", "codex@example.com"], { cwd: repoRoot, stdio: "pipe" });
+  execFileSync("git", ["add", "."], { cwd: repoRoot, stdio: "pipe" });
+  execFileSync("git", ["commit", "-m", "initial qualification fixture"], { cwd: repoRoot, stdio: "pipe" });
+  return repoRoot;
+}
+
+function authoredDigestsForRepo(repoRoot, workflowCatalog) {
+  return Object.fromEntries(
+    workflowCatalog.workflows
+      .flatMap((workflow) => workflow.productionRecipes)
+      .filter((value, index, all) => all.indexOf(value) === index)
+      .map((recipeId) => {
+        const bytes = readFileSync(path.join(repoRoot, "authored/recipes", `${recipeId}.yaml`));
+        return [recipeId, createHash("sha256").update(bytes).digest("hex")];
+      }),
+  );
+}
+
+function targetRegistrationCandidateForRepo(repoRoot, {
+  candidateId = "qualification-candidate-0123456789abcdef0123456789abcdef",
+} = {}) {
+  const build = buildMaterialIdentity({ repoRoot, requireClean: false });
+  const target = structuredClone(readJson("definitions-valid/device-targets.json").targets[0]);
+  delete target.id;
+  return {
+    candidateSchemaVersion: 1,
+    candidateId,
+    kind: "target_registration",
+    capturedAt: "2026-08-23T12:00:00Z",
+    build,
+    target,
+  };
+}
+
+function runCandidateForRepo(repoRoot, {
+  candidateId = "qualification-candidate-fedcba9876543210fedcba9876543210",
+} = {}) {
+  const workflowCatalog = loadWorkflowCatalog(path.join(repoRoot, "docs/testing/device-qualification/workflow-catalog.json"));
+  const targets = loadDeviceTargets(
+    path.join(repoRoot, "docs/testing/device-qualification/device-targets.json"),
+    { authoredProfilesDir: path.join(repoRoot, "authored/device_profiles") },
+  ).targets;
+  const workflow = workflowCatalog.workflows.find((item) => item.id === "retroarch-plus-bios");
+  const target = targets[0];
+  const build = buildMaterialIdentity({ repoRoot, requireClean: false });
+  const fingerprint = buildCurrentFingerprint({
+    workflow,
+    target,
+    currentBuild: build,
+    runtimeContract: RUNTIME_CONTRACT,
+    authoredContentDigests: authoredDigestsForRepo(repoRoot, workflowCatalog),
+  });
+  return {
+    candidateSchemaVersion: 1,
+    candidateId,
+    kind: "qualification_run",
+    capturedAt: "2026-08-23T12:30:00Z",
+    build,
+    workflowId: workflow.id,
+    workflowVersion: workflow.version,
+    deviceTargetId: target.id,
+    fingerprint,
+    runValidity: "valid",
+    qualificationOutcome: "passed",
+    automatedObservations: [
+      { id: "execution-report", outcome: "passed", observedAt: "2026-08-23T12:31:00Z" },
+    ],
+    humanCheckpoints: [
+      {
+        checkpointId: "clean_or_deliberately_reset_device",
+        outcome: "pass",
+        observedAt: "2026-08-23T12:30:30Z",
+      },
+    ],
+    targetWideFailure: null,
+    limitations: [],
+    artifacts: [
+      {
+        id: "execution-report",
+        kind: "production_execution_report",
+        path: "execution-report.json",
+        sha256: createHash("sha256").update(REPORT_BYTES).digest("hex"),
+      },
+    ],
+  };
+}
+
+function writeCandidateFixture(repoRoot, candidate, reportBytes = null) {
+  const directory = path.join(repoRoot, ".emuchef_runtime/qualification-candidates", candidate.candidateId);
+  mkdirSync(directory, { recursive: true });
+  writeFileSync(path.join(directory, "candidate.json"), `${JSON.stringify(candidate, null, 2)}\n`, "utf8");
+  if (reportBytes !== null) {
+    writeFileSync(path.join(directory, "execution-report.json"), reportBytes);
+  }
+}
+
+function snapshotTree(root) {
+  if (!existsSync(root)) {
+    return [];
+  }
+  const entries = [];
+  const walk = (current, relative) => {
+    for (const entry of readdirSync(current, { withFileTypes: true }).sort((left, right) => left.name.localeCompare(right.name))) {
+      const nextRelative = relative ? path.join(relative, entry.name) : entry.name;
+      const fullPath = path.join(current, entry.name);
+      if (entry.isDirectory()) {
+        entries.push({ type: "dir", path: nextRelative });
+        walk(fullPath, nextRelative);
+      } else {
+        entries.push({
+          type: "file",
+          path: nextRelative,
+          content: readFileSync(fullPath, "utf8"),
+        });
+      }
+    }
+  };
+  walk(root, "");
+  return entries;
 }
 
 test("loads a strict version-1 workflow catalog from fixtures", () => {
@@ -222,7 +416,7 @@ test("target identity excludes provenance source and policy fields", () => {
 
 test("schema-v2 evidence records require qualification run ids", () => {
   const context = syntheticContext();
-  const record = recordFor("evidence-valid/passing-retroarch-bios.json");
+  const record = recordFor("evidence-valid/passing-retroarch-bios");
   assert.match(record.runId, /^qualification-run-sha256:[0-9a-f]{64}$/);
 
   const oldPrefix = structuredClone(record);
@@ -386,6 +580,22 @@ test("production catalog loads and every production recipe exists", () => {
   }
 });
 
+test("production catalog binds retroarch prerequisite review to a required human checkpoint", () => {
+  const catalog = loadWorkflowCatalog(path.join(REPO_ROOT, "docs/testing/device-qualification/workflow-catalog.json"));
+  const retroarch = catalog.workflows.find((workflow) => workflow.id === "retroarch-plus-bios");
+  assert.equal(retroarch.version, 2);
+  assert.deepEqual(retroarch.prerequisites, ["clean_or_deliberately_reset_device"]);
+  assert.deepEqual(retroarch.humanCheckpoints, [
+    {
+      id: "clean_or_deliberately_reset_device",
+      instruction: "Before execution, verify the connected device is clean or has been deliberately reset to the intended qualification baseline.",
+      fact: "The device was clean or deliberately reset before this qualification run.",
+      allowedOutcomes: ["pass", "fail", "unable_to_verify"],
+      required: true,
+    },
+  ]);
+});
+
 test("production device registry starts with no targets", () => {
   const targets = loadDeviceTargets(
     path.join(REPO_ROOT, "docs/testing/device-qualification/device-targets.json"),
@@ -416,6 +626,135 @@ test("the evidence schema matches the validator contract", () => {
     [...CHECKPOINT_OUTCOMES].sort(),
   );
   assert.doesNotThrow(() => validateEvidenceSchemaContract(schema));
+});
+
+test("valid evidence requires one digest-bound production execution report", () => {
+  const bundle = loadEvidenceBundle(path.join(FIXTURES, "evidence-valid/passing-retroarch-bios"));
+  assert.equal(bundle.record.runValidity, "valid");
+  assert.equal(bundle.record.artifacts.length, 1);
+  assert.equal(bundle.record.artifacts[0].id, "execution-report");
+  assert.doesNotThrow(() => validateEvidenceBundle(bundle, syntheticContext()));
+});
+
+test("invalid audit evidence may omit report only when it is not referenced", () => {
+  const bundle = loadEvidenceBundle(path.join(FIXTURES, "evidence-valid/invalid-report-unavailable"));
+  assert.equal(bundle.record.runValidity, "invalid");
+  assert.deepEqual(bundle.record.artifacts, []);
+  assert.equal(bundle.reportBytes, null);
+  assert.doesNotThrow(() => validateEvidenceBundle(bundle, syntheticContext()));
+});
+
+test("changing a bound report invalidates the bundle", () => {
+  const bundle = loadEvidenceBundle(path.join(FIXTURES, "evidence-valid/passing-retroarch-bios"));
+  assert.throws(
+    () => validateEvidenceBundle({ ...bundle, reportBytes: Buffer.from("{}") }, syntheticContext()),
+    /execution report digest/i,
+  );
+});
+
+test("a retroarch run cannot validate as valid when its required human checkpoint is missing", () => {
+  const bundle = loadEvidenceBundle(path.join(FIXTURES, "evidence-valid/passing-retroarch-bios"));
+  const unsealed = structuredClone(bundle.record);
+  delete unsealed.runId;
+  delete unsealed.recordDigest;
+  delete unsealed.fingerprintDigest;
+  unsealed.humanCheckpoints = [];
+  const resealed = sealEvidenceRecord(unsealed);
+  assert.throws(
+    () => validateEvidenceBundle({ ...bundle, record: resealed }, syntheticContext()),
+    /missing required human checkpoint/i,
+  );
+});
+
+test("recording the same target or run twice rejects the second write without mutating canonical bytes", () => {
+  const emptyRepo = createTempQualificationRepo();
+  try {
+    const targetCandidate = targetRegistrationCandidateForRepo(emptyRepo);
+    writeCandidateFixture(emptyRepo, targetCandidate);
+    const targetPaths = {
+      repoRoot: emptyRepo,
+      fsOps: undefined,
+    };
+    registerQualificationTargetCandidate(targetCandidate.candidateId, targetPaths);
+    const registeredBytes = readFileSync(
+      path.join(emptyRepo, "docs/testing/device-qualification/device-targets.json"),
+      "utf8",
+    );
+    assert.throws(
+      () => registerQualificationTargetCandidate(targetCandidate.candidateId, targetPaths),
+      /already exists|immutable|duplicate/i,
+    );
+    assert.equal(
+      readFileSync(path.join(emptyRepo, "docs/testing/device-qualification/device-targets.json"), "utf8"),
+      registeredBytes,
+    );
+  } finally {
+    rmSync(emptyRepo, { recursive: true, force: true });
+  }
+
+  const seededRepo = createTempQualificationRepo({
+    deviceTargetsSource: path.join(FIXTURES, "definitions-valid/device-targets.json"),
+  });
+  try {
+    const runCandidate = runCandidateForRepo(seededRepo);
+    writeCandidateFixture(seededRepo, runCandidate, REPORT_BYTES);
+    const recordPaths = {
+      repoRoot: seededRepo,
+      fsOps: undefined,
+    };
+    const firstRecord = recordQualificationRunCandidate(runCandidate.candidateId, recordPaths);
+    const evidenceRoot = path.join(seededRepo, "docs/testing/device-qualification/evidence");
+    const before = snapshotTree(evidenceRoot);
+    assert.ok(firstRecord.runId);
+    assert.throws(
+      () => recordQualificationRunCandidate(runCandidate.candidateId, recordPaths),
+      /already exists|immutable|duplicate/i,
+    );
+    assert.deepEqual(snapshotTree(evidenceRoot), before);
+  } finally {
+    rmSync(seededRepo, { recursive: true, force: true });
+  }
+});
+
+test("recording a run rolls back the newly created evidence bundle when matrix replacement fails", () => {
+  const repoRoot = createTempQualificationRepo({
+    deviceTargetsSource: path.join(FIXTURES, "definitions-valid/device-targets.json"),
+  });
+  try {
+    const runCandidate = runCandidateForRepo(repoRoot, {
+      candidateId: "qualification-candidate-00112233445566778899aabbccddeeff",
+    });
+    writeCandidateFixture(repoRoot, runCandidate, REPORT_BYTES);
+    const evidenceRoot = path.join(repoRoot, "docs/testing/device-qualification/evidence");
+    const registryPath = path.join(repoRoot, "docs/testing/device-qualification/device-targets.json");
+    const beforeEvidence = snapshotTree(evidenceRoot);
+    const beforeRegistry = readFileSync(registryPath, "utf8");
+    let renameCount = 0;
+    assert.throws(
+      () => recordQualificationRunCandidate(runCandidate.candidateId, {
+        repoRoot,
+        fsOps: {
+          mkdirSync,
+          renameSync(source, destination) {
+            renameCount += 1;
+            if (renameCount === 2) {
+              throw new Error("forced matrix replacement failure");
+            }
+            rmSync(destination, { recursive: true, force: true });
+            cpSync(source, destination, { recursive: true });
+            rmSync(source, { recursive: true, force: true });
+          },
+          rmSync,
+          writeFileSync,
+        },
+      }),
+      /forced matrix replacement failure/i,
+    );
+    assert.deepEqual(snapshotTree(evidenceRoot), beforeEvidence);
+    assert.equal(readFileSync(registryPath, "utf8"), beforeRegistry);
+  } finally {
+    rmSync(repoRoot, { recursive: true, force: true });
+  }
 });
 
 test("validateEvidenceSchemaContract rejects qualification build identity schema drift", () => {
@@ -453,20 +792,21 @@ test("validateEvidenceSchemaContract rejects qualification build identity schema
 
 test("a passing evidence fixture validates with its stored digests", () => {
   assert.doesNotThrow(() => validateEvidenceRecord(
-    recordFor("evidence-valid/passing-retroarch-bios.json"),
+    recordFor("evidence-valid/passing-retroarch-bios"),
     syntheticContext(),
   ));
 });
 
 test("a valid failed evidence fixture validates", () => {
   assert.doesNotThrow(() => validateEvidenceRecord(
-    recordFor("evidence-valid/failed-retroarch-bios.json"),
+    recordFor("evidence-valid/failed-retroarch-bios"),
     syntheticContext(),
   ));
 });
 
 test("rejects a fingerprint digest that does not match structured inputs", () => {
-  const record = recordFor("evidence-invalid/bad-digest.json");
+  const record = recordFor("evidence-valid/passing-retroarch-bios");
+  record.fingerprintDigest = `sha256:${"0".repeat(64)}`;
   assert.throws(
     () => validateEvidenceRecord(record, syntheticContext()),
     /fingerprintDigest does not match canonical fingerprint/,
@@ -474,7 +814,7 @@ test("rejects a fingerprint digest that does not match structured inputs", () =>
 });
 
 test("rejects a missing required human-checkpoint result as invalid evidence", () => {
-  const record = recordFor("evidence-invalid/missing-required-checkpoint.json");
+  const record = recordFor("evidence-invalid/missing-required-checkpoint");
   assert.throws(
     () => validateEvidenceRecord(record, syntheticContext()),
     /missing required human checkpoint/,
@@ -482,7 +822,7 @@ test("rejects a missing required human-checkpoint result as invalid evidence", (
 });
 
 test("invalid infrastructure runs cannot claim a product qualification failure", () => {
-  const record = recordFor("evidence-invalid/impossible-run-result.json");
+  const record = recordFor("evidence-invalid/impossible-run-result");
   assert.throws(
     () => validateEvidenceRecord(record, syntheticContext()),
     /invalid run must use qualificationOutcome "not_observed"/,
@@ -490,7 +830,7 @@ test("invalid infrastructure runs cannot claim a product qualification failure",
 });
 
 test("an invalid infrastructure run with not_observed remains valid historical evidence", () => {
-  const record = recordFor("evidence-valid/passing-retroarch-bios.json");
+  const record = recordFor("evidence-valid/passing-retroarch-bios");
   record.runId = `qualification-run-sha256:${"6".repeat(64)}`;
   record.capturedAt = "2026-08-21T01:00:00Z";
   record.runValidity = "invalid";
@@ -503,14 +843,14 @@ test("an invalid infrastructure run with not_observed remains valid historical e
 
 test("valid runs forbid not_observed and invalid runs forbid passed and failed", () => {
   const context = syntheticContext();
-  const validNotObserved = recordFor("evidence-valid/passing-retroarch-bios.json");
+  const validNotObserved = recordFor("evidence-valid/passing-retroarch-bios");
   validNotObserved.qualificationOutcome = "not_observed";
   assert.throws(
     () => validateEvidenceRecord(sealRecord(validNotObserved), context),
     /valid run must use qualificationOutcome/,
   );
   for (const outcome of ["passed", "failed"]) {
-    const record = recordFor("evidence-valid/passing-retroarch-bios.json");
+    const record = recordFor("evidence-valid/passing-retroarch-bios");
     record.runValidity = "invalid";
     record.qualificationOutcome = outcome;
     record.automatedObservations = [];
@@ -524,7 +864,7 @@ test("valid runs forbid not_observed and invalid runs forbid passed and failed",
 });
 
 test("a passed record requires every required automated observation", () => {
-  const record = recordFor("evidence-valid/passing-retroarch-bios.json");
+  const record = recordFor("evidence-valid/passing-retroarch-bios");
   record.automatedObservations = [];
   assert.throws(
     () => validateEvidenceRecord(sealRecord(record), syntheticContext()),
@@ -533,7 +873,7 @@ test("a passed record requires every required automated observation", () => {
 });
 
 test("a failed required automated observation produces a valid failed record", () => {
-  const record = recordFor("evidence-valid/passing-retroarch-bios.json");
+  const record = recordFor("evidence-valid/passing-retroarch-bios");
   record.runId = `qualification-run-sha256:${"8".repeat(64)}`;
   record.capturedAt = "2026-08-21T03:00:00Z";
   record.automatedObservations[0].outcome = "failed";
@@ -581,18 +921,18 @@ test("an optional checkpoint unable_to_verify does not block a passed record", (
 
 test("target-wide failures are restricted, required to be failed, and forbidden on invalid runs", () => {
   const context = syntheticContext();
-  const failed = recordFor("evidence-valid/failed-retroarch-bios.json");
+  const failed = recordFor("evidence-valid/failed-retroarch-bios");
   failed.targetWideFailure = "safety_invariant_failed";
   assert.doesNotThrow(() => validateEvidenceRecord(sealRecord(failed), context));
 
-  const unknown = recordFor("evidence-valid/failed-retroarch-bios.json");
+  const unknown = recordFor("evidence-valid/failed-retroarch-bios");
   unknown.targetWideFailure = "arbitrary_failure";
   assert.throws(
     () => validateEvidenceRecord(sealRecord(unknown), context),
     /targetWideFailure/,
   );
 
-  const passed = recordFor("evidence-valid/passing-retroarch-bios.json");
+  const passed = recordFor("evidence-valid/passing-retroarch-bios");
   passed.targetWideFailure = "safety_invariant_failed";
   assert.throws(
     () => validateEvidenceRecord(sealRecord(passed), context),
@@ -601,7 +941,7 @@ test("target-wide failures are restricted, required to be failed, and forbidden 
 });
 
 test("a valid failed record must contain a failed observation, failed checkpoint, or target-wide failure", () => {
-  const record = recordFor("evidence-valid/passing-retroarch-bios.json");
+  const record = recordFor("evidence-valid/passing-retroarch-bios");
   record.runId = `qualification-run-sha256:${"9".repeat(64)}`;
   record.capturedAt = "2026-08-21T04:00:00Z";
   record.qualificationOutcome = "failed";
@@ -614,23 +954,23 @@ test("a valid failed record must contain a failed observation, failed checkpoint
 
 test("evidence must bind to a registered target, workflow, and workflow version", () => {
   const context = syntheticContext();
-  const wrongTarget = recordFor("evidence-valid/passing-retroarch-bios.json");
+  const wrongTarget = recordFor("evidence-valid/passing-retroarch-bios");
   wrongTarget.deviceTarget.id = targetByProfile(context.targets, SYNTHETIC_AIR_MINI_PROFILE).id;
   assert.throws(
     () => validateEvidenceRecord(sealRecord(wrongTarget), context),
     /unknown device target|registered target/,
   );
 
-  const wrongWorkflow = recordFor("evidence-valid/passing-retroarch-bios.json");
+  const wrongWorkflow = recordFor("evidence-valid/passing-retroarch-bios");
   wrongWorkflow.workflowId = "does-not-exist";
   assert.throws(
     () => validateEvidenceRecord(sealRecord(wrongWorkflow), context),
     /unknown workflow/,
   );
 
-  const wrongVersion = recordFor("evidence-valid/passing-retroarch-bios.json");
-  wrongVersion.workflowVersion = 2;
-  wrongVersion.fingerprint.workflowVersion = 2;
+  const wrongVersion = recordFor("evidence-valid/passing-retroarch-bios");
+  wrongVersion.workflowVersion = 3;
+  wrongVersion.fingerprint.workflowVersion = 3;
   wrongVersion.fingerprintDigest = evidenceFingerprintDigest(wrongVersion.fingerprint);
   assert.throws(
     () => validateEvidenceRecord(sealRecord(wrongVersion), context),
@@ -639,7 +979,7 @@ test("evidence must bind to a registered target, workflow, and workflow version"
 });
 
 test("fingerprint validation is strict, deterministic, and digest-bound", () => {
-  const record = recordFor("evidence-valid/passing-retroarch-bios.json");
+  const record = recordFor("evidence-valid/passing-retroarch-bios");
   assert.equal(evidenceFingerprintDigest(record.fingerprint), record.fingerprintDigest);
   const extra = structuredClone(record.fingerprint);
   extra.extra = true;
@@ -650,7 +990,7 @@ test("fingerprint validation is strict, deterministic, and digest-bound", () => 
 });
 
 test("compatibility classifies identical evidence as compatible", () => {
-  const record = recordFor("evidence-valid/passing-retroarch-bios.json");
+  const record = recordFor("evidence-valid/passing-retroarch-bios");
   const workflow = syntheticContext().workflowCatalog.workflows.find((item) => item.id === "retroarch-plus-bios");
   assert.equal(classifyCompatibility({
     workflow,
@@ -662,13 +1002,13 @@ test("compatibility classifies identical evidence as compatible", () => {
 test("every declared compatibility dimension invalidates on change", () => {
   const context = syntheticContext();
   const workflow = context.workflowCatalog.workflows.find((item) => item.id === "retroarch-plus-bios");
-  const base = recordFor("evidence-valid/passing-retroarch-bios.json").fingerprint;
+  const base = recordFor("evidence-valid/passing-retroarch-bios").fingerprint;
   const cases = [
     ["emuchefBuild", {
       ...base.emuchefBuild,
       materialBuildDigest: `sha256:${"f".repeat(64)}`,
     }],
-    ["workflowVersion", 2],
+    ["workflowVersion", 3],
     ["runtimeContract", "v2"],
     ["deviceProfile", "ayaneo.pocket_air_mini"],
     ["androidApi", 34],
@@ -698,7 +1038,7 @@ test("every declared compatibility dimension invalidates on change", () => {
 });
 
 test("workflow compatibility treats git-sha-only build changes as compatible", () => {
-  const record = recordFor("evidence-valid/passing-retroarch-bios.json");
+  const record = recordFor("evidence-valid/passing-retroarch-bios");
   const workflow = syntheticContext().workflowCatalog.workflows.find((item) => item.id === "retroarch-plus-bios");
   const currentFingerprint = record.fingerprint;
   const movedCommit = structuredClone(record.fingerprint);
@@ -713,7 +1053,7 @@ test("workflow compatibility treats git-sha-only build changes as compatible", (
 test("compatibility ignores dimensions the workflow does not declare", () => {
   const context = syntheticContext();
   const workflow = context.workflowCatalog.workflows.find((item) => item.id === "retroarch-plus-bios");
-  const base = recordFor("evidence-valid/passing-retroarch-bios.json").fingerprint;
+  const base = recordFor("evidence-valid/passing-retroarch-bios").fingerprint;
   const changed = structuredClone(base);
   changed.connectionType = "usb2";
   assert.equal(classifyCompatibility({
@@ -777,7 +1117,10 @@ test("current evidence selection picks the newest compatible valid record", () =
     currentFingerprint: currentFingerprint(workflow, target),
     records: context.records,
   });
-  assert.equal(selected.runId, "qualification-run-sha256:" + "a".repeat(64));
+  assert.equal(
+    selected.runId,
+    context.records.find((record) => record.workflowId === "retroarch-plus-bios" && record.runValidity === "valid").runId,
+  );
 });
 
 test("newer invalid evidence never replaces older valid evidence", () => {
@@ -790,7 +1133,10 @@ test("newer invalid evidence never replaces older valid evidence", () => {
     currentFingerprint: currentFingerprint(workflow, target),
     records: context.records,
   });
-  assert.equal(selected.runId, "qualification-run-sha256:" + "e".repeat(64));
+  assert.equal(
+    selected.runId,
+    context.records.find((record) => record.workflowId === "xaniteog-install" && record.runValidity === "valid").runId,
+  );
   assert.ok(context.records.some((record) => record.runValidity === "invalid"));
 });
 
@@ -812,7 +1158,7 @@ test("current evidence selection is deterministic on capturedAt then runId", () 
   const workflow = context.workflowCatalog.workflows.find((item) => item.id === "retroarch-plus-bios");
   const target = targetByProfile(context.targets, SYNTHETIC_POCKET_S2_PROFILE);
   const fingerprint = currentFingerprint(workflow, target);
-  const base = recordFor("evidence-valid/passing-retroarch-bios.json");
+  const base = recordFor("evidence-valid/passing-retroarch-bios");
   const first = structuredClone(base);
   first.runId = "qualification-run-sha256:" + "f".repeat(64);
   const second = structuredClone(base);

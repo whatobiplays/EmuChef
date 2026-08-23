@@ -3,7 +3,7 @@
   "workflows": [
     {
       "id": "retroarch-plus-bios",
-      "version": 1,
+      "version": 2,
       "purpose": "Provision RetroArch and copy the required BIOS set through the production EmuChef workflow.",
       "productionRecipes": [
         "app.retroarch.provision",
@@ -33,7 +33,19 @@
           "required": true
         }
       ],
-      "humanCheckpoints": []
+      "humanCheckpoints": [
+        {
+          "id": "clean_or_deliberately_reset_device",
+          "instruction": "Before execution, verify the connected device is clean or has been deliberately reset to the intended qualification baseline.",
+          "fact": "The device was clean or deliberately reset before this qualification run.",
+          "allowedOutcomes": [
+            "pass",
+            "fail",
+            "unable_to_verify"
+          ],
+          "required": true
+        }
+      ]
     },
     {
       "id": "obtainium-install",

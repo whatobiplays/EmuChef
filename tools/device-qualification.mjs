@@ -12,12 +12,13 @@
  */
 import { createHash } from "node:crypto";
 import { execFileSync } from "node:child_process";
-import { existsSync, readFileSync, readdirSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync, readdirSync, renameSync, rmSync, writeFileSync } from "node:fs";
 import path from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 
 const REPO_ROOT = fileURLToPath(new URL("../", import.meta.url));
 const QUALIFICATION_ROOT = path.join(REPO_ROOT, "docs/testing/device-qualification");
+const EVIDENCE_ROOT = path.join(QUALIFICATION_ROOT, "evidence");
 
 const WORKFLOW_FIELDS = [
   "id",
@@ -143,6 +144,7 @@ export const EVIDENCE_RECORD_FIELDS = [
   "humanCheckpoints",
   "targetWideFailure",
   "limitations",
+  "artifacts",
 ];
 export const FINGERPRINT_FIELDS = [
   "schemaVersion",
@@ -168,12 +170,39 @@ export const TARGET_WIDE_FAILURES = [
   "safety_invariant_failed",
 ];
 const AUTHORED_CONTENT_ENTRY_FIELDS = ["id", "sha256"];
+const EVIDENCE_ARTIFACT_FIELDS = ["id", "kind", "path", "sha256"];
 const EVIDENCE_DEVICE_TARGET_FIELDS = [
   "id",
   ...TARGET_FACT_FIELDS,
 ];
 const AUTOMATED_OBSERVATION_RECORD_FIELDS = ["id", "outcome", "observedAt"];
 const HUMAN_CHECKPOINT_RECORD_FIELDS = ["checkpointId", "outcome", "observedAt"];
+const TARGET_REGISTRATION_CANDIDATE_FIELDS = [
+  "candidateSchemaVersion",
+  "candidateId",
+  "kind",
+  "capturedAt",
+  "build",
+  "target",
+];
+const QUALIFICATION_RUN_CANDIDATE_FIELDS = [
+  "candidateSchemaVersion",
+  "candidateId",
+  "kind",
+  "capturedAt",
+  "build",
+  "workflowId",
+  "workflowVersion",
+  "deviceTargetId",
+  "fingerprint",
+  "runValidity",
+  "qualificationOutcome",
+  "automatedObservations",
+  "humanCheckpoints",
+  "targetWideFailure",
+  "limitations",
+  "artifacts",
+];
 const DIMENSION_FIELDS = {
   emuchef_build: "emuchefBuild",
   workflow_version: "workflowVersion",
@@ -186,11 +215,26 @@ const DIMENSION_FIELDS = {
   root_state: "rootState",
 };
 const RUN_ID_PATTERN = /^qualification-run-sha256:[0-9a-f]{64}$/;
+const CANDIDATE_ID_PATTERN = /^qualification-candidate-[0-9a-f]{32}$/;
 const DIGEST_PATTERN = /^sha256:[0-9a-f]{64}$/;
 const SHA256_PATTERN = /^[0-9a-f]{64}$/;
 const TARGET_ID_PATTERN = /^device-target-sha256:[0-9a-f]{64}$/;
 const RFC3339_PATTERN = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d+)?(?:Z|[+-]\d{2}:\d{2})$/;
 const GIT_COMMIT_PATTERN = /^[0-9a-f]{40}$/;
+const EXECUTION_REPORT_ARTIFACT = {
+  id: "execution-report",
+  kind: "production_execution_report",
+  path: "execution-report.json",
+};
+const PRE_EXECUTION_PREREQUISITE_CHECKPOINTS = new Set([
+  "clean_or_deliberately_reset_device",
+]);
+const defaultFsOps = {
+  mkdirSync,
+  renameSync,
+  rmSync,
+  writeFileSync,
+};
 
 function fail(message) {
   throw new Error(message);
@@ -295,12 +339,14 @@ function trackedWorktreeStatus(repoRoot) {
 }
 
 function materialBuildDigest(repoRoot) {
-  const entries = trackedFiles(repoRoot).map((relativePath) => ({
-    path: relativePath,
-    sha256: createHash("sha256")
-      .update(readFileSync(path.join(repoRoot, relativePath)))
-      .digest("hex"),
-  }));
+  const entries = trackedFiles(repoRoot)
+    .filter((relativePath) => existsSync(path.join(repoRoot, relativePath)))
+    .map((relativePath) => ({
+      path: relativePath,
+      sha256: createHash("sha256")
+        .update(readFileSync(path.join(repoRoot, relativePath)))
+        .digest("hex"),
+    }));
   return materialBuildDigestFromEntries(entries);
 }
 
@@ -490,6 +536,22 @@ export function evidenceRecordDigest(record) {
   return canonicalDigest(canonical);
 }
 
+export function qualificationRunId(unsealedRecord) {
+  const identity = structuredClone(unsealedRecord);
+  delete identity.runId;
+  delete identity.recordDigest;
+  delete identity.fingerprintDigest;
+  return `qualification-run-sha256:${canonicalDigest(identity).slice("sha256:".length)}`;
+}
+
+export function sealEvidenceRecord(unsealedRecord) {
+  const record = structuredClone(unsealedRecord);
+  record.fingerprintDigest = evidenceFingerprintDigest(record.fingerprint);
+  record.runId = qualificationRunId(record);
+  record.recordDigest = evidenceRecordDigest(record);
+  return record;
+}
+
 function validateFingerprint(fingerprint) {
   assertExactKeys(fingerprint, FINGERPRINT_FIELDS, "fingerprint");
   if (fingerprint.schemaVersion !== 2) fail("fingerprint schemaVersion must be 2");
@@ -543,6 +605,12 @@ function compareDimension(dimension, currentFingerprint, evidenceFingerprint) {
     : "invalidating";
 }
 
+function buildEvidenceDeviceTarget(target) {
+  return Object.fromEntries(
+    EVIDENCE_DEVICE_TARGET_FIELDS.map((field) => [field, structuredClone(target[field])]),
+  );
+}
+
 export function classifyCompatibility({ workflow, currentFingerprint, evidenceFingerprint }) {
   for (const dimension of workflow.compatibilityDimensions) {
     if (compareDimension(dimension, currentFingerprint, evidenceFingerprint) === "invalidating") {
@@ -584,6 +652,35 @@ function validateAutomatedObservationRecords(record, workflow) {
     assertRfc3339(observation.observedAt, `automated observation ${observation.id} observedAt`);
   }
   return seen;
+}
+
+function validateEvidenceArtifacts(record) {
+  if (!Array.isArray(record.artifacts)) {
+    fail("artifacts must be an array");
+  }
+  if (record.artifacts.length > 1) {
+    fail("artifacts may contain at most one execution-report entry");
+  }
+  const seen = new Set();
+  for (const artifact of record.artifacts) {
+    assertExactKeys(artifact, EVIDENCE_ARTIFACT_FIELDS, "evidence artifact");
+    assertString(artifact.id, "evidence artifact id");
+    if (seen.has(artifact.id)) fail(`duplicate evidence artifact ${artifact.id}`);
+    seen.add(artifact.id);
+    if (artifact.id !== EXECUTION_REPORT_ARTIFACT.id) {
+      fail(`evidence artifact id ${artifact.id} is not supported`);
+    }
+    if (artifact.kind !== EXECUTION_REPORT_ARTIFACT.kind) {
+      fail(`evidence artifact kind ${artifact.kind} is not supported`);
+    }
+    if (artifact.path !== EXECUTION_REPORT_ARTIFACT.path) {
+      fail("execution-report artifact path must be exactly execution-report.json");
+    }
+    if (!SHA256_PATTERN.test(artifact.sha256)) {
+      fail("execution-report artifact sha256 must be a 64-character lowercase hex digest");
+    }
+  }
+  return record.artifacts.length === 1 ? record.artifacts[0] : null;
 }
 
 function validateHumanCheckpointRecords(record, workflow) {
@@ -677,6 +774,9 @@ export function validateEvidenceRecord(record, context) {
   if (record.fingerprintDigest !== evidenceFingerprintDigest(record.fingerprint)) {
     fail("fingerprintDigest does not match canonical fingerprint");
   }
+  if (record.runId !== qualificationRunId(record)) {
+    fail("runId does not match canonical qualification run identity");
+  }
   if (record.recordDigest !== evidenceRecordDigest(record)) {
     fail("canonical record content digest does not match the evidence record");
   }
@@ -692,8 +792,19 @@ export function validateEvidenceRecord(record, context) {
   if (!Array.isArray(record.limitations) || record.limitations.some((item) => typeof item !== "string" || item.length === 0)) {
     fail("limitations must be an array of non-empty strings");
   }
+  const executionReportArtifact = validateEvidenceArtifacts(record);
   validateAutomatedObservationRecords(record, workflow);
   validateHumanCheckpointRecords(record, workflow);
+  const executionReportObservation = record.automatedObservations.find((observation) => observation.id === EXECUTION_REPORT_ARTIFACT.id);
+  for (const checkpoint of record.humanCheckpoints) {
+    if (
+      PRE_EXECUTION_PREREQUISITE_CHECKPOINTS.has(checkpoint.checkpointId)
+      && checkpoint.outcome !== "pass"
+      && (record.runValidity !== "invalid" || record.qualificationOutcome !== "not_observed")
+    ) {
+      fail(`pre-execution checkpoint ${checkpoint.checkpointId} requires an invalid not_observed record when it does not pass`);
+    }
+  }
   if (record.runValidity === "invalid") {
     if (record.qualificationOutcome !== "not_observed") {
       fail('invalid run must use qualificationOutcome "not_observed"');
@@ -701,10 +812,19 @@ export function validateEvidenceRecord(record, context) {
     if (record.targetWideFailure !== null) {
       fail("an invalid run cannot record a target-wide failure");
     }
+    if (executionReportArtifact === null && executionReportObservation) {
+      fail("invalid run cannot record an execution-report observation without an execution-report artifact");
+    }
     return true;
   }
   if (record.qualificationOutcome === "not_observed") {
     fail('valid run must use qualificationOutcome "passed" or "failed"');
+  }
+  if (executionReportArtifact === null) {
+    fail("valid run must include an execution-report artifact");
+  }
+  if (!executionReportObservation) {
+    fail("missing required automated observation execution-report");
   }
   if (record.targetWideFailure !== null && record.qualificationOutcome !== "failed") {
     fail("targetWideFailure requires a failed valid record");
@@ -751,6 +871,30 @@ export function validateEvidenceRecord(record, context) {
     if (!hasFailure) {
       fail("failed record has no failed observation, failed checkpoint, or target-wide failure");
     }
+  }
+  return true;
+}
+
+export function validateEvidenceBundle(bundle, context) {
+  assertObject(bundle, "evidence bundle");
+  const { record, reportBytes } = bundle;
+  validateEvidenceRecord(record, context);
+  const executionReportArtifact = record.artifacts[0] ?? null;
+  if (executionReportArtifact === null) {
+    if (reportBytes !== null) {
+      fail("bundle must not include execution report bytes when no execution-report artifact is referenced");
+    }
+    if (record.runValidity !== "invalid" || record.qualificationOutcome !== "not_observed") {
+      fail("only invalid not_observed evidence may omit an execution-report artifact");
+    }
+    return true;
+  }
+  if (!(reportBytes instanceof Buffer)) {
+    fail("execution-report artifact requires execution report bytes");
+  }
+  const actualSha256 = createHash("sha256").update(reportBytes).digest("hex");
+  if (actualSha256 !== executionReportArtifact.sha256) {
+    fail("execution report digest does not match the bound artifact sha256");
   }
   return true;
 }
@@ -820,6 +964,12 @@ export function validateEvidenceSchemaContract(schema) {
   }
   if (!equalJson(schema.$defs.humanCheckpoint.properties.outcome.enum, CHECKPOINT_OUTCOMES)) {
     fail("evidence schema human checkpoint outcomes drifted from the validator");
+  }
+  if (!equalJson(schema.$defs.evidenceArtifact.required, EVIDENCE_ARTIFACT_FIELDS)) {
+    fail("evidence schema artifact fields drifted from the validator");
+  }
+  if (!equalJson(schema.properties.artifacts.items, { $ref: "#/$defs/evidenceArtifact" })) {
+    fail("evidence schema artifacts item reference drifted from the validator");
   }
   return true;
 }
@@ -972,6 +1122,172 @@ export function deriveDeviceSupportTier(workflowStates) {
   return "unqualified";
 }
 
+function qualificationPaths(repoRoot) {
+  const authoredProfilesDir = path.join(repoRoot, "authored/device_profiles");
+  return {
+    repoRoot,
+    authoredProfilesDir,
+    workflowCatalogPath: path.join(repoRoot, "docs/testing/device-qualification/workflow-catalog.json"),
+    deviceTargetsPath: path.join(repoRoot, "docs/testing/device-qualification/device-targets.json"),
+    evidenceRoot: path.join(repoRoot, "docs/testing/device-qualification/evidence"),
+    matrixPath: path.join(repoRoot, "docs/qualification/device-qualification-matrix.md"),
+    candidateRoot: path.join(repoRoot, ".emuchef_runtime/qualification-candidates"),
+  };
+}
+
+function candidateDirectory(candidateId, repoRoot = REPO_ROOT) {
+  if (!CANDIDATE_ID_PATTERN.test(candidateId)) fail("qualification candidate id is invalid");
+  return path.join(qualificationPaths(repoRoot).candidateRoot, candidateId);
+}
+
+function loadCandidateJson(candidateId, repoRoot = REPO_ROOT) {
+  const directory = candidateDirectory(candidateId, repoRoot);
+  const candidatePath = path.join(directory, "candidate.json");
+  if (!existsSync(candidatePath)) {
+    fail(`qualification candidate ${candidateId} does not exist`);
+  }
+  const candidate = JSON.parse(readFileSync(candidatePath, "utf8"));
+  if (candidate.candidateId !== candidateId) {
+    fail("qualification candidate payload does not match its directory id");
+  }
+  return {
+    directory,
+    candidate,
+  };
+}
+
+function validateCandidateEnvelope(candidate, { kind, fields }) {
+  assertExactKeys(candidate, fields, `${kind} candidate`);
+  if (candidate.candidateSchemaVersion !== 1) {
+    fail(`${kind} candidate schema version must be 1`);
+  }
+  if (!CANDIDATE_ID_PATTERN.test(candidate.candidateId)) {
+    fail(`${kind} candidate id is invalid`);
+  }
+  if (candidate.kind !== kind) {
+    fail(`${kind} candidate kind must be ${kind}`);
+  }
+  assertRfc3339(candidate.capturedAt, `${kind} candidate capturedAt`);
+  validateBuildIdentity(candidate.build, `${kind} candidate build`);
+}
+
+function validateTargetRegistrationCandidate(candidate, repoRoot = REPO_ROOT) {
+  validateCandidateEnvelope(candidate, {
+    kind: "target_registration",
+    fields: TARGET_REGISTRATION_CANDIDATE_FIELDS,
+  });
+  const target = structuredClone(candidate.target);
+  target.id = deviceTargetId(target);
+  validateDeviceTargets(
+    { schemaVersion: 2, targets: [target] },
+    { authoredProfilesDir: path.join(repoRoot, "authored/device_profiles") },
+  );
+  return target;
+}
+
+function validateQualificationRunCandidate(candidate) {
+  validateCandidateEnvelope(candidate, {
+    kind: "qualification_run",
+    fields: QUALIFICATION_RUN_CANDIDATE_FIELDS,
+  });
+  if (!TARGET_ID_PATTERN.test(candidate.deviceTargetId)) {
+    fail("qualification_run candidate deviceTargetId format is invalid");
+  }
+  validateFingerprint(candidate.fingerprint);
+  if (!RUN_VALIDITIES.includes(candidate.runValidity)) {
+    fail(`qualification_run candidate runValidity ${candidate.runValidity} is not supported`);
+  }
+  if (!QUALIFICATION_OUTCOMES.includes(candidate.qualificationOutcome)) {
+    fail(`qualification_run candidate qualificationOutcome ${candidate.qualificationOutcome} is not supported`);
+  }
+  if (!TARGET_WIDE_FAILURES.includes(candidate.targetWideFailure)) {
+    fail(`qualification_run candidate targetWideFailure ${candidate.targetWideFailure} is not supported`);
+  }
+  if (!Array.isArray(candidate.limitations) || candidate.limitations.some((item) => typeof item !== "string" || item.length === 0)) {
+    fail("qualification_run candidate limitations must be an array of non-empty strings");
+  }
+  validateEvidenceArtifacts(candidate);
+  return candidate;
+}
+
+function validatePromotionBuildState(candidateBuild, repoRoot) {
+  if (trackedWorktreeStatus(repoRoot) !== "") {
+    fail("device qualification requires a clean tracked worktree");
+  }
+  const currentCommit = execFileSync("git", ["rev-parse", "HEAD"], { cwd: repoRoot, encoding: "utf8" }).trim();
+  if (candidateBuild.gitCommit !== currentCommit) {
+    fail("qualification candidate git commit no longer matches HEAD");
+  }
+  const currentBuild = buildMaterialIdentity({ repoRoot, requireClean: false });
+  if (candidateBuild.materialBuildDigest !== currentBuild.materialBuildDigest) {
+    fail("qualification candidate material build digest no longer matches the current repository state");
+  }
+  if (candidateBuild.qualificationContract !== QUALIFICATION_CONTRACT_VERSION) {
+    fail(`qualification candidate qualificationContract must be ${QUALIFICATION_CONTRACT_VERSION}`);
+  }
+  if (candidateBuild.realExecutionEnabled !== true) {
+    fail("qualification candidate must be captured from a real-execution-enabled build");
+  }
+  return currentBuild;
+}
+
+function createTemporaryPath(targetPath) {
+  return `${targetPath}.tmp-${process.pid}-${Date.now()}-${Math.random().toString(16).slice(2)}`;
+}
+
+function writeTemporaryFile(targetPath, content, fsOps) {
+  fsOps.mkdirSync(path.dirname(targetPath), { recursive: true });
+  const temporaryPath = createTemporaryPath(targetPath);
+  fsOps.writeFileSync(temporaryPath, content, "utf8");
+  return temporaryPath;
+}
+
+function renderMatrixForState({ workflowCatalog, targets, records, currentBuild, runtimeContract, authoredContentDigests }) {
+  return renderQualificationMatrix(projectQualificationState({
+    workflowCatalog,
+    targets,
+    records,
+    currentBuild,
+    runtimeContract,
+    authoredContentDigests,
+  }));
+}
+
+function ensureDirectoryAbsent(targetPath) {
+  if (existsSync(targetPath)) {
+    fail(`canonical evidence directory ${path.basename(targetPath)} already exists`);
+  }
+}
+
+function currentQualificationContext(repoRoot) {
+  const paths = qualificationPaths(repoRoot);
+  const workflowCatalog = loadWorkflowCatalog(paths.workflowCatalogPath);
+  const targetFile = loadDeviceTargets(paths.deviceTargetsPath, { authoredProfilesDir: paths.authoredProfilesDir });
+  return {
+    paths,
+    workflowCatalog,
+    targets: targetFile.targets,
+    authoredContentDigests: productionAuthoredContentDigests(workflowCatalog, repoRoot),
+  };
+}
+
+export function loadEvidenceBundle(bundlePath) {
+  const resolved = path.resolve(bundlePath);
+  if (!existsSync(resolved)) {
+    fail(`evidence bundle ${resolved} does not exist`);
+  }
+  const evidencePath = path.join(resolved, "evidence.json");
+  if (!existsSync(evidencePath)) {
+    fail(`evidence bundle ${resolved} must contain evidence.json`);
+  }
+  const record = JSON.parse(readFileSync(evidencePath, "utf8"));
+  const reportPath = path.join(resolved, EXECUTION_REPORT_ARTIFACT.path);
+  return {
+    record,
+    reportBytes: existsSync(reportPath) ? readFileSync(reportPath) : null,
+  };
+}
+
 export function loadEvidenceDirectory(evidenceDir, { fixtureMode }) {
   const resolved = path.resolve(evidenceDir);
   const fixtureRoot = path.resolve(REPO_ROOT, "tests/fixtures");
@@ -982,15 +1298,27 @@ export function loadEvidenceDirectory(evidenceDir, { fixtureMode }) {
     fail("synthetic fixture path cannot be used as production evidence");
   }
   if (!existsSync(resolved)) return [];
-  const records = [];
+  const bundles = [];
   const seenRunIds = new Set();
-  for (const name of readdirSync(resolved).filter((entry) => entry.endsWith(".json")).sort()) {
-    const record = JSON.parse(readFileSync(path.join(resolved, name), "utf8"));
+  for (const entry of readdirSync(resolved, { withFileTypes: true }).sort((left, right) => left.name.localeCompare(right.name))) {
+    if (entry.name === "README.md") continue;
+    let bundle;
+    if (entry.isDirectory()) {
+      bundle = loadEvidenceBundle(path.join(resolved, entry.name));
+    } else if (fixtureMode && entry.isFile() && entry.name.endsWith(".json")) {
+      bundle = {
+        record: JSON.parse(readFileSync(path.join(resolved, entry.name), "utf8")),
+        reportBytes: null,
+      };
+    } else {
+      continue;
+    }
+    const record = bundle.record;
     if (seenRunIds.has(record.runId)) fail(`duplicate run identity ${record.runId}`);
     seenRunIds.add(record.runId);
-    records.push(record);
+    bundles.push(bundle);
   }
-  return records;
+  return bundles.map((bundle) => bundle.record);
 }
 
 export function projectQualificationState({
@@ -1064,15 +1392,144 @@ export function renderQualificationMatrix(projection) {
   return lines.join("\n");
 }
 
-function productionAuthoredContentDigests(workflowCatalog) {
+function productionAuthoredContentDigests(workflowCatalog, repoRoot = REPO_ROOT) {
   const digests = {};
   for (const workflow of workflowCatalog.workflows) {
     for (const recipeId of workflow.productionRecipes) {
-      const recipePath = path.join(REPO_ROOT, "authored/recipes", `${recipeId}.yaml`);
+      const recipePath = path.join(repoRoot, "authored/recipes", `${recipeId}.yaml`);
       digests[recipeId] = createHash("sha256").update(readFileSync(recipePath)).digest("hex");
     }
   }
   return digests;
+}
+
+export function registerQualificationTargetCandidate(candidateId, { repoRoot = REPO_ROOT, fsOps = defaultFsOps } = {}) {
+  const { candidate } = loadCandidateJson(candidateId, repoRoot);
+  const target = validateTargetRegistrationCandidate(candidate, repoRoot);
+  const paths = qualificationPaths(repoRoot);
+  const targetFile = loadDeviceTargets(paths.deviceTargetsPath, { authoredProfilesDir: paths.authoredProfilesDir });
+  if (targetFile.targets.some((entry) => entry.id === target.id)) {
+    fail(`canonical device target ${target.id} already exists`);
+  }
+  const currentBuild = validatePromotionBuildState(candidate.build, repoRoot);
+  const workflowCatalog = loadWorkflowCatalog(paths.workflowCatalogPath);
+  const authoredContentDigests = productionAuthoredContentDigests(workflowCatalog, repoRoot);
+  const nextTargets = {
+    schemaVersion: targetFile.schemaVersion,
+    targets: [...targetFile.targets, target],
+  };
+  const matrixText = renderMatrixForState({
+    workflowCatalog,
+    targets: nextTargets.targets,
+    records: loadEvidenceDirectory(paths.evidenceRoot, { fixtureMode: false }),
+    currentBuild,
+    runtimeContract: RUNTIME_CONTRACT,
+    authoredContentDigests,
+  });
+  const originalTargets = readFileSync(paths.deviceTargetsPath, "utf8");
+  const originalMatrix = readFileSync(paths.matrixPath, "utf8");
+  const tempTargetsPath = writeTemporaryFile(
+    paths.deviceTargetsPath,
+    `${JSON.stringify(nextTargets, null, 2)}\n`,
+    fsOps,
+  );
+  const tempMatrixPath = writeTemporaryFile(paths.matrixPath, matrixText, fsOps);
+  try {
+    fsOps.renameSync(tempTargetsPath, paths.deviceTargetsPath);
+    fsOps.renameSync(tempMatrixPath, paths.matrixPath);
+  } catch (error) {
+    fsOps.writeFileSync(paths.deviceTargetsPath, originalTargets, "utf8");
+    fsOps.writeFileSync(paths.matrixPath, originalMatrix, "utf8");
+    fsOps.rmSync(tempTargetsPath, { force: true, recursive: true });
+    fsOps.rmSync(tempMatrixPath, { force: true, recursive: true });
+    throw error;
+  }
+  return target;
+}
+
+export function recordQualificationRunCandidate(candidateId, { repoRoot = REPO_ROOT, fsOps = defaultFsOps } = {}) {
+  const { directory, candidate } = loadCandidateJson(candidateId, repoRoot);
+  validateQualificationRunCandidate(candidate);
+  const { paths, workflowCatalog, targets, authoredContentDigests } = currentQualificationContext(repoRoot);
+  const workflow = workflowCatalog.workflows.find((item) => item.id === candidate.workflowId);
+  if (!workflow) fail(`unknown workflow id ${candidate.workflowId}`);
+  if (candidate.workflowVersion !== workflow.version) {
+    fail(`qualification candidate workflow version ${candidate.workflowVersion} does not match catalog version ${workflow.version}`);
+  }
+  const target = targets.find((item) => item.id === candidate.deviceTargetId);
+  if (!target) fail(`unknown device target id ${candidate.deviceTargetId}`);
+  const provisionalRecord = sealEvidenceRecord({
+    schemaVersion: 2,
+    capturedAt: candidate.capturedAt,
+    workflowId: workflow.id,
+    workflowVersion: workflow.version,
+    deviceTarget: buildEvidenceDeviceTarget(target),
+    fingerprint: structuredClone(candidate.fingerprint),
+    runValidity: candidate.runValidity,
+    qualificationOutcome: candidate.qualificationOutcome,
+    automatedObservations: structuredClone(candidate.automatedObservations),
+    humanCheckpoints: structuredClone(candidate.humanCheckpoints),
+    targetWideFailure: candidate.targetWideFailure,
+    limitations: structuredClone(candidate.limitations),
+    artifacts: structuredClone(candidate.artifacts),
+  });
+  const bundleDir = path.join(paths.evidenceRoot, provisionalRecord.runId);
+  ensureDirectoryAbsent(bundleDir);
+  const currentBuild = validatePromotionBuildState(candidate.build, repoRoot);
+  const expectedFingerprint = buildCurrentFingerprint({
+    workflow,
+    target,
+    currentBuild,
+    runtimeContract: RUNTIME_CONTRACT,
+    authoredContentDigests,
+  });
+  if (!equalJson(candidate.fingerprint, expectedFingerprint)) {
+    fail("qualification candidate fingerprint no longer matches the current canonical workflow, target, and authored content");
+  }
+  const reportPath = path.join(directory, EXECUTION_REPORT_ARTIFACT.path);
+  const reportBytes = existsSync(reportPath) ? readFileSync(reportPath) : null;
+  const sealedRecord = sealEvidenceRecord({
+    schemaVersion: 2,
+    capturedAt: candidate.capturedAt,
+    workflowId: workflow.id,
+    workflowVersion: workflow.version,
+    deviceTarget: buildEvidenceDeviceTarget(target),
+    fingerprint: expectedFingerprint,
+    runValidity: candidate.runValidity,
+    qualificationOutcome: candidate.qualificationOutcome,
+    automatedObservations: structuredClone(candidate.automatedObservations),
+    humanCheckpoints: structuredClone(candidate.humanCheckpoints),
+    targetWideFailure: candidate.targetWideFailure,
+    limitations: structuredClone(candidate.limitations),
+    artifacts: structuredClone(candidate.artifacts),
+  });
+  validateEvidenceBundle({ record: sealedRecord, reportBytes }, { workflowCatalog, targets });
+  const existingRecords = loadEvidenceDirectory(paths.evidenceRoot, { fixtureMode: false });
+  const matrixText = renderMatrixForState({
+    workflowCatalog,
+    targets,
+    records: [...existingRecords, sealedRecord],
+    currentBuild,
+    runtimeContract: RUNTIME_CONTRACT,
+    authoredContentDigests,
+  });
+  const temporaryBundleDir = createTemporaryPath(bundleDir);
+  fsOps.mkdirSync(temporaryBundleDir, { recursive: true });
+  fsOps.writeFileSync(path.join(temporaryBundleDir, "evidence.json"), `${JSON.stringify(sealedRecord, null, 2)}\n`, "utf8");
+  if (reportBytes !== null) {
+    fsOps.writeFileSync(path.join(temporaryBundleDir, EXECUTION_REPORT_ARTIFACT.path), reportBytes);
+  }
+  const tempMatrixPath = writeTemporaryFile(paths.matrixPath, matrixText, fsOps);
+  try {
+    fsOps.renameSync(temporaryBundleDir, bundleDir);
+    fsOps.renameSync(tempMatrixPath, paths.matrixPath);
+  } catch (error) {
+    fsOps.rmSync(temporaryBundleDir, { recursive: true, force: true });
+    fsOps.rmSync(bundleDir, { recursive: true, force: true });
+    fsOps.rmSync(tempMatrixPath, { recursive: true, force: true });
+    throw error;
+  }
+  return sealedRecord;
 }
 
 function projectProductionQualification() {
@@ -1086,13 +1543,16 @@ function projectProductionQualification() {
     "utf8",
   ));
   validateEvidenceSchemaContract(schema);
-  const records = loadEvidenceDirectory(
-    path.join(QUALIFICATION_ROOT, "evidence"),
-    { fixtureMode: false },
-  );
-  for (const record of records) {
-    validateEvidenceRecord(record, { workflowCatalog, targets: targetsFile.targets });
+  const bundles = [];
+  if (existsSync(EVIDENCE_ROOT)) {
+    for (const entry of readdirSync(EVIDENCE_ROOT, { withFileTypes: true }).sort((left, right) => left.name.localeCompare(right.name))) {
+      if (entry.name === "README.md" || !entry.isDirectory()) continue;
+      const bundle = loadEvidenceBundle(path.join(EVIDENCE_ROOT, entry.name));
+      validateEvidenceBundle(bundle, { workflowCatalog, targets: targetsFile.targets });
+      bundles.push(bundle);
+    }
   }
+  const records = bundles.map((bundle) => bundle.record);
   return projectQualificationState({
     workflowCatalog,
     targets: targetsFile.targets,
@@ -1119,14 +1579,22 @@ function repositoryDescription() {
 
 if (process.argv[1] && import.meta.url === pathToFileURL(path.resolve(process.argv[1])).href) {
   const args = process.argv.slice(2);
-  const allowedArgs = new Set(["--build-identity", "--require-clean", "--describe", "--check", "--write-matrix"]);
-  const actionArgs = args.filter((arg) => ["--build-identity", "--describe", "--check", "--write-matrix"].includes(arg));
+  const candidateActions = new Set(["--register-target", "--record-run"]);
+  const allowedArgs = new Set(["--build-identity", "--require-clean", "--describe", "--check", "--write-matrix", ...candidateActions]);
+  const actionArgs = args.filter((arg) => ["--build-identity", "--describe", "--check", "--write-matrix", ...candidateActions].includes(arg));
+  const registerTargetIndex = args.indexOf("--register-target");
+  const recordRunIndex = args.indexOf("--record-run");
+  const candidateValueIndexes = new Set();
+  if (registerTargetIndex !== -1) candidateValueIndexes.add(registerTargetIndex + 1);
+  if (recordRunIndex !== -1) candidateValueIndexes.add(recordRunIndex + 1);
   if (
-    args.some((arg) => !allowedArgs.has(arg))
+    args.some((arg, index) => !allowedArgs.has(arg) && !candidateValueIndexes.has(index))
     || actionArgs.length !== 1
     || (args.includes("--require-clean") && !args.includes("--build-identity"))
+    || (registerTargetIndex !== -1 && args.length !== 2)
+    || (recordRunIndex !== -1 && args.length !== 2)
   ) {
-    process.stderr.write("usage: node tools/device-qualification.mjs [--build-identity [--require-clean]|--describe|--check|--write-matrix]\n");
+    process.stderr.write("usage: node tools/device-qualification.mjs [--build-identity [--require-clean]|--describe|--check|--write-matrix|--register-target <candidate-id>|--record-run <candidate-id>]\n");
     process.exitCode = 1;
   } else {
     try {
@@ -1137,6 +1605,12 @@ if (process.argv[1] && import.meta.url === pathToFileURL(path.resolve(process.ar
         }))}\n`);
       } else if (args.includes("--describe")) {
         process.stdout.write(`${JSON.stringify(repositoryDescription())}\n`);
+      } else if (registerTargetIndex !== -1) {
+        const target = registerQualificationTargetCandidate(args[registerTargetIndex + 1], { repoRoot: REPO_ROOT });
+        process.stdout.write(`${JSON.stringify(target)}\n`);
+      } else if (recordRunIndex !== -1) {
+        const record = recordQualificationRunCandidate(args[recordRunIndex + 1], { repoRoot: REPO_ROOT });
+        process.stdout.write(`${JSON.stringify(record)}\n`);
       } else {
         const projection = projectProductionQualification();
         const rendered = renderQualificationMatrix(projection);

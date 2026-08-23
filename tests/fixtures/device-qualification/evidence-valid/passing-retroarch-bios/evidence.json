@@ -1,10 +1,8 @@
 {
   "schemaVersion": 2,
-  "runId": "qualification-run-sha256:3333333333333333333333333333333333333333333333333333333333333333",
-  "recordDigest": "sha256:7b13b898527fa14d88b715085304e98adbf6fda4652a426ca27fd17f0bb2ea7d",
-  "capturedAt": "2026-08-21T00:02:00Z",
+  "capturedAt": "2026-08-20T00:00:00Z",
   "workflowId": "retroarch-plus-bios",
-  "workflowVersion": 1,
+  "workflowVersion": 2,
   "deviceTarget": {
     "id": "device-target-sha256:8b9f6cf2dc8831a9188c2ad1d85b8a83ea8e8baf0d674943b7d5e9925f047c62",
     "profileId": {
@@ -53,7 +51,7 @@
       "realExecutionEnabled": true,
       "qualificationContract": 1
     },
-    "workflowVersion": 1,
+    "workflowVersion": 2,
     "authoredContent": [
       {
         "id": "app.retroarch.provision",
@@ -72,17 +70,33 @@
     "rootState": "non_root",
     "connectionType": "usb3"
   },
-  "fingerprintDigest": "sha256:0000000000000000000000000000000000000000000000000000000000000000",
   "runValidity": "valid",
   "qualificationOutcome": "passed",
   "automatedObservations": [
     {
       "id": "execution-report",
       "outcome": "passed",
-      "observedAt": "2026-08-21T00:03:00Z"
+      "observedAt": "2026-08-20T00:01:00Z"
     }
   ],
-  "humanCheckpoints": [],
+  "humanCheckpoints": [
+    {
+      "checkpointId": "clean_or_deliberately_reset_device",
+      "outcome": "pass",
+      "observedAt": "2026-08-23T12:30:30Z"
+    }
+  ],
   "targetWideFailure": null,
-  "limitations": []
+  "limitations": [],
+  "artifacts": [
+    {
+      "id": "execution-report",
+      "kind": "production_execution_report",
+      "path": "execution-report.json",
+      "sha256": "4eca7a03826386b6cb9720fcb0b35ebae2d55c051f9e72b5e52ae3b46a494962"
+    }
+  ],
+  "fingerprintDigest": "sha256:7ddccdd0ba72152cd17c247e81081295f0aa645201579596ed7edd31e8b289a5",
+  "runId": "qualification-run-sha256:41c5416c2d52c3f246c6e2f68ddd987a088f3b70f656689101b364322fd99fb4",
+  "recordDigest": "sha256:50ffa08e73d6ca9df42ff7c869b86cbb47d9e3a1629f6dda9427de4bf7430bea"
 }

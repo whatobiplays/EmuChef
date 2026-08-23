@@ -1151,9 +1151,10 @@ configuration planning usable for the root-capability review gate.
 ## Device qualification repository contract
 
 The repository-owned device qualification Node tool remains the canonical
-authority for target registration validation, evidence validation, canonical
-digests, compatibility projection, and matrix rendering. Production runtime
-behavior is unchanged by these repository contracts.
+authority for target registration validation, qualification-candidate
+promotion, evidence-bundle validation, canonical digests, compatibility
+projection, current-evidence selection, and matrix rendering. Production
+runtime behavior is unchanged by these repository contracts.
 
 `docs/testing/device-qualification/device-targets.json` now uses schema
 version 2. Every material target fact is stored as an exact `{ value, source }`
@@ -1175,11 +1176,43 @@ material-build digest, `realExecutionEnabled`, and
 compares the application version, material-build digest, `realExecutionEnabled`,
 and qualification contract only; the exact Git commit is preserved as audit
 provenance but does not invalidate evidence by itself. The material-build
-digest is repository-owned and covers tracked product/runtime/authored inputs
-under `authored/`, `crates/emuchef-rust-backend/`, and the application source
-roots plus the exact package/lock/config files declared by
-`tools/device-qualification.mjs`, while excluding qualification-only UI/runtime
-files and evidence artifacts.
+digest is repository-owned and covers the current working tree contents of the
+tracked product/runtime/authored inputs under `authored/`,
+`crates/emuchef-rust-backend/`, and the application source roots plus the exact
+package/lock/config files declared by `tools/device-qualification.mjs`, while
+excluding qualification-only UI/runtime files and evidence artifacts.
+
+Physical-device evidence is now bundle-shaped. Each recorded run directory under
+`docs/testing/device-qualification/evidence/` contains `evidence.json` and,
+when report capture succeeded, a digest-bound `execution-report.json`. Every
+valid run must contain exactly one `artifacts` entry for
+`execution-report.json`, the matching required automated observation, and
+report bytes whose SHA-256 matches the bound artifact. Invalid
+`qualificationOutcome: "not_observed"` audit bundles may omit the artifact and
+report file only when report capture itself was unavailable. Synthetic evidence
+fixtures under `tests/fixtures/device-qualification/` follow the same bundle
+layout.
+
+The canonical workflow contract for `retroarch-plus-bios` is now version 2.
+Its prerequisite `clean_or_deliberately_reset_device` remains declared in
+`prerequisites` and is also a required human checkpoint with allowed outcomes
+`pass`, `fail`, and `unable_to_verify`. This checkpoint is a pre-execution
+qualification gate: only `pass` may participate in a valid record, while
+`fail` or `unable_to_verify` force an invalid `not_observed` run rather than a
+product qualification failure.
+
+Qualification promotion is create-new and repository-bounded. Target and run
+promotion accept only `qualification-candidate-<32 lowercase hex>` identifiers
+through `node tools/device-qualification.mjs --register-target <candidate-id>`
+and `node tools/device-qualification.mjs --record-run <candidate-id>`. Before
+any canonical mutation the tool rechecks that the candidate build commit still
+matches `HEAD`, the tracked worktree is clean, the candidate material-build
+digest matches the current repository state, `qualificationContract` still
+matches the current tool contract, and `realExecutionEnabled` remains true. Run
+promotion also reloads the current workflow catalog, target registry, authored
+recipe digests, and runtime contract, rebuilds the expected fingerprint, binds
+the embedded evidence `deviceTarget` from the registered target rather than the
+candidate payload, and rejects any drift before sealing the run.
 
 `tools/device-qualification.mjs` is also the sole repository authority for
 deriving build/runtime identity. `node tools/device-qualification.mjs
@@ -1193,9 +1226,13 @@ registry. Active repository projection and validation no longer read
 `EMUCHEF_PHASE_6F_BUILD_IDENTITY` or `EMUCHEF_PHASE_6F_RUNTIME_CONTRACT`.
 
 Active schema-v2 run records use the domain-oriented immutable ID form
-`qualification-run-sha256:<64 lowercase hex characters>`. The current
-production target registry remains empty, so repository validation and matrix
-generation still make no claim that any physical device is qualified.
+`qualification-run-sha256:<64 lowercase hex characters>`, derived from the
+unsealed record payload and then sealed with canonical `fingerprintDigest` and
+`recordDigest`. Current-state projection selects only valid, compatibility-clean
+bundles as current evidence; invalid runs remain historical audit evidence and
+cannot replace current qualification state. The current production target
+registry remains empty, so repository validation and matrix generation still
+make no claim that any physical device is qualified.
 
 ## Phase 6D.6 physical interruption qualification
 

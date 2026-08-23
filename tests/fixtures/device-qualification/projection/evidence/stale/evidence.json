@@ -1,9 +1,7 @@
 {
   "schemaVersion": 2,
-  "runId": "qualification-run-sha256:5555555555555555555555555555555555555555555555555555555555555555",
-  "recordDigest": "sha256:c2939ac48dc0d5cc2f0a0de8b79e0e38db90390a981cb8dd8c80a0920b62b6f2",
-  "capturedAt": "2026-08-21T00:06:00Z",
-  "workflowId": "checkpoint-gated",
+  "capturedAt": "2026-08-19T00:00:00Z",
+  "workflowId": "obtainium-install",
   "workflowVersion": 1,
   "deviceTarget": {
     "id": "device-target-sha256:8b9f6cf2dc8831a9188c2ad1d85b8a83ea8e8baf0d674943b7d5e9925f047c62",
@@ -48,13 +46,18 @@
     "schemaVersion": 2,
     "emuchefBuild": {
       "appVersion": "0.1.0",
-      "gitCommit": "1111111111111111111111111111111111111111",
-      "materialBuildDigest": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "gitCommit": "3333333333333333333333333333333333333333",
+      "materialBuildDigest": "sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
       "realExecutionEnabled": true,
       "qualificationContract": 1
     },
     "workflowVersion": 1,
-    "authoredContent": [],
+    "authoredContent": [
+      {
+        "id": "app.obtainium.install",
+        "sha256": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc"
+      }
+    ],
     "runtimeContract": "real-execution-v1",
     "deviceProfile": "ayaneo.pocket_s2",
     "androidApi": 35,
@@ -63,19 +66,27 @@
     "rootState": "non_root",
     "connectionType": "usb3"
   },
-  "fingerprintDigest": "sha256:1879d3e8d53b7debc46f97069ec1a60941a23f873c14cd155cc3ebb38a13608a",
-  "runValidity": "invalid",
-  "qualificationOutcome": "failed",
+  "runValidity": "valid",
+  "qualificationOutcome": "passed",
   "automatedObservations": [
     {
       "id": "execution-report",
       "outcome": "passed",
-      "observedAt": "2026-08-21T00:07:00Z"
+      "observedAt": "2026-08-19T00:01:00Z"
     }
   ],
   "humanCheckpoints": [],
   "targetWideFailure": null,
-  "limitations": [
-    "harness failure prevented reliable product observation"
-  ]
+  "limitations": [],
+  "artifacts": [
+    {
+      "id": "execution-report",
+      "kind": "production_execution_report",
+      "path": "execution-report.json",
+      "sha256": "4eca7a03826386b6cb9720fcb0b35ebae2d55c051f9e72b5e52ae3b46a494962"
+    }
+  ],
+  "fingerprintDigest": "sha256:56abd0e757a761c112cac628f8b1614e5c1d7ff2250066481b7747cc308325dc",
+  "runId": "qualification-run-sha256:3c0c3f963c4b3610eca24da81a7984b214884c9654ccbdce4fb397481f580410",
+  "recordDigest": "sha256:136dcdf0210666e1a4476d61a52ecb3304e544797a3741bee760610f550eaf4a"
 }

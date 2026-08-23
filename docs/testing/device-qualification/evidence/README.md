@@ -1,5 +1,6 @@
 # Phase 6F Physical Evidence
 
-This directory is reserved for immutable, validated physical-device qualification records.
+This directory is reserved for immutable, validated physical-device qualification bundles.
+Each recorded run lives in its own `qualification-run-sha256:<digest>/` directory with `evidence.json` and, when present, a digest-bound `execution-report.json`.
 Synthetic fixtures belong only under `tests/fixtures/device-qualification/` and must never be copied here.
-The Phase 6F foundation intentionally contains no physical evidence JSON records.
+The Phase 6F foundation intentionally contains no physical evidence bundles yet.

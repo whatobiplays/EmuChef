@@ -20,7 +20,8 @@
     "automatedObservations",
     "humanCheckpoints",
     "targetWideFailure",
-    "limitations"
+    "limitations",
+    "artifacts"
   ],
   "properties": {
     "schemaVersion": {
@@ -101,6 +102,12 @@
       "items": {
         "type": "string",
         "minLength": 1
+      }
+    },
+    "artifacts": {
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/evidenceArtifact"
       }
     }
   },
@@ -244,6 +251,31 @@
         "observedAt": {
           "type": "string",
           "format": "date-time"
+        }
+      }
+    },
+    "evidenceArtifact": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "id",
+        "kind",
+        "path",
+        "sha256"
+      ],
+      "properties": {
+        "id": {
+          "const": "execution-report"
+        },
+        "kind": {
+          "const": "production_execution_report"
+        },
+        "path": {
+          "const": "execution-report.json"
+        },
+        "sha256": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{64}$"
         }
       }
     },
