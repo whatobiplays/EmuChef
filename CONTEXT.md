@@ -1167,6 +1167,19 @@ promotion, evidence-bundle validation, canonical digests, compatibility
 projection, current-evidence selection, and matrix rendering. Production
 runtime behavior is unchanged by these repository contracts.
 
+Trusted Rust candidate persistence uses the compile-time repository root and
+the ignored `.emuchef_runtime/qualification-candidates/` directory. Each
+candidate is stored beneath an opaque
+`qualification-candidate-<32 lowercase hex>` handle with a `candidate.json`
+file and, only when the candidate declares a captured production report, an
+`execution-report.json` file containing the exact captured bytes. Restart
+recovery checks the handle-to-directory binding, JSON shape, report-file
+presence, and comparison with the embedded build identity without
+reimplementing Node semantic validation. The Rust boundary accepts only the
+fixed `--describe`, `--register-target <handle>`, and `--record-run <handle>`
+operations; React receives no repository path, candidate path, executable
+path, or arbitrary process arguments.
+
 `docs/testing/device-qualification/device-targets.json` now uses schema
 version 2. Every material target fact is stored as an exact `{ value, source }`
 wrapper, with legal provenance restricted by field: ordinary identity facts use

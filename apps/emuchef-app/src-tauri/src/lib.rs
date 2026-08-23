@@ -11,6 +11,8 @@ mod qualification;
 // layer consumes it, so it is intentionally unused by the ordinary app flow.
 #[allow(dead_code)]
 pub(crate) mod qualification_build;
+#[allow(dead_code)]
+pub(crate) mod qualification_repository;
 mod recovery;
 mod saved_configurations;
 mod sidecar;
