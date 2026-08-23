@@ -94,6 +94,13 @@ const COMPATIBILITY_DIMENSIONS = new Set([
 const ROOT_STATES = new Set(["non_root", "rooted"]);
 const CONNECTION_TYPES = new Set(["usb2", "usb3"]);
 const CHECKPOINT_OUTCOME_SET = new Set(["pass", "fail", "unable_to_verify"]);
+const BUILD_IDENTITY_FIELDS = [
+  "appVersion",
+  "gitCommit",
+  "materialBuildDigest",
+  "realExecutionEnabled",
+  "qualificationContract",
+];
 const MATERIAL_ROOTS = [
   "authored/",
   "crates/emuchef-rust-backend/",
@@ -298,13 +305,7 @@ function materialBuildDigest(repoRoot) {
 }
 
 function validateBuildIdentity(buildIdentity, label) {
-  assertExactKeys(buildIdentity, [
-    "appVersion",
-    "gitCommit",
-    "materialBuildDigest",
-    "realExecutionEnabled",
-    "qualificationContract",
-  ], label);
+  assertExactKeys(buildIdentity, BUILD_IDENTITY_FIELDS, label);
   assertString(buildIdentity.appVersion, `${label} appVersion`);
   assertString(buildIdentity.gitCommit, `${label} gitCommit`);
   if (!GIT_COMMIT_PATTERN.test(buildIdentity.gitCommit)) {
@@ -754,6 +755,36 @@ export function validateEvidenceRecord(record, context) {
   return true;
 }
 
+function validateBuildIdentitySchemaContract(schema) {
+  const definition = schema.$defs?.qualificationBuildIdentity;
+  assertObject(definition, "evidence schema qualificationBuildIdentity");
+  if (definition.additionalProperties !== false) {
+    fail("evidence schema qualificationBuildIdentity must reject additional properties");
+  }
+  if (!equalJson(definition.required, BUILD_IDENTITY_FIELDS)) {
+    fail("evidence schema qualificationBuildIdentity required fields drifted from the validator");
+  }
+  assertObject(definition.properties, "evidence schema qualificationBuildIdentity properties");
+  if (!equalJson(Object.keys(definition.properties), BUILD_IDENTITY_FIELDS)) {
+    fail("evidence schema qualificationBuildIdentity properties drifted from the validator");
+  }
+  if (!equalJson(definition.properties.appVersion, { type: "string", minLength: 1 })) {
+    fail("evidence schema qualificationBuildIdentity appVersion drifted from the validator");
+  }
+  if (!equalJson(definition.properties.gitCommit, { type: "string", pattern: GIT_COMMIT_PATTERN.source })) {
+    fail("evidence schema qualificationBuildIdentity gitCommit drifted from the validator");
+  }
+  if (!equalJson(definition.properties.materialBuildDigest, { type: "string", pattern: DIGEST_PATTERN.source })) {
+    fail("evidence schema qualificationBuildIdentity materialBuildDigest drifted from the validator");
+  }
+  if (!equalJson(definition.properties.realExecutionEnabled, { type: "boolean" })) {
+    fail("evidence schema qualificationBuildIdentity realExecutionEnabled drifted from the validator");
+  }
+  if (!equalJson(definition.properties.qualificationContract, { type: "integer", minimum: 1 })) {
+    fail("evidence schema qualificationBuildIdentity qualificationContract drifted from the validator");
+  }
+}
+
 export function validateEvidenceSchemaContract(schema) {
   assertObject(schema, "evidence schema");
   if (!equalJson(schema.required, EVIDENCE_RECORD_FIELDS)) {
@@ -774,6 +805,7 @@ export function validateEvidenceSchemaContract(schema) {
   if (!equalJson(schema.$defs.fingerprint.required, FINGERPRINT_FIELDS)) {
     fail("evidence schema fingerprint fields drifted from the validator");
   }
+  validateBuildIdentitySchemaContract(schema);
   if (!equalJson(schema.$defs.deviceTarget.required, EVIDENCE_DEVICE_TARGET_FIELDS)) {
     fail("evidence schema deviceTarget fields drifted from the validator");
   }

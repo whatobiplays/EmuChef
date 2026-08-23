@@ -418,6 +418,39 @@ test("the evidence schema matches the validator contract", () => {
   assert.doesNotThrow(() => validateEvidenceSchemaContract(schema));
 });
 
+test("validateEvidenceSchemaContract rejects qualification build identity schema drift", () => {
+  const schema = JSON.parse(readFileSync(
+    path.join(REPO_ROOT, "docs/testing/device-qualification/evidence-schema.json"),
+    "utf8",
+  ));
+
+  const missingRequired = structuredClone(schema);
+  missingRequired.$defs.qualificationBuildIdentity.required = [
+    "appVersion",
+    "gitCommit",
+    "materialBuildDigest",
+    "realExecutionEnabled",
+  ];
+  assert.throws(
+    () => validateEvidenceSchemaContract(missingRequired),
+    /qualificationBuildIdentity/i,
+  );
+
+  const nonStrict = structuredClone(schema);
+  nonStrict.$defs.qualificationBuildIdentity.additionalProperties = true;
+  assert.throws(
+    () => validateEvidenceSchemaContract(nonStrict),
+    /qualificationBuildIdentity/i,
+  );
+
+  const driftedConstraint = structuredClone(schema);
+  driftedConstraint.$defs.qualificationBuildIdentity.properties.gitCommit.pattern = "^[0-9a-f]{7}$";
+  assert.throws(
+    () => validateEvidenceSchemaContract(driftedConstraint),
+    /qualificationBuildIdentity/i,
+  );
+});
+
 test("a passing evidence fixture validates with its stored digests", () => {
   assert.doesNotThrow(() => validateEvidenceRecord(
     recordFor("evidence-valid/passing-retroarch-bios.json"),
