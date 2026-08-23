@@ -31,10 +31,10 @@ import {
   validateEvidenceSchemaContract,
   validateDeviceTargets,
   validateWorkflowCatalog,
-} from "./phase-6f-qualification.mjs";
+} from "./device-qualification.mjs";
 
 const REPO_ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
-const FIXTURES = path.join(REPO_ROOT, "tests/fixtures/phase-6f");
+const FIXTURES = path.join(REPO_ROOT, "tests/fixtures/device-qualification");
 const AUTHORED_PROFILES = path.join(REPO_ROOT, "authored/device_profiles");
 
 function readJson(relative) {
@@ -209,7 +209,7 @@ test("canonicalization sorts object keys recursively and keeps array order", () 
 });
 
 test("production catalog loads and every production recipe exists", () => {
-  const catalog = loadWorkflowCatalog(path.join(REPO_ROOT, "docs/testing/phase-6f/workflow-catalog.json"));
+  const catalog = loadWorkflowCatalog(path.join(REPO_ROOT, "docs/testing/device-qualification/workflow-catalog.json"));
   assert.equal(catalog.workflows.length, 4);
   assert.deepEqual(
     catalog.workflows.map((workflow) => workflow.id),
@@ -230,7 +230,7 @@ test("production catalog loads and every production recipe exists", () => {
 
 test("production device registry starts with no targets", () => {
   const targets = loadDeviceTargets(
-    path.join(REPO_ROOT, "docs/testing/phase-6f/device-targets.json"),
+    path.join(REPO_ROOT, "docs/testing/device-qualification/device-targets.json"),
     { authoredProfilesDir: AUTHORED_PROFILES },
   );
   assert.deepEqual(targets.targets, []);
@@ -238,7 +238,7 @@ test("production device registry starts with no targets", () => {
 
 test("the evidence schema matches the validator contract", () => {
   const schema = JSON.parse(readFileSync(
-    path.join(REPO_ROOT, "docs/testing/phase-6f/evidence-schema.json"),
+    path.join(REPO_ROOT, "docs/testing/device-qualification/evidence-schema.json"),
     "utf8",
   ));
   assert.deepEqual([...schema.required].sort(), [...EVIDENCE_RECORD_FIELDS].sort());
@@ -712,7 +712,7 @@ test("fixture evidence loading accepts synthetic evidence in fixture mode", () =
 });
 
 test("the production evidence directory contains no physical JSON records", () => {
-  const entries = readdirSync(path.join(REPO_ROOT, "docs/testing/phase-6f/evidence")).sort();
+  const entries = readdirSync(path.join(REPO_ROOT, "docs/testing/device-qualification/evidence")).sort();
   assert.deepEqual(entries, ["README.md"]);
 });
 
@@ -760,12 +760,12 @@ test("projection preserves device target and workflow catalog order", () => {
 test("production --check exits zero and detects matrix drift", () => {
   const check = () => execFileSync(
     process.execPath,
-    ["tools/phase-6f-qualification.mjs", "--check"],
+    ["tools/device-qualification.mjs", "--check"],
     { cwd: REPO_ROOT, encoding: "utf8", stdio: "pipe" },
   );
   assert.doesNotThrow(check);
   const committed = readFileSync(
-    path.join(REPO_ROOT, "docs/qualification/phase-6f-device-matrix.md"),
+    path.join(REPO_ROOT, "docs/qualification/device-qualification-matrix.md"),
     "utf8",
   );
   assert.match(committed, /No physical-device qualification targets have been registered yet/);
@@ -776,7 +776,7 @@ test("the CLI rejects unknown flags", () => {
   assert.throws(
     () => execFileSync(
       process.execPath,
-      ["tools/phase-6f-qualification.mjs", "--bogus"],
+    ["tools/device-qualification.mjs", "--bogus"],
       { cwd: REPO_ROOT, encoding: "utf8", stdio: "pipe" },
     ),
     /usage|unknown/i,
@@ -785,12 +785,12 @@ test("the CLI rejects unknown flags", () => {
 
 test("operator runbook documents the evidence boundary without claiming physical qualification", () => {
   const runbook = readFileSync(
-    path.join(REPO_ROOT, "docs/manual/phase-6f-qualification-operator.md"),
+    path.join(REPO_ROOT, "docs/manual/device-qualification-operator.md"),
     "utf8",
   );
   assert.match(runbook, /production EmuChef remains the system under test/i);
-  assert.match(runbook, /node tools\/phase-6f-qualification\.mjs --check/);
-  assert.match(runbook, /node tools\/phase-6f-qualification\.mjs --write-matrix/);
+  assert.match(runbook, /node tools\/device-qualification\.mjs --check/);
+  assert.match(runbook, /node tools\/device-qualification\.mjs --write-matrix/);
   assert.match(runbook, /unable_to_verify/);
   assert.match(runbook, /does not\s+itself imply support/i);
   assert.match(runbook, /EMUCHEF_PHASE_6F_BUILD_IDENTITY/);
@@ -807,15 +807,31 @@ test("repository validation wires phase 6f without claiming completion", () => {
   );
   const roadmap = readFileSync(path.join(REPO_ROOT, "docs/product/product-roadmap.md"), "utf8");
 
-  assert.match(makefile, /phase-6f-qualification-check:/);
-  assert.match(makefile, /node --test tools\/phase-6f-qualification\.test\.mjs/);
-  assert.match(makefile, /node tools\/phase-6f-qualification\.mjs --check/);
-  assert.match(makefile, /test: ensure-deps phase-6f-qualification-check/);
-  assert.match(workflow, /tools\/phase-6f-\*/);
-  assert.match(workflow, /docs\/testing\/phase-6f\/\*\*/);
-  assert.match(workflow, /node --test tools\/phase-6f-qualification\.test\.mjs/);
-  assert.match(workflow, /node tools\/phase-6f-qualification\.mjs --check/);
+  assert.match(makefile, /device-qualification-check:/);
+  assert.match(makefile, /node --test tools\/device-qualification\.test\.mjs/);
+  assert.match(makefile, /node tools\/device-qualification\.mjs --check/);
+  assert.match(makefile, /test: ensure-deps device-qualification-check/);
+  assert.match(workflow, /tools\/device-qualification\*/);
+  assert.match(workflow, /docs\/testing\/device-qualification\/\*\*/);
+  assert.match(workflow, /node --test tools\/device-qualification\.test\.mjs/);
+  assert.match(workflow, /node tools\/device-qualification\.mjs --check/);
   assert.match(roadmap, /6F \| Physical-device test matrix \| In progress/);
   assert.match(roadmap, /no physical-device qualification evidence has been added/i);
   assert.doesNotMatch(roadmap, /6F \| Physical-device test matrix \| Completed/);
+});
+
+test("active device qualification artifacts use domain-oriented names", () => {
+  const forbidden = [
+    "tools/phase-6f-qualification.mjs",
+    "tools/phase-6f-qualification.test.mjs",
+    "docs/testing/phase-6f",
+    "tests/fixtures/phase-6f",
+    "docs/qualification/phase-6f-device-matrix.md",
+    "docs/manual/phase-6f-qualification-operator.md",
+  ];
+  for (const relative of forbidden) {
+    assert.equal(existsSync(path.join(REPO_ROOT, relative)), false, relative);
+  }
+  const makefile = readFileSync(path.join(REPO_ROOT, "Makefile"), "utf8");
+  assert.doesNotMatch(makefile, /phase-6f-qualification-check/);
 });

@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 
 /**
- * Dependency-free Phase 6F qualification evidence foundation.
+ * Dependency-free device qualification evidence foundation.
  *
  * This module owns the repository contracts for physical-device
  * qualification: canonical workflow definitions, device-target identity,
@@ -819,7 +819,7 @@ export function renderQualificationMatrix(projection) {
   const lines = [
     "# Phase 6F Physical-Device Qualification Matrix",
     "",
-    "Generated from `docs/testing/phase-6f/` definitions and immutable physical evidence.",
+    "Generated from `docs/testing/device-qualification/` definitions and immutable physical evidence.",
     "",
   ];
   if (projection.targets.length === 0) {
@@ -848,19 +848,19 @@ function productionAuthoredContentDigests(workflowCatalog) {
 
 function projectProductionQualification() {
   const workflowCatalog = loadWorkflowCatalog(
-    path.join(REPO_ROOT, "docs/testing/phase-6f/workflow-catalog.json"),
+    path.join(REPO_ROOT, "docs/testing/device-qualification/workflow-catalog.json"),
   );
   const targetsFile = loadDeviceTargets(
-    path.join(REPO_ROOT, "docs/testing/phase-6f/device-targets.json"),
+    path.join(REPO_ROOT, "docs/testing/device-qualification/device-targets.json"),
     { authoredProfilesDir: path.join(REPO_ROOT, "authored/device_profiles") },
   );
   const schema = JSON.parse(readFileSync(
-    path.join(REPO_ROOT, "docs/testing/phase-6f/evidence-schema.json"),
+    path.join(REPO_ROOT, "docs/testing/device-qualification/evidence-schema.json"),
     "utf8",
   ));
   validateEvidenceSchemaContract(schema);
   const records = loadEvidenceDirectory(
-    path.join(REPO_ROOT, "docs/testing/phase-6f/evidence"),
+    path.join(REPO_ROOT, "docs/testing/device-qualification/evidence"),
     { fixtureMode: false },
   );
   for (const record of records) {
@@ -879,13 +879,13 @@ function projectProductionQualification() {
 if (process.argv[1] && import.meta.url === pathToFileURL(path.resolve(process.argv[1])).href) {
   const args = process.argv.slice(2);
   if (args.some((arg) => !["--check", "--write-matrix"].includes(arg))) {
-    process.stderr.write("usage: node tools/phase-6f-qualification.mjs [--check|--write-matrix]\n");
+    process.stderr.write("usage: node tools/device-qualification.mjs [--check|--write-matrix]\n");
     process.exitCode = 1;
   } else {
     try {
       const projection = projectProductionQualification();
       const rendered = renderQualificationMatrix(projection);
-      const matrixPath = path.join(REPO_ROOT, "docs/qualification/phase-6f-device-matrix.md");
+      const matrixPath = path.join(REPO_ROOT, "docs/qualification/device-qualification-matrix.md");
       if (args.includes("--write-matrix")) {
         writeFileSync(matrixPath, rendered, "utf8");
       }

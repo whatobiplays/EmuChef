@@ -1,6 +1,6 @@
 # Phase 6F Physical-Device Qualification Matrix
 
-Generated from `docs/testing/phase-6f/` definitions and immutable physical evidence.
+Generated from `docs/testing/device-qualification/` definitions and immutable physical evidence.
 
 ## synthetic-pocket-s2
 

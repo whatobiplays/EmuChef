@@ -15,8 +15,8 @@ itself imply support.
 
 ## Before you start
 
-1. Choose one canonical workflow from `docs/testing/phase-6f/workflow-catalog.json`.
-2. Verify the device target is registered in `docs/testing/phase-6f/device-targets.json`.
+1. Choose one canonical workflow from `docs/testing/device-qualification/workflow-catalog.json`.
+2. Verify the device target is registered in `docs/testing/device-qualification/device-targets.json`.
 3. Set `EMUCHEF_PHASE_6F_BUILD_IDENTITY` to the exact EmuChef build identity under test.
 4. Set `EMUCHEF_PHASE_6F_RUNTIME_CONTRACT` to the execution or runtime contract version under test.
 5. Confirm the workflow's required capabilities and prerequisites apply to the target.
@@ -32,8 +32,8 @@ itself imply support.
 7. Collect only declared human checkpoints using `pass`, `fail`, or `unable_to_verify`.
 8. Distinguish an invalid harness or infrastructure run from a valid product failure.
 9. Create a new immutable evidence JSON record without overwriting an older run.
-10. Run `node tools/phase-6f-qualification.mjs --check` after adding evidence.
-11. Regenerate with `node tools/phase-6f-qualification.mjs --write-matrix` only after validation succeeds.
+10. Run `node tools/device-qualification.mjs --check` after adding evidence.
+11. Regenerate with `node tools/device-qualification.mjs --write-matrix` only after validation succeeds.
 12. Rerun `--check` and repository tests before committing evidence.
 
 ## Evidence record rules
@@ -71,8 +71,8 @@ failed automated observation, a failed human checkpoint, or a modeled
 target-wide prerequisite or safety failure.
 
 Run IDs use the immutable form `phase-6f-run-sha256:<64 hex characters>`.
-Records live under `docs/testing/phase-6f/evidence/`. Synthetic fixtures
-belong only under `tests/fixtures/phase-6f/` and must never be copied into
+Records live under `docs/testing/device-qualification/evidence/`. Synthetic fixtures
+belong only under `tests/fixtures/device-qualification/` and must never be copied into
 the production evidence directory.
 
 ## Current state derivation
@@ -101,13 +101,13 @@ qualification-only planner or executor behavior.
 Run the full Phase 6F validation before and after adding evidence:
 
 ```sh
-node --test tools/phase-6f-qualification.test.mjs
-node tools/phase-6f-qualification.mjs --check
-make phase-6f-qualification-check
+node --test tools/device-qualification.test.mjs
+node tools/device-qualification.mjs --check
+make device-qualification-check
 ```
 
 `--check` validates the production definitions and evidence, renders the
 expected matrix in memory, and compares it byte-for-byte with
-`docs/qualification/phase-6f-device-matrix.md`. `--write-matrix` writes only
+`docs/qualification/device-qualification-matrix.md`. `--write-matrix` writes only
 the generated matrix, and only after all inputs validate. The generated
 matrix is a projection, not an independent source of truth.

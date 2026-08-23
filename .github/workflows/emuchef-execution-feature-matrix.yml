@@ -13,13 +13,13 @@ on:
       - "tests/fixtures/phase-6c/non-root/**"
       - "tools/phase-6c-fixture.mjs"
       - "tools/phase-6c-fixture.test.mjs"
-      - "tools/phase-6f-*"
+      - "tools/device-qualification*"
       - "tools/phase-6d6-*"
       - "docs/testing/phase-6d6/**"
-      - "docs/testing/phase-6f/**"
+      - "docs/testing/device-qualification/**"
       - "docs/manual/phase-6d6-physical-interruption-qualification.md"
-      - "docs/manual/phase-6f-qualification-operator.md"
-      - "docs/qualification/phase-6f-device-matrix.md"
+      - "docs/manual/device-qualification-operator.md"
+      - "docs/qualification/device-qualification-matrix.md"
       - "docs/product/phase-6d6-physical-interruption-qualification.md"
       - "scripts/build-phase-6c-android-fixture.sh"
   push:
@@ -36,13 +36,13 @@ on:
       - "tests/fixtures/phase-6c/non-root/**"
       - "tools/phase-6c-fixture.mjs"
       - "tools/phase-6c-fixture.test.mjs"
-      - "tools/phase-6f-*"
+      - "tools/device-qualification*"
       - "tools/phase-6d6-*"
       - "docs/testing/phase-6d6/**"
-      - "docs/testing/phase-6f/**"
+      - "docs/testing/device-qualification/**"
       - "docs/manual/phase-6d6-physical-interruption-qualification.md"
-      - "docs/manual/phase-6f-qualification-operator.md"
-      - "docs/qualification/phase-6f-device-matrix.md"
+      - "docs/manual/device-qualification-operator.md"
+      - "docs/qualification/device-qualification-matrix.md"
       - "docs/product/phase-6d6-physical-interruption-qualification.md"
       - "scripts/build-phase-6c-android-fixture.sh"
   workflow_dispatch:
@@ -83,8 +83,8 @@ jobs:
           node --test tools/phase-6d6-result.test.mjs
       - name: Validate Phase 6F qualification foundation
         run: |
-          node --test tools/phase-6f-qualification.test.mjs
-          node tools/phase-6f-qualification.mjs --check
+          node --test tools/device-qualification.test.mjs
+          node tools/device-qualification.mjs --check
       - name: Verify committed fixture APK contract
         run: >-
           node tools/phase-6c-fixture.mjs
