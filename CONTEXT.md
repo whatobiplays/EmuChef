@@ -1170,15 +1170,24 @@ runtime behavior is unchanged by these repository contracts.
 Trusted Rust candidate persistence uses the compile-time repository root and
 the ignored `.emuchef_runtime/qualification-candidates/` directory. Each
 candidate is stored beneath an opaque
-`qualification-candidate-<32 lowercase hex>` handle with a `candidate.json`
-file and, only when the candidate declares a captured production report, an
-`execution-report.json` file containing the exact captured bytes. Restart
-recovery checks the handle-to-directory binding, JSON shape, report-file
-presence, and comparison with the embedded build identity without
-reimplementing Node semantic validation. The Rust boundary accepts only the
-fixed `--describe`, `--register-target <handle>`, and `--record-run <handle>`
-operations; React receives no repository path, candidate path, executable
-path, or arbitrary process arguments.
+`qualification-candidate-<32 lowercase hex>` handle. Its `candidate.json` is a
+strict Rust-owned envelope containing the handle, candidate kind, captured-at
+metadata, optional typed build identity, opaque Node-owned semantic payload,
+and optional report metadata. A declared report metadata entry names only
+`execution-report.json` and binds its byte length and SHA-256 to the exact
+`execution-report.json` bytes in the same directory. Candidate creation stages
+both files in a private temporary directory, synchronizes them, and publishes
+the complete directory with create-new collision behavior. Restart recovery,
+read, discard, and promotion reject symlinked root components, candidate
+directories, candidate files, and report files; no candidate path can escape
+the fixed root. Rust checks only this local envelope, file, and build-binding
+integrity and does not reimplement Node semantic validation. The Rust boundary
+accepts only the fixed `--describe`, `--register-target <handle>`, and
+`--record-run <handle>` operations. Promotion is refused before Node is
+invoked when build identity is missing or stale, and operation results use a
+strict Rust-owned envelope around an opaque canonical payload. React receives
+no repository path, candidate path, executable path, or arbitrary process
+arguments.
 
 `docs/testing/device-qualification/device-targets.json` now uses schema
 version 2. Every material target fact is stored as an exact `{ value, source }`

@@ -12,7 +12,20 @@
  */
 import { createHash } from "node:crypto";
 import { execFileSync } from "node:child_process";
-import { existsSync, mkdirSync, readFileSync, readdirSync, renameSync, rmSync, writeFileSync } from "node:fs";
+import {
+  closeSync,
+  constants as fsConstants,
+  existsSync,
+  fstatSync,
+  lstatSync,
+  mkdirSync,
+  openSync,
+  readFileSync,
+  readdirSync,
+  renameSync,
+  rmSync,
+  writeFileSync,
+} from "node:fs";
 import path from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 
@@ -226,6 +239,15 @@ const EXECUTION_REPORT_ARTIFACT = {
   kind: "production_execution_report",
   path: "execution-report.json",
 };
+const CANDIDATE_ENVELOPE_FIELDS = [
+  "candidateHandle",
+  "kind",
+  "capturedAt",
+  "build",
+  "payload",
+  "report",
+];
+const CANDIDATE_REPORT_FIELDS = ["path", "byteLength", "sha256"];
 const PRE_EXECUTION_PREREQUISITE_CHECKPOINTS = new Set([
   "clean_or_deliberately_reset_device",
 ]);
@@ -1140,19 +1162,130 @@ function candidateDirectory(candidateId, repoRoot = REPO_ROOT) {
   return path.join(qualificationPaths(repoRoot).candidateRoot, candidateId);
 }
 
+function lstatIfPresent(targetPath) {
+  try {
+    return lstatSync(targetPath);
+  } catch (error) {
+    if (error?.code === "ENOENT") return null;
+    throw error;
+  }
+}
+
+function assertCandidateRootIsSafe(repoRoot) {
+  const { candidateRoot } = qualificationPaths(repoRoot);
+  const resolvedRepoRoot = path.resolve(repoRoot);
+  const resolvedCandidateRoot = path.resolve(candidateRoot);
+  const relative = path.relative(resolvedRepoRoot, resolvedCandidateRoot);
+  if (relative.startsWith("..") || path.isAbsolute(relative)) {
+    fail("qualification candidate root is outside the repository");
+  }
+  const repoMetadata = lstatIfPresent(resolvedRepoRoot);
+  if (repoMetadata?.isSymbolicLink()) fail("qualification repository root is a symlink");
+  if (repoMetadata !== null && !repoMetadata?.isDirectory()) {
+    fail("qualification repository root is not a directory");
+  }
+  let current = resolvedRepoRoot;
+  for (const component of relative ? relative.split(path.sep) : []) {
+    current = path.join(current, component);
+    const metadata = lstatIfPresent(current);
+    if (metadata?.isSymbolicLink()) fail("qualification candidate root contains a symlink");
+    if (metadata !== null && !metadata.isDirectory()) {
+      fail("qualification candidate root contains a non-directory");
+    }
+    if (metadata === null) break;
+  }
+}
+
+function assertRegularCandidateFile(filePath, label, { required = true } = {}) {
+  const metadata = lstatIfPresent(filePath);
+  if (metadata === null) {
+    if (required) fail(`${label} does not exist`);
+    return false;
+  }
+  if (metadata.isSymbolicLink()) fail(`${label} is a symlink`);
+  if (!metadata.isFile()) fail(`${label} is not a regular file`);
+  return true;
+}
+
+function readRegularCandidateFile(filePath, label, encoding = null) {
+  assertRegularCandidateFile(filePath, label);
+  const noFollow = fsConstants.O_NOFOLLOW ?? 0;
+  let descriptor;
+  try {
+    descriptor = openSync(filePath, fsConstants.O_RDONLY | noFollow);
+    const metadata = fstatSync(descriptor);
+    if (!metadata.isFile()) fail(`${label} is not a regular file`);
+    return readFileSync(descriptor, encoding ?? undefined);
+  } catch (error) {
+    if (error?.code === "ELOOP") fail(`${label} is a symlink`);
+    throw error;
+  } finally {
+    if (descriptor !== undefined) closeSync(descriptor);
+  }
+}
+
+function validateCandidateReportMetadata(report, reportBytes) {
+  if (report === null) {
+    if (reportBytes !== null) fail("qualification execution report is not declared by the candidate");
+    return;
+  }
+  assertExactKeys(report, CANDIDATE_REPORT_FIELDS, "qualification candidate report metadata");
+  if (report.path !== EXECUTION_REPORT_ARTIFACT.path) {
+    fail("qualification candidate report path must be execution-report.json");
+  }
+  if (!Number.isSafeInteger(report.byteLength) || report.byteLength < 0) {
+    fail("qualification candidate report byteLength must be a non-negative integer");
+  }
+  if (typeof report.sha256 !== "string" || !SHA256_PATTERN.test(report.sha256)) {
+    fail("qualification candidate report sha256 is invalid");
+  }
+  if (reportBytes === null) fail("qualification execution report is missing");
+  if (report.byteLength !== reportBytes.length) fail("qualification execution report byte length does not match metadata");
+  const actualSha256 = createHash("sha256").update(reportBytes).digest("hex");
+  if (report.sha256 !== actualSha256) fail("qualification execution report digest does not match metadata");
+}
+
 function loadCandidateJson(candidateId, repoRoot = REPO_ROOT) {
   const directory = candidateDirectory(candidateId, repoRoot);
-  const candidatePath = path.join(directory, "candidate.json");
-  if (!existsSync(candidatePath)) {
+  assertCandidateRootIsSafe(repoRoot);
+  const directoryMetadata = lstatIfPresent(directory);
+  if (directoryMetadata?.isSymbolicLink()) fail("qualification candidate directory is a symlink");
+  if (directoryMetadata === null) {
     fail(`qualification candidate ${candidateId} does not exist`);
   }
-  const candidate = JSON.parse(readFileSync(candidatePath, "utf8"));
+  if (!directoryMetadata.isDirectory()) fail("qualification candidate directory is invalid");
+  const candidatePath = path.join(directory, "candidate.json");
+  assertRegularCandidateFile(candidatePath, "qualification candidate file");
+  const envelope = JSON.parse(readRegularCandidateFile(candidatePath, "qualification candidate file", "utf8"));
+  assertExactKeys(envelope, CANDIDATE_ENVELOPE_FIELDS, "qualification candidate envelope");
+  if (envelope.candidateHandle !== candidateId) {
+    fail("qualification candidate envelope does not match its directory id");
+  }
+  if (!["target_registration", "qualification_run"].includes(envelope.kind)) {
+    fail("qualification candidate envelope kind is invalid");
+  }
+  assertObject(envelope.payload, "qualification candidate payload");
+  const candidate = envelope.payload;
   if (candidate.candidateId !== candidateId) {
     fail("qualification candidate payload does not match its directory id");
   }
+  if (candidate.kind !== envelope.kind) fail("qualification candidate kind metadata is inconsistent");
+  if (!equalJson(envelope.capturedAt, candidate.capturedAt ?? null)) {
+    fail("qualification candidate capturedAt metadata is inconsistent");
+  }
+  if (!equalJson(envelope.build, candidate.build ?? null)) {
+    fail("qualification candidate build metadata is inconsistent");
+  }
+  const reportPath = path.join(directory, EXECUTION_REPORT_ARTIFACT.path);
+  const reportExists = assertRegularCandidateFile(reportPath, "qualification execution report", { required: false });
+  const reportBytes = reportExists
+    ? readRegularCandidateFile(reportPath, "qualification execution report")
+    : null;
+  validateCandidateReportMetadata(envelope.report, reportBytes);
   return {
     directory,
     candidate,
+    reportBytes,
   };
 }
 
@@ -1471,7 +1604,7 @@ export function registerQualificationTargetCandidate(candidateId, { repoRoot = R
 }
 
 export function recordQualificationRunCandidate(candidateId, { repoRoot = REPO_ROOT, fsOps = defaultFsOps } = {}) {
-  const { directory, candidate } = loadCandidateJson(candidateId, repoRoot);
+  const { candidate, reportBytes } = loadCandidateJson(candidateId, repoRoot);
   validateQualificationRunCandidate(candidate);
   const { paths, workflowCatalog, targets, authoredContentDigests } = currentQualificationContext(repoRoot);
   const workflow = workflowCatalog.workflows.find((item) => item.id === candidate.workflowId);
@@ -1515,8 +1648,6 @@ export function recordQualificationRunCandidate(candidateId, { repoRoot = REPO_R
   if (!equalJson(candidate.fingerprint, expectedFingerprint)) {
     fail("qualification candidate fingerprint no longer matches the current canonical workflow, target, and authored content");
   }
-  const reportPath = path.join(directory, EXECUTION_REPORT_ARTIFACT.path);
-  const reportBytes = existsSync(reportPath) ? readFileSync(reportPath) : null;
   const sealedRecord = sealEvidenceRecord({
     schemaVersion: 2,
     capturedAt: candidate.capturedAt,
@@ -1604,6 +1735,15 @@ function repositoryDescription() {
   };
 }
 
+function qualificationOperationResult(operation, candidateHandle, candidateKind, payload) {
+  return {
+    operation,
+    candidateHandle,
+    candidateKind,
+    payload,
+  };
+}
+
 if (process.argv[1] && import.meta.url === pathToFileURL(path.resolve(process.argv[1])).href) {
   const args = process.argv.slice(2);
   const candidateActions = new Set(["--register-target", "--record-run"]);
@@ -1633,11 +1773,23 @@ if (process.argv[1] && import.meta.url === pathToFileURL(path.resolve(process.ar
       } else if (args.includes("--describe")) {
         process.stdout.write(`${JSON.stringify(repositoryDescription())}\n`);
       } else if (registerTargetIndex !== -1) {
-        const target = registerQualificationTargetCandidate(args[registerTargetIndex + 1], { repoRoot: REPO_ROOT });
-        process.stdout.write(`${JSON.stringify(target)}\n`);
+        const candidateHandle = args[registerTargetIndex + 1];
+        const target = registerQualificationTargetCandidate(candidateHandle, { repoRoot: REPO_ROOT });
+        process.stdout.write(`${JSON.stringify(qualificationOperationResult(
+          "register_target",
+          candidateHandle,
+          "target_registration",
+          target,
+        ))}\n`);
       } else if (recordRunIndex !== -1) {
-        const record = recordQualificationRunCandidate(args[recordRunIndex + 1], { repoRoot: REPO_ROOT });
-        process.stdout.write(`${JSON.stringify(record)}\n`);
+        const candidateHandle = args[recordRunIndex + 1];
+        const record = recordQualificationRunCandidate(candidateHandle, { repoRoot: REPO_ROOT });
+        process.stdout.write(`${JSON.stringify(qualificationOperationResult(
+          "record_run",
+          candidateHandle,
+          "qualification_run",
+          record,
+        ))}\n`);
       } else {
         const projection = projectProductionQualification();
         const rendered = renderQualificationMatrix(projection);

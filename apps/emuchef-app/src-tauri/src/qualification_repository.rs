@@ -5,12 +5,17 @@
 //! checking needed to recover that data safely. The Node tool remains the
 //! authority for candidate semantics, canonical digests, and repository state.
 
-use std::fs;
-use std::path::{Path, PathBuf};
+use std::fs::{self, File, OpenOptions};
+use std::io::{Read, Write};
+use std::path::{Component, Path, PathBuf};
 use std::process::Command;
+
+#[cfg(any(target_os = "macos", target_os = "linux"))]
+use std::os::unix::fs::OpenOptionsExt;
 
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
+use sha2::{Digest, Sha256};
 use uuid::Uuid;
 
 use crate::qualification_build::{embedded_build_identity, QualificationBuildIdentity};
@@ -21,7 +26,9 @@ const CANDIDATE_HANDLE_HEX_LENGTH: usize = 32;
 const CANDIDATE_SCHEMA_VERSION: u64 = 1;
 const CANDIDATE_DIRECTORY: &str = ".emuchef_runtime/qualification-candidates";
 const QUALIFICATION_TOOL: &str = "tools/device-qualification.mjs";
+const CANDIDATE_FILE: &str = "candidate.json";
 const EXECUTION_REPORT_FILE: &str = "execution-report.json";
+const CANDIDATE_STAGING_PREFIX: &str = ".qualification-candidate-tmp-";
 const MAX_TOOL_OUTPUT_BYTES: usize = 8 * 1024 * 1024;
 
 /// The two candidate kinds understood by the repository qualification tool.
@@ -58,15 +65,59 @@ pub struct QualificationCandidateSummary {
     pub(crate) qualification_outcome: Option<String>,
 }
 
+/// Metadata for the one optional report file owned by a candidate directory.
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub(crate) struct QualificationReportMetadata {
+    pub(crate) path: String,
+    pub(crate) byte_length: u64,
+    pub(crate) sha256: String,
+}
+
+/// The Rust-owned envelope stored around a Node-owned candidate payload.
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct CandidateFileEnvelope {
+    candidate_handle: String,
+    kind: CandidateKind,
+    captured_at: Option<String>,
+    build: Option<QualificationBuildIdentity>,
+    payload: Value,
+    report: Option<QualificationReportMetadata>,
+}
+
 /// A candidate loaded from the fixed runtime directory.
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct StoredQualificationCandidate {
-    pub(crate) handle: String,
+    pub(crate) candidate_handle: String,
     pub(crate) kind: CandidateKind,
-    pub(crate) json: Value,
+    pub(crate) captured_at: Option<String>,
+    pub(crate) build: Option<QualificationBuildIdentity>,
+    pub(crate) payload: Value,
+    pub(crate) report: Option<QualificationReportMetadata>,
+    #[serde(skip)]
     pub(crate) report_bytes: Option<Vec<u8>>,
     pub(crate) promotable: bool,
     pub(crate) non_promotable_reason: Option<String>,
+}
+
+/// The bounded operation envelope emitted by the canonical Node tool.
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub(crate) enum QualificationOperation {
+    RegisterTarget,
+    RecordRun,
+}
+
+/// Rust-owned shape for a canonical target/run operation result.
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct QualificationOperationResult {
+    pub(crate) operation: QualificationOperation,
+    pub(crate) candidate_handle: String,
+    pub(crate) candidate_kind: CandidateKind,
+    pub(crate) payload: Value,
 }
 
 /// The machine-readable repository description returned by Node `--describe`.
@@ -91,6 +142,7 @@ pub struct QualificationRepository {
     repo_root: PathBuf,
     candidate_root: PathBuf,
     runner: Box<dyn QualificationToolRunner>,
+    embedded_build_identity: Option<QualificationBuildIdentity>,
 }
 
 impl QualificationRepository {
@@ -108,12 +160,24 @@ impl QualificationRepository {
         Self::with_root(repo_root, runner)
     }
 
+    #[cfg(test)]
+    fn new_for_test_with_embedded_build(
+        repo_root: PathBuf,
+        runner: Box<dyn QualificationToolRunner>,
+        build: QualificationBuildIdentity,
+    ) -> Self {
+        let mut repository = Self::with_root(repo_root, runner);
+        repository.embedded_build_identity = Some(build);
+        repository
+    }
+
     fn with_root(repo_root: PathBuf, runner: Box<dyn QualificationToolRunner>) -> Self {
-        let repo_root = fs::canonicalize(&repo_root).unwrap_or(repo_root);
+        let repo_root = absolute_normalized_path(&repo_root);
         Self {
             candidate_root: repo_root.join(CANDIDATE_DIRECTORY),
             repo_root,
             runner,
+            embedded_build_identity: embedded_build_identity(),
         }
     }
 
@@ -138,12 +202,19 @@ impl QualificationRepository {
             .as_object()
             .cloned()
             .ok_or_else(|| "qualification candidate must be a JSON object".to_string())?;
+        let candidate_value = Value::Object(candidate.clone());
+        let captured_at = optional_string_field(&candidate_value, "capturedAt")?;
+        let build = candidate_build_identity(&candidate_value)?;
+        let report = report_metadata_for_candidate(&candidate_value, report_bytes)?;
         ensure_candidate_root(&self.repo_root, &self.candidate_root)?;
 
         for _ in 0..4 {
             let handle = new_candidate_handle();
-            let directory = self.candidate_root.join(&handle);
-            match fs::create_dir(&directory) {
+            let staging = self.candidate_root.join(format!(
+                "{CANDIDATE_STAGING_PREFIX}{}",
+                Uuid::new_v4().simple()
+            ));
+            match fs::create_dir(&staging) {
                 Ok(()) => {
                     candidate.insert(
                         "candidateSchemaVersion".to_string(),
@@ -152,24 +223,51 @@ impl QualificationRepository {
                     candidate.insert("candidateId".to_string(), Value::from(handle.clone()));
                     candidate.insert("kind".to_string(), Value::from(kind.as_str()));
 
-                    let mut bytes =
-                        serde_json::to_vec_pretty(&Value::Object(candidate)).map_err(|_| {
-                            "qualification candidate could not be serialized".to_string()
-                        })?;
+                    let envelope = CandidateFileEnvelope {
+                        candidate_handle: handle.clone(),
+                        kind,
+                        captured_at: captured_at.clone(),
+                        build: build.clone(),
+                        payload: Value::Object(candidate.clone()),
+                        report: report.clone(),
+                    };
+                    let mut bytes = serde_json::to_vec_pretty(&envelope).map_err(|_| {
+                        "qualification candidate could not be serialized".to_string()
+                    })?;
                     bytes.push(b'\n');
-                    if let Err(error) = atomic_write(&directory.join("candidate.json"), &bytes) {
-                        let _ = fs::remove_dir_all(&directory);
+                    if let Err(error) = write_synced_new_file(&staging.join(CANDIDATE_FILE), &bytes)
+                    {
+                        cleanup_owned_staging(&staging);
                         return Err(error);
                     }
                     if let Some(report_bytes) = report_bytes {
-                        if let Err(error) =
-                            atomic_write(&directory.join(EXECUTION_REPORT_FILE), report_bytes)
-                        {
-                            let _ = fs::remove_dir_all(&directory);
+                        if let Err(error) = write_synced_new_file(
+                            &staging.join(EXECUTION_REPORT_FILE),
+                            report_bytes,
+                        ) {
+                            cleanup_owned_staging(&staging);
                             return Err(error);
                         }
                     }
-                    return Ok(handle);
+
+                    if let Err(error) = sync_directory(&staging) {
+                        cleanup_owned_staging(&staging);
+                        return Err(error);
+                    }
+                    let final_directory = self.candidate_root.join(&handle);
+                    match publish_staged_candidate(&staging, &final_directory) {
+                        Ok(()) => {
+                            sync_directory(&self.candidate_root)?;
+                            return Ok(handle);
+                        }
+                        Err(PublishCandidateError::Collision) => {
+                            cleanup_owned_staging(&staging);
+                        }
+                        Err(PublishCandidateError::Io(error)) => {
+                            cleanup_owned_staging(&staging);
+                            return Err(error);
+                        }
+                    }
                 }
                 Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => continue,
                 Err(_) => {
@@ -182,25 +280,24 @@ impl QualificationRepository {
 
     /// Lists stored candidates after local integrity checks.
     pub fn list_candidates(&self) -> Result<Vec<QualificationCandidateSummary>, String> {
-        if !self.candidate_root.exists() {
+        let Some(root) = existing_candidate_root(&self.repo_root, &self.candidate_root)? else {
             return Ok(Vec::new());
-        }
-        let root = existing_candidate_root(&self.repo_root, &self.candidate_root)?;
+        };
         let mut handles = Vec::new();
         for entry in fs::read_dir(root)
             .map_err(|_| "qualification candidates could not be listed".to_string())?
         {
             let entry =
                 entry.map_err(|_| "qualification candidates could not be listed".to_string())?;
-            if entry
+            let file_type = entry
                 .file_type()
-                .map_err(|_| "qualification candidate metadata could not be read".to_string())?
-                .is_dir()
-            {
-                let handle = entry.file_name().to_string_lossy().into_owned();
-                if validate_candidate_handle(&handle).is_ok() {
-                    handles.push(handle);
-                }
+                .map_err(|_| "qualification candidate metadata could not be read".to_string())?;
+            let handle = entry.file_name().to_string_lossy().into_owned();
+            if file_type.is_symlink() && validate_candidate_handle(&handle).is_ok() {
+                return Err("qualification candidate directory is a symlink".to_string());
+            }
+            if file_type.is_dir() && validate_candidate_handle(&handle).is_ok() {
+                handles.push(handle);
             }
         }
         handles.sort();
@@ -217,62 +314,36 @@ impl QualificationRepository {
     /// Loads one candidate and rechecks only Rust-owned local integrity.
     pub fn load_candidate(&self, handle: &str) -> Result<StoredQualificationCandidate, String> {
         let directory = self.candidate_directory(handle)?;
-        let candidate_bytes = fs::read(directory.join("candidate.json"))
-            .map_err(|_| "qualification candidate could not be read".to_string())?;
-        let candidate: Value = serde_json::from_slice(&candidate_bytes)
-            .map_err(|_| "qualification candidate JSON is invalid".to_string())?;
-        let candidate_object = candidate
-            .as_object()
-            .ok_or_else(|| "qualification candidate must be a JSON object".to_string())?;
-        if candidate_object.get("candidateId").and_then(Value::as_str) != Some(handle) {
-            return Err(
-                "qualification candidate identity does not match its directory".to_string(),
-            );
+        let candidate_bytes =
+            read_regular_file(&directory.join(CANDIDATE_FILE), "qualification candidate")?;
+        let envelope = decode_candidate_envelope(&candidate_bytes)?;
+        validate_candidate_binding(&envelope, handle)?;
+        let payload_build = candidate_build_identity(&envelope.payload)?;
+        if payload_build != envelope.build {
+            return Err("qualification candidate build metadata is inconsistent".to_string());
         }
-        if candidate_object
-            .get("candidateSchemaVersion")
-            .and_then(Value::as_u64)
-            != Some(CANDIDATE_SCHEMA_VERSION)
-        {
-            return Err("qualification candidate schema version is unsupported".to_string());
+        if optional_string_field(&envelope.payload, "capturedAt")? != envelope.captured_at {
+            return Err("qualification candidate capture metadata is inconsistent".to_string());
         }
-        let kind = serde_json::from_value::<CandidateKind>(
-            candidate_object
-                .get("kind")
-                .cloned()
-                .ok_or_else(|| "qualification candidate kind is missing".to_string())?,
-        )
-        .map_err(|_| "qualification candidate kind is invalid".to_string())?;
-
         let report_path = directory.join(EXECUTION_REPORT_FILE);
-        let report_metadata = candidate_declares_report(&candidate)?;
-        let report_bytes = match fs::symlink_metadata(&report_path) {
-            Ok(metadata) if !metadata.is_file() => {
-                return Err("qualification execution report is not a regular file".to_string());
-            }
-            Ok(_) if !report_metadata => {
-                return Err(
-                    "qualification execution report is not declared by the candidate".to_string(),
-                );
-            }
-            Ok(_) => Some(
-                fs::read(report_path)
-                    .map_err(|_| "qualification execution report could not be read".to_string())?,
-            ),
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound && report_metadata => {
-                return Err("qualification execution report is missing".to_string());
-            }
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => None,
-            Err(_) => {
-                return Err("qualification execution report could not be inspected".to_string())
-            }
-        };
-        let (promotable, non_promotable_reason) = candidate_promotion_status(&candidate);
+        let declared_report_sha256 = candidate_report_sha256(&envelope.payload)?;
+        let report_bytes = load_report_bytes(
+            &report_path,
+            envelope.report.as_ref(),
+            declared_report_sha256.as_deref(),
+        )?;
+        let (promotable, non_promotable_reason) = candidate_promotion_status(
+            envelope.build.as_ref(),
+            self.embedded_build_identity.as_ref(),
+        );
 
         Ok(StoredQualificationCandidate {
-            handle: handle.to_string(),
-            kind,
-            json: candidate,
+            candidate_handle: handle.to_string(),
+            kind: envelope.kind,
+            captured_at: envelope.captured_at,
+            build: envelope.build,
+            payload: envelope.payload,
+            report: envelope.report,
             report_bytes,
             promotable,
             non_promotable_reason,
@@ -282,6 +353,7 @@ impl QualificationRepository {
     /// Removes one validated candidate directory beneath the fixed root.
     pub fn discard_candidate(&self, handle: &str) -> Result<(), String> {
         let directory = self.candidate_directory(handle)?;
+        validate_candidate_files(&directory)?;
         fs::remove_dir_all(directory)
             .map_err(|_| "qualification candidate could not be discarded".to_string())
     }
@@ -294,17 +366,31 @@ impl QualificationRepository {
     }
 
     /// Invokes the canonical tool for a target-registration candidate.
-    pub fn register_target(&self, handle: &str) -> Result<Value, String> {
+    pub fn register_target(&self, handle: &str) -> Result<QualificationOperationResult, String> {
         self.require_kind(handle, CandidateKind::TargetRegistration)?;
-        let output = self.invoke(vec!["--register-target".to_string(), handle.to_string()])?;
-        parse_tool_json(&output)
+        let output = self.invoke_candidate(
+            handle,
+            vec!["--register-target".to_string(), handle.to_string()],
+        )?;
+        parse_operation_result(
+            &output,
+            QualificationOperation::RegisterTarget,
+            handle,
+            CandidateKind::TargetRegistration,
+        )
     }
 
     /// Invokes the canonical tool for a qualification-run candidate.
-    pub fn record_run(&self, handle: &str) -> Result<Value, String> {
+    pub fn record_run(&self, handle: &str) -> Result<QualificationOperationResult, String> {
         self.require_kind(handle, CandidateKind::QualificationRun)?;
-        let output = self.invoke(vec!["--record-run".to_string(), handle.to_string()])?;
-        parse_tool_json(&output)
+        let output =
+            self.invoke_candidate(handle, vec!["--record-run".to_string(), handle.to_string()])?;
+        parse_operation_result(
+            &output,
+            QualificationOperation::RecordRun,
+            handle,
+            CandidateKind::QualificationRun,
+        )
     }
 
     fn require_kind(&self, handle: &str, expected: CandidateKind) -> Result<(), String> {
@@ -314,22 +400,26 @@ impl QualificationRepository {
                 "qualification candidate kind does not match the requested operation".to_string(),
             );
         }
+        if !candidate.promotable {
+            return Err(candidate
+                .non_promotable_reason
+                .unwrap_or_else(|| "qualification candidate is not promotable".to_string()));
+        }
         Ok(())
     }
 
     fn candidate_directory(&self, handle: &str) -> Result<PathBuf, String> {
         validate_candidate_handle(handle)?;
-        let root = existing_candidate_root(&self.repo_root, &self.candidate_root)?;
-        let directory = self.candidate_root.join(handle);
+        let root = existing_candidate_root(&self.repo_root, &self.candidate_root)?
+            .ok_or_else(|| "qualification candidate root does not exist".to_string())?;
+        let directory = root.join(handle);
         let metadata = fs::symlink_metadata(&directory)
             .map_err(|_| "qualification candidate does not exist".to_string())?;
+        if metadata.file_type().is_symlink() {
+            return Err("qualification candidate directory is a symlink".to_string());
+        }
         if !metadata.is_dir() {
             return Err("qualification candidate directory is invalid".to_string());
-        }
-        let canonical_directory = fs::canonicalize(&directory)
-            .map_err(|_| "qualification candidate directory is invalid".to_string())?;
-        if !canonical_directory.starts_with(&root) {
-            return Err("qualification candidate directory is outside the fixed root".to_string());
         }
         Ok(directory)
     }
@@ -338,31 +428,34 @@ impl QualificationRepository {
         if !allowlisted_tool_args(&args) {
             return Err("qualification tool operation is not allowlisted".to_string());
         }
+        validate_repository_root(&self.repo_root)?;
+        let _ = existing_candidate_root(&self.repo_root, &self.candidate_root)?;
         self.runner.run(&self.repo_root, &args)
+    }
+
+    fn invoke_candidate(&self, handle: &str, args: Vec<String>) -> Result<Vec<u8>, String> {
+        let directory = self.candidate_directory(handle)?;
+        validate_candidate_files(&directory)?;
+        self.invoke(args)
     }
 }
 
 impl StoredQualificationCandidate {
     fn summary(&self) -> QualificationCandidateSummary {
         QualificationCandidateSummary {
-            candidate_handle: self.handle.clone(),
+            candidate_handle: self.candidate_handle.clone(),
             kind: self.kind,
-            captured_at: self
-                .json
-                .get("capturedAt")
-                .and_then(Value::as_str)
-                .unwrap_or_default()
-                .to_string(),
+            captured_at: self.captured_at.clone().unwrap_or_default(),
             promotable: self.promotable,
             non_promotable_reason: self.non_promotable_reason.clone(),
-            target: self.json.get("target").cloned(),
+            target: self.payload.get("target").cloned(),
             run_validity: self
-                .json
+                .payload
                 .get("runValidity")
                 .and_then(Value::as_str)
                 .map(ToString::to_string),
             qualification_outcome: self
-                .json
+                .payload
                 .get("qualificationOutcome")
                 .and_then(Value::as_str)
                 .map(ToString::to_string),
@@ -377,7 +470,7 @@ impl QualificationToolRunner for ProcessQualificationToolRunner {
         if !allowlisted_tool_args(args) {
             return Err("qualification tool operation is not allowlisted".to_string());
         }
-        let tool = repo_root.join(QUALIFICATION_TOOL);
+        let tool = qualification_tool_path(repo_root)?;
         let output = Command::new("node")
             .arg(tool)
             .args(args)
@@ -421,72 +514,335 @@ fn validate_candidate_handle(handle: &str) -> Result<(), String> {
 }
 
 fn ensure_candidate_root(repo_root: &Path, candidate_root: &Path) -> Result<(), String> {
-    fs::create_dir_all(candidate_root)
-        .map_err(|_| "qualification candidate root could not be created".to_string())?;
-    let canonical_repo = fs::canonicalize(repo_root)
+    validate_candidate_root_path(repo_root, candidate_root, true).map(|_| ())
+}
+
+fn existing_candidate_root(
+    repo_root: &Path,
+    candidate_root: &Path,
+) -> Result<Option<PathBuf>, String> {
+    validate_candidate_root_path(repo_root, candidate_root, false)
+}
+
+fn validate_repository_root(repo_root: &Path) -> Result<(), String> {
+    let metadata = fs::symlink_metadata(repo_root)
         .map_err(|_| "qualification repository root is unavailable".to_string())?;
-    let canonical_root = fs::canonicalize(candidate_root)
-        .map_err(|_| "qualification candidate root is unavailable".to_string())?;
-    if !canonical_root.starts_with(&canonical_repo) {
-        return Err("qualification candidate root is outside the repository".to_string());
+    if metadata.file_type().is_symlink() {
+        return Err("qualification repository root is a symlink".to_string());
+    }
+    if !metadata.is_dir() {
+        return Err("qualification repository root is not a directory".to_string());
     }
     Ok(())
 }
 
-fn existing_candidate_root(repo_root: &Path, candidate_root: &Path) -> Result<PathBuf, String> {
-    if !candidate_root.exists() {
-        return Err("qualification candidate root does not exist".to_string());
+fn validate_candidate_root_path(
+    repo_root: &Path,
+    candidate_root: &Path,
+    create_missing: bool,
+) -> Result<Option<PathBuf>, String> {
+    validate_repository_root(repo_root)?;
+    let relative = candidate_root
+        .strip_prefix(repo_root)
+        .map_err(|_| "qualification candidate root is outside the repository".to_string())?;
+    let mut current = repo_root.to_path_buf();
+    for component in relative.components() {
+        let Component::Normal(name) = component else {
+            return Err("qualification candidate root contains an invalid path".to_string());
+        };
+        current.push(name);
+        match fs::symlink_metadata(&current) {
+            Ok(metadata) if metadata.file_type().is_symlink() => {
+                return Err("qualification candidate root contains a symlink".to_string());
+            }
+            Ok(metadata) if !metadata.is_dir() => {
+                return Err("qualification candidate root contains a non-directory".to_string());
+            }
+            Ok(_) => {}
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound && create_missing => {
+                fs::create_dir(&current)
+                    .map_err(|_| "qualification candidate root could not be created".to_string())?;
+                let metadata = fs::symlink_metadata(&current).map_err(|_| {
+                    "qualification candidate root could not be inspected".to_string()
+                })?;
+                if metadata.file_type().is_symlink() || !metadata.is_dir() {
+                    return Err(
+                        "qualification candidate root is not a regular directory".to_string()
+                    );
+                }
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+            Err(_) => return Err("qualification candidate root could not be inspected".to_string()),
+        }
     }
-    ensure_candidate_root(repo_root, candidate_root)?;
-    fs::canonicalize(candidate_root)
-        .map_err(|_| "qualification candidate root is unavailable".to_string())
+    Ok(Some(candidate_root.to_path_buf()))
 }
 
-fn atomic_write(path: &Path, bytes: &[u8]) -> Result<(), String> {
-    let file_name = path
-        .file_name()
-        .and_then(|name| name.to_str())
-        .ok_or_else(|| "qualification candidate file name is invalid".to_string())?;
-    let temporary = path.with_file_name(format!(".{file_name}.tmp-{}", Uuid::new_v4().simple()));
-    fs::write(&temporary, bytes)
-        .map_err(|_| "qualification candidate file could not be written".to_string())?;
-    if fs::rename(&temporary, path).is_err() {
-        let _ = fs::remove_file(&temporary);
-        return Err("qualification candidate file could not be committed".to_string());
+fn absolute_normalized_path(path: &Path) -> PathBuf {
+    let absolute = if path.is_absolute() {
+        path.to_path_buf()
+    } else {
+        std::env::current_dir()
+            .unwrap_or_else(|_| PathBuf::from("."))
+            .join(path)
+    };
+    let mut normalized = PathBuf::new();
+    for component in absolute.components() {
+        match component {
+            Component::Prefix(prefix) => normalized.push(prefix.as_os_str()),
+            Component::RootDir => normalized.push(Path::new(std::path::MAIN_SEPARATOR_STR)),
+            Component::CurDir => {}
+            Component::ParentDir => {
+                normalized.pop();
+            }
+            Component::Normal(value) => normalized.push(value),
+        }
     }
-    Ok(())
+    normalized
 }
 
-fn candidate_declares_report(candidate: &Value) -> Result<bool, String> {
+fn optional_string_field(candidate: &Value, field: &str) -> Result<Option<String>, String> {
+    match candidate.get(field) {
+        None | Some(Value::Null) => Ok(None),
+        Some(Value::String(value)) => Ok(Some(value.clone())),
+        Some(_) => Err(format!(
+            "qualification candidate {field} metadata is invalid"
+        )),
+    }
+}
+
+fn candidate_build_identity(
+    candidate: &Value,
+) -> Result<Option<QualificationBuildIdentity>, String> {
+    match candidate.get("build") {
+        None | Some(Value::Null) => Ok(None),
+        Some(build) => serde_json::from_value(build.clone())
+            .map(Some)
+            .map_err(|_| "qualification candidate build identity is invalid".to_string()),
+    }
+}
+
+fn candidate_report_sha256(candidate: &Value) -> Result<Option<String>, String> {
     let Some(artifacts) = candidate.get("artifacts") else {
-        return Ok(false);
+        return Ok(None);
     };
     let artifacts = artifacts
         .as_array()
         .ok_or_else(|| "qualification candidate artifacts are invalid".to_string())?;
-    Ok(artifacts.iter().any(|artifact| {
-        artifact.get("path").and_then(Value::as_str) == Some(EXECUTION_REPORT_FILE)
-    }))
+    let mut report_sha256 = None;
+    for artifact in artifacts {
+        if artifact.get("path").and_then(Value::as_str) != Some(EXECUTION_REPORT_FILE) {
+            continue;
+        }
+        if report_sha256.is_some() {
+            return Err(
+                "qualification candidate declares the execution report more than once".to_string(),
+            );
+        }
+        let sha256 = artifact
+            .get("sha256")
+            .and_then(Value::as_str)
+            .ok_or_else(|| {
+                "qualification execution report metadata is missing its digest".to_string()
+            })?;
+        if !is_sha256_hex(sha256) {
+            return Err(
+                "qualification execution report metadata has an invalid digest".to_string(),
+            );
+        }
+        report_sha256 = Some(sha256.to_string());
+    }
+    Ok(report_sha256)
 }
 
-fn candidate_promotion_status(candidate: &Value) -> (bool, Option<String>) {
-    let Some(build) = candidate.get("build") else {
+fn report_metadata_for_candidate(
+    candidate: &Value,
+    report_bytes: Option<&[u8]>,
+) -> Result<Option<QualificationReportMetadata>, String> {
+    let declared_sha256 = candidate_report_sha256(candidate)?;
+    match (declared_sha256, report_bytes) {
+        (Some(expected), Some(bytes)) => {
+            let actual = hex::encode(Sha256::digest(bytes));
+            if actual != expected {
+                return Err(
+                    "qualification execution report metadata does not match its bytes".to_string(),
+                );
+            }
+            Ok(Some(QualificationReportMetadata {
+                path: EXECUTION_REPORT_FILE.to_string(),
+                byte_length: bytes.len() as u64,
+                sha256: actual,
+            }))
+        }
+        (Some(_), None) => {
+            Err("qualification execution report is declared but its bytes are missing".to_string())
+        }
+        (None, Some(_)) => Err(
+            "qualification execution report bytes are not declared by the candidate".to_string(),
+        ),
+        (None, None) => Ok(None),
+    }
+}
+
+fn decode_candidate_envelope(bytes: &[u8]) -> Result<CandidateFileEnvelope, String> {
+    let value: Value = serde_json::from_slice(bytes)
+        .map_err(|_| "qualification candidate JSON is invalid".to_string())?;
+    let object = value
+        .as_object()
+        .ok_or_else(|| "qualification candidate envelope must be a JSON object".to_string())?;
+    const ENVELOPE_FIELDS: [&str; 6] = [
+        "candidateHandle",
+        "kind",
+        "capturedAt",
+        "build",
+        "payload",
+        "report",
+    ];
+    if object.len() != ENVELOPE_FIELDS.len()
+        || ENVELOPE_FIELDS
+            .iter()
+            .any(|field| !object.contains_key(*field))
+    {
+        return Err("qualification candidate envelope has the wrong shape".to_string());
+    }
+    serde_json::from_value(value)
+        .map_err(|_| "qualification candidate envelope is invalid".to_string())
+}
+
+fn validate_candidate_binding(
+    envelope: &CandidateFileEnvelope,
+    handle: &str,
+) -> Result<(), String> {
+    if envelope.candidate_handle != handle {
+        return Err("qualification candidate identity does not match its directory".to_string());
+    }
+    let candidate = envelope
+        .payload
+        .as_object()
+        .ok_or_else(|| "qualification candidate payload must be a JSON object".to_string())?;
+    if candidate.get("candidateId").and_then(Value::as_str) != Some(handle) {
+        return Err(
+            "qualification candidate payload identity does not match its directory".to_string(),
+        );
+    }
+    let payload_kind = serde_json::from_value::<CandidateKind>(
+        candidate
+            .get("kind")
+            .cloned()
+            .ok_or_else(|| "qualification candidate payload kind is missing".to_string())?,
+    )
+    .map_err(|_| "qualification candidate payload kind is invalid".to_string())?;
+    if payload_kind != envelope.kind {
+        return Err("qualification candidate kind metadata is inconsistent".to_string());
+    }
+    Ok(())
+}
+
+fn validate_candidate_files(directory: &Path) -> Result<(), String> {
+    validate_regular_file_path(
+        &directory.join(CANDIDATE_FILE),
+        true,
+        "qualification candidate",
+    )?;
+    validate_regular_file_path(
+        &directory.join(EXECUTION_REPORT_FILE),
+        false,
+        "qualification execution report",
+    )?;
+    Ok(())
+}
+
+fn validate_regular_file_path(path: &Path, required: bool, label: &str) -> Result<(), String> {
+    match fs::symlink_metadata(path) {
+        Ok(metadata) if metadata.file_type().is_symlink() => {
+            Err(format!("{label} file is a symlink"))
+        }
+        Ok(metadata) if !metadata.is_file() => Err(format!("{label} file is not regular")),
+        Ok(_) => Ok(()),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound && !required => Ok(()),
+        Err(_) if required => Err(format!("{label} file could not be inspected")),
+        Err(_) => Err(format!("{label} file could not be inspected")),
+    }
+}
+
+fn read_regular_file(path: &Path, label: &str) -> Result<Vec<u8>, String> {
+    validate_regular_file_path(path, true, label)?;
+    let mut options = OpenOptions::new();
+    options.read(true);
+    // Keep the final component no-following even if it changes after lstat.
+    #[cfg(target_os = "macos")]
+    options.custom_flags(0x100);
+    #[cfg(target_os = "linux")]
+    options.custom_flags(0x20_000);
+    let mut file = options
+        .open(path)
+        .map_err(|_| format!("{label} file could not be read"))?;
+    let metadata = file
+        .metadata()
+        .map_err(|_| format!("{label} file could not be inspected"))?;
+    if !metadata.is_file() {
+        return Err(format!("{label} file is not regular"));
+    }
+    let mut bytes = Vec::new();
+    file.read_to_end(&mut bytes)
+        .map_err(|_| format!("{label} file could not be read"))?;
+    Ok(bytes)
+}
+
+fn load_report_bytes(
+    report_path: &Path,
+    metadata: Option<&QualificationReportMetadata>,
+    declared_sha256: Option<&str>,
+) -> Result<Option<Vec<u8>>, String> {
+    match metadata {
+        Some(metadata) => {
+            if metadata.path != EXECUTION_REPORT_FILE
+                || declared_sha256 != Some(metadata.sha256.as_str())
+                || !is_sha256_hex(&metadata.sha256)
+            {
+                return Err("qualification execution report metadata is inconsistent".to_string());
+            }
+            let bytes = read_regular_file(report_path, "qualification execution report")?;
+            if metadata.byte_length != bytes.len() as u64
+                || metadata.sha256 != hex::encode(Sha256::digest(&bytes))
+            {
+                return Err(
+                    "qualification execution report bytes do not match metadata".to_string()
+                );
+            }
+            Ok(Some(bytes))
+        }
+        None => match fs::symlink_metadata(report_path) {
+            Ok(metadata) if metadata.file_type().is_symlink() => {
+                Err("qualification execution report is a symlink".to_string())
+            }
+            Ok(_) => {
+                Err("qualification execution report is not declared by the candidate".to_string())
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(None),
+            Err(_) => Err("qualification execution report could not be inspected".to_string()),
+        },
+    }
+}
+
+fn is_sha256_hex(value: &str) -> bool {
+    value.len() == 64
+        && value
+            .bytes()
+            .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+}
+
+fn candidate_promotion_status(
+    candidate_build: Option<&QualificationBuildIdentity>,
+    embedded_build: Option<&QualificationBuildIdentity>,
+) -> (bool, Option<String>) {
+    let Some(candidate_build) = candidate_build else {
         return (
             false,
             Some("qualification candidate build identity is missing".to_string()),
         );
     };
-    let candidate_build = match serde_json::from_value::<QualificationBuildIdentity>(build.clone())
-    {
-        Ok(build) => build,
-        Err(_) => {
-            return (
-                false,
-                Some("qualification candidate build identity is invalid".to_string()),
-            )
-        }
-    };
-    let Some(embedded_build) = embedded_build_identity() else {
+    let Some(embedded_build) = embedded_build else {
         return (
             false,
             Some("this application has no recordable qualification build identity".to_string()),
@@ -501,6 +857,85 @@ fn candidate_promotion_status(candidate: &Value) -> (bool, Option<String>) {
     (true, None)
 }
 
+fn qualification_tool_path(repo_root: &Path) -> Result<PathBuf, String> {
+    validate_repository_root(repo_root)?;
+    let tools_directory = repo_root.join("tools");
+    let tools_metadata = fs::symlink_metadata(&tools_directory)
+        .map_err(|_| "qualification tool directory is unavailable".to_string())?;
+    if tools_metadata.file_type().is_symlink() || !tools_metadata.is_dir() {
+        return Err("qualification tool directory is not trusted".to_string());
+    }
+    let tool = repo_root.join(QUALIFICATION_TOOL);
+    let metadata =
+        fs::symlink_metadata(&tool).map_err(|_| "qualification tool is unavailable".to_string())?;
+    if metadata.file_type().is_symlink() || !metadata.is_file() {
+        return Err("qualification tool is not a regular file".to_string());
+    }
+    Ok(tool)
+}
+
+fn write_synced_new_file(path: &Path, bytes: &[u8]) -> Result<(), String> {
+    let mut file = OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(path)
+        .map_err(|_| "qualification candidate file could not be created".to_string())?;
+    file.write_all(bytes)
+        .map_err(|_| "qualification candidate file could not be written".to_string())?;
+    file.sync_all()
+        .map_err(|_| "qualification candidate file could not be synchronized".to_string())?;
+    drop(file);
+    Ok(())
+}
+
+fn sync_directory(path: &Path) -> Result<(), String> {
+    File::open(path)
+        .and_then(|directory| directory.sync_all())
+        .map_err(|_| "qualification candidate directory could not be synchronized".to_string())
+}
+
+enum PublishCandidateError {
+    Collision,
+    Io(String),
+}
+
+fn publish_staged_candidate(
+    staging: &Path,
+    final_directory: &Path,
+) -> Result<(), PublishCandidateError> {
+    if fs::symlink_metadata(final_directory).is_ok() {
+        return Err(PublishCandidateError::Collision);
+    }
+    match fs::rename(staging, final_directory) {
+        Ok(()) => Ok(()),
+        Err(_) if fs::symlink_metadata(final_directory).is_ok() => {
+            Err(PublishCandidateError::Collision)
+        }
+        Err(_) => Err(PublishCandidateError::Io(
+            "qualification candidate directory could not be committed".to_string(),
+        )),
+    }
+}
+
+fn cleanup_owned_staging(path: &Path) {
+    let owned = path
+        .file_name()
+        .and_then(|name| name.to_str())
+        .is_some_and(|name| name.starts_with(CANDIDATE_STAGING_PREFIX));
+    if !owned {
+        return;
+    }
+    match fs::symlink_metadata(path) {
+        Ok(metadata) if metadata.file_type().is_symlink() => {
+            let _ = fs::remove_file(path);
+        }
+        Ok(_) => {
+            let _ = fs::remove_dir_all(path);
+        }
+        Err(_) => {}
+    }
+}
+
 fn allowlisted_tool_args(args: &[String]) -> bool {
     match args {
         [operation] => operation == "--describe",
@@ -511,9 +946,22 @@ fn allowlisted_tool_args(args: &[String]) -> bool {
     }
 }
 
-fn parse_tool_json(output: &[u8]) -> Result<Value, String> {
-    serde_json::from_slice(output)
-        .map_err(|_| "qualification tool returned invalid JSON".to_string())
+fn parse_operation_result(
+    output: &[u8],
+    expected_operation: QualificationOperation,
+    handle: &str,
+    expected_kind: CandidateKind,
+) -> Result<QualificationOperationResult, String> {
+    let result: QualificationOperationResult = serde_json::from_slice(output)
+        .map_err(|_| "qualification tool returned an invalid operation envelope".to_string())?;
+    if result.operation != expected_operation
+        || result.candidate_handle != handle
+        || result.candidate_kind != expected_kind
+        || !result.payload.is_object()
+    {
+        return Err("qualification tool returned the wrong operation result shape".to_string());
+    }
+    Ok(result)
 }
 
 #[cfg(test)]
@@ -522,7 +970,11 @@ mod tests {
     use std::sync::{Arc, Mutex};
 
     use serde_json::{json, Value};
+    use sha2::Digest;
     use tempfile::TempDir;
+
+    #[cfg(unix)]
+    use std::os::unix::fs::symlink;
 
     use super::*;
 
@@ -550,6 +1002,25 @@ mod tests {
                 .expect("fake calls should not be poisoned")
                 .clone()
         }
+
+        fn set_response(&self, response: Value) {
+            *self
+                .response
+                .lock()
+                .expect("fake response should not be poisoned") =
+                serde_json::to_vec(&response).expect("fake response should serialize");
+        }
+    }
+
+    fn repository_with_embedded_build(
+        temp: &TempDir,
+        runner: FakeQualificationToolRunner,
+    ) -> QualificationRepository {
+        QualificationRepository::new_for_test_with_embedded_build(
+            temp.path().to_path_buf(),
+            Box::new(runner),
+            build_identity(),
+        )
     }
 
     impl QualificationToolRunner for FakeQualificationToolRunner {
@@ -591,6 +1062,19 @@ mod tests {
             .join(&handle)
             .join("candidate.json");
         assert!(candidate_path.is_file());
+        let stored_entries = std::fs::read_dir(
+            temp.path()
+                .join(".emuchef_runtime/qualification-candidates"),
+        )
+        .expect("candidate root should be readable")
+        .map(|entry| {
+            entry
+                .expect("candidate entry should be readable")
+                .file_name()
+        })
+        .collect::<Vec<_>>();
+        assert_eq!(stored_entries.len(), 1);
+        assert_eq!(stored_entries[0].to_string_lossy(), handle);
 
         let reopened = QualificationRepository::new_for_test(
             repository.repo_root().to_path_buf(),
@@ -607,7 +1091,7 @@ mod tests {
             reopened
                 .load_candidate(&handle)
                 .expect("candidate should reload")
-                .handle,
+                .candidate_handle,
             handle
         );
         assert!(reopened.load_candidate("../../etc/passwd").is_err());
@@ -623,8 +1107,7 @@ mod tests {
 
         assert_eq!(
             repository.candidate_root(),
-            std::fs::canonicalize(temp.path())
-                .expect("temporary repository should canonicalize")
+            temp.path()
                 .join(".emuchef_runtime/qualification-candidates")
         );
         assert!(production_repo_root()
@@ -639,12 +1122,15 @@ mod tests {
             temp.path().to_path_buf(),
             Box::new(FakeQualificationToolRunner::default()),
         );
+        let report = b"{\"status\":\"completed\"}";
         let json = json!({
             "capturedAt": "2026-08-23T12:00:00Z",
             "build": build_identity_json(),
-            "artifacts": [{ "path": "execution-report.json" }],
+            "artifacts": [{
+                "path": "execution-report.json",
+                "sha256": hex::encode(sha2::Sha256::digest(report)),
+            }],
         });
-        let report = b"{\"status\":\"completed\"}";
 
         let handle = repository
             .create_candidate(CandidateKind::QualificationRun, &json, Some(report))
@@ -674,7 +1160,10 @@ mod tests {
         let json = json!({
             "capturedAt": "2026-08-23T12:00:00Z",
             "build": build_identity_json(),
-            "artifacts": [{ "path": "execution-report.json" }],
+            "artifacts": [{
+                "path": "execution-report.json",
+                "sha256": hex::encode(sha2::Sha256::digest(b"report")),
+            }],
         });
         let handle = repository
             .create_candidate(CandidateKind::QualificationRun, &json, Some(b"report"))
@@ -715,32 +1204,43 @@ mod tests {
     #[test]
     fn node_operations_are_allowlisted_and_receive_only_opaque_handles() {
         let temp = TempDir::new().expect("temporary repository should be created");
-        let response = json!({
-            "schemaVersion": 1,
-            "runtimeContract": "real-execution-v1",
-            "qualificationContract": 1,
-            "build": build_identity_json(),
-            "workflowCatalog": { "schemaVersion": 1, "workflows": [] },
-            "deviceTargets": { "schemaVersion": 2, "targets": [] },
-        });
-        let runner = FakeQualificationToolRunner::with_response(response);
+        let runner = FakeQualificationToolRunner::default();
         let calls = runner.clone();
-        let repository =
-            QualificationRepository::new_for_test(temp.path().to_path_buf(), Box::new(runner));
+        let repository = repository_with_embedded_build(&temp, runner);
 
         let target_handle = repository
-            .create_candidate(CandidateKind::TargetRegistration, &json!({}), None)
+            .create_candidate(
+                CandidateKind::TargetRegistration,
+                &json!({ "build": build_identity_json() }),
+                None,
+            )
             .expect("target candidate should be stored");
         let run_handle = repository
-            .create_candidate(CandidateKind::QualificationRun, &json!({}), None)
+            .create_candidate(
+                CandidateKind::QualificationRun,
+                &json!({ "build": build_identity_json() }),
+                None,
+            )
             .expect("run candidate should be stored");
 
         repository
             .describe()
-            .expect("describe should parse the fake response");
+            .expect_err("the operation-shaped response is not a description");
+        calls.set_response(json!({
+            "operation": "register_target",
+            "candidateHandle": target_handle,
+            "candidateKind": "target_registration",
+            "payload": {},
+        }));
         repository
             .register_target(&target_handle)
             .expect("target registration should invoke the tool");
+        calls.set_response(json!({
+            "operation": "record_run",
+            "candidateHandle": run_handle,
+            "candidateKind": "qualification_run",
+            "payload": {},
+        }));
         repository
             .record_run(&run_handle)
             .expect("run recording should invoke the tool");
@@ -886,6 +1386,300 @@ mod tests {
 
         assert!(repository.record_run(&handle).is_err());
         assert!(calls.calls().is_empty());
+    }
+
+    #[test]
+    fn promotion_does_not_invoke_node_for_missing_or_stale_build_identity() {
+        let missing_temp = TempDir::new().expect("temporary repository should be created");
+        let missing_runner = FakeQualificationToolRunner::default();
+        let missing_calls = missing_runner.clone();
+        let missing_repository = QualificationRepository::new_for_test(
+            missing_temp.path().to_path_buf(),
+            Box::new(missing_runner),
+        );
+        let missing_handle = missing_repository
+            .create_candidate(CandidateKind::TargetRegistration, &json!({}), None)
+            .expect("candidate should be stored");
+        assert!(missing_repository.register_target(&missing_handle).is_err());
+        assert!(missing_calls.calls().is_empty());
+
+        let stale_temp = TempDir::new().expect("temporary repository should be created");
+        let stale_runner = FakeQualificationToolRunner::default();
+        let stale_calls = stale_runner.clone();
+        let stale_repository = repository_with_embedded_build(&stale_temp, stale_runner);
+        let stale_handle = stale_repository
+            .create_candidate(
+                CandidateKind::TargetRegistration,
+                &json!({
+                    "build": {
+                        "appVersion": "0.1.0",
+                        "gitCommit": "2".repeat(40),
+                        "materialBuildDigest": format!("sha256:{}", "b".repeat(64)),
+                        "realExecutionEnabled": true,
+                        "qualificationContract": 1,
+                    },
+                }),
+                None,
+            )
+            .expect("stale candidate should be stored");
+        assert!(stale_repository.register_target(&stale_handle).is_err());
+        assert!(stale_calls.calls().is_empty());
+    }
+
+    #[test]
+    fn strict_candidate_envelope_rejects_valid_json_with_the_wrong_shape() {
+        let temp = TempDir::new().expect("temporary repository should be created");
+        let repository = QualificationRepository::new_for_test(
+            temp.path().to_path_buf(),
+            Box::new(FakeQualificationToolRunner::default()),
+        );
+        let handle = "qualification-candidate-0123456789abcdef0123456789abcdef";
+        let directory = repository.candidate_root().join(handle);
+        std::fs::create_dir_all(&directory).expect("candidate directory should be created");
+        std::fs::write(
+            directory.join("candidate.json"),
+            serde_json::to_vec(&json!({
+                "candidateHandle": handle,
+                "kind": "target_registration",
+                "capturedAt": null,
+                "build": null,
+                "payload": {},
+                "report": null,
+                "unexpected": true,
+            }))
+            .expect("wrong-shaped envelope should serialize"),
+        )
+        .expect("wrong-shaped envelope should be written");
+
+        assert!(repository.load_candidate(handle).is_err());
+    }
+
+    #[test]
+    fn strict_operation_envelope_rejects_valid_json_with_the_wrong_shape() {
+        let temp = TempDir::new().expect("temporary repository should be created");
+        let runner = FakeQualificationToolRunner::default();
+        let calls = runner.clone();
+        let repository = repository_with_embedded_build(&temp, runner);
+        let handle = repository
+            .create_candidate(
+                CandidateKind::TargetRegistration,
+                &json!({ "build": build_identity_json() }),
+                None,
+            )
+            .expect("candidate should be stored");
+
+        calls.set_response(json!({
+            "operation": "register_target",
+            "candidateHandle": handle,
+            "candidateKind": "target_registration",
+        }));
+        assert!(repository.register_target(&handle).is_err());
+        assert_eq!(calls.calls().len(), 1);
+
+        calls.set_response(json!({
+            "operation": "register_target",
+            "candidateHandle": handle,
+            "candidateKind": "target_registration",
+            "payload": {},
+            "unexpected": true,
+        }));
+        assert!(repository.register_target(&handle).is_err());
+        assert_eq!(calls.calls().len(), 2);
+    }
+
+    #[test]
+    fn report_metadata_must_match_bytes_before_candidate_creation_writes_anything() {
+        let temp = TempDir::new().expect("temporary repository should be created");
+        let repository = QualificationRepository::new_for_test(
+            temp.path().to_path_buf(),
+            Box::new(FakeQualificationToolRunner::default()),
+        );
+        let result = repository.create_candidate(
+            CandidateKind::QualificationRun,
+            &json!({
+                "artifacts": [{
+                    "path": "execution-report.json",
+                    "sha256": "0".repeat(64),
+                }],
+            }),
+            Some(b"report"),
+        );
+
+        assert!(result.is_err());
+        assert!(!repository.candidate_root().exists());
+    }
+
+    #[test]
+    fn publishing_a_duplicate_handle_preserves_the_existing_candidate() {
+        let temp = TempDir::new().expect("temporary repository should be created");
+        let root = temp
+            .path()
+            .join(".emuchef_runtime/qualification-candidates");
+        std::fs::create_dir_all(&root).expect("candidate root should be created");
+        let handle = "qualification-candidate-0123456789abcdef0123456789abcdef";
+        let existing = root.join(handle);
+        std::fs::create_dir(&existing).expect("existing candidate should be created");
+        std::fs::write(existing.join("candidate.json"), b"existing")
+            .expect("existing candidate should be written");
+        let staging = root.join(".qualification-candidate-tmp-test");
+        std::fs::create_dir(&staging).expect("staging directory should be created");
+        std::fs::write(staging.join("candidate.json"), b"replacement")
+            .expect("staging candidate should be written");
+
+        assert!(publish_staged_candidate(&staging, &existing).is_err());
+        assert_eq!(
+            std::fs::read(existing.join("candidate.json"))
+                .expect("existing candidate should remain"),
+            b"existing"
+        );
+        assert!(staging.exists());
+        std::fs::remove_dir_all(staging).expect("test staging directory should be removed");
+    }
+
+    #[test]
+    fn incomplete_candidate_staging_is_not_recovered_after_restart() {
+        let temp = TempDir::new().expect("temporary repository should be created");
+        let repository = QualificationRepository::new_for_test(
+            temp.path().to_path_buf(),
+            Box::new(FakeQualificationToolRunner::default()),
+        );
+        ensure_candidate_root(repository.repo_root(), repository.candidate_root())
+            .expect("candidate root should be created");
+        let staging = repository
+            .candidate_root()
+            .join(format!("{CANDIDATE_STAGING_PREFIX}crash"));
+        std::fs::create_dir(&staging).expect("partial staging directory should be created");
+        std::fs::write(staging.join(CANDIDATE_FILE), b"partial")
+            .expect("partial candidate should be written");
+
+        assert!(repository
+            .list_candidates()
+            .expect("partial staging should be ignored")
+            .is_empty());
+        assert!(staging.exists());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn symlinked_candidate_root_components_are_rejected() {
+        let temp = TempDir::new().expect("temporary repository should be created");
+        let outside = TempDir::new().expect("outside directory should be created");
+        let runtime_root = temp.path().join(".emuchef_runtime");
+        symlink(outside.path(), &runtime_root).expect("runtime root symlink should be created");
+        let runner = FakeQualificationToolRunner::default();
+        let calls = runner.clone();
+        let repository =
+            QualificationRepository::new_for_test(temp.path().to_path_buf(), Box::new(runner));
+
+        assert!(repository
+            .create_candidate(CandidateKind::TargetRegistration, &json!({}), None)
+            .is_err());
+        assert!(repository.list_candidates().is_err());
+        assert!(repository.describe().is_err());
+        assert!(calls.calls().is_empty());
+        assert!(outside
+            .path()
+            .read_dir()
+            .expect("outside should be readable")
+            .next()
+            .is_none());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn symlinked_candidate_files_are_rejected_before_read_or_discard() {
+        let temp = TempDir::new().expect("temporary repository should be created");
+        let outside = TempDir::new().expect("outside directory should be created");
+        let repository = QualificationRepository::new_for_test(
+            temp.path().to_path_buf(),
+            Box::new(FakeQualificationToolRunner::default()),
+        );
+        let handle = repository
+            .create_candidate(CandidateKind::TargetRegistration, &json!({}), None)
+            .expect("candidate should be stored");
+        let candidate_path = repository
+            .candidate_root()
+            .join(&handle)
+            .join("candidate.json");
+        let outside_candidate = outside.path().join("candidate.json");
+        std::fs::write(&outside_candidate, b"outside")
+            .expect("outside candidate should be written");
+        std::fs::remove_file(&candidate_path).expect("candidate should be removed");
+        symlink(&outside_candidate, &candidate_path).expect("candidate symlink should be created");
+
+        assert!(repository.load_candidate(&handle).is_err());
+        assert!(repository.discard_candidate(&handle).is_err());
+        assert!(candidate_path.exists());
+        assert_eq!(
+            std::fs::read(outside_candidate).expect("outside candidate should remain"),
+            b"outside"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn symlinked_candidate_directories_are_rejected_during_listing() {
+        let temp = TempDir::new().expect("temporary repository should be created");
+        let outside = TempDir::new().expect("outside directory should be created");
+        let repository = QualificationRepository::new_for_test(
+            temp.path().to_path_buf(),
+            Box::new(FakeQualificationToolRunner::default()),
+        );
+        let handle = repository
+            .create_candidate(CandidateKind::TargetRegistration, &json!({}), None)
+            .expect("candidate should be stored");
+        let directory = repository.candidate_root().join(&handle);
+        let outside_directory = outside.path().join(&handle);
+        std::fs::rename(&directory, &outside_directory).expect("candidate should be moved");
+        symlink(&outside_directory, &directory)
+            .expect("candidate directory symlink should be created");
+
+        assert!(repository.list_candidates().is_err());
+        assert!(outside_directory.join(CANDIDATE_FILE).exists());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn symlinked_execution_reports_are_rejected_before_read_or_discard() {
+        let temp = TempDir::new().expect("temporary repository should be created");
+        let outside = TempDir::new().expect("outside directory should be created");
+        let repository = QualificationRepository::new_for_test(
+            temp.path().to_path_buf(),
+            Box::new(FakeQualificationToolRunner::default()),
+        );
+        let report = b"report";
+        let handle = repository
+            .create_candidate(
+                CandidateKind::QualificationRun,
+                &json!({
+                    "artifacts": [{
+                        "path": EXECUTION_REPORT_FILE,
+                        "sha256": hex::encode(sha2::Sha256::digest(report)),
+                    }],
+                }),
+                Some(report),
+            )
+            .expect("candidate should be stored");
+        let report_path = repository
+            .candidate_root()
+            .join(&handle)
+            .join(EXECUTION_REPORT_FILE);
+        let outside_report = outside.path().join(EXECUTION_REPORT_FILE);
+        std::fs::write(&outside_report, report).expect("outside report should be written");
+        std::fs::remove_file(&report_path).expect("report should be removed");
+        symlink(&outside_report, &report_path).expect("report symlink should be created");
+
+        assert!(repository.load_candidate(&handle).is_err());
+        assert!(repository.discard_candidate(&handle).is_err());
+        assert!(report_path.exists());
+        assert_eq!(
+            std::fs::read(outside_report).expect("outside report should remain"),
+            report
+        );
+    }
+
+    fn build_identity() -> QualificationBuildIdentity {
+        serde_json::from_value(build_identity_json()).expect("test build identity should decode")
     }
 
     #[test]

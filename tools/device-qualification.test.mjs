@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { execFileSync, spawnSync } from "node:child_process";
 import { createHash } from "node:crypto";
-import { cpSync, existsSync, mkdtempSync, mkdirSync, readdirSync, readFileSync, realpathSync, rmSync, statSync, writeFileSync } from "node:fs";
+import { cpSync, existsSync, mkdtempSync, mkdirSync, readdirSync, readFileSync, realpathSync, rmSync, statSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import test from "node:test";
@@ -320,7 +320,21 @@ function runCandidateForRepo(repoRoot, {
 function writeCandidateFixture(repoRoot, candidate, reportBytes = null) {
   const directory = path.join(repoRoot, ".emuchef_runtime/qualification-candidates", candidate.candidateId);
   mkdirSync(directory, { recursive: true });
-  writeFileSync(path.join(directory, "candidate.json"), `${JSON.stringify(candidate, null, 2)}\n`, "utf8");
+  const report = reportBytes === null
+    ? null
+    : {
+      path: "execution-report.json",
+      byteLength: reportBytes.length,
+      sha256: createHash("sha256").update(reportBytes).digest("hex"),
+    };
+  writeFileSync(path.join(directory, "candidate.json"), `${JSON.stringify({
+    candidateHandle: candidate.candidateId,
+    kind: candidate.kind,
+    capturedAt: candidate.capturedAt ?? null,
+    build: candidate.build ?? null,
+    payload: candidate,
+    report,
+  }, null, 2)}\n`, "utf8");
   if (reportBytes !== null) {
     writeFileSync(path.join(directory, "execution-report.json"), reportBytes);
   }
@@ -973,6 +987,89 @@ test("recording a run rolls back the newly created evidence bundle when matrix r
     assert.equal(readFileSync(registryPath, "utf8"), beforeRegistry);
   } finally {
     rmSync(repoRoot, { recursive: true, force: true });
+  }
+});
+
+test("canonical promotion rejects a symlinked candidate root before reading it", () => {
+  const repoRoot = createTempQualificationRepo();
+  const outside = mkdtempSync(path.join(tmpdir(), "device-qualification-outside-"));
+  try {
+    rmSync(path.join(repoRoot, ".emuchef_runtime"), { recursive: true, force: true });
+    symlinkSync(outside, path.join(repoRoot, ".emuchef_runtime"));
+    const candidate = targetRegistrationCandidateForRepo(repoRoot);
+    assert.throws(
+      () => registerQualificationTargetCandidate(candidate.candidateId, { repoRoot }),
+      /symlink|symbolic|candidate root/i,
+    );
+    assert.deepEqual(readdirSync(outside), []);
+  } finally {
+    rmSync(repoRoot, { recursive: true, force: true });
+    rmSync(outside, { recursive: true, force: true });
+  }
+});
+
+test("canonical promotion rejects a symlinked candidate file before mutation", () => {
+  const repoRoot = createTempQualificationRepo();
+  const outside = mkdtempSync(path.join(tmpdir(), "device-qualification-outside-"));
+  try {
+    const candidate = targetRegistrationCandidateForRepo(repoRoot, {
+      candidateId: "qualification-candidate-12344321123443211234432112344321",
+    });
+    writeCandidateFixture(repoRoot, candidate);
+    const candidatePath = path.join(
+      repoRoot,
+      ".emuchef_runtime/qualification-candidates",
+      candidate.candidateId,
+      "candidate.json",
+    );
+    const outsidePath = path.join(outside, "candidate.json");
+    cpSync(candidatePath, outsidePath);
+    rmSync(candidatePath);
+    symlinkSync(outsidePath, candidatePath);
+    const registryPath = path.join(repoRoot, "docs/testing/device-qualification/device-targets.json");
+    const before = readFileSync(registryPath, "utf8");
+    assert.throws(
+      () => registerQualificationTargetCandidate(candidate.candidateId, { repoRoot }),
+      /symlink|symbolic|regular|candidate/i,
+    );
+    assert.equal(readFileSync(registryPath, "utf8"), before);
+    assert.ok(existsSync(outsidePath));
+  } finally {
+    rmSync(repoRoot, { recursive: true, force: true });
+    rmSync(outside, { recursive: true, force: true });
+  }
+});
+
+test("canonical run promotion rejects a symlinked execution report before mutation", () => {
+  const repoRoot = createTempQualificationRepo({
+    deviceTargetsSource: path.join(FIXTURES, "definitions-valid/device-targets.json"),
+  });
+  const outside = mkdtempSync(path.join(tmpdir(), "device-qualification-outside-"));
+  try {
+    const candidate = runCandidateForRepo(repoRoot, {
+      candidateId: "qualification-candidate-fedcba9876543210fedcba9876543210",
+    });
+    writeCandidateFixture(repoRoot, candidate, REPORT_BYTES);
+    const reportPath = path.join(
+      repoRoot,
+      ".emuchef_runtime/qualification-candidates",
+      candidate.candidateId,
+      "execution-report.json",
+    );
+    const outsidePath = path.join(outside, "execution-report.json");
+    cpSync(reportPath, outsidePath);
+    rmSync(reportPath);
+    symlinkSync(outsidePath, reportPath);
+    const evidenceRoot = path.join(repoRoot, "docs/testing/device-qualification/evidence");
+    const before = snapshotTree(evidenceRoot);
+    assert.throws(
+      () => recordQualificationRunCandidate(candidate.candidateId, { repoRoot }),
+      /symlink|symbolic|regular|report/i,
+    );
+    assert.deepEqual(snapshotTree(evidenceRoot), before);
+  } finally {
+    rmSync(repoRoot, { recursive: true, force: true });
+    rmSync(outside, { recursive: true, force: true });
   }
 });
 
