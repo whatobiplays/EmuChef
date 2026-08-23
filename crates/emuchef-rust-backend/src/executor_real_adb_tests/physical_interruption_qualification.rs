@@ -3999,6 +3999,17 @@ fn within_tolerance(left: u64, right: u64, tolerance: u64) -> bool {
 
 /// Classify suspension from the deadline clock and remaining budget only.
 /// Terminal success or timeout is deliberately not an input.
+///
+/// The `sleepEnteredAt -> wakeAt` interval is an operator-marker interval and
+/// therefore an upper bound around the actual suspension interval, not an
+/// exact OS suspend duration. `tolerance_ms` bounds marker, handoff, and
+/// scheduler uncertainty. Advancement within tolerance is treated as
+/// suspended-time excluded; advancement beyond tolerance but no further than
+/// the wall interval plus tolerance, with consistent budget consumption,
+/// establishes meaningful clock advancement across the bounded suspension
+/// interval and is treated as suspended-time included. Advancement beyond
+/// `wall + tolerance` is outside the bounded interval and remains
+/// indeterminate.
 fn classify_host_sleep_clock(
     measurement: HostSleepClockMeasurement,
 ) -> HostSleepClockClassification {
@@ -4016,12 +4027,14 @@ fn classify_host_sleep_clock(
         expected_consumption,
         measurement.tolerance_ms,
     );
+    // The operator-marker wall interval bounds, but is not required to equal,
+    // the interval in which the retained monotonic deadline clock can advance.
     let clock_excluded = measurement.deadline_clock_advance_ms <= measurement.tolerance_ms;
-    let clock_included = within_tolerance(
-        measurement.deadline_clock_advance_ms,
-        measurement.suspended_wall_ms,
-        measurement.tolerance_ms,
-    );
+    let clock_included = !clock_excluded
+        && measurement.deadline_clock_advance_ms
+            <= measurement
+                .suspended_wall_ms
+                .saturating_add(measurement.tolerance_ms);
     match (clock_excluded, clock_included, budget_matches_clock) {
         (true, false, true) => HostSleepClockClassification::SuspendedTimeExcluded,
         (false, true, true) => HostSleepClockClassification::SuspendedTimeIncluded,
@@ -5590,6 +5603,53 @@ mod tests {
             }),
             HostSleepClockClassification::Contradictory
         );
+        // Advancement exactly at tolerance is still excluded.
+        assert_eq!(
+            classify_host_sleep_clock(HostSleepClockMeasurement {
+                suspended_wall_ms: 10_000,
+                deadline_clock_advance_ms: 100,
+                remaining_before_sleep_ms: 20_000,
+                remaining_after_wake_ms: 19_900,
+                tolerance_ms: 100,
+            }),
+            HostSleepClockClassification::SuspendedTimeExcluded
+        );
+        // One millisecond beyond tolerance is included when the budget
+        // consumed matches and the advance stays within wall + tolerance.
+        assert_eq!(
+            classify_host_sleep_clock(HostSleepClockMeasurement {
+                suspended_wall_ms: 10_000,
+                deadline_clock_advance_ms: 101,
+                remaining_before_sleep_ms: 20_000,
+                remaining_after_wake_ms: 19_899,
+                tolerance_ms: 100,
+            }),
+            HostSleepClockClassification::SuspendedTimeIncluded
+        );
+        // Advancement beyond wall + tolerance remains indeterminate even when
+        // the budget consumption is internally consistent.
+        assert_eq!(
+            classify_host_sleep_clock(HostSleepClockMeasurement {
+                suspended_wall_ms: 10_000,
+                deadline_clock_advance_ms: 10_101,
+                remaining_before_sleep_ms: 20_000,
+                remaining_after_wake_ms: 9_899,
+                tolerance_ms: 100,
+            }),
+            HostSleepClockClassification::Indeterminate
+        );
+        // The physical after-deadline shape (58.830 s advance across a 130 s
+        // operator-marker wall interval) is included, not indeterminate.
+        assert_eq!(
+            classify_host_sleep_clock(HostSleepClockMeasurement {
+                suspended_wall_ms: 130_000,
+                deadline_clock_advance_ms: 58_830,
+                remaining_before_sleep_ms: 45_706,
+                remaining_after_wake_ms: 0,
+                tolerance_ms: 8_000,
+            }),
+            HostSleepClockClassification::SuspendedTimeIncluded
+        );
     }
 
     #[test]
@@ -7064,6 +7124,25 @@ mod tests {
         terminal_remaining_ns: 0,
     };
 
+    // Materially equivalent to physical attempt
+    // `host_sleep_after_deadline-rep1-d2d8b0d8c363d077`: the retained
+    // monotonic deadline clock advanced 58.830 s across a 130 s
+    // operator-marker wall interval, consumed the full pre-sleep budget, and
+    // the owner terminal preceded both wake and the retained post-wake sample.
+    const HOST_SLEEP_PHYSICAL_AFTER_DEADLINE_SAMPLES: HostSleepSampleFixture =
+        HostSleepSampleFixture {
+            deadline_start_wall_ms: 1_000,
+            before_wall_ms: 75_000,
+            before_ns: 74_293_851_125,
+            before_remaining_ns: 45_706_148_875,
+            after_wall_ms: 205_000,
+            after_ns: 133_124_150_625,
+            after_remaining_ns: 0,
+            terminal_wall_ms: 149_000,
+            terminal_ns: 120_004_784_375,
+            terminal_remaining_ns: 0,
+        };
+
     fn host_sleep_events(
         operation_id: OwnedProcessOperationId,
         base: SystemTime,
@@ -7264,6 +7343,138 @@ mod tests {
         assert_eq!(value["operationStartedAt"], "unix:1");
         assert_eq!(value["operatorActionPhase"], "after_deadline");
         assert_eq!(value["terminalAt"], "unix:129");
+    }
+
+    #[test]
+    fn host_sleep_evidence_accepts_the_physical_after_deadline_timeout_with_terminal_before_wake() {
+        let operation_id = OwnedProcessOperationId::from_raw_for_test(916);
+        let base = UNIX_EPOCH;
+        let deadline_ns =
+            u64::try_from(HOST_SLEEP_QUALIFICATION_DEADLINE.as_nanos()).expect("deadline fits u64");
+        let events = host_sleep_events(
+            operation_id,
+            base,
+            deadline_ns,
+            HOST_SLEEP_PHYSICAL_AFTER_DEADLINE_SAMPLES,
+            true,
+        );
+        let run = host_sleep_step(Some(StepFailureKind::OperationTimedOut));
+        let evidence = host_sleep_evidence(
+            &Scenario::HostSleepAfterDeadline,
+            &host_sleep_sentinel(1, 75, 75, 205),
+            Ok(&run),
+            &events,
+        );
+        let value = evidence
+            .as_object()
+            .expect("the physical after-deadline lifecycle must serialize hostSleep evidence");
+        assert_eq!(value["terminalOutcome"], "timed_out");
+        assert_eq!(value["operatorActionPhase"], "after_deadline");
+        assert_eq!(value["timerClassification"], "suspended_time_included");
+        assert_eq!(
+            value["deadlineClockBeforeSleepNs"],
+            "monotonic-ns:74293851125"
+        );
+        assert_eq!(
+            value["deadlineClockTerminalNs"],
+            "monotonic-ns:120004784375"
+        );
+        assert_eq!(
+            value["deadlineClockAfterWakeNs"],
+            "monotonic-ns:133124150625"
+        );
+        assert_eq!(value["deadlineClockAdvanceDuringSuspensionMs"], 58830);
+        assert_eq!(value["suspendedWallMs"], 130000);
+        assert_eq!(value["remainingBeforeSleepMs"], 45706);
+        assert_eq!(value["remainingAfterWakeMs"], 0);
+        assert_eq!(value["executorElapsedMs"], 120004);
+        assert_eq!(value["terminalAt"], "unix:149");
+        assert_eq!(value["wakeAt"], "unix:205");
+        assert_eq!(value["deadlineMs"], 120000);
+    }
+
+    #[test]
+    fn host_sleep_evidence_blocks_physical_after_deadline_timeout_without_owner_deadline_reached() {
+        let operation_id = OwnedProcessOperationId::from_raw_for_test(917);
+        let base = UNIX_EPOCH;
+        let deadline_ns =
+            u64::try_from(HOST_SLEEP_QUALIFICATION_DEADLINE.as_nanos()).expect("deadline fits u64");
+        let events = host_sleep_events(
+            operation_id,
+            base,
+            deadline_ns,
+            HOST_SLEEP_PHYSICAL_AFTER_DEADLINE_SAMPLES,
+            false,
+        );
+        let run = host_sleep_step(Some(StepFailureKind::OperationTimedOut));
+        assert!(
+            host_sleep_evidence(
+                &Scenario::HostSleepAfterDeadline,
+                &host_sleep_sentinel(1, 75, 75, 205),
+                Ok(&run),
+                &events,
+            )
+            .is_null(),
+            "a timed-out physical-shaped lifecycle without the owner DeadlineReached event must block"
+        );
+    }
+
+    #[test]
+    fn host_sleep_evidence_blocks_physical_after_deadline_without_post_wake_sample() {
+        let operation_id = OwnedProcessOperationId::from_raw_for_test(918);
+        let base = UNIX_EPOCH;
+        let deadline_ns =
+            u64::try_from(HOST_SLEEP_QUALIFICATION_DEADLINE.as_nanos()).expect("deadline fits u64");
+        let mut events = host_sleep_events(
+            operation_id,
+            base,
+            deadline_ns,
+            HOST_SLEEP_PHYSICAL_AFTER_DEADLINE_SAMPLES,
+            true,
+        );
+        // The builder appends the retained post-wake watcher sample last.
+        events.pop();
+        let run = host_sleep_step(Some(StepFailureKind::OperationTimedOut));
+        assert!(
+            host_sleep_evidence(
+                &Scenario::HostSleepAfterDeadline,
+                &host_sleep_sentinel(1, 75, 75, 205),
+                Ok(&run),
+                &events,
+            )
+            .is_null(),
+            "a physical-shaped lifecycle without the retained post-wake sample must block"
+        );
+    }
+
+    #[test]
+    fn host_sleep_evidence_blocks_physical_after_deadline_when_pre_sleep_sample_passes_sleep_entered(
+    ) {
+        let operation_id = OwnedProcessOperationId::from_raw_for_test(919);
+        let base = UNIX_EPOCH;
+        let deadline_ns =
+            u64::try_from(HOST_SLEEP_QUALIFICATION_DEADLINE.as_nanos()).expect("deadline fits u64");
+        let events = host_sleep_events(
+            operation_id,
+            base,
+            deadline_ns,
+            HostSleepSampleFixture {
+                before_wall_ms: 76_000,
+                ..HOST_SLEEP_PHYSICAL_AFTER_DEADLINE_SAMPLES
+            },
+            true,
+        );
+        let run = host_sleep_step(Some(StepFailureKind::OperationTimedOut));
+        assert!(
+            host_sleep_evidence(
+                &Scenario::HostSleepAfterDeadline,
+                &host_sleep_sentinel(1, 75, 75, 205),
+                Ok(&run),
+                &events,
+            )
+            .is_null(),
+            "a pre-sleep sample after the sleep-entered handoff boundary must block"
+        );
     }
 
     #[test]

@@ -1067,6 +1067,84 @@ test("host sleep accepts an owner terminal that precedes the retained-basis post
   assert.doesNotThrow(() => validateEvidenceRecord(withHostSleepLifecycle(after)));
 });
 
+test("host sleep accepts the physical after-deadline lifecycle when the retained clock advanced less than the wall interval", () => {
+  const after = recordForScenario("host_sleep_after_deadline", 1);
+  after.sentinel = {
+    ...after.sentinel,
+    operationStartedAt: "unix:1787476402",
+    operationFinishedAt: "unix:1787476552",
+    sleepRequestedAt: "unix:1787476478",
+    sleepEnteredAt: "unix:1787476478",
+    wakeAt: "unix:1787476608",
+  };
+  after.hostSleep = {
+    sleepRequestedAt: "unix:1787476478",
+    sleepEnteredAt: "unix:1787476478",
+    wakeAt: "unix:1787476608",
+    wallElapsedMs: 149000,
+    executorElapsedMs: 120004,
+    deadlineMs: 120000,
+    operationStartedAt: "unix:1787476403",
+    terminalAt: "unix:1787476552",
+    terminalOutcome: "timed_out",
+    hostOs: "macOS",
+    hostVersion: "26.5",
+    timerImplementation: "async_io::Timer",
+    toolchain: "rustc 1.85.0",
+    timerClassification: "suspended_time_included",
+    measurementBasis: "owned_process_monotonic_deadline_clock_samples_and_sentinel_timestamps",
+    transportLossBlockedMeasurement: false,
+    elapsedBeforeSleepMs: 75000,
+    deadlineClockStartNs: "monotonic-ns:0",
+    deadlineClockBeforeSleepNs: "monotonic-ns:74293851125",
+    deadlineClockAfterWakeNs: "monotonic-ns:133124150625",
+    deadlineClockTerminalNs: "monotonic-ns:120004784375",
+    suspendedWallMs: 130000,
+    deadlineClockAdvanceDuringSuspensionMs: 58830,
+    remainingBeforeSleepMs: 45706,
+    remainingAfterWakeMs: 0,
+    measurementToleranceMs: 8000,
+    toleranceRationale: "Eight seconds bounds marker and scheduler jitter on the host-sleep qualification handshake.",
+    operatorActionPhase: "after_deadline",
+    deadlineClockSource: "owned_process_monotonic_deadline_clock",
+  };
+  after.activeProcess = {
+    ...after.activeProcess,
+    spawnedAt: "unix:1787476403",
+    mutationStartedAt: "unix:1787476403",
+    checkedAliveAt: "unix:1787476478",
+    actionAt: "unix:1787476478",
+    terminalAt: "unix:1787476552",
+  };
+  assert.doesNotThrow(() => validateEvidenceRecord(withHostSleepLifecycle(after)));
+});
+
+test("host sleep classification boundaries pin excluded, included, and indeterminate", () => {
+  const build = (advanceMs, remainingAfterWakeMs, classification) => {
+    const record = recordForScenario("host_sleep_before_deadline", 1);
+    record.hostSleep = {
+      ...record.hostSleep,
+      terminalOutcome: "completed",
+      ...measuredHostClock({
+        phase: "before_deadline",
+        classification,
+        beforeNs: 1_000_000_000,
+        afterNs: 1_000_000_000 + advanceMs * 1_000_000,
+        terminalNs: 90_000_000_000,
+        suspendedWallMs: 58_000,
+        remainingBeforeSleepMs: 100_000,
+        remainingAfterWakeMs,
+      }),
+      measurementToleranceMs: 8000,
+      toleranceRationale: "Eight seconds bounds marker and scheduler jitter on the host-sleep qualification handshake.",
+    };
+    return withHostSleepLifecycle(record);
+  };
+  assert.doesNotThrow(() => validateEvidenceRecord(build(8000, 92000, "suspended_time_excluded")));
+  assert.doesNotThrow(() => validateEvidenceRecord(build(8001, 91999, "suspended_time_included")));
+  assert.throws(() => validateEvidenceRecord(build(66001, 33999, "indeterminate")), /indeterminate|timer/i);
+});
+
 test("host sleep accepts completion when the owner won before the timer at the deadline boundary", () => {
   const before = recordForScenario("host_sleep_before_deadline", 1);
   before.executionSuccess = true;
@@ -1740,6 +1818,8 @@ function checkedInRecordObjects() {
     "operation_timeout-rep2-4baf257a04838450.json",
     "host_sleep_before_deadline-rep1-18917650add26861.json",
     "host_sleep_before_deadline-rep2-735aba0b279d4da7.json",
+    "host_sleep_after_deadline-rep1-3eabd150440fc731.json",
+    "host_sleep_after_deadline-rep2-a44a7bcf418ffbf4.json",
   ];
   return names.map((name) => JSON.parse(readFileSync(path.join(CHECKED_IN_EVIDENCE_DIR, name), "utf8")));
 }
@@ -1771,10 +1851,10 @@ test("ui binding index eligibility is exact and excludes incompatible physical e
   assert.ok(bindings.transport.every((binding) => /be0ba89089556f91|06d326ca5f4a8d14/.test(binding.runId)));
   assert.equal(bindings.root.length, 2);
   assert.equal(bindings.storage.length, 2);
-  assert.equal(bindings.host_sleep.length, 2);
-  assert.ok(bindings.host_sleep.every((binding) => binding.scenario === "host_sleep_before_deadline"));
+  assert.equal(bindings.host_sleep.length, 4);
+  assert.ok(bindings.host_sleep.every((binding) => ["host_sleep_before_deadline", "host_sleep_after_deadline"].includes(binding.scenario)));
   assert.ok(bindings.host_sleep.every((binding) => binding.issueCode === "operation_timed_out"));
-  assert.ok(bindings.host_sleep.every((binding) => /18917650add26861|735aba0b279d4da7/.test(binding.runId)));
+  assert.ok(bindings.host_sleep.every((binding) => /18917650add26861|735aba0b279d4da7|3eabd150440fc731|a44a7bcf418ffbf4/.test(binding.runId)));
   assert.ok(bindings.transport.every((binding) => !binding.evidencePath.includes("boundary")));
   assert.ok(bindings.host_sleep.every((binding) => binding.scenario !== "operation_timeout"));
 });

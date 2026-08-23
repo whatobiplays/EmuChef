@@ -1,0 +1,135 @@
+{
+  "runId": "physical-run-sha256:a44a7bcf418ffbf4be9e816b986daf8281e2679053ce409ad135b498725830b9",
+  "scenario": "host_sleep_after_deadline",
+  "repetition": 2,
+  "sentinel": {
+    "sentinelId": "sentinel-sha256:1afd118b810eecbf67c9930ecf8f97df42ee6cbf768fe05137ccca4b5589bb6c",
+    "nonce": "nonce-sha256:8640024afe76e3fc8f656f52f51a2ce4530f264286b74d0f7fa1ec5e20dd3cb4",
+    "runId": "physical-run-sha256:a44a7bcf418ffbf4be9e816b986daf8281e2679053ce409ad135b498725830b9",
+    "scenario": "host_sleep_after_deadline",
+    "repetition": 2,
+    "armedAt": "unix:1787487025",
+    "operationStartedAt": "unix:1787487025",
+    "boundaryReadyAt": null,
+    "operatorActionAt": null,
+    "operationFinishedAt": "unix:1787487147",
+    "cleanupReadyAt": null,
+    "sleepRequestedAt": "unix:1787487099",
+    "sleepEnteredAt": "unix:1787487099",
+    "wakeAt": "unix:1787487226",
+    "chronologyValid": true,
+    "uniqueMarkers": true
+  },
+  "slot": {
+    "runId": "run-scope-sha256:2c0a1b743ffd27b4413ceb7862c9270035431d643199e6c4bcaf9f3b1d3324b5",
+    "executionId": "execution-sha256:aaa72c6cbc68dbca345509e54815cbc3594db5b4ffa350fc145bf60082538e5c",
+    "acquired": true,
+    "released": true,
+    "acquiredAt": "unix:1787487025",
+    "terminalCleanupAt": "unix:1787487147",
+    "releasedAt": "unix:1787487147"
+  },
+  "terminal": {
+    "outcome": "passed",
+    "issueCode": "operation_timed_out",
+    "stepStates": {
+      "executed": 0,
+      "skipped": 0,
+      "failed": 1,
+      "cancelled": 0,
+      "blocked": 0,
+      "notAttempted": 1
+    }
+  },
+  "lifecycle": [
+    {
+      "kind": "spawned",
+      "runId": "run-scope-sha256:2c0a1b743ffd27b4413ceb7862c9270035431d643199e6c4bcaf9f3b1d3324b5",
+      "operationId": "operation-sha256:e4d520551bb3f02d87ea034ed598a4071299db367c3f8b73d7ea60eb67378825",
+      "childIdentity": "child-sha256:04c11dd5a4deeaa36b0bd22b6a71b5824789253a5274b04e75e1cd5e787e954e",
+      "operationClass": "device_copy",
+      "at": "unix:1787487026"
+    },
+    {
+      "kind": "mutation_started",
+      "runId": "run-scope-sha256:2c0a1b743ffd27b4413ceb7862c9270035431d643199e6c4bcaf9f3b1d3324b5",
+      "operationId": "operation-sha256:e4d520551bb3f02d87ea034ed598a4071299db367c3f8b73d7ea60eb67378825",
+      "childIdentity": "child-sha256:04c11dd5a4deeaa36b0bd22b6a71b5824789253a5274b04e75e1cd5e787e954e",
+      "operationClass": "device_copy",
+      "at": "unix:1787487026"
+    },
+    {
+      "kind": "deadline_clock_started",
+      "runId": "run-scope-sha256:2c0a1b743ffd27b4413ceb7862c9270035431d643199e6c4bcaf9f3b1d3324b5",
+      "operationId": "operation-sha256:e4d520551bb3f02d87ea034ed598a4071299db367c3f8b73d7ea60eb67378825",
+      "childIdentity": "child-sha256:04c11dd5a4deeaa36b0bd22b6a71b5824789253a5274b04e75e1cd5e787e954e",
+      "operationClass": "device_copy",
+      "at": "unix:1787487026",
+      "deadlineClockStartNs": "monotonic-ns:0",
+      "deadlineMs": 120000
+    },
+    {
+      "kind": "liveness_sampled",
+      "runId": "run-scope-sha256:2c0a1b743ffd27b4413ceb7862c9270035431d643199e6c4bcaf9f3b1d3324b5",
+      "operationId": "operation-sha256:e4d520551bb3f02d87ea034ed598a4071299db367c3f8b73d7ea60eb67378825",
+      "childIdentity": "child-sha256:04c11dd5a4deeaa36b0bd22b6a71b5824789253a5274b04e75e1cd5e787e954e",
+      "operationClass": "device_copy",
+      "at": "unix:1787487099",
+      "alive": true,
+      "terminalReported": false
+    },
+    {
+      "kind": "deadline_clock_sampled",
+      "runId": "run-scope-sha256:2c0a1b743ffd27b4413ceb7862c9270035431d643199e6c4bcaf9f3b1d3324b5",
+      "operationId": "operation-sha256:e4d520551bb3f02d87ea034ed598a4071299db367c3f8b73d7ea60eb67378825",
+      "childIdentity": "child-sha256:04c11dd5a4deeaa36b0bd22b6a71b5824789253a5274b04e75e1cd5e787e954e",
+      "operationClass": "device_copy",
+      "at": "unix:1787487099",
+      "deadlineClockNs": "monotonic-ns:72858354417",
+      "remainingNs": "monotonic-ns:47141645583",
+      "deadlineReached": false,
+      "ownerReported": false
+    },
+    {
+      "kind": "deadline_reached",
+      "runId": "run-scope-sha256:2c0a1b743ffd27b4413ceb7862c9270035431d643199e6c4bcaf9f3b1d3324b5",
+      "operationId": "operation-sha256:e4d520551bb3f02d87ea034ed598a4071299db367c3f8b73d7ea60eb67378825",
+      "childIdentity": "child-sha256:04c11dd5a4deeaa36b0bd22b6a71b5824789253a5274b04e75e1cd5e787e954e",
+      "operationClass": "device_copy",
+      "at": "unix:1787487147",
+      "deadlineMs": 120000
+    },
+    {
+      "kind": "terminal",
+      "runId": "run-scope-sha256:2c0a1b743ffd27b4413ceb7862c9270035431d643199e6c4bcaf9f3b1d3324b5",
+      "operationId": "operation-sha256:e4d520551bb3f02d87ea034ed598a4071299db367c3f8b73d7ea60eb67378825",
+      "childIdentity": "child-sha256:04c11dd5a4deeaa36b0bd22b6a71b5824789253a5274b04e75e1cd5e787e954e",
+      "operationClass": "device_copy",
+      "at": "unix:1787487147"
+    },
+    {
+      "kind": "deadline_clock_sampled",
+      "runId": "run-scope-sha256:2c0a1b743ffd27b4413ceb7862c9270035431d643199e6c4bcaf9f3b1d3324b5",
+      "operationId": "operation-sha256:e4d520551bb3f02d87ea034ed598a4071299db367c3f8b73d7ea60eb67378825",
+      "childIdentity": "child-sha256:04c11dd5a4deeaa36b0bd22b6a71b5824789253a5274b04e75e1cd5e787e954e",
+      "operationClass": "device_copy",
+      "at": "unix:1787487147",
+      "deadlineClockNs": "monotonic-ns:120004173292",
+      "remainingNs": "monotonic-ns:0",
+      "deadlineReached": true,
+      "ownerReported": true
+    },
+    {
+      "kind": "deadline_clock_sampled",
+      "runId": "run-scope-sha256:2c0a1b743ffd27b4413ceb7862c9270035431d643199e6c4bcaf9f3b1d3324b5",
+      "operationId": "operation-sha256:e4d520551bb3f02d87ea034ed598a4071299db367c3f8b73d7ea60eb67378825",
+      "childIdentity": "child-sha256:04c11dd5a4deeaa36b0bd22b6a71b5824789253a5274b04e75e1cd5e787e954e",
+      "operationClass": "device_copy",
+      "at": "unix:1787487226",
+      "deadlineClockNs": "monotonic-ns:181260129334",
+      "remainingNs": "monotonic-ns:0",
+      "deadlineReached": true,
+      "ownerReported": false
+    }
+  ]
+}

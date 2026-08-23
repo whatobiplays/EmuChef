@@ -4,7 +4,7 @@
     "docs/testing/phase-6d6/scenario-manifest.json": "sha256:9fc75d0fea6d5eb5d8ef89b1384d4599a2a29a58e276c3f97161b566e8faf397",
     "docs/testing/phase-6d6/evidence-schema.json": "sha256:866fb6082a30f7508a217f9a97c762d23692d143dce9b2e8c56b1a091b40b571",
     "apps/emuchef-app/src-tauri/src/execution.rs": "sha256:9ea1d9a250fefb4b35bf563e6e47289ab18791efe75a90aca26ba3b4ccc7271f",
-    "tools/phase-6d6-evidence.mjs": "sha256:345e45e6291f3a5e683d818090e4453188d517eb73ae291b53261e53cf8d155a"
+    "tools/phase-6d6-evidence.mjs": "sha256:b677bdf226ffef50d44657f197a133a2b8440dec0463dc332fa0e3e4fbda03c6"
   },
   "bindings": {
     "cancellation": [
@@ -148,6 +148,19 @@
     "host_sleep": [
       {
         "repetition": 1,
+        "runId": "physical-run-sha256:3eabd150440fc731d92ae09f425756b4557e9ece3d95ee7bd3c361cffe90910a",
+        "scenario": "host_sleep_after_deadline",
+        "commit": "17500bb54151ff15c9b1920279a3038c8cd7162d",
+        "issueCode": "operation_timed_out",
+        "evidencePath": "docs/testing/phase-6d6/evidence/host_sleep_after_deadline-rep1-3eabd150440fc731.json",
+        "tracePath": "docs/testing/phase-6d6/evidence/traces/host_sleep_after_deadline-rep1-3eabd150440fc731.json",
+        "recordDigest": "sha256:67949df41d642e3a32fb9faa7a47a104bcc79b68f791d2b73cc1b86ca735d558",
+        "traceDigest": "sha256:2a0ce1e4efeb34b2bc048c1a26d5536698d24bf6bfd8f4e341f3d764ce97ff4b",
+        "evidenceSha256": "sha256:b9ef25ce32e75cc25f49cf17d1ba86b44f84a3927c1bfd232d62b72ce6dde534",
+        "traceSha256": "sha256:750c0795c945de4d3b5510547eedfa947da4ab52ec6780e95ff5ffd6df147a4f"
+      },
+      {
+        "repetition": 1,
         "runId": "physical-run-sha256:18917650add268613ac8f3e60f4ef1e187732562ea0ecefe2506b89ccbb54bbd",
         "scenario": "host_sleep_before_deadline",
         "commit": "23cccd7d77d01bd9d9ff134736d2141f9006406a",
@@ -158,6 +171,19 @@
         "traceDigest": "sha256:c0f45533559fe9b198f7539982671efb8ecfd9ae91969a51a205bbb7ad1f1690",
         "evidenceSha256": "sha256:d853d50a89d52cb6edeb749a51d7069fa6e4443da59dcac3f10e08faaad5298e",
         "traceSha256": "sha256:3c5338ef91d0024f8f7d3f2d22964180247dac7490b44bc19c9e6a45f50e096f"
+      },
+      {
+        "repetition": 2,
+        "runId": "physical-run-sha256:a44a7bcf418ffbf4be9e816b986daf8281e2679053ce409ad135b498725830b9",
+        "scenario": "host_sleep_after_deadline",
+        "commit": "17500bb54151ff15c9b1920279a3038c8cd7162d",
+        "issueCode": "operation_timed_out",
+        "evidencePath": "docs/testing/phase-6d6/evidence/host_sleep_after_deadline-rep2-a44a7bcf418ffbf4.json",
+        "tracePath": "docs/testing/phase-6d6/evidence/traces/host_sleep_after_deadline-rep2-a44a7bcf418ffbf4.json",
+        "recordDigest": "sha256:a4db29a05e9fcee8644d3d00f1a012a0be06ff8471428af8c06f01c01980831c",
+        "traceDigest": "sha256:fc727be6d96f9df2bcf60dd275d6bae95b498aac96aa568f55f124b6429dabc1",
+        "evidenceSha256": "sha256:688ffa17503437d75a60455e8ec8752421c762ea0285ffbe24f3e4d5d125e518",
+        "traceSha256": "sha256:5c12ab313d931da3832801b2fbaba795dc123f6f84941248614342fa7975163c"
       },
       {
         "repetition": 2,
@@ -174,5 +200,5 @@
       }
     ]
   },
-  "digest": "sha256:01b8567f89cc8cec61901ea92d5a39591edcfae517931389ad67ecd100477182"
+  "digest": "sha256:82d1ab0195a4fe6dd72a969b5bfa218c04479a7b2140b380a7346383591f8c57"
 }

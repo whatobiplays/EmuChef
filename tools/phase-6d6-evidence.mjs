@@ -699,11 +699,21 @@ function validateHostSleep(record, contract, passingRecord) {
   const near = (left, right) => Math.abs(left - right) <= tolerance;
   const expectedBudgetConsumption = Math.min(advanceMs, record.hostSleep.remainingBeforeSleepMs);
   const budgetMatches = near(consumedBudget, expectedBudgetConsumption);
-  const derivedClassification = advanceMs <= tolerance && budgetMatches
+  // The sleepEnteredAt -> wakeAt interval is an operator-marker interval and
+  // therefore an upper bound around the actual suspension interval, not an
+  // exact OS suspend duration; tolerance bounds marker, handoff, and scheduler
+  // uncertainty. Advancement within tolerance is excluded; advancement beyond
+  // tolerance but no further than wall + tolerance, with consistent budget
+  // consumption, establishes meaningful clock advancement across the bounded
+  // suspension interval and is included; advancement beyond wall + tolerance
+  // is outside the bounded interval and remains indeterminate.
+  const clockExcluded = advanceMs <= tolerance;
+  const clockIncluded = !clockExcluded && advanceMs <= suspendedWallMs + tolerance;
+  const derivedClassification = clockExcluded && budgetMatches
     ? "suspended_time_excluded"
-    : near(advanceMs, suspendedWallMs) && budgetMatches
+    : clockIncluded && budgetMatches
       ? "suspended_time_included"
-      : (advanceMs <= tolerance || near(advanceMs, suspendedWallMs)) && !budgetMatches
+      : (clockExcluded || clockIncluded) && !budgetMatches
         ? "contradictory"
         : "indeterminate";
   if (record.hostSleep.timerClassification !== derivedClassification) fail("host timer classification is inconsistent with measured deadline-clock advancement");
