@@ -1253,9 +1253,15 @@ function renderMatrixForState({ workflowCatalog, targets, records, currentBuild,
   }));
 }
 
-function ensureDirectoryAbsent(targetPath) {
-  if (existsSync(targetPath)) {
-    fail(`canonical evidence directory ${path.basename(targetPath)} already exists`);
+function reserveCreateNewDirectory(targetPath, fsOps) {
+  fsOps.mkdirSync(path.dirname(targetPath), { recursive: true });
+  try {
+    fsOps.mkdirSync(targetPath);
+  } catch (error) {
+    if (error?.code === "EEXIST" || error?.code === "ENOTEMPTY") {
+      fail(`canonical evidence directory ${path.basename(targetPath)} already exists`);
+    }
+    throw error;
   }
 }
 
@@ -1288,7 +1294,7 @@ export function loadEvidenceBundle(bundlePath) {
   };
 }
 
-export function loadEvidenceDirectory(evidenceDir, { fixtureMode }) {
+function loadEvidenceBundlesInDirectory(evidenceDir, { fixtureMode }) {
   const resolved = path.resolve(evidenceDir);
   const fixtureRoot = path.resolve(REPO_ROOT, "tests/fixtures");
   if (
@@ -1318,7 +1324,19 @@ export function loadEvidenceDirectory(evidenceDir, { fixtureMode }) {
     seenRunIds.add(record.runId);
     bundles.push(bundle);
   }
+  return bundles;
+}
+
+function loadValidatedEvidenceRecords(evidenceDir, { fixtureMode, workflowCatalog, targets }) {
+  const bundles = loadEvidenceBundlesInDirectory(evidenceDir, { fixtureMode });
+  for (const bundle of bundles) {
+    validateEvidenceBundle(bundle, { workflowCatalog, targets });
+  }
   return bundles.map((bundle) => bundle.record);
+}
+
+export function loadEvidenceDirectory(evidenceDir, { fixtureMode }) {
+  return loadEvidenceBundlesInDirectory(evidenceDir, { fixtureMode }).map((bundle) => bundle.record);
 }
 
 export function projectQualificationState({
@@ -1414,6 +1432,11 @@ export function registerQualificationTargetCandidate(candidateId, { repoRoot = R
   const currentBuild = validatePromotionBuildState(candidate.build, repoRoot);
   const workflowCatalog = loadWorkflowCatalog(paths.workflowCatalogPath);
   const authoredContentDigests = productionAuthoredContentDigests(workflowCatalog, repoRoot);
+  const existingRecords = loadValidatedEvidenceRecords(paths.evidenceRoot, {
+    fixtureMode: false,
+    workflowCatalog,
+    targets: targetFile.targets,
+  });
   const nextTargets = {
     schemaVersion: targetFile.schemaVersion,
     targets: [...targetFile.targets, target],
@@ -1421,7 +1444,7 @@ export function registerQualificationTargetCandidate(candidateId, { repoRoot = R
   const matrixText = renderMatrixForState({
     workflowCatalog,
     targets: nextTargets.targets,
-    records: loadEvidenceDirectory(paths.evidenceRoot, { fixtureMode: false }),
+    records: existingRecords,
     currentBuild,
     runtimeContract: RUNTIME_CONTRACT,
     authoredContentDigests,
@@ -1473,8 +1496,14 @@ export function recordQualificationRunCandidate(candidateId, { repoRoot = REPO_R
     limitations: structuredClone(candidate.limitations),
     artifacts: structuredClone(candidate.artifacts),
   });
-  const bundleDir = path.join(paths.evidenceRoot, provisionalRecord.runId);
-  ensureDirectoryAbsent(bundleDir);
+  const existingRecords = loadValidatedEvidenceRecords(paths.evidenceRoot, {
+    fixtureMode: false,
+    workflowCatalog,
+    targets,
+  });
+  if (existingRecords.some((record) => record.runId === provisionalRecord.runId)) {
+    fail(`canonical evidence directory ${provisionalRecord.runId} already exists`);
+  }
   const currentBuild = validatePromotionBuildState(candidate.build, repoRoot);
   const expectedFingerprint = buildCurrentFingerprint({
     workflow,
@@ -1504,7 +1533,7 @@ export function recordQualificationRunCandidate(candidateId, { repoRoot = REPO_R
     artifacts: structuredClone(candidate.artifacts),
   });
   validateEvidenceBundle({ record: sealedRecord, reportBytes }, { workflowCatalog, targets });
-  const existingRecords = loadEvidenceDirectory(paths.evidenceRoot, { fixtureMode: false });
+  const bundleDir = path.join(paths.evidenceRoot, sealedRecord.runId);
   const matrixText = renderMatrixForState({
     workflowCatalog,
     targets,
@@ -1513,20 +1542,24 @@ export function recordQualificationRunCandidate(candidateId, { repoRoot = REPO_R
     runtimeContract: RUNTIME_CONTRACT,
     authoredContentDigests,
   });
-  const temporaryBundleDir = createTemporaryPath(bundleDir);
-  fsOps.mkdirSync(temporaryBundleDir, { recursive: true });
-  fsOps.writeFileSync(path.join(temporaryBundleDir, "evidence.json"), `${JSON.stringify(sealedRecord, null, 2)}\n`, "utf8");
-  if (reportBytes !== null) {
-    fsOps.writeFileSync(path.join(temporaryBundleDir, EXECUTION_REPORT_ARTIFACT.path), reportBytes);
-  }
-  const tempMatrixPath = writeTemporaryFile(paths.matrixPath, matrixText, fsOps);
+  let tempMatrixPath = null;
+  let reservedBundleDir = false;
   try {
-    fsOps.renameSync(temporaryBundleDir, bundleDir);
+    reserveCreateNewDirectory(bundleDir, fsOps);
+    reservedBundleDir = true;
+    fsOps.writeFileSync(path.join(bundleDir, "evidence.json"), `${JSON.stringify(sealedRecord, null, 2)}\n`, "utf8");
+    if (reportBytes !== null) {
+      fsOps.writeFileSync(path.join(bundleDir, EXECUTION_REPORT_ARTIFACT.path), reportBytes);
+    }
+    tempMatrixPath = writeTemporaryFile(paths.matrixPath, matrixText, fsOps);
     fsOps.renameSync(tempMatrixPath, paths.matrixPath);
   } catch (error) {
-    fsOps.rmSync(temporaryBundleDir, { recursive: true, force: true });
-    fsOps.rmSync(bundleDir, { recursive: true, force: true });
-    fsOps.rmSync(tempMatrixPath, { recursive: true, force: true });
+    if (reservedBundleDir) {
+      fsOps.rmSync(bundleDir, { recursive: true, force: true });
+    }
+    if (tempMatrixPath !== null) {
+      fsOps.rmSync(tempMatrixPath, { recursive: true, force: true });
+    }
     throw error;
   }
   return sealedRecord;
@@ -1543,20 +1576,14 @@ function projectProductionQualification() {
     "utf8",
   ));
   validateEvidenceSchemaContract(schema);
-  const bundles = [];
-  if (existsSync(EVIDENCE_ROOT)) {
-    for (const entry of readdirSync(EVIDENCE_ROOT, { withFileTypes: true }).sort((left, right) => left.name.localeCompare(right.name))) {
-      if (entry.name === "README.md" || !entry.isDirectory()) continue;
-      const bundle = loadEvidenceBundle(path.join(EVIDENCE_ROOT, entry.name));
-      validateEvidenceBundle(bundle, { workflowCatalog, targets: targetsFile.targets });
-      bundles.push(bundle);
-    }
-  }
-  const records = bundles.map((bundle) => bundle.record);
   return projectQualificationState({
     workflowCatalog,
     targets: targetsFile.targets,
-    records,
+    records: loadValidatedEvidenceRecords(EVIDENCE_ROOT, {
+      fixtureMode: false,
+      workflowCatalog,
+      targets: targetsFile.targets,
+    }),
     currentBuild: buildMaterialIdentity({ repoRoot: REPO_ROOT, requireClean: false }),
     runtimeContract: RUNTIME_CONTRACT,
     authoredContentDigests: productionAuthoredContentDigests(workflowCatalog),

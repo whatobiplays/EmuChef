@@ -221,6 +221,20 @@ function createTempQualificationRepo({ deviceTargetsSource } = {}) {
   return repoRoot;
 }
 
+function commitRepoChanges(repoRoot, message) {
+  execFileSync("git", ["add", "."], { cwd: repoRoot, stdio: "pipe" });
+  execFileSync("git", ["commit", "-m", message], { cwd: repoRoot, stdio: "pipe" });
+}
+
+function replaceDeviceTargets(repoRoot, targets, commitMessage = "narrow device targets") {
+  writeFileSync(
+    path.join(repoRoot, "docs/testing/device-qualification/device-targets.json"),
+    `${JSON.stringify({ schemaVersion: 2, targets }, null, 2)}\n`,
+    "utf8",
+  );
+  commitRepoChanges(repoRoot, commitMessage);
+}
+
 function authoredDigestsForRepo(repoRoot, workflowCatalog) {
   return Object.fromEntries(
     workflowCatalog.workflows
@@ -235,9 +249,10 @@ function authoredDigestsForRepo(repoRoot, workflowCatalog) {
 
 function targetRegistrationCandidateForRepo(repoRoot, {
   candidateId = "qualification-candidate-0123456789abcdef0123456789abcdef",
+  targetIndex = 0,
 } = {}) {
   const build = buildMaterialIdentity({ repoRoot, requireClean: false });
-  const target = structuredClone(readJson("definitions-valid/device-targets.json").targets[0]);
+  const target = structuredClone(readJson("definitions-valid/device-targets.json").targets[targetIndex]);
   delete target.id;
   return {
     candidateSchemaVersion: 1,
@@ -309,6 +324,20 @@ function writeCandidateFixture(repoRoot, candidate, reportBytes = null) {
   if (reportBytes !== null) {
     writeFileSync(path.join(directory, "execution-report.json"), reportBytes);
   }
+}
+
+function installEvidenceBundle(repoRoot, fixtureRelative, { reportBytes } = {}) {
+  const source = path.join(FIXTURES, fixtureRelative);
+  const destination = path.join(
+    repoRoot,
+    "docs/testing/device-qualification/evidence",
+    path.basename(source),
+  );
+  cpSync(source, destination, { recursive: true });
+  if (reportBytes !== undefined) {
+    writeFileSync(path.join(destination, "execution-report.json"), reportBytes);
+  }
+  return destination;
 }
 
 function snapshotTree(root) {
@@ -716,6 +745,157 @@ test("recording the same target or run twice rejects the second write without mu
   }
 });
 
+test("recording a run refuses a destination reserved by another invocation without deleting it", () => {
+  const repoRoot = createTempQualificationRepo({
+    deviceTargetsSource: path.join(FIXTURES, "definitions-valid/device-targets.json"),
+  });
+  try {
+    const runCandidate = runCandidateForRepo(repoRoot, {
+      candidateId: "qualification-candidate-11112222333344445555666677778888",
+    });
+    writeCandidateFixture(repoRoot, runCandidate, REPORT_BYTES);
+    const evidenceRoot = path.join(repoRoot, "docs/testing/device-qualification/evidence");
+    const matrixPath = path.join(repoRoot, "docs/qualification/device-qualification-matrix.md");
+    const beforeMatrix = readFileSync(matrixPath, "utf8");
+    const raceMarker = "reservation-owner.txt";
+    let competitorCreated = false;
+    const isCanonicalBundlePath = (targetPath) => (
+      targetPath.startsWith(`${evidenceRoot}${path.sep}`)
+      && path.basename(targetPath).startsWith("qualification-run-sha256:")
+      && !path.basename(targetPath).includes(".tmp-")
+    );
+    const createCompetingBundle = (targetPath) => {
+      if (competitorCreated) return;
+      competitorCreated = true;
+      mkdirSync(targetPath, { recursive: false });
+      writeFileSync(path.join(targetPath, raceMarker), "competing invocation\n", "utf8");
+      const error = new Error("competing invocation reserved destination first");
+      error.code = "EEXIST";
+      throw error;
+    };
+    assert.throws(
+      () => recordQualificationRunCandidate(runCandidate.candidateId, {
+        repoRoot,
+        fsOps: {
+          mkdirSync(targetPath, options) {
+            if (isCanonicalBundlePath(targetPath)) {
+              createCompetingBundle(targetPath);
+            }
+            mkdirSync(targetPath, options);
+          },
+          renameSync(source, destination) {
+            if (isCanonicalBundlePath(destination)) {
+              createCompetingBundle(destination);
+            }
+            rmSync(destination, { recursive: true, force: true });
+            cpSync(source, destination, { recursive: true });
+            rmSync(source, { recursive: true, force: true });
+          },
+          rmSync,
+          writeFileSync,
+        },
+      }),
+      /reserved destination first|already exists|immutable/i,
+    );
+    const after = snapshotTree(evidenceRoot);
+    assert.ok(after.some((entry) => entry.path.endsWith(`/${raceMarker}`)));
+    assert.equal(readFileSync(matrixPath, "utf8"), beforeMatrix);
+  } finally {
+    rmSync(repoRoot, { recursive: true, force: true });
+  }
+});
+
+test("tampered existing evidence bundle report blocks both promotions before canonical mutation", () => {
+  const narrowedTargets = [readJson("definitions-valid/device-targets.json").targets[0]];
+  const targetRepo = createTempQualificationRepo();
+  try {
+    replaceDeviceTargets(targetRepo, narrowedTargets, "narrow target repo");
+    installEvidenceBundle(targetRepo, "evidence-valid/passing-retroarch-bios", {
+      reportBytes: Buffer.from("{}\n", "utf8"),
+    });
+    const targetCandidate = targetRegistrationCandidateForRepo(targetRepo, {
+      candidateId: "qualification-candidate-9999aaaabbbbccccddddeeeeffff0000",
+      targetIndex: 1,
+    });
+    writeCandidateFixture(targetRepo, targetCandidate);
+    const targetRegistryPath = path.join(targetRepo, "docs/testing/device-qualification/device-targets.json");
+    const targetMatrixPath = path.join(targetRepo, "docs/qualification/device-qualification-matrix.md");
+    const beforeRegistry = readFileSync(targetRegistryPath, "utf8");
+    const beforeMatrix = readFileSync(targetMatrixPath, "utf8");
+    assert.throws(
+      () => registerQualificationTargetCandidate(targetCandidate.candidateId, { repoRoot: targetRepo }),
+      /execution report digest/i,
+    );
+    assert.equal(readFileSync(targetRegistryPath, "utf8"), beforeRegistry);
+    assert.equal(readFileSync(targetMatrixPath, "utf8"), beforeMatrix);
+  } finally {
+    rmSync(targetRepo, { recursive: true, force: true });
+  }
+
+  const runRepo = createTempQualificationRepo();
+  try {
+    replaceDeviceTargets(runRepo, narrowedTargets, "narrow run repo");
+    installEvidenceBundle(runRepo, "evidence-valid/passing-retroarch-bios", {
+      reportBytes: Buffer.from("{}\n", "utf8"),
+    });
+    const runCandidate = runCandidateForRepo(runRepo, {
+      candidateId: "qualification-candidate-0000ffffeeeeddddccccbbbbaaaa9999",
+    });
+    writeCandidateFixture(runRepo, runCandidate, REPORT_BYTES);
+    const evidenceRoot = path.join(runRepo, "docs/testing/device-qualification/evidence");
+    const matrixPath = path.join(runRepo, "docs/qualification/device-qualification-matrix.md");
+    const beforeEvidence = snapshotTree(evidenceRoot);
+    const beforeMatrix = readFileSync(matrixPath, "utf8");
+    assert.throws(
+      () => recordQualificationRunCandidate(runCandidate.candidateId, { repoRoot: runRepo }),
+      /execution report digest/i,
+    );
+    assert.deepEqual(snapshotTree(evidenceRoot), beforeEvidence);
+    assert.equal(readFileSync(matrixPath, "utf8"), beforeMatrix);
+  } finally {
+    rmSync(runRepo, { recursive: true, force: true });
+  }
+});
+
+test("target registration restores registry and matrix bytes when matrix replacement fails", () => {
+  const repoRoot = createTempQualificationRepo();
+  try {
+    const targetCandidate = targetRegistrationCandidateForRepo(repoRoot, {
+      candidateId: "qualification-candidate-12344321123443211234432112344321",
+    });
+    writeCandidateFixture(repoRoot, targetCandidate);
+    const registryPath = path.join(repoRoot, "docs/testing/device-qualification/device-targets.json");
+    const matrixPath = path.join(repoRoot, "docs/qualification/device-qualification-matrix.md");
+    const beforeRegistry = readFileSync(registryPath, "utf8");
+    const beforeMatrix = readFileSync(matrixPath, "utf8");
+    let renameCount = 0;
+    assert.throws(
+      () => registerQualificationTargetCandidate(targetCandidate.candidateId, {
+        repoRoot,
+        fsOps: {
+          mkdirSync,
+          renameSync(source, destination) {
+            renameCount += 1;
+            if (renameCount === 2) {
+              throw new Error("forced matrix replacement failure");
+            }
+            rmSync(destination, { recursive: true, force: true });
+            cpSync(source, destination, { recursive: true });
+            rmSync(source, { recursive: true, force: true });
+          },
+          rmSync,
+          writeFileSync,
+        },
+      }),
+      /forced matrix replacement failure/i,
+    );
+    assert.equal(readFileSync(registryPath, "utf8"), beforeRegistry);
+    assert.equal(readFileSync(matrixPath, "utf8"), beforeMatrix);
+  } finally {
+    rmSync(repoRoot, { recursive: true, force: true });
+  }
+});
+
 test("recording a run rolls back the newly created evidence bundle when matrix replacement fails", () => {
   const repoRoot = createTempQualificationRepo({
     deviceTargetsSource: path.join(FIXTURES, "definitions-valid/device-targets.json"),
@@ -737,7 +917,7 @@ test("recording a run rolls back the newly created evidence bundle when matrix r
           mkdirSync,
           renameSync(source, destination) {
             renameCount += 1;
-            if (renameCount === 2) {
+            if (renameCount === 1) {
               throw new Error("forced matrix replacement failure");
             }
             rmSync(destination, { recursive: true, force: true });

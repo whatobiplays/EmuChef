@@ -118,3 +118,83 @@ Required commit message:
 ```text
 feat: record immutable qualification bundles
 ```
+
+## Fix Round 1 — Review Corrections
+
+Review required three behavior corrections and one coverage expansion:
+
+- make run-bundle creation truly create-new/no-clobber atomic;
+- validate every existing evidence bundle, including bound execution-report
+  bytes, before either promotion path projects or mutates canonical state;
+- add focused regressions for reservation races, tampered existing bundles,
+  and target-registration rollback symmetry.
+
+### RED
+
+Focused regression command before the fix:
+
+```sh
+node --test --test-name-pattern="refuses a destination reserved|tampered existing evidence bundle report blocks|target registration restores registry" tools/device-qualification.test.mjs
+```
+
+Result:
+
+```text
+3 tests, 1 passed, 2 failed
+```
+
+Expected failures before implementation:
+
+- run recording deleted a competing destination created after the absence check;
+- promotions did not validate existing bundle report bytes before mutation.
+
+### GREEN
+
+Focused command after the fix:
+
+```sh
+node --test --test-name-pattern="recording the same target or run twice|refuses a destination reserved|tampered existing evidence bundle report blocks|target registration restores registry|recording a run rolls back the newly created evidence bundle" tools/device-qualification.test.mjs
+```
+
+Result:
+
+```text
+5 tests, 5 passed, 0 failed
+```
+
+Full command after the fix:
+
+```sh
+node --test tools/device-qualification.test.mjs
+```
+
+Result:
+
+```text
+68 tests, 68 passed, 0 failed
+```
+
+Sequential CLI verification after the fix:
+
+```sh
+node tools/device-qualification.mjs --write-matrix
+node tools/device-qualification.mjs --check
+```
+
+Result for both:
+
+```text
+Phase 6F qualification foundation check passed.
+```
+
+### Fix-Round Delta
+
+- Replaced the run-bundle check-then-rename flow with an atomic create-new
+  directory reservation that cannot clobber a destination created by another
+  invocation and only cleans up directories reserved by the current process.
+- Introduced validated existing-evidence loading for canonical projection so
+  target registration, run recording, and production projection all verify
+  bundle bytes before using historical evidence.
+- Added regression coverage for competing destination reservation, tampered
+  existing execution-report artifacts on both promotion paths, and
+  target-registration rollback when matrix replacement fails.
