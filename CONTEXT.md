@@ -1225,6 +1225,20 @@ identity, the validated workflow catalog, and the validated device-target
 registry. Active repository projection and validation no longer read
 `EMUCHEF_PHASE_6F_BUILD_IDENTITY` or `EMUCHEF_PHASE_6F_RUNTIME_CONTRACT`.
 
+Recordable qualification application builds use the pinned
+`apps/emuchef-app/scripts/run-device-qualification.mjs` launcher. It performs
+the frontend build, prepares the development Rust sidecar, and then starts the
+Tauri application with the `real-execution` Cargo feature and
+`EMUCHEF_DEVICE_QUALIFICATION=1`; it does not use Vite hot reload or `tauri
+dev`. When that opt-in is present, the Tauri build script obtains the build
+identity only from `tools/device-qualification.mjs --build-identity
+--require-clean` and embeds the resulting strict camelCase JSON as
+`EMUCHEF_QUALIFICATION_BUILD_IDENTITY`. Rust qualification mode requires a
+debug build, the compiled `real-execution` feature, the explicit runtime opt-in,
+and a successfully parsed embedded identity whose real-execution capability is
+enabled. Ordinary application builds omit this identity and retain their normal
+production behavior.
+
 Active schema-v2 run records use the domain-oriented immutable ID form
 `qualification-run-sha256:<64 lowercase hex characters>`, derived from the
 unsealed record payload and then sealed with canonical `fingerprintDigest` and

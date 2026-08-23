@@ -7,6 +7,10 @@ mod handles;
 mod menu;
 mod phase6d6_ui_smoke;
 mod qualification;
+// The gate API is introduced before the later qualification orchestration
+// layer consumes it, so it is intentionally unused by the ordinary app flow.
+#[allow(dead_code)]
+pub(crate) mod qualification_build;
 mod recovery;
 mod saved_configurations;
 mod sidecar;

@@ -9,6 +9,7 @@ default = []
 real-execution = []
 
 [build-dependencies]
+serde_json = { version = "1.0", features = ["preserve_order"] }
 tauri-build = { version = "2.5.1", features = [] }
 
 [dependencies]
