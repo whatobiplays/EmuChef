@@ -57,7 +57,7 @@ pub fn run() {
             app.manage(commands::AppState {
                 sidecar,
                 catalog,
-                qualification_repository: qualification_repository::QualificationRepository::production(),
+                qualification_repository: qualification_repository::QualificationRepositoryProvider::default(),
                 adb: Mutex::new(adb::AdbManager::new(app_data.join("platform-tools"))),
                 platform_tools_selections: Mutex::new(
                     commands::PlatformToolsSelectionStore::default(),

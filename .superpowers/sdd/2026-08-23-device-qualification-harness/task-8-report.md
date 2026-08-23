@@ -1,85 +1,100 @@
-# Task 8 Implementation Report
+# Task 8 Review-Fix Report
 
 Date: 2026-08-23
 Worktree: `device-qualification-harness`
+Base Task 8 commit: `9652d928538f4250916dc14dcc825735cdf16543`
 
 ## 1. Result
 
-Task 8 is implemented and committed locally. The change adds the development-only target-registration surface without replacing the production EmuChef workflow. Target facts come from the existing probe, match, qualification, and root-check boundaries. Node remains the authority for schema validation, target IDs, canonical mutation, and repository projection.
+The bounded review-fix round is complete. Qualification repository access is now lazy and optional, disabled builds return a sanitized unavailable projection without initializing Node or repository state, and trusted source/build checks fail closed. Registration leaves the trusted lifecycle dirty until a clean commit and rebuild are observed. Candidate previews recompute promotability from current source state, and repository filesystem work, Node status, candidate projection, and canonical mutation share one operation gate.
 
-No physical device was used. No physical target or evidence record was created.
+The production EmuChef workflow remains the system under test. React receives only opaque handles and plans plus sanitized DTOs; `tools/device-qualification.mjs` remains the sole canonical schema, digest, identity, mutation, and projection authority. No physical device was used and no physical qualification or evidence was created.
 
 ## 2. TDD evidence
 
-The required Rust serialization test was written against the camelCase contract before the serialization implementation was corrected.
+The review fixes followed the required RED/GREEN sequence.
 
-RED:
+### RED 1: missing lazy provider, source state, and command seams
+
+Before implementation, the focused Rust command failed at compile time:
 
 ```text
 rtk cargo test --manifest-path apps/emuchef-app/src-tauri/Cargo.toml qualification_mode
 FAIL, exit 101
-camelCase qualification DTO should deserialize: missing field `production_recipes`
+unresolved/missing: QualificationRepositoryProvider,
+QualificationObservationSource, QualificationSourceState,
+qualification_mode_status, and capture_target_registration_payload_from
 ```
 
-The TypeScript contract typecheck passed after the interfaces were added. GREEN was then verified with:
+### GREEN 1
+
+After adding the lazy provider, fail-closed status projection, trusted source checks, observation seam, strict fact handling, and operation gate:
 
 ```text
 rtk cargo test --manifest-path apps/emuchef-app/src-tauri/Cargo.toml qualification_mode
-cargo test: 9 passed
+PASS: 14 tests
+rtk cargo test --manifest-path apps/emuchef-app/src-tauri/Cargo.toml qualification_repository
+PASS: 27 tests
 ```
 
-The Rust tests cover camelCase round-tripping, disabled-mode status, sanitized mode guards, capability projection, production plan/profile resolution, schema-v2 target projection, stored provenance preservation, and fail-closed fact handling. TypeScript tests cover DTO shape and the four opaque API commands.
+### RED 2: command-boundary lifecycle regression
 
-## 3. Implementation
+The added registration lifecycle test was then run before its command helper/provider injection was implemented:
 
-1. Added `qualification_mode.rs` with:
+```text
+rtk cargo test --manifest-path apps/emuchef-app/src-tauri/Cargo.toml qualification_mode
+FAIL, exit 101
+missing: QualificationRepositoryProvider::for_test and
+register_qualification_target_with_repository
+```
 
-   - strict camelCase Tauri DTOs for build identity, workflows, target summaries, provenance previews, candidate summaries, and mode status;
-   - four-gate mode status with no Node invocation when disabled;
-   - target capture from production probe, match, qualification, and root-check helpers;
-   - exact capability mapping for APK installation and shared-storage writes;
-   - schema-v2 fact provenance for observations, root checks, and USB connection attestation;
-   - opaque candidate persistence and read-only preview projection;
-   - guarded registration delegation to `--register-target`; and
-   - validated opaque candidate discard.
+### GREEN 2
 
-2. Extended `commands.rs` and the existing root-qualification module so public product commands and qualification capture share the same observation authorities.
+The command-level registration guard and test provider were implemented and verified:
 
-3. Registered the repository state and four Tauri commands in `lib.rs`.
+```text
+rtk cargo test --manifest-path apps/emuchef-app/src-tauri/Cargo.toml qualification_mode
+PASS: 15 tests
+rtk cargo test --manifest-path apps/emuchef-app/src-tauri/Cargo.toml qualification_repository
+PASS: 27 tests
+```
 
-4. Added the frontend DTO contract and opaque API wrappers. React receives no repository, candidate, evidence, executable, or process paths.
+The focused tests cover disabled Node suppression, sanitized unavailable status, production observation order, strict manufacturer/model/firmware types, numeric Android-version normalization, every root outcome, stale source/build classification, lifecycle blocking, candidate immutability, and registration/discard/status serialization.
 
-5. Added the required project-context documentation for the target-registration semantics.
+## 3. Review fixes implemented
+
+1. `QualificationRepositoryProvider` uses `OnceLock<Option<_>>`; ordinary and packaged builds do not resolve or canonicalize a source checkout during startup, and unavailable repositories produce empty sanitized status.
+2. Registration requires trusted embedded build identity, matching clean Git `HEAD`, and a clean tracked worktree. Successful canonical registration marks trusted lifecycle state dirty; subsequent recordable operations fail until a clean commit/rebuild identity is present. Stale candidates remain inspectable and explicitly discardable.
+3. A repository-wide operation gate serializes candidate filesystem work, Node `--describe`, candidate status/projection, discard, and canonical registration. The concurrency regression proves status and discard cannot observe or delete a candidate during status or matrix replacement.
+4. Candidate promotability is recomputed from current source/build facts on load/list and preserves the stored target values and provenance when stale.
+5. Manufacturer, model, and firmware observations require non-empty strings. Only numeric Android version values are normalized. Granted and denied root checks map to rooted/non-root; unavailable, failed, and identity-mismatched root checks reject the candidate.
+6. `CONTEXT.md` documents the lazy provider, trusted lifecycle, serialization gate, stale classification, and strict observation semantics.
 
 ## 4. Validation
 
 All validation completed without connected hardware:
 
-1. `cargo fmt --manifest-path apps/emuchef-app/src-tauri/Cargo.toml -- --check` passed.
-2. Focused Rust qualification tests passed: 9 tests.
-3. Repository candidate tests passed: 24 tests.
-4. Full default Tauri Rust tests passed: 293 passed, 2 ignored.
-5. `cargo check --features real-execution` passed with 0 errors. Two existing dead-code warnings remain in the future run-record repository API.
+1. `rtk cargo fmt --manifest-path apps/emuchef-app/src-tauri/Cargo.toml -- --check` passed.
+2. Focused mode tests passed: 15.
+3. Focused repository tests passed: 27.
+4. Full default Tauri Rust tests passed: 302 passed, 2 ignored.
+5. `rtk cargo check --manifest-path apps/emuchef-app/src-tauri/Cargo.toml --features real-execution` passed with 0 errors; two existing dead-code warnings remain for future run-record repository APIs.
 6. App typecheck and lint passed.
-7. Full app tests passed: 82 logic tests and 76 Vitest tests.
-8. The focused opaque API Vitest suite passed: 2 tests.
+7. Full app tests passed: 82 logic tests and 76 Vitest tests. A parallel invocation produced one non-reproducible call-count assertion; the isolated file and complete suite both passed on rerun.
+8. Focused opaque API Vitest tests passed: 2.
 9. App security tests passed: 28 policy tests and 12 Python-retirement tests.
 10. App production build passed.
-11. Canonical Node qualification tests passed: 72 tests.
-12. `node tools/device-qualification.mjs --check` and `make device-qualification-check` passed.
-13. `git diff --check` passed. New Task 8 source and tests contain no phase/slice terminology, and the React source contains none of the forbidden path-authority fields.
+11. Canonical Node qualification tests passed: 72.
+12. `rtk node tools/device-qualification.mjs --check` and `rtk make device-qualification-check` passed.
+13. `rtk git diff --check` passed. New Task 8 source/test additions contain no active phase/slice identifiers, React qualification inputs remain opaque, and no qualification path authority is exposed.
 
-The focused Vitest command was run from `apps/emuchef-app`, because Vitest resolves `tests/vitest.config.ts` relative to its working directory.
-
-## 5. Changed files
+## 5. Fix-round changed files
 
 1. `CONTEXT.md`
-2. `.superpowers/sdd/2026-08-23-device-qualification-harness/task-8-report.md`
-3. `apps/emuchef-app/src-tauri/src/qualification_mode.rs`
-4. `apps/emuchef-app/src-tauri/src/commands.rs`
-5. `apps/emuchef-app/src-tauri/src/device_qualification.rs`
-6. `apps/emuchef-app/src-tauri/src/lib.rs`
-7. `apps/emuchef-app/src/types.ts`
-8. `apps/emuchef-app/src/api.ts`
-9. `apps/emuchef-app/tests/deviceQualificationContract.test.ts`
-10. `apps/emuchef-app/tests/deviceQualificationApi.dom.test.tsx`
+2. `apps/emuchef-app/src-tauri/src/commands.rs`
+3. `apps/emuchef-app/src-tauri/src/lib.rs`
+4. `apps/emuchef-app/src-tauri/src/qualification_mode.rs`
+5. `apps/emuchef-app/src-tauri/src/qualification_repository.rs`
+6. `.superpowers/sdd/2026-08-23-device-qualification-harness/task-8-report.md`
+
+No `.chatgpt` files, SDD ledgers, canonical qualification tool/schema files, physical-device evidence, or external systems were modified.

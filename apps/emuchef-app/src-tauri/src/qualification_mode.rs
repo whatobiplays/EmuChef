@@ -22,7 +22,8 @@ use crate::qualification_build::{
 };
 use crate::qualification_repository::{
     CandidateKind, QualificationCandidateSummary as RepositoryCandidateSummary,
-    QualificationOperation, RepositoryQualificationDescription, StoredQualificationCandidate,
+    QualificationOperation, QualificationRepositoryProvider, RepositoryQualificationDescription,
+    StoredQualificationCandidate,
 };
 
 /// The operator outcomes accepted by a workflow-declared checkpoint.
@@ -167,6 +168,51 @@ pub(crate) struct QualificationModeStatus {
     pub(crate) resumable_candidates: Vec<QualificationCandidateSummaryDto>,
 }
 
+/// The production observation boundary consumed by target registration.
+/// Qualification mode may orchestrate these calls, but it does not create a
+/// second device-probing, matching, qualification, or root authority.
+trait QualificationObservationSource {
+    fn probe(&mut self, device_handle: &str) -> Result<Value, String>;
+    fn match_device(&mut self, device_handle: &str) -> Result<Value, String>;
+    fn qualification(
+        &mut self,
+        device_handle: &str,
+    ) -> Result<crate::device_qualification::DeviceQualificationSnapshotDto, String>;
+    fn root(
+        &mut self,
+        device_handle: &str,
+    ) -> Result<crate::device_qualification::RootQualificationCheckDto, String>;
+}
+
+struct AppStateQualificationObservationSource<'a> {
+    state: &'a AppState,
+}
+
+impl QualificationObservationSource for AppStateQualificationObservationSource<'_> {
+    fn probe(&mut self, device_handle: &str) -> Result<Value, String> {
+        probe_device_facts(device_handle, self.state).map(|(facts, _)| facts)
+    }
+
+    fn match_device(&mut self, device_handle: &str) -> Result<Value, String> {
+        match_device_observation(device_handle, self.state)
+    }
+
+    fn qualification(
+        &mut self,
+        device_handle: &str,
+    ) -> Result<crate::device_qualification::DeviceQualificationSnapshotDto, String> {
+        refresh_current_qualification(self.state, Some(device_handle))
+            .map(|current| current.snapshot)
+    }
+
+    fn root(
+        &mut self,
+        device_handle: &str,
+    ) -> Result<crate::device_qualification::RootQualificationCheckDto, String> {
+        check_device_root_observation(device_handle, self.state)
+    }
+}
+
 /// The only input accepted by target-registration capture.
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
@@ -244,27 +290,37 @@ pub fn get_device_qualification_mode_status(
     state: State<'_, AppState>,
 ) -> Result<QualificationModeStatus, String> {
     let mode = QualificationModeState::current();
+    qualification_mode_status(&mode, &state.qualification_repository)
+}
+
+fn qualification_mode_status(
+    mode: &QualificationModeState,
+    provider: &QualificationRepositoryProvider,
+) -> Result<QualificationModeStatus, String> {
     if !mode.enabled {
         return Ok(disabled_mode_status());
     }
+    let Some(build) = mode.build.as_ref() else {
+        return Ok(unavailable_mode_status("qualification_build_unavailable"));
+    };
+    let Some(repository) = provider.get() else {
+        return Ok(unavailable_mode_status(
+            "qualification_repository_unavailable",
+        ));
+    };
 
-    let description = state
-        .qualification_repository
-        .describe()
+    let repository_status = repository
+        .describe_and_list_candidates()
         .map_err(|_| safe_qualification_error("qualification_repository_unavailable"))?;
+    let description = repository_status.description;
     let workflows = workflows_from_description(&description)?;
     let targets = targets_from_description(&description)?;
-    let candidates = state
-        .qualification_repository
-        .list_candidates()
-        .map_err(|_| safe_qualification_error("qualification_repository_unavailable"))?
+    let candidates = repository_status
+        .candidates
         .into_iter()
         .map(candidate_summary_from_repository)
         .collect::<Result<Vec<_>, _>>()?;
-    let recordable = mode
-        .build
-        .as_ref()
-        .is_some_and(|embedded| embedded == &description.build);
+    let recordable = repository_status.recordable && build == &description.build;
     let message = (!recordable).then(|| {
         "The committed repository state no longer matches this qualification build. Rebuild before recording."
             .to_string()
@@ -286,13 +342,30 @@ fn disabled_mode_status() -> QualificationModeStatus {
     QualificationModeStatus {
         enabled: false,
         recordable: false,
-        message: None,
+        message: Some(
+            "Device qualification mode is unavailable in this application build.".to_string(),
+        ),
         build: None,
         runtime_contract: None,
         workflows: Vec::new(),
         targets: Vec::new(),
         resumable_candidates: Vec::new(),
     }
+}
+
+fn unavailable_mode_status(code: &str) -> QualificationModeStatus {
+    let mut status = disabled_mode_status();
+    status.message = Some(match code {
+        "qualification_build_unavailable" => {
+            "The application has no recordable qualification build identity.".to_string()
+        }
+        "qualification_repository_unavailable" => {
+            "Qualification definitions are unavailable. Rebuild the qualification application."
+                .to_string()
+        }
+        _ => "Device qualification mode is unavailable in this application build.".to_string(),
+    });
+    status
 }
 
 #[tauri::command]
@@ -302,13 +375,18 @@ pub fn create_qualification_target_candidate(
 ) -> Result<QualificationTargetCandidatePreview, String> {
     let mode = QualificationModeState::current();
     let build = require_recordable_mode(&mode)?.clone();
-    let payload = capture_target_registration_payload(&state, &request, &build)?;
-    let handle = state
+    let repository = state
         .qualification_repository
+        .get()
+        .ok_or_else(|| safe_qualification_error("qualification_repository_unavailable"))?;
+    repository
+        .require_recordable()
+        .map_err(|_| safe_qualification_error("qualification_source_changed"))?;
+    let payload = capture_target_registration_payload(&state, &request, &build)?;
+    let handle = repository
         .create_candidate(CandidateKind::TargetRegistration, &payload, None)
         .map_err(|_| safe_qualification_error("qualification_candidate_invalid"))?;
-    let candidate = state
-        .qualification_repository
+    let candidate = repository
         .load_candidate(&handle)
         .map_err(|_| safe_qualification_error("qualification_candidate_invalid"))?;
     target_candidate_preview(&candidate)
@@ -320,11 +398,25 @@ pub fn register_qualification_target(
     state: State<'_, AppState>,
 ) -> Result<QualificationTargetRegistrationResult, String> {
     let mode = QualificationModeState::current();
-    let _ = require_recordable_mode(&mode)?;
-    let result = state
-        .qualification_repository
-        .register_target(&candidate_handle)
-        .map_err(|_| safe_qualification_error("qualification_candidate_invalid"))?;
+    register_qualification_target_with_repository(
+        &candidate_handle,
+        &mode,
+        &state.qualification_repository,
+    )
+}
+
+fn register_qualification_target_with_repository(
+    candidate_handle: &str,
+    mode: &QualificationModeState,
+    provider: &QualificationRepositoryProvider,
+) -> Result<QualificationTargetRegistrationResult, String> {
+    let _ = require_recordable_mode(mode)?;
+    let repository = provider
+        .get()
+        .ok_or_else(|| safe_qualification_error("qualification_repository_unavailable"))?;
+    let result = repository
+        .register_target(candidate_handle)
+        .map_err(|error| qualification_repository_command_error(&error))?;
     if result.operation != QualificationOperation::RegisterTarget
         || result.candidate_kind != CandidateKind::TargetRegistration
         || result.candidate_handle != candidate_handle
@@ -343,6 +435,14 @@ pub fn register_qualification_target(
     })
 }
 
+fn qualification_repository_command_error(error: &str) -> String {
+    if error.contains("source state") || error.contains("build identity") {
+        safe_qualification_error("qualification_source_changed")
+    } else {
+        safe_qualification_error("qualification_candidate_invalid")
+    }
+}
+
 #[tauri::command]
 pub fn discard_qualification_candidate(
     candidate_handle: String,
@@ -350,8 +450,11 @@ pub fn discard_qualification_candidate(
 ) -> Result<(), String> {
     let mode = QualificationModeState::current();
     let _ = require_recordable_mode(&mode)?;
-    state
+    let repository = state
         .qualification_repository
+        .get()
+        .ok_or_else(|| safe_qualification_error("qualification_repository_unavailable"))?;
+    repository
         .discard_candidate(&candidate_handle)
         .map_err(|_| safe_qualification_error("qualification_candidate_invalid"))
 }
@@ -369,16 +472,24 @@ fn capture_target_registration_payload(
     request: &CreateQualificationTargetCandidateRequest,
     build: &QualificationBuildIdentity,
 ) -> Result<Value, String> {
-    let (facts, _) = probe_device_facts(&request.device_handle, state)?;
-    let matched = match_device_observation(&request.device_handle, state)?;
+    let mut source = AppStateQualificationObservationSource { state };
+    capture_target_registration_payload_from(&mut source, request, build)
+}
+
+fn capture_target_registration_payload_from(
+    source: &mut impl QualificationObservationSource,
+    request: &CreateQualificationTargetCandidateRequest,
+    build: &QualificationBuildIdentity,
+) -> Result<Value, String> {
+    let facts = source.probe(&request.device_handle)?;
+    let matched = source.match_device(&request.device_handle)?;
     let profile_id = matched_profile_id(&matched, &request.device_plan).ok_or_else(|| {
         safe_error(
             "device_plan_unmatched",
             "The selected device plan is not a trusted match for this device.",
         )
     })?;
-    let current = refresh_current_qualification(state, Some(&request.device_handle))?;
-    let snapshot = current.snapshot;
+    let snapshot = source.qualification(&request.device_handle)?;
     if snapshot.state != DeviceQualificationState::Supported
         || snapshot.device_identity.is_none()
         || snapshot.android_api_level.is_none()
@@ -386,7 +497,7 @@ fn capture_target_registration_payload(
     {
         return Err(safe_qualification_error("qualification_target_unverified"));
     }
-    let root = check_device_root_observation(&request.device_handle, state)?;
+    let root = source.root(&request.device_handle)?;
     if root.device_identity != request.device_handle {
         return Err(safe_qualification_error("qualification_target_unverified"));
     }
@@ -466,7 +577,7 @@ fn required_fact_string(facts: &Value, field: &str) -> Result<String, String> {
         .ok_or_else(|| safe_qualification_error("qualification_target_unverified"))?;
     match value {
         Value::String(value) if !value.is_empty() => Ok(value.clone()),
-        Value::Number(value) => Ok(value.to_string()),
+        Value::Number(value) if field == "android_version" => Ok(value.to_string()),
         _ => Err(safe_qualification_error("qualification_target_unverified")),
     }
 }
@@ -617,8 +728,286 @@ fn target_candidate_preview(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::device_qualification::CapabilityAvailabilityDto;
+    use crate::device_qualification::{
+        CapabilityAvailabilityDto, DeviceQualificationSnapshotDto, RootQualificationCheckDto,
+        RootQualificationFailureReason,
+    };
+    use crate::qualification_repository::QualificationRepositoryProvider;
     use serde_json::json;
+    use std::path::Path;
+    use std::sync::{Arc, Mutex};
+
+    #[derive(Clone)]
+    struct FakeObservationSource {
+        calls: Vec<&'static str>,
+        facts: Value,
+        matched: Value,
+        qualification: DeviceQualificationSnapshotDto,
+        root: RootQualificationCheckDto,
+    }
+
+    impl QualificationObservationSource for FakeObservationSource {
+        fn probe(&mut self, _device_handle: &str) -> Result<Value, String> {
+            self.calls.push("probe");
+            Ok(self.facts.clone())
+        }
+
+        fn match_device(&mut self, _device_handle: &str) -> Result<Value, String> {
+            self.calls.push("match");
+            Ok(self.matched.clone())
+        }
+
+        fn qualification(
+            &mut self,
+            _device_handle: &str,
+        ) -> Result<DeviceQualificationSnapshotDto, String> {
+            self.calls.push("qualification");
+            Ok(self.qualification.clone())
+        }
+
+        fn root(&mut self, device_handle: &str) -> Result<RootQualificationCheckDto, String> {
+            self.calls.push("root");
+            let mut root = self.root.clone();
+            root.device_identity = device_handle.to_string();
+            Ok(root)
+        }
+    }
+
+    fn observation_source() -> FakeObservationSource {
+        FakeObservationSource {
+            calls: Vec::new(),
+            facts: json!({
+                "manufacturer": "AYANEO",
+                "model": "Pocket S2",
+                "android_version": 15,
+                "android_api_level": 35,
+                "firmware_build": "vendor/build"
+            }),
+            matched: json!({
+                "candidates": [{ "planId": "selected-plan", "profileId": "ayaneo.pocket_s2" }]
+            }),
+            qualification: DeviceQualificationSnapshotDto {
+                state: DeviceQualificationState::Supported,
+                summary: "supported",
+                limitations: Vec::new(),
+                android_major: Some(15),
+                android_api_level: Some(35),
+                abi_class: Some("arm64"),
+                storage: CapabilityAvailabilityDto::Available,
+                package_manager: CapabilityAvailabilityDto::Available,
+                activity_manager: CapabilityAvailabilityDto::Unavailable,
+                root: None,
+                runtime_generation: 1,
+                qualification_revision: 1,
+                device_identity: Some("device-opaque".to_string()),
+            },
+            root: RootQualificationCheckDto {
+                qualification: RootQualificationState::Denied,
+                runtime_generation: 1,
+                qualification_revision: 1,
+                device_identity: "device-opaque".to_string(),
+            },
+        }
+    }
+
+    fn capture_request() -> CreateQualificationTargetCandidateRequest {
+        CreateQualificationTargetCandidateRequest {
+            device_handle: "device-opaque".to_string(),
+            device_plan: "selected-plan".to_string(),
+            connection_type: QualificationConnectionType::Usb3,
+        }
+    }
+
+    fn test_build() -> QualificationBuildIdentity {
+        serde_json::from_value(json!({
+            "appVersion": "0.1.0",
+            "gitCommit": "1".repeat(40),
+            "materialBuildDigest": format!("sha256:{}", "a".repeat(64)),
+            "realExecutionEnabled": true,
+            "qualificationContract": 1
+        }))
+        .expect("test build should decode")
+    }
+
+    #[test]
+    fn disabled_status_does_not_initialize_or_touch_the_repository() {
+        let provider = QualificationRepositoryProvider::default();
+        let status = qualification_mode_status(
+            &QualificationModeState {
+                enabled: false,
+                build: None,
+            },
+            &provider,
+        )
+        .expect("disabled status should be safe");
+
+        assert!(!status.enabled);
+        assert!(!status.recordable);
+        assert!(status.workflows.is_empty());
+        assert!(status.targets.is_empty());
+        assert!(status.resumable_candidates.is_empty());
+        assert!(!provider.is_initialized_for_test());
+    }
+
+    #[test]
+    fn enabled_status_without_a_trusted_checkout_is_sanitized_and_empty() {
+        let provider = QualificationRepositoryProvider::unavailable_for_test();
+        let status = qualification_mode_status(
+            &QualificationModeState {
+                enabled: true,
+                build: Some(test_build()),
+            },
+            &provider,
+        )
+        .expect("unavailable status should be safe");
+
+        assert!(!status.enabled);
+        assert!(!status.recordable);
+        assert!(status.message.is_some());
+        assert!(status.workflows.is_empty());
+        assert!(status.targets.is_empty());
+        assert!(status.resumable_candidates.is_empty());
+    }
+
+    #[test]
+    fn registration_command_blocks_the_next_lifecycle_operation_until_rebuild() {
+        let temp = tempfile::tempdir().expect("temporary repository should be created");
+        let runner = RegistrationRunner::default();
+        let calls = runner.clone();
+        let build = test_build();
+        let repository = crate::qualification_repository::QualificationRepository::new_for_test_with_source_state(
+            temp.path().to_path_buf(),
+            Box::new(runner),
+            build.clone(),
+            crate::qualification_repository::QualificationSourceState {
+                head: build.git_commit.clone(),
+                tracked_worktree_clean: true,
+            },
+        );
+        let candidate = repository
+            .create_candidate(
+                CandidateKind::TargetRegistration,
+                &json!({ "build": serde_json::to_value(&build).expect("build should serialize") }),
+                None,
+            )
+            .expect("candidate should be stored");
+        let provider = QualificationRepositoryProvider::for_test(repository);
+        let mode = QualificationModeState {
+            enabled: true,
+            build: Some(build),
+        };
+
+        register_qualification_target_with_repository(&candidate, &mode, &provider)
+            .expect("first registration should succeed");
+        let error = register_qualification_target_with_repository(&candidate, &mode, &provider)
+            .expect_err("second registration must wait for a clean rebuild");
+        let error: Value = serde_json::from_str(&error).expect("error should be JSON");
+        assert_eq!(error["code"], "qualification_source_changed");
+        assert_eq!(
+            *calls.calls.lock().expect("calls should not be poisoned"),
+            1
+        );
+    }
+
+    #[derive(Clone, Default)]
+    struct RegistrationRunner {
+        calls: Arc<Mutex<usize>>,
+    }
+
+    impl crate::qualification_repository::QualificationToolRunner for RegistrationRunner {
+        fn run(&self, _repo_root: &Path, args: &[String]) -> Result<Vec<u8>, String> {
+            if args.first().map(String::as_str) != Some("--register-target") {
+                return Err("unexpected test operation".to_string());
+            }
+            *self.calls.lock().expect("calls should not be poisoned") += 1;
+            serde_json::to_vec(&json!({
+                "operation": "register_target",
+                "candidateHandle": args[1],
+                "candidateKind": "target_registration",
+                "payload": { "id": "device-target-sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa" }
+            }))
+            .map_err(|_| "test response should serialize".to_string())
+        }
+    }
+
+    #[test]
+    fn target_capture_uses_the_production_observation_order() {
+        let mut source = observation_source();
+        let payload = capture_target_registration_payload_from(
+            &mut source,
+            &capture_request(),
+            &test_build(),
+        )
+        .expect("trusted observations should produce a candidate");
+
+        assert_eq!(
+            source.calls,
+            vec!["probe", "match", "qualification", "root"]
+        );
+        assert_eq!(payload["target"]["profileId"]["value"], "ayaneo.pocket_s2");
+        assert_eq!(payload["target"]["androidVersion"]["value"], "15");
+        assert_eq!(payload["target"]["rootState"]["value"], "non_root");
+        assert_eq!(
+            payload["target"]["connectionType"]["source"],
+            "operator_attestation"
+        );
+    }
+
+    #[test]
+    fn target_capture_rejects_non_string_identity_observations() {
+        for field in ["manufacturer", "model", "firmware_build"] {
+            let mut source = observation_source();
+            source.facts[field] = json!(35);
+            assert!(
+                capture_target_registration_payload_from(
+                    &mut source,
+                    &capture_request(),
+                    &test_build(),
+                )
+                .is_err(),
+                "{field} must remain a string"
+            );
+        }
+    }
+
+    #[test]
+    fn target_capture_accepts_numeric_android_version_but_rejects_unverified_root() {
+        let mut numeric_version = observation_source();
+        let payload = capture_target_registration_payload_from(
+            &mut numeric_version,
+            &capture_request(),
+            &test_build(),
+        )
+        .expect("numeric Android version should normalize");
+        assert_eq!(payload["target"]["androidVersion"]["value"], "15");
+
+        let mut granted = observation_source();
+        granted.root.qualification = RootQualificationState::Granted;
+        let granted_payload = capture_target_registration_payload_from(
+            &mut granted,
+            &capture_request(),
+            &test_build(),
+        )
+        .expect("granted root should be recorded as rooted");
+        assert_eq!(granted_payload["target"]["rootState"]["value"], "rooted");
+
+        for root in [
+            RootQualificationState::Unavailable,
+            RootQualificationState::CheckFailed {
+                reason: RootQualificationFailureReason::TimedOut,
+                message: "timed out".to_string(),
+            },
+        ] {
+            let mut source = observation_source();
+            source.root.qualification = root;
+            assert!(capture_target_registration_payload_from(
+                &mut source,
+                &capture_request(),
+                &test_build(),
+            )
+            .is_err());
+        }
+    }
 
     #[test]
     fn qualification_dtos_round_trip_the_camel_case_frontend_contract() {
@@ -720,7 +1109,10 @@ mod tests {
         let status = disabled_mode_status();
         assert!(!status.enabled);
         assert!(!status.recordable);
-        assert!(status.message.is_none());
+        assert!(status
+            .message
+            .as_deref()
+            .is_some_and(|message| message.contains("unavailable")));
         assert!(status.build.is_none());
         assert!(status.runtime_contract.is_none());
         assert!(status.workflows.is_empty());

@@ -26,7 +26,7 @@ use crate::device_qualification::{reconcile_inventory_with_context, RootQualific
 use crate::device_qualification::{RootQualificationKey, RootQualificationState};
 use crate::execution::ExecutionHandleStore;
 use crate::handles::{DeviceDto, ReviewedPlanSnapshot, SessionHandles};
-use crate::qualification_repository::QualificationRepository;
+use crate::qualification_repository::QualificationRepositoryProvider;
 use crate::recovery::RecoveryState;
 use crate::saved_configurations::SavedConfigurationState;
 use crate::sidecar::{RuntimeStatusDto, SidecarState};
@@ -36,7 +36,7 @@ use crate::updates::{ActivityGate, UpdateService};
 pub struct AppState {
     pub sidecar: SidecarState,
     pub catalog: Result<CatalogDescriptor, String>,
-    pub qualification_repository: QualificationRepository,
+    pub qualification_repository: QualificationRepositoryProvider,
     pub adb: Mutex<AdbManager>,
     pub platform_tools_selections: Mutex<PlatformToolsSelectionStore>,
     pub input_contracts: Mutex<InputContractSnapshot>,

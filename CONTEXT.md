@@ -1286,15 +1286,25 @@ registry remains empty, so repository validation and matrix generation still
 make no claim that any physical device is qualified.
 
 The development-only qualification mode exposes target-registration status and
-capture through the existing EmuChef application workflow. Its status command
-returns an empty disabled projection without starting Node unless all four
-runtime gates pass: debug build, compiled `real-execution` feature, embedded
-clean-build identity, and `EMUCHEF_DEVICE_QUALIFICATION=1`. An enabled status
-uses the canonical repository `--describe` operation, keeps
-`runtimeContract` separate from the embedded build identity, projects
-workflow and registered-target selectors, and includes restart-safe candidate
-summaries. A current repository/build mismatch makes the mode non-recordable
-until a fresh clean build is produced.
+capture through the existing EmuChef application workflow. Its repository is a
+lazy optional provider: ordinary and packaged builds do not resolve, canonicalize,
+or expect a trusted source checkout during application startup. When any of the
+four runtime gates fail—debug build, compiled `real-execution` feature, embedded
+clean-build identity, and `EMUCHEF_DEVICE_QUALIFICATION=1`—the status command
+returns an empty disabled projection without initializing the provider or
+starting Node. If an opted-in build cannot resolve the trusted checkout or
+canonical tool, the command returns a sanitized unavailable projection with no
+workflow, target, or candidate data.
+
+An enabled status uses one serialized repository snapshot containing the
+canonical `--describe` result and restart-safe candidate summaries. It keeps
+`runtimeContract` separate from the embedded build identity and reports
+recordability only when the current trusted Git `HEAD`, tracked worktree
+cleanliness, embedded build identity, and in-process lifecycle state all agree.
+Candidate previews recompute promotability against those current facts on every
+load/list operation while preserving the stored immutable target values and
+provenance. A current repository/build mismatch makes the mode non-recordable
+until a fresh clean commit/rebuild is observed.
 
 Target capture accepts only an opaque device handle, an opaque authored device
 plan, and the attested `usb2` or `usb3` connection enum. Rust resolves the
@@ -1305,16 +1315,24 @@ Captured schema-v2 facts retain `production_observation`,
 `explicit_root_check`, or `operator_attestation` provenance. Package-manager
 and storage availability map exactly to `apk_install` and
 `shared_storage_write`; unavailable or failed root verification rejects the
-candidate. The review preview is read-only and contains the exact typed facts
-and sources persisted in the opaque candidate directory.
+candidate. Manufacturer, model, and firmware observations must be strings;
+only a numeric Android release is normalized to its string representation.
+The review preview is read-only and contains the exact typed facts and sources
+persisted in the opaque candidate directory.
 
 Target registration and candidate discard are explicit Tauri actions. The
 registration action accepts only an opaque candidate handle, delegates
 validation and deterministic target identity/mutation to
 `tools/device-qualification.mjs`, and returns the canonical target ID plus a
-`requiresCommitAndRebuild` consequence. The discard action removes only the
-validated candidate directory beneath the fixed runtime root. React receives
-only these opaque handles and sanitized DTOs; it has no repository, candidate,
+`requiresCommitAndRebuild` consequence. Successful registration also marks the
+trusted repository lifecycle dirty; registration, capture, and future
+recordable qualification operations then fail closed until a clean commit,
+fresh build identity, and clean tracked worktree are observed. Candidate
+discard remains an explicit cleanup operation for stale candidates and is
+serialized with status and canonical mutations. Repository filesystem work,
+Node status, and Node mutations share one operation gate so status cannot read
+half-replaced registry/matrix state or race candidate deletion. React receives
+only opaque handles and sanitized DTOs; it has no repository, candidate,
 evidence, executable, or process authority. No target or physical evidence is
 created by the qualification-mode implementation itself.
 

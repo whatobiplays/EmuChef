@@ -9,6 +9,10 @@ use std::fs::{self, File, OpenOptions};
 use std::io::{self, Read, Write};
 use std::path::{Component, Path, PathBuf};
 use std::process::Command;
+use std::sync::{
+    atomic::{AtomicBool, Ordering},
+    Mutex, OnceLock,
+};
 
 #[cfg(any(target_os = "macos", target_os = "linux"))]
 use std::os::unix::fs::OpenOptionsExt;
@@ -134,6 +138,22 @@ pub struct RepositoryQualificationDescription {
     pub(crate) device_targets: Value,
 }
 
+/// The trusted source/worktree facts used to decide whether qualification may
+/// record or promote anything from the current application build.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(crate) struct QualificationSourceState {
+    pub(crate) head: String,
+    pub(crate) tracked_worktree_clean: bool,
+}
+
+/// A repository status snapshot is read while the repository operation gate is
+/// held so candidate projection cannot observe a half-completed mutation.
+pub(crate) struct QualificationRepositoryStatus {
+    pub(crate) description: RepositoryQualificationDescription,
+    pub(crate) candidates: Vec<QualificationCandidateSummary>,
+    pub(crate) recordable: bool,
+}
+
 /// Narrow seam used to test the repository without starting Node.
 pub trait QualificationToolRunner: Send + Sync {
     fn run(&self, repo_root: &Path, args: &[String]) -> Result<Vec<u8>, String>;
@@ -145,15 +165,67 @@ pub struct QualificationRepository {
     candidate_root: PathBuf,
     runner: Box<dyn QualificationToolRunner>,
     embedded_build_identity: Option<QualificationBuildIdentity>,
+    operation_gate: Mutex<()>,
+    lifecycle_dirty: AtomicBool,
+    #[cfg(test)]
+    source_state_override: Option<std::sync::Arc<Mutex<QualificationSourceState>>>,
+}
+
+/// Lazily resolves the trusted qualification repository only when the mode is
+/// enabled and a valid source checkout is available.
+pub struct QualificationRepositoryProvider {
+    repository: OnceLock<Option<QualificationRepository>>,
+}
+
+impl Default for QualificationRepositoryProvider {
+    fn default() -> Self {
+        Self {
+            repository: OnceLock::new(),
+        }
+    }
+}
+
+impl QualificationRepositoryProvider {
+    pub(crate) fn get(&self) -> Option<&QualificationRepository> {
+        self.repository
+            .get_or_init(QualificationRepository::production)
+            .as_ref()
+    }
+
+    #[cfg(test)]
+    pub(crate) fn is_initialized_for_test(&self) -> bool {
+        self.repository.get().is_some()
+    }
+
+    #[cfg(test)]
+    pub(crate) fn unavailable_for_test() -> Self {
+        let provider = Self::default();
+        let _ = provider.repository.set(None);
+        provider
+    }
+
+    #[cfg(test)]
+    pub(crate) fn for_test(repository: QualificationRepository) -> Self {
+        let provider = Self::default();
+        let _ = provider.repository.set(Some(repository));
+        provider
+    }
 }
 
 impl QualificationRepository {
     /// Builds the production repository using the compile-time trusted root.
-    pub fn production() -> Self {
-        Self::with_root(
-            production_repo_root(),
+    ///
+    /// Packaged or ordinary builds may not contain the development source
+    /// checkout. In that case construction returns `None` without resolving a
+    /// path or invoking Node.
+    pub fn production() -> Option<Self> {
+        let repo_root = production_repo_root();
+        validate_repository_root(&repo_root).ok()?;
+        qualification_tool_path(&repo_root).ok()?;
+        Some(Self::with_root(
+            repo_root,
             Box::new(ProcessQualificationToolRunner),
-        )
+        ))
     }
 
     /// Builds a repository with an injected runner for unit tests.
@@ -170,6 +242,33 @@ impl QualificationRepository {
     ) -> Self {
         let mut repository = Self::with_root(repo_root, runner);
         repository.embedded_build_identity = Some(build);
+        repository.source_state_override =
+            Some(std::sync::Arc::new(Mutex::new(QualificationSourceState {
+                head: repository
+                    .embedded_build_identity
+                    .as_ref()
+                    .expect("test build identity should be present")
+                    .git_commit
+                    .clone(),
+                tracked_worktree_clean: true,
+            })));
+        repository
+    }
+
+    #[cfg(test)]
+    pub(crate) fn new_for_test_with_source_state(
+        repo_root: PathBuf,
+        runner: Box<dyn QualificationToolRunner>,
+        build: QualificationBuildIdentity,
+        source_state: QualificationSourceState,
+    ) -> Self {
+        let repository = Self::new_for_test_with_embedded_build(repo_root, runner, build);
+        *repository
+            .source_state_override
+            .as_ref()
+            .expect("test source state should be present")
+            .lock()
+            .expect("test source state should not be poisoned") = source_state;
         repository
     }
 
@@ -180,7 +279,43 @@ impl QualificationRepository {
             repo_root,
             runner,
             embedded_build_identity: embedded_build_identity(),
+            operation_gate: Mutex::new(()),
+            lifecycle_dirty: AtomicBool::new(false),
+            #[cfg(test)]
+            source_state_override: None,
         }
+    }
+
+    fn lock_operation(&self) -> Result<std::sync::MutexGuard<'_, ()>, String> {
+        self.operation_gate
+            .lock()
+            .map_err(|_| "qualification repository operation is unavailable".to_string())
+    }
+
+    fn current_source_state(&self) -> Result<QualificationSourceState, String> {
+        #[cfg(test)]
+        if let Some(source_state) = &self.source_state_override {
+            return source_state
+                .lock()
+                .map(|state| state.clone())
+                .map_err(|_| "qualification source state is unavailable".to_string());
+        }
+        read_git_source_state(&self.repo_root)
+    }
+
+    #[cfg(test)]
+    fn set_source_state_for_test(&self, state: QualificationSourceState) {
+        if let Some(source_state) = &self.source_state_override {
+            *source_state
+                .lock()
+                .expect("test source state should not be poisoned") = state;
+        }
+    }
+
+    /// Rechecks the trusted source/worktree lifecycle before capture begins.
+    pub(crate) fn require_recordable(&self) -> Result<(), String> {
+        let _operation = self.lock_operation()?;
+        self.ensure_recordable_unlocked()
     }
 
     /// Returns the normalized trusted repository root used for every operation.
@@ -200,6 +335,7 @@ impl QualificationRepository {
         json: &Value,
         report_bytes: Option<&[u8]>,
     ) -> Result<String, String> {
+        let _operation = self.lock_operation()?;
         let mut candidate = json
             .as_object()
             .cloned()
@@ -282,6 +418,11 @@ impl QualificationRepository {
 
     /// Lists stored candidates after local integrity checks.
     pub fn list_candidates(&self) -> Result<Vec<QualificationCandidateSummary>, String> {
+        let _operation = self.lock_operation()?;
+        self.list_candidates_unlocked()
+    }
+
+    fn list_candidates_unlocked(&self) -> Result<Vec<QualificationCandidateSummary>, String> {
         let Some(root) = existing_candidate_root(&self.repo_root, &self.candidate_root)? else {
             return Ok(Vec::new());
         };
@@ -307,7 +448,7 @@ impl QualificationRepository {
         handles
             .into_iter()
             .map(|handle| {
-                self.load_candidate(&handle)
+                self.load_candidate_unlocked(&handle)
                     .map(|candidate| candidate.summary())
             })
             .collect()
@@ -315,7 +456,15 @@ impl QualificationRepository {
 
     /// Loads one candidate and rechecks only Rust-owned local integrity.
     pub fn load_candidate(&self, handle: &str) -> Result<StoredQualificationCandidate, String> {
-        let directory = self.candidate_directory(handle)?;
+        let _operation = self.lock_operation()?;
+        self.load_candidate_unlocked(handle)
+    }
+
+    fn load_candidate_unlocked(
+        &self,
+        handle: &str,
+    ) -> Result<StoredQualificationCandidate, String> {
+        let directory = self.candidate_directory_unlocked(handle)?;
         let candidate_bytes =
             read_regular_file(&directory.join(CANDIDATE_FILE), "qualification candidate")?;
         let envelope = decode_candidate_envelope(&candidate_bytes)?;
@@ -334,10 +483,8 @@ impl QualificationRepository {
             envelope.report.as_ref(),
             declared_report_sha256.as_deref(),
         )?;
-        let (promotable, non_promotable_reason) = candidate_promotion_status(
-            envelope.build.as_ref(),
-            self.embedded_build_identity.as_ref(),
-        );
+        let (promotable, non_promotable_reason) =
+            self.candidate_promotion_status(envelope.build.as_ref());
 
         Ok(StoredQualificationCandidate {
             candidate_handle: handle.to_string(),
@@ -354,7 +501,8 @@ impl QualificationRepository {
 
     /// Removes one validated candidate directory beneath the fixed root.
     pub fn discard_candidate(&self, handle: &str) -> Result<(), String> {
-        let directory = self.candidate_directory(handle)?;
+        let _operation = self.lock_operation()?;
+        let directory = self.candidate_directory_unlocked(handle)?;
         validate_candidate_files(&directory)?;
         fs::remove_dir_all(directory)
             .map_err(|_| "qualification candidate could not be discarded".to_string())
@@ -362,31 +510,60 @@ impl QualificationRepository {
 
     /// Invokes the canonical tool's bounded repository description operation.
     pub fn describe(&self) -> Result<RepositoryQualificationDescription, String> {
-        let output = self.invoke(vec!["--describe".to_string()])?;
+        let _operation = self.lock_operation()?;
+        self.describe_unlocked()
+    }
+
+    fn describe_unlocked(&self) -> Result<RepositoryQualificationDescription, String> {
+        let output = self.invoke_unlocked(vec!["--describe".to_string()])?;
         serde_json::from_slice(&output)
             .map_err(|_| "qualification repository description is invalid".to_string())
     }
 
+    /// Reads Node's repository projection and local candidates under the same
+    /// operation gate used by candidate mutations.
+    pub(crate) fn describe_and_list_candidates(
+        &self,
+    ) -> Result<QualificationRepositoryStatus, String> {
+        let _operation = self.lock_operation()?;
+        let description = self.describe_unlocked()?;
+        let candidates = self.list_candidates_unlocked()?;
+        let recordable = self.recordable_for_build_unlocked(&description.build);
+        Ok(QualificationRepositoryStatus {
+            description,
+            candidates,
+            recordable,
+        })
+    }
+
     /// Invokes the canonical tool for a target-registration candidate.
     pub fn register_target(&self, handle: &str) -> Result<QualificationOperationResult, String> {
-        self.require_kind(handle, CandidateKind::TargetRegistration)?;
-        let output = self.invoke_candidate(
+        let _operation = self.lock_operation()?;
+        self.ensure_recordable_unlocked()?;
+        self.require_kind_unlocked(handle, CandidateKind::TargetRegistration)?;
+        let output = self.invoke_candidate_unlocked(
             handle,
             vec!["--register-target".to_string(), handle.to_string()],
         )?;
-        parse_operation_result(
+        let result = parse_operation_result(
             &output,
             QualificationOperation::RegisterTarget,
             handle,
             CandidateKind::TargetRegistration,
-        )
+        )?;
+        self.lifecycle_dirty.store(true, Ordering::Release);
+        Ok(result)
     }
 
     /// Invokes the canonical tool for a qualification-run candidate.
     pub fn record_run(&self, handle: &str) -> Result<QualificationOperationResult, String> {
-        self.require_kind(handle, CandidateKind::QualificationRun)?;
-        let output =
-            self.invoke_candidate(handle, vec!["--record-run".to_string(), handle.to_string()])?;
+        let _operation = self.lock_operation()?;
+        self.ensure_recordable_unlocked()?;
+        self.require_kind_unlocked(handle, CandidateKind::QualificationRun)?;
+        let output = self.invoke_candidate_unlocked(
+            handle,
+            vec!["--record-run".to_string(), handle.to_string()],
+        )?;
         parse_operation_result(
             &output,
             QualificationOperation::RecordRun,
@@ -395,8 +572,8 @@ impl QualificationRepository {
         )
     }
 
-    fn require_kind(&self, handle: &str, expected: CandidateKind) -> Result<(), String> {
-        let candidate = self.load_candidate(handle)?;
+    fn require_kind_unlocked(&self, handle: &str, expected: CandidateKind) -> Result<(), String> {
+        let candidate = self.load_candidate_unlocked(handle)?;
         if candidate.kind != expected {
             return Err(
                 "qualification candidate kind does not match the requested operation".to_string(),
@@ -410,7 +587,7 @@ impl QualificationRepository {
         Ok(())
     }
 
-    fn candidate_directory(&self, handle: &str) -> Result<PathBuf, String> {
+    fn candidate_directory_unlocked(&self, handle: &str) -> Result<PathBuf, String> {
         validate_candidate_handle(handle)?;
         let root = existing_candidate_root(&self.repo_root, &self.candidate_root)?
             .ok_or_else(|| "qualification candidate root does not exist".to_string())?;
@@ -426,7 +603,7 @@ impl QualificationRepository {
         Ok(directory)
     }
 
-    fn invoke(&self, args: Vec<String>) -> Result<Vec<u8>, String> {
+    fn invoke_unlocked(&self, args: Vec<String>) -> Result<Vec<u8>, String> {
         if !allowlisted_tool_args(&args) {
             return Err("qualification tool operation is not allowlisted".to_string());
         }
@@ -435,10 +612,87 @@ impl QualificationRepository {
         self.runner.run(&self.repo_root, &args)
     }
 
-    fn invoke_candidate(&self, handle: &str, args: Vec<String>) -> Result<Vec<u8>, String> {
-        let directory = self.candidate_directory(handle)?;
+    fn invoke_candidate_unlocked(
+        &self,
+        handle: &str,
+        args: Vec<String>,
+    ) -> Result<Vec<u8>, String> {
+        let directory = self.candidate_directory_unlocked(handle)?;
         validate_candidate_files(&directory)?;
-        self.invoke(args)
+        self.invoke_unlocked(args)
+    }
+
+    fn candidate_promotion_status(
+        &self,
+        candidate_build: Option<&QualificationBuildIdentity>,
+    ) -> (bool, Option<String>) {
+        let Some(candidate_build) = candidate_build else {
+            return (
+                false,
+                Some("qualification candidate build identity is missing".to_string()),
+            );
+        };
+        let Some(embedded_build) = self.embedded_build_identity.as_ref() else {
+            return (
+                false,
+                Some("this application has no recordable qualification build identity".to_string()),
+            );
+        };
+        if candidate_build != embedded_build {
+            return (
+                false,
+                Some(
+                    "qualification candidate build identity does not match this build".to_string(),
+                ),
+            );
+        }
+        if self.lifecycle_dirty.load(Ordering::Acquire) {
+            return (
+                false,
+                Some("qualification source state is dirty after a canonical mutation".to_string()),
+            );
+        }
+        let Ok(source_state) = self.current_source_state() else {
+            return (
+                false,
+                Some("qualification source state is unavailable".to_string()),
+            );
+        };
+        if !source_state.tracked_worktree_clean {
+            return (
+                false,
+                Some("qualification source state is not clean".to_string()),
+            );
+        }
+        if source_state.head != embedded_build.git_commit {
+            return (
+                false,
+                Some("qualification source state no longer matches this build".to_string()),
+            );
+        }
+        (true, None)
+    }
+
+    fn recordable_for_build_unlocked(&self, current_build: &QualificationBuildIdentity) -> bool {
+        self.candidate_promotion_status(Some(current_build)).0
+    }
+
+    fn ensure_recordable_unlocked(&self) -> Result<(), String> {
+        let Some(embedded_build) = self.embedded_build_identity.as_ref() else {
+            return Err("qualification build identity is unavailable".to_string());
+        };
+        if self.lifecycle_dirty.load(Ordering::Acquire) {
+            return Err(
+                "qualification source state is dirty after a canonical mutation".to_string(),
+            );
+        }
+        let source_state = self.current_source_state()?;
+        if !source_state.tracked_worktree_clean || source_state.head != embedded_build.git_commit {
+            return Err(
+                "qualification source state changed and requires a clean rebuild".to_string(),
+            );
+        }
+        Ok(())
     }
 }
 
@@ -493,8 +747,34 @@ impl QualificationToolRunner for ProcessQualificationToolRunner {
 
 /// Derives the only production repository root from the trusted manifest path.
 pub fn production_repo_root() -> PathBuf {
-    let root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../..");
-    fs::canonicalize(&root).expect("the EmuChef repository root must exist")
+    PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../..")
+}
+
+fn read_git_source_state(repo_root: &Path) -> Result<QualificationSourceState, String> {
+    let head = Command::new("git")
+        .args(["rev-parse", "HEAD"])
+        .current_dir(repo_root)
+        .output()
+        .map_err(|_| "qualification source state is unavailable".to_string())?;
+    if !head.status.success() {
+        return Err("qualification source state is unavailable".to_string());
+    }
+    let status = Command::new("git")
+        .args(["status", "--porcelain", "--untracked-files=no"])
+        .current_dir(repo_root)
+        .output()
+        .map_err(|_| "qualification source state is unavailable".to_string())?;
+    if !status.status.success() {
+        return Err("qualification source state is unavailable".to_string());
+    }
+    let head = String::from_utf8(head.stdout)
+        .map_err(|_| "qualification source state is unavailable".to_string())?
+        .trim()
+        .to_string();
+    Ok(QualificationSourceState {
+        head,
+        tracked_worktree_clean: status.stdout.is_empty(),
+    })
 }
 
 fn new_candidate_handle() -> String {
@@ -834,31 +1114,6 @@ fn is_sha256_hex(value: &str) -> bool {
             .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
 }
 
-fn candidate_promotion_status(
-    candidate_build: Option<&QualificationBuildIdentity>,
-    embedded_build: Option<&QualificationBuildIdentity>,
-) -> (bool, Option<String>) {
-    let Some(candidate_build) = candidate_build else {
-        return (
-            false,
-            Some("qualification candidate build identity is missing".to_string()),
-        );
-    };
-    let Some(embedded_build) = embedded_build else {
-        return (
-            false,
-            Some("this application has no recordable qualification build identity".to_string()),
-        );
-    };
-    if candidate_build != embedded_build {
-        return (
-            false,
-            Some("qualification candidate build identity does not match this build".to_string()),
-        );
-    }
-    (true, None)
-}
-
 fn qualification_tool_path(repo_root: &Path) -> Result<PathBuf, String> {
     validate_repository_root(repo_root)?;
     let tools_directory = repo_root.join("tools");
@@ -1023,7 +1278,11 @@ fn parse_operation_result(
 #[cfg(test)]
 mod tests {
     use std::path::{Path, PathBuf};
-    use std::sync::{Arc, Mutex};
+    use std::sync::{
+        atomic::{AtomicBool, Ordering},
+        Arc, Barrier, Mutex,
+    };
+    use std::thread;
 
     use serde_json::{json, Value};
     use sha2::Digest;
@@ -1299,17 +1558,16 @@ mod tests {
         }));
         repository
             .record_run(&run_handle)
-            .expect("run recording should invoke the tool");
+            .expect_err("run recording must wait for a clean rebuild after registration");
 
         let calls = calls.calls();
-        assert_eq!(calls.len(), 3);
+        assert_eq!(calls.len(), 2);
         assert_eq!(calls[0].0, repository.repo_root());
         assert_eq!(calls[0].1, vec!["--describe"]);
         assert_eq!(
             calls[1].1,
             vec!["--register-target".to_string(), target_handle]
         );
-        assert_eq!(calls[2].1, vec!["--record-run".to_string(), run_handle]);
     }
 
     #[test]
@@ -1480,6 +1738,274 @@ mod tests {
             .expect("stale candidate should be stored");
         assert!(stale_repository.register_target(&stale_handle).is_err());
         assert!(stale_calls.calls().is_empty());
+    }
+
+    #[test]
+    fn candidate_preview_recomputes_promotability_against_current_source_state() {
+        let temp = TempDir::new().expect("temporary repository should be created");
+        let repository =
+            repository_with_embedded_build(&temp, FakeQualificationToolRunner::default());
+        let handle = repository
+            .create_candidate(
+                CandidateKind::TargetRegistration,
+                &json!({
+                    "capturedAt": "2026-08-23T12:00:00Z",
+                    "build": build_identity_json(),
+                    "target": {
+                        "model": {
+                            "value": "Pocket S2",
+                            "source": "production_observation"
+                        }
+                    }
+                }),
+                None,
+            )
+            .expect("candidate should be stored");
+
+        assert!(
+            repository
+                .load_candidate(&handle)
+                .expect("candidate should load")
+                .promotable
+        );
+
+        repository.set_source_state_for_test(QualificationSourceState {
+            head: "2".repeat(40),
+            tracked_worktree_clean: true,
+        });
+        let stale = repository
+            .load_candidate(&handle)
+            .expect("stale candidate should remain inspectable");
+        assert!(!stale.promotable);
+        assert!(stale
+            .non_promotable_reason
+            .as_deref()
+            .is_some_and(|reason| reason.contains("source")));
+        assert_eq!(stale.payload["target"]["model"]["value"], "Pocket S2");
+
+        repository.set_source_state_for_test(QualificationSourceState {
+            head: build_identity().git_commit,
+            tracked_worktree_clean: false,
+        });
+        let dirty = repository
+            .load_candidate(&handle)
+            .expect("dirty candidate should remain inspectable");
+        assert!(!dirty.promotable);
+        assert!(dirty
+            .non_promotable_reason
+            .as_deref()
+            .is_some_and(|reason| reason.contains("clean")));
+    }
+
+    #[test]
+    fn successful_registration_blocks_lifecycle_until_a_clean_rebuild() {
+        let temp = TempDir::new().expect("temporary repository should be created");
+        let runner = FakeQualificationToolRunner::with_response(json!({
+            "operation": "register_target",
+            "candidateHandle": "placeholder",
+            "candidateKind": "target_registration",
+            "payload": { "id": "device-target-sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa" }
+        }));
+        let calls = runner.clone();
+        let repository = repository_with_embedded_build(&temp, runner);
+        let handle = repository
+            .create_candidate(
+                CandidateKind::TargetRegistration,
+                &json!({ "build": build_identity_json() }),
+                None,
+            )
+            .expect("candidate should be stored");
+        calls.set_response(json!({
+            "operation": "register_target",
+            "candidateHandle": handle,
+            "candidateKind": "target_registration",
+            "payload": { "id": "device-target-sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa" }
+        }));
+
+        repository
+            .register_target(&handle)
+            .expect("canonical registration should succeed");
+        let calls_after_registration = calls.calls().len();
+
+        let second_handle = repository
+            .create_candidate(
+                CandidateKind::TargetRegistration,
+                &json!({ "build": build_identity_json() }),
+                None,
+            )
+            .expect("second candidate should remain storable for inspection");
+        assert!(repository.register_target(&second_handle).is_err());
+        assert_eq!(calls.calls().len(), calls_after_registration);
+        repository
+            .discard_candidate(&second_handle)
+            .expect("stale candidates must remain discardable");
+        assert!(repository.load_candidate(&second_handle).is_err());
+    }
+
+    #[test]
+    fn registration_discard_and_status_share_one_operation_gate() {
+        let temp = TempDir::new().expect("temporary repository should be created");
+        let runner = BlockingQualificationToolRunner::new();
+        let status_started = runner.status_started.clone();
+        let release_status = runner.release_status.clone();
+        let repository = Arc::new(QualificationRepository::new_for_test_with_source_state(
+            temp.path().to_path_buf(),
+            Box::new(runner.clone()),
+            build_identity(),
+            QualificationSourceState {
+                head: build_identity().git_commit,
+                tracked_worktree_clean: true,
+            },
+        ));
+        let status_handle = repository
+            .create_candidate(
+                CandidateKind::TargetRegistration,
+                &json!({ "build": build_identity_json() }),
+                None,
+            )
+            .expect("candidate should be stored");
+
+        let registration_handle = repository
+            .create_candidate(
+                CandidateKind::TargetRegistration,
+                &json!({ "build": build_identity_json() }),
+                None,
+            )
+            .expect("registration candidate should be stored");
+
+        let status_repository = Arc::clone(&repository);
+        let status = thread::spawn(move || status_repository.describe_and_list_candidates());
+        status_started.wait();
+
+        let discard_done = Arc::new(AtomicBool::new(false));
+        let discard_repository = Arc::clone(&repository);
+        let discard_handle = status_handle.clone();
+        let discard_done_for_thread = Arc::clone(&discard_done);
+        let discard = thread::spawn(move || {
+            let result = discard_repository.discard_candidate(&discard_handle);
+            discard_done_for_thread.store(true, Ordering::Release);
+            result
+        });
+        for _ in 0..128 {
+            thread::yield_now();
+        }
+        assert!(repository
+            .candidate_root()
+            .join(&status_handle)
+            .join(CANDIDATE_FILE)
+            .exists());
+        assert!(!discard_done.load(Ordering::Acquire));
+
+        release_status.wait();
+        let status = status
+            .join()
+            .expect("status thread should join")
+            .expect("status should succeed");
+        assert_eq!(status.candidates.len(), 2);
+        discard
+            .join()
+            .expect("discard thread should join")
+            .expect("discard should be serialized after status");
+
+        let registration_repository = Arc::clone(&repository);
+        let registration_handle_for_thread = registration_handle.clone();
+        let registration = thread::spawn(move || {
+            registration_repository.register_target(&registration_handle_for_thread)
+        });
+        runner.registration_started.wait();
+
+        let registration_discard_done = Arc::new(AtomicBool::new(false));
+        let registration_discard_repository = Arc::clone(&repository);
+        let registration_discard_handle = registration_handle.clone();
+        let registration_discard_done_for_thread = Arc::clone(&registration_discard_done);
+        let registration_discard = thread::spawn(move || {
+            let result =
+                registration_discard_repository.discard_candidate(&registration_discard_handle);
+            registration_discard_done_for_thread.store(true, Ordering::Release);
+            result
+        });
+        for _ in 0..128 {
+            thread::yield_now();
+        }
+        assert!(!registration_discard_done.load(Ordering::Acquire));
+
+        runner.release_registration.wait();
+        registration
+            .join()
+            .expect("registration thread should join")
+            .expect("registration should succeed");
+        registration_discard
+            .join()
+            .expect("registration discard thread should join")
+            .expect("discard should be serialized after registration");
+        let status = repository
+            .describe_and_list_candidates()
+            .expect("post-mutation status should succeed");
+        assert!(!status.recordable);
+        assert!(status.candidates.is_empty());
+        assert!(!repository
+            .candidate_root()
+            .join(&registration_handle)
+            .join(CANDIDATE_FILE)
+            .exists());
+    }
+
+    #[derive(Clone)]
+    struct BlockingQualificationToolRunner {
+        calls: Arc<Mutex<Vec<RunnerCall>>>,
+        status_started: Arc<Barrier>,
+        release_status: Arc<Barrier>,
+        registration_started: Arc<Barrier>,
+        release_registration: Arc<Barrier>,
+        status_blocked: Arc<AtomicBool>,
+    }
+
+    impl BlockingQualificationToolRunner {
+        fn new() -> Self {
+            Self {
+                calls: Arc::new(Mutex::new(Vec::new())),
+                status_started: Arc::new(Barrier::new(2)),
+                release_status: Arc::new(Barrier::new(2)),
+                registration_started: Arc::new(Barrier::new(2)),
+                release_registration: Arc::new(Barrier::new(2)),
+                status_blocked: Arc::new(AtomicBool::new(false)),
+            }
+        }
+    }
+
+    impl QualificationToolRunner for BlockingQualificationToolRunner {
+        fn run(&self, repo_root: &Path, args: &[String]) -> Result<Vec<u8>, String> {
+            self.calls
+                .lock()
+                .expect("blocking calls should not be poisoned")
+                .push((repo_root.to_path_buf(), args.to_vec()));
+            if args.first().map(String::as_str) == Some("--register-target") {
+                self.registration_started.wait();
+                self.release_registration.wait();
+                return Ok(serde_json::to_vec(&json!({
+                    "operation": "register_target",
+                    "candidateHandle": args[1],
+                    "candidateKind": "target_registration",
+                    "payload": { "id": "device-target-sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa" }
+                }))
+                .expect("registration response should serialize"));
+            }
+            if args.first().map(String::as_str) == Some("--describe")
+                && !self.status_blocked.swap(true, Ordering::AcqRel)
+            {
+                self.status_started.wait();
+                self.release_status.wait();
+            }
+            Ok(serde_json::to_vec(&json!({
+                "schemaVersion": 1,
+                "runtimeContract": "real-execution-v1",
+                "qualificationContract": 1,
+                "build": build_identity_json(),
+                "workflowCatalog": { "schemaVersion": 1, "workflows": [] },
+                "deviceTargets": { "schemaVersion": 2, "targets": [] }
+            }))
+            .expect("description response should serialize"))
+        }
     }
 
     #[test]
