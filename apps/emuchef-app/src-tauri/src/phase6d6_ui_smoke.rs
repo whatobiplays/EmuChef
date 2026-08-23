@@ -1385,7 +1385,7 @@ mod tests {
             assert_eq!(subcase_candidates(&status, "transport").len(), 2);
             assert_eq!(subcase_candidates(&status, "root").len(), 2);
             assert_eq!(subcase_candidates(&status, "storage").len(), 2);
-            assert_eq!(subcase_candidates(&status, "host_sleep").len(), 2);
+            assert_eq!(subcase_candidates(&status, "host_sleep").len(), 4);
             let serialized = status.to_string();
             for forbidden in [
                 "physical-run-sha256",
@@ -1395,6 +1395,8 @@ mod tests {
                 "be0ba890",
                 "18917650",
                 "735aba0b",
+                "3eabd150",
+                "a44a7bcf",
                 "sha256:",
             ] {
                 assert!(
