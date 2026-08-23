@@ -9,7 +9,15 @@ import { APP_ROOT } from "./run-device-qualification.mjs";
 
 const REPO_ROOT = path.resolve(APP_ROOT, "../..");
 const BUILD_SCRIPT_SOURCE = path.join(APP_ROOT, "src-tauri", "build.rs");
+const BUILD_MODULE_SOURCE = path.join(APP_ROOT, "src-tauri", "src/qualification_build.rs");
 const TOOL_SOURCE = path.join(REPO_ROOT, "tools/device-qualification.mjs");
+const INHERITED_BUILD_IDENTITY = JSON.stringify({
+  appVersion: "0.1.0",
+  gitCommit: "1".repeat(40),
+  materialBuildDigest: `sha256:${"a".repeat(64)}`,
+  realExecutionEnabled: true,
+  qualificationContract: 1,
+});
 
 function writeFixtureFile(fixtureRoot, relativePath, contents) {
   const destination = path.join(fixtureRoot, relativePath);
@@ -67,6 +75,8 @@ default = []
 real-execution = []
 
 [dependencies]
+serde = { version = "1.0", features = ["derive"] }
+serde_json = { version = "1.0", features = ["preserve_order"] }
 tauri = { path = "../../../tauri-fixture" }
 
 [build-dependencies]
@@ -80,7 +90,31 @@ path = "src/lib.rs"
     writeFixtureFile(
       fixtureRoot,
       "apps/emuchef-app/src-tauri/src/lib.rs",
-      "pub fn fixture_library() {}\n",
+      `#[path = "qualification_build.rs"]
+mod qualification_build;
+
+pub fn fixture_library() {}
+pub fn fixture_build_state() -> (bool, bool) {
+    (
+        qualification_build::embedded_build_identity().is_some(),
+        qualification_build::qualification_mode_enabled_at_runtime(),
+    )
+}
+
+#[cfg(test)]
+mod tests {
+    #[test]
+    fn inherited_identity_is_ignored_without_runtime_opt_in() {
+        let (identity_present, mode_enabled) = super::fixture_build_state();
+        assert!(!identity_present);
+        assert!(!mode_enabled);
+    }
+}
+`,
+    );
+    copyFileSync(
+      BUILD_MODULE_SOURCE,
+      path.join(fixtureRoot, "apps/emuchef-app/src-tauri/src/qualification_build.rs"),
     );
     writeFixtureFile(
       fixtureRoot,
@@ -164,6 +198,36 @@ function cargoQualificationCheck(fixture) {
 function commandOutput(result) {
   return `${result.stdout}\n${result.stderr}`;
 }
+
+function cargoQualificationTestWithInheritedIdentity(fixture) {
+  const environment = {
+    ...process.env,
+    CARGO_NET_OFFLINE: "true",
+    CARGO_TARGET_DIR: fixture.targetPath,
+    EMUCHEF_QUALIFICATION_BUILD_IDENTITY: INHERITED_BUILD_IDENTITY,
+  };
+  delete environment.EMUCHEF_DEVICE_QUALIFICATION;
+  return spawnSync(
+    "cargo",
+    ["test", "--locked", "--manifest-path", fixture.manifestPath, "--features", "real-execution"],
+    {
+      cwd: fixture.fixtureRoot,
+      encoding: "utf8",
+      env: environment,
+    },
+  );
+}
+
+test("ordinary Cargo builds reject inherited qualification identity metadata", () => {
+  const fixture = createCargoFixture();
+
+  try {
+    const ordinaryBuild = cargoQualificationTestWithInheritedIdentity(fixture);
+    assert.equal(ordinaryBuild.status, 0, commandOutput(ordinaryBuild));
+  } finally {
+    rmSync(fixture.fixtureRoot, { recursive: true, force: true });
+  }
+});
 
 test("opted-in Cargo builds rerun build.rs after tracked material changes", () => {
   const fixture = createCargoFixture();

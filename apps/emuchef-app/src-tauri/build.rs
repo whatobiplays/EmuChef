@@ -2,6 +2,7 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 
 const QUALIFICATION_TOOL: &str = "../../../tools/device-qualification.mjs";
+const QUALIFICATION_BUILD_IDENTITY_ENV: &str = "EMUCHEF_QUALIFICATION_BUILD_IDENTITY";
 
 // These paths mirror the canonical tool's material inputs. The build script
 // only uses them to invalidate Cargo's build-script cache; the Node tool still
@@ -33,6 +34,8 @@ fn main() {
         );
         configure_qualification_reruns(&manifest_dir);
         embed_build_identity(&manifest_dir);
+    } else {
+        clear_embedded_build_identity();
     }
     tauri_build::build();
 }
@@ -77,7 +80,12 @@ fn embed_build_identity(manifest_dir: &Path) {
     let value: serde_json::Value = serde_json::from_slice(&output.stdout)
         .expect("device qualification build identity must be valid JSON");
     let encoded = serde_json::to_string(&value).expect("build identity must serialize");
-    println!("cargo:rustc-env=EMUCHEF_QUALIFICATION_BUILD_IDENTITY={encoded}");
+    println!("cargo:rustc-env={QUALIFICATION_BUILD_IDENTITY_ENV}={encoded}");
+}
+
+/// Masks any inherited identity so ordinary builds cannot consume qualification metadata.
+fn clear_embedded_build_identity() {
+    println!("cargo:rustc-env={QUALIFICATION_BUILD_IDENTITY_ENV}=");
 }
 
 fn qualification_tool(manifest_dir: &Path) -> PathBuf {
