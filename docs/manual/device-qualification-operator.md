@@ -17,8 +17,8 @@ itself imply support.
 
 1. Choose one canonical workflow from `docs/testing/device-qualification/workflow-catalog.json`.
 2. Verify the device target is registered in `docs/testing/device-qualification/device-targets.json`.
-3. Set `EMUCHEF_PHASE_6F_BUILD_IDENTITY` to the exact EmuChef build identity under test.
-4. Set `EMUCHEF_PHASE_6F_RUNTIME_CONTRACT` to the execution or runtime contract version under test.
+3. Capture the canonical repository build identity with `node tools/device-qualification.mjs --build-identity`.
+4. Inspect the repository-owned qualification description with `node tools/device-qualification.mjs --describe`.
 5. Confirm the workflow's required capabilities and prerequisites apply to the target.
 
 ## Qualification sequence
@@ -26,7 +26,7 @@ itself imply support.
 1. Choose an existing canonical workflow ID.
 2. Register or capture a device target from observed facts and an existing authored profile ID.
 3. Verify prerequisites and production capability applicability.
-4. Capture the current EmuChef build identity, workflow version, exact relevant authored recipe SHA-256 digests, runtime contract version, device facts, root state, and connection type.
+4. Capture the current EmuChef build identity, workflow version, exact relevant authored recipe SHA-256 digests, runtime contract version, device facts, root state, and connection type from the repository-owned qualification tool outputs.
 5. Execute the real production EmuChef workflow through its ordinary reviewed execution boundary.
 6. Collect the required automated observations from product outputs and device observations.
 7. Collect only declared human checkpoints using `pass`, `fail`, or `unable_to_verify`.

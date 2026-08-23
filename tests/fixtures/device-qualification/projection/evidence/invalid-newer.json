@@ -1,7 +1,7 @@
 {
   "schemaVersion": 2,
   "runId": "qualification-run-sha256:dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd",
-  "recordDigest": "sha256:e7ea7e6e680006a5f0b65e7d0402844f8b182fed9233f41e181f08a153d88a9d",
+  "recordDigest": "sha256:3891ec8b844015463a438b0555e40aae57b128b546532ac891cce72406485477",
   "capturedAt": "2026-08-22T00:00:00Z",
   "workflowId": "xaniteog-install",
   "workflowVersion": 1,
@@ -46,7 +46,13 @@
   },
   "fingerprint": {
     "schemaVersion": 2,
-    "emuchefBuild": "2026-08-21-foundation",
+    "emuchefBuild": {
+      "appVersion": "0.1.0",
+      "gitCommit": "1111111111111111111111111111111111111111",
+      "materialBuildDigest": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "realExecutionEnabled": true,
+      "qualificationContract": 1
+    },
     "workflowVersion": 1,
     "authoredContent": [
       {
@@ -54,7 +60,7 @@
         "sha256": "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd"
       }
     ],
-    "runtimeContract": "v1",
+    "runtimeContract": "real-execution-v1",
     "deviceProfile": "ayaneo.pocket_s2",
     "androidApi": 35,
     "firmwareBuild": "synthetic/build",
@@ -62,7 +68,7 @@
     "rootState": "non_root",
     "connectionType": "usb3"
   },
-  "fingerprintDigest": "sha256:0d585947ae87c17de019e2e3163bfc028af551374928d4d2249f09e8fafe1dd8",
+  "fingerprintDigest": "sha256:c61eeb3ff3ffc3ca25f4ec14ae5daa6a0056f0a4abc1b917eef80695460fc4e9",
   "runValidity": "invalid",
   "qualificationOutcome": "not_observed",
   "automatedObservations": [],

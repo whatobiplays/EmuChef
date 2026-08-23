@@ -10,12 +10,15 @@ import {
   FINGERPRINT_FIELDS,
   RUN_VALIDITIES,
   QUALIFICATION_OUTCOMES,
+  QUALIFICATION_CONTRACT_VERSION,
+  RUNTIME_CONTRACT,
   CHECKPOINT_OUTCOMES,
   TARGET_WIDE_FAILURES,
   buildCurrentFingerprint,
   canonicalDigest,
   canonicalize,
   classifyCompatibility,
+  compareBuildIdentity,
   deviceTargetId,
   deriveApplicability,
   deriveDeviceSupportTier,
@@ -25,6 +28,7 @@ import {
   loadEvidenceDirectory,
   loadDeviceTargets,
   loadWorkflowCatalog,
+  materialBuildDigestFromEntries,
   projectQualificationState,
   renderQualificationMatrix,
   selectCurrentEvidence,
@@ -81,8 +85,13 @@ function checkpointGatedRecord() {
   return sealRecord(record);
 }
 
-const CURRENT_BUILD = "2026-08-21-foundation";
-const RUNTIME_CONTRACT = "v1";
+const CURRENT_BUILD = {
+  appVersion: "0.1.0",
+  gitCommit: "1".repeat(40),
+  materialBuildDigest: `sha256:${"a".repeat(64)}`,
+  realExecutionEnabled: true,
+  qualificationContract: QUALIFICATION_CONTRACT_VERSION,
+};
 const AUTHORED_DIGESTS = {
   "app.retroarch.provision": "a".repeat(64),
   "feature.copy_bios": "b".repeat(64),
@@ -320,6 +329,41 @@ test("canonicalization sorts object keys recursively and keeps array order", () 
   const second = canonicalDigest({ a: 2, b: 1 });
   assert.equal(first, second);
   assert.match(first, /^sha256:[0-9a-f]{64}$/);
+});
+
+test("material build digest changes for product inputs but ignores qualification evidence", () => {
+  const base = [
+    { path: "authored/recipes/app.retroarch.provision.yaml", sha256: "a".repeat(64) },
+    { path: "crates/emuchef-rust-backend/src/planner.rs", sha256: "b".repeat(64) },
+  ];
+  const original = materialBuildDigestFromEntries(base);
+  const changedProduct = materialBuildDigestFromEntries([
+    base[0],
+    { path: base[1].path, sha256: "c".repeat(64) },
+  ]);
+  assert.notEqual(changedProduct, original);
+
+  const withEvidence = materialBuildDigestFromEntries([
+    ...base,
+    { path: "docs/testing/device-qualification/evidence/example/evidence.json", sha256: "d".repeat(64) },
+  ]);
+  assert.equal(withEvidence, original);
+});
+
+test("emuchef build compatibility ignores git commit but honors material content", () => {
+  const left = {
+    appVersion: "0.1.0",
+    gitCommit: "1".repeat(40),
+    materialBuildDigest: `sha256:${"a".repeat(64)}`,
+    realExecutionEnabled: true,
+    qualificationContract: 1,
+  };
+  const evidence = { ...left, gitCommit: "2".repeat(40) };
+  assert.equal(compareBuildIdentity(left, evidence), "compatible");
+  assert.equal(
+    compareBuildIdentity(left, { ...evidence, materialBuildDigest: `sha256:${"b".repeat(64)}` }),
+    "invalidating",
+  );
 });
 
 test("production catalog loads and every production recipe exists", () => {
@@ -568,7 +612,7 @@ test("fingerprint validation is strict, deterministic, and digest-bound", () => 
   extra.extra = true;
   assert.throws(() => evidenceFingerprintDigest(extra), /fields must be exactly/);
   const tampered = structuredClone(record.fingerprint);
-  tampered.emuchefBuild = "other-build";
+  tampered.emuchefBuild = { ...tampered.emuchefBuild, materialBuildDigest: `sha256:${"0".repeat(64)}` };
   assert.notEqual(evidenceFingerprintDigest(tampered), record.fingerprintDigest);
 });
 
@@ -587,7 +631,10 @@ test("every declared compatibility dimension invalidates on change", () => {
   const workflow = context.workflowCatalog.workflows.find((item) => item.id === "retroarch-plus-bios");
   const base = recordFor("evidence-valid/passing-retroarch-bios.json").fingerprint;
   const cases = [
-    ["emuchefBuild", "other-build"],
+    ["emuchefBuild", {
+      ...base.emuchefBuild,
+      materialBuildDigest: `sha256:${"f".repeat(64)}`,
+    }],
     ["workflowVersion", 2],
     ["runtimeContract", "v2"],
     ["deviceProfile", "ayaneo.pocket_air_mini"],
@@ -617,6 +664,19 @@ test("every declared compatibility dimension invalidates on change", () => {
   }), "invalidating", "authored_content must invalidate");
 });
 
+test("workflow compatibility treats git-sha-only build changes as compatible", () => {
+  const record = recordFor("evidence-valid/passing-retroarch-bios.json");
+  const workflow = syntheticContext().workflowCatalog.workflows.find((item) => item.id === "retroarch-plus-bios");
+  const currentFingerprint = record.fingerprint;
+  const movedCommit = structuredClone(record.fingerprint);
+  movedCommit.emuchefBuild.gitCommit = "f".repeat(40);
+  assert.equal(classifyCompatibility({
+    workflow,
+    currentFingerprint,
+    evidenceFingerprint: movedCommit,
+  }), "compatible");
+});
+
 test("compatibility ignores dimensions the workflow does not declare", () => {
   const context = syntheticContext();
   const workflow = context.workflowCatalog.workflows.find((item) => item.id === "retroarch-plus-bios");
@@ -632,7 +692,10 @@ test("compatibility ignores dimensions the workflow does not declare", () => {
   const narrowWorkflow = structuredClone(workflow);
   narrowWorkflow.compatibilityDimensions = ["workflow_version"];
   const buildChanged = structuredClone(base);
-  buildChanged.emuchefBuild = "other-build";
+  buildChanged.emuchefBuild = {
+    ...buildChanged.emuchefBuild,
+    materialBuildDigest: `sha256:${"0".repeat(64)}`,
+  };
   assert.equal(classifyCompatibility({
     workflow: narrowWorkflow,
     currentFingerprint: base,
@@ -909,10 +972,12 @@ test("operator runbook documents the evidence boundary without claiming physical
   assert.match(runbook, /production EmuChef remains the system under test/i);
   assert.match(runbook, /node tools\/device-qualification\.mjs --check/);
   assert.match(runbook, /node tools\/device-qualification\.mjs --write-matrix/);
+  assert.match(runbook, /node tools\/device-qualification\.mjs --build-identity/);
+  assert.match(runbook, /node tools\/device-qualification\.mjs --describe/);
   assert.match(runbook, /unable_to_verify/);
   assert.match(runbook, /does not\s+itself imply support/i);
-  assert.match(runbook, /EMUCHEF_PHASE_6F_BUILD_IDENTITY/);
-  assert.match(runbook, /EMUCHEF_PHASE_6F_RUNTIME_CONTRACT/);
+  assert.doesNotMatch(runbook, /EMUCHEF_PHASE_6F_BUILD_IDENTITY/);
+  assert.doesNotMatch(runbook, /EMUCHEF_PHASE_6F_RUNTIME_CONTRACT/);
   assert.match(runbook, /rerun `--check` and repository tests before committing evidence/i);
   assert.doesNotMatch(runbook, /first qualified device/i);
 });

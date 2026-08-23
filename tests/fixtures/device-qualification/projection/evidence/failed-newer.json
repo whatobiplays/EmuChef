@@ -1,7 +1,7 @@
 {
   "schemaVersion": 2,
   "runId": "qualification-run-sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
-  "recordDigest": "sha256:66ecdfa9bfe16285b8bf9c5dede3aee5384e052bccd78116620cd79086e8b72c",
+  "recordDigest": "sha256:79046ad3c00603afce3d41a30f51ddf3fe8953dd2be1a0d67040e60c57d1cf72",
   "capturedAt": "2026-08-21T00:00:00Z",
   "workflowId": "rom-library-sync",
   "workflowVersion": 1,
@@ -46,7 +46,13 @@
   },
   "fingerprint": {
     "schemaVersion": 2,
-    "emuchefBuild": "2026-08-21-foundation",
+    "emuchefBuild": {
+      "appVersion": "0.1.0",
+      "gitCommit": "1111111111111111111111111111111111111111",
+      "materialBuildDigest": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "realExecutionEnabled": true,
+      "qualificationContract": 1
+    },
     "workflowVersion": 1,
     "authoredContent": [
       {
@@ -54,7 +60,7 @@
         "sha256": "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee"
       }
     ],
-    "runtimeContract": "v1",
+    "runtimeContract": "real-execution-v1",
     "deviceProfile": "ayaneo.pocket_s2",
     "androidApi": 35,
     "firmwareBuild": "synthetic/build",
@@ -62,7 +68,7 @@
     "rootState": "non_root",
     "connectionType": "usb3"
   },
-  "fingerprintDigest": "sha256:438b680f91e00d217b9815cb263f671789d94ba7b1637fede08a6b46096b08a8",
+  "fingerprintDigest": "sha256:86c0e58aee26d4547a8d9d75fa810d64be9a342f9703b4dda98d1deeade4da9f",
   "runValidity": "valid",
   "qualificationOutcome": "failed",
   "automatedObservations": [

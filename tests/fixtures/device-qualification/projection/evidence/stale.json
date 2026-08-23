@@ -1,7 +1,7 @@
 {
   "schemaVersion": 2,
   "runId": "qualification-run-sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
-  "recordDigest": "sha256:e5be7e0922ff1d6d435f4747474329e52df06bd486f166ff058395c96d342f6e",
+  "recordDigest": "sha256:2963dfbb56706ded22e84900a1165bc7ba30f771b81086ff3de5ea0103dbb2af",
   "capturedAt": "2026-08-19T00:00:00Z",
   "workflowId": "obtainium-install",
   "workflowVersion": 1,
@@ -46,7 +46,13 @@
   },
   "fingerprint": {
     "schemaVersion": 2,
-    "emuchefBuild": "2026-08-19-old-build",
+    "emuchefBuild": {
+      "appVersion": "0.1.0",
+      "gitCommit": "3333333333333333333333333333333333333333",
+      "materialBuildDigest": "sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+      "realExecutionEnabled": true,
+      "qualificationContract": 1
+    },
     "workflowVersion": 1,
     "authoredContent": [
       {
@@ -54,7 +60,7 @@
         "sha256": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc"
       }
     ],
-    "runtimeContract": "v1",
+    "runtimeContract": "real-execution-v1",
     "deviceProfile": "ayaneo.pocket_s2",
     "androidApi": 35,
     "firmwareBuild": "synthetic/build",
@@ -62,7 +68,7 @@
     "rootState": "non_root",
     "connectionType": "usb3"
   },
-  "fingerprintDigest": "sha256:ea8ab3970b4f21abe5979cafbf4fcb5c15bfd46cd25eb744e8021e42601a5501",
+  "fingerprintDigest": "sha256:56abd0e757a761c112cac628f8b1614e5c1d7ff2250066481b7747cc308325dc",
   "runValidity": "valid",
   "qualificationOutcome": "passed",
   "automatedObservations": [

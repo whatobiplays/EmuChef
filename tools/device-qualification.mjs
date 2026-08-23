@@ -11,11 +11,13 @@
  * authority. No function in this module performs a physical-device run.
  */
 import { createHash } from "node:crypto";
+import { execFileSync } from "node:child_process";
 import { existsSync, readFileSync, readdirSync, writeFileSync } from "node:fs";
 import path from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 
 const REPO_ROOT = fileURLToPath(new URL("../", import.meta.url));
+const QUALIFICATION_ROOT = path.join(REPO_ROOT, "docs/testing/device-qualification");
 
 const WORKFLOW_FIELDS = [
   "id",
@@ -92,6 +94,31 @@ const COMPATIBILITY_DIMENSIONS = new Set([
 const ROOT_STATES = new Set(["non_root", "rooted"]);
 const CONNECTION_TYPES = new Set(["usb2", "usb3"]);
 const CHECKPOINT_OUTCOME_SET = new Set(["pass", "fail", "unable_to_verify"]);
+const MATERIAL_ROOTS = [
+  "authored/",
+  "crates/emuchef-rust-backend/",
+  "apps/emuchef-app/src/",
+  "apps/emuchef-app/src-tauri/src/",
+];
+const MATERIAL_EXACT_FILES = new Set([
+  "apps/emuchef-app/package.json",
+  "apps/emuchef-app/package-lock.json",
+  "apps/emuchef-app/src-tauri/Cargo.toml",
+  "apps/emuchef-app/src-tauri/Cargo.lock",
+  "apps/emuchef-app/src-tauri/tauri.conf.json",
+]);
+const MATERIAL_EXCLUDED = [
+  "apps/emuchef-app/src/DeviceQualificationOverlay.tsx",
+  "apps/emuchef-app/src/useDeviceQualificationMode.ts",
+  "apps/emuchef-app/src-tauri/src/qualification_build.rs",
+  "apps/emuchef-app/src-tauri/src/qualification_repository.rs",
+  "apps/emuchef-app/src-tauri/src/qualification_mode.rs",
+  "apps/emuchef-app/src/Phase6d6UiSmoke.tsx",
+  "apps/emuchef-app/src-tauri/src/phase6d6_ui_smoke.rs",
+];
+
+export const QUALIFICATION_CONTRACT_VERSION = 1;
+export const RUNTIME_CONTRACT = "real-execution-v1";
 
 export const EVIDENCE_RECORD_FIELDS = [
   "schemaVersion",
@@ -156,6 +183,7 @@ const DIGEST_PATTERN = /^sha256:[0-9a-f]{64}$/;
 const SHA256_PATTERN = /^[0-9a-f]{64}$/;
 const TARGET_ID_PATTERN = /^device-target-sha256:[0-9a-f]{64}$/;
 const RFC3339_PATTERN = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d+)?(?:Z|[+-]\d{2}:\d{2})$/;
+const GIT_COMMIT_PATTERN = /^[0-9a-f]{40}$/;
 
 function fail(message) {
   throw new Error(message);
@@ -179,6 +207,12 @@ function assertExactKeys(value, expected, label) {
 function assertString(value, label) {
   if (typeof value !== "string" || value.length === 0) {
     fail(`${label} must be a non-empty string`);
+  }
+}
+
+function assertBoolean(value, label) {
+  if (typeof value !== "boolean") {
+    fail(`${label} must be a boolean`);
   }
 }
 
@@ -225,6 +259,89 @@ export function canonicalDigest(value) {
   return `sha256:${createHash("sha256")
     .update(JSON.stringify(canonicalize(value)))
     .digest("hex")}`;
+}
+
+function isMaterialBuildPath(relativePath) {
+  if (MATERIAL_EXCLUDED.includes(relativePath)) return false;
+  return MATERIAL_EXACT_FILES.has(relativePath)
+    || MATERIAL_ROOTS.some((prefix) => relativePath.startsWith(prefix));
+}
+
+export function materialBuildDigestFromEntries(entries) {
+  const material = entries
+    .filter((entry) => isMaterialBuildPath(entry.path))
+    .sort((left, right) => left.path.localeCompare(right.path));
+  return canonicalDigest(material);
+}
+
+function trackedFiles(repoRoot) {
+  const output = execFileSync("git", ["ls-files", "-z"], { cwd: repoRoot, encoding: "utf8" });
+  return output.split("\0").filter(Boolean);
+}
+
+function trackedWorktreeStatus(repoRoot) {
+  return execFileSync(
+    "git",
+    ["status", "--porcelain", "--untracked-files=no"],
+    { cwd: repoRoot, encoding: "utf8" },
+  );
+}
+
+function materialBuildDigest(repoRoot) {
+  const entries = trackedFiles(repoRoot).map((relativePath) => ({
+    path: relativePath,
+    sha256: createHash("sha256")
+      .update(readFileSync(path.join(repoRoot, relativePath)))
+      .digest("hex"),
+  }));
+  return materialBuildDigestFromEntries(entries);
+}
+
+function validateBuildIdentity(buildIdentity, label) {
+  assertExactKeys(buildIdentity, [
+    "appVersion",
+    "gitCommit",
+    "materialBuildDigest",
+    "realExecutionEnabled",
+    "qualificationContract",
+  ], label);
+  assertString(buildIdentity.appVersion, `${label} appVersion`);
+  assertString(buildIdentity.gitCommit, `${label} gitCommit`);
+  if (!GIT_COMMIT_PATTERN.test(buildIdentity.gitCommit)) {
+    fail(`${label} gitCommit must be a 40-character lowercase hex commit`);
+  }
+  assertString(buildIdentity.materialBuildDigest, `${label} materialBuildDigest`);
+  if (!DIGEST_PATTERN.test(buildIdentity.materialBuildDigest)) {
+    fail(`${label} materialBuildDigest must be a sha256 digest`);
+  }
+  assertBoolean(buildIdentity.realExecutionEnabled, `${label} realExecutionEnabled`);
+  assertPositiveInteger(buildIdentity.qualificationContract, `${label} qualificationContract`);
+  return buildIdentity;
+}
+
+export function compareBuildIdentity(current, evidence) {
+  validateBuildIdentity(current, "current build identity");
+  validateBuildIdentity(evidence, "evidence build identity");
+  return current.appVersion === evidence.appVersion
+    && current.materialBuildDigest === evidence.materialBuildDigest
+    && current.realExecutionEnabled === evidence.realExecutionEnabled
+    && current.qualificationContract === evidence.qualificationContract
+    ? "compatible"
+    : "invalidating";
+}
+
+export function buildMaterialIdentity({ repoRoot, requireClean = false }) {
+  if (requireClean && trackedWorktreeStatus(repoRoot) !== "") {
+    fail("device qualification requires a clean tracked worktree");
+  }
+  const packageJson = JSON.parse(readFileSync(path.join(repoRoot, "apps/emuchef-app/package.json"), "utf8"));
+  return {
+    appVersion: packageJson.version,
+    gitCommit: execFileSync("git", ["rev-parse", "HEAD"], { cwd: repoRoot, encoding: "utf8" }).trim(),
+    materialBuildDigest: materialBuildDigest(repoRoot),
+    realExecutionEnabled: true,
+    qualificationContract: QUALIFICATION_CONTRACT_VERSION,
+  };
 }
 
 export function targetFactValue(target, field) {
@@ -375,8 +492,12 @@ export function evidenceRecordDigest(record) {
 function validateFingerprint(fingerprint) {
   assertExactKeys(fingerprint, FINGERPRINT_FIELDS, "fingerprint");
   if (fingerprint.schemaVersion !== 2) fail("fingerprint schemaVersion must be 2");
-  for (const field of ["emuchefBuild", "runtimeContract", "deviceProfile", "firmwareBuild", "abiSocClass"]) {
+  validateBuildIdentity(fingerprint.emuchefBuild, "fingerprint emuchefBuild");
+  for (const field of ["runtimeContract", "deviceProfile", "firmwareBuild", "abiSocClass"]) {
     assertString(fingerprint[field], `fingerprint ${field}`);
+  }
+  if (fingerprint.runtimeContract !== RUNTIME_CONTRACT) {
+    fail(`fingerprint runtimeContract must be ${RUNTIME_CONTRACT}`);
   }
   assertPositiveInteger(fingerprint.workflowVersion, "fingerprint workflowVersion");
   assertPositiveInteger(fingerprint.androidApi, "fingerprint androidApi");
@@ -408,6 +529,9 @@ export function evidenceFingerprintDigest(fingerprint) {
 function compareDimension(dimension, currentFingerprint, evidenceFingerprint) {
   const field = DIMENSION_FIELDS[dimension];
   if (!field) return "not_applicable";
+  if (dimension === "emuchef_build") {
+    return compareBuildIdentity(currentFingerprint.emuchefBuild, evidenceFingerprint.emuchefBuild);
+  }
   if (dimension === "authored_content") {
     return equalJson(currentFingerprint.authoredContent, evidenceFingerprint.authoredContent)
       ? "compatible"
@@ -920,20 +1044,18 @@ function productionAuthoredContentDigests(workflowCatalog) {
 }
 
 function projectProductionQualification() {
-  const workflowCatalog = loadWorkflowCatalog(
-    path.join(REPO_ROOT, "docs/testing/device-qualification/workflow-catalog.json"),
-  );
+  const workflowCatalog = loadWorkflowCatalog(path.join(QUALIFICATION_ROOT, "workflow-catalog.json"));
   const targetsFile = loadDeviceTargets(
-    path.join(REPO_ROOT, "docs/testing/device-qualification/device-targets.json"),
+    path.join(QUALIFICATION_ROOT, "device-targets.json"),
     { authoredProfilesDir: path.join(REPO_ROOT, "authored/device_profiles") },
   );
   const schema = JSON.parse(readFileSync(
-    path.join(REPO_ROOT, "docs/testing/device-qualification/evidence-schema.json"),
+    path.join(QUALIFICATION_ROOT, "evidence-schema.json"),
     "utf8",
   ));
   validateEvidenceSchemaContract(schema);
   const records = loadEvidenceDirectory(
-    path.join(REPO_ROOT, "docs/testing/device-qualification/evidence"),
+    path.join(QUALIFICATION_ROOT, "evidence"),
     { fixtureMode: false },
   );
   for (const record of records) {
@@ -943,30 +1065,59 @@ function projectProductionQualification() {
     workflowCatalog,
     targets: targetsFile.targets,
     records,
-    currentBuild: process.env.EMUCHEF_PHASE_6F_BUILD_IDENTITY ?? "unreported",
-    runtimeContract: process.env.EMUCHEF_PHASE_6F_RUNTIME_CONTRACT ?? "v1",
+    currentBuild: buildMaterialIdentity({ repoRoot: REPO_ROOT, requireClean: false }),
+    runtimeContract: RUNTIME_CONTRACT,
     authoredContentDigests: productionAuthoredContentDigests(workflowCatalog),
   });
 }
 
+function repositoryDescription() {
+  return {
+    schemaVersion: 1,
+    runtimeContract: RUNTIME_CONTRACT,
+    qualificationContract: QUALIFICATION_CONTRACT_VERSION,
+    build: buildMaterialIdentity({ repoRoot: REPO_ROOT, requireClean: false }),
+    workflowCatalog: loadWorkflowCatalog(path.join(QUALIFICATION_ROOT, "workflow-catalog.json")),
+    deviceTargets: loadDeviceTargets(
+      path.join(QUALIFICATION_ROOT, "device-targets.json"),
+      { authoredProfilesDir: path.join(REPO_ROOT, "authored/device_profiles") },
+    ),
+  };
+}
+
 if (process.argv[1] && import.meta.url === pathToFileURL(path.resolve(process.argv[1])).href) {
   const args = process.argv.slice(2);
-  if (args.some((arg) => !["--check", "--write-matrix"].includes(arg))) {
-    process.stderr.write("usage: node tools/device-qualification.mjs [--check|--write-matrix]\n");
+  const allowedArgs = new Set(["--build-identity", "--require-clean", "--describe", "--check", "--write-matrix"]);
+  const actionArgs = args.filter((arg) => ["--build-identity", "--describe", "--check", "--write-matrix"].includes(arg));
+  if (
+    args.some((arg) => !allowedArgs.has(arg))
+    || actionArgs.length !== 1
+    || (args.includes("--require-clean") && !args.includes("--build-identity"))
+  ) {
+    process.stderr.write("usage: node tools/device-qualification.mjs [--build-identity [--require-clean]|--describe|--check|--write-matrix]\n");
     process.exitCode = 1;
   } else {
     try {
-      const projection = projectProductionQualification();
-      const rendered = renderQualificationMatrix(projection);
-      const matrixPath = path.join(REPO_ROOT, "docs/qualification/device-qualification-matrix.md");
-      if (args.includes("--write-matrix")) {
-        writeFileSync(matrixPath, rendered, "utf8");
+      if (args.includes("--build-identity")) {
+        process.stdout.write(`${JSON.stringify(buildMaterialIdentity({
+          repoRoot: REPO_ROOT,
+          requireClean: args.includes("--require-clean"),
+        }))}\n`);
+      } else if (args.includes("--describe")) {
+        process.stdout.write(`${JSON.stringify(repositoryDescription())}\n`);
+      } else {
+        const projection = projectProductionQualification();
+        const rendered = renderQualificationMatrix(projection);
+        const matrixPath = path.join(REPO_ROOT, "docs/qualification/device-qualification-matrix.md");
+        if (args.includes("--write-matrix")) {
+          writeFileSync(matrixPath, rendered, "utf8");
+        }
+        const committed = readFileSync(matrixPath, "utf8");
+        if (committed !== rendered) {
+          fail("generated Phase 6F qualification matrix is out of date; run --write-matrix");
+        }
+        process.stdout.write("Phase 6F qualification foundation check passed.\n");
       }
-      const committed = readFileSync(matrixPath, "utf8");
-      if (committed !== rendered) {
-        fail("generated Phase 6F qualification matrix is out of date; run --write-matrix");
-      }
-      process.stdout.write("Phase 6F qualification foundation check passed.\n");
     } catch (error) {
       process.stderr.write(`${error instanceof Error ? error.message : String(error)}\n`);
       process.exitCode = 1;

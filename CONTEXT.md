@@ -1168,8 +1168,31 @@ material fact-value changes do.
 Device qualification evidence records and fingerprints also use schema version
 2. Embedded `deviceTarget` facts preserve the same typed provenance wrappers as
 the registered target, while compatibility fingerprints project only the fact
-values needed by workflow invalidation. Active schema-v2 run records use the
-domain-oriented immutable ID form
+values needed by workflow invalidation. `fingerprint.emuchefBuild` is a strict
+object containing the application version, exact Git commit, canonical
+material-build digest, `realExecutionEnabled`, and
+`qualificationContract`. Compatibility for the `emuchef_build` dimension
+compares the application version, material-build digest, `realExecutionEnabled`,
+and qualification contract only; the exact Git commit is preserved as audit
+provenance but does not invalidate evidence by itself. The material-build
+digest is repository-owned and covers tracked product/runtime/authored inputs
+under `authored/`, `crates/emuchef-rust-backend/`, and the application source
+roots plus the exact package/lock/config files declared by
+`tools/device-qualification.mjs`, while excluding qualification-only UI/runtime
+files and evidence artifacts.
+
+`tools/device-qualification.mjs` is also the sole repository authority for
+deriving build/runtime identity. `node tools/device-qualification.mjs
+--build-identity` prints the canonical current build identity, optionally with
+`--require-clean` to reject tracked worktree drift. `node
+tools/device-qualification.mjs --describe` prints a machine-readable repository
+description containing schema version 1, runtime contract
+`real-execution-v1`, qualification contract version 1, the canonical build
+identity, the validated workflow catalog, and the validated device-target
+registry. Active repository projection and validation no longer read
+`EMUCHEF_PHASE_6F_BUILD_IDENTITY` or `EMUCHEF_PHASE_6F_RUNTIME_CONTRACT`.
+
+Active schema-v2 run records use the domain-oriented immutable ID form
 `qualification-run-sha256:<64 lowercase hex characters>`. The current
 production target registry remains empty, so repository validation and matrix
 generation still make no claim that any physical device is qualified.

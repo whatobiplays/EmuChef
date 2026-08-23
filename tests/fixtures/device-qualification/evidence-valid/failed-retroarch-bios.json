@@ -1,7 +1,7 @@
 {
   "schemaVersion": 2,
   "runId": "qualification-run-sha256:2222222222222222222222222222222222222222222222222222222222222222",
-  "recordDigest": "sha256:71b4a5db98529d88f25c90cfe00072e5ab5490eca36626c8b991223efd676a4e",
+  "recordDigest": "sha256:b8b9fb346a4d84aebc12f5170dd55aca8455b9f8d4e8f2004cc9f8dfd62656c7",
   "capturedAt": "2026-08-21T00:00:00Z",
   "workflowId": "retroarch-plus-bios",
   "workflowVersion": 1,
@@ -46,7 +46,13 @@
   },
   "fingerprint": {
     "schemaVersion": 2,
-    "emuchefBuild": "2026-08-21-foundation",
+    "emuchefBuild": {
+      "appVersion": "0.1.0",
+      "gitCommit": "1111111111111111111111111111111111111111",
+      "materialBuildDigest": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "realExecutionEnabled": true,
+      "qualificationContract": 1
+    },
     "workflowVersion": 1,
     "authoredContent": [
       {
@@ -58,7 +64,7 @@
         "sha256": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
       }
     ],
-    "runtimeContract": "v1",
+    "runtimeContract": "real-execution-v1",
     "deviceProfile": "ayaneo.pocket_s2",
     "androidApi": 35,
     "firmwareBuild": "synthetic/build",
@@ -66,7 +72,7 @@
     "rootState": "non_root",
     "connectionType": "usb3"
   },
-  "fingerprintDigest": "sha256:16812c05852083b785df39c0dc9a037ab81c32aa852a942fc47aa559f5d884f7",
+  "fingerprintDigest": "sha256:dbee598ec4620a8b6ac2caa6f96b86278b816546ea4168d44fb5526ac1ec0273",
   "runValidity": "valid",
   "qualificationOutcome": "failed",
   "automatedObservations": [

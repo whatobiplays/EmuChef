@@ -164,6 +164,38 @@
         }
       }
     },
+    "qualificationBuildIdentity": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "appVersion",
+        "gitCommit",
+        "materialBuildDigest",
+        "realExecutionEnabled",
+        "qualificationContract"
+      ],
+      "properties": {
+        "appVersion": {
+          "type": "string",
+          "minLength": 1
+        },
+        "gitCommit": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{40}$"
+        },
+        "materialBuildDigest": {
+          "type": "string",
+          "pattern": "^sha256:[0-9a-f]{64}$"
+        },
+        "realExecutionEnabled": {
+          "type": "boolean"
+        },
+        "qualificationContract": {
+          "type": "integer",
+          "minimum": 1
+        }
+      }
+    },
     "automatedObservation": {
       "type": "object",
       "additionalProperties": false,
@@ -285,8 +317,7 @@
           "const": 2
         },
         "emuchefBuild": {
-          "type": "string",
-          "minLength": 1
+          "$ref": "#/$defs/qualificationBuildIdentity"
         },
         "workflowVersion": {
           "type": "integer",
@@ -299,8 +330,7 @@
           }
         },
         "runtimeContract": {
-          "type": "string",
-          "minLength": 1
+          "const": "real-execution-v1"
         },
         "deviceProfile": {
           "type": "string",
