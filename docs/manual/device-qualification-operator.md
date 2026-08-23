@@ -70,7 +70,7 @@ A valid product failure uses `qualificationOutcome: "failed"` and must show a
 failed automated observation, a failed human checkpoint, or a modeled
 target-wide prerequisite or safety failure.
 
-Run IDs use the immutable form `phase-6f-run-sha256:<64 hex characters>`.
+Run IDs use the immutable form `qualification-run-sha256:<64 hex characters>`.
 Records live under `docs/testing/device-qualification/evidence/`. Synthetic fixtures
 belong only under `tests/fixtures/device-qualification/` and must never be copied into
 the production evidence directory.

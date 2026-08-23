@@ -28,7 +28,7 @@
     },
     "runId": {
       "type": "string",
-      "pattern": "^phase-6f-run-sha256:[0-9a-f]{64}$"
+      "pattern": "^qualification-run-sha256:[0-9a-f]{64}$"
     },
     "recordDigest": {
       "type": "string",

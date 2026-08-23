@@ -1,7 +1,7 @@
 {
   "schemaVersion": 2,
-  "runId": "phase-6f-run-sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
-  "recordDigest": "sha256:a9afced7fd8e6f7010d9447d50478007de520def35f3ff696309de9af317bbf7",
+  "runId": "qualification-run-sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+  "recordDigest": "sha256:66ecdfa9bfe16285b8bf9c5dede3aee5384e052bccd78116620cd79086e8b72c",
   "capturedAt": "2026-08-21T00:00:00Z",
   "workflowId": "rom-library-sync",
   "workflowVersion": 1,

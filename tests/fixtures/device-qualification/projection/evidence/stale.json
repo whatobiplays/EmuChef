@@ -1,7 +1,7 @@
 {
   "schemaVersion": 2,
-  "runId": "phase-6f-run-sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
-  "recordDigest": "sha256:9318ae92a8734a7dbd15256fd33f8a8d7dcc8e422a84066db7ae1f1270c91d1e",
+  "runId": "qualification-run-sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+  "recordDigest": "sha256:e5be7e0922ff1d6d435f4747474329e52df06bd486f166ff058395c96d342f6e",
   "capturedAt": "2026-08-19T00:00:00Z",
   "workflowId": "obtainium-install",
   "workflowVersion": 1,

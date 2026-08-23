@@ -65,7 +65,7 @@ function sealRecord(record) {
 
 function checkpointGatedRecord() {
   const record = recordFor("evidence-valid/passing-retroarch-bios.json");
-  record.runId = `phase-6f-run-sha256:${"7".repeat(64)}`;
+  record.runId = `qualification-run-sha256:${"7".repeat(64)}`;
   record.capturedAt = "2026-08-21T02:00:00Z";
   record.workflowId = "checkpoint-gated";
   record.fingerprint.authoredContent = [];
@@ -190,6 +190,16 @@ test("schema-v2 device targets require legal per-fact provenance and determinist
   );
 });
 
+test("schema-v2 device targets reject malformed fact wrappers through validation errors", () => {
+  const valid = structuredClone(readJson("definitions-valid/device-targets.json"));
+  const malformed = valid.targets[0];
+  malformed.rootState = null;
+  assert.throws(
+    () => validateDeviceTargets(valid, { authoredProfilesDir: AUTHORED_PROFILES }),
+    /device target rootState/i,
+  );
+});
+
 test("target identity excludes provenance source and policy fields", () => {
   const target = structuredClone(readJson("definitions-valid/device-targets.json").targets[0]);
   const original = deviceTargetId(target);
@@ -199,6 +209,20 @@ test("target identity excludes provenance source and policy fields", () => {
   assert.equal(deviceTargetId(target), original);
   target.connectionType.value = target.connectionType.value === "usb3" ? "usb2" : "usb3";
   assert.notEqual(deviceTargetId(target), original);
+});
+
+test("schema-v2 evidence records require qualification run ids", () => {
+  const context = syntheticContext();
+  const record = recordFor("evidence-valid/passing-retroarch-bios.json");
+  assert.match(record.runId, /^qualification-run-sha256:[0-9a-f]{64}$/);
+
+  const oldPrefix = structuredClone(record);
+  oldPrefix.runId = `phase-6f-run-sha256:${"1".repeat(64)}`;
+  oldPrefix.recordDigest = evidenceRecordDigest(oldPrefix);
+  assert.throws(
+    () => validateEvidenceRecord(oldPrefix, context),
+    /runId format/i,
+  );
 });
 
 test("rejects duplicate workflow ids", () => {
@@ -390,7 +414,7 @@ test("invalid infrastructure runs cannot claim a product qualification failure",
 
 test("an invalid infrastructure run with not_observed remains valid historical evidence", () => {
   const record = recordFor("evidence-valid/passing-retroarch-bios.json");
-  record.runId = `phase-6f-run-sha256:${"6".repeat(64)}`;
+  record.runId = `qualification-run-sha256:${"6".repeat(64)}`;
   record.capturedAt = "2026-08-21T01:00:00Z";
   record.runValidity = "invalid";
   record.qualificationOutcome = "not_observed";
@@ -433,7 +457,7 @@ test("a passed record requires every required automated observation", () => {
 
 test("a failed required automated observation produces a valid failed record", () => {
   const record = recordFor("evidence-valid/passing-retroarch-bios.json");
-  record.runId = `phase-6f-run-sha256:${"8".repeat(64)}`;
+  record.runId = `qualification-run-sha256:${"8".repeat(64)}`;
   record.capturedAt = "2026-08-21T03:00:00Z";
   record.automatedObservations[0].outcome = "failed";
   record.qualificationOutcome = "failed";
@@ -501,7 +525,7 @@ test("target-wide failures are restricted, required to be failed, and forbidden 
 
 test("a valid failed record must contain a failed observation, failed checkpoint, or target-wide failure", () => {
   const record = recordFor("evidence-valid/passing-retroarch-bios.json");
-  record.runId = `phase-6f-run-sha256:${"9".repeat(64)}`;
+  record.runId = `qualification-run-sha256:${"9".repeat(64)}`;
   record.capturedAt = "2026-08-21T04:00:00Z";
   record.qualificationOutcome = "failed";
   record.limitations = ["product behavior was observed as failed"];
@@ -657,7 +681,7 @@ test("current evidence selection picks the newest compatible valid record", () =
     currentFingerprint: currentFingerprint(workflow, target),
     records: context.records,
   });
-  assert.equal(selected.runId, "phase-6f-run-sha256:" + "a".repeat(64));
+  assert.equal(selected.runId, "qualification-run-sha256:" + "a".repeat(64));
 });
 
 test("newer invalid evidence never replaces older valid evidence", () => {
@@ -670,7 +694,7 @@ test("newer invalid evidence never replaces older valid evidence", () => {
     currentFingerprint: currentFingerprint(workflow, target),
     records: context.records,
   });
-  assert.equal(selected.runId, "phase-6f-run-sha256:" + "e".repeat(64));
+  assert.equal(selected.runId, "qualification-run-sha256:" + "e".repeat(64));
   assert.ok(context.records.some((record) => record.runValidity === "invalid"));
 });
 
@@ -694,12 +718,12 @@ test("current evidence selection is deterministic on capturedAt then runId", () 
   const fingerprint = currentFingerprint(workflow, target);
   const base = recordFor("evidence-valid/passing-retroarch-bios.json");
   const first = structuredClone(base);
-  first.runId = "phase-6f-run-sha256:" + "f".repeat(64);
+  first.runId = "qualification-run-sha256:" + "f".repeat(64);
   const second = structuredClone(base);
-  second.runId = "phase-6f-run-sha256:" + "e".repeat(64);
+  second.runId = "qualification-run-sha256:" + "e".repeat(64);
   const records = [first, second];
   const selected = selectCurrentEvidence({ workflow, target, currentFingerprint: fingerprint, records });
-  assert.equal(selected.runId, "phase-6f-run-sha256:" + "f".repeat(64));
+  assert.equal(selected.runId, "qualification-run-sha256:" + "f".repeat(64));
   const reversed = selectCurrentEvidence({ workflow, target, currentFingerprint: fingerprint, records: [second, first] });
   assert.equal(reversed.runId, selected.runId);
 });

@@ -1,7 +1,7 @@
 {
   "schemaVersion": 2,
-  "runId": "phase-6f-run-sha256:4444444444444444444444444444444444444444444444444444444444444444",
-  "recordDigest": "sha256:1acd2462945bf0aa6cfcf80343625931e0c5beb8ac99bfabe9971639a91c0ad2",
+  "runId": "qualification-run-sha256:4444444444444444444444444444444444444444444444444444444444444444",
+  "recordDigest": "sha256:22f68946b5e3bf88b516fc6e16f6fb6520684a9330452e4aca6df97d803a9c1a",
   "capturedAt": "2026-08-21T00:04:00Z",
   "workflowId": "checkpoint-gated",
   "workflowVersion": 1,

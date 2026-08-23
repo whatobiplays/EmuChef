@@ -1,7 +1,7 @@
 {
   "schemaVersion": 2,
-  "runId": "phase-6f-run-sha256:dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd",
-  "recordDigest": "sha256:04e5bf07a50c1b8fe1ad49f35171f622023f30bce4fc92b5897b05b44c9d327d",
+  "runId": "qualification-run-sha256:dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd",
+  "recordDigest": "sha256:e7ea7e6e680006a5f0b65e7d0402844f8b182fed9233f41e181f08a153d88a9d",
   "capturedAt": "2026-08-22T00:00:00Z",
   "workflowId": "xaniteog-install",
   "workflowVersion": 1,

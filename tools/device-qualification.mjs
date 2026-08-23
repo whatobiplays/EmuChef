@@ -151,7 +151,7 @@ const DIMENSION_FIELDS = {
   abi_soc_class: "abiSocClass",
   root_state: "rootState",
 };
-const RUN_ID_PATTERN = /^phase-6f-run-sha256:[0-9a-f]{64}$/;
+const RUN_ID_PATTERN = /^qualification-run-sha256:[0-9a-f]{64}$/;
 const DIGEST_PATTERN = /^sha256:[0-9a-f]{64}$/;
 const SHA256_PATTERN = /^[0-9a-f]{64}$/;
 const TARGET_ID_PATTERN = /^device-target-sha256:[0-9a-f]{64}$/;
@@ -330,14 +330,14 @@ export function validateDeviceTargets(value, { authoredProfilesDir }) {
       assertFactWrapper(target, field, assertString);
     }
     assertFactWrapper(target, "androidApi", assertPositiveInteger);
-    if (!ROOT_STATES.has(targetFactValue(target, "rootState"))) {
-      fail(`device target rootState value ${targetFactValue(target, "rootState")} is not supported`);
+    const rootState = assertFactWrapper(target, "rootState", assertString);
+    if (!ROOT_STATES.has(rootState.value)) {
+      fail(`device target rootState value ${rootState.value} is not supported`);
     }
-    assertFactWrapper(target, "rootState", assertString);
-    if (!CONNECTION_TYPES.has(targetFactValue(target, "connectionType"))) {
-      fail(`device target connectionType value ${targetFactValue(target, "connectionType")} is not supported`);
+    const connectionType = assertFactWrapper(target, "connectionType", assertString);
+    if (!CONNECTION_TYPES.has(connectionType.value)) {
+      fail(`device target connectionType value ${connectionType.value} is not supported`);
     }
-    assertFactWrapper(target, "connectionType", assertString);
     if (target.id !== deviceTargetId(target)) {
       fail("device target id does not match canonical target identity");
     }
@@ -517,15 +517,16 @@ export function validateEvidenceRecord(record, context) {
   if (!TARGET_ID_PATTERN.test(record.deviceTarget.id)) {
     fail("evidence device target id format is invalid");
   }
+  const observedFacts = new Map();
   for (const field of TARGET_FACT_FIELDS) {
     const validator = field === "androidApi" ? assertPositiveInteger : assertString;
-    assertFactWrapper(record.deviceTarget, field, validator);
+    observedFacts.set(field, assertFactWrapper(record.deviceTarget, field, validator));
   }
-  if (!ROOT_STATES.has(targetFactValue(record.deviceTarget, "rootState"))) {
-    fail(`evidence device target rootState value ${targetFactValue(record.deviceTarget, "rootState")} is not supported`);
+  if (!ROOT_STATES.has(observedFacts.get("rootState").value)) {
+    fail(`evidence device target rootState value ${observedFacts.get("rootState").value} is not supported`);
   }
-  if (!CONNECTION_TYPES.has(targetFactValue(record.deviceTarget, "connectionType"))) {
-    fail(`evidence device target connectionType value ${targetFactValue(record.deviceTarget, "connectionType")} is not supported`);
+  if (!CONNECTION_TYPES.has(observedFacts.get("connectionType").value)) {
+    fail(`evidence device target connectionType value ${observedFacts.get("connectionType").value} is not supported`);
   }
   assertEvidenceDeviceTarget(record.deviceTarget, target);
   validateFingerprint(record.fingerprint);

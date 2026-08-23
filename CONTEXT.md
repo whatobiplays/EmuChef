@@ -1168,9 +1168,11 @@ material fact-value changes do.
 Device qualification evidence records and fingerprints also use schema version
 2. Embedded `deviceTarget` facts preserve the same typed provenance wrappers as
 the registered target, while compatibility fingerprints project only the fact
-values needed by workflow invalidation. The current production target registry
-remains empty, so repository validation and matrix generation still make no
-claim that any physical device is qualified.
+values needed by workflow invalidation. Active schema-v2 run records use the
+domain-oriented immutable ID form
+`qualification-run-sha256:<64 lowercase hex characters>`. The current
+production target registry remains empty, so repository validation and matrix
+generation still make no claim that any physical device is qualified.
 
 ## Phase 6D.6 physical interruption qualification
 

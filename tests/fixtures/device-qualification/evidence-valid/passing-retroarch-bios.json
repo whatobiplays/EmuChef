@@ -1,7 +1,7 @@
 {
   "schemaVersion": 2,
-  "runId": "phase-6f-run-sha256:1111111111111111111111111111111111111111111111111111111111111111",
-  "recordDigest": "sha256:8090192162c7f6590a91fea149a38417a3fce458cad6438f54b1021ce48153b4",
+  "runId": "qualification-run-sha256:1111111111111111111111111111111111111111111111111111111111111111",
+  "recordDigest": "sha256:a33cf5c3202c9bfc4a91dfbfdfe0323ec68c62dc541018c65162910fce1bf602",
   "capturedAt": "2026-08-20T00:00:00Z",
   "workflowId": "retroarch-plus-bios",
   "workflowVersion": 1,
