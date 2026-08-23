@@ -222,6 +222,7 @@ __marimo__/
 .emuchef_runtime
 AGENTS.md
 .codex
+.worktrees/
 .codegraph
 .chatgpt
 
