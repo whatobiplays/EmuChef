@@ -19,7 +19,8 @@
 - PASS: cargo test --manifest-path apps/emuchef-app/src-tauri/Cargo.toml qualification_repository — 28 passed, 289 filtered.
 - PASS: cargo check --manifest-path apps/emuchef-app/src-tauri/Cargo.toml --features real-execution — 0 errors, 2 existing dead-code warnings.
 - PASS: npm run typecheck — completed with ok.
-- PASS: npm exec -- vitest run --config tests/vitest.config.ts tests/deviceQualificationApi.dom.test.tsx tests/deviceQualificationContract.test.ts — 3 passed.
+- PASS: npm exec -- vitest run --config tests/vitest.config.ts tests/deviceQualificationApi.dom.test.tsx — 3 passed.
+- PASS: node --test --import tsx tests/deviceQualificationContract.test.ts — 3 passed.
 - PASS: git diff --check.
 
 ## Implementation status
