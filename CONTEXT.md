@@ -1336,6 +1336,21 @@ only opaque handles and sanitized DTOs; it has no repository, candidate,
 evidence, executable, or process authority. No target or physical evidence is
 created by the qualification-mode implementation itself.
 
+Qualification session state is Rust-owned and restartable. A session uses an
+opaque qualification-session-<32 lowercase hex> handle associated with its
+opaque run candidate and persists strict lifecycle state in a separate
+session.json file beside the candidate envelope. Device refresh invalidation
+is monotonic; identity, target-fact, prerequisite, checkpoint, execution, and
+report failures cannot be cleared by a later observation. Review and execution
+bindings must match the stored device plan, workflow production recipes,
+registered target identity, and the existing real production execution
+relationship. Finalization reuses the production sanitized execution-report
+serializer and stores the exact report bytes; canonical run IDs, fingerprints,
+record digests, and evidence mutation remain owned by
+tools/device-qualification.mjs. Invalid or interrupted sessions remain
+recordable audit candidates only when the canonical tool accepts their
+invalid/not_observed state.
+
 ## Phase 6D.6 physical interruption qualification
 
 The ignored Rust physical harness is fail-closed and fail-reporting: explicit

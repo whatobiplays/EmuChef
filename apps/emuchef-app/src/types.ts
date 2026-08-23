@@ -522,6 +522,27 @@ export interface QualificationModeStatus {
   resumableCandidates: QualificationCandidateSummary[];
 }
 
+export interface QualificationRecordedCheckpoint {
+  checkpointId: string;
+  outcome: QualificationCheckpointOutcome;
+  observedAt: string;
+}
+
+export interface QualificationSessionSnapshot {
+  sessionHandle: string;
+  targetId: string;
+  workflowId: string;
+  workflowVersion: number;
+  devicePlan: string;
+  requiredRecipes: string[];
+  humanCheckpoints: QualificationWorkflow["humanCheckpoints"];
+  recordedCheckpoints: QualificationRecordedCheckpoint[];
+  runValidity: "valid" | "invalid";
+  qualificationOutcome: "passed" | "failed" | "not_observed";
+  invalidReason: string | null;
+  candidate: QualificationCandidateSummary | null;
+}
+
 export interface RealExecutionConfirmation {
   phrase: string;
   irreversibleChangesAcknowledged: boolean;

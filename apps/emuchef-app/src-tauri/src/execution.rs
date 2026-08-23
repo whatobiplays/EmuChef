@@ -68,6 +68,19 @@ struct StoredExecutionReport {
     runtime: Value,
 }
 
+/// Internal relationship data used by qualification binding. The public API
+/// exposes only the execution handle; qualification reads this narrow view so
+/// it cannot start, confirm, or reinterpret an execution.
+pub(crate) struct QualificationExecutionBinding {
+    pub(crate) real: bool,
+    pub(crate) terminal: bool,
+    pub(crate) review_handle: String,
+    pub(crate) device_handle: String,
+    pub(crate) review: ReviewedPlanSnapshot,
+    pub(crate) status: Option<String>,
+    pub(crate) report_available: bool,
+}
+
 /// Bounded, restart-volatile execution handle state.
 ///
 /// A start reservation prevents concurrent preflight races. At most one active
@@ -377,6 +390,35 @@ impl ExecutionHandleStore {
             self.successful_launches.remove(public_handle);
             self.active = None;
         }
+    }
+
+    pub(crate) fn qualification_binding(
+        &self,
+        public_handle: &str,
+    ) -> Result<QualificationExecutionBinding, String> {
+        let mapping = self.mapping_any(public_handle)?;
+        let terminal = self
+            .latest_terminal
+            .as_ref()
+            .is_some_and(|candidate| candidate.public_handle == public_handle);
+        let status = terminal
+            .then(|| {
+                self.latest_terminal_report
+                    .as_ref()
+                    .and_then(|report| report.report.get("status"))
+                    .and_then(Value::as_str)
+                    .map(ToString::to_string)
+            })
+            .flatten();
+        Ok(QualificationExecutionBinding {
+            real: mapping.kind == ExecutionKind::Real,
+            terminal,
+            review_handle: mapping.review_handle,
+            device_handle: mapping.review.device_handle.clone(),
+            review: mapping.review,
+            status,
+            report_available: terminal && self.latest_terminal_report.is_some(),
+        })
     }
 }
 

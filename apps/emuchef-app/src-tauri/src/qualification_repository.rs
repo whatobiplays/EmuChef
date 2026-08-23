@@ -25,6 +25,7 @@ use sha2::{Digest, Sha256};
 use uuid::Uuid;
 
 use crate::qualification_build::{embedded_build_identity, QualificationBuildIdentity};
+use crate::qualification_mode::{PersistedQualificationSession, QualificationSession};
 
 /// Prefix shared by every opaque candidate handle.
 pub(crate) const CANDIDATE_HANDLE_PREFIX: &str = "qualification-candidate-";
@@ -33,8 +34,10 @@ const CANDIDATE_SCHEMA_VERSION: u64 = 1;
 const CANDIDATE_DIRECTORY: &str = ".emuchef_runtime/qualification-candidates";
 const QUALIFICATION_TOOL: &str = "tools/device-qualification.mjs";
 const CANDIDATE_FILE: &str = "candidate.json";
+const SESSION_FILE: &str = "session.json";
 const EXECUTION_REPORT_FILE: &str = "execution-report.json";
 const CANDIDATE_STAGING_PREFIX: &str = ".qualification-candidate-tmp-";
+const SESSION_STAGING_PREFIX: &str = ".qualification-session-tmp-";
 const MAX_TOOL_OUTPUT_BYTES: usize = 8 * 1024 * 1024;
 
 /// The two candidate kinds understood by the repository qualification tool.
@@ -473,6 +476,116 @@ impl QualificationRepository {
         self.load_candidate_unlocked(handle)
     }
 
+    /// Persists strict Rust-owned session state beside, but separately from,
+    /// the Node-owned candidate payload. A save is immediately visible after a
+    /// process restart and never changes canonical candidate data.
+    pub(crate) fn save_session(
+        &self,
+        candidate_handle: &str,
+        persisted: &PersistedQualificationSession,
+    ) -> Result<(), String> {
+        let _operation = self.lock_operation()?;
+        let directory = self.candidate_directory_unlocked(candidate_handle)?;
+        validate_candidate_files(&directory)?;
+        if persisted.candidate_handle != candidate_handle {
+            return Err("qualification session candidate binding is inconsistent".to_string());
+        }
+        let _ = QualificationSession::from_persisted(persisted.clone())?;
+        let mut bytes = serde_json::to_vec_pretty(persisted)
+            .map_err(|_| "qualification session could not be serialized".to_string())?;
+        bytes.push(b'\n');
+        write_synced_replaced_file(&directory, SESSION_FILE, SESSION_STAGING_PREFIX, &bytes)
+    }
+
+    /// Loads and validates strict session state associated with a candidate.
+    pub(crate) fn load_session(
+        &self,
+        candidate_handle: &str,
+    ) -> Result<PersistedQualificationSession, String> {
+        let _operation = self.lock_operation()?;
+        let directory = self.candidate_directory_unlocked(candidate_handle)?;
+        validate_candidate_files(&directory)?;
+        let bytes = read_regular_file(&directory.join(SESSION_FILE), "qualification session")?;
+        let persisted: PersistedQualificationSession = serde_json::from_slice(&bytes)
+            .map_err(|_| "qualification session JSON is invalid".to_string())?;
+        if persisted.candidate_handle != candidate_handle {
+            return Err("qualification session candidate binding is inconsistent".to_string());
+        }
+        let _ = QualificationSession::from_persisted(persisted.clone())?;
+        Ok(persisted)
+    }
+
+    /// Replaces a provisional candidate payload with the terminal run
+    /// candidate while retaining its opaque directory and resumable session.
+    pub(crate) fn finalize_candidate(
+        &self,
+        candidate_handle: &str,
+        kind: CandidateKind,
+        payload: &Value,
+        report_bytes: Option<&[u8]>,
+    ) -> Result<StoredQualificationCandidate, String> {
+        let _operation = self.lock_operation()?;
+        let directory = self.candidate_directory_unlocked(candidate_handle)?;
+        validate_candidate_files(&directory)?;
+        let existing = self.load_candidate_unlocked(candidate_handle)?;
+        if existing.kind != kind {
+            return Err("qualification candidate kind does not match the session".to_string());
+        }
+        let mut candidate = payload
+            .as_object()
+            .cloned()
+            .ok_or_else(|| "qualification candidate must be a JSON object".to_string())?;
+        candidate.insert(
+            "candidateSchemaVersion".to_string(),
+            Value::from(CANDIDATE_SCHEMA_VERSION),
+        );
+        candidate.insert("candidateId".to_string(), Value::from(candidate_handle));
+        candidate.insert("kind".to_string(), Value::from(kind.as_str()));
+        let candidate = Value::Object(candidate);
+        let captured_at = optional_string_field(&candidate, "capturedAt")?;
+        let build = candidate_build_identity(&candidate)?;
+        let report = report_metadata_for_candidate(&candidate, report_bytes)?;
+        let envelope = CandidateFileEnvelope {
+            candidate_handle: candidate_handle.to_string(),
+            kind,
+            captured_at,
+            build,
+            payload: candidate,
+            report,
+        };
+        let mut bytes = serde_json::to_vec_pretty(&envelope)
+            .map_err(|_| "qualification candidate could not be serialized".to_string())?;
+        bytes.push(b'\n');
+        write_synced_replaced_file(
+            &directory,
+            CANDIDATE_FILE,
+            CANDIDATE_STAGING_PREFIX,
+            &bytes,
+        )?;
+        let report_path = directory.join(EXECUTION_REPORT_FILE);
+        match report_bytes {
+            Some(report_bytes) => write_synced_replaced_file(
+                &directory,
+                EXECUTION_REPORT_FILE,
+                CANDIDATE_STAGING_PREFIX,
+                report_bytes,
+            )?,
+            None => match fs::symlink_metadata(&report_path) {
+                Ok(metadata) if metadata.file_type().is_symlink() || !metadata.is_file() => {
+                    return Err("qualification execution report is not regular".to_string())
+                }
+                Ok(_) => fs::remove_file(report_path)
+                    .map_err(|_| "qualification execution report could not be removed".to_string())?,
+                Err(error) if error.kind() == io::ErrorKind::NotFound => {}
+                Err(_) => {
+                    return Err("qualification execution report could not be inspected".to_string())
+                }
+            },
+        }
+        sync_directory(&directory)?;
+        self.load_candidate_unlocked(candidate_handle)
+    }
+
     fn load_candidate_unlocked(
         &self,
         handle: &str,
@@ -710,7 +823,7 @@ impl QualificationRepository {
 }
 
 impl StoredQualificationCandidate {
-    fn summary(&self) -> QualificationCandidateSummary {
+    pub(crate) fn summary(&self) -> QualificationCandidateSummary {
         QualificationCandidateSummary {
             candidate_handle: self.candidate_handle.clone(),
             kind: self.kind,
@@ -1158,6 +1271,31 @@ fn write_synced_new_file(path: &Path, bytes: &[u8]) -> Result<(), String> {
     Ok(())
 }
 
+fn write_synced_replaced_file(
+    directory: &Path,
+    filename: &str,
+    staging_prefix: &str,
+    bytes: &[u8],
+) -> Result<(), String> {
+    let path = directory.join(filename);
+    if let Ok(metadata) = fs::symlink_metadata(&path) {
+        if metadata.file_type().is_symlink() || !metadata.is_file() {
+            return Err("qualification session file is not regular".to_string());
+        }
+    }
+    let staging = directory.join(format!("{staging_prefix}{}", Uuid::new_v4().simple()));
+    let result = (|| {
+        write_synced_new_file(&staging, bytes)?;
+        fs::rename(&staging, &path)
+            .map_err(|_| "qualification session file could not be committed".to_string())?;
+        sync_directory(directory)
+    })();
+    if result.is_err() {
+        let _ = fs::remove_file(&staging);
+    }
+    result
+}
+
 fn sync_directory(path: &Path) -> Result<(), String> {
     File::open(path)
         .and_then(|directory| directory.sync_all())
@@ -1305,6 +1443,7 @@ mod tests {
     use std::os::unix::fs::symlink;
 
     use super::*;
+    use crate::qualification_mode::QualificationSession;
 
     #[derive(Clone, Default)]
     struct FakeQualificationToolRunner {
@@ -2324,6 +2463,43 @@ mod tests {
             "--record-run".to_string(),
             "not-a-handle".to_string()
         ]));
+    }
+
+    #[test]
+    fn persisted_session_survives_repository_restart_without_becoming_candidate_data() {
+        let temp = TempDir::new().expect("temporary repository should be created");
+        let repository = repository_with_embedded_build(&temp, FakeQualificationToolRunner::default());
+        let candidate_handle = repository
+            .create_candidate(
+                CandidateKind::QualificationRun,
+                &json!({
+                    "capturedAt": "2026-08-23T12:00:00Z",
+                    "build": build_identity_json(),
+                }),
+                None,
+            )
+            .expect("session candidate should be stored");
+        let mut persisted = QualificationSession::for_test(&["device_behavior_verified"])
+            .to_persisted();
+        persisted.candidate_handle = candidate_handle.clone();
+        repository
+            .save_session(&candidate_handle, &persisted)
+            .expect("session should be persisted");
+
+        let restarted = repository_with_embedded_build(&temp, FakeQualificationToolRunner::default());
+        let restored = restarted
+            .load_session(&candidate_handle)
+            .expect("session should survive restart");
+        assert_eq!(restored, persisted);
+        assert!(restarted
+            .candidate_root()
+            .join(&candidate_handle)
+            .join("session.json")
+            .is_file());
+        let candidate = restarted
+            .load_candidate(&candidate_handle)
+            .expect("candidate should remain loadable");
+        assert!(candidate.payload.get("sessionHandle").is_none());
     }
 
     fn build_identity_json() -> Value {
