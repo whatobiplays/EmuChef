@@ -142,11 +142,16 @@ At minimum, the embedded identity includes:
 - EmuChef application version;
 - exact Git commit SHA;
 - a clean-worktree assertion captured at build time;
+- a deterministic material build-content digest;
 - whether `real-execution` is enabled;
 - a qualification-capability/contract version; and
 - the production runtime-contract version.
 
-Where practical, deterministic compiled/runtime artifact digests may supplement this identity. Artifact digests do not replace the source commit identity.
+The exact Git commit is immutable audit provenance and is the pre-promotion source-state binding. It is not itself the equality key for the `emuchef_build` compatibility dimension: committing a newly recorded evidence bundle must not immediately make that evidence stale. Instead, `emuchef_build` compatibility compares the application version, material build-content digest, `real-execution` state, and qualification-capability/contract version. The runtime-contract version remains its own compatibility dimension.
+
+The material build-content digest is a canonical SHA-256 over repository-owned product/runtime/authored inputs that can materially change planning or execution. It deliberately excludes qualification evidence, the generated qualification matrix, qualification/operator documentation, tests/fixtures, and ignored runtime candidates. Therefore evidence-only or documentation-only commits do not stale otherwise compatible evidence, while material product/runtime/authored changes do.
+
+The repository qualification tool owns the material-input set and digest algorithm so build-time capture and later projection cannot drift. Where practical, deterministic compiled artifact digests may supplement this identity, but they do not replace the exact source commit provenance or material build-content digest.
 
 The operator cannot edit or override build identity or runtime-contract identity. Both are frozen when a qualification session begins and are rechecked before candidate promotion.
 
@@ -503,6 +508,8 @@ The qualification fingerprint continues to bind the dimensions required by the c
 - connection type where modeled.
 
 Schema v2 preserves the value and provenance necessary to audit the material target facts.
+
+For the `emuchef_build` dimension specifically, evidence retains the exact Git commit as audit provenance, but compatibility equality uses the application version, material build-content digest, `real-execution` state, and qualification-capability/contract version. The Git commit itself is deliberately excluded from compatibility equality so recording evidence or changing qualification-only documentation cannot self-invalidate the run.
 
 Compatibility projection remains workflow-specific: only the dimensions declared by that workflow may invalidate otherwise valid historical evidence.
 
